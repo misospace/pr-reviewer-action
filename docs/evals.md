@@ -365,7 +365,7 @@ findings (`final_findings_count` / `dedupe_final_findings` max 0) while a
 `max_tool_calls` bound in its `expected_evidence` keeps the tool loop
 lean. The weekly scheduled sweep remains standard-only (`deep`
 absent → `false`), and none of this changes production defaults:
-`deep_review` is still off by default for action users.
+`deep-review` is still off by default for action users.
 
 ## Real-PR corpus (#779)
 

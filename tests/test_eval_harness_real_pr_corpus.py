@@ -26,6 +26,7 @@ from eval_harness import (
     RealPRScenario,
     ReviewRun,
     _checkout_pinned_commit,
+    _files_from_pinned_diff,
     _normalize_path_for_match,
     _prepare_pinned_workspace,
     generate_context_report,
@@ -493,12 +494,61 @@ class TestPreparePinnedWorkspace:
         diff = (repo / "pr.diff").read_text()
         assert "+x = 1" in diff and "stale" not in diff
 
+    def test_base_sha_seeds_the_file_manifest_at_that_head(self, tmp_path):
+        repo, base, head = self._repo(tmp_path)
+        ok, err = _prepare_pinned_workspace(repo, head, base)
+        assert ok, err
+        seed = json.loads((repo / "pr-files.seed.json").read_text())
+        assert seed == [{
+            "filename": "a.py", "status": "added",
+            "additions": 1, "deletions": 0, "changes": 1,
+            "previous_filename": None,
+        }]
+
+    def test_no_base_sha_writes_no_seed(self, tmp_path):
+        repo, _base, head = self._repo(tmp_path)
+        ok, err = _prepare_pinned_workspace(repo, head)
+        assert ok, err
+        assert not (repo / "pr-files.seed.json").exists()
+
+    def test_manifest_derivation_failure_fails_the_prepare(self, tmp_path, monkeypatch):
+        repo, base, head = self._repo(tmp_path)
+        monkeypatch.setattr("eval_harness._files_from_pinned_diff", lambda *_a, **_k: None)
+        ok, err = _prepare_pinned_workspace(repo, head, base)
+        assert not ok
+        assert "manifest" in err
+        assert (repo / "pr.diff").exists()
+        assert not (repo / "pr-files.seed.json").exists()
+
     def test_bad_base_sha_is_rejected_by_validation(self, tmp_path):
         base = {"repo_full_name": "acme/repo", "number": 1, "head_sha": "a" * 40, "base_sha": "abc"}
         path = tmp_path / "corpus.json"
         path.write_text(json.dumps({"real_pr_corpus": {"vulnerable": [], "clean": [{**base, "expected_clean": True}]}}), encoding="utf-8")
         with pytest.raises(ValueError, match="base_sha"):
             RealPRCorpus.from_file(path)
+
+
+class TestFilesFromPinnedDiff:
+    def test_renamed_file_carries_previous_filename(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git_in(repo, "init", "-q", "-b", "main")
+        (repo / "b.txt").write_text("b\nb\nb\nb\nb\n")
+        _git_in(repo, "add", "b.txt")
+        _git_in(repo, "-c", "user.name=t", "-c", "user.email=t@e", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base")
+        base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        _git_in(repo, "mv", "b.txt", "c.txt")
+        (repo / "c.txt").write_text("b\nb\nb\nb\nb\nextra\n")
+        _git_in(repo, "add", "-A")
+        _git_in(repo, "-c", "user.name=t", "-c", "user.email=t@e", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "head")
+        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+        files = json.loads(_files_from_pinned_diff(repo, base, head))
+        assert files == [{
+            "filename": "c.txt", "status": "renamed",
+            "additions": 1, "deletions": 0, "changes": 1,
+            "previous_filename": "b.txt",
+        }]
 
 
 class TestContextOnly:

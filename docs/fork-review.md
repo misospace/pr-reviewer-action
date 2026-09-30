@@ -90,8 +90,8 @@ The fork reviewer is pinned to the self-hosted LiteLLM endpoint and must
 
 | Layer | Mechanism |
 |---|---|
-| Workflow inputs | `ai_model` / `ai_smart_model` read **only** the `FORK_PRIMARY_*` / `FORK_SMART_*` repo variables — never the org-level `PRIMARY_*` / `SMART_*` / `FALLBACK_*` dogfood variables, which are not local-only and drift over time |
-| No fallback | The workflow passes no `ai_fallback_*` inputs; with `ai_fallback_model` empty the pipeline never attempts a fallback call. An unavailable local model degrades via `on_model_failure: notice` — a visible `request_changes` notice on the PR — and stops |
+| Workflow inputs | `ai-model` / `ai-smart-model` read **only** the `FORK_PRIMARY_*` / `FORK_SMART_*` repo variables — never the org-level `PRIMARY_*` / `SMART_*` / `FALLBACK_*` dogfood variables, which are not local-only and drift over time |
+| No fallback | The workflow passes no `ai-fallback-*` inputs; with `ai-fallback-model` empty the pipeline never attempts a fallback call. An unavailable local model degrades via `on-model-failure: notice` — a visible `request_changes` notice on the PR — and stops |
 | Credential scope | `FORK_LITELLM_API_KEY` is a LiteLLM virtual key scoped to exactly the two fork models, so even a routing mistake cannot bill or reach another model |
 
 The credential-scope row is an **operational** requirement: create the key
@@ -144,7 +144,7 @@ private credentials is disabled:
 | Repository map | on | **off** | Same worktree dependency |
 | Evidence providers / SARIF | per config | **off** | Operator commands + private config |
 | Linear context | per config | **off** | Private credentials |
-| Linked-source URL fetching | allowlisted hosts | **off** (`allowed_source_hosts: ""`) | Fork-controlled URLs must not be fetched with review credentials in play |
+| Linked-source URL fetching | allowlisted hosts | **off** (`allowed-source-hosts: ""`) | Fork-controlled URLs must not be fetched with review credentials in play |
 | PR thread context | on | on | Read-only API data |
 | Image digest provenance | on | on | Public registry metadata, budgeted |
 | Deep review specialists | all roles | `auto` (classifier-selected, bounded) | Compute bound |
@@ -189,8 +189,8 @@ model-compute denial of service. Hard limits, and why:
 | Stale heads | skipped at the gate (PR head ≠ triggering run head) and re-verified pre-model and pre-publication | Only the newest head spends compute; a superseded run never publishes |
 | Model retries | 1 retry, 5 s delay | An outage must not become prolonged load |
 | Model timeout | job `timeout-minutes: 30` | Hard wall-clock bound on the whole review |
-| Completion budget | `ai_max_tokens: 16384` | Bounds per-review token spend |
-| Context budget | `context_limit_mode: low` | Bounds prompt size |
+| Completion budget | `ai-max-tokens: 16384` | Bounds per-review token spend |
+| Context budget | `context-limit-mode: low` | Bounds prompt size |
 | Smart escalation | reviewer-requested only, single shot | No repeated or recursive escalation |
 | Specialist phase | `auto` selection, 300 s budget | Possibly zero roles; never unbounded |
 | Duplicate suppression | the action's unchanged-diff fingerprint skip | An unchanged head re-runs CI but costs zero model tokens |
@@ -208,8 +208,8 @@ dogfood workflow. Workflow permissions are minimal: `contents: read` +
 read permissions and never sees any credential.
 
 Fork reviews may publish findings, inline comments, and `request_changes`.
-They must never create a native approval: `allow_approve: false` and
-`approve_forks: false` are pinned (both by the workflow and by the action's
+They must never create a native approval: `allow-approve: false` and
+`approve-forks: false` are pinned (both by the workflow and by the action's
 own fork gate in `scripts/publish.sh`).
 
 Publication is exact-head guarded twice: `fork_review_gate.py verify` before

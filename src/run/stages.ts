@@ -127,6 +127,22 @@ export function filesProjection(files: readonly unknown[], totalChangedFiles: nu
   return JSON.stringify(projected);
 }
 
+/** Size totals for a seeded ``pr-files.seed.json`` file list (#833): the
+ * pinned-replay counterpart of the live PR's `changed_files`/`additions`/
+ * `deletions`, summed from the same diff the file list came from so a size-
+ * scaled budget reads consistent numbers. Missing/non-numeric per-file
+ * counts contribute 0. */
+export function seededFileTotals(files: readonly unknown[]): { changedFiles: number; additions: number; deletions: number } {
+  let additions = 0;
+  let deletions = 0;
+  for (const raw of files) {
+    const record = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
+    additions += typeof record.additions === "number" ? record.additions : 0;
+    deletions += typeof record.deletions === "number" ? record.deletions : 0;
+  }
+  return { changedFiles: files.length, additions, deletions };
+}
+
 /** `derive_is_fork_pr` (fail-closed): an unusable PR object conservatively
  * derives a fork. */
 export function deriveFork(prObject: unknown): string {

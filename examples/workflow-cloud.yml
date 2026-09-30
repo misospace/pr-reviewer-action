@@ -7,6 +7,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  checks: read
 
 jobs:
   review:
@@ -14,17 +15,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Review PR with cloud model
-        uses: misospace/pr-reviewer-action@v1
+        uses: misospace/pr-reviewer-action@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          ai_base_url: https://api.openai.com/v1
-          ai_model: gpt-4.1-mini
-          ai_api_key: ${{ secrets.OPENAI_API_KEY }}
-          standards_file: ""
-          publish_review_comment: "true"
+          ai-base-url: https://api.openai.com/v1
+          ai-model: gpt-4.1-mini
+          ai-api-key: ${{ secrets.OPENAI_API_KEY }}

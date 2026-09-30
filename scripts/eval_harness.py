@@ -1653,6 +1653,58 @@ def _checkout_pr_head(repo_path: Path, pr_number: int) -> tuple[bool, str | None
         )
 
 
+_GIT_STATUS_KIND = {"A": "added", "M": "modified", "D": "removed", "R": "renamed", "C": "copied", "T": "changed"}
+
+
+def _files_from_pinned_diff(repo_path: Path, base_sha: str, head_sha: str) -> str | None:
+    """Derive the ``pr-files.json`` projection's raw shape from ``base...head``.
+
+    Zips ``--numstat`` (per-file additions/deletions) with ``--name-status``
+    (per-file status, and old/new paths for renames): both are computed with
+    the same ``-M`` diff and so list files in the same order. Returns ``None``
+    on any git failure or shape mismatch rather than guess at a manifest.
+    """
+    numstat = subprocess.run(
+        ["git", "-C", str(repo_path), "diff", "--numstat", "-M", f"{base_sha}...{head_sha}"],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    name_status = subprocess.run(
+        ["git", "-C", str(repo_path), "diff", "--name-status", "-M", f"{base_sha}...{head_sha}"],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    if numstat.returncode != 0 or name_status.returncode != 0:
+        return None
+    numstat_lines = [line for line in numstat.stdout.split("\n") if line]
+    status_lines = [line for line in name_status.stdout.split("\n") if line]
+    if len(numstat_lines) != len(status_lines):
+        return None
+    entries = []
+    for num_line, status_line in zip(numstat_lines, status_lines):
+        num_parts = num_line.split("\t")
+        status_parts = status_line.split("\t")
+        if len(num_parts) != 3 or len(status_parts) < 2:
+            return None
+        added_raw, deleted_raw, _path_field = num_parts
+        kind = _GIT_STATUS_KIND.get(status_parts[0][0], "changed")
+        previous_filename = None
+        if kind in ("renamed", "copied") and len(status_parts) == 3:
+            previous_filename, filename = status_parts[1], status_parts[2]
+        else:
+            filename = status_parts[-1]
+        additions = None if added_raw == "-" else int(added_raw)
+        deletions = None if deleted_raw == "-" else int(deleted_raw)
+        changes = None if additions is None or deletions is None else additions + deletions
+        entries.append({
+            "filename": filename,
+            "status": kind,
+            "additions": additions,
+            "deletions": deletions,
+            "changes": changes,
+            "previous_filename": previous_filename,
+        })
+    return json.dumps(entries)
+
+
 def _prepare_pinned_workspace(
     repo_path: Path, head_sha: str, base_sha: str | None = None,
 ) -> tuple[bool, str]:
@@ -1662,7 +1714,13 @@ def _prepare_pinned_workspace(
     non-empty ``pr.diff`` it finds there, so a stale one would review the
     wrong PR. Removes every untracked/ignored file, then, when ``base_sha`` is
     given, writes ``pr.diff`` as ``base...head`` so the review sees the diff as
-    it was at that head rather than the PR's current state. Returns (ok, error).
+    it was at that head rather than the PR's current state, and seeds
+    ``pr-files.seed.json`` with that same diff's file manifest so the runtime's
+    file list and size totals match the diff instead of the PR's live,
+    possibly-since-changed file list. The manifest is part of the pinned
+    replay's identity, not best-effort: a manifest derivation failure fails
+    the whole prepare, exactly like a diff failure, rather than leaving the
+    review to fall back to the live file list. Returns (ok, error).
     """
     result = subprocess.run(
         ["git", "-C", str(repo_path), "clean", "-ffdxq"],
@@ -1687,6 +1745,10 @@ def _prepare_pinned_workspace(
     if result.returncode != 0 or not result.stdout:
         return False, f"diff {base_sha[:12]}...{head_sha[:12]} failed: {result.stderr[:300]}"
     (repo_path / "pr.diff").write_text(result.stdout, encoding="utf-8")
+    files_json = _files_from_pinned_diff(repo_path, base_sha, head_sha)
+    if files_json is None:
+        return False, f"file manifest {base_sha[:12]}...{head_sha[:12]} could not be derived"
+    (repo_path / "pr-files.seed.json").write_text(files_json, encoding="utf-8")
     return True, ""
 
 

@@ -1432,3 +1432,135 @@ test("#812 review: authoritativeBodyRevision normalizes the snapshot and fails s
   const throwing: PlatformReadAdapter = { getPrBodyRevision: () => Promise.reject(new Error("down")) } as unknown as PlatformReadAdapter;
   assert.equal(await authoritativeBodyRevision(throwing), null);
 });
+
+test("#833: a seeded pr-files.seed.json overrides the live file list and size totals", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(
+      join(runDir, "pr-files.seed.json"),
+      JSON.stringify([
+        { filename: "a.py", status: "modified", additions: 3, deletions: 1, changes: 4, previous_filename: null },
+      ]),
+    );
+    const platform = mockPlatform({
+      files: [
+        { filename: "a.py", status: "modified", additions: 3, deletions: 1, changes: 4 },
+        { filename: "phantom.py", status: "added", additions: 50, deletions: 0, changes: 50 },
+      ],
+      additions: 53,
+      deletions: 1,
+    });
+    let listPrFilesCalls = 0;
+    const originalListPrFiles = platform.listPrFiles;
+    platform.listPrFiles = (...args: Parameters<typeof originalListPrFiles>) => {
+      listPrFilesCalls += 1;
+      return originalListPrFiles(...args);
+    };
+    await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": server.url, "ai-model": "m", "ai-stream": "false", "ai-api-key": "k",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: platform,
+      persistArtifacts: true,
+      quiet: true,
+    });
+    assert.equal(listPrFilesCalls, 0);
+    const files = JSON.parse(readFileSync(join(runDir, "pr-files.json"), "utf8")) as Array<Record<string, unknown>>;
+    assert.deepEqual(files.map((f) => f.filename), ["a.py"]);
+    const pr = JSON.parse(readFileSync(join(runDir, "pr.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(pr.changedFiles, 1);
+    assert.equal(pr.additions, 3);
+    assert.equal(pr.deletions, 1);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#833: a malformed seed file throws and never falls back to the live list", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "pr-files.seed.json"), "");
+    const platform = mockPlatform();
+    let listPrFilesCalls = 0;
+    const originalListPrFiles = platform.listPrFiles;
+    platform.listPrFiles = (...args: Parameters<typeof originalListPrFiles>) => {
+      listPrFilesCalls += 1;
+      return originalListPrFiles(...args);
+    };
+    await assert.rejects(
+      runReview({
+        env: {},
+        inputs: {
+          "github-token": "tok", repo: "o/r", "pr-number": "7",
+          "ai-base-url": server.url, "ai-model": "m", "ai-stream": "false", "ai-api-key": "k",
+        },
+        runDir,
+        workspace: runDir,
+        platformAdapter: platform,
+        persistArtifacts: true,
+        quiet: true,
+      }),
+      /pr-files\.seed\.json/,
+    );
+    assert.equal(listPrFilesCalls, 0);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#833: no seed file falls back to the live PR file list and totals", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const platform = mockPlatform({
+      files: [{ filename: "a.py", status: "modified", additions: 3, deletions: 1, changes: 4 }],
+      additions: 3,
+      deletions: 1,
+    });
+    let listPrFilesCalls = 0;
+    const originalListPrFiles = platform.listPrFiles;
+    platform.listPrFiles = (...args: Parameters<typeof originalListPrFiles>) => {
+      listPrFilesCalls += 1;
+      return originalListPrFiles(...args);
+    };
+    await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": server.url, "ai-model": "m", "ai-stream": "false", "ai-api-key": "k",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: platform,
+      persistArtifacts: true,
+      quiet: true,
+    });
+    assert.equal(listPrFilesCalls, 1);
+    const files = JSON.parse(readFileSync(join(runDir, "pr-files.json"), "utf8")) as Array<Record<string, unknown>>;
+    assert.deepEqual(files.map((f) => f.filename), ["a.py"]);
+    const pr = JSON.parse(readFileSync(join(runDir, "pr.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(pr.changedFiles, 1);
+    assert.equal(pr.additions, 3);
+    assert.equal(pr.deletions, 1);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
