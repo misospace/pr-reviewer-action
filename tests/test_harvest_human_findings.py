@@ -1111,15 +1111,14 @@ def test_main_requires_repos_maintainers_bots():
 
 
 
-def test_github_client_uses_safe_opener_refuses_redirects():
-    """The GitHub client uses the safe opener that refuses redirects."""
+def test_github_client_uses_safe_opener_refuses_redirects(monkeypatch):
+    """The GitHubClient uses the safe opener that refuses redirects."""
     import threading
     from http.server import BaseHTTPRequestHandler, HTTPServer
-    import urllib.request
 
     SECRET = "test-gh-token"
     target_seen = {"requests": 0}
-    origin_seen = {"requests": 0, "auth": None}
+    origin_seen = {"requests": 0, "auth": None, "path": None}
 
     class TargetHandler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -1127,7 +1126,7 @@ def test_github_client_uses_safe_opener_refuses_redirects():
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"data": "should not be reached"}).encode())
+            self.wfile.write(json.dumps([{"data": "should not be reached"}]).encode())
 
         def log_message(self, *_args):
             pass
@@ -1136,8 +1135,9 @@ def test_github_client_uses_safe_opener_refuses_redirects():
         def do_GET(self):
             origin_seen["requests"] += 1
             origin_seen["auth"] = self.headers.get("Authorization")
+            origin_seen["path"] = self.path
             self.send_response(302)
-            self.send_header("Location", f"http://127.0.0.1:{target_server.server_port}/api")
+            self.send_header("Location", f"http://127.0.0.1:{target_server.server_port}/api/redirected")
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b"{}")
@@ -1152,19 +1152,25 @@ def test_github_client_uses_safe_opener_refuses_redirects():
         threading.Thread(target=target_server.serve_forever, daemon=True).start()
         threading.Thread(target=origin_server.serve_forever, daemon=True).start()
 
-        # Direct test of the safe opener with a request that would redirect
-        from pr_reviewer.http_safe import OPENER_NO_REDIRECT
-        
-        url = f"http://127.0.0.1:{origin_server.server_port}/test"
-        headers = {
-            "Authorization": f"Bearer {SECRET}",
-            "Accept": "application/vnd.github+json",
-        }
-        req = urllib.request.Request(url, headers=headers)
-        
-        # The safe opener should raise an error when it encounters a redirect
-        with pytest.raises(urllib.error.HTTPError):
-            OPENER_NO_REDIRECT.open(req, timeout=30)
+        # Create a GitHubClient and monkeypatch its URL construction to use test server
+        # We patch at the Request URL level to exercise the real _request() code path
+        client = hhf.GitHubClient(token=SECRET, use_gh_cli=False)
+
+        # Patch urllib.request.Request to use the test origin server
+        import urllib.request as urllib_req_module
+        original_request = urllib_req_module.Request
+
+        def patched_request(url, *args, **kwargs):
+            # Replace api.github.com with our test origin server
+            if "api.github.com" in url:
+                url = url.replace("https://api.github.com", f"http://127.0.0.1:{origin_server.server_port}")
+            return original_request(url, *args, **kwargs)
+
+        monkeypatch.setattr(urllib_req_module, "Request", patched_request)
+
+        # Call the real _request() method which should refuse the redirect
+        with pytest.raises(hhf.GitHubAPIError):
+            client._request("/repos/test/pulls")
 
         # Verify the origin was contacted but the redirect target was not
         assert origin_seen["requests"] == 1, "origin should have been contacted once"

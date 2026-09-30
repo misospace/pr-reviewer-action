@@ -658,37 +658,17 @@ class TestPostIssueArgument:
             threading.Thread(target=target_server.serve_forever, daemon=True).start()
             threading.Thread(target=origin_server.serve_forever, daemon=True).start()
 
-            # Mock the API URL to point to our origin server
+            # Set the API URL to point to our test origin server (production uses https://api.github.com)
+            monkeypatch.setenv("GITHUB_API_URL", f"http://127.0.0.1:{origin_server.server_port}")
             monkeypatch.setenv("GITHUB_TOKEN", SECRET)
             monkeypatch.setenv("GITHUB_REPOSITORY", "misospace/pr-reviewer-action")
             monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
 
-            # Patch the _post_tracking_comment to use our test servers
-            def fake_post_comment(body, issue_number):
-                from urllib.request import Request
-                from pr_reviewer.http_safe import OPENER_NO_REDIRECT
+            # Reload the module to pick up the env var
+            import importlib
+            importlib.reload(eval_weekly_summary)
 
-                # Construct URL pointing to our test origin server
-                url = f"http://127.0.0.1:{origin_server.server_port}/api/repos/test/issues/{issue_number}/comments"
-                payload = json.dumps({"body": body}).encode("utf-8")
-                req = Request(
-                    url,
-                    data=payload,
-                    method="POST",
-                    headers={
-                        "Authorization": f"Bearer {SECRET}",
-                        "Accept": "application/vnd.github+json",
-                        "Content-Type": "application/json",
-                        "X-GitHub-Api-Version": "2022-11-28",
-                    },
-                )
-                try:
-                    OPENER_NO_REDIRECT.open(req, timeout=15).read()
-                except Exception as exc:
-                    print(f"Failed to post summary: {exc}", file=sys.stderr)
-
-            monkeypatch.setattr(eval_weekly_summary, "_post_tracking_comment", fake_post_comment)
-
+            # Call the real main() which exercises the real _post_tracking_comment
             rc = eval_weekly_summary.main([
                 "--report", str(FIXTURES / "eval-report-agentic.json"),
                 "--stamp", STAMP,
@@ -696,8 +676,10 @@ class TestPostIssueArgument:
             ])
 
             # Verify the origin was contacted but the redirect target was not
+            assert rc == 0
             assert origin_seen["requests"] == 1, "origin should have been contacted once"
             assert target_seen.get("requests", 0) == 0, "redirect target must never be contacted"
+            assert origin_seen["auth"] == f"Bearer {SECRET}", "auth header should be sent to origin"
         finally:
             origin_server.shutdown()
             target_server.shutdown()
