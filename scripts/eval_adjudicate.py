@@ -139,6 +139,13 @@ def cmd_pack(args: argparse.Namespace) -> int:
     roster: list[dict[str, str]] = []
     fid_counter: dict[str, int] = {}
 
+    # Phase 1: collect every (arm, pr, mode, run) in input order, across all
+    # files for all arms, without assigning rep ids yet. A rep id can only
+    # be assigned once every file contributing to a given (arm, pr, mode)
+    # has been seen -- otherwise two separate report files for the same arm
+    # (e.g. two shards of the same sweep) would each restart their run
+    # counter at 1 and collide on the same (arm, pr, rep) key.
+    raw_runs: list[tuple[str, str, str, dict[str, Any]]] = []
     for arm_label, paths in arms:
         for path in paths:
             report = _load_json(path)
@@ -151,32 +158,54 @@ def cmd_pack(args: argparse.Namespace) -> int:
                         f"pack: conflicting metadata for {pr} between reports "
                         f"({group['meta']!r} vs {meta!r})"
                     )
+                for mode, _idx, run in _iter_runs(scenario.get("runs", {})):
+                    raw_runs.append((arm_label, pr, mode, run))
 
-                runs_by_mode = scenario.get("runs", {})
-                multi_mode = len(runs_by_mode) > 1
-                for mode, idx, run in _iter_runs(runs_by_mode):
-                    rep = _rep_label(mode, idx, multi_mode)
-                    roster.append({"arm": arm_label, "pr": pr, "rep": rep})
-                    findings = run.get("findings") or []
-                    for i, finding in enumerate(findings):
-                        raw = f"{pr}|{arm_label}|{rep}|{i}"
-                        fid = hashlib.sha256(raw.encode()).hexdigest()[:16]
-                        if fid in fid_counter:
-                            # Extremely unlikely (would need a truncated-hash
-                            # collision), but never silently merge findings.
-                            raise SystemExit(f"pack: fid collision for {raw!r}")
-                        fid_counter[fid] = 1
-                        pr_groups[pr]["findings"].append(
-                            {
-                                "fid": fid,
-                                "severity": finding.get("severity"),
-                                "category": finding.get("category"),
-                                "file": finding.get("file"),
-                                "line": finding.get("line"),
-                                "message": finding.get("message"),
-                            }
-                        )
-                        unblind_key[fid] = {"arm": arm_label, "rep": rep, "pr": pr}
+    modes_by_arm_pr: dict[tuple[str, str], set[str]] = {}
+    for arm_label, pr, mode, _run in raw_runs:
+        modes_by_arm_pr.setdefault((arm_label, pr), set()).add(mode)
+
+    # Phase 2: assign rep ids with a running counter per (arm, pr, mode)
+    # spanning every file, so a PR/mode repeated across two files for one
+    # arm gets distinct, sequential rep ids rather than colliding on r1.
+    rep_counters: dict[tuple[str, str, str], int] = {}
+    seen_run_keys: set[tuple[str, str, str]] = set()
+    for arm_label, pr, mode, run in raw_runs:
+        counter_key = (arm_label, pr, mode)
+        rep_counters[counter_key] = rep_counters.get(counter_key, 0) + 1
+        idx = rep_counters[counter_key]
+        multi_mode = len(modes_by_arm_pr[(arm_label, pr)]) > 1
+        rep = _rep_label(mode, idx, multi_mode)
+
+        run_key = (arm_label, pr, rep)
+        if run_key in seen_run_keys:
+            # Fail closed: a duplicate (arm, pr, rep) would otherwise
+            # silently collapse two distinct runs into one roster entry
+            # and merge their findings.
+            raise SystemExit(f"pack: duplicate run key {run_key!r} -- overlapping --arm inputs?")
+        seen_run_keys.add(run_key)
+
+        roster.append({"arm": arm_label, "pr": pr, "rep": rep})
+        findings = run.get("findings") or []
+        for i, finding in enumerate(findings):
+            raw = f"{pr}|{arm_label}|{rep}|{i}"
+            fid = hashlib.sha256(raw.encode()).hexdigest()[:16]
+            if fid in fid_counter:
+                # Extremely unlikely (would need a truncated-hash
+                # collision), but never silently merge findings.
+                raise SystemExit(f"pack: fid collision for {raw!r}")
+            fid_counter[fid] = 1
+            pr_groups[pr]["findings"].append(
+                {
+                    "fid": fid,
+                    "severity": finding.get("severity"),
+                    "category": finding.get("category"),
+                    "file": finding.get("file"),
+                    "line": finding.get("line"),
+                    "message": finding.get("message"),
+                }
+            )
+            unblind_key[fid] = {"arm": arm_label, "rep": rep, "pr": pr}
 
     rng = random.Random(args.seed)
     pr_order = sorted(pr_groups.keys())
@@ -268,14 +297,24 @@ def _validate(unblind_key: dict[str, Any], packets: dict[str, Any], verdicts: di
     for fid in key_fids:
         finding = packets[fid]
         verdict = verdicts[fid]
+        is_blocker_major = finding.get("severity") in BLOCKER_MAJOR
         if verdict["fp_label"] is not None:
-            if finding.get("severity") not in BLOCKER_MAJOR:
+            if not is_blocker_major:
                 raise SystemExit(
                     f"score: {fid} has fp_label={verdict['fp_label']!r} but severity "
                     f"{finding.get('severity')!r} is not blocker/major"
                 )
             if verdict["same_defect"] == "yes":
                 raise SystemExit(f"score: {fid} has fp_label set but same_defect is 'yes'")
+        elif is_blocker_major and verdict["same_defect"] != "yes":
+            # A blocker/major finding that isn't the caught defect MUST be
+            # labelled real/false_positive/unverifiable -- a null fp_label
+            # here would silently vanish from both the FP and real-other
+            # counts instead of being accounted for one way or the other.
+            raise SystemExit(
+                f"score: {fid} is blocker/major with same_defect={verdict['same_defect']!r} "
+                "but fp_label is null; label it real/false_positive/unverifiable"
+            )
 
 
 def _build_runs_map(

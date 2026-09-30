@@ -297,7 +297,16 @@ def test_score_rejects_fp_label_on_non_blocker_major(tmp_path, synthetic_reports
     findings_by_fid = {f["fid"]: f for group in packets for f in group["findings"]}
     minor_fid = next(fid for fid, f in findings_by_fid.items() if f["severity"] == "minor")
 
-    verdicts = [_fake_verdict(fid, "no") for fid in unblind_key]
+    # Every blocker/major non-catch needs an fp_label to satisfy the other
+    # validation rule; only the minor finding should trip this one.
+    verdicts = [
+        _fake_verdict(
+            fid,
+            "no",
+            fp_label="real" if findings_by_fid[fid]["severity"] in ("blocker", "major") else None,
+        )
+        for fid in unblind_key
+    ]
     for v in verdicts:
         if v["fid"] == minor_fid:
             v["fp_label"] = "real"
@@ -314,6 +323,115 @@ def test_score_rejects_fp_label_on_non_blocker_major(tmp_path, synthetic_reports
                 "--runs", str(out_dir / "roster.json"),
             ]
         )
+
+
+def test_score_rejects_null_fp_label_on_blocker_major_non_catch(tmp_path, synthetic_reports):
+    on_path, off_path = synthetic_reports
+    out_dir = tmp_path / "packets"
+    ea.main(
+        [
+            "pack",
+            "--arm", f"on={on_path}",
+            "--arm", f"off={off_path}",
+            "--packets", "1",
+            "--out-dir", str(out_dir),
+        ]
+    )
+    unblind_key = json.loads((out_dir / "unblind-key.json").read_text())
+    packets = json.loads((out_dir / "packet1.json").read_text())
+    findings_by_fid = {f["fid"]: f for group in packets for f in group["findings"]}
+    blocker_fid = next(fid for fid, f in findings_by_fid.items() if f["severity"] == "blocker")
+
+    # blocker/major, not the catch, and no fp_label -- must be rejected: a
+    # null fp_label here would silently drop out of both the FP and
+    # real-other counts instead of being accounted for either way.
+    verdicts = [_fake_verdict(fid, "no") for fid in unblind_key]
+    for v in verdicts:
+        if v["fid"] == blocker_fid:
+            v["fp_label"] = None
+    verdicts_path = tmp_path / "verdicts.json"
+    _write(verdicts_path, verdicts)
+
+    with pytest.raises(SystemExit, match="fp_label is null"):
+        ea.main(
+            [
+                "score",
+                "--packets", str(out_dir / "packet1.json"),
+                "--unblind-key", str(out_dir / "unblind-key.json"),
+                "--verdicts", str(verdicts_path),
+                "--runs", str(out_dir / "roster.json"),
+            ]
+        )
+
+
+def test_pack_multiple_files_same_arm_same_pr_distinct_runs(tmp_path):
+    """Two report files both tagged as the "on" arm, both containing the
+    same PR/mode, must produce two distinct runs -- not collide on the same
+    (arm, pr, rep) key and collapse one run's findings into the other's."""
+    shard_a = {
+        "per_scenario_results": [
+            _scenario(
+                "acme/widgets", 1, "a" * 40, "off-by-one in the loop bound",
+                runs={"native_loop": {"findings": [_finding("blocker", "shard a finding")]}},
+            )
+        ]
+    }
+    shard_b = {
+        "per_scenario_results": [
+            _scenario(
+                "acme/widgets", 1, "a" * 40, "off-by-one in the loop bound",
+                runs={"native_loop": {"findings": [_finding("blocker", "shard b finding")]}},
+            )
+        ]
+    }
+    path_a = tmp_path / "shard_a.json"
+    path_b = tmp_path / "shard_b.json"
+    _write(path_a, shard_a)
+    _write(path_b, shard_b)
+
+    out_dir = tmp_path / "packets"
+    ea.main(
+        [
+            "pack",
+            "--arm", f"on={path_a},{path_b}",
+            "--packets", "1",
+            "--out-dir", str(out_dir),
+        ]
+    )
+
+    roster = json.loads((out_dir / "roster.json").read_text())
+    unblind_key = json.loads((out_dir / "unblind-key.json").read_text())
+    packet = json.loads((out_dir / "packet1.json").read_text())
+
+    assert len(roster) == 2
+    reps = {r["rep"] for r in roster}
+    assert len(reps) == 2, f"expected two distinct rep ids, got {roster!r}"
+
+    all_findings = [f for group in packet for f in group["findings"]]
+    assert len(all_findings) == 2
+    assert {f["message"] for f in all_findings} == {"shard a finding", "shard b finding"}
+    assert len(unblind_key) == 2
+
+    # Score it: both runs caught the defect and both should be counted
+    # (correct totals, not undercounted-runs/double-counted-findings).
+    verdicts = [_fake_verdict(fid, "yes") for fid in unblind_key]
+    verdicts_path = tmp_path / "verdicts.json"
+    _write(verdicts_path, verdicts)
+    summary_path = tmp_path / "summary.json"
+    ea.main(
+        [
+            "score",
+            "--packets", str(out_dir / "packet1.json"),
+            "--unblind-key", str(out_dir / "unblind-key.json"),
+            "--verdicts", str(verdicts_path),
+            "--runs", str(out_dir / "roster.json"),
+            "--out-summary", str(summary_path),
+        ]
+    )
+    summary = json.loads(summary_path.read_text())
+    assert summary["totals"]["on"]["runs"] == 2
+    assert summary["totals"]["on"]["semantic_catch"] == 2
+    assert summary["totals"]["on"]["blocker_major"] == 2
 
 
 # ---------------------------------------------------------------------------
