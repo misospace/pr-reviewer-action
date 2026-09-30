@@ -200,8 +200,12 @@ function roleLine(entry: SpecialistRoleEntry): string {
     usageNote = `, tokens in/out=${pyStr(usage.prompt_tokens ?? null)}/${pyStr(usage.completion_tokens ?? null)} cached=${pyStr(usage.cached_tokens ?? null)}`;
   }
   const reason = entry.reason ? ` — ${entry.reason}` : "";
+  // #846: an actual HTTP error response carries its status and a redacted
+  // body excerpt into the log line — the symptom this closes was a bare
+  // "error (transport)" line with no clue the endpoint answered 404.
+  const httpDetail = entry.error_status !== undefined && entry.error_detail ? ` — ${entry.error_detail}` : "";
   if (entry.overrun_retry === true) usageNote += ` overrun-retry(max_tokens=${pyStr(entry.retry_max_tokens ?? null)})`;
-  return `specialist ${entry.role}: ${entry.status}${suffix}${reason} — ${entry.lead_count} lead(s), ${entry.errors_count} error(s), ${pyFloatRepr(entry.elapsed_sec)}s${usageNote}`;
+  return `specialist ${entry.role}: ${entry.status}${suffix}${reason}${httpDetail} — ${entry.lead_count} lead(s), ${entry.errors_count} error(s), ${pyFloatRepr(entry.elapsed_sec)}s${usageNote}`;
 }
 
 /** Fold a refused write into the role entry the way v2's in-flight guard

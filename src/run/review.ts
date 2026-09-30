@@ -15,6 +15,7 @@ import { buildHarnessObligations } from "../requirements/obligations.js";
 import { externalChecksConclusion } from "../precheck/decide.js";
 import { resolveStandardsFile } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
+import { describeTransportFailure } from "../transport/http.js";
 import type { FetchLike } from "../platform/http.js";
 import { normalizePrIdentity } from "../platform/pr.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
@@ -1046,7 +1047,12 @@ async function callTier(
   } else if (outcome.status === "parse_exhausted") {
     errorLog(`${profile.label}: parse/validate failures exhausted (${outcome.failure.message})`);
   } else {
-    errorLog(`${profile.label}: transport failures exhausted (${outcome.failure.message})`);
+    // #846: carry the HTTP status and a redacted, length-capped body excerpt
+    // (plus the ai-api-format hint on a 404) instead of the bare "model
+    // endpoint returned HTTP <status>" message.
+    const detail = describeTransportFailure(outcome.failure);
+    errorLog(`${profile.label}: transport failures exhausted (${detail})`);
+    ws.write(responseArtifact, pyJsonDumps({ error: detail }));
   }
   return { ok: false, artifact: null, rawResponse: null };
 }

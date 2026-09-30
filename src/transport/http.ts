@@ -2,6 +2,7 @@ import http from "node:http";
 import https from "node:https";
 import { URL } from "node:url";
 import type { ApiFormat } from "../model/types.js";
+import { redactText } from "../context/redact.js";
 
 /**
  * Typed HTTP transport for model calls (#677). Replaces the v2 curl/jq wire
@@ -101,6 +102,29 @@ export class TransportFailure extends Error {
     if (options.maxResponseBytes !== undefined) this.maxResponseBytes = options.maxResponseBytes;
     if (options.bytesReceived !== undefined) this.bytesReceived = options.bytesReceived;
   }
+}
+
+/** #846: a 404 from the completions/messages path is most often a wrong
+ * `ai-api-format` (routed to an endpoint that doesn't serve the requested
+ * API shape) rather than a dead endpoint — point at the fix instead of
+ * leaving the operator to guess from a bare status code. */
+const API_FORMAT_404_HINT = "check ai-api-format for this model (openai vs anthropic)";
+
+/**
+ * A short, secret-redacted, length-capped detail string for a
+ * `TransportFailure`, suitable for logs and error telemetry (#846):
+ * `HTTP <status>: <redacted body excerpt>`, with the #846 hint appended on a
+ * 404. Falls back to the bare `.message` for failure kinds that carry no
+ * status/body (connect/request timeouts, network errors) — there is nothing
+ * to excerpt there.
+ */
+export function describeTransportFailure(failure: TransportFailure, maxBodyChars = 300): string {
+  if (failure.status === undefined) return failure.message;
+  const redacted = redactText((failure.body ?? "").trim());
+  const points = Array.from(redacted);
+  const body = points.length > maxBodyChars ? `${points.slice(0, maxBodyChars).join("")}...[truncated]` : redacted;
+  const hint = failure.status === 404 ? ` — ${API_FORMAT_404_HINT}` : "";
+  return `HTTP ${failure.status}${body ? `: ${body}` : ""}${hint}`;
 }
 
 function oversizeFailure(

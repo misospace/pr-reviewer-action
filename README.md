@@ -1073,6 +1073,7 @@ on-model-failure: notice   # visible explanation instead of a long red check
 | --- | --- | --- |
 | `curl transport error (exit 7)` in logs | endpoint unreachable from the runner | check `ai-base-url`, runner network, server is listening |
 | HTTP 404 from the endpoint | base URL missing `/v1` (ollama) or wrong `ai-api-format` | use the OpenAI-compatible base path |
+| HTTP 404 from the endpoint, model only served in Anthropic format | `ai-api-format` (and/or `ai-fallback-api-format`/`ai-primary-api-format`/`ai-smart-api-format`) left at the `openai` default | set the matching input(s) to `ai-api-format: anthropic` so the action posts to `/messages` instead of `/chat/completions` |
 | `context length exceeded` in the logged error body | corpus exceeds the served window | set `model-context-tokens` (and/or lower `ai-max-tokens`) |
 | Verdict parse failures, retries, then fallback | model wraps JSON in prose | set `ai-response-format: json_object` |
 | Reviews time out behind a proxy | idle-read timer on non-streamed response | keep `ai-stream: "true"` |

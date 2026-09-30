@@ -1,6 +1,7 @@
 import { redactText } from "../context/redact.js";
 import type { ApiFormat, NormalizedModelResponse, TransportWirePayload } from "../model/types.js";
 import type { SpecialistRequestFn, SpecialistTransportOutcome } from "../specialists/runner.js";
+import { describeTransportFailure } from "../transport/http.js";
 import { runChatRequest, type ChatRequestInput, type ChatRequestOutcome } from "../transport/transport.js";
 
 /**
@@ -55,15 +56,18 @@ export function toV2Completion(response: NormalizedModelResponse): Record<string
   return result;
 }
 
-function failureMessage(outcome: Extract<ChatRequestOutcome, { status: "failure" }>): { message: string; timeout: boolean } {
+function failureMessage(outcome: Extract<ChatRequestOutcome, { status: "failure" }>): { message: string; timeout: boolean; status?: number; statusDetail?: string } {
   const failure = outcome.failure;
   if (failure.kind === "connect_timeout" || failure.kind === "request_timeout") {
     return { message: "planner model request timed out", timeout: true };
   }
   if (failure.kind === "http_status" && failure.status !== undefined) {
-    let body = redactText((failure.body ?? "").trim());
-    if (Array.from(body).length > 300) body = `${codePointSlice(body, 300)}...[truncated]`;
-    return { message: `planner model request failed with HTTP ${failure.status}${body ? `: ${body}` : ""}`, timeout: false };
+    // #846: `statusDetail` is the clean "HTTP <status>: <excerpt>[ — hint]"
+    // form, carried separately for log lines/telemetry; `message` keeps the
+    // v2-parity "planner model request failed with ..." phrasing used in
+    // the persisted artifact errors.
+    const statusDetail = describeTransportFailure(failure, 300);
+    return { message: `planner model request failed with ${statusDetail}`, timeout: false, status: failure.status, statusDetail };
   }
   return { message: failure.message, timeout: false };
 }
@@ -97,8 +101,14 @@ export function specialistRequestFn(config: SpecialistTransportConfig): Speciali
       const raw = payload.stream === true ? toV2Completion(outcome.response) : outcome.raw;
       return { ok: true, raw };
     }
-    const { message, timeout } = failureMessage(outcome);
+    const { message, timeout, status, statusDetail } = failureMessage(outcome);
     const masked = codePointSlice(redactText(message), 500);
-    return { ok: false, errorMessage: masked, timeout: timeout || masked.toLowerCase().includes("timed out") };
+    return {
+      ok: false,
+      errorMessage: masked,
+      timeout: timeout || masked.toLowerCase().includes("timed out"),
+      ...(status !== undefined ? { status } : {}),
+      ...(statusDetail !== undefined ? { statusDetail } : {}),
+    };
   };
 }

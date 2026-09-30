@@ -57,6 +57,15 @@ export interface SpecialistTransportOutcome {
   errorMessage?: string;
   /** True when the failure was itself a timeout (never retried). */
   timeout?: boolean;
+  /** HTTP status of a failed attempt (#846); present only when the failure
+   * was an actual HTTP error response — never for network/timeout/oversized
+   * failures, which have no status to report. */
+  status?: number;
+  /** #846: a short, secret-redacted, length-capped "HTTP <status>: <body
+   * excerpt>[ — hint]" detail, present alongside `status`, for surfacing in
+   * the role's log line and telemetry (separate from `errorMessage`, which
+   * keeps its own v2-parity phrasing). */
+  statusDetail?: string;
 }
 
 /** `(payload, apiFormat, timeoutSec) => outcome`. Never throws — transport
@@ -81,6 +90,13 @@ export interface SpecialistRoleEntry {
   overrun_retry?: boolean;
   retry_max_tokens?: number | null;
   reason?: string;
+  /** #846: present only for an error entry whose failure was an actual HTTP
+   * error response from the model endpoint (never for input/timeout/guard
+   * failures, or a 200 carrying an error body). */
+  error_status?: number;
+  /** #846: the redacted, length-capped "HTTP <status>: <excerpt>[ — hint]"
+   * detail for `error_status`, meant for the role's log line. */
+  error_detail?: string;
   /** #758: which corpus (and prompt family) this role ran against —
    * telemetry only, never a behavior switch downstream. Present only for
    * roles run through `_run_role`'s three_call/prime_then_fanout path
@@ -187,6 +203,8 @@ function roleEntry(
     overrunRetry?: boolean;
     retryMaxTokens?: number | null;
     corpusSource?: "standard" | "adversarial";
+    errorStatus?: number | undefined;
+    errorDetail?: string | undefined;
   } = {},
 ): SpecialistRoleEntry {
   return {
@@ -201,6 +219,8 @@ function roleEntry(
     overrun_retry: options.overrunRetry ?? false,
     retry_max_tokens: options.retryMaxTokens ?? null,
     ...(options.corpusSource !== undefined ? { corpus_source: options.corpusSource } : {}),
+    ...(options.errorStatus !== undefined ? { error_status: options.errorStatus } : {}),
+    ...(options.errorDetail !== undefined ? { error_detail: options.errorDetail } : {}),
   };
 }
 
@@ -223,6 +243,11 @@ class RoleFailure {
   constructor(
     public readonly kind: string,
     public readonly message: string,
+    /** #846: HTTP status of the failed attempt, when the failure was an
+     * actual HTTP error response. */
+    public readonly status?: number,
+    /** #846: redacted, length-capped "HTTP <status>: <excerpt>[ — hint]". */
+    public readonly detail?: string,
   ) {}
 }
 
@@ -280,6 +305,11 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
   let requestBytes: number | null = null;
   let overrunRetry = false;
   let retryMaxTokens: number | null = null;
+  // #846: set only when the terminal failure was an actual HTTP error
+  // response (never for input/timeout/guard failures or a 200 carrying an
+  // error body).
+  let errorStatus: number | undefined;
+  let errorDetail: string | undefined;
 
   const finish = (
     artifact: SpecialistArtifact,
@@ -295,6 +325,8 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
       overrunRetry,
       retryMaxTokens,
       corpusSource,
+      errorStatus,
+      errorDetail,
     }),
     request,
     response,
@@ -350,7 +382,9 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
       if (outcome.timeout) {
         return timeoutFailure(outcome.errorMessage ?? "specialist phase deadline exceeded");
       }
-      lastFailure = new RoleFailure("transport", outcome.errorMessage ?? "transport failure");
+      lastFailure = new RoleFailure("transport", outcome.errorMessage ?? "transport failure", outcome.status, outcome.statusDetail);
+      errorStatus = outcome.status;
+      errorDetail = outcome.statusDetail;
       if (attempt < MAX_ATTEMPTS) {
         const delay = Math.min(RETRY_DELAY_SEC, Math.max(0, deadline - now()));
         if (delay > 0) await sleep(delay);
@@ -360,6 +394,11 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
       failureArtifact.errors.push(`${lastFailure.kind}: ${lastFailure.message}`);
       return finish(failureArtifact, "error", lastFailure.kind, null, payload, { error: `${lastFailure.kind}: ${lastFailure.message}` });
     }
+
+    // A retried attempt succeeded after an earlier failed one: the earlier
+    // attempt's HTTP detail must not leak onto a success entry (#846).
+    errorStatus = undefined;
+    errorDetail = undefined;
 
     // A 200 whose body is an error object is a transport failure (some
     // gateways do this); never parse it as a lead set.
@@ -475,6 +514,11 @@ async function runSpecialistScout(
 ): Promise<{ entries: SpecialistRoleEntry[]; request: SpecialistPayload | null; response: unknown; artifacts: Record<string, SpecialistArtifact> }> {
   const started = now();
   const system = buildScoutSystem(rolePrompts);
+  // #846: set only when the terminal failure was an actual HTTP error
+  // response (never for input/timeout failures or a 200 carrying an error
+  // body).
+  let errorStatus: number | undefined;
+  let errorDetail: string | undefined;
   const failureEntries = (message: string): { entries: SpecialistRoleEntry[]; request: SpecialistPayload | null; response: unknown; artifacts: Record<string, SpecialistArtifact> } => {
     const artifacts: Record<string, SpecialistArtifact> = {};
     const entries: SpecialistRoleEntry[] = [];
@@ -482,7 +526,7 @@ async function runSpecialistScout(
       const artifact = emptyArtifact(role);
       artifact.errors.push(message);
       artifacts[role] = artifact;
-      entries.push(roleEntry(role, artifact, "error", message.split(":", 1)[0] ?? "transport", now() - started));
+      entries.push(roleEntry(role, artifact, "error", message.split(":", 1)[0] ?? "transport", now() - started, { errorStatus, errorDetail }));
     }
     // v2 writes specialist-scout.request.json before the call, so a failed
     // scout still leaves it; there is no response artifact on failure.
@@ -527,6 +571,8 @@ async function runSpecialistScout(
         break;
       }
       lastError = `transport: ${outcome.errorMessage ?? "transport failure"}`;
+      errorStatus = outcome.status;
+      errorDetail = outcome.statusDetail;
       if (attempt < MAX_ATTEMPTS) {
         const delay = Math.min(RETRY_DELAY_SEC, Math.max(0, deadline - now()));
         if (delay > 0) await sleep(delay);

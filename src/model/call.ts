@@ -10,7 +10,7 @@ import { VerdictParseFailure } from "./types.js";
 import { buildModelRequest } from "./request.js";
 import { parseVerdictResponse } from "./verdict.js";
 import { runChatRequest, type ChatRequestOutcome } from "../transport/transport.js";
-import { TransportFailure } from "../transport/http.js";
+import { describeTransportFailure, TransportFailure } from "../transport/http.js";
 
 /**
  * Port of the v2 `call_model_tier` retry loop (scripts/model_call.sh): one
@@ -184,7 +184,10 @@ export async function produceVerdict(
 
   const evaluate = (outcome: ChatRequestOutcome): { ok: boolean; verdict: ParsedReviewVerdict | null; raw: unknown; reason: VerdictOutcome["reason"]; detail: string } => {
     if (outcome.status === "failure") {
-      return { ok: false, verdict: null, raw: null, reason: "transport", detail: outcome.failure.message };
+      // #846: carry the HTTP status and a redacted body excerpt (plus the
+      // ai-api-format hint on a 404) instead of the bare "model endpoint
+      // returned HTTP <status>" message.
+      return { ok: false, verdict: null, raw: null, reason: "transport", detail: describeTransportFailure(outcome.failure) };
     }
     try {
       return { ok: true, verdict: parseVerdictResponse(outcome.raw), raw: outcome.raw, reason: "accepted", detail: "" };

@@ -11,6 +11,7 @@ import { payloadBytes } from "../src/specialists/payload.js";
 import type { SpecialistRequestFn } from "../src/specialists/runner.js";
 import { TransportFailure } from "../src/transport/http.js";
 import type { ChatRequestInput, ChatRequestOutcome } from "../src/transport/transport.js";
+import { startMockServer } from "./helpers.js";
 
 const CORPUS = "# Corpus\n\n+def load(path):\n+    return open(path).read()\n";
 
@@ -300,4 +301,75 @@ test("a failed combined scout still leaves its request artifact and no response 
     "transport: endpoint returned an error body: {'message': 'context length exceeded'}",
   ]);
   rmSync(result.root, { recursive: true, force: true });
+});
+
+test("#846: a specialist role's HTTP errors carry status, a redacted body excerpt, and the 404 hint into the log line and artifact", async () => {
+  const planted = "ghp_" + "b".repeat(36); // matches redactText's GitHub PAT pattern
+  const apiKey = "specialist-secret-key-value";
+  let call = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    call += 1;
+    if (call === 1) {
+      // A non-retryable status (transport.ts's own internal retry only
+      // fires for 429/500/502/503/504): the runner's own MAX_ATTEMPTS=2
+      // retry drives the second attempt, not the transport layer's backoff.
+      res.statusCode = 400;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: { message: "bad request" } }));
+      return;
+    }
+    res.statusCode = 404;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: { message: `no route for this model; leaked token ${planted}` } }));
+  });
+  try {
+    const requestFn = specialistRequestFn({ baseUrl: server.url, apiKey, anthropicVersion: "2023-06-01" });
+    const result = await run(
+      { DEEP_REVIEW: "auto", AI_STREAM: "false" },
+      {
+        requestFn,
+        // Scale real time down 1000x (interpret seconds as ms) rather than a
+        // no-op: the deadline-race sentinel and the retry delay share this
+        // sleep, and a no-op would resolve the deadline race before the real
+        // attempt ever runs.
+        sleep: (seconds) => new Promise((resolve) => setTimeout(resolve, Math.max(0, seconds))),
+        setup: (root) => writeFileSync(join(root, "classification.json"), JSON.stringify({ pr_kind: "dependency_upgrade", risk_flags: [], changed_files_summary: ["package.json"] })),
+      },
+    );
+    assert.equal(result.code, 0);
+    assert.equal(call, 2, "the single selected role (tests) gets exactly MAX_ATTEMPTS attempts");
+
+    const roleLine = result.out.find((line) => line.startsWith("specialist tests:"));
+    assert.ok(roleLine, `expected a "specialist tests:" log line, got: ${JSON.stringify(result.out)}`);
+    assert.match(roleLine!, /error \(transport\)/);
+    assert.match(roleLine!, /HTTP 404/);
+    assert.match(roleLine!, /no route for this model/);
+    assert.match(roleLine!, /check ai-api-format for this model \(openai vs anthropic\)/);
+    assert.ok(!roleLine!.includes(planted), "the planted secret must not appear in the log line");
+    assert.ok(!roleLine!.includes(apiKey), "the configured API key must not appear in the log line");
+
+    const aggregate = JSON.parse(result.read("specialists.json")) as {
+      roles: { role: string; error_status?: number; error_detail?: string }[];
+    };
+    const testsRole = aggregate.roles.find((role) => role.role === "tests")!;
+    assert.equal(testsRole.error_status, 404);
+    assert.match(testsRole.error_detail ?? "", /HTTP 404/);
+    assert.match(testsRole.error_detail ?? "", /check ai-api-format for this model \(openai vs anthropic\)/);
+    assert.ok(!(testsRole.error_detail ?? "").includes(planted));
+
+    const roleArtifact = result.read("specialist-tests.json");
+    assert.match(roleArtifact, /HTTP 404/);
+    assert.ok(!roleArtifact.includes(planted));
+
+    const responseArtifact = result.read("specialist-tests.response.json");
+    assert.match(responseArtifact, /HTTP 404/);
+    assert.ok(!responseArtifact.includes(planted));
+
+    for (const line of [...result.out, ...result.err]) {
+      assert.ok(!line.includes(apiKey), "the configured API key must never appear anywhere in the log output");
+    }
+    rmSync(result.root, { recursive: true, force: true });
+  } finally {
+    await server.close();
+  }
 });

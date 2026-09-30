@@ -41,6 +41,7 @@ import { pyJsonDumps } from "../evidence/pyjson.js";
 import { runEvidenceProvidersPhase } from "../evidence/index.js";
 import { runToolHarness, type HarnessTransport } from "../tools/harness.js";
 import { runChatRequest } from "../transport/transport.js";
+import { describeTransportFailure } from "../transport/http.js";
 import type { NormalizedModelResponse, TransportWirePayload } from "../model/types.js";
 import type { TierBudgets } from "../corpus/budgets.js";
 import type { StageEnv } from "./env.js";
@@ -512,7 +513,10 @@ export function harnessTransportAdapter(env: StageEnv): HarnessTransport {
       requestTimeoutSec: Math.max(1, Math.trunc(timeoutSec)),
       connectTimeoutSec: Number(env.AI_CONNECT_TIMEOUT_SEC ?? "30") || 30,
     });
-    if (outcome.status === "failure") throw new Error(outcome.failure.message);
+    // #846: carry the HTTP status and a redacted body excerpt (plus the
+    // ai-api-format hint on a 404) instead of the bare "model endpoint
+    // returned HTTP <status>" message.
+    if (outcome.status === "failure") throw new Error(describeTransportFailure(outcome.failure));
     // A streamed turn's `raw` is the reassembled NormalizedModelResponse, not
     // provider JSON. The loop's tool-call extraction and usage accounting
     // read the OpenAI chat shape (as v2's reassembler produced), so project

@@ -1608,3 +1608,67 @@ test("#833: no seed file falls back to the live PR file list and totals", async 
     cleanup();
   }
 });
+
+test("#846: primary HTTP errors carry status, a redacted body excerpt, and the 404 hint into the error log", async () => {
+  const planted = "ghp_" + "a".repeat(36); // matches redactText's GitHub PAT pattern
+  const apiKey = "primary-secret-key-value";
+  let call = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    call += 1;
+    if (call === 1) {
+      res.statusCode = 429;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: { message: "rate limited, back off" } }));
+      return;
+    }
+    res.statusCode = 404;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: { message: `no route for this model; leaked token ${planted}` } }));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const errors: string[] = [];
+  try {
+    // Default on-model-failure=fail: runReview rejects once the primary
+    // (no fallback configured) exhausts its retries, but the transport
+    // error line is logged synchronously before that throw.
+    await assert.rejects(() => runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": apiKey,
+        "ai-primary-retries": "2",
+        "ai-primary-retry-delay-sec": "0",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      error: (line) => errors.push(line),
+      quiet: true,
+    }));
+    assert.ok(call >= 2, `expected at least one retry, got ${call} call(s)`);
+    const failureLine = errors.find((line) => line.includes("transport failures exhausted"));
+    assert.ok(failureLine, `expected a transport-exhausted error line, got: ${JSON.stringify(errors)}`);
+    assert.match(failureLine!, /HTTP 404/);
+    assert.match(failureLine!, /no route for this model/);
+    assert.match(failureLine!, /check ai-api-format for this model \(openai vs anthropic\)/);
+    assert.ok(!failureLine!.includes(planted), "the planted secret must not appear in the error log");
+    assert.ok(!failureLine!.includes(apiKey), "the configured API key must not appear in the error log");
+
+    const responseArtifact = JSON.parse(readFileSync(join(runDir, "ai-response.primary.json"), "utf8")) as Record<string, unknown>;
+    assert.match(String(responseArtifact.error), /HTTP 404/);
+    assert.ok(!String(responseArtifact.error).includes(planted));
+
+    for (const line of errors) {
+      assert.ok(!line.includes(apiKey), "the configured API key must never appear anywhere in logs");
+    }
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
