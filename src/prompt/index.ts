@@ -24,6 +24,7 @@ export {
   annotateAnalysisEngine,
   handleModelFailure,
   modelFailureNoticeMarkdown,
+  publicAnalysisEngine,
   type AnalysisEngineOrigin,
   type EngineRouting,
   type ModelFailureOutcome,

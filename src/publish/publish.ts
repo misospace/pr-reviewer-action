@@ -13,6 +13,7 @@
  * the v2 error text names.
  */
 import { sanitizeMarkdown, stripReservedMarkers, stripEmptyConditionalSections, type ConditionalSectionPresence, type UpstreamLinkMode } from "./sanitize.js";
+import { publicAnalysisEngine } from "../prompt/index.js";
 import { buildComments, SEVERITY_LABELS } from "./inline-findings.js";
 import { redactText } from "../context/redact.js";
 import { buildRunMetadataMarker, emitReviewMarkers, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
@@ -144,7 +145,7 @@ export function buildPublishedBody(options: {
   if (options.note) {
     lines.push(options.note, "");
   }
-  lines.push(`_Analysis engine: ${options.analysisEngine}_`, "");
+  lines.push(`_Analysis engine: ${publicAnalysisEngine(options.analysisEngine)}_`, "");
   if (options.coverageNotice) {
     lines.push(options.coverageNotice, "");
   }
