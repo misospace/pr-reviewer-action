@@ -45,7 +45,7 @@ import { renderClaimsSection } from "../claims/render.js";
 import { buildModelRequest } from "../model/request.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
 import { parseVerdictResponse } from "../model/verdict.js";
-import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, publicAnalysisEngine, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, resolveSystemPrompt } from "../prompt/index.js";
+import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, publicAnalysisEngine, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, resolveSystemPrompt } from "../prompt/index.js";
 import { reviewArtifactFromParsed } from "../enforcement/artifact.js";
 import { applyStrictVerdictPolicy, applyVerdictPolicy } from "../enforcement/verdict-policy.js";
 import { markerReviewResult } from "../publish/publish.js";
@@ -53,6 +53,7 @@ import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "../enforcement/enforce.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
+import { applyRequirementTraceEnforcement } from "../enforcement/requirement-trace.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
 import {
@@ -591,6 +592,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ...(env.PR_THREAD_CONTEXT !== undefined ? { prThreadContext: env.PR_THREAD_CONTEXT } : {}),
     ...(env.REVIEW_VERBOSITY !== undefined ? { reviewVerbosity: env.REVIEW_VERBOSITY } : {}),
   }, ws);
+  promptState = applyRequirementTraceFragment(promptState, ws, (env.REQUIREMENT_TRACE ?? "false").toLowerCase() === "true");
   env.SYSTEM_PROMPT = promptState.systemPrompt;
 
   // ── Corpus stage part 1 (corpus.sh): fork CI, harvest advisory ───────
@@ -867,14 +869,25 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     humanReviews: safeJsonArray(ws.read("human-reviews.json")) as never,
     verdictPolicy,
   };
+  // #874: read here (rather than after the verdict is decided, like the
+  // advisory requirement_coverage fold below) because a trace escalation
+  // must be visible to the verdict mapping, not just recorded afterward.
+  const ledgerValue = safeJson(ws.read("requirement-ledger.json"));
+  const requirementTraceEnabled = (env.REQUIREMENT_TRACE ?? "false").toLowerCase() === "true";
+  let requirementTraceResult: ReturnType<typeof applyRequirementTraceEnforcement> | null = null;
   if (analysisEngine === MODEL_UNAVAILABLE_ENGINE) {
     // on-model-failure=notice (#863): no model reviewed this PR, so the
     // notice's request_changes is final; no verdict policy may relax it.
   } else if (verdictPolicy === "strict") {
     // #811 composition (same order as the enforcement-pipeline fixture):
     // coverage, then the enforcement overlays, then the strict mapping over
-    // the final still-open findings set.
+    // the final still-open findings set. #874's requirement-trace pass runs
+    // between completeness and the overlays: it needs completeness's
+    // `required_checks` write to have already happened (its own escalation
+    // must not be clobbered by it), and its synthesized findings must be in
+    // place before the strict mapping counts open findings.
     const completeness = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completeness.status === "incomplete" && completeness.mode === "fail");
@@ -885,17 +898,25 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       securityFlagged: isSecurityFlagged(classificationArtifact),
     });
     applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
   }
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(reviewRecord)}\n`, "utf8"));
 
   // Requirement coverage fold (#624) — advisory, never alters a verdict.
   ws.write("requirement-coverage.json", new Uint8Array(0));
-  const ledgerValue = safeJson(ws.read("requirement-ledger.json"));
   const ledgerRequirements = (ledgerValue as { requirements?: unknown } | null)?.requirements;
   if (Array.isArray(ledgerRequirements) && ledgerRequirements.length > 0) {
     const coverage = normalizeRequirementCoverage(reviewRecord.requirement_coverage as never, ledgerValue);
     ws.write("requirement-coverage.json", Buffer.from(`${pyJsonDumps(coverage)}\n`, "utf8"));
+  }
+
+  // #874: the requirement-trace artifact (already applied above, before the
+  // verdict was decided) — persisted here purely for the published render
+  // and the step summary; its escalation already happened.
+  ws.write("requirement-trace.json", new Uint8Array(0));
+  if (requirementTraceResult !== null && requirementTraceResult.applied) {
+    ws.write("requirement-trace.json", Buffer.from(`${pyJsonDumps(requirementTraceResult.trace as never)}\n`, "utf8"));
   }
 
   // ── Outputs + step summary (review.sh tail) ──────────────────────────

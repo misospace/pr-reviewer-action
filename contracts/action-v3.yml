@@ -237,6 +237,12 @@ inputs:
     default: "6000"
     description: "Maximum bytes of the equivalent-paths section included in context"
     repo-configurable: true
+  - id: requirement-trace
+    v2_id: requirement_trace
+    required: false
+    default: "false"
+    description: "Require a per-requirement trace (production enforcement + regression test locations, deterministically verified against the checkout) for every acceptance/normative requirement in the ledger before crediting it; an unverifiable or missing trace marks review coverage incomplete, and an unmet requirement without a finding gets a deterministic one. Off by default: not yet measured on the real-PR corpus."
+    repo-configurable: true
   - id: linear-api-key
     v2_id: linear_api_key
     required: false

@@ -1,6 +1,6 @@
 export const BOOLEAN_INPUTS = new Set([
   "fail-on-request-changes", "inline-findings",
-  "ai-stream", "related-code-context", "harness-obligations", "equivalent-paths", "linear-enable-for-forks",
+  "ai-stream", "related-code-context", "harness-obligations", "equivalent-paths", "requirement-trace", "linear-enable-for-forks",
   "ai-fallback-stream",
   "publish-review-comment", "allow-approve", "approve-forks", "repo-map-context", "pr-thread-context", "review-threads-context",
   "evidence-blocker-enforcement", "evidence-enable-for-forks", "tool-loop-summarize", "tool-failure-enforcement",

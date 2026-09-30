@@ -428,6 +428,7 @@ Inputs with no v2 implementation.
 | v3 input | Default |
 | --- | --- |
 | `harness-obligations` | `false` |
+| `requirement-trace` | `false` |
 | `claim-falsification` | `false` |
 | `equivalent-paths` | `false` |
 | `equivalent-paths-max-bytes` | `6000` |

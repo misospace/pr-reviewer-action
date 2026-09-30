@@ -10,6 +10,7 @@ export {
   SystemPromptFileError,
   applySpecialistLeadsFragment,
   applySupersededDiscussionFragment,
+  applyRequirementTraceFragment,
   SUPERSEDED_DISCUSSION_GUIDANCE,
   applySystemPromptFragments,
   resolveSystemPrompt,
