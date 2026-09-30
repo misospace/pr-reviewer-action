@@ -71,13 +71,16 @@ test("transport failures consume the budget with doubling backoff capped at 120s
   });
   assert.equal(outcome.status, "transport_exhausted");
   assert.equal(calls, 4);
-  assert.deepEqual(sleeps, [15, 30, 60, 120]);
+  // #887 maintainer follow-up: no sleep after the final attempt — there is
+  // no retry coming, so only the 3 backoffs between the 4 attempts happen.
+  assert.deepEqual(sleeps, [15, 30, 60]);
 });
 
 test("#867: retries: 0 still makes one real attempt, classified as transport_exhausted (never the synthetic parse default)", async () => {
   let calls = 0;
+  const sleeps: number[] = [];
   const outcome = await callModelTier(profile({ retries: 0 }), CONTEXT, {
-    sleep: async () => {},
+    sleep: async (s) => { sleeps.push(s); },
     call: async () => {
       calls++;
       return transportFailure();
@@ -88,6 +91,24 @@ test("#867: retries: 0 still makes one real attempt, classified as transport_exh
   if (outcome.status === "transport_exhausted") {
     assert.equal(outcome.failure.message, "boom");
   }
+  // #887 maintainer follow-up: a zero-retry outage must not pay the retry
+  // delay for a retry that will never happen.
+  assert.deepEqual(sleeps, []);
+});
+
+test("#887: retries: 2 sleeps only between the two attempts, never after the final one", async () => {
+  const sleeps: number[] = [];
+  let calls = 0;
+  const outcome = await callModelTier(profile({ retries: 2, retryDelaySec: 15 }), CONTEXT, {
+    sleep: async (s) => { sleeps.push(s); },
+    call: async () => {
+      calls++;
+      return transportFailure();
+    },
+  });
+  assert.equal(outcome.status, "transport_exhausted");
+  assert.equal(calls, 2);
+  assert.deepEqual(sleeps, [15]);
 });
 
 test("backoff is capped at MAX_RETRY_DELAY_SEC", async () => {
@@ -96,7 +117,8 @@ test("backoff is capped at MAX_RETRY_DELAY_SEC", async () => {
     sleep: async (s) => { sleeps.push(s); },
     call: async () => transportFailure(),
   });
-  assert.deepEqual(sleeps, [90, 120, 120, 120, 120, 120]);
+  // #887 maintainer follow-up: no sleep after the 6th (final) attempt.
+  assert.deepEqual(sleeps, [90, 120, 120, 120, 120]);
   assert.ok(MAX_RETRY_DELAY_SEC === 120);
 });
 

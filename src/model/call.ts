@@ -131,11 +131,15 @@ export async function callModelTier(
 
     if (outcome.status === "failure") {
       // Transport or HTTP error: consume the retry budget with doubling
-      // backoff, capped at 120 s.
+      // backoff, capped at 120 s. Only sleep/back off when another attempt
+      // is actually coming — a final failed attempt (no budget left) must
+      // never pay the retry delay for a retry that will never happen.
       lastTransportFailure = outcome.failure;
       attempt++;
-      await sleep(delay);
-      delay = Math.min(delay * 2, MAX_RETRY_DELAY_SEC);
+      if (attempt <= totalAttempts) {
+        await sleep(delay);
+        delay = Math.min(delay * 2, MAX_RETRY_DELAY_SEC);
+      }
       continue;
     }
 
@@ -155,7 +159,9 @@ export async function callModelTier(
         return { status: "parse_exhausted", attempts: attempt, failure: error };
       }
       attempt++;
-      await sleep(delay);
+      // Same rule as the transport branch: only sleep when a further
+      // attempt is actually going to run.
+      if (attempt <= totalAttempts) await sleep(delay);
     }
   }
   return lastTransportFailure
