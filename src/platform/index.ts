@@ -10,6 +10,7 @@ export {
   requireImplementedBackend,
   tangledContextFromEnv,
 } from "./tangled.js";
+export { resolveTangledPull, TangledResolverError, type ResolveTangledPullOptions, type TangledPullIdentity, type TangledResolverFailure } from "./tangled-bobbin.js";
 export { USER_AGENT } from "./user-agent.js";
 export { GITHUB_API_BASE, LINKED_SOURCE_GITHUB_BASE, parsePlatformBaseUrl, PlatformUrlError } from "./urls.js";
 export { validateEndpoint } from "./endpoint.js";
