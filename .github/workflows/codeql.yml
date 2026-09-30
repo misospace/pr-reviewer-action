@@ -3,26 +3,13 @@
 # CodeQL adds semantic security analysis on top of the existing CI gates
 # (gitleaks, shellcheck, yamllint, actionlint, and pytest) in ci.yaml. The
 # static linters cannot see the finding classes this workflow targets — the
-# threat model in SECURITY.md:
+# threat model in SECURITY.md: command injection, path traversal, SSRF and
+# token handling in the shipped TypeScript runtime (src/: tool executors,
+# HTTP/transport, platform adapters).
 #
-#   - py/command-line-injection at the subprocess call sites in
-#     pr_reviewer/tool_executors.py
-#   - path traversal via pr_reviewer/tool_executors.py
-#     `_resolve_workspace_path`
-#   - SSRF in pr_reviewer/http_client.py
-#   - token/secret handling in pr_reviewer/transport.py,
-#     pr_reviewer/tangled_session.py, and pr_reviewer/forgejo_backend.py
-#
-# The matrix covers both implementation languages while the
-# Bash/Python → TypeScript migration is in flight (#718): python for the
-# legacy runtime (pr_reviewer/, scripts/) and javascript-typescript for the
-# growing src/ surface (HTTP/transport, platform adapters, request/config
-# parsing, runtime orchestration). Python stays until the migration actually
-# retires it — removing it is a separate deliberate cleanup, not part of
-# adding TypeScript coverage.
-#
-# The whole checkout is analysed; pr_reviewer/, scripts/ (Python helpers
-# alongside shell scripts), and src/ dominate it.
+# javascript-typescript covers the shipped runtime. python covers the retained
+# repository tooling (scripts/ eval, harvest, fork-gate and judge helpers;
+# pr_reviewer/ semantic-eval modules), which is not part of the action.
 #
 # Bash is intentionally NOT in the matrix: CodeQL ships no bash extractor
 # (verified by a failed run of the predecessor PR #622 — the init step

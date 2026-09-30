@@ -184,7 +184,7 @@ WORK="$TMPDIR/work"
 git clone -q "$FORGEJO_API_URL/reviewer/sample.git" "$WORK"
 (
   cd "$WORK"
-  git fetch -q origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
+  git fetch -q origin "pull/${PR_NUMBER}/head:pr-${PR_NUMBER}"
   git checkout -q "pr-${PR_NUMBER}"
 
   export REPO=reviewer/sample
