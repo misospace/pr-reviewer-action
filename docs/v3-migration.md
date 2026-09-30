@@ -71,7 +71,6 @@ Set any of them explicitly to keep the v2 behavior; the parity harness pins each
 | `ai_fallback_stream` | `ai-fallback-stream` |
 | `allowed_source_hosts` | `allowed-source-hosts` |
 | `related_code_context` | `related-code-context` |
-| `harness_obligations` | `harness-obligations` |
 | `related_code_max_bytes` | `related-code-max-bytes` |
 | `linear_api_key` | `linear-api-key` |
 | `linear_issue_prefixes` | `linear-issue-prefixes` |
@@ -230,6 +229,14 @@ the marker's fixed insertion order. Runs with complete coverage serialize
 byte-identically to the pre-#810 marker; the #680 `metadata-markers` parity
 fixtures need no divergence because they never set coverage. Presentation
 beyond the notice (e.g. demoting clean approves) is #811's.
+
+## New inputs
+
+Inputs with no v2 implementation.
+
+| v3 input | Default |
+| --- | --- |
+| `harness-obligations` | `false` |
 
 ## Retained outputs
 

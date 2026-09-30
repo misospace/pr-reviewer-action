@@ -111,10 +111,13 @@ def test_removed_fields_are_documented_and_have_no_aliases():
 def test_migration_tables_cover_all_contract_mappings():
     doc = (ROOT / "docs" / "v3-migration.md").read_text()
     contract = _load()
+    new_table = doc.split("## New inputs", 1)[1].split("\n## ", 1)[0]
+    new_inputs = set(re.findall(r"^\| `([^`]+)` \|", new_table, re.M))
+    assert new_inputs <= {entry["id"] for entry in contract["inputs"]}
     for kind, section in (("inputs", "Retained inputs"), ("outputs", "Retained outputs")):
         table = doc.split(f"## {section}", 1)[1].split("\n## ", 1)[0]
         pairs = set(re.findall(r"\| `([^`]+)` \| `([^`]+)` \|", table))
-        expected = {(entry["v2_id"], entry["id"]) for entry in contract[kind]}
+        expected = {(entry["v2_id"], entry["id"]) for entry in contract[kind] if entry["id"] not in new_inputs}
         assert pairs == expected, f"{section} migration table differs from contract"
 
 
