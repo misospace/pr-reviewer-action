@@ -946,7 +946,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // (rather than only below, alongside the marker) so the #873 review-result
   // output — persisted immediately below — already reflects a tool-loop
   // coverage gap, not only a completed run's required-check status.
-  const partialCoverage = partialCoverageOf(harnessForMarker);
+  const partialCoverage = resolvePartialCoverage(harnessForMarker, toolMode === "native_loop", ws.isNonEmpty(enforcementHarness));
   const outputVerdict = String(reviewRecord.verdict ?? "");
   const outputRequiredChecks = String(reviewRecord.required_checks ?? "none");
   // #873 maintainer follow-up: the standalone `publish` CLI is a separate
@@ -1086,6 +1086,18 @@ function cachedProjectNumber(bytes: Uint8Array): number | null {
  * process from `run`, reading the run's persisted artifacts rather than
  * holding the harness in memory) can derive the same coverage-gap record
  * from the tool-harness artifact on disk. */
+/** #899: a loop that ran but left an unreadable harness artifact has unknown
+ * coverage, which must never publish as complete. */
+export function resolvePartialCoverage(
+  harness: Record<string, unknown> | null,
+  loopRan: boolean,
+  harnessWritten: boolean,
+): PartialCoverage | undefined {
+  const recorded = partialCoverageOf(harness);
+  if (recorded !== undefined || !loopRan || harness !== null || !harnessWritten) return recorded;
+  return { stop_reason: "harness-unreadable", changed_files_total: 0, unread_files: [], leads_total: 0, unresolved_leads: [] };
+}
+
 export function partialCoverageOf(harness: Record<string, unknown> | null): PartialCoverage | undefined {
   const value = harness?.partial_coverage;
   return value !== null && typeof value === "object" && !Array.isArray(value)

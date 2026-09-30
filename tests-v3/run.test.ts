@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { runReview } from "../src/run/review.js";
+import { resolvePartialCoverage, runReview } from "../src/run/review.js";
 import { authoritativeBodyRevision, harnessTransportAdapter, type PrBodyRevision } from "../src/run/stages.js";
 import type { StageEnv } from "../src/run/env.js";
 import { forkGate } from "../src/gates/gates.js";
@@ -2732,4 +2732,13 @@ test("#874: verdict-policy=findings_severity_gated — an unmet trace stops cove
     await server.close();
     cleanup();
   }
+});
+
+test("#899: a native loop whose harness artifact is unreadable records partial coverage, never complete", () => {
+  assert.equal(resolvePartialCoverage(null, true, true)?.stop_reason, "harness-unreadable");
+  assert.equal(resolvePartialCoverage(null, false, true), undefined);
+  assert.equal(resolvePartialCoverage(null, true, false), undefined);
+  assert.equal(resolvePartialCoverage({ mode: "native_loop" }, true, true), undefined);
+  const recorded = { stop_reason: "max-rounds", changed_files_total: 3, unread_files: ["a.ts"], leads_total: 0, unresolved_leads: [] };
+  assert.deepEqual(resolvePartialCoverage({ partial_coverage: recorded }, true, true), recorded);
 });

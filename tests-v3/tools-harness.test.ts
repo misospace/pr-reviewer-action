@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, buildPlanningContext, accumulateUsage, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
+import { redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, buildPlanningContext, accumulateUsage, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
 import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
-import { KNOWN_SECRET_REDACTED } from "../src/context/redact.js";
+import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
 
 function workspace(): { root: string; deps: (overrides?: Partial<HarnessDeps>) => HarnessDeps } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "harness-test-"));
@@ -578,4 +578,20 @@ test("#847: a size-scaled run persists route/budget/source/size, stop reason and
   assert.equal(telemetry.budget.effective_max_requests, 26);
   assert.deepEqual(telemetry.budget.size, { changed_files: 54, changed_lines: 4527, specialist_leads: 0 });
   assert.equal(telemetry.usage.tool_calls_executed, 1);
+});
+
+test("#899: redactedJson stays valid JSON when a secret pattern would swallow a quote's escape", () => {
+  const summary = { tool_results: [{ tool: "read_file", result: { content: 'fileOf("github-token: supersecret")\npassword: hunter22"' } }] };
+  assert.throws(() => JSON.parse(redactText(JSON.stringify(summary, null, 2))), SyntaxError, "the fixture must reproduce the corruption");
+  const written = new Map<string, string>();
+  writeOutputs(summary as unknown as HarnessResult, "", { env: {}, writeArtifact: (name: string, text: string) => written.set(name, text) } as unknown as HarnessDeps);
+  const parsed = JSON.parse(written.get("tool-harness.json")!) as typeof summary;
+  const content = parsed.tool_results[0]!.result.content;
+  assert.ok(!content.includes("supersecret") && !content.includes("hunter22"));
+  assert.match(content, /\[REDACTED\]/);
+});
+
+test("#899: redactedJson keeps the serialized-redaction bytes whenever they parse", () => {
+  const summary = { tool_results: [{ result: { content: "plain text" } }], stop_reason: "model-stopped" };
+  assert.equal(redactedJson(summary), JSON.stringify(summary, null, 2));
 });

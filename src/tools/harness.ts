@@ -1661,8 +1661,29 @@ export function writeOutputs(summary: HarnessResult, markdown: string, deps: Har
   if (telemetry !== null) summary.tool_loop_telemetry = telemetry;
   const tier = deps.env.TOOL_HARNESS_TIER || "primary";
   const stem = tier === "smart" ? "tool-harness.smart" : "tool-harness";
-  deps.writeArtifact(`${stem}.json`, redactText(JSON.stringify(summary, null, 2)) + "\n");
+  deps.writeArtifact(`${stem}.json`, redactedJson(summary) + "\n");
   deps.writeArtifact(`${stem}.md`, redactText(markdown));
+}
+
+/** #899: redacting the serialized text can swallow the backslash escaping a
+ * quote and leave invalid JSON; fall back to redacting each string value. */
+export function redactedJson(value: unknown): string {
+  const text = redactText(JSON.stringify(value, null, 2));
+  try {
+    JSON.parse(text);
+    return text;
+  } catch {
+    return JSON.stringify(redactStrings(value), null, 2);
+  }
+}
+
+function redactStrings(value: unknown): unknown {
+  if (typeof value === "string") return redactText(value);
+  if (Array.isArray(value)) return value.map(redactStrings);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactStrings(entry)]));
+  }
+  return value;
 }
 
 export interface RunToolHarnessOutcome {
