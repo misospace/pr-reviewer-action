@@ -169,6 +169,18 @@ interface CoverageResolution {
   unknown: boolean;
 }
 
+/** Mirrors review.ts's own `(env.TOOL_MODE ?? "off").toLowerCase()`
+ * normalization exactly (any value other than "native_loop" — including
+ * empty, a stale planner-mode value, or an unset var — is "off"), so
+ * `publish` and `run` agree on whether a tool harness was ever expected to
+ * exist. There is no run artifact recording this independently: `run`
+ * simply never writes tool-harness.json when tools are off, which is the
+ * one signal ambient TOOL_MODE lets publish tell apart from "the harness
+ * ran and its artifact went missing". */
+function toolLoopExpected(env: NodeJS.ProcessEnv): boolean {
+  return (env.TOOL_MODE ?? "off").trim().toLowerCase() === "native_loop";
+}
+
 /** #873/#838: the `publish` CLI subcommand is a separate process from
  * `run`, so it cannot hold the tool harness in memory — it reads the same
  * persisted artifact `runReview` wrote, from the same explicit, non-empty
@@ -179,13 +191,20 @@ interface CoverageResolution {
  * `enforcementHarness` selection: an escalated run publishes the smart
  * harness, everything else the primary one.
  *
- * With no explicit run dir, or a harness artifact that is missing or fails
- * to parse, the coverage state is UNKNOWN, not "complete" — publish must
- * fail closed (§ the `unknown` flag), never read that silence as a clean
- * run. */
+ * Three states, not two:
+ * - no explicit run dir at all: UNKNOWN — publish cannot check anything.
+ * - an explicit run dir, but tools were never expected (tool-mode=off, or
+ *   any value review.ts itself treats as off): no harness is ever written
+ *   by design, so its absence is NOT a gap — coverage from the tool loop
+ *   simply doesn't apply, and a tools-off review can still approve.
+ * - an explicit run dir, tools expected, but the harness artifact is
+ *   missing or fails to parse: UNKNOWN — the loop should have left a
+ *   record and didn't, so publish fails closed exactly like a confirmed
+ *   #810 gap, never reading the silence as "it was clean". */
 function partialCoverageFromRunDir(env: NodeJS.ProcessEnv): CoverageResolution {
   const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
   if (runDir === undefined) return { partialCoverage: undefined, unknown: true };
+  if (!toolLoopExpected(env)) return { partialCoverage: undefined, unknown: false };
   const harnessName = env.REVIEW_ROUTE === "escalated" ? "tool-harness.smart.json" : "tool-harness.json";
   const harness = readJsonObject(join(runDir, harnessName));
   if (harness === null) return { partialCoverage: undefined, unknown: true };

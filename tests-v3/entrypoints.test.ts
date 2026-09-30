@@ -172,7 +172,7 @@ test("#873: publishInputFromEnv reads partial coverage from the run dir's tool-h
   withRunDir((dir) => {
     writeFileSync(join(dir, "tool-harness.json"), PARTIAL_COVERAGE_HARNESS);
     const input = publishInputFromEnv(
-      { PR_REVIEWER_RUN_DIR: dir, REVIEW_ROUTE: "primary", PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv,
+      { PR_REVIEWER_RUN_DIR: dir, REVIEW_ROUTE: "primary", PUBLISH_MODE: "comment", TOOL_MODE: "native_loop" } as NodeJS.ProcessEnv,
       "github",
     );
     assert.ok(input.partialCoverage);
@@ -184,24 +184,44 @@ test("#873: publishInputFromEnv reads the smart harness for an escalated route",
   withRunDir((dir) => {
     writeFileSync(join(dir, "tool-harness.smart.json"), PARTIAL_COVERAGE_HARNESS);
     const input = publishInputFromEnv(
-      { PR_REVIEWER_RUN_DIR: dir, REVIEW_ROUTE: "escalated", PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv,
+      { PR_REVIEWER_RUN_DIR: dir, REVIEW_ROUTE: "escalated", PUBLISH_MODE: "comment", TOOL_MODE: "native_loop" } as NodeJS.ProcessEnv,
       "github",
     );
     assert.ok(input.partialCoverage);
     // The primary harness is never consulted on an escalated route.
     const primaryOnly = publishInputFromEnv(
-      { PR_REVIEWER_RUN_DIR: dir, REVIEW_ROUTE: "primary", PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv,
+      { PR_REVIEWER_RUN_DIR: dir, REVIEW_ROUTE: "primary", PUBLISH_MODE: "comment", TOOL_MODE: "native_loop" } as NodeJS.ProcessEnv,
       "github",
     );
     assert.equal(primaryOnly.partialCoverage, undefined);
   });
 });
 
-test("#873/#838: an explicit run dir with a missing harness artifact fails closed (coverage unknown, never 'complete')", () => {
+test("#873/#838: an explicit run dir with tools expected but a missing harness artifact fails closed (coverage unknown, never 'complete')", () => {
   withRunDir((dir) => {
-    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    const input = publishInputFromEnv(
+      { PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment", TOOL_MODE: "native_loop" } as NodeJS.ProcessEnv,
+      "github",
+    );
     assert.equal(input.partialCoverage, undefined);
     assert.equal(input.coverageUnknown, true);
+  });
+});
+
+test("#873/#838: tool-mode=off with an explicit run dir and no harness artifact is NOT a coverage gap", () => {
+  withRunDir((dir) => {
+    // tool-mode=off never writes a harness artifact by design: its
+    // absence here must not be confused with "the loop ran and its record
+    // went missing" — every stale/off-ish value review.ts itself treats
+    // as off behaves the same way.
+    for (const toolMode of [undefined, "off", "OFF", "", "plan_execute_loop"]) {
+      const input = publishInputFromEnv(
+        { PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment", ...(toolMode !== undefined ? { TOOL_MODE: toolMode } : {}) } as NodeJS.ProcessEnv,
+        "github",
+      );
+      assert.equal(input.partialCoverage, undefined, String(toolMode));
+      assert.equal(input.coverageUnknown, undefined, String(toolMode));
+    }
   });
 });
 
@@ -224,6 +244,7 @@ test("#873: the CLI publish path (publishInputFromEnv + publishReview) downgrade
     const env = {
       PR_REVIEWER_RUN_DIR: dir,
       REVIEW_ROUTE: "primary",
+      TOOL_MODE: "native_loop",
       VERDICT: "approve",
       REQUIRED_CHECKS: "complete",
       PUBLISH_MODE: "review_verdict",
@@ -260,6 +281,7 @@ const FORGED_COMPLETE_HARNESS = JSON.stringify({ stop_reason: "model_stop" }); /
 function publishVerdictEnv(overrides: Partial<Record<string, string>> = {}): NodeJS.ProcessEnv {
   return {
     REVIEW_ROUTE: "primary",
+    TOOL_MODE: "native_loop",
     VERDICT: "approve",
     REQUIRED_CHECKS: "complete",
     PUBLISH_MODE: "review_verdict",
@@ -332,4 +354,38 @@ test("#873/#838 regression: publish reads the real partial state from an explici
     rmSync(runDir, { recursive: true, force: true });
     rmSync(checkoutDir, { recursive: true, force: true });
   }
+});
+
+test("#873/#838 regression: tool-mode=off with an explicit run dir and no harness artifact still APPROVEs (no tool-loop gap, given no other gap)", async () => {
+  await withRunDirAsync(async (dir) => {
+    // No tool-harness.json written at all — exactly what a tool-mode=off
+    // run leaves behind. Must not be confused with a native_loop run whose
+    // harness went missing.
+    const input = publishInputFromEnv(
+      publishVerdictEnv({ PR_REVIEWER_RUN_DIR: dir, TOOL_MODE: "off" }),
+      "github",
+    );
+    assert.equal(input.partialCoverage, undefined);
+    assert.equal(input.coverageUnknown, undefined);
+    const api = new MinimalPublishApi("a".repeat(40));
+    const result = await publishReview(input, api, { diffText: "" });
+    assert.equal(result.status, "published");
+    assert.equal(api.submitted[0]!.event, "APPROVE");
+  });
+});
+
+test("#873/#838 regression: tool-mode=native_loop with an explicit run dir and a missing harness artifact withholds APPROVE", async () => {
+  await withRunDirAsync(async (dir) => {
+    // TOOL_MODE defaults to native_loop in publishVerdictEnv: the loop was
+    // expected to run and leave tool-harness.json, and didn't.
+    const input = publishInputFromEnv(publishVerdictEnv({ PR_REVIEWER_RUN_DIR: dir }), "github");
+    assert.equal(input.partialCoverage, undefined);
+    assert.equal(input.coverageUnknown, true);
+    const api = new MinimalPublishApi("a".repeat(40));
+    const result = await publishReview(input, api, { diffText: "" });
+    assert.equal(result.status, "published");
+    assert.notEqual(api.submitted[0]!.event, "APPROVE");
+    assert.equal(api.submitted[0]!.event, "COMMENT");
+    assert.match(api.submitted[0]!.body, /could not be verified/);
+  });
 });
