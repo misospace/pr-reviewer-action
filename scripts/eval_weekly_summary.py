@@ -40,6 +40,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT = SCRIPT_DIR.parent
+for _p in (str(ROOT), str(SCRIPT_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from pr_reviewer.http_safe import OPENER_NO_REDIRECT  # noqa: E402
+
 # Below this capability pass rate a mode is flagged with a warning emoji
 # (matches the runbook's "a pass rate below 0.95 should block the release").
 PASS_RATE_GREEN_THRESHOLD = 0.95
@@ -221,17 +229,6 @@ def _post_tracking_comment(body: str, issue_number: int) -> None:
     comment (the step summary itself is the primary surface).
     """
     from urllib.request import Request
-
-    # sys.path is already set up in main() to access pr_reviewer modules
-    try:
-        from pr_reviewer.http_safe import OPENER_NO_REDIRECT
-    except ImportError:
-        # Fallback if import fails (shouldn't happen in normal operation)
-        import sys as _sys
-        _root = Path(__file__).resolve().parent.parent
-        if str(_root) not in _sys.path:
-            _sys.path.insert(0, str(_root))
-        from pr_reviewer.http_safe import OPENER_NO_REDIRECT
 
     token = os.environ.get("GITHUB_TOKEN", "")
     gh_repo = os.environ.get("GITHUB_REPOSITORY", "")

@@ -105,7 +105,9 @@ class GitHubClient:
                 )
             return json.loads(result.stdout)
 
-        url = f"https://api.github.com{path_with_query}"
+        # Read GitHub API base URL at call time (can be overridden via GITHUB_API_URL env for testing)
+        github_api_base = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+        url = f"{github_api_base}{path_with_query}"
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
