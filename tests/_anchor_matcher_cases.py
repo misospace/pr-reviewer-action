@@ -50,4 +50,12 @@ MATCHER_CASES: list[tuple[str, str, bool]] = [
     ),
     # ...nor an unrelated file.
     ("kubernetes/apps/base/llm/litellm/foreman.yaml", "kubernetes/apps/base/llm/litellm/virtualkeys/", False),
+    # Directory anchors keep the file-anchor root leniency: a finding named
+    # from a shorter root (any '/'-aligned tail of the anchor) or a longer one.
+    ("virtualkeys/foreman.yaml", "kubernetes/apps/base/llm/litellm/virtualkeys/", True),
+    ("litellm/virtualkeys/sub/foreman.yaml", "kubernetes/apps/base/llm/litellm/virtualkeys/", True),
+    ("repo/kubernetes/apps/base/llm/litellm/virtualkeys/foreman.yaml", "kubernetes/apps/base/llm/litellm/virtualkeys/", True),
+    # ...but never across a name prefix or a different parent.
+    ("virtualkeys-other/foreman.yaml", "kubernetes/apps/base/llm/litellm/virtualkeys/", False),
+    ("other/virtualkeys/foreman.yaml", "kubernetes/apps/base/llm/litellm/virtualkeys/", False),
 ]

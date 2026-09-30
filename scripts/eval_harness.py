@@ -453,7 +453,12 @@ def _finding_file_matches_anchor(finding_file: Any, anchor_file: str) -> bool:
         a_dir = a.rstrip("/")
         if not a_dir:
             return False
-        return f == a_dir or f.startswith(a_dir + "/") or ("/" + a_dir + "/") in ("/" + f)
+        if f == a_dir or ("/" + a_dir + "/") in ("/" + f):
+            return True
+        # Shorter-root leniency, as for file anchors: the finding may name
+        # the path from any '/'-aligned tail of the directory anchor.
+        parts = a_dir.split("/")
+        return any(f.startswith("/".join(parts[i:]) + "/") for i in range(len(parts)))
     return f == a or f.endswith("/" + a) or a.endswith("/" + f)
 
 
