@@ -22,20 +22,24 @@ v3 is a JavaScript action (`runs.using: node24`, `main: dist/index.js`):
 - **Forgejo** runners need **runner 9 or newer** with a job image that has
   **Node 22+** and `git` (Forgejo executes `node24`-declared actions with the
   job image's own Node; runners 6.3.1, 7 and 8 fail to load the action at
-  all). See the [Forgejo compatibility table](../README.md#-how-it-works)
-  and requirements in the README for the full platform support matrix.
+  all). See [Platform support](../README.md#-platform-support) in the
+  README for the full platform support matrix.
 
 ### 2. Point the workflow at v3
 
 Change `@v2` to `@v3` (or pin an exact `vX.Y.Z` tag/SHA — see
-[Versioning](#6-versioning-floating-vs-pinned) below).
+[Versioning](#8-versioning-floating-vs-pinned) below).
 
 ### 3. Rename inputs and outputs to kebab-case
 
-Every v2 `snake_case` input and output has a v3 `kebab-case` counterpart with
-identical behavior. Rename them per the [Retained inputs](#retained-inputs)
-and [Retained outputs](#retained-outputs) tables. Nothing else changes for a
-retained field: same semantics, same default, same type.
+Every v2 `snake_case` input and output that is *retained* in v3 has a
+`kebab-case` counterpart with the same semantics and type. Rename these per
+the [Retained inputs](#retained-inputs) and [Retained outputs](#retained-outputs)
+tables. Two kinds of field are not a straight rename: fields with no v3
+equivalent at all ([step 4](#4-drop-removed-inputs-and-outputs)), and
+retained fields whose *default* changed on purpose
+([step 6](#6-review-the-defaults-that-changed-on-purpose)) — the input or
+output itself is still renamed the same way, only its default differs.
 
 ### 4. Drop removed inputs and outputs
 
