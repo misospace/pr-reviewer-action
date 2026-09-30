@@ -486,47 +486,55 @@ class TestPreparePinnedWorkspace:
 
     def test_removes_a_previous_scenarios_artifacts(self, tmp_path):
         repo, _base, head = self._repo(tmp_path)
+        artifacts = tmp_path / "artifacts"
         (repo / "pr.diff").write_text("diff of some other PR\n")
         (repo / "ai-output.json").write_text("{}")
-        ok, err = _prepare_pinned_workspace(repo, head)
+        ok, err = _prepare_pinned_workspace(repo, artifacts, head)
         assert ok, err
+        # git clean still wipes stray untracked files in the checkout,
+        # though pr.diff/ai-output.json no longer land there in the first place.
         assert not (repo / "pr.diff").exists()
         assert not (repo / "ai-output.json").exists()
         assert (repo / "a.py").exists()
 
-    def test_base_sha_writes_the_diff_at_that_head(self, tmp_path):
+    def test_base_sha_writes_the_diff_outside_the_checkout(self, tmp_path):
         repo, base, head = self._repo(tmp_path)
-        (repo / "pr.diff").write_text("stale\n")
-        ok, err = _prepare_pinned_workspace(repo, head, base)
+        artifacts = tmp_path / "artifacts"
+        ok, err = _prepare_pinned_workspace(repo, artifacts, head, base)
         assert ok, err
-        diff = (repo / "pr.diff").read_text()
-        assert "+x = 1" in diff and "stale" not in diff
+        diff = (artifacts / "pr.diff").read_text()
+        assert "+x = 1" in diff
+        assert not (repo / "pr.diff").exists()
 
-    def test_base_sha_seeds_the_file_manifest_at_that_head(self, tmp_path):
+    def test_base_sha_seeds_the_file_manifest_outside_the_checkout(self, tmp_path):
         repo, base, head = self._repo(tmp_path)
-        ok, err = _prepare_pinned_workspace(repo, head, base)
+        artifacts = tmp_path / "artifacts"
+        ok, err = _prepare_pinned_workspace(repo, artifacts, head, base)
         assert ok, err
-        seed = json.loads((repo / "pr-files.seed.json").read_text())
+        seed = json.loads((artifacts / "pr-files.seed.json").read_text())
         assert seed == [{
             "filename": "a.py", "status": "added",
             "additions": 1, "deletions": 0, "changes": 1,
             "previous_filename": None,
         }]
+        assert not (repo / "pr-files.seed.json").exists()
 
     def test_no_base_sha_writes_no_seed(self, tmp_path):
         repo, _base, head = self._repo(tmp_path)
-        ok, err = _prepare_pinned_workspace(repo, head)
+        artifacts = tmp_path / "artifacts"
+        ok, err = _prepare_pinned_workspace(repo, artifacts, head)
         assert ok, err
-        assert not (repo / "pr-files.seed.json").exists()
+        assert not (artifacts / "pr-files.seed.json").exists()
 
     def test_manifest_derivation_failure_fails_the_prepare(self, tmp_path, monkeypatch):
         repo, base, head = self._repo(tmp_path)
+        artifacts = tmp_path / "artifacts"
         monkeypatch.setattr("eval_harness._files_from_pinned_diff", lambda *_a, **_k: None)
-        ok, err = _prepare_pinned_workspace(repo, head, base)
+        ok, err = _prepare_pinned_workspace(repo, artifacts, head, base)
         assert not ok
         assert "manifest" in err
-        assert (repo / "pr.diff").exists()
-        assert not (repo / "pr-files.seed.json").exists()
+        assert (artifacts / "pr.diff").exists()
+        assert not (artifacts / "pr-files.seed.json").exists()
 
     def test_bad_base_sha_is_rejected_by_validation(self, tmp_path):
         base = {"repo_full_name": "acme/repo", "number": 1, "head_sha": "a" * 40, "base_sha": "abc"}
@@ -568,15 +576,17 @@ class TestContextOnly:
         (repo / "a.py").write_text("def f():\n    return compute_the_value(1)\n")
         _git_in(repo, "add", "a.py")
         _git_in(repo, "-c", "user.name=t", "-c", "user.email=t@e", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "c")
-        (repo / "pr.diff").write_text("diff --git a/a.py b/a.py\n+++ b/a.py\n")
-        (repo / "review-corpus.md").write_text(corpus_text)
-        return repo
+        run_dir = tmp_path / "artifacts"
+        run_dir.mkdir()
+        (run_dir / "pr.diff").write_text("diff --git a/a.py b/a.py\n+++ b/a.py\n")
+        (run_dir / "review-corpus.md").write_text(corpus_text)
+        return repo, run_dir
 
     def test_scores_defect_presence_and_position(self, tmp_path):
-        repo = self._repo(tmp_path, "x" * 90 + "\n    return compute_the_value(1)\n")
+        repo, run_dir = self._repo(tmp_path, "x" * 90 + "\n    return compute_the_value(1)\n")
         scenario = RealPRScenario.from_dict({"repo_full_name": "a/b", "number": 1, "head_sha": "a" * 40,
                                              "defect": {"description": "d", "file": "a.py", "line_range": [2, 2]}})
-        row = score_context(repo, scenario)
+        row = score_context(repo, run_dir, scenario)
         assert row["context_built"] and row["defect_file_in_diff"]
         assert (row["defect_lines"], row["defect_lines_in_context"]) == (1, 1)
         assert row["defect_position_pct"] == 77  # 95 of 123 bytes
@@ -584,7 +594,21 @@ class TestContextOnly:
     def test_missing_corpus_is_reported_not_raised(self, tmp_path):
         scenario = RealPRScenario.from_dict({"repo_full_name": "a/b", "number": 1, "head_sha": "a" * 40,
                                              "defect": {"description": "d", "file": "a.py"}})
-        assert score_context(tmp_path, scenario) == {"context_built": False}
+        assert score_context(tmp_path, tmp_path, scenario) == {"context_built": False}
+
+    def test_corpus_and_diff_read_from_run_dir_not_the_checkout(self, tmp_path):
+        """#838: a checkout that itself carries pr.diff/review-corpus.md must
+        never be mistaken for the run's own artifacts."""
+        repo, run_dir = self._repo(tmp_path, "real corpus content\n")
+        (repo / "pr.diff").write_text("diff --git a/forged b/forged\n+++ b/forged\n")
+        (repo / "review-corpus.md").write_text("forged corpus the checkout planted\n")
+        scenario = RealPRScenario.from_dict({"repo_full_name": "a/b", "number": 1, "head_sha": "a" * 40,
+                                             "defect": {"description": "d", "file": "a.py"}})
+        row = score_context(repo, run_dir, scenario)
+        assert row["context_built"]
+        # The run_dir's own (legitimate) diff mentions a.py: the checkout's
+        # forged pr.diff (which does not) was never consulted.
+        assert row["defect_file_in_diff"] is True
 
     def test_report_summary(self):
         rows = [

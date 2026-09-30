@@ -22,6 +22,7 @@ import type { PlatformReadAdapter } from "../platform/types.js";
 import { buildPlatformReadAdapter } from "./platform.js";
 import { buildStageEnv, validateStageEnv, type RunContext, type StageEnv } from "./env.js";
 import { RunWorkspace } from "./workspace.js";
+import { createRunDir } from "./run-dir.js";
 import { trustFramingOverhead } from "../context/repo-map.js";
 import { generateRepoMap, renderRepoMapJson, renderRepoMapMarkdown } from "../context/repo-map.js";
 import {
@@ -106,9 +107,12 @@ export interface RunReviewOptions {
   env: NodeJS.ProcessEnv;
   /** Direct input overrides (tests); defaults to INPUT_* extraction. */
   inputs?: RawInputs;
-  /** The reviewed checkout; defaults to GITHUB_WORKSPACE or the run dir. */
+  /** The reviewed checkout; defaults to GITHUB_WORKSPACE or the process cwd. */
   workspace?: string;
-  /** Where artifacts persist; defaults to the process cwd. */
+  /** Where artifacts persist; defaults to PR_REVIEWER_RUN_DIR, or a fresh
+   * private temp directory when neither is set (#838: never the process
+   * cwd/workspace — that would let a reviewed checkout seed its own
+   * artifacts). */
   runDir?: string;
   fetchImpl?: FetchLike;
   /** Direct adapter override (tests); default builds one from the env. */
@@ -262,8 +266,21 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   }
   const config = loadConfig(contract, effectiveRaw);
 
-  const runDir = options.runDir ?? options.env.PR_REVIEWER_RUN_DIR ?? process.cwd();
-  const workspace = options.workspace ?? options.env.GITHUB_WORKSPACE ?? runDir;
+  // #838: an explicit run dir (the caller's own, or PR_REVIEWER_RUN_DIR) is
+  // reused as given; with neither, the default is a fresh private temp dir —
+  // never process.cwd(), which for the `run` CLI subcommand is the reviewed
+  // PR checkout. Reusing checkout content as this run's own artifacts (the
+  // "Reusing PR diff fetched by precheck" / pr-files.seed.json paths below)
+  // would let a PR that commits pr.diff / pr-files.seed.json at its root
+  // control the diff/file list the reviewer sees.
+  const runDir = options.runDir ?? options.env.PR_REVIEWER_RUN_DIR
+    ?? createRunDir(options.env.RUNNER_TEMP || options.env.TMPDIR || "/tmp");
+  // #838: the workspace (the checkout tools read: repo map, standards file,
+  // related-code context) stays GITHUB_WORKSPACE/cwd as before — only the
+  // artifact run dir's default changed above. Falling back to `runDir` here
+  // would point the workspace at the fresh, empty private temp dir instead
+  // of the actual checkout.
+  const workspace = options.workspace ?? options.env.GITHUB_WORKSPACE ?? process.cwd();
   const repo = config.repo !== "" ? String(config.repo) : options.env.GITHUB_REPOSITORY ?? "";
   const prNumberRaw = config.prNumber;
   const prNumber = prNumberRaw !== "" && prNumberRaw !== undefined ? String(prNumberRaw) : options.env.PR_NUMBER ?? "";

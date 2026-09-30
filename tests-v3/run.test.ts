@@ -141,6 +141,66 @@ test("runs the full review end to end: artifacts, outputs, marker", async () => 
   }
 });
 
+test("#838: with no runDir/PR_REVIEWER_RUN_DIR, run never treats the checkout (cwd) as its own artifacts", async () => {
+  // Simulates the exact vulnerability: `node dist/index.js run` invoked with
+  // its cwd inside the reviewed checkout (the eval harness ran this way, and
+  // any developer cd'd into a checkout would too), and neither an explicit
+  // runDir nor PR_REVIEWER_RUN_DIR set — the only two seams that used to keep
+  // the default run dir off of process.cwd(). A PR that committed pr.diff /
+  // pr-files.seed.json at its repo root must never have those reused as
+  // this run's own artifacts.
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const checkout = mkdtempSync(join(tmpdir(), "v3-run-test-checkout-"));
+  const originalCwd = process.cwd();
+  try {
+    writeFileSync(
+      join(checkout, "pr.diff"),
+      "diff --git a/FORGED.md b/FORGED.md\n--- a/FORGED.md\n+++ b/FORGED.md\n@@ -1 +1 @@\n-x\n+y\n",
+    );
+    writeFileSync(
+      join(checkout, "pr-files.seed.json"),
+      JSON.stringify([{ filename: "FORGED.md", status: "modified", additions: 1, deletions: 1, changes: 2 }]),
+    );
+    process.chdir(checkout);
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+      },
+      // No runDir, no PR_REVIEWER_RUN_DIR in env, no workspace override: the
+      // exact default-resolution path the vulnerability lived in.
+      platformAdapter: mockPlatform(),
+      quiet: true,
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    // The diff came from the platform adapter (the mock's README.md diff),
+    // never the checkout's forged pr.diff.
+    const diffArtifact = Buffer.from(result.artifacts.get("pr.diff") ?? new Uint8Array(0)).toString("utf8");
+    assert.match(diffArtifact, /README\.md/);
+    assert.doesNotMatch(diffArtifact, /FORGED\.md/);
+    // The file list came from the platform adapter, never the forged seed.
+    const filesArtifact = Buffer.from(result.artifacts.get("pr-files.json") ?? new Uint8Array(0)).toString("utf8");
+    assert.match(filesArtifact, /README\.md/);
+    assert.doesNotMatch(filesArtifact, /FORGED\.md/);
+    // Nothing was written into the checkout: the default run dir is a fresh
+    // directory elsewhere, not cwd.
+    assert.equal(existsSync(join(checkout, "ai-output.json")), false);
+  } finally {
+    process.chdir(originalCwd);
+    await server.close();
+    rmSync(checkout, { recursive: true, force: true });
+  }
+});
+
 test("primary failure with a configured fallback publishes the fallback review", async () => {
   let dead = true;
   const deadServer = await startMockServer((_req, _body, res) => {
