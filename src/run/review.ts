@@ -13,7 +13,7 @@ import { canonicalChangedFile, normalizeLinkedIssues } from "../context/types.js
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { buildHarnessObligations } from "../requirements/obligations.js";
 import { externalChecksConclusion } from "../precheck/decide.js";
-import { resolveStandardsFile } from "../context/standards-file.js";
+import { readStandardsFileAtRef, StandardsFileRefError } from "../context/standards-file-ref.js";
 import { runChatRequest } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
 import type { FetchLike } from "../platform/http.js";
@@ -352,7 +352,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   const streamBool = (env.AI_STREAM ?? "true").toLowerCase() === "true";
 
   // Standards resolution + initial system prompt (config.sh).
-  const standards = resolveStandards(env, workspace);
+  const standards = resolveStandards(env, workspace, baseRef, errorLog);
   let promptState = resolveSystemPrompt(
     {
       ...(env.SYSTEM_PROMPT !== undefined ? { systemPrompt: env.SYSTEM_PROMPT } : {}),
@@ -444,6 +444,16 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   ws.write("pr-files.json", filesProjection(rawFilesList, totalChangedFiles));
   ws.write("pr-files.truncated.json", truncateClean(Buffer.from(filesProjection(rawFilesList, totalChangedFiles)), budgets.primary.maxFiles, "…[file list truncated]"));
   ws.write("pr-body.txt", String(pr.body ?? ""));
+
+  // #885: the corpus note that this PR edits its own (base-ref-resolved)
+  // standards file — its changes appear only in the diff under review, never
+  // as a live rewrite of the rules the review enforces.
+  if (standards.resolved !== null) {
+    standards.changedInPr = rawFilesList.some((raw) => {
+      const filename = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>).filename : undefined;
+      return typeof filename === "string" && filename === standards.resolved;
+    });
+  }
 
   // Repository map (context.sh).
   if ((env.REPO_MAP_CONTEXT ?? "true").toLowerCase() === "true") {
@@ -1123,18 +1133,30 @@ function gateForkForForks(env: StageEnv, forkFlag: string): { md: string; json: 
   return null;
 }
 
-function resolveStandards(env: StageEnv, workspace: string): { resolved: string | null; content: Uint8Array | null } {
-  const resolved = resolveStandardsFile({
-    standardsFile: env.STANDARDS_FILE ?? "",
-    candidates: env.STANDARDS_FILE_CANDIDATES || "AGENTS.md,agents.md,CLAUDE.md,claude.md,.github/ai-review-rules.md,.github/ai-review-rules.txt",
-    workspace,
-  });
-  if (resolved === "") return { resolved: null, content: null };
+/** #885: standards must be read from the trusted base ref, never the PR
+ * head — a PR must not be able to rewrite the rules its own review enforces
+ * by editing AGENTS.md (or adding a higher-priority candidate) on its own
+ * branch. Mirrors `resolveRepositoryConfig`'s degrade path exactly: with no
+ * base ref, or when the base-ref read fails for an infrastructure reason
+ * (git missing, timeout), the result is no standards plus a warning — never
+ * a fallback to the checked-out working tree. */
+function resolveStandards(
+  env: StageEnv,
+  workspace: string,
+  baseRef: string,
+  errorLog: (line: string) => void,
+): { resolved: string | null; content: Uint8Array | null; changedInPr: boolean } {
   try {
-    const path = resolved.startsWith("/") ? resolved : `${workspace}/${resolved}`;
-    return { resolved, content: readFileSync(path) };
-  } catch {
-    return { resolved, content: null };
+    const { resolved, content } = readStandardsFileAtRef({
+      standardsFile: env.STANDARDS_FILE ?? "",
+      candidates: env.STANDARDS_FILE_CANDIDATES || "AGENTS.md,agents.md,CLAUDE.md,claude.md,.github/ai-review-rules.md,.github/ai-review-rules.txt",
+      ref: baseRef,
+      workspace,
+    });
+    return { resolved, content, changedInPr: false };
+  } catch (error) {
+    errorLog(`standards file could not be read from the base ref: ${error instanceof StandardsFileRefError ? error.message : "unknown error"}; ignoring it.`);
+    return { resolved: null, content: null, changedInPr: false };
   }
 }
 
@@ -1351,7 +1373,7 @@ function noticeResult(
 interface SmartReviewInput extends ReviewCallInput {
   budgets: ReturnType<typeof resolveTierBudgets>;
   generatedPaths: ReadonlySet<string>;
-  standards: { resolved: string | null; content: Uint8Array | null };
+  standards: { resolved: string | null; content: Uint8Array | null; changedInPr?: boolean };
   runDir: string;
   /** The checkout the tool executors read (never the artifact run dir). */
   workspace: string;

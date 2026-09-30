@@ -158,7 +158,11 @@ export function isGlobPattern(word: string): boolean {
   return false;
 }
 
-function componentRegex(component: string): RegExp {
+/** Exported for `standards-file-ref.ts` (#885): the base-ref resolution path
+ * reuses this exact pattern-matching logic against `git ls-tree` entries
+ * instead of `readdirSync`, so candidate matching semantics never diverge
+ * between the workspace-fs and base-ref resolution paths. */
+export function componentRegex(component: string): RegExp {
   const chars = [...component];
   let source = "";
   for (let i = 0; i < chars.length; i += 1) {

@@ -145,14 +145,22 @@ function isNativeLoop(toolMode: string): boolean {
 export function prepareStandardsContext(
   standardsFile: string,
   standardsFileContent: Uint8Array | null,
+  /** #885: true when the PR's diff touches `standardsFile` itself — the
+   * content above is still the base-ref version (never the PR's rewrite of
+   * it), and the corpus says so in one line. Defaults to `false` so every
+   * existing caller/fixture/golden is byte-for-byte unaffected. */
+  changedInPr = false,
 ): Map<string, Uint8Array> {
   const artifacts = new Map<string, Uint8Array>();
   if (standardsFileContent !== null) {
+    const note = changedInPr
+      ? `Note: this PR modifies ${standardsFile}; the base-ref version above was used for this review.\n\n`
+      : "";
     artifacts.set(
       "standards-context.md",
       concat(
         enc(
-          `# Repository Standards and Conventions\nDerived from ${standardsFile} for this repository.\n\n`,
+          `# Repository Standards and Conventions\nDerived from ${standardsFile} for this repository.\n\n${note}`,
         ),
         standardsFileContent,
       ),

@@ -441,9 +441,9 @@ export function assembleCorpus(
   tier: "primary" | "smart",
   slot: "primary" | "smart",
   generatedPaths: ReadonlySet<string>,
-  standards: { resolved: string | null; content: Uint8Array | null },
+  standards: { resolved: string | null; content: Uint8Array | null; changedInPr?: boolean },
 ): CorpusBuildResult {
-  const standardsContext = prepareStandardsContext(standards.resolved ?? "", standards.content);
+  const standardsContext = prepareStandardsContext(standards.resolved ?? "", standards.content, standards.changedInPr ?? false);
   for (const [name, data] of standardsContext) ws.write(name, data);
   const harnessArtifacts = prepareToolHarness(env.TOOL_MODE ?? "off", ws.read("tool-harness.md"), ws.read("tool-harness.json"));
   for (const [name, data] of harnessArtifacts) ws.write(name, data);
