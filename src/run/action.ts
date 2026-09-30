@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, mkdtempSync } from "node:fs";
+import { appendFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { validateContract } from "../config/contract.js";
@@ -11,6 +11,9 @@ import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { stageEnvFromConfig } from "./env.js";
 import { buildAdapter, buildPublishApi, publishInputFromEnv, publishWith, readEvent } from "./entrypoints.js";
 import { rawInputsFromEnv, runReview } from "./review.js";
+import { createRunDir } from "./run-dir.js";
+
+export { createRunDir };
 
 /**
  * The JavaScript action entry (`runs.using: node24`, #706): the whole review
@@ -39,15 +42,6 @@ export function writeOutputs(env: NodeJS.ProcessEnv, outputs: ReadonlyArray<[str
     text += `${key}<<${delimiter}\n${value}\n${delimiter}\n`;
   }
   if (text !== "") appendFileSync(file, text);
-}
-
-/** A fresh run directory per invocation: the run workspace reads through to
- * disk (it reuses pr.diff / pr-object.json when present), so a directory
- * shared by two invocations in one job would feed the second the first's
- * artifacts. */
-export function createRunDir(temp: string): string {
-  mkdirSync(temp, { recursive: true });
-  return mkdtempSync(join(temp, "v3-review-run-"));
 }
 
 /** The label a `labeled` event carries (GitHub sends `{ name }`). */
