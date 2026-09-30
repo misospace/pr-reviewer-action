@@ -33,8 +33,10 @@ export interface ClaimsArtifact {
   claims: Claim[];
   truncated: boolean;
   errors: string[];
-  /** How the claims were produced: a deterministic scan of the diff/PR body,
-   * a bounded model fallback, or both (deterministic augmented by the
-   * fallback when it ran and contributed). */
+  /** How the claims were produced: the deterministic scan found claims
+   * ("deterministic"), only the bounded model fallback did ("model"), or
+   * neither did ("none"). The fallback never augments a deterministic hit
+   * (pass.ts short-circuits on a deterministic artifact), so no combined
+   * value exists. */
   method: "deterministic" | "model" | "none";
 }
