@@ -921,6 +921,27 @@ class TestRequirementTraceMetadata:
             ),
         )
 
+    def test_requirement_trace_threads_to_every_run_call(self, monkeypatch, tmp_path):
+        """Mirrors the claim-falsification threading test: the flag must reach
+        every run_review_for_pr call — true forwards True, default/false
+        forwards False."""
+        seen: list[bool] = []
+
+        def fake_run_review_for_pr(pr_entry, mode, work_dir, model_config, requirement_trace=False, **kwargs):
+            seen.append(requirement_trace)
+            return ReviewRun(mode=mode, pr_number=pr_entry["number"], repo_full_name=pr_entry["repo_full_name"])
+
+        monkeypatch.setattr("eval_harness.run_review_for_pr", fake_run_review_for_pr)
+
+        on_report = run_real_pr_corpus(self._corpus(), ["tools_off"], tmp_path, {}, requirement_trace=True)
+        assert seen == [True]
+        assert on_report["metadata"]["requirement_trace"] is True
+
+        seen.clear()
+        off_report = run_real_pr_corpus(self._corpus(), ["tools_off"], tmp_path, {})
+        assert seen == [False]
+        assert off_report["metadata"]["requirement_trace"] is False
+
     def test_default_false(self, monkeypatch, tmp_path):
         self._stub(monkeypatch)
         report = run_real_pr_corpus(self._corpus(), ["tools_off"], tmp_path, {})
