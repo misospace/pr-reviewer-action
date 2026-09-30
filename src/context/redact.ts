@@ -137,30 +137,40 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
   );
 
   // Kubernetes / kubeconfig credential-bearing keys: keep the key and
-  // separator, mask only the value.
+  // separator, mask only the value. A tagged form (`!Ref X`, `!Sub ...`,
+  // `!GetAtt ...`) is captured whole, to end of line, so it is judged (and,
+  // being a reference, left alone) as ONE value rather than truncated at its
+  // first space — `!Ref ClientKeyData` must never become `⟦…⟧ ClientKeyData`.
   redacted = redacted.replace(
-    /(client-certificate-data|client-key-data|certificate-authority-data)(\s*:\s*)(\S+)/gi,
-    (_m, key: string, sep: string) => `${key}${sep}${REDACTED_SOURCE}`,
+    /(client-certificate-data|client-key-data|certificate-authority-data)(\s*:\s*)(![^\n]*|\S+)/gi,
+    (m, key: string, sep: string, value: string) =>
+      isReferenceValue(value.trim()) ? m : `${key}${sep}${REDACTED_SOURCE}`,
   );
 
-  // A secret-named key assigned a QUOTED string literal: keep the key,
-  // separator, and quotes; mask only the value. Requires matching quotes and
-  // no quote inside the value, so a code expression (unquoted) never
-  // matches. A quoted reference (e.g. `apiKey: "${API_KEY}"`) is left alone.
+  // A secret-named key assigned a QUOTED string literal: keep the key
+  // (and, when present, matching quotes around it — `"token": "..."` in
+  // JSON/YAML), separator, and value quotes; mask only the value. Requires
+  // matching value quotes and no quote inside the value, so a code
+  // expression (unquoted) never matches. A quoted reference (e.g.
+  // `apiKey: "${API_KEY}"`) is left alone.
   redacted = redacted.replace(
-    new RegExp(`(${SECRET_KEY_ALTERNATION})(\\s*[:=]\\s*)(["'\`])([^"'\`]{8,})\\3`, "gi"),
-    (m, key: string, sep: string, quote: string, value: string) =>
-      isReferenceValue(value) ? m : `${key}${sep}${quote}${REDACTED_SOURCE}${quote}`,
+    new RegExp(`(["'\`]?)(${SECRET_KEY_ALTERNATION})\\1(\\s*[:=]\\s*)(["'\`])([^"'\`]{8,})\\4`, "gi"),
+    (m, keyQuote: string, key: string, sep: string, quote: string, value: string) =>
+      isReferenceValue(value) ? m : `${keyQuote}${key}${keyQuote}${sep}${quote}${REDACTED_SOURCE}${quote}`,
   );
 
   // A secret-named key assigned an UNQUOTED scalar literal: config-file-only
   // (#876) — in a code file the same shape is a bare identifier/expression
-  // (`apiKey: config.apiKey`), which must survive untouched.
+  // (`apiKey: config.apiKey`), which must survive untouched. Same optional
+  // matching-quote handling on the key as the quoted-value rule above (a
+  // quoted JSON/YAML key can still carry an unquoted value, e.g.
+  // `"token": hunter2hunter2`), and the same whole-value-to-end-of-line
+  // capture for a tagged reference form.
   if (isConfigLikePath(filePath)) {
     redacted = redacted.replace(
-      new RegExp(`(${SECRET_KEY_ALTERNATION})(\\s*[:=]\\s*)([^\\s#'"]{8,})`, "gi"),
-      (m, key: string, sep: string, value: string) =>
-        isReferenceValue(value) ? m : `${key}${sep}${REDACTED_SOURCE}`,
+      new RegExp(`(["'\`]?)(${SECRET_KEY_ALTERNATION})\\1(\\s*[:=]\\s*)(![^\\n#]*|[^\\s#'"]{8,})`, "gi"),
+      (m, keyQuote: string, key: string, sep: string, value: string) =>
+        isReferenceValue(value.trim()) ? m : `${keyQuote}${key}${keyQuote}${sep}${REDACTED_SOURCE}`,
     );
   }
 

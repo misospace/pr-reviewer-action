@@ -114,6 +114,54 @@ test("#876 maintainer-review: secretKeyRef/valueFrom YAML structure is never tou
   assert.equal(redactSourceText(block, "deployment.yaml"), block);
 });
 
+test("#876 maintainer-review round 2: quoted JSON/YAML keys are masked — key quotes, colon, value quotes, and surrounding punctuation survive", () => {
+  assert.equal(redactSourceText('{"token": "hunter2hunter2"}', "config.json"), `{"token": "${REDACTED_SOURCE}"}`);
+  assert.equal(redactSourceText('{"token":"hunter2hunter2"}', "config.json"), `{"token":"${REDACTED_SOURCE}"}`);
+  assert.equal(redactSourceText('{"apiKey": "hunter2hunter2"}', "config.json"), `{"apiKey": "${REDACTED_SOURCE}"}`);
+  // Quoted-value masking is universal (not path-gated) — same result in an
+  // unknown/code path.
+  assert.equal(redactSourceText('{"token": "hunter2hunter2"}'), `{"token": "${REDACTED_SOURCE}"}`);
+
+  // Pretty-printed multi-line JSON: only the value line changes.
+  const pretty = ["{", '  "apiKey": "hunter2hunter2",', '  "baseUrl": "https://example.com"', "}"].join("\n");
+  const expected = ["{", `  "apiKey": "${REDACTED_SOURCE}",`, '  "baseUrl": "https://example.com"', "}"].join("\n");
+  assert.equal(redactSourceText(pretty, "config.json"), expected);
+
+  // YAML with a quoted key and an unquoted literal value (config-only).
+  assert.equal(redactSourceText('"password": correcthorsebattery', "values.yaml"), `"password": ${REDACTED_SOURCE}`);
+  // Same shape in code (or unknown path) is left alone.
+  assert.equal(redactSourceText('"password": correcthorsebattery', "src/x.ts"), '"password": correcthorsebattery');
+});
+
+test("#876 maintainer-review round 2: kubeconfig masker respects reference values and whole-line tagged forms", () => {
+  // A reference must never be masked, even for the kubeconfig-specific rule.
+  assert.equal(
+    redactSourceText("client-key-data: ${CLIENT_KEY_DATA}", "kubeconfig"),
+    "client-key-data: ${CLIENT_KEY_DATA}",
+  );
+  // A CloudFormation-style tag is captured as ONE value to end of line, not
+  // truncated at its first space — must never become
+  // `client-key-data: ⟦redacted:credential⟧ ClientKeyData`.
+  assert.equal(
+    redactSourceText("client-key-data: !Ref ClientKeyData", "kubeconfig"),
+    "client-key-data: !Ref ClientKeyData",
+  );
+  assert.equal(
+    redactSourceText("client-certificate-data: !Sub '${ClientCertData}'", "kubeconfig"),
+    "client-certificate-data: !Sub '${ClientCertData}'",
+  );
+  // A real base64 literal is still masked, key and separator kept.
+  assert.equal(
+    redactSourceText("client-key-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t", "kubeconfig"),
+    `client-key-data: ${REDACTED_SOURCE}`,
+  );
+});
+
+test("#876 maintainer-review round 2: the generic unquoted-config rule also treats a tagged reference as one whole-line value", () => {
+  assert.equal(redactSourceText("token: !Ref TokenParam", "values.yaml"), "token: !Ref TokenParam");
+  assert.equal(redactSourceText("apiKey: !GetAtt MyStack.ApiKey", "values.yaml"), "apiKey: !GetAtt MyStack.ApiKey");
+});
+
 test("#876: maskAndTruncateSource masks then truncates, same contract as maskAndTruncate", () => {
   const result = maskAndTruncateSource("apiKey: config.apiKey, ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456", 12);
   assert.equal(result.truncated, true);

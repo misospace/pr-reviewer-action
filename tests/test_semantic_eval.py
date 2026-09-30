@@ -366,10 +366,10 @@ def test_offline_runner_writes_report_without_credentials(tmp_path: Path) -> Non
     assert result.returncode == 0, result.stderr
     payload = json.loads(report.read_text(encoding="utf-8"))
     assert payload["passed"] is True
-    # #750 adds scenarios 7480 (ungrounded-N/A converse) and 7481 (grounded-N/A
-    # clean-shape negative control) to the historical corpus; #757 adds the
-    # counterexample-falsification family 7571-7584.
-    assert payload["scenarios_evaluated"] == 38
+    # The expected count is derived from the corpus itself (#876): a fixed
+    # magic number drifts every time a scenario is added (most recently
+    # #750's 7480/7481, #757's 7571-7584, and #876's 8760).
+    assert payload["scenarios_evaluated"] == len(SemanticCorpus.from_file(CORPUS).scenarios)
     assert {"6551", "6552", "6553", "6891", "6892", "7480", "7481"} <= payload["per_scenario_summary"].keys()
     assert {"7571", "7572", "7573", "7574", "7575", "7576", "7577", "7578",
             "7579", "7580", "7581", "7582", "7583", "7584"} <= payload["per_scenario_summary"].keys()
