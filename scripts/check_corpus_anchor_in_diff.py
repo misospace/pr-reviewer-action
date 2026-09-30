@@ -1,41 +1,52 @@
 #!/usr/bin/env python3
-"""Manual check: does a real-PR corpus entry's pinned head actually contain
-its defect (#842)?
+"""Manual check: is a real-PR corpus entry's defect anchor file untouched
+between its pinned base and head?
 
 For every ``vulnerable`` entry that pins both ``head_sha`` and ``base_sha``,
 this compares the two commits (``GET /repos/{repo}/compare/{base}...{head}``)
-and confirms the defect's anchor file is among the changed files. If it
-isn't, the pinned head was reviewed *after* the defect was already fixed (or
-never contained it), the defect can't be caught there, and the entry only
-adds noise to recall — the exact #842 bug (`joryirving/home-ops#9075`
-pinned `b3d77613`, the commit that already added the fix).
+and confirms the defect's anchor file is among the changed files. When it
+isn't, the anchor file was never modified in that base..head range at all —
+a corpus-authoring mistake (wrong file, wrong shas, or a base/head pair from
+the wrong PR).
+
+Important limitation: this check is NOT sufficient to catch a #842-style
+stale pin (a head that already contains the fix a human asked for). The
+anchor file can perfectly well be "changed between base and head" in BOTH
+the buggy pre-fix commit and a later commit that already fixed it — the
+file shows up in the compare diff either way, because the compare range
+spans every commit in between, defect-introducing and defect-fixing alike.
+Catching #842 itself needs `check_corpus_stale_pin.py`, which compares the
+pinned head against the commit that was actually live when the human
+finding was posted. Treat this script as a narrower, complementary sanity
+check: "does the diff even touch the right file", not "is the defect still
+present at head".
 
 This is a manual, network-using script — never invoked by the unit test
 suite or CI. Its logic (matching a defect's anchor file against a compare
 response's file list) is unit-tested in
-``tests/test_check_corpus_defect_in_diff.py`` against fixture JSON, with no
+``tests/test_check_corpus_anchor_in_diff.py`` against fixture JSON, with no
 network calls.
 
 Usage:
-    python3 scripts/check_corpus_defect_in_diff.py evals/corpus-human-findings.json
-    python3 scripts/check_corpus_defect_in_diff.py evals/corpus-real-prs.json --verbose
+    python3 scripts/check_corpus_anchor_in_diff.py evals/corpus-human-findings.json
+    python3 scripts/check_corpus_anchor_in_diff.py evals/corpus-real-prs.json --verbose
 
-Reads via the `gh` CLI when present (auth via gh's own token handling),
-otherwise falls back to `urllib` with GITHUB_TOKEN/GH_TOKEN from the
-environment.
+Reads exclusively via the `gh` CLI (auth flows through gh's own token
+handling; this deliberately has no direct-HTTP fallback — a hand-rolled
+`Authorization: Bearer` header over `urllib.request.urlopen` follows
+redirects by default and would forward the token cross-origin on a 3xx).
+Requires `gh` on PATH and authenticated.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
-from urllib.request import Request, urlopen
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
@@ -51,34 +62,25 @@ class GitHubAPIError(RuntimeError):
 
 
 class GitHubClient:
-    """Minimal read-only GitHub REST client (gh CLI, else urllib+token)."""
+    """Read-only GitHub REST client, `gh` CLI only.
 
-    def __init__(self, token: str | None = None, use_gh_cli: bool | None = None):
-        self.token = token
-        self.use_gh_cli = shutil.which("gh") is not None if use_gh_cli is None else use_gh_cli
+    No direct-HTTP fallback on purpose (#855-class risk): a hand-rolled
+    `Authorization: Bearer <token>` header over `urlopen` follows redirects
+    by default, which can forward the token cross-origin on a 3xx response.
+    The `gh` CLI handles auth and redirects safely on its own.
+    """
+
+    def __init__(self):
+        if shutil.which("gh") is None:
+            raise GitHubAPIError("the `gh` CLI is required and was not found on PATH")
 
     def get(self, path: str) -> Any:
-        if self.use_gh_cli:
-            result = subprocess.run(
-                ["gh", "api", path], capture_output=True, text=True, check=False,
-            )
-            if result.returncode != 0:
-                raise GitHubAPIError(f"gh api {path} failed: {result.stderr.strip()}")
-            return json.loads(result.stdout)
-
-        url = f"https://api.github.com{path}"
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        req = Request(url, headers=headers)
-        try:
-            with urlopen(req, timeout=30) as resp:  # noqa: S310 - fixed https host
-                return json.loads(resp.read().decode("utf-8"))
-        except Exception as exc:  # noqa: BLE001
-            raise GitHubAPIError(f"GET {path} failed: {exc}") from exc
+        result = subprocess.run(
+            ["gh", "api", path], capture_output=True, text=True, check=False,
+        )
+        if result.returncode != 0:
+            raise GitHubAPIError(f"gh api {path} failed: {result.stderr.strip()}")
+        return json.loads(result.stdout)
 
     def compare(self, repo: str, base: str, head: str) -> dict[str, Any]:
         return self.get(f"/repos/{repo}/compare/{base}...{head}")
@@ -133,9 +135,13 @@ def check_entries(
     ``fetch_compare(repo, base, head)`` is injected so this stays
     network-free under test. Returns one result dict per checked entry:
     ``{"id", "ok", "reason"}`` — ``ok`` is True when the defect file is
-    confirmed changed between base and head, False when it is not (the
-    #842 failure mode), and entries without both shas pinned or without a
-    defect file are skipped (not returned).
+    confirmed changed somewhere between base and head, False when it is
+    not touched at all in that range, and entries without both shas pinned
+    or without a defect file are skipped (not returned). A `False` here
+    means the anchor is wrong or the base/head pair doesn't bracket the
+    defect commit — it does NOT by itself mean "the defect is still live
+    at head" (see the module docstring: that needs
+    `check_corpus_stale_pin.py`).
     """
     results: list[dict[str, Any]] = []
     for entry in entries:
@@ -158,8 +164,8 @@ def check_entries(
             "id": entry_id,
             "ok": bool(present),
             "reason": (
-                "defect file changed between base and head" if present
-                else f"defect file {defect_file!r} NOT in the base..head diff"
+                "defect file changed somewhere between base and head" if present
+                else f"defect file {defect_file!r} NOT touched anywhere in the base..head diff"
             ),
         })
     return results
@@ -180,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
     block = data.get("real_pr_corpus") or {}
     entries = list(block.get("vulnerable") or [])
 
-    client = GitHubClient(token=os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN"))
+    client = GitHubClient()
     results = check_entries(entries, client.compare)
 
     bad = [r for r in results if r["ok"] is not True]

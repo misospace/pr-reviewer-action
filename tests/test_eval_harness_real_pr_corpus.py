@@ -20,7 +20,6 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import eval_harness
 from eval_harness import (
     RealPRCorpus,
     RealPRDefect,
@@ -647,7 +646,7 @@ class TestRunsPerModeRealPRCorpus:
                 findings=[_finding("a.py")], verdict="request_changes",
             )
 
-        monkeypatch.setattr(eval_harness, "run_review_for_pr", fake_run_review_for_pr)
+        monkeypatch.setattr("eval_harness.run_review_for_pr", fake_run_review_for_pr)
         report = run_real_pr_corpus(self._corpus(), ["tools_off"], tmp_path, {}, runs_per_mode=3)
 
         assert calls == ["acme/repo#1:tools_off"] * 3 + ["acme/repo#2:tools_off"] * 3
@@ -661,7 +660,7 @@ class TestRunsPerModeRealPRCorpus:
         def fake_run_review_for_pr(pr_entry, mode, work_dir, model_config, **kwargs):
             return ReviewRun(mode=mode, pr_number=pr_entry["number"], repo_full_name=pr_entry["repo_full_name"])
 
-        monkeypatch.setattr(eval_harness, "run_review_for_pr", fake_run_review_for_pr)
+        monkeypatch.setattr("eval_harness.run_review_for_pr", fake_run_review_for_pr)
         report = run_real_pr_corpus(self._corpus(), ["tools_off"], tmp_path, {}, runs_per_mode=2)
         vuln_entry = next(e for e in report["per_scenario_results"] if e["id"] == "v1")
         assert isinstance(vuln_entry["runs"]["tools_off"], list)
@@ -672,7 +671,7 @@ class TestRunsPerModeRealPRCorpus:
         def fake_run_review_for_pr(pr_entry, mode, work_dir, model_config, **kwargs):
             return ReviewRun(mode=mode, pr_number=pr_entry["number"], repo_full_name=pr_entry["repo_full_name"])
 
-        monkeypatch.setattr(eval_harness, "run_review_for_pr", fake_run_review_for_pr)
+        monkeypatch.setattr("eval_harness.run_review_for_pr", fake_run_review_for_pr)
         report = run_real_pr_corpus(self._corpus(), ["tools_off"], tmp_path, {})  # runs_per_mode default = 1
         vuln_entry = next(e for e in report["per_scenario_results"] if e["id"] == "v1")
         assert isinstance(vuln_entry["runs"]["tools_off"], dict)
@@ -685,7 +684,7 @@ class TestRunsPerModeRealPRCorpus:
             calls.append(mode)
             return ReviewRun(mode=mode, pr_number=pr_entry["number"], repo_full_name=pr_entry["repo_full_name"])
 
-        monkeypatch.setattr(eval_harness, "run_review_for_pr", fake_run_review_for_pr)
+        monkeypatch.setattr("eval_harness.run_review_for_pr", fake_run_review_for_pr)
         run_real_pr_corpus(
             self._corpus(), ["tools_off"], tmp_path, {}, context_only=True, runs_per_mode=5,
         )

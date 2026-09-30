@@ -1,4 +1,12 @@
-"""Unit tests for scripts/check_corpus_defect_in_diff.py's pure logic (#842).
+"""Unit tests for scripts/check_corpus_anchor_in_diff.py's pure logic.
+
+This script checks a narrower thing than #842 itself: whether a corpus
+entry's defect anchor file is touched ANYWHERE between its pinned base and
+head. It cannot by itself catch a #842-style stale pin (a head that already
+contains the fix) — the anchor file is "changed between base and head" in
+both the buggy pre-fix commit and a later fix-already-applied commit, since
+the compare range spans every commit in between. That case is covered by
+`check_corpus_stale_pin.py` / `test_check_corpus_stale_pin.py` instead.
 
 No network: `check_entries` takes an injected `fetch_compare` callable, so
 every case here is fixture JSON shaped like a GitHub compare response.
@@ -9,11 +17,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from check_corpus_defect_in_diff import (
+from check_corpus_anchor_in_diff import (
     GitHubAPIError,
     check_entries,
     defect_file_in_changed_files,
@@ -90,17 +100,18 @@ class TestCheckEntries:
         result = check_entries([entry], lambda repo, base, head: _compare("a.py"))
         assert result == [{
             "id": "acme/repo#1@abc123", "ok": True,
-            "reason": "defect file changed between base and head",
+            "reason": "defect file changed somewhere between base and head",
         }]
 
-    def test_flags_the_842_case_fix_already_present_at_head(self):
-        """The exact #842 shape: the pinned head's diff (against its base)
-        doesn't touch the defect file at all, because the file's fix landed
-        in an earlier commit already folded into that head."""
+    def test_flags_when_the_anchor_file_is_never_touched_in_the_range(self):
+        """A corpus-authoring mistake this check CAN catch: the anchor file
+        doesn't appear anywhere in the base..head diff (wrong file, or a
+        base/head pair from the wrong PR). Not the same as #842 — see the
+        module docstring."""
         entry = self._entry(defect={"file": "llm/llama-nvidia.yaml"})
         result = check_entries([entry], lambda repo, base, head: _compare("other/file.yaml"))
         assert result[0]["ok"] is False
-        assert "NOT in the base..head diff" in result[0]["reason"]
+        assert "NOT touched anywhere in the base..head diff" in result[0]["reason"]
 
     def test_skips_entries_missing_base_sha(self):
         entry = self._entry(base_sha=None)
@@ -134,3 +145,22 @@ class TestCheckEntries:
 
         check_entries([entry], _capture)
         assert seen == [("acme/repo", "b" * 40, "h" * 40)]
+
+
+class TestGitHubClientHasNoHttpFallback:
+    """#855-class safety: this client must never hold a bearer token over a
+    redirect-following urlopen call. The simplest guarantee is having no
+    direct-HTTP path at all."""
+
+    def test_raises_when_gh_cli_is_missing(self, monkeypatch):
+        import check_corpus_anchor_in_diff as mod
+
+        monkeypatch.setattr(mod.shutil, "which", lambda _name: None)
+        with pytest.raises(GitHubAPIError, match="gh"):
+            mod.GitHubClient()
+
+    def test_has_no_urllib_import(self):
+        import check_corpus_anchor_in_diff as mod
+
+        assert not hasattr(mod, "urlopen")
+        assert not hasattr(mod, "Request")
