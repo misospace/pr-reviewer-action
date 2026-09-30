@@ -102,9 +102,9 @@ force `request_changes` when the underlying risk is demonstrably absent;
 requesting changes is reserved for an actually violated or unresolved
 applicable requirement.
 
-## `required_check_validation_mode` mapping
+## `required-check-validation-mode` mapping
 
-The public `required_checks` output vocabulary is unchanged
+The public `required-checks` output vocabulary is unchanged
 (`complete` / `incomplete` / `none`):
 
 - `auto` — validate when `must_check` is non-empty;
@@ -121,7 +121,7 @@ no keyword mention can substitute for a missing or malformed disposition.
 The v2 pipeline keeps its shallow keyword matching
 (`completeness.py::validate_review`) **only** as a fallback for outputs that
 carry no `required_check_dispositions` field at all (models on
-`ai_response_format: off`/`json_object` that never engaged with the
+`ai-response-format: off`/`json_object` that never engaged with the
 structured contract). When the field is present — even partially or
 malformed — the structured evaluation is authoritative. This fallback is
 explicit, documented, and removed by #680; it is not the v3 contract. The
