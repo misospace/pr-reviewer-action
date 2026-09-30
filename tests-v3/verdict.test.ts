@@ -272,6 +272,25 @@ test("#868: an in-body error is masked even with no secrets threaded in (redactT
   );
 });
 
+test("#868: a one-character configured key is masked everywhere it occurs, including in the static 'Model endpoint returned an error: ' prefix", () => {
+  // ai-api-key has no configured minimum length (#862's precedent for
+  // describeTransportFailure); a one-character key can coincide with
+  // ordinary letters in surfaceStreamError's own static prefix text, which
+  // only a whole-string second mask pass (not just masking the raw body
+  // message) can catch. "e" appears in "endpoint"/"error" in the prefix.
+  assert.throws(
+    () => parseVerdictResponse({ error: { message: "credential rejected" } }, ["e"]),
+    (error: unknown) => {
+      assert.ok(error instanceof VerdictParseFailure);
+      // Every literal "e" is gone — including from the static prefix —
+      // while the uppercase "E" inside "[REDACTED]" is untouched.
+      assert.ok(!error.message.includes("e"), `expected every "e" to be masked, got: ${error.message}`);
+      assert.match(error.message, /\[REDACTED\]/);
+      return true;
+    },
+  );
+});
+
 test("#868: an oversized in-body error message is capped at 300 chars, mirroring #862", () => {
   const huge = "x".repeat(1000);
   assert.throws(

@@ -516,7 +516,13 @@ function surfaceStreamError(response: Record<string, unknown>, secrets: readonly
   if (isRecord(err)) msg = typeof err.message === "string" && err.message !== "" ? err.message : JSON.stringify(err);
   else if (typeof err === "string") msg = err;
   else msg = JSON.stringify(err) ?? String(err);
-  throw new VerdictParseFailure("endpoint_error", `Model endpoint returned an error: ${maskStreamErrorMessage(msg, secrets)}`);
+  // A second, whole-string mask pass (matching #862's `describeTransportFailure`):
+  // a very short configured key (down to one character — `ai-api-key` has no
+  // minimum length) can coincide with ordinary letters in the static
+  // "Model endpoint returned an error: " prefix, which the body-only pass
+  // above never touches.
+  const full = `Model endpoint returned an error: ${maskStreamErrorMessage(msg, secrets)}`;
+  throw new VerdictParseFailure("endpoint_error", maskKnownSecrets(full, secrets));
 }
 
 const SEVERITY_RANK: Record<string, number> = { blocker: 0, major: 1, minor: 2, info: 3 };

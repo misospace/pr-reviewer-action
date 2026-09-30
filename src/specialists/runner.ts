@@ -409,7 +409,15 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
     // A 200 whose body is an error object is a transport failure (some
     // gateways do this); never parse it as a lead set.
     if (typeof outcome.raw === "object" && outcome.raw !== null && "error" in (outcome.raw as Record<string, unknown>) && (outcome.raw as Record<string, unknown>).error) {
-      const message = `endpoint returned an error body: ${errorBodyText((outcome.raw as Record<string, unknown>).error, [config.apiKey])}`;
+      // A second, whole-string mask pass (matching #862's
+      // `describeTransportFailure`): a one-character configured key can
+      // coincide with ordinary letters in the static "endpoint returned an
+      // error body: " prefix, which `errorBodyText`'s body-only pass never
+      // touches.
+      const message = maskKnownSecrets(
+        `endpoint returned an error body: ${errorBodyText((outcome.raw as Record<string, unknown>).error, [config.apiKey])}`,
+        [config.apiKey],
+      );
       const failureArtifact = emptyArtifact(role);
       failureArtifact.errors.push(`transport: ${message}`);
       return finish(failureArtifact, "error", "transport", null, payload, { error: `transport: ${message}` });
@@ -587,7 +595,13 @@ async function runSpecialistScout(
       break;
     }
     if (typeof outcome.raw === "object" && outcome.raw !== null && (outcome.raw as Record<string, unknown>).error) {
-      lastError = `transport: endpoint returned an error body: ${errorBodyText((outcome.raw as Record<string, unknown>).error, [config.apiKey])}`;
+      // See the matching comment above `runSpecialistRole`'s in-body-error
+      // branch: a second whole-string pass covers a one-character key
+      // coinciding with the static prefix text.
+      lastError = maskKnownSecrets(
+        `transport: endpoint returned an error body: ${errorBodyText((outcome.raw as Record<string, unknown>).error, [config.apiKey])}`,
+        [config.apiKey],
+      );
       break;
     }
     const artifacts = parseScoutResponse(extractResponseText(outcome.raw), roles);
