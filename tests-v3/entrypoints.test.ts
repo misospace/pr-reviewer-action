@@ -4,8 +4,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TangledNotImplementedError } from "../src/platform/tangled.js";
-import { buildAdapter, buildPublishApi, precheckMain, publishMain } from "../src/run/entrypoints.js";
+import { buildAdapter, buildPublishApi, precheckMain, publishInputFromEnv, publishMain } from "../src/run/entrypoints.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
+import { publishReview } from "../src/publish/publish.js";
+import type { NativeReviewRequest, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
 
 function mockAdapter(): PlatformReadAdapter {
   return {
@@ -108,4 +110,124 @@ test("explicit tangled without its identity fails with the resolver diagnostic",
     () => buildAdapter(env),
     (e: unknown) => e instanceof Error && /TANGLED_REPO_DID/.test(e.message),
   );
+});
+
+// ── #873: the standalone `publish` CLI reads the run's own coverage record ──
+//
+// `run` and `publish` are separate processes (the composite's two steps, or
+// the standalone CLI subcommands): `publish` never holds the tool harness
+// in memory, so it must read the same persisted artifact `runReview` wrote,
+// from PR_REVIEWER_RUN_DIR — never the checkout — or a partial-coverage run
+// could still publish APPROVE through this path.
+
+class MinimalPublishApi implements PublishPlatformApi {
+  readonly platform = "github" as const;
+  submitted: NativeReviewRequest[] = [];
+  constructor(private readonly head: string) {}
+  async getHeadSha(): Promise<string | null> { return this.head; }
+  async listIssueComments(): Promise<PublishCommentRef[]> { return []; }
+  async upsertStickyComment(): Promise<{ ok: boolean; created: boolean }> { return { ok: true, created: true }; }
+  async listReviews(): Promise<PublishReviewRef[]> { return []; }
+  async createReview(request: NativeReviewRequest): Promise<{ ok: boolean }> { this.submitted.push(request); return { ok: true }; }
+  async dismissReview(): Promise<boolean> { return true; }
+  async minimizedReviewIds(): Promise<string[]> { return []; }
+  async minimizeReview(): Promise<boolean> { return true; }
+  async unresolvedSupersededThreads(): Promise<{ ok: boolean; threads: { id: string }[]; hasNextPage: boolean }> {
+    return { ok: true, threads: [], hasNextPage: false };
+  }
+  async resolveThread(): Promise<boolean> { return true; }
+  async removeLabel(): Promise<boolean> { return true; }
+}
+
+function withRunDir<T>(fn: (dir: string) => T): T {
+  const dir = mkdtempSync(join(tmpdir(), "v3-publish-entry-"));
+  try {
+    return fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function withRunDirAsync<T>(fn: (dir: string) => Promise<T>): Promise<T> {
+  const dir = mkdtempSync(join(tmpdir(), "v3-publish-entry-"));
+  try {
+    return await fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const PARTIAL_COVERAGE_HARNESS = JSON.stringify({
+  stop_reason: "tool-call-budget-exhausted",
+  partial_coverage: {
+    stop_reason: "tool-call-budget-exhausted",
+    changed_files_total: 2,
+    unread_files: ["a.ts"],
+    leads_total: 0,
+    unresolved_leads: [],
+  },
+});
+
+test("#873: publishInputFromEnv reads partial coverage from the run dir's tool-harness artifact", () => {
+  withRunDir((dir) => {
+    writeFileSync(join(dir, "tool-harness.json"), PARTIAL_COVERAGE_HARNESS);
+    const input = publishInputFromEnv(
+      { PR_REVIEWER_RUN_DIR: dir, REVIEW_ROUTE: "primary", PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv,
+      "github",
+    );
+    assert.ok(input.partialCoverage);
+    assert.equal(input.partialCoverage?.stop_reason, "tool-call-budget-exhausted");
+  });
+});
+
+test("#873: publishInputFromEnv reads the smart harness for an escalated route", () => {
+  withRunDir((dir) => {
+    writeFileSync(join(dir, "tool-harness.smart.json"), PARTIAL_COVERAGE_HARNESS);
+    const input = publishInputFromEnv(
+      { PR_REVIEWER_RUN_DIR: dir, REVIEW_ROUTE: "escalated", PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv,
+      "github",
+    );
+    assert.ok(input.partialCoverage);
+    // The primary harness is never consulted on an escalated route.
+    const primaryOnly = publishInputFromEnv(
+      { PR_REVIEWER_RUN_DIR: dir, REVIEW_ROUTE: "primary", PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv,
+      "github",
+    );
+    assert.equal(primaryOnly.partialCoverage, undefined);
+  });
+});
+
+test("#873: publishInputFromEnv omits partialCoverage without a tool-harness artifact", () => {
+  withRunDir((dir) => {
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(input.partialCoverage, undefined);
+  });
+});
+
+test("#873: the CLI publish path (publishInputFromEnv + publishReview) downgrades APPROVE to COMMENT for a partial-coverage run", async () => {
+  await withRunDirAsync(async (dir) => {
+    writeFileSync(join(dir, "tool-harness.json"), PARTIAL_COVERAGE_HARNESS);
+    const head = "a".repeat(40);
+    const env = {
+      PR_REVIEWER_RUN_DIR: dir,
+      REVIEW_ROUTE: "primary",
+      VERDICT: "approve",
+      REQUIRED_CHECKS: "complete",
+      PUBLISH_MODE: "review_verdict",
+      ALLOW_APPROVE: "true",
+      HEAD_SHA: head,
+      PR_NUMBER: "7",
+      COMMENT_MARKER: "<!-- ai-pr-review -->",
+      REVIEW_MARKDOWN: "Looks fine.",
+    } as NodeJS.ProcessEnv;
+    const input = publishInputFromEnv(env, "github");
+    assert.ok(input.partialCoverage);
+
+    const api = new MinimalPublishApi(head);
+    const result = await publishReview(input, api, { diffText: "" });
+    assert.equal(result.status, "published");
+    assert.equal(api.submitted.length, 1);
+    assert.notEqual(api.submitted[0]!.event, "APPROVE");
+    assert.equal(api.submitted[0]!.event, "COMMENT");
+  });
 });

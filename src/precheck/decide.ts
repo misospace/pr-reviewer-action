@@ -133,6 +133,9 @@ export interface PrecheckOutput {
   effective_forgejo_api_url: string;
   verdict?: string;
   verdict_source?: string;
+  /** #873: the carried marker's `review_result` state, for the additive
+   * `review-result` action output. Undefined when nothing was carried. */
+  review_result?: string;
 }
 
 /** Extract the broad fingerprint from the last published comment body —
@@ -179,13 +182,16 @@ export function lastManagedBody(
  * unparseable marker → verdict stays empty. #811's strict-policy marker
  * values (`findings` / `partial`) are non-blocking states and carry an
  * approve, exactly like `clean`. */
-export function carriedVerdict(lastCommentBody: string): { verdict: string; verdictSource: string } | null {
+export function carriedVerdict(lastCommentBody: string): { verdict: string; verdictSource: string; reviewResult: string } | null {
   const data = parseMetadata(lastCommentBody);
   if (!data) return null;
   const result = String(data.review_result ?? "").toLowerCase();
-  if (result === "issues") return { verdict: "request_changes", verdictSource: "carry_forward" };
+  if (result === "issues") return { verdict: "request_changes", verdictSource: "carry_forward", reviewResult: result };
   if (result === "clean" || result === "findings" || result === "partial") {
-    return { verdict: "approve", verdictSource: "carry_forward" };
+    // #873: the carried `review-result` output stays honest across a
+    // diff-unchanged skip too — a previously-partial review must not
+    // silently read as `clean` just because nothing changed.
+    return { verdict: "approve", verdictSource: "carry_forward", reviewResult: result };
   }
   return null;
 }
@@ -340,6 +346,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
       if (carried) {
         output.verdict = carried.verdict;
         output.verdict_source = carried.verdictSource;
+        output.review_result = carried.reviewResult;
       }
       return output;
     }

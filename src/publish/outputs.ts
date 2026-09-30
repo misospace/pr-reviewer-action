@@ -18,6 +18,7 @@ export const REVIEW_STEP_OUTPUT_IDS = [
   "verdict",
   "verdict-source",
   "required-checks",
+  "review-result",
   "review-route",
   "escalation-reason",
   "findings",
@@ -33,6 +34,11 @@ export interface ReviewStepOutputs {
   verdict: string;
   verdictSource: string;
   requiredChecks: string;
+  /** #873: the metadata marker's review_result state (clean/findings/
+   * partial/issues) — additive; verdict's own value set is unchanged, so
+   * a partial review still reports verdict "approve" here and the
+   * incompleteness surfaces only through this field. */
+  reviewResult: string;
   reviewRoute: string;
   escalationReason: string;
   /** Compact JSON array of the normalized findings. */
@@ -80,6 +86,7 @@ export function formatReviewStepOutputs(
     ["verdict", outputs.verdict],
     ["verdict-source", outputs.verdictSource],
     ["required-checks", outputs.requiredChecks],
+    ["review-result", outputs.reviewResult],
     ["review-route", outputs.reviewRoute],
     ["escalation-reason", outputs.escalationReason],
     ["review-markdown", outputs.reviewMarkdown],

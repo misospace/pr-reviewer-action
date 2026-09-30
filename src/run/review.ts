@@ -814,15 +814,34 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   }
 
   // ── Outputs + step summary (review.sh tail) ──────────────────────────
-  const cacheHitRatio = buildCacheHitRatioOutput(safeJson(ws.read(enforcementHarness)));
+  const harnessForMarker = safeJson(ws.read(enforcementHarness));
+  const cacheHitRatio = buildCacheHitRatioOutput(harnessForMarker);
   const toolCalls = buildToolCallsOutput(
     safeJson(ws.read("tool-harness.json")),
     enforcementHarness === "tool-harness.smart.json" ? safeJson(ws.read("tool-harness.smart.json")) : null,
   );
+  // #810: the harness's own deterministic coverage record for the published
+  // route (smart when escalated), never the model's claim. Computed here
+  // (rather than only below, alongside the marker) so the #873 review-result
+  // output — persisted immediately below — already reflects a tool-loop
+  // coverage gap, not only a completed run's required-check status.
+  const partialCoverage = partialCoverageOf(harnessForMarker);
+  const outputVerdict = String(reviewRecord.verdict ?? "");
+  const outputRequiredChecks = String(reviewRecord.required_checks ?? "none");
   const outputs: ReviewStepOutputs = {
-    verdict: String(reviewRecord.verdict ?? ""),
+    verdict: outputVerdict,
     verdictSource: String(reviewRecord.verdict_source ?? "model"),
-    requiredChecks: String(reviewRecord.required_checks ?? "none"),
+    requiredChecks: outputRequiredChecks,
+    // #873: additive alongside verdict — a partial review's verdict can
+    // still read "approve" (the strict mapping's own contract), so this is
+    // the one output that surfaces the coverage gap on its own.
+    reviewResult: markerReviewResult({
+      verdictPolicy,
+      verdict: outputVerdict,
+      findings: reviewRecord.findings,
+      requiredChecks: outputRequiredChecks,
+      partialCoverage,
+    }),
     reviewRoute: env.REVIEW_ROUTE ?? "legacy",
     escalationReason: escalationReasons,
     reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
@@ -855,10 +874,6 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   });
 
   const finished = clock();
-  const harnessForMarker = safeJson(ws.read(enforcementHarness));
-  // #810: the harness's own deterministic coverage record for the published
-  // route (smart when escalated), never the model's claim.
-  const partialCoverage = partialCoverageOf(harnessForMarker);
   // #847: the #810/#702 tool-budget provenance for the same route, recorded
   // on every review (not only partial-coverage ones) so #810's size-scaled
   // default can be measured from published reviews without needing the
@@ -879,14 +894,8 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     // head so the marker never claims a wrong binding.
     headSha: context.headSha || String(pr.headRefOid ?? ""),
     baseSha: identity.baseSha ?? "",
-    // Same derivation as the publish path's marker (#811, #810).
-    reviewResult: markerReviewResult({
-      verdictPolicy,
-      verdict: outputs.verdict,
-      findings: reviewRecord.findings,
-      requiredChecks: outputs.requiredChecks,
-      partialCoverage,
-    }),
+    // Same value the #873 review-result output above already carries.
+    reviewResult: outputs.reviewResult,
     requiredChecks: outputs.requiredChecks,
     reviewRoute: outputs.reviewRoute,
     escalationReason: outputs.escalationReason,
@@ -929,7 +938,11 @@ function cachedProjectNumber(bytes: Uint8Array): number | null {
   return typeof number === "number" ? number : null;
 }
 
-function partialCoverageOf(harness: Record<string, unknown> | null): PartialCoverage | undefined {
+/** #873: exported so the standalone `publish` CLI entrypoint (a separate
+ * process from `run`, reading the run's persisted artifacts rather than
+ * holding the harness in memory) can derive the same coverage-gap record
+ * from the tool-harness artifact on disk. */
+export function partialCoverageOf(harness: Record<string, unknown> | null): PartialCoverage | undefined {
   const value = harness?.partial_coverage;
   return value !== null && typeof value === "object" && !Array.isArray(value)
     && typeof (value as { stop_reason?: unknown }).stop_reason === "string"

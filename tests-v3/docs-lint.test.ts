@@ -37,6 +37,12 @@ const allowlist = new Map<string, string>([
   // scripts/sections/review.sh, scripts/artifact_paths.sh), not the action's
   // `analysis-engine` output.
   ["analysis_engine", "the eval harness's analysis_engine.txt filename, not the action output"],
+  // The metadata marker's own raw JSON key (src/metadata/markers.ts,
+  // src/precheck/decide.ts's carriedVerdict, src/enforcement/verdict-policy.ts's
+  // StrictReviewResult) — literally `review_result` inside the marker's JSON
+  // blob, distinct from the action's #873 `review-result` output (which
+  // carries the same value under the kebab contract name).
+  ["review_result", "the metadata marker's raw JSON field, not the action output"],
 ]);
 
 const excludedDocs = new Set(["docs/v3-migration.md", "docs/v3-teardown-audit.md"]);

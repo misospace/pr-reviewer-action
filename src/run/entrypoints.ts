@@ -12,6 +12,8 @@ import { publishReview, type PublishInput, type PublishResult, type PublishMode 
 import type { PublishPlatformApi } from "../platform/publish-api.js";
 import type { UpstreamLinkMode } from "../publish/sanitize.js";
 import { nonEmpty } from "./run-dir.js";
+import { partialCoverageOf } from "./review.js";
+import type { PartialCoverage } from "../tools/coverage.js";
 
 /**
  * Production entrypoints for the #706 composite cutover: the precheck and
@@ -145,6 +147,51 @@ function isFileNonEmpty(env: NodeJS.ProcessEnv, name: string): boolean {
   }
 }
 
+function readJsonObject(path: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The result of resolving #810's coverage-gap record for the `publish` CLI
+ * path. `unknown: true` (no explicit run dir, or an unreadable/missing
+ * harness artifact) is distinct from a confirmed-complete run: it means
+ * publish could not confirm the coverage state at all, and must fail
+ * closed for approval exactly as a confirmed gap does — see
+ * `partialCoverageFromRunDir` below. */
+interface CoverageResolution {
+  partialCoverage: PartialCoverage | undefined;
+  unknown: boolean;
+}
+
+/** #873/#838: the `publish` CLI subcommand is a separate process from
+ * `run`, so it cannot hold the tool harness in memory — it reads the same
+ * persisted artifact `runReview` wrote, from the same explicit, non-empty
+ * `PR_REVIEWER_RUN_DIR` `isFileNonEmpty` above already requires (never
+ * `GITHUB_WORKSPACE`/the process cwd — the reviewed checkout, per #838:
+ * a PR could otherwise forge or hide a "complete" tool-harness.json at its
+ * repository root). The harness filename mirrors review.ts's own
+ * `enforcementHarness` selection: an escalated run publishes the smart
+ * harness, everything else the primary one.
+ *
+ * With no explicit run dir, or a harness artifact that is missing or fails
+ * to parse, the coverage state is UNKNOWN, not "complete" — publish must
+ * fail closed (§ the `unknown` flag), never read that silence as a clean
+ * run. */
+function partialCoverageFromRunDir(env: NodeJS.ProcessEnv): CoverageResolution {
+  const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
+  if (runDir === undefined) return { partialCoverage: undefined, unknown: true };
+  const harnessName = env.REVIEW_ROUTE === "escalated" ? "tool-harness.smart.json" : "tool-harness.json";
+  const harness = readJsonObject(join(runDir, harnessName));
+  if (harness === null) return { partialCoverage: undefined, unknown: true };
+  return { partialCoverage: partialCoverageOf(harness), unknown: false };
+}
+
 /** The platform publish seam (GitHub REST/GraphQL or Forgejo /api/v1). */
 export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformApi; platform: string; diffProvider: () => Promise<string> } {
   const repo = env.REPO ?? "";
@@ -201,6 +248,19 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
     },
     ...(env.REREVIEW_LABEL ? { rerunLabel: env.REREVIEW_LABEL } : {}),
     ...(env.VERDICT_POLICY ? { verdictPolicy: env.VERDICT_POLICY } : {}),
+    // #873: the same coverage-gap record `run` computed, read back from its
+    // persisted tool-harness artifact so a partial-coverage run can never
+    // publish APPROVE through the standalone `publish` CLI path either.
+    // `unknown` (no explicit run dir, or an unreadable harness artifact)
+    // fails closed the same way: publish must never read "I couldn't check"
+    // as "it was clean".
+    ...(() => {
+      const coverage = partialCoverageFromRunDir(env);
+      return {
+        ...(coverage.partialCoverage ? { partialCoverage: coverage.partialCoverage } : {}),
+        ...(coverage.unknown ? { coverageUnknown: true } : {}),
+      };
+    })(),
     forgejoPositions: platform === "forgejo",
   };
 }

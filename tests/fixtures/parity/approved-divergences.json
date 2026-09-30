@@ -864,6 +864,34 @@
         "new": "{\"ok\":true,\"data\":{\"body\":\"\",\"title\":\"No body key\",\"state\":\"closed\",\"created_at\":\"\",\"updated_at\":\"\",\"pull_request\":null}}"
       },
       "reason": "#872: normalizeForgejoIssue now passes through the raw pull_request field (previously always absent from the normalized shape) so isPullRequestPayload can reject a non-closing linked ref that actually names a pull request. Additive-only key; every v2-parity consumer (projectLinkedIssue) whitelists its own fields and ignores it."
+},
+    {
+      "boundary": "precheck-decision",
+      "fixtures": [
+        "auto-linear-unchanged-skip",
+        "auto-unchanged-skip",
+        "fork-linear-disabled-skip",
+        "unchanged-diff-skip-comment",
+        "unchanged-skip-review-verdict"
+      ],
+      "key": "review_result",
+      "expected": {
+        "old": "<missing>",
+        "new": "clean"
+      },
+      "reason": "#873: review_result is a new v3-only additive PrecheckOutput field (surfaced as the review-result action output), carried forward from the marker on a diff-unchanged skip via carriedVerdict; v2 never produced it."
+    },
+    {
+      "boundary": "precheck-decision",
+      "fixtures": [
+        "unchanged-diff-skip-issues"
+      ],
+      "key": "review_result",
+      "expected": {
+        "old": "<missing>",
+        "new": "issues"
+      },
+      "reason": "#873: review_result is a new v3-only additive PrecheckOutput field (surfaced as the review-result action output), carried forward from the marker on a diff-unchanged skip via carriedVerdict; v2 never produced it."
     }
   ]
 }

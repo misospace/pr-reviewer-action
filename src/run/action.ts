@@ -96,7 +96,7 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
     ["diff-fingerprint", pre.diff_fingerprint],
   ]);
   if (pre.should_review !== "true") {
-    writeOutputs(env, [["verdict", pre.verdict], ["verdict-source", pre.verdict_source]]);
+    writeOutputs(env, [["verdict", pre.verdict], ["verdict-source", pre.verdict_source], ["review-result", pre.review_result]]);
     return failOnRequestChanges(stage, pre.verdict ?? "");
   }
 

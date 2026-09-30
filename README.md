@@ -460,6 +460,7 @@ A title such as `LAB-123: add Linear review context` then contributes that Linea
 | `verdict` | `approve` or `request_changes` |
 | `verdict-source` | `model`, `findings` (per `verdict-policy`), or `carry_forward` (an unchanged-diff skip retained the prior verdict) |
 | `required-checks` | Required-check validation status: `complete`, `incomplete`, or `none` (validation did not run) |
+| `review-result` | The metadata marker's review-result state: `clean`, `findings`, `partial`, or `issues`. `verdict: approve` with `review-result: partial` is not an approval (#873) — gate merges on both, never on `verdict` alone |
 | `review-route` | Model route used: `legacy` (routing off), `primary`, `smart`, or `escalated` |
 | `escalation-reason` | `primary_requested` when the primary reviewer's structured `smart_review_requested` field triggered the escalated re-review (`review-route` is `escalated`); empty otherwise |
 | `findings` | Normalized structured findings as a JSON array (`[]` when the model produced none) |
@@ -785,7 +786,7 @@ When `publish-mode=review_verdict` is set, the action submits a native GitHub PR
 - `approve-forks` defaults to `false`. Even when `allow-approve=true`, native approvals are blocked for cross-repository (fork) PRs unless this is also set to `true`.
 - If evidence provider enforcement or tool harness failure enforcement modified the verdict to `request_changes`, approval is automatically blocked.
 - The review body must be non-empty for an approval to be submitted.
-- An approve whose own coverage is incomplete (`required_checks: incomplete`, or a coverage gap from the native tool loop) is never submitted as `APPROVE` — it publishes as an advisory `COMMENT` instead, regardless of `verdict-policy`.
+- An approve whose own coverage is incomplete (`required-checks: incomplete`, or a coverage gap from the native tool loop) is never submitted as `APPROVE` — it publishes as an advisory `COMMENT` instead, regardless of `verdict-policy`.
 
 > [!WARNING]
 > Native approvals can affect branch protection rules and automerge pipelines. Enable `allow-approve` only when you understand the implications for your repository's merge policy.

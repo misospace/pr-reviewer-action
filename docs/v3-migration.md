@@ -429,6 +429,14 @@ Inputs with no v2 implementation.
 | --- | --- |
 | `harness-obligations` | `false` |
 
+## New outputs
+
+Outputs with no v2 implementation.
+
+| v3 output | Description |
+| --- | --- |
+| `review-result` | The metadata marker's `review_result` state (`clean`/`findings`/`partial`/`issues`), additive alongside `verdict` (#873). `verdict: approve` with `review-result: partial` is not an approval; gate merges on both, never on `verdict` alone. |
+
 ## Retained outputs
 
 | v2 output | v3 output |
@@ -531,6 +539,12 @@ review_verdict` downgrades an `approve` with `review_result: partial` to a
 findings or a fail-closed enforcement layer), and `comment` mode swaps its
 "APPROVE" recommendation header for an "INCOMPLETE" one so the rendered body
 can never contradict the actual review outcome.
+
+The `review-result` action output (#873, additive — see "New outputs" above)
+carries this same marker state, since the `verdict` output's value set
+stays `approve`/`request_changes` unchanged: **`verdict: approve` with
+`review-result: partial` is not an approval; gate merges on both, never on
+`verdict` alone.**
 
 - Minor and info findings can never request changes on their own; a model
   `request_changes` backed only by them publishes as the non-blocking state

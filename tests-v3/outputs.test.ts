@@ -12,7 +12,7 @@ import type { StepSummaryTelemetry } from "../src/publish/outputs.js";
 
 test("review step output IDs exactly match the kebab-case contract", () => {
   assert.deepEqual(REVIEW_STEP_OUTPUT_IDS, [
-    "verdict", "verdict-source", "required-checks", "review-route", "escalation-reason",
+    "verdict", "verdict-source", "required-checks", "review-result", "review-route", "escalation-reason",
     "findings", "review-markdown", "analysis-engine", "tool-calls", "cache-hit-ratio",
   ]);
   for (const id of REVIEW_STEP_OUTPUT_IDS) {
@@ -49,16 +49,17 @@ test("output assignment keeps single lines direct and multiline values collision
 
 test("review output formatting serializes all keys in contract order with kebab-case names", () => {
   const result = formatReviewStepOutputs({
-    verdict: "approve", verdictSource: "model", requiredChecks: "complete", reviewRoute: "primary",
+    verdict: "approve", verdictSource: "model", requiredChecks: "complete", reviewResult: "clean", reviewRoute: "primary",
     escalationReason: "", findings: "[]", reviewMarkdown: "a\nb", analysisEngine: "engine",
     toolCalls: "[]", cacheHitRatio: "0.5",
   }, () => new Uint8Array(16).fill(0xab));
   // Parse assignment headers independent of whether their values are single or multiline.
   const headers = [...result.matchAll(/^([a-z][a-z-]*)(?:=|<<)/gm)].map((match) => match[1]);
   assert.deepEqual(headers, [
-    "verdict", "verdict-source", "required-checks", "review-route", "escalation-reason",
+    "verdict", "verdict-source", "required-checks", "review-result", "review-route", "escalation-reason",
     "review-markdown", "findings", "tool-calls", "cache-hit-ratio", "analysis-engine",
   ]);
+  assert.ok(result.includes("review-result=clean\n"));
   assert.ok(result.includes("verdict-source=model\n"));
   assert.ok(result.includes("review-markdown<<EOF_"));
   assert.ok(!result.includes("verdict_source"));

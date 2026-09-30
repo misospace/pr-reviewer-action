@@ -172,10 +172,11 @@ test("metadata markers parse and drive the carried verdict", () => {
   const body = `text\n${buildMetadataMarker({ head_sha: "h", base_sha: "b", review_result: "issues" })}\n`;
   const data = parseMetadata(body);
   assert.equal(data?.review_result, "issues");
-  assert.deepEqual(carriedVerdict(body), { verdict: "request_changes", verdictSource: "carry_forward" });
+  assert.deepEqual(carriedVerdict(body), { verdict: "request_changes", verdictSource: "carry_forward", reviewResult: "issues" });
   assert.deepEqual(carriedVerdict(`x\n${buildMetadataMarker({ review_result: "clean" })}`), {
     verdict: "approve",
     verdictSource: "carry_forward",
+    reviewResult: "clean",
   });
   assert.equal(carriedVerdict("no marker"), null);
   assert.equal(carriedVerdict("<!-- ai-pr-reviewer:not json -->"), null);

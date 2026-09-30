@@ -508,6 +508,8 @@ outputs:
     description: Where the final verdict came from ('model' or 'findings' per verdict_policy, or 'carry_forward' when an unchanged-diff skip retains the prior verdict)
   required-checks:
     description: Required-check validation status ('complete', 'incomplete', or 'none' when validation did not run)
+  review-result:
+    description: "The metadata marker's review_result state ('clean', 'findings', 'partial', or 'issues'), from the same still-open findings and coverage the marker records. #873: 'partial' means the review's own coverage is incomplete (required checks or the tool-loop investigation did not finish) — 'verdict: approve' with 'review-result: partial' is not an approval; gate merges on both, never on verdict alone. Has no v2 equivalent."
   review-route:
     description: Model route used for this review ('legacy', 'primary', 'smart', or 'escalated')
   escalation-reason:

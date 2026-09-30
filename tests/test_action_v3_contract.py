@@ -111,13 +111,28 @@ def test_removed_fields_are_documented_and_have_no_aliases():
 def test_migration_tables_cover_all_contract_mappings():
     doc = (ROOT / "docs" / "v3-migration.md").read_text()
     contract = _load()
-    new_table = doc.split("## New inputs", 1)[1].split("\n## ", 1)[0]
-    new_inputs = set(re.findall(r"^\| `([^`]+)` \|", new_table, re.M))
-    assert new_inputs <= {entry["id"] for entry in contract["inputs"]}
+
+    def _new_ids(heading: str) -> set[str]:
+        # A "New <kind>" section is optional: only present once a kind has
+        # a field with no v2 implementation (inputs got one first; outputs
+        # got its first with #873's review-result).
+        if f"## {heading}" not in doc:
+            return set()
+        table = doc.split(f"## {heading}", 1)[1].split("\n## ", 1)[0]
+        return set(re.findall(r"^\| `([^`]+)` \|", table, re.M))
+
+    new_ids = {"inputs": _new_ids("New inputs"), "outputs": _new_ids("New outputs")}
+    for kind in ("inputs", "outputs"):
+        assert new_ids[kind] <= {entry["id"] for entry in contract[kind]}
+
     for kind, section in (("inputs", "Retained inputs"), ("outputs", "Retained outputs")):
         table = doc.split(f"## {section}", 1)[1].split("\n## ", 1)[0]
         pairs = set(re.findall(r"\| `([^`]+)` \| `([^`]+)` \|", table))
-        expected = {(entry["v2_id"], entry["id"]) for entry in contract[kind] if entry["id"] not in new_inputs}
+        expected = {
+            (entry["v2_id"], entry["id"])
+            for entry in contract[kind]
+            if entry["id"] not in new_ids[kind]
+        }
         assert pairs == expected, f"{section} migration table differs from contract"
 
 
