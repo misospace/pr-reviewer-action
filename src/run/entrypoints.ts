@@ -164,8 +164,10 @@ function readJsonObject(path: string): Record<string, unknown> | null {
  * trusted) is distinct from a confirmed-complete run: it means publish
  * could not confirm the coverage state at all, and must fail closed for
  * approval exactly as a confirmed gap does — see `partialCoverageFromRunDir`
- * below. `requiredChecks` is always a validated value (never ambient env):
- * see `validateRequiredChecks`. */
+ * below. `requiredChecks` is always a validated value (never ambient env,
+ * never a normalization of an absent/invalid recorded value — that case is
+ * `unknown: true` with the conservative "incomplete"): see
+ * `validateRequiredChecks`. */
 interface CoverageResolution {
   partialCoverage: PartialCoverage | undefined;
   unknown: boolean;
@@ -185,12 +187,16 @@ function parsePartialCoverageField(value: unknown): PartialCoverage | undefined 
 
 /** The exact value set `completeness.ts`'s `RequiredCheckValidationResult.
  * status` (and so `review.ts`'s `required_checks` artifact field) can
- * produce. Anything else — absent, malformed, a future schema addition —
- * is conservatively "none" rather than trusted verbatim. */
+ * produce. Anything else — absent, malformed, a future schema addition — is
+ * not a known status: the resolution fails closed (unknown coverage, and
+ * the publish input conservatively carries "incomplete") rather than
+ * normalizing to "none", which is a legitimate *recorded* status (no
+ * required checks configured) and therefore approve-eligible — not a
+ * sentinel. */
 const REQUIRED_CHECKS_VALUES: ReadonlySet<string> = new Set(["complete", "incomplete", "none"]);
 
-function validateRequiredChecks(value: unknown): string {
-  return typeof value === "string" && REQUIRED_CHECKS_VALUES.has(value) ? value : "none";
+function validateRequiredChecks(value: unknown): string | undefined {
+  return typeof value === "string" && REQUIRED_CHECKS_VALUES.has(value) ? value : undefined;
 }
 
 /** The only two harness filenames `review.ts` ever records as
@@ -240,6 +246,15 @@ function partialCoverageFromRunDir(env: NodeJS.ProcessEnv): CoverageResolution {
     return { partialCoverage: undefined, unknown: true, requiredChecks: "none" };
   }
   const requiredChecks = validateRequiredChecks(artifact.required_checks);
+  if (requiredChecks === undefined) {
+    // #873 maintainer follow-up: the run writer always emits this field, so
+    // an absent or invalid value means the artifact is not one this runtime
+    // wrote. Normalizing to "none" would be approve-eligible; fail closed
+    // instead — coverage unknown, and the publish input carries the
+    // conservative "incomplete" so no policy branch can read the
+    // required-check dimension as clean.
+    return { partialCoverage: undefined, unknown: true, requiredChecks: "incomplete" };
+  }
   if (!artifact.tool_loop_ran) return { partialCoverage: undefined, unknown: false, requiredChecks };
 
   const recordedGap = parsePartialCoverageField(artifact.partial_coverage);

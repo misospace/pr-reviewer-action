@@ -391,6 +391,33 @@ test("#873/#838 regression: tool_loop_ran:true naming a missing enforcement_harn
   });
 });
 
+test("#873/#838 regression: an absent or invalid persisted required_checks is coverage-unknown and never APPROVEs", async () => {
+  // "none" is a legitimate recorded status (no required checks configured)
+  // and therefore approve-eligible — it must never be the normalization of
+  // an absent or invalid field. The real run writer always emits
+  // required_checks, so its absence (or a value outside the known set —
+  // e.g. a future schema's) means this artifact is not one this runtime
+  // wrote: fail closed on both dimensions, exactly like the
+  // harness-pointer cases below.
+  for (const artifact of [
+    { version: 1, tool_loop_ran: false },
+    { version: 1, tool_loop_ran: false, required_checks: "garbage" },
+    { version: 1, tool_loop_ran: false, required_checks: 7 },
+    { version: 1, tool_loop_ran: false, required_checks: null },
+  ]) {
+    await withRunDirAsync(async (dir) => {
+      writeFileSync(join(dir, "review-coverage.json"), JSON.stringify(artifact));
+      const input = publishInputFromEnv(publishVerdictEnv({ PR_REVIEWER_RUN_DIR: dir }), "github");
+      assert.equal(input.coverageUnknown, true, JSON.stringify(artifact));
+      assert.equal(input.requiredChecks, "incomplete", JSON.stringify(artifact));
+      const api = new MinimalPublishApi("a".repeat(40));
+      const result = await publishReview(input, api, { diffText: "" });
+      assert.equal(result.status, "published", JSON.stringify(artifact));
+      assert.notEqual(api.submitted[0]!.event, "APPROVE", JSON.stringify(artifact));
+    });
+  }
+});
+
 test("#873/#838 regression: a confirmed partial_coverage in the artifact is authoritative even when the harness file is also missing", async () => {
   await withRunDirAsync(async (dir) => {
     // The artifact's OWN partial_coverage is already a confirmed gap: no
