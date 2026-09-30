@@ -1,7 +1,7 @@
 import type { FetchLike } from "../platform/http.js";
 import type { GhApiResult, ManagedComment, ManagedReview, PlatformAdapter } from "../platform/types.js";
 import { type LinkedIssue } from "../context/types.js";
-import { runPrecheck, type PrecheckOutput } from "./decide.js";
+import { runPrecheck, type PrecheckEventLabel, type PrecheckOutput } from "./decide.js";
 import { extractIssueIdentifiers, LINEAR_PRIORITY_LABELS, type CollectResult } from "./linear.js";
 
 /** Fixture-driven precheck for the #673 parity harness (#674): a
@@ -14,7 +14,11 @@ export interface PrecheckFixture {
   fixture?: string;
   description?: string;
   env: Record<string, string>;
-  event?: { name?: string; action?: string; label?: string } | null | undefined;
+  // #892: `label` must allow the real `{ name }` object shape a `labeled`
+  // event actually carries, not just a bare string — a `label?: string`
+  // field here let the fixture/test surface diverge from production and
+  // hide the object-vs-string bug this issue was about.
+  event?: { name?: string; action?: string; label?: PrecheckEventLabel } | null | undefined;
   event_head_sha?: string | undefined;
   platform: {
     diff?: string;

@@ -7,7 +7,7 @@ import { ForgejoAdapter } from "../platform/forgejo.js";
 import type { PlatformAdapter } from "../platform/types.js";
 import { GitHubPublishApi } from "../platform/publish-api.js";
 import { ForgejoPublishApi } from "../platform/publish-api.js";
-import { runPrecheck } from "../precheck/decide.js";
+import { eventLabelName, runPrecheck } from "../precheck/decide.js";
 import { publishReview, type PublishInput, type PublishResult, type PublishMode } from "../publish/publish.js";
 import type { PublishPlatformApi } from "../platform/publish-api.js";
 import type { UpstreamLinkMode } from "../publish/sanitize.js";
@@ -62,7 +62,7 @@ export function buildAdapter(env: NodeJS.ProcessEnv): PlatformAdapter {
   });
 }
 
-interface StepEvent {
+export interface StepEvent {
   name?: string;
   action?: string;
   label?: string;
@@ -72,11 +72,25 @@ export function readEvent(env: NodeJS.ProcessEnv): { event?: StepEvent; headSha?
   const path = env.GITHUB_EVENT_PATH ?? "";
   if (path === "") return {};
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as StepEvent & { pull_request?: { number?: number; head?: { sha?: string } } };
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+      name?: string;
+      action?: string;
+      label?: unknown;
+      pull_request?: { number?: number; head?: { sha?: string } };
+    };
     const event: StepEvent = {};
-    if (parsed.name !== undefined) event.name = parsed.name;
+    // #892: the GitHub (and Forgejo act_runner) event payload has no
+    // top-level `name` — the event name lives only in GITHUB_EVENT_NAME.
+    // Prefer a payload-provided name if one is ever present, else fall back
+    // to the env var.
+    const name = parsed.name ?? env.GITHUB_EVENT_NAME;
+    if (name !== undefined && name !== "") event.name = name;
     if (parsed.action !== undefined) event.action = parsed.action;
-    if (parsed.label !== undefined) event.label = parsed.label;
+    // #892: a real `labeled` event's `label` is an object (`{ name, color,
+    // ... }`), not a string — normalize it the same way the label-cleanup
+    // path in action.ts already does, so the precheck gate sees a string.
+    const labelName = eventLabelName(parsed.label);
+    if (labelName !== "") event.label = labelName;
     return {
       ...(Object.keys(event).length > 0 ? { event } : {}),
       ...(parsed.pull_request?.head?.sha !== undefined ? { headSha: parsed.pull_request.head.sha } : {}),

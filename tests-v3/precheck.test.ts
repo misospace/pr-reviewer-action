@@ -27,6 +27,7 @@ import { extractIssueIdentifiers, parsePrefixes } from "../src/precheck/linear.j
 import { buildSelectionSignature } from "../src/precheck/selection.js";
 import {
   carriedVerdict,
+  eventLabelName,
   evaluatePrecheck,
   extractStoredFingerprint,
   lastManagedBody,
@@ -590,4 +591,53 @@ test("precheck fails loudly on a resolved tangled platform before any backend op
     TangledNotImplementedError,
   );
   assert.equal(adapterCalls, 0, "no backend operation may run for tangled");
+});
+
+// ── #892: the label gate normalizes the real object label shape and also
+// treats pull_request_target as a PR event (the fork-review workflow's
+// ai-review-fork label gate fires on pull_request_target; docs/fork-review.md) ──
+
+test("eventLabelName normalizes both the real {name} object shape and a bare string", () => {
+  assert.equal(eventLabelName({ name: "ai-review", color: "00ff00" }), "ai-review");
+  assert.equal(eventLabelName("ai-review"), "ai-review");
+  assert.equal(eventLabelName(undefined), "");
+  assert.equal(eventLabelName(null), "");
+  assert.equal(eventLabelName({}), "");
+});
+
+test("runPrecheck forces a review from the real {name} object label shape on a pull_request event (#892 fixture, no longer a bare string)", async () => {
+  const fx = fixture("rereview-label-forces");
+  assert.equal(typeof fx.event?.label, "object", "fixture must carry the real object shape, not a string, to actually cover #892");
+  const output = await runPrecheck({
+    env: fx.env,
+    adapter: new FixtureAdapter("github", fx.platform),
+    event: fx.event ?? undefined,
+  });
+  // The stored marker's fingerprint matches the current diff exactly (see
+  // the fixture's comment body) — without forceReview this would skip as
+  // diff-unchanged. The label bypasses that.
+  assert.equal(output.should_review, "true");
+  assert.equal(output.skip_reason, "");
+});
+
+test("runPrecheck forces a review the same way on pull_request_target (the fork-review ai-review-fork label gate)", async () => {
+  const fx = fixture("rereview-label-forces");
+  const output = await runPrecheck({
+    env: fx.env,
+    adapter: new FixtureAdapter("github", fx.platform),
+    event: { ...fx.event, name: "pull_request_target" },
+  });
+  assert.equal(output.should_review, "true");
+  assert.equal(output.skip_reason, "");
+});
+
+test("runPrecheck still no-ops an unrelated object-shaped label on pull_request_target", async () => {
+  const fx = fixture("unrelated-label-noop");
+  const output = await runPrecheck({
+    env: fx.env,
+    adapter: new FixtureAdapter("github", fx.platform),
+    event: { ...fx.event, name: "pull_request_target" },
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "unrelated-label");
 });

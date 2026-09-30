@@ -8,7 +8,10 @@
   "event": {
     "name": "pull_request",
     "action": "labeled",
-    "label": "ai-review"
+    "label": {
+      "name": "ai-review",
+      "color": "00ff00"
+    }
   },
   "platform": {
     "diff": "diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n",
