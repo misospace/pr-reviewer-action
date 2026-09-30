@@ -5,8 +5,10 @@ entry's defect anchor file is touched ANYWHERE between its pinned base and
 head. It cannot by itself catch a #842-style stale pin (a head that already
 contains the fix) — the anchor file is "changed between base and head" in
 both the buggy pre-fix commit and a later fix-already-applied commit, since
-the compare range spans every commit in between. That case is covered by
-`check_corpus_stale_pin.py` / `test_check_corpus_stale_pin.py` instead.
+the compare range spans every commit in between. A timestamp-based
+heuristic for that case was tried and abandoned (it inverts on the
+canonical #9075 case — see issue #861); catching a stale pin currently
+needs per-entry diff inspection, not an automated check.
 
 No network: `check_entries` takes an injected `fetch_compare` callable, so
 every case here is fixture JSON shaped like a GitHub compare response.

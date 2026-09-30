@@ -15,11 +15,16 @@ anchor file can perfectly well be "changed between base and head" in BOTH
 the buggy pre-fix commit and a later commit that already fixed it — the
 file shows up in the compare diff either way, because the compare range
 spans every commit in between, defect-introducing and defect-fixing alike.
-Catching #842 itself needs `check_corpus_stale_pin.py`, which compares the
-pinned head against the commit that was actually live when the human
-finding was posted. Treat this script as a narrower, complementary sanity
-check: "does the diff even touch the right file", not "is the defect still
-present at head".
+A timestamp-based heuristic (pinned head vs. the commit live when the
+human finding was posted) was tried and abandoned: it inverts whenever the
+finding's own timestamp postdates the fix commit (e.g. a PR author's
+post-hoc comment narrating a fix they'd already pushed), which is exactly
+the #9075 case — see issue #861 for the writeup. Catching a #842-style
+stale pin currently needs per-entry diff inspection (does the described
+defect state actually exist at the pinned head?), not an automated check.
+Treat this script as a narrower, complementary sanity check: "does the
+diff even touch the right file", not "is the defect still present at
+head".
 
 This is a manual, network-using script — never invoked by the unit test
 suite or CI. Its logic (matching a defect's anchor file against a compare
@@ -140,8 +145,8 @@ def check_entries(
     or without a defect file are skipped (not returned). A `False` here
     means the anchor is wrong or the base/head pair doesn't bracket the
     defect commit — it does NOT by itself mean "the defect is still live
-    at head" (see the module docstring: that needs
-    `check_corpus_stale_pin.py`).
+    at head" (see the module docstring and issue #861: that needs
+    per-entry diff inspection, not an automated check).
     """
     results: list[dict[str, Any]] = []
     for entry in entries:
