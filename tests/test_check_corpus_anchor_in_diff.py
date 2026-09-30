@@ -84,6 +84,30 @@ class TestDefectFileInChangedFiles:
             "nvidia.yaml", {"kubernetes/apps/base/llm/litellm/llama-nvidia.yaml"},
         ) is False
 
+    def test_directory_anchor_matches_a_file_nested_under_it(self):
+        """A defect that spans every file under a directory (e.g. #861's
+        home-ops#9189, anchored to a virtualkeys/ folder because the same
+        regression is repeated identically in all 11 files under it) should
+        match any changed file nested under that directory, not just an
+        exact path."""
+        assert defect_file_in_changed_files(
+            "kubernetes/apps/base/llm/litellm/virtualkeys",
+            {"kubernetes/apps/base/llm/litellm/virtualkeys/foreman.yaml"},
+        ) is True
+
+    def test_directory_anchor_does_not_match_a_sibling_directory(self):
+        assert defect_file_in_changed_files(
+            "kubernetes/apps/base/llm/litellm/virtualkeys",
+            {"kubernetes/apps/base/llm/litellm/virtualkeys-other/foreman.yaml"},
+        ) is False
+
+    def test_file_anchor_with_no_extension_still_requires_a_path_match(self):
+        """A dir-anchor's looser matching must not make an ordinary
+        extension-less file anchor match an unrelated changed file."""
+        assert defect_file_in_changed_files(
+            "scripts/Makefile", {"scripts/other/Makefile"},
+        ) is False
+
 
 class TestCheckEntries:
     def _entry(self, **overrides):
@@ -126,6 +150,15 @@ class TestCheckEntries:
     def test_skips_clean_entries_without_a_defect_block(self):
         entry = self._entry(defect=None)
         assert check_entries([entry], lambda *a: _compare("a.py")) == []
+
+    def test_skips_entries_flagged_defect_outside_diff(self):
+        """#861: a defect confirmed present at the pinned head but living in
+        a file the PR's own diff doesn't touch is marked
+        defect_outside_diff and must not be flagged, even though its anchor
+        is genuinely absent from the compare response."""
+        entry = self._entry(defect_outside_diff=True)
+        result = check_entries([entry], lambda repo, base, head: _compare("other/file.py"))
+        assert result == []
 
     def test_compare_failure_is_reported_not_raised(self):
         entry = self._entry()
