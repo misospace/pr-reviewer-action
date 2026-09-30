@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TangledNotImplementedError } from "../src/platform/tangled.js";
@@ -336,6 +336,91 @@ test("#873/#838 regression: a complete primary harness never hides a partial sma
       assert.equal(result.status, "published", JSON.stringify(routeOverride));
       assert.notEqual(api.submitted[0]!.event, "APPROVE", JSON.stringify(routeOverride));
     });
+  }
+});
+
+test("#873/#838 regression: an incomplete required_checks is never hidden by an omitted or stale ambient REQUIRED_CHECKS", async () => {
+  // Same class of bug as TOOL_MODE/REVIEW_ROUTE above, for the third field
+  // publish used to read from ambient env: the artifact says incomplete;
+  // REQUIRED_CHECKS is omitted in one case and actively lies ("complete")
+  // in the other. publishVerdictEnv's own REQUIRED_CHECKS: "complete"
+  // default covers the "stale" half; the override covers "omitted".
+  for (const requiredChecksOverride of [{}, { REQUIRED_CHECKS: "complete" }]) {
+    await withRunDirAsync(async (dir) => {
+      // tool_loop_ran:false here on purpose: proves this is REQUIRED_CHECKS
+      // alone closing the gap, independent of any tool-loop coverage state.
+      writeCoverageArtifact(dir, { tool_loop_ran: false, required_checks: "incomplete" });
+      const input = publishInputFromEnv(publishVerdictEnv({ PR_REVIEWER_RUN_DIR: dir, ...requiredChecksOverride }), "github");
+      assert.equal(input.requiredChecks, "incomplete", JSON.stringify(requiredChecksOverride));
+      const api = new MinimalPublishApi("a".repeat(40));
+      const result = await publishReview(input, api, { diffText: "" });
+      assert.equal(result.status, "published", JSON.stringify(requiredChecksOverride));
+      assert.notEqual(api.submitted[0]!.event, "APPROVE", JSON.stringify(requiredChecksOverride));
+    });
+  }
+});
+
+test("#873/#838 regression: tool_loop_ran:true with an unrecognized enforcement_harness (including null) never APPROVEs", async () => {
+  for (const enforcementHarness of [null, "", "tool-harness.txt", 42]) {
+    await withRunDirAsync(async (dir) => {
+      writeCoverageArtifact(dir, { tool_loop_ran: true, enforcement_harness: enforcementHarness as unknown as string | null });
+      const input = publishInputFromEnv(publishVerdictEnv({ PR_REVIEWER_RUN_DIR: dir }), "github");
+      assert.equal(input.partialCoverage, undefined, JSON.stringify(enforcementHarness));
+      assert.equal(input.coverageUnknown, true, JSON.stringify(enforcementHarness));
+      const api = new MinimalPublishApi("a".repeat(40));
+      const result = await publishReview(input, api, { diffText: "" });
+      assert.equal(result.status, "published", JSON.stringify(enforcementHarness));
+      assert.notEqual(api.submitted[0]!.event, "APPROVE", JSON.stringify(enforcementHarness));
+    });
+  }
+});
+
+test("#873/#838 regression: tool_loop_ran:true naming a missing enforcement_harness file (partial_coverage null) never APPROVEs", async () => {
+  await withRunDirAsync(async (dir) => {
+    // No tool-harness.json actually written — the artifact's own
+    // partial_coverage is null (no confirmed gap recorded), so the only
+    // way to confirm completeness would be reading the named harness.
+    writeCoverageArtifact(dir, { tool_loop_ran: true, enforcement_harness: "tool-harness.json", partial_coverage: null });
+    const input = publishInputFromEnv(publishVerdictEnv({ PR_REVIEWER_RUN_DIR: dir }), "github");
+    assert.equal(input.partialCoverage, undefined);
+    assert.equal(input.coverageUnknown, true);
+    const api = new MinimalPublishApi("a".repeat(40));
+    const result = await publishReview(input, api, { diffText: "" });
+    assert.equal(result.status, "published");
+    assert.notEqual(api.submitted[0]!.event, "APPROVE");
+  });
+});
+
+test("#873/#838 regression: a confirmed partial_coverage in the artifact is authoritative even when the harness file is also missing", async () => {
+  await withRunDirAsync(async (dir) => {
+    // The artifact's OWN partial_coverage is already a confirmed gap: no
+    // harness read is needed (or attempted) to settle this one.
+    writeCoverageArtifact(dir, { tool_loop_ran: true, enforcement_harness: "tool-harness.json", partial_coverage: PARTIAL_COVERAGE });
+    const input = publishInputFromEnv(publishVerdictEnv({ PR_REVIEWER_RUN_DIR: dir }), "github");
+    assert.ok(input.partialCoverage);
+    assert.equal(input.coverageUnknown, undefined);
+  });
+});
+
+test("#873/#838 regression: a traversal-looking enforcement_harness value is never read — resolves unknown even if a forged file sits at that path", async () => {
+  const parentDir = mkdtempSync(join(tmpdir(), "v3-run-parent-"));
+  const runDir = join(parentDir, "run");
+  try {
+    mkdirSync(runDir);
+    // If the traversal were ever honored, join(runDir, "../x.json")
+    // resolves to parentDir/x.json — plant a "clean" (no partial_coverage)
+    // harness there so a buggy read would wrongly allow APPROVE.
+    writeFileSync(join(parentDir, "x.json"), COMPLETE_HARNESS);
+    writeCoverageArtifact(runDir, { tool_loop_ran: true, enforcement_harness: "../x.json", partial_coverage: null });
+    const input = publishInputFromEnv(publishVerdictEnv({ PR_REVIEWER_RUN_DIR: runDir }), "github");
+    assert.equal(input.partialCoverage, undefined);
+    assert.equal(input.coverageUnknown, true);
+    const api = new MinimalPublishApi("a".repeat(40));
+    const result = await publishReview(input, api, { diffText: "" });
+    assert.equal(result.status, "published");
+    assert.notEqual(api.submitted[0]!.event, "APPROVE");
+  } finally {
+    rmSync(parentDir, { recursive: true, force: true });
   }
 });
 
