@@ -98,7 +98,7 @@ test("outbound tool fetches carry the non-default reviewer User-Agent (#221/#252
 test("tool wrapper applies byte truncation and redaction", async () => fixture(async (root) => {
   const p = path.join(root, "sample.txt"); fs.writeFileSync(p, "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456 AKIA1234567890ABCDEF");
   const result = await executeToolRequest("read_file", { path: "sample.txt" }, ctx(root, { maxResponseBytes: 12000 }));
-  assert.equal(result.status, "ok"); assert.match(result.result.content, /\[REDACTED\]/); assert.doesNotMatch(result.result.content, /ghp_|AKIA/);
+  assert.equal(result.status, "ok"); assert.match(result.result.content, /redacted:credential/); assert.doesNotMatch(result.result.content, /ghp_|AKIA/);
   const clipped = await executeToolRequest("web_fetch", { url: "https://github.com/" }, ctx(root, { maxResponseBytes: 5, allowedHosts: ["github.com"], deps: { ...deps(), fetch: async () => ({ status: 200, body: "abcdefgh" }) } }));
   assert.match(clipped.result.content, /\[truncated\]/);
 }));

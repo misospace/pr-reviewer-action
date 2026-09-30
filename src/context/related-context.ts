@@ -16,7 +16,7 @@
 import { spawn } from "node:child_process";
 import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { redactText } from "./redact.js";
+import { redactSourceText, redactText } from "./redact.js";
 import { pyJsonDump } from "./py-json.js";
 
 export const ARTIFACT_VERSION = 1;
@@ -217,7 +217,11 @@ interface GrepRow {
 }
 
 function snippetOf(value: string): string {
-  let text = redactText(value);
+  // Source-safe (#876): this is a repository source line (a grep hit), not
+  // untrusted prose, so it must survive structurally — only literal
+  // credential values are masked, never identifier/property syntax such as
+  // `apiKey: config.apiKey,`.
+  let text = redactSourceText(value);
   text = escapeControls(text);
   if (charCount(text) > MAX_SNIPPET_CHARS) return charSlice(text, MAX_SNIPPET_CHARS - 3) + "...";
   return text;
@@ -1464,7 +1468,7 @@ function location(path: unknown, line: unknown): string {
 
 function fenced(start: unknown, lines: unknown, indent: string): string[] {
   const first = positive(start) || 1;
-  const body = (Array.isArray(lines) ? lines : []).map((text, offset) => `${first + offset}: ${display(redactText(String(text)), MAX_SNIPPET_CHARS)}`);
+  const body = (Array.isArray(lines) ? lines : []).map((text, offset) => `${first + offset}: ${display(redactSourceText(String(text)), MAX_SNIPPET_CHARS)}`);
   let longest = 0;
   for (const text of body) for (const run of text.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
   const fence = "`".repeat(Math.max(3, longest + 1));
@@ -1500,7 +1504,7 @@ function renderConsumerLines(artifact: Record<string, unknown>): string[] {
         lines.push(loc);
         lines.push(...fenced(reference.start, reference.lines, "    "));
       } else {
-        lines.push(`${loc} — ${codeSpan(display(redactText(String(reference.snippet ?? ""))))}`);
+        lines.push(`${loc} — ${codeSpan(display(redactSourceText(String(reference.snippet ?? ""))))}`);
       }
     }
   }
@@ -1563,7 +1567,7 @@ function renderLines(artifact: Record<string, unknown>): string[] {
             const refPath = codeSpan(display(toPath(reference.path ?? "")));
             let line = reference.line;
             if (typeof line !== "number" || !Number.isInteger(line) || line < 0) line = 0;
-            const snippet = codeSpan(display(redactText(String(reference.snippet ?? ""))));
+            const snippet = codeSpan(display(redactSourceText(String(reference.snippet ?? ""))));
             const marker = reference.changed_file === true ? " (changed file)" : "";
             lines.push(`  - ${refPath}:${line}${marker} — ${snippet}`);
           }

@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "scenario": 8760,
+  "provenance": {
+    "historical_pr": 862,
+    "state": "regression",
+    "source": "#876 sanitizer-inserted redaction marker misattributed as committed source"
+  },
+  "pr_json": {
+    "number": 862,
+    "title": "fix(transport): surface HTTP status and body detail on model-call errors",
+    "body": "",
+    "head": {
+      "sha": "fixture-8760-head",
+      "ref": "fix/846-http-error-detail"
+    },
+    "base": {
+      "sha": "fixture-8760-base",
+      "ref": "main"
+    },
+    "user": {
+      "login": "fixture"
+    },
+    "changed_files": 1,
+    "additions": 11,
+    "deletions": 0,
+    "html_url": "https://github.com/misospace/pr-reviewer-action/pull/862"
+  },
+  "diff": "diff --git a/src/model/auth.ts b/src/model/auth.ts\nnew file mode 100644\nindex 0000000..8fc20df\n--- /dev/null\n+++ b/src/model/auth.ts\n@@ -0,0 +1,11 @@\n+export interface AuthConfig {\n+  apiKey: string;\n+  baseUrl: string;\n+}\n+\n+export function buildAuthHeaders(config: AuthConfig): Record<string, string> {\n+  return {\n+    apiKey: config.apiKey,\n+    baseUrl: config.baseUrl,\n+  };\n+}\n",
+  "pr_files": [
+    {
+      "filename": "src/model/auth.ts",
+      "status": "added",
+      "additions": 11,
+      "deletions": 0,
+      "changes": 11
+    }
+  ],
+  "files": [
+    {
+      "path": "src/model/auth.ts",
+      "content": "export interface AuthConfig {\n  apiKey: string;\n  baseUrl: string;\n}\n\nexport function buildAuthHeaders(config: AuthConfig): Record<string, string> {\n  return {\n    apiKey: config.apiKey,\n    baseUrl: config.baseUrl,\n  };\n}\n"
+    },
+    {
+      "path": "README.md",
+      "content": "Adds a helper that forwards the configured API key onto request headers.\n"
+    }
+  ]
+}

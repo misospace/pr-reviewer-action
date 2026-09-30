@@ -53,7 +53,7 @@ test("high-confidence symbols are searched; hits exclude changed paths and are r
   // src/other.py carry the symbol.
   assert.deepEqual(refs.map((r) => r.path), ["src/other.py", "src/other.py", "tests/test_app.py"]);
   // The secret inside a hit line is redacted in the stored snippet.
-  assert.ok((refs[2]?.snippet ?? "").includes("[REDACTED]"));
+  assert.ok((refs[2]?.snippet ?? "").includes("redacted:credential"));
   assert.ok(!((refs[2]?.snippet ?? "").includes("ghp_")));
   assert.equal(related.truncated, false);
   // Tests: scored stem match (test_app.py ↔ app) plus same-parent sibling.

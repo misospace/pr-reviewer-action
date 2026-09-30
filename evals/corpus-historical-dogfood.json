@@ -3079,6 +3079,53 @@
           "tool_calls": []
         }
       ]
+    },
+    {
+      "number": 8760,
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "url": "https://github.com/misospace/pr-reviewer-action/pull/862",
+      "title": "regression control: sanitizer-inserted redaction markers are never committed source",
+      "provenance": {
+        "pr": 862,
+        "issue": 876,
+        "pr_url": "https://github.com/misospace/pr-reviewer-action/pull/862",
+        "issue_url": "https://github.com/misospace/pr-reviewer-action/issues/876"
+      },
+      "class": "negative_control",
+      "review_mode": "any",
+      "route": "any",
+      "stage_attribution": "any",
+      "expected_capabilities": [],
+      "expected_evidence_anchors": [],
+      "forbidden_capabilities": [
+        "sanitizer_marker_misattribution"
+      ],
+      "negative_control": true,
+      "description": "#876 regression: PR #862 at e2aeed3 added `apiKey: config.apiKey,`-shaped property assignments; the pre-fix heuristic redactor matched the secret-named key and replaced the whole code-expression value with `[REDACTED]`, and the reviewer then reported the sanitizer's own marker as invalid TypeScript / a missing property. The committed source is clean: `apiKey`/`baseUrl` are assigned from identifier member access, never a credential literal, so a correct review finds nothing here.",
+      "expected_metrics": {
+        "max_tool_calls": 1
+      },
+      "fixture": {
+        "path": "historical-dogfood/8760.json",
+        "sha256": "8da4717f39d0c0d6fce746c4c7d0aef5f10532e805aed9c265ecaf06efbc3384"
+      },
+      "offline_runs": [
+        {
+          "mode": "standard",
+          "stage": "primary",
+          "route": "primary",
+          "review_markdown": "The new helper forwards the configured apiKey and baseUrl onto the request headers; no defect found. Approve.",
+          "tool_calls": [
+            {
+              "tool": "read_file",
+              "args": {
+                "path": "src/model/auth.ts"
+              },
+              "status": "ok"
+            }
+          ]
+        }
+      ]
     }
   ],
   "metadata": {
@@ -3143,6 +3190,7 @@
       "remediation_process_topology",
       "review_corpus_evidence_transport",
       "runtime_protocol",
+      "sanitizer_marker_misattribution",
       "stale_review_state",
       "truncation_counterexample",
       "undeclared_capability_dependency"

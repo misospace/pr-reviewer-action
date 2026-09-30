@@ -768,6 +768,42 @@
         "new": "{\"classification_available\": true, \"decisions\": [{\"reason\": \"selected: substantial non-test source change (a new source module, or over 200 non-test source lines changed) \u2014 correctness runs regardless of pr_kind (#871)\", \"role\": \"correctness\", \"selected\": true, \"signals\": []}, {\"reason\": \"selected: security-lane signals matched: pr_kind=path_handling_changes, risk_flag=path_handling_changes\", \"role\": \"security\", \"selected\": true, \"signals\": [\"pr_kind=path_handling_changes\", \"risk_flag=path_handling_changes\"]}, {\"reason\": \"skipped: no tests-lane signal in classification (pr_kind=path_handling_changes; risk_flags=path_handling_changes)\", \"role\": \"tests\", \"selected\": false, \"signals\": []}], \"metadata_uncertain\": false, \"metadata_uncertainty_reasons\": [], \"mode\": \"auto\", \"pr_kind\": \"path_handling_changes\", \"risk_flags\": [\"path_handling_changes\"], \"selected_roles\": [\"correctness\", \"security\"], \"skipped_roles\": [\"tests\"], \"version\": 1, \"zero_selection_reason\": \"\"}"
       },
       "reason": "#871: correctness now runs regardless of pr_kind on a substantial PR (this fixture adds a new non-test source module, path_join.py) \u2014 the security-only skip of correctness was exactly the failure mode #871 fixes, not a v2 behavior to preserve."
+    },
+    {
+      "boundary": "related-code",
+      "fixtures": [
+        "legacy-anchors"
+      ],
+      "key": "json_document",
+      "expected": {
+        "old": "{\n  \"version\": 1,\n  \"files\": [\n    {\n      \"path\": \"src/service.py\",\n      \"symbols\": [\n        {\n          \"name\": \"handle\",\n          \"references\": [\n            {\n              \"path\": \"src/util.py\",\n              \"line\": 1,\n              \"snippet\": \"from src.service import handle\"\n            },\n            {\n              \"path\": \"src/util.py\",\n              \"line\": 2,\n              \"snippet\": \"handle(1)\"\n            },\n            {\n              \"path\": \"tests/test_service.py\",\n              \"line\": 1,\n              \"snippet\": \"import handle from service\"\n            },\n            {\n              \"path\": \"tests/test_service.py\",\n              \"line\": 2,\n              \"snippet\": \"handle('[REDACTED]')\"\n            }\n          ]\n        }\n      ],\n      \"tests\": [\n        \"tests/test_service.py\"\n      ],\n      \"manifests\": [\n        \"setup.py\"\n      ]\n    }\n  ],\n  \"truncated\": false,\n  \"errors\": [],\n  \"truncation\": {\n    \"truncated\": false,\n    \"reasons\": [],\n    \"omitted_symbols\": 0,\n    \"omitted_references\": 0,\n    \"omitted_tests\": 0,\n    \"omitted_manifests\": 0,\n    \"omitted_output_bytes\": 0\n  }\n}\n",
+        "new": "{\n  \"version\": 1,\n  \"files\": [\n    {\n      \"path\": \"src/service.py\",\n      \"symbols\": [\n        {\n          \"name\": \"handle\",\n          \"references\": [\n            {\n              \"path\": \"src/util.py\",\n              \"line\": 1,\n              \"snippet\": \"from src.service import handle\"\n            },\n            {\n              \"path\": \"src/util.py\",\n              \"line\": 2,\n              \"snippet\": \"handle(1)\"\n            },\n            {\n              \"path\": \"tests/test_service.py\",\n              \"line\": 1,\n              \"snippet\": \"import handle from service\"\n            },\n            {\n              \"path\": \"tests/test_service.py\",\n              \"line\": 2,\n              \"snippet\": \"handle('⟦redacted:credential⟧')\"\n            }\n          ]\n        }\n      ],\n      \"tests\": [\n        \"tests/test_service.py\"\n      ],\n      \"manifests\": [\n        \"setup.py\"\n      ]\n    }\n  ],\n  \"truncated\": false,\n  \"errors\": [],\n  \"truncation\": {\n    \"truncated\": false,\n    \"reasons\": [],\n    \"omitted_symbols\": 0,\n    \"omitted_references\": 0,\n    \"omitted_tests\": 0,\n    \"omitted_manifests\": 0,\n    \"omitted_output_bytes\": 0\n  }\n}\n"
+      },
+      "reason": "#876: repository source snippets in Related Code Context now use the source-safe redaction policy (redactSourceText), whose marker is `⟦redacted:credential⟧` instead of `[REDACTED]`, so provenance can never be confused with committed source bytes. The fixture's snippet is a real ghp_ token literal, still masked under the new policy — only the marker text differs."
+    },
+    {
+      "boundary": "related-code",
+      "fixtures": [
+        "legacy-anchors"
+      ],
+      "key": "markdown",
+      "expected": {
+        "old": "# Related Code (v1)\n\n_Deterministic bounded textual references, test candidates, and nearest manifests. References are textual matches, not proven runtime callers._\n\n## Changed Files\n\n### `src/service.py`\n\n- `handle` references:\n  - `src/util.py`:1 — `from src.service import handle`\n  - `src/util.py`:2 — `handle(1)`\n  - `tests/test_service.py`:1 — `import handle from service`\n  - `tests/test_service.py`:2 — `handle('[REDACTED]')`\n- Tests: `tests/test_service.py`\n- Manifests (nearest first): `setup.py`\n\n",
+        "new": "# Related Code (v1)\n\n_Deterministic bounded textual references, test candidates, and nearest manifests. References are textual matches, not proven runtime callers._\n\n## Changed Files\n\n### `src/service.py`\n\n- `handle` references:\n  - `src/util.py`:1 — `from src.service import handle`\n  - `src/util.py`:2 — `handle(1)`\n  - `tests/test_service.py`:1 — `import handle from service`\n  - `tests/test_service.py`:2 — `handle('⟦redacted:credential⟧')`\n- Tests: `tests/test_service.py`\n- Manifests (nearest first): `setup.py`\n\n"
+      },
+      "reason": "#876: repository source snippets in Related Code Context now use the source-safe redaction policy (redactSourceText); marker changed from `[REDACTED]` to `⟦redacted:credential⟧`. Same rationale as the json_document divergence above."
+    },
+    {
+      "boundary": "related-code",
+      "fixtures": [
+        "legacy-anchors"
+      ],
+      "key": "related",
+      "expected": {
+        "old": "{\"errors\": [], \"files\": [{\"manifests\": [\"setup.py\"], \"path\": \"src/service.py\", \"symbols\": [{\"name\": \"handle\", \"references\": [{\"line\": 1, \"path\": \"src/util.py\", \"snippet\": \"from src.service import handle\"}, {\"line\": 2, \"path\": \"src/util.py\", \"snippet\": \"handle(1)\"}, {\"line\": 1, \"path\": \"tests/test_service.py\", \"snippet\": \"import handle from service\"}, {\"line\": 2, \"path\": \"tests/test_service.py\", \"snippet\": \"handle('[REDACTED]')\"}]}], \"tests\": [\"tests/test_service.py\"]}], \"truncated\": false, \"truncation\": {\"omitted_manifests\": 0, \"omitted_output_bytes\": 0, \"omitted_references\": 0, \"omitted_symbols\": 0, \"omitted_tests\": 0, \"reasons\": [], \"truncated\": false}, \"version\": 1}",
+        "new": "{\"errors\": [], \"files\": [{\"manifests\": [\"setup.py\"], \"path\": \"src/service.py\", \"symbols\": [{\"name\": \"handle\", \"references\": [{\"line\": 1, \"path\": \"src/util.py\", \"snippet\": \"from src.service import handle\"}, {\"line\": 2, \"path\": \"src/util.py\", \"snippet\": \"handle(1)\"}, {\"line\": 1, \"path\": \"tests/test_service.py\", \"snippet\": \"import handle from service\"}, {\"line\": 2, \"path\": \"tests/test_service.py\", \"snippet\": \"handle('⟦redacted:credential⟧')\"}]}], \"tests\": [\"tests/test_service.py\"]}], \"truncated\": false, \"truncation\": {\"omitted_manifests\": 0, \"omitted_output_bytes\": 0, \"omitted_references\": 0, \"omitted_symbols\": 0, \"omitted_tests\": 0, \"reasons\": [], \"truncated\": false}, \"version\": 1}"
+      },
+      "reason": "#876: repository source snippets in Related Code Context now use the source-safe redaction policy (redactSourceText); marker changed from `[REDACTED]` to `⟦redacted:credential⟧`. Same rationale as the json_document divergence above."
     }
   ]
 }

@@ -32,6 +32,9 @@ DETERMINISTIC_SCENARIOS = frozenset(
         # fixed negative control.
         7571, 7572, 7573, 7574, 7575, 7576, 7577, 7578,
         7579, 7580, 7581, 7582, 7583, 7584,
+        # #876: sanitizer-inserted redaction markers must never be
+        # misattributed as committed source (PR #862 regression).
+        8760,
     }
 )
 

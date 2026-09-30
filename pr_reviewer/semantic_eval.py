@@ -70,6 +70,15 @@ CAPABILITY_INCIDENTAL_FIXTURE = "incidental_positive_fixture"
 # waiver ungrounded); a review that emits the N/A token over a present risk
 # detects nothing.
 CAPABILITY_REQUIRED_CHECK_GROUNDING = "required_check_grounding"
+# #876: the reviewer must never report the sanitizer's own redaction marker
+# (inserted over a repository-source read/grep/blame result or a Related
+# Code Context snippet) as if it were literal committed source. The negative
+# control is code that legitimately assigns a secret-named property from an
+# identifier/member expression (`apiKey: config.apiKey,`), which the
+# source-safe redaction policy leaves untouched; a reviewer that still
+# invents a defect from `[REDACTED]`/`⟦redacted:credential⟧` text is
+# hallucinating over harness-inserted bytes, not reading the repository.
+CAPABILITY_SANITIZER_MARKER_MISATTRIBUTION = "sanitizer_marker_misattribution"
 # #661 merge-safety review dispositions: the per-run quality categories the
 # semantic report records so a miss is attributable to its failure mode — the
 # defect was never found, it was found but suppressed as pre-existing to the
@@ -191,6 +200,7 @@ KNOWN_CAPABILITY_CLASSES = frozenset(
         CAPABILITY_FALSE_FLOW,
         CAPABILITY_INCIDENTAL_FIXTURE,
         CAPABILITY_REQUIRED_CHECK_GROUNDING,
+        CAPABILITY_SANITIZER_MARKER_MISATTRIBUTION,
     }
 )
 
@@ -389,6 +399,26 @@ _VOCABULARY: tuple[tuple[str, tuple[str, ...]], ...] = (
         "not_applicable is not grounded", "ungrounded not_applicable", "ungrounded n/a",
         "n/a is not grounded", "cannot be waived as not applicable",
         "waives the path check", "waived as not applicable",
+    )),
+    # #876: the reviewer mistook the harness's own redaction marker for
+    # committed source and reported it as a defect — invalid syntax, a
+    # missing/replaced identifier, or a security issue caused by the marker
+    # itself. Deliberately keyed on naming the MARKER as source, not on the
+    # word "redacted" alone (a review may legitimately discuss redaction as
+    # a feature without this failure).
+    (CAPABILITY_SANITIZER_MARKER_MISATTRIBUTION, (
+        "[redacted] is not valid", "[redacted] appears in the source",
+        "[redacted] is not a valid identifier", "[redacted] breaks the syntax",
+        "redacted token in the committed source", "redacted marker in the source code",
+        "redacted placeholder is reported as", "sanitizer marker is treated as source",
+        "sanitizer marker as if it were source", "the token [redacted] replaces",
+        "property was replaced by [redacted]", "value was replaced by [redacted]",
+        "identifier is replaced with [redacted]", "apikey was replaced by [redacted]",
+        "⟦redacted:credential⟧ appears in the source",
+        "⟦redacted:credential⟧ is not valid",
+        "⟦redacted:credential⟧ breaks the syntax",
+        "treats the redaction marker as literal source",
+        "mistakes the redaction marker for committed code",
     )),
 )
 
@@ -1451,7 +1481,7 @@ __all__ = [
     "CAPABILITY_UNDECLARED_CAPABILITY_DEPENDENCY",
     "CAPABILITY_CANONICAL_ARTIFACT", "CAPABILITY_PRECHECK_CREDENTIAL",
     "CAPABILITY_BROKEN_ARROW", "CAPABILITY_CORPUS_EVIDENCE", "CAPABILITY_TRUNCATION_COUNTEREXAMPLE",
-    "CAPABILITY_REQUIRED_CHECK_GROUNDING",
+    "CAPABILITY_REQUIRED_CHECK_GROUNDING", "CAPABILITY_SANITIZER_MARKER_MISATTRIBUTION",
     "DISPOSITION_CORRECT", "DISPOSITION_INVALID_REMEDIATION", "DISPOSITION_NOT_FOUND",
     "DISPOSITION_SPECULATIVE_FALSE_POSITIVE", "DISPOSITION_SUPPRESSED_PRE_EXISTING",
     "MERGE_SAFETY_DISPOSITIONS", "MERGE_SAFETY_DISPOSITIONS_ORDER",

@@ -38,6 +38,62 @@ export function redactText(text: string | null | undefined): string {
   return redacted;
 }
 
+// ---------------------------------------------------------------------------
+// Source-safe redaction (#876)
+// ---------------------------------------------------------------------------
+
+/** Marker used for repository-source redaction. Deliberately distinct from
+ * `[REDACTED]` (which reads as plausible removed prose) so it cannot be
+ * mistaken for literal repository bytes: no TypeScript/Python/YAML file ever
+ * legitimately contains this token, and the review system prompt states that
+ * it is harness-inserted, never committed source. */
+export const REDACTED_SOURCE = "⟦redacted:credential⟧";
+
+// Applied to repository SOURCE content (file reads, grep matches, blame) —
+// evidence the model must be able to trust structurally. Unlike `MASKERS`,
+// these patterns only ever match a literal credential VALUE (a bare token
+// shape, or a secret-named key assigned a QUOTED STRING LITERAL). A
+// secret-named key assigned a code expression — an identifier, member
+// access, call, template literal, or env lookup, e.g. `apiKey: config.apiKey,`,
+// `token: opts.token`, `password=self.password`, `secret = getSecret()` — is
+// never touched: replacing it would destroy code structure the model relies
+// on to judge correctness (#876).
+const SOURCE_MASKERS: readonly RegExp[] = [
+  // GitHub personal access tokens (classic & fine-grained)
+  /ghp_[A-Za-z0-9]{30,}/g,
+  /github_pat_[A-Za-z0-9_]{20,}/g,
+  // Bearer / Basic auth headers and inline tokens
+  /Bearer\s+[A-Za-z0-9._-]{20,}/gi,
+  /Basic\s+[A-Za-z0-9+/=]{20,}/gi,
+  // AWS-style access keys
+  /AKIA[0-9A-Z]{16}/g,
+  // OpenAI/Anthropic-style API keys
+  /sk-[A-Za-z0-9]{20,}/g,
+  // PEM private key blocks
+  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
+  // Kubernetes / kubeconfig credentials, value on the same line only.
+  /(client-certificate-data|client-key-data|certificate-authority-data)\s*:\s*\S+/gi,
+  // A secret-named key assigned a quoted string literal of meaningful
+  // length. Requires matching quotes and no quote inside the value, so a
+  // code expression (unquoted) never matches.
+  /(api[_-]?key|token|password|secret|access[_-]?key|auth[_-]?token)\s*[:=]\s*(["'`])[^"'`]{8,}\2/gi,
+];
+
+/** Source-safe counterpart to `redactText` (#876): masks only high-confidence
+ * literal credential values, never generic identifier/property/assignment
+ * syntax. Use this for repository source evidence (tool file reads, grep
+ * matches, blame) where the model must be able to trust that what it sees is
+ * byte-for-byte the committed source, modulo actual secret values. Untrusted
+ * prose/log/web payloads keep using `redactText`. */
+export function redactSourceText(text: string | null | undefined): string {
+  if (!text) return "";
+  let redacted = text;
+  for (const pattern of SOURCE_MASKERS) {
+    redacted = redacted.replace(pattern, REDACTED_SOURCE);
+  }
+  return redacted;
+}
+
 /**
  * #846/security-review: mask every literal occurrence of a caller-supplied
  * secret (an operator's configured model API key), plus its URL-encoded and
@@ -121,6 +177,23 @@ export function maskAndTruncate(
   maxBytes: number,
 ): { text: string; truncated: boolean } {
   const masked = redactText(text);
+  const raw = Buffer.from(masked, "utf8");
+  if (raw.length <= maxBytes) {
+    return { text: masked, truncated: false };
+  }
+  const clipped = raw.subarray(0, maxBytes).toString("utf8");
+  return { text: clipped + "\n[truncated]", truncated: true };
+}
+
+/** Source-safe counterpart to `maskAndTruncate` (#876): same truncation
+ * contract, but masks with `redactSourceText` so repository source content
+ * (tool file reads, grep matches, blame) survives byte-for-byte apart from
+ * actual credential values. */
+export function maskAndTruncateSource(
+  text: string | null | undefined,
+  maxBytes: number,
+): { text: string; truncated: boolean } {
+  const masked = redactSourceText(text);
   const raw = Buffer.from(masked, "utf8");
   if (raw.length <= maxBytes) {
     return { text: masked, truncated: false };
