@@ -105,6 +105,7 @@ test("parseTangledAtUri: malformed shapes are invalid-uri", () => {
     "at://did:plc:author/sh.tangled.repo.pull", // 2 segments
     "at://did:plc:author/sh.tangled.repo.pull/3mxa/extra", // 4 segments
     "at://user:abc/sh.tangled.repo.pull/3mxa", // did not starting with did:
+    "at://did::x/sh.tangled.repo.pull/3mxa", // empty DID method
     "at://did:plc:author//3mxa", // empty collection
     "at://did:plc:author/sh.tangled.repo.pull/", // empty rkey
   ];
@@ -207,6 +208,34 @@ test("resolveTangledPull: a 404 getPull is a no-match", async () => {
     (e: unknown) => e instanceof TangledResolverError && e.kind === "no-match",
     "expected no-match",
   );
+});
+
+test("resolveTangledPull: a non-2xx getPull with a success-shaped body is a read-failed", async () => {
+  const { fetchImpl } = makeFetch(() => json(GET_PULL_OK, 500));
+  await assert.rejects(
+    resolveTangledPull(makeCtx(), { pullUri: PULL_URI, fetchImpl }),
+    (e: unknown) => e instanceof TangledResolverError && e.kind === "read-failed",
+    "expected read-failed for a 500 with a success-shaped body",
+  );
+});
+
+test("resolveTangledPull: a getPull body echoing a different uri is not trusted", async () => {
+  const echoed = {
+    uri: "at://did:plc:eve/sh.tangled.repo.pull/zzzz",
+    cid: "c",
+    value: GET_PULL_OK.value,
+  };
+  const { fetchImpl } = makeFetch(() => json(echoed));
+  const identity = await resolveTangledPull(makeCtx(), { pullUri: PULL_URI, fetchImpl });
+  assert.equal(identity.uri, PULL_URI);
+  assert.equal(identity.authorDid, "did:plc:author");
+  assert.equal(identity.rkey, "3mxa");
+});
+
+test("resolveTangledPull: a getPull body with state is carried into the identity", async () => {
+  const { fetchImpl } = makeFetch(() => json({ ...GET_PULL_OK, state: "open" }));
+  const identity = await resolveTangledPull(makeCtx(), { pullUri: PULL_URI, fetchImpl });
+  assert.equal(identity.state, "open");
 });
 
 test("resolveTangledPull: a getPull body with no CID is an invalid-response", async () => {
@@ -352,6 +381,72 @@ test("resolveTangledPull (list): a transport rejection is a read-failed", async 
     (e: unknown) => e instanceof TangledResolverError && e.kind === "read-failed",
     "expected read-failed, not 404/no-match",
   );
+});
+
+test("resolveTangledPull (list): a non-2xx listPulls with a success-shaped body is a read-failed", async () => {
+  const { fetchImpl } = makeFetch(() => json(LIST_ONE, 403));
+  await assert.rejects(
+    resolveTangledPull(makeCtx(), { fetchImpl }),
+    (e: unknown) => e instanceof TangledResolverError && e.kind === "read-failed",
+    "expected read-failed for a 403 with a success-shaped body",
+  );
+});
+
+test("resolveTangledPull (list): a 404 listPulls is a read-failed, not a no-match", async () => {
+  const { fetchImpl } = makeFetch(() => json({ message: "not found" }, 404));
+  await assert.rejects(
+    resolveTangledPull(makeCtx(), { fetchImpl }),
+    (e: unknown) => e instanceof TangledResolverError && e.kind === "read-failed",
+    "expected read-failed, not no-match, for a 404 list",
+  );
+});
+
+test("resolveTangledPull (list): a uri repeated across pages is deduped, not ambiguous", async () => {
+  const dupUri = "at://did:plc:author/sh.tangled.repo.pull/3dup";
+  const page1 = {
+    items: [listItem(dupUri, "bafyrei-dup", "open", "main", "feat/x")],
+    cursor: "P2",
+  };
+  const page2 = {
+    items: [listItem(dupUri, "bafyrei-dup", "open", "main", "feat/x")],
+    cursor: null,
+  };
+  const { fetchImpl, calls } = makeFetch((url) =>
+    url.searchParams.get("cursor") === "P2" ? json(page2) : json(page1),
+  );
+  const identity = await resolveTangledPull(makeCtx(), { fetchImpl });
+  assert.equal(calls.length, 2, "expected two listPulls pages");
+  assert.equal(identity.uri, dupUri);
+  assert.equal(identity.rkey, "3dup");
+});
+
+test("resolveTangledPull (list): a malformed item uri is an invalid-response", async () => {
+  const body = {
+    items: [listItem("pull/3mxb", "bafyrei2", "open", "main", "feat/x")],
+    cursor: null,
+  };
+  const { fetchImpl } = makeFetch(() => json(body));
+  await assert.rejects(
+    resolveTangledPull(makeCtx(), { fetchImpl }),
+    (e: unknown) =>
+      e instanceof TangledResolverError && e.kind === "invalid-response" && e.message.includes("invalid AT-URI"),
+    "expected the invalid AT-URI invalid-response",
+  );
+});
+
+test("resolveTangledPull (list): pagination is bounded by MAX_PAGES", async () => {
+  const loop = {
+    items: [listItem("at://did:plc:author/sh.tangled.repo.pull/3zoo", "bafyrei-x", "open", "main", "feat/other")],
+    cursor: "LOOP",
+  };
+  const { fetchImpl, calls } = makeFetch(() => json(loop));
+  await assert.rejects(
+    resolveTangledPull(makeCtx(), { fetchImpl }),
+    (e: unknown) =>
+      e instanceof TangledResolverError && e.kind === "read-failed" && e.message.includes("50"),
+    "expected the MAX_PAGES read-failed",
+  );
+  assert.equal(calls.length, 50, "expected exactly MAX_PAGES requests");
 });
 
 // ── credential transport ─────────────────────────────────────────────────

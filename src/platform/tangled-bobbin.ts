@@ -122,8 +122,9 @@ export function parseTangledAtUri(uri: string): ParsedAtUri {
   const did = parts[0] ?? "";
   const collection = parts[1] ?? "";
   const rkey = parts[2] ?? "";
-  if (!did.startsWith("did:") || did.indexOf(":", 4) === -1) {
-    throw new TangledResolverError("invalid-uri", `AT-URI DID must be did:<method>:<suffix>: ${did}`);
+  const didParts = did.split(":");
+  if (didParts[0] !== "did" || didParts.length < 3 || (didParts[1]?.length ?? 0) === 0) {
+    throw new TangledResolverError("invalid-uri", `AT-URI DID must be did:<method>:<method-specific-id>: ${did}`);
   }
   if (collection === "") {
     throw new TangledResolverError("invalid-uri", `AT-URI collection is empty: ${uri}`);
@@ -169,12 +170,11 @@ export async function resolveTangledPull(
   }
   const origin = base.origin;
 
-  // Build an XRPC request URL: preserve the base's path and query, and
-  // append the per-request params last (so they win over the base's).
+  // Build an XRPC request URL from the base's path plus the per-request
+  // params; the base's query string is intentionally not forwarded.
   const xrpc = (nsid: string, params: Record<string, string>): { url: string; origin: string } => {
     const pathname = base.pathname.replace(/\/+$/, "") + "/xrpc/" + nsid;
     const u = new URL(origin + pathname);
-    base.searchParams.forEach((v, k) => u.searchParams.append(k, v));
     for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v);
     return { url: u.toString(), origin };
   };
@@ -220,11 +220,14 @@ export async function resolveTangledPull(
     if (status === 404) {
       throw new TangledResolverError("no-match", `pull not found: ${trimmed}`);
     }
+    if (status < 200 || status >= 300) {
+      throw new TangledResolverError("read-failed", `getPull returned HTTP ${status}`);
+    }
     const record = asRecord(data);
     if (record === undefined) {
       throw new TangledResolverError("invalid-response", `getPull for ${trimmed} did not return a JSON object`);
     }
-    const uri = str(record.uri) ?? `at://${parsed.did}/${parsed.collection}/${parsed.rkey}`;
+    const uri = `at://${parsed.did}/${parsed.collection}/${parsed.rkey}`;
     const value = asRecord(record.value);
     if (value === undefined) {
       throw new TangledResolverError("invalid-response", `getPull for ${trimmed} has no pull value object`);
@@ -255,7 +258,7 @@ export async function resolveTangledPull(
       targetBranch: target === undefined ? undefined : str(target.branch),
       sourceBranch: source === undefined ? undefined : str(source.branch),
       sourceRepoDid: source === undefined ? undefined : str(source.repo),
-      state: undefined,
+      state: str(record.state),
       sourceSha: ctx.sourceSha,
     };
   }
@@ -277,7 +280,7 @@ export async function resolveTangledPull(
   for (;;) {
     page += 1;
     if (page > MAX_PAGES) {
-      throw new TangledResolverError("read-failed", "pull pagination exceeded 50 pages without resolving");
+      throw new TangledResolverError("read-failed", `pull pagination exceeded ${MAX_PAGES} pages without resolving`);
     }
     const params: Record<string, string> = { subject: ctx.repoDid, limit: String(PAGE_LIMIT) };
     if (cursor !== undefined) params.cursor = cursor;
@@ -291,16 +294,16 @@ export async function resolveTangledPull(
         timeoutMs,
       });
     } catch (error) {
-      if (error instanceof PlatformRequestError && error.status === 404) {
-        throw new TangledResolverError("no-match", `no Tangled pull list for repo ${ctx.repoDid} (404)`);
-      }
       throw new TangledResolverError(
         "read-failed",
         `Tangled pull read failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
     if (result.status === 404) {
-      throw new TangledResolverError("no-match", `no Tangled pull list for repo ${ctx.repoDid} (404)`);
+      throw new TangledResolverError("read-failed", "listPulls returned HTTP 404 (check TANGLED_BOBBIN_URL)");
+    }
+    if (result.status < 200 || result.status >= 300) {
+      throw new TangledResolverError("read-failed", `listPulls returned HTTP ${result.status}`);
     }
     const resp = asRecord(result.data);
     if (resp === undefined) {
@@ -319,6 +322,15 @@ export async function resolveTangledPull(
       if (itemUri === undefined || itemUri === "") {
         throw new TangledResolverError("invalid-response", "listPulls item has no uri");
       }
+      let itemParsed: ParsedAtUri;
+      try {
+        itemParsed = parseTangledAtUri(itemUri);
+      } catch {
+        throw new TangledResolverError("invalid-response", `listPulls item has an invalid AT-URI: ${itemUri}`);
+      }
+      if (itemParsed.collection !== PULL_COLLECTION) {
+        throw new TangledResolverError("invalid-response", `listPulls item is not a ${PULL_COLLECTION}: ${itemUri}`);
+      }
       const itemValue = asRecord(itemRecord.value);
       if (itemValue === undefined) {
         throw new TangledResolverError("invalid-response", "listPulls item has no value object");
@@ -330,7 +342,7 @@ export async function resolveTangledPull(
       const matchesBranches =
         (ctx.targetBranch === undefined || itemTargetBranch === ctx.targetBranch) &&
         (ctx.sourceBranch === undefined || itemSourceBranch === ctx.sourceBranch);
-      if (matchesBranches) {
+      if (matchesBranches && !matched.some((m) => m.uri === itemUri)) {
         matched.push({
           uri: itemUri,
           cid: str(itemRecord.cid),
@@ -356,15 +368,14 @@ export async function resolveTangledPull(
     if (cid === "") {
       throw new TangledResolverError("invalid-response", `matching pull ${m.uri} carries no CID to pin`);
     }
-    const pathPart = m.uri.split("?")[0] ?? m.uri;
-    const segments = pathPart.split("/");
+    const p = parseTangledAtUri(m.uri);
     return {
       uri: m.uri,
       cid,
-      rkey: segments[segments.length - 1] ?? "",
+      rkey: p.rkey,
       record: m.value,
       repoDid,
-      authorDid: segments[2] ?? "",
+      authorDid: p.did,
       targetBranch: target === undefined ? undefined : str(target.branch),
       sourceBranch: source === undefined ? undefined : str(source.branch),
       sourceRepoDid: source === undefined ? undefined : str(source.repo),
