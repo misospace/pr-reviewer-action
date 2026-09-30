@@ -785,6 +785,7 @@ When `publish-mode=review_verdict` is set, the action submits a native GitHub PR
 - `approve-forks` defaults to `false`. Even when `allow-approve=true`, native approvals are blocked for cross-repository (fork) PRs unless this is also set to `true`.
 - If evidence provider enforcement or tool harness failure enforcement modified the verdict to `request_changes`, approval is automatically blocked.
 - The review body must be non-empty for an approval to be submitted.
+- An approve whose own coverage is incomplete (`required_checks: incomplete`, or a coverage gap from the native tool loop) is never submitted as `APPROVE` — it publishes as an advisory `COMMENT` instead, regardless of `verdict-policy`.
 
 > [!WARNING]
 > Native approvals can affect branch protection rules and automerge pipelines. Enable `allow-approve` only when you understand the implications for your repository's merge policy.

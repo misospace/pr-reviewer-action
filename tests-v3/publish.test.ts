@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   APPROVAL_FAILURE_GUIDANCE,
   evaluateApprovalGuardrails,
+  markerReviewResult,
   publishReview,
   renderPartialCoverageNotice,
   resolveCleanupFlag,
@@ -384,4 +385,127 @@ test("#847: without a tool harness the marker stays byte-identical to the pre-#8
   assert.ok(marker);
   assert.ok(!marker.includes("tool_budget"));
   assert.ok(!marker.includes("tool_calls"));
+});
+
+// ---------------------------------------------------------------------------
+// #873 — required-check coverage incomplete (or a #810 tool-loop coverage
+// gap) must never let an approve publish as APPROVE, under every verdict
+// policy and publish mode. Evidence: PR #854 published APPROVE with
+// "review_result":"partial","required_checks":"incomplete" in its marker.
+// ---------------------------------------------------------------------------
+
+const VERDICT_POLICIES = [undefined, "model", "findings_severity_gated", "strict"] as const;
+
+test("markerReviewResult: required-check coverage incomplete is 'partial' under every verdict policy", () => {
+  for (const verdictPolicy of VERDICT_POLICIES) {
+    assert.equal(
+      markerReviewResult({ verdictPolicy, verdict: "approve", findings: [], requiredChecks: "incomplete" }),
+      "partial",
+      `policy=${verdictPolicy}`,
+    );
+    assert.equal(
+      markerReviewResult({ verdictPolicy, verdict: "approve", findings: [], requiredChecks: "complete" }),
+      "clean",
+      `policy=${verdictPolicy}`,
+    );
+    // A #810 tool-loop coverage gap is also 'partial', independent of required_checks.
+    assert.equal(
+      markerReviewResult({
+        verdictPolicy, verdict: "approve", findings: [], requiredChecks: "complete",
+        partialCoverage: PARTIAL_COVERAGE,
+      }),
+      "partial",
+      `policy=${verdictPolicy}`,
+    );
+    // request_changes always reads as 'issues', coverage notwithstanding.
+    assert.equal(
+      markerReviewResult({ verdictPolicy, verdict: "request_changes", findings: [], requiredChecks: "incomplete" }),
+      "issues",
+      `policy=${verdictPolicy}`,
+    );
+  }
+});
+
+const INCOMPLETE_STATES: Array<{ name: string; requiredChecks: string; partialCoverage?: typeof PARTIAL_COVERAGE }> = [
+  { name: "required_checks incomplete", requiredChecks: "incomplete" },
+  { name: "#810 tool-loop partial coverage", requiredChecks: "complete", partialCoverage: PARTIAL_COVERAGE },
+];
+
+for (const state of INCOMPLETE_STATES) {
+  for (const verdictPolicy of VERDICT_POLICIES) {
+    test(`review_verdict: ${state.name} + approve (policy=${verdictPolicy ?? "default"}) never publishes APPROVE`, async () => {
+      const api = new MockPublishApi();
+      const result = await publishReview(input({
+        mode: "review_verdict", allowApprove: true, verdict: "approve",
+        requiredChecks: state.requiredChecks,
+        ...(state.partialCoverage ? { partialCoverage: state.partialCoverage } : {}),
+        ...(verdictPolicy ? { verdictPolicy } : {}),
+      }), api, { diffText: "" });
+      assert.equal(result.status, "published");
+      assert.equal(api.submitted.length, 1);
+      assert.notEqual(api.submitted[0]!.event, "APPROVE");
+      assert.equal(api.submitted[0]!.event, "COMMENT");
+      assert.match(api.submitted[0]!.body, /Approval withheld/);
+    });
+
+    test(`comment: ${state.name} + approve (policy=${verdictPolicy ?? "default"}) never headers as APPROVE`, async () => {
+      const api = new MockPublishApi();
+      await publishReview(input({
+        mode: "comment", verdict: "approve",
+        requiredChecks: state.requiredChecks,
+        ...(state.partialCoverage ? { partialCoverage: state.partialCoverage } : {}),
+        ...(verdictPolicy ? { verdictPolicy } : {}),
+      }), api, { diffText: "" });
+      const body = api.sticky[0]!.body;
+      assert.ok(!body.includes("Automated recommendation: APPROVE"));
+      assert.match(body, /INCOMPLETE — not an approval/);
+    });
+
+    test(`review_comment: ${state.name} + approve (policy=${verdictPolicy ?? "default"}) never submits a native APPROVE`, async () => {
+      const api = new MockPublishApi();
+      const result = await publishReview(input({
+        mode: "review_comment", verdict: "approve",
+        requiredChecks: state.requiredChecks,
+        ...(state.partialCoverage ? { partialCoverage: state.partialCoverage } : {}),
+        ...(verdictPolicy ? { verdictPolicy } : {}),
+      }), api, { diffText: "" });
+      assert.equal(result.status, "published");
+      // review_comment never submits a native review event for the summary
+      // (only best-effort inline COMMENT findings), so there is nothing to
+      // downgrade — asserted here so the invariant is pinned per mode.
+      assert.ok(api.submitted.every((r) => r.event !== "APPROVE"));
+    });
+  }
+}
+
+test("review_verdict: complete coverage + approve still publishes APPROVE (no regression)", async () => {
+  for (const verdictPolicy of VERDICT_POLICIES) {
+    const api = new MockPublishApi();
+    const result = await publishReview(input({
+      mode: "review_verdict", allowApprove: true, verdict: "approve", requiredChecks: "complete",
+      ...(verdictPolicy ? { verdictPolicy } : {}),
+    }), api, { diffText: "" });
+    assert.equal(result.status, "published");
+    assert.equal(api.submitted[0]!.event, "APPROVE", `policy=${verdictPolicy}`);
+  }
+});
+
+test("review_verdict: request_changes stays REQUEST_CHANGES even with incomplete coverage", async () => {
+  const api = new MockPublishApi();
+  const result = await publishReview(input({
+    mode: "review_verdict", verdict: "request_changes", requiredChecks: "incomplete",
+  }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
+});
+
+test("review_verdict: allow_approve=false still reports the pre-#873 policy-block message, not the coverage one", async () => {
+  const api = new MockPublishApi();
+  const result = await publishReview(input({
+    mode: "review_verdict", allowApprove: false, verdict: "approve", requiredChecks: "complete",
+  }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted[0]!.event, "COMMENT");
+  assert.match(api.submitted[0]!.body, /Approval blocked by policy/);
+  assert.ok(!api.submitted[0]!.body.includes("Approval withheld"));
 });

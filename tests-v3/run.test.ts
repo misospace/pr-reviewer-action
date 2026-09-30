@@ -10,6 +10,8 @@ import type { StageEnv } from "../src/run/env.js";
 import { forkGate } from "../src/gates/gates.js";
 import { startMockServer } from "./helpers.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
+import { publishReview } from "../src/publish/publish.js";
+import type { NativeReviewRequest, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
 
 /** A minimal in-memory platform adapter: the reads a small PR needs, served
  * without network. Everything else must not be reached by the pipeline with
@@ -718,6 +720,84 @@ test("findings_severity_gated policy: CSV non-blocking categories are split, not
   assert.equal(result.outputs.verdict, "approve");
   assert.equal(result.outputs.verdictSource, "findings");
   assert.match(result.outputs.reviewMarkdown, /Verdict relaxed from structured findings/);
+});
+
+/** A minimal review_verdict-mode publish API: only what submitNativeReview
+ * and the publication-boundary head re-check touch. */
+class MinimalPublishApi implements PublishPlatformApi {
+  readonly platform = "github" as const;
+  submitted: NativeReviewRequest[] = [];
+  constructor(private readonly head: string) {}
+  async getHeadSha(): Promise<string | null> { return this.head; }
+  async listIssueComments(): Promise<PublishCommentRef[]> { return []; }
+  async upsertStickyComment(): Promise<{ ok: boolean; created: boolean }> { return { ok: true, created: true }; }
+  async listReviews(): Promise<PublishReviewRef[]> { return []; }
+  async createReview(request: NativeReviewRequest): Promise<{ ok: boolean }> { this.submitted.push(request); return { ok: true }; }
+  async dismissReview(): Promise<boolean> { return true; }
+  async minimizedReviewIds(): Promise<string[]> { return []; }
+  async minimizeReview(): Promise<boolean> { return true; }
+  async unresolvedSupersededThreads(): Promise<{ ok: boolean; threads: { id: string }[]; hasNextPage: boolean }> {
+    return { ok: true, threads: [], hasNextPage: false };
+  }
+  async resolveThread(): Promise<boolean> { return true; }
+  async removeLabel(): Promise<boolean> { return true; }
+}
+
+test("#873: required-check coverage incomplete + a model approve never publishes APPROVE (PR #854 regression)", async () => {
+  // src/auth.ts deterministically classifies as an auth change (#750/#680
+  // classification), which mandates must_check items; the model — exactly
+  // like PR #854's published marker (review_result: partial, required_
+  // checks: incomplete) — emits no required_check_dispositions at all, so
+  // coverage stays conservatively unresolved (#750 key-absence semantics).
+  const platform = mockPlatform({
+    files: [{ filename: "src/auth.ts", status: "modified", additions: 4, deletions: 1, changes: 5 }],
+    diff: "diff --git a/src/auth.ts b/src/auth.ts\n--- a/src/auth.ts\n+++ b/src/auth.ts\n@@ -1 +1,2 @@\n old\n+new line\n",
+  });
+  const result = await runWithVerdictOn(platform, { verdict: "approve", findings: [] });
+
+  // The reproduction: exactly PR #854's shape.
+  assert.equal(result.outputs.verdict, "approve");
+  assert.equal(result.outputs.requiredChecks, "incomplete");
+  assert.match(result.marker, /"review_result":"partial"/);
+  assert.match(result.marker, /"required_checks":"incomplete"/);
+
+  // The invariant: piping that exact shape through publish (review_verdict
+  // mode, allow_approve on) must never yield a native APPROVE event.
+  const api = new MinimalPublishApi("a".repeat(40));
+  const publishResult = await publishReview({
+    mode: "review_verdict",
+    reviewMarkdown: result.outputs.reviewMarkdown,
+    verdict: result.outputs.verdict,
+    verdictPolicy: result.verdictPolicy,
+    analysisEngine: result.outputs.analysisEngine,
+    baseSha: "b".repeat(40),
+    headSha: "a".repeat(40),
+    prNumber: "7",
+    commentMarker: "<!-- ai-pr-review -->",
+    requiredChecks: result.outputs.requiredChecks,
+    reviewRoute: result.outputs.reviewRoute,
+    escalationReason: result.outputs.escalationReason,
+    cacheHitRatio: result.outputs.cacheHitRatio,
+    inlineFindings: false,
+    inlineFindingsMax: 5,
+    findings: JSON.parse(result.outputs.findings),
+    cleanupPreviousNativeReviews: "false",
+    allowApprove: true,
+    approveForks: false,
+    isForkPr: false,
+    upstreamLinkMode: "inert",
+    conditionalPresence: {
+      linkedIssue: false, evidenceProvider: false, standards: false,
+      toolHarnessFindings: false, toolHarnessResults: false,
+    },
+    forgejoPositions: false,
+  }, api, { diffText: "" });
+
+  assert.equal(publishResult.status, "published");
+  assert.equal(api.submitted.length, 1);
+  assert.notEqual(api.submitted[0]!.event, "APPROVE");
+  assert.equal(api.submitted[0]!.event, "COMMENT");
+  assert.match(api.submitted[0]!.body, /Approval withheld/);
 });
 
 /** The native loop only reads tracked files: make the run dir a checkout. */
