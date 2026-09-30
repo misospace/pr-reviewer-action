@@ -18,8 +18,8 @@ Do not freeze temporary v2 implementation details into permanent product rules. 
 
 ## Authority model (normative)
 
-- **Deterministic policy owns deterministic decisions.** The classifier, precheck, verdict policy, required-check validation, and skip logic (the v3 `src/classification/`, `src/precheck/`, `src/enforcement/` ports; the v2 `pr_reviewer/` modules survive only as parity oracles) are rule-based; models do not override them.
-- **Path-handling classification requires a real untrusted-path surface (#749).** Trusted path scaffolding (`Path(__file__).resolve()` root discovery, `__dirname`/`import.meta` anchors, module specifiers, constant-path pathlib usage) and test-file fixture paths never fire `path_handling_changes` by themselves; traversal literals, containment/sanitization logic, untrusted-source joins, archive extraction, and symlink operations do. Every decision is explainable from the bounded `path_handling_provenance` artifact field. The v2 module and the v3 `src/classification/classify.ts` implement the same signal model; parity fixtures pin it.
+- **Deterministic policy owns deterministic decisions.** The classifier, precheck, verdict policy, required-check validation, and skip logic (`src/classification/`, `src/precheck/`, `src/enforcement/`) are rule-based; models do not override them.
+- **Path-handling classification requires a real untrusted-path surface (#749).** Trusted path scaffolding (`Path(__file__).resolve()` root discovery, `__dirname`/`import.meta` anchors, module specifiers, constant-path pathlib usage) and test-file fixture paths never fire `path_handling_changes` by themselves; traversal literals, containment/sanitization logic, untrusted-source joins, archive extraction, and symlink operations do. Every decision is explainable from the bounded `path_handling_provenance` artifact field. `src/classification/classify.ts` implements the signal model; parity goldens pin it.
 - **The final reviewer owns the model verdict.** Specialist leads, tool-harness output, and evidence-provider findings are advisory evidence sources — they never flip or produce the verdict, and specialist severity is capped below `blocker`.
 - **Fallback is availability recovery, not quality escalation.** A fallback model call exists only to complete a review the primary could not.
 - **Post-primary smart escalation is reviewer-requested only** (#721): after a successful primary review, the sole escalation trigger is the verdict's `smart_review_requested` field. The historical `should_escalate` heuristics are telemetry only.
@@ -40,9 +40,9 @@ Do not freeze temporary v2 implementation details into permanent product rules. 
 |---|---|
 | `action.yml` | Shipped action definition, generated from `contracts/action-v3.yml` (`node24` JavaScript action; precheck → review → publish run in one process) |
 | `src/` | The TypeScript runtime — the shipped production path (`node dist/index.js`, entry `src/run/action.ts`): `platform/`, `precheck/`, `prompt/`, `context/`, `classification/`, `requirements/`, `corpus/`, `model/`, `transport/`, `runtime/`, `gates/`, `evidence/` |
-| `scripts/` | Retained tooling (eval, harvest, fork gate, release, v3 build) plus the retired v2 bash runtime — parity oracles only, teardown-pending (`docs/v3-teardown-audit.md`) |
-| `pr_reviewer/` | Retained eval-tooling modules plus the retired v2 Python package — parity oracles only, teardown-pending (`docs/v3-teardown-audit.md`) |
-| `tests/`, `tests-v3/` | pytest + shell tests (oracles, eval tooling, retained gates); vitest for v3; parity fixtures under `tests/fixtures/parity/` |
+| `scripts/` | Repository tooling (eval, harvest, fork gate, judge, release, v3 build assets); not part of the action |
+| `pr_reviewer/` | Python modules for the semantic-eval and judge tooling; not part of the action |
+| `tests/`, `tests-v3/` | pytest + shell tests (tooling, parity harness, retained gates); node:test for v3; parity fixtures and goldens under `tests/fixtures/parity/` |
 | `evals/` | graded eval corpora driven by `scripts/eval_harness.py` through the v3 runtime (runbook: `docs/evals.md`) |
 | `.github/workflows/fork-ai-review.yaml` | privilege-separated fork-PR reviewer (`docs/fork-review.md`) |
 
@@ -51,9 +51,9 @@ Full per-module detail, the pipeline architecture, corpus section order, and des
 ## Build, test, validate
 
 ```bash
-npm ci && npm run typecheck && npm test     # v3 TypeScript (vitest via node --test)
+npm ci && npm run typecheck && npm test     # v3 TypeScript (node --test)
 npm run build                                # dist/ is not committed; npm test and the parity harness need it built
-pytest tests/ -v --tb=short                 # Python tests: parity/eval oracles + retained gates
+pytest tests/ -v --tb=short                 # Python tests: parity harness, eval tooling, retained gates
 GIT_CONFIG_GLOBAL=/dev/null python3 tests/parity_harness.py   # v2/v3 parity boundaries (needs dist/ built)
 ```
 

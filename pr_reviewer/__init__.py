@@ -1,5 +1,1 @@
-"""pr_reviewer – testable Python modules extracted from run_review.sh."""
-
-__all__ = [
-    "response_parser",
-]
+"""pr_reviewer: Python modules for the repository's semantic-eval and judge tooling."""
