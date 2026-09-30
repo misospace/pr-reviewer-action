@@ -31,6 +31,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 # Ensure scripts directory is on path for imports
 _ROOT = Path(__file__).resolve().parent.parent
 _SCRIPTS_DIR = _ROOT / "scripts"
@@ -617,18 +619,26 @@ class TestPostIssueArgument:
         assert rc == 0
         assert "skipping the" in capsys.readouterr().err
 
-    def test_post_tracking_comment_refuses_redirects(self, tmp_path, monkeypatch, capsys):
+    @pytest.mark.parametrize("redirect_code", [301, 302, 303, 307, 308])
+    def test_post_tracking_comment_refuses_redirects(self, tmp_path, monkeypatch, capsys, redirect_code):
         """The tracker comment client refuses HTTP redirects to prevent token leakage."""
         import threading
         from http.server import BaseHTTPRequestHandler, HTTPServer
 
         SECRET = "test-gh-token"
-        target_seen = {"requests": 0}
+        target_seen = {"requests": 0, "auth": None}
         origin_seen = {"requests": 0, "auth": None}
 
         class TargetHandler(BaseHTTPRequestHandler):
-            def do_POST(self):
+            def handle_one_request(self):
+                """Handle any HTTP method."""
+                self.raw_requestline = self.rfile.readline()
+                if not self.raw_requestline:
+                    return
+                if not self.parse_request():
+                    return
                 target_seen["requests"] += 1
+                target_seen["auth"] = self.headers.get("Authorization")
                 self.send_response(201)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -638,11 +648,17 @@ class TestPostIssueArgument:
                 pass
 
         class OriginHandler(BaseHTTPRequestHandler):
-            def do_POST(self):
+            def handle_one_request(self):
+                """Handle any HTTP method."""
+                self.raw_requestline = self.rfile.readline()
+                if not self.raw_requestline:
+                    return
+                if not self.parse_request():
+                    return
                 origin_seen["requests"] += 1
                 origin_seen["auth"] = self.headers.get("Authorization")
                 # Send a redirect to the target
-                self.send_response(302)
+                self.send_response(redirect_code)
                 self.send_header("Location", f"http://127.0.0.1:{target_server.server_port}/redirect-target")
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -664,11 +680,8 @@ class TestPostIssueArgument:
             monkeypatch.setenv("GITHUB_REPOSITORY", "misospace/pr-reviewer-action")
             monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
 
-            # Reload the module to pick up the env var
-            import importlib
-            importlib.reload(eval_weekly_summary)
-
             # Call the real main() which exercises the real _post_tracking_comment
+            # No reload needed: env is read at call time, not import time
             rc = eval_weekly_summary.main([
                 "--report", str(FIXTURES / "eval-report-agentic.json"),
                 "--stamp", STAMP,
@@ -678,8 +691,9 @@ class TestPostIssueArgument:
             # Verify the origin was contacted but the redirect target was not
             assert rc == 0
             assert origin_seen["requests"] == 1, "origin should have been contacted once"
-            assert target_seen.get("requests", 0) == 0, "redirect target must never be contacted"
+            assert target_seen["requests"] == 0, f"redirect target must never be contacted (redirect code {redirect_code})"
             assert origin_seen["auth"] == f"Bearer {SECRET}", "auth header should be sent to origin"
+            assert target_seen["auth"] is None, f"target should never see Authorization header (redirect code {redirect_code})"
         finally:
             origin_server.shutdown()
             target_server.shutdown()

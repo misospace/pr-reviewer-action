@@ -40,9 +40,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# GitHub API base URL (can be overridden via GITHUB_API_URL env for testing)
-GITHUB_API_BASE = os.environ.get("GITHUB_API_URL", "https://api.github.com")
-
 # Below this capability pass rate a mode is flagged with a warning emoji
 # (matches the runbook's "a pass rate below 0.95 should block the release").
 PASS_RATE_GREEN_THRESHOLD = 0.95
@@ -245,8 +242,10 @@ def _post_tracking_comment(body: str, issue_number: int) -> None:
             file=sys.stderr,
         )
         return
+    # Read GitHub API base URL at call time (can be overridden via GITHUB_API_URL env for testing)
+    github_api_base = os.environ.get("GITHUB_API_URL", "https://api.github.com")
     summary_url = (
-        f"{GITHUB_API_BASE}/repos/{gh_repo}/issues/{issue_number}/comments"
+        f"{github_api_base}/repos/{gh_repo}/issues/{issue_number}/comments"
     )
     payload = json.dumps({"body": body}).encode("utf-8")
     req = Request(

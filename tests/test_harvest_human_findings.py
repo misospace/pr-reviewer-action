@@ -1117,12 +1117,19 @@ def test_github_client_uses_safe_opener_refuses_redirects(monkeypatch):
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
     SECRET = "test-gh-token"
-    target_seen = {"requests": 0}
-    origin_seen = {"requests": 0, "auth": None, "path": None}
+    target_seen = {"requests": 0, "auth": None}
+    origin_seen = {"requests": 0, "auth": None}
 
     class TargetHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
+        def handle_one_request(self):
+            """Handle any HTTP method."""
+            self.raw_requestline = self.rfile.readline()
+            if not self.raw_requestline:
+                return
+            if not self.parse_request():
+                return
             target_seen["requests"] += 1
+            target_seen["auth"] = self.headers.get("Authorization")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -1132,10 +1139,15 @@ def test_github_client_uses_safe_opener_refuses_redirects(monkeypatch):
             pass
 
     class OriginHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
+        def handle_one_request(self):
+            """Handle any HTTP method."""
+            self.raw_requestline = self.rfile.readline()
+            if not self.raw_requestline:
+                return
+            if not self.parse_request():
+                return
             origin_seen["requests"] += 1
             origin_seen["auth"] = self.headers.get("Authorization")
-            origin_seen["path"] = self.path
             self.send_response(302)
             self.send_header("Location", f"http://127.0.0.1:{target_server.server_port}/api/redirected")
             self.send_header("Content-Type", "application/json")
@@ -1174,6 +1186,7 @@ def test_github_client_uses_safe_opener_refuses_redirects(monkeypatch):
         assert origin_seen["requests"] == 1, "origin should have been contacted once"
         assert target_seen["requests"] == 0, "redirect target must never be contacted"
         assert origin_seen["auth"] == f"Bearer {SECRET}", "authorization header should be sent to origin"
+        assert target_seen["auth"] is None, "target should never see Authorization header"
     finally:
         origin_server.shutdown()
         target_server.shutdown()
