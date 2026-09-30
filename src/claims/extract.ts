@@ -37,8 +37,16 @@ const CLAIM_KEYWORDS_RE =
 
 const COMMENT_LINE_RE = /^(\/\/|\/\*\*?|\*(?!\/)|#(?!!)|"""|'''|--(?:\s|$)|<!--)/;
 
+// The method alternative (5th capture) recognizes ordinary TS class-body
+// methods/accessors (`render(): string {`, `private static async
+// load(): Promise<string> {`) conservatively: the line must end with the
+// opening brace, params may nest parens once but contain no string quotes
+// (so `it("...", () => {` is never a declaration), and the name is never a
+// control keyword (so `if (cond) {` is not one either). Java/C#-style
+// `public String render()` (type before name) and Allman braces are
+// deliberately not recognized.
 const FUNCTION_SIGNATURE_RE =
-  /^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\*?\s+([A-Za-z_$][\w$]*)|(?:public\s+|private\s+|protected\s+|static\s+)*(?:async\s+)?def\s+([A-Za-z_][\w]*)|(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*[:=]|class\s+([A-Za-z_$][\w$]*))/;
+  /^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\*?\s+([A-Za-z_$][\w$]*)|(?:public\s+|private\s+|protected\s+|static\s+)*(?:async\s+)?def\s+([A-Za-z_][\w]*)|(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*[:=]|class\s+([A-Za-z_$][\w$]*)|(?:(?:public|private|protected|static|override|readonly|async|get|set)\s+)*(?:\*)?\s*(?!(?:if|for|while|switch|catch|do|else|try|return|await|yield|new|delete|typeof|case|throw|function|class|const|let|var|export|import|default|extends|implements|interface|type|enum|namespace)\b)([A-Za-z_$][\w$]*)\s*(?:<(?:[^<>]|<[^<>]*>)*>)?\s*\((?:[^()"'`]|\([^()]*\))*\)\s*(?::\s*[^={}]+)?\{\s*$)/;
 
 const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+(?=[A-Z(`])|\n{2,}/;
 const INLINE_CODE_RE = /`([^`\n]{1,200})`/g;
@@ -74,6 +82,12 @@ interface HunkGroup {
   lines: HunkLineEntry[];
 }
 
+/** A call-shaped line (`name(`, name not a control keyword): the first
+ * construct directly following a leading comment. A recognized declaration
+ * wins first; this shape only decides the unrecognized fallback. */
+const CALL_SHAPED_LINE_RE =
+  /^(?!(?:if|for|while|switch|catch|do|else|try|return|await|yield|new|delete|typeof|case|throw|function|class|const|let|var|export|import|default)\b)[A-Za-z_$][\w$]*\s*\(/;
+
 const HUNK_HEADER_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@[ \t]?(.*)$/;
 const HUNK_HEADER_CALL_RE = /([A-Za-z_$][\w$]*)\s*\(/g;
 const HUNK_HEADER_TYPE_RE = /\b(?:class|struct|interface|impl|enum|namespace|module|trait)\s+([A-Za-z_$][\w$]*)/;
@@ -87,7 +101,7 @@ function hunkHeaderSymbol(context: string): string | null {
   const trimmed = context.trim();
   if (!trimmed) return null;
   const sig = FUNCTION_SIGNATURE_RE.exec(trimmed);
-  if (sig) return sig[1] ?? sig[2] ?? sig[3] ?? sig[4] ?? null;
+  if (sig) return sig[1] ?? sig[2] ?? sig[3] ?? sig[4] ?? sig[5] ?? null;
   const typeMatch = HUNK_HEADER_TYPE_RE.exec(trimmed);
   if (typeMatch) return typeMatch[1] ?? null;
   const calls = [...trimmed.matchAll(HUNK_HEADER_CALL_RE)];
@@ -109,7 +123,7 @@ function collectHunks(diffText: string): HunkGroup[] {
 
   const declaresOf = (text: string): string | null => {
     const sig = FUNCTION_SIGNATURE_RE.exec(text.trimStart());
-    return sig ? (sig[1] ?? sig[2] ?? sig[3] ?? sig[4] ?? null) : null;
+    return sig ? (sig[1] ?? sig[2] ?? sig[3] ?? sig[4] ?? sig[5] ?? null) : null;
   };
 
   for (const raw of diffText.split("\n")) {
@@ -179,7 +193,16 @@ function resolveHunkSymbol(hunk: HunkGroup, index: number): string | null {
     for (let k = index + 1; k < hunk.lines.length; k++) {
       const next = hunk.lines[k]!;
       if (next.declares) return next.declares;
-      if (!isBlankOrComment(next.text)) break;
+      if (!isBlankOrComment(next.text)) {
+        // The comment's directly-following construct is call-shaped but not
+        // a recognized declaration (e.g. a multi-line signature the
+        // conservative recognizer deliberately does not know): the comment
+        // describes THAT construct, so fall back to the line anchor rather
+        // than confidently crediting an enclosing class found further up
+        // the hunk.
+        if (CALL_SHAPED_LINE_RE.test(next.text.trimStart())) return null;
+        break;
+      }
     }
   }
   for (let k = index - 1; k >= 0; k--) {

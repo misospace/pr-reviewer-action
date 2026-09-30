@@ -92,12 +92,14 @@ test("hunk boundary: with no header function context, an in-function claim falls
   assert.ok(!claim!.items.some((item) => item.includes("newlyAddedB")));
 });
 
-test("a leading docstring directly above a new function anchors to that function even when the hunk header names an enclosing scope", () => {
+test("a leading docstring directly above an ordinary class method anchors to that method even when the hunk header names the enclosing class", () => {
+  // Realistic TS class-method syntax: `render(): string {`, not a nested
+  // `function` declaration.
   const diffText = [
     "diff --git a/src/widget.ts b/src/widget.ts",
     "@@ -10,2 +10,7 @@ class Widget {",
     "+  // render always returns a non-empty string for a mounted widget.",
-    "+  function render(): string {",
+    "+  render(): string {",
     "+    return this.html;",
     "+  }",
   ].join("\n");
@@ -105,6 +107,64 @@ test("a leading docstring directly above a new function anchors to that function
   const claim = result.claims.find((c) => /render always returns/.test(c.claim));
   assert.ok(claim, "expected the leading-docstring claim to be extracted");
   assert.deepEqual(claim!.items, ["src/widget.ts:render"]);
+});
+
+test("method signatures with modifiers and accessors are recognized declarations", () => {
+  const diffText = [
+    "diff --git a/src/widget.ts b/src/widget.ts",
+    "@@ -10,2 +10,9 @@ class Widget {",
+    "+  // load always resolves a mounted widget before caching.",
+    "+  private static async load(): Promise<string> {",
+    "+    return fetchHtml();",
+    "+  }",
+    "+  // html is never empty for a mounted widget.",
+    "+  get html(): string {",
+    "+    return this.render();",
+    "+  }",
+  ].join("\n");
+  const result = extractClaimsDeterministic({ prBody: "", diffText });
+  const load = result.claims.find((c) => /load always resolves/.test(c.claim));
+  assert.ok(load, "expected the load claim");
+  assert.deepEqual(load!.items, ["src/widget.ts:load"]);
+  const html = result.claims.find((c) => /html is never empty/.test(c.claim));
+  assert.ok(html, "expected the html claim");
+  assert.deepEqual(html!.items, ["src/widget.ts:html"]);
+});
+
+test("in-body comments inside a recognized method anchor to the method, not a control statement and not the class", () => {
+  const diffText = [
+    "diff --git a/src/widget.ts b/src/widget.ts",
+    "@@ -10,3 +10,10 @@ class Widget {",
+    "+  render(): string {",
+    "+    // always returns the cached html without re-rendering.",
+    "+    if (!this.html) {",
+    "+      this.html = compute();",
+    "+    }",
+    "+    return this.html;",
+    "+  }",
+  ].join("\n");
+  const result = extractClaimsDeterministic({ prBody: "", diffText });
+  const claim = result.claims.find((c) => /always returns the cached html/.test(c.claim));
+  assert.ok(claim, "expected the in-body claim to be extracted");
+  assert.deepEqual(claim!.items, ["src/widget.ts:render"]);
+});
+
+test("a leading docstring above an unrecognized multi-line method signature falls back to file:L<n>, never the enclosing class", () => {
+  const diffText = [
+    "diff --git a/src/widget.ts b/src/widget.ts",
+    "@@ -10,2 +10,9 @@ class Widget {",
+    "+  // renderLong always returns a non-empty string for a mounted widget.",
+    "+  renderLong(",
+    "+    a: string,",
+    "+  ): string {",
+    "+    return a;",
+    "+  }",
+  ].join("\n");
+  const result = extractClaimsDeterministic({ prBody: "", diffText });
+  const claim = result.claims.find((c) => /renderLong always returns/.test(c.claim));
+  assert.ok(claim, "expected the leading-docstring claim to be extracted");
+  assert.match(claim!.items[0]!, /^src\/widget\.ts:L\d+$/);
+  assert.ok(!claim!.items.some((item) => item.includes("Widget")), "the class must not steal the anchor");
 });
 
 test("PR-body 'cross-checked against ctx.repoDid' claim resolves items from every added-line occurrence", () => {
