@@ -79,7 +79,7 @@ jobs:
           python-version: '3.14'
 
       - name: Install test dependencies
-        run: pip install -r requirements.txt
+        run: pip install --require-hashes -r requirements.txt
 
       - name: Set up Node.js
         # Node 24 must be on PATH for the parity harness (tests/test_parity_harness.py
@@ -140,7 +140,7 @@ jobs:
       - name: Install lint dependencies
         # Same pinned set as validate-python; this job only needs yamllint
         # from it. Keeping one requirements file means one supply-chain pin.
-        run: pip install -r requirements.txt
+        run: pip install --require-hashes -r requirements.txt
 
       - name: Validate action metadata YAML
         run: ruby -e 'require "yaml"; YAML.load_file("action.yml")'
@@ -210,7 +210,7 @@ jobs:
       - name: Install test dependencies
         # Some suites import PyYAML in inline python (it arrives transitively
         # via yamllint in requirements.txt).
-        run: pip install -r requirements.txt
+        run: pip install --require-hashes -r requirements.txt
 
       # Auto-discover every bash suite so a new (or previously unlisted)
       # suite cannot silently stay out of CI.
