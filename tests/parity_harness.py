@@ -44,8 +44,6 @@ Structure:
 
 CLI: python3 tests/parity_harness.py [--boundary ID] [--report PATH]
 [--skip-gates]. Exits nonzero on any unapproved drift or failed gate.
-``--record-goldens`` re-records goldens from a live pair and is refused for
-frozen boundaries.
 """
 
 from __future__ import annotations
@@ -70,9 +68,6 @@ FIXTURES = ROOT / "tests" / "fixtures" / "parity"
 CONTRACT_PATH = ROOT / "contracts" / "action-v3.yml"
 APPROVED_PATH = FIXTURES / "approved-divergences.json"
 GOLDENS = FIXTURES / "goldens"
-# "record" re-runs the live v2 side and rewrites its golden; otherwise a
-# frozen boundary (run_new set) compares v3 against the recorded golden.
-GOLDEN_MODE = ""
 
 # ---------------------------------------------------------------------------
 # Normalization
@@ -134,31 +129,10 @@ def _golden_file(boundary_id: str, fixture_name: str) -> Path:
     return GOLDENS / boundary_id / f"{fixture_name}.json"
 
 
-def _path_tokens(workdir: Path) -> list[tuple[str, str]]:
-    tokens = {str(workdir): "<WORKDIR>", str(workdir.resolve()): "<WORKDIR>", str(ROOT): "<ROOT>"}
-    return sorted(tokens.items(), key=lambda item: -len(item[0]))
-
-
-def write_golden(boundary_id: str, fixture_name: str, side: SideResult, workdir: Path) -> None:
-    text = json.dumps({
-        "ok": side.ok,
-        "values": side.values,
-        "error": side.error,
-        "unresolved": side.unresolved,
-        "pre": side.pre,
-        "raw": base64.b64encode(side.raw).decode("ascii") if side.raw is not None else None,
-    }, indent=1, sort_keys=True, ensure_ascii=False)
-    for value, token in _path_tokens(workdir):
-        text = text.replace(value, token)
-    path = _golden_file(boundary_id, fixture_name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text + "\n", encoding="utf-8")
-
-
 def read_golden(boundary_id: str, fixture_name: str, workdir: Path) -> SideResult:
     path = _golden_file(boundary_id, fixture_name)
     if not path.is_file():
-        raise RuntimeError(f"missing golden {path.relative_to(ROOT)} (boundary {boundary_id} is frozen)")
+        raise RuntimeError(f"missing golden {path.relative_to(ROOT)}")
     text = path.read_text(encoding="utf-8")
     text = text.replace("<WORKDIR>", str(workdir)).replace("<ROOT>", str(ROOT))
     data = json.loads(text)
@@ -186,8 +160,10 @@ class Boundary:
     id: str
     description: str
     fixtures_dir: str
-    run: Callable[[dict[str, Any], Path], tuple[SideResult, SideResult]] | None = None
     run_new: Callable[[dict[str, Any], Path], SideResult] | None = None
+    # An explicit (old, new) pair instead of a golden; the harness's own
+    # tests use it to drive the comparison logic with synthetic sides.
+    run: Callable[[dict[str, Any], Path], tuple[SideResult, SideResult]] | None = None
     error_categories: tuple[tuple[re.Pattern[str], str], ...] = ()
     key_mapping: dict[str, str] = field(default_factory=dict)  # v3 key -> v2 key
     canonical_json_keys: set[str] = field(default_factory=set)  # keys compared as canonical JSON (sorted keys)
@@ -197,17 +173,11 @@ class Boundary:
     static_exclusions: dict[str, str] = field(default_factory=dict)  # v2 key -> reason
 
     def sides(self, fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
-        if GOLDEN_MODE == "record":
-            if self.run is None:
-                raise RuntimeError(f"boundary {self.id} is frozen; its golden cannot be re-recorded")
-            left, right = self.run(fixture, workdir)
-            write_golden(self.id, fixture["fixture"], left, workdir)
-            return left, right
-        if self.run_new is not None:
-            return read_golden(self.id, fixture["fixture"], workdir), self.run_new(fixture, workdir)
-        if self.run is None:
-            raise RuntimeError(f"boundary {self.id} has neither a live pair nor a frozen v3 side")
-        return self.run(fixture, workdir)
+        if self.run is not None:
+            return self.run(fixture, workdir)
+        if self.run_new is None:
+            raise RuntimeError(f"boundary {self.id} has no v3 side")
+        return read_golden(self.id, fixture["fixture"], workdir), self.run_new(fixture, workdir)
 
     def evaluate(self, fixture: dict[str, Any], workdir: Path) -> FixtureOutcome:
         try:
@@ -1639,10 +1609,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--boundary", action="append", help="restrict to these boundary ids")
     parser.add_argument("--report", help="write the structured parity report JSON here")
     parser.add_argument("--skip-gates", action="store_true", help="skip the migration gates")
-    parser.add_argument("--record-goldens", action="store_true", help="re-run live v2 sides and rewrite their goldens")
     args = parser.parse_args(argv)
-    global GOLDEN_MODE
-    GOLDEN_MODE = "record" if args.record_goldens else ""
     if not (ROOT / "dist" / "index.js").is_file():
         parser.error("dist/index.js is missing; run `npm run build` first")
 
