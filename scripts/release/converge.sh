@@ -6,9 +6,14 @@
 #                                            the dist build itself
 #
 # A release is complete when the version tag exists, the floating major tag
-# (stable releases) points at the version tag's commit, the GitHub Release
-# exists, and the merged release PR is marked `autorelease: tagged` (and not
-# `autorelease: pending`). Every step is idempotent, so any later run
+# (stable releases) points at the version tag's commit, the `source-<tag>`
+# anchor points at the release commit on main, the GitHub Release exists, and
+# the merged release PR is marked `autorelease: tagged` (and not
+# `autorelease: pending`).
+#
+# The version tag points at a dist build commit off main, which release-please
+# can never find in main's history (#906). The anchor is the tag release-please
+# tracks instead (component `source` in release-please-config.json). Every step is idempotent, so any later run
 # converges a partially published release; the PR check fails closed.
 # Needs `git` (with an `origin` remote), `gh`, and GITHUB_REPOSITORY.
 set -euo pipefail
@@ -23,6 +28,7 @@ TAGGED="autorelease: tagged"
 remote_sha() { git ls-remote origin "refs/tags/$1" | cut -f1; }
 stable() { [[ "$TAG" != *-* ]]; }
 major_tag() { local version=${TAG#v}; echo "v${version%%.*}"; }
+ANCHOR="source-$TAG"
 # The release PR and its labels are read fail-closed: any lookup failure
 # leaves the PR state unknown, which never counts as complete.
 PR=""
@@ -47,18 +53,20 @@ major_ok=true
 if stable && [ "$tag_present" = true ] && [ "$(remote_sha "$(major_tag)")" != "$tag_sha" ]; then
   major_ok=false
 fi
+anchor_ok=false
+[ "$(remote_sha "$ANCHOR")" = "$SHA" ] && anchor_ok=true
 release_present=false
 gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 && release_present=true
 read_pr_state 2>/dev/null || PR_STATE=unknown
 
 complete=false
-if [ "$tag_present" = true ] && [ "$major_ok" = true ] && [ "$release_present" = true ] && [ "$PR_STATE" = tagged ]; then
+if [ "$tag_present" = true ] && [ "$major_ok" = true ] && [ "$anchor_ok" = true ] && [ "$release_present" = true ] && [ "$PR_STATE" = tagged ]; then
   complete=true
 fi
 
 if [ "$MODE" = state ]; then
   printf '%s\n' \
-    "tag_present=$tag_present" "major_ok=$major_ok" "release_present=$release_present" \
+    "tag_present=$tag_present" "major_ok=$major_ok" "anchor_ok=$anchor_ok" "release_present=$release_present" \
     "pr_state=$PR_STATE" "complete=$complete" "needs_build=$([ "$tag_present" = true ] && echo false || echo true)"
   exit 0
 fi
@@ -71,6 +79,11 @@ fi
 if [ "$major_ok" = false ]; then
   git push --force origin "$tag_sha:refs/tags/$(major_tag)" >&2
   echo "converge: moved $(major_tag) to $TAG ($tag_sha)"
+fi
+
+if [ "$anchor_ok" = false ]; then
+  git push --force origin "$SHA:refs/tags/$ANCHOR" >&2
+  echo "converge: pointed $ANCHOR at the release commit ($SHA)"
 fi
 
 if [ "$release_present" = false ]; then

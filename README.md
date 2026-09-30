@@ -1168,6 +1168,7 @@ Releases are cut when features or fixes are ready (no fixed cadence). Tags are `
 - **Minor** (`Y`): new inputs, outputs, tools, or modes — always additive. New inputs default to the previous behavior (typically off), so an un-edited workflow behaves identically after upgrading.
 - **Major** (`X`): anything that can require a consumer to edit their workflow — removing or renaming inputs/outputs, changing a default that alters the published review or verdict behavior, or dropping platform support. Breaking changes are batched into majors rather than trickled through deprecation cycles.
 - **Deprecations**: a deprecated input keeps working (with a log warning) for the remainder of the current major and is removed in the next one. Deprecations and removals are always called out in the release notes.
+- **`source-vX.Y.Z` tags** mark each release's source commit on `main` for release tooling. They have no `dist/`, so never pin to them.
 - **Pre-releases**: `vX.Y.Z-rc.N` tags are supported for testing a release candidate. Pre-releases are marked as such on GitHub Releases and do **not** advance the floating major tag, so `@vX` consumers never receive an RC.
 
 To publish, run **Actions → Manual Release → Run workflow** with the target version. The workflow tags protected `main`, advances the matching floating major tag (`v1`, `v2`, and so on; stable releases only), and creates the GitHub release.

@@ -44,8 +44,8 @@ BUILD="$(git rev-parse HEAD)"
 git -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m "older build"
 OLD="$(git rev-parse HEAD)"
 
-reset_state() { rm -f "$FAKE/release" "$FAKE/log" "$FAKE/labels" "$FAKE/pr" "$FAKE/pr_fail" "$FAKE/labels_fail"; for t in v3.0.0 v3 v3.1.0-rc.1; do git push -q origin --delete "$t" 2>/dev/null || true; done; }
-published() { git push -q origin "$BUILD:refs/tags/v3.0.0" "$BUILD:refs/tags/v3"; touch "$FAKE/release"; echo 42 > "$FAKE/pr"; }
+reset_state() { rm -f "$FAKE/release" "$FAKE/log" "$FAKE/labels" "$FAKE/pr" "$FAKE/pr_fail" "$FAKE/labels_fail"; for t in v3.0.0 v3 v3.1.0-rc.1 source-v3.0.0 source-v3.1.0-rc.1; do git push -q origin --delete "$t" 2>/dev/null || true; done; }
+published() { git push -q origin "$BUILD:refs/tags/v3.0.0" "$BUILD:refs/tags/v3" "$BASE:refs/tags/source-v3.0.0"; touch "$FAKE/release"; echo 42 > "$FAKE/pr"; }
 state() { bash "$SCRIPT" state v3.0.0 "$BASE" | grep "^$1=" | cut -d= -f2; }
 
 echo "=== nothing published: build needed ==="
@@ -113,6 +113,18 @@ echo "=== no release PR resolvable: fail closed ==="
 reset_state; git push -q origin "$BUILD:refs/tags/v3.0.0" "$BUILD:refs/tags/v3"; touch "$FAKE/release"
 check "never complete" '[ "$(state complete)" = false ]'
 check "finish exits non-zero" '! bash "$SCRIPT" finish v3.0.0 "$BASE" >/dev/null 2>&1'
+
+echo "=== #906: source anchor missing or pointing off the release commit ==="
+reset_state; published; printf 'autorelease: tagged\n' > "$FAKE/labels"
+git push -q origin --delete source-v3.0.0
+check "incomplete without the anchor" '[ "$(state complete)" = false ] && [ "$(state anchor_ok)" = false ]'
+bash "$SCRIPT" finish v3.0.0 "$BASE" >/dev/null 2>&1
+check "anchor created at the release commit, not the build" '[ "$(git ls-remote origin refs/tags/source-v3.0.0 | cut -f1)" = "$BASE" ]'
+check "complete afterwards" '[ "$(state complete)" = true ]'
+git push -q --force origin "$BUILD:refs/tags/source-v3.0.0"
+check "an anchor on the build commit is not ok" '[ "$(state anchor_ok)" = false ]'
+bash "$SCRIPT" finish v3.0.0 "$BASE" >/dev/null 2>&1
+check "anchor moved back to the release commit" '[ "$(git ls-remote origin refs/tags/source-v3.0.0 | cut -f1)" = "$BASE" ]'
 
 echo "=== PR already tagged: complete, finish is a no-op ==="
 reset_state; published; printf 'autorelease: tagged\n' > "$FAKE/labels"

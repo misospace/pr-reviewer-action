@@ -10,7 +10,8 @@
 # (skip-github-release). When a release PR merges, publish-release-build commits
 # the built bundle on top of the release commit (off main), smokes it as
 # consumers get it, and only then points vX.Y.Z and vX at it and creates the
-# GitHub Release.
+# GitHub Release. Because vX.Y.Z is off main, release-please tracks a
+# `source-vX.Y.Z` anchor tag on the release commit instead (#906).
 name: Release Please
 
 on:
