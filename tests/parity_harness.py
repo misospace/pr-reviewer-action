@@ -564,7 +564,7 @@ CONFIG_BOUNDARY = Boundary(
         "loader (dist/index.js)."
     ),
     fixtures_dir="config",
-    run=lambda fixture, workdir: (run_v2_config(fixture, workdir), run_v3_config(fixture, workdir)),
+    run_new=run_v3_config,
     error_categories=CONFIG_CATEGORIES,
     scope_rule="config",
     static_exclusions={
@@ -625,10 +625,7 @@ TRUNCATION_BOUNDARY = Boundary(
         "variant must pass."
     ),
     fixtures_dir="dataflow-662",
-    run=lambda fixture, workdir: (
-        make_truncation_runner("old")(fixture, workdir),
-        make_truncation_runner("new")(fixture, workdir),
-    ),
+    run_new=lambda fixture, workdir: read_golden("dataflow-662-corpus-truncation", fixture["fixture"] + ".new", workdir),
 )
 
 # ---------------------------------------------------------------------------
@@ -704,7 +701,7 @@ PRECHECK_BOUNDARY = Boundary(
         "superseded heads, and GitHub vs Forgejo."
     ),
     fixtures_dir="precheck",
-    run=lambda fixture, workdir: (run_v2_precheck(fixture, workdir), run_v3_precheck(fixture, workdir)),
+    run_new=run_v3_precheck,
     error_categories=PRECHECK_CATEGORIES,
 )
 
@@ -751,7 +748,7 @@ MODEL_REQUEST_BOUNDARY = Boundary(
         "output modes, and streaming options."
     ),
     fixtures_dir="model-request",
-    run=lambda fixture, workdir: (run_v2_request(fixture, workdir), run_v3_request(fixture, workdir)),
+    run_new=run_v3_request,
 )
 
 
@@ -804,7 +801,7 @@ VERDICT_BOUNDARY = Boundary(
         "invalid verdict, flattened markdown, endpoint errors)."
     ),
     fixtures_dir="verdict-parsing",
-    run=lambda fixture, workdir: (run_v2_verdict(fixture, workdir), run_v3_verdict(fixture, workdir)),
+    run_new=run_v3_verdict,
     error_categories=VERDICT_CATEGORIES,
 )
 
@@ -849,7 +846,7 @@ COVERAGE_BOUNDARY = Boundary(
         "version-1 coverage artifact."
     ),
     fixtures_dir="required-check-coverage",
-    run=lambda fixture, workdir: (run_v2_required_checks(fixture, workdir), run_v3_required_checks(fixture, workdir)),
+    run_new=run_v3_required_checks,
 )
 
 
@@ -897,7 +894,7 @@ TOOL_BUDGET_BOUNDARY = Boundary(
         "regress to a single undifferentiated ceiling."
     ),
     fixtures_dir="tool-budget",
-    run=lambda fixture, workdir: (run_v2_tool_budget(fixture, workdir), run_v3_tool_budget(fixture, workdir)),
+    run_new=run_v3_tool_budget,
 )
 
 
@@ -947,7 +944,7 @@ CLASSIFICATION_BOUNDARY = Boundary(
         "risk flags and role selection."
     ),
     fixtures_dir="classification",
-    run=lambda fixture, workdir: (run_v2_classification(fixture, workdir), run_v3_classification(fixture, workdir)),
+    run_new=run_v3_classification,
 )
 
 
@@ -981,10 +978,7 @@ REQUIREMENT_LEDGER_BOUNDARY = Boundary(
         "heading forgery)."
     ),
     fixtures_dir="requirement-ledger",
-    run=lambda fixture, workdir: (
-        run_v2_requirement_ledger(fixture, workdir),
-        run_v3_requirement_ledger(fixture, workdir),
-    ),
+    run_new=run_v3_requirement_ledger,
 )
 
 
@@ -1018,7 +1012,7 @@ ENRICHMENT_BOUNDARY = Boundary(
         "policy owned by the platform/tool boundaries and stays in v2."
     ),
     fixtures_dir="enrichment-normalization",
-    run=lambda fixture, workdir: (run_v2_enrichment(fixture, workdir), run_v3_enrichment(fixture, workdir)),
+    run_new=run_v3_enrichment,
 )
 
 
@@ -1070,7 +1064,7 @@ REPO_MAP_BOUNDARY = Boundary(
         "and the clean no-Git failure."
     ),
     fixtures_dir="repo-map",
-    run=lambda fixture, workdir: (run_v2_repo_map(fixture, workdir), run_v3_repo_map(fixture, workdir)),
+    run_new=run_v3_repo_map,
 )
 
 
@@ -1102,7 +1096,7 @@ DIFF_PRIORITY_BOUNDARY = Boundary(
         "TypeScript port. Outputs compare as base64 so invalid UTF-8 survives."
     ),
     fixtures_dir="diff-priority",
-    run=lambda fixture, workdir: (run_v2_diff_priority(fixture, workdir), run_v3_diff_priority(fixture, workdir)),
+    run_new=run_v3_diff_priority,
 )
 
 
@@ -1133,7 +1127,7 @@ REVIEW_THREADS_BOUNDARY = Boundary(
         "view) versus the v3 TypeScript port."
     ),
     fixtures_dir="review-threads",
-    run=lambda fixture, workdir: (run_v2_review_threads(fixture, workdir), run_v3_review_threads(fixture, workdir)),
+    run_new=run_v3_review_threads,
 )
 
 
@@ -1165,7 +1159,7 @@ HUMAN_REVIEWS_BOUNDARY = Boundary(
         "enforcement view) versus the v3 TypeScript port."
     ),
     fixtures_dir="human-reviews",
-    run=lambda fixture, workdir: (run_v2_human_reviews(fixture, workdir), run_v3_human_reviews(fixture, workdir)),
+    run_new=run_v3_human_reviews,
 )
 
 
@@ -1202,7 +1196,7 @@ PR_THREAD_BOUNDARY = Boundary(
         "custom managed-marker substring mode."
     ),
     fixtures_dir="pr-thread",
-    run=lambda fixture, workdir: (run_v2_pr_thread(fixture, workdir), run_v3_pr_thread(fixture, workdir)),
+    run_new=run_v3_pr_thread,
 )
 
 
@@ -1250,7 +1244,7 @@ RELATED_CODE_BOUNDARY = Boundary(
         "identical harness-prepared worktrees."
     ),
     fixtures_dir="related-code",
-    run=lambda fixture, workdir: (run_v2_related_code(fixture, workdir), run_v3_related_code(fixture, workdir)),
+    run_new=run_v3_related_code,
 )
 
 
@@ -1278,28 +1272,21 @@ def _resolve_change_anchors_fixture(fixture: dict[str, Any], workdir: Path) -> t
     return resolved, path
 
 
-def _change_anchors_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
+def _change_anchors_run(fixture: dict[str, Any], workdir: Path) -> SideResult:
     node = os.environ.get("PARITY_NODE") or shutil.which("node")
     if not node:
         raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 22)")
     resolved, fixture_path = _resolve_change_anchors_fixture(fixture, workdir)
-    # Both sides see the same workspace path (prepared fresh for each), so
-    # CLI stderr that echoes it compares without relying on scrubbing.
+    # The frozen v2 side saw this same workspace path, so CLI stderr that
+    # echoes it compares without relying on scrubbing.
     workspace = workdir / "change-anchors-ws"
     prepare_workspace(workspace, resolved)
-    old = run_json_runner(
-        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_change_anchors.py"), str(fixture_path), str(workspace)],
-        workdir,
-        timeout=120,
-    )
-    prepare_workspace(workspace, resolved)
-    new = run_json_runner(
+    return run_json_runner(
         [node, "dist/index.js", "change-anchors-fixture", str(fixture_path)],
         workdir,
         timeout=120,
         env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(workdir), "PARITY_REPO_DIR": str(workspace)},
     )
-    return old, new
 
 
 CHANGE_ANCHORS_BOUNDARY = Boundary(
@@ -1316,7 +1303,7 @@ CHANGE_ANCHORS_BOUNDARY = Boundary(
         "related-code fixture also prove its anchors are the extractor output."
     ),
     fixtures_dir="change-anchors",
-    run=_change_anchors_run,
+    run_new=_change_anchors_run,
 )
 
 
@@ -1352,7 +1339,7 @@ IMAGE_PROVENANCE_BOUNDARY = Boundary(
         "registry token, Bearer/Accept headers, unauthenticated compare)."
     ),
     fixtures_dir="image-provenance",
-    run=lambda fixture, workdir: (run_v2_image_provenance(fixture, workdir), run_v3_image_provenance(fixture, workdir)),
+    run_new=run_v3_image_provenance,
 )
 
 
@@ -1391,41 +1378,39 @@ CORPUS_BOUNDARY = Boundary(
         "slot semantics, fork gating, and presence signals."
     ),
     fixtures_dir="corpus",
-    run=lambda fixture, workdir: (run_v2_corpus(fixture, workdir), run_v3_corpus(fixture, workdir)),
+    run_new=run_v3_corpus,
     error_categories=CORPUS_CATEGORIES,
 )
 
-def _run_new_boundary(runner: str, cli: str, fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
+def _run_v3_cli(cli: str, fixture: dict[str, Any], workdir: Path) -> SideResult:
     node = os.environ.get("PARITY_NODE") or shutil.which("node")
     if not node:
         raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 22)")
-    old = run_json_runner([sys.executable, str(ROOT / "tests" / "parity_runners" / runner), str(_fixture_path(fixture))], workdir, timeout=120)
-    new = run_json_runner([node, "dist/index.js", cli, str(_fixture_path(fixture))], workdir, timeout=120, env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(workdir)})
-    return old, new
+    return run_json_runner([node, "dist/index.js", cli, str(_fixture_path(fixture))], workdir, timeout=120, env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(workdir)})
 
 
-def _conversation_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
-    return _run_new_boundary("v2_conversation.py", "conversation-fixture", fixture, workdir)
+def _conversation_run(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return _run_v3_cli("conversation-fixture", fixture, workdir)
 
 
-def _escalation_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
-    return _run_new_boundary("v2_escalation.py", "escalation-fixture", fixture, workdir)
+def _escalation_run(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return _run_v3_cli("escalation-fixture", fixture, workdir)
 
 
-def _tool_loop_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
-    return _run_new_boundary("v2_tool_loop.py", "tool-loop-fixture", fixture, workdir)
+def _tool_loop_run(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return _run_v3_cli("tool-loop-fixture", fixture, workdir)
 
 
-def _specialist_corpus_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
-    return _run_new_boundary("v2_specialist_corpus.py", "specialist-corpus-fixture", fixture, workdir)
+def _specialist_corpus_run(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return _run_v3_cli("specialist-corpus-fixture", fixture, workdir)
 
 
-def _specialist_payload_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
-    return _run_new_boundary("v2_specialist_payload.py", "specialist-payload-fixture", fixture, workdir)
+def _specialist_payload_run(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return _run_v3_cli("specialist-payload-fixture", fixture, workdir)
 
 
-def _specialist_normalize_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
-    return _run_new_boundary("v2_specialist_normalize.py", "specialist-normalize-fixture", fixture, workdir)
+def _specialist_normalize_run(fixture: dict[str, Any], workdir: Path) -> SideResult:
+    return _run_v3_cli("specialist-normalize-fixture", fixture, workdir)
 
 # ---------------------------------------------------------------------------
 # Boundaries: enforcement / publishing / metadata (#680)
@@ -1444,7 +1429,7 @@ ENFORCEMENT_BOUNDARY = Boundary(
         "banner normalization, and the #624 requirement-coverage fold."
     ),
     fixtures_dir="enforcement-pipeline",
-    run=lambda fixture, workdir: _run_new_boundary("v2_enforcement.py", "enforcement-fixture", fixture, workdir),
+    run_new=lambda fixture, workdir: _run_v3_cli("enforcement-fixture", fixture, workdir),
 )
 
 REQUIREMENT_COVERAGE_BOUNDARY = Boundary(
@@ -1456,7 +1441,7 @@ REQUIREMENT_COVERAGE_BOUNDARY = Boundary(
         "and out-of-ledger errors, visible caps)."
     ),
     fixtures_dir="requirement-coverage",
-    run=lambda fixture, workdir: _run_new_boundary("v2_requirement_coverage.py", "requirement-coverage-fixture", fixture, workdir),
+    run_new=lambda fixture, workdir: _run_v3_cli("requirement-coverage-fixture", fixture, workdir),
 )
 
 SANITIZE_BOUNDARY = Boundary(
@@ -1467,7 +1452,7 @@ SANITIZE_BOUNDARY = Boundary(
         "preservation, and fence-aware empty-conditional-section stripping."
     ),
     fixtures_dir="review-sanitize",
-    run=lambda fixture, workdir: _run_new_boundary("v2_sanitize.py", "sanitize-fixture", fixture, workdir),
+    run_new=lambda fixture, workdir: _run_v3_cli("sanitize-fixture", fixture, workdir),
 )
 
 INLINE_FINDINGS_BOUNDARY = Boundary(
@@ -1479,7 +1464,7 @@ INLINE_FINDINGS_BOUNDARY = Boundary(
         "sanitization of comment bodies."
     ),
     fixtures_dir="inline-findings",
-    run=lambda fixture, workdir: _run_new_boundary("v2_inline_findings.py", "inline-findings-fixture", fixture, workdir),
+    run_new=lambda fixture, workdir: _run_v3_cli("inline-findings-fixture", fixture, workdir),
 )
 
 METADATA_MARKERS_BOUNDARY = Boundary(
@@ -1492,7 +1477,7 @@ METADATA_MARKERS_BOUNDARY = Boundary(
         "output from forging action-owned markers."
     ),
     fixtures_dir="metadata-markers",
-    run=lambda fixture, workdir: _run_new_boundary("v2_metadata_markers.py", "metadata-markers-fixture", fixture, workdir),
+    run_new=lambda fixture, workdir: _run_v3_cli("metadata-markers-fixture", fixture, workdir),
 )
 
 
@@ -1511,7 +1496,7 @@ PLATFORM_NORMALIZATION_BOUNDARY = Boundary(
         "the request log."
     ),
     fixtures_dir="platform-normalization",
-    run=lambda fixture, workdir: _run_new_boundary("v2_platform_normalization.py", "platform-normalization-fixture", fixture, workdir),
+    run_new=lambda fixture, workdir: _run_v3_cli("platform-normalization-fixture", fixture, workdir),
 )
 
 PROMPT_ASSEMBLY_BOUNDARY = Boundary(
@@ -1529,7 +1514,7 @@ PROMPT_ASSEMBLY_BOUNDARY = Boundary(
         "(plus sha256) of the system prompt and user message."
     ),
     fixtures_dir="prompt-assembly",
-    run=lambda fixture, workdir: _run_new_boundary("v2_prompt_assembly.py", "prompt-assembly-fixture", fixture, workdir),
+    run_new=lambda fixture, workdir: _run_v3_cli("prompt-assembly-fixture", fixture, workdir),
     error_categories=(
         (re.compile(r"SYSTEM_PROMPT_FILE does not exist"), "system_prompt_file_missing"),
         (re.compile(r"Traceback \(most recent call last\)|user message build failed"), "user_message_build_failed"),
@@ -1561,7 +1546,7 @@ LINKED_SOURCES_BOUNDARY = Boundary(
         "budget-warning count."
     ),
     fixtures_dir="linked-sources",
-    run=lambda fixture, workdir: _run_new_boundary("v2_linked_sources.py", "linked-sources-fixture", fixture, workdir),
+    run_new=lambda fixture, workdir: _run_v3_cli("linked-sources-fixture", fixture, workdir),
     error_categories=LINKED_SOURCES_CATEGORIES,
 )
 
@@ -1573,17 +1558,10 @@ def _producer_git_env() -> dict[str, str]:
     return {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "LC_ALL": "C"}
 
 
-def _context_producers_run(fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
+def _context_producers_run(fixture: dict[str, Any], workdir: Path) -> SideResult:
     node = os.environ.get("PARITY_NODE") or shutil.which("node")
     if not node:
         raise RuntimeError("node executable not found (set PARITY_NODE or install Node >= 22)")
-    repo_v2 = prepare_repo(workdir / "repo-v2", fixture)
-    old = run_json_runner(
-        [sys.executable, str(ROOT / "tests" / "parity_runners" / "v2_context_producers.py"), str(_fixture_path(fixture)), str(repo_v2)],
-        workdir,
-        timeout=180,
-        env={**os.environ, **_producer_git_env()},
-    )
     repo_v3 = prepare_repo(workdir / "repo-v3", fixture)
     new = run_json_runner(
         [node, "dist/index.js", "context-producers-fixture", str(_fixture_path(fixture))],
@@ -1597,14 +1575,12 @@ def _context_producers_run(fixture: dict[str, Any], workdir: Path) -> tuple[Side
         },
     )
     # Adversarial containment fixtures (#805) name content that lives outside
-    # the worktree behind a symlink: it must never reach either runtime's
-    # output, whatever the two sides agree on.
+    # the worktree behind a symlink: it must never reach the runtime's output.
     for marker in fixture.get("forbidden_output") or []:
-        for side, result in (("v2", old), ("v3", new)):
-            leaked = [key for key, value in result.values.items() if marker in str(value)]
-            if leaked or marker in (result.error or ""):
-                raise RuntimeError(f"{side} output leaked out-of-checkout content {marker!r} via {leaked or ['<error>']}")
-    return old, new
+        leaked = [key for key, value in new.values.items() if marker in str(value)]
+        if leaked or marker in (new.error or ""):
+            raise RuntimeError(f"v3 output leaked out-of-checkout content {marker!r} via {leaked or ['<error>']}")
+    return new
 
 
 CONTEXT_PRODUCERS_BOUNDARY = Boundary(
@@ -1621,7 +1597,7 @@ CONTEXT_PRODUCERS_BOUNDARY = Boundary(
         "artifact compared byte for byte."
     ),
     fixtures_dir="context-producers",
-    run=_context_producers_run,
+    run_new=_context_producers_run,
     error_categories=(
         (re.compile(r"jq: error|jq: projection failed"), "projection-failed"),
     ),
@@ -1641,7 +1617,7 @@ CI_GATE_BOUNDARY = Boundary(
         "mid-wait, self-exclusion, and the approved transient-read divergence."
     ),
     fixtures_dir="ci-gate",
-    run=lambda fixture, workdir: _run_new_boundary("v2_ci_gate.py", "ci-gate-fixture", fixture, workdir),
+    run_new=lambda fixture, workdir: _run_v3_cli("ci-gate-fixture", fixture, workdir),
 )
 
 SPECIALISTS_GATE_BOUNDARY = Boundary(
@@ -1663,7 +1639,7 @@ SPECIALISTS_GATE_BOUNDARY = Boundary(
         "names with the contract floats."
     ),
     fixtures_dir="specialists-gate",
-    run=lambda fixture, workdir: _run_new_boundary("v2_specialists_gate.py", "specialists-gate-fixture", fixture, workdir),
+    run_new=lambda fixture, workdir: _run_v3_cli("specialists-gate-fixture", fixture, workdir),
 )
 
 EVIDENCE_PROVIDERS_BOUNDARY = Boundary(
@@ -1680,7 +1656,7 @@ EVIDENCE_PROVIDERS_BOUNDARY = Boundary(
         "head/tail markdown caps, and the byte-exact .md/.json artifacts."
     ),
     fixtures_dir="evidence-providers",
-    run=lambda fixture, workdir: _run_new_boundary("v2_evidence_providers.py", "evidence-providers-fixture", fixture, workdir),
+    run_new=lambda fixture, workdir: _run_v3_cli("evidence-providers-fixture", fixture, workdir),
 )
 
 SARIF_BOUNDARY = Boundary(
@@ -1694,13 +1670,13 @@ SARIF_BOUNDARY = Boundary(
         "redaction before storage, rendering) versus the v3 port."
     ),
     fixtures_dir="sarif",
-    run=lambda fixture, workdir: _run_new_boundary("v2_evidence_providers.py", "evidence-providers-fixture", fixture, workdir),
+    run_new=lambda fixture, workdir: _run_v3_cli("evidence-providers-fixture", fixture, workdir),
 )
 
 NEW_BOUNDARIES = (
-    Boundary(id="conversation-rendering", description="Conversation wire rendering and corpus dedup parity.", fixtures_dir="conversation-rendering", run=_conversation_run, canonical_json_keys={"result"}),
-    Boundary(id="escalation-decision", description="Escalation request and telemetry parity.", fixtures_dir="escalation-decision", run=_escalation_run, canonical_json_keys={"result"}),
-    Boundary(id="tool-loop", description="Native tool-loop deterministic state-machine parity.", fixtures_dir="tool-loop", run=_tool_loop_run, canonical_json_keys={"result"}),
+    Boundary(id="conversation-rendering", description="Conversation wire rendering and corpus dedup parity.", fixtures_dir="conversation-rendering", run_new=_conversation_run, canonical_json_keys={"result"}),
+    Boundary(id="escalation-decision", description="Escalation request and telemetry parity.", fixtures_dir="escalation-decision", run_new=_escalation_run, canonical_json_keys={"result"}),
+    Boundary(id="tool-loop", description="Native tool-loop deterministic state-machine parity.", fixtures_dir="tool-loop", run_new=_tool_loop_run, canonical_json_keys={"result"}),
     Boundary(
         id="specialist-corpus",
         description=(
@@ -1711,7 +1687,7 @@ NEW_BOUNDARIES = (
             "against the v3 TypeScript port."
         ),
         fixtures_dir="specialist-corpus",
-        run=_specialist_corpus_run,
+        run_new=_specialist_corpus_run,
         canonical_json_keys={"result"},
     ),
     Boundary(
@@ -1724,7 +1700,7 @@ NEW_BOUNDARIES = (
             "the v3 TypeScript port."
         ),
         fixtures_dir="specialist-payload",
-        run=_specialist_payload_run,
+        run_new=_specialist_payload_run,
         canonical_json_keys={"result"},
     ),
     Boundary(
@@ -1738,7 +1714,7 @@ NEW_BOUNDARIES = (
             "retry decision, byte-exact against the v3 TypeScript port."
         ),
         fixtures_dir="specialist-normalize",
-        run=_specialist_normalize_run,
+        run_new=_specialist_normalize_run,
         canonical_json_keys={"result"},
     ),
     ENFORCEMENT_BOUNDARY,
