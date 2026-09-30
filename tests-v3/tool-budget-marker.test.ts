@@ -62,3 +62,50 @@ test("#847: buildRunMetadataMarker omits the tool-budget keys entirely when no h
   assert.doesNotMatch(marker, /tool_budget/);
   assert.doesNotMatch(marker, /tool_calls/);
 });
+
+// ---------------------------------------------------------------------------
+// #895 — tool_rounds/max_rounds record the loop's round usage next to
+// tool_budget/tool_calls, additively (appended last).
+// ---------------------------------------------------------------------------
+
+test("#895: buildMetadataMarker appends tool_rounds/max_rounds last, after tool_calls", () => {
+  const marker = buildMetadataMarker({
+    head_sha: "h",
+    base_sha: "b",
+    review_result: "clean",
+    tool_budget: 32,
+    tool_budget_source: "size-scaled",
+    tool_calls: 30,
+    tool_rounds: 15,
+    max_rounds: 16,
+  });
+  assert.equal(
+    marker,
+    '<!-- ai-pr-reviewer:{"version":1,"head_sha":"h","base_sha":"b","review_result":"clean",' +
+      '"tool_budget":32,"tool_budget_source":"size-scaled","tool_calls":30,"tool_rounds":15,"max_rounds":16} -->',
+  );
+});
+
+test("#895: a zero tool_rounds is recorded, not treated as absent", () => {
+  const marker = buildMetadataMarker({ head_sha: "h", base_sha: "b", review_result: "clean", tool_rounds: 0, max_rounds: 16 });
+  assert.match(marker, /"tool_rounds":0/);
+  assert.match(marker, /"max_rounds":16/);
+});
+
+test("#895: buildRunMetadataMarker wires toolRounds/maxRounds through additively", () => {
+  const marker = buildRunMetadataMarker({
+    headSha: "h",
+    baseSha: "b",
+    reviewResult: "clean",
+    toolRounds: 12,
+    maxRounds: 16,
+  });
+  assert.match(marker, /"tool_rounds":12/);
+  assert.match(marker, /"max_rounds":16/);
+});
+
+test("#895: buildRunMetadataMarker omits tool_rounds/max_rounds when unset", () => {
+  const marker = buildRunMetadataMarker({ headSha: "h", baseSha: "b", reviewResult: "clean" });
+  assert.doesNotMatch(marker, /tool_rounds/);
+  assert.doesNotMatch(marker, /max_rounds/);
+});

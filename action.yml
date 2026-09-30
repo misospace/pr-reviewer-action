@@ -386,7 +386,7 @@ inputs:
     required: false
     default: ""
   tool-max-rounds:
-    description: "Round budget for tool_mode=native_loop, where a round is a single model turn: the loop allows up to twice this value (capped at 12) to leave room for one-call-per-turn chains and repair turns. Ignored when tool_mode=off."
+    description: "Round budget for tool_mode=native_loop, where a round is a single model turn. When left at its default, the effective round cap also scales with the resolved tool-max-requests budget (#895) — at least one round per ~2 tool calls — so a larger size-scaled or tiered call budget isn't stopped early by an unscaled round cap; it is bounded at 25 rounds. Set this explicitly to opt back out of that scaling: the loop then allows up to twice the configured value (capped at 12), exactly as before #895, to leave room for one-call-per-turn chains and repair turns. Ignored when tool_mode=off."
     required: false
     default: "4"
   tool-turn-timeout-sec:

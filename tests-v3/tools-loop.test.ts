@@ -8,6 +8,7 @@ import {
   STOP_NO_TOOL_CALLS,
   STOP_REQUEST_ERROR,
   STOP_WALL_CLOCK,
+  TOOL_LOOP_ROUNDS_CEILING,
   adaptiveLoopBudgets,
   driveToolLoop,
   extractToolCalls,
@@ -305,8 +306,38 @@ test("streamed anthropic turns reassembled into OpenAI shape still yield tool ca
   assert.deepEqual(calls, [{ id: "call_1", name: "list_tree", arguments: '{"path": "."}' }]);
 });
 
-test("adaptiveLoopBudgets: rounds double and cap at 12", () => {
+test("adaptiveLoopBudgets: rounds double and cap at 12 (explicit override, the default 4th arg)", () => {
   assert.equal(adaptiveLoopBudgets(2, 5, 30).maxRounds, 4);
   assert.equal(adaptiveLoopBudgets(6, 5, 30).maxRounds, 12);
   assert.equal(adaptiveLoopBudgets(7, 5, 30).maxRounds, 12);
+});
+
+// ---------------------------------------------------------------------------
+// #895 — the round cap didn't scale with the #810 size-scaled tool-call
+// budget, so reviews were stopping on max-rounds with roughly half the call
+// budget unspent. `roundsExplicit: false` is what the harness passes when
+// TOOL_MAX_ROUNDS/SMART_TOOL_MAX_ROUNDS was never explicitly set.
+// ---------------------------------------------------------------------------
+
+test("#895: a default (non-explicit) config with a 32-call budget yields at least 16 rounds", () => {
+  const budgets = adaptiveLoopBudgets(4, 32, 600, false);
+  assert.ok(budgets.maxRounds >= 16, `expected >= 16 rounds, got ${budgets.maxRounds}`);
+});
+
+test("#895: an explicit TOOL_MAX_ROUNDS override is respected — the call budget does not widen it", () => {
+  // Same 32-call budget as above, but the caller resolved maxRounds from an
+  // explicit env override: stays at the pre-#895 doubled-and-capped-at-12
+  // value, exactly like adaptiveLoopBudgets(4, 32, 600) with no 4th arg.
+  const budgets = adaptiveLoopBudgets(4, 32, 600, true);
+  assert.equal(budgets.maxRounds, 8);
+});
+
+test("#895: the scaled round cap holds at the TOOL_LOOP_ROUNDS_CEILING for a large budget", () => {
+  const budgets = adaptiveLoopBudgets(4, 50, 600, false);
+  assert.equal(budgets.maxRounds, TOOL_LOOP_ROUNDS_CEILING);
+});
+
+test("#895: a small non-explicit budget still gets at least the doubled-rounds floor", () => {
+  const budgets = adaptiveLoopBudgets(4, 10, 600, false);
+  assert.equal(budgets.maxRounds, 8); // max(4*2, ceil(10/2)=5) = 8
 });

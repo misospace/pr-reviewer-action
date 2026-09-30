@@ -87,6 +87,11 @@ export interface RunMarkerContext {
   toolBudgetSource?: string;
   /** #847: tool calls the loop actually executed against that budget. */
   toolCalls?: number;
+  /** #895: rounds the loop actually used against `maxRounds` (see
+   * `adaptiveLoopBudgets` in src/tools/loop.ts). */
+  toolRounds?: number;
+  /** #895: the resolved round cap the loop ran against for this run. */
+  maxRounds?: number;
 }
 
 /**
@@ -126,6 +131,8 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
     tool_budget: context.toolBudget ?? null,
     tool_budget_source: context.toolBudgetSource ?? null,
     tool_calls: context.toolCalls ?? null,
+    tool_rounds: context.toolRounds ?? null,
+    max_rounds: context.maxRounds ?? null,
   });
 }
 

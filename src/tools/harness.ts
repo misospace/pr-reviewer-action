@@ -166,15 +166,29 @@ export function envIntBounded(env: EnvLike, name: string, defaultValue: number, 
   return Math.max(minValue, Math.min(maxValue, value));
 }
 
-/** [maxRounds, wallClockSec] for a native-loop tier, from env with defaults. */
-export function resolveLoopLimits(env: EnvLike, tier: string): [number, number] {
+/** True when *name* holds a value `pyInt`-parseable int (i.e. the caller
+ * explicitly set it), regardless of how `envIntBounded` ultimately clamps
+ * it. Distinguishes a user override from the implicit default (#895) so the
+ * round cap can track the tool-call budget only when nobody asked for a
+ * specific round count. */
+function envIntIsSet(env: EnvLike, name: string): boolean {
+  const raw = (env[name] ?? "").trim();
+  return raw !== "" && /^[+-]?[0-9]+(_[0-9]+)*$/.test(raw);
+}
+
+/** [maxRounds, wallClockSec, roundsExplicit] for a native-loop tier, from
+ * env with defaults. `roundsExplicit` is true when TOOL_MAX_ROUNDS (or, on
+ * the smart tier, SMART_TOOL_MAX_ROUNDS) was explicitly set (#895). */
+export function resolveLoopLimits(env: EnvLike, tier: string): [number, number, boolean] {
   let maxRounds = envIntBounded(env, "TOOL_MAX_ROUNDS", 4, 1, 6);
   let wallClock = envIntBounded(env, "TOOL_LOOP_WALL_CLOCK_SEC", 600, 10, 900);
+  let roundsExplicit = envIntIsSet(env, "TOOL_MAX_ROUNDS");
   if (tier === "smart") {
+    roundsExplicit = roundsExplicit || envIntIsSet(env, "SMART_TOOL_MAX_ROUNDS");
     maxRounds = envIntBounded(env, "SMART_TOOL_MAX_ROUNDS", maxRounds, 1, 6);
     wallClock = envIntBounded(env, "SMART_TOOL_LOOP_WALL_CLOCK_SEC", wallClock, 10, 900);
   }
-  return [maxRounds, wallClock];
+  return [maxRounds, wallClock, roundsExplicit];
 }
 
 export function normalizeRepoName(value: string | undefined): string {
@@ -1142,8 +1156,8 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   const toolSchemas = [...TOOL_SCHEMAS];
   if (searchUrl) toolSchemas.push(WEB_SEARCH_SCHEMA);
 
-  const [maxRounds, wallClock] = resolveLoopLimits(env, input.tier);
-  const budgets = adaptiveLoopBudgets(maxRounds, input.maxRequests, wallClock);
+  const [maxRounds, wallClock, roundsExplicit] = resolveLoopLimits(env, input.tier);
+  const budgets = adaptiveLoopBudgets(maxRounds, input.maxRequests, wallClock, roundsExplicit);
   const deadline = input.tier === "smart" ? timeFn() + wallClock : null;
 
   // Read-only MCP tools (#245), allowlisted via TOOL_MCP_SERVERS. Fork-gating

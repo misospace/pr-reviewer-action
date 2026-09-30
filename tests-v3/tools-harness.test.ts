@@ -401,10 +401,19 @@ test("usage accounting reads the OpenAI shape a streamed anthropic turn reassemb
 });
 
 test("resolveLoopLimits: defaults are 4 rounds / 600s; smart overrides; bounds clamp", () => {
-  assert.deepEqual(resolveLoopLimits({}, "primary"), [4, 600]);
-  assert.deepEqual(resolveLoopLimits({ TOOL_MAX_ROUNDS: "9", TOOL_LOOP_WALL_CLOCK_SEC: "5000" }, "primary"), [6, 900]);
-  assert.deepEqual(resolveLoopLimits({ SMART_TOOL_MAX_ROUNDS: "5", SMART_TOOL_LOOP_WALL_CLOCK_SEC: "300" }, "smart"), [5, 300]);
-  assert.deepEqual(resolveLoopLimits({ SMART_TOOL_MAX_ROUNDS: "5" }, "primary"), [4, 600]);
+  assert.deepEqual(resolveLoopLimits({}, "primary"), [4, 600, false]);
+  assert.deepEqual(resolveLoopLimits({ TOOL_MAX_ROUNDS: "9", TOOL_LOOP_WALL_CLOCK_SEC: "5000" }, "primary"), [6, 900, true]);
+  assert.deepEqual(resolveLoopLimits({ SMART_TOOL_MAX_ROUNDS: "5", SMART_TOOL_LOOP_WALL_CLOCK_SEC: "300" }, "smart"), [5, 300, true]);
+  assert.deepEqual(resolveLoopLimits({ SMART_TOOL_MAX_ROUNDS: "5" }, "primary"), [4, 600, false]);
+});
+
+test("resolveLoopLimits: #895 roundsExplicit is false for an unset/unparsable value, true once TOOL_MAX_ROUNDS is set", () => {
+  assert.deepEqual(resolveLoopLimits({ TOOL_MAX_ROUNDS: "" }, "primary"), [4, 600, false]);
+  assert.deepEqual(resolveLoopLimits({ TOOL_MAX_ROUNDS: "nope" }, "primary"), [4, 600, false]);
+  assert.deepEqual(resolveLoopLimits({ TOOL_MAX_ROUNDS: "2" }, "primary"), [2, 600, true]);
+  // On the smart tier, an unset SMART_TOOL_MAX_ROUNDS still inherits an
+  // explicit TOOL_MAX_ROUNDS as the override signal.
+  assert.deepEqual(resolveLoopLimits({ TOOL_MAX_ROUNDS: "2" }, "smart"), [2, 600, true]);
 });
 
 // ---------------------------------------------------------------------------

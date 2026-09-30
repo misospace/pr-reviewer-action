@@ -172,6 +172,10 @@ export interface RunReviewResult {
   toolBudgetSource?: string;
   /** #847: tool calls the loop actually executed against that budget. */
   toolCallsUsed?: number;
+  /** #895: rounds the loop actually used, and the resolved round cap it ran
+   * against (see `adaptiveLoopBudgets` in src/tools/loop.ts). */
+  toolRoundsUsed?: number;
+  toolMaxRounds?: number;
   /** Wall-clock seconds for the whole run. */
   durationSec: number;
 }
@@ -1041,6 +1045,8 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ...(toolBudgetTelemetry.budget !== undefined ? { toolBudget: toolBudgetTelemetry.budget } : {}),
     ...(toolBudgetTelemetry.source !== undefined ? { toolBudgetSource: toolBudgetTelemetry.source } : {}),
     ...(toolBudgetTelemetry.calls !== undefined ? { toolCalls: toolBudgetTelemetry.calls } : {}),
+    ...(toolBudgetTelemetry.rounds !== undefined ? { toolRounds: toolBudgetTelemetry.rounds } : {}),
+    ...(toolBudgetTelemetry.maxRounds !== undefined ? { maxRounds: toolBudgetTelemetry.maxRounds } : {}),
   });
   return {
     outputs,
@@ -1061,6 +1067,8 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ...(toolBudgetTelemetry.budget !== undefined ? { toolBudget: toolBudgetTelemetry.budget } : {}),
     ...(toolBudgetTelemetry.source !== undefined ? { toolBudgetSource: toolBudgetTelemetry.source } : {}),
     ...(toolBudgetTelemetry.calls !== undefined ? { toolCallsUsed: toolBudgetTelemetry.calls } : {}),
+    ...(toolBudgetTelemetry.rounds !== undefined ? { toolRoundsUsed: toolBudgetTelemetry.rounds } : {}),
+    ...(toolBudgetTelemetry.maxRounds !== undefined ? { toolMaxRounds: toolBudgetTelemetry.maxRounds } : {}),
   };
 }
 
@@ -1099,14 +1107,31 @@ function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): {
   budget?: number;
   source?: string;
   calls?: number;
+  rounds?: number;
+  maxRounds?: number;
 } {
   if (harness === null) return {};
-  const out: { budget?: number; source?: string; calls?: number } = {};
+  const out: { budget?: number; source?: string; calls?: number; rounds?: number; maxRounds?: number } = {};
   if (typeof harness.tool_request_budget === "number") out.budget = harness.tool_request_budget;
   if (typeof harness.tool_budget_source === "string" && harness.tool_budget_source !== "") {
     out.source = harness.tool_budget_source;
   }
   if (typeof harness.executed_request_count === "number") out.calls = harness.executed_request_count;
+  // #895: the rounds actually used and the resolved round cap the loop ran
+  // against, lifted from the #702 telemetry object (`usage.rounds_used` /
+  // `budget.max_rounds`) so the marker can show whether the round cap (not
+  // just the call budget) is what stopped the loop.
+  const telemetry = harness.tool_loop_telemetry;
+  if (telemetry !== null && typeof telemetry === "object") {
+    const usage = (telemetry as Record<string, unknown>).usage;
+    if (usage !== null && typeof usage === "object" && typeof (usage as Record<string, unknown>).rounds_used === "number") {
+      out.rounds = (usage as Record<string, unknown>).rounds_used as number;
+    }
+    const budget = (telemetry as Record<string, unknown>).budget;
+    if (budget !== null && typeof budget === "object" && typeof (budget as Record<string, unknown>).max_rounds === "number") {
+      out.maxRounds = (budget as Record<string, unknown>).max_rounds as number;
+    }
+  }
   return out;
 }
 

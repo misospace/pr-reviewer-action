@@ -65,6 +65,14 @@ export interface MetadataOptions {
   /** #847: tool calls the loop actually executed against that budget.
    * Omitted alongside `tool_budget`. */
   tool_calls?: number | null;
+  /** #895: rounds the loop actually used, so the size-scaled round cap can
+   * be measured from published reviews alone. Omitted when no tool harness
+   * ran or the loop never reported a round count. */
+  tool_rounds?: number | null;
+  /** #895: the resolved round cap the loop ran against for this run (see
+   * `adaptiveLoopBudgets` in src/tools/loop.ts). Omitted alongside
+   * `tool_rounds`. */
+  max_rounds?: number | null;
 }
 
 /** Build a metadata marker string for insertion into managed comments
@@ -110,6 +118,12 @@ export function buildMetadataMarker(options: MetadataOptions = {}): string {
   }
   if (options.tool_calls !== null && options.tool_calls !== undefined) {
     data.tool_calls = options.tool_calls;
+  }
+  if (options.tool_rounds !== null && options.tool_rounds !== undefined) {
+    data.tool_rounds = options.tool_rounds;
+  }
+  if (options.max_rounds !== null && options.max_rounds !== undefined) {
+    data.max_rounds = options.max_rounds;
   }
   return `<!-- ai-pr-reviewer:${jsonCompact(data)} -->`;
 }

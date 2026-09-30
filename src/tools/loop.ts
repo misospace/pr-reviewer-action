@@ -87,21 +87,40 @@ export interface LoopBudgets {
 }
 
 /**
- * Right-size the loop budget. A native round is one model turn, so the
- * headroom is 2× the configured rounds (capped at 12); the configured tool-call
- * budget is used as-is. #701: the request budget is TIER-AWARE — the caller
- * resolves the effective budget from the route (primary ~16, smart ~32,
- * escalated up to 40 — see resolveToolMaxRequests in src/tools/budget.ts) and
- * passes it in here. #810: without an explicit override that budget is
- * scaled from the PR's changed files/lines and specialist leads, floored at
- * the route's tier default.
+ * #895: ceiling for the size-scaled round cap below — high enough that a
+ * large tool-call budget isn't strangled by an unscaled round count, low
+ * enough to still bound worst-case loop wall-clock.
+ */
+export const TOOL_LOOP_ROUNDS_CEILING = 25;
+
+/**
+ * Right-size the loop budget. A native round is one model turn. #701: the
+ * request budget is TIER-AWARE — the caller resolves the effective budget
+ * from the route (primary ~16, smart ~32, escalated up to 40 — see
+ * resolveToolMaxRequests in src/tools/budget.ts) and passes it in here.
+ * #810: without an explicit override that budget is scaled from the PR's
+ * changed files/lines and specialist leads, floored at the route's tier
+ * default.
+ *
+ * #895: the round cap didn't scale with that request budget, so reviews
+ * were stopping on `max-rounds` with roughly half the call budget unspent.
+ * When `roundsExplicit` is true (the caller resolved `maxRounds` from a
+ * user-set TOOL_MAX_ROUNDS / SMART_TOOL_MAX_ROUNDS) the cap stays the
+ * original doubled-and-capped-at-12 value — an explicit override is a user
+ * decision, not something the request budget should override. Otherwise the
+ * cap also tracks the tool-call budget (~2 calls/round), so a 32-call budget
+ * gets at least 16 rounds to spend it in, capped at TOOL_LOOP_ROUNDS_CEILING.
  */
 export function adaptiveLoopBudgets(
   maxRounds: number,
   maxToolCalls: number,
   wallClockSec: number,
+  roundsExplicit = true,
 ): LoopBudgets {
-  const rounds = Math.min(Math.max(maxRounds, 1) * 2, 12);
+  const doubled = Math.max(maxRounds, 1) * 2;
+  const rounds = roundsExplicit
+    ? Math.min(doubled, 12)
+    : Math.min(Math.max(doubled, Math.ceil(maxToolCalls / 2)), TOOL_LOOP_ROUNDS_CEILING);
   return {
     maxToolCalls,
     maxRounds: rounds,
