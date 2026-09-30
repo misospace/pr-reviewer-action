@@ -1,7 +1,7 @@
 import type { PlatformAdapter } from "../platform/types.js";
 import { deriveIsFork } from "../platform/pr.js";
 import { canonicalLinkedIssue, type LinkedIssue } from "../context/types.js";
-import { extractLinkedIssueRefs, MAX_LINKED_ISSUES, type LinkedIssueRef } from "./linked-issues.js";
+import { acceptedLinkedIssues, extractLinkedIssueRefs, type LinkedIssueFetchResult, type LinkedIssueRef } from "./linked-issues.js";
 import { collectFromPr, extractIssueIdentifiers, parsePrefixes } from "./linear.js";
 import { pythonJsonStringify } from "./metadata.js";
 import { createHash } from "node:crypto";
@@ -70,25 +70,36 @@ export async function buildSelectionSignature(
   const body = typeof record.body === "string" ? record.body : "";
 
   const issues: { ref: string; repo: string; number: number; labels: string[] }[] = [];
-  // extractLinkedIssueRefs's own bound is a generous safety valve for the
-  // #872 accepted-issue cap (buildLinkedIssueContext); this fingerprint has
-  // no such notion (no closing/pull-request distinction), so it keeps its
-  // pre-existing fetch-count bound explicitly, over the same canonically
-  // deduped set (a bare `#N` and an explicit same-repo `owner/repo#N` are
-  // already merged into one entry upstream, so duplicates never perturb the
-  // hashed signature).
-  for (const item of extractLinkedIssueRefs(body, repo, title).slice(0, MAX_LINKED_ISSUES)) {
-    const fetched = unwrap(await adapter.ghApi(`repos/${item.repo}/issues/${item.number}`));
+  // Shares acceptedLinkedIssues with buildLinkedIssueContext (#872
+  // cross-stage fix): both stages MUST apply the identical accepted-issue
+  // cap (a title ref that resolves to a pull request must not consume one
+  // of the 8 slots here any more than it does over there), over the same
+  // canonically deduped candidate set (a bare `#N` and an explicit
+  // same-repo `owner/repo#N` are already merged into one entry upstream, so
+  // duplicates never perturb the hashed signature).
+  const fetchIssue = async (issueRepo: string, number: number): Promise<LinkedIssueFetchResult> => {
+    const fetched = unwrap(await adapter.ghApi(`repos/${issueRepo}/issues/${number}`));
     if (typeof fetched === "object" && fetched !== null && !(fetched as Record<string, unknown>).error) {
-      issues.push(signatureLinkedIssue(item, canonicalLinkedIssue(fetched, item.repo)));
-    } else {
+      return { ok: true, data: fetched };
+    }
+    const error = typeof fetched === "object" && fetched !== null && (fetched as Record<string, unknown>).error
+      ? String((fetched as Record<string, unknown>).error)
+      : "unusable response";
+    return { ok: false, error };
+  };
+  for await (const outcome of acceptedLinkedIssues(extractLinkedIssueRefs(body, repo, title), fetchIssue)) {
+    if (outcome.kind === "fetch_failed") {
       // Unknown labels cannot be omitted into a skip: fail the build so the
       // caller forces a fresh review.
-      const error = typeof fetched === "object" && fetched !== null && (fetched as Record<string, unknown>).error
-        ? String((fetched as Record<string, unknown>).error)
-        : "unusable response";
-      return { signature: null, error: `linked issue ${item.ref} fetch failed: ${error}` };
+      return { signature: null, error: `linked issue ${outcome.ref.ref} fetch failed: ${outcome.error}` };
     }
+    if (outcome.kind === "accepted") {
+      issues.push(signatureLinkedIssue(outcome.ref, canonicalLinkedIssue(outcome.data, outcome.ref.repo)));
+    }
+    // A "pull_request_skip" outcome is deliberately NOT recorded here, not
+    // even by identity: its content (and any labels fetched to determine
+    // it's a PR) must never perturb the signature, so a label change on the
+    // rejected pull request itself is inert.
   }
 
   const linearState = await linearStateFor(title, {

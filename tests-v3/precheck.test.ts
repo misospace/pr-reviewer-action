@@ -344,6 +344,45 @@ test("selection fingerprint: a duplicate spelling of the same issue is fetched o
   assert.equal(issueFetches, 1, "bare #2 and explicit o/r#2 are the same canonical identity — one fetch");
 });
 
+test("#872 cross-stage: the selection fingerprint applies the SAME accepted-issue cap as buildLinkedIssueContext — a rejected title PR never evicts the real 8th body issue, and its own labels never perturb the signature", async () => {
+  // Title trails "(#879)" — getIssue for #879 returns a pull_request
+  // payload, so the shared acceptedLinkedIssues generator rejects it
+  // without consuming one of the 8 accepted-issue slots. Eight body issues
+  // (#1..#8, closing keywords) are all real and must all be accepted.
+  const body = Array.from({ length: 8 }, (_, i) => `Closes #${i + 1}`).join("\n");
+  const buildAdapter = (selfPrLabels: string[], issue8Labels: string[]): PlatformAdapter => ({
+    platform: "github",
+    ghApi: async (endpoint: string) => {
+      if (endpoint === "repos/o/r/pulls/1") return { data: { title: "feat: thing (#879)", body } };
+      if (endpoint === "repos/o/r/issues/879") {
+        return { data: { number: 879, pull_request: { url: "https://example/pulls/879" }, labels: selfPrLabels.map((name) => ({ name })) } };
+      }
+      const match = /^repos\/o\/r\/issues\/(\d+)$/.exec(endpoint);
+      if (match) {
+        const n = Number(match[1]);
+        const labels = n === 8 ? issue8Labels : [`label-${n}`];
+        return { data: { number: n, labels: labels.map((name) => ({ name })) } };
+      }
+      return { error: `no fixture response for endpoint: ${endpoint}` };
+    },
+  } as unknown as PlatformAdapter);
+
+  const base = await buildSelectionSignature("o/r", "1", buildAdapter(["p0"], ["team-a"]));
+  assert.equal(base.error, "");
+  assert.ok(base.signature, "the signature must build successfully — #8 was not evicted, so no unknown label to fail closed on");
+
+  // Changing issue #8's labels must change the signature: proves #8 (the
+  // real 8th accepted issue) is actually in the hashed payload, not evicted
+  // by the rejected title ref.
+  const issue8Changed = await buildSelectionSignature("o/r", "1", buildAdapter(["p0"], ["team-b"]));
+  assert.notEqual(issue8Changed.signature, base.signature, "issue #8's label change must be visible in the signature");
+
+  // Changing the self-referencing pull request's labels must be inert: it
+  // was rejected, so its labels must never enter the hashed payload.
+  const selfPrChanged = await buildSelectionSignature("o/r", "1", buildAdapter(["p1", "urgent"], ["team-a"]));
+  assert.equal(selfPrChanged.signature, base.signature, "the rejected pull request's labels must never perturb the signature");
+});
+
 // ── Managed body selection ───────────────────────────────────────────────
 
 test("last managed body reads reviews in review_verdict mode, comments otherwise", () => {

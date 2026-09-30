@@ -100,6 +100,71 @@ export function extractLinkedIssueRefs(body: string, defaultRepo?: string, title
   return items;
 }
 
+/** True when a fetched GitHub/Forgejo "issue" payload is actually a pull
+ * request (#872): both platforms' issue-fetch APIs return PRs through the
+ * same endpoint, distinguished only by a `pull_request` object on the raw
+ * payload (GitHub natively; Forgejo's normalized shape passes it through —
+ * see `normalizeForgejoIssue`). A trailing `(#N)` on a squash-merge or
+ * automation-authored title very often names the PR that produced it, not
+ * an issue, and that PR's own content must never masquerade as issue
+ * guidance — in `linked-issues.md` / the requirement ledger, or in the
+ * #633 selection fingerprint. */
+export function isPullRequestPayload(data: unknown): boolean {
+  return typeof data === "object" && data !== null && !Array.isArray(data)
+    && (data as Record<string, unknown>).pull_request != null;
+}
+
+export type LinkedIssueFetchResult = { ok: true; data: unknown } | { ok: false; error: string };
+
+export type LinkedIssueOutcome =
+  | { kind: "accepted"; ref: LinkedIssueRef; data: unknown }
+  | { kind: "pull_request_skip"; ref: LinkedIssueRef }
+  | { kind: "fetch_failed"; ref: LinkedIssueRef; error: string };
+
+/** Shared accepted-issue iteration (#872 cross-stage fix): `buildLinkedIssueContext`
+ * (src/context/linked-issue-context.ts) and `buildSelectionSignature`
+ * (src/precheck/selection.ts) MUST apply identical accepted-issue semantics
+ * over the same candidate list, or their two views of "the linked issues"
+ * can diverge — a title ref that resolves to a pull request must not
+ * consume one of the `cap` slots in either place, or a body issue evicted
+ * from one stage but not the other lets a label change perturb one signal
+ * (classification) without perturbing the other (the stale-review
+ * fingerprint), or vice versa, silently letting precheck skip a review that
+ * should have re-run.
+ *
+ * Iterates `refItems` (the FULL uncapped candidate list from
+ * `extractLinkedIssueRefs`, itself bounded by `MAX_LINKED_ISSUE_CANDIDATES`)
+ * in order, calling `fetchIssue` for each until `cap` issues have been
+ * ACCEPTED — successfully fetched and, for a non-closing ref, not a
+ * pull-request payload. A pull-request payload on a non-closing ref is a
+ * skip: it consumes a fetch (so its content is known), never a slot.
+ * Closing-keyword refs are never rejected as pull requests (parity with
+ * pre-#872 fetch behavior). This generator makes no fail-open/fail-closed
+ * decision on a fetch failure — that is the caller's call: one stage may
+ * continue past a failure (recording it) while another aborts entirely on
+ * the first one. Because refs beyond `cap` accepted issues are never
+ * reached, stopping consumption of the generator early (e.g. via `return`
+ * from a `for await` loop) never triggers any further fetches. */
+export async function* acceptedLinkedIssues(
+  refItems: readonly LinkedIssueRef[],
+  fetchIssue: (repo: string, number: number) => Promise<LinkedIssueFetchResult>,
+  cap: number = MAX_LINKED_ISSUES,
+): AsyncGenerator<LinkedIssueOutcome, void, void> {
+  let accepted = 0;
+  for (const ref of refItems) {
+    if (accepted >= cap) return;
+    const fetched = await fetchIssue(ref.repo, ref.number);
+    if (fetched.ok && !ref.closing && isPullRequestPayload(fetched.data)) {
+      yield { kind: "pull_request_skip", ref };
+    } else if (fetched.ok) {
+      accepted += 1;
+      yield { kind: "accepted", ref, data: fetched.data };
+    } else {
+      yield { kind: "fetch_failed", ref, error: fetched.error };
+    }
+  }
+}
+
 /** Label names from an issue object (GitHub REST shape); empty when
  * unusable. */
 export function labelsOf(issue: unknown): string[] {

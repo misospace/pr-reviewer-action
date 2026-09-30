@@ -33,7 +33,7 @@ import { isPlainObject, jqAlt, jqEach, jqEachOpt, jqField, jqPretty, jqRaw, JqEr
 import { pyOr, pyStr } from "../platform/py.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
 import { collectFromPr, linearIssueToV2, parsePrefixes, pyStrip, renderLinearMarkdown, type CollectResult } from "../precheck/linear.js";
-import { extractLinkedIssueRefs, MAX_LINKED_ISSUES } from "../precheck/linked-issues.js";
+import { acceptedLinkedIssues, extractLinkedIssueRefs, isPullRequestPayload } from "../precheck/linked-issues.js";
 import { pyJsonDump, pyJsonDumpsLine } from "./py-json.js";
 
 export const LINKED_ISSUE_EMBED_BYTES = 12000;
@@ -43,18 +43,11 @@ export class LinkedIssueProjectionError extends Error {}
 
 const enc = (text: string): Buffer => Buffer.from(text, "utf8");
 
-/** True when a fetched GitHub/Forgejo "issue" payload is actually a pull
- * request (#872): both platforms' issue-fetch APIs return PRs through the
- * same endpoint, distinguished only by a `pull_request` object on the raw
- * payload (GitHub natively; Forgejo's normalized shape passes it through —
- * see `normalizeForgejoIssue`). A trailing `(#N)` on a squash-merge or
- * automation-authored title very often names the PR that produced it, not
- * an issue, and that PR's own body must never masquerade as issue guidance
- * in `linked-issues.md` / the requirement ledger. */
-export function isPullRequestPayload(data: unknown): boolean {
-  return typeof data === "object" && data !== null && !Array.isArray(data)
-    && (data as Record<string, unknown>).pull_request != null;
-}
+// Re-exported for existing consumers (src/context/index.ts); the
+// implementation moved to src/precheck/linked-issues.ts (#872 cross-stage
+// fix) so buildSelectionSignature can share it without a context->precheck
+// import cycle.
+export { isPullRequestPayload };
 
 /** `jq '{number,title,state,html_url,labels:[.labels[]?.name],body}'`. */
 export function projectLinkedIssue(issue: unknown): Record<string, unknown> {
@@ -187,14 +180,15 @@ export async function buildLinkedIssueContext(input: LinkedIssueContextInput): P
   const title = pyStr(pyOr(isPlainObject(input.pr) ? input.pr.title : undefined, ""));
   // Extraction is uncapped up to a generous hard safety bound (candidates
   // may include refs this loop never reaches). The MAX_LINKED_ISSUES cap is
-  // enforced HERE, over accepted issues — a fetched-and-projected issue,
-  // i.e. successfully fetched and (for non-closing refs) not rejected as a
-  // pull request — not over raw refs: a title `(#N)` that resolves to a
-  // pull request, or a ref whose fetch fails, must not evict a real issue
-  // from the cap (#872 follow-up). `processedRefs` is exactly the prefix of
-  // candidates this loop actually attempted, in order, and is what
-  // `linked-issues.json` / the requirement ledger see — refs beyond it are
-  // never fetched at all.
+  // enforced by the SHARED `acceptedLinkedIssues` generator (also used by
+  // buildSelectionSignature, #872 cross-stage fix), over accepted issues —
+  // a fetched-and-projected issue, i.e. successfully fetched and (for
+  // non-closing refs) not rejected as a pull request — not over raw refs: a
+  // title `(#N)` that resolves to a pull request, or a ref whose fetch
+  // fails, must not evict a real issue from the cap, in this stage or the
+  // other one. `processedRefs` is exactly the prefix of candidates this
+  // loop actually attempted, in order, and is what `linked-issues.json` /
+  // the requirement ledger see — refs beyond it are never fetched at all.
   const refItems = extractLinkedIssueRefs(body, input.repo, title);
   const md: Buffer[] = [];
   const githubFailures: string[] = [];
@@ -202,21 +196,21 @@ export async function buildLinkedIssueContext(input: LinkedIssueContextInput): P
   const processedRefs: { ref: string; repo: string; number: number }[] = [];
   const labelsByRef = new Map<string, unknown[]>();
   let anyLabels = false;
-  let accepted = 0;
 
-  for (const item of refItems) {
-    if (accepted >= MAX_LINKED_ISSUES) break;
+  for await (const outcome of acceptedLinkedIssues(
+    refItems,
+    (repo, number) => input.adapter.getIssue(repo, String(number)),
+  )) {
+    const item = outcome.ref;
     processedRefs.push({ ref: item.ref, repo: item.repo, number: item.number });
     md.push(enc(`## ${item.ref}\n`));
-    const fetched = await input.adapter.getIssue(item.repo, String(item.number));
-    if (fetched.ok && !item.closing && isPullRequestPayload(fetched.data)) {
+    if (outcome.kind === "pull_request_skip") {
       md.push(enc(`(Skipped issue ${item.ref} from ${item.repo}: linked object is a pull request)\n`));
       pullRequestSkips.push(item.ref);
-    } else if (fetched.ok) {
-      const filtered = projectLinkedIssue(fetched.data);
+    } else if (outcome.kind === "accepted") {
+      const filtered = projectLinkedIssue(outcome.data);
       labelsByRef.set(item.ref, (filtered.labels as unknown[]).map((name) => ({ name })));
       anyLabels = true;
-      accepted += 1;
       md.push(enc("```json\n"), enc(`${jqPretty(filtered)}\n`).subarray(0, LINKED_ISSUE_EMBED_BYTES), enc("\n```\n"));
     } else {
       md.push(enc(`(Could not fetch issue ${item.ref} from ${item.repo})\n`));
