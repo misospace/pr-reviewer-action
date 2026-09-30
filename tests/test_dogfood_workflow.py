@@ -114,6 +114,8 @@ def test_dogfood_workflow_exists() -> None:
 # plus only the overrides that are genuinely this repository's choice.
 DOGFOOD_OVERRIDES = {
     "github-token",
+    "tool-allowed-gh-api-repos",
+    "claim-falsification",
     "ai-base-url",
     "ai-api-format",
     "ai-model",

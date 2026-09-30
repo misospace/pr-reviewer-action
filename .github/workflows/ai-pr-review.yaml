@@ -92,5 +92,7 @@ jobs:
           ai-smart-model: ${{ vars.SMART_MODEL }}
           ai-smart-api-key: ${{ secrets.LITELLM_API_KEY }}
           ci-timeout-sec: "600"
+          tool-allowed-gh-api-repos: "*"
+          claim-falsification: "true"
           publish-mode: review_verdict
           allow-approve: "true"
