@@ -126,6 +126,22 @@ check "an anchor on the build commit is not ok" '[ "$(state anchor_ok)" = false 
 bash "$SCRIPT" finish v3.0.0 "$BASE" >/dev/null 2>&1
 check "anchor moved back to the release commit" '[ "$(git ls-remote origin refs/tags/source-v3.0.0 | cut -f1)" = "$BASE" ]'
 
+echo "=== #906: anchor mode publishes only the source anchor, before anything else ==="
+reset_state
+# New manifest version, consumer tag published, but the source anchor never
+# made it (publication failed before converge): the pre-release-please step
+# must repair it without needing the Release, the PR state or the dist tag.
+git push -q origin "$BUILD:refs/tags/v3.0.0"
+touch "$FAKE/pr_fail" "$FAKE/labels_fail"
+bash "$SCRIPT" anchor v3.0.0 "$BASE" >/dev/null 2>&1
+check "anchor points at the release commit" '[ "$(git ls-remote origin refs/tags/source-v3.0.0 | cut -f1)" = "$BASE" ]'
+check "no Release or PR writes" '[ ! -s "$FAKE/log" ]'
+reset_state
+bash "$SCRIPT" anchor v3.0.0 "$BASE" >/dev/null 2>&1
+check "works before the version tag exists" '[ "$(git ls-remote origin refs/tags/source-v3.0.0 | cut -f1)" = "$BASE" ]'
+bash "$SCRIPT" anchor v3.0.0 "$BASE" >/dev/null 2>&1
+check "idempotent" '[ "$(git ls-remote origin refs/tags/source-v3.0.0 | cut -f1)" = "$BASE" ]'
+
 echo "=== PR already tagged: complete, finish is a no-op ==="
 reset_state; published; printf 'autorelease: tagged\n' > "$FAKE/labels"
 check "complete" '[ "$(state complete)" = true ]'

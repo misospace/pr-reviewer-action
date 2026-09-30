@@ -41,6 +41,23 @@ jobs:
           app-id: ${{ secrets.MISO_APP_ID }}
           private-key: ${{ secrets.MISO_APP_PRIVATE_KEY }}
 
+      - name: Checkout pushed commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      # release-please locates the last release by its source-vX.Y.Z anchor
+      # (#906). Publish the manifest version's anchor before release-please
+      # runs, so a release whose publication failed part-way can never make the
+      # next push regenerate a release PR from the previous version.
+      - name: Anchor the manifest version on main
+        run: |
+          set -euo pipefail
+          VERSION="$(jq -r '."."' .release-please-manifest.json)"
+          SHA="$(git log -1 --format=%H -- .release-please-manifest.json)"
+          scripts/release/converge.sh anchor "v$VERSION" "$SHA"
+
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
         id: release
         with:
@@ -54,12 +71,6 @@ jobs:
       # version at the last commit that changed the manifest; it is unfinished
       # until every publication piece exists (converge.sh), so any later push
       # to main converges a partially published release.
-      - name: Checkout pushed commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
       - name: Detect an unfinished release
         id: detect
         env:

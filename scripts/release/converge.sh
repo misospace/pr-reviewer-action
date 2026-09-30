@@ -4,6 +4,9 @@
 #   converge.sh state  <tag> <release-sha>   print key=value publication state
 #   converge.sh finish <tag> <release-sha>   repair every missing piece except
 #                                            the dist build itself
+#   converge.sh anchor <tag> <release-sha>   point only the source anchor at the
+#                                            release commit (runs before
+#                                            release-please on every push)
 #
 # A release is complete when the version tag exists, the floating major tag
 # (stable releases) points at the version tag's commit, the `source-<tag>`
@@ -29,6 +32,19 @@ remote_sha() { git ls-remote origin "refs/tags/$1" | cut -f1; }
 stable() { [[ "$TAG" != *-* ]]; }
 major_tag() { local version=${TAG#v}; echo "v${version%%.*}"; }
 ANCHOR="source-$TAG"
+
+ensure_anchor() {
+  [ "$(remote_sha "$ANCHOR")" = "$SHA" ] && return 0
+  git push --force origin "$SHA:refs/tags/$ANCHOR" >&2
+  echo "converge: pointed $ANCHOR at the release commit ($SHA)"
+}
+
+# The manifest version is the release decision, so its anchor is published
+# before anything else can fail: release-please reads it on the next push.
+if [ "$MODE" = anchor ]; then
+  ensure_anchor
+  exit 0
+fi
 # The release PR and its labels are read fail-closed: any lookup failure
 # leaves the PR state unknown, which never counts as complete.
 PR=""
@@ -81,10 +97,7 @@ if [ "$major_ok" = false ]; then
   echo "converge: moved $(major_tag) to $TAG ($tag_sha)"
 fi
 
-if [ "$anchor_ok" = false ]; then
-  git push --force origin "$SHA:refs/tags/$ANCHOR" >&2
-  echo "converge: pointed $ANCHOR at the release commit ($SHA)"
-fi
+[ "$anchor_ok" = true ] || ensure_anchor
 
 if [ "$release_present" = false ]; then
   version=${TAG#v}
