@@ -13,7 +13,7 @@ Design:
     HTTP glue.
   * ``run_calibration`` takes an injected ``judge_call(messages) -> str`` so it
     is unit-testable with fakes and never contacts the network in tests. The
-    production transport (``pr_reviewer.transport.run_chat_request``) is built
+    production transport (``pr_reviewer.judge_http.chat_completion``) is built
     only in ``main`` behind ``_openai_judge_call``.
   * Fail-closed: a reference passes ONLY when the judge output parses to exactly
     one of the five dispositions, matches the declared ``expected_disposition``,
@@ -217,9 +217,8 @@ def _openai_judge_call(
     judge_model: str, base_url: str, api_key: str, timeout_sec: int
 ) -> JudgeCall:
     """Production transport: build a single-turn OpenAI chat payload for the
-    judge messages and return the assistant text. Mirrors how
-    scripts/run_specialists.py drives pr_reviewer.transport.run_chat_request."""
-    from pr_reviewer.transport import run_chat_request
+    judge messages and return the assistant text."""
+    from pr_reviewer.judge_http import chat_completion
 
     def _call(messages: list[dict], attempt: int) -> str:
         system = ""
@@ -240,7 +239,7 @@ def _openai_judge_call(
             "temperature": _attempt_temperature(attempt),
             "response_format": {"type": "json_object"},
         }
-        response = run_chat_request(base_url, "openai", payload, api_key, timeout_sec)
+        response = chat_completion(base_url, payload, api_key, timeout_sec)
         return _extract_text(response)
 
     return _call

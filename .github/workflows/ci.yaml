@@ -19,7 +19,6 @@ jobs:
       - validate-typescript
       - validate-python
       - validate-static
-      - validate-bash-timeout
       - validate-bash
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -35,7 +34,6 @@ jobs:
             "validate-typescript ${{ needs.validate-typescript.result }}" \
             "validate-python ${{ needs.validate-python.result }}" \
             "validate-static ${{ needs.validate-static.result }}" \
-            "validate-bash-timeout ${{ needs.validate-bash-timeout.result }}" \
             "validate-bash ${{ needs.validate-bash.result }}"; do
             job="${job_result%% *}"
             result="${job_result#* }"
@@ -200,49 +198,6 @@ jobs:
       - name: Verify Forgejo E2E smoke harness parses
         run: bash -n tests/forgejo_e2e_smoke.sh
 
-  # The two longest bash suites each get their own runner instead of queueing
-  # the other one (or every other suite) behind it. Each job selects its
-  # suite from the shared tests/slow-bash-suites.txt map by its own $GITHUB_JOB
-  # — the file is the single source of truth for both the slow runners and
-  # validate-bash's exclusion below.
-  validate-bash-timeout:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          # Same pinned interpreter as validate-python so bash suites that shell
-          # out to python3 see the same version (see the skew note above).
-          python-version: '3.14'
-
-      - name: Install test dependencies
-        # Some suites import PyYAML in inline python (it arrives transitively
-        # via yamllint in requirements.txt), so the bash jobs need the same
-        # pinned install the old serial job provided.
-        run: pip install -r requirements.txt
-
-      - name: Run assigned slow bash suite
-        run: |
-          set -euo pipefail
-          mapfile -t suites < <(awk -v job="$GITHUB_JOB" '$1 !~ /^#/ && $1 == job {print $2}' tests/slow-bash-suites.txt)
-          if (( ${#suites[@]} == 0 )); then
-            echo "::error::no slow suite assigned to job '$GITHUB_JOB' in tests/slow-bash-suites.txt"
-            exit 1
-          fi
-          failed=0
-          for t in "${suites[@]}"; do
-            echo "::group::$t"
-            if ! bash "$t"; then
-              echo "::error::$t failed"
-              failed=1
-            fi
-            echo "::endgroup::"
-          done
-          exit "$failed"
-
   validate-bash:
     runs-on: ubuntu-latest
     steps:
@@ -257,34 +212,17 @@ jobs:
           python-version: '3.14'
 
       - name: Install test dependencies
-        # See the note in validate-bash-slow: suites import PyYAML transitively.
+        # Some suites import PyYAML in inline python (it arrives transitively
+        # via yamllint in requirements.txt).
         run: pip install -r requirements.txt
 
-      # Auto-discover every bash suite except the slow ones assigned in
-      # tests/slow-bash-suites.txt (run by their validate-bash-* jobs) so a
-      # new (or previously unlisted) suite cannot silently stay out of CI.
+      # Auto-discover every bash suite so a new (or previously unlisted)
+      # suite cannot silently stay out of CI.
       - name: Run bash test suites (auto-discover)
         run: |
           set -euo pipefail
           failed=0
-          # Guard the slow-suite map: an assignment whose job id is missing
-          # from this workflow (or whose suite file does not exist) would be
-          # excluded here and run nowhere — fail loudly instead.
-          while read -r slow_job suite; do
-            [[ -z "$slow_job" || "$slow_job" == \#* ]] && continue
-            if [[ ! -f "$suite" ]]; then
-              echo "::error::slow suite '$suite' (job $slow_job) does not exist"
-              failed=1
-            fi
-            if ! grep -qE "^  ${slow_job}:" .github/workflows/ci.yaml; then
-              echo "::error::slow suite '$suite' assigned to job '$slow_job' which is not defined in ci.yaml — it would never run"
-              failed=1
-            fi
-          done < tests/slow-bash-suites.txt
           for t in tests/test_*.sh; do
-            if grep -Fxq "$t" <(awk '$1 !~ /^#/ {print $2}' tests/slow-bash-suites.txt); then
-              continue
-            fi
             echo "::group::$t"
             if ! bash "$t"; then
               echo "::error::$t failed"

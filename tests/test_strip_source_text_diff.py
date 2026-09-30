@@ -1,11 +1,14 @@
-"""Differential corpus: CPython ``strip_source_text.reduce_source`` and
-``html.unescape`` versus the v3 port (#706 PR 5b).
+"""Differential corpus: the recorded v2 ``strip_source_text.reduce_source``
+outputs and CPython ``html.unescape`` versus the v3 port (#706 PR 5b).
 
 A seeded generator builds the same cases on every run (hostile HTML block
 tags with case-folding look-alikes, entity edge cases, UTF-8 garbage,
 Python-vs-JS whitespace differences, byte caps on multibyte boundaries);
 the v3 side runs them through ``node dist/index.js strip-source-text-fixture``
-and every output must match CPython exactly (errors by exception name).
+and every output must match exactly (errors by exception name). The v2
+``reduce_source`` side was frozen at the #681 gate into
+``tests/fixtures/strip-source-text/reduce-source-goldens.json`` (one entry per
+generated case, per seed; ``null`` for ``unescape`` cases).
 """
 
 from __future__ import annotations
@@ -16,14 +19,12 @@ import json
 import random
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "scripts"))
-from strip_source_text import reduce_source  # noqa: E402
+GOLDENS = json.loads((ROOT / "tests" / "fixtures" / "strip-source-text" / "reduce-source-goldens.json").read_text(encoding="utf-8"))
 
 ATOMS = [
     "<script>", "</script>", "<SCRIPT a=1>", "</Script>", "<scrİpt>", "</scrİpt>", "<ſcript>",
@@ -64,11 +65,11 @@ def _cases(seed: int, count: int) -> list[dict]:
     return cases
 
 
-def _cpython(case: dict) -> dict:
+def _expected(seed: int, index: int, case: dict) -> dict:
+    if case["kind"] != "unescape":
+        return GOLDENS[str(seed)][index]
     try:
-        if case["kind"] == "unescape":
-            return {"ok": True, "text": html.unescape(case["text"])}
-        return {"ok": True, "text": reduce_source(base64.b64decode(case["b64"]), case["max"])}
+        return {"ok": True, "text": html.unescape(case["text"])}
     except Exception as error:  # noqa: BLE001 — compared by exception name
         return {"ok": False, "error": type(error).__name__}
 
@@ -84,7 +85,7 @@ def test_v3_strip_source_text_matches_cpython(seed: int, tmp_path: Path) -> None
     assert len(v3) == len(cases)
     mismatches = []
     for index, (case, got) in enumerate(zip(cases, v3)):
-        want = _cpython(case)
+        want = _expected(seed, index, case)
         if want.get("error"):
             want = {"ok": False, "error": want["error"]}
             got = {"ok": got["ok"], "error": "ValueError" if got.get("error") == "PyValueError" else got.get("error")}

@@ -183,7 +183,7 @@ def score_arm(
 def _openai_judge_call(
     judge_model: str, base_url: str, api_key: str, timeout_sec: int
 ) -> JudgeCall:
-    from pr_reviewer.transport import run_chat_request
+    from pr_reviewer.judge_http import chat_completion
 
     def _call(messages: list[dict], attempt: int) -> str:
         system = next((m["content"] for m in messages if m["role"] == "system"), "")
@@ -202,7 +202,7 @@ def _openai_judge_call(
             ),
             "response_format": {"type": "json_object"},
         }
-        return _extract_text(run_chat_request(base_url, "openai", payload, api_key, timeout_sec))
+        return _extract_text(chat_completion(base_url, payload, api_key, timeout_sec))
 
     return _call
 

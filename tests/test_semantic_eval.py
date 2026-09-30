@@ -604,28 +604,6 @@ def test_normal_benchmark_entries_do_not_require_semantic_fixture(tmp_path: Path
     assert corpus.prs == [{"number": 1, "repo_full_name": "o/r"}]
 
 
-def test_fixture_precheck_bypasses_fingerprint(tmp_path: Path) -> None:
-    output = tmp_path / "output.txt"
-    result = subprocess.run(
-        ["bash", str(ROOT / "scripts" / "check_review_needed.sh")],
-        cwd=tmp_path,
-        env={
-            "PATH": "/usr/bin:/bin",
-            "REPO": "fixture/repo",
-            "PR_NUMBER": "1",
-            "GITHUB_OUTPUT": str(output),
-            "SEMANTIC_FIXTURE_MODE": "true",
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    assert "should_review=true" in output.read_text(encoding="utf-8")
-    assert "skip_reason=semantic-fixture" in output.read_text(encoding="utf-8")
-    assert not (tmp_path / "pr.diff").exists()
-
-
 def test_fixture_run_materializes_pre_fix_files_without_pr_head_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import eval_harness
     from eval_harness import BenchmarkCorpus, run_review_for_pr
