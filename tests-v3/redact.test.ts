@@ -162,6 +162,46 @@ test("#876 maintainer-review round 2: the generic unquoted-config rule also trea
   assert.equal(redactSourceText("apiKey: !GetAtt MyStack.ApiKey", "values.yaml"), "apiKey: !GetAtt MyStack.ApiKey");
 });
 
+test("#876 maintainer-review round 3: a quoted value starting with `!` is a real literal, not a tag — mask it", () => {
+  assert.equal(redactSourceText('password: "!hunter2hunter2"', "values.yaml"), `password: "${REDACTED_SOURCE}"`);
+  assert.equal(redactSourceText("password: '!hunter2hunter2'", "src/x.ts"), `password: '${REDACTED_SOURCE}'`);
+});
+
+test("#876 maintainer-review round 3: a quoted bare $VAR-shaped literal is masked; a quoted braced ${VAR} reference survives only when it is the WHOLE value", () => {
+  // "$ecret123" is shaped exactly like a bare env-var reference, but a
+  // QUOTED bare $VAR is never exempted — only the braced form is unambiguous
+  // enough to trust inside quotes.
+  assert.equal(redactSourceText('password: "$ecret123"', "values.yaml"), `password: "${REDACTED_SOURCE}"`);
+  // A prefix/suffix around a braced reference is not "the entire value is
+  // exactly the reference form" — still a real secret, still masked.
+  assert.equal(
+    redactSourceText('password: "prefix${VAR}suffix-realsecret"', "values.yaml"),
+    `password: "${REDACTED_SOURCE}"`,
+  );
+  // The whole quoted value being exactly `${VAR}` still survives.
+  assert.equal(redactSourceText('apiKey: "${API_KEY}"', "values.yaml"), 'apiKey: "${API_KEY}"');
+});
+
+test("#876 maintainer-review round 3: only the recognized CloudFormation-tag whitelist counts as a reference, unquoted only", () => {
+  const positives: ReadonlyArray<[string, string]> = [
+    ["client-key-data: !Ref ClientKeyData", "kubeconfig"],
+    ["client-certificate-data: !Sub '${ClientCertData}'", "kubeconfig"],
+    ["apiKey: !GetAtt MyStack.ApiKey", "values.yaml"],
+    ["apiKey: op://vault/item/api-key", "values.yaml"],
+  ];
+  for (const [line, path] of positives) {
+    assert.equal(redactSourceText(line, path), line, `expected ${JSON.stringify(line)} to survive`);
+  }
+  // Env-var forms remain references, unquoted.
+  assert.equal(redactSourceText("password: ${DB_PASSWORD}", "values.yaml"), "password: ${DB_PASSWORD}");
+  assert.equal(redactSourceText("password: $DB_PASSWORD", "values.yaml"), "password: $DB_PASSWORD");
+  // A Helm-style template with internal spaces survives quoted (captured
+  // whole) and unquoted (never captured at all — the value-capture regex
+  // requires an unbroken run of non-whitespace characters).
+  assert.equal(redactSourceText('apiKey: "{{ .Values.x }}"', "values.yaml"), 'apiKey: "{{ .Values.x }}"');
+  assert.equal(redactSourceText("apiKey: {{ .Values.x }}", "values.yaml"), "apiKey: {{ .Values.x }}");
+});
+
 test("#876: maskAndTruncateSource masks then truncates, same contract as maskAndTruncate", () => {
   const result = maskAndTruncateSource("apiKey: config.apiKey, ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456", 12);
   assert.equal(result.truncated, true);

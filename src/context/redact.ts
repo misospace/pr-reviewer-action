@@ -62,22 +62,38 @@ export const REDACTED_SOURCE = "⟦redacted:credential⟧";
 // correctness (#876).
 const SECRET_KEY_ALTERNATION = "api[_-]?key|token|password|secret|access[_-]?key|auth[_-]?token";
 
+// Recognized CloudFormation-style YAML short-form tags. Deliberately a fixed
+// whitelist, not "anything starting with `!`" (#876 review round 3): a real
+// quoted literal can start with `!` (`password: "!hunter2hunter2"`), and an
+// unrecognized/custom tag name is not assumed to be a reference either.
+const REFERENCE_TAG_RE =
+  /^!(Ref|Sub|GetAtt|ImportValue|Join|Select|FindInMap|Base64|Cidr|GetAZs|Split|If|Equals|Not|And|Or)(\s.*)?$/;
+
 /** A value that is a REFERENCE to a secret, not the secret itself — env-var
  * interpolation (`${VAR}`, `$VAR`), a template placeholder (`{{ ... }}`), a
- * CloudFormation short-form tag (`!Ref`/`!Sub`/`!GetAtt`), a 1Password
+ * CloudFormation short-form tag (`!Ref`/`!Sub`/`!GetAtt`/...), a 1Password
  * reference (`op://...`), a Vault reference (`vault:...`), or an
  * already-encrypted SOPS/ansible-vault value (`ENC[...]`). These must never
- * be masked: they are not literal credential bytes, in code or config. */
-function isReferenceValue(value: string): boolean {
-  return (
-    /^\$\{.*\}$/.test(value) ||
-    /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(value) ||
-    /^\{\{.*\}\}$/.test(value) ||
-    value.startsWith("!") ||
-    /^op:\/\//i.test(value) ||
-    /^vault:/i.test(value) ||
-    /^ENC\[.*\]$/.test(value)
-  );
+ * be masked: they are not literal credential bytes, in code or config.
+ *
+ * `quoted` narrows two forms that are otherwise ambiguous with a real quoted
+ * literal (#876 review round 3):
+ *  - a YAML tag is only a reference when UNQUOTED — inside quotes it is
+ *    string content, e.g. `password: "!hunter2hunter2"` must still mask;
+ *  - a bare `$VAR` (no braces) is only a reference when UNQUOTED — a quoted
+ *    `"$ecret123"` reads exactly like a real secret that happens to start
+ *    with `$`, so it is never exempted. The braced `${VAR}` form is
+ *    unambiguous either way (and only when the ENTIRE value is exactly that
+ *    shape: `"prefix${VAR}suffix-realsecret"` still masks). */
+function isReferenceValue(value: string, quoted: boolean): boolean {
+  if (/^\$\{[^}]*\}$/.test(value)) return true;
+  if (!quoted && /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(value)) return true;
+  if (/^\{\{.*\}\}$/.test(value)) return true;
+  if (!quoted && REFERENCE_TAG_RE.test(value)) return true;
+  if (/^op:\/\/\S*$/i.test(value)) return true;
+  if (/^vault:\S*$/i.test(value)) return true;
+  if (/^ENC\[[^\]]*\]$/.test(value)) return true;
+  return false;
 }
 
 // config-like paths where an UNQUOTED scalar after a secret-named key is a
@@ -144,7 +160,7 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
   redacted = redacted.replace(
     /(client-certificate-data|client-key-data|certificate-authority-data)(\s*:\s*)(![^\n]*|\S+)/gi,
     (m, key: string, sep: string, value: string) =>
-      isReferenceValue(value.trim()) ? m : `${key}${sep}${REDACTED_SOURCE}`,
+      isReferenceValue(value.trim(), false) ? m : `${key}${sep}${REDACTED_SOURCE}`,
   );
 
   // A secret-named key assigned a QUOTED string literal: keep the key
@@ -156,7 +172,7 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
   redacted = redacted.replace(
     new RegExp(`(["'\`]?)(${SECRET_KEY_ALTERNATION})\\1(\\s*[:=]\\s*)(["'\`])([^"'\`]{8,})\\4`, "gi"),
     (m, keyQuote: string, key: string, sep: string, quote: string, value: string) =>
-      isReferenceValue(value) ? m : `${keyQuote}${key}${keyQuote}${sep}${quote}${REDACTED_SOURCE}${quote}`,
+      isReferenceValue(value, true) ? m : `${keyQuote}${key}${keyQuote}${sep}${quote}${REDACTED_SOURCE}${quote}`,
   );
 
   // A secret-named key assigned an UNQUOTED scalar literal: config-file-only
@@ -170,7 +186,7 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
     redacted = redacted.replace(
       new RegExp(`(["'\`]?)(${SECRET_KEY_ALTERNATION})\\1(\\s*[:=]\\s*)(![^\\n#]*|[^\\s#'"]{8,})`, "gi"),
       (m, keyQuote: string, key: string, sep: string, value: string) =>
-        isReferenceValue(value.trim()) ? m : `${keyQuote}${key}${keyQuote}${sep}${REDACTED_SOURCE}`,
+        isReferenceValue(value.trim(), false) ? m : `${keyQuote}${key}${keyQuote}${sep}${REDACTED_SOURCE}`,
     );
   }
 
