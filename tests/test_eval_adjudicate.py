@@ -594,3 +594,41 @@ def test_reproduces_796_adjudicated_totals(tmp_path):
     paired = out["paired"]["metrics"]
     assert paired["catch"]["prs_on_better"] == expected["prs_on_better"] == 8
     assert paired["catch"]["prs_on_worse"] == expected["prs_on_worse"] == 9
+
+
+def test_pack_rejects_mixed_identity_schemas(tmp_path):
+    """One arm with corpus ids and one without would key the same scenario two
+    ways and silently drop the pair; pack must fail closed instead."""
+    with_id = {
+        "per_scenario_results": [
+            _scenario(
+                "acme/widgets", 1, "a" * 40, "defect",
+                runs={"native_loop": {"findings": [_finding("blocker", "finding")]}},
+            )
+        ]
+    }
+    with_id["per_scenario_results"][0]["id"] = "acme/widgets#1@aaaaaaaa"
+    without_id = {
+        "per_scenario_results": [
+            _scenario(
+                "acme/widgets", 1, "a" * 40, "defect",
+                runs={"native_loop": {"findings": [_finding("blocker", "finding")]}},
+            )
+        ]
+    }
+    without_id["per_scenario_results"][0].pop("id", None)
+    on_path = tmp_path / "on.json"
+    off_path = tmp_path / "off.json"
+    _write(on_path, with_id)
+    _write(off_path, without_id)
+
+    with pytest.raises(SystemExit, match="mixed scenario identity schemas"):
+        ea.main(
+            [
+                "pack",
+                "--arm", f"on={on_path}",
+                "--arm", f"off={off_path}",
+                "--packets", "1",
+                "--out-dir", str(tmp_path / "packets"),
+            ]
+        )
