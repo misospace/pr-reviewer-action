@@ -82,11 +82,16 @@ interface HunkGroup {
   lines: HunkLineEntry[];
 }
 
-/** A call-shaped line (`name(`, name not a control keyword): the first
- * construct directly following a leading comment. A recognized declaration
- * wins first; this shape only decides the unrecognized fallback. */
+/** A call-shaped line: an ordinary TS method-modifier prefix (`public
+ * render(`, `private static load(`) or a bare name followed by `(`, name not
+ * a control keyword. This is the first construct directly following a
+ * leading comment: a recognized declaration wins first, and this shape only
+ * decides the unrecognized fallback — modifier-prefixed multi-line
+ * signatures must fall back to the line anchor too, or the backward scan
+ * credits the enclosing class for exactly the syntax the single-line
+ * recognizer deliberately does not parse. */
 const CALL_SHAPED_LINE_RE =
-  /^(?!(?:if|for|while|switch|catch|do|else|try|return|await|yield|new|delete|typeof|case|throw|function|class|const|let|var|export|import|default)\b)[A-Za-z_$][\w$]*\s*\(/;
+  /^(?:(?:public|private|protected|static|override|readonly|async|get|set)\s+)*(?!(?:if|for|while|switch|catch|do|else|try|return|await|yield|new|delete|typeof|case|throw|function|class|const|let|var|export|import|default)\b)[A-Za-z_$][\w$]*\s*\(/;
 
 const HUNK_HEADER_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@[ \t]?(.*)$/;
 const HUNK_HEADER_CALL_RE = /([A-Za-z_$][\w$]*)\s*\(/g;

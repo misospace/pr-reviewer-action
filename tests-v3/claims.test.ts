@@ -149,6 +149,27 @@ test("in-body comments inside a recognized method anchor to the method, not a co
   assert.deepEqual(claim!.items, ["src/widget.ts:render"]);
 });
 
+test("a leading docstring above a modifier-prefixed multi-line signature falls back to file:L<n>, never the enclosing class", () => {
+  // `public render(` starts with a modifier, so the fallback must tolerate
+  // the ordinary TS modifier prefixes — otherwise the backward scan credits
+  // the enclosing class for the most common real-world form.
+  const diffText = [
+    "diff --git a/src/widget.ts b/src/widget.ts",
+    "@@ -10,2 +10,9 @@ class Widget {",
+    "+  // render always returns a non-empty string for a mounted widget.",
+    "+  public render(",
+    "+    value: string,",
+    "+  ): string {",
+    "+    return value;",
+    "+  }",
+  ].join("\n");
+  const result = extractClaimsDeterministic({ prBody: "", diffText });
+  const claim = result.claims.find((c) => /render always returns/.test(c.claim));
+  assert.ok(claim, "expected the leading-docstring claim to be extracted");
+  assert.match(claim!.items[0]!, /^src\/widget\.ts:L\d+$/);
+  assert.ok(!claim!.items.some((item) => item.includes("Widget")), "the class must not steal the anchor");
+});
+
 test("a leading docstring above an unrecognized multi-line method signature falls back to file:L<n>, never the enclosing class", () => {
   const diffText = [
     "diff --git a/src/widget.ts b/src/widget.ts",

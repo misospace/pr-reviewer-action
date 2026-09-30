@@ -2081,7 +2081,8 @@ def run_review_for_pr(
         # #785 A/B: the contract input projects to this exact env key
         # (src/run/env.ts stageEnvFromConfig: `claim-falsification` ->
         # `CLAIM_FALSIFICATION`); only "true" enables the pre-pass, matching
-        # the runtime's own case-sensitive gate.
+        # the runtime's own case-insensitive gate (review.ts lowercases the
+        # value before comparing).
         if claim_falsification:
             env["CLAIM_FALSIFICATION"] = "true"
         else:
