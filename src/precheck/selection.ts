@@ -70,7 +70,7 @@ export async function buildSelectionSignature(
   const body = typeof record.body === "string" ? record.body : "";
 
   const issues: { ref: string; repo: string; number: number; labels: string[] }[] = [];
-  for (const item of extractLinkedIssueRefs(body, repo)) {
+  for (const item of extractLinkedIssueRefs(body, repo, title)) {
     const fetched = unwrap(await adapter.ghApi(`repos/${item.repo}/issues/${item.number}`));
     if (typeof fetched === "object" && fetched !== null && !(fetched as Record<string, unknown>).error) {
       issues.push(signatureLinkedIssue(item, canonicalLinkedIssue(fetched, item.repo)));

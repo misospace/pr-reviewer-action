@@ -186,9 +186,48 @@ test("metadata markers parse and drive the carried verdict", () => {
 test("linked issue refs extract, dedupe, and cap", () => {
   const refs = extractLinkedIssueRefs("Fixes #1, closes other/repo#2, fixes #1, RESOLVES: #3", "o/r");
   assert.deepEqual(refs.map((ref) => ref.ref), ["#1", "other/repo#2", "#3"]);
+  assert.ok(refs.every((ref) => ref.closing));
   assert.equal(extractLinkedIssueRefs("Fixes #1", "o/r")[0]!.repo, "o/r");
   assert.deepEqual(labelsOf({ labels: [{ name: " b " }, "c", {}, { name: "" }] }), ["b", "c"]);
   assert.deepEqual(labelsOf({ labels: [] }), []);
+});
+
+test("linked issue refs: title (#N) / (owner/repo#N) convention (#872)", () => {
+  const bare = extractLinkedIssueRefs("body text", "o/r", "feat(v3): add thing (#584)");
+  assert.deepEqual(bare.map((ref) => ref.ref), ["#584"]);
+  assert.equal(bare[0]!.repo, "o/r");
+  assert.equal(bare[0]!.closing, false);
+
+  const scoped = extractLinkedIssueRefs("body text", "o/r", "feat: add thing (other/repo#584)");
+  assert.deepEqual(scoped.map((ref) => ref.ref), ["other/repo#584"]);
+  assert.equal(scoped[0]!.repo, "other/repo");
+  assert.equal(scoped[0]!.closing, false);
+
+  assert.deepEqual(
+    extractLinkedIssueRefs("body text", "o/r", "feat: add thing (#123) more text"),
+    [],
+    "(#N) not at the end of the title must not match",
+  );
+  assert.deepEqual(extractLinkedIssueRefs("body text", "o/r", "feat: no ref here"), []);
+});
+
+test("linked issue refs: non-closing body implementation references (#872)", () => {
+  for (const body of ["Implements #10", "Part of #10", "Refs #10", "Ref #10"]) {
+    const refs = extractLinkedIssueRefs(body, "o/r");
+    assert.deepEqual(refs.map((ref) => ref.ref), ["#10"], body);
+    assert.equal(refs[0]!.closing, false, body);
+  }
+});
+
+test("linked issue refs: incidental mentions are never linked (#872)", () => {
+  assert.deepEqual(extractLinkedIssueRefs("depends on #583", "o/r"), []);
+  assert.deepEqual(extractLinkedIssueRefs("see #12 for background", "o/r"), []);
+  assert.deepEqual(extractLinkedIssueRefs("Related to #12", "o/r"), [], "ambiguous form stays unlinked");
+});
+
+test("linked issue refs: title and body forms combine, deduped, capped at 8", () => {
+  const refs = extractLinkedIssueRefs("Implements #584\nRefs #7", "o/r", "feat: thing (#584)");
+  assert.deepEqual(refs.map((ref) => ref.ref), ["#584", "#7"], "title ref deduped against body ref");
 });
 
 test("linear prefixes and identifiers parse conservatively", () => {

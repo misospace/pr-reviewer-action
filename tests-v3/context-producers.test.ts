@@ -95,6 +95,19 @@ test("linked issues merge fetched labels and record failures", async () => {
   assert.match(text(result.artifacts.get("linked-issues.md")), /\(Could not fetch issue #2 from o\/r\)/);
 });
 
+test("a title-only (#N) reference links the issue (#872)", async () => {
+  const getIssue = async (repo: string, number: string): Promise<ReadResult<unknown>> =>
+    number === "584" ? { ok: true, data: { number: 584, labels: [{ name: "acceptance" }] } } : { ok: false, error: `no ${repo}#${number}` };
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat(v3): add Tangled Bobbin read client and canonical pull resolver (#584)", body: "no closing keyword here" },
+    repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+  });
+  assert.deepEqual(result.linkedIssues, [
+    { ref: "#584", repo: "o/r", number: 584, labels: [{ name: "acceptance" }] },
+  ]);
+  assert.match(text(result.artifacts.get("linked-issues.md")), /## #584/);
+});
+
 test("a string label aborts the linked-issue projection", async () => {
   const getIssue = async (): Promise<ReadResult<unknown>> => ({ ok: true, data: { labels: ["security"] } });
   await assert.rejects(

@@ -353,7 +353,7 @@ Only three inputs are required: `github-token`, `ai-base-url`, and `ai-model`. E
 <details>
 <summary><b>Issue/spec context</b> — GitHub/Forgejo and optional Linear issues</summary>
 
-GitHub/Forgejo issues referenced with `Fixes`/`Closes`/`Resolves` in the PR body are fetched automatically. To also recognize Linear identifiers in PR titles, configure an API key and the allowed team prefixes:
+GitHub/Forgejo issues referenced with `Fixes`/`Closes`/`Resolves` in the PR body are fetched automatically, as is the issue named by a trailing `(#123)` / `(owner/repo#123)` on the PR title (the conventional-commit / squash-merge convention) or by a non-closing `Implements`/`Part of`/`Refs #123` reference in the body — these do not close the issue, but still feed the requirement ledger with its acceptance criteria. To also recognize Linear identifiers in PR titles, configure an API key and the allowed team prefixes:
 
 ```yaml
 with:

@@ -1354,6 +1354,62 @@ test("a PR whose body keyword-links a fetched issue classifies without crashing"
   }
 });
 
+test("#872: a title-only (#N) reference feeds the fetched issue's acceptance criteria into the requirement ledger", async () => {
+  // Reproduces the #854/#584 gap: the PR title trails "(#584)" and the body
+  // has no closing keyword, so only the title convention can surface #584.
+  const platform = mockPlatform({
+    title: "feat(v3): add Tangled Bobbin read client and canonical pull resolver (#584)",
+    body: "No closing keyword mentions #584 here.",
+  });
+  platform.getIssue = async () => ({
+    ok: true,
+    data: {
+      number: 584,
+      title: "Tangled Bobbin canonical pull resolver",
+      state: "open",
+      html_url: "https://forge.example/o/r/issues/584",
+      labels: [],
+      body: "- The resolver MUST resolve from repository identity plus source SHA/branch and target branch",
+    },
+  }) as never;
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: platform,
+      persistArtifacts: true,
+      quiet: true,
+    });
+    const ledger = JSON.parse(readFileSync(join(runDir, "requirement-ledger.json"), "utf8")) as {
+      requirements: Array<{ text: string; provenance: Array<{ source: string; ref: string }> }>;
+    };
+    const linked = ledger.requirements.filter((entry) => entry.provenance.some((p) => p.source === "linked_issues" && p.ref === "#584"));
+    assert.ok(
+      linked.some((entry) => entry.text.includes("resolve from repository identity plus source SHA/branch")),
+      "the title-only linked issue's acceptance criterion must reach the ledger",
+    );
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
 test("#812: unresolved bot threads re-emit with their original severity and Minor/Info alone approves", async () => {
   // The #814 shape: 10 unresolved bot-managed threads, 9 Minor/Info + 1 Major
   // the model resolved with code-citing evidence. The re-emitted findings must

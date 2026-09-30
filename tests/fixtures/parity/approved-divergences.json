@@ -804,6 +804,42 @@
         "new": "{\"errors\": [], \"files\": [{\"manifests\": [\"setup.py\"], \"path\": \"src/service.py\", \"symbols\": [{\"name\": \"handle\", \"references\": [{\"line\": 1, \"path\": \"src/util.py\", \"snippet\": \"from src.service import handle\"}, {\"line\": 2, \"path\": \"src/util.py\", \"snippet\": \"handle(1)\"}, {\"line\": 1, \"path\": \"tests/test_service.py\", \"snippet\": \"import handle from service\"}, {\"line\": 2, \"path\": \"tests/test_service.py\", \"snippet\": \"handle('⟦redacted:credential⟧')\"}]}], \"tests\": [\"tests/test_service.py\"]}], \"truncated\": false, \"truncation\": {\"omitted_manifests\": 0, \"omitted_output_bytes\": 0, \"omitted_references\": 0, \"omitted_symbols\": 0, \"omitted_tests\": 0, \"reasons\": [], \"truncated\": false}, \"version\": 1}"
       },
       "reason": "#876: repository source snippets in Related Code Context now use the source-safe redaction policy (redactSourceText); marker changed from `[REDACTED]` to `⟦redacted:credential⟧`. Same rationale as the json_document divergence above."
+    },
+    {
+      "boundary": "context-producers",
+      "fixtures": [
+        "linked-none"
+      ],
+      "key": "file:linked-issues.json",
+      "expected": {
+        "old": "[]\n",
+        "new": "[{\"ref\": \"#9\", \"repo\": \"owner/repo\", \"number\": 9}]\n"
+      },
+      "reason": "#872: a non-closing `Refs #N` body reference now links the issue (previously only Closes/Fixes/Resolves did). The fixture linked-none exists to prove the OLD negative case (a non-closing mention stays unlinked); #872 intentionally makes Refs/Ref/Implements/Part of link, so this fixture now surfaces #9 as a fetched (here: failed-fetch) linked issue instead of an empty set."
+    },
+    {
+      "boundary": "context-producers",
+      "fixtures": [
+        "linked-none"
+      ],
+      "key": "file:linked-issues.md",
+      "expected": {
+        "old": "",
+        "new": "## #9\n(Could not fetch issue #9 from owner/repo)\n\n"
+      },
+      "reason": "#872: same root cause as the linked-issues.json divergence on this fixture — Refs #9 now links, and the fixture has no issues map entry for #9 so the fetch fails and renders the failure notice."
+    },
+    {
+      "boundary": "context-producers",
+      "fixtures": [
+        "linked-none"
+      ],
+      "key": "file:linked-metadata-status.json",
+      "expected": {
+        "old": "{\n  \"version\": 1,\n  \"github_fetch_failures\": [],\n  \"linear_fetch_failures\": [],\n  \"linear_known_disabled\": false\n}\n",
+        "new": "{\n  \"version\": 1,\n  \"github_fetch_failures\": [\n    \"#9\"\n  ],\n  \"linear_fetch_failures\": [],\n  \"linear_known_disabled\": false\n}\n"
+      },
+      "reason": "#872: same root cause — Refs #9 now links and its (fixture-unmodeled) fetch fails, so github_fetch_failures now records #9 instead of staying empty."
     }
   ]
 }

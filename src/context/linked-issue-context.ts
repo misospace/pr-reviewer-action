@@ -159,7 +159,8 @@ async function runLinear(input: LinkedIssueContextInput): Promise<LinearOutcome>
 export async function buildLinkedIssueContext(input: LinkedIssueContextInput): Promise<LinkedIssueContextResult> {
   const artifacts = new Map<string, Uint8Array>();
   const body = `${jqRaw(jqAlt(jqField(input.pr, "body"), ""))}\n`;
-  const refs = extractLinkedIssueRefs(body, input.repo).map((item) => ({ ref: item.ref, repo: item.repo, number: item.number }));
+  const title = pyStr(pyOr(isPlainObject(input.pr) ? input.pr.title : undefined, ""));
+  const refs = extractLinkedIssueRefs(body, input.repo, title).map((item) => ({ ref: item.ref, repo: item.repo, number: item.number }));
   let linkedJson: Buffer = enc(`${pyJsonDumpsLine(refs)}\n`);
   let linked: unknown[] = refs;
   const md: Buffer[] = [];
