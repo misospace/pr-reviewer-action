@@ -121,7 +121,10 @@ Four consumer groups keep v2 code alive after the cutover. Everything in
   oracle-only tests were deleted, along with the wave-1 holdovers
   (`scripts/verify_pr_head.sh`, `test_verify_pr_head.sh`,
   `test_concurrent_gating.sh`, `test_corpus_standards_survival.sh`,
-  `test_ci_api_timeout.sh`) and the `validate-bash-timeout` job.
+  `test_ci_api_timeout.sh`), the three v2 dataflow-gate tests the semantic
+  gate stopped executing (`test_issue_749_path_classification.py`,
+  `test_linked_issue_classification.sh`, `test_precheck_linear_fingerprint.sh`),
+  and the `validate-bash-timeout` job.
   Consumer moves: the semantic gate's four production dataflow checks and
   `test_issue_662_dataflow.py` run against v3 (the preceding re-point PR);
   `test_strip_source_text_diff.py` compares v3 with a frozen
