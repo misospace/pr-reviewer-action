@@ -758,6 +758,22 @@
       "reason": "v3 recommended default (#706): tool-turn-timeout-sec 180 (v2 60); a ceiling that protects slow local prompt eval."
     },
     {
+      "boundary": "config-default-resolution",
+      "fixtures": [
+        "defaults-only",
+        "empty-temperature-omitted",
+        "explicit-values",
+        "numeric-bounds",
+        "tier-inheritance"
+      ],
+      "key": "toolMaxRounds",
+      "expected": {
+        "old": "4",
+        "new": ""
+      },
+      "reason": "#895: tool-max-rounds defaults to empty (resolved to 4 internally) so an omitted input lets the loop round cap scale with the tool-call budget; an explicit value keeps the v2 fixed cap."
+    },
+    {
       "boundary": "classification-role-selection",
       "fixtures": [
         "path-filename-signal-fires"

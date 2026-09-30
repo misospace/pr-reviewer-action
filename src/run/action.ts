@@ -151,6 +151,8 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       ...(review.toolBudget !== undefined ? { toolBudget: review.toolBudget } : {}),
       ...(review.toolBudgetSource !== undefined ? { toolBudgetSource: review.toolBudgetSource } : {}),
       ...(review.toolCallsUsed !== undefined ? { toolCalls: review.toolCallsUsed } : {}),
+      ...(review.toolRoundsUsed !== undefined ? { toolRounds: review.toolRoundsUsed } : {}),
+      ...(review.toolMaxRounds !== undefined ? { maxRounds: review.toolMaxRounds } : {}),
     };
     publishFailed = (await publishWith(input, seam)) !== 0;
   }

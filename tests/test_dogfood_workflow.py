@@ -159,7 +159,7 @@ def test_public_action_defaults_are_the_recommended_setup() -> None:
         "verdict-policy": "strict",
         "allow-approve": "false",
         "tool-max-requests": "",
-        "tool-max-rounds": "4",
+        "tool-max-rounds": "",
         "tool-loop-wall-clock-sec": "600",
         "tool-corpus-max-bytes": "50000",
         "tool-max-response-bytes": "12000",

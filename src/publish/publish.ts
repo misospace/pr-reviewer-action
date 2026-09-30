@@ -93,6 +93,9 @@ export interface PublishInput {
   toolBudgetSource?: string;
   /** #847: tool calls the loop actually executed against that budget. */
   toolCalls?: number;
+  /** #895: loop rounds used, and the round cap they ran against. */
+  toolRounds?: number;
+  maxRounds?: number;
 }
 
 export interface PublishResult {
@@ -549,6 +552,8 @@ export async function publishReview(
     ...(input.toolBudget !== undefined ? { toolBudget: input.toolBudget } : {}),
     ...(input.toolBudgetSource !== undefined && input.toolBudgetSource !== "" ? { toolBudgetSource: input.toolBudgetSource } : {}),
     ...(input.toolCalls !== undefined ? { toolCalls: input.toolCalls } : {}),
+    ...(input.toolRounds !== undefined ? { toolRounds: input.toolRounds } : {}),
+    ...(input.maxRounds !== undefined ? { maxRounds: input.maxRounds } : {}),
   };
   if (input.partialCoverage) {
     // #810: the marker records partial coverage additively; a complete run

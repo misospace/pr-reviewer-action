@@ -10,6 +10,8 @@ import { GitHubAdapter } from "../src/platform/github.js";
 import { SemanticFixtureAdapter } from "../src/platform/semantic-fixture.js";
 import { TangledNotImplementedError } from "../src/platform/tangled.js";
 import { buildPlatformReadAdapter } from "../src/run/platform.js";
+import { resolveLoopLimits } from "../src/tools/harness.js";
+import { adaptiveLoopBudgets } from "../src/tools/loop.js";
 import { stageEnvFromConfig, buildStageEnv, validateStageEnv, type RunContext } from "../src/run/env.js";
 
 /**
@@ -152,4 +154,14 @@ test("the Tangled identity signal survives the stage-env projection (#583)", () 
     buildStageEnv(config, base, { REPO: "o/r", PR_NUMBER: "9", GITHUB_TOKEN: "tok" }),
   );
   assert.ok(plain instanceof GitHubAdapter);
+});
+
+test("#895: an omitted tool-max-rounds scales the round cap through the real config path; an explicit one does not", () => {
+  const required = Object.fromEntries(contract.inputs.filter((input) => input.required).map((input) => [input.id, `required-${input.id}`]));
+  const rounds = (raw: Record<string, string>): number => {
+    const [maxRounds, wallClock, explicit] = resolveLoopLimits(stageEnvFromConfig(loadConfig(contract, raw)), "smart");
+    return adaptiveLoopBudgets(maxRounds, 32, wallClock, explicit).maxRounds;
+  };
+  assert.ok(rounds(required) >= 16, "the contract default must leave the round cap free to scale with a 32-call budget");
+  assert.equal(rounds({ ...required, "tool-max-rounds": "4" }), 8);
 });

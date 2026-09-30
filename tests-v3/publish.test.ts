@@ -377,6 +377,19 @@ test("#847: the tool-budget provenance reaches the published marker additively",
   assert.ok(marker.indexOf('"tool_budget"') > marker.indexOf('"cache_hit_ratio"'));
 });
 
+test("#895: tool_rounds / max_rounds reach the published marker", async () => {
+  const api = new MockPublishApi();
+  await publishReview(
+    input({ toolBudget: 32, toolBudgetSource: "tier-default", toolCalls: 14, toolRounds: 8, maxRounds: 16 }),
+    api,
+    { diffText: "" },
+  );
+  const marker = api.sticky[0]!.body.split("\n").find((line) => line.startsWith("<!-- ai-pr-reviewer:"));
+  assert.ok(marker);
+  assert.ok(marker.includes('"tool_rounds":8'));
+  assert.ok(marker.includes('"max_rounds":16'));
+});
+
 test("#847: without a tool harness the marker stays byte-identical to the pre-#847 shape", async () => {
   const api = new MockPublishApi();
   await publishReview(input(), api, { diffText: "" });
