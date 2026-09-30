@@ -577,3 +577,54 @@ test("path-classification-untrusted-surface: genuine attacker-controlled path fl
   assert.deepEqual(selectSpecialistRoles(rebuilt).selectedRoles, selectSpecialistRoles(result).selectedRoles);
   assert.ok(selectSpecialistRoles(result).selectedRoles.includes("security"));
 });
+
+test("path-classification-untrusted-surface: #871 a content-only file_serving/path_handling match on a substantial new module does not skip correctness", () => {
+  // Reproduces #854's shape: a new network client (src/platform/*.ts, no
+  // filesystem access) whose content mentions URL paths/URIs — content-only
+  // FILE_SERVING_PATTERNS and path_reference_identifier (`.pathname`)
+  // matches, no changed filename backing either. On #854 this became
+  // pr_kind=file_serving_changes, filled must_check with path-traversal
+  // items, and the correctness specialist was skipped (only security ran).
+  const prFiles = [
+    canonicalChangedFile({
+      filename: "src/platform/tangled-bobbin.ts",
+      status: "added",
+      additions: 409,
+      deletions: 0,
+    }),
+    canonicalChangedFile({
+      filename: "tests-v3/tangled-bobbin.test.ts",
+      status: "added",
+      additions: 462,
+      deletions: 0,
+    }),
+  ];
+  const diff = [
+    "diff --git a/src/platform/tangled-bobbin.ts b/src/platform/tangled-bobbin.ts",
+    "+++ b/src/platform/tangled-bobbin.ts",
+    "+    const pathname = base.pathname.replace(/\\/+$/, \"\") + \"/xrpc/\" + nsid;",
+    "+    const url = new URL(pathname, base);",
+  ].join("\n");
+  const result = classifyPr({ prFiles, diffText: diff, linkedIssues: [] });
+
+  // The content-only match is too weak to route on (#159/#749) and, as of
+  // #871, too weak to set pr_kind or inject its must_check items too.
+  assert.notEqual(result.prKind, "file_serving_changes");
+  assert.equal(result.riskFlagsWithFiles["file_serving_changes"]?.length ?? 0, 0);
+  assert.ok(!result.mustCheck.some((c) => c.includes("directory traversal")));
+  assert.ok(!result.mustCheck.some((c) => c.includes("file path sanitization")));
+
+  // #871 follow-up: `.pathname` is a WHATWG URL component here (the file
+  // never touches a filesystem/path-construction API), not a real
+  // untrusted-path surface — path_handling_changes must not fire either.
+  assert.notEqual(result.prKind, "path_handling_changes");
+  assert.ok(!result.riskFlags.includes("path_handling_changes"));
+  assert.equal(result.pathHandlingProvenance.fired, false);
+  assert.equal(result.prKind, "app_code");
+
+  // The correctness specialist is not skipped on a substantial PR just
+  // because a weak content-only signal happened to pick a non-correctness
+  // pr_kind.
+  const selection = selectSpecialistRoles(result);
+  assert.ok(selection.selectedRoles.includes("correctness"));
+});

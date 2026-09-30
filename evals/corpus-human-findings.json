@@ -69,7 +69,7 @@
         "head_sha": "61ddf828f2dcd01a17815dcf5825f1df0c59449e",
         "defect": {
           "description": "Containment-prefix bypass: the guard used str(resolved).startswith(str(root)), which admits a sibling dir sharing the workspace's name prefix (resolving to .../repo2/secret passes a .../repo test). Switched to Path.is_relative_to, which respects path boundaries. Verified the old check returned True for /tmp/ws2 vs /tmp/ws. Null bytes: an embedded NUL makes pathlib raise ValueError (not OSError), so it slipped past except OSError onto the broad outer catch.",
-          "file": "pr_reviewer/tool_executors.py",
+          "file": "scripts/run_tool_harness.py",
           "severity": "major"
         },
         "source": {
@@ -96,7 +96,8 @@
           "production_bot_flagged_same": false,
           "anchor_confidence": "medium"
         },
-        "base_sha": "5ea064bee00b95fe4d1c792ba6916c07e080f62e"
+        "base_sha": "5ea064bee00b95fe4d1c792ba6916c07e080f62e",
+        "defect_outside_diff": true
       },
       {
         "id": "misospace/pr-reviewer-action#294@f6e284e4",
@@ -135,13 +136,13 @@
         "base_sha": "b08ecf3838eecfc179c066c6c5b6e345cfc63bea"
       },
       {
-        "id": "misospace/pr-reviewer-action#348@0f71b099",
+        "id": "misospace/pr-reviewer-action#348@69dc95ac",
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 348,
-        "head_sha": "0f71b09976e74fe52b5466b3a67fab03c9e053c0",
+        "head_sha": "69dc95ac47f43c69061e497cbb59a8c3ffe4d2f8",
         "defect": {
           "description": "is_read_only_tool broadening weakens the default-deny boundary. The old check looked only at the leading verb. The new logic accepts a tool if any of the first three underscore-segments is a read verb. Concrete regression: an allowlisted MCP server advertising a write tool named set_status, create_view, update_diff, or refresh_status would now be advertised to the model and pass the call-time re-check, defeating the module's stated hard requirement that a tool is advertised only if its name begins with a read verb.",
-          "file": "scripts/run_tool_harness.py",
+          "file": "pr_reviewer/mcp_client.py",
           "severity": "major"
         },
         "source": {
@@ -565,7 +566,8 @@
           "production_bot_flagged_same": false,
           "anchor_confidence": "medium"
         },
-        "base_sha": "503d73b8997b349d3811493c1a5e1e592c027ca8"
+        "base_sha": "503d73b8997b349d3811493c1a5e1e592c027ca8",
+        "defect_outside_diff": true
       },
       {
         "id": "misospace/dispatch#845@1a333129",
@@ -681,7 +683,8 @@
           "production_bot_flagged_same": "partial",
           "anchor_confidence": "low"
         },
-        "base_sha": "f68bfc12a8b36585dbc63091da1d373a42090203"
+        "base_sha": "f68bfc12a8b36585dbc63091da1d373a42090203",
+        "defect_outside_diff": true
       },
       {
         "id": "misospace/courier#46@84dfc777",
@@ -770,24 +773,6 @@
           "anchor_confidence": "high"
         },
         "base_sha": "fa11e9de6aab86061c71a6db31251efa896ce262"
-      },
-      {
-        "id": "misospace/courier#107@5690b16f",
-        "repo_full_name": "misospace/courier",
-        "number": 107,
-        "head_sha": "5690b16f6fda7f8f1f7cecd22245d27686f97f52",
-        "defect": {
-          "description": "#100 added the liveness restart-ceiling path in internal/controller/liveness.go, which terminalizes directly with return r.transitionTerminal(ctx, run, courierv1alpha1.PhaseNeedsHuman, \"\"). That means a run can still open a PR, never pass through Verifying, wedge/restart until the liveness ceiling, and then reach NeedsHuman with status.pr empty and a lifecycle report that omits the PR. That still violates #103's terminal metadata contract.",
-          "file": "internal/controller/liveness.go",
-          "severity": "major"
-        },
-        "source": {
-          "url": "https://github.com/misospace/courier/pull/107#pullrequestreview-5323279368",
-          "production_bot_at_head": "APPROVED",
-          "production_bot_flagged_same": false,
-          "anchor_confidence": "low"
-        },
-        "base_sha": "4f6045f33c1f3a55f5b9bb1ca898ee3b413437e6"
       },
       {
         "id": "misospace/courier#108@ff99fc4d",
@@ -920,7 +905,7 @@
         "head_sha": "570571a2b69c5a1187eecbf65cbb2fbb4d4ffe04",
         "defect": {
           "description": "This PR does not scope the real KubeJobFailed alert shape that motivated #130. resolveSubjects only reads a.Labels[\"job\"], while kube-state-metrics KubeJobFailed in this deployment identifies the Job with job_name (and #127 / PR #138 explicitly adds job_name -> Job -> owned Pod resolution). As a result, after this PR lands, the motivating alert still has no Job subject.",
-          "file": "correlate.go",
+          "file": "enrich.go",
           "severity": "blocker"
         },
         "source": {
@@ -956,7 +941,7 @@
         "head_sha": "b024b6d9cccc369d049756f5429ccc025a934c09",
         "defect": {
           "description": "The rebase has accidentally reintroduced several already-fixed regressions from current main. 1. Reverts #139's Flux causality fix... 2. Reverts #142's subject-scoped warning events... 3. Reverts #150's SIGTERM/context propagation fix. Both GitHub delivery arms go back to context.WithTimeout(context.Background(), 30*time.Second) instead of deriving from Deliver's caller ctx; the PR arm also reintroduces parameter shadowing. That would again let GitHub writes outlive shutdown drain.",
-          "file": "github.go",
+          "file": "report.go",
           "severity": "blocker"
         },
         "source": {
@@ -996,7 +981,7 @@
         "head_sha": "b8bdda4db9b7b41576fc23d4169a47e888411d73",
         "defect": {
           "description": "BackendLogs are placed inside DIRECT EVIDENCE, but on current main they are still namespace-wide fallback data, not subject-scoped. Issue #129 is still open and explicitly exists because fetchBackendLogsResult seeds a namespace-only query, which can return unrelated Flux/controller chatter. Until #129 lands, presenting BackendLogs as direct subject evidence upgrades unrelated namespace noise to the highest-precedence tier.",
-          "file": "enrich.go",
+          "file": "report.go",
           "severity": "blocker"
         },
         "source": {
@@ -1023,7 +1008,8 @@
           "production_bot_flagged_same": false,
           "anchor_confidence": "low"
         },
-        "base_sha": "1266b83a25a514091f1411f93d90ef74886d8138"
+        "base_sha": "1266b83a25a514091f1411f93d90ef74886d8138",
+        "defect_outside_diff": true
       },
       {
         "id": "misospace/alert-triage#151@15f81e37",
@@ -1032,7 +1018,7 @@
         "head_sha": "15f81e3750566b0ddc0a11e7b58219a420d4c65b",
         "defect": {
           "description": "MetricsScoped is still too coarse for the data it classifies. EnrichMetricsWithRules returns one mixed []string containing both summaries from each alert rule expression, replayed exactly as written, and the fixed context metrics... main.go then sets r.MetricsScoped = g.Label(\"pod\") != \"\" for the entire slice. A common pod label proves only that the fixed context metrics were pod-bounded; it does not make the alert-rule expression subject-scoped... Also: DIRECT still emits false negatives when no subject object was actually resolved/observed.",
-          "file": "metrics.go",
+          "file": "main.go",
           "severity": "major"
         },
         "source": {
@@ -1139,7 +1125,8 @@
           "production_bot_flagged_same": false,
           "anchor_confidence": "low"
         },
-        "base_sha": "8fcc45603441676fbf76f47d2620f6072d66b979"
+        "base_sha": "8fcc45603441676fbf76f47d2620f6072d66b979",
+        "defect_outside_diff": true
       },
       {
         "id": "misospace/alert-triage#165@ef6572f9",
@@ -1312,7 +1299,7 @@
         "head_sha": "1097dd6686eca5d774e1bc1a6a6ca8e0303c2454",
         "defect": {
           "description": "Closing: the alias *is* the accounting key. `litellm.json` groups by `api_key_alias` in 10 panels and never uses `hashed_api_key`, so suffixing would rename `Foreman` -> `Foreman (managed)` and split every one of them at the cutover. Deleting the unmanaged key first achieves the same result without that cost: the CR then generates with the plain alias, so the metric series stays continuous. The auth gap I was avoiding is the smaller problem.",
-          "file": "kubernetes/apps/base/llm/litellm/virtualkeys",
+          "file": "kubernetes/apps/base/llm/litellm/virtualkeys/",
           "severity": "major"
         },
         "source": {

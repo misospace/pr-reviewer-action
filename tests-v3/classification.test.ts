@@ -714,6 +714,51 @@ test("#749: lexical material classes need executable context", () => {
   }
 });
 
+test("#871: a bare `pathname` is a WHATWG URL component, not a path variable, unless the file also touches a filesystem/path-construction API", () => {
+  // Negative: URL .pathname in a network/URL-only file (#854's shape) never
+  // fires path_handling_changes — the file never calls a filesystem/path API
+  // at all, so `pathname` here is exactly as likely to be `url.pathname` as
+  // a filesystem path.
+  const urlOnly = [
+    "+const pathname = base.pathname.replace(/\\/+$/, \"\") + \"/xrpc/\" + nsid;\n",
+    "+const url = new URL(pathname, base);\n",
+    "+const p2 = new URL(req.url).pathname;\n",
+    "+const p3 = window.location.pathname;\n",
+  ];
+  for (const diff of urlOnly) {
+    const result = classifyPr({ prFiles: files("src/platform/client.ts"), diffText: diff, linkedIssues: [] });
+    assert.notEqual(result.prKind, "path_handling_changes", diff);
+    assert.equal(result.pathHandlingProvenance.fired, false, diff);
+  }
+
+  // Positive: the SAME `.pathname` reaching a real filesystem/path-
+  // construction call in the same file DOES fire — an untrusted URL
+  // component reaching the filesystem is real path handling. Fires via
+  // untrusted_source_join (pathname is now an untrusted-source pattern,
+  // scoped to construction-call operands) even without other fs evidence
+  // in the file.
+  const reachesFs = classifyPr({
+    prFiles: files("src/platform/serve.ts"),
+    diffText: '+const dest = path.join(root, url.pathname);\n',
+    linkedIssues: [],
+  });
+  assert.equal(reachesFs.prKind, "path_handling_changes");
+  assert.ok(reachesFs.pathHandlingProvenance.signals.some((s) => s.signal === "untrusted_source_join"));
+
+  // Positive: `pathname` co-occurring with genuine fs/path-construction API
+  // usage elsewhere in the same file also fires the identifier class, even
+  // when the pathname reference itself is a separate line/statement.
+  const coOccurs = classifyPr({
+    prFiles: files("src/platform/serve.ts"),
+    diffText: [
+      "+const pathname = url.pathname;\n",
+      '+fs.readFile(path.join(ROOT, "static.txt"), cb);\n',
+    ].join(""),
+    linkedIssues: [],
+  });
+  assert.equal(coOccurs.prKind, "path_handling_changes");
+});
+
 test("#749: anchor + untrusted operand refuses neutralization and fires", () => {
   const cases: [string, string][] = [
     ["request.args", '+target = os.path.join(__dirname, request.args["path"])\n'],

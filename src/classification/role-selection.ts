@@ -14,7 +14,7 @@
  * roles run with explicit reasons. Zero selection is only ever allowed by an
  * explicit, documented trivial gate. */
 
-import type { PRClassification } from "./classify.js";
+import { SUBSTANTIAL_SOURCE_LINE_THRESHOLD, type PRClassification } from "./classify.js";
 
 /** Version of the selection artifact. Bump on any shape change. */
 export const SELECTION_ARTIFACT_VERSION = 1;
@@ -195,6 +195,11 @@ export function classificationFromArtifact(raw: unknown): PRClassification | nul
     // #749 provenance is a diagnostic, not a selection input: the persisted
     // artifact's provenance is not consumed here.
     pathHandlingProvenance: { fired: false, signals: [], discounted: [] },
+    // #871: not part of the persisted artifact (see the PRClassification
+    // field doc) — the specialists gate overrides this on the rebuilt
+    // classification from the SUBSTANTIAL_CODE_CHANGE env var instead of
+    // reading it from here.
+    substantialCodeChange: false,
   };
 }
 
@@ -303,6 +308,7 @@ export function selectSpecialistRoles(classification: PRClassification | null): 
   // Metadata uncertainty (usable classifications only — the unavailable
   // fallback already covers unusable input).
   const uncertaintyReasons = usable ? classification.linkedMetadataUncertainty : [];
+  const substantialCodeChange = usable ? classification.substantialCodeChange : false;
 
   if (conservativeFallback(usable, kind)) {
     // Both fallback shapes report the classification as unavailable.
@@ -363,6 +369,24 @@ export function selectSpecialistRoles(classification: PRClassification | null): 
       skippedRoles.push(role);
     }
   }
+  // #871: a signal too weak to route on (a content-only file_serving/
+  // path_handling match) is too weak to suppress the correctness specialist
+  // too. Independent of which pr_kind/risk-flag lane matched, force the
+  // correctness lane on for a PR whose non-test source footprint is
+  // substantial (see PRClassification.substantialCodeChange) — e.g. #854: an
+  // 874-line PR adding a new 409-line non-test source module classified as
+  // file_serving_changes from a content-only match and skipped correctness.
+  const correctnessDecision = decisions[0];
+  if (substantialCodeChange && correctnessDecision !== undefined && correctnessDecision.role === "correctness" && !correctnessDecision.selected) {
+    const reason =
+      `selected: substantial non-test source change (a new source module, or ` +
+      `over ${SUBSTANTIAL_SOURCE_LINE_THRESHOLD} non-test source lines changed) ` +
+      "— correctness runs regardless of pr_kind (#871)";
+    decisions[0] = { role: "correctness", selected: true, signals: correctnessDecision.signals, reason };
+    skippedRoles.splice(skippedRoles.indexOf("correctness"), 1);
+    selectedRoles.unshift("correctness");
+  }
+
   if (selectedRoles.length === 0) {
     // Conservative no-match fallback: a usable classification whose kind
     // matches no lane (a future classifier value) must fail toward MORE

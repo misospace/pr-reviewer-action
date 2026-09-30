@@ -305,7 +305,17 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
         classification = null;
       }
     }
-    const selection = selectSpecialistRoles(classificationFromArtifact(classification));
+    // #871: the persisted classification.json never carries
+    // substantialCodeChange (see PRClassification's field doc — the parity
+    // boundary compares that artifact as one opaque string per fixture).
+    // review.ts threads the in-memory signal here via this env var instead,
+    // set from the same classification the run already computed.
+    const rebuilt = classificationFromArtifact(classification);
+    const withSubstantialChange =
+      rebuilt !== null && envStr(env, "SUBSTANTIAL_CODE_CHANGE").trim().toLowerCase() === "true"
+        ? { ...rebuilt, substantialCodeChange: true }
+        : rebuilt;
+    const selection = selectSpecialistRoles(withSubstantialChange);
     selectionArtifact = selectionToArtifact(selection);
     const selected = new Set(selection.selectedRoles);
     rolesToRun = SPECIALIST_ROLES_ORDER.filter((role) => selected.has(role));

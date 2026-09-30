@@ -454,11 +454,33 @@ const PATH_HANDLING_CONTENT_CLASSES: readonly (readonly [string, readonly RegExp
   ["symlink_sensitive", [
     /symlink|readlink|lstat|follow_symlinks|O_NOFOLLOW/i,
   ]],
-  // Identifier-shaped path references (`filepath`, `pathname`) — variables
-  // and identifiers named after the path they denote. More specific than the
+  // Identifier-shaped path references (`filepath`) — variables and
+  // identifiers named after the path they denote. More specific than the
   // removed `pathlib`/`os.path` mention patterns and kept deliberately.
-  ["path_reference_identifier", [/filepath|pathname/i]],
+  // `pathname` is handled separately below (PATHNAME_IDENTIFIER_PATTERN):
+  // unlike `filepath`, it has a common non-filesystem meaning (a WHATWG
+  // URL's `.pathname`, `location.pathname`) that is syntactically identical
+  // to a path variable named `pathname` (#854/#871).
+  ["path_reference_identifier", [/filepath/i]],
 ];
+
+/** #871 follow-up: `pathname` alone (`url.pathname`, `const pathname = ...`)
+ * is exactly as likely to be a WHATWG URL component as a filesystem path —
+ * #854's false positive was `const pathname = base.pathname.replace(...)` in
+ * a network client with no filesystem access at all. #749's own principle
+ * ("path handling requires a real untrusted-PATH surface") says a bare
+ * mention is not that surface. It only counts as the
+ * path_reference_identifier signal when the same file/hunk ALSO shows
+ * evidence of a filesystem/path-construction API — the same head vocabulary
+ * PATH_CONSTRUCTION_HEADS recognizes (fs.*, path.join/resolve, open/fopen,
+ * readFile, os.path.*, Path(...), send_file, shutil.*, ...). A file that
+ * only ever touches URLs (#854's shape) never shows that evidence, so
+ * `pathname` never fires there; a file that also does real path
+ * construction keeps the signal. This is deliberately coarser than the
+ * per-call operand scan used elsewhere (file-wide, not call-scoped) — it is
+ * a permissive gate that only ever makes `pathname` fire LESS often, so the
+ * imprecision only trades in the safe direction. */
+const PATHNAME_IDENTIFIER_PATTERN = /\bpathname\b/i;
 
 /** Path construction heads: a callee that opens a filesystem-path
  * construction call. The untrusted-source scan reads ONLY the call's
@@ -487,6 +509,17 @@ const PATH_CONSTRUCTION_HEAD_PATTERNS: readonly { pattern: RegExp; isPathlib: bo
     pattern: new RegExp(`${head}\\s*\\(`, `${flags}g`),
     isPathlib,
   }));
+
+/** #871 follow-up: file-wide (not call-scoped) existence check for "this file
+ * touches a filesystem/path-construction API somewhere" — see
+ * PATHNAME_IDENTIFIER_PATTERN above. Built from the same head vocabulary as
+ * PATH_CONSTRUCTION_HEADS but as a fresh, non-global regex (a `.test()` used
+ * for existence-only, never `matchAll`, so no `lastIndex` state to leak
+ * across calls, unlike PATH_CONSTRUCTION_HEAD_PATTERNS above). */
+const FS_API_EVIDENCE_PATTERN = new RegExp(
+  PATH_CONSTRUCTION_HEADS.map(([head]) => `(?:${head})\\s*\\(`).join("|"),
+  "i",
+);
 
 /** Cap on continuation lines accumulated for one open construction call.
  * Continuation lines are operand-list text by construction (the call is
@@ -521,6 +554,13 @@ const UNTRUSTED_SOURCE_PATTERNS: readonly RegExp[] = [
   /\.\s*filename\b/i,
   /\boriginalname\b/i,
   /\buntrusted|\bunsanitized|\battacker/i,
+  // #871 follow-up: a WHATWG URL's `.pathname` (or `.pathname =`) is an
+  // untrusted URL component exactly like `.filename` is an untrusted upload
+  // name — real when it reaches a filesystem/path-construction call
+  // (`path.join(root, url.pathname)`), bookkeeping-adjacent noise otherwise.
+  // Property-access-only, like `.filename` above: a bare `pathname`
+  // identifier is not itself proof of an untrusted URL component.
+  /\.\s*pathname\b/i,
 ];
 
 /** Test/fixture file conventions, cross-language. Signals found only in test
@@ -837,6 +877,25 @@ export function evaluatePathHandlingSignals(
       }
     }
 
+    // #871 follow-up: `pathname` alone only counts as the
+    // path_reference_identifier signal when this file/hunk also shows
+    // filesystem/path-construction API evidence — otherwise it is exactly
+    // as likely to be a WHATWG URL component (`url.pathname`,
+    // `location.pathname`) as a filesystem path variable (#854/#749).
+    if (!isDocumentation) {
+      const fsEvidence = lines.some((line) =>
+        FS_API_EVIDENCE_PATTERN.test(stripCodeComments(stripStaticStringLiterals(line))),
+      );
+      if (fsEvidence) {
+        for (let index = 0; index < neutralized.length; index++) {
+          const scanLine = stripCodeComments(neutralized[index] ?? "");
+          if (!PATHNAME_IDENTIFIER_PATTERN.test(scanLine)) continue;
+          recordSignal(buckets, "path_reference_identifier", source, chunkFile, pathSample(lines[index] ?? ""));
+          break;
+        }
+      }
+    }
+
     // Untrusted-source join: the scan reads ONLY the operand text of the
     // construction call(s) matched on the line — never the assignment LHS,
     // comments, or sibling statements. Same-line construction with an
@@ -927,6 +986,51 @@ export interface PRClassification {
    * deliberately discounted. Empty lists when path handling did not fire.
    * Never contains unbounded attacker-controlled text. */
   pathHandlingProvenance: PathHandlingProvenance;
+  /** #871: true when the PR's non-test source footprint is substantial — a
+   * new non-test source module, or non-test source lines changed over
+   * SUBSTANTIAL_SOURCE_LINE_THRESHOLD. role-selection forces the correctness
+   * lane on this regardless of pr_kind, so a content-only file_serving/
+   * path_handling match (too weak to route, per routeSignals) cannot also
+   * be the sole reason correctness gets skipped on a real, sizable change.
+   * Deliberately NOT part of `classificationToArtifact`'s persisted shape:
+   * v2 has no equivalent field, and the parity harness's classification
+   * boundary compares that artifact as one opaque canonical-JSON string per
+   * fixture — adding a key there would touch every existing golden. The
+   * production run instead threads this signal to the specialists gate via
+   * the `SUBSTANTIAL_CODE_CHANGE` env var (see run/review.ts and
+   * gates/specialists-gate.ts), entirely outside classification.json. */
+  substantialCodeChange: boolean;
+}
+
+/** #871: threshold (in changed lines — additions + deletions) above which a
+ * PR's non-test source footprint counts as "substantial" for role selection,
+ * independent of pr_kind/risk-flag lane matching. Grounded in the #854
+ * evidence: the PR the correctness specialist was wrongly skipped on added
+ * one new 409-line non-test source module (src/platform/tangled-bobbin.ts).
+ * 200 sits comfortably below that (margin for smaller-but-still-nontrivial
+ * PRs) while still excluding a typical small diff (a handful of lines in an
+ * existing file). */
+export const SUBSTANTIAL_SOURCE_LINE_THRESHOLD = 200;
+
+const SOURCE_FILE_PATTERN = new RegExp(`\\.${SRC_EXT}$`, "i");
+
+function isNonTestSourceFile(filename: string): boolean {
+  return SOURCE_FILE_PATTERN.test(filename) && !isTestPath(filename);
+}
+
+/** #871: substantial-change detection over the changed-file list — a new
+ * non-test source module (added status), or the non-test source lines
+ * changed (additions + deletions, summed across matching files) exceeding
+ * SUBSTANTIAL_SOURCE_LINE_THRESHOLD. */
+function evaluateSubstantialCodeChange(files: readonly ChangedFile[]): boolean {
+  let hasNewModule = false;
+  let lines = 0;
+  for (const file of files) {
+    if (!isNonTestSourceFile(file.filename)) continue;
+    if (file.status === "added") hasNewModule = true;
+    lines += (file.additions ?? 0) + (file.deletions ?? 0);
+  }
+  return hasNewModule || lines > SUBSTANTIAL_SOURCE_LINE_THRESHOLD;
 }
 
 /** Serialize the internal classification to the persisted v2-identical
@@ -968,7 +1072,19 @@ const KIND_RULES: readonly { kind: string; matches: KindPredicate }[] = [
   { kind: "db_or_migration_changes", matches: filenameMatches(DB_MIGRATION_PATTERNS) },
   { kind: "auth_changes", matches: filenameMatches(AUTH_PATTERNS) },
   { kind: "public_route_changes", matches: filenameMatches(PUBLIC_ROUTE_PATTERNS) },
-  { kind: "file_serving_changes", matches: filenameOrDiffMatches(FILE_SERVING_PATTERNS) },
+  // #871: unlike every other content-capable rule in this table,
+  // file_serving_changes had no material/mention distinction at all — a bare
+  // keyword regex scanned over raw diff text, matching prose or unrelated API
+  // surfaces (a network client's URL-parsing text) exactly as readily as an
+  // actual static-file handler. `routeSignals` already refuses to route on
+  // that class of content-only match (too weak); this rule now requires the
+  // same filename backing to set `pr_kind`, so it falls through to
+  // path_handling_changes / the default kind instead of mislabeling a PR from
+  // prose alone. The risk flag (FILE_RISK_RULES below) still fires from
+  // content — a weaker, informational signal that can still select the
+  // security lane — but `buildMustCheck` skips its checklist items when
+  // content-only (see CONTENT_ONLY_SUPPRESSED_CHECK_FLAGS).
+  { kind: "file_serving_changes", matches: filenameMatches(FILE_SERVING_PATTERNS) },
   { kind: "path_handling_changes", matches: isPathHandling },
 ];
 
@@ -977,11 +1093,6 @@ export const DEFAULT_PR_KIND = "app_code";
 
 function filenameMatches(patterns: readonly RegExp[]): KindPredicate {
   return (filenames) => filenames.some((name) => matchesAny(name, patterns));
-}
-
-function filenameOrDiffMatches(patterns: readonly RegExp[]): KindPredicate {
-  return (filenames, diffText) =>
-    filenames.some((name) => matchesAny(name, patterns)) || matchesAny(diffText, patterns);
 }
 
 /** True only when EVERY changed file is a known lockfile — guards
@@ -1160,21 +1271,48 @@ const FLAG_CHECKS: Readonly<Record<string, readonly string[]>> = {
   linked_priority_p1: ["treat as high priority — verify correctness carefully"],
 };
 
-/** Kinds whose classification can come from diff CONTENT (the
- * filenameOrDiffMatches rules). A content-only match of these must not drive
- * smart-model routing — only an actual changed filename should. The
- * path_handling kind fires from the #749 signal model; routing stays
- * filename-gated exactly as before — only a filename vocabulary hit (the same
- * effective subset as the removed mention patterns) may route. */
+/** Kinds/flags whose RISK FLAG can still fire from diff CONTENT alone (with an
+ * empty `riskFlagsWithFiles` file list). A content-only match of these must
+ * not drive smart-model routing — only an actual changed filename should. As
+ * of #871, `file_serving_changes` can no longer become `pr_kind` from
+ * content alone (see the KIND_RULES comment above), but its risk flag still
+ * can — kept only as the routing gate below, and as the must_check
+ * suppression key in CONTENT_ONLY_SUPPRESSED_CHECK_FLAGS. The
+ * path_handling_changes kind still fires `pr_kind` from the #749 signal
+ * model regardless of filename backing (kept — a real behavioral signal, not
+ * a bare keyword scan); routing stays filename-gated exactly as before —
+ * only a filename vocabulary hit (the same effective subset as the removed
+ * mention patterns) may route. */
 const CONTENT_CAPABLE_KINDS: Readonly<Record<string, readonly RegExp[]>> = {
   file_serving_changes: FILE_SERVING_PATTERNS,
   path_handling_changes: PATH_HANDLING_FILENAME_PATTERNS,
 };
 
-function buildMustCheck(prKind: string, riskFlags: readonly string[]): string[] {
+/** #871: risk flags whose must_check items must not fire from a content-only
+ * match (empty `riskFlagsWithFiles` attribution) — the same threshold
+ * `routeSignals` already applies. Deliberately just `file_serving_changes`:
+ * unlike path_handling_changes, it has no material-signal model
+ * distinguishing real usage from an incidental keyword mention (see the
+ * KIND_RULES comment), so a content-only hit is never strong enough to
+ * inject "verify file path sanitization" / "check for directory traversal
+ * vulnerabilities" into must_check. path_handling_changes keeps firing its
+ * must_check from content per the #749 regression suite (a real untrusted-
+ * path signal, not a bare mention, can appear with no filename backing at
+ * all — e.g. `os.path.join(base, request.args["p"])` in an arbitrarily named
+ * file). */
+const CONTENT_ONLY_SUPPRESSED_CHECK_FLAGS: ReadonlySet<string> = new Set(["file_serving_changes"]);
+
+function buildMustCheck(
+  prKind: string,
+  riskFlags: readonly string[],
+  riskFlagsWithFiles: Readonly<Record<string, string[]>>,
+): string[] {
   const checks: string[] = [];
   const seen = new Set<string>();
   for (const key of [prKind, ...riskFlags]) {
+    if (CONTENT_ONLY_SUPPRESSED_CHECK_FLAGS.has(key) && (riskFlagsWithFiles[key] ?? []).length === 0) {
+      continue;
+    }
     for (const check of [...(KIND_CHECKS[key] ?? []), ...(FLAG_CHECKS[key] ?? [])]) {
       if (!seen.has(check)) {
         seen.add(check);
@@ -1297,12 +1435,13 @@ export function classifyPr(input: ClassifyInput): PRClassification {
 
   const prKind = classifyPrKind(prFiles, diffText);
   const { flags, flagsWithFiles } = detectRiskFlags(prFiles, diffText, linkedIssues);
-  const mustCheck = buildMustCheck(prKind, flags);
+  const mustCheck = buildMustCheck(prKind, flags, flagsWithFiles);
 
   // Build changed files summary (just filenames, truncated).
   const fileNames = prFiles.map((file) => file.filename);
   const changedFilesSummary = fileNames.slice(0, maxSummaryFiles);
   const routeSignalsList = routeSignals(prKind, fileNames, flags, flagsWithFiles);
+  const substantialCodeChange = evaluateSubstantialCodeChange(prFiles);
 
   // Collect linked issue labels (case-sensitive, encounter order).
   const linkedIssueLabels: string[] = [];
@@ -1324,5 +1463,6 @@ export function classifyPr(input: ClassifyInput): PRClassification {
     linkedMetadataUncertain: uncertainty.uncertain,
     linkedMetadataUncertainty: uncertainty.reasons,
     pathHandlingProvenance,
+    substantialCodeChange,
   };
 }

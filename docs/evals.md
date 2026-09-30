@@ -499,12 +499,22 @@ in `mode_summary` separately from other errors.
 A real-PR replay reviews an old head, but the pipeline fetches some context
 live. The harness therefore:
 
-- **Resets the reused clone per scenario** (`git clean -ffdx` after checkout).
-  `context.sh` reuses a non-empty `pr.diff`, so a leftover one would silently
-  review the previous PR's diff.
+- **Resets the reused clone per scenario** (`git clean -ffdx` after checkout),
+  so no untracked leftover from a previous scenario's run lingers in the
+  checkout.
 - **Builds the diff locally when an entry pins `base_sha`** (`git diff
   base...head`). The API diff reflects the PR's *current* state, which already
-  contains later fixes.
+  contains later fixes. The resulting `pr.diff` / `pr-files.seed.json` are
+  written to a fresh, private artifact directory the harness creates per run
+  and passes as `PR_REVIEWER_RUN_DIR` (#838) — never into the checkout
+  (`repo_path`/`GITHUB_WORKSPACE`) itself, so a corpus entry can never seed
+  its own diff/file list by committing those filenames at its repo root. The
+  runtime's own outputs (`ai-output.json`, `review-corpus.md`,
+  `tool-harness.json`, `specialists*.json`, …) land in that same directory
+  and the harness reads them back from there (`ReviewRun.run_dir`), not from
+  `repo_path`. This mirrors the production `run` CLI, which since #838
+  defaults its artifact directory to a fresh private temp dir (never
+  `process.cwd()`) whenever `PR_REVIEWER_RUN_DIR` is unset.
 - **Turns off the PR thread, unresolved review threads and outstanding human
   reviews** (`PR_THREAD_CONTEXT`, `REVIEW_THREADS_CONTEXT`,
   `HUMAN_REVIEWS_CONTEXT` = `false`). They are fetched as of today and can
