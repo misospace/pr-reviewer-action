@@ -156,18 +156,26 @@ test("an empty ref throws StandardsFileRefError rather than silently resolving a
   }), StandardsFileRefError);
 });
 
-test("an unresolvable ref in a real git repo yields no standards, not a thrown error (matches repository-config's permissive per-candidate treatment)", () => {
+test("an unresolvable ref (garbage, or unknown) throws StandardsFileRefError — a base-ref read failure, not silent 'no candidate matched'", () => {
   const root = initRepo();
   write(root, "AGENTS.md", "rules\n");
   commit(root, "base");
-  const result = readStandardsFileAtRef({
+  assert.throws(() => readStandardsFileAtRef({
     standardsFile: "",
     candidates: DEFAULT_STANDARDS_FILE_CANDIDATES,
     ref: "not-a-real-ref",
     workspace: root,
-  });
-  assert.equal(result.resolved, null);
-  assert.equal(result.content, null);
+  }), StandardsFileRefError);
+});
+
+test("a workspace with no git repository at all is a base-ref failure (verifyRef cannot confirm the ref), not silent 'no standards'", () => {
+  const root = mkdtempSync(join(tmpdir(), "standards-ref-nogit-"));
+  assert.throws(() => resolveStandardsFileAtRef({
+    standardsFile: "",
+    candidates: DEFAULT_STANDARDS_FILE_CANDIDATES,
+    ref: "HEAD",
+    workspace: root,
+  }), StandardsFileRefError);
 });
 
 test("an operator-owned absolute standards-file outside the repository is read directly from disk", () => {

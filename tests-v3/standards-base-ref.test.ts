@@ -71,12 +71,6 @@ function commit(root: string, message: string): string {
   return execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { env: GIT_ENV }).toString("utf8").trim();
 }
 
-function initRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "standards-base-ref-test-"));
-  execFileSync("git", ["-c", "init.defaultBranch=main", "init", "-q", root], { env: GIT_ENV });
-  return root;
-}
-
 interface RunFixture { runDir: string; cleanup: () => void }
 function withRunDir(): RunFixture {
   const runDir = mkdtempSync(join(tmpdir(), "v3-run-test-"));

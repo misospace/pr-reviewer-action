@@ -98,15 +98,44 @@ function runGit(args: string[], workspace: string, timeoutSec: number): Buffer |
   }
 }
 
+/** `-z` (NUL-separated entries, no C-quoting of unusual path bytes) so a
+ * path with a tab, newline, or non-ASCII byte is parsed exactly, never
+ * re-escaped or split on the wrong character. */
+/** Whether `ref` resolves to a real commit in this repository — distinct
+ * from "a candidate path is absent at a valid ref". A ref that cannot be
+ * resolved (unknown/garbage ref, or `workspace` is not a git repository at
+ * all) is a base-ref *read failure* per #885: the caller must degrade with
+ * a warning, never silently proceed as "no candidate matched", which would
+ * be indistinguishable from an ordinary clean repository with no standards
+ * file. `git cat-file -e <ref>^{commit}` is a silent existence check (no
+ * stdout) — cheaper than `ls-tree` and unambiguous about what's being
+ * tested. */
+function verifyRef(ref: string, workspace: string, timeoutSec: number): boolean {
+  try {
+    execFileSync("git", ["cat-file", "-e", `${ref}^{commit}`], {
+      cwd: workspace,
+      timeout: timeoutSec * 1000,
+      stdio: ["ignore", "ignore", "ignore"],
+      windowsHide: true,
+    });
+    return true;
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException & { code?: string | number | null; killed?: boolean; signal?: string | null };
+    if (typeof err.code === "string" && err.code === "ENOENT") throw new StandardsFileRefError("git executable not found");
+    if (err.killed || err.signal) throw new StandardsFileRefError(`git cat-file timed out after ${timeoutSec}s verifying ref ${ref}`);
+    return false;
+  }
+}
+
 function parseLsTree(stdout: Buffer): RefEntry[] {
   const text = stdout.toString("utf8");
   const entries: RefEntry[] = [];
-  for (const line of text.split("\n")) {
-    if (line === "") continue;
-    const tab = line.indexOf("\t");
+  for (const record of text.split("\0")) {
+    if (record === "") continue;
+    const tab = record.indexOf("\t");
     if (tab < 0) continue;
-    const meta = line.slice(0, tab).split(" ");
-    const fullPath = line.slice(tab + 1);
+    const meta = record.slice(0, tab).split(" ");
+    const fullPath = record.slice(tab + 1);
     const mode = meta[0] ?? "";
     const type = (meta[1] ?? "") as RefEntry["type"];
     const name = fullPath.includes("/") ? fullPath.slice(fullPath.lastIndexOf("/") + 1) : fullPath;
@@ -120,7 +149,7 @@ function parseLsTree(stdout: Buffer): RefEntry[] {
  * when nothing is there. */
 function lsTreeSelf(ref: string, relPath: string, workspace: string, timeoutSec: number): RefEntry | null {
   if (relPath === "") return null;
-  const stdout = runGit(["ls-tree", ref, "--", relPath], workspace, timeoutSec);
+  const stdout = runGit(["ls-tree", "-z", ref, "--", relPath], workspace, timeoutSec);
   if (stdout === null) return null;
   // An exact (non-glob) pathspec resolves to at most one tree entry.
   return parseLsTree(stdout)[0] ?? null;
@@ -130,7 +159,7 @@ function lsTreeSelf(ref: string, relPath: string, workspace: string, timeoutSec:
  * mirrors `readdirSync` (one level, not recursive). */
 function lsTreeChildren(ref: string, dirPath: string, workspace: string, timeoutSec: number): RefEntry[] {
   const pathspec = dirPath === "" ? "." : `${dirPath}/`;
-  const stdout = runGit(["ls-tree", ref, "--", pathspec], workspace, timeoutSec);
+  const stdout = runGit(["ls-tree", "-z", ref, "--", pathspec], workspace, timeoutSec);
   if (stdout === null) return [];
   return parseLsTree(stdout);
 }
@@ -199,6 +228,9 @@ function safeAtRef(path: string, ref: string, workspace: string, timeoutSec: num
 export function resolveStandardsFileAtRef(input: StandardsRefInput): string {
   if (input.ref === "") throw new StandardsFileRefError("resolveStandardsFileAtRef requires a non-empty ref");
   const timeoutSec = input.gitTimeoutSec ?? DEFAULT_GIT_TIMEOUT_SEC;
+  if (!verifyRef(input.ref, input.workspace, timeoutSec)) {
+    throw new StandardsFileRefError(`base ref '${input.ref}' could not be resolved to a commit in ${input.workspace}`);
+  }
   const safe = (path: string): boolean => safeAtRef(path, input.ref, input.workspace, timeoutSec);
   if (input.standardsFile !== "" && safe(input.standardsFile)) return input.standardsFile;
   const firstLine = input.candidates.split("\n")[0] ?? "";

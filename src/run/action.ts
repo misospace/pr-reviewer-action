@@ -104,6 +104,14 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
   stage.PLATFORM = pre.resolved_platform || stage.PLATFORM;
   stage.FORGEJO_API_URL = pre.effective_forgejo_api_url;
   stage.PR_HEAD_SHA = eventHeadSha || pre.head_sha;
+  // #885: the trusted base ref the review stage reads both repository config
+  // and the standards file from (never the PR head) — the same `pre.base_sha`
+  // precheck already resolved and that the publish stage below sends as
+  // `BASE_SHA`. Without this, the action path always ran `runReview` with an
+  // empty `PR_REVIEWER_BASE_REF`, silently dropping repository config and
+  // standards on every real run (only explicit-env callers like the `run`
+  // CLI subcommand or tests, which set it themselves, exercised either).
+  stage.PR_REVIEWER_BASE_REF = stage.PR_REVIEWER_BASE_REF || pre.base_sha || "";
   stage.IS_FORK_PR = pre.is_fork_pr;
   const temp = env.RUNNER_TEMP || env.TMPDIR || "/tmp";
   stage.CI_CHECKS_FILE = join(temp, "ci-checks-context.md");
