@@ -178,6 +178,51 @@ test("#868: a 200 verdict-turn reply carrying an in-body error masks the configu
   }
 });
 
+test("#868 maintainer follow-up: a 200 verdict-turn reply that parses to {verdict: <configured key>} masks the key everywhere, long and one-character keys, native loop", async () => {
+  // A one-character key is a plausible ai-api-key (#862's precedent) but,
+  // unlike a realistic key string, a single common letter also turns up
+  // constantly in unrelated JSON (field names like "tokens", ordinary log
+  // prose, ...) — scanning a whole persisted artifact for "does it contain
+  // this one letter anywhere" would fail on those unrelated occurrences, not
+  // on an actual leak. So for the short key this test checks the *specific*
+  // leak signature (the quoted verdict value, unmasked) rather than bare
+  // character presence; the long key gets the broad, unambiguous scan.
+  for (const apiKey of ["sk-native-loop-long-configured-secret", "k"]) {
+    const { root, deps } = workspace();
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff (truncated)\n+ change\n");
+    const scripted = [
+      openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+      openAiText("summary"),
+      openAiText(JSON.stringify({ verdict: apiKey, review_markdown: "x" })),
+    ];
+    let transportCalls = 0;
+    const logs: string[] = [];
+    const { result } = await runToolHarness(deps({
+      env: { ...withPrompt.env, AI_API_KEY: apiKey },
+      transport: async () => scripted[transportCalls++],
+      log: (line: string) => logs.push(line),
+    }));
+    assert.equal(result.native_loop_verdict_produced, undefined, apiKey);
+    assert.equal(result.native_loop_verdict_status, "fallback", apiKey);
+    assert.equal(result.native_loop_verdict_reason, "parse", apiKey);
+    const errorField = String(result.native_loop_verdict_error ?? "");
+    const leakSignature = `got '${apiKey}'`;
+    const isLongKey = apiKey.length > 1;
+    const includesLeak = (text: string) => (isLongKey ? text.includes(apiKey) : text.includes(leakSignature));
+    assert.ok(!includesLeak(errorField), `[key=${apiKey}] telemetry field leaked the key: ${errorField}`);
+    assert.match(errorField, /\[REDACTED\]/, `[key=${apiKey}] telemetry field was not masked at all: ${errorField}`);
+    for (const line of logs) {
+      assert.ok(!includesLeak(line), `[key=${apiKey}] log line leaked the key: ${line}`);
+    }
+    for (const name of ["ai-response.primary.json", "tool-harness.json", "tool-harness.md"]) {
+      const file = path.join(root, name);
+      if (!fs.existsSync(file)) continue;
+      const text = fs.readFileSync(file, "utf8");
+      assert.ok(!includesLeak(text), `[key=${apiKey}] ${name} leaked the key`);
+    }
+  }
+});
+
 test("smart-tier tool failures fall back to the primary review without a smart verdict", async () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff (truncated)\n+ change\n");

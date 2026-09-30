@@ -34,7 +34,7 @@ import {
 } from "../model/conversation.js";
 import { redactText } from "../context/redact.js";
 import { fenceSafeLength } from "../context/related-context.js";
-import { maskAndTruncate, maskKnownSecrets } from "../context/redact.js";
+import { maskAndTruncate, maskDiagnostic } from "../context/redact.js";
 import { reframeForCorpus, renderRepoMapMarkdown, repoMapFromArtifact, trustFramingOverhead } from "../context/repo-map.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { VerdictParseFailure } from "../model/types.js";
@@ -265,26 +265,6 @@ export type VerdictEvaluation =
   | { ok: true; reason: "accepted"; detail: "" }
   | { ok: false; reason: "transport" | "empty" | "parse"; detail: string };
 
-/** Length cap matching #862's `describeTransportFailure` (300 chars). */
-const NATIVE_VERDICT_ERROR_MAX_CHARS = 300;
-
-/**
- * #868: mask this call's configured key(s) (unconditionally, before
- * `redactText`'s pattern heuristics), then cap length — applied to the
- * in-body error text this native-loop path extracts directly from the
- * response (below), independent of `parseVerdictResponse`'s own masking,
- * since a 200 reply carrying `{"error": ...}` never reaches the verdict
- * parser here.
- */
-function maskNativeVerdictError(text: string, secrets: readonly (string | null | undefined)[]): string {
-  const withoutKnownSecrets = maskKnownSecrets(text, secrets);
-  const redacted = redactText(withoutKnownSecrets);
-  const points = Array.from(redacted);
-  return points.length > NATIVE_VERDICT_ERROR_MAX_CHARS
-    ? `${points.slice(0, NATIVE_VERDICT_ERROR_MAX_CHARS).join("")}...[truncated]`
-    : redacted;
-}
-
 /**
  * Validate a verdict response with the downstream verdict contract (#637).
  * Uses `parseVerdictResponse` — the exact contract the standard review path
@@ -306,14 +286,19 @@ export function evaluateNativeVerdict(response: unknown, secrets: readonly (stri
       typeof error === "object"
         ? (((error as Record<string, unknown>).message as string) ?? JSON.stringify(error))
         : String(error);
-    return { ok: false, reason: "transport", detail: maskNativeVerdictError(rawDetail, secrets) };
+    return { ok: false, reason: "transport", detail: maskDiagnostic(rawDetail, secrets) };
   }
   try {
     parseVerdictResponse(response, secrets);
     return { ok: true, reason: "accepted", detail: "" };
   } catch (exc) {
     if (!(exc instanceof VerdictParseFailure)) throw exc;
-    return { ok: false, reason: exc.emptyCompletion ? "empty" : "parse", detail: exc.message };
+    // `parseVerdictResponse` already masks `exc.message` when `secrets` is
+    // given (its own masking boundary); `maskDiagnostic` here is a defensive
+    // second pass, not load-bearing — it costs nothing since masking is
+    // idempotent, and it keeps this call site correct even if that
+    // invariant ever changes.
+    return { ok: false, reason: exc.emptyCompletion ? "empty" : "parse", detail: maskDiagnostic(exc.message, secrets) };
   }
 }
 

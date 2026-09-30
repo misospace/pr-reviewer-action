@@ -23,7 +23,7 @@ import { emptyArtifact, extractSpecialistJson, normalizeSpecialistOutput, parseS
 import { buildSpecialistPayload, overrunRetryPayload, payloadBytes, type SpecialistPayload } from "./payload.js";
 import { completionOverran, extractResponseText, extractResponseUsage, mergeUsage, type SpecialistUsage } from "./wire.js";
 import { renderSpecialistLeadsSection } from "./render.js";
-import { maskKnownSecrets, redactText } from "../context/redact.js";
+import { maskDiagnostic, maskKnownSecrets, redactText } from "../context/redact.js";
 import { pyStr } from "../platform/py.js";
 
 /** v2's `redact_text(str(response["error"]))[:500]` for an error body,
@@ -409,14 +409,17 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
     // A 200 whose body is an error object is a transport failure (some
     // gateways do this); never parse it as a lead set.
     if (typeof outcome.raw === "object" && outcome.raw !== null && "error" in (outcome.raw as Record<string, unknown>) && (outcome.raw as Record<string, unknown>).error) {
-      // A second, whole-string mask pass (matching #862's
-      // `describeTransportFailure`): a one-character configured key can
-      // coincide with ordinary letters in the static "endpoint returned an
+      // `maskDiagnostic`'s second, whole-string mask pass (matching #862's
+      // `describeTransportFailure`) catches a one-character configured key
+      // coinciding with ordinary letters in the static "endpoint returned an
       // error body: " prefix, which `errorBodyText`'s body-only pass never
-      // touches.
-      const message = maskKnownSecrets(
+      // touches. `maxChars` here only guards the wrapping prose — it never
+      // re-truncates `errorBodyText`'s own v2-parity 500-char cap, since the
+      // whole string (prefix + up to 500 chars of body) never exceeds it.
+      const message = maskDiagnostic(
         `endpoint returned an error body: ${errorBodyText((outcome.raw as Record<string, unknown>).error, [config.apiKey])}`,
         [config.apiKey],
+        1000,
       );
       const failureArtifact = emptyArtifact(role);
       failureArtifact.errors.push(`transport: ${message}`);
@@ -596,11 +599,12 @@ async function runSpecialistScout(
     }
     if (typeof outcome.raw === "object" && outcome.raw !== null && (outcome.raw as Record<string, unknown>).error) {
       // See the matching comment above `runSpecialistRole`'s in-body-error
-      // branch: a second whole-string pass covers a one-character key
-      // coinciding with the static prefix text.
-      lastError = maskKnownSecrets(
+      // branch: `maskDiagnostic`'s whole-string pass covers a one-character
+      // key coinciding with the static prefix text.
+      lastError = maskDiagnostic(
         `transport: endpoint returned an error body: ${errorBodyText((outcome.raw as Record<string, unknown>).error, [config.apiKey])}`,
         [config.apiKey],
+        1000,
       );
       break;
     }

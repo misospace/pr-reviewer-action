@@ -1,27 +1,6 @@
 import type { NormalizedFinding, NormalizedHumanReviewDisposition, NormalizedRequiredCheckDisposition, NormalizedThreadDisposition, ParsedReviewVerdict, RequiredCheckStatus, VerdictValue } from "./types.js";
 import { VerdictParseFailure } from "./types.js";
-import { maskKnownSecrets, redactText } from "../context/redact.js";
-
-/** Length cap for an in-body error message, matching #862's
- * `describeTransportFailure` (300 chars) — the message may originate from an
- * untrusted upstream body and must never grow the log/artifact without
- * bound. */
-const STREAM_ERROR_MAX_CHARS = 300;
-
-/**
- * #868: the same masking `describeTransportFailure` applies to a non-2xx
- * body (#846) — mask the operator's configured key(s) unconditionally, then
- * `redactText`'s pattern heuristics, then cap length — applied here to a 200
- * reply whose body itself carries an error object (including mid-stream SSE
- * errors). `secrets` masking runs on the full untruncated text first so a
- * secret split across the truncation boundary is never partially exposed.
- */
-function maskStreamErrorMessage(text: string, secrets: readonly (string | null | undefined)[]): string {
-  const withoutKnownSecrets = maskKnownSecrets(text, secrets);
-  const redacted = redactText(withoutKnownSecrets);
-  const points = Array.from(redacted);
-  return points.length > STREAM_ERROR_MAX_CHARS ? `${points.slice(0, STREAM_ERROR_MAX_CHARS).join("")}...[truncated]` : redacted;
-}
+import { maskDiagnostic } from "../context/redact.js";
 
 /**
  * Port of pr_reviewer/response_parser.py: tolerant model-output parsing and
@@ -509,20 +488,21 @@ function completionTokens(response: Record<string, unknown>): number | null {
   return null;
 }
 
-function surfaceStreamError(response: Record<string, unknown>, secrets: readonly (string | null | undefined)[]): void {
+/**
+ * A 200 reply whose body carries an error object (`{"error": ...}`, common
+ * on OpenAI-compatible proxies and mid-stream SSE failures). Builds the raw,
+ * unmasked message — `parseVerdictResponse`'s outer boundary masks every
+ * `VerdictParseFailure` it throws (this one included) before it can reach a
+ * caller, so there is no masking to do here.
+ */
+function surfaceStreamError(response: Record<string, unknown>): void {
   const err = response.error;
   if (!err) return;
   let msg: string;
   if (isRecord(err)) msg = typeof err.message === "string" && err.message !== "" ? err.message : JSON.stringify(err);
   else if (typeof err === "string") msg = err;
   else msg = JSON.stringify(err) ?? String(err);
-  // A second, whole-string mask pass (matching #862's `describeTransportFailure`):
-  // a very short configured key (down to one character — `ai-api-key` has no
-  // minimum length) can coincide with ordinary letters in the static
-  // "Model endpoint returned an error: " prefix, which the body-only pass
-  // above never touches.
-  const full = `Model endpoint returned an error: ${maskStreamErrorMessage(msg, secrets)}`;
-  throw new VerdictParseFailure("endpoint_error", maskKnownSecrets(full, secrets));
+  throw new VerdictParseFailure("endpoint_error", `Model endpoint returned an error: ${msg}`);
 }
 
 const SEVERITY_RANK: Record<string, number> = { blocker: 0, major: 1, minor: 2, info: 3 };
@@ -588,17 +568,15 @@ export interface ParsedResponse {
 /**
  * Parse a raw model response (already deserialized JSON) into a validated
  * review verdict. Throws VerdictParseFailure on any validation failure, with
- * v2-identical messages. `secrets` (#868) is the operator-configured model
- * API key(s) for this call, if known to the caller — masked out of an
- * in-body error message (`surfaceStreamError`) before it reaches the
- * exception, so every downstream log/artifact sink inherits the masking for
- * free. Callers with no key in scope (e.g. the parity harness) may omit it.
+ * v2-identical messages — before masking (see `parseVerdictResponse` below,
+ * the exported entry point, which is the ONE place every such message gets
+ * masked before a caller ever sees it).
  */
-export function parseVerdictResponse(response: unknown, secrets: readonly (string | null | undefined)[] = []): ParsedReviewVerdict {
+function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
   if (!isRecord(response)) {
     throw new VerdictParseFailure("not_object", `Expected JSON object but got ${pyTypeName(response)}`);
   }
-  surfaceStreamError(response, secrets);
+  surfaceStreamError(response);
 
   const raw = extractContent(response);
   const text = Array.isArray(raw)
@@ -701,4 +679,29 @@ export function parseVerdictResponse(response: unknown, secrets: readonly (strin
     smartReviewReason: smartRequest.reason,
     extra,
   };
+}
+
+/**
+ * Parse a raw model response (already deserialized JSON) into a validated
+ * review verdict — the exported entry point, and the ONE masking boundary
+ * for every failure kind `parseVerdictResponseUnmasked` can throw (#868):
+ * an in-body error (`endpoint_error`), but just as much an `invalid_verdict`
+ * ("got '<model-controlled value>'"), a flattened-markdown notice, or any
+ * other kind whose v2-parity message embeds text the parser itself has no
+ * control over. `secrets` (the operator-configured model API key(s) for
+ * this call, if known to the caller) is masked into the message via
+ * `maskDiagnostic` — `kind`/`truncated` (and the `emptyCompletion` it
+ * derives) are preserved so every caller's failure-kind branching is
+ * unaffected. Callers with no key in scope (e.g. the parity harness) may
+ * omit `secrets`; the v2-parity message text is untouched in that case.
+ */
+export function parseVerdictResponse(response: unknown, secrets: readonly (string | null | undefined)[] = []): ParsedReviewVerdict {
+  try {
+    return parseVerdictResponseUnmasked(response);
+  } catch (error) {
+    if (error instanceof VerdictParseFailure) {
+      throw new VerdictParseFailure(error.kind, maskDiagnostic(error.message, secrets), { truncated: error.truncated });
+    }
+    throw error;
+  }
 }

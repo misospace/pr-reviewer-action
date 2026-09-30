@@ -79,6 +79,36 @@ export function maskKnownSecrets(text: string, secrets: readonly (string | null 
   return masked;
 }
 
+/** Default length cap for `maskDiagnostic`, matching #862's
+ * `describeTransportFailure` (300 chars). */
+export const DIAGNOSTIC_MAX_CHARS = 300;
+
+/**
+ * #868/#862: the one shared recipe for turning an untrusted, model-derived
+ * diagnostic string (a parse-failure message, an in-body error, a transport
+ * detail, ...) into something safe to log or persist: mask the caller's
+ * configured secret(s) first (on the full untruncated text, so a secret
+ * split across the cap is never partially exposed), then `redactText`'s
+ * pattern heuristics, then cap length, then — because a very short
+ * configured key (down to one character; `ai-api-key` has no minimum) can
+ * coincide with ordinary letters in whatever static prose the caller wraps
+ * this text in — mask the caller's *final*, fully-assembled string again.
+ * That last step is why every caller should build its full message (static
+ * prefix included) and pass the WHOLE thing through `maskDiagnostic` once,
+ * rather than only masking the untrusted substring before splicing it in.
+ */
+export function maskDiagnostic(
+  text: string,
+  secrets: readonly (string | null | undefined)[] = [],
+  maxChars: number = DIAGNOSTIC_MAX_CHARS,
+): string {
+  const withoutKnownSecrets = maskKnownSecrets(text, secrets);
+  const redacted = redactText(withoutKnownSecrets);
+  const points = Array.from(redacted);
+  const capped = points.length > maxChars ? `${points.slice(0, maxChars).join("")}...[truncated]` : redacted;
+  return maskKnownSecrets(capped, secrets);
+}
+
 /**
  * Port of `scripts/redact.py`'s `mask_and_truncate`: redact secrets, then
  * truncate to *maxBytes* UTF-8 bytes with a visible `\n[truncated]` marker.

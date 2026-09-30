@@ -276,3 +276,38 @@ test("#868: callModelTier's parse-exhausted failure masks the configured key fro
     assert.ok(!outcome.failure.message.includes("ghp_"), `expected the PAT-shaped secret to be masked, got: ${outcome.failure.message}`);
   }
 });
+
+function verdictEchoesKeyResponse(apiKey: string): ChatRequestOutcome {
+  return {
+    status: "ok",
+    raw: {
+      choices: [{ message: { content: JSON.stringify({ verdict: apiKey, review_markdown: "x" }) }, finish_reason: "stop" }],
+      usage: { completion_tokens: 5 },
+    },
+    response: {
+      id: "", object: "chat.completion", model: "m", content: "", toolCalls: [],
+      finishReason: "stop", usage: null, error: undefined,
+    },
+  };
+}
+
+test("#868 maintainer follow-up: the primary call masks a configured key echoed back as the verdict value (invalid_verdict), long and one-character keys", async () => {
+  for (const apiKey of ["primary-call-long-configured-secret-key", "k"]) {
+    const outcome = await callModelTier(profile({ retries: 8, apiKey }), CONTEXT, {
+      sleep: async () => {},
+      call: async () => verdictEchoesKeyResponse(apiKey),
+    });
+    assert.equal(outcome.status, "parse_exhausted", apiKey);
+    if (outcome.status === "parse_exhausted") {
+      assert.equal(outcome.failure.kind, "invalid_verdict");
+      assert.ok(!outcome.failure.message.includes(apiKey), `[key=${apiKey}] leaked in callModelTier's failure.message: ${outcome.failure.message}`);
+    }
+
+    const verdictOutcome = await produceVerdict(profile({ stream: false, apiKey }), CONTEXT, {
+      call: async () => verdictEchoesKeyResponse(apiKey),
+    });
+    assert.equal(verdictOutcome.ok, false, apiKey);
+    assert.equal(verdictOutcome.reason, "parse");
+    assert.ok(!verdictOutcome.detail.includes(apiKey), `[key=${apiKey}] leaked in produceVerdict's detail: ${verdictOutcome.detail}`);
+  }
+});
