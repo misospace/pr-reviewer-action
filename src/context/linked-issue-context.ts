@@ -33,7 +33,7 @@ import { isPlainObject, jqAlt, jqEach, jqEachOpt, jqField, jqPretty, jqRaw, JqEr
 import { pyOr, pyStr } from "../platform/py.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
 import { collectFromPr, linearIssueToV2, parsePrefixes, pyStrip, renderLinearMarkdown, type CollectResult } from "../precheck/linear.js";
-import { extractLinkedIssueRefs } from "../precheck/linked-issues.js";
+import { extractLinkedIssueRefs, MAX_LINKED_ISSUES } from "../precheck/linked-issues.js";
 import { pyJsonDump, pyJsonDumpsLine } from "./py-json.js";
 
 export const LINKED_ISSUE_EMBED_BYTES = 12000;
@@ -185,39 +185,51 @@ export async function buildLinkedIssueContext(input: LinkedIssueContextInput): P
   const artifacts = new Map<string, Uint8Array>();
   const body = `${jqRaw(jqAlt(jqField(input.pr, "body"), ""))}\n`;
   const title = pyStr(pyOr(isPlainObject(input.pr) ? input.pr.title : undefined, ""));
+  // Extraction is uncapped up to a generous hard safety bound (candidates
+  // may include refs this loop never reaches). The MAX_LINKED_ISSUES cap is
+  // enforced HERE, over accepted issues — a fetched-and-projected issue,
+  // i.e. successfully fetched and (for non-closing refs) not rejected as a
+  // pull request — not over raw refs: a title `(#N)` that resolves to a
+  // pull request, or a ref whose fetch fails, must not evict a real issue
+  // from the cap (#872 follow-up). `processedRefs` is exactly the prefix of
+  // candidates this loop actually attempted, in order, and is what
+  // `linked-issues.json` / the requirement ledger see — refs beyond it are
+  // never fetched at all.
   const refItems = extractLinkedIssueRefs(body, input.repo, title);
-  const closingByRef = new Map(refItems.map((item) => [item.ref, item.closing]));
-  const refs = refItems.map((item) => ({ ref: item.ref, repo: item.repo, number: item.number }));
-  let linkedJson: Buffer = enc(`${pyJsonDumpsLine(refs)}\n`);
-  let linked: unknown[] = refs;
   const md: Buffer[] = [];
   const githubFailures: string[] = [];
   const pullRequestSkips: string[] = [];
+  const processedRefs: { ref: string; repo: string; number: number }[] = [];
+  const labelsByRef = new Map<string, unknown[]>();
+  let anyLabels = false;
+  let accepted = 0;
 
-  if (refs.length > 0) {
-    const labelsByRef = new Map<string, unknown[]>();
-    let anyLabels = false;
-    for (const item of refs) {
-      md.push(enc(`## ${item.ref}\n`));
-      const fetched = await input.adapter.getIssue(item.repo, String(item.number));
-      if (fetched.ok && !closingByRef.get(item.ref) && isPullRequestPayload(fetched.data)) {
-        md.push(enc(`(Skipped issue ${item.ref} from ${item.repo}: linked object is a pull request)\n`));
-        pullRequestSkips.push(item.ref);
-      } else if (fetched.ok) {
-        const filtered = projectLinkedIssue(fetched.data);
-        labelsByRef.set(item.ref, (filtered.labels as unknown[]).map((name) => ({ name })));
-        anyLabels = true;
-        md.push(enc("```json\n"), enc(`${jqPretty(filtered)}\n`).subarray(0, LINKED_ISSUE_EMBED_BYTES), enc("\n```\n"));
-      } else {
-        md.push(enc(`(Could not fetch issue ${item.ref} from ${item.repo})\n`));
-        githubFailures.push(item.ref);
-      }
-      md.push(enc("\n"));
+  for (const item of refItems) {
+    if (accepted >= MAX_LINKED_ISSUES) break;
+    processedRefs.push({ ref: item.ref, repo: item.repo, number: item.number });
+    md.push(enc(`## ${item.ref}\n`));
+    const fetched = await input.adapter.getIssue(item.repo, String(item.number));
+    if (fetched.ok && !item.closing && isPullRequestPayload(fetched.data)) {
+      md.push(enc(`(Skipped issue ${item.ref} from ${item.repo}: linked object is a pull request)\n`));
+      pullRequestSkips.push(item.ref);
+    } else if (fetched.ok) {
+      const filtered = projectLinkedIssue(fetched.data);
+      labelsByRef.set(item.ref, (filtered.labels as unknown[]).map((name) => ({ name })));
+      anyLabels = true;
+      accepted += 1;
+      md.push(enc("```json\n"), enc(`${jqPretty(filtered)}\n`).subarray(0, LINKED_ISSUE_EMBED_BYTES), enc("\n```\n"));
+    } else {
+      md.push(enc(`(Could not fetch issue ${item.ref} from ${item.repo})\n`));
+      githubFailures.push(item.ref);
     }
-    if (anyLabels) {
-      linked = refs.map((item) => ({ ...item, labels: labelsByRef.get(item.ref) ?? [] }));
-      linkedJson = enc(`${jqPretty(linked)}\n`);
-    }
+    md.push(enc("\n"));
+  }
+
+  let linkedJson: Buffer = enc(`${pyJsonDumpsLine(processedRefs)}\n`);
+  let linked: unknown[] = processedRefs;
+  if (anyLabels) {
+    linked = processedRefs.map((item) => ({ ...item, labels: labelsByRef.get(item.ref) ?? [] }));
+    linkedJson = enc(`${jqPretty(linked)}\n`);
   }
 
   let linearJson: Buffer = enc("[]\n");

@@ -20,6 +20,15 @@ export interface LinkedIssueRef {
 
 export const MAX_LINKED_ISSUES = 8;
 
+/** Hard safety bound on raw extraction (#872 follow-up): the accepted-issue
+ * cap (`MAX_LINKED_ISSUES`) is enforced downstream, over issues that
+ * actually get fetched and accepted (see `buildLinkedIssueContext`), not
+ * over raw refs — a title `(#N)` that turns out to name a pull request must
+ * not evict a real 8th body issue. Extraction itself still needs *some*
+ * bound so a pathological body cannot force unbounded fetches; this is
+ * generous (4x the accepted cap) precisely because it is not the real cap. */
+export const MAX_LINKED_ISSUE_CANDIDATES = MAX_LINKED_ISSUES * 4;
+
 const GITHUB_ISSUE_REF_PATTERN = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?[ \t]+((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)/gi;
 
 /** Non-closing implementation references: `Implements`/`Part of`/`Refs`/
@@ -34,25 +43,24 @@ const IMPLEMENTATION_ISSUE_REF_PATTERN = /\b(?:implements|part of|refs?)\s*:?[ \
 const TITLE_TRAILING_ISSUE_REF_PATTERN = /\(((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)\)[ \t]*$/;
 
 /** Extract linked-issue references from a PR title and body, deduplicated
- * in order of appearance (max 8): first the title's trailing `(#N)`
- * convention, then closing-keyword body references, then non-closing
- * implementation body references. A bare `#N` uses the default repo.
- * Dedupe is a merge, not a first-write-wins: if a ref first appears in a
- * non-closing form and a later occurrence is a closing-keyword form, the
+ * by CANONICAL IDENTITY in order of appearance (hard bound
+ * `MAX_LINKED_ISSUE_CANDIDATES`; see its docstring for why this isn't the
+ * accepted-issue cap): first the title's trailing `(#N)` convention, then
+ * closing-keyword body references, then non-closing implementation body
+ * references. A bare `#N` resolves against the default repo, so a bare
+ * `#584` and an explicit `owner/repo#584` naming the same repo (compared
+ * case-insensitively) are the SAME identity, not two entries.
+ * Dedupe is a merge, not a first-write-wins: if an identity first appears in
+ * a non-closing form and a later occurrence is a closing-keyword form, the
  * existing entry is upgraded to `closing: true` in place — the returned
- * list's order (position of first occurrence) never changes. */
+ * list's order (position of first occurrence, in its first-seen spelling)
+ * never changes, and an already-closing entry is never downgraded. */
 export function extractLinkedIssueRefs(body: string, defaultRepo?: string, title?: string): LinkedIssueRef[] {
   const repo = defaultRepo ?? "";
-  const byRef = new Map<string, LinkedIssueRef>();
+  const byKey = new Map<string, LinkedIssueRef>();
   const items: LinkedIssueRef[] = [];
 
   const add = (ref: string, closing: boolean): void => {
-    const existing = byRef.get(ref);
-    if (existing) {
-      if (closing) existing.closing = true;
-      return;
-    }
-    if (items.length >= MAX_LINKED_ISSUES) return;
     let repoName: string;
     let issueNumber: string;
     if (ref.includes("/")) {
@@ -65,8 +73,15 @@ export function extractLinkedIssueRefs(body: string, defaultRepo?: string, title
     }
     const number = Number.parseInt(issueNumber, 10);
     if (Number.isNaN(number)) return;
+    const canonicalKey = `${repoName.toLowerCase()}#${number}`;
+    const existing = byKey.get(canonicalKey);
+    if (existing) {
+      if (closing) existing.closing = true;
+      return;
+    }
+    if (items.length >= MAX_LINKED_ISSUE_CANDIDATES) return;
     const item: LinkedIssueRef = { ref, repo: repoName, number, closing };
-    byRef.set(ref, item);
+    byKey.set(canonicalKey, item);
     items.push(item);
   };
 
@@ -74,11 +89,11 @@ export function extractLinkedIssueRefs(body: string, defaultRepo?: string, title
   if (titleMatch) add(titleMatch[1] ?? "", false);
 
   for (const match of (body ?? "").matchAll(GITHUB_ISSUE_REF_PATTERN)) {
-    if (items.length >= MAX_LINKED_ISSUES) break;
+    if (items.length >= MAX_LINKED_ISSUE_CANDIDATES) break;
     add(match[1] ?? "", true);
   }
   for (const match of (body ?? "").matchAll(IMPLEMENTATION_ISSUE_REF_PATTERN)) {
-    if (items.length >= MAX_LINKED_ISSUES) break;
+    if (items.length >= MAX_LINKED_ISSUE_CANDIDATES) break;
     add(match[1] ?? "", false);
   }
 

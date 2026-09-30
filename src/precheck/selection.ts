@@ -1,7 +1,7 @@
 import type { PlatformAdapter } from "../platform/types.js";
 import { deriveIsFork } from "../platform/pr.js";
 import { canonicalLinkedIssue, type LinkedIssue } from "../context/types.js";
-import { extractLinkedIssueRefs, type LinkedIssueRef } from "./linked-issues.js";
+import { extractLinkedIssueRefs, MAX_LINKED_ISSUES, type LinkedIssueRef } from "./linked-issues.js";
 import { collectFromPr, extractIssueIdentifiers, parsePrefixes } from "./linear.js";
 import { pythonJsonStringify } from "./metadata.js";
 import { createHash } from "node:crypto";
@@ -70,7 +70,14 @@ export async function buildSelectionSignature(
   const body = typeof record.body === "string" ? record.body : "";
 
   const issues: { ref: string; repo: string; number: number; labels: string[] }[] = [];
-  for (const item of extractLinkedIssueRefs(body, repo, title)) {
+  // extractLinkedIssueRefs's own bound is a generous safety valve for the
+  // #872 accepted-issue cap (buildLinkedIssueContext); this fingerprint has
+  // no such notion (no closing/pull-request distinction), so it keeps its
+  // pre-existing fetch-count bound explicitly, over the same canonically
+  // deduped set (a bare `#N` and an explicit same-repo `owner/repo#N` are
+  // already merged into one entry upstream, so duplicates never perturb the
+  // hashed signature).
+  for (const item of extractLinkedIssueRefs(body, repo, title).slice(0, MAX_LINKED_ISSUES)) {
     const fetched = unwrap(await adapter.ghApi(`repos/${item.repo}/issues/${item.number}`));
     if (typeof fetched === "object" && fetched !== null && !(fetched as Record<string, unknown>).error) {
       issues.push(signatureLinkedIssue(item, canonicalLinkedIssue(fetched, item.repo)));

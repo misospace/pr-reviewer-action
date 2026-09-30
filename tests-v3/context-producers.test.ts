@@ -142,6 +142,35 @@ test("a CLOSING keyword ref that names a pull request is fetched unchanged (#872
   assert.deepEqual(result.githubPullRequestSkips, []);
 });
 
+test("the MAX_LINKED_ISSUES cap counts accepted issues, not raw refs: a self-referencing PR title never evicts a real 8th body issue (#872 follow-up)", async () => {
+  // Title ends in the PR's own number, `(#879)` — getIssue for #879 returns
+  // a pull_request payload, so it's rejected. Eight further body issues
+  // (Refs/Closes) are all real. All eight must reach linked-issues.md and
+  // the ledger; only the PR is recorded as a skip — it must not consume one
+  // of the 8 accepted-issue slots and evict a real body issue.
+  const body = Array.from({ length: 8 }, (_, i) => (i % 2 === 0 ? `Refs #${i + 1}` : `Closes #${i + 1}`)).join("\n");
+  const getIssue = async (repo: string, number: string): Promise<ReadResult<unknown>> => {
+    if (number === "879") return { ok: true, data: { number: 879, pull_request: { url: "https://example/pulls/879" } } };
+    return { ok: true, data: { number: Number(number), labels: [], body: `Issue ${number} MUST hold` } };
+  };
+  const result = await buildLinkedIssueContext({
+    pr: { title: "feat: thing (#879)", body },
+    repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+  });
+  assert.deepEqual(result.githubPullRequestSkips, ["#879"]);
+  // The rejected title ref still appears as a bare, label-less entry (same
+  // treatment as a fetch failure), so linkedIssues has 9 entries total —
+  // what matters is that none of the 8 REAL issues were evicted.
+  const linked = result.linkedIssues as Array<{ ref: string }>;
+  for (let i = 1; i <= 8; i += 1) {
+    assert.ok(linked.some((issue) => issue.ref === `#${i}`), `issue #${i} must be in the accepted set`);
+  }
+  const md = text(result.artifacts.get("linked-issues.md"));
+  for (let i = 1; i <= 8; i += 1) assert.match(md, new RegExp(`Issue ${i} MUST hold`));
+  assert.equal(md.match(/```json/g)?.length, 8, "exactly the 8 real issues render fenced content that feeds the requirement ledger");
+  assert.match(md, /\(Skipped issue #879 from o\/r: linked object is a pull request\)/);
+});
+
 test("a string label aborts the linked-issue projection", async () => {
   const getIssue = async (): Promise<ReadResult<unknown>> => ({ ok: true, data: { labels: ["security"] } });
   await assert.rejects(

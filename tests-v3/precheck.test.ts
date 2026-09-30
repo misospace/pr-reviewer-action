@@ -245,6 +245,36 @@ test("linked issue refs: a later closing occurrence upgrades an earlier non-clos
   assert.equal(reordered[0]!.closing, true);
 });
 
+test("linked issue refs: dedupe/merge is by canonical identity (bare #N resolved through defaultRepo, case-insensitive), not raw spelling", () => {
+  // Regression: title `(#584)` (bare, resolves to o/r#584 via defaultRepo)
+  // and body `Closes o/r#584` (explicit, same repo) name the SAME issue —
+  // they must merge into one entry, not two, with the merge still upgrading
+  // to closing:true and keeping the first-occurrence spelling (the title's).
+  const merged = extractLinkedIssueRefs("Closes o/r#584", "o/r", "feat: thing (#584)");
+  assert.deepEqual(merged.map((ref) => ({ ref: ref.ref, repo: ref.repo, number: ref.number })), [
+    { ref: "#584", repo: "o/r", number: 584 },
+  ], "one merged entry, keeping the title's bare spelling (first occurrence)");
+  assert.equal(merged[0]!.closing, true);
+
+  // Reverse spelling assignment: the explicit form appears first (title),
+  // the bare form second (body) — must still merge into one entry, keeping
+  // the title's (now explicit) spelling.
+  const reversedSpelling = extractLinkedIssueRefs("Closes #584", "o/r", "feat: thing (o/r#584)");
+  assert.deepEqual(reversedSpelling.map((ref) => ({ ref: ref.ref, repo: ref.repo, number: ref.number })), [
+    { ref: "o/r#584", repo: "o/r", number: 584 },
+  ]);
+  assert.equal(reversedSpelling[0]!.closing, true);
+
+  // Case-insensitive owner/repo comparison.
+  const caseInsensitive = extractLinkedIssueRefs("Closes O/R#584", "o/r", "feat: thing (#584)");
+  assert.equal(caseInsensitive.length, 1, "O/R#584 and defaultRepo o/r must be the same identity");
+  assert.equal(caseInsensitive[0]!.closing, true);
+
+  // A different repo's #584 is a genuinely different identity and must not merge.
+  const differentRepo = extractLinkedIssueRefs("Closes other/repo#584", "o/r", "feat: thing (#584)");
+  assert.equal(differentRepo.length, 2, "different repos with the same issue number are distinct identities");
+});
+
 test("linear prefixes and identifiers parse conservatively", () => {
   assert.deepEqual(parsePrefixes("eng, Ops, ENG"), ["ENG", "OPS"]);
   assert.throws(() => parsePrefixes("1bad"), /invalid Linear issue prefix/);
@@ -289,6 +319,29 @@ test("selection signature fails conservatively on unknown inputs", async () => {
   const { signature, error } = await buildSelectionSignature("o/r", "1", adapter);
   assert.equal(signature, null);
   assert.match(error, /linked issue #2 fetch failed/);
+});
+
+test("selection fingerprint: a duplicate spelling of the same issue is fetched once, not twice (#872 canonical dedupe)", async () => {
+  // The body names issue #2 twice, once bare and once with an explicit
+  // same-repo owner/repo prefix — extractLinkedIssueRefs merges these into
+  // one canonical identity upstream, so the fingerprint must only fetch (and
+  // hash) it once, never perturbed by how many spellings the text used.
+  let issueFetches = 0;
+  const adapter: PlatformAdapter = {
+    platform: "github",
+    ghApi: async (endpoint: string) => {
+      if (endpoint === "repos/o/r/pulls/1") return { data: { title: "t", body: "Fixes #2 and also refs o/r#2" } };
+      if (endpoint === "repos/o/r/issues/2") {
+        issueFetches += 1;
+        return { data: { number: 2, labels: [{ name: "security" }] } };
+      }
+      return { error: `no fixture response for endpoint: ${endpoint}` };
+    },
+  } as unknown as PlatformAdapter;
+  const { signature, error } = await buildSelectionSignature("o/r", "1", adapter);
+  assert.equal(error, "");
+  assert.ok(signature);
+  assert.equal(issueFetches, 1, "bare #2 and explicit o/r#2 are the same canonical identity — one fetch");
 });
 
 // ── Managed body selection ───────────────────────────────────────────────
