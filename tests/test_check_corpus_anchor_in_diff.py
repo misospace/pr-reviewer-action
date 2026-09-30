@@ -31,6 +31,7 @@ from check_corpus_anchor_in_diff import (
     defect_file_in_changed_files,
     files_from_compare,
 )
+from _anchor_matcher_cases import MATCHER_CASES
 
 
 def _compare(*filenames_and_previous):
@@ -89,24 +90,42 @@ class TestDefectFileInChangedFiles:
         home-ops#9189, anchored to a virtualkeys/ folder because the same
         regression is repeated identically in all 11 files under it) should
         match any changed file nested under that directory, not just an
-        exact path."""
+        exact path. A directory anchor is marked with an explicit trailing
+        '/' (#877) — the only signal distinguishing it from an ordinary
+        extension-less file anchor."""
         assert defect_file_in_changed_files(
-            "kubernetes/apps/base/llm/litellm/virtualkeys",
+            "kubernetes/apps/base/llm/litellm/virtualkeys/",
             {"kubernetes/apps/base/llm/litellm/virtualkeys/foreman.yaml"},
         ) is True
 
     def test_directory_anchor_does_not_match_a_sibling_directory(self):
         assert defect_file_in_changed_files(
-            "kubernetes/apps/base/llm/litellm/virtualkeys",
+            "kubernetes/apps/base/llm/litellm/virtualkeys/",
             {"kubernetes/apps/base/llm/litellm/virtualkeys-other/foreman.yaml"},
         ) is False
 
-    def test_file_anchor_with_no_extension_still_requires_a_path_match(self):
-        """A dir-anchor's looser matching must not make an ordinary
-        extension-less file anchor match an unrelated changed file."""
+    def test_file_anchor_with_no_extension_and_no_trailing_slash_is_not_a_directory(self):
+        """Without the explicit trailing '/' marker, an extension-less file
+        anchor is an ordinary file: it must not match anything nested
+        "under" it as if it were a directory prefix."""
         assert defect_file_in_changed_files(
             "scripts/Makefile", {"scripts/other/Makefile"},
         ) is False
+        assert defect_file_in_changed_files(
+            "scripts/Makefile", {"scripts/Makefile"},
+        ) is True
+
+
+class TestDefectFileInChangedFilesSharedCases:
+    """Runs the exact same (finding_file, anchor_file, expected) table the
+    real-PR scorer's tests run against `_finding_file_matches_anchor` — see
+    tests/_anchor_matcher_cases.py and
+    test_eval_harness_real_pr_corpus.py::TestFindingFileMatchesAnchorSharedCases
+    — so the checker and the scorer can never silently disagree (#877)."""
+
+    @pytest.mark.parametrize("finding_file,anchor_file,expected", MATCHER_CASES)
+    def test_shared_matcher_cases(self, finding_file, anchor_file, expected):
+        assert defect_file_in_changed_files(anchor_file, {finding_file}) is expected
 
 
 class TestCheckEntries:

@@ -28,6 +28,7 @@ from eval_harness import (
     ReviewRun,
     _checkout_pinned_commit,
     _files_from_pinned_diff,
+    _finding_file_matches_anchor,
     _normalize_path_for_match,
     _prepare_pinned_workspace,
     _review_timeout_sec,
@@ -39,6 +40,7 @@ from eval_harness import (
     score_vulnerable_run,
     validate_real_pr_corpus,
 )
+from _anchor_matcher_cases import MATCHER_CASES
 
 CORPUS_PATH = Path(__file__).resolve().parent.parent / "evals" / "corpus-real-prs.json"
 
@@ -144,6 +146,44 @@ class TestScoreVulnerableRun:
         assert score["errored"] is True
         assert score["hit"] is False
         assert score["file_only_hit"] is False
+
+    def test_directory_anchor_scores_file_only_hit(self):
+        """#877: a directory anchor (trailing '/') matches a finding nested
+        under it, but only ever as a file-level hit — there's no single
+        line to check a finding against a directory."""
+        defect = RealPRDefect("d", "kubernetes/apps/base/llm/litellm/virtualkeys/", None, "major")
+        run = _run([_finding("kubernetes/apps/base/llm/litellm/virtualkeys/foreman.yaml")])
+        score = score_vulnerable_run(run, defect)
+        assert score["file_only_hit"] is True
+        assert score["hit"] is True  # no line_range: file-only hit promotes to hit, same as a file anchor
+
+    def test_directory_anchor_with_a_line_range_still_scores_a_file_level_hit(self):
+        """A directory has no single line to check a finding's line
+        against, so even if a directory anchor carried a line_range (not
+        expected in practice), a matching finding still scores `hit` on
+        the file-level match alone rather than silently missing."""
+        defect = RealPRDefect("d", "kubernetes/apps/base/llm/litellm/virtualkeys/", (1, 5), "major")
+        run = _run([_finding("kubernetes/apps/base/llm/litellm/virtualkeys/foreman.yaml", line=9999)])
+        score = score_vulnerable_run(run, defect)
+        assert score["file_only_hit"] is True
+        assert score["hit"] is True
+
+    def test_directory_anchor_does_not_match_a_sibling_directory(self):
+        defect = RealPRDefect("d", "kubernetes/apps/base/llm/litellm/virtualkeys/", None, "major")
+        run = _run([_finding("kubernetes/apps/base/llm/litellm/virtualkeys-other/foreman.yaml")])
+        assert score_vulnerable_run(run, defect)["file_only_hit"] is False
+
+
+class TestFindingFileMatchesAnchorSharedCases:
+    """The exact matcher check_corpus_anchor_in_diff.py delegates to for
+    the corpus anchor-in-diff check runs the same table — see
+    tests/_anchor_matcher_cases.py and
+    test_check_corpus_anchor_in_diff.py::TestDefectFileInChangedFilesSharedCases
+    — so the scorer and the checker can never silently disagree (#877)."""
+
+    @pytest.mark.parametrize("finding_file,anchor_file,expected", MATCHER_CASES)
+    def test_shared_matcher_cases(self, finding_file, anchor_file, expected):
+        assert _finding_file_matches_anchor(finding_file, anchor_file) is expected
 
 
 # ---------------------------------------------------------------------------

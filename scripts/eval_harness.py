@@ -423,12 +423,25 @@ def _normalize_path_for_match(path: str) -> str:
 
 
 def _finding_file_matches_anchor(finding_file: Any, anchor_file: str) -> bool:
-    """Loose file match: exact, or one path is a path-boundary suffix of the other.
+    """Loose file match: exact, a path-boundary suffix, or nested under a
+    directory anchor.
+
+    This is the single matcher shared by the real-PR scorer (here) and
+    ``scripts/check_corpus_anchor_in_diff.py``'s anchor-in-diff check, so
+    the two can never silently drift on what counts as a match (#877).
 
     Findings may report a path relative to the repo root, or (less
     commonly) something shorter/longer; treat a match as either exact or a
     suffix aligned on a '/' boundary so ``foo.sh`` doesn't
     false-positive-match ``scripts/other_foo.sh``.
+
+    A directory anchor — ``anchor_file`` ending in ``/`` — instead matches
+    any file nested under it (e.g. a defect that's repeated identically in
+    every file under a directory, like #861's ``.../virtualkeys/``
+    corpus entry). The trailing slash is required and load-bearing: it is
+    the only signal that distinguishes a directory anchor from an
+    ordinary extension-less file anchor (e.g. ``scripts/Makefile``), which
+    must still match only by exact-or-suffix, never as a path prefix.
     """
     if not isinstance(finding_file, str) or not finding_file:
         return False
@@ -436,6 +449,11 @@ def _finding_file_matches_anchor(finding_file: Any, anchor_file: str) -> bool:
     a = _normalize_path_for_match(anchor_file)
     if not f or not a:
         return False
+    if a.endswith("/"):
+        a_dir = a.rstrip("/")
+        if not a_dir:
+            return False
+        return f == a_dir or f.startswith(a_dir + "/") or ("/" + a_dir + "/") in ("/" + f)
     return f == a or f.endswith("/" + a) or a.endswith("/" + f)
 
 
@@ -453,19 +471,32 @@ def score_vulnerable_run(
     line-check (or a reviewer that got the file right but misreported the
     line). An errored run scores as a miss on every field (it produced no
     findings to check).
+
+    A directory anchor (``defect.file`` ending in ``/``, see
+    ``_finding_file_matches_anchor``) has no single line to check a
+    finding against, so a matching finding is always a file-level
+    ``hit`` — the same as a file anchor with no ``line_range`` — even if
+    the defect happens to also carry a ``line_range`` (which shouldn't
+    occur for a directory anchor in practice, but is handled the same
+    way rather than left to silently miss).
     """
     hit = False
     file_only_hit = False
     if not run.error and defect.file:
         findings = run.findings if isinstance(run.findings, list) else []
         lo_hi = defect.line_range
+        is_dir_anchor = _normalize_path_for_match(defect.file).endswith("/")
         for finding in findings:
             if not isinstance(finding, dict):
                 continue
             if not _finding_file_matches_anchor(finding.get("file"), defect.file):
                 continue
             file_only_hit = True
-            if lo_hi is None:
+            if lo_hi is None or is_dir_anchor:
+                # No line to check against (either the defect has no
+                # line_range, or the anchor is a directory and there's no
+                # single line a directory match could be checked
+                # against) — the file-level match is the whole signal.
                 hit = True
                 continue
             line = finding.get("line")

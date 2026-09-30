@@ -1299,7 +1299,7 @@
         "head_sha": "1097dd6686eca5d774e1bc1a6a6ca8e0303c2454",
         "defect": {
           "description": "Closing: the alias *is* the accounting key. `litellm.json` groups by `api_key_alias` in 10 panels and never uses `hashed_api_key`, so suffixing would rename `Foreman` -> `Foreman (managed)` and split every one of them at the cutover. Deleting the unmanaged key first achieves the same result without that cost: the CR then generates with the plain alias, so the metric series stays continuous. The auth gap I was avoiding is the smaller problem.",
-          "file": "kubernetes/apps/base/llm/litellm/virtualkeys",
+          "file": "kubernetes/apps/base/llm/litellm/virtualkeys/",
           "severity": "major"
         },
         "source": {

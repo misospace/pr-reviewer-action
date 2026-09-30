@@ -59,7 +59,7 @@ for _p in (str(ROOT), str(SCRIPT_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from eval_harness import _normalize_path_for_match  # noqa: E402
+from eval_harness import _finding_file_matches_anchor, _normalize_path_for_match  # noqa: E402
 
 
 class GitHubAPIError(RuntimeError):
@@ -119,22 +119,20 @@ def defect_file_in_changed_files(defect_file: str | None, changed_files: set[str
     """Whether the defect's anchor file is among the changed files.
 
     Returns None (not applicable) when the entry has no anchor file to
-    check. Matching is exact-or-suffix on a '/' boundary, matching the
-    scorer's own file-match leniency (`_finding_file_matches_anchor`), plus
-    a directory-prefix match: an anchor with no '.' in its final segment
-    (e.g. a defect that spans every file under a directory, like a
-    virtualkeys/ folder) also matches any changed file nested under it.
+    check. Delegates to ``eval_harness._finding_file_matches_anchor`` — the
+    same matcher the real-PR scorer uses to check a *finding's* file
+    against this same anchor — so the checker and the scorer can never
+    silently drift on what counts as a match (#877). That matcher treats
+    an anchor ending in ``/`` as a directory: it matches any changed file
+    nested under it (e.g. a defect repeated identically in every file
+    under a directory, like #861's ``.../virtualkeys/`` corpus entry),
+    while an ordinary file anchor — including an extension-less one like
+    ``scripts/Makefile`` — still matches only exact-or-suffix, never as a
+    path prefix.
     """
     if not defect_file:
         return None
-    target = _normalize_path_for_match(defect_file)
-    is_dir_anchor = "." not in target.rsplit("/", 1)[-1]
-    for changed in changed_files:
-        if changed == target or changed.endswith(f"/{target}") or target.endswith(f"/{changed}"):
-            return True
-        if is_dir_anchor and (changed.startswith(f"{target}/") or f"/{target}/" in changed):
-            return True
-    return False
+    return any(_finding_file_matches_anchor(changed, defect_file) for changed in changed_files)
 
 
 def check_entries(
