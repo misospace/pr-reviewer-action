@@ -318,6 +318,56 @@ test("reason regression, folded through enforcement: all not_applicable with emp
   }
 });
 
+test("malformed claim entries populate errors with field-naming diagnostics and fall back to the missing-claim path", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([
+      { id: "req-1", text: "must validate X", kind: "acceptance" },
+      { id: "req-2", text: "must validate Y", kind: "acceptance" },
+    ]);
+    const claims = [
+      "not an object",
+      { requirement_id: "req-1", disposition: "met", enforcement: [{ file: "src/real.ts", line: 1 }], test: [VALID_TEST_LOCATION], reason: "present" },
+      { disposition: "met", reason: "no requirement_id" },
+    ];
+    const result = validateRequirementTrace(claims, ledger, workspace);
+    assert.deepEqual(result.errors, [
+      "requirement_trace[0]: entry is not an object; skipped",
+      "requirement_trace[2]: missing or non-string requirement_id; skipped",
+    ]);
+    // The malformed entries are skipped, so the requirement whose only claim
+    // lacked a requirement_id falls back to the missing-claim path:
+    // unverifiable plus the not-traced-by-reviewer note. The well-formed
+    // claim beside it is unaffected.
+    assert.equal(result.rows[0]?.disposition, "met");
+    assert.equal(result.rows[1]?.disposition, "unverifiable");
+    assert.ok(result.rows[1]?.notes.includes("not-traced-by-reviewer"));
+    assert.equal(result.incomplete, true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("malformed claim entries cap errors at 8 with a final truncation note", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([{ id: "req-1", text: "must validate X", kind: "acceptance" }]);
+    // Alternate the two malformed shapes so both diagnostics flow through the cap.
+    const claims = Array.from({ length: 12 }, (_unused, i) => (i % 2 === 0 ? "not an object" : { disposition: "met" }));
+    const result = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(result.errors.length, 8);
+    assert.ok(result.errors[0]?.startsWith("requirement_trace[0]:"));
+    const truncationNotes = result.errors.filter((e) => e.includes("truncat") || e.includes("omitted"));
+    assert.equal(truncationNotes.length, 1);
+    assert.ok(result.errors[result.errors.length - 1]?.includes("omitted"));
+    // The cap must not disturb the per-requirement fold.
+    assert.equal(result.rows[0]?.disposition, "unverifiable");
+    assert.equal(result.incomplete, true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("a well-formed unmet requirement is a coverage stop (incomplete), not just a finding", () => {
   const workspace = makeWorkspace();
   try {

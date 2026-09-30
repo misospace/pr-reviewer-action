@@ -55,6 +55,9 @@ export const TRACE_DISPOSITIONS: readonly string[] = ["met", "unmet", "not_appli
 
 export const MAX_TRACE_LOCATIONS = 5;
 export const MAX_REASON_CHARS = 300;
+/** Hard cap on the artifact's `errors` diagnostics, so a hostile payload
+ * cannot bloat the persisted artifact with unbounded parser noise. */
+export const MAX_ARTIFACT_ERRORS = 8;
 const TRUNCATION_MARKER = "…";
 
 export interface TraceLocation {
@@ -81,6 +84,12 @@ export interface RequirementTraceArtifact {
    * gap (a well-formed `unmet`) — the signal that folds into
    * `required_checks=incomplete` (review_result=partial). */
   incomplete: boolean;
+  /** Bounded, field-naming diagnostics for artifact-level parser/validation
+   * problems in the model's `requirement_coverage` claim list — entries that
+   * are not objects or lack a string `requirement_id` are skipped here and
+   * their requirement falls back to the missing-claim path. Capped at
+   * MAX_ARTIFACT_ERRORS with a final truncation note. Diagnostic metadata
+   * only; never rendered into the review body. */
   errors: string[];
 }
 
@@ -350,6 +359,16 @@ interface RawClaim {
   symbol?: unknown;
 }
 
+/** Records an artifact-level parser/validation diagnostic. The final slot of
+ * `errors` is reserved for the truncation note, so the array is bounded at
+ * MAX_ARTIFACT_ERRORS even when a hostile payload is entirely malformed;
+ * returns false once the cap is reached. */
+function recordArtifactError(errors: string[], message: string): boolean {
+  if (errors.length >= MAX_ARTIFACT_ERRORS - 1) return false;
+  errors.push(message);
+  return true;
+}
+
 /**
  * Validate the model's per-requirement trace claims (read from the same
  * untrusted `requirement_coverage` payload `normalizeRequirementCoverage`
@@ -369,12 +388,27 @@ export function validateRequirementTrace(
   const cache = new FileTextCache(workspace);
   const claimsById = new Map<string, RawClaim>();
   const errors: string[] = [];
+  let errorsTruncated = false;
   if (Array.isArray(coveragePayload)) {
-    for (const claim of coveragePayload) {
-      if (!claim || typeof claim !== "object" || Array.isArray(claim)) continue;
+    for (const [index, claim] of coveragePayload.entries()) {
+      if (!claim || typeof claim !== "object" || Array.isArray(claim)) {
+        if (!recordArtifactError(errors, `requirement_trace[${index}]: entry is not an object; skipped`)) {
+          errorsTruncated = true;
+        }
+        continue;
+      }
       const record = claim as RawClaim;
       const rid = record.requirement_id;
-      if (typeof rid === "string" && !claimsById.has(rid)) claimsById.set(rid, record);
+      if (typeof rid !== "string") {
+        if (!recordArtifactError(errors, `requirement_trace[${index}]: missing or non-string requirement_id; skipped`)) {
+          errorsTruncated = true;
+        }
+        continue;
+      }
+      if (!claimsById.has(rid)) claimsById.set(rid, record);
+    }
+    if (errorsTruncated) {
+      errors.push(`requirement_trace: additional malformed entries omitted (diagnostics capped at ${MAX_ARTIFACT_ERRORS})`);
     }
   }
 
