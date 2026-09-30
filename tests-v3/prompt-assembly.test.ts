@@ -174,9 +174,18 @@ test("annotateAnalysisEngine explains the route", () => {
 });
 
 test("publicAnalysisEngine strips the base URL but keeps model, format, and route (#832)", () => {
-  assert.equal(publicAnalysisEngine("glm-5.3-flash@https://llm.example.com/v1 (openai)"), "glm-5.3-flash (openai)");
-  const routed = annotateAnalysisEngine("glm-5.3-flash@https://llm.example.com/v1 (openai)", "fallback");
-  assert.equal(publicAnalysisEngine(routed), "glm-5.3-flash (openai) — fallback (primary failed)");
+  const cases: Array<[string, string]> = [
+    ["m@https://llm.example.net/v1 (openai)", "m (openai)"],
+    ["m@https://user:secret@llm.example.net/v1 (anthropic)", "m (anthropic)"],
+    [
+      annotateAnalysisEngine("m@https://x.example.org/v1 (openai)", "fallback"),
+      "m (openai) — fallback (primary failed)",
+    ],
+    ["test-engine", "test-engine"],
+  ];
+  for (const [engine, expected] of cases) {
+    assert.equal(publicAnalysisEngine(engine), expected);
+  }
   assert.equal(publicAnalysisEngine(MODEL_UNAVAILABLE_ENGINE), MODEL_UNAVAILABLE_ENGINE);
 });
 

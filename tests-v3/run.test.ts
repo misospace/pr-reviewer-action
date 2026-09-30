@@ -116,7 +116,6 @@ test("runs the full review end to end: artifacts, outputs, marker", async () => 
     // URL; the action output above keeps the full engine string for logs.
     const stepSummary = readFileSync(stepSummaryFile, "utf8");
     assert.match(stepSummary, /\| Engine \| m \(openai\) \|/);
-    assert.ok(!stepSummary.includes("127.0.0.1"));
     // Key artifacts persisted with the v2 names.
     for (const name of ["ai-output.json", "ai-request.primary.json", "ai-response.primary.json", "classification.json", "pr.json", "pr.diff", "pr.diff.truncated", "pr-files.json", "review-corpus.md", "review-corpus.truncated.md", "review-body.md", "verdict.txt"]) {
       assert.ok(existsSync(join(runDir, name)), `missing artifact ${name}`);

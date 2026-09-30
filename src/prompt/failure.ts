@@ -74,11 +74,13 @@ export function analysisEngineBase(model: string, baseUrl: string, apiFormat: st
   return `${model}@${baseUrl} (${apiFormat})`;
 }
 
-/** Strips the `@<baseUrl>` segment `analysisEngineBase` adds, keeping the
- * model, API format, and any `annotateAnalysisEngine` route suffix (#832):
- * the endpoint URL is operator configuration, not review content, so it must
- * not leak into a published review body. Callers that need the full string
- * for logs or run artifacts keep using the raw engine value. */
+/** Strips the leading `@<baseUrl>` token `analysisEngineBase` adds (up to the
+ * next whitespace, so a credentialed URL like `https://user:pass@host/v1`
+ * disappears in full), keeping the model, API format, and any
+ * `annotateAnalysisEngine` route suffix (#832): the endpoint URL is operator
+ * configuration, not review content, so it must not leak into a published
+ * review body. Callers that need the full string for logs or run artifacts
+ * keep using the raw engine value. */
 export function publicAnalysisEngine(engine: string): string {
-  return engine.replace(/@\S+(?=\s\()/, "");
+  return engine.replace(/@\S+/, "");
 }
