@@ -15,17 +15,11 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from pr_reviewer.http_safe import OPENER_NO_REDIRECT
+
 
 class JudgeHTTPError(RuntimeError):
     """The endpoint could not be reached or returned a non-2xx status."""
-
-
-class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, ARG002
-        return None
-
-
-_OPENER = urllib.request.build_opener(_RefuseRedirect)
 
 
 def chat_completion(base_url: str, payload: dict[str, Any], api_key: str, timeout_sec: int) -> Any:
@@ -35,7 +29,7 @@ def chat_completion(base_url: str, payload: dict[str, Any], api_key: str, timeou
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
     try:
-        with _OPENER.open(request, timeout=timeout_sec) as response:  # noqa: S310 - operator-configured endpoint
+        with OPENER_NO_REDIRECT.open(request, timeout=timeout_sec) as response:  # noqa: S310 - operator-configured endpoint
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         if 300 <= error.code < 400:

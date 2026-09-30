@@ -59,6 +59,7 @@ for _p in (str(ROOT), str(SCRIPT_DIR)):
 
 from eval_harness import RealPRCorpus  # noqa: E402
 from pr_reviewer.metadata import parse_metadata  # noqa: E402
+from pr_reviewer.http_safe import OPENER_NO_REDIRECT  # noqa: E402
 
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 
@@ -104,7 +105,9 @@ class GitHubClient:
                 )
             return json.loads(result.stdout)
 
-        url = f"https://api.github.com{path_with_query}"
+        # Read GitHub API base URL at call time (can be overridden via GITHUB_API_URL env for testing)
+        github_api_base = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+        url = f"{github_api_base}{path_with_query}"
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -113,7 +116,7 @@ class GitHubClient:
             headers["Authorization"] = f"Bearer {self.token}"
         req = Request(url, headers=headers)
         try:
-            with urlopen(req, timeout=30) as resp:  # noqa: S310 - fixed https host
+            with OPENER_NO_REDIRECT.open(req, timeout=30) as resp:  # noqa: S310 - fixed https host
                 return json.loads(resp.read().decode("utf-8"))
         except Exception as exc:  # noqa: BLE001
             raise GitHubAPIError(f"GET {path_with_query} failed: {exc}") from exc

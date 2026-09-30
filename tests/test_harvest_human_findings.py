@@ -12,6 +12,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -1101,3 +1103,82 @@ def test_main_requires_repos_maintainers_bots():
             assert exc.code != 0
         else:
             raise AssertionError("expected argparse to reject missing required input")
+
+
+# ---------------------------------------------------------------------------
+# GitHub client redirect safety
+# ---------------------------------------------------------------------------
+
+
+
+def test_github_client_uses_safe_opener_refuses_redirects(monkeypatch):
+    """The GitHubClient uses the safe opener that refuses redirects."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    SECRET = "test-gh-token"
+    target_seen = {"requests": 0, "auth": None}
+    origin_seen = {"requests": 0, "auth": None}
+
+    class TargetHandler(BaseHTTPRequestHandler):
+        def handle_one_request(self):
+            """Handle any HTTP method."""
+            self.raw_requestline = self.rfile.readline()
+            if not self.raw_requestline:
+                return
+            if not self.parse_request():
+                return
+            target_seen["requests"] += 1
+            target_seen["auth"] = self.headers.get("Authorization")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps([{"data": "should not be reached"}]).encode())
+
+        def log_message(self, *_args):
+            pass
+
+    class OriginHandler(BaseHTTPRequestHandler):
+        def handle_one_request(self):
+            """Handle any HTTP method."""
+            self.raw_requestline = self.rfile.readline()
+            if not self.raw_requestline:
+                return
+            if not self.parse_request():
+                return
+            origin_seen["requests"] += 1
+            origin_seen["auth"] = self.headers.get("Authorization")
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{target_server.server_port}/api/redirected")
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *_args):
+            pass
+
+    target_server = HTTPServer(("127.0.0.1", 0), TargetHandler)
+    origin_server = HTTPServer(("127.0.0.1", 0), OriginHandler)
+
+    try:
+        threading.Thread(target=target_server.serve_forever, daemon=True).start()
+        threading.Thread(target=origin_server.serve_forever, daemon=True).start()
+
+        # Set the API URL to point to our test origin server (production uses https://api.github.com)
+        monkeypatch.setenv("GITHUB_API_URL", f"http://127.0.0.1:{origin_server.server_port}")
+
+        # Create a GitHubClient
+        client = hhf.GitHubClient(token=SECRET, use_gh_cli=False)
+
+        # Call the real _request() method which should refuse the redirect
+        with pytest.raises(hhf.GitHubAPIError):
+            client._request("/repos/test/pulls")
+
+        # Verify the origin was contacted but the redirect target was not
+        assert origin_seen["requests"] == 1, "origin should have been contacted once"
+        assert target_seen["requests"] == 0, "redirect target must never be contacted"
+        assert origin_seen["auth"] == f"Bearer {SECRET}", "authorization header should be sent to origin"
+        assert target_seen["auth"] is None, "target should never see Authorization header"
+    finally:
+        origin_server.shutdown()
+        target_server.shutdown()
