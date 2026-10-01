@@ -45,6 +45,67 @@ test("k8s manifests beat dependency files", () => {
   assert.equal(result.prKind, "k8s_manifest");
 });
 
+// ── image digest refreshes (#909) ─────────────────────────────────────────
+const DIGEST_A = "a".repeat(64);
+const DIGEST_B = "b".repeat(64);
+
+test("image-digest-only manifest PRs classify as image_digest_only", () => {
+  // A HelmRelease `tag:` line: repository and tag unchanged, digest refreshed.
+  const result = classifyPr({
+    prFiles: files("k8s/lemonade.yaml"),
+    diffText: `-    tag: latest@sha256:${DIGEST_A}\n+    tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "image_digest_only");
+  assert.deepEqual(result.riskFlags, []);
+  assert.deepEqual(result.mustCheck, ["verify only image digests changed; repository and tag unchanged"]);
+});
+
+test("image_digest_only covers compose image: and Dockerfile FROM forms", () => {
+  const compose = classifyPr({
+    prFiles: files("docker-compose.yml"),
+    diffText: `-    image: ghcr.io/o/app:v1@sha256:${DIGEST_A}\n+    image: ghcr.io/o/app:v1@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(compose.prKind, "image_digest_only");
+
+  const dockerfile = classifyPr({
+    prFiles: files("Dockerfile"),
+    diffText: `-FROM node:20@sha256:${DIGEST_A} AS build\n+FROM node:20@sha256:${DIGEST_B} AS build\n`,
+  });
+  assert.equal(dockerfile.prKind, "image_digest_only");
+});
+
+test("a repository or tag change is not image_digest_only", () => {
+  const tagChange = classifyPr({
+    prFiles: files("k8s/lemonade.yaml"),
+    diffText: `-    tag: 1.2.3@sha256:${DIGEST_A}\n+    tag: 1.2.4@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(tagChange.prKind, "k8s_manifest");
+
+  const repoChange = classifyPr({
+    prFiles: files("docker-compose.yml"),
+    diffText: `-    image: ghcr.io/o/old:v1@sha256:${DIGEST_A}\n+    image: ghcr.io/o/new:v1@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(repoChange.prKind, "app_code");
+});
+
+test("a mixed diff keeps the current classification (digest + other change)", () => {
+  const result = classifyPr({
+    prFiles: files("k8s/lemonade.yaml"),
+    diffText:
+      `-    tag: latest@sha256:${DIGEST_A}\n+    tag: latest@sha256:${DIGEST_B}\n` +
+      "-  replicas: 3\n+  replicas: 5\n",
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("a digest change outside a YAML/Dockerfile manifest is not image_digest_only", () => {
+  const result = classifyPr({
+    prFiles: files("scripts/pin.txt"),
+    diffText: `-image: ghcr.io/o/app:v1@sha256:${DIGEST_A}\n+image: ghcr.io/o/app:v1@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "app_code");
+});
+
 test("secret handling precedes auth", () => {
   const result = classifyPr({ prFiles: files("src/secret_handler.py") });
   assert.equal(result.prKind, "secret_handling_changes");
@@ -931,6 +992,13 @@ test("digest-only with no flags selects zero roles via the documented gate", () 
   assert.deepEqual(selection.selectedRoles, []);
   assert.deepEqual(selection.skippedRoles, SPECIALIST_ROLES_ORDER);
   assert.match(selection.zeroSelectionReason, /digest-only lockfile change/);
+});
+
+test("image-digest-only with no flags selects zero roles via the documented gate", () => {
+  const selection = selectFromArtifact({ pr_kind: "image_digest_only", risk_flags: [], changed_files_summary: ["k8s/lemonade.yaml"] });
+  assert.deepEqual(selection.selectedRoles, []);
+  assert.deepEqual(selection.skippedRoles, SPECIALIST_ROLES_ORDER);
+  assert.match(selection.zeroSelectionReason, /image-digest-only change/);
 });
 
 test("docs/meta-only app_code PRs select zero roles; workflows keep correctness", () => {

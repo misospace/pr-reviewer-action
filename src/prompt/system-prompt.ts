@@ -128,7 +128,7 @@ export function applySystemPromptFragments(
     const bytes = workspace.readBytes(PROMPT_PRESENCE_FILES.classification);
     const kind = bytes === null ? "" : jqRawPrKind(bytes.toString("utf8"));
     const infra = kind === "dependency_upgrade" || kind === "k8s_manifest";
-    const digest = kind === "renovate_digest_only";
+    const digest = kind === "renovate_digest_only" || kind === "image_digest_only";
     sub("VERSION_BUMP_GUIDANCE", infra ? guidance(assets, "version_bump") : "");
     sub("IMAGE_DIGEST_GUIDANCE", digest ? guidance(assets, "image_digest") : "");
     sub("RELEASE_NOTES_GUIDANCE", infra || digest ? guidance(assets, "release_notes") : "");

@@ -267,6 +267,13 @@ function trivialZeroReason(kind: string, flags: readonly string[], files: readon
       "zero-selection gate)"
     );
   }
+  if (kind === "image_digest_only") {
+    return (
+      "trivial class: image-digest-only change with no risk " +
+      "signals — no role has a meaningful lane (documented " +
+      "zero-selection gate)"
+    );
+  }
   if (
     kind === "app_code" &&
     files.length > 0 &&

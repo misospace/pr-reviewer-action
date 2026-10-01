@@ -16,6 +16,7 @@ import type { ChangedFile, IssueLabel, LinkedIssue } from "../context/types.js";
 /** The authoritative pr_kind enumeration (order = documentation order). */
 export const PR_KINDS: readonly string[] = [
   "renovate_digest_only",
+  "image_digest_only",
   "dependency_upgrade",
   "app_code",
   "k8s_manifest",
@@ -50,6 +51,14 @@ const RENOVATE_DIGEST_FILE_PATTERNS: readonly RegExp[] = [
   /npm-shrinkwrap\.json/,
   /yarn\.lock/,
   /pnpm-lock\.yaml/,
+];
+
+/** Manifest files that can pin a container image by digest: Kubernetes/Helm/
+ * compose YAML and Dockerfiles (#909). */
+const IMAGE_DIGEST_FILE_PATTERNS: readonly RegExp[] = [
+  /\.ya?ml$/i,
+  /(^|\/)Dockerfile(\..+)?$/i,
+  /\.dockerfile$/i,
 ];
 
 /** Dependency-related files (lockfiles, manifests). */
@@ -1065,6 +1074,7 @@ export function classificationToArtifact(classification: PRClassification): Reco
 type KindPredicate = (filenames: string[], diffText: string) => boolean;
 const KIND_RULES: readonly { kind: string; matches: KindPredicate }[] = [
   { kind: "renovate_digest_only", matches: isRenovateDigestOnly },
+  { kind: "image_digest_only", matches: isImageDigestOnly },
   { kind: "dependency_upgrade", matches: isDependencyUpgrade },
   { kind: "k8s_manifest", matches: filenameMatches(K8S_PATTERNS) },
   // secret handling before auth (more specific)
@@ -1112,6 +1122,57 @@ function hasVersionBump(diffText: string): boolean {
 
 function isRenovateDigestOnly(filenames: string[], diffText: string): boolean {
   return allFilesAreLockfiles(filenames) && !hasVersionBump(diffText);
+}
+
+/** True only when EVERY changed file is a YAML/Dockerfile image manifest. */
+function allFilesAreImageManifests(filenames: string[]): boolean {
+  if (filenames.length === 0) return false;
+  return filenames.every((name) => matchesAny(name, IMAGE_DIGEST_FILE_PATTERNS));
+}
+
+/** A changed diff line that is exactly one image reference, optionally behind a
+ * YAML `image:`/`tag:` key or a Dockerfile `FROM [--platform=...]` directive
+ * (with an optional trailing `AS <stage>`). Captures the reference text before
+ * `@sha256:` and the digest. */
+const IMAGE_DIGEST_LINE_RE =
+  /^(?:FROM\s+(?:--platform=\S+\s+)?|(?:image|tag)\s*:\s*)?["']?([A-Za-z0-9][A-Za-z0-9._:/-]*)@sha256:([0-9a-fA-F]{64})["']?(?:\s+AS\s+\S+)?$/i;
+
+function sameMultiset(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.every((value, index) => value === sortedRight[index]);
+}
+
+/** Renovate image-digest-only refresh: every changed line is a single image
+ * reference whose repository and tag are unchanged and only the `@sha256:`
+ * digest differs (YAML `image:`/`tag:`, compose, Dockerfile `FROM`). A mixed
+ * diff — any other changed line, or a changed repository/tag — is left to the
+ * existing rules (notably k8s_manifest), which would otherwise demand a check
+ * a digest-only change cannot answer (#909). */
+function isImageDigestOnly(filenames: string[], diffText: string): boolean {
+  if (!allFilesAreImageManifests(filenames)) return false;
+  const removed: { ref: string; digest: string }[] = [];
+  const added: { ref: string; digest: string }[] = [];
+  for (const line of diffText.split("\n")) {
+    let bucket: { ref: string; digest: string }[];
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      bucket = added;
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      bucket = removed;
+    } else {
+      continue;
+    }
+    const match = IMAGE_DIGEST_LINE_RE.exec(line.slice(1).trim());
+    if (match === null) return false;
+    bucket.push({ ref: match[1]!, digest: match[2]!.toLowerCase() });
+  }
+  if (removed.length === 0 || added.length === 0) return false;
+  // Repository and tag must be identical across the removed/added lines; the
+  // digests must actually differ. A tag change is a real version change, not a
+  // digest refresh.
+  if (!sameMultiset(removed.map((entry) => entry.ref), added.map((entry) => entry.ref))) return false;
+  return !sameMultiset(removed.map((entry) => entry.digest), added.map((entry) => entry.digest));
 }
 
 /** A dependency/manifest file changed, but NOT a k8s manifest (which happens
@@ -1232,6 +1293,7 @@ function detectRiskFlags(
  * app_code PR still pulls in the auth checklist (#157). */
 const KIND_CHECKS: Readonly<Record<string, readonly string[]>> = {
   renovate_digest_only: ["verify no functional changes beyond lockfile hashes"],
+  image_digest_only: ["verify only image digests changed; repository and tag unchanged"],
   dependency_upgrade: [
     "check for breaking API changes in updated dependencies",
     "run full test suite after upgrade",
