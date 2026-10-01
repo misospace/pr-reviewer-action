@@ -147,6 +147,34 @@ test("a realistic hunk with context lines still classifies as image_digest_only"
   assert.equal(result.prKind, "image_digest_only");
 });
 
+test("changing the YAML key or indentation around a digest is not image_digest_only", () => {
+  const keyChange = classifyPr({
+    prFiles: files("k8s/lemonade.yaml"),
+    diffText: `-    tag: latest@sha256:${DIGEST_A}\n+    image: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(keyChange.prKind, "k8s_manifest");
+
+  const indentChange = classifyPr({
+    prFiles: files("k8s/lemonade.yaml"),
+    diffText: `-    tag: latest@sha256:${DIGEST_A}\n+      tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(indentChange.prKind, "k8s_manifest");
+});
+
+test("changing Dockerfile platform or stage around a digest is not image_digest_only", () => {
+  const platform = classifyPr({
+    prFiles: files("Dockerfile"),
+    diffText: `-FROM --platform=linux/amd64 node:20@sha256:${DIGEST_A} AS build\n+FROM --platform=linux/arm64 node:20@sha256:${DIGEST_B} AS build\n`,
+  });
+  assert.equal(platform.prKind, "app_code");
+
+  const stage = classifyPr({
+    prFiles: files("Dockerfile"),
+    diffText: `-FROM node:20@sha256:${DIGEST_A} AS build\n+FROM node:20@sha256:${DIGEST_B} AS runtime\n`,
+  });
+  assert.equal(stage.prKind, "app_code");
+});
+
 test("relocating an image reference between files is not image_digest_only", () => {
   const result = classifyPr({
     prFiles: files("k8s/a.yaml", "k8s/b.yaml"),
