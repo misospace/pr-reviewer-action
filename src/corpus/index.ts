@@ -3,6 +3,8 @@
 export {
   buildBoundedRepoMap,
   buildReviewCorpus,
+  CORPUS_DIFF_SECTION_ARTIFACT,
+  CORPUS_DIFF_SECTION_SMART_ARTIFACT,
   gateFeatureForForks,
   prepareStandardsContext,
   prepareToolHarness,

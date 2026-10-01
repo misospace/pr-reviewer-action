@@ -55,6 +55,7 @@ import {
   type PartialCoverage,
 } from "./coverage.js";
 import { McpToolset, parseServerSpecs, splitNamespaced, resolveMcpToolName } from "./mcp.js";
+import { CORPUS_DIFF_SECTION_ARTIFACT, CORPUS_DIFF_SECTION_SMART_ARTIFACT } from "../corpus/assemble.js";
 import { buildTrackedIndex, executeToolRequest, type ToolContext, type TrackedIndex } from "./executors.js";
 import { runProcess } from "../runtime/subprocess.js";
 import { decodeUtf8Ignore } from "../corpus/truncate.js";
@@ -1485,17 +1486,20 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // run issued no calls at all and is reported through its own degraded
   // path, not as a partial tool investigation.
   if (!outcome.degraded) {
-    // #921: the corpus the verdict turn reads (same tier-keyed name the
-    // verdict and planning paths use) also credits files whose complete,
-    // untruncated diff it already carries — a missing corpus or raw diff
-    // credits nothing and keeps the strict tool-read rule.
+    // #921/#930: coverage credits files whose complete diff is in the corpus
+    // via the assembler-certified diff-section payload (tier-keyed, written
+    // beside the corpus the verdict turn reads) — never by re-parsing the
+    // rendered corpus, whose earlier sections are repository-controlled and
+    // can forge any heading. A missing payload or raw diff credits nothing
+    // and keeps the strict tool-read rule.
     const changedFiles = loadChangedFilePaths(deps.readText);
-    const corpusName = input.tier === "smart" ? "review-corpus.smart.truncated.md" : "review-corpus.truncated.md";
+    const diffSectionName =
+      input.tier === "smart" ? CORPUS_DIFF_SECTION_SMART_ARTIFACT : CORPUS_DIFF_SECTION_ARTIFACT;
     const coverage = computePartialCoverage(outcome, {
       changedFiles,
       leads: loadSpecialistLeadRefs(deps.readText),
       corpusDiffCoveredFiles: corpusDiffCoveredFiles(
-        deps.readText(corpusName) ?? "",
+        deps.readText(diffSectionName) ?? "",
         deps.readText("pr.diff"),
         changedFiles,
       ),

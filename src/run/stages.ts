@@ -7,6 +7,8 @@ import { splitChunks } from "../corpus/diff-priority.js";
 import {
   buildBoundedRepoMap,
   buildReviewCorpus,
+  CORPUS_DIFF_SECTION_ARTIFACT,
+  CORPUS_DIFF_SECTION_SMART_ARTIFACT,
   prepareStandardsContext,
   prepareToolHarness,
   type CorpusBuildResult,
@@ -506,6 +508,10 @@ export function assembleCorpus(
     },
   );
   for (const [name, data] of result.artifacts) ws.write(name, data);
+  // #921/#930: the assembler-certified diff-section payload rides beside the
+  // corpus alias, keyed like the diff artifacts, so the tool-loop coverage
+  // rule never has to rediscover the section from rendered markdown.
+  ws.write(tier === "smart" ? CORPUS_DIFF_SECTION_SMART_ARTIFACT : CORPUS_DIFF_SECTION_ARTIFACT, result.corpusDiffPayload);
   return result;
 }
 

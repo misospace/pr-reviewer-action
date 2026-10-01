@@ -20,10 +20,15 @@
  * One second path to coverage exists (#921): a changed file whose complete,
  * untruncated diff is already in the assembled review corpus needs no tool
  * read — the reviewer has every changed line in context. The rule is
- * verified, not inferred: the file's full per-file chunk from the RAW
- * `pr.diff` must appear byte-exact inside the corpus's diff section, so a
- * diff the corpus budget truncated or omitted never earns the credit and
- * keeps the strict tool-read rule (see `corpusDiffCoveredFiles`).
+ * verified against assembler-owned structure, never inferred from the
+ * rendered corpus: the corpus assembler certifies the diff-section bytes it
+ * actually retained (one exact byte sequence at a recorded body offset,
+ * re-verified after the body truncation — `corpusDiffPayload` in
+ * corpus/assemble.ts, persisted as `pr.diff.corpus-section.txt`), and the
+ * file's full per-file chunk from the RAW `pr.diff` must appear byte-exact
+ * inside that certified payload. A diff the corpus budget truncated or
+ * omitted never earns the credit and keeps the strict tool-read rule (see
+ * `corpusDiffCoveredFiles`).
  *
  * A specialist lead is resolved when its own file (if it names one) was
  * read by the rules above. A lead without a file path cannot be tied to any
@@ -152,30 +157,6 @@ export function loadSpecialistLeadRefs(read: (name: string) => string | null): C
 // #921: the corpus-diff coverage rule
 // ---------------------------------------------------------------------------
 
-/** The level-1 heading the corpus renderer gives the diff section
- * (corpus/assemble.ts `pushSection("# PR Diff (truncated)", …)`) and the
- * body-truncation marker line that ends the surviving corpus body. The
- * credit only counts bytes between that heading and whichever comes first:
- * the next level-1 heading (the section closed intact) or the truncation
- * marker (the corpus body was cut). */
-const DIFF_SECTION_HEADING = "# PR Diff (truncated)";
-const BODY_TRUNCATION_MARKER = "…[review corpus truncated to fit the model context budget]";
-
-/** The corpus's diff-section bytes, or null when the corpus carries no diff
- * section at all (no credit is possible without one). */
-function corpusDiffSection(corpusText: string): string | null {
-  let start = corpusText.indexOf(`\n${DIFF_SECTION_HEADING}\n`) + 1;
-  if (start === 0 && !corpusText.startsWith(`${DIFF_SECTION_HEADING}\n`)) return null;
-  const afterHeading = start + DIFF_SECTION_HEADING.length + 1;
-  const body = corpusText.slice(afterHeading);
-  let end = body.length;
-  const nextHeading = body.indexOf("\n# ");
-  if (nextHeading >= 0 && nextHeading < end) end = nextHeading;
-  const truncated = body.indexOf(`\n${BODY_TRUNCATION_MARKER}`);
-  if (truncated >= 0 && truncated < end) end = truncated;
-  return body.slice(0, end);
-}
-
 /** Per-file diff chunks keyed by their b/-side path, straight from the RAW
  * `pr.diff` (the authoritative source the corpus prioritizer slices). The
  * last chunk wins for a repeated path, matching git's one-chunk-per-file
@@ -193,34 +174,41 @@ function rawDiffChunks(rawDiff: string): Map<string, string> {
 
 /**
  * Changed files whose complete, untruncated diff is in the assembled review
- * corpus (#921). A file qualifies only when its full per-file chunk from the
- * RAW `pr.diff` appears byte-exact inside the corpus's diff section: the
- * prioritizer emits whole chunks verbatim and marks clipped chunks with an
- * inline note and dropped chunks in an omitted-file manifest, so any
- * truncation or omission inside the chunk breaks the exact match and the
- * file keeps the strict tool-read rule. New files, deleted files, renames,
- * and mode-only changes all ride the same byte-exact rule.
+ * corpus (#921). The first argument is the assembler-certified diff-section
+ * payload (`corpusDiffPayload` from corpus/assemble.ts, persisted as
+ * `pr.diff(.smart).corpus-section.txt`) — the exact bytes the corpus's diff
+ * section carries, identified by assembler-owned structure. A file
+ * qualifies only when its full per-file chunk from the RAW `pr.diff`
+ * appears byte-exact inside that payload: the prioritizer emits whole
+ * chunks verbatim and marks clipped chunks with an inline note and dropped
+ * chunks in an omitted-file manifest, so any truncation or omission inside
+ * the chunk breaks the exact match and the file keeps the strict tool-read
+ * rule. New files, deleted files, renames, and mode-only changes all ride
+ * the same byte-exact rule.
  *
- * Deliberately narrow so the credit errs toward honesty: nothing outside the
- * diff section counts (a diff quoted in tool results or related-code
- * sections is not the corpus diff), a missing `pr.diff`, missing corpus, or
- * missing diff section credits nothing, and an added line that quotes a
- * diff header cannot forge a chunk because chunk boundaries are anchored at
- * real `diff --git` line starts in both the raw diff and the corpus.
+ * Deliberately narrow so the credit errs toward honesty: a missing
+ * `pr.diff`, an empty or absent payload (the body truncation cut the diff
+ * section, or no corpus was assembled) credits nothing. The payload — not
+ * the rendered corpus document — is the only thing searched, because
+ * sections assembled before the diff (changed manifests) are
+ * repository-controlled and can forge a `# PR Diff (truncated)` heading
+ * with a planted copy of any file's diff; trusting rendered headings would
+ * let untrusted content erase a coverage gap (#252 trust-boundary class).
+ * Chunk boundaries anchor at real `diff --git` line starts in both the raw
+ * diff and the payload, so a planted mid-line header cannot forge a chunk
+ * either.
  */
 export function corpusDiffCoveredFiles(
-  corpusText: string,
+  corpusDiffPayload: string,
   rawDiff: string | null,
   changedFiles: readonly string[],
 ): Set<string> {
   const covered = new Set<string>();
-  if (rawDiff === null || rawDiff === "" || corpusText === "") return covered;
-  const area = corpusDiffSection(corpusText);
-  if (area === null || area === "") return covered;
+  if (rawDiff === null || rawDiff === "" || corpusDiffPayload === "") return covered;
   const chunks = rawDiffChunks(rawDiff);
   for (const path of changedFiles) {
     const chunk = chunks.get(path);
-    if (chunk !== undefined && chunk !== "" && area.includes(chunk)) covered.add(path);
+    if (chunk !== undefined && chunk !== "" && corpusDiffPayload.includes(chunk)) covered.add(path);
   }
   return covered;
 }

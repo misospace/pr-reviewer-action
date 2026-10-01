@@ -112,7 +112,22 @@ export interface CorpusBuildResult {
    * ERROR and returns 1; the caller aborts the review). The output is still
    * written before the guard fires, exactly like v2. */
   overBudget: boolean;
+  /** #921/#930: the diff-section bytes this corpus actually carries,
+   * certified by construction — the section is written as one exact byte
+   * sequence at a recorded body offset and those exact bytes are
+   * re-verified there after the body truncation. Empty when the truncation
+   * cut the section or the diff is empty. The #921 coverage consumer grants
+   * corpus-diff credit from THIS payload only, never from rendered
+   * markdown: corpus sections assembled earlier (changed manifests) are
+   * repository-controlled and can forge any heading. */
+  corpusDiffPayload: Uint8Array;
 }
+
+/** Workspace artifacts carrying `corpusDiffPayload` per tier — written by the
+ * v3 run layer next to the corpus alias, consumed by the #921 coverage rule
+ * in src/tools/coverage.ts. */
+export const CORPUS_DIFF_SECTION_ARTIFACT = "pr.diff.corpus-section.txt";
+export const CORPUS_DIFF_SECTION_SMART_ARTIFACT = "pr.diff.smart.corpus-section.txt";
 
 const BODY_FLOOR = 4100;
 const STANDARDS_CAP_DEFAULT = 16000;
@@ -306,8 +321,10 @@ export function buildReviewCorpus(
 
   // Build non-standards body first (this is the portion subject to truncation).
   const body: Uint8Array[] = [];
+  let bodyLength = 0;
   const push = (data: Uint8Array): void => {
     body.push(data);
+    bodyLength += data.length;
   };
   /** header? + [```lang + content + ```]? + blank line. `content` carries the
    * exact bytes the v2 `cat`/command emitted (jq output includes its own
@@ -372,7 +389,20 @@ export function buildReviewCorpus(
     ws.versionHintsTruncatedTxt !== null ? bytes(ws.versionHintsTruncatedTxt) : enc("(none)\n"),
     "text",
   );
-  pushSection("# PR Diff (truncated)", diffContent, "diff");
+  // The diff section enters the body as ONE exact byte sequence at a
+  // recorded offset (#921/#930): after the body truncation, finding those
+  // exact bytes at that offset is what certifies the corpus genuinely
+  // retained the whole section. No rendered-markdown heading is ever
+  // trusted to locate it — untrusted sections assembled earlier (changed
+  // manifests) can forge any heading.
+  const diffSectionBytes = concat(
+    enc("# PR Diff (truncated)\n"),
+    enc("```diff\n"),
+    diffContent,
+    enc("```\n\n"),
+  );
+  const diffSectionOffset = bodyLength;
+  push(diffSectionBytes);
   // High-value evidence comes BEFORE linked sources / repo scans so that when
   // the corpus overflows the budget, the noisy low-value sections at the tail
   // are dropped first instead of this evidence.
@@ -475,6 +505,16 @@ export function buildReviewCorpus(
   const bodyTruncated = truncateClean(bodyMd, bodyBudget, BODY_MARKER);
   write("review-corpus.body.truncated.md", bodyTruncated);
 
+  // #921/#930: certify what the corpus actually retained. The full section
+  // bytes must still sit exactly at their recorded offset — a body-budget
+  // cut replaces or shortens them there, and nothing earlier in the body
+  // can move the offset. An empty payload means no corpus-diff credit.
+  const sectionSurvived =
+    bodyTruncated.length >= diffSectionOffset + diffSectionBytes.length &&
+    Buffer.from(bodyTruncated.subarray(diffSectionOffset, diffSectionOffset + diffSectionBytes.length)).equals(
+      Buffer.from(diffSectionBytes),
+    );
+
   // Prepend the (capped) standards section — first and highest-authority,
   // truncation-exempt — then the truncated body, then the reserved ledger
   // block, then the reserved claims-to-falsify block, then the reserved
@@ -508,7 +548,7 @@ export function buildReviewCorpus(
     }
   }
 
-  return { artifacts, outputName, overBudget };
+  return { artifacts, outputName, overBudget, corpusDiffPayload: sectionSurvived ? diffContent : new Uint8Array(0) };
 }
 
 function indexOfSub(haystack: Uint8Array, needle: Uint8Array): number {

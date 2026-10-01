@@ -10,6 +10,7 @@ import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
 import { reassembleSse } from "../src/transport/sse.js";
 import { normalizedToOpenAiChat } from "../src/run/stages.js";
 import { prioritizeDiff } from "../src/corpus/diff-priority.js";
+import { CORPUS_DIFF_SECTION_ARTIFACT } from "../src/corpus/assemble.js";
 
 function workspace(): { root: string; deps: (overrides?: Partial<HarnessDeps>) => HarnessDeps } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "harness-test-"));
@@ -554,6 +555,9 @@ test("#921: a docs PR whose small files are fully in the corpus lists only the t
   const section = Buffer.from(prioritizeDiff(Buffer.from(rawDiff, "utf8"), 900)).toString("utf8");
   assert.ok(section.includes("…[diff truncated to fit context budget]"), "fixture must actually truncate");
   fs.writeFileSync(path.join(root, "pr.diff"), rawDiff);
+  // #930: the coverage rule consumes the assembler-certified sidecar, not
+  // the rendered corpus.
+  fs.writeFileSync(path.join(root, CORPUS_DIFF_SECTION_ARTIFACT), section);
   fs.writeFileSync(
     path.join(root, "review-corpus.truncated.md"),
     `# Repository Standards and Conventions (AGENTS.md)\n\n# PR Diff (truncated)\n\`\`\`diff\n${section}\`\`\`\n\n# Tool Harness Findings\n\nnone\n`,

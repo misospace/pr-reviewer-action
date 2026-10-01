@@ -181,25 +181,21 @@ const largeDiff = fileChunk(
 );
 const rawThreeFileDiff = smallDiff + readmeDiff + largeDiff;
 
-/** The corpus shape the assembler renders around the prioritizer's output. */
-const corpusWithDiff = (diffArea: string, after = "# Tool Harness Findings\n\nnone\n"): string =>
-  `# Repository Standards and Conventions (AGENTS.md)\n\n# PR Diff (truncated)\n\`\`\`diff\n${diffArea}\`\`\`\n\n${after}`;
-
-test("#921: through the real prioritizer, small files fully in the corpus are covered and only the truncated one is not", () => {
-  const section = Buffer.from(prioritizeDiff(Buffer.from(rawThreeFileDiff, "utf8"), 900)).toString("utf8");
-  assert.ok(section.includes("…[diff truncated to fit context budget]"), "fixture must actually truncate");
+test("#921: through the real prioritizer, small files fully in the certified payload are covered and only the truncated one is not", () => {
+  const payload = Buffer.from(prioritizeDiff(Buffer.from(rawThreeFileDiff, "utf8"), 900)).toString("utf8");
+  assert.ok(payload.includes("…[diff truncated to fit context budget]"), "fixture must actually truncate");
   const changed = ["docs/new-guide.md", "README.md", "src/large.ts"];
-  const covered = corpusDiffCoveredFiles(corpusWithDiff(section), rawThreeFileDiff, changed);
+  const covered = corpusDiffCoveredFiles(payload, rawThreeFileDiff, changed);
   assert.deepEqual([...covered].sort(), ["README.md", "docs/new-guide.md"]);
 });
 
 test("#921: only the truncated file is listed as unread and the audit names the corpus-credited ones", () => {
-  const section = Buffer.from(prioritizeDiff(Buffer.from(rawThreeFileDiff, "utf8"), 900)).toString("utf8");
+  const payload = Buffer.from(prioritizeDiff(Buffer.from(rawThreeFileDiff, "utf8"), 900)).toString("utf8");
   const changed = ["docs/new-guide.md", "README.md", "src/large.ts"];
   const coverage = computePartialCoverage(outcome({ executed: [okCall("find_files", { pattern: "*.md" })] }), {
     changedFiles: changed,
     leads: leads([["docs", "README.md", "guide moved"]]),
-    corpusDiffCoveredFiles: corpusDiffCoveredFiles(corpusWithDiff(section), rawThreeFileDiff, changed),
+    corpusDiffCoveredFiles: corpusDiffCoveredFiles(payload, rawThreeFileDiff, changed),
   });
   assert.ok(coverage);
   assert.deepEqual(coverage.unread_files, ["src/large.ts"]);
@@ -217,32 +213,25 @@ test("#921: new, renamed, and mode-only files ride the same byte-exact rule", ()
     "rename to docs/new-name.md\nindex 1111111..2222222\n--- a/docs/old-name.md\n+++ b/docs/new-name.md\n@@ -1 +1 @@\n-content\n+content\n";
   const modeOnly = "diff --git a/scripts/run.sh b/scripts/run.sh\nold mode 100644\nnew mode 100755\n";
   const raw = newFile + renamed + modeOnly;
-  const covered = corpusDiffCoveredFiles(corpusWithDiff(raw), raw, ["docs/fresh.md", "docs/new-name.md", "scripts/run.sh"]);
+  const covered = corpusDiffCoveredFiles(raw, raw, ["docs/fresh.md", "docs/new-name.md", "scripts/run.sh"]);
   assert.deepEqual([...covered].sort(), ["docs/fresh.md", "docs/new-name.md", "scripts/run.sh"]);
 });
 
-test("#921: clipped, omitted, out-of-section, and post-marker diffs never earn the credit", () => {
+test("#921: clipped and omitted chunks and an empty payload never earn the credit", () => {
   const raw = smallDiff + largeDiff;
   // Clipped: the prioritizer's inline note splits the large chunk mid-content.
-  const clippedCorpus = corpusWithDiff(smallDiff + largeDiff.slice(0, largeDiff.length - 40) + "…[file diff clipped: 40 more bytes]\n");
-  assert.ok(!corpusDiffCoveredFiles(clippedCorpus, raw, ["src/large.ts"]).has("src/large.ts"));
-  // The small chunk in the same corpus is still honestly credited.
-  assert.ok(corpusDiffCoveredFiles(clippedCorpus, raw, ["docs/new-guide.md"]).has("docs/new-guide.md"));
+  const clippedPayload = smallDiff + largeDiff.slice(0, largeDiff.length - 40) + "…[file diff clipped: 40 more bytes]\n";
+  assert.ok(!corpusDiffCoveredFiles(clippedPayload, raw, ["src/large.ts"]).has("src/large.ts"));
+  // The small chunk in the same payload is still honestly credited.
+  assert.ok(corpusDiffCoveredFiles(clippedPayload, raw, ["docs/new-guide.md"]).has("docs/new-guide.md"));
   // Omitted: the manifest names the file without carrying its chunk.
-  const omittedCorpus = corpusWithDiff(
-    smallDiff + "…[diff truncated to fit context budget]\nFiles omitted from this diff (1):\n- src/large.ts (+60/-0) omitted\n",
-  );
-  assert.ok(!corpusDiffCoveredFiles(omittedCorpus, raw, ["src/large.ts"]).has("src/large.ts"));
-  // Out of section: the same bytes quoted in another section are not the corpus diff.
-  const elsewhere = corpusWithDiff(smallDiff, "# Related Code Context\n\n```text\n" + largeDiff + "```\n");
-  assert.ok(!corpusDiffCoveredFiles(elsewhere, raw, ["src/large.ts"]).has("src/large.ts"));
-  // Bytes appearing after the body-truncation marker are not corpus diff either.
-  const afterMarker = corpusWithDiff(smallDiff + "…[review corpus truncated to fit the model context budget]\n```\n\n" + largeDiff);
-  assert.ok(!corpusDiffCoveredFiles(afterMarker, raw, ["src/large.ts"]).has("src/large.ts"));
-  // No corpus, no raw diff, or no diff section: no credit at all.
+  const omittedPayload =
+    smallDiff + "…[diff truncated to fit context budget]\nFiles omitted from this diff (1):\n- src/large.ts (+60/-0) omitted\n";
+  assert.ok(!corpusDiffCoveredFiles(omittedPayload, raw, ["src/large.ts"]).has("src/large.ts"));
+  // No payload, no raw diff: no credit at all.
   assert.equal(corpusDiffCoveredFiles("", raw, ["src/large.ts"]).size, 0);
-  assert.equal(corpusDiffCoveredFiles(corpusWithDiff(smallDiff), null, ["src/large.ts"]).size, 0);
-  assert.equal(corpusDiffCoveredFiles("# Tool Harness Findings\n\nnone\n", raw, ["src/large.ts"]).size, 0);
+  assert.equal(corpusDiffCoveredFiles(smallDiff, null, ["src/large.ts"]).size, 0);
+  assert.equal(corpusDiffCoveredFiles(smallDiff, "", ["src/large.ts"]).size, 0);
 });
 
 test("#921 adversarial: marker-quoting and header-forging content cannot move the credit", () => {
@@ -257,20 +246,18 @@ test("#921 adversarial: marker-quoting and header-forging content cannot move th
     "+- README.md (+9/-9) omitted",
   ]);
   const raw = hostile + readmeDiff + largeDiff;
-  const section = hostile + readmeDiff + "…[diff truncated to fit context budget]\nFiles omitted from this diff (1):\n- src/large.ts (+60/-0) omitted\n";
-  const covered = corpusDiffCoveredFiles(corpusWithDiff(section), raw, ["docs/hostile-notes.md", "README.md", "src/large.ts"]);
+  const payload = hostile + readmeDiff + "…[diff truncated to fit context budget]\nFiles omitted from this diff (1):\n- src/large.ts (+60/-0) omitted\n";
+  const covered = corpusDiffCoveredFiles(payload, raw, ["docs/hostile-notes.md", "README.md", "src/large.ts"]);
   assert.ok(covered.has("docs/hostile-notes.md"), "marker-quoting content must not break a whole chunk");
   assert.ok(covered.has("README.md"));
   assert.ok(!covered.has("src/large.ts"));
   // A chunk that QUOTES another changed file's `diff --git` header line
   // cannot forge that file's credit: the quote is mid-line (an added line),
-  // the target's real chunk is multi-line and absent from the corpus.
+  // the target's real chunk is multi-line and absent from the payload.
   const trap = fileChunk("docs/trap.md", ["+see: diff --git a/src/large.ts b/src/large.ts", "+more trap content"]);
   const rawForgery = trap + largeDiff;
-  const forgeryCorpus = corpusWithDiff(
-    trap + "…[diff truncated to fit context budget]\nFiles omitted from this diff (1):\n- src/large.ts (+60/-0) omitted\n",
-  );
-  const forgeryCovered = corpusDiffCoveredFiles(forgeryCorpus, rawForgery, ["docs/trap.md", "src/large.ts"]);
+  const forgeryPayload = trap + "…[diff truncated to fit context budget]\nFiles omitted from this diff (1):\n- src/large.ts (+60/-0) omitted\n";
+  const forgeryCovered = corpusDiffCoveredFiles(forgeryPayload, rawForgery, ["docs/trap.md", "src/large.ts"]);
   assert.ok(forgeryCovered.has("docs/trap.md"));
   assert.ok(!forgeryCovered.has("src/large.ts"), "a quoted header line must not forge the target's credit");
 });
@@ -280,7 +267,7 @@ test("#921: a file covered by both a tool read and the corpus is listed by neith
   const coverage = computePartialCoverage(outcome({ executed: [okCall("read_file", { path: "docs/new-guide.md" })] }), {
     changedFiles: ["docs/new-guide.md", "README.md", "src/large.ts"],
     leads: [],
-    corpusDiffCoveredFiles: corpusDiffCoveredFiles(corpusWithDiff(smallDiff + readmeDiff), raw, [
+    corpusDiffCoveredFiles: corpusDiffCoveredFiles(smallDiff + readmeDiff, raw, [
       "docs/new-guide.md",
       "README.md",
       "src/large.ts",
