@@ -1137,6 +1137,26 @@ function allFilesAreImageManifests(filenames: string[]): boolean {
 const IMAGE_DIGEST_LINE_RE =
   /^(?:FROM\s+(?:--platform=\S+\s+)?|(?:image|tag)\s*:\s*)?["']?([A-Za-z0-9][A-Za-z0-9._:/-]*)@sha256:([0-9a-fA-F]{64})["']?(?:\s+AS\s+\S+)?$/i;
 
+/** Validate one contiguous change block — a run of removed lines immediately
+ * followed by added lines, with no context/header line between. Every removed
+ * image must pair with an added image at the same position and keep its
+ * repository/tag. Returns whether any paired digest differed, or null when the
+ * block is not a pure digest refresh (unbalanced, ref mismatch). */
+function evaluateDigestBlock(
+  removed: readonly { ref: string; digest: string }[],
+  added: readonly { ref: string; digest: string }[],
+): boolean | null {
+  if (removed.length === 0 || removed.length !== added.length) return null;
+  let digestChanged = false;
+  for (let index = 0; index < removed.length; index += 1) {
+    const before = removed[index]!;
+    const after = added[index]!;
+    if (before.ref !== after.ref) return null;
+    if (before.digest !== after.digest) digestChanged = true;
+  }
+  return digestChanged;
+}
+
 /** Renovate image-digest-only refresh: every changed line is a single image
  * reference whose repository and tag are unchanged and only the `@sha256:`
  * digest differs (YAML `image:`/`tag:`, compose, Dockerfile `FROM`). A mixed
@@ -1144,36 +1164,52 @@ const IMAGE_DIGEST_LINE_RE =
  * existing rules (notably k8s_manifest), which would otherwise demand a check
  * a digest-only change cannot answer (#909).
  *
- * Removed and added lines are paired positionally (git emits a hunk's removed
- * lines then its added lines, both in file order), so each image must keep its
- * repository/tag at the same position. Comparing refs as global multisets
- * would accept a diff that swaps which digest belongs to which image. */
+ * Removed and added lines are paired within each contiguous change block
+ * (a run of removals immediately followed by additions, delimited by context,
+ * hunk headers, or file headers), so an image cannot move between hunks or
+ * files and still count as a digest refresh. Comparing refs globally would
+ * accept either a digest swap or a relocation. */
 function isImageDigestOnly(filenames: string[], diffText: string): boolean {
   if (!allFilesAreImageManifests(filenames)) return false;
-  const removed: { ref: string; digest: string }[] = [];
-  const added: { ref: string; digest: string }[] = [];
+  let removed: { ref: string; digest: string }[] = [];
+  let added: { ref: string; digest: string }[] = [];
+  let sawBlock = false;
+  let anyDigestChanged = false;
+
+  const flushBlock = (): boolean => {
+    if (removed.length === 0 && added.length === 0) return true;
+    const changed = evaluateDigestBlock(removed, added);
+    if (changed === null) return false;
+    sawBlock = true;
+    anyDigestChanged = anyDigestChanged || changed;
+    removed = [];
+    added = [];
+    return true;
+  };
+
   for (const line of diffText.split("\n")) {
-    let bucket: { ref: string; digest: string }[];
-    if (line.startsWith("+") && !line.startsWith("+++")) {
-      bucket = added;
-    } else if (line.startsWith("-") && !line.startsWith("---")) {
-      bucket = removed;
-    } else {
+    const isRemoved = line.startsWith("-") && !line.startsWith("---");
+    const isAdded = line.startsWith("+") && !line.startsWith("+++");
+    if (!isRemoved && !isAdded) {
+      // Context line, hunk header (`@@`), file header, or any other line:
+      // the current change block is complete.
+      if (!flushBlock()) return false;
       continue;
     }
     const match = IMAGE_DIGEST_LINE_RE.exec(line.slice(1).trim());
     if (match === null) return false;
-    bucket.push({ ref: match[1]!, digest: match[2]!.toLowerCase() });
+    const entry = { ref: match[1]!, digest: match[2]!.toLowerCase() };
+    if (isRemoved) {
+      // Git emits a block's removals before its additions; a removal after an
+      // addition means the block boundary was mis-detected, so fail closed.
+      if (added.length > 0) return false;
+      removed.push(entry);
+    } else {
+      added.push(entry);
+    }
   }
-  if (removed.length === 0 || removed.length !== added.length) return false;
-  let digestChanged = false;
-  for (let index = 0; index < removed.length; index += 1) {
-    const before = removed[index]!;
-    const after = added[index]!;
-    if (before.ref !== after.ref) return false;
-    if (before.digest !== after.digest) digestChanged = true;
-  }
-  return digestChanged;
+  if (!flushBlock()) return false;
+  return sawBlock && anyDigestChanged;
 }
 
 /** A dependency/manifest file changed, but NOT a k8s manifest (which happens

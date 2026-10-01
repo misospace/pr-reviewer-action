@@ -132,6 +132,48 @@ test("swapping which digest belongs to which image is not image_digest_only", ()
   assert.equal(result.prKind, "k8s_manifest");
 });
 
+test("a realistic hunk with context lines still classifies as image_digest_only", () => {
+  const result = classifyPr({
+    prFiles: files("k8s/lemonade.yaml"),
+    diffText:
+      "diff --git a/k8s/lemonade.yaml b/k8s/lemonade.yaml\n" +
+      "@@ -9,7 +9,7 @@ spec:\n" +
+      "   image:\n" +
+      "     repository: ghcr.io/o/lemonade\n" +
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n` +
+      "     pullPolicy: IfNotPresent\n",
+  });
+  assert.equal(result.prKind, "image_digest_only");
+});
+
+test("relocating an image reference between files is not image_digest_only", () => {
+  const result = classifyPr({
+    prFiles: files("k8s/a.yaml", "k8s/b.yaml"),
+    diffText:
+      "diff --git a/k8s/a.yaml b/k8s/a.yaml\n" +
+      "@@ -1 +0,0 @@\n" +
+      `-    image: ghcr.io/o/api:v1@sha256:${DIGEST_A}\n` +
+      "diff --git a/k8s/b.yaml b/k8s/b.yaml\n" +
+      "@@ -0,0 +1 @@\n" +
+      `+    image: ghcr.io/o/api:v1@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("relocating an image reference between hunks is not image_digest_only", () => {
+  const result = classifyPr({
+    prFiles: files("k8s/a.yaml"),
+    diffText:
+      "diff --git a/k8s/a.yaml b/k8s/a.yaml\n" +
+      "@@ -1 +0,0 @@\n" +
+      `-    image: ghcr.io/o/api:v1@sha256:${DIGEST_A}\n` +
+      "@@ -10,0 +10 @@\n" +
+      `+    image: ghcr.io/o/api:v1@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
 test("secret handling precedes auth", () => {
   const result = classifyPr({ prFiles: files("src/secret_handler.py") });
   assert.equal(result.prKind, "secret_handling_changes");
