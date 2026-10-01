@@ -247,6 +247,34 @@ test("a renamed manifest with an otherwise digest-only hunk is not image_digest_
   assert.equal(result.prKind, "k8s_manifest");
 });
 
+test("rename metadata fails closed even when the file status is modified", () => {
+  // The file-list entry says modified, but the diff carries rename metadata:
+  // the structural-line guard must catch it, not just the status guard.
+  const result = classifyPr({
+    prFiles: [digestFile("k8s/b.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText:
+      "diff --git a/k8s/a.yaml b/k8s/b.yaml\n" +
+      "similarity index 90%\n" +
+      "rename from k8s/a.yaml\n" +
+      "rename to k8s/b.yaml\n" +
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("a line with more than one digest token is not image_digest_only", () => {
+  const result = classifyPr({
+    prFiles: [digestFile("Dockerfile", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText:
+      `-FROM node:20@sha256:${DIGEST_A} AS sha256:${DIGEST_B}\n` +
+      `+FROM node:20@sha256:${"c".repeat(64)} AS sha256:${"d".repeat(64)}\n`,
+  });
+  assert.equal(result.prKind, "app_code");
+});
+
 test("a mode change around a digest is not image_digest_only", () => {
   const result = classifyPr({
     prFiles: files("k8s/lemonade.yaml"),

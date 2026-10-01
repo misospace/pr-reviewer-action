@@ -1170,6 +1170,11 @@ const DIGEST_TOKEN_RE = /sha256:[0-9a-fA-F]{64}/;
 function parseImageDigestLine(content: string): { normalized: string; digest: string } | null {
   const match = IMAGE_DIGEST_LINE_RE.exec(content);
   if (match === null) return null;
+  // Exactly one digest token per line. The anchored regex admits a single
+  // `@sha256:` (the ref charset excludes `@`), but a second `sha256:<hex>`
+  // could sit in the optional `AS <stage>` tail; blanking an ambiguous token
+  // would let a non-digest difference normalize away. Fail closed instead.
+  if ((content.match(/sha256:[0-9a-fA-F]{64}/g) ?? []).length !== 1) return null;
   return {
     normalized: content.replace(DIGEST_TOKEN_RE, "sha256:<DIGEST>"),
     digest: match[1]!.toLowerCase(),
