@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.1.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.0.1...source-v3.1.0) (2026-10-01)
+
+
+### Features
+
+* **tools:** raise the native-loop budget and report a real cache hit ratio ([#911](https://github.com/misospace/pr-reviewer-action/issues/911)) ([bf937d0](https://github.com/misospace/pr-reviewer-action/commit/bf937d011786fc9c45a5be56220ed17489bd6648))
+
 ## [3.0.1](https://github.com/misospace/pr-reviewer-action/compare/source-v3.0.0...source-v3.0.1) (2026-09-30)
 
 
