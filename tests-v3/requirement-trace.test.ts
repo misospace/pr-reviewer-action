@@ -520,3 +520,32 @@ test("predicate check is skipped (documented limitation) when the requirement te
     rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test("#935: standards and PR-body requirements are out of trace scope; linked-issue ones stay in", () => {
+  const ws = makeWorkspace();
+  try {
+    const ledger = {
+      requirements: [
+        { id: "req-std", text: "All inputs MUST be validated.", kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 3 }] },
+        { id: "req-body", text: "The new route MUST check merge state.", kind: "acceptance", provenance: [{ source: "pr_body", ref: "pr", line: 2 }] },
+      ],
+    };
+    // A config-only PR that never mentions them keeps coverage complete.
+    const out = validateRequirementTrace([], ledger, ws);
+    assert.equal(out.incomplete, false);
+    assert.deepEqual(out.rows, []);
+
+    const withIssue = {
+      requirements: [
+        ...ledger.requirements,
+        { id: "req-issue", text: "Resolution MUST compare the source SHA.", kind: "acceptance", provenance: [{ source: "linked_issues", ref: "#584", line: 9 }] },
+        { id: "req-both", text: "Repo DID MUST match.", kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 7 }, { source: "linked_issues", ref: "#584", line: 11 }] },
+      ],
+    };
+    const traced = validateRequirementTrace([], withIssue, ws);
+    assert.deepEqual(traced.rows.map((row) => row.requirement_id), ["req-issue", "req-both"]);
+    assert.equal(traced.incomplete, true, "an untraced linked-issue requirement still fails the trace");
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});

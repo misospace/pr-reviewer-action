@@ -333,6 +333,18 @@ export interface TracedLedgerEntry {
 /** Read `ledger.requirements` from an untrusted value (the parsed
  * `requirement-ledger.json`, or `null` when it never ran) without assuming
  * either serialization's field casing beyond `id`/`text`/`kind`. */
+/** #935: the trace demands code+test enforcement for what the change was
+ * asked to deliver: linked-issue requirements (#874). Repository standards,
+ * PR-body statements (claim falsification covers those) and harness
+ * obligations are general or self-reported, so a PR that cannot touch them
+ * must not lose its approval over them. An entry without provenance stays in
+ * scope (fail closed). */
+function tracedByProvenance(record: Record<string, unknown>): boolean {
+  const provenance = record.provenance;
+  if (!Array.isArray(provenance) || provenance.length === 0) return true;
+  return provenance.some((item) => !!item && typeof item === "object" && (item as { source?: unknown }).source === "linked_issues");
+}
+
 function ledgerEntriesInScope(ledger: unknown): TracedLedgerEntry[] {
   const raw = (ledger as { requirements?: unknown } | null | undefined)?.requirements;
   if (!Array.isArray(raw)) return [];
@@ -342,7 +354,7 @@ function ledgerEntriesInScope(ledger: unknown): TracedLedgerEntry[] {
     const record = item as Record<string, unknown>;
     const { id, text, kind } = record;
     if (typeof id !== "string" || typeof text !== "string" || typeof kind !== "string") continue;
-    if (kind === "acceptance" || kind === "normative") entries.push({ id, text, kind });
+    if ((kind === "acceptance" || kind === "normative") && tracedByProvenance(record)) entries.push({ id, text, kind });
   }
   return entries;
 }
