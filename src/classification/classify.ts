@@ -1137,19 +1137,17 @@ function allFilesAreImageManifests(filenames: string[]): boolean {
 const IMAGE_DIGEST_LINE_RE =
   /^(?:FROM\s+(?:--platform=\S+\s+)?|(?:image|tag)\s*:\s*)?["']?([A-Za-z0-9][A-Za-z0-9._:/-]*)@sha256:([0-9a-fA-F]{64})["']?(?:\s+AS\s+\S+)?$/i;
 
-function sameMultiset(left: readonly string[], right: readonly string[]): boolean {
-  if (left.length !== right.length) return false;
-  const sortedLeft = [...left].sort();
-  const sortedRight = [...right].sort();
-  return sortedLeft.every((value, index) => value === sortedRight[index]);
-}
-
 /** Renovate image-digest-only refresh: every changed line is a single image
  * reference whose repository and tag are unchanged and only the `@sha256:`
  * digest differs (YAML `image:`/`tag:`, compose, Dockerfile `FROM`). A mixed
  * diff — any other changed line, or a changed repository/tag — is left to the
  * existing rules (notably k8s_manifest), which would otherwise demand a check
- * a digest-only change cannot answer (#909). */
+ * a digest-only change cannot answer (#909).
+ *
+ * Removed and added lines are paired positionally (git emits a hunk's removed
+ * lines then its added lines, both in file order), so each image must keep its
+ * repository/tag at the same position. Comparing refs as global multisets
+ * would accept a diff that swaps which digest belongs to which image. */
 function isImageDigestOnly(filenames: string[], diffText: string): boolean {
   if (!allFilesAreImageManifests(filenames)) return false;
   const removed: { ref: string; digest: string }[] = [];
@@ -1167,12 +1165,15 @@ function isImageDigestOnly(filenames: string[], diffText: string): boolean {
     if (match === null) return false;
     bucket.push({ ref: match[1]!, digest: match[2]!.toLowerCase() });
   }
-  if (removed.length === 0 || added.length === 0) return false;
-  // Repository and tag must be identical across the removed/added lines; the
-  // digests must actually differ. A tag change is a real version change, not a
-  // digest refresh.
-  if (!sameMultiset(removed.map((entry) => entry.ref), added.map((entry) => entry.ref))) return false;
-  return !sameMultiset(removed.map((entry) => entry.digest), added.map((entry) => entry.digest));
+  if (removed.length === 0 || removed.length !== added.length) return false;
+  let digestChanged = false;
+  for (let index = 0; index < removed.length; index += 1) {
+    const before = removed[index]!;
+    const after = added[index]!;
+    if (before.ref !== after.ref) return false;
+    if (before.digest !== after.digest) digestChanged = true;
+  }
+  return digestChanged;
 }
 
 /** A dependency/manifest file changed, but NOT a k8s manifest (which happens

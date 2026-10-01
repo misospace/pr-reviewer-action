@@ -106,6 +106,32 @@ test("a digest change outside a YAML/Dockerfile manifest is not image_digest_onl
   assert.equal(result.prKind, "app_code");
 });
 
+test("a multi-image digest refresh keeps each image's repository/tag in place", () => {
+  const result = classifyPr({
+    prFiles: files("k8s/leaves.yaml"),
+    diffText:
+      `-    image: ghcr.io/o/api:v1@sha256:${DIGEST_A}\n` +
+      `-    image: ghcr.io/o/worker:v1@sha256:${DIGEST_B}\n` +
+      `+    image: ghcr.io/o/api:v1@sha256:${"c".repeat(64)}\n` +
+      `+    image: ghcr.io/o/worker:v1@sha256:${"d".repeat(64)}\n`,
+  });
+  assert.equal(result.prKind, "image_digest_only");
+});
+
+test("swapping which digest belongs to which image is not image_digest_only", () => {
+  // The ref multiset is unchanged, but the images swapped digests — that is a
+  // functional change, not a digest refresh.
+  const result = classifyPr({
+    prFiles: files("k8s/leaves.yaml"),
+    diffText:
+      `-    image: ghcr.io/o/api:v1@sha256:${DIGEST_A}\n` +
+      `-    image: ghcr.io/o/worker:v1@sha256:${DIGEST_B}\n` +
+      `+    image: ghcr.io/o/worker:v1@sha256:${"c".repeat(64)}\n` +
+      `+    image: ghcr.io/o/api:v1@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
 test("secret handling precedes auth", () => {
   const result = classifyPr({ prFiles: files("src/secret_handler.py") });
   assert.equal(result.prKind, "secret_handling_changes");
