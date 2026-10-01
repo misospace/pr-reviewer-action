@@ -12,9 +12,14 @@ const CONTRACT = "contracts/action-v3.yml";
 const GROUPS = "scripts/docs/input-groups.json";
 const OUTPUT = "docs/inputs.md";
 
-// Raw JSON field names that legitimately stay snake_case in prose (mirrors
-// the allowlist in tests-v3/docs-lint.test.ts).
+// Raw JSON field names the contract prose means literally (a subset of the
+// allowlist in tests-v3/docs-lint.test.ts); other v2 ids render kebab-case.
 const KEEP_SNAKE = new Set(["review_markdown", "verdict_source", "tool_calls", "analysis_engine", "review_result"]);
+
+/** Escape a value for a Markdown table cell: backslashes first, then pipes. */
+function cell(text) {
+  return String(text).replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
+}
 
 export function render(contract, groups) {
   const inputs = new Map(contract.inputs.map((input) => [input.id, input]));
@@ -24,13 +29,13 @@ export function render(contract, groups) {
   const prose = (text) => {
     let out = String(text ?? "").replace(/\s+/g, " ").trim();
     for (const entry of renames) out = out.replace(new RegExp(`\\b${entry.v2_id}\\b`, "g"), entry.id);
-    return out.replace(/\|/g, "\\|");
+    return cell(out);
   };
   const fmtDefault = (input) => {
     if (input.required) return "**required**";
     if (input.default === undefined || input.default === null) return "—";
     if (input.default === "") return "empty";
-    return `\`${String(input.default).replace(/\|/g, "\\|")}\``;
+    return `\`${cell(input.default)}\``;
   };
 
   const listed = new Set();
