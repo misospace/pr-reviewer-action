@@ -77,6 +77,9 @@ const AMBIENT_KEYS = [
   // Tangled identity signal (#583): DID-first auto resolution in
   // src/platform/resolve.ts reads it from the projected stage env.
   "TANGLED_REPO_DID",
+  // #928: env-only knobs the stages read that are not contract inputs. The
+  // eval harness relies on HUMAN_REVIEWS_CONTEXT=false to keep replays blind.
+  "HUMAN_REVIEWS_CONTEXT", "DEEP_REVIEW_EXECUTION", "AI_FALLBACK_RETRIES", "AI_SMART_RETRIES",
 ] as const;
 
 export function buildStageEnv(
