@@ -19,12 +19,13 @@
  * fixture keeps pinning v2 and v3 agreement without an approved divergence.
  *
  * This module is the v3 port of `tool_budget_route` /
- * `resolve_tool_max_requests` in scripts/run_tool_harness.py. The two MUST
- * stay in lockstep on the explicit/override precedence and the tier defaults:
- * tests/fixtures/parity/tool-budget/ pins the shared behavior through the
- * parity harness (#673) so the #678 migration cannot regress to a single
- * undifferentiated request ceiling. The size-scaled default is v3-only
- * (#810); the v2 resolver stays at the flat tier default until #681.
+ * `resolve_tool_max_requests` in scripts/run_tool_harness.py. The two stay
+ * in lockstep on the explicit/override precedence and the smart/escalated
+ * tier defaults: tests/fixtures/parity/tool-budget/ pins the shared behavior
+ * through the parity harness (#673) so the #678 migration cannot regress to a
+ * single undifferentiated request ceiling. They deliberately differ on the
+ * primary tier default (v3 24, v2 16), recorded as approved parity
+ * divergences, and the size-scaled default is v3-only (#810).
  *
  * The Python side reads os.environ; this side takes the environment as a
  * plain record so the resolver is pure and the parity mode can evaluate
