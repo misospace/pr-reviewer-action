@@ -34,6 +34,8 @@ Every key below is the literal JSON key in the marker.
 | `tool_calls` | number, omitted | Tool calls the loop actually executed against that budget. Omitted alongside `tool_budget`. |
 | `tool_rounds` | number, omitted | Rounds the loop actually used. Omitted when no tool harness ran or the loop reported no round count. |
 | `max_rounds` | number, omitted | The resolved round cap the loop ran against for this run (see [`docs/tool-loop.md`](tool-loop.md#round-cap)). Omitted alongside `tool_rounds`. |
+| `context_budget` | number, omitted | The loop's conversation budget in approximate tokens: past it, older tool results are compacted. 24,000 unless a context window is declared (see [Context limits](tool-loop.md#context-limits)). Omitted when no loop ran. |
+| `context_peak` | number, omitted | The largest conversation the loop reached (approximate tokens). Close to `context_budget` means compaction was in play. Omitted alongside `context_budget`. |
 
 Two more action-owned markers can follow on their own line, outside the
 `ai-pr-reviewer:{...}` JSON: `<!-- ai-pr-review-sha:<sha> -->` (the head SHA,
