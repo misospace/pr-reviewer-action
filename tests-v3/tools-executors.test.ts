@@ -64,6 +64,65 @@ test("gh endpoint guard applies repo and denied-path policy on repo and root rou
   const bad = await ghApi("repos/o/r/actions/secrets", ctx("/tmp", { allowedGhRepos: ["o/r"], deps: { ...deps(), ghGet: async () => { throw Error("must not call"); } } })); assert.match(bad.error, /Path segment denied/);
 });
 
+test("gh_api decodes Contents API file objects instead of slicing base64 (#913)", async () => {
+  const call = (payload: unknown) =>
+    executeToolRequest("gh_api", { endpoint: "repos/o/r/contents/action.yml" },
+      ctx("/tmp", { allowedGhRepos: ["o/r"], deps: { ...deps(), env: { GH_TOKEN: "test-token" }, ghGet: async () => ({ status: 200, body: JSON.stringify(payload) }) } }));
+  const fileObj = (path: string, bytes: Buffer, shaSeed: string) => ({
+    type: "file", encoding: "base64", path, sha: shaSeed.repeat(40), size: bytes.length,
+    content: bytes.toString("base64").replace(/(.{60})/g, "$1\n"),
+  });
+
+  // The regression: a large action.yml read through gh_api arrives readable
+  // and flagged, not as an unreadable slice of base64.
+  const fileText = "name: CI\non: pull_request\n" + "  run: echo verify-inputs\n".repeat(1200);
+  const decoded = await call(fileObj("action.yml", Buffer.from(fileText, "utf8"), "a"));
+  assert.equal(decoded.status, "ok");
+  assert.equal(decoded.result.path, "action.yml");
+  assert.equal(decoded.result.sha, "a".repeat(40));
+  assert.equal(decoded.result.size, Buffer.byteLength(fileText));
+  assert.match(decoded.result.content, /^name: CI\non: pull_request\n/);
+  assert.equal(decoded.result.truncated, true);
+  assert.equal(decoded.result.content, fileText.slice(0, 12000) + "\n[truncated]");
+  assert.equal(decoded.result.response, undefined);
+
+  // A small file is complete and untruncated.
+  const smallText = "name: Small\njobs: {}\n";
+  const small = await call(fileObj("small.yml", Buffer.from(smallText, "utf8"), "b"));
+  assert.equal(small.result.content, smallText);
+  assert.equal(small.result.truncated, false);
+
+  // Decoded file text is repository source content: source-safe masking (#876).
+  const secretText = "token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456\n";
+  const secret = await call(fileObj("cfg.yml", Buffer.from(secretText, "utf8"), "c"));
+  assert.match(secret.result.content, /redacted:credential/);
+  assert.doesNotMatch(secret.result.content, /ghp_/);
+
+  // A credential straddling the cap boundary is masked whole (#926): the
+  // masker sees the full decoded text before any truncation. In a code file
+  // with no secret-named key, a partial ghp_ token (27 visible chars here)
+  // matches no masker pattern, so a decode-then-truncate order would leak
+  // the fragment; the token starts at byte 11969 and ends at 12008.
+  const straddleText = "x".repeat(11957) + "\n" + 'const v = "ghp_' + "A".repeat(36) + '";\n' + "tail();\n".repeat(10);
+  const straddle = await call(fileObj("src/app.ts", Buffer.from(straddleText, "utf8"), "f"));
+  assert.match(straddle.result.content, /redacted:credential/);
+  assert.doesNotMatch(straddle.result.content, /ghp_/);
+  assert.equal(straddle.result.truncated, true);
+
+  // Binary and invalid-UTF-8 payloads return safe metadata without bytes.
+  const binary = await call(fileObj("img.png", Buffer.from([0x89, 0x00, 0x50, 0x4e]), "d"));
+  assert.deepEqual(binary.result, { path: "img.png", sha: "d".repeat(40), size: 4, binary: true, truncated: false });
+  const badUtf8 = await call(fileObj("bin.dat", Buffer.from([0xff, 0x28]), "e"));
+  assert.equal(badUtf8.result.binary, true);
+
+  // Directory listings and non-file objects keep the raw compact-JSON response.
+  const dir = await call([{ type: "dir", path: "src" }, { type: "file", path: "src/a.ts" }]);
+  assert.equal(dir.result.content, undefined);
+  assert.match(dir.result.response, /^\[\{"type":"dir","path":"src"\}/);
+  const meta = await call({ number: 913, title: "x" });
+  assert.equal(meta.result.response, '{"number":913,"title":"x"}');
+});
+
 test("web fetch checks exact hosts and every redirect; search sanitizes result schemes", async () => {
   assert.equal(allowlistedHost("github.com.evil.example", ["github.com"]), false);
   assert.equal(allowlistedHost("evil.example", ["*"]), true);
