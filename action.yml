@@ -521,7 +521,7 @@ outputs:
   verdict:
     description: AI verdict, approve or request_changes
   verdict-source:
-    description: Where the final verdict came from ('model' or 'findings' per verdict_policy, or 'carry_forward' when an unchanged-diff skip retains the prior verdict)
+    description: Where the final verdict came from ('model' or 'findings' per verdict_policy, 'enforcement' when a fail-closed enforcement layer forced it, or 'carry_forward' when an unchanged-diff skip retains the prior verdict)
   required-checks:
     description: Required-check validation status ('complete', 'incomplete', or 'none' when validation did not run)
   review-result:

@@ -39,6 +39,7 @@ Do not freeze temporary v2 implementation details into permanent product rules. 
 | Area | Purpose |
 |---|---|
 | `action.yml` | Shipped action definition, generated from `contracts/action-v3.yml` (`node24` JavaScript action; precheck → review → publish run in one process) |
+| `docs/inputs.md` | Inputs/outputs reference, generated from `contracts/action-v3.yml` + `scripts/docs/input-groups.json` by `node scripts/generate-inputs-doc.mjs` (a test fails when stale; add new inputs to a group) |
 | `src/` | The TypeScript runtime — the shipped production path (`node dist/index.js`, entry `src/run/action.ts`): `platform/`, `precheck/`, `prompt/`, `context/`, `classification/`, `requirements/`, `corpus/`, `model/`, `transport/`, `runtime/`, `gates/`, `evidence/` |
 | `scripts/` | Repository tooling (eval, harvest, fork gate, judge, release, v3 build assets); not part of the action |
 | `pr_reviewer/` | Python modules for the semantic-eval and judge tooling; not part of the action |

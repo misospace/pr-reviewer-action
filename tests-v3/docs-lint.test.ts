@@ -43,6 +43,12 @@ const allowlist = new Map<string, string>([
   // blob, distinct from the action's #873 `review-result` output (which
   // carries the same value under the kebab contract name).
   ["review_result", "the metadata marker's raw JSON field, not the action output"],
+  // More raw marker JSON keys (src/metadata/markers.ts) that share a v2 id;
+  // docs/telemetry.md documents the marker by its literal keys.
+  ["required_checks", "the metadata marker's raw JSON field, not the action output"],
+  ["review_route", "the metadata marker's raw JSON field, not the action output"],
+  ["escalation_reason", "the metadata marker's raw JSON field, not the action output"],
+  ["cache_hit_ratio", "the metadata marker's raw JSON field, not the action output"],
 ]);
 
 const excludedDocs = new Set(["docs/v3-migration.md", "docs/v3-teardown-audit.md"]);

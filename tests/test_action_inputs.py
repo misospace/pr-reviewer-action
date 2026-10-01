@@ -1,8 +1,10 @@
-"""Tests for action.yml / README input consistency."""
+"""Tests for action.yml / docs/inputs.md input consistency."""
 
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 
 import yaml
 from pathlib import Path
@@ -34,13 +36,13 @@ def parse_action_inputs():
 
 
 def parse_readme_inputs():
-    """Parse documented input names from the README inputs tables.
+    """Parse documented input names from the docs/inputs.md tables.
 
-    The README groups inputs into multiple tables (one per category,
-    inside <details> blocks), so every table with an `| Input |` header
+    docs/inputs.md (generated from contracts/action-v3.yml) groups inputs
+    into one table per category, so every table with an `| Input |` header
     is scanned.
     """
-    readme = _REPO_ROOT / "README.md"
+    readme = _REPO_ROOT / "docs" / "inputs.md"
     content = readme.read_text()
 
     inputs = set()
@@ -65,19 +67,19 @@ def parse_readme_inputs():
 
 
 def test_readme_inputs_in_action():
-    """Every input documented in README must be declared in action.yml."""
+    """Every input documented in docs/inputs.md must be declared in action.yml."""
     action_inputs = parse_action_inputs()
     readme_inputs = parse_readme_inputs()
 
     missing = readme_inputs - action_inputs
     assert not missing, (
-        f"README documents inputs not declared in action.yml: {sorted(missing)}. "
+        f"docs/inputs.md documents inputs not declared in action.yml: {sorted(missing)}. "
         f"Add them to the inputs: section of action.yml."
     )
 
 
 def test_action_inputs_in_readme():
-    """Every input declared in action.yml should be documented in README."""
+    """Every input declared in action.yml should be documented in docs/inputs.md."""
     action_inputs = parse_action_inputs()
     readme_inputs = parse_readme_inputs()
 
@@ -90,9 +92,20 @@ def test_action_inputs_in_readme():
     }
     undocumented = (action_inputs - readme_inputs) - skip_internal
     assert not undocumented, (
-        f"action.yml declares inputs not documented in README: {sorted(undocumented)}. "
-        f"Add them to the Inputs table in README.md."
+        f"action.yml declares inputs not documented in docs/inputs.md: {sorted(undocumented)}. "
+        f"Add them to scripts/docs/input-groups.json and run node scripts/generate-inputs-doc.mjs."
     )
+
+
+def test_inputs_doc_is_fresh():
+    """docs/inputs.md must match what scripts/generate-inputs-doc.mjs renders."""
+    node = shutil.which("node")
+    assert node, "node is required to check docs/inputs.md freshness"
+    result = subprocess.run(
+        [node, "scripts/generate-inputs-doc.mjs", "--check"],
+        cwd=_REPO_ROOT, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_removed_incremental_contract_is_migration_only():

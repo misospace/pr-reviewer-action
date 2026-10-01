@@ -1,0 +1,209 @@
+[
+  {
+    "title": "Core",
+    "summary": "token, repo, PR targeting",
+    "inputs": [
+      "github-token",
+      "repo",
+      "pr-number"
+    ]
+  },
+  {
+    "title": "Primary model",
+    "summary": "endpoint, format, sampling, structured output",
+    "inputs": [
+      "ai-base-url",
+      "ai-api-format",
+      "ai-model",
+      "ai-api-key",
+      "ai-max-tokens",
+      "ai-temperature",
+      "ai-response-format",
+      "ai-tokens-param",
+      "anthropic-version"
+    ]
+  },
+  {
+    "title": "Fallback & failure handling",
+    "summary": "fallback endpoint, retries, failure behavior",
+    "inputs": [
+      "ai-fallback-base-url",
+      "ai-fallback-api-format",
+      "ai-fallback-model",
+      "ai-fallback-api-key",
+      "ai-primary-retries",
+      "ai-primary-retry-delay-sec",
+      "on-model-failure"
+    ]
+  },
+  {
+    "title": "Verdicts & findings",
+    "summary": "verdict policy, inline comments, required-check validation",
+    "inputs": [
+      "verdict-policy",
+      "non-blocking-finding-categories",
+      "fail-on-request-changes",
+      "inline-findings",
+      "inline-findings-max",
+      "validate-required-checks",
+      "required-check-validation-mode"
+    ]
+  },
+  {
+    "title": "Routing & escalation",
+    "summary": "primary/smart model split and escalation triggers",
+    "inputs": [
+      "review-routing-mode",
+      "ai-primary-model",
+      "ai-primary-base-url",
+      "ai-primary-api-format",
+      "ai-primary-api-key",
+      "ai-smart-model",
+      "ai-smart-base-url",
+      "ai-smart-api-format",
+      "ai-smart-api-key",
+      "escalate-on-risk-flags"
+    ]
+  },
+  {
+    "title": "Publishing",
+    "summary": "comment vs. native review, approval guardrails, cleanup",
+    "inputs": [
+      "publish-review-comment",
+      "publish-mode",
+      "allow-approve",
+      "allow-repo-policy-overrides",
+      "approve-forks",
+      "cleanup-previous-native-reviews",
+      "upstream-link-mode",
+      "comment-marker"
+    ]
+  },
+  {
+    "title": "Prompt & standards",
+    "summary": "system prompt overrides and repo-local rules",
+    "inputs": [
+      "system-prompt",
+      "system-prompt-file",
+      "system-prompt-mode",
+      "review-verbosity",
+      "standards-file",
+      "standards-file-candidates"
+    ]
+  },
+  {
+    "title": "Context & enrichment budgets",
+    "summary": "context window sizing, enrichment time limits",
+    "inputs": [
+      "context-limit-mode",
+      "model-context-tokens",
+      "primary-model-context-tokens",
+      "smart-model-context-tokens",
+      "primary-request-shape",
+      "smart-request-shape",
+      "repo-map-context",
+      "repo-map-max-bytes",
+      "enrichment-budget-sec",
+      "image-digest-budget-sec",
+      "allowed-source-hosts",
+      "related-code-context",
+      "related-code-max-bytes",
+      "harness-obligations",
+      "equivalent-paths",
+      "equivalent-paths-max-bytes",
+      "requirement-trace",
+      "pr-thread-context",
+      "pr-thread-max-bytes",
+      "review-threads-context",
+      "review-threads-max-bytes",
+      "deep-review",
+      "deep-review-timeout-sec",
+      "deep-review-max-tokens",
+      "deep-review-corpus-max-bytes",
+      "claim-falsification"
+    ]
+  },
+  {
+    "title": "Issue/spec context",
+    "summary": "GitHub/Forgejo and optional Linear issues",
+    "inputs": [
+      "linear-api-key",
+      "linear-issue-prefixes",
+      "linear-issue-timeout-sec",
+      "linear-enable-for-forks"
+    ]
+  },
+  {
+    "title": "Evidence providers",
+    "summary": "repo-defined check commands",
+    "inputs": [
+      "evidence-providers-file",
+      "sarif-files",
+      "sarif-max-findings",
+      "evidence-provider-timeout-sec",
+      "evidence-provider-max-output-bytes",
+      "evidence-provider-parallelism",
+      "evidence-blocker-enforcement",
+      "evidence-enable-for-forks"
+    ]
+  },
+  {
+    "title": "Tool harness",
+    "summary": "read-only model-planned evidence gathering",
+    "inputs": [
+      "tool-mode",
+      "tool-max-requests",
+      "primary-tool-max-requests",
+      "smart-tool-max-requests",
+      "tool-max-rounds",
+      "tool-loop-wall-clock-sec",
+      "tool-loop-summarize",
+      "tool-loop-summarize-max-tokens",
+      "tool-turn-timeout-sec",
+      "tool-corpus-max-bytes",
+      "tool-max-tokens-per-turn",
+      "tool-max-response-bytes",
+      "tool-allowed-gh-api-repos",
+      "tool-request-timeout-sec",
+      "search-url",
+      "tool-max-search-results",
+      "tool-failure-enforcement",
+      "tool-min-successful-requests",
+      "tool-enable-for-forks",
+      "tool-mcp-servers",
+      "tool-mcp-token",
+      "tool-mcp-name-prefixes"
+    ]
+  },
+  {
+    "title": "Timeouts & streaming",
+    "summary": "request/connect timeouts, streaming toggles",
+    "inputs": [
+      "ai-request-timeout-sec",
+      "ai-connect-timeout-sec",
+      "ai-fallback-request-timeout-sec",
+      "ai-fallback-connect-timeout-sec",
+      "ai-stream",
+      "ai-fallback-stream"
+    ]
+  },
+  {
+    "title": "Review behavior & CI gating",
+    "summary": "diff skip, forced re-review, waiting for CI",
+    "inputs": [
+      "platform",
+      "forgejo-api-url",
+      "forgejo-token",
+      "forgejo-auth-method",
+      "forgejo-authorized-integration-audience",
+      "forgejo-skip-permission-preflight",
+      "skip-if-diff-unchanged",
+      "force-review",
+      "rereview-label",
+      "ci-status-check",
+      "ci-timeout-sec",
+      "ci-interval-sec",
+      "ci-skip-on-timeout"
+    ]
+  }
+]
