@@ -162,6 +162,8 @@ export interface LoopOutcome {
   toolResultBytes: number;
   compactionSummarize: number;
   compactionTruncate: number;
+  /** #922: largest approximate conversation size seen before a turn. */
+  peakConversationTokens: number;
 }
 
 /**
@@ -309,6 +311,7 @@ export async function driveToolLoop(
     toolResultBytes: 0,
     compactionSummarize: 0,
     compactionTruncate: 0,
+    peakConversationTokens: 0,
   };
   const started = timeFn();
   let callsExecuted = 0;
@@ -329,6 +332,7 @@ export async function driveToolLoop(
     // wired, fold them into a model-generated digest that preserves salient
     // facts; otherwise (or if it frees nothing / fails) fall back to blunt
     // truncation, which is the guaranteed backstop.
+    outcome.peakConversationTokens = Math.max(outcome.peakConversationTokens, conversation.approxTokens());
     if (conversation.approxTokens() > budgets.maxConversationTokens) {
       let summarized = 0;
       if (summarizeFn !== null) {

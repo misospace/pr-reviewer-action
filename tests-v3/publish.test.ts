@@ -390,6 +390,15 @@ test("#895: tool_rounds / max_rounds reach the published marker", async () => {
   assert.ok(marker.includes('"max_rounds":16'));
 });
 
+test("#922: the loop's context budget and peak reach the published marker", async () => {
+  const api = new MockPublishApi();
+  await publishReview(input({ toolBudget: 24, toolCalls: 10, toolRounds: 6, maxRounds: 24, contextBudget: 250000, contextPeak: 61234 }), api, { diffText: "" });
+  const marker = api.sticky[0]!.body.split("\n").find((line) => line.startsWith("<!-- ai-pr-reviewer:"));
+  assert.ok(marker);
+  assert.ok(marker.includes('"context_budget":250000'));
+  assert.ok(marker.includes('"context_peak":61234'));
+});
+
 test("#847: without a tool harness the marker stays byte-identical to the pre-#847 shape", async () => {
   const api = new MockPublishApi();
   await publishReview(input(), api, { diffText: "" });

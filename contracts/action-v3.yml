@@ -353,6 +353,11 @@ inputs:
     required: false
     default: ""
     description: "Smart tier context window in tokens; empty inherits model_context_tokens/context_limit_mode"
+  - id: fallback-model-context-tokens
+    v2_id: fallback_model_context_tokens
+    required: false
+    default: ""
+    description: "Fallback model context window in tokens; empty inherits model_context_tokens. The fallback reuses the primary review corpus, so when this is set the shared corpus is sized to the smaller of the primary and fallback windows (#922)."
   - id: primary-request-shape
     v2_id: primary_request_shape
     required: false
@@ -535,8 +540,8 @@ inputs:
   - id: tool-corpus-max-bytes
     v2_id: tool_corpus_max_bytes
     required: false
-    default: "50000"
-    description: "Maximum corpus bytes passed into the native_loop conversation's first turn"
+    default: ""
+    description: "Maximum corpus bytes passed into the native_loop conversation's first turn. Empty (the default) resolves to 50000, or to about 15% of the tier's declared context window (in bytes, 50000..600000) when primary-model-context-tokens / smart-model-context-tokens / model-context-tokens is set (#922)."
   - id: tool-max-tokens-per-turn
     v2_id: tool_max_tokens_per_turn
     required: false
@@ -545,8 +550,8 @@ inputs:
   - id: tool-max-response-bytes
     v2_id: tool_max_response_bytes
     required: false
-    default: "12000"
-    description: "Maximum bytes captured from each tool execution result"
+    default: ""
+    description: "Maximum bytes captured from each tool execution result. Empty (the default) resolves to 12000, or to about 2% of the tier's declared context window (in bytes, 12000..64000) when a context window is declared (#922)."
     repo-configurable: true
   - id: tool-allowed-gh-api-repos
     v2_id: tool_allowed_gh_api_repos

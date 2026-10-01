@@ -11,7 +11,7 @@ export const BOOLEAN_INPUTS = new Set([
 export const INTEGER_INPUTS = new Set([
   "pr-number", "ai-max-tokens", "ai-primary-retries", "ai-primary-retry-delay-sec", "inline-findings-max",
   "related-code-max-bytes", "equivalent-paths-max-bytes", "linear-issue-timeout-sec", "model-context-tokens", "primary-model-context-tokens",
-  "smart-model-context-tokens", "repo-map-max-bytes", "pr-thread-max-bytes", "review-threads-max-bytes", "deep-review-timeout-sec",
+  "smart-model-context-tokens", "fallback-model-context-tokens", "repo-map-max-bytes", "pr-thread-max-bytes", "review-threads-max-bytes", "deep-review-timeout-sec",
   "deep-review-max-tokens", "deep-review-corpus-max-bytes", "enrichment-budget-sec", "image-digest-budget-sec",
   "sarif-max-findings", "evidence-provider-timeout-sec", "evidence-provider-max-output-bytes",
   "evidence-provider-parallelism", "tool-loop-wall-clock-sec", "tool-loop-summarize-max-tokens", "tool-max-requests",
@@ -57,7 +57,7 @@ export const SECRET_INPUTS = new Set([
 
 export const POSITIVE_INTEGER_INPUTS = new Set([
   "ai-max-tokens", "inline-findings-max", "related-code-max-bytes", "equivalent-paths-max-bytes", "linear-issue-timeout-sec",
-  "model-context-tokens", "primary-model-context-tokens", "smart-model-context-tokens",
+  "model-context-tokens", "primary-model-context-tokens", "smart-model-context-tokens", "fallback-model-context-tokens",
   "deep-review-timeout-sec", "deep-review-max-tokens",
   "sarif-max-findings", "evidence-provider-timeout-sec", "evidence-provider-max-output-bytes",
   "evidence-provider-parallelism", "tool-loop-wall-clock-sec", "tool-loop-summarize-max-tokens", "tool-max-requests",

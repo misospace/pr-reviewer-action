@@ -11,6 +11,74 @@
   "schema_version": 1,
   "entries": [
     {
+      "boundary": "config-default-resolution",
+      "fixtures": [
+        "defaults-only",
+        "empty-temperature-omitted",
+        "explicit-values",
+        "numeric-bounds",
+        "tier-inheritance"
+      ],
+      "key": "toolCorpusMaxBytes",
+      "expected": {
+        "old": "50000",
+        "new": ""
+      },
+      "reason": "#922: tool-corpus-max-bytes / tool-max-response-bytes default to empty so they can follow a declared context window; empty with no window resolves to the v2 value (50000 / 12000)."
+    },
+    {
+      "boundary": "config-default-resolution",
+      "fixtures": [
+        "defaults-only",
+        "empty-temperature-omitted",
+        "explicit-values",
+        "numeric-bounds",
+        "tier-inheritance"
+      ],
+      "key": "toolMaxResponseBytes",
+      "expected": {
+        "old": "12000",
+        "new": ""
+      },
+      "reason": "#922: tool-corpus-max-bytes / tool-max-response-bytes default to empty so they can follow a declared context window; empty with no window resolves to the v2 value (50000 / 12000)."
+    },
+    {
+      "boundary": "corpus-assembly",
+      "fixtures": [
+        "budget-tier-override-cap"
+      ],
+      "key": "budget_smart_max_corpus",
+      "expected": {
+        "old": "499998",
+        "new": "1200000"
+      },
+      "reason": "#922: the declared tier-window cap rises from 166,666 to 400,000 usable tokens so large-context models get proportionate corpus budgets."
+    },
+    {
+      "boundary": "corpus-assembly",
+      "fixtures": [
+        "budget-tier-override-cap"
+      ],
+      "key": "budget_smart_max_diff",
+      "expected": {
+        "old": "299998",
+        "new": "720000"
+      },
+      "reason": "#922: the declared tier-window cap rises from 166,666 to 400,000 usable tokens so large-context models get proportionate corpus budgets."
+    },
+    {
+      "boundary": "corpus-assembly",
+      "fixtures": [
+        "budget-tier-override-cap"
+      ],
+      "key": "budget_smart_max_files",
+      "expected": {
+        "old": "74999",
+        "new": "180000"
+      },
+      "reason": "#922: the declared tier-window cap rises from 166,666 to 400,000 usable tokens so large-context models get proportionate corpus budgets."
+    },
+    {
       "boundary": "tool-request-budget",
       "fixtures": [
         "tool-budget-tiers"

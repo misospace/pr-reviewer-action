@@ -73,6 +73,10 @@ export interface MetadataOptions {
    * `adaptiveLoopBudgets` in src/tools/loop.ts). Omitted alongside
    * `tool_rounds`. */
   max_rounds?: number | null;
+  /** #922: the loop's conversation budget (approx tokens) and the largest
+   * conversation it actually reached. Omitted when no loop ran. */
+  context_budget?: number | null;
+  context_peak?: number | null;
 }
 
 /** Build a metadata marker string for insertion into managed comments
@@ -124,6 +128,12 @@ export function buildMetadataMarker(options: MetadataOptions = {}): string {
   }
   if (options.max_rounds !== null && options.max_rounds !== undefined) {
     data.max_rounds = options.max_rounds;
+  }
+  if (options.context_budget !== null && options.context_budget !== undefined) {
+    data.context_budget = options.context_budget;
+  }
+  if (options.context_peak !== null && options.context_peak !== undefined) {
+    data.context_peak = options.context_peak;
   }
   return `<!-- ai-pr-reviewer:${jsonCompact(data)} -->`;
 }

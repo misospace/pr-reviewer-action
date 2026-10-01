@@ -19,6 +19,7 @@ import {
   prepareToolHarness,
   replaceHarnessFindingsSection,
   resolveTierBudgets,
+  TIER_USABLE_TOKENS_CAP,
   classificationLine,
   prMetadataLine,
   ProjectionError,
@@ -130,7 +131,7 @@ test("global override floors at 2000 usable tokens; tier overrides refuse", () =
   );
 });
 
-test("tier overrides are capped at 166666 usable tokens and keep their own profile", () => {
+test("tier overrides are capped at TIER_USABLE_TOKENS_CAP usable tokens and keep their own profile", () => {
   const budgets = resolveTierBudgets({
     modelContextTokens: "400000",
     primaryModelContextTokens: "9000",
@@ -138,7 +139,8 @@ test("tier overrides are capped at 166666 usable tokens and keep their own profi
     aiMaxTokens: "1000",
   });
   assert.equal(budgets.primary.maxCorpus, (9000 - 3000) * 3);
-  assert.equal(budgets.smart.maxCorpus, 166666 * 3);
+  assert.equal(budgets.smart.maxCorpus, TIER_USABLE_TOKENS_CAP * 3);
+  assert.equal(TIER_USABLE_TOKENS_CAP, 400000);
   // runtime budgets track the primary profile
   assert.deepEqual(budgets.smart, resolveTierBudgets({ smartModelContextTokens: "900000", aiMaxTokens: "1000" }).smart);
 });
@@ -566,4 +568,25 @@ test("replaceHarnessFindingsSection returns the corpus unchanged without the sec
 test("replaceHarnessFindingsSection matches the header regardless of trailing whitespace", () => {
   const corpus = "# Tool Harness Findings   \nold\n# Next\n";
   assert.ok(replaceHarnessFindingsSection(corpus, "new").startsWith("# Tool Harness Findings   \nnew\n# Next"));
+});
+
+test("#922: a declared fallback window caps the shared primary corpus; the smart tier keeps its own", () => {
+  const budgets = resolveTierBudgets({
+    primaryModelContextTokens: "1000000",
+    smartModelContextTokens: "1000000",
+    fallbackModelContextTokens: "262144",
+    aiMaxTokens: "16384",
+  });
+  const fallbackOnly = resolveTierBudgets({ primaryModelContextTokens: "262144", aiMaxTokens: "16384" }).primary;
+  assert.deepEqual(budgets.primary, fallbackOnly);
+  assert.equal(budgets.smart.maxCorpus, TIER_USABLE_TOKENS_CAP * 3);
+});
+
+test("#922: no declared windows keeps the named-mode budgets exactly", () => {
+  assert.deepEqual(resolveTierBudgets({}).primary, { maxCorpus: 220000, maxDiff: 140000, maxFiles: 70000 });
+  assert.deepEqual(resolveTierBudgets({ fallbackModelContextTokens: "" }).primary, { maxCorpus: 220000, maxDiff: 140000, maxFiles: 70000 });
+});
+
+test("#922: an invalid fallback window is refused like the other tier windows", () => {
+  assert.throws(() => resolveTierBudgets({ fallbackModelContextTokens: "abc" }), /FALLBACK_MODEL_CONTEXT_TOKENS/);
 });

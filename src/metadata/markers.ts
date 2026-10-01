@@ -92,6 +92,9 @@ export interface RunMarkerContext {
   toolRounds?: number;
   /** #895: the resolved round cap the loop ran against for this run. */
   maxRounds?: number;
+  /** #922: the loop's conversation budget and peak (approx tokens). */
+  contextBudget?: number;
+  contextPeak?: number;
 }
 
 /**
@@ -133,6 +136,8 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
     tool_calls: context.toolCalls ?? null,
     tool_rounds: context.toolRounds ?? null,
     max_rounds: context.maxRounds ?? null,
+    context_budget: context.contextBudget ?? null,
+    context_peak: context.contextPeak ?? null,
   });
 }
 

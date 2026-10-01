@@ -27,6 +27,7 @@ function outcome(overrides: Partial<LoopOutcome> = {}): LoopOutcome {
     toolResultBytes: 100,
     compactionSummarize: 0,
     compactionTruncate: 0,
+    peakConversationTokens: 0,
     ...overrides,
   };
 }

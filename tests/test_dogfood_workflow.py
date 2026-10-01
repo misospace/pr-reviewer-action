@@ -163,8 +163,8 @@ def test_public_action_defaults_are_the_recommended_setup() -> None:
         "tool-max-requests": "",
         "tool-max-rounds": "",
         "tool-loop-wall-clock-sec": "600",
-        "tool-corpus-max-bytes": "50000",
-        "tool-max-response-bytes": "12000",
+        "tool-corpus-max-bytes": "",
+        "tool-max-response-bytes": "",
     }
     for name, want in expected.items():
         assert defaults.get(name) == want, f"{name}: {defaults.get(name)!r} != {want!r}"

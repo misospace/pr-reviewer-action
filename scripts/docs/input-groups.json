@@ -99,6 +99,7 @@
       "model-context-tokens",
       "primary-model-context-tokens",
       "smart-model-context-tokens",
+      "fallback-model-context-tokens",
       "primary-request-shape",
       "smart-request-shape",
       "repo-map-context",

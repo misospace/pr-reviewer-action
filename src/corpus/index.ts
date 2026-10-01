@@ -12,7 +12,7 @@ export {
   type CorpusTier,
   type CorpusWorkspace,
 } from "./assemble.js";
-export { BudgetError, resolveTierBudgets, type BudgetInputs, type TierBudgets } from "./budgets.js";
+export { BudgetError, resolveTierBudgets, TIER_USABLE_TOKENS_CAP, type BudgetInputs, type TierBudgets } from "./budgets.js";
 export { runCorpusFixture, runDiffPriorityFixture } from "./fixture.js";
 export { replaceHarnessFindingsSection } from "./harness-section.js";
 export { classificationLine, prMetadataLine, ProjectionError } from "./projections.js";

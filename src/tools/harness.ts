@@ -176,6 +176,44 @@ function envIntIsSet(env: EnvLike, name: string): boolean {
   return raw !== "" && /^[+-]?[0-9]+(_[0-9]+)*$/.test(raw);
 }
 
+/** #922: the tier's declared context window in tokens (the tier input, which
+ * already inherits model-context-tokens), or null when none is declared. */
+export function declaredWindowTokens(env: EnvLike, tier: string): number | null {
+  const raw = ((tier === "smart" ? env.SMART_MODEL_CONTEXT_TOKENS : env.PRIMARY_MODEL_CONTEXT_TOKENS) || env.MODEL_CONTEXT_TOKENS || "").trim();
+  return /^[0-9]+$/.test(raw) && Number(raw) > 0 ? Number(raw) : null;
+}
+
+function clampInt(value: number, low: number, high: number): number {
+  return Math.min(Math.max(Math.floor(value), low), high);
+}
+
+export interface LoopContextLimits {
+  /** Conversation size (approx tokens) past which old tool results compact. */
+  maxConversationTokens: number;
+  /** Bytes of review corpus in the loop's first turn. */
+  corpusMaxBytes: number;
+  /** Bytes kept from each tool result. */
+  maxResponseBytes: number;
+}
+
+/** #922: native-loop context limits. Without a declared window they are the
+ * v3.1 constants; with one they scale with it (conversation ~25%, first-turn
+ * corpus ~15%, per-result ~2%, at ~3 bytes/token). Explicit byte inputs win. */
+export function loopContextLimits(env: EnvLike, tier: string): LoopContextLimits {
+  const window = declaredWindowTokens(env, tier);
+  const explicitCorpus = env.TOOL_CORPUS_MAX_BYTES || env.TOOL_PLANNING_MAX_CONTEXT_BYTES || "";
+  const explicitResponse = env.TOOL_MAX_RESPONSE_BYTES || "";
+  return {
+    maxConversationTokens: window === null ? 24000 : clampInt(window * 0.25, 24000, 250000),
+    corpusMaxBytes: explicitCorpus !== ""
+      ? pyInt(explicitCorpus, "TOOL_CORPUS_MAX_BYTES")
+      : window === null ? 50000 : clampInt(window * 0.15 * 3, 50000, 600000),
+    maxResponseBytes: explicitResponse !== ""
+      ? pyInt(explicitResponse, "TOOL_MAX_RESPONSE_BYTES")
+      : window === null ? 12000 : clampInt(window * 0.02 * 3, 12000, 64000),
+  };
+}
+
 /** [maxRounds, wallClockSec, roundsExplicit] for a native-loop tier, from
  * env with defaults. `roundsExplicit` is true when TOOL_MAX_ROUNDS (or, on
  * the smart tier, SMART_TOOL_MAX_ROUNDS) was explicitly set (#895). */
@@ -976,6 +1014,7 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
         ...telemetryBudgetProvenance(result),
         max_rounds: meta.max_rounds ?? 0,
         wall_clock_sec: meta.wall_clock_sec ?? 0.0,
+        ...(meta.max_conversation_tokens !== undefined ? { max_conversation_tokens: meta.max_conversation_tokens } : {}),
       },
       usage: {
         tool_calls_issued: result.planned_request_count ?? 0,
@@ -984,6 +1023,7 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
         requests_remaining_at_stop: meta.requests_remaining ?? 0,
         elapsed_sec: Number((Number(meta.elapsed_sec ?? 0.0)).toFixed(3)),
         tool_result_bytes: meta.tool_result_bytes ?? 0,
+        ...(meta.peak_conversation_tokens !== undefined ? { peak_conversation_tokens: meta.peak_conversation_tokens } : {}),
       },
       compaction: {
         summarize: meta.compaction_summarize ?? 0,
@@ -1161,7 +1201,10 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   if (searchUrl) toolSchemas.push(WEB_SEARCH_SCHEMA);
 
   const [maxRounds, wallClock, roundsExplicit] = resolveLoopLimits(env, input.tier);
-  const budgets = adaptiveLoopBudgets(maxRounds, input.maxRequests, wallClock, roundsExplicit);
+  const budgets = {
+    ...adaptiveLoopBudgets(maxRounds, input.maxRequests, wallClock, roundsExplicit),
+    maxConversationTokens: loopContextLimits(env, input.tier).maxConversationTokens,
+  };
   const deadline = input.tier === "smart" ? timeFn() + wallClock : null;
 
   // Read-only MCP tools (#245), allowlisted via TOOL_MCP_SERVERS. Fork-gating
@@ -1413,6 +1456,8 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     tool_result_bytes: outcome.toolResultBytes,
     compaction_summarize: outcome.compactionSummarize,
     compaction_truncate: outcome.compactionTruncate,
+    max_conversation_tokens: budgets.maxConversationTokens,
+    peak_conversation_tokens: outcome.peakConversationTokens,
   };
   // #810: on any budget stop, account from the loop's own call log which
   // changed files and specialist leads were never read/resolved. A degraded
@@ -1710,12 +1755,11 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   if (tier !== "primary" && tier !== "smart") {
     throw new Error("invalid tool harness tier");
   }
-  const maxResponseBytes = pyInt(env.TOOL_MAX_RESPONSE_BYTES ?? "12000", "TOOL_MAX_RESPONSE_BYTES");
   // #540: the legacy tool_planning_* names are a fallback; the new name wins.
+  // #922: corpus and per-result bytes follow the declared window when set.
+  const { maxResponseBytes, corpusMaxBytes } = loopContextLimits(env, tier);
   const turnTimeoutRaw = env.TOOL_TURN_TIMEOUT_SEC || env.TOOL_PLANNING_TIMEOUT_SEC || "60";
   const turnTimeout = pyInt(turnTimeoutRaw, "TOOL_TURN_TIMEOUT_SEC");
-  const corpusMaxBytesRaw = env.TOOL_CORPUS_MAX_BYTES || env.TOOL_PLANNING_MAX_CONTEXT_BYTES || "50000";
-  const corpusMaxBytes = pyInt(corpusMaxBytesRaw, "TOOL_CORPUS_MAX_BYTES");
   // #810: the default budget scales with the PR (changed files/lines +
   // specialist leads), floored at the tier default; explicit overrides in
   // the env still win. Artifacts the harness cannot see simply leave the

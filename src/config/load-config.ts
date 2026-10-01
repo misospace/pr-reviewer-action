@@ -91,6 +91,7 @@ function resolveInherited(config: MutableConfig): void {
   inheritSecret(config, "aiSmartApiKey", "aiApiKey");
   inherit(config, "primaryModelContextTokens", "modelContextTokens");
   inherit(config, "smartModelContextTokens", "modelContextTokens");
+  inherit(config, "fallbackModelContextTokens", "modelContextTokens");
 }
 
 function inherit(config: MutableConfig, target: string, fallback: string): void {

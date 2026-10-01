@@ -96,6 +96,9 @@ export interface PublishInput {
   /** #895: loop rounds used, and the round cap they ran against. */
   toolRounds?: number;
   maxRounds?: number;
+  /** #922: the loop's conversation budget and peak (approx tokens). */
+  contextBudget?: number;
+  contextPeak?: number;
 }
 
 export interface PublishResult {
@@ -554,6 +557,8 @@ export async function publishReview(
     ...(input.toolCalls !== undefined ? { toolCalls: input.toolCalls } : {}),
     ...(input.toolRounds !== undefined ? { toolRounds: input.toolRounds } : {}),
     ...(input.maxRounds !== undefined ? { maxRounds: input.maxRounds } : {}),
+    ...(input.contextBudget !== undefined ? { contextBudget: input.contextBudget } : {}),
+    ...(input.contextPeak !== undefined ? { contextPeak: input.contextPeak } : {}),
   };
   if (input.partialCoverage) {
     // #810: the marker records partial coverage additively; a complete run
