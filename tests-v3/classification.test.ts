@@ -107,6 +107,25 @@ test("a mixed diff keeps the current classification (digest + other change)", ()
   assert.equal(result.prKind, "k8s_manifest");
 });
 
+test("a per-hunk mixed diff is not image_digest_only", () => {
+  // First hunk is a clean digest refresh; the second (separate hunk) changes a
+  // non-image line. The per-block boundary must not let the first hunk stand in
+  // for the whole PR.
+  const result = classifyPr({
+    prFiles: [digestFile("k8s/lemonade.yaml", 2, 2)],
+    authoritativeChangedFiles: 1,
+    diffText:
+      "diff --git a/k8s/lemonade.yaml b/k8s/lemonade.yaml\n" +
+      "@@ -9,1 +9,1 @@\n" +
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n` +
+      "@@ -20,1 +20,1 @@\n" +
+      "-  replicas: 3\n" +
+      "+  replicas: 5\n",
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
 test("a digest change outside a YAML/Dockerfile manifest is not image_digest_only", () => {
   const result = classifyPr({
     prFiles: files("scripts/pin.txt"),
@@ -343,6 +362,10 @@ test("path handling can match diff content only (#749: untrusted input flow)", (
 test("the default kind is app_code", () => {
   assert.equal(classifyPr({ prFiles: files("src/anything.go") }).prKind, "app_code");
   assert.ok(PR_KINDS.includes("app_code"));
+  // The new digest kind sits between the lockfile digest kind and the
+  // dependency kind, ahead of k8s_manifest (#909). Pin the documented order so
+  // an accidental reorder is caught here rather than only at a parity boundary.
+  assert.deepEqual(PR_KINDS.slice(0, 3), ["renovate_digest_only", "image_digest_only", "dependency_upgrade"]);
   assert.ok(RISK_FLAGS.includes("linked_security_issue"));
 });
 
