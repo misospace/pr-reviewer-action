@@ -14,6 +14,7 @@ import { pythonJsonStringify } from "../precheck/metadata.js";
 import { buildHarnessObligations } from "../requirements/obligations.js";
 import { externalChecksConclusion } from "../precheck/decide.js";
 import { readStandardsFileAtRef, StandardsFileRefError } from "../context/standards-file-ref.js";
+import { loopContextLimits } from "../tools/harness.js";
 import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
@@ -342,6 +343,12 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     aiMaxTokens: env.AI_MAX_TOKENS,
     contextLimitMode: env.CONTEXT_LIMIT_MODE,
   });
+  // #922: a declared window too small for the native loop fails up front,
+  // like a too-small corpus window, rather than overflowing every turn.
+  if ((env.TOOL_MODE ?? "off").toLowerCase() === "native_loop") {
+    loopContextLimits(env, "primary");
+    if (env.AI_SMART_MODEL) loopContextLimits(env, "smart");
+  }
   env.MAX_CORPUS = String(budgets.primary.maxCorpus);
   env.MAX_DIFF = String(budgets.primary.maxDiff);
   env.MAX_FILES = String(budgets.primary.maxFiles);

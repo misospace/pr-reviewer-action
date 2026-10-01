@@ -143,8 +143,13 @@ scale with it:
 | First-turn corpus | 50 KB | ~15% of the window, 50 KB–600 KB | `tool-corpus-max-bytes` |
 | Each tool result | 12 KB | ~2% of the window, 12 KB–64 KB | `tool-max-response-bytes` |
 
-For a 1M-token model that is 250k tokens / 450 KB / 60 KB; for 262k it is
-65k tokens / 118 KB / 16 KB. Explicit byte inputs always win. The marker's
+A declared window first reserves `tool-max-tokens-per-turn` plus 2,000
+tokens of framing, so the conversation and each turn's completion always fit;
+the first-turn corpus stays within ~60% of the conversation budget and each
+result within ~8%. A window too small for the per-turn completion plus a
+4,000-token conversation is refused at startup. For a 1M-token model that is
+250k tokens / 450 KB / 60 KB; for 262k it is 65k tokens / 118 KB / 16 KB.
+Explicit byte inputs always win. The marker's
 `context_budget` and `context_peak` show the budget a run used and how much
 of it the conversation actually reached (see [Telemetry](telemetry.md)).
 

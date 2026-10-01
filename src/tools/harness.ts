@@ -196,21 +196,41 @@ export interface LoopContextLimits {
   maxResponseBytes: number;
 }
 
+export class LoopContextError extends Error {}
+
+/** Tokens kept free for prompt framing beside the per-turn completion. */
+const LOOP_FRAMING_TOKENS = 2000;
+/** Smallest conversation a declared window must leave room for. */
+const LOOP_MIN_CONVERSATION_TOKENS = 4000;
+
 /** #922: native-loop context limits. Without a declared window they are the
- * v3.1 constants; with one they scale with it (conversation ~25%, first-turn
- * corpus ~15%, per-result ~2%, at ~3 bytes/token). Explicit byte inputs win. */
+ * v3.1 constants. With one, the window first reserves the per-turn completion
+ * (tool-max-tokens-per-turn) plus framing, then the conversation budget is
+ * ~25% of the window (24k..250k, never above what's left), the first-turn
+ * corpus ~60% of that budget and each result ~8%, at ~3 bytes/token.
+ * Explicit byte inputs win. A window too small for the per-turn completion
+ * and a minimal conversation is refused, like a too-small corpus window. */
 export function loopContextLimits(env: EnvLike, tier: string): LoopContextLimits {
   const window = declaredWindowTokens(env, tier);
   const explicitCorpus = env.TOOL_CORPUS_MAX_BYTES || env.TOOL_PLANNING_MAX_CONTEXT_BYTES || "";
   const explicitResponse = env.TOOL_MAX_RESPONSE_BYTES || "";
+  const corpus = (derived: number): number => (explicitCorpus !== "" ? pyInt(explicitCorpus, "TOOL_CORPUS_MAX_BYTES") : derived);
+  const response = (derived: number): number => (explicitResponse !== "" ? pyInt(explicitResponse, "TOOL_MAX_RESPONSE_BYTES") : derived);
+  if (window === null) {
+    return { maxConversationTokens: 24000, corpusMaxBytes: corpus(50000), maxResponseBytes: response(12000) };
+  }
+  const perTurn = pyInt(env.TOOL_MAX_TOKENS_PER_TURN || env.TOOL_PLANNING_MAX_TOKENS || "400", "TOOL_MAX_TOKENS_PER_TURN");
+  const available = window - perTurn - LOOP_FRAMING_TOKENS;
+  if (available < LOOP_MIN_CONVERSATION_TOKENS) {
+    throw new LoopContextError(
+      `Model context ${window} cannot fit TOOL_MAX_TOKENS_PER_TURN=${perTurn} plus ${LOOP_FRAMING_TOKENS} tokens of framing and a ${LOOP_MIN_CONVERSATION_TOKENS}-token tool-loop conversation`,
+    );
+  }
+  const maxConversationTokens = Math.min(clampInt(window * 0.25, 24000, 250000), available);
   return {
-    maxConversationTokens: window === null ? 24000 : clampInt(window * 0.25, 24000, 250000),
-    corpusMaxBytes: explicitCorpus !== ""
-      ? pyInt(explicitCorpus, "TOOL_CORPUS_MAX_BYTES")
-      : window === null ? 50000 : clampInt(window * 0.15 * 3, 50000, 600000),
-    maxResponseBytes: explicitResponse !== ""
-      ? pyInt(explicitResponse, "TOOL_MAX_RESPONSE_BYTES")
-      : window === null ? 12000 : clampInt(window * 0.02 * 3, 12000, 64000),
+    maxConversationTokens,
+    corpusMaxBytes: corpus(Math.min(clampInt(window * 0.15 * 3, 50000, 600000), Math.floor(maxConversationTokens * 1.8))),
+    maxResponseBytes: response(Math.min(clampInt(window * 0.02 * 3, 12000, 64000), Math.max(2000, Math.floor(maxConversationTokens * 0.24)))),
   };
 }
 
