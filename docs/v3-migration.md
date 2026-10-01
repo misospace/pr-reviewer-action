@@ -432,6 +432,7 @@ Inputs with no v2 implementation.
 | `claim-falsification` | `false` |
 | `equivalent-paths` | `false` |
 | `equivalent-paths-max-bytes` | `6000` |
+| `fallback-model-context-tokens` | empty |
 
 ## New outputs
 
