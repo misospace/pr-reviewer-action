@@ -1149,6 +1149,11 @@ const STRUCTURAL_DIFF_LINE_RE =
  * diff must fail closed rather than reason over incomplete evidence (#909). */
 const DIFF_TRUNCATION_MARKER_RE = /…\[diff truncated|…\[file diff clipped:|Files omitted from this diff \(/;
 
+/** Binary diffs carry no `+`/`-` lines, so a binary (or otherwise unparsed)
+ * manifest would contribute nothing to the line reconciliation while hiding a
+ * real change. Both git binary forms fail closed (#909). */
+const BINARY_DIFF_LINE_RE = /^(?:Binary files .* differ|GIT binary patch)$/;
+
 /** An allowed image-reference line form, optionally behind a YAML
  * `image:`/`tag:` key or a Dockerfile `FROM [--platform=...]` directive (with
  * an optional trailing `AS <stage>`). Captures the `@sha256:` digest; every
@@ -1241,6 +1246,9 @@ function isImageDigestOnly(
     // A truncation marker means changed lines are missing: not complete
     // evidence, so never claim digest-only.
     if (DIFF_TRUNCATION_MARKER_RE.test(line)) return false;
+    // A binary diff has no `+`/`-` lines, so it would otherwise vanish from
+    // the line reconciliation below.
+    if (BINARY_DIFF_LINE_RE.test(line)) return false;
     const isRemoved = line.startsWith("-") && !line.startsWith("---");
     const isAdded = line.startsWith("+") && !line.startsWith("+++");
     if (!isRemoved && !isAdded) {
@@ -1285,9 +1293,15 @@ function evidenceIsComplete(
   let expectedAdded = 0;
   let expectedRemoved = 0;
   for (const file of files) {
-    if (!Number.isInteger(file.additions) || !Number.isInteger(file.deletions)) return false;
-    expectedAdded += file.additions!;
-    expectedRemoved += file.deletions!;
+    const additions = file.additions;
+    const deletions = file.deletions;
+    if (!Number.isInteger(additions) || !Number.isInteger(deletions)) return false;
+    // A zero-line side contributes nothing to the reconciliation and can hide
+    // a binary or otherwise unparsed change, so a pure digest refresh must move
+    // at least one line on each side of every file.
+    if (additions! <= 0 || deletions! <= 0) return false;
+    expectedAdded += additions!;
+    expectedRemoved += deletions!;
   }
   return totalAdded === expectedAdded && totalRemoved === expectedRemoved;
 }

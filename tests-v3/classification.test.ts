@@ -339,6 +339,51 @@ test("complete evidence with matching counts and pure digests is image_digest_on
   assert.equal(result.prKind, "image_digest_only");
 });
 
+test("a binary sibling manifest defeats image_digest_only", () => {
+  // File A is a clean digest refresh (+1/-1); file B is a modified binary that
+  // contributes no +/- lines. Without the binary/zero-line guard the aggregate
+  // line totals still match, so the kind would fire on a hidden change.
+  const result = classifyPr({
+    prFiles: [digestFile("k8s/lemonade.yaml", 1, 1), digestFile("k8s/opaque.yaml", 0, 0)],
+    authoritativeChangedFiles: 2,
+    diffText:
+      "diff --git a/k8s/lemonade.yaml b/k8s/lemonade.yaml\n" +
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n` +
+      "diff --git a/k8s/opaque.yaml b/k8s/opaque.yaml\n" +
+      "Binary files a/k8s/opaque.yaml and b/k8s/opaque.yaml differ\n",
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("a GIT binary patch marker defeats image_digest_only", () => {
+  const result = classifyPr({
+    prFiles: [digestFile("k8s/lemonade.yaml", 1, 1), digestFile("k8s/opaque.yaml", 0, 0)],
+    authoritativeChangedFiles: 2,
+    diffText:
+      "diff --git a/k8s/lemonade.yaml b/k8s/lemonade.yaml\n" +
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n` +
+      "diff --git a/k8s/opaque.yaml b/k8s/opaque.yaml\n" +
+      "GIT binary patch\n",
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("a zero-line modified manifest defeats image_digest_only", () => {
+  // No binary marker, but a participating file reports +0/-0: it cannot be a
+  // digest refresh and must fail closed.
+  const result = classifyPr({
+    prFiles: [digestFile("k8s/lemonade.yaml", 1, 1), digestFile("k8s/opaque.yaml", 0, 0)],
+    authoritativeChangedFiles: 2,
+    diffText:
+      "diff --git a/k8s/lemonade.yaml b/k8s/lemonade.yaml\n" +
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
 test("secret handling precedes auth", () => {
   const result = classifyPr({ prFiles: files("src/secret_handler.py") });
   assert.equal(result.prKind, "secret_handling_changes");
