@@ -49,10 +49,17 @@ test("k8s manifests beat dependency files", () => {
 const DIGEST_A = "a".repeat(64);
 const DIGEST_B = "b".repeat(64);
 
+/** A modified image manifest with the platform's line totals, as production
+ * supplies them (the completeness reconciliation reads both). */
+function digestFile(name: string, additions: number, deletions: number) {
+  return canonicalChangedFile({ filename: name, status: "modified", additions, deletions });
+}
+
 test("image-digest-only manifest PRs classify as image_digest_only", () => {
   // A HelmRelease `tag:` line: repository and tag unchanged, digest refreshed.
   const result = classifyPr({
-    prFiles: files("k8s/lemonade.yaml"),
+    prFiles: [digestFile("k8s/lemonade.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
     diffText: `-    tag: latest@sha256:${DIGEST_A}\n+    tag: latest@sha256:${DIGEST_B}\n`,
   });
   assert.equal(result.prKind, "image_digest_only");
@@ -62,13 +69,15 @@ test("image-digest-only manifest PRs classify as image_digest_only", () => {
 
 test("image_digest_only covers compose image: and Dockerfile FROM forms", () => {
   const compose = classifyPr({
-    prFiles: files("docker-compose.yml"),
+    prFiles: [digestFile("docker-compose.yml", 1, 1)],
+    authoritativeChangedFiles: 1,
     diffText: `-    image: ghcr.io/o/app:v1@sha256:${DIGEST_A}\n+    image: ghcr.io/o/app:v1@sha256:${DIGEST_B}\n`,
   });
   assert.equal(compose.prKind, "image_digest_only");
 
   const dockerfile = classifyPr({
-    prFiles: files("Dockerfile"),
+    prFiles: [digestFile("Dockerfile", 1, 1)],
+    authoritativeChangedFiles: 1,
     diffText: `-FROM node:20@sha256:${DIGEST_A} AS build\n+FROM node:20@sha256:${DIGEST_B} AS build\n`,
   });
   assert.equal(dockerfile.prKind, "image_digest_only");
@@ -108,7 +117,8 @@ test("a digest change outside a YAML/Dockerfile manifest is not image_digest_onl
 
 test("a multi-image digest refresh keeps each image's repository/tag in place", () => {
   const result = classifyPr({
-    prFiles: files("k8s/leaves.yaml"),
+    prFiles: [digestFile("k8s/leaves.yaml", 2, 2)],
+    authoritativeChangedFiles: 1,
     diffText:
       `-    image: ghcr.io/o/api:v1@sha256:${DIGEST_A}\n` +
       `-    image: ghcr.io/o/worker:v1@sha256:${DIGEST_B}\n` +
@@ -134,7 +144,8 @@ test("swapping which digest belongs to which image is not image_digest_only", ()
 
 test("a realistic hunk with context lines still classifies as image_digest_only", () => {
   const result = classifyPr({
-    prFiles: files("k8s/lemonade.yaml"),
+    prFiles: [digestFile("k8s/lemonade.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
     diffText:
       "diff --git a/k8s/lemonade.yaml b/k8s/lemonade.yaml\n" +
       "@@ -9,7 +9,7 @@ spec:\n" +
@@ -248,7 +259,8 @@ test("image_digest_only reads the full diff, not the truncated context diff", ()
     "…[diff truncated to fit context budget]\n";
   // The complete diff has no hidden changes: still digest-only.
   const clean = classifyPr({
-    prFiles: files("k8s/lemonade.yaml"),
+    prFiles: [digestFile("k8s/lemonade.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
     diffText: truncated,
     fullDiffText: `-    tag: latest@sha256:${DIGEST_A}\n+    tag: latest@sha256:${DIGEST_B}\n`,
   });
@@ -266,6 +278,46 @@ test("image_digest_only reads the full diff, not the truncated context diff", ()
       "+  replicas: 5\n",
   });
   assert.equal(hidden.prKind, "k8s_manifest");
+});
+
+test("a file list shorter than the authoritative changed_files count is not image_digest_only", () => {
+  // changed_files=2 but only one file was supplied (e.g. the single-page list
+  // was capped): the evidence is incomplete.
+  const result = classifyPr({
+    prFiles: [digestFile("k8s/lemonade.yaml", 1, 1)],
+    authoritativeChangedFiles: 2,
+    diffText: `-    tag: latest@sha256:${DIGEST_A}\n+    tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("line totals that disagree with the diff are not image_digest_only", () => {
+  // Metadata claims 2 additions / 2 deletions; the diff has one digest pair.
+  const result = classifyPr({
+    prFiles: [digestFile("k8s/lemonade.yaml", 2, 2)],
+    authoritativeChangedFiles: 1,
+    diffText: `-    tag: latest@sha256:${DIGEST_A}\n+    tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("missing line metadata is not image_digest_only", () => {
+  // additions/deletions are absent (null), so completeness cannot be proven.
+  const result = classifyPr({
+    prFiles: files("k8s/lemonade.yaml"),
+    authoritativeChangedFiles: 1,
+    diffText: `-    tag: latest@sha256:${DIGEST_A}\n+    tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("complete evidence with matching counts and pure digests is image_digest_only", () => {
+  const result = classifyPr({
+    prFiles: [digestFile("k8s/lemonade.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText: `-    tag: latest@sha256:${DIGEST_A}\n+    tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "image_digest_only");
 });
 
 test("secret handling precedes auth", () => {

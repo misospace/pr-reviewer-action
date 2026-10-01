@@ -585,6 +585,9 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     // `pr.diff.truncated` is the prioritized context diff and can omit
     // functional changes. `diffText` here is the complete fetched PR diff.
     fullDiffText: diffText,
+    // The PR object's authoritative changed-file count; the image-digest rule
+    // reconciles the (single-page) file list and diff against it.
+    authoritativeChangedFiles: totalChangedFiles,
     // classifyPr sits behind the canonical LinkedIssue boundary
     // (src/context/types.ts): the linked-issue stage's raw collection —
     // GitHub refs with labels only when fetched, Linear records — is

@@ -1071,7 +1071,12 @@ export function classificationToArtifact(classification: PRClassification): Reco
 
 /** Classification is a declarative table evaluated top-to-bottom; the FIRST
  * matching rule wins, so table order is precedence (most-specific first). */
-type KindPredicate = (files: readonly ChangedFile[], diffText: string, fullDiffText: string) => boolean;
+type KindPredicate = (
+  files: readonly ChangedFile[],
+  diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+) => boolean;
 const KIND_RULES: readonly { kind: string; matches: KindPredicate }[] = [
   { kind: "renovate_digest_only", matches: isRenovateDigestOnly },
   { kind: "image_digest_only", matches: isImageDigestOnly },
@@ -1204,12 +1209,19 @@ function evaluateDigestBlock(
  * Parsed against `fullDiffText` — the complete PR diff — because `diffText` is
  * the prioritized/truncated context diff and can omit functional changes
  * (#909). A truncation marker in the supplied diff fails closed. */
-function isImageDigestOnly(files: readonly ChangedFile[], _diffText: string, fullDiffText: string): boolean {
+function isImageDigestOnly(
+  files: readonly ChangedFile[],
+  _diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+): boolean {
   if (!allFilesAreImageManifests(files)) return false;
   let removed: { normalized: string; digest: string }[] = [];
   let added: { normalized: string; digest: string }[] = [];
   let sawBlock = false;
   let anyDigestChanged = false;
+  let totalRemoved = 0;
+  let totalAdded = 0;
 
   const flushBlock = (): boolean => {
     if (removed.length === 0 && added.length === 0) return true;
@@ -1244,12 +1256,40 @@ function isImageDigestOnly(files: readonly ChangedFile[], _diffText: string, ful
       // addition means the block boundary was mis-detected, so fail closed.
       if (added.length > 0) return false;
       removed.push(parsed);
+      totalRemoved += 1;
     } else {
       added.push(parsed);
+      totalAdded += 1;
     }
   }
   if (!flushBlock()) return false;
-  return sawBlock && anyDigestChanged;
+  if (!sawBlock || !anyDigestChanged) return false;
+  return evidenceIsComplete(files, authoritativeChangedFiles, totalAdded, totalRemoved);
+}
+
+/** Prove the supplied file list and diff are complete before claiming every
+ * changed line is digest-only. Both platform reads can be incomplete — GitHub's
+ * file listing is a single capped page and the raw diff carries no completeness
+ * proof — so reconcile the authoritative changed-file count and the per-file
+ * line totals against the diff actually parsed. Missing metadata or any count
+ * mismatch fails closed (#909). */
+function evidenceIsComplete(
+  files: readonly ChangedFile[],
+  authoritativeChangedFiles: number | undefined,
+  totalAdded: number,
+  totalRemoved: number,
+): boolean {
+  if (!Number.isInteger(authoritativeChangedFiles) || authoritativeChangedFiles !== files.length) {
+    return false;
+  }
+  let expectedAdded = 0;
+  let expectedRemoved = 0;
+  for (const file of files) {
+    if (!Number.isInteger(file.additions) || !Number.isInteger(file.deletions)) return false;
+    expectedAdded += file.additions!;
+    expectedRemoved += file.deletions!;
+  }
+  return totalAdded === expectedAdded && totalRemoved === expectedRemoved;
 }
 
 /** A dependency/manifest file changed, but NOT a k8s manifest (which happens
@@ -1262,9 +1302,14 @@ function isDependencyUpgrade(files: readonly ChangedFile[], _diffText: string): 
   return !hasK8s;
 }
 
-function classifyPrKind(files: readonly ChangedFile[], diffText: string, fullDiffText: string): string {
+function classifyPrKind(
+  files: readonly ChangedFile[],
+  diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+): string {
   for (const rule of KIND_RULES) {
-    if (rule.matches(files, diffText, fullDiffText)) return rule.kind;
+    if (rule.matches(files, diffText, fullDiffText, authoritativeChangedFiles)) return rule.kind;
   }
   return DEFAULT_PR_KIND;
 }
@@ -1553,6 +1598,10 @@ export interface ClassifyInput {
    * prioritized/truncated context diff and can omit functional changes. Falls
    * back to `diffText`. */
   fullDiffText?: string | undefined;
+  /** The platform PR object's authoritative `changed_files` count. The
+   * image-digest check reconciles the supplied file list and diff against it
+   * and fails closed when either is short (#909). */
+  authoritativeChangedFiles?: number | undefined;
   linkedIssues?: readonly LinkedIssue[] | undefined;
   maxSummaryFiles?: number | undefined;
   metadataStatus?: unknown;
@@ -1561,7 +1610,15 @@ export interface ClassifyInput {
 /** Run deterministic classification on a PR. Pure and synchronous — no model
  * calls, no network, no command execution. */
 export function classifyPr(input: ClassifyInput): PRClassification {
-  const { prFiles, diffText = "", fullDiffText, linkedIssues = [], maxSummaryFiles = 50, metadataStatus = null } = input;
+  const {
+    prFiles,
+    diffText = "",
+    fullDiffText,
+    authoritativeChangedFiles,
+    linkedIssues = [],
+    maxSummaryFiles = 50,
+    metadataStatus = null,
+  } = input;
 
   const uncertainty = linkedMetadataUncertainty(metadataStatus);
 
@@ -1577,7 +1634,7 @@ export function classifyPr(input: ClassifyInput): PRClassification {
     discounted: pathEvaluation.discounted,
   };
 
-  const prKind = classifyPrKind(prFiles, diffText, fullDiffText ?? diffText);
+  const prKind = classifyPrKind(prFiles, diffText, fullDiffText ?? diffText, authoritativeChangedFiles);
   const { flags, flagsWithFiles } = detectRiskFlags(prFiles, diffText, linkedIssues);
   const mustCheck = buildMustCheck(prKind, flags, flagsWithFiles);
 
