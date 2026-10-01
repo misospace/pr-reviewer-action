@@ -494,11 +494,14 @@ export async function repoContents(
 /** Contents API file decode for `gh_api` (#913): a file object is one base64
  * string ~33% larger than the file, so any byte-slice of the compact JSON is
  * unreadable to the model. Decoding mirrors `repoContents` (NUL and
- * invalid-UTF-8 round-trip checks); the decoded text is bounded to `capBytes`
- * bytes. Returns null for anything that is not a base64 file object —
- * directory listings and every other endpoint keep the raw compact-JSON
- * response. */
-function decodeGhApiContentsFile(data: unknown, capBytes: number): Obj | null {
+ * invalid-UTF-8 round-trip checks) over the FULL file; the text path returns
+ * the complete decoded text and the caller must run
+ * `maskAndTruncateSource(fullText, cap, path)` — masking before any
+ * truncation (#926), so a credential straddling the cap boundary is masked
+ * whole instead of cut in half. Returns null for anything that is not a
+ * base64 file object — directory listings and every other endpoint keep the
+ * raw compact-JSON response. */
+function decodeGhApiContentsFile(data: unknown): Obj | null {
   if (data === null || typeof data !== "object" || Array.isArray(data)) return null;
   const payload = data as Obj;
   if (payload.type !== "file" || payload.encoding !== "base64" || typeof payload.content !== "string") return null;
@@ -515,9 +518,7 @@ function decodeGhApiContentsFile(data: unknown, capBytes: number): Obj | null {
   if (Buffer.from(text, "utf8").toString("base64") !== decoded.toString("base64")) {
     return { path, sha, size, binary: true, truncated: false };
   }
-  const truncated = decoded.length > capBytes;
-  const content = truncated ? decoded.subarray(0, capBytes).toString("utf8") : text;
-  return { path, sha, size, content, truncated };
+  return { path, sha, size, content: text };
 }
 
 export async function readFile(input: string, ctx: ToolContext, offset?: number | null, limit?: number | null): Promise<Obj> {
@@ -1115,13 +1116,16 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         if (!endpoint) throw new Error("Missing 'endpoint' argument");
         const res = await ghApi(endpoint, ctx);
         if (res.error) throw new Error(res.error);
-        const contentsFile = decodeGhApiContentsFile(res.data, cap);
+        const contentsFile = decodeGhApiContentsFile(res.data);
         if (contentsFile) {
           if (typeof contentsFile.content === "string") {
             // Repository source content: the source-safe masking policy
-            // (#876), same treatment as a repo_contents file read.
+            // (#876), same treatment as a repo_contents file read. Masking
+            // runs over the FULL decoded text and maskAndTruncateSource owns
+            // the mask-then-truncate order (#926): a credential straddling
+            // the cap boundary is masked whole, never cut in half.
             const clipped = maskAndTruncateSource(contentsFile.content, cap, contentsFile.path);
-            result = { ...contentsFile, content: clipped.text, truncated: (contentsFile.truncated ?? false) || clipped.truncated };
+            result = { ...contentsFile, content: clipped.text, truncated: clipped.truncated };
           } else {
             result = contentsFile;
           }

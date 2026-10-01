@@ -83,7 +83,7 @@ test("gh_api decodes Contents API file objects instead of slicing base64 (#913)"
   assert.equal(decoded.result.size, Buffer.byteLength(fileText));
   assert.match(decoded.result.content, /^name: CI\non: pull_request\n/);
   assert.equal(decoded.result.truncated, true);
-  assert.equal(Buffer.byteLength(decoded.result.content), 12000);
+  assert.equal(decoded.result.content, fileText.slice(0, 12000) + "\n[truncated]");
   assert.equal(decoded.result.response, undefined);
 
   // A small file is complete and untruncated.
@@ -97,6 +97,17 @@ test("gh_api decodes Contents API file objects instead of slicing base64 (#913)"
   const secret = await call(fileObj("cfg.yml", Buffer.from(secretText, "utf8"), "c"));
   assert.match(secret.result.content, /redacted:credential/);
   assert.doesNotMatch(secret.result.content, /ghp_/);
+
+  // A credential straddling the cap boundary is masked whole (#926): the
+  // masker sees the full decoded text before any truncation. In a code file
+  // with no secret-named key, a partial ghp_ token (27 visible chars here)
+  // matches no masker pattern, so a decode-then-truncate order would leak
+  // the fragment; the token starts at byte 11969 and ends at 12008.
+  const straddleText = "x".repeat(11957) + "\n" + 'const v = "ghp_' + "A".repeat(36) + '";\n' + "tail();\n".repeat(10);
+  const straddle = await call(fileObj("src/app.ts", Buffer.from(straddleText, "utf8"), "f"));
+  assert.match(straddle.result.content, /redacted:credential/);
+  assert.doesNotMatch(straddle.result.content, /ghp_/);
+  assert.equal(straddle.result.truncated, true);
 
   // Binary and invalid-UTF-8 payloads return safe metadata without bytes.
   const binary = await call(fileObj("img.png", Buffer.from([0x89, 0x00, 0x50, 0x4e]), "d"));
