@@ -969,6 +969,15 @@ function gitInit(dir: string): void {
 }
 
 test("#810: a budget-exhausted tool loop publishes partial coverage in the run marker", async () => {
+  // #921: the small README diff sits in the corpus whole and is credited
+  // without a read, so the gap comes from a large docs file whose diff the
+  // corpus budget truncates — that file stays strictly unread. The paths
+  // keep the PR classifying as docs so no specialist lane consumes a mock
+  // response before the loop's first turn.
+  const bigDiff =
+    "diff --git a/docs/big-guide.md b/docs/big-guide.md\nindex 1111111..2222222 100644\n--- a/docs/big-guide.md\n+++ b/docs/big-guide.md\n" +
+    Array.from({ length: 5000 }, (_, i) => `@@ -${i * 10 + 1},9 +${i * 10 + 1},10 @@\n ${i} context\n+${i} added line that makes this diff far larger than the corpus diff budget\n`).join("");
+  const rawDiff = `diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+world\n` + bigDiff;
   let calls = 0;
   const server = await startMockServer((_req, _body, res) => {
     calls += 1;
@@ -1004,13 +1013,23 @@ test("#810: a budget-exhausted tool loop publishes partial coverage in the run m
       },
       runDir,
       workspace: runDir,
-      platformAdapter: mockPlatform(),
+      platformAdapter: mockPlatform({
+        diff: rawDiff,
+        files: [
+          { filename: "README.md", status: "modified", additions: 1, deletions: 0, changes: 1 },
+          { filename: "docs/big-guide.md", status: "modified", additions: 5000, deletions: 0, changes: 5000 },
+        ],
+        additions: 5001,
+        deletions: 0,
+      }),
       persistArtifacts: true,
       quiet: true,
     });
     const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as Record<string, unknown>;
     assert.equal(harness.stop_reason, "tool-call-budget-exhausted");
-    assert.deepEqual((harness.partial_coverage as { unread_files: string[] }).unread_files, ["README.md"]);
+    const coverage = harness.partial_coverage as { unread_files: string[]; corpus_diff_covered_files?: string[] };
+    assert.deepEqual(coverage.unread_files, ["docs/big-guide.md"]);
+    assert.deepEqual(coverage.corpus_diff_covered_files, ["README.md"]);
     // The strict default reports the gap instead of a plain clean approve.
     assert.equal(result.outputs.verdict, "approve");
     assert.match(result.marker, /review_result.{0,4}partial/);

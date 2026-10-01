@@ -49,6 +49,7 @@ import {
 } from "./loop.js";
 import {
   computePartialCoverage,
+  corpusDiffCoveredFiles,
   loadChangedFilePaths,
   loadSpecialistLeadRefs,
   type PartialCoverage,
@@ -1484,9 +1485,20 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // run issued no calls at all and is reported through its own degraded
   // path, not as a partial tool investigation.
   if (!outcome.degraded) {
+    // #921: the corpus the verdict turn reads (same tier-keyed name the
+    // verdict and planning paths use) also credits files whose complete,
+    // untruncated diff it already carries — a missing corpus or raw diff
+    // credits nothing and keeps the strict tool-read rule.
+    const changedFiles = loadChangedFilePaths(deps.readText);
+    const corpusName = input.tier === "smart" ? "review-corpus.smart.truncated.md" : "review-corpus.truncated.md";
     const coverage = computePartialCoverage(outcome, {
-      changedFiles: loadChangedFilePaths(deps.readText),
+      changedFiles,
       leads: loadSpecialistLeadRefs(deps.readText),
+      corpusDiffCoveredFiles: corpusDiffCoveredFiles(
+        deps.readText(corpusName) ?? "",
+        deps.readText("pr.diff"),
+        changedFiles,
+      ),
     });
     if (coverage !== null) input.result.partial_coverage = coverage;
   }
