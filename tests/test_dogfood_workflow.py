@@ -116,6 +116,8 @@ DOGFOOD_OVERRIDES = {
     "github-token",
     "tool-allowed-gh-api-repos",
     "claim-falsification",
+    "equivalent-paths",
+    "requirement-trace",
     "ai-base-url",
     "ai-api-format",
     "ai-model",
