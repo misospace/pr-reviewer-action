@@ -26,7 +26,9 @@ for (const output of contract.outputs) outputs[output.id] = { description: outpu
 
 const action = {
   name: "Miso PR Review",
-  description: "Review pull requests with OpenAI- or Anthropic-compatible models and post an optional sticky comment.",
+  description: "AI pull request reviews with any OpenAI- or Anthropic-compatible model, cloud or self-hosted, grounded in the code.",
+  author: "misospace",
+  branding: { icon: "git-pull-request", color: "orange" },
   inputs,
   outputs,
   runs: { using: "node24", main: "dist/index.js" },

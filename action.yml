@@ -1,7 +1,11 @@
 # Generated from contracts/action-v3.yml by scripts/generate-action-yml.mjs.
 # Edit the contract, then regenerate.
 name: Miso PR Review
-description: Review pull requests with OpenAI- or Anthropic-compatible models and post an optional sticky comment.
+description: AI pull request reviews with any OpenAI- or Anthropic-compatible model, cloud or self-hosted, grounded in the code.
+author: misospace
+branding:
+  icon: git-pull-request
+  color: orange
 inputs:
   github-token:
     description: GitHub token for PR and API access. Defaults to the workflow's own token.
