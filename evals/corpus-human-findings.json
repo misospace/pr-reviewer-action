@@ -1383,6 +1383,44 @@
           "anchor_confidence": "high",
           "needs_external_knowledge": false
         }
+      },
+      {
+        "id": "misospace/dispatch#1142@48272aaa",
+        "repo_full_name": "misospace/dispatch",
+        "number": 1142,
+        "head_sha": "48272aaa5d59aafd9d98d5b897cff4d2b15d4ded",
+        "base_sha": "edc1afbe6eaab4db302c028dfc388b44608d9e73",
+        "source": {
+          "url": "https://github.com/misospace/dispatch/pull/1142",
+          "production_bot_at_head": "APPROVED",
+          "production_bot_flagged_same": false,
+          "anchor_confidence": "high",
+          "needs_external_knowledge": false
+        },
+        "defect": {
+          "description": "The new POST /api/pr-fix-queue/mark route settles an alreadyAddressed run as FIXED without the merge-state check the tasks/report path applies (resolvePrFixFromAgentReport calls fetchPullRequestMergeState first), so the two equivalent settlement paths disagree.",
+          "severity": "blocker",
+          "file": "src/lib/pr-fix-queue.ts"
+        }
+      },
+      {
+        "id": "misospace/courier#177@18a4aa2a",
+        "repo_full_name": "misospace/courier",
+        "number": 177,
+        "head_sha": "18a4aa2a25d8ef73d35d274dca7db8eed21647ab",
+        "base_sha": "ad2ca1fef039eef91f35f276a45d88b8a627a28b",
+        "source": {
+          "url": "https://github.com/misospace/courier/pull/177",
+          "production_bot_at_head": "APPROVED",
+          "production_bot_flagged_same": true,
+          "anchor_confidence": "high",
+          "needs_external_knowledge": false
+        },
+        "defect": {
+          "description": "The no-progress fingerprint is strings.Join of fields with '|' and dirty paths with ',', so distinct states can collide and falsely end the run as looping.",
+          "severity": "major",
+          "file": "internal/executor/executor.go"
+        }
       }
     ],
     "clean": []
