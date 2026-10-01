@@ -12,7 +12,7 @@ import { classificationToArtifact } from "../src/classification/classify.js";
 import { canonicalChangedFile, normalizeLinkedIssues } from "../src/context/index.js";
 
 function files(...names: string[]) {
-  return names.map((name) => canonicalChangedFile({ filename: name }));
+  return names.map((name) => canonicalChangedFile({ filename: name, status: "modified" }));
 }
 
 // ── pr_kind precedence (#675 port of pr_reviewer/classifier.py) ───────────
@@ -198,6 +198,34 @@ test("relocating an image reference between hunks is not image_digest_only", () 
       `-    image: ghcr.io/o/api:v1@sha256:${DIGEST_A}\n` +
       "@@ -10,0 +10 @@\n" +
       `+    image: ghcr.io/o/api:v1@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("a renamed manifest with an otherwise digest-only hunk is not image_digest_only", () => {
+  const renamed = canonicalChangedFile({ filename: "k8s/b.yaml", status: "renamed" });
+  const result = classifyPr({
+    prFiles: [renamed],
+    diffText:
+      "diff --git a/k8s/a.yaml b/k8s/b.yaml\n" +
+      "similarity index 90%\n" +
+      "rename from k8s/a.yaml\n" +
+      "rename to k8s/b.yaml\n" +
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("a mode change around a digest is not image_digest_only", () => {
+  const result = classifyPr({
+    prFiles: files("k8s/lemonade.yaml"),
+    diffText:
+      "diff --git a/k8s/lemonade.yaml b/k8s/lemonade.yaml\n" +
+      "old mode 100644\n" +
+      "new mode 100755\n" +
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n`,
   });
   assert.equal(result.prKind, "k8s_manifest");
 });

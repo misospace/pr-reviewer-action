@@ -935,8 +935,8 @@ export function evaluatePathHandlingSignals(
 
 /** Path-handling kind rule: fires only when the signal model found a
  * material (non-discounted) untrusted-path surface. */
-function isPathHandling(filenames: readonly string[], diffText: string): boolean {
-  return evaluatePathHandlingSignals(filenames, diffText).fired.length > 0;
+function isPathHandling(files: readonly ChangedFile[], diffText: string): boolean {
+  return evaluatePathHandlingSignals(files.map((file) => file.filename), diffText).fired.length > 0;
 }
 
 /** Secret handling changes. */
@@ -1071,7 +1071,7 @@ export function classificationToArtifact(classification: PRClassification): Reco
 
 /** Classification is a declarative table evaluated top-to-bottom; the FIRST
  * matching rule wins, so table order is precedence (most-specific first). */
-type KindPredicate = (filenames: string[], diffText: string) => boolean;
+type KindPredicate = (files: readonly ChangedFile[], diffText: string) => boolean;
 const KIND_RULES: readonly { kind: string; matches: KindPredicate }[] = [
   { kind: "renovate_digest_only", matches: isRenovateDigestOnly },
   { kind: "image_digest_only", matches: isImageDigestOnly },
@@ -1102,7 +1102,7 @@ const KIND_RULES: readonly { kind: string; matches: KindPredicate }[] = [
 export const DEFAULT_PR_KIND = "app_code";
 
 function filenameMatches(patterns: readonly RegExp[]): KindPredicate {
-  return (filenames) => filenames.some((name) => matchesAny(name, patterns));
+  return (files) => files.some((file) => matchesAny(file.filename, patterns));
 }
 
 /** True only when EVERY changed file is a known lockfile — guards
@@ -1120,15 +1120,22 @@ function hasVersionBump(diffText: string): boolean {
   return false;
 }
 
-function isRenovateDigestOnly(filenames: string[], diffText: string): boolean {
-  return allFilesAreLockfiles(filenames) && !hasVersionBump(diffText);
+function isRenovateDigestOnly(files: readonly ChangedFile[], diffText: string): boolean {
+  return allFilesAreLockfiles(files.map((file) => file.filename)) && !hasVersionBump(diffText);
 }
 
-/** True only when EVERY changed file is a YAML/Dockerfile image manifest. */
-function allFilesAreImageManifests(filenames: string[]): boolean {
-  if (filenames.length === 0) return false;
-  return filenames.every((name) => matchesAny(name, IMAGE_DIGEST_FILE_PATTERNS));
+/** True only when EVERY changed file is a modified YAML/Dockerfile image
+ * manifest. A rename, copy, addition, or removal changes the manifest's
+ * location/shape and must not take the digest-only path (#909). */
+function allFilesAreImageManifests(files: readonly ChangedFile[]): boolean {
+  if (files.length === 0) return false;
+  return files.every((file) => file.status === "modified" && matchesAny(file.filename, IMAGE_DIGEST_FILE_PATTERNS));
 }
+
+/** Git metadata lines that signal a rename, copy, or mode change — a
+ * structural change to the manifest, not a digest refresh. */
+const STRUCTURAL_DIFF_LINE_RE =
+  /^(?:old mode|new mode|rename from|rename to|copy from|copy to|similarity index|dissimilarity index|new file mode|deleted file mode)\b/;
 
 /** An allowed image-reference line form, optionally behind a YAML
  * `image:`/`tag:` key or a Dockerfile `FROM [--platform=...]` directive (with
@@ -1186,8 +1193,8 @@ function evaluateDigestBlock(
  * hunk headers, or file headers), so an image cannot move between hunks or
  * files and still count as a digest refresh. Comparing refs globally would
  * accept either a digest swap or a relocation. */
-function isImageDigestOnly(filenames: string[], diffText: string): boolean {
-  if (!allFilesAreImageManifests(filenames)) return false;
+function isImageDigestOnly(files: readonly ChangedFile[], diffText: string): boolean {
+  if (!allFilesAreImageManifests(files)) return false;
   let removed: { normalized: string; digest: string }[] = [];
   let added: { normalized: string; digest: string }[] = [];
   let sawBlock = false;
@@ -1205,6 +1212,9 @@ function isImageDigestOnly(filenames: string[], diffText: string): boolean {
   };
 
   for (const line of diffText.split("\n")) {
+    // Rename/copy/mode metadata is a structural change, never a digest
+    // refresh — fail closed even if the file status looks like a plain edit.
+    if (STRUCTURAL_DIFF_LINE_RE.test(line)) return false;
     const isRemoved = line.startsWith("-") && !line.startsWith("---");
     const isAdded = line.startsWith("+") && !line.startsWith("+++");
     if (!isRemoved && !isAdded) {
@@ -1230,7 +1240,8 @@ function isImageDigestOnly(filenames: string[], diffText: string): boolean {
 
 /** A dependency/manifest file changed, but NOT a k8s manifest (which happens
  * to reference versions and must classify as k8s_manifest instead). */
-function isDependencyUpgrade(filenames: string[], _diffText: string): boolean {
+function isDependencyUpgrade(files: readonly ChangedFile[], _diffText: string): boolean {
+  const filenames = files.map((file) => file.filename);
   const hasDepFile = filenames.some((name) => matchesAny(name, DEPENDENCY_PATTERNS));
   if (!hasDepFile) return false;
   const hasK8s = filenames.some((name) => matchesAny(name, K8S_PATTERNS));
@@ -1238,9 +1249,8 @@ function isDependencyUpgrade(filenames: string[], _diffText: string): boolean {
 }
 
 function classifyPrKind(files: readonly ChangedFile[], diffText: string): string {
-  const filenames = files.map((file) => file.filename);
   for (const rule of KIND_RULES) {
-    if (rule.matches(filenames, diffText)) return rule.kind;
+    if (rule.matches(files, diffText)) return rule.kind;
   }
   return DEFAULT_PR_KIND;
 }
