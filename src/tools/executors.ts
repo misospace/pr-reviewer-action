@@ -491,6 +491,35 @@ export async function repoContents(
   return { repo, path: path_, type: "file", content, truncated };
 }
 
+/** Contents API file decode for `gh_api` (#913): a file object is one base64
+ * string ~33% larger than the file, so any byte-slice of the compact JSON is
+ * unreadable to the model. Decoding mirrors `repoContents` (NUL and
+ * invalid-UTF-8 round-trip checks); the decoded text is bounded to `capBytes`
+ * bytes. Returns null for anything that is not a base64 file object —
+ * directory listings and every other endpoint keep the raw compact-JSON
+ * response. */
+function decodeGhApiContentsFile(data: unknown, capBytes: number): Obj | null {
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return null;
+  const payload = data as Obj;
+  if (payload.type !== "file" || payload.encoding !== "base64" || typeof payload.content !== "string") return null;
+  const path = typeof payload.path === "string" ? payload.path : "";
+  const sha = typeof payload.sha === "string" ? payload.sha : "";
+  const decoded = Buffer.from(payload.content, "base64");
+  const size = typeof payload.size === "number" ? payload.size : decoded.length;
+  if (decoded.includes(0)) {
+    return { path, sha, size, binary: true, truncated: false };
+  }
+  const text = decoded.toString("utf8");
+  // Round-trip check: invalid UTF-8 survives a Buffer round-trip with
+  // replacement chars, which the strict decode would have rejected.
+  if (Buffer.from(text, "utf8").toString("base64") !== decoded.toString("base64")) {
+    return { path, sha, size, binary: true, truncated: false };
+  }
+  const truncated = decoded.length > capBytes;
+  const content = truncated ? decoded.subarray(0, capBytes).toString("utf8") : text;
+  return { path, sha, size, content, truncated };
+}
+
 export async function readFile(input: string, ctx: ToolContext, offset?: number | null, limit?: number | null): Promise<Obj> {
   const guarded = resolveWorkspacePath(input, ctx.workspaceRoot);
   if (guarded.error) return { error: guarded.error };
@@ -1086,6 +1115,18 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         if (!endpoint) throw new Error("Missing 'endpoint' argument");
         const res = await ghApi(endpoint, ctx);
         if (res.error) throw new Error(res.error);
+        const contentsFile = decodeGhApiContentsFile(res.data, cap);
+        if (contentsFile) {
+          if (typeof contentsFile.content === "string") {
+            // Repository source content: the source-safe masking policy
+            // (#876), same treatment as a repo_contents file read.
+            const clipped = maskAndTruncateSource(contentsFile.content, cap, contentsFile.path);
+            result = { ...contentsFile, content: clipped.text, truncated: (contentsFile.truncated ?? false) || clipped.truncated };
+          } else {
+            result = contentsFile;
+          }
+          break;
+        }
         const data = res.data;
         let text = "";
         if (data !== null && typeof data === "object") {
