@@ -402,7 +402,7 @@ inputs:
     required: false
     default: "180"
   tool-corpus-max-bytes:
-    description: Maximum corpus bytes passed into the native_loop conversation's first turn. Empty (the default) resolves to 50000, or to about 15% of the tier's declared context window (in bytes, 50000..600000) when primary-model-context-tokens / smart-model-context-tokens / model-context-tokens is set (#922).
+    description: "Maximum corpus bytes passed into the native_loop conversation's first turn. Empty (the default) resolves to 50000. When primary-model-context-tokens / smart-model-context-tokens / model-context-tokens declares a window, it derives from it instead: normally about 15% of the window (up to 600000 bytes), and lower for small windows, since it never exceeds ~60% of the loop's conversation budget after the per-turn completion is reserved (#922). An explicit value is an operator override and is used as-is, even beyond that envelope; the operator is then responsible for fitting the model's window."
     required: false
     default: ""
   tool-max-tokens-per-turn:
@@ -410,7 +410,7 @@ inputs:
     required: false
     default: "16384"
   tool-max-response-bytes:
-    description: Maximum bytes captured from each tool execution result. Empty (the default) resolves to 12000, or to about 2% of the tier's declared context window (in bytes, 12000..64000) when a context window is declared (#922).
+    description: "Maximum bytes captured from each tool execution result. Empty (the default) resolves to 12000. With a declared context window it derives from it instead: normally about 2% of the window (up to 64000 bytes), and lower for small windows, since it never exceeds ~8% of the loop's conversation budget (#922). An explicit value is an operator override and is used as-is, even beyond that envelope; the operator is then responsible for fitting the model's window."
     required: false
     default: ""
   tool-allowed-gh-api-repos:

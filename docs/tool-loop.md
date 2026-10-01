@@ -137,11 +137,16 @@ they are fixed; declare one per tier (`primary-model-context-tokens`,
 `smart-model-context-tokens`, or `model-context-tokens` for both) and they
 scale with it:
 
-| Limit | No window declared | Window declared | Input override |
+| Limit | No window declared | Window declared (normal range, ceiling) | Input override |
 | --- | --- | --- | --- |
-| Conversation budget (compaction threshold) | 24,000 tokens | ~25% of the window, 24k–250k tokens | — |
-| First-turn corpus | 50 KB | ~15% of the window, 50 KB–600 KB | `tool-corpus-max-bytes` |
-| Each tool result | 12 KB | ~2% of the window, 12 KB–64 KB | `tool-max-response-bytes` |
+| Conversation budget (compaction threshold) | 24,000 tokens | ~25% of the window, up to 250k tokens | — |
+| First-turn corpus | 50 KB | ~15% of the window, up to 600 KB | `tool-corpus-max-bytes` |
+| Each tool result | 12 KB | ~2% of the window, up to 64 KB | `tool-max-response-bytes` |
+
+These ranges are normal values, not minimums: for a small window, reserving
+the per-turn completion takes priority and can push all three below the
+undeclared defaults (32k window with a 16k completion: 14,384 tokens /
+25,891 bytes / 3,452 bytes).
 
 A declared window first reserves `tool-max-tokens-per-turn` plus 2,000
 tokens of framing, so the conversation and each turn's completion always fit;
@@ -149,7 +154,9 @@ the first-turn corpus stays within ~60% of the conversation budget and each
 result within ~8%. A window too small for the per-turn completion plus a
 4,000-token conversation is refused at startup. For a 1M-token model that is
 250k tokens / 450 KB / 60 KB; for 262k it is 65k tokens / 118 KB / 16 KB.
-Explicit byte inputs always win. The marker's
+Explicit byte inputs are operator overrides: they're used as-is, even
+beyond the derived envelope, and fitting the model's window is then up to
+you. The marker's
 `context_budget` and `context_peak` show the budget a run used and how much
 of it the conversation actually reached (see [Telemetry](telemetry.md)).
 
