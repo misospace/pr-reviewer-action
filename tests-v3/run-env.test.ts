@@ -13,6 +13,8 @@ import { buildPlatformReadAdapter } from "../src/run/platform.js";
 import { resolveLoopLimits } from "../src/tools/harness.js";
 import { adaptiveLoopBudgets } from "../src/tools/loop.js";
 import { stageEnvFromConfig, buildStageEnv, validateStageEnv, type RunContext } from "../src/run/env.js";
+import { buildHumanReviewsSection } from "../src/run/stages.js";
+import { RunWorkspace } from "../src/run/workspace.js";
 
 /**
  * The kebab→SCREAMING_SNAKE projection the orchestrator feeds the ported
@@ -164,4 +166,29 @@ test("#895: an omitted tool-max-rounds scales the round cap through the real con
   };
   assert.ok(rounds(required) >= 16, "the contract default must leave the round cap free to scale with a 32-call budget");
   assert.equal(rounds({ ...required, "tool-max-rounds": "4" }), 8);
+});
+
+test("#928: env-only stage knobs survive buildStageEnv, so blind replays really skip human reviews", async () => {
+  const base: RunContext = {
+    workspace: "/ws", runDir: "/run", repo: "o/r", prNumber: "7", headSha: "",
+    isForkPr: "false", platform: "github", forgejoApiUrl: "", ciChecksFile: "",
+    outputFilePath: "/dev/null", stepSummaryPath: "", baseRef: "",
+  };
+  const config = loadConfig(contract, { "repo": "o/r", "pr-number": "7", "ai-base-url": "http://m/v1", "ai-model": "m" });
+  const env = buildStageEnv(config, base, {
+    HUMAN_REVIEWS_CONTEXT: "false", DEEP_REVIEW_EXECUTION: "prime_then_fanout", AI_FALLBACK_RETRIES: "2", AI_SMART_RETRIES: "1",
+  });
+  assert.equal(env.HUMAN_REVIEWS_CONTEXT, "false");
+  assert.equal(env.DEEP_REVIEW_EXECUTION, "prime_then_fanout");
+  assert.equal(env.AI_FALLBACK_RETRIES, "2");
+  assert.equal(env.AI_SMART_RETRIES, "1");
+
+  const review = { id: 1, state: "CHANGES_REQUESTED", user: { login: "maintainer", type: "User" }, body: "Blocker: the resolver ignores ctx.sourceSha.", commit_id: "a".repeat(40), submitted_at: "2026-09-30T00:00:00Z" };
+  const adapter = { listPrReviewsPaginated: () => Promise.resolve({ ok: true, data: [review] }) } as never;
+  const blind = new RunWorkspace(mkdtempSync(join(tmpdir(), "v3-hr-blind-")), false);
+  await buildHumanReviewsSection(blind, adapter, "a".repeat(40), env as never);
+  assert.equal(blind.readText("human-reviews.md") ?? "", "");
+  const seeing = new RunWorkspace(mkdtempSync(join(tmpdir(), "v3-hr-open-")), false);
+  await buildHumanReviewsSection(seeing, adapter, "a".repeat(40), buildStageEnv(config, base, {}) as never);
+  assert.match(seeing.readText("human-reviews.md") ?? "", /ctx\.sourceSha/);
 });
