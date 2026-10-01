@@ -511,7 +511,7 @@ inputs:
     v2_id: tool_max_requests
     required: false
     default: ""
-    description: "Maximum number of tool requests the harness executes when tool_mode is enabled. Empty (the default) resolves a tier-aware budget from the review route (#701) — ~16 for the primary route, ~32 for the smart route, up to 40 for the escalated (deep) path — scaled for the PR size (#810) from changed files, changed lines and specialist leads, floored at the tier default (small PRs keep the tier budget) and capped at the hard ceiling of 50; wall-clock and round budgets still bind. An explicit value overrides every tier and the scaling and is bounded to 1..50."
+    description: "Maximum number of tool requests the harness executes when tool_mode is enabled. Empty (the default) resolves a tier-aware budget from the review route (#701) — ~24 for the primary route, ~32 for the smart route, up to 40 for the escalated (deep) path — scaled for the PR size (#810) from changed files, changed lines and specialist leads, floored at the tier default (small PRs keep the tier budget) and capped at the hard ceiling of 50; wall-clock and round budgets still bind. An explicit value overrides every tier and the scaling and is bounded to 1..50."
   - id: primary-tool-max-requests
     v2_id: primary_tool_max_requests
     required: false
@@ -526,7 +526,7 @@ inputs:
     v2_id: tool_max_rounds
     required: false
     default: ""
-    description: "Round budget for tool_mode=native_loop, where a round is a single model turn. Empty (the default) resolves to 4, and the effective round cap also scales with the resolved tool-max-requests budget (#895) — at least one round per ~2 tool calls — so a larger size-scaled or tiered call budget isn't stopped early by an unscaled round cap; it is bounded at 25 rounds. Set this explicitly to opt back out of that scaling: the loop then allows up to twice the configured value (capped at 12), exactly as before #895, to leave room for one-call-per-turn chains and repair turns. Ignored when tool_mode=off."
+    description: "Round budget for tool_mode=native_loop, where a round is a single model turn. Empty (the default) resolves to 4, and the effective round cap also scales with the resolved tool-max-requests budget (#895) — one round per tool call, so a model that reads one file per turn can spend the whole size-scaled or tiered call budget; it is bounded at 32 rounds, and the wall clock is the real bound. Set this explicitly to opt back out of that scaling: the loop then allows up to twice the configured value (capped at 12), exactly as before #895, to leave room for one-call-per-turn chains and repair turns. Ignored when tool_mode=off."
   - id: tool-turn-timeout-sec
     v2_id: tool_turn_timeout_sec
     required: false

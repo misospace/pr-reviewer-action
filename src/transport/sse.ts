@@ -1,4 +1,4 @@
-import type { NormalizedModelResponse, NormalizedToolCall } from "../model/types.js";
+import type { NormalizedModelResponse, NormalizedToolCall, NormalizedUsage } from "../model/types.js";
 
 /**
  * Port of pr_reviewer/sse_reassembler.py: reassembles a streamed SSE
@@ -34,6 +34,16 @@ function flushTool(state: { id: string; name: string; argsParts: string[] } | nu
   return call;
 }
 
+/** #910: attach cache counts only when the provider reported any, so a
+ * cache-less response keeps the exact v2 usage shape. */
+function withCache(usage: NormalizedUsage, cacheReadTokens: number, cacheWriteTokens: number): NormalizedUsage {
+  return {
+    ...usage,
+    ...(cacheReadTokens > 0 ? { cacheReadTokens } : {}),
+    ...(cacheWriteTokens > 0 ? { cacheWriteTokens } : {}),
+  };
+}
+
 function baseResponse(id: string, model: string, content: string, toolCalls: NormalizedToolCall[], finishReason: string, usage: NormalizedModelResponse["usage"], error: unknown): NormalizedModelResponse {
   const response: NormalizedModelResponse = {
     id,
@@ -56,6 +66,7 @@ function reassembleOpenai(text: string): NormalizedModelResponse {
   let id = "";
   let model = "";
   let promptTokens = 0;
+  let cacheReadTokens = 0;
   let completionTokens = 0;
   let error: unknown;
 
@@ -119,6 +130,8 @@ function reassembleOpenai(text: string): NormalizedModelResponse {
       const completion = chunk.usage.completion_tokens;
       if (typeof prompt === "number") promptTokens += prompt;
       if (typeof completion === "number") completionTokens += completion;
+      const details = isRecord(chunk.usage.prompt_tokens_details) ? chunk.usage.prompt_tokens_details : {};
+      if (typeof details.cached_tokens === "number") cacheReadTokens += details.cached_tokens;
     }
   }
   flushAll();
@@ -126,7 +139,7 @@ function reassembleOpenai(text: string): NormalizedModelResponse {
   // Both v2 reassemblers always emit a usage object (zeros when the stream
   // carried none) — the parser's empty-completion detection reads
   // usage.completion_tokens == 0, so an absent usage must not read as null.
-  const usage = { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens };
+  const usage = withCache({ promptTokens, completionTokens, totalTokens: promptTokens + completionTokens }, cacheReadTokens, 0);
   return baseResponse(id, model, contentParts.join(""), toolCalls, finishReason || "stop", usage, error);
 }
 
@@ -143,6 +156,8 @@ function reassembleAnthropic(text: string): NormalizedModelResponse {
   let id = "";
   let model = "";
   let promptTokens = 0;
+  let cacheReadTokens = 0;
+  let cacheWriteTokens = 0;
   let completionTokens = 0;
   let stopReason = "";
   let error: unknown;
@@ -177,6 +192,8 @@ function reassembleAnthropic(text: string): NormalizedModelResponse {
       const usage = isRecord(message.usage) ? message.usage : {};
       if (typeof usage.input_tokens === "number") promptTokens += usage.input_tokens;
       if (typeof usage.output_tokens === "number") completionTokens += usage.output_tokens;
+      if (typeof usage.cache_read_input_tokens === "number") cacheReadTokens += usage.cache_read_input_tokens;
+      if (typeof usage.cache_creation_input_tokens === "number") cacheWriteTokens += usage.cache_creation_input_tokens;
       continue;
     }
     if (event.type === "content_block_start") {
@@ -226,7 +243,7 @@ function reassembleAnthropic(text: string): NormalizedModelResponse {
 
   let finishReason = stopReason || "stop";
   if (toolCalls.length > 0 && finishReason === "tool_use") finishReason = "tool_calls";
-  const usage = { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens };
+  const usage = withCache({ promptTokens, completionTokens, totalTokens: promptTokens + completionTokens }, cacheReadTokens, cacheWriteTokens);
   return baseResponse(id, model, contentParts.join(""), toolCalls, finishReason, usage, error);
 }
 

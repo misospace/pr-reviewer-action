@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, buildPlanningContext, accumulateUsage, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
+import { redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, buildPlanningContext, accumulateUsage, usageWithCacheRatio, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
 import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
 import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
+import { reassembleSse } from "../src/transport/sse.js";
+import { normalizedToOpenAiChat } from "../src/run/stages.js";
 
 function workspace(): { root: string; deps: (overrides?: Partial<HarnessDeps>) => HarnessDeps } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "harness-test-"));
@@ -64,7 +66,7 @@ test("missing corpus aborts pre-loop with the version-1 telemetry shape", async 
   assert.equal(telemetry!.phase, "pre-loop");
   assert.equal(telemetry!.stop_reason, "harness-abort");
   assert.equal(telemetry!.failure, "missing-corpus");
-  assert.equal((telemetry!.usage as Record<string, unknown>).requests_remaining_at_stop, 16);
+  assert.equal((telemetry!.usage as Record<string, unknown>).requests_remaining_at_stop, 24);
   assert.equal((telemetry!.budget as Record<string, unknown>).source, "tier-default");
 });
 
@@ -397,7 +399,40 @@ test("usage accounting reads the OpenAI shape a streamed anthropic turn reassemb
   const acc = { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 };
   accumulateUsage(acc, { usage: { prompt_tokens: 10, completion_tokens: 4 } }, "anthropic");
   accumulateUsage(acc, { usage: { input_tokens: 5, output_tokens: 1, cache_read_input_tokens: 2 } }, "anthropic");
-  assert.deepEqual(acc, { requests: 2, prompt_tokens: 15, completion_tokens: 5, cached_prompt_tokens: 2 });
+  // #910: Anthropic input_tokens excludes cache reads, so the prompt total is 5 + 2.
+  assert.deepEqual(acc, { requests: 2, prompt_tokens: 17, completion_tokens: 5, cached_prompt_tokens: 2 });
+});
+
+test("#910: cache_hit_ratio stays within 0..1 for a well-cached Anthropic turn", () => {
+  const acc = { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 };
+  accumulateUsage(acc, { usage: { input_tokens: 1, output_tokens: 9, cache_read_input_tokens: 44402, cache_creation_input_tokens: 97 } }, "anthropic");
+  assert.deepEqual(acc, { requests: 1, prompt_tokens: 44500, completion_tokens: 9, cached_prompt_tokens: 44402 });
+  assert.equal(usageWithCacheRatio(acc).cache_hit_ratio, 0.998);
+});
+
+test("#910: streamed turns keep their cache counts through the OpenAI projection", () => {
+  const anthropic = reassembleSse([
+    'data: {"type":"message_start","message":{"id":"m","model":"x","usage":{"input_tokens":3,"output_tokens":0,"cache_read_input_tokens":900,"cache_creation_input_tokens":100}}}',
+    'data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}',
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}',
+    'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}',
+    'data: {"type":"message_stop"}',
+  ].join("\n"), "anthropic");
+  const openai = reassembleSse([
+    'data: {"id":"o","model":"y","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}',
+    'data: {"id":"o","model":"y","choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":750}}}',
+    "data: [DONE]",
+  ].join("\n"), "openai");
+  const acc = { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 };
+  accumulateUsage(acc, normalizedToOpenAiChat(anthropic), "anthropic");
+  assert.deepEqual(acc, { requests: 1, prompt_tokens: 1003, completion_tokens: 2, cached_prompt_tokens: 900 });
+  accumulateUsage(acc, normalizedToOpenAiChat(openai), "openai");
+  assert.deepEqual(acc, { requests: 2, prompt_tokens: 2003, completion_tokens: 4, cached_prompt_tokens: 1650 });
+});
+
+test("#910: a cache-less stream keeps the v2 usage shape", () => {
+  const plain = reassembleSse('data: {"type":"message_start","message":{"id":"m","model":"x","usage":{"input_tokens":3,"output_tokens":1}}}\ndata: {"type":"message_stop"}', "anthropic");
+  assert.deepEqual(plain.usage, { promptTokens: 3, completionTokens: 1, totalTokens: 4 });
 });
 
 test("resolveLoopLimits: defaults are 4 rounds / 600s; smart overrides; bounds clamp", () => {
@@ -439,7 +474,7 @@ test("#810: a small PR's harness budget matches today's tier default", async () 
   ]));
   const { result } = await runToolHarness(deps());
   assert.equal(result.planning_error, "Missing review-corpus.truncated.md");
-  assert.equal(result.tool_request_budget, 16);
+  assert.equal(result.tool_request_budget, 24);
   assert.equal(result.tool_budget_source, "tier-default");
   assert.deepEqual(result.tool_budget_size, { changed_files: 2, changed_lines: 40, specialist_leads: 0 });
 });

@@ -255,11 +255,15 @@ export function accumulateUsage(acc: UsageAccumulator, response: unknown, apiFor
     return Number.isFinite(n) && n !== 0 ? Math.trunc(n) : 0;
   };
   acc.requests += 1;
-  // Streamed Anthropic turns are reassembled into OpenAI shape.
-  if (apiFormat === "anthropic" && !("prompt_tokens" in u)) {
-    acc.prompt_tokens += intOf(u.input_tokens);
-    acc.completion_tokens += intOf(u.output_tokens);
-    acc.cached_prompt_tokens += intOf(u.cache_read_input_tokens);
+  // #910: Anthropic counts cache reads/writes outside input_tokens, so the
+  // prompt total is all three; streamed Anthropic turns arrive in OpenAI
+  // shape with the uncached count in prompt_tokens and the cache fields kept.
+  if (apiFormat === "anthropic") {
+    const cacheRead = intOf(u.cache_read_input_tokens);
+    const uncached = "prompt_tokens" in u ? intOf(u.prompt_tokens) : intOf(u.input_tokens);
+    acc.prompt_tokens += uncached + cacheRead + intOf(u.cache_creation_input_tokens);
+    acc.completion_tokens += "completion_tokens" in u ? intOf(u.completion_tokens) : intOf(u.output_tokens);
+    acc.cached_prompt_tokens += cacheRead;
   } else {
     acc.prompt_tokens += intOf(u.prompt_tokens);
     acc.completion_tokens += intOf(u.completion_tokens);
@@ -276,7 +280,7 @@ export function usageWithCacheRatio(acc: UsageAccumulator): Record<string, unkno
     ...acc,
     cache_hit_ratio:
       acc.prompt_tokens > 0
-        ? Number((acc.cached_prompt_tokens / acc.prompt_tokens).toFixed(3))
+        ? Number(Math.min(1, acc.cached_prompt_tokens / acc.prompt_tokens).toFixed(3))
         : 0.0,
   };
 }

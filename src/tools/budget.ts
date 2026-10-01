@@ -50,7 +50,7 @@ export const TOOL_REQUEST_HARD_MAX = 50;
 
 export const TOOL_REQUEST_TIER_DEFAULTS: Readonly<
   Record<ToolBudgetTier, number>
-> = Object.freeze({ primary: 16, smart: 32, escalated: 40 });
+> = Object.freeze({ primary: 24, smart: 32, escalated: 40 });
 
 /**
  * PR-size weights for the #810 scaled default. One request per few changed

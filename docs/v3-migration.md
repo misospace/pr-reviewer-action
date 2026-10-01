@@ -310,7 +310,7 @@ v3's `verdict-policy` defaults to `strict` (#811, below). Set
 ### Tier-aware tool request budget (#701)
 
 `tool_max_requests` defaults to **empty** on both sides. The empty value is
-resolved at tool-harness time into a tier-aware budget — primary ~16, smart
+resolved at tool-harness time into a tier-aware budget — primary ~24, smart
 route ~32, escalated (deep) up to 40, hard ceiling 50 — instead of one
 undifferentiated ceiling. Explicit values override every tier (bounded to
 1..50); `SMART_TOOL_MAX_REQUESTS` overrides on smart/escalated runs.

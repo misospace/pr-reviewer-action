@@ -11,6 +11,30 @@
   "schema_version": 1,
   "entries": [
     {
+      "boundary": "tool-request-budget",
+      "fixtures": [
+        "tool-budget-tiers"
+      ],
+      "key": "primary-default",
+      "expected": {
+        "old": "primary/16/tier-default",
+        "new": "primary/24/tier-default"
+      },
+      "reason": "v3 raises the primary-route tool-call tier default from 16 to 24: reviews were stopping mid-investigation on the primary tier, and honest partial coverage plus the wall clock bound the cost."
+    },
+    {
+      "boundary": "tool-request-budget",
+      "fixtures": [
+        "tool-budget-tiers"
+      ],
+      "key": "smart-override-ignored-on-primary",
+      "expected": {
+        "old": "primary/16/tier-default",
+        "new": "primary/24/tier-default"
+      },
+      "reason": "v3 raises the primary-route tool-call tier default from 16 to 24: reviews were stopping mid-investigation on the primary tier, and honest partial coverage plus the wall clock bound the cost."
+    },
+    {
       "boundary": "config-default-resolution",
       "fixtures": [
         "defaults-only",

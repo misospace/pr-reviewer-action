@@ -338,6 +338,10 @@ test("#895: the scaled round cap holds at the TOOL_LOOP_ROUNDS_CEILING for a lar
 });
 
 test("#895: a small non-explicit budget still gets at least the doubled-rounds floor", () => {
-  const budgets = adaptiveLoopBudgets(4, 10, 600, false);
-  assert.equal(budgets.maxRounds, 8); // max(4*2, ceil(10/2)=5) = 8
+  assert.equal(adaptiveLoopBudgets(4, 6, 600, false).maxRounds, 8); // max(4*2, 6)
+});
+
+test("a non-explicit round cap allows one round per tool call", () => {
+  assert.equal(adaptiveLoopBudgets(4, 24, 600, false).maxRounds, 24);
+  assert.equal(adaptiveLoopBudgets(4, 32, 600, false).maxRounds, 32);
 });

@@ -779,7 +779,7 @@ TOOL_BUDGET_BOUNDARY = Boundary(
         "#701 tier-aware native tool-loop request budget: the v2 production "
         "harness resolver (run through the real run_tool_harness.py "
         "missing-corpus path) versus the v3 port, over tier defaults "
-        "(primary 16, smart 32, escalated 40), explicit overrides, "
+        "(primary 24 in v3, 16 in the v2 golden as an approved divergence; smart 32, escalated 40), explicit overrides, "
         "SMART_TOOL_MAX_REQUESTS precedence, the 1..50 hard ceiling, and the "
         "#702 budget provenance (source). Both sides enforce the fixture's "
         "expected (route, budget, source), so the absolute values are "

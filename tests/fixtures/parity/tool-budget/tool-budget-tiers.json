@@ -9,7 +9,7 @@
       "env": {},
       "expected": {
         "route": "primary",
-        "budget": 16,
+        "budget": 24,
         "source": "tier-default"
       }
     },
@@ -180,7 +180,7 @@
       },
       "expected": {
         "route": "primary",
-        "budget": 16,
+        "budget": 24,
         "source": "tier-default"
       }
     },

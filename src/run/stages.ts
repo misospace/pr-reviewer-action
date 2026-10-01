@@ -575,10 +575,14 @@ export function normalizedToOpenAiChat(response: NormalizedModelResponse): Recor
     choices: [{ index: 0, message, finish_reason: response.finishReason }],
   };
   if (response.usage) {
+    const { cacheReadTokens, cacheWriteTokens } = response.usage;
     shaped.usage = {
       prompt_tokens: response.usage.promptTokens,
       completion_tokens: response.usage.completionTokens,
       total_tokens: response.usage.totalTokens,
+      // #910: the loop's cache accounting reads these per api format.
+      ...(cacheReadTokens !== undefined ? { prompt_tokens_details: { cached_tokens: cacheReadTokens }, cache_read_input_tokens: cacheReadTokens } : {}),
+      ...(cacheWriteTokens !== undefined ? { cache_creation_input_tokens: cacheWriteTokens } : {}),
     };
   }
   if (response.error) shaped.error = response.error;
