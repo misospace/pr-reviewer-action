@@ -230,6 +230,44 @@ test("a mode change around a digest is not image_digest_only", () => {
   assert.equal(result.prKind, "k8s_manifest");
 });
 
+test("a truncation marker around a digest-only hunk is not image_digest_only", () => {
+  const result = classifyPr({
+    prFiles: files("k8s/lemonade.yaml"),
+    diffText:
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n` +
+      "…[diff truncated to fit context budget]\n",
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("image_digest_only reads the full diff, not the truncated context diff", () => {
+  const truncated =
+    `-    tag: latest@sha256:${DIGEST_A}\n` +
+    `+    tag: latest@sha256:${DIGEST_B}\n` +
+    "…[diff truncated to fit context budget]\n";
+  // The complete diff has no hidden changes: still digest-only.
+  const clean = classifyPr({
+    prFiles: files("k8s/lemonade.yaml"),
+    diffText: truncated,
+    fullDiffText: `-    tag: latest@sha256:${DIGEST_A}\n+    tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(clean.prKind, "image_digest_only");
+
+  // The complete diff hides a functional change behind the truncation marker:
+  // the visible hunk alone would have been digest-only.
+  const hidden = classifyPr({
+    prFiles: files("k8s/lemonade.yaml"),
+    diffText: truncated,
+    fullDiffText:
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n` +
+      "-  replicas: 3\n" +
+      "+  replicas: 5\n",
+  });
+  assert.equal(hidden.prKind, "k8s_manifest");
+});
+
 test("secret handling precedes auth", () => {
   const result = classifyPr({ prFiles: files("src/secret_handler.py") });
   assert.equal(result.prKind, "secret_handling_changes");

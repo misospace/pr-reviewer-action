@@ -1071,7 +1071,7 @@ export function classificationToArtifact(classification: PRClassification): Reco
 
 /** Classification is a declarative table evaluated top-to-bottom; the FIRST
  * matching rule wins, so table order is precedence (most-specific first). */
-type KindPredicate = (files: readonly ChangedFile[], diffText: string) => boolean;
+type KindPredicate = (files: readonly ChangedFile[], diffText: string, fullDiffText: string) => boolean;
 const KIND_RULES: readonly { kind: string; matches: KindPredicate }[] = [
   { kind: "renovate_digest_only", matches: isRenovateDigestOnly },
   { kind: "image_digest_only", matches: isImageDigestOnly },
@@ -1137,6 +1137,13 @@ function allFilesAreImageManifests(files: readonly ChangedFile[]): boolean {
 const STRUCTURAL_DIFF_LINE_RE =
   /^(?:old mode|new mode|rename from|rename to|copy from|copy to|similarity index|dissimilarity index|new file mode|deleted file mode)\b/;
 
+/** `prioritizeDiff` evidence-completeness markers (src/corpus/diff-priority.ts).
+ * Their presence means the supplied diff is missing changed lines, so no
+ * "only the digest changed" claim is safe. The classifier normally receives the
+ * full diff for this rule, but a caller that only has the truncated context
+ * diff must fail closed rather than reason over incomplete evidence (#909). */
+const DIFF_TRUNCATION_MARKER_RE = /…\[diff truncated|…\[file diff clipped:|Files omitted from this diff \(/;
+
 /** An allowed image-reference line form, optionally behind a YAML
  * `image:`/`tag:` key or a Dockerfile `FROM [--platform=...]` directive (with
  * an optional trailing `AS <stage>`). Captures the `@sha256:` digest; every
@@ -1192,8 +1199,12 @@ function evaluateDigestBlock(
  * (a run of removals immediately followed by additions, delimited by context,
  * hunk headers, or file headers), so an image cannot move between hunks or
  * files and still count as a digest refresh. Comparing refs globally would
- * accept either a digest swap or a relocation. */
-function isImageDigestOnly(files: readonly ChangedFile[], diffText: string): boolean {
+ * accept either a digest swap or a relocation.
+ *
+ * Parsed against `fullDiffText` — the complete PR diff — because `diffText` is
+ * the prioritized/truncated context diff and can omit functional changes
+ * (#909). A truncation marker in the supplied diff fails closed. */
+function isImageDigestOnly(files: readonly ChangedFile[], _diffText: string, fullDiffText: string): boolean {
   if (!allFilesAreImageManifests(files)) return false;
   let removed: { normalized: string; digest: string }[] = [];
   let added: { normalized: string; digest: string }[] = [];
@@ -1211,10 +1222,13 @@ function isImageDigestOnly(files: readonly ChangedFile[], diffText: string): boo
     return true;
   };
 
-  for (const line of diffText.split("\n")) {
+  for (const line of fullDiffText.split("\n")) {
     // Rename/copy/mode metadata is a structural change, never a digest
     // refresh — fail closed even if the file status looks like a plain edit.
     if (STRUCTURAL_DIFF_LINE_RE.test(line)) return false;
+    // A truncation marker means changed lines are missing: not complete
+    // evidence, so never claim digest-only.
+    if (DIFF_TRUNCATION_MARKER_RE.test(line)) return false;
     const isRemoved = line.startsWith("-") && !line.startsWith("---");
     const isAdded = line.startsWith("+") && !line.startsWith("+++");
     if (!isRemoved && !isAdded) {
@@ -1248,9 +1262,9 @@ function isDependencyUpgrade(files: readonly ChangedFile[], _diffText: string): 
   return !hasK8s;
 }
 
-function classifyPrKind(files: readonly ChangedFile[], diffText: string): string {
+function classifyPrKind(files: readonly ChangedFile[], diffText: string, fullDiffText: string): string {
   for (const rule of KIND_RULES) {
-    if (rule.matches(files, diffText)) return rule.kind;
+    if (rule.matches(files, diffText, fullDiffText)) return rule.kind;
   }
   return DEFAULT_PR_KIND;
 }
@@ -1534,6 +1548,11 @@ function linkedMetadataUncertainty(metadataStatus: unknown): { uncertain: boolea
 export interface ClassifyInput {
   prFiles: readonly ChangedFile[];
   diffText?: string | undefined;
+  /** The complete PR diff, when available. The deterministic image-digest check
+   * (#909) must see every changed line; the primary `diffText` is the
+   * prioritized/truncated context diff and can omit functional changes. Falls
+   * back to `diffText`. */
+  fullDiffText?: string | undefined;
   linkedIssues?: readonly LinkedIssue[] | undefined;
   maxSummaryFiles?: number | undefined;
   metadataStatus?: unknown;
@@ -1542,7 +1561,7 @@ export interface ClassifyInput {
 /** Run deterministic classification on a PR. Pure and synchronous — no model
  * calls, no network, no command execution. */
 export function classifyPr(input: ClassifyInput): PRClassification {
-  const { prFiles, diffText = "", linkedIssues = [], maxSummaryFiles = 50, metadataStatus = null } = input;
+  const { prFiles, diffText = "", fullDiffText, linkedIssues = [], maxSummaryFiles = 50, metadataStatus = null } = input;
 
   const uncertainty = linkedMetadataUncertainty(metadataStatus);
 
@@ -1558,7 +1577,7 @@ export function classifyPr(input: ClassifyInput): PRClassification {
     discounted: pathEvaluation.discounted,
   };
 
-  const prKind = classifyPrKind(prFiles, diffText);
+  const prKind = classifyPrKind(prFiles, diffText, fullDiffText ?? diffText);
   const { flags, flagsWithFiles } = detectRiskFlags(prFiles, diffText, linkedIssues);
   const mustCheck = buildMustCheck(prKind, flags, flagsWithFiles);
 
