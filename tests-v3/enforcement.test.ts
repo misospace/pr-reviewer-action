@@ -51,6 +51,30 @@ test("artifact maps verdict, tri-state dispositions, findings, and extra fields"
   assert.equal(result.custom, 7);
 });
 
+test("#762: a finding with endLine/suggestion/agentPrompt maps to snake_case artifact fields", () => {
+  const result = reviewArtifactFromParsed(parsed({
+    findings: [{ severity: "major", category: "bug", file: "a.ts", line: 8, message: "bad", endLine: 10, suggestion: "apply the fix", agentPrompt: "run the tests" }],
+  }));
+  assert.deepEqual(result.findings[0], { severity: "major", category: "bug", file: "a.ts", line: 8, message: "bad", end_line: 10, suggestion: "apply the fix", agent_prompt: "run the tests" });
+});
+
+test("#762: a finding without the optional fields emits none of the snake_case keys", () => {
+  const result = reviewArtifactFromParsed(parsed({
+    findings: [{ severity: "major", category: "bug", file: "a.ts", line: 8, message: "bad" }],
+  }));
+  assert.deepEqual(result.findings[0], { severity: "major", category: "bug", file: "a.ts", line: 8, message: "bad" });
+});
+
+test("#762: a finding's suggestion is inert to the strict verdict policy", () => {
+  const base = { severity: "major", category: "bug", file: "src/a.ts", line: 4, message: "finding" };
+  const withSuggestion = artifact({ findings: [{ ...base, suggestion: "apply the fix" }] });
+  const withoutSuggestion = artifact({ findings: [{ ...base }] });
+  const a = applyStrictVerdictPolicy(withSuggestion, { modelVerdict: "approve", forced: false });
+  const b = applyStrictVerdictPolicy(withoutSuggestion, { modelVerdict: "approve", forced: false });
+  assert.deepEqual(a, b);
+  assert.equal(withSuggestion.verdict, withoutSuggestion.verdict);
+});
+
 test("model policy is a no-op and records model source", () => {
   const a = artifact({ verdict: "request_changes", findings: [finding("blocker")] });
   assert.deepEqual(applyVerdictPolicy(a, "model", policyOptions), { source: "model" });

@@ -109,3 +109,41 @@ test("forgejo graphql-only capabilities degrade without any request", async () =
   assert.equal(threads.ok, false);
   assert.equal(calls.length, 0);
 });
+
+/** #762: forge-adaptable actionable findings — the GitHub adapter posts a
+ * one-click suggestion (range keys + fence) verbatim, while the Forgejo
+ * adapter degrades it (re-anchor + preserve body, drop the range keys) and
+ * drops a suggestion whose line no longer anchors against the fresh diff. */
+
+test("#762: github createReview posts a one-click suggestion comment verbatim", async () => {
+  const { fetchImpl, calls } = recorder([[`POST ${BASE}/repos/o/r/pulls/9/reviews`, 200, { id: 1 }]]);
+  const request = {
+    body: "review",
+    event: "REQUEST_CHANGES",
+    comments: [{ path: "f", body: "msg\n\n```suggestion\nREPL\n```", line: 4, side: "RIGHT", start_line: 2, start_side: "RIGHT" }],
+  };
+  assert.deepEqual(await github(fetchImpl).createReview(request as never), { ok: true });
+  assert.deepEqual(calls[0]!.body, request);
+});
+
+test("#762: forgejo createReview degrades a suggestion: re-anchors, keeps body, drops range keys", async () => {
+  const freshDiff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1,2 @@\n context\n+added\n";
+  const { fetchImpl, calls } = recorder([[`POST https://forge.example/repos/o/r/pulls/9/reviews`, 200, {}]]);
+  const api = new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token t", baseUrl: "https://forge.example", fetchImpl, diffProvider: async () => freshDiff });
+  await api.createReview({
+    body: "review",
+    event: "COMMENT",
+    comments: [{ path: "f", line: 2, side: "RIGHT", start_line: 1, start_side: "RIGHT", body: "Explanation\n\n```\nREPL\n```" }],
+  } as never);
+  const sent = calls[0]!.body as { comments: Array<Record<string, unknown>> };
+  assert.deepEqual(sent.comments, [{ path: "f", new_position: 2, body: "Explanation\n\n```\nREPL\n```" }]);
+});
+
+test("#762: forgejo createReview drops a suggestion whose line no longer anchors (stale head)", async () => {
+  const freshDiff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1,1 @@\n context\n";
+  const { fetchImpl, calls } = recorder([[`POST https://forge.example/repos/o/r/pulls/9/reviews`, 200, {}]]);
+  const api = new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token t", baseUrl: "https://forge.example", fetchImpl, diffProvider: async () => freshDiff });
+  await api.createReview({ body: "review", event: "COMMENT", comments: [{ path: "f", line: 5, body: "x\n\n```\nREPL\n```" }] } as never);
+  const sent = calls[0]!.body as { comments?: unknown };
+  assert.equal(sent.comments, undefined);
+});

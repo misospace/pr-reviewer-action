@@ -28,6 +28,13 @@ const FINDING_CATEGORIES = new Set(["bug", "security", "performance", "style", "
 const MAX_FINDINGS = 50;
 const MAX_FINDING_MESSAGE_CHARS = 2000;
 
+// #762: optional actionable finding fields. Neither carries verdict
+// authority; the caps bound one model answer. The prompt control regex is
+// the C0 range minus \n and \t.
+const MAX_FINDING_SUGGESTION_CHARS = 4000;
+const MAX_FINDING_AGENT_PROMPT_CHARS = 1200;
+const FINDING_AGENT_PROMPT_CONTROL = /[\u0000-\u0008\u000B-\u001F]/g;
+
 // #721: bounded reviewer-request reason. Control chars (everything at or
 // below SPACE plus DEL) collapse to one space so the reason can never break
 // single-line consumers; the cap bounds one model answer. Byte-identical to
@@ -502,6 +509,45 @@ function surfaceStreamError(response: Record<string, unknown>): void {
   throw new VerdictParseFailure("endpoint_error", `Model endpoint returned an error: ${msg}`);
 }
 
+/** #762: normalize a finding's optional one-click `suggestion`. CRLF/CR
+ * newlines are normalized first; then, when the whole value is wrapped in a
+ * single fenced code block (first non-blank line opens a run of 3+ backticks
+ * and the last non-blank line is a fence run), those fence lines are
+ * dropped, info string on the opening line included. The value is kept only
+ * if no line still begins with a run of 3+ backticks or 3+ tildes (a hostile
+ * fence could close the publish boundary's own code fence), it is non-empty,
+ * and it is within the cap — an over-cap value is rejected to absent, never
+ * truncated. Never verdict authority. */
+function normalizeFindingSuggestion(value: string): string | null {
+  const normalized = value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const lines = normalized.split("\n");
+  let first = -1;
+  let last = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i]!.trim() !== "") {
+      first = i;
+      break;
+    }
+  }
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i]!.trim() !== "") {
+      last = i;
+      break;
+    }
+  }
+  let candidate = normalized;
+  if (first !== -1 && last > first && /^`{3,}/.test(lines[first]!.trim()) && /^`{3,}$/.test(lines[last]!.trim())) {
+    candidate = lines
+      .filter((line, index) => index !== first && index !== last)
+      .join("\n")
+      .trim();
+  }
+  if (candidate === "") return null;
+  if (candidate.split("\n").some((line) => /^(`{3,}|~{3,})/.test(line.trim()))) return null;
+  if (candidate.length > MAX_FINDING_SUGGESTION_CHARS) return null;
+  return candidate;
+}
+
 const SEVERITY_RANK: Record<string, number> = { blocker: 0, major: 1, minor: 2, info: 3 };
 
 function normalizeFindings(value: unknown): NormalizedFinding[] {
@@ -545,6 +591,20 @@ function normalizeFindings(value: unknown): NormalizedFinding[] {
     const finding: NormalizedFinding = { severity, category, file, line, message: trimmedMessage };
     if (typeof item.preliminary_finding === "number" && Number.isInteger(item.preliminary_finding)) {
       finding.preliminaryFinding = item.preliminary_finding;
+    }
+    // #762: optional actionable fields. None of them carries verdict
+    // authority; they are passed through untouched for the publish boundary
+    // to validate and render.
+    if (typeof item.end_line === "number" && Number.isInteger(item.end_line) && item.end_line >= 1) {
+      finding.endLine = item.end_line;
+    }
+    if (typeof item.suggestion === "string") {
+      const suggestion = normalizeFindingSuggestion(item.suggestion);
+      if (suggestion !== null) finding.suggestion = suggestion;
+    }
+    if (typeof item.agent_prompt === "string") {
+      const agentPrompt = item.agent_prompt.replace(FINDING_AGENT_PROMPT_CONTROL, "").trim();
+      if (agentPrompt !== "" && agentPrompt.length <= MAX_FINDING_AGENT_PROMPT_CHARS) finding.agentPrompt = agentPrompt;
     }
 
     findings.push(finding);

@@ -39,6 +39,10 @@ export interface NativeReviewComment {
   line?: number;
   side?: string;
   new_position?: number;
+  /** #762: multi-line one-click suggestion range (GitHub). The Forgejo adapter
+   * drops these (it cannot express a multi-line suggestion) and re-anchors. */
+  start_line?: number;
+  start_side?: string;
 }
 
 export interface NativeReviewRequest {

@@ -84,6 +84,50 @@ function safePath(path: unknown): path is string {
   return typeof path === "string" && path.length > 0 && !path.startsWith("/") && !path.split("/").includes("..");
 }
 
+type Actionable = { start: number; end: number; replacement: string };
+
+/** #762: longest run of consecutive backticks in *content* (0 when none) —
+ * the fence length must outlast it so no inner run can close the block. */
+function longestBacktickRun(content: string): number {
+  let longest = 0;
+  let run = 0;
+  for (const ch of content) {
+    run = ch === "`" ? run + 1 : 0;
+    if (run > longest) longest = run;
+  }
+  return longest;
+}
+
+/** #762: wrap *content* in a backtick fence of `max(3, longestRun + 1)`
+ * backticks so any inner backtick run cannot break out of the fence. */
+function wrapFence(content: string, lang = ""): string {
+  const fence = "`".repeat(Math.max(3, longestBacktickRun(content) + 1));
+  return `${fence}${lang}\n${content}\n${fence}`;
+}
+
+/** #762: derive the one-click suggestion action from the finding record, or
+ * null when the suggestion is absent/blank, fence-hostile (any line whose
+ * trim() begins with 3+ backticks or 3+ tildes), or the [start..end_line]
+ * range is not fully presentable in the diff. The anchor line is already
+ * validated by the caller's existing anchor check. */
+function validateAction(rec: Finding, line: number, pathPositions: Map<number, number>): Actionable | null {
+  if (typeof rec.suggestion !== "string") return null;
+  const replacement = rec.suggestion.replace(/[\r\n]+$/, "");
+  if (replacement === "") return null;
+  for (const suggestionLine of replacement.split("\n")) {
+    if (/^(`{3,}|~{3,})/.test(suggestionLine.trim())) return null;
+  }
+  let end = line;
+  const endLine = rec.end_line;
+  if (typeof endLine === "number" && Number.isInteger(endLine) && endLine > 0 && endLine >= line) {
+    for (let candidate = line; candidate <= endLine; candidate += 1) {
+      if (!pathPositions.has(candidate)) return null;
+    }
+    end = endLine;
+  }
+  return { start: line, end, replacement };
+}
+
 /** Build anchorable comments; thread-backed findings are deduplicated (#766). */
 export function buildComments(
   findings: unknown,
@@ -93,6 +137,8 @@ export function buildComments(
 ): { comments: unknown[]; skipped: number } {
   if (!Array.isArray(findings)) return { comments: [], skipped: 0 };
   const positions = diffPositions(diffText);
+  // #762: same inert/togithub normalization `findingToBody` applies.
+  const mode = opts.linkMode === "inert" || opts.linkMode === "togithub" ? opts.linkMode : "inert";
   const comments: unknown[] = [];
   let skipped = 0;
   for (const value of findings) {
@@ -104,12 +150,37 @@ export function buildComments(
       skipped += 1;
       continue;
     }
-    const comment: Record<string, unknown> = {
-      path,
-      body: findingToBody(value, opts.linkMode ?? "inert"),
-    };
+    let body = findingToBody(value, opts.linkMode ?? "inert");
+    const comment: Record<string, unknown> = { path, body };
     if (opts.forgejoPositions) comment.new_position = positions.get(path)!.get(line)!;
     else { comment.line = line; comment.side = "RIGHT"; }
+    // #762: actionable one-click suggestion (GitHub) / degraded plain block
+    // (Forgejo) + opt-in agent-prompt section. Findings without the new keys
+    // render byte-identically to before.
+    const action = validateAction(value, line, positions.get(path)!);
+    if (action) {
+      if (opts.forgejoPositions) {
+        body +=
+          `\n\nReplacement for lines ${action.start}-${action.end} (this forge cannot apply a one-click suggestion):\n\n\`\`\`\n` +
+          redactText(action.replacement) +
+          "\n```";
+      } else {
+        body += `\n\n\`\`\`suggestion\n${redactText(action.replacement)}\n\`\`\``;
+        comment.line = action.end;
+        if (action.end > action.start) {
+          comment.start_line = action.start;
+          comment.start_side = "RIGHT";
+        }
+      }
+    }
+    if (typeof value.agent_prompt === "string" && value.agent_prompt.trim() !== "") {
+      const section =
+        `\n\n<details><summary>Suggested agent prompt</summary>\n\n` +
+        wrapFence(value.agent_prompt) +
+        "\n\n</details>";
+      body += sanitizeMarkdown(redactText(section), mode);
+    }
+    comment.body = body;
     comments.push(comment);
     if (comments.length >= maxComments) break;
   }

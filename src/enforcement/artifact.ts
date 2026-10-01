@@ -25,6 +25,10 @@ export interface ArtifactFinding {
   message: string;
   /** Specialist provenance (#624-era), passed through by the parser. */
   preliminary_finding?: number;
+  /** #762: optional actionable fields; never verdict authority. */
+  end_line?: number;
+  suggestion?: string;
+  agent_prompt?: string;
   /** Set only on findings re-emitted from unresolved review threads (#766):
    * the publish step skips inlining these — the thread already exists. */
   thread_id?: string;
@@ -84,6 +88,15 @@ function findingToArtifact(finding: NormalizedFinding): ArtifactFinding {
   };
   if (finding.preliminaryFinding !== undefined) {
     artifact.preliminary_finding = finding.preliminaryFinding;
+  }
+  if (finding.endLine !== undefined) {
+    artifact.end_line = finding.endLine;
+  }
+  if (finding.suggestion !== undefined) {
+    artifact.suggestion = finding.suggestion;
+  }
+  if (finding.agentPrompt !== undefined) {
+    artifact.agent_prompt = finding.agentPrompt;
   }
   return artifact;
 }

@@ -101,6 +101,15 @@ export interface NormalizedFinding {
   line: number | null;
   message: string;
   preliminaryFinding?: number;
+  /** #762: inclusive last line of the affected range; absent means the range
+   * is the single `line`. Never verdict authority. */
+  endLine?: number;
+  /** #762: exact replacement text for the file's lines [line..endLine];
+   * rendered one-click where the forge supports it. Never verdict authority. */
+  suggestion?: string;
+  /** #762: a concise coding-agent prompt describing the fix, presented
+   * separately. Never verdict authority. */
+  agentPrompt?: string;
 }
 
 /**

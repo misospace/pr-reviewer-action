@@ -554,3 +554,114 @@ test("human_review_dispositions bounds, tri-state by key presence, no alias tabl
   assert.equal(nonList.humanReviewDispositionsEmitted, true);
   assert.equal(nonList.humanReviewDispositions, null);
 });
+
+test("#762: actionable finding fields carry through camelCase without touching severity or verdict", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "request_changes",
+    review_markdown: "## Findings",
+    findings: [
+      {
+        severity: "major", category: "bug", file: "src/a.py", line: 10, message: "off by one",
+        end_line: 12,
+        suggestion: "x = 1\ny = 2",
+        agent_prompt: "Fix the off-by-one in src/a.py lines 10-12.",
+      },
+    ],
+  })));
+  assert.equal(verdict.verdict, "request_changes");
+  assert.deepEqual(verdict.findings, [
+    {
+      severity: "major", category: "bug", file: "src/a.py", line: 10, message: "off by one",
+      endLine: 12,
+      suggestion: "x = 1\ny = 2",
+      agentPrompt: "Fix the off-by-one in src/a.py lines 10-12.",
+    },
+  ]);
+});
+
+test("#762: a fenced suggestion is unwrapped to its inner content", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "x",
+    findings: [
+      { message: "fix this", suggestion: "```python\nfixed = True\n```" },
+      { message: "crlf fence", suggestion: "```\r\nfixed = True\r\n```" },
+    ],
+  })));
+  assert.deepEqual(verdict.findings, [
+    { severity: "info", category: "other", file: null, line: null, message: "fix this", suggestion: "fixed = True" },
+    { severity: "info", category: "other", file: null, line: null, message: "crlf fence", suggestion: "fixed = True" },
+  ]);
+});
+
+test("#762: a suggestion carrying a ``` or ~~~ line is rejected to absent; the finding remains", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "x",
+    findings: [
+      { severity: "major", message: "keep me", suggestion: "line one\n```bash\nrm -rf /\n```" },
+      { severity: "minor", message: "keep me too", suggestion: "a\n~~~\nb" },
+      { message: "unfenced stays", suggestion: "plain\ntext" },
+    ],
+  })));
+  assert.equal(verdict.findings.length, 3);
+  assert.equal(verdict.findings[0]!.severity, "major");
+  assert.equal(verdict.findings[0]!.message, "keep me");
+  assert.equal("suggestion" in verdict.findings[0]!, false);
+  assert.equal(verdict.findings[1]!.message, "keep me too");
+  assert.equal("suggestion" in verdict.findings[1]!, false);
+  assert.equal(verdict.findings[2]!.suggestion, "plain\ntext");
+});
+
+test("#762: an over-cap suggestion is rejected to absent; a non-string suggestion is ignored", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "x",
+    findings: [
+      { message: "over cap", suggestion: "a".repeat(4001) },
+      { message: "at cap", suggestion: "b".repeat(4000) },
+      { message: "non-string", suggestion: 42 },
+      { message: "null suggestion", suggestion: null },
+    ],
+  })));
+  assert.equal(verdict.findings.length, 4);
+  assert.equal("suggestion" in verdict.findings[0]!, false);
+  assert.equal(verdict.findings[1]!.suggestion, "b".repeat(4000));
+  assert.equal("suggestion" in verdict.findings[2]!, false);
+  assert.equal("suggestion" in verdict.findings[3]!, false);
+});
+
+test("#762: end_line keeps valid integers and drops 0/negative/non-integer/non-number", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "x",
+    findings: [
+      { message: "valid", end_line: 7 },
+      { message: "zero", end_line: 0 },
+      { message: "negative", end_line: -3 },
+      { message: "float", end_line: 2.5 },
+      { message: "string", end_line: "8" },
+      { message: "bool", end_line: true },
+    ],
+  })));
+  assert.equal(verdict.findings.length, 6);
+  assert.equal(verdict.findings[0]!.endLine, 7);
+  for (let i = 1; i < verdict.findings.length; i++) {
+    assert.equal("endLine" in verdict.findings[i]!, false, `finding ${i}`);
+  }
+});
+
+test("#762: a finding without the new keys serializes without them (parity)", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "x",
+    findings: [{ severity: "minor", category: "style", file: "a.py", line: 3, message: "old shape" }],
+  })));
+  assert.deepEqual(verdict.findings, [
+    { severity: "minor", category: "style", file: "a.py", line: 3, message: "old shape" },
+  ]);
+  const finding = verdict.findings[0]!;
+  assert.equal("endLine" in finding, false);
+  assert.equal("suggestion" in finding, false);
+  assert.equal("agentPrompt" in finding, false);
+});
