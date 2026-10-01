@@ -94,5 +94,7 @@ jobs:
           ci-timeout-sec: "600"
           tool-allowed-gh-api-repos: "*"
           claim-falsification: "true"
+          equivalent-paths: "true"
+          requirement-trace: "true"
           publish-mode: review_verdict
           allow-approve: "true"
