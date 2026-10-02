@@ -53,19 +53,23 @@ export function appendStepSummary(env: NodeJS.ProcessEnv, line: string): void {
   appendFileSync(file, `${line}\n`);
 }
 
-/** Render untrusted inline text as an inert Markdown code span: the
- * delimiter is one backtick longer than the longest run in the content —
- * the repo-wide fence-safe strategy (e.g. `src/context/pr-thread.ts`,
- * `src/context/repo-map.ts`) — so embedded backticks, link syntax, or
- * emphasis characters can neither close the span nor render as Markdown.
+/** Render untrusted inline text as an inert Markdown code span, following
+ * the repo-wide fence-safe strategy (e.g. `src/context/repo-map.ts`
+ * `codeSpan`): the delimiter is one backtick longer than the longest run in
+ * the content, so embedded backticks, link syntax, or emphasis characters
+ * can neither close the span nor render as Markdown. Padding spaces keep a
+ * boundary backtick from merging into the delimiter — a leading backtick
+ * plus the generated fence would otherwise form a longer opening run,
+ * leaving the span unterminated and the payload exposed as live Markdown.
  * Control characters are flattened first: the step summary line must stay
  * one line. */
 function inlineCodeValue(text: string): string {
   const flat = text.replace(/[\u0000-\u001f\u007f]+/g, " ");
-  const runs = flat.match(/`+/g);
-  const longest = runs ? Math.max(...runs.map((run) => run.length)) : 0;
-  const fence = "`".repeat(longest + 1);
-  return `${fence}${flat}${fence}`;
+  if (!flat.includes("`")) return `\`${flat}\``;
+  let maxRun = 0;
+  for (const run of flat.match(/`+/g) ?? []) maxRun = Math.max(maxRun, run.length);
+  const delim = "`".repeat(maxRun + 1);
+  return `${delim} ${flat} ${delim}`;
 }
 
 /** The label a `labeled` event carries (GitHub sends `{ name }`). Moved to
