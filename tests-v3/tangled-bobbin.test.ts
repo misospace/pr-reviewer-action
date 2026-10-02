@@ -17,6 +17,7 @@ interface Call {
   nsid: string;
   query: Record<string, string>;
   auth: string | null;
+  body: string | null;
 }
 
 function makeFetch(
@@ -29,7 +30,8 @@ function makeFetch(
     const query: Record<string, string> = {};
     for (const [k, v] of url.searchParams.entries()) query[k] = v;
     const headers = new Headers(init?.headers);
-    calls.push({ url, nsid, query, auth: headers.get("authorization") });
+    const body = init?.body === undefined || init?.body === null ? null : String(init.body);
+    calls.push({ url, nsid, query, auth: headers.get("authorization"), body });
     return responder(url, init);
   };
   return { fetchImpl, calls };
@@ -558,11 +560,21 @@ test("resolveTangledPull (list): pagination is bounded by MAX_PAGES", async () =
 // ── credential transport ─────────────────────────────────────────────────
 
 test("resolveTangledPull: the token travels only as Authorization to the Bobbin origin", async () => {
+  const secret = "s3cr3t-token-value";
+  const token = `Bearer ${secret}`;
   const get = makeFetch(() => json(GET_PULL_OK));
-  await resolveTangledPull(makeCtx(), { pullUri: PULL_URI, fetchImpl: get.fetchImpl, token: "Bearer xyz" });
-  assert.equal(get.calls[0]!.auth, "Bearer xyz");
+  await resolveTangledPull(makeCtx(), { pullUri: PULL_URI, fetchImpl: get.fetchImpl, token });
+  assert.equal(get.calls[0]!.auth, token);
 
   const list = makeFetch(() => json(LIST_ONE));
-  await resolveTangledPull(makeCtx(), { fetchImpl: list.fetchImpl, token: "Bearer xyz" });
-  assert.equal(list.calls[0]!.auth, "Bearer xyz");
+  await resolveTangledPull(makeCtx(), { fetchImpl: list.fetchImpl, token });
+  assert.equal(list.calls[0]!.auth, token);
+
+  // Negative: the credential must never leak into the URL, a query parameter,
+  // or the body — only the Authorization header (defense in depth).
+  for (const call of [...get.calls, ...list.calls]) {
+    assert.doesNotMatch(call.url.toString(), /s3cr3t-token-value/, "token must not appear in the request URL");
+    assert.ok(!Object.values(call.query).some((v) => v.includes(secret)), "token must not appear in a query parameter");
+    assert.ok(call.body === null || !call.body.includes(secret), "token must not appear in the request body");
+  }
 });
