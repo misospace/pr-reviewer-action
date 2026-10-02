@@ -16,6 +16,7 @@ import type { ChangedFile, IssueLabel, LinkedIssue } from "../context/types.js";
 /** The authoritative pr_kind enumeration (order = documentation order). */
 export const PR_KINDS: readonly string[] = [
   "renovate_digest_only",
+  "image_digest_only",
   "dependency_upgrade",
   "app_code",
   "k8s_manifest",
@@ -50,6 +51,14 @@ const RENOVATE_DIGEST_FILE_PATTERNS: readonly RegExp[] = [
   /npm-shrinkwrap\.json/,
   /yarn\.lock/,
   /pnpm-lock\.yaml/,
+];
+
+/** Manifest files that can pin a container image by digest: Kubernetes/Helm/
+ * compose YAML and Dockerfiles (#909). */
+const IMAGE_DIGEST_FILE_PATTERNS: readonly RegExp[] = [
+  /\.ya?ml$/i,
+  /(^|\/)Dockerfile(\..+)?$/i,
+  /\.dockerfile$/i,
 ];
 
 /** Dependency-related files (lockfiles, manifests). */
@@ -926,8 +935,8 @@ export function evaluatePathHandlingSignals(
 
 /** Path-handling kind rule: fires only when the signal model found a
  * material (non-discounted) untrusted-path surface. */
-function isPathHandling(filenames: readonly string[], diffText: string): boolean {
-  return evaluatePathHandlingSignals(filenames, diffText).fired.length > 0;
+function isPathHandling(files: readonly ChangedFile[], diffText: string): boolean {
+  return evaluatePathHandlingSignals(files.map((file) => file.filename), diffText).fired.length > 0;
 }
 
 /** Secret handling changes. */
@@ -1062,9 +1071,15 @@ export function classificationToArtifact(classification: PRClassification): Reco
 
 /** Classification is a declarative table evaluated top-to-bottom; the FIRST
  * matching rule wins, so table order is precedence (most-specific first). */
-type KindPredicate = (filenames: string[], diffText: string) => boolean;
+type KindPredicate = (
+  files: readonly ChangedFile[],
+  diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+) => boolean;
 const KIND_RULES: readonly { kind: string; matches: KindPredicate }[] = [
   { kind: "renovate_digest_only", matches: isRenovateDigestOnly },
+  { kind: "image_digest_only", matches: isImageDigestOnly },
   { kind: "dependency_upgrade", matches: isDependencyUpgrade },
   { kind: "k8s_manifest", matches: filenameMatches(K8S_PATTERNS) },
   // secret handling before auth (more specific)
@@ -1092,7 +1107,7 @@ const KIND_RULES: readonly { kind: string; matches: KindPredicate }[] = [
 export const DEFAULT_PR_KIND = "app_code";
 
 function filenameMatches(patterns: readonly RegExp[]): KindPredicate {
-  return (filenames) => filenames.some((name) => matchesAny(name, patterns));
+  return (files) => files.some((file) => matchesAny(file.filename, patterns));
 }
 
 /** True only when EVERY changed file is a known lockfile — guards
@@ -1110,23 +1125,210 @@ function hasVersionBump(diffText: string): boolean {
   return false;
 }
 
-function isRenovateDigestOnly(filenames: string[], diffText: string): boolean {
-  return allFilesAreLockfiles(filenames) && !hasVersionBump(diffText);
+function isRenovateDigestOnly(files: readonly ChangedFile[], diffText: string): boolean {
+  return allFilesAreLockfiles(files.map((file) => file.filename)) && !hasVersionBump(diffText);
+}
+
+/** True only when EVERY changed file is a modified YAML/Dockerfile image
+ * manifest. A rename, copy, addition, or removal changes the manifest's
+ * location/shape and must not take the digest-only path (#909). */
+function allFilesAreImageManifests(files: readonly ChangedFile[]): boolean {
+  if (files.length === 0) return false;
+  return files.every((file) => file.status === "modified" && matchesAny(file.filename, IMAGE_DIGEST_FILE_PATTERNS));
+}
+
+/** Git metadata lines that signal a rename, copy, or mode change — a
+ * structural change to the manifest, not a digest refresh. */
+const STRUCTURAL_DIFF_LINE_RE =
+  /^(?:old mode|new mode|rename from|rename to|copy from|copy to|similarity index|dissimilarity index|new file mode|deleted file mode)\b/;
+
+/** `prioritizeDiff` evidence-completeness markers (src/corpus/diff-priority.ts).
+ * Their presence means the supplied diff is missing changed lines, so no
+ * "only the digest changed" claim is safe. The classifier normally receives the
+ * full diff for this rule, but a caller that only has the truncated context
+ * diff must fail closed rather than reason over incomplete evidence (#909). */
+const DIFF_TRUNCATION_MARKER_RE = /…\[diff truncated|…\[file diff clipped:|Files omitted from this diff \(/;
+
+/** Binary diffs carry no `+`/`-` lines, so a binary (or otherwise unparsed)
+ * manifest would contribute nothing to the line reconciliation while hiding a
+ * real change. Both git binary forms fail closed (#909). */
+const BINARY_DIFF_LINE_RE = /^(?:Binary files .* differ|GIT binary patch)$/;
+
+/** An allowed image-reference line form, optionally behind a YAML
+ * `image:`/`tag:` key or a Dockerfile `FROM [--platform=...]` directive (with
+ * an optional trailing `AS <stage>`). Captures the `@sha256:` digest; every
+ * other byte of the line (key, indentation, platform, stage, ref) must stay
+ * identical across a paired removal and addition. */
+const IMAGE_DIGEST_LINE_RE =
+  /^\s*(?:FROM\s+(?:--platform=\S+\s+)?|(?:image|tag)\s*:\s*)?["']?[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:([0-9a-fA-F]{64})["']?(?:\s+AS\s+\S+)?\s*$/i;
+
+const DIGEST_TOKEN_RE = /sha256:[0-9a-fA-F]{64}/;
+
+/** Parse a changed line (without its diff `+`/`-` prefix) into a normalized
+ * form with the digest blanked out, plus the digest itself. Null when the line
+ * is not an allowed image-reference form. */
+function parseImageDigestLine(content: string): { normalized: string; digest: string } | null {
+  const match = IMAGE_DIGEST_LINE_RE.exec(content);
+  if (match === null) return null;
+  // Exactly one digest token per line. The anchored regex admits a single
+  // `@sha256:` (the ref charset excludes `@`), but a second `sha256:<hex>`
+  // could sit in the optional `AS <stage>` tail; blanking an ambiguous token
+  // would let a non-digest difference normalize away. Fail closed instead.
+  if ((content.match(/sha256:[0-9a-fA-F]{64}/g) ?? []).length !== 1) return null;
+  return {
+    normalized: content.replace(DIGEST_TOKEN_RE, "sha256:<DIGEST>"),
+    digest: match[1]!.toLowerCase(),
+  };
+}
+
+/** Validate one contiguous change block — a run of removed lines immediately
+ * followed by added lines, with no context/header line between. Each removed
+ * line must pair with an added line at the same position whose only difference
+ * is the digest. Returns whether any paired digest differed, or null when the
+ * block is not a pure digest refresh. */
+function evaluateDigestBlock(
+  removed: readonly { normalized: string; digest: string }[],
+  added: readonly { normalized: string; digest: string }[],
+): boolean | null {
+  if (removed.length === 0 || removed.length !== added.length) return null;
+  let digestChanged = false;
+  for (let index = 0; index < removed.length; index += 1) {
+    const before = removed[index]!;
+    const after = added[index]!;
+    // Everything except the digest — key, indentation, platform, stage, ref —
+    // must be byte-identical, which is what proves "only the digest changed".
+    if (before.normalized !== after.normalized) return null;
+    if (before.digest !== after.digest) digestChanged = true;
+  }
+  return digestChanged;
+}
+
+/** Renovate image-digest-only refresh: every changed line is a single image
+ * reference whose repository and tag are unchanged and only the `@sha256:`
+ * digest differs (YAML `image:`/`tag:`, compose, Dockerfile `FROM`). A mixed
+ * diff — any other changed line, or any other change around the digest — is
+ * left to the existing rules (notably k8s_manifest), which would otherwise
+ * demand a check a digest-only change cannot answer (#909).
+ *
+ * Removed and added lines are paired within each contiguous change block
+ * (a run of removals immediately followed by additions, delimited by context,
+ * hunk headers, or file headers), so an image cannot move between hunks or
+ * files and still count as a digest refresh. Comparing refs globally would
+ * accept either a digest swap or a relocation.
+ *
+ * Parsed against `fullDiffText` — the complete PR diff — because `diffText` is
+ * the prioritized/truncated context diff and can omit functional changes
+ * (#909). A truncation marker in the supplied diff fails closed. */
+function isImageDigestOnly(
+  files: readonly ChangedFile[],
+  _diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+): boolean {
+  if (!allFilesAreImageManifests(files)) return false;
+  let removed: { normalized: string; digest: string }[] = [];
+  let added: { normalized: string; digest: string }[] = [];
+  let sawBlock = false;
+  let anyDigestChanged = false;
+  let totalRemoved = 0;
+  let totalAdded = 0;
+
+  const flushBlock = (): boolean => {
+    if (removed.length === 0 && added.length === 0) return true;
+    const changed = evaluateDigestBlock(removed, added);
+    if (changed === null) return false;
+    sawBlock = true;
+    anyDigestChanged = anyDigestChanged || changed;
+    removed = [];
+    added = [];
+    return true;
+  };
+
+  for (const line of fullDiffText.split("\n")) {
+    // Rename/copy/mode metadata is a structural change, never a digest
+    // refresh — fail closed even if the file status looks like a plain edit.
+    if (STRUCTURAL_DIFF_LINE_RE.test(line)) return false;
+    // A truncation marker means changed lines are missing: not complete
+    // evidence, so never claim digest-only.
+    if (DIFF_TRUNCATION_MARKER_RE.test(line)) return false;
+    // A binary diff has no `+`/`-` lines, so it would otherwise vanish from
+    // the line reconciliation below.
+    if (BINARY_DIFF_LINE_RE.test(line)) return false;
+    const isRemoved = line.startsWith("-") && !line.startsWith("---");
+    const isAdded = line.startsWith("+") && !line.startsWith("+++");
+    if (!isRemoved && !isAdded) {
+      // Context line, hunk header (`@@`), file header, or any other line:
+      // the current change block is complete.
+      if (!flushBlock()) return false;
+      continue;
+    }
+    const parsed = parseImageDigestLine(line.slice(1));
+    if (parsed === null) return false;
+    if (isRemoved) {
+      // Git emits a block's removals before its additions; a removal after an
+      // addition means the block boundary was mis-detected, so fail closed.
+      if (added.length > 0) return false;
+      removed.push(parsed);
+      totalRemoved += 1;
+    } else {
+      added.push(parsed);
+      totalAdded += 1;
+    }
+  }
+  if (!flushBlock()) return false;
+  if (!sawBlock || !anyDigestChanged) return false;
+  return evidenceIsComplete(files, authoritativeChangedFiles, totalAdded, totalRemoved);
+}
+
+/** Prove the supplied file list and diff are complete before claiming every
+ * changed line is digest-only. Both platform reads can be incomplete — GitHub's
+ * file listing is a single capped page and the raw diff carries no completeness
+ * proof — so reconcile the authoritative changed-file count and the per-file
+ * line totals against the diff actually parsed. Missing metadata or any count
+ * mismatch fails closed (#909). */
+function evidenceIsComplete(
+  files: readonly ChangedFile[],
+  authoritativeChangedFiles: number | undefined,
+  totalAdded: number,
+  totalRemoved: number,
+): boolean {
+  if (!Number.isInteger(authoritativeChangedFiles) || authoritativeChangedFiles !== files.length) {
+    return false;
+  }
+  let expectedAdded = 0;
+  let expectedRemoved = 0;
+  for (const file of files) {
+    const additions = file.additions;
+    const deletions = file.deletions;
+    if (!Number.isInteger(additions) || !Number.isInteger(deletions)) return false;
+    // A zero-line side contributes nothing to the reconciliation and can hide
+    // a binary or otherwise unparsed change, so a pure digest refresh must move
+    // at least one line on each side of every file.
+    if (additions! <= 0 || deletions! <= 0) return false;
+    expectedAdded += additions!;
+    expectedRemoved += deletions!;
+  }
+  return totalAdded === expectedAdded && totalRemoved === expectedRemoved;
 }
 
 /** A dependency/manifest file changed, but NOT a k8s manifest (which happens
  * to reference versions and must classify as k8s_manifest instead). */
-function isDependencyUpgrade(filenames: string[], _diffText: string): boolean {
+function isDependencyUpgrade(files: readonly ChangedFile[], _diffText: string): boolean {
+  const filenames = files.map((file) => file.filename);
   const hasDepFile = filenames.some((name) => matchesAny(name, DEPENDENCY_PATTERNS));
   if (!hasDepFile) return false;
   const hasK8s = filenames.some((name) => matchesAny(name, K8S_PATTERNS));
   return !hasK8s;
 }
 
-function classifyPrKind(files: readonly ChangedFile[], diffText: string): string {
-  const filenames = files.map((file) => file.filename);
+function classifyPrKind(
+  files: readonly ChangedFile[],
+  diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+): string {
   for (const rule of KIND_RULES) {
-    if (rule.matches(filenames, diffText)) return rule.kind;
+    if (rule.matches(files, diffText, fullDiffText, authoritativeChangedFiles)) return rule.kind;
   }
   return DEFAULT_PR_KIND;
 }
@@ -1232,6 +1434,7 @@ function detectRiskFlags(
  * app_code PR still pulls in the auth checklist (#157). */
 const KIND_CHECKS: Readonly<Record<string, readonly string[]>> = {
   renovate_digest_only: ["verify no functional changes beyond lockfile hashes"],
+  image_digest_only: ["verify only image digests changed; repository and tag unchanged"],
   dependency_upgrade: [
     "check for breaking API changes in updated dependencies",
     "run full test suite after upgrade",
@@ -1409,6 +1612,15 @@ function linkedMetadataUncertainty(metadataStatus: unknown): { uncertain: boolea
 export interface ClassifyInput {
   prFiles: readonly ChangedFile[];
   diffText?: string | undefined;
+  /** The complete PR diff, when available. The deterministic image-digest check
+   * (#909) must see every changed line; the primary `diffText` is the
+   * prioritized/truncated context diff and can omit functional changes. Falls
+   * back to `diffText`. */
+  fullDiffText?: string | undefined;
+  /** The platform PR object's authoritative `changed_files` count. The
+   * image-digest check reconciles the supplied file list and diff against it
+   * and fails closed when either is short (#909). */
+  authoritativeChangedFiles?: number | undefined;
   linkedIssues?: readonly LinkedIssue[] | undefined;
   maxSummaryFiles?: number | undefined;
   metadataStatus?: unknown;
@@ -1417,7 +1629,15 @@ export interface ClassifyInput {
 /** Run deterministic classification on a PR. Pure and synchronous — no model
  * calls, no network, no command execution. */
 export function classifyPr(input: ClassifyInput): PRClassification {
-  const { prFiles, diffText = "", linkedIssues = [], maxSummaryFiles = 50, metadataStatus = null } = input;
+  const {
+    prFiles,
+    diffText = "",
+    fullDiffText,
+    authoritativeChangedFiles,
+    linkedIssues = [],
+    maxSummaryFiles = 50,
+    metadataStatus = null,
+  } = input;
 
   const uncertainty = linkedMetadataUncertainty(metadataStatus);
 
@@ -1433,7 +1653,7 @@ export function classifyPr(input: ClassifyInput): PRClassification {
     discounted: pathEvaluation.discounted,
   };
 
-  const prKind = classifyPrKind(prFiles, diffText);
+  const prKind = classifyPrKind(prFiles, diffText, fullDiffText ?? diffText, authoritativeChangedFiles);
   const { flags, flagsWithFiles } = detectRiskFlags(prFiles, diffText, linkedIssues);
   const mustCheck = buildMustCheck(prKind, flags, flagsWithFiles);
 

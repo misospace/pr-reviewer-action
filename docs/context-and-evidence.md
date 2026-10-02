@@ -15,7 +15,7 @@ irrelevant context.
 
 | Field | Description |
 |-------|-------------|
-| `pr_kind` | One of `renovate_digest_only`, `dependency_upgrade`, `app_code`, `k8s_manifest`, `auth_changes`, `public_route_changes`, `file_serving_changes`, `path_handling_changes`, `secret_handling_changes`, `db_or_migration_changes` |
+| `pr_kind` | One of `renovate_digest_only`, `image_digest_only`, `dependency_upgrade`, `app_code`, `k8s_manifest`, `auth_changes`, `public_route_changes`, `file_serving_changes`, `path_handling_changes`, `secret_handling_changes`, `db_or_migration_changes` |
 | `risk_flags` | Risk indicators: `linked_security_issue`, `linked_audit_issue`, `linked_priority_p0`, `linked_priority_p1`, `file_serving_changes`, `path_handling_changes`, `auth_changes`, `secret_handling_changes` |
 | `changed_files_summary` | Changed file paths, truncated to 50 |
 | `linked_issue_labels` | Labels from linked issues (GitHub labels + Linear state), merged into `linked-issues.json` |

@@ -10,7 +10,7 @@ In `auto`, role selection is a pure lookup over classification data the pipeline
 
 `pr_kind` is a single value from a fixed, precedence-ordered rule table (first match wins), falling back to `app_code` when nothing else matches:
 
-`renovate_digest_only`, `dependency_upgrade`, `k8s_manifest`, `secret_handling_changes`, `db_or_migration_changes`, `auth_changes`, `public_route_changes`, `file_serving_changes`, `path_handling_changes`, `app_code` (default).
+`renovate_digest_only`, `image_digest_only`, `dependency_upgrade`, `k8s_manifest`, `secret_handling_changes`, `db_or_migration_changes`, `auth_changes`, `public_route_changes`, `file_serving_changes`, `path_handling_changes`, `app_code` (default).
 
 `risk_flags` is a set of zero or more additional signals: `linked_security_issue`, `linked_audit_issue`, `linked_priority_p0`, `linked_priority_p1` (from linked-issue labels, or Linear priority 1/2), plus `file_serving_changes`, `path_handling_changes`, `auth_changes`, `secret_handling_changes` when those patterns match the diff content as well as (or instead of) the filename.
 
@@ -26,10 +26,11 @@ A PR can match several lanes and select several roles. There's one additional, i
 
 ### Zero-selection gates
 
-Zero selection only ever happens through one of two explicit, documented trivial gates — both require `risk_flags` to be empty:
+Zero selection only ever happens through one of three explicit, documented trivial gates — all require `risk_flags` to be empty:
 
 1. **`renovate_digest_only` with no risk flags** — a lockfile digest bump with no version change and no risk signal.
-2. **`app_code` with no risk flags, where every changed file is in the enumerated trivial class** — `docs/`, prose extensions (`.md`, `.rst`, `.txt`, ...), license/contributor/bot-config files, and a specific inert subset of `.github/` (issue templates, `CODEOWNERS`, `dependabot.yml`, `FUNDING.yml`). This gate only applies when the changed-file list is under the classifier's 50-file summary cap — a capped (truncated) list can't prove every file is trivial, so it doesn't fire. Unknown `.github/**` content (workflows, actions, anything not explicitly enumerated) is treated as non-trivial on purpose.
+2. **`image_digest_only` with no risk flags** — an image-reference-only change (YAML `image:`/`tag:`, compose, Dockerfile `FROM`) where every changed line keeps its repository and tag and only the `@sha256:` digest differs.
+3. **`app_code` with no risk flags, where every changed file is in the enumerated trivial class** — `docs/`, prose extensions (`.md`, `.rst`, `.txt`, ...), license/contributor/bot-config files, and a specific inert subset of `.github/` (issue templates, `CODEOWNERS`, `dependabot.yml`, `FUNDING.yml`). This gate only applies when the changed-file list is under the classifier's 50-file summary cap — a capped (truncated) list can't prove every file is trivial, so it doesn't fire. Unknown `.github/**` content (workflows, actions, anything not explicitly enumerated) is treated as non-trivial on purpose.
 
 ### Unknown kinds and conservative fallback
 
@@ -46,6 +47,7 @@ Any time the classifier gives no deterministic basis to skip a role, auto fails 
 | Docs-only edit (`docs/foo.md`, `README.md`) | `app_code` (no other rule matches) | none | **Zero selection** — docs/meta-only trivial gate |
 | Edit to `src/auth/login.ts` | `auth_changes` | `auth_changes` | `security` selected; `correctness`/`tests` skipped unless the diff is also substantial (#871) |
 | Renovate PR bumping only `package-lock.json` hashes | `renovate_digest_only` | none | **Zero selection** — digest-only trivial gate |
+| Renovate PR refreshing only an image `@sha256:` digest in a HelmRelease | `image_digest_only` | none | **Zero selection** — image-digest-only trivial gate |
 | New 300-line non-test module, e.g. `src/platform/foo.ts` | `app_code` | none | `correctness` selected (direct `app_code` match, reinforced by the #871 substantial-change force-on); `security`/`tests` skipped |
 
 ## Where to see the decision
