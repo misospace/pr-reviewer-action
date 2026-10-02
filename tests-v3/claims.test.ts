@@ -438,6 +438,43 @@ test("#898: flag-token enumeration matches snake/camel variants and digit-run ke
   assert.deepEqual(shim!.items, ["src/shim.ts:V2_ONLY"]);
 });
 
+test("#898 review: a mixed body keeps every invariant deterministically — 'all callers' is in the vocabulary", () => {
+  const scan = extractClaimsDeterministic({
+    prBody: "Benign output is byte-identical. Updates all callers of the removed helper.",
+    diffText: "",
+  });
+  assert.equal(scan.claims.length, 2, JSON.stringify(scan.claims.map((c) => c.claim)));
+  assert.ok(scan.claims.some((c) => c.claim.includes("byte-identical")));
+  assert.ok(scan.claims.some((c) => c.claim.includes("all callers of the removed helper")));
+});
+
+test("#898 review: a header-attributed matching line still yields its item occurrence, degraded to file:L<n>", () => {
+  // The ordinary existing-function diff shape: the signature sits in the
+  // hunk header, the changed line in the body. The header's symbol guess is
+  // distrusted, but the occurrence itself must survive as a plain line
+  // anchor — dropping it removes exactly the item a body claim is about.
+  const prBody = "Every pull resolution is cross-checked against `ctx.repoDid` before it is trusted.";
+  const diffText = [
+    "diff --git a/src/auth.ts b/src/auth.ts",
+    "@@ -40,6 +40,7 @@ function getPull(ctx: Ctx) {",
+    "+  if (value.repo !== ctx.repoDid) throw new Error(\"mismatch\");",
+  ].join("\n");
+  const result = extractClaimsDeterministic({ prBody, diffText });
+  const claim = result.claims.find((c) => /cross-checked/.test(c.claim));
+  assert.ok(claim, JSON.stringify(result.claims.map((c) => c.claim)));
+  assert.deepEqual(claim!.items, ["src/auth.ts:L40"]);
+  assert.ok(!claim!.items.some((item) => item.includes("getPull")), "the header symbol must not be trusted for items");
+});
+
+test("#898 review: a human automerge policy is a claim, not bot boilerplate", () => {
+  const result = extractClaimsDeterministic({
+    prBody: "Automerge must never run for major-version updates.",
+    diffText: "",
+  });
+  assert.equal(result.claims.length, 1, JSON.stringify(result.claims.map((c) => c.claim)));
+  assert.match(result.claims[0]!.claim, /Automerge must never run for major-version updates/);
+});
+
 // ── rendering ────────────────────────────────────────────────────────────
 
 function claim(overrides: Partial<Claim> = {}): Claim {
@@ -547,17 +584,20 @@ function stubRequestFn(response: unknown): SpecialistRequestFn {
   return async (): Promise<SpecialistTransportOutcome> => ({ ok: true, raw: response });
 }
 
-test("deterministic hit with a PR-body claim never calls the model fallback", async () => {
-  const called = { count: 0 };
+test("#898 review: the bounded model pass runs even when the scan found body claims — no adequacy proxy", async () => {
+  // Jory's mixed-body counterexample: one recognized sentence ("byte-identical")
+  // must never suppress the pass that could read "all callers" and anything
+  // else the vocabulary misses.
+  let calls = 0;
   const requestFn: SpecialistRequestFn = async () => {
-    called.count += 1;
-    throw new Error("must not be called");
+    calls += 1;
+    return { ok: true, raw: { choices: [{ message: { content: JSON.stringify({ claims: [{ claim: "the tool loop fails closed on unset budgets" }] }) } }] } };
   };
   const result = await runClaimFalsificationPass({
     title: "t",
-    body: "Benign output is byte-identical to the reference implementation.",
+    body: "Benign output is byte-identical. Updates all callers of the removed helper.",
     files: [],
-    diff: "diff --git a/x.ts b/x.ts\n@@ -1,1 +1,2 @@\n+// only valid tokens may proceed here.\n+function f() {}\n",
+    diff: "diff --git a/x.ts b/x.ts\n@@ -1,1 +1,2 @@\n+// function f only accepts validated input.\n+function f() {}\n",
     model: {
       config: {
         apiFormat: "openai", model: "m", baseUrl: "http://x", apiKey: "k",
@@ -567,22 +607,24 @@ test("deterministic hit with a PR-body claim never calls the model fallback", as
       requestFn,
     },
   });
-  assert.equal(called.count, 0);
+  assert.equal(calls, 1);
   assert.equal(result.status, "ok");
-  assert.ok(result.artifact.claims.some((c) => c.source === "pr_body"));
+  assert.equal(result.artifact.method, "deterministic+model");
+  const texts = result.artifact.claims.map((c) => c.claim);
+  assert.ok(texts.some((t) => t.includes("byte-identical")), JSON.stringify(texts));
+  assert.ok(texts.some((t) => t.includes("all callers of the removed helper")), JSON.stringify(texts));
+  assert.ok(texts.some((t) => t.includes("fails closed on unset budgets")), JSON.stringify(texts));
 });
 
-test("#898: deterministic hit without a PR-body claim runs the model pass and merges, deduplicated", async () => {
-  // "all callers" is exactly the invariant vocabulary the keyword regex
-  // misses — the model pass exists to read what the scan cannot.
+test("#898: model claims merge after deterministic claims, deduplicated by normalized text", async () => {
   const openai = {
     choices: [{
       message: {
         content: JSON.stringify({
           claims: [
-            { claim: "Benign output is byte-identical" },
             { claim: "  function   f only   accepts validated input. " },
             { claim: "updates all callers of the removed helper" },
+            { claim: "Benign output is byte-identical" },
           ],
         }),
       },
@@ -604,9 +646,11 @@ test("#898: deterministic hit without a PR-body claim runs the model pass and me
   });
   assert.equal(result.status, "ok");
   assert.equal(result.artifact.method, "deterministic+model");
+  // The two model restatements dedupe against the deterministic claims
+  // (case/whitespace/trailing punctuation); only the new one is appended.
   assert.equal(result.artifact.claims.length, 3, JSON.stringify(result.artifact.claims.map((c) => c.claim)));
-  assert.equal(result.artifact.claims[0]!.source, "diff");
-  assert.ok(result.artifact.claims.some((c) => c.claim === "updates all callers of the removed helper"));
+  assert.equal(result.artifact.claims[0]!.source, "pr_body");
+  assert.equal(result.artifact.claims[2]!.claim, "Benign output is byte-identical");
 });
 
 test("#898: a failed model augment keeps the deterministic claims and records the error", async () => {
@@ -629,7 +673,7 @@ test("#898: a failed model augment keeps the deterministic claims and records th
   });
   assert.equal(result.status, "ok");
   assert.equal(result.artifact.method, "deterministic");
-  assert.equal(result.artifact.claims.length, 1);
+  assert.equal(result.artifact.claims.length, 2);
   assert.ok(result.artifact.errors.some((e) => e.includes("model fallback")), JSON.stringify(result.artifact.errors));
   assert.equal(result.errorKind, "transport");
 });

@@ -34,8 +34,8 @@ export interface ClaimsArtifact {
   truncated: boolean;
   errors: string[];
   /** How the claims were produced: the deterministic scan alone
-   * ("deterministic"), only the bounded model fallback ("model"), both
-   * merged when the deterministic set lacked PR-body claims and the model
-   * pass contributed (#898 — "deterministic+model"), or neither ("none"). */
+   * ("deterministic"), only the bounded model pass ("model"), both merged
+   * when the model pass contributed on top of a non-empty scan (#898 —
+   * "deterministic+model"), or neither ("none"). */
   method: "deterministic" | "model" | "none" | "deterministic+model";
 }

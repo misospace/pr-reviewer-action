@@ -32,9 +32,9 @@
  * flagged inputs, which is where a counterexample lives (#898).
  *
  * Bounded and pure: no network, no model call, never throws. `extractClaims`
- * always returns a (possibly empty) artifact; the caller decides whether an
- * empty or body-less deterministic result should fall back to the bounded
- * model pass. */
+ * always returns a (possibly empty) artifact; the caller runs the bounded
+ * model pass as an augment on top of it — the scan is never treated as proof
+ * that the body was fully captured (#898 review). */
 
 import {
   MAX_CHECK_CHARS,
@@ -48,18 +48,20 @@ import {
 } from "./types.js";
 
 const CLAIM_KEYWORDS_RE =
-  /\b(only|never|always|must|validat(?:es?|ion)|cross[- ]check(?:ed|s)?|fails?[- ]closed|bound to|byte[- ]identical|identical|guarantees?|ensures?|invariant|cannot|no longer|at most|exactly|every|each|all consumers|parity|unchanged|backward[- ]compatible)\b/i;
+  /\b(only|never|always|must|validat(?:es?|ion)|cross[- ]check(?:ed|s)?|fails?[- ]closed|bound to|byte[- ]identical|identical|guarantees?|ensures?|invariant|cannot|no longer|at most|exactly|every|each|all (?:consumers|callers|call sites)|parity|unchanged|backward[- ]compatible)\b/i;
 
 const COMMENT_LINE_RE = /^(\/\/|\/\*\*?|\*(?!\/)|#(?!!)|"""|'''|--(?:\s|$)|<!--)/;
 
-/** Bot-authored PR-body boilerplate (Renovate/Dependabot footers and config
- * summaries): workflow notices, not the PR's own invariants — spending a
- * claim slot on "Automerge disabled" hides a real one (#898). Matched per
- * sentence, before the keyword filter; a legitimate sentence merely mentioning
- * a bot is dropped too, which fails toward fewer claims, never fabricated
- * ones. */
+/** Bot-authored PR-body boilerplate (Renovate/Dependabot footers and
+ * checklists): workflow notices, not the PR's own invariants. Matched per
+ * sentence, before the keyword filter. Kept tight on purpose — the match
+ * must be a bot signature (bot name, the rebase/retry checkbox), never a
+ * subject a human legitimately writes policy about: an automerge rule like
+ * "Automerge must never run for major-version updates" is a real claim and
+ * survives (#898 review). The bot footers' own automerge lines carry no
+ * keyword vocabulary, so they were never claims to begin with. */
 const BOT_TEMPLATE_RE =
-  /\b(?:renovate|dependabot|greenkeeper|auto-?merge)\b|rebase[/-]retry|rebase-check/i;
+  /\b(?:renovate|dependabot|greenkeeper)\b|rebase[/-]retry|rebase-check/i;
 
 /** HTML comments carry bot anchors (`<!-- rebase-check -->`,
  * `<!--renovate-debug:...-->`) and are never claim prose. The second pattern
@@ -332,8 +334,11 @@ interface CommentBlock {
   path: string;
   /** Hunk-local index of the block's first line, for `resolveHunkSymbol`. */
   startIndex: number;
-  /** New-file line number of the block's first line, for `file:L<n>`. */
+  /** New-file line range of the block (contiguous: only added lines, no
+   * context in between), used to keep a claim's own comment lines out of its
+   * sibling-item enumeration. */
   firstNewLine: number;
+  lastNewLine: number;
   /** Comment-marker-stripped prose of every line in the block, joined. */
   text: string;
 }
@@ -353,7 +358,7 @@ function collectCommentBlocks(hunk: HunkGroup): CommentBlock[] {
     }
     if (isComment) {
       if (!current) {
-        current = { path: hunk.path, startIndex: i, firstNewLine: line.newLine, text: "" };
+        current = { path: hunk.path, startIndex: i, firstNewLine: line.newLine, lastNewLine: line.newLine, text: "" };
         blocks.push(current);
         prose = [];
       }
@@ -361,6 +366,7 @@ function collectCommentBlocks(hunk: HunkGroup): CommentBlock[] {
       // A blank added line before any comment starts nothing.
       continue;
     }
+    current.lastNewLine = line.newLine;
     const stripped = trimmed === "" ? "" : stripCommentMarkers(trimmed);
     if (stripped) prose.push(stripped);
     current.text = prose.join(" ");
@@ -384,10 +390,12 @@ function documentedLineText(hunk: HunkGroup, fromIndex: number): string {
 
 /** Items shared by both extractors: anchors of every added line matching a
  * backtick identifier (substring, the pre-#898 semantics) or a flag-like
- * token (case/separator-insensitive variant). Lines whose only symbol is
- * git's hunk-header guess are skipped — a class header must not steal an
- * item anchor from the method a sibling line actually belongs to (the
- * claim's own anchor may still use it). Capped at `MAX_ITEMS_PER_CLAIM` with
+ * token (case/separator-insensitive variant). A line whose only symbol is
+ * git's hunk-header guess still yields its occurrence — the guess is
+ * distrusted (the anchor degrades to a plain `file:L<n>`) but the match is
+ * never thrown away, or a normal existing-function diff (signature in the
+ * hunk header, changed line in the body) would lose exactly the item a body
+ * claim is about (#898 review). Capped at `MAX_ITEMS_PER_CLAIM` with
  * `itemsTruncated` — a visibly capped list is the honest shape for a claim
  * quantifying over more units than fit. */
 function resolveItems(
@@ -410,14 +418,11 @@ function resolveItems(
     .map((token) => tokenVariantRe(token))
     .filter((re): re is RegExp => re !== null);
   for (const line of addedLines) {
-    // Skip only lines where git's hunk header SUPPLIED the symbol — that
-    // attribution is the unreliable one. A null symbol (plain `file:L<n>`
-    // line anchor) is honest and always enumerable.
-    if (line.symbolFromHeader && line.symbol !== null) continue;
     const matches =
       identifiers.some((identifier) => line.text.includes(identifier)) ||
       variantRes.some((re) => re.test(line.text));
-    if (matches) pushAnchor(line);
+    if (!matches) continue;
+    pushAnchor(line.symbolFromHeader ? { ...line, symbol: null } : line);
   }
   return { items, itemsTruncated };
 }
@@ -437,11 +442,17 @@ function extractDiffCommentClaims(diffText: string): Claim[] {
       const symbol = resolved.symbol;
       const anchor = `${block.path}:${symbol ?? `L${block.firstNewLine}`}`;
       const tokens = extractFlagTokens(`${block.text} ${documentedLineText(hunk, block.startIndex)}`);
+      // The claim's own comment lines are the claim, not items it quantifies
+      // over — the block anchor already covers them; only other lines are
+      // enumerated as siblings.
+      const siblings = addedLines.filter(
+        (line) => !(line.path === block.path && line.newLine >= block.firstNewLine && line.newLine <= block.lastNewLine),
+      );
       for (const sentence of splitSentences(block.text)) {
         if (!CLAIM_KEYWORDS_RE.test(sentence)) continue;
         const text = clip(sentence, MAX_CLAIM_CHARS);
         const key = text.toLowerCase();
-        const { items, itemsTruncated: resolvedTruncated } = resolveItems([], tokens, addedLines);
+        const { items, itemsTruncated: resolvedTruncated } = resolveItems([], tokens, siblings);
         let itemsTruncated = resolvedTruncated;
         if (!items.includes(anchor)) {
           if (items.length >= MAX_ITEMS_PER_CLAIM) itemsTruncated = true;

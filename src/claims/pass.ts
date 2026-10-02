@@ -1,12 +1,14 @@
 /** Top-level claim falsification pre-pass orchestration (#785, trigger per
- * #898): deterministic extraction first; the bounded model call runs when the
- * deterministic scan finds nothing OR finds claims but no PR-body claim — a
- * docs-heavy diff used to suppress the one pass that could read the body
- * properly. Model claims merge after the deterministic ones (deduplicated by
- * normalized text, capped at `MAX_CLAIMS`); a model failure never discards a
- * deterministic result — it is recorded in the artifact's errors. Always
- * fail-soft: an exception from either half is caught and reported as an empty
- * artifact, never thrown. */
+ * #898 and its review): deterministic extraction first, then — whenever a
+ * primary model route is configured — one bounded model pass whose claims
+ * MERGE after the deterministic ones (deduplicated by normalized text, capped
+ * at `MAX_CLAIMS`). There is deliberately no "the scan found enough" gate:
+ * any adequacy test the scan itself could compute is circular (every
+ * keyword-bearing sentence is captured by construction), so one keyword hit
+ * must never suppress the one pass that can read invariants the vocabulary
+ * misses. A model failure never discards a deterministic result — it is
+ * recorded in the artifact's errors. Always fail-soft: an exception from
+ * either half is caught and reported as an empty artifact, never thrown. */
 
 import { extractClaimsDeterministic } from "./extract.js";
 import { runClaimFalsificationModelPass, type ClaimModelPassConfig } from "./model.js";
@@ -18,11 +20,11 @@ export interface ClaimFalsificationInput {
   body: string;
   files: unknown;
   diff: string;
-  /** When present, a bounded model call runs whenever the deterministic scan
-   * finds no claims, or finds claims but none from the PR body (the model may
-   * read invariants the keyword vocabulary misses, e.g. "all callers").
-   * Absent/undefined (no model config resolved) skips the fallback entirely —
-   * deterministic-only, never an error. */
+  /** When present, one bounded model pass always runs and its claims merge
+   * after the deterministic ones — the deterministic scan is evidence, never
+   * proof the PR body was fully captured (#898 review). Absent/undefined (no
+   * model config resolved) skips it entirely — deterministic-only, never an
+   * error. */
   model?:
     | {
         config: ClaimModelPassConfig;
@@ -39,7 +41,7 @@ export interface ClaimFalsificationResult {
 }
 
 function normalizeClaimText(text: string): string {
-  return text.toLowerCase().replace(/\s+/g, " ").trim();
+  return text.toLowerCase().replace(/\s+/g, " ").trim().replace(/[.!?:;]+$/, "");
 }
 
 /** Append `extra`'s claims after `primary`'s, skipping claims whose normalized
@@ -50,12 +52,13 @@ function mergeArtifacts(primary: ClaimsArtifact, extra: ClaimsArtifact): ClaimsA
   const seen = new Set(claims.map((claim) => normalizeClaimText(claim.claim)));
   let dropped = false;
   for (const claim of extra.claims) {
-    if (seen.has(normalizeClaimText(claim.claim))) continue;
+    const key = normalizeClaimText(claim.claim);
+    if (seen.has(key)) continue;
     if (claims.length >= MAX_CLAIMS) {
       dropped = true;
       break;
     }
-    seen.add(normalizeClaimText(claim.claim));
+    seen.add(key);
     claims.push(claim);
   }
   return {
@@ -70,10 +73,6 @@ function mergeArtifacts(primary: ClaimsArtifact, extra: ClaimsArtifact): ClaimsA
 export async function runClaimFalsificationPass(input: ClaimFalsificationInput): Promise<ClaimFalsificationResult> {
   try {
     const deterministic = extractClaimsDeterministic({ prBody: input.body, diffText: input.diff });
-    const hasBodyClaims = deterministic.claims.some((claim) => claim.source === "pr_body");
-    if (hasBodyClaims) {
-      return { artifact: deterministic, status: "ok", errorKind: null, error: null };
-    }
     if (!input.model) {
       const status = deterministic.claims.length > 0 ? "ok" : "empty";
       return { artifact: deterministic, status, errorKind: null, error: null };
@@ -89,10 +88,9 @@ export async function runClaimFalsificationPass(input: ClaimFalsificationInput):
     if (deterministic.claims.length === 0) {
       return { artifact: fallback.artifact, status: fallback.status, errorKind: fallback.errorKind, error: fallback.error };
     }
-    // Deterministic claims exist but none from the PR body: the model pass
-    // runs as an augment. Whatever it returns, the deterministic claims stand
-    // — a model failure is recorded in the artifact, never discards the
-    // scan's result.
+    // Deterministic claims exist: the model pass augments them. Whatever it
+    // returns, the deterministic claims stand — a model failure is recorded
+    // in the artifact, never discards the scan's result.
     const merged = mergeArtifacts(deterministic, fallback.artifact);
     if (fallback.status !== "ok" && fallback.error) {
       merged.errors = [...merged.errors, `model fallback ${fallback.status}: ${fallback.error}`].slice(0, MAX_ERRORS);
