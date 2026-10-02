@@ -151,6 +151,18 @@ function readOutputs(path: string): Record<string, string> {
   return out;
 }
 
+/** Swallows and records stderr while an expected skip log line is asserted
+ * (same pattern as transport.test.ts). */
+function captureStderr(): { lines: string[]; restore: () => void } {
+  const lines: string[] = [];
+  const original = process.stderr.write;
+  process.stderr.write = ((chunk: unknown): boolean => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  return { lines, restore: (): void => { process.stderr.write = original; } };
+}
+
 test("#892: the ai-review label (real object shape) forces a fresh review and clears the label on the review branch", async () => {
   const workspace = mkdtempSync(join(tmpdir(), "action-rereview-workspace-"));
   const runnerTemp = mkdtempSync(join(tmpdir(), "action-rereview-runner-temp-"));
@@ -265,6 +277,97 @@ test("#892: an unrelated label never forces a review and never clears the ai-rev
     assert.equal(outputs["skip-reason"], "unrelated-label");
     assert.equal(github.deleteCalls.length, 0, "an unrelated label must never be cleared");
   } finally {
+    await model.close();
+    await github?.close();
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runnerTemp, { recursive: true, force: true });
+  }
+});
+
+test("#903: an unrelated-label skip logs its reason and label and writes a one-line step summary", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "action-skip-observability-workspace-"));
+  const runnerTemp = mkdtempSync(join(tmpdir(), "action-skip-observability-runner-temp-"));
+  const model = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody());
+  });
+  let github: Awaited<ReturnType<typeof startGithubMock>> | undefined;
+  const stderr = captureStderr();
+  try {
+    const baseSha = "b".repeat(40);
+    const headSha = "a".repeat(40);
+    github = await startGithubMock({ baseSha, headSha });
+
+    const eventPath = join(runnerTemp, "event.json");
+    writeFileSync(eventPath, JSON.stringify({
+      action: "labeled",
+      label: { id: 2, name: "bug", color: "ff0000" },
+      pull_request: { number: 7, head: { sha: headSha } },
+    }));
+
+    const env = baseEnv({ eventPath, runnerTemp, githubUrl: github.url, modelUrl: model.url, workspace });
+    const exitCode = await actionMain(env);
+    assert.equal(exitCode, 0);
+
+    // The skip is announced in the same log stream the review path uses.
+    assert.ok(
+      stderr.lines.includes(`[v3] Review skipped: unrelated-label (label: "bug")\n`),
+      `expected the skip log line, got: ${JSON.stringify(stderr.lines)}`,
+    );
+    // ...and lands as exactly one line in the step summary, so a skipped
+    // run is distinguishable from a crash in the job summary.
+    assert.equal(
+      readFileSync(env.GITHUB_STEP_SUMMARY!, "utf8"),
+      `**AI PR Review skipped:** \`unrelated-label\` (label: "bug")\n`,
+    );
+  } finally {
+    stderr.restore();
+    await model.close();
+    await github?.close();
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runnerTemp, { recursive: true, force: true });
+  }
+});
+
+test("#903: a superseded-head skip logs no label detail and tolerates a missing step summary", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "action-skip-observability-workspace-stale-"));
+  const runnerTemp = mkdtempSync(join(tmpdir(), "action-skip-observability-runner-temp-stale-"));
+  const model = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody());
+  });
+  let github: Awaited<ReturnType<typeof startGithubMock>> | undefined;
+  const stderr = captureStderr();
+  try {
+    const baseSha = "b".repeat(40);
+    const headSha = "a".repeat(40);
+    // Stale label event (as in the #892 superseded test): the event carries
+    // a label, but the skip reason is not unrelated-label, so no label
+    // detail may appear in the skip line.
+    const staleEventHeadSha = "c".repeat(40);
+    github = await startGithubMock({ baseSha, headSha });
+
+    const eventPath = join(runnerTemp, "event.json");
+    writeFileSync(eventPath, JSON.stringify({
+      action: "labeled",
+      label: { id: 9, name: "ai-review", color: "00ff00" },
+      pull_request: { number: 7, head: { sha: staleEventHeadSha } },
+    }));
+
+    const env = baseEnv({ eventPath, runnerTemp, githubUrl: github.url, modelUrl: model.url, workspace });
+    // No runner summary file: the skip must still complete cleanly.
+    delete env.GITHUB_STEP_SUMMARY;
+    const exitCode = await actionMain(env);
+    assert.equal(exitCode, 0);
+
+    const outputs = readOutputs(env.GITHUB_OUTPUT!);
+    assert.equal(outputs["skip-reason"], "superseded-head");
+    assert.ok(
+      stderr.lines.includes("[v3] Review skipped: superseded-head\n"),
+      `expected the skip log line, got: ${JSON.stringify(stderr.lines)}`,
+    );
+  } finally {
+    stderr.restore();
     await model.close();
     await github?.close();
     rmSync(workspace, { recursive: true, force: true });

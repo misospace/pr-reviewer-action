@@ -44,6 +44,15 @@ export function writeOutputs(env: NodeJS.ProcessEnv, outputs: ReadonlyArray<[str
   if (text !== "") appendFileSync(file, text);
 }
 
+/** #903: append one already-rendered line to the job's step summary. Like
+ * `writeOutputs`, a no-op outside a runner (no path, or the /dev/null
+ * sentinel). */
+export function appendStepSummary(env: NodeJS.ProcessEnv, line: string): void {
+  const file = env.GITHUB_STEP_SUMMARY ?? "";
+  if (file === "" || file === "/dev/null") return;
+  appendFileSync(file, `${line}\n`);
+}
+
 /** The label a `labeled` event carries (GitHub sends `{ name }`). Moved to
  * `precheck/decide.ts` (#892) so both `decide.ts`'s label gate and this
  * cleanup path normalize the same way; re-exported here for callers (and
@@ -94,6 +103,17 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
   ]);
   if (pre.should_review !== "true") {
     writeOutputs(env, [["verdict", pre.verdict], ["verdict-source", pre.verdict_source], ["review-result", pre.review_result]]);
+    // #903: this branch used to exit silently — outputs written, no log
+    // line, no step summary — so a labeler-triggered skip showed the same
+    // green check as a run that crashed before doing anything. Announce the
+    // reason; the event label is untrusted payload, quoted as JSON so it
+    // can neither forge log lines nor break out of the summary's code span.
+    const skipLabel = eventLabelName(event?.label);
+    const skipDetail = pre.skip_reason === "unrelated-label" && skipLabel !== ""
+      ? ` (label: ${JSON.stringify(skipLabel)})`
+      : "";
+    process.stderr.write(`[v3] Review skipped: ${pre.skip_reason || "<none>"}${skipDetail}\n`);
+    appendStepSummary(env, `**AI PR Review skipped:** \`${pre.skip_reason || "<none>"}\`${skipDetail}`);
     await maybeClearRereviewLabel(stage, event);
     return failOnRequestChanges(stage, pre.verdict ?? "");
   }
