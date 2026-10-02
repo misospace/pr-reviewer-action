@@ -509,9 +509,14 @@ export function assembleCorpus(
   );
   for (const [name, data] of result.artifacts) ws.write(name, data);
   // #921/#930: the assembler-certified diff-section payload rides beside the
-  // corpus alias, keyed like the diff artifacts, so the tool-loop coverage
-  // rule never has to rediscover the section from rendered markdown.
-  ws.write(tier === "smart" ? CORPUS_DIFF_SECTION_SMART_ARTIFACT : CORPUS_DIFF_SECTION_ARTIFACT, result.corpusDiffPayload);
+  // corpus alias, keyed by the ARTIFACT SLOT it certifies — the direct-smart
+  // initial review builds tier=smart into the primary slot (slot="primary"),
+  // and the initial harness runs at TOOL_HARNESS_TIER=primary, so keying by
+  // model tier would leave the primary-named sidecar absent on fresh runs.
+  // The harness's tier-keyed read follows the same primary/smart corpus
+  // split: slot=primary builds the review-corpus.truncated.md corpus,
+  // slot=smart the review-corpus.smart.truncated.md one.
+  ws.write(slot === "smart" ? CORPUS_DIFF_SECTION_SMART_ARTIFACT : CORPUS_DIFF_SECTION_ARTIFACT, result.corpusDiffPayload);
   return result;
 }
 

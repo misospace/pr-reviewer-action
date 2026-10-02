@@ -1027,14 +1027,89 @@ test("#810: a budget-exhausted tool loop publishes partial coverage in the run m
     });
     const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as Record<string, unknown>;
     assert.equal(harness.stop_reason, "tool-call-budget-exhausted");
-    const coverage = harness.partial_coverage as { unread_files: string[]; corpus_diff_covered_files?: string[] };
+    const coverage = harness.partial_coverage as { unread_files: string[] };
     assert.deepEqual(coverage.unread_files, ["docs/big-guide.md"]);
-    assert.deepEqual(coverage.corpus_diff_covered_files, ["README.md"]);
+    // #930: the credit audit lives on the harness result, not in the gap record.
+    assert.deepEqual(harness.corpus_diff_covered_files, ["README.md"]);
     // The strict default reports the gap instead of a plain clean approve.
     assert.equal(result.outputs.verdict, "approve");
     assert.match(result.marker, /review_result.{0,4}partial/);
     assert.match(result.marker, /coverage.{0,4}partial/);
     assert.match(result.marker, /coverage_stop_reason.{0,4}tool-call-budget-exhausted/);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#930: a direct-smart initial review grants corpus-diff credit through the primary artifact slot", async () => {
+  // The direct-smart profile builds tier=smart into the primary artifact
+  // slot (review-corpus.truncated.md) while the initial harness still runs
+  // at TOOL_HARNESS_TIER=primary — so the certified sidecar must be keyed by
+  // the slot, not the model tier. A tiny diff sits in the corpus whole; the
+  // loop spends its one request on discovery, the budget stops, and the
+  // credit completes coverage with no gap record at all.
+  //
+  // The mock discriminates by request shape, not call order: loop turns
+  // carry a `tools` array and get the scripted tool call; specialist and
+  // review calls (which can run before the loop on an auth-classified PR)
+  // get verdict bodies.
+  const toolCallResponse = JSON.stringify({
+    id: "c0", object: "chat.completion", model: "m",
+    choices: [{ index: 0, finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "t1", type: "function", function: { name: "find_files", arguments: '{"pattern":"*.ts"}' } }] } }],
+    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+  });
+  const server = await startMockServer((_req, body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    let tools: unknown[] = [];
+    try {
+      const parsed = JSON.parse(String(body ?? "{}")) as { tools?: unknown };
+      if (Array.isArray(parsed.tools)) tools = parsed.tools;
+    } catch { /* non-JSON body: treat as a non-loop call */ }
+    res.end(tools.length > 0 ? toolCallResponse : verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    mkdirSync(join(runDir, "src"), { recursive: true });
+    writeFileSync(join(runDir, "src", "auth.ts"), "export const check = (t: string): boolean => t.length > 0;\n");
+    gitInit(runDir);
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "tool-mode": "native_loop",
+        "tool-max-requests": "1",
+        "review-routing-mode": "auto",
+        "escalate-on-risk-flags": "auth_changes",
+        "ai-smart-model": "m",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform({
+        title: "Tighten the auth check",
+        files: [{ filename: "src/auth.ts", status: "modified", additions: 1, deletions: 0, changes: 1 }],
+        diff: "diff --git a/src/auth.ts b/src/auth.ts\nindex 1111111..2222222 100644\n--- a/src/auth.ts\n+++ b/src/auth.ts\n@@ -1 +1 @@\n export const check = (t: string): boolean => t.length > 0;\n",
+        additions: 1,
+        deletions: 0,
+      }),
+      persistArtifacts: true,
+      quiet: true,
+    });
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as Record<string, unknown>;
+    // Fixture sanity: the run really took the direct-smart route and built
+    // the smart-profile corpus into the primary slot.
+    assert.equal(result.outputs.reviewRoute, "smart");
+    assert.ok(existsSync(join(runDir, "pr.diff.smart.truncated")), "the smart-profile build must have run");
+    assert.equal(harness.stop_reason, "tool-call-budget-exhausted");
+    assert.equal(harness.partial_coverage, undefined, "complete coverage: the corpus credit resolves the only changed file");
+    assert.deepEqual(harness.corpus_diff_covered_files, ["src/auth.ts"]);
+    assert.equal(result.outputs.verdict, "approve");
   } finally {
     await server.close();
     cleanup();

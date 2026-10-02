@@ -28,7 +28,16 @@
  * file's full per-file chunk from the RAW `pr.diff` must appear byte-exact
  * inside that certified payload. A diff the corpus budget truncated or
  * omitted never earns the credit and keeps the strict tool-read rule (see
- * `corpusDiffCoveredFiles`).
+ * `corpusDiffCoveredFiles`). Deleted files ride the credit rule too — their
+ * removal chunk — but stay excluded from `unread_files` (#810: the loop can
+ * never read a file the PR deletes), so a deleted file appears in the
+ * coverage accounting only through the credit audit.
+ *
+ * The credit audit lives on the harness result itself
+ * (`corpus_diff_covered_files`), not inside the `partial_coverage` gap
+ * record: a budget stop whose every gap the corpus credit resolves is
+ * complete coverage and emits no gap record, and the audit must survive
+ * that.
  *
  * A specialist lead is resolved when its own file (if it names one) was
  * read by the rules above. A lead without a file path cannot be tied to any
@@ -67,11 +76,6 @@ export interface PartialCoverage {
   unread_files: string[];
   leads_total: number;
   unresolved_leads: CoverageLeadRef[];
-  /** #921 audit: changed files credited as covered by the corpus-diff rule
-   * (complete untruncated diff in the assembled review corpus) rather than
-   * by a tool read. Every other covered file was tool-read. Absent when no
-   * file was credited this way. Sorted lexicographically. */
-  corpus_diff_covered_files?: string[];
 }
 
 /** Bounded notice size: beyond this many entries the section lists a count
@@ -91,6 +95,43 @@ function excerptOf(message: unknown): string {
     : singleLine;
 }
 
+/** One parsed view of the changed-file manifest: the tool-read surface
+ * (`files` — deleted files excluded, #810) and the removed paths, which the
+ * #921 corpus-diff credit rule still accounts for. */
+interface ChangedManifest {
+  files: string[];
+  removed: string[];
+}
+
+function parseChangedManifest(body: string | null): ChangedManifest {
+  const empty: ChangedManifest = { files: [], removed: [] };
+  if (body === null || body.trim() === "") return empty;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body) as unknown;
+  } catch {
+    return empty;
+  }
+  const entries = Array.isArray(parsed)
+    ? parsed
+    : parsed !== null && typeof parsed === "object" && Array.isArray((parsed as Record<string, unknown>).files)
+      ? (parsed as Record<string, unknown>).files as unknown[]
+      : [];
+  const manifest: ChangedManifest = { files: [], removed: [] };
+  for (const entry of entries) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    const path = normalizeRelPath(record.filename);
+    if (path === "" || record.note !== undefined) continue;
+    if (typeof record.status === "string" && record.status === "removed") {
+      manifest.removed.push(path);
+      continue;
+    }
+    manifest.files.push(path);
+  }
+  return manifest;
+}
+
 /**
  * Changed-file paths from the harness workspace manifest (pr-files.json —
  * the same artifact the corpus renders). Files the PR deletes are skipped:
@@ -99,29 +140,18 @@ function excerptOf(message: unknown): string {
  * manifest yields an empty list (and with it, no file-coverage claims).
  */
 export function loadChangedFilePaths(read: (name: string) => string | null): string[] {
-  const body = read("pr-files.json");
-  if (body === null || body.trim() === "") return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body) as unknown;
-  } catch {
-    return [];
-  }
-  const entries = Array.isArray(parsed)
-    ? parsed
-    : parsed !== null && typeof parsed === "object" && Array.isArray((parsed as Record<string, unknown>).files)
-      ? (parsed as Record<string, unknown>).files as unknown[]
-      : [];
-  const paths: string[] = [];
-  for (const entry of entries) {
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
-    const record = entry as Record<string, unknown>;
-    const path = normalizeRelPath(record.filename);
-    if (path === "" || record.note !== undefined) continue;
-    if (typeof record.status === "string" && record.status === "removed") continue;
-    paths.push(path);
-  }
-  return paths;
+  return parseChangedManifest(read("pr-files.json")).files;
+}
+
+/**
+ * The paths the PR deletes, from the same manifest. #810 keeps them out of
+ * `unread_files` (they can never be tool-read); #921 still runs them
+ * through the corpus-diff credit rule, so a deleted file whose complete
+ * removal diff is in the certified payload is credited and audited like any
+ * other changed file.
+ */
+export function loadRemovedFilePaths(read: (name: string) => string | null): string[] {
+  return parseChangedManifest(read("pr-files.json")).removed;
 }
 
 /**
@@ -183,8 +213,8 @@ function rawDiffChunks(rawDiff: string): Map<string, string> {
  * chunks verbatim and marks clipped chunks with an inline note and dropped
  * chunks in an omitted-file manifest, so any truncation or omission inside
  * the chunk breaks the exact match and the file keeps the strict tool-read
- * rule. New files, deleted files, renames, and mode-only changes all ride
- * the same byte-exact rule.
+ * rule. New files, deleted files (their removal chunk), renames, and
+ * mode-only changes all ride the same byte-exact rule.
  *
  * Deliberately narrow so the credit errs toward honesty: a missing
  * `pr.diff`, an empty or absent payload (the body truncation cut the diff
@@ -273,7 +303,6 @@ export function computePartialCoverage(
   if (!isBudgetStopReason(outcome.stopReason)) return null;
   const touched = pathsTouchedByLoop(outcome);
   const corpus = inputs.corpusDiffCoveredFiles ?? new Set<string>();
-  const coveredByCorpus = inputs.changedFiles.filter((path) => !touched.has(path) && corpus.has(path));
   const unreadFiles = inputs.changedFiles.filter((path) => !touched.has(path) && !corpus.has(path));
   const unresolvedLeads = inputs.leads.filter(
     (lead) => lead.file === null || (!touched.has(lead.file) && !corpus.has(lead.file)),
@@ -285,8 +314,5 @@ export function computePartialCoverage(
     unread_files: unreadFiles,
     leads_total: inputs.leads.length,
     unresolved_leads: unresolvedLeads,
-    ...(coveredByCorpus.length > 0
-      ? { corpus_diff_covered_files: [...coveredByCorpus].sort() }
-      : {}),
   };
 }

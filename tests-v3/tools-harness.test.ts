@@ -10,7 +10,7 @@ import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
 import { reassembleSse } from "../src/transport/sse.js";
 import { normalizedToOpenAiChat } from "../src/run/stages.js";
 import { prioritizeDiff } from "../src/corpus/diff-priority.js";
-import { CORPUS_DIFF_SECTION_ARTIFACT } from "../src/corpus/assemble.js";
+import { CORPUS_DIFF_SECTION_ARTIFACT, CORPUS_DIFF_SECTION_SMART_ARTIFACT } from "../src/corpus/assemble.js";
 
 function workspace(): { root: string; deps: (overrides?: Partial<HarnessDeps>) => HarnessDeps } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "harness-test-"));
@@ -580,9 +580,45 @@ test("#921: a docs PR whose small files are fully in the corpus lists only the t
   assert.ok(coverage, "partial coverage must be recorded on a budget stop");
   assert.equal(coverage.changed_files_total, 3);
   assert.deepEqual(coverage.unread_files, ["src/large.ts"]);
-  assert.deepEqual(coverage.corpus_diff_covered_files, ["README.md", "docs/new-guide.md"]);
+  // #930: the credit audit lives on the harness result, not inside the gap
+  // record, so it survives complete coverage too.
+  assert.deepEqual(result.corpus_diff_covered_files, ["README.md", "docs/new-guide.md"]);
   const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
   assert.deepEqual(artifact.partial_coverage, coverage);
+  assert.deepEqual(artifact.corpus_diff_covered_files, ["README.md", "docs/new-guide.md"]);
+});
+
+test("#930: the smart-tier harness consumes the smart-named sidecar", async () => {
+  const { root, deps } = workspace();
+  const chunk = (path: string, body: string[]): string =>
+    `diff --git a/${path} b/${path}\nindex 1111111..2222222 100644\n--- a/${path}\n+++ b/${path}\n` +
+    `@@ -1,${body.length} +1,${body.length} @@\n${body.join("\n")}\n`;
+  const rawDiff =
+    chunk("docs/new-guide.md", ["+## New guide", "+", "+All new content."]) +
+    chunk("src/large.ts", Array.from({ length: 60 }, (_, i) => `+line ${i} of a very large change that keeps going`));
+  const section = Buffer.from(prioritizeDiff(Buffer.from(rawDiff, "utf8"), 900)).toString("utf8");
+  fs.writeFileSync(path.join(root, "pr.diff"), rawDiff);
+  fs.writeFileSync(path.join(root, CORPUS_DIFF_SECTION_SMART_ARTIFACT), section);
+  fs.writeFileSync(
+    path.join(root, "review-corpus.smart.truncated.md"),
+    `# PR Diff (truncated)\n\`\`\`diff\n${section}\`\`\`\n\n# Tool Harness Findings\n\nnone\n`,
+  );
+  fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify([
+    { filename: "docs/new-guide.md", status: "added", additions: 3, deletions: 0, changes: 3 },
+    { filename: "src/large.ts", status: "modified", additions: 60, deletions: 0, changes: 60 },
+  ]));
+  const scripted = [openAiCall("c1", "find_files", '{"pattern":"*.md"}'), validVerdict()];
+  let transportCalls = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => scripted[transportCalls++],
+    env: {
+      TOOL_HARNESS_TIER: "smart", TOOL_MAX_REQUESTS: "1", SYSTEM_PROMPT: "You are the reviewer.",
+      SMART_BASE_URL: "http://model.test/v1", SMART_MODEL: "m1", SMART_API_KEY: "k", SMART_STREAM: "false",
+    },
+  }));
+  assert.equal(result.stop_reason, "tool-call-budget-exhausted");
+  assert.deepEqual(result.partial_coverage?.unread_files, ["src/large.ts"]);
+  assert.deepEqual(result.corpus_diff_covered_files, ["docs/new-guide.md"]);
 });
 
 test("#810: a model-chosen stop leaves no partial-coverage record", async () => {

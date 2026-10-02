@@ -123,9 +123,12 @@ export interface CorpusBuildResult {
   corpusDiffPayload: Uint8Array;
 }
 
-/** Workspace artifacts carrying `corpusDiffPayload` per tier — written by the
- * v3 run layer next to the corpus alias, consumed by the #921 coverage rule
- * in src/tools/coverage.ts. */
+/** Workspace artifacts carrying `corpusDiffPayload` per artifact slot — the
+ * slot the corpus alias carries, not the model tier (the direct-smart
+ * initial review builds tier=smart into the primary slot and its harness
+ * still runs at TOOL_HARNESS_TIER=primary). Written by the v3 run layer next
+ * to the corpus alias, consumed by the #921 coverage rule in
+ * src/tools/coverage.ts. */
 export const CORPUS_DIFF_SECTION_ARTIFACT = "pr.diff.corpus-section.txt";
 export const CORPUS_DIFF_SECTION_SMART_ARTIFACT = "pr.diff.smart.corpus-section.txt";
 

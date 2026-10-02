@@ -50,7 +50,9 @@ import {
 import {
   computePartialCoverage,
   corpusDiffCoveredFiles,
+  isBudgetStopReason,
   loadChangedFilePaths,
+  loadRemovedFilePaths,
   loadSpecialistLeadRefs,
   type PartialCoverage,
 } from "./coverage.js";
@@ -1012,6 +1014,14 @@ export type HarnessResult = Record<string, unknown> & {
    * loop stopped on a budget with changed files / specialist leads left
    * unread (snake_case: persisted verbatim in the harness artifact). */
   partial_coverage?: PartialCoverage;
+  /** #921/#930 audit: changed files credited as covered by the corpus-diff
+   * rule (complete untruncated diff in the assembler-certified payload)
+   * rather than by a tool read, on a budget stop — including deleted files,
+   * which can never appear in `unread_files`. Lives at the result level, not
+   * inside `partial_coverage`, so the audit survives a budget stop whose
+   * every gap the corpus credit resolves (no gap record is emitted then).
+   * Absent when nothing was credited. Sorted lexicographically. */
+  corpus_diff_covered_files?: string[];
   tool_loop_meta?: Record<string, unknown> | null;
 };
 
@@ -1485,24 +1495,30 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // changed files and specialist leads were never read/resolved. A degraded
   // run issued no calls at all and is reported through its own degraded
   // path, not as a partial tool investigation.
-  if (!outcome.degraded) {
+  if (!outcome.degraded && isBudgetStopReason(outcome.stopReason)) {
     // #921/#930: coverage credits files whose complete diff is in the corpus
-    // via the assembler-certified diff-section payload (tier-keyed, written
+    // via the assembler-certified diff-section payload (slot-keyed, written
     // beside the corpus the verdict turn reads) — never by re-parsing the
     // rendered corpus, whose earlier sections are repository-controlled and
-    // can forge any heading. A missing payload or raw diff credits nothing
-    // and keeps the strict tool-read rule.
+    // can forge any heading. Deleted files ride the credit rule too, though
+    // they can never be tool-read. A missing payload or raw diff credits
+    // nothing and keeps the strict tool-read rule.
     const changedFiles = loadChangedFilePaths(deps.readText);
+    const removedFiles = loadRemovedFilePaths(deps.readText);
     const diffSectionName =
       input.tier === "smart" ? CORPUS_DIFF_SECTION_SMART_ARTIFACT : CORPUS_DIFF_SECTION_ARTIFACT;
+    const corpusCovered = corpusDiffCoveredFiles(
+      deps.readText(diffSectionName) ?? "",
+      deps.readText("pr.diff"),
+      [...changedFiles, ...removedFiles],
+    );
+    // The audit lives on the result, not inside the gap record: a budget
+    // stop the credit completes emits no partial_coverage at all.
+    if (corpusCovered.size > 0) input.result.corpus_diff_covered_files = [...corpusCovered].sort();
     const coverage = computePartialCoverage(outcome, {
       changedFiles,
       leads: loadSpecialistLeadRefs(deps.readText),
-      corpusDiffCoveredFiles: corpusDiffCoveredFiles(
-        deps.readText(diffSectionName) ?? "",
-        deps.readText("pr.diff"),
-        changedFiles,
-      ),
+      corpusDiffCoveredFiles: corpusCovered,
     });
     if (coverage !== null) input.result.partial_coverage = coverage;
   }

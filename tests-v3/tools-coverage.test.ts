@@ -5,6 +5,7 @@ import {
   corpusDiffCoveredFiles,
   isBudgetStopReason,
   loadChangedFilePaths,
+  loadRemovedFilePaths,
   loadSpecialistLeadRefs,
   COVERAGE_LEAD_EXCERPT_CHARS,
   type CoverageLeadRef,
@@ -189,7 +190,7 @@ test("#921: through the real prioritizer, small files fully in the certified pay
   assert.deepEqual([...covered].sort(), ["README.md", "docs/new-guide.md"]);
 });
 
-test("#921: only the truncated file is listed as unread and the audit names the corpus-credited ones", () => {
+test("#921: only the truncated file is listed as unread; the corpus credit resolves leads by the same rule", () => {
   const payload = Buffer.from(prioritizeDiff(Buffer.from(rawThreeFileDiff, "utf8"), 900)).toString("utf8");
   const changed = ["docs/new-guide.md", "README.md", "src/large.ts"];
   const coverage = computePartialCoverage(outcome({ executed: [okCall("find_files", { pattern: "*.md" })] }), {
@@ -199,9 +200,35 @@ test("#921: only the truncated file is listed as unread and the audit names the 
   });
   assert.ok(coverage);
   assert.deepEqual(coverage.unread_files, ["src/large.ts"]);
-  assert.deepEqual(coverage.corpus_diff_covered_files, ["README.md", "docs/new-guide.md"]);
   // A lead on a corpus-covered file resolves by the same rule.
   assert.deepEqual(coverage.unresolved_leads, []);
+});
+
+test("#921: deleted files ride the credit rule (their removal chunk) but never the unread list", () => {
+  const removedDiff = fileChunk("docs/gone.md", ["-removed content", "-more removed content"]);
+  const raw = removedDiff + smallDiff + largeDiff;
+  const payload = removedDiff + smallDiff + "…[diff truncated to fit context budget]\nFiles omitted from this diff (1):\n- src/large.ts (+60/-0) omitted\n";
+  const loaded = loadChangedFilePaths(() => JSON.stringify([
+    { filename: "docs/gone.md", status: "removed" },
+    { filename: "docs/new-guide.md", status: "added" },
+    { filename: "src/large.ts", status: "modified" },
+  ]));
+  const removed = loadRemovedFilePaths(() => JSON.stringify([
+    { filename: "docs/gone.md", status: "removed" },
+    { filename: "docs/new-guide.md", status: "added" },
+  ]));
+  assert.deepEqual(loaded, ["docs/new-guide.md", "src/large.ts"]);
+  assert.deepEqual(removed, ["docs/gone.md"]);
+  const covered = corpusDiffCoveredFiles(payload, raw, [...loaded, ...removed]);
+  assert.ok(covered.has("docs/gone.md"), "a deleted file whose removal diff is fully in the payload is credited");
+  const coverage = computePartialCoverage(outcome({ executed: [] }), {
+    changedFiles: loaded,
+    leads: [],
+    corpusDiffCoveredFiles: covered,
+  });
+  assert.ok(coverage);
+  // The deleted file is never listed as unread (#810) — the truncated file is.
+  assert.deepEqual(coverage.unread_files, ["src/large.ts"]);
 });
 
 test("#921: new, renamed, and mode-only files ride the same byte-exact rule", () => {
@@ -262,7 +289,7 @@ test("#921 adversarial: marker-quoting and header-forging content cannot move th
   assert.ok(!forgeryCovered.has("src/large.ts"), "a quoted header line must not forge the target's credit");
 });
 
-test("#921: a file covered by both a tool read and the corpus is listed by neither audit field", () => {
+test("#921: a file covered by both a tool read and the corpus is neither unread nor double-counted", () => {
   const raw = smallDiff + readmeDiff + largeDiff;
   const coverage = computePartialCoverage(outcome({ executed: [okCall("read_file", { path: "docs/new-guide.md" })] }), {
     changedFiles: ["docs/new-guide.md", "README.md", "src/large.ts"],
@@ -275,7 +302,6 @@ test("#921: a file covered by both a tool read and the corpus is listed by neith
   });
   assert.ok(coverage);
   assert.deepEqual(coverage.unread_files, ["src/large.ts"]);
-  assert.deepEqual(coverage.corpus_diff_covered_files, ["README.md"]);
 });
 
 test("#921: without a corpus-credit set the accounting is the strict tool-read rule; credit alone can complete coverage", () => {
@@ -285,7 +311,8 @@ test("#921: without a corpus-credit set the accounting is the strict tool-read r
   });
   assert.ok(coverage);
   assert.deepEqual(coverage.unread_files, ["src/a.ts"]);
-  assert.equal(coverage.corpus_diff_covered_files, undefined);
+  // A budget stop the credit fully resolves is complete coverage: no gap
+  // record at all (the credit audit lives on the harness result).
   assert.equal(
     computePartialCoverage(outcome({ executed: [] }), {
       changedFiles: ["docs/new-guide.md"],
