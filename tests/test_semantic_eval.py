@@ -584,17 +584,39 @@ def test_fixture_git_env_disables_background_gc(tmp_path: Path) -> None:
 def test_fixture_git_env_drops_inherited_config(monkeypatch, tmp_path: Path) -> None:
     from pr_reviewer.semantic_eval import _fixture_git_env
 
-    # An inherited GIT_CONFIG_COUNT that disagrees with its KEY_*/VALUE_* pairs
-    # would abort every git call if it were carried through.
+    # Inherited config that must not leak through: an inconsistent
+    # GIT_CONFIG_COUNT (aborts every git call) and GIT_CONFIG=<file>, which
+    # redirects `git config` writes out of .git/config.
+    external = tmp_path / "inherited-gitconfig"
+    external.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG", str(external))
     monkeypatch.setenv("GIT_CONFIG_COUNT", "14")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "commit.gpgsign")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "true")
+
     env = _fixture_git_env()
+    assert "GIT_CONFIG" not in env
     assert env["GIT_CONFIG_COUNT"] == "4"
     keys = {env[f"GIT_CONFIG_KEY_{index}"] for index in range(4)}
     assert keys == {"gc.auto", "gc.autoDetach", "gc.autoPackLimit", "maintenance.auto"}
-    # git parses the derived env cleanly despite the inconsistent inherited count.
-    subprocess.run(["git", "init", "-q", str(tmp_path / "repo")], check=True, capture_output=True, env=env)
+
+    # Exercise the real materialization path (init, identity, commit): a leaked
+    # GIT_CONFIG sends the identity writes to the external file, leaving
+    # .git/config without them (and the commit failing with "Author identity
+    # unknown" wherever git cannot auto-detect one).
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "eval@test"], check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "semantic-eval"], check=True, capture_output=True, env=env)
+    (repo / "file.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--all"], check=True, capture_output=True, env=env)
+    committed = subprocess.run(
+        ["git", "-C", str(repo), "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "-q", "-m", "fixture-head"],
+        capture_output=True, env=env, text=True,
+    )
+    assert committed.returncode == 0, committed.stderr
+    assert "eval@test" in (repo / ".git" / "config").read_text(encoding="utf-8")
+    assert "eval@test" not in external.read_text(encoding="utf-8")
 
 
 def test_fixture_teardown_retries_transient_enotempty(monkeypatch, tmp_path: Path) -> None:

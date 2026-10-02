@@ -720,13 +720,19 @@ def _fixture_git_env() -> dict[str, str]:
 
     `GIT_CONFIG_*` entries behave like `git -c`, so every spawned git command
     inherits them without mutating the caller's environment. Inherited
-    `GIT_CONFIG_*` entries are dropped first: the fixture is deliberately
-    hermetic (like the `GIT_CONFIG_GLOBAL`/`NOSYSTEM` isolation above), and an
-    inherited `GIT_CONFIG_COUNT` that disagrees with its `KEY_*`/`VALUE_*`
-    pairs would make every git call abort."""
-    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
-    for inherited in [name for name in env if name.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))]:
-        del env[inherited]
+    `GIT_CONFIG*` entries are dropped first: the fixture is deliberately
+    hermetic (like the `GIT_CONFIG_GLOBAL`/`NOSYSTEM` isolation below), and a
+    leaked `GIT_CONFIG_COUNT` that disagrees with its `KEY_*`/`VALUE_*` pairs
+    aborts every git call, while a leaked `GIT_CONFIG=<file>` redirects
+    `git config` writes out of `.git/config`, so the fixture's identity never
+    lands where `git commit` reads it."""
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name != "GIT_CONFIG" and not name.startswith("GIT_CONFIG_")
+    }
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
     for index, (key, value) in enumerate(_GIT_BACKGROUND_OFF.items()):
         env[f"GIT_CONFIG_KEY_{index}"] = key
         env[f"GIT_CONFIG_VALUE_{index}"] = value
