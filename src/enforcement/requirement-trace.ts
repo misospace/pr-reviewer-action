@@ -332,8 +332,8 @@ export interface TracedLedgerEntry {
 
 /** Read `ledger.requirements` from an untrusted value (the parsed
  * `requirement-ledger.json`, or `null` when it never ran) without assuming
- * either serialization's field casing beyond `id`/`text`/`kind`. */
-/** Every acceptance/normative ledger entry with its provenance sources. */
+ * either serialization's field casing beyond `id`/`text`/`kind`.
+ * Returns every acceptance/normative entry with its provenance sources. */
 function ledgerTraceCandidates(ledger: unknown): { entry: TracedLedgerEntry; sources: string[] | null }[] {
   const raw = (ledger as { requirements?: unknown } | null | undefined)?.requirements;
   if (!Array.isArray(raw)) return [];

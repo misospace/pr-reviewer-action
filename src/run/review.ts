@@ -619,10 +619,6 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ...(env.PR_THREAD_CONTEXT !== undefined ? { prThreadContext: env.PR_THREAD_CONTEXT } : {}),
     ...(env.REVIEW_VERBOSITY !== undefined ? { reviewVerbosity: env.REVIEW_VERBOSITY } : {}),
   }, ws);
-  // #935: one deterministic trace scope for the prompt and the validator.
-  const traceChanged = traceChangedText(ws);
-  const traceScopeIds = requirementTraceScope(safeJson(ws.read("requirement-ledger.json")), traceChanged).inScope.map((entry) => entry.id);
-  promptState = applyRequirementTraceFragment(promptState, ws, (env.REQUIREMENT_TRACE ?? "false").toLowerCase() === "true", undefined, traceScopeIds);
   env.SYSTEM_PROMPT = promptState.systemPrompt;
 
   // ── Corpus stage part 1 (corpus.sh): fork CI, harvest advisory ───────
@@ -807,6 +803,14 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   }
 
   promptState = applySpecialistLeadsFragment(promptState, ws);
+  // #935: scope the trace from the FINAL ledger (the #812 same-head refresh
+  // above can rebuild it), so the tool loop, the verdict turn and the
+  // validator below all see the same in-scope requirement ids.
+  const traceChanged = traceChangedText(ws);
+  promptState = applyRequirementTraceFragment(
+    promptState, ws, (env.REQUIREMENT_TRACE ?? "false").toLowerCase() === "true", undefined,
+    requirementTraceScope(safeJson(ws.read("requirement-ledger.json")), traceChanged).inScope.map((entry) => entry.id),
+  );
   env.SYSTEM_PROMPT = promptState.systemPrompt;
 
   // ── Native tool harness (corpus.sh tail) ─────────────────────────────
