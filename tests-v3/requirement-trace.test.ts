@@ -4,13 +4,16 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ReviewArtifact } from "../src/enforcement/artifact.js";
+import { applyRequirementTraceFragment, workspaceAt } from "../src/prompt/index.js";
 import { applyStrictVerdictPolicy } from "../src/enforcement/verdict-policy.js";
 import {
   applyRequirementTraceEnforcement,
   ensureUnmetRequirementFindings,
   extractRequirementTerms,
   renderRequirementTraceMarkdown,
+  changedSubjectText,
   requirementNotEnforcedMessage,
+  requirementTraceScope,
   validateRequirementTrace,
 } from "../src/enforcement/requirement-trace.js";
 
@@ -521,31 +524,71 @@ test("predicate check is skipped (documented limitation) when the requirement te
   }
 });
 
-test("#935: standards and PR-body requirements are out of trace scope; linked-issue ones stay in", () => {
+test("#935: trace scope = linked-issue requirements plus any requirement whose subject the change touches", () => {
+  const ledger = {
+    requirements: [
+      { id: "req-wf", text: "The review workflow MUST pin every action by commit SHA.", kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 3 }] },
+      { id: "req-db", text: "Database migrations MUST be reversible.", kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 5 }] },
+      { id: "req-issue", text: "Resolution MUST compare the source SHA.", kind: "acceptance", provenance: [{ source: "linked_issues", ref: "#584", line: 9 }] },
+      { id: "req-noprov", text: "Something MUST hold.", kind: "normative" },
+    ],
+  };
+  const changed = changedSubjectText(
+    "diff --git a/.github/workflows/review.yaml b/.github/workflows/review.yaml\n+++ b/.github/workflows/review.yaml\n-        uses: actions/checkout@v4\n+        uses: actions/checkout@3d3c42e5 # v7.0.1 pin by commit sha\n",
+    [".github/workflows/review.yaml"],
+  );
+  const scope = requirementTraceScope(ledger, changed);
+  assert.deepEqual(scope.inScope.map((e) => e.id).sort(), ["req-issue", "req-noprov", "req-wf"]);
+  assert.deepEqual(scope.outOfScope.map((o) => o.entry.id), ["req-db"]);
+  assert.match(scope.outOfScope[0]!.reason, /out of scope: from standards/);
+  // Without changed text, nothing is dropped (fail closed).
+  assert.equal(requirementTraceScope(ledger).inScope.length, 4);
+});
+
+test("#935: an untouched standards requirement is not_applicable with a reason and keeps coverage complete", () => {
   const ws = makeWorkspace();
   try {
-    const ledger = {
-      requirements: [
-        { id: "req-std", text: "All inputs MUST be validated.", kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 3 }] },
-        { id: "req-body", text: "The new route MUST check merge state.", kind: "acceptance", provenance: [{ source: "pr_body", ref: "pr", line: 2 }] },
-      ],
-    };
-    // A config-only PR that never mentions them keeps coverage complete.
-    const out = validateRequirementTrace([], ledger, ws);
-    assert.equal(out.incomplete, false);
-    assert.deepEqual(out.rows, []);
-
-    const withIssue = {
-      requirements: [
-        ...ledger.requirements,
-        { id: "req-issue", text: "Resolution MUST compare the source SHA.", kind: "acceptance", provenance: [{ source: "linked_issues", ref: "#584", line: 9 }] },
-        { id: "req-both", text: "Repo DID MUST match.", kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 7 }, { source: "linked_issues", ref: "#584", line: 11 }] },
-      ],
-    };
-    const traced = validateRequirementTrace([], withIssue, ws);
-    assert.deepEqual(traced.rows.map((row) => row.requirement_id), ["req-issue", "req-both"]);
-    assert.equal(traced.incomplete, true, "an untraced linked-issue requirement still fails the trace");
+    const ledger = { requirements: [
+      { id: "req-db", text: "Database migrations MUST be reversible.", kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 5 }] },
+      { id: "req-body", text: "The exporter MUST retry failed scrapes.", kind: "acceptance", provenance: [{ source: "pr_body", ref: "pr", line: 2 }] },
+    ] };
+    const changed = changedSubjectText("+  equivalent-paths: \"true\"\n", [".github/workflows/ai-pr-review.yaml"]);
+    const trace = validateRequirementTrace([], ledger, ws, changed);
+    assert.equal(trace.incomplete, false);
+    assert.deepEqual(trace.rows.map((r) => [r.requirement_id, r.disposition]), [["req-db", "not_applicable"], ["req-body", "not_applicable"]]);
+    assert.ok(trace.rows.every((r) => r.reason.startsWith("out of scope") && r.notes.includes("out-of-scope")));
+    // The reviewer can still report one unmet, and then it counts.
+    const reported = validateRequirementTrace([{ requirement_id: "req-db", disposition: "unmet", reason: "drops the down migration" }], ledger, ws, changed);
+    assert.equal(reported.incomplete, true);
   } finally {
     rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test("#935: an untraced in-scope requirement still fails the trace", () => {
+  const ws = makeWorkspace();
+  try {
+    const ledger = { requirements: [{ id: "req-issue", text: "Resolution MUST compare the source SHA.", kind: "acceptance", provenance: [{ source: "linked_issues", ref: "#584", line: 9 }] }] };
+    const trace = validateRequirementTrace([], ledger, ws, changedSubjectText("+x\n", ["README.md"]));
+    assert.equal(trace.incomplete, true);
+    assert.equal(trace.rows[0]!.disposition, "unverifiable");
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test("#935: the trace prompt asks only for the in-scope requirements", () => {
+  const dir = mkdtempSync(join(tmpdir(), "req-trace-prompt-"));
+  try {
+    writeFileSync(join(dir, "requirement-ledger-present.txt"), "1\n");
+    const ws = workspaceAt(dir);
+    const base = { systemPrompt: "BASE", isDefault: true, addendum: "" };
+    const scoped = applyRequirementTraceFragment(base, ws, true, undefined, ["req-issue"]);
+    assert.match(scoped.systemPrompt, /For every requirement in trace scope \(req-issue\); other ledger requirements need no trace,/);
+    assert.doesNotMatch(scoped.systemPrompt, /in the Requirement Ledger,/);
+    assert.equal(applyRequirementTraceFragment(base, ws, true, undefined, []).systemPrompt, "BASE");
+    assert.match(applyRequirementTraceFragment(base, ws, true).systemPrompt, /For every acceptance\/normative requirement in the Requirement Ledger,/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

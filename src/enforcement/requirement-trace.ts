@@ -333,30 +333,74 @@ export interface TracedLedgerEntry {
 /** Read `ledger.requirements` from an untrusted value (the parsed
  * `requirement-ledger.json`, or `null` when it never ran) without assuming
  * either serialization's field casing beyond `id`/`text`/`kind`. */
-/** #935: the trace demands code+test enforcement for what the change was
- * asked to deliver: linked-issue requirements (#874). Repository standards,
- * PR-body statements (claim falsification covers those) and harness
- * obligations are general or self-reported, so a PR that cannot touch them
- * must not lose its approval over them. An entry without provenance stays in
- * scope (fail closed). */
-function tracedByProvenance(record: Record<string, unknown>): boolean {
-  const provenance = record.provenance;
-  if (!Array.isArray(provenance) || provenance.length === 0) return true;
-  return provenance.some((item) => !!item && typeof item === "object" && (item as { source?: unknown }).source === "linked_issues");
-}
-
-function ledgerEntriesInScope(ledger: unknown): TracedLedgerEntry[] {
+/** Every acceptance/normative ledger entry with its provenance sources. */
+function ledgerTraceCandidates(ledger: unknown): { entry: TracedLedgerEntry; sources: string[] | null }[] {
   const raw = (ledger as { requirements?: unknown } | null | undefined)?.requirements;
   if (!Array.isArray(raw)) return [];
-  const entries: TracedLedgerEntry[] = [];
+  const out: { entry: TracedLedgerEntry; sources: string[] | null }[] = [];
   for (const item of raw) {
     if (!item || typeof item !== "object") continue;
     const record = item as Record<string, unknown>;
     const { id, text, kind } = record;
     if (typeof id !== "string" || typeof text !== "string" || typeof kind !== "string") continue;
-    if ((kind === "acceptance" || kind === "normative") && tracedByProvenance(record)) entries.push({ id, text, kind });
+    if (kind !== "acceptance" && kind !== "normative") continue;
+    const provenance = record.provenance;
+    const sources = Array.isArray(provenance) && provenance.length > 0
+      ? provenance.map((p) => (p && typeof p === "object" ? String((p as { source?: unknown }).source ?? "") : "")).filter((s) => s !== "")
+      : null;
+    out.push({ entry: { id, text, kind }, sources });
   }
-  return entries;
+  return out;
+}
+
+function ledgerEntriesInScope(ledger: unknown): TracedLedgerEntry[] {
+  return ledgerTraceCandidates(ledger).map((candidate) => candidate.entry);
+}
+
+/** #935: the text a change touches: changed file paths plus the added and
+ * removed diff lines, lowercased, for the subject test below. */
+export function changedSubjectText(diff: string, files: readonly string[]): string {
+  const lines = diff.split("\n")
+    .filter((line) => (line.startsWith("+") || line.startsWith("-")) && !line.startsWith("+++") && !line.startsWith("---"))
+    .map((line) => line.slice(1));
+  return [...files, ...lines].join("\n").toLowerCase();
+}
+
+/** A requirement's subject is touched when the changed text contains one of
+ * its multi-word terms, or at least two of its single-word terms (joined
+ * forms like `sourceSha` / `source_sha` count). Bounded heuristic, like
+ * `enforcementPredicateFound`. */
+function subjectTouched(text: string, changed: string): boolean {
+  const variants = (term: string): string[] => [term, term.replace(/ /g, ""), term.replace(/ /g, "_"), term.replace(/ /g, "-")];
+  const hits = extractRequirementTerms(text).filter((term) => variants(term).some((v) => changed.includes(v)));
+  if (hits.some((term) => term.includes(" "))) return true;
+  return new Set(hits).size >= 2;
+}
+
+export interface RequirementTraceScope {
+  inScope: TracedLedgerEntry[];
+  outOfScope: { entry: TracedLedgerEntry; reason: string }[];
+}
+
+/** #935: which requirements the trace demands. A linked-issue requirement
+ * (what the PR was asked to deliver, #874), an entry without provenance, and
+ * any requirement whose subject the change touches are in scope; a
+ * standards / PR-body / harness requirement the change never touches is out
+ * of scope and is dispositioned `not_applicable` with a reason. Without
+ * changed text every entry stays in scope (fail closed). */
+export function requirementTraceScope(ledger: unknown, changed?: string): RequirementTraceScope {
+  const scope: RequirementTraceScope = { inScope: [], outOfScope: [] };
+  for (const { entry, sources } of ledgerTraceCandidates(ledger)) {
+    if (changed === undefined || sources === null || sources.includes("linked_issues") || subjectTouched(entry.text, changed)) {
+      scope.inScope.push(entry);
+    } else {
+      scope.outOfScope.push({
+        entry,
+        reason: `out of scope: from ${[...new Set(sources)].join("/")}, and none of its subject terms appear in the changed files or lines`,
+      });
+    }
+  }
+  return scope;
 }
 
 interface RawClaim {
@@ -391,9 +435,10 @@ export function validateRequirementTrace(
   coveragePayload: unknown,
   ledger: unknown,
   workspace: string,
+  changed?: string,
 ): RequirementTraceArtifact {
-  const inScope = ledgerEntriesInScope(ledger);
-  if (inScope.length === 0) {
+  const { inScope, outOfScope } = requirementTraceScope(ledger, changed);
+  if (inScope.length === 0 && outOfScope.length === 0) {
     return { version: ARTIFACT_VERSION, rows: [], incomplete: false, errors: [] };
   }
 
@@ -498,6 +543,19 @@ export function validateRequirementTrace(
     rows.push({ requirement_id: entry.id, disposition, enforcement, test, reason, notes });
   }
 
+  // #935: an out-of-scope requirement is grounded not_applicable and never
+  // makes coverage incomplete, unless the reviewer itself reports it unmet.
+  for (const { entry, reason } of outOfScope) {
+    const claim = claimsById.get(entry.id);
+    const claimedUnmet = typeof claim?.disposition === "string" && claim.disposition.toLowerCase() === "unmet" && capReason(claim.reason) !== "";
+    if (claimedUnmet) {
+      incomplete = true;
+      rows.push({ requirement_id: entry.id, disposition: "unmet", enforcement: parseLocations(claim!.enforcement), test: parseLocations(claim!.test), reason: capReason(claim!.reason), notes: ["out-of-scope-reported-unmet"] });
+    } else {
+      rows.push({ requirement_id: entry.id, disposition: "not_applicable", enforcement: [], test: [], reason, notes: ["out-of-scope"] });
+    }
+  }
+
   return { version: ARTIFACT_VERSION, rows, incomplete, errors };
 }
 
@@ -600,12 +658,12 @@ export interface RequirementTraceEnforcementResult {
  */
 export function applyRequirementTraceEnforcement(
   artifact: ReviewArtifact,
-  options: { enabled: boolean; ledger: unknown; workspace: string },
+  options: { enabled: boolean; ledger: unknown; workspace: string; changed?: string },
 ): RequirementTraceEnforcementResult {
   if (!options.enabled) {
     return { applied: false, trace: { version: ARTIFACT_VERSION, rows: [], incomplete: false, errors: [] }, findingsAdded: 0 };
   }
-  const trace = validateRequirementTrace(artifact.requirement_coverage, options.ledger, options.workspace);
+  const trace = validateRequirementTrace(artifact.requirement_coverage, options.ledger, options.workspace, options.changed);
   if (trace.rows.length === 0) {
     return { applied: false, trace, findingsAdded: 0 };
   }
