@@ -39,9 +39,10 @@ writeFileSync('.v3-generated/prompt-assets.generated.ts', promptAssets);
 // manual-release.yml) stamps vX.Y.Z from .release-please-manifest.json — the
 // release version's single source of truth; GITHUB_ACTION_REF cannot serve
 // (it is a SHA for SHA-pinned consumers). `dev` (dogfood builds of PR source:
-// ai-pr-review.yaml, fork-ai-review.yaml) stamps vX.Y.Z-dev+<short sha>. Any
-// other invocation bakes "" so parity/test/local builds publish output that is
-// byte-identical to pre-#915.
+// ai-pr-review.yaml, fork-ai-review.yaml) stamps vX.Y.Z-dev+<short sha> of
+// the bundle's source commit — PR_REVIEWER_BUILD_SHA when the workflow names
+// it, GITHUB_SHA otherwise. Any other invocation bakes "" so parity/test/local
+// builds publish output that is byte-identical to pre-#915.
 const stampMode = process.env.PR_REVIEWER_BUILD_STAMP ?? "";
 let actionVersion = "";
 if (stampMode === "release" || stampMode === "dev") {
@@ -57,9 +58,12 @@ if (stampMode === "release" || stampMode === "dev") {
   if (stampMode === "release") {
     actionVersion = `v${manifestVersion}`;
   } else {
-    const sha = process.env.GITHUB_SHA;
+    // The bundle's true source commit. PR_REVIEWER_BUILD_SHA is explicit and
+    // wins: for a pull_request event GITHUB_SHA is the synthetic merge ref,
+    // while the dogfood checkout builds the PR head (#941 review finding).
+    const sha = process.env.PR_REVIEWER_BUILD_SHA || process.env.GITHUB_SHA;
     if (typeof sha !== "string" || !/^[0-9a-f]{7,40}$/i.test(sha)) {
-      throw new Error(`PR_REVIEWER_BUILD_STAMP=dev requires GITHUB_SHA to be a commit sha (the source commit of the bundle); got ${JSON.stringify(sha ?? null)}`);
+      throw new Error(`PR_REVIEWER_BUILD_STAMP=dev requires PR_REVIEWER_BUILD_SHA or GITHUB_SHA to be a commit sha (the bundle's source commit); got ${JSON.stringify(sha ?? null)}`);
     }
     actionVersion = `v${manifestVersion}-dev+${sha.slice(0, 7)}`;
   }

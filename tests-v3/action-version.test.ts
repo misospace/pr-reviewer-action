@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { parse } from "yaml";
 import { buildPublishedBody } from "../src/publish/publish.js";
 import { buildRunMetadataMarker } from "../src/metadata/markers.js";
 import { buildMetadataMarker, parseMetadata } from "../src/precheck/metadata.js";
@@ -122,6 +123,27 @@ test("#915: build generator stamps release/dev versions and fails closed", () =>
     assert.notEqual(malformedSha.status, 0);
     assert.match(malformedSha.stderr, /GITHUB_SHA/);
 
+    // #941 review: a pull_request event's GITHUB_SHA is the synthetic merge
+    // ref, while the dogfood checkout builds the PR head — the explicit
+    // build-source sha must win, or the stamp names a commit never built.
+    const mergeRefSha = "80ffd71".padEnd(40, "b"); // event GITHUB_SHA: synthetic merge ref
+    const headSha = "1f559e9".padEnd(40, "a"); // what the checkout actually built
+    const explicitSource = runGenerator({
+      PR_REVIEWER_BUILD_STAMP: "dev",
+      GITHUB_SHA: mergeRefSha,
+      PR_REVIEWER_BUILD_SHA: headSha,
+    });
+    assert.equal(explicitSource.status, 0, explicitSource.stderr);
+    assertGenerated(`v${version}-dev+1f559e9`);
+
+    const malformedExplicit = runGenerator({
+      PR_REVIEWER_BUILD_STAMP: "dev",
+      GITHUB_SHA: mergeRefSha,
+      PR_REVIEWER_BUILD_SHA: "not-a-sha",
+    });
+    assert.notEqual(malformedExplicit.status, 0);
+    assert.match(malformedExplicit.stderr, /PR_REVIEWER_BUILD_SHA/);
+
     const missingShaEnv: NodeJS.ProcessEnv = { ...process.env, PR_REVIEWER_BUILD_STAMP: "dev" };
     delete missingShaEnv.GITHUB_SHA;
     const missingSha = spawnSync(process.execPath, ["scripts/generate-v3-contract.mjs"], {
@@ -136,4 +158,39 @@ test("#915: build generator stamps release/dev versions and fails closed", () =>
     assert.equal(unstamped.status, 0, unstamped.stderr);
     assertGenerated("");
   }
+});
+
+test("#941 review: dogfood workflows stamp the sha they actually checked out", () => {
+  interface WorkflowJob {
+    steps?: Array<{ name?: string; uses?: string; with?: { ref?: string }; env?: Record<string, string> }>;
+  }
+  const stepName = "Build the action bundle";
+  const loadJob = (workflow: string): WorkflowJob => {
+    const doc = parse(readFileSync(resolve(ROOT, ".github/workflows", workflow), "utf8")) as { jobs?: Record<string, WorkflowJob> };
+    const job = Object.values(doc.jobs ?? {}).find((candidate) =>
+      (candidate.steps ?? []).some((step) => step.name === stepName));
+    assert.ok(job, `${workflow}: no job contains the ${stepName} step`);
+    return job;
+  };
+
+  for (const workflow of ["ai-pr-review.yaml", "fork-ai-review.yaml"]) {
+    const job = loadJob(workflow);
+    const buildStep = job.steps?.find((step) => step.name === stepName);
+    const stampedSha = buildStep?.env?.PR_REVIEWER_BUILD_SHA;
+    assert.ok(stampedSha, `${workflow}: build step sets PR_REVIEWER_BUILD_SHA`);
+    const checkoutRefs = (job.steps ?? [])
+      .filter((step) => typeof step.uses === "string" && step.uses.startsWith("actions/checkout"))
+      .map((step) => step.with?.ref ?? "");
+    assert.ok(
+      checkoutRefs.includes(stampedSha),
+      `${workflow}: PR_REVIEWER_BUILD_SHA (${stampedSha}) must equal a checkout ref of the same job (checkouts: ${checkoutRefs.join(" | ")})`,
+    );
+  }
+
+  // The same-repo dogfood specifically must stamp the PR head: a
+  // pull_request event leaves GITHUB_SHA at the synthetic merge ref, which
+  // is not the source the checkout builds (#941 review caught exactly this).
+  const sameRepo = loadJob("ai-pr-review.yaml");
+  const stampedSha = sameRepo.steps?.find((step) => step.name === stepName)?.env?.PR_REVIEWER_BUILD_SHA;
+  assert.equal(stampedSha, "${{ github.event.pull_request.head.sha || github.sha }}");
 });
