@@ -4,7 +4,7 @@ Four features default to `false`. None change the verdict policy on their own; e
 
 ## `claim-falsification`
 
-**What it does:** scans the PR's own description and its diff's added comments/docstrings for quantified claims and invariants the PR author made — "only", "never", "always", "byte-identical", "cross-checked", authority boundaries, compatibility promises — and anchors each to the concrete function or line it describes (never a whole file). If the deterministic scan (`src/claims/extract.ts`) finds nothing, it falls back to one bounded model call on the primary route (`src/claims/model.ts`). The review corpus then gets a `# Claims to Falsify` section telling the reviewer to check every listed claim (plus any the list missed) and report a counterexample as a finding.
+**What it does:** scans the PR's own description and its diff's added comments/docstrings for quantified claims and invariants the PR author made — "only", "never", "always", "byte-identical", "cross-checked", authority boundaries, compatibility promises — and anchors each to the concrete function or line it describes (never a whole file). Comment blocks are joined and split into whole sentences (never per-line fragments), bot-authored body boilerplate (Renovate/Dependabot footers) is skipped, PR-body claims always outrank diff-comment claims, and each claim enumerates the items it quantifies over when they are resolvable from the diff (every inline identifier plus flag-like tokens such as `repo-configurable`, so a claim over "every input carrying the flag" ships the flagged lines). If the deterministic scan (`src/claims/extract.ts`) finds nothing — or finds claims but none from the PR body — it runs one bounded model call on the primary route (`src/claims/model.ts`) and merges the result. The review corpus then gets a `# Claims to Falsify` section telling the reviewer to check every listed claim (plus any the list missed) and report a counterexample as a finding.
 
 **Enable:** `claim-falsification: true`.
 
@@ -18,7 +18,7 @@ Four features default to `false`. None change the verdict policy on their own; e
 | `CLAIM_FALSIFICATION_INPUT_MAX_BYTES` (env) | `48000` | Model-fallback input cap |
 | `CLAIMS_SECTION_MAX_BYTES` (env) | `8000` | Corpus section cap |
 
-**Status:** default off, experimental. Pre-release it was measured only together with `requirement-trace` and `equivalent-paths` (all three on vs. off, blind-adjudicated), which showed no net gain as a bundle. A small three-PR smoke on its own found one extra catch with one model and none with two others. Claim extraction is being improved (#898) before it is measured again.
+**Status:** default off, experimental. Pre-release it was measured only together with `requirement-trace` and `equivalent-paths` (all three on vs. off, blind-adjudicated), which showed no net gain as a bundle. A small three-PR smoke on its own found one extra catch with one model and none with two others; that smoke also exposed the extraction defects #898 fixed (line fragments, crowded-out body claims, unenumerated quantified items, bot boilerplate). The smoke is to be re-run before the feature is measured again.
 
 ## `requirement-trace`
 

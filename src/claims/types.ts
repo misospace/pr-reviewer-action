@@ -33,10 +33,9 @@ export interface ClaimsArtifact {
   claims: Claim[];
   truncated: boolean;
   errors: string[];
-  /** How the claims were produced: the deterministic scan found claims
-   * ("deterministic"), only the bounded model fallback did ("model"), or
-   * neither did ("none"). The fallback never augments a deterministic hit
-   * (pass.ts short-circuits on a deterministic artifact), so no combined
-   * value exists. */
-  method: "deterministic" | "model" | "none";
+  /** How the claims were produced: the deterministic scan alone
+   * ("deterministic"), only the bounded model fallback ("model"), both
+   * merged when the deterministic set lacked PR-body claims and the model
+   * pass contributed (#898 — "deterministic+model"), or neither ("none"). */
+  method: "deterministic" | "model" | "none" | "deterministic+model";
 }
