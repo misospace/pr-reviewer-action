@@ -50,12 +50,19 @@ export interface EngineRouting {
   readonly escalationReasons?: string;
 }
 
+/** The tier each review route calls first, which is the tier that failed
+ * when availability fallback runs. Unset and legacy call primary. A route
+ * missing here names itself rather than reading as a primary failure. */
+const FIRST_PASS_TIER: ReadonlyMap<string, string> = new Map([["", "primary"], ["legacy", "primary"], ["primary", "primary"], ["smart", "smart"]]);
+
 /** Port of `annotate_analysis_engine`: appends why this model produced the
  * review. A legacy (routing off) primary success stays unannotated. */
 export function annotateAnalysisEngine(engine: string, origin: string, routing: EngineRouting = {}): string {
   switch (origin) {
-    case "fallback":
-      return `${engine} — fallback (primary failed)`;
+    case "fallback": {
+      const route = routing.reviewRoute ?? "";
+      return `${engine} — fallback (${FIRST_PASS_TIER.get(route) ?? route} failed)`;
+    }
     case "escalated":
       return `${engine} — escalated (${routing.escalationReasons || "unknown"})`;
     case "primary": {

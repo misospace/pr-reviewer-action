@@ -180,6 +180,15 @@ function envIntIsSet(env: EnvLike, name: string): boolean {
   return raw !== "" && /^[+-]?[0-9]+(_[0-9]+)*$/.test(raw);
 }
 
+/** The model profile whose loop limits a harness run uses. The tier names the
+ * artifact slot, and the primary slot can carry a directly routed smart model
+ * (REVIEW_CONTEXT_PROFILE=smart), so its window and loop limits follow the
+ * profile, as toolBudgetRoute already does for the request budget. */
+export function loopLimitsProfile(env: EnvLike, tier: string): "primary" | "smart" {
+  if (tier === "smart") return "smart";
+  return (env.REVIEW_CONTEXT_PROFILE ?? "").trim().toLowerCase() === "smart" ? "smart" : "primary";
+}
+
 /** #922: the tier's declared context window in tokens (the tier input, which
  * already inherits model-context-tokens), or null when none is declared. */
 export function declaredWindowTokens(env: EnvLike, tier: string): number | null {
@@ -1232,10 +1241,11 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   const toolSchemas = [...TOOL_SCHEMAS];
   if (searchUrl) toolSchemas.push(WEB_SEARCH_SCHEMA);
 
-  const [maxRounds, wallClock, roundsExplicit] = resolveLoopLimits(env, input.tier);
+  const limitsProfile = loopLimitsProfile(env, input.tier);
+  const [maxRounds, wallClock, roundsExplicit] = resolveLoopLimits(env, limitsProfile);
   const budgets = {
     ...adaptiveLoopBudgets(maxRounds, input.maxRequests, wallClock, roundsExplicit),
-    maxConversationTokens: loopContextLimits(env, input.tier).maxConversationTokens,
+    maxConversationTokens: loopContextLimits(env, limitsProfile).maxConversationTokens,
   };
   const deadline = input.tier === "smart" ? timeFn() + wallClock : null;
 
@@ -1809,7 +1819,7 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   }
   // #540: the legacy tool_planning_* names are a fallback; the new name wins.
   // #922: corpus and per-result bytes follow the declared window when set.
-  const { maxResponseBytes, corpusMaxBytes } = loopContextLimits(env, tier);
+  const { maxResponseBytes, corpusMaxBytes } = loopContextLimits(env, loopLimitsProfile(env, tier));
   const turnTimeoutRaw = env.TOOL_TURN_TIMEOUT_SEC || env.TOOL_PLANNING_TIMEOUT_SEC || "60";
   const turnTimeout = pyInt(turnTimeoutRaw, "TOOL_TURN_TIMEOUT_SEC");
   // #810: the default budget scales with the PR (changed files/lines +

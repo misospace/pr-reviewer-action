@@ -1000,6 +1000,18 @@
         "new": "issues"
       },
       "reason": "#873: review_result is a new v3-only additive PrecheckOutput field (surfaced as the review-result action output), carried forward from the marker on a diff-unchanged skip via carriedVerdict; v2 never produced it."
+    },
+    {
+      "boundary": "prompt-assembly",
+      "fixtures": [
+        "failure-notice-and-engine"
+      ],
+      "key": "engine_annotations",
+      "expected": {
+        "old": "[\"m@https://api.example (openai)\",\"m@https://api.example (openai) \u2014 primary route\",\"s@https://api.example (anthropic) \u2014 routed smart (security_sensitive matched)\",\"s@https://api.example (anthropic) \u2014 routed smart (risk match)\",\"m@u (openai)\",\"f@https://fallback.example (openai) \u2014 fallback (primary failed)\",\"s@u (openai) \u2014 escalated (smart_review_requested: tricky concurrency)\",\"s@u (openai) \u2014 escalated (unknown)\",\"x@u (openai)\"]",
+        "new": "[\"m@https://api.example (openai)\",\"m@https://api.example (openai) \u2014 primary route\",\"s@https://api.example (anthropic) \u2014 routed smart (security_sensitive matched)\",\"s@https://api.example (anthropic) \u2014 routed smart (risk match)\",\"m@u (openai)\",\"f@https://fallback.example (openai) \u2014 fallback (smart failed)\",\"s@u (openai) \u2014 escalated (smart_review_requested: tricky concurrency)\",\"s@u (openai) \u2014 escalated (unknown)\",\"x@u (openai)\"]"
+      },
+      "reason": "A direct smart route now attributes availability fallback to the smart tier that actually failed; the v2 annotation incorrectly named primary."
     }
   ]
 }

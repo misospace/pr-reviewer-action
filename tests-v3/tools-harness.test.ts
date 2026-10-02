@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { LoopContextError, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, buildPlanningContext, accumulateUsage, usageWithCacheRatio, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
+import { LoopContextError, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
 import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
 import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
@@ -435,6 +435,13 @@ test("#910: streamed turns keep their cache counts through the OpenAI projection
 test("#910: a cache-less stream keeps the v2 usage shape", () => {
   const plain = reassembleSse('data: {"type":"message_start","message":{"id":"m","model":"x","usage":{"input_tokens":3,"output_tokens":1}}}\ndata: {"type":"message_stop"}', "anthropic");
   assert.deepEqual(plain.usage, { promptTokens: 3, completionTokens: 1, totalTokens: 4 });
+});
+
+test("loopLimitsProfile: the primary slot follows a directly routed smart profile", () => {
+  assert.equal(loopLimitsProfile({}, "primary"), "primary");
+  assert.equal(loopLimitsProfile({ REVIEW_CONTEXT_PROFILE: "primary" }, "primary"), "primary");
+  assert.equal(loopLimitsProfile({ REVIEW_CONTEXT_PROFILE: "smart" }, "primary"), "smart");
+  assert.equal(loopLimitsProfile({ REVIEW_CONTEXT_PROFILE: "primary" }, "smart"), "smart");
 });
 
 test("resolveLoopLimits: defaults are 4 rounds / 600s; smart overrides; bounds clamp", () => {

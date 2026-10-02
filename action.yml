@@ -130,7 +130,7 @@ inputs:
     required: false
     default: ""
   ai-smart-model:
-    description: Opt-in smarter model for high-risk reviews (review_routing_mode=auto). With no smart model set, auto-routing stays on the primary model and never escalates. After a successful primary review, a smart re-review runs only when the primary reviewer explicitly requests it via the structured smart_review_requested verdict field (#721); heuristic signals (request_changes, low confidence, blockers, incomplete coverage) are telemetry only. The fallback model is NEVER an escalation target — it only catches a primary-availability failure.
+    description: Opt-in smarter model for high-risk reviews (review_routing_mode=auto). With no smart model set, auto-routing stays on the primary model and never escalates. After a successful primary review, a smart re-review runs only when the primary reviewer explicitly requests it via the structured smart_review_requested verdict field (#721); heuristic signals (request_changes, low confidence, blockers, incomplete coverage) are telemetry only. The fallback model is NEVER an escalation target — it only catches an availability failure of the first-pass model (primary, or smart on a direct smart route).
     required: false
     default: ""
   ai-smart-base-url:

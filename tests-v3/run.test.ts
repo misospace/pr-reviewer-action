@@ -610,6 +610,214 @@ test("reviewer-requested escalation publishes the smart review", async () => {
   }
 });
 
+test("direct smart route calls the smart endpoint and reports the model that answered", async () => {
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ review_markdown: "Primary review.\n" })));
+  });
+  const smartServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ review_markdown: "Smart review.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const primaryRun = withRunDir();
+  const inputs = {
+    "github-token": "tok", repo: "o/r", "pr-number": "7",
+    "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+    "ai-smart-base-url": smartServer.url, "ai-smart-model": "smart-m", "ai-smart-api-key": "smart-key",
+    "ai-stream": "false", "review-routing-mode": "auto",
+    "escalate-on-risk-flags": "auth_changes", "tool-mode": "off", "deep-review": "false",
+  };
+  try {
+    const smartResult = await runReview({
+      env: {}, inputs, runDir, workspace: runDir,
+      platformAdapter: mockPlatform({
+        files: [{ filename: "src/auth/login.ts", status: "modified", additions: 1, deletions: 1, changes: 2 }],
+        diff: "diff --git a/src/auth/login.ts b/src/auth/login.ts\n--- a/src/auth/login.ts\n+++ b/src/auth/login.ts\n@@ -1 +1 @@\n-old\n+new\n",
+      }),
+      quiet: true,
+    });
+    assert.equal(smartResult.outputs.reviewRoute, "smart");
+    assert.equal(primaryServer.requests.length, 0, "direct smart routing must not call the primary endpoint");
+    assert.equal(smartServer.requests.length, 1);
+    assert.ok(smartServer.requests.every((request) => request.headers.authorization === "Bearer smart-key"));
+    assert.ok(smartServer.requests.every((request) => (JSON.parse(request.body) as { model: string }).model === "smart-m"));
+    assert.equal((JSON.parse(readFileSync(join(runDir, "ai-request.primary.json"), "utf8")) as { model: string }).model, "smart-m");
+    assert.equal(smartResult.outputs.analysisEngine, `smart-m@${smartServer.url} (openai) — routed smart (risk match: auth_changes)`);
+    assert.match(smartResult.outputs.reviewMarkdown, /Smart review\./);
+    const smartCalls = smartServer.requests.length;
+
+    const primaryResult = await runReview({
+      env: {}, inputs, runDir: primaryRun.runDir, workspace: primaryRun.runDir,
+      platformAdapter: mockPlatform(), quiet: true,
+    });
+    assert.equal(primaryResult.outputs.reviewRoute, "primary");
+    assert.equal(primaryServer.requests.length, 1);
+    assert.equal(primaryServer.requests[0]!.headers.authorization, "Bearer primary-key");
+    assert.equal((JSON.parse(primaryServer.requests[0]!.body) as { model: string }).model, "primary-m");
+    assert.equal(smartServer.requests.length, smartCalls);
+    assert.match(primaryResult.outputs.analysisEngine, /^primary-m@/);
+  } finally {
+    await primaryServer.close();
+    await smartServer.close();
+    cleanup();
+    primaryRun.cleanup();
+  }
+});
+
+test("direct smart failure uses smart retries and the availability fallback", async () => {
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const smartServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ choices: [] }));
+  });
+  const fallbackServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ review_markdown: "Fallback review.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-smart-base-url": smartServer.url, "ai-smart-model": "smart-m", "ai-smart-api-key": "smart-key",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "ai-stream": "false", "review-routing-mode": "auto", "escalate-on-risk-flags": "auth_changes",
+        "ai-primary-retries": "1", "ai-smart-retries": "2", "ai-primary-retry-delay-sec": "0", "tool-mode": "off", "deep-review": "false",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform({ files: [{ filename: "src/auth/login.ts", status: "modified", additions: 1, deletions: 1, changes: 2 }] }),
+      sleep: async () => {}, quiet: true,
+    });
+    assert.equal(result.outputs.reviewRoute, "smart");
+    assert.equal(primaryServer.requests.length, 0);
+    assert.equal(smartServer.requests.length, 2);
+    assert.ok(smartServer.requests.every((request) => request.headers.authorization === "Bearer smart-key"));
+    assert.equal(fallbackServer.requests.length, 1);
+    assert.equal(fallbackServer.requests[0]!.headers.authorization, "Bearer fallback-key");
+    assert.equal(result.outputs.analysisEngine, `fallback-m@${fallbackServer.url} (openai) — fallback (smart failed)`);
+    assert.match(result.outputs.reviewMarkdown, /Fallback review\./);
+    assert.equal(result.outputs.escalationReason, "");
+  } finally {
+    await primaryServer.close();
+    await smartServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
+test("direct smart native loop runs under the smart context window in the first-pass slot", async () => {
+  let toolCallSent = false;
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const smartServer = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    if (!toolCallSent && Array.isArray(request.tools) && request.tools.length > 0) {
+      toolCallSent = true;
+      res.end(JSON.stringify({
+        id: "c0", object: "chat.completion", model: "smart-m",
+        choices: [{ index: 0, finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "t1", type: "function", function: { name: "read_file", arguments: '{"path":"README.md"}' } }] } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      }));
+      return;
+    }
+    res.end(verdictBody(baseVerdict({ review_markdown: "Smart review.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-smart-base-url": smartServer.url, "ai-smart-model": "smart-m", "ai-smart-api-key": "smart-key",
+        "primary-model-context-tokens": "400000", "smart-model-context-tokens": "200000",
+        "ai-stream": "false", "review-routing-mode": "auto", "escalate-on-risk-flags": "auth_changes",
+        "tool-mode": "native_loop", "deep-review": "false",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform({ files: [{ filename: "src/auth/login.ts", status: "modified", additions: 1, deletions: 1, changes: 2 }] }),
+      quiet: true,
+    });
+    assert.equal(result.outputs.reviewRoute, "smart");
+    assert.equal(primaryServer.requests.length, 0, "direct smart routing must not call the primary endpoint");
+    assert.ok(smartServer.requests.length >= 2, "the native loop must run against the smart endpoint");
+    assert.ok(smartServer.requests.every((request) => request.headers.authorization === "Bearer smart-key"));
+    assert.equal(existsSync(join(runDir, "tool-harness.smart.json")), false, "the first pass keeps its artifact slot");
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as {
+      tool_loop_telemetry?: { route?: string; budget?: { max_conversation_tokens?: number } };
+    };
+    const telemetry = harness.tool_loop_telemetry;
+    assert.equal(telemetry?.route, "smart");
+    // The 200k smart window budgets 50k conversation tokens; the 400k
+    // primary window would budget 100k.
+    assert.equal(telemetry?.budget?.max_conversation_tokens, 50000);
+  } finally {
+    await primaryServer.close();
+    await smartServer.close();
+    cleanup();
+  }
+});
+
+test("legacy native-loop verdict reports the routed model when a primary override differs", async () => {
+  let toolCallSent = false;
+  const baseServer = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    if (!toolCallSent && Array.isArray(request.tools) && request.tools.length > 0) {
+      toolCallSent = true;
+      res.end(JSON.stringify({
+        id: "c0", object: "chat.completion", model: "base-m",
+        choices: [{ index: 0, finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "t1", type: "function", function: { name: "read_file", arguments: '{"path":"README.md"}' } }] } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      }));
+      return;
+    }
+    res.end(verdictBody(baseVerdict()));
+  });
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": baseServer.url, "ai-model": "base-m", "ai-api-key": "base-key",
+        "ai-primary-base-url": primaryServer.url, "ai-primary-model": "primary-m", "ai-primary-api-key": "primary-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop",
+        "tool-max-requests": "1", "deep-review": "false",
+      },
+      runDir, workspace: runDir, platformAdapter: mockPlatform(), quiet: true,
+    });
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_verdict_produced?: boolean };
+    assert.equal(harness.native_loop_verdict_produced, true, "the native verdict path must be exercised");
+    assert.equal(result.outputs.reviewRoute, "legacy");
+    assert.equal(result.outputs.analysisEngine, `base-m@${baseServer.url} (openai)`);
+    assert.equal(primaryServer.requests.length, 0);
+    assert.ok(baseServer.requests.length >= 2);
+    assert.ok(baseServer.requests.every((request) => request.headers.authorization === "Bearer base-key"));
+  } finally {
+    await baseServer.close();
+    await primaryServer.close();
+    cleanup();
+  }
+});
+
 test("fork PR without overrides writes the gated skip artifacts and still reviews", async () => {
   const server = await startMockServer((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
