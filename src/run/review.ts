@@ -55,7 +55,7 @@ import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "../enforcement/enforce.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
-import { applyRequirementTraceEnforcement } from "../enforcement/requirement-trace.js";
+import { applyRequirementTraceEnforcement, changedSubjectText, requirementTraceScope } from "../enforcement/requirement-trace.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
 import {
@@ -626,7 +626,6 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ...(env.PR_THREAD_CONTEXT !== undefined ? { prThreadContext: env.PR_THREAD_CONTEXT } : {}),
     ...(env.REVIEW_VERBOSITY !== undefined ? { reviewVerbosity: env.REVIEW_VERBOSITY } : {}),
   }, ws);
-  promptState = applyRequirementTraceFragment(promptState, ws, (env.REQUIREMENT_TRACE ?? "false").toLowerCase() === "true");
   env.SYSTEM_PROMPT = promptState.systemPrompt;
 
   // ── Corpus stage part 1 (corpus.sh): fork CI, harvest advisory ───────
@@ -811,6 +810,14 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   }
 
   promptState = applySpecialistLeadsFragment(promptState, ws);
+  // #935: scope the trace from the FINAL ledger (the #812 same-head refresh
+  // above can rebuild it), so the tool loop, the verdict turn and the
+  // validator below all see the same in-scope requirement ids.
+  const traceChanged = traceChangedText(ws);
+  promptState = applyRequirementTraceFragment(
+    promptState, ws, (env.REQUIREMENT_TRACE ?? "false").toLowerCase() === "true", undefined,
+    requirementTraceScope(safeJson(ws.read("requirement-ledger.json")), traceChanged).inScope.map((entry) => entry.id),
+  );
   env.SYSTEM_PROMPT = promptState.systemPrompt;
 
   // ── Native tool harness (corpus.sh tail) ─────────────────────────────
@@ -921,7 +928,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     // must not be clobbered by it), and its synthesized findings must be in
     // place before the strict mapping counts open findings.
     const completeness = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completeness.status === "incomplete" && completeness.mode === "fail");
@@ -932,7 +939,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       securityFlagged: isSecurityFlagged(classificationArtifact),
     });
     applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
   }
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(reviewRecord)}\n`, "utf8"));
@@ -1174,6 +1181,30 @@ function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): {
     }
     if (usage !== null && typeof usage === "object" && typeof (usage as Record<string, unknown>).peak_conversation_tokens === "number") {
       out.contextPeak = (usage as Record<string, unknown>).peak_conversation_tokens as number;
+    }
+  }
+  return out;
+}
+
+/** #935: what the change touches, from the FULL raw diff (the budgeted
+ * `pr.diff.truncated` may drop the very hunk that touches a requirement's
+ * subject). Undefined when the raw diff is unavailable, so the trace keeps
+ * every requirement in scope instead of treating missing evidence as an
+ * empty change. */
+export function traceChangedText(ws: Pick<RunWorkspace, "readText" | "read">): string | undefined {
+  const diff = ws.readText("pr.diff");
+  if (diff === null || diff === undefined || diff === "") return undefined;
+  return changedSubjectText(diff, changedFilePaths(safeJsonArray(ws.read("pr-files.json"))));
+}
+
+/** Changed file paths (current and previous names) from `pr-files.json`. */
+function changedFilePaths(files: unknown[] | null): string[] {
+  const out: string[] = [];
+  for (const file of files ?? []) {
+    if (!file || typeof file !== "object") continue;
+    for (const key of ["filename", "previous_filename"]) {
+      const value = (file as Record<string, unknown>)[key];
+      if (typeof value === "string" && value !== "") out.push(value);
     }
   }
   return out;

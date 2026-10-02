@@ -2836,3 +2836,49 @@ test("#899: a native loop whose harness artifact is unreadable records partial c
   const recorded = { stop_reason: "max-rounds", changed_files_total: 3, unread_files: ["a.ts"], leads_total: 0, unresolved_leads: [] };
   assert.deepEqual(resolvePartialCoverage({ partial_coverage: recorded }, true, true), recorded);
 });
+
+for (const direction of ["added", "removed"] as const) {
+  test(`#935: a same-head refresh that ${direction === "added" ? "adds" : "removes"} a linked-issue requirement re-scopes the trace prompt`, async () => {
+    const requests: string[] = [];
+    const server = await startMockServer((_req, body, res) => {
+      requests.push(String(body));
+      res.setHeader("Content-Type", "application/json");
+      res.end(verdictBody(baseVerdict()));
+    });
+    let prBody = direction === "added" ? "Original description." : "Fixes #40";
+    const platform = mockPlatform();
+    const base = platform.getPr.bind(platform);
+    platform.getPr = async () => ({ ...(await base() as Record<string, unknown>), body: prBody }) as never;
+    platform.getIssue = (async () => ({
+      ok: true,
+      data: { number: 40, title: "Resolver", state: "open", labels: [], body: "## Acceptance criteria\n- [ ] Resolution MUST compare the source SHA.\n" },
+    })) as never;
+    const { runDir, cleanup } = withRunDir();
+    try {
+      await runReview({
+        env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+        inputs: {
+          "github-token": "tok", repo: "o/r", "pr-number": "7",
+          "ai-base-url": server.url, "ai-model": "m", "ai-stream": "false", "ai-api-key": "k",
+          "ci-status-check": "true", "requirement-trace": "true",
+        },
+        runDir, workspace: runDir, platformAdapter: platform,
+        ciGate: { file: "", envAllowlist: [], workload: async () => { prBody = direction === "added" ? "Fixes #40" : "No linked issue."; return 0; } },
+        persistArtifacts: true, quiet: true,
+      });
+      const ledger = JSON.parse(readFileSync(join(runDir, "requirement-ledger.json"), "utf8")) as { requirements: { id: string; text: string }[] };
+      const reviewRequest = requests.at(-1) ?? "";
+      if (direction === "added") {
+        const req = ledger.requirements.find((r) => /source SHA/.test(r.text));
+        assert.ok(req, "the refreshed ledger carries the linked-issue requirement");
+        assert.match(reviewRequest, new RegExp(`trace scope \\(${req.id}\\)`));
+      } else {
+        assert.equal(ledger.requirements.some((r) => /source SHA/.test(r.text)), false);
+        assert.doesNotMatch(reviewRequest, /trace scope \(/);
+      }
+    } finally {
+      await server.close();
+      cleanup();
+    }
+  });
+}

@@ -173,11 +173,21 @@ export function applyRequirementTraceFragment(
   workspace: PromptWorkspace,
   enabled: boolean,
   assets: PromptAssets = BUNDLED_PROMPT_ASSETS,
+  scopeIds?: readonly string[],
 ): SystemPromptState {
   if (!state.isDefault || !enabled) return state;
   if (!workspace.isNonEmpty(PROMPT_PRESENCE_FILES.requirementLedger)) return state;
-  const trace = bashCapture(rawFragment(assets, "requirement_trace"));
+  // #935: with a deterministic scope, ask only for the in-scope requirements
+  // (none in scope: no trace instructions at all).
+  if (scopeIds !== undefined && scopeIds.length === 0) return state;
+  let trace = bashCapture(rawFragment(assets, "requirement_trace"));
   if (trace === "") return state;
+  if (scopeIds !== undefined) {
+    trace = trace.replace(
+      "For every acceptance/normative requirement in the Requirement Ledger,",
+      `For every requirement in trace scope (${scopeIds.join(", ")}); other ledger requirements need no trace,`,
+    );
+  }
   if (state.systemPrompt.includes(trace)) return state;
   return { ...state, systemPrompt: `${state.systemPrompt}\n${trace}` };
 }
