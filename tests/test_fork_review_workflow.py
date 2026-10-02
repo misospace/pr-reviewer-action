@@ -319,6 +319,9 @@ def test_fork_model_policy_pinned_to_fork_variables(fork_text) -> None:
     assert values.get("ai-smart-model") == "${{ vars.FORK_SMART_MODEL }}"
     assert values.get("ai-smart-api-format") == "${{ vars.FORK_SMART_FORMAT }}"
     assert values.get("review-routing-mode") == "auto"
+    # #922: context windows come from fork pins too, never the dogfood ones.
+    assert values.get("primary-model-context-tokens") == "${{ vars.FORK_PRIMARY_CONTEXT_TOKENS }}"
+    assert values.get("smart-model-context-tokens") == "${{ vars.FORK_SMART_CONTEXT_TOKENS }}"
 
 
 def test_fork_model_policy_ignores_org_dogfood_variables(fork_text) -> None:

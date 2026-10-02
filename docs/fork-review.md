@@ -120,6 +120,8 @@ Repo **variables**:
 | `FORK_PRIMARY_FORMAT` | `openai` |
 | `FORK_SMART_MODEL` | `qwen3.8-flash-next` |
 | `FORK_SMART_FORMAT` | `openai` |
+| `FORK_PRIMARY_CONTEXT_TOKENS` | `131072` (optional: the primary model's window; unset keeps the `low` context profile) |
+| `FORK_SMART_CONTEXT_TOKENS` | `262144` (optional: the smart model's window) |
 
 Repo **secret**:
 
