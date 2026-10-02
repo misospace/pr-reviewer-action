@@ -184,3 +184,19 @@ If the operator's workflow already sets `verdict-policy` explicitly, that
 line above is a no-op (with a warning); `inline-findings-max: 10` only takes
 effect if the operator's own ceiling (explicit value, or the contract
 default of 20) is 10 or higher.
+
+## Operator mode: the same file under #727
+
+This file, its locations, and its trust rules are the repository config
+layer shared with the future self-hosted Operator mode (#727). There the
+operator's layer is a centrally managed instance config instead of workflow
+inputs, and the same file gains operator-mode **extension keys** — profile
+selection (`model-profile`, `executor-profile`, `evidence-profile`), path
+narrowing (`ignore-paths`, `skip-only-paths`), `review-instructions`,
+`require-suggested-fix`, and `enabled` — all of which only narrow, disable,
+or select operator-approved profiles. In this Action those extension keys
+are unknown keys: warned about and inert, exactly like any other
+non-repo-configurable key above. The full model — the three config layers,
+the adoption lifecycle, profile resolution, and the effective-config
+fingerprint the canonical job contract consumes — is defined in
+[`docs/architecture/operator-config-and-adoption.md`](architecture/operator-config-and-adoption.md).

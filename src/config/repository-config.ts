@@ -185,8 +185,11 @@ function numericCeiling(input: ContractInput, operatorRaw: RawInputs): number {
 /** Validate and normalize one candidate repository-config value into the
  * string form `loadConfig` expects, or reject it. Mirrors `loadConfig`'s own
  * per-type rules so a value accepted here can never later make `loadConfig`
- * throw. */
-function normalizeCandidate(input: ContractInput, raw: unknown): { ok: true; text: string } | { ok: false; reason: string } {
+ * throw. Exported for the #727 operator layer: `instance-config.ts`
+ * validates its `reviewer-defaults` envelope with the exact same per-type
+ * rules, so an operator-set ceiling and a repository-narrowed value can
+ * never disagree about what a valid value is. */
+export function normalizeCandidate(input: ContractInput, raw: unknown): { ok: true; text: string } | { ok: false; reason: string } {
   if (BOOLEAN_INPUTS.has(input.id)) {
     if (typeof raw === "boolean") return { ok: true, text: raw ? "true" : "false" };
     if (raw === "true" || raw === "false") return { ok: true, text: raw };
@@ -228,42 +231,59 @@ export function applyRepositoryConfig(
   operatorRaw: RawInputs,
   file: RepositoryConfigFile | undefined,
 ): RepositoryConfigResolution {
+  if (file === undefined) {
+    return { raw: { ...operatorRaw }, warnings: [], sourcePath: null, appliedKeys: [] };
+  }
+  const parsed = parseRepositoryConfigText(file.text, file.path);
+  if ("malformed" in parsed) {
+    return { raw: { ...operatorRaw }, warnings: [parsed.warning], sourcePath: null, appliedKeys: [] };
+  }
+  return applyRepositoryConfigValues(contract, operatorRaw, parsed.values, file.path);
+}
+
+/**
+ * The precedence merge over an already-parsed repository-config key/value
+ * map (the parse and malformed-file handling live in
+ * `parseRepositoryConfigText`). Exported for the #727 operator layer:
+ * `effective-config.ts` splits a shared repository config file into its
+ * contract-input keys (narrowed here, byte-identical to the Action path)
+ * and its operator-extension keys (resolved separately), so both modes run
+ * ONE narrow-not-widen implementation. Same contract as
+ * `applyRepositoryConfig`: pure and total, never throws.
+ */
+export function applyRepositoryConfigValues(
+  contract: ActionContract,
+  operatorRaw: RawInputs,
+  values: Readonly<Record<string, unknown>>,
+  sourcePath: string,
+): RepositoryConfigResolution {
   const raw: Record<string, string | undefined> = { ...operatorRaw };
   const warnings: string[] = [];
   const appliedKeys: string[] = [];
 
-  if (file === undefined) {
-    return { raw, warnings, sourcePath: null, appliedKeys };
-  }
-
-  const parsed = parseRepositoryConfigText(file.text, file.path);
-  if ("malformed" in parsed) {
-    return { raw, warnings: [parsed.warning], sourcePath: null, appliedKeys };
-  }
-
   const byId = new Map(contract.inputs.map((input) => [input.id, input]));
   const policyAllowed = operatorRaw["allow-repo-policy-overrides"] === "true";
-  for (const [key, value] of Object.entries(parsed.values)) {
+  for (const [key, value] of Object.entries(values)) {
     const input = byId.get(key);
     if (!input || !input["repo-configurable"] || SECRET_INPUTS.has(key)) {
-      warnings.push(`Repository config '${file.path}' sets '${key}', which is not repo-configurable; ignoring it.`);
+      warnings.push(`Repository config '${sourcePath}' sets '${key}', which is not repo-configurable; ignoring it.`);
       continue;
     }
     if (input["repo-policy"] && !policyAllowed) {
-      warnings.push(`Repository config '${file.path}' sets policy input '${key}', but the operator did not enable allow-repo-policy-overrides; ignoring it.`);
+      warnings.push(`Repository config '${sourcePath}' sets policy input '${key}', but the operator did not enable allow-repo-policy-overrides; ignoring it.`);
       continue;
     }
     const isNumeric = INTEGER_INPUTS.has(key) || FLOAT_INPUTS.has(key);
     if (isNumeric) {
       const candidate = normalizeCandidate(input, value);
       if (!candidate.ok) {
-        warnings.push(`Repository config '${file.path}' sets '${key}' to an invalid value (${candidate.reason}); ignoring it.`);
+        warnings.push(`Repository config '${sourcePath}' sets '${key}' to an invalid value (${candidate.reason}); ignoring it.`);
         continue;
       }
       const ceiling = numericCeiling(input, operatorRaw);
       const number = Number(candidate.text);
       if (number > ceiling) {
-        warnings.push(`Repository config '${file.path}' sets '${key}' to ${number}, which exceeds the operator ceiling of ${ceiling}; ignoring it.`);
+        warnings.push(`Repository config '${sourcePath}' sets '${key}' to ${number}, which exceeds the operator ceiling of ${ceiling}; ignoring it.`);
         continue;
       }
       raw[key] = candidate.text;
@@ -271,19 +291,19 @@ export function applyRepositoryConfig(
       continue;
     }
     if (isOperatorExplicit(input, operatorRaw)) {
-      warnings.push(`Repository config '${file.path}' sets '${key}', but the operator explicitly set it; repository value ignored.`);
+      warnings.push(`Repository config '${sourcePath}' sets '${key}', but the operator explicitly set it; repository value ignored.`);
       continue;
     }
     const candidate = normalizeCandidate(input, value);
     if (!candidate.ok) {
-      warnings.push(`Repository config '${file.path}' sets '${key}' to an invalid value (${candidate.reason}); ignoring it.`);
+      warnings.push(`Repository config '${sourcePath}' sets '${key}' to an invalid value (${candidate.reason}); ignoring it.`);
       continue;
     }
     raw[key] = candidate.text;
     appliedKeys.push(key);
   }
 
-  return { raw, warnings, sourcePath: file.path, appliedKeys };
+  return { raw, warnings, sourcePath, appliedKeys };
 }
 
 /**
