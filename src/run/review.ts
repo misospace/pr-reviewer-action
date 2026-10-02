@@ -844,7 +844,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // ── Review stage (review.sh) ─────────────────────────────────────────
   const userMessage = buildUserMessage(ws, "classification.json");
   const primary = await producePrimaryReview({
-    env, ws, profiles, streamBool, userMessage, log, errorLog, clock, sleep: options.sleep,
+    env, ws, profiles, streamBool, userMessage, log, errorLog, clock, sleep: options.sleep, budgets,
   });
   let analysisEngine = primary.analysisEngine;
   let primaryProduced = primary.fromPrimary;
@@ -1410,13 +1410,16 @@ function configuredApiKeys(routeKey: string | undefined, profiles: TierProfiles)
 
 /** review.sh: the primary call (native-verdict fast path, then the standard
  * corpus review) and the fallback on total primary failure. */
-async function producePrimaryReview(input: ReviewCallInput & { runDir?: string }): Promise<{
+async function producePrimaryReview(input: ReviewCallInput & {
+  runDir?: string;
+  budgets: ReturnType<typeof resolveTierBudgets>;
+}): Promise<{
   artifact: Record<string, unknown> | null;
   analysisEngine: string;
   fromPrimary: boolean;
   fromFallback: boolean;
 }> {
-  const { env, ws, profiles, log, errorLog } = input;
+  const { env, ws, profiles, log, errorLog, budgets } = input;
   const toolMode = (env.TOOL_MODE ?? "off").toLowerCase();
   const harness = safeJson(ws.read("tool-harness.json"));
   const firstTier = env.REVIEW_ROUTE === "smart" ? "smart" : "primary";
@@ -1484,8 +1487,14 @@ async function producePrimaryReview(input: ReviewCallInput & { runDir?: string }
   }
 
   errorLog(`${firstProfile.label} model unavailable after retries; trying fallback: ${profiles.fallback.model} @ ${profiles.fallback.baseUrl} (${profiles.fallback.apiFormat})`);
-  // #368: the fallback re-truncates the initial corpus at 120000 bytes.
-  ws.write("review-corpus.fallback.truncated.md", truncateClean(ws.read("review-corpus.md") ?? new Uint8Array(0), 120000, "…[content truncated]\n"));
+  // #368: the fallback re-truncates the initial corpus. #940: the bound is
+  // the declared fallback capacity — #922 caps only the primary tier, so a
+  // direct smart route can assemble a corpus far beyond a smaller fallback's
+  // window — never above the historical 120000-byte constant.
+  const fallbackCorpusBudget = budgets.fallback !== null
+    ? Math.min(120000, budgets.fallback.maxCorpus)
+    : 120000;
+  ws.write("review-corpus.fallback.truncated.md", truncateClean(ws.read("review-corpus.md") ?? new Uint8Array(0), fallbackCorpusBudget, "…[content truncated]\n"));
   const fallbackProfile = tierProfileFrom(profiles, "fallback", env);
   const fallback = await callTier("fallback", fallbackProfile, input, "review-corpus.fallback.truncated.md", "ai-request.fallback.json", "ai-response.fallback.json");
   if (fallback.ok) {

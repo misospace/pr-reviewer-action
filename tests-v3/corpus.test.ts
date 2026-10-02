@@ -593,6 +593,19 @@ test("#922: an invalid fallback window is refused like the other tier windows", 
   assert.throws(() => resolveTierBudgets({ fallbackModelContextTokens: "abc" }), /FALLBACK_MODEL_CONTEXT_TOKENS/);
 });
 
+test("#940: the fallback tier's own budgets ride along for the recovery path", () => {
+  const budgets = resolveTierBudgets({ fallbackModelContextTokens: "24000", aiMaxTokens: "16384" });
+  // usable = 24000 - (16384 + 2000) = 5616 tokens → 16848 bytes, with the
+  // 60% / 15% diff and files splits and their floors.
+  assert.deepEqual(budgets.fallback, { maxCorpus: 16848, maxDiff: 10108, maxFiles: 2527 });
+  // #922 still folds the same derivation into the primary cap.
+  assert.equal(budgets.primary.maxCorpus, budgets.fallback!.maxCorpus);
+  // Undeclared (absent or empty) stays null: the recovery path keeps the
+  // historical constant.
+  assert.deepEqual(resolveTierBudgets({}).fallback, null);
+  assert.deepEqual(resolveTierBudgets({ fallbackModelContextTokens: "" }).fallback, null);
+});
+
 // ---------------------------------------------------------------------------
 // #921/#930: the assembler-certified corpus-diff payload (adversarial)
 // ---------------------------------------------------------------------------

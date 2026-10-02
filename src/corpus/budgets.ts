@@ -16,7 +16,11 @@
  *   window that cannot fit the output headroom plus a 2000-token input
  *   budget; the legacy global setting floors at 2000 instead of refusing.
  * - The runtime budgets always reflect the PRIMARY tier; the smart tier
- *   profile is what `build_review_corpus smart` consumes (#658/#668). */
+ *   profile is what `build_review_corpus smart` consumes (#658/#668). The
+ *   fallback tier's own budgets (#940) ride along for the recovery path:
+ *   the smart tier is deliberately left uncapped by the fallback window,
+ *   so the availability-fallback request sizes its re-truncated corpus
+ *   from `fallback` instead. */
 
 export class BudgetError extends Error {}
 
@@ -116,7 +120,16 @@ function namedModeBudgets(contextLimitMode: string): TierBudgets {
  * `BudgetError` with the v2-identical message when a tier token override is
  * invalid or cannot fit the output headroom; the caller decides whether that
  * aborts the run (v2: `exit 1`). */
-export function resolveTierBudgets(inputs: BudgetInputs): { primary: TierBudgets; smart: TierBudgets } {
+export function resolveTierBudgets(inputs: BudgetInputs): {
+  primary: TierBudgets;
+  smart: TierBudgets;
+  /** #940: the fallback tier's own derivation, or null when no fallback
+   * window is declared. #922 caps the primary tier with these budgets, but
+   * the smart tier is returned uncapped — a direct smart route can assemble
+   * a corpus far beyond a smaller fallback's capacity, so the recovery
+   * request reads its bound from here. */
+  fallback: TierBudgets | null;
+} {
   const aiMaxTokens = inputs.aiMaxTokens !== undefined && inputs.aiMaxTokens !== ""
     ? Number(inputs.aiMaxTokens)
     : DEFAULT_AI_MAX_TOKENS;
@@ -150,9 +163,10 @@ function resolveFrom(
   inputs: BudgetInputs,
   aiMaxTokens: number,
   contextLimitMode: string,
-): { primary: TierBudgets; smart: TierBudgets } {
+): { primary: TierBudgets; smart: TierBudgets; fallback: TierBudgets | null } {
   let primary = base;
   let smart = base;
+  let fallback: TierBudgets | null = null;
   if (inputs.primaryModelContextTokens !== undefined && inputs.primaryModelContextTokens !== "") {
     primary = applyContextLimits(inputs.primaryModelContextTokens, "tier", aiMaxTokens, contextLimitMode);
   }
@@ -160,12 +174,12 @@ function resolveFrom(
     smart = applyContextLimits(inputs.smartModelContextTokens, "tier", aiMaxTokens, contextLimitMode);
   }
   if (inputs.fallbackModelContextTokens !== undefined && inputs.fallbackModelContextTokens !== "") {
-    const fallback = applyContextLimits(inputs.fallbackModelContextTokens, "tier", aiMaxTokens, contextLimitMode);
+    fallback = applyContextLimits(inputs.fallbackModelContextTokens, "tier", aiMaxTokens, contextLimitMode);
     primary = {
       maxCorpus: Math.min(primary.maxCorpus, fallback.maxCorpus),
       maxDiff: Math.min(primary.maxDiff, fallback.maxDiff),
       maxFiles: Math.min(primary.maxFiles, fallback.maxFiles),
     };
   }
-  return { primary, smart };
+  return { primary, smart, fallback };
 }

@@ -711,6 +711,91 @@ test("direct smart failure uses smart retries and the availability fallback", as
   }
 });
 
+test("#940: direct smart recovery truncates the fallback corpus to the fallback's declared capacity", async () => {
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const smartServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ choices: [] }));
+  });
+  const fallbackServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ review_markdown: "Fallback review.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    // A diff large enough that the smart-profile corpus (~157KB) exceeds both
+    // the fallback's derived capacity (16848 = (24000 - 16384 - 2000) * 3)
+    // and the historical 120000-byte constant. The mid sentinel sits between
+    // the two, so the old constant-path recovery request would retain it.
+    const filler = (n: number): string => `+padding ${String(n).padStart(6, "0")} of inert context filler for the review corpus`;
+    const lines: string[] = [
+      "diff --git a/big.txt b/big.txt",
+      "index 0000000..1111111 100644",
+      "--- a/big.txt",
+      "+++ b/big.txt",
+      "@@ -1,2 +1,2600 @@",
+      "+HEAD-SENTINEL-940 kept by the recovery cut",
+    ];
+    let size = lines.join("\n").length;
+    let n = 0;
+    for (; size < 60000; n += 1) {
+      const line = filler(n);
+      lines.push(line);
+      size += line.length + 1;
+    }
+    lines.push("+MID-SENTINEL-940 dropped by the recovery cut");
+    size += lines[lines.length - 1]!.length + 1;
+    for (; size < 156000; n += 1) {
+      const line = filler(n);
+      lines.push(line);
+      size += line.length + 1;
+    }
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-smart-base-url": smartServer.url, "ai-smart-model": "smart-m", "ai-smart-api-key": "smart-key",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "smart-model-context-tokens": "200000", "fallback-model-context-tokens": "24000", "ai-max-tokens": "16384",
+        "ai-stream": "false", "review-routing-mode": "auto", "escalate-on-risk-flags": "auth_changes",
+        "ai-primary-retries": "1", "ai-smart-retries": "1", "ai-primary-retry-delay-sec": "0", "tool-mode": "off", "deep-review": "false",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform({
+        diff: `${lines.join("\n")}\n`,
+        files: [{ filename: "src/auth/login.ts", status: "modified", additions: 1, deletions: 1, changes: 2 }],
+      }),
+      sleep: async () => {}, quiet: true,
+    });
+    assert.equal(result.outputs.reviewRoute, "smart");
+    assert.equal(primaryServer.requests.length, 0, "direct smart routing must not call the primary endpoint");
+
+    // The smart first-pass budget is untouched: the assembled corpus keeps
+    // content far beyond what the recovery request may carry.
+    const assembled = readFileSync(join(runDir, "review-corpus.md"));
+    assert.ok(assembled.length > 120000, `assembled smart corpus must exceed the historical constant, got ${assembled.length}`);
+    assert.ok(assembled.includes("MID-SENTINEL-940"), "the assembled corpus must retain the mid sentinel");
+
+    // The recovery request is sized by the fallback's declared window.
+    const fallbackCorpus = readFileSync(join(runDir, "review-corpus.fallback.truncated.md"));
+    assert.ok(fallbackCorpus.length <= 16848, `fallback corpus must fit the derived capacity, got ${fallbackCorpus.length}`);
+    assert.equal(fallbackServer.requests.length, 1);
+    const fallbackBody = String(fallbackServer.requests[0]!.body);
+    assert.ok(fallbackBody.includes("HEAD-SENTINEL-940"), "the recovery request must still carry the corpus head");
+    assert.ok(!fallbackBody.includes("MID-SENTINEL-940"), "the recovery request must drop content beyond the fallback capacity");
+    assert.match(result.outputs.reviewMarkdown, /Fallback review\./);
+  } finally {
+    await primaryServer.close();
+    await smartServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
 test("direct smart native loop runs under the smart context window in the first-pass slot", async () => {
   let toolCallSent = false;
   const primaryServer = await startMockServer((_req, _body, res) => {
