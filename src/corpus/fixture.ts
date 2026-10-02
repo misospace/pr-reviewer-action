@@ -19,7 +19,7 @@
 
 import { prioritizeDiff, type PrioritizeDiffOptions } from "./diff-priority.js";
 import { readFileSync } from "node:fs";
-import { BudgetError, resolveTierBudgets, type TierBudgets } from "./budgets.js";
+import { BudgetError, resolveTierBudgets } from "./budgets.js";
 import { ProjectionError } from "./projections.js";
 import {
   buildReviewCorpus,
@@ -140,7 +140,7 @@ export function runCorpusFixture(fixturePath: string): { ok: boolean; values?: R
   const context = fixture.context ?? {};
   const env = fixture.env ?? {};
 
-  let budgets: { primary: TierBudgets; smart: TierBudgets };
+  let budgets: ReturnType<typeof resolveTierBudgets>;
   try {
     budgets = resolveTierBudgets({
       modelContextTokens: context.model_context_tokens,
