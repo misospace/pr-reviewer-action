@@ -395,6 +395,49 @@ test("#898: a markdown bullet starts a new body claim unit even without terminal
   assert.ok(texts.some((t) => t.includes("payload normalization for every specialist role") && !t.includes("corpus builder")), JSON.stringify(texts));
 });
 
+test("#252: hostile bot markers and HTML comments in the body cannot break extraction or promote themselves", () => {
+  // The sanitizers are fed their own delimiters with regex/backtick/shell
+  // metacharacters, not just benign input: the HTML-comment strip is a plain
+  // string replace and the bot denylist a plain test — neither may throw,
+  // re-inject content, or leave a bot marker inside a claim.
+  const prBody = [
+    "The gate <!--rebase-check${ process.env.SECRET }-->(.*)+? must never skip a required check.",
+    "Config lives in `renovate.json5` and must never contain secrets.",
+    "<!-- unterminated .* [$(``)] only admins may see this",
+  ].join("\n");
+  const result = extractClaimsDeterministic({ prBody, diffText: "" });
+  const texts = result.claims.map((c) => c.claim);
+  assert.ok(result.claims.some((c) => c.claim.includes("must never skip a required check")), JSON.stringify(texts));
+  assert.ok(!texts.some((t) => /\$\{|rebase-check/.test(t)), "comment content must be stripped whole: " + JSON.stringify(texts));
+  assert.ok(!texts.some((t) => /renovate/i.test(t)), "a bot keyword inside backticks is still bot template: " + JSON.stringify(texts));
+  assert.ok(!texts.some((t) => /only admins/.test(t)), "an unterminated comment drops its trailing text");
+});
+
+test("#898: flag-token enumeration matches snake/camel variants and digit-run kebab tokens", () => {
+  const prBody = "Every `repo_configurable` input only narrows the ceiling. The v2-only shim must never ship.";
+  const diffText = [
+    "diff --git a/contracts/c.yml b/contracts/c.yml",
+    "@@ -0,0 +1,4 @@",
+    "+  alpha:",
+    "+    repo-configurable: true",
+    "+  beta:",
+    "+    repoConfigurable: true",
+    "diff --git a/src/shim.ts b/src/shim.ts",
+    "@@ -0,0 +1,2 @@",
+    "+export const V2_ONLY = true; // the v2_only flag",
+    "+export const keep = 1;",
+  ].join("\n");
+  const result = extractClaimsDeterministic({ prBody, diffText });
+  const narrow = result.claims.find((c) => /only narrows the ceiling/.test(c.claim));
+  assert.ok(narrow, JSON.stringify(result.claims.map((c) => c.claim)));
+  // The snake identifier matches no literal line; the variant pattern must
+  // match the kebab and camel spellings.
+  assert.deepEqual(narrow!.items, ["contracts/c.yml:L2", "contracts/c.yml:L4"]);
+  const shim = result.claims.find((c) => /v2-only shim/.test(c.claim));
+  assert.ok(shim, JSON.stringify(result.claims.map((c) => c.claim)));
+  assert.deepEqual(shim!.items, ["src/shim.ts:V2_ONLY"]);
+});
+
 // ── rendering ────────────────────────────────────────────────────────────
 
 function claim(overrides: Partial<Claim> = {}): Claim {
