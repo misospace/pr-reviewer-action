@@ -658,7 +658,7 @@ export interface RequirementTraceEnforcementResult {
  */
 export function applyRequirementTraceEnforcement(
   artifact: ReviewArtifact,
-  options: { enabled: boolean; ledger: unknown; workspace: string; changed?: string },
+  options: { enabled: boolean; ledger: unknown; workspace: string; changed?: string | undefined },
 ): RequirementTraceEnforcementResult {
   if (!options.enabled) {
     return { applied: false, trace: { version: ARTIFACT_VERSION, rows: [], incomplete: false, errors: [] }, findingsAdded: 0 };

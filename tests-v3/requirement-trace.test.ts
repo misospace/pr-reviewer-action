@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ReviewArtifact } from "../src/enforcement/artifact.js";
 import { applyRequirementTraceFragment, workspaceAt } from "../src/prompt/index.js";
+import { traceChangedText } from "../src/run/review.js";
+import { RunWorkspace } from "../src/run/workspace.js";
 import { applyStrictVerdictPolicy } from "../src/enforcement/verdict-policy.js";
 import {
   applyRequirementTraceEnforcement,
@@ -591,4 +593,21 @@ test("#935: the trace prompt asks only for the in-scope requirements", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("#935: the touched-subject scope reads the full raw diff, not the budgeted one", () => {
+  const ledger = { requirements: [{ id: "req-csrf", text: "Every request MUST validate the CSRF token.", kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 4 }] }] };
+  const ws = new RunWorkspace(mkdtempSync(join(tmpdir(), "req-trace-diff-")), false);
+  ws.write("pr.diff", "diff --git a/src/http.ts b/src/http.ts\n+++ b/src/http.ts\n+  validateCsrfToken(request);\n");
+  ws.write("pr.diff.truncated", "diff --git a/src/http.ts b/src/http.ts\n[hunk omitted by the context budget]\n");
+  ws.write("pr-files.json", JSON.stringify([{ filename: "src/http.ts" }]));
+  assert.deepEqual(requirementTraceScope(ledger, traceChangedText(ws)).inScope.map((e) => e.id), ["req-csrf"]);
+});
+
+test("#935: missing raw diff evidence keeps every requirement in scope (fail closed)", () => {
+  const ledger = { requirements: [{ id: "req-db", text: "Database migrations MUST be reversible.", kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 5 }] }] };
+  const ws = new RunWorkspace(mkdtempSync(join(tmpdir(), "req-trace-nodiff-")), false);
+  ws.write("pr-files.json", JSON.stringify([{ filename: "README.md" }]));
+  assert.equal(traceChangedText(ws), undefined);
+  assert.deepEqual(requirementTraceScope(ledger, traceChangedText(ws)).inScope.map((e) => e.id), ["req-db"]);
 });

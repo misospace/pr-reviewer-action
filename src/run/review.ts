@@ -620,10 +620,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ...(env.REVIEW_VERBOSITY !== undefined ? { reviewVerbosity: env.REVIEW_VERBOSITY } : {}),
   }, ws);
   // #935: one deterministic trace scope for the prompt and the validator.
-  const traceChanged = changedSubjectText(
-    ws.readText("pr.diff.truncated") ?? ws.readText("pr.diff") ?? "",
-    changedFilePaths(safeJsonArray(ws.read("pr-files.json"))),
-  );
+  const traceChanged = traceChangedText(ws);
   const traceScopeIds = requirementTraceScope(safeJson(ws.read("requirement-ledger.json")), traceChanged).inScope.map((entry) => entry.id);
   promptState = applyRequirementTraceFragment(promptState, ws, (env.REQUIREMENT_TRACE ?? "false").toLowerCase() === "true", undefined, traceScopeIds);
   env.SYSTEM_PROMPT = promptState.systemPrompt;
@@ -1176,6 +1173,17 @@ function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): {
     }
   }
   return out;
+}
+
+/** #935: what the change touches, from the FULL raw diff (the budgeted
+ * `pr.diff.truncated` may drop the very hunk that touches a requirement's
+ * subject). Undefined when the raw diff is unavailable, so the trace keeps
+ * every requirement in scope instead of treating missing evidence as an
+ * empty change. */
+export function traceChangedText(ws: Pick<RunWorkspace, "readText" | "read">): string | undefined {
+  const diff = ws.readText("pr.diff");
+  if (diff === null || diff === undefined || diff === "") return undefined;
+  return changedSubjectText(diff, changedFilePaths(safeJsonArray(ws.read("pr-files.json"))));
 }
 
 /** Changed file paths (current and previous names) from `pr-files.json`. */
