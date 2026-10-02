@@ -178,6 +178,9 @@ jobs:
           node-version: 24
 
       - name: Build the action bundle
+        env:
+          # #915: dogfood builds review PR source; stamp vX.Y.Z-dev+<short sha> so each review names the commit that produced it.
+          PR_REVIEWER_BUILD_STAMP: dev
         run: |
           npm ci --no-audit --no-fund --ignore-scripts
           npm run build

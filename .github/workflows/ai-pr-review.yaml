@@ -63,6 +63,9 @@ jobs:
         # reviews each PR with its own source, so it builds the bundle first.
         # Consumers of a release tag need none of this.
         if: github.event_name == 'pull_request'
+        env:
+          # #915: dogfood builds review PR source; stamp vX.Y.Z-dev+<short sha> so each review names the commit that produced it.
+          PR_REVIEWER_BUILD_STAMP: dev
         run: |
           npm ci --no-audit --no-fund
           npm run build
