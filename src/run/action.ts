@@ -53,6 +53,21 @@ export function appendStepSummary(env: NodeJS.ProcessEnv, line: string): void {
   appendFileSync(file, `${line}\n`);
 }
 
+/** Render untrusted inline text as an inert Markdown code span: the
+ * delimiter is one backtick longer than the longest run in the content —
+ * the repo-wide fence-safe strategy (e.g. `src/context/pr-thread.ts`,
+ * `src/context/repo-map.ts`) — so embedded backticks, link syntax, or
+ * emphasis characters can neither close the span nor render as Markdown.
+ * Control characters are flattened first: the step summary line must stay
+ * one line. */
+function inlineCodeValue(text: string): string {
+  const flat = text.replace(/[\u0000-\u001f\u007f]+/g, " ");
+  const runs = flat.match(/`+/g);
+  const longest = runs ? Math.max(...runs.map((run) => run.length)) : 0;
+  const fence = "`".repeat(longest + 1);
+  return `${fence}${flat}${fence}`;
+}
+
 /** The label a `labeled` event carries (GitHub sends `{ name }`). Moved to
  * `precheck/decide.ts` (#892) so both `decide.ts`'s label gate and this
  * cleanup path normalize the same way; re-exported here for callers (and
@@ -105,15 +120,23 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
     writeOutputs(env, [["verdict", pre.verdict], ["verdict-source", pre.verdict_source], ["review-result", pre.review_result]]);
     // #903: this branch used to exit silently — outputs written, no log
     // line, no step summary — so a labeler-triggered skip showed the same
-    // green check as a run that crashed before doing anything. Announce the
-    // reason; the event label is untrusted payload, quoted as JSON so it
-    // can neither forge log lines nor break out of the summary's code span.
+    // green check as a run that crashed before doing anything. The event
+    // label is untrusted payload and the two surfaces are different fences:
+    // the stderr line quotes it as JSON (control characters become
+    // escapes, so no forged log lines), while the Markdown summary renders
+    // it as a fence-safe code span (JSON escaping does not neutralize
+    // backticks or link syntax). The reason is one of this action's fixed
+    // constants and is interpolated directly.
     const skipLabel = eventLabelName(event?.label);
-    const skipDetail = pre.skip_reason === "unrelated-label" && skipLabel !== ""
-      ? ` (label: ${JSON.stringify(skipLabel)})`
-      : "";
-    process.stderr.write(`[v3] Review skipped: ${pre.skip_reason || "<none>"}${skipDetail}\n`);
-    appendStepSummary(env, `**AI PR Review skipped:** \`${pre.skip_reason || "<none>"}\`${skipDetail}`);
+    const carryLabel = pre.skip_reason === "unrelated-label" && skipLabel !== "";
+    const skipReason = pre.skip_reason || "<none>";
+    process.stderr.write(
+      `[v3] Review skipped: ${skipReason}${carryLabel ? ` (label: ${JSON.stringify(skipLabel)})` : ""}\n`,
+    );
+    appendStepSummary(
+      env,
+      `**AI PR Review skipped:** \`${skipReason}\`${carryLabel ? ` (label: ${inlineCodeValue(skipLabel)})` : ""}`,
+    );
     await maybeClearRereviewLabel(stage, event);
     return failOnRequestChanges(stage, pre.verdict ?? "");
   }

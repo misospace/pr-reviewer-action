@@ -315,10 +315,62 @@ test("#903: an unrelated-label skip logs its reason and label and writes a one-l
       `expected the skip log line, got: ${JSON.stringify(stderr.lines)}`,
     );
     // ...and lands as exactly one line in the step summary, so a skipped
-    // run is distinguishable from a crash in the job summary.
+    // run is distinguishable from a crash in the job summary. The label is
+    // a fence-safe code span there, not the JSON form.
     assert.equal(
       readFileSync(env.GITHUB_STEP_SUMMARY!, "utf8"),
-      `**AI PR Review skipped:** \`unrelated-label\` (label: "bug")\n`,
+      `**AI PR Review skipped:** \`unrelated-label\` (label: \`bug\`)\n`,
+    );
+  } finally {
+    stderr.restore();
+    await model.close();
+    await github?.close();
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runnerTemp, { recursive: true, force: true });
+  }
+});
+
+test("#903: a hostile label with backticks and Markdown link syntax renders inert in both surfaces", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "action-skip-observability-workspace-hostile-"));
+  const runnerTemp = mkdtempSync(join(tmpdir(), "action-skip-observability-runner-temp-hostile-"));
+  const model = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody());
+  });
+  let github: Awaited<ReturnType<typeof startGithubMock>> | undefined;
+  const stderr = captureStderr();
+  try {
+    const baseSha = "b".repeat(40);
+    const headSha = "a".repeat(40);
+    github = await startGithubMock({ baseSha, headSha });
+
+    const eventPath = join(runnerTemp, "event.json");
+    // A label name is untrusted payload: backticks alone would break out of
+    // a naive single-backtick code span, and the link syntax would render a
+    // live Markdown link in the summary if it were only JSON-quoted.
+    const hostileLabel = "bug `x` [click](https://example.invalid)";
+    writeFileSync(eventPath, JSON.stringify({
+      action: "labeled",
+      label: { id: 4, name: hostileLabel, color: "ff0000" },
+      pull_request: { number: 7, head: { sha: headSha } },
+    }));
+
+    const env = baseEnv({ eventPath, runnerTemp, githubUrl: github.url, modelUrl: model.url, workspace });
+    const exitCode = await actionMain(env);
+    assert.equal(exitCode, 0);
+
+    // stderr: JSON quoting is the control-character fence (backticks are
+    // inert in a log stream, so they stay literal inside the JSON quotes).
+    assert.ok(
+      stderr.lines.includes('[v3] Review skipped: unrelated-label (label: "bug `x` [click](https://example.invalid)")\n'),
+      `expected the skip log line, got: ${JSON.stringify(stderr.lines)}`,
+    );
+    // Summary: fence-safe inline code — the delimiter grows one past the
+    // label's longest backtick run, so the backticks and the link syntax
+    // render as literal text: no live link, no broken span.
+    assert.equal(
+      readFileSync(env.GITHUB_STEP_SUMMARY!, "utf8"),
+      "**AI PR Review skipped:** `unrelated-label` (label: ``bug `x` [click](https://example.invalid)``)\n",
     );
   } finally {
     stderr.restore();
