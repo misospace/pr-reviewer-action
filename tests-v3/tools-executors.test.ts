@@ -123,6 +123,30 @@ test("gh_api decodes Contents API file objects instead of slicing base64 (#913)"
   assert.equal(meta.result.response, '{"number":913,"title":"x"}');
 });
 
+test("repo_contents masks credentials before truncating decoded files (#927)", async () => {
+  const call = (fileText: string) => executeToolRequest("repo_contents", { repo: "o/r", path: "src/app.ts" },
+    ctx("tmp", { allowedGhRepos: ["o/r"], deps: { ...deps(), env: { GH_TOKEN: "test-token" }, ghGet: async (url) => {
+      if (url === "https://api.github.com/repos/o/r/contents/src") {
+        return { status: 200, body: JSON.stringify([{ name: "app.ts", type: "file", path: "src/app.ts", sha: "f".repeat(40) }]) };
+      }
+      if (url === `https://api.github.com/repos/o/r/git/blobs/${"f".repeat(40)}`) {
+        return { status: 200, body: JSON.stringify({ encoding: "base64", content: Buffer.from(fileText, "utf8").toString("base64") }) };
+      }
+      throw new Error(`Unexpected GitHub URL: ${url}`);
+    } } }));
+
+  const straddleText = "x".repeat(11957) + "\n" + 'const v = "ghp_' + "A".repeat(36) + '";\n' + "tail();\n".repeat(10);
+  const straddle = await call(straddleText);
+  assert.match(straddle.result.content, /redacted:credential/);
+  assert.doesNotMatch(straddle.result.content, /ghp_/);
+  assert.equal(straddle.result.truncated, true);
+
+  const smallText = "const x = 1;\n";
+  const small = await call(smallText);
+  assert.equal(small.result.content, smallText);
+  assert.equal(small.result.truncated, false);
+});
+
 test("web fetch checks exact hosts and every redirect; search sanitizes result schemes", async () => {
   assert.equal(allowlistedHost("github.com.evil.example", ["github.com"]), false);
   assert.equal(allowlistedHost("evil.example", ["*"]), true);
