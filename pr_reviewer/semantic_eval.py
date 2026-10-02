@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import contextlib
+import errno
 import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import tempfile
-from collections.abc import Iterable
+import time
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 from typing import Any
@@ -697,6 +701,65 @@ class SemanticCorpusError(ValueError):
     pass
 
 
+# Git can spawn background auto-gc / maintenance after a commit; that races the
+# fixture teardown and makes rmtree fail with ENOTEMPTY on .git/objects/pack
+# (#920). Disable it for every git subprocess the fixture spawns, and retry
+# teardown as a belt-and-braces guard.
+_GIT_BACKGROUND_OFF: dict[str, str] = {
+    "gc.auto": "0",
+    "gc.autoDetach": "false",
+    "gc.autoPackLimit": "0",
+    "maintenance.auto": "false",
+}
+_FIXTURE_RMTREE_ATTEMPTS = 5
+_FIXTURE_RMTREE_DELAY_SECONDS = 0.05
+
+
+def _fixture_git_env() -> dict[str, str]:
+    """Subprocess environment for fixture git calls.
+
+    `GIT_CONFIG_*` entries behave like `git -c`, so every spawned git command
+    inherits them without mutating the caller's environment. Inherited
+    `GIT_CONFIG_*` entries are dropped first: the fixture is deliberately
+    hermetic (like the `GIT_CONFIG_GLOBAL`/`NOSYSTEM` isolation above), and an
+    inherited `GIT_CONFIG_COUNT` that disagrees with its `KEY_*`/`VALUE_*`
+    pairs would make every git call abort."""
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    for inherited in [name for name in env if name.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))]:
+        del env[inherited]
+    for index, (key, value) in enumerate(_GIT_BACKGROUND_OFF.items()):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+    env["GIT_CONFIG_COUNT"] = str(len(_GIT_BACKGROUND_OFF))
+    return env
+
+
+def _remove_fixture_tree(directory: str) -> None:
+    """Remove the fixture tree, retrying only a transient ENOTEMPTY (#920).
+
+    Any other `OSError` (permissions, read-only mount, …) is not a race and is
+    surfaced immediately rather than after a pointless sleep."""
+    for attempt in range(_FIXTURE_RMTREE_ATTEMPTS):
+        try:
+            shutil.rmtree(directory)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            if exc.errno != errno.ENOTEMPTY or attempt == _FIXTURE_RMTREE_ATTEMPTS - 1:
+                raise
+            time.sleep(_FIXTURE_RMTREE_DELAY_SECONDS)
+
+
+@contextlib.contextmanager
+def _fixture_directory() -> Iterator[str]:
+    directory = tempfile.mkdtemp(prefix="semantic-fixture-")
+    try:
+        yield directory
+    finally:
+        _remove_fixture_tree(directory)
+
+
 def validate_semantic_fixture_integrity(fixture: dict[str, Any]) -> None:
     files = fixture.get("files")
     diff = fixture.get("diff")
@@ -719,9 +782,9 @@ def validate_semantic_fixture_integrity(fixture: dict[str, Any]) -> None:
             raise SemanticCorpusError(f"semantic fixture content must be text: {path}")
         expected[path] = content.encode("utf-8")
 
-    with tempfile.TemporaryDirectory(prefix="semantic-fixture-") as directory:
+    with _fixture_directory() as directory:
         repo = Path(directory)
-        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        env = _fixture_git_env()
         subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True, env=env)
         subprocess.run(["git", "-C", str(repo), "config", "user.email", "eval@test"], check=True, capture_output=True, env=env)
         subprocess.run(["git", "-C", str(repo), "config", "user.name", "semantic-eval"], check=True, capture_output=True, env=env)
