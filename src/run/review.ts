@@ -58,6 +58,7 @@ import { normalizeRequirementCoverage } from "../enforcement/requirement-coverag
 import { applyRequirementTraceEnforcement, changedSubjectText, requirementTraceScope } from "../enforcement/requirement-trace.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
+import { ACTION_VERSION } from "../version.js";
 import {
   buildCacheHitRatioOutput,
   buildToolCallsOutput,
@@ -1078,6 +1079,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ...(toolBudgetTelemetry.maxRounds !== undefined ? { maxRounds: toolBudgetTelemetry.maxRounds } : {}),
     ...(toolBudgetTelemetry.contextBudget !== undefined ? { contextBudget: toolBudgetTelemetry.contextBudget } : {}),
     ...(toolBudgetTelemetry.contextPeak !== undefined ? { contextPeak: toolBudgetTelemetry.contextPeak } : {}),
+    actionVersion: ACTION_VERSION,
   });
   return {
     outputs,

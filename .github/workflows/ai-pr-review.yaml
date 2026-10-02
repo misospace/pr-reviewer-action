@@ -63,6 +63,13 @@ jobs:
         # reviews each PR with its own source, so it builds the bundle first.
         # Consumers of a release tag need none of this.
         if: github.event_name == 'pull_request'
+        env:
+          # #915: dogfood builds review PR source; stamp vX.Y.Z-dev+<short sha> so each review names the commit that produced it.
+          PR_REVIEWER_BUILD_STAMP: dev
+          # The stamp must name what this job checked out: the PR head. For a
+          # pull_request event GITHUB_SHA is the synthetic merge ref, not the
+          # source being built, so the build sha is passed explicitly.
+          PR_REVIEWER_BUILD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           npm ci --no-audit --no-fund
           npm run build

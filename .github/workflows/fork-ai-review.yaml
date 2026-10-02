@@ -178,6 +178,12 @@ jobs:
           node-version: 24
 
       - name: Build the action bundle
+        env:
+          # #915: dogfood builds review PR source; stamp vX.Y.Z-dev+<short sha> so each review names the commit that produced it.
+          PR_REVIEWER_BUILD_STAMP: dev
+          # Match the trusted checkout above: the base-repo commit this job
+          # builds, named explicitly rather than trusting ambient GITHUB_SHA.
+          PR_REVIEWER_BUILD_SHA: ${{ github.sha }}
         run: |
           npm ci --no-audit --no-fund --ignore-scripts
           npm run build

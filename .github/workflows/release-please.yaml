@@ -113,6 +113,9 @@ jobs:
           cache-dependency-path: package-lock.json
 
       - name: Build
+        env:
+          # #915: stamp vX.Y.Z from the manifest into the release bundle.
+          PR_REVIEWER_BUILD_STAMP: release
         run: npm ci --no-audit --no-fund && npm run build
 
       - name: Upload dist
