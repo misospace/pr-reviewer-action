@@ -124,13 +124,14 @@ test("gh_api decodes Contents API file objects instead of slicing base64 (#913)"
 });
 
 test("repo_contents masks credentials before truncating decoded files (#927)", async () => {
-  const call = (fileText: string) => executeToolRequest("repo_contents", { repo: "o/r", path: "src/app.ts" },
+  const call = (bytes: Buffer | string) => executeToolRequest("repo_contents", { repo: "o/r", path: "src/app.ts" },
     ctx("tmp", { allowedGhRepos: ["o/r"], deps: { ...deps(), env: { GH_TOKEN: "test-token" }, ghGet: async (url) => {
       if (url === "https://api.github.com/repos/o/r/contents/src") {
         return { status: 200, body: JSON.stringify([{ name: "app.ts", type: "file", path: "src/app.ts", sha: "f".repeat(40) }]) };
       }
       if (url === `https://api.github.com/repos/o/r/git/blobs/${"f".repeat(40)}`) {
-        return { status: 200, body: JSON.stringify({ encoding: "base64", content: Buffer.from(fileText, "utf8").toString("base64") }) };
+        const encoded = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes, "utf8");
+        return { status: 200, body: JSON.stringify({ encoding: "base64", content: encoded.toString("base64") }) };
       }
       throw new Error(`Unexpected GitHub URL: ${url}`);
     } } }));
@@ -145,6 +146,13 @@ test("repo_contents masks credentials before truncating decoded files (#927)", a
   const small = await call(smallText);
   assert.equal(small.result.content, smallText);
   assert.equal(small.result.truncated, false);
+
+  // Binary and invalid-UTF-8 files still return metadata without bytes, so no
+  // content key reaches the masker (same guardrails as the gh_api test).
+  const binary = await call(Buffer.from([0x89, 0x00, 0x50, 0x4e]));
+  assert.deepEqual(binary.result, { repo: "o/r", path: "src/app.ts", type: "file", binary: true, truncated: false });
+  const badUtf8 = await call(Buffer.from([0xff, 0x28]));
+  assert.equal(badUtf8.result.binary, true);
 });
 
 test("web fetch checks exact hosts and every redirect; search sanitizes result schemes", async () => {
