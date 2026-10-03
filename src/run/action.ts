@@ -44,6 +44,34 @@ export function writeOutputs(env: NodeJS.ProcessEnv, outputs: ReadonlyArray<[str
   if (text !== "") appendFileSync(file, text);
 }
 
+/** #903: append one already-rendered line to the job's step summary. Like
+ * `writeOutputs`, a no-op outside a runner (no path, or the /dev/null
+ * sentinel). */
+export function appendStepSummary(env: NodeJS.ProcessEnv, line: string): void {
+  const file = env.GITHUB_STEP_SUMMARY ?? "";
+  if (file === "" || file === "/dev/null") return;
+  appendFileSync(file, `${line}\n`);
+}
+
+/** Render untrusted inline text as an inert Markdown code span, following
+ * the repo-wide fence-safe strategy (e.g. `src/context/repo-map.ts`
+ * `codeSpan`): the delimiter is one backtick longer than the longest run in
+ * the content, so embedded backticks, link syntax, or emphasis characters
+ * can neither close the span nor render as Markdown. Padding spaces keep a
+ * boundary backtick from merging into the delimiter — a leading backtick
+ * plus the generated fence would otherwise form a longer opening run,
+ * leaving the span unterminated and the payload exposed as live Markdown.
+ * Control characters are flattened first: the step summary line must stay
+ * one line. */
+function inlineCodeValue(text: string): string {
+  const flat = text.replace(/[\u0000-\u001f\u007f]+/g, " ");
+  if (!flat.includes("`")) return `\`${flat}\``;
+  let maxRun = 0;
+  for (const run of flat.match(/`+/g) ?? []) maxRun = Math.max(maxRun, run.length);
+  const delim = "`".repeat(maxRun + 1);
+  return `${delim} ${flat} ${delim}`;
+}
+
 /** The label a `labeled` event carries (GitHub sends `{ name }`). Moved to
  * `precheck/decide.ts` (#892) so both `decide.ts`'s label gate and this
  * cleanup path normalize the same way; re-exported here for callers (and
@@ -94,6 +122,25 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
   ]);
   if (pre.should_review !== "true") {
     writeOutputs(env, [["verdict", pre.verdict], ["verdict-source", pre.verdict_source], ["review-result", pre.review_result]]);
+    // #903: this branch used to exit silently — outputs written, no log
+    // line, no step summary — so a labeler-triggered skip showed the same
+    // green check as a run that crashed before doing anything. The event
+    // label is untrusted payload and the two surfaces are different fences:
+    // the stderr line quotes it as JSON (control characters become
+    // escapes, so no forged log lines), while the Markdown summary renders
+    // it as a fence-safe code span (JSON escaping does not neutralize
+    // backticks or link syntax). The reason is one of this action's fixed
+    // constants and is interpolated directly.
+    const skipLabel = eventLabelName(event?.label);
+    const carryLabel = pre.skip_reason === "unrelated-label" && skipLabel !== "";
+    const skipReason = pre.skip_reason || "<none>";
+    process.stderr.write(
+      `[v3] Review skipped: ${skipReason}${carryLabel ? ` (label: ${JSON.stringify(skipLabel)})` : ""}\n`,
+    );
+    appendStepSummary(
+      env,
+      `**AI PR Review skipped:** \`${skipReason}\`${carryLabel ? ` (label: ${inlineCodeValue(skipLabel)})` : ""}`,
+    );
     await maybeClearRereviewLabel(stage, event);
     return failOnRequestChanges(stage, pre.verdict ?? "");
   }

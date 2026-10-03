@@ -37,7 +37,26 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
+      - name: Verify manifest version matches the requested release
+        # #915: the release stamp comes from .release-please-manifest.json, so
+        # an inputs.version that disagrees with the manifest would tag vX.Y.Z
+        # while stamping vA.B.C into every published review — fail closed.
+        env:
+          RAW_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="${RAW_VERSION#v}"
+          MANIFEST=$(jq -r '."."' .release-please-manifest.json)
+          if [ "$VERSION" != "$MANIFEST" ]; then
+            echo "inputs.version ($VERSION) does not match .release-please-manifest.json ($MANIFEST)."
+            echo "Merge the release-please PR that bumps the manifest, or fix the dispatch input."
+            exit 1
+          fi
+
       - name: Build
+        env:
+          # #915: stamp vX.Y.Z from the manifest into the release bundle.
+          PR_REVIEWER_BUILD_STAMP: release
         run: npm ci --no-audit --no-fund && npm run build
 
       - name: Upload dist

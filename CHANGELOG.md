@@ -1,5 +1,41 @@
 # Changelog
 
+## [3.2.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.1.0...source-v3.2.0) (2026-10-03)
+
+
+### Features
+
+* **build:** stamp action version into the engine line and marker ([#941](https://github.com/misospace/pr-reviewer-action/issues/941)) ([c0721cf](https://github.com/misospace/pr-reviewer-action/commit/c0721cf7af5d838f99ab0d16a8a7d4de788fe6b9))
+* **config:** define the operator instance/repo config and adoption contract ([#946](https://github.com/misospace/pr-reviewer-action/issues/946)) ([1529026](https://github.com/misospace/pr-reviewer-action/commit/1529026b19fde60b70402a43dc8998b8f7f43bba))
+* **context:** derive context budgets from each tier's declared window ([#923](https://github.com/misospace/pr-reviewer-action/issues/923)) ([3ef1fd2](https://github.com/misospace/pr-reviewer-action/commit/3ef1fd2c87c817047fc79b1df7679bd3df80ae34))
+* **v3:** add Tangled Bobbin read client and canonical pull resolver ([#584](https://github.com/misospace/pr-reviewer-action/issues/584)) ([#854](https://github.com/misospace/pr-reviewer-action/issues/854)) ([4899ece](https://github.com/misospace/pr-reviewer-action/commit/4899ece12cc6c345edccf45e379cc068cac7f3f2))
+
+
+### Bug Fixes
+
+* **action:** log the precheck skip reason and write a step summary line ([#944](https://github.com/misospace/pr-reviewer-action/issues/944)) ([69a91d7](https://github.com/misospace/pr-reviewer-action/commit/69a91d7139573bf5d61778ac2e9d6ad1236cc802)), closes [#903](https://github.com/misospace/pr-reviewer-action/issues/903)
+* **claims:** whole-sentence claim units, body-claim priority, item enumeration ([#939](https://github.com/misospace/pr-reviewer-action/issues/939)) ([a625193](https://github.com/misospace/pr-reviewer-action/commit/a625193be1c2ced7f8b4783fdff6d1de97179951)), closes [#898](https://github.com/misospace/pr-reviewer-action/issues/898)
+* **classification:** classify image-digest-only manifest refreshes ([#909](https://github.com/misospace/pr-reviewer-action/issues/909)) ([#925](https://github.com/misospace/pr-reviewer-action/issues/925)) ([7f6ab64](https://github.com/misospace/pr-reviewer-action/commit/7f6ab644a3ebcced52fccf252ede51ec6976f462))
+* **deps:** update dependency @types/node (24.19.0 → 24.19.1) ([#936](https://github.com/misospace/pr-reviewer-action/issues/936)) ([0562534](https://github.com/misospace/pr-reviewer-action/commit/0562534f861fc5178f47e37700ae6d802c766f0f))
+* **eval:** carry env-only stage knobs so blind replays really skip human reviews ([#928](https://github.com/misospace/pr-reviewer-action/issues/928)) ([#929](https://github.com/misospace/pr-reviewer-action/issues/929)) ([14900d9](https://github.com/misospace/pr-reviewer-action/commit/14900d9fcfee89382df2d84ac146b5555d7d8d1a))
+* **requirement-trace:** scope the trace to relevant requirements ([#937](https://github.com/misospace/pr-reviewer-action/issues/937)) ([b0a3d6e](https://github.com/misospace/pr-reviewer-action/commit/b0a3d6ed0b59b2eb931774a8717ffc535e9339d6))
+* **review:** bound the availability-fallback corpus by the declared fallback capacity ([#942](https://github.com/misospace/pr-reviewer-action/issues/942)) ([0162197](https://github.com/misospace/pr-reviewer-action/commit/0162197f463a9f03d4826c4e8e0fec95c7080b5c))
+* **review:** use selected model for direct smart routes ([#933](https://github.com/misospace/pr-reviewer-action/issues/933)) ([d5923ee](https://github.com/misospace/pr-reviewer-action/commit/d5923ee63dd161953b48a4e68e69f2a1abbdf2e4))
+* **test:** stop the semantic fixture racing git's background gc ([#920](https://github.com/misospace/pr-reviewer-action/issues/920)) ([#945](https://github.com/misospace/pr-reviewer-action/issues/945)) ([19f0f6b](https://github.com/misospace/pr-reviewer-action/commit/19f0f6b4dd554851a1899f5d1a6a4a9d8f513b4c))
+* **tools:** credit changed files whose full diff is already in the review corpus ([#930](https://github.com/misospace/pr-reviewer-action/issues/930)) ([0a5c700](https://github.com/misospace/pr-reviewer-action/commit/0a5c7002d31dee14fc923a11086d447f824449b0))
+* **tools:** gh_api decodes Contents API files instead of returning truncated base64 ([#926](https://github.com/misospace/pr-reviewer-action/issues/926)) ([d1fdbd4](https://github.com/misospace/pr-reviewer-action/commit/d1fdbd4fc6e0d6579000ab615538d9b2b4fd613c))
+* **tools:** mask repo_contents files before truncating ([#943](https://github.com/misospace/pr-reviewer-action/issues/943)) ([861a326](https://github.com/misospace/pr-reviewer-action/commit/861a3262aada2b3573c2f475455cfc5d9fff89fa))
+
+
+### Chores
+
+* **action:** refresh the Marketplace listing metadata ([#918](https://github.com/misospace/pr-reviewer-action/issues/918)) ([554500d](https://github.com/misospace/pr-reviewer-action/commit/554500d6ab81e9c8f01981693cbce8fb8cef59de))
+
+
+### Documentation
+
+* split the README into focused pages and generate the inputs reference ([#917](https://github.com/misospace/pr-reviewer-action/issues/917)) ([93118c6](https://github.com/misospace/pr-reviewer-action/commit/93118c6f2ac2d7096f930833f25cdc69beb91513))
+
 ## [3.1.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.0.1...source-v3.1.0) (2026-10-01)
 
 

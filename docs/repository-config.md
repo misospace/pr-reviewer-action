@@ -36,6 +36,18 @@ review that judges their own PR by editing the config the review reads.
 Only a maintainer merging a change to the base branch (main) changes what
 repository config future PRs are reviewed under.
 
+A base-ref **read failure** is distinct from genuine absence. If the ref
+cannot be resolved to a commit (unknown/garbage ref), the workspace is not a
+git repository, or git times out, `readRepositoryConfigFromRef` throws
+`RepositoryConfigError` and `resolveRepositoryConfig` degrades to the
+operator's inputs **with the warning surfaced** — the same rule
+`src/context/standards-file-ref.ts` established for the standards file
+(#885), and the #727 rule that a config resolution failure must never be
+silently read as "no repository config". Only a *valid* ref with neither
+candidate file present is the ordinary, silent "no repository config" case.
+`src/config/instructions.ts` applies the same rule when reading the
+operator-mode `review-instructions` files from the same trusted ref.
+
 `resolveRepositoryConfig(contract, operatorRaw, { baseRef, workspace })` is
 the entry point; `baseRef` must be a trusted base commit-ish (for example the
 PR's `base.sha`, as normalized by `src/platform/pr.ts`'s `PrIdentity`) that
@@ -184,3 +196,19 @@ If the operator's workflow already sets `verdict-policy` explicitly, that
 line above is a no-op (with a warning); `inline-findings-max: 10` only takes
 effect if the operator's own ceiling (explicit value, or the contract
 default of 20) is 10 or higher.
+
+## Operator mode: the same file under #727
+
+This file, its locations, and its trust rules are the repository config
+layer shared with the future self-hosted Operator mode (#727). There the
+operator's layer is a centrally managed instance config instead of workflow
+inputs, and the same file gains operator-mode **extension keys** — profile
+selection (`model-profile`, `executor-profile`, `evidence-profile`), path
+narrowing (`ignore-paths`, `skip-only-paths`), `review-instructions`,
+`require-suggested-fix`, and `enabled` — all of which only narrow, disable,
+or select operator-approved profiles. In this Action those extension keys
+are unknown keys: warned about and inert, exactly like any other
+non-repo-configurable key above. The full model — the three config layers,
+the adoption lifecycle, profile resolution, and the effective-config
+fingerprint the canonical job contract consumes — is defined in
+[`docs/architecture/operator-config-and-adoption.md`](architecture/operator-config-and-adoption.md).

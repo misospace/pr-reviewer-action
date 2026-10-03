@@ -77,6 +77,9 @@ export interface MetadataOptions {
    * conversation it actually reached. Omitted when no loop ran. */
   context_budget?: number | null;
   context_peak?: number | null;
+  /** #915: build-time action release stamp, appended last under the additive
+   * key discipline of #810/#847/#895/#922; unstamped builds preserve pre-#915 bytes. */
+  action_version?: string | null;
 }
 
 /** Build a metadata marker string for insertion into managed comments
@@ -134,6 +137,11 @@ export function buildMetadataMarker(options: MetadataOptions = {}): string {
   }
   if (options.context_peak !== null && options.context_peak !== undefined) {
     data.context_peak = options.context_peak;
+  }
+  // #915 additive key: appended last, same discipline as the #810/#847 keys
+  // above — an unstamped build serializes byte-identically to pre-#915.
+  if (options.action_version !== null && options.action_version !== undefined && options.action_version !== "") {
+    data.action_version = options.action_version;
   }
   return `<!-- ai-pr-reviewer:${jsonCompact(data)} -->`;
 }

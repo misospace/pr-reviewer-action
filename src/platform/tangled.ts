@@ -6,6 +6,8 @@ import type { ResolvedPlatform } from "./resolve.js";
  * fail-loud guard every adapter-construction site runs, and the Spindle
  * runtime-context normalization later tickets will consume.
  *
+ * The read-side Bobbin client + canonical pull resolver live in tangled-bobbin.ts (#584).
+ *
  * The context port mirrors `pr_reviewer/tangled_context.py` semantics:
  * environment-driven, stdlib-only, never reads GitHub event JSON, never
  * makes network calls. `TANGLED_REPO_DID` is the repository *owner's* DID

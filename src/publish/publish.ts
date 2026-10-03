@@ -14,6 +14,7 @@
  */
 import { sanitizeMarkdown, stripReservedMarkers, stripEmptyConditionalSections, type ConditionalSectionPresence, type UpstreamLinkMode } from "./sanitize.js";
 import { publicAnalysisEngine } from "../prompt/index.js";
+import { ACTION_VERSION } from "../version.js";
 import { buildComments, SEVERITY_LABELS } from "./inline-findings.js";
 import { redactText } from "../context/redact.js";
 import { buildRunMetadataMarker, emitReviewMarkers, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
@@ -191,6 +192,8 @@ export function buildPublishedBody(options: {
   coverageNotice?: string;
   /** Rendered coverage-gap notice + findings summary for verdict_policy=strict. */
   stateBlock?: string | undefined;
+  /** #915: defaults to the build-time stamp; explicit "" forces unstamped. */
+  actionVersion?: string;
 }): string {
   const lines = [options.markers];
   if (options.header) {
@@ -199,7 +202,9 @@ export function buildPublishedBody(options: {
   if (options.note) {
     lines.push(options.note, "");
   }
-  lines.push(`_Analysis engine: ${publicAnalysisEngine(options.analysisEngine)}_`, "");
+  const actionVersion = options.actionVersion ?? ACTION_VERSION;
+  const versionSuffix = actionVersion === "" ? "" : ` · pr-reviewer-action ${actionVersion}`;
+  lines.push(`_Analysis engine: ${publicAnalysisEngine(options.analysisEngine)}${versionSuffix}_`, "");
   if (options.coverageNotice) {
     lines.push(options.coverageNotice, "");
   }
@@ -559,6 +564,7 @@ export async function publishReview(
     ...(input.maxRounds !== undefined ? { maxRounds: input.maxRounds } : {}),
     ...(input.contextBudget !== undefined ? { contextBudget: input.contextBudget } : {}),
     ...(input.contextPeak !== undefined ? { contextPeak: input.contextPeak } : {}),
+    actionVersion: ACTION_VERSION,
   };
   if (input.partialCoverage) {
     // #810: the marker records partial coverage additively; a complete run

@@ -1,25 +1,40 @@
-/** Deterministic claim extraction (#785): a PR often states its own
- * invariants — "every caller", "byte-identical", "never widens", "only
- * operator-configurable" — either in prose (the PR body) or in a docstring/
- * comment the diff adds or changes. A review that reads the diff line by
- * line can approve a change that breaks one of those promises somewhere the
- * diff never touches. This module finds such claims WITHOUT a model call:
+/** Deterministic claim extraction (#785, sentence units per #898): a PR often
+ * states its own invariants — "every caller", "byte-identical", "never
+ * widens", "only operator-configurable" — either in prose (the PR body) or in
+ * a docstring/comment the diff adds or changes. A review that reads the diff
+ * line by line can approve a change that breaks one of those promises
+ * somewhere the diff never touches. This module finds such claims WITHOUT a
+ * model call:
  *
- * - **Docstring/comment claims**: added comment lines in the diff that use
- *   an assertion verb or quantifier ("only", "never", "always", "must",
- *   "validates", "cross-checked", "byte-identical", ...), anchored to the
- *   exact `file:symbol` (or `file:line` when no enclosing symbol is found)
- *   the comment sits above/inside — never a whole file or module.
+ * - **Docstring/comment claims**: a run of added comment lines (one block) is
+ *   joined, stripped of its comment markers, and split into sentences; each
+ *   sentence using an assertion verb or quantifier ("only", "never",
+ *   "always", "must", "validates", "cross-checked", "byte-identical", ...)
+ *   becomes one whole-sentence claim, anchored to the exact `file:symbol`
+ *   (or `file:line` when no enclosing symbol is found) the comment sits
+ *   above/inside — never a whole file or module. Whole sentences, not lines:
+ *   per-line extraction cut docstring prose mid-sentence into fragment
+ *   "claims" (#898).
  * - **PR-body claims**: sentences in the PR description that use the same
- *   quantifier/assertion vocabulary. Each inline `` `identifier` `` the
- *   sentence names is resolved to every added-line occurrence of that
- *   identifier in the diff, so a claim like "cross-checked against
- *   `ctx.repoDid`" comes with the concrete call sites to check — including
- *   sibling code paths the sentence itself never mentions.
+ *   quantifier/assertion vocabulary, with bot-authored template text
+ *   (Renovate/Dependabot footers) skipped. Body claims always outrank
+ *   diff-comment claims — they are the PR's headline invariants, and the
+ *   pre-#898 ranking let a docs-heavy diff crowd them out of `MAX_CLAIMS`
+ *   entirely.
+ *
+ * Both sources resolve **items** — the concrete units a claim quantifies
+ * over — from the diff: every inline `` `identifier` `` the sentence names,
+ * plus flag-like tokens (kebab/snake/camel compounds such as
+ * `repo-configurable`) from the sentence and, for a comment claim, from the
+ * declaration line the comment documents. Each match's added-line anchor is
+ * enumerated, capped at `MAX_ITEMS_PER_CLAIM` with a visible truncation flag:
+ * a claim quantifying over "every input carrying the flag" ships the list of
+ * flagged inputs, which is where a counterexample lives (#898).
  *
  * Bounded and pure: no network, no model call, never throws. `extractClaims`
- * always returns a (possibly empty) artifact; the caller decides whether an
- * empty deterministic result should fall back to the bounded model pass. */
+ * always returns a (possibly empty) artifact; the caller runs the bounded
+ * model pass as an augment on top of it — the scan is never treated as proof
+ * that the body was fully captured (#898 review). */
 
 import {
   MAX_CHECK_CHARS,
@@ -33,9 +48,28 @@ import {
 } from "./types.js";
 
 const CLAIM_KEYWORDS_RE =
-  /\b(only|never|always|must|validat(?:es?|ion)|cross[- ]check(?:ed|s)?|fails?[- ]closed|bound to|byte[- ]identical|identical|guarantees?|ensures?|invariant|cannot|no longer|at most|exactly|every|each|all consumers|parity|unchanged|backward[- ]compatible)\b/i;
+  /\b(only|never|always|must|validat(?:es?|ion)|cross[- ]check(?:ed|s)?|fails?[- ]closed|bound to|byte[- ]identical|identical|guarantees?|ensures?|invariant|cannot|no longer|at most|exactly|every|each|all (?:consumers|callers|call sites)|parity|unchanged|backward[- ]compatible)\b/i;
 
 const COMMENT_LINE_RE = /^(\/\/|\/\*\*?|\*(?!\/)|#(?!!)|"""|'''|--(?:\s|$)|<!--)/;
+
+/** Bot-authored PR-body boilerplate (Renovate/Dependabot footers and
+ * checklists): workflow notices, not the PR's own invariants. Matched per
+ * sentence, before the keyword filter. Kept tight on purpose — the match
+ * must be a bot signature (bot name, the rebase/retry checkbox), never a
+ * subject a human legitimately writes policy about: an automerge rule like
+ * "Automerge must never run for major-version updates" is a real claim and
+ * survives (#898 review). The bot footers' own automerge lines carry no
+ * keyword vocabulary, so they were never claims to begin with. */
+const BOT_TEMPLATE_RE =
+  /\b(?:renovate|dependabot|greenkeeper)\b|rebase[/-]retry|rebase-check/i;
+
+/** HTML comments carry bot anchors (`<!-- rebase-check -->`,
+ * `<!--renovate-debug:...-->`) and are never claim prose. The second pattern
+ * drops an unterminated `<!--` and everything after it: a hostile body cannot
+ * be trusted to close a fence it opened, and failing toward fewer claims is
+ * safe. */
+const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
+const HTML_COMMENT_UNTERMINATED_RE = /<!--[\s\S]*$/;
 
 // The method alternative (5th capture) recognizes ordinary TS class-body
 // methods/accessors (`render(): string {`, `private static async
@@ -48,8 +82,52 @@ const COMMENT_LINE_RE = /^(\/\/|\/\*\*?|\*(?!\/)|#(?!!)|"""|'''|--(?:\s|$)|<!--)
 const FUNCTION_SIGNATURE_RE =
   /^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\*?\s+([A-Za-z_$][\w$]*)|(?:public\s+|private\s+|protected\s+|static\s+)*(?:async\s+)?def\s+([A-Za-z_][\w]*)|(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*[:=]|class\s+([A-Za-z_$][\w$]*)|(?:(?:public|private|protected|static|override|readonly|async|get|set)\s+)*(?:\*)?\s*(?!(?:if|for|while|switch|catch|do|else|try|return|await|yield|new|delete|typeof|case|throw|function|class|const|let|var|export|import|default|extends|implements|interface|type|enum|namespace)\b)([A-Za-z_$][\w$]*)\s*(?:<(?:[^<>]|<[^<>]*>)*>)?\s*\((?:[^()"'`]|\([^()]*\))*\)\s*(?::\s*[^={}]+)?\{\s*$)/;
 
-const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+(?=[A-Z(`])|\n{2,}/;
+/** Markdown bullet starts are claim-unit boundaries in PR bodies: a bullet
+ * whose prose has no terminal punctuation otherwise swallows the next bullet
+ * into one run-on "sentence". A bullet start splits regardless of the
+ * preceding punctuation; a sentence-internal `* ` or `- ` (wrapped prose,
+ * multiplication) never splits because the preceding character is not a
+ * terminator. */
+const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+(?=[A-Z(`]|[-*+]\s)|\n{2,}|\n[ \t]*(?=[-*+][ \t])/;
 const INLINE_CODE_RE = /`([^`\n]{1,200})`/g;
+
+/** Kebab/snake flag-like tokens (`repo-configurable`,
+ * `allow_repo_policy_overrides`) and camelCase compounds (`repoConfigurable`,
+ * `SpecialistCorpusWorkspace`): the shapes flags, inputs, and identifiers
+ * take in diffs. Each becomes a case/separator-insensitive search over added
+ * lines, so a claim quantifying over "every input carrying the flag"
+ * enumerates the flagged lines. */
+const FLAG_TOKEN_RE = /\b[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)+\b/g;
+const CAMEL_TOKEN_RE = /\b[A-Za-z][a-z0-9]*(?:[A-Z][a-z0-9]+)+\b/g;
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** A token's variant pattern: word parts (split on `-`/`_`/camel humps)
+ * joined by an optional single `-` or `_`, case-insensitive — so
+ * `repo-configurable`, `repo_configurable`, and `repoConfigurable` all match
+ * one another's lines. `null` when the token does not split into at least
+ * two parts (plain words are not flags). */
+function tokenVariantRe(token: string): RegExp | null {
+  const parts = token
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[-_\s]+/)
+    .map((part) => part.toLowerCase())
+    .filter(Boolean);
+  if (parts.length < 2) return null;
+  return new RegExp(`\\b${parts.map(escapeRegExp).join("[-_]?")}`, "i");
+}
+
+/** Flag-like tokens in free text: kebab/snake compounds and camelCase
+ * compounds, deduplicated. Paths (containing `/`) never qualify — they are
+ * handled as inline-code identifiers. */
+function extractFlagTokens(text: string): string[] {
+  const tokens: string[] = [];
+  for (const match of text.matchAll(FLAG_TOKEN_RE)) tokens.push(match[0]);
+  for (const match of text.matchAll(CAMEL_TOKEN_RE)) tokens.push(match[0]);
+  return [...new Set(tokens)];
+}
 
 function clip(text: string, limit: number): string {
   const trimmed = text.trim();
@@ -184,20 +262,24 @@ function isBlankOrComment(text: string): boolean {
  *    line within the same hunk.
  * 3. Otherwise, git's own hunk-header function context — the declaration
  *    isn't visible in the hunk body at all (the signature sits outside the
- *    diff context window), but git's heuristic still names it.
+ *    diff context window), but git's heuristic still names it. `fromHeader`
+ *    marks this case: the attribution is git's guess, good enough for a
+ *    claim's own anchor but never for enumerating sibling items (#898 —
+ *    a class header must not steal an item anchor from the method the
+ *    sibling line actually belongs to).
  * 4. Otherwise `null`: the caller falls back to a plain `file:L<n>` anchor.
  *
  * Never looks outside `hunk.lines` — a declaration added in a later hunk of
  * the same file is invisible here. */
-function resolveHunkSymbol(hunk: HunkGroup, index: number): string | null {
+function resolveHunkSymbol(hunk: HunkGroup, index: number): { symbol: string | null; fromHeader: boolean } {
   const line = hunk.lines[index]!;
   // A declaration line is its own anchor (e.g. a PR-body identifier match on
   // the signature line itself, not just on lines inside its body).
-  if (line.declares) return line.declares;
+  if (line.declares) return { symbol: line.declares, fromHeader: false };
   if (isBlankOrComment(line.text)) {
     for (let k = index + 1; k < hunk.lines.length; k++) {
       const next = hunk.lines[k]!;
-      if (next.declares) return next.declares;
+      if (next.declares) return { symbol: next.declares, fromHeader: false };
       if (!isBlankOrComment(next.text)) {
         // The comment's directly-following construct is call-shaped but not
         // a recognized declaration (e.g. a multi-line signature the
@@ -205,65 +287,201 @@ function resolveHunkSymbol(hunk: HunkGroup, index: number): string | null {
         // describes THAT construct, so fall back to the line anchor rather
         // than confidently crediting an enclosing class found further up
         // the hunk.
-        if (CALL_SHAPED_LINE_RE.test(next.text.trimStart())) return null;
+        if (CALL_SHAPED_LINE_RE.test(next.text.trimStart())) return { symbol: null, fromHeader: false };
         break;
       }
     }
   }
   for (let k = index - 1; k >= 0; k--) {
-    if (hunk.lines[k]!.declares) return hunk.lines[k]!.declares;
+    if (hunk.lines[k]!.declares) return { symbol: hunk.lines[k]!.declares, fromHeader: false };
   }
-  return hunk.headerSymbol;
+  return { symbol: hunk.headerSymbol, fromHeader: true };
 }
 
 /** Flatten every hunk's ADDED lines (only) into the shape the claim
  * extractors consume, each resolved to its hunk-scoped enclosing symbol. */
-function walkAddedLines(diffText: string): Array<DiffLine & { symbol: string | null }> {
-  const out: Array<DiffLine & { symbol: string | null }> = [];
+function walkAddedLines(diffText: string): Array<DiffLine & { symbol: string | null; symbolFromHeader: boolean }> {
+  const out: Array<DiffLine & { symbol: string | null; symbolFromHeader: boolean }> = [];
   for (const hunk of collectHunks(diffText)) {
     for (let i = 0; i < hunk.lines.length; i++) {
       const line = hunk.lines[i]!;
       if (!line.isAdded) continue;
-      out.push({ path: hunk.path, newLine: line.newLine, text: line.text, symbol: resolveHunkSymbol(hunk, i) });
+      const resolved = resolveHunkSymbol(hunk, i);
+      out.push({ path: hunk.path, newLine: line.newLine, text: line.text, symbol: resolved.symbol, symbolFromHeader: resolved.fromHeader });
     }
   }
   return out;
 }
 
-/** Docstring/comment claims: added comment-shaped lines that use an
- * assertion verb or quantifier, anchored at `path:symbol` (or `path:line`
- * with no enclosing symbol). Adjacent matching comment lines in the same
- * file collapse into one claim with one item per anchor (a multi-line
- * docstring commonly repeats the same assertion across lines). */
+/** Strip one comment line's markers (`//`, `/**`/` * `/` * /`, `#`, docstring
+ * quotes, HTML comments incl. the `--!>` close some parsers accept), leaving
+ * the prose for sentence splitting. */
+function stripCommentMarkers(trimmed: string): string {
+  return trimmed
+    .replace(/^(\/\/|\/\*\*?|\*\/?|#|"""|'''|--|<!--)\s?/, "")
+    .replace(/\*\/\s*$/, "")
+    .replace(/"{3}\s*$/, "")
+    .replace(/'{3}\s*$/, "")
+    .replace(/--!?>\s*$/, "")
+    .trim();
+}
+
+/** A maximal run of ADDED comment-shaped (or blank) lines inside one hunk:
+ * one docstring or comment block. A context line, a removed line, or any
+ * non-comment added line ends the block — a claim unit never reaches across
+ * a hunk boundary or into surrounding code. */
+interface CommentBlock {
+  path: string;
+  /** Hunk-local index of the block's first line, for `resolveHunkSymbol`. */
+  startIndex: number;
+  /** New-file line range of the block (contiguous: only added lines, no
+   * context in between), used to keep a claim's own comment lines out of its
+   * sibling-item enumeration. */
+  firstNewLine: number;
+  lastNewLine: number;
+  /** Comment-marker-stripped prose of every line in the block, joined. */
+  text: string;
+}
+
+function collectCommentBlocks(hunk: HunkGroup): CommentBlock[] {
+  const blocks: CommentBlock[] = [];
+  let current: CommentBlock | null = null;
+  let prose: string[] = [];
+  for (let i = 0; i < hunk.lines.length; i++) {
+    const line = hunk.lines[i]!;
+    const trimmed = line.text.trim();
+    const isComment = trimmed !== "" && COMMENT_LINE_RE.test(trimmed);
+    if (!line.isAdded || (!isComment && trimmed !== "")) {
+      current = null;
+      prose = [];
+      continue;
+    }
+    if (isComment) {
+      if (!current) {
+        current = { path: hunk.path, startIndex: i, firstNewLine: line.newLine, lastNewLine: line.newLine, text: "" };
+        blocks.push(current);
+        prose = [];
+      }
+    } else if (!current) {
+      // A blank added line before any comment starts nothing.
+      continue;
+    }
+    current.lastNewLine = line.newLine;
+    const stripped = trimmed === "" ? "" : stripCommentMarkers(trimmed);
+    if (stripped) prose.push(stripped);
+    current.text = prose.join(" ");
+  }
+  return blocks.filter((block) => block.text.trim() !== "");
+}
+
+/** The first non-comment, non-blank line at or after `fromIndex` within the
+ * hunk: the construct a comment block documents. Its flag-like tokens
+ * (`readonly "repo-configurable"?: boolean;` → `repo-configurable`) are what
+ * a quantified claim over "every input carrying the flag" resolves against. */
+function documentedLineText(hunk: HunkGroup, fromIndex: number): string {
+  for (let k = fromIndex; k < hunk.lines.length; k++) {
+    const line = hunk.lines[k]!;
+    const trimmed = line.text.trim();
+    if (trimmed === "" || isBlankOrComment(trimmed)) continue;
+    return line.text;
+  }
+  return "";
+}
+
+/** Items shared by both extractors: anchors of every added line matching a
+ * backtick identifier (substring, the pre-#898 semantics) or a flag-like
+ * token (case/separator-insensitive variant). A line whose only symbol is
+ * git's hunk-header guess still yields its occurrence — the guess is
+ * distrusted (the anchor degrades to a plain `file:L<n>`) but the match is
+ * never thrown away, or a normal existing-function diff (signature in the
+ * hunk header, changed line in the body) would lose exactly the item a body
+ * claim is about (#898 review). Capped at `MAX_ITEMS_PER_CLAIM` with
+ * `itemsTruncated` — a visibly capped list is the honest shape for a claim
+ * quantifying over more units than fit. */
+function resolveItems(
+  identifiers: string[],
+  tokens: string[],
+  addedLines: Array<DiffLine & { symbol: string | null; symbolFromHeader: boolean }>,
+): { items: string[]; itemsTruncated: boolean } {
+  const items: string[] = [];
+  let itemsTruncated = false;
+  const pushAnchor = (line: DiffLine & { symbol: string | null }): void => {
+    const anchor = `${line.path}:${line.symbol ?? `L${line.newLine}`}`;
+    if (items.includes(anchor)) return;
+    if (items.length >= MAX_ITEMS_PER_CLAIM) {
+      itemsTruncated = true;
+      return;
+    }
+    items.push(clip(anchor, MAX_ITEM_CHARS));
+  };
+  const variantRes = tokens
+    .map((token) => tokenVariantRe(token))
+    .filter((re): re is RegExp => re !== null);
+  for (const line of addedLines) {
+    const matches =
+      identifiers.some((identifier) => line.text.includes(identifier)) ||
+      variantRes.some((re) => re.test(line.text));
+    if (!matches) continue;
+    pushAnchor(line.symbolFromHeader ? { ...line, symbol: null } : line);
+  }
+  return { items, itemsTruncated };
+}
+
+/** Docstring/comment claims: each maximal added comment block is split into
+ * sentences; every sentence using an assertion verb or quantifier becomes a
+ * whole-sentence claim anchored at `path:symbol` (or `path:line` with no
+ * enclosing symbol). The same sentence in two blocks (copy-pasted docstrings)
+ * merges into one claim listing both anchors. */
 function extractDiffCommentClaims(diffText: string): Claim[] {
   const claims: Claim[] = [];
   const seen = new Map<string, Claim>();
-  for (const line of walkAddedLines(diffText)) {
-    const trimmed = line.text.trim();
-    if (!COMMENT_LINE_RE.test(trimmed)) continue;
-    // HTML comment terminators: both `-->` and the `--!>` form some HTML
-    // parsers also accept as a valid comment close (CodeQL: incomplete
-    // multi-character sanitization).
-    const stripped = trimmed.replace(/^(\/\/|\/\*\*?|\*\/?|#|"""|'''|--|<!--)\s?/, "").replace(/\*\/\s*$/, "").replace(/--!?>\s*$/, "").trim();
-    if (!stripped || !CLAIM_KEYWORDS_RE.test(stripped)) continue;
-    const anchor = `${line.path}:${line.symbol ?? `L${line.newLine}`}`;
-    const key = clip(stripped, MAX_CLAIM_CHARS).toLowerCase();
-    let claim = seen.get(key);
-    if (!claim) {
-      claim = {
-        claim: clip(stripped, MAX_CLAIM_CHARS),
-        source: "diff",
-        scope: clip(line.symbol ? `${line.path}:${line.symbol}` : line.path, MAX_SCOPE_CHARS),
-        items: [],
-        itemsTruncated: false,
-        check: clip(`Read ${anchor} and try to construct an input that violates the claim; then check whether sibling code paths enforce the same thing.`, MAX_CHECK_CHARS),
-      };
-      seen.set(key, claim);
-      claims.push(claim);
-    }
-    if (!claim.items.includes(anchor)) {
-      if (claim.items.length >= MAX_ITEMS_PER_CLAIM) claim.itemsTruncated = true;
-      else claim.items.push(clip(anchor, MAX_ITEM_CHARS));
+  const addedLines = walkAddedLines(diffText);
+  for (const hunk of collectHunks(diffText)) {
+    for (const block of collectCommentBlocks(hunk)) {
+      const resolved = resolveHunkSymbol(hunk, block.startIndex);
+      const symbol = resolved.symbol;
+      const anchor = `${block.path}:${symbol ?? `L${block.firstNewLine}`}`;
+      const tokens = extractFlagTokens(`${block.text} ${documentedLineText(hunk, block.startIndex)}`);
+      // The claim's own comment lines are the claim, not items it quantifies
+      // over — the block anchor already covers them; only other lines are
+      // enumerated as siblings.
+      const siblings = addedLines.filter(
+        (line) => !(line.path === block.path && line.newLine >= block.firstNewLine && line.newLine <= block.lastNewLine),
+      );
+      for (const sentence of splitSentences(block.text)) {
+        if (!CLAIM_KEYWORDS_RE.test(sentence)) continue;
+        const text = clip(sentence, MAX_CLAIM_CHARS);
+        const key = text.toLowerCase();
+        const { items, itemsTruncated: resolvedTruncated } = resolveItems([], tokens, siblings);
+        let itemsTruncated = resolvedTruncated;
+        if (!items.includes(anchor)) {
+          if (items.length >= MAX_ITEMS_PER_CLAIM) itemsTruncated = true;
+          else items.unshift(anchor);
+        }
+        let claim = seen.get(key);
+        if (!claim) {
+          claim = {
+            claim: text,
+            source: "diff",
+            scope: clip(symbol ? `${block.path}:${symbol}` : block.path, MAX_SCOPE_CHARS),
+            items,
+            itemsTruncated,
+            check: clip(`Read ${anchor} and try to construct an input that violates the claim; then check whether sibling code paths enforce the same thing.`, MAX_CHECK_CHARS),
+          };
+          seen.set(key, claim);
+          claims.push(claim);
+        } else {
+          for (const item of items) {
+            if (claim.items.includes(item)) continue;
+            if (claim.items.length >= MAX_ITEMS_PER_CLAIM) {
+              claim.itemsTruncated = true;
+              break;
+            }
+            claim.items.push(item);
+          }
+          claim.itemsTruncated = claim.itemsTruncated || itemsTruncated;
+        }
+      }
     }
   }
   return claims;
@@ -277,31 +495,24 @@ function splitSentences(body: string): string[] {
 }
 
 /** PR-body claims: sentences using the assertion/quantifier vocabulary, with
- * items resolved from every added-line diff occurrence of each backtick
- * identifier the sentence names (falls back to no items when the sentence
- * names none, or none appear in the diff — the render step then tells the
- * reviewer to enumerate items themselves). */
+ * bot-authored template text (Renovate/Dependabot footers) removed first.
+ * Items resolve from every added-line diff occurrence of each backtick
+ * identifier or flag-like token the sentence names (falls back to no items
+ * when none appear in the diff — the render step then tells the reviewer to
+ * enumerate items themselves). */
 function extractPrBodyClaims(body: string, diffText: string): Claim[] {
-  if (!body.trim()) return [];
+  const strippedBody = body
+    .replace(HTML_COMMENT_RE, " ")
+    .replace(HTML_COMMENT_UNTERMINATED_RE, " ");
+  if (!strippedBody.trim()) return [];
   const addedLines = [...walkAddedLines(diffText)];
   const claims: Claim[] = [];
-  for (const sentence of splitSentences(body)) {
+  for (const sentence of splitSentences(strippedBody)) {
+    if (BOT_TEMPLATE_RE.test(sentence)) continue;
     if (!CLAIM_KEYWORDS_RE.test(sentence)) continue;
     const identifiers = [...sentence.matchAll(INLINE_CODE_RE)].map((m) => m[1]!).filter(Boolean);
-    const items: string[] = [];
-    let itemsTruncated = false;
-    for (const identifier of identifiers) {
-      for (const line of addedLines) {
-        if (!line.text.includes(identifier)) continue;
-        const anchor = `${line.path}:${line.symbol ?? `L${line.newLine}`}`;
-        if (items.includes(anchor)) continue;
-        if (items.length >= MAX_ITEMS_PER_CLAIM) {
-          itemsTruncated = true;
-          break;
-        }
-        items.push(clip(anchor, MAX_ITEM_CHARS));
-      }
-    }
+    const tokens = extractFlagTokens(sentence);
+    const { items, itemsTruncated } = resolveItems(identifiers, tokens, addedLines);
     claims.push({
       claim: clip(sentence, MAX_CLAIM_CHARS),
       source: "pr_body",
@@ -319,12 +530,12 @@ function extractPrBodyClaims(body: string, diffText: string): Claim[] {
   return claims;
 }
 
-/** Deterministic claim extraction over the PR body and diff. Comment/
- * docstring claims (each already anchored to a concrete function or line)
- * are ranked first — they carry the strongest evidence of a checkable
- * claim — followed by PR-body claims that resolved at least one concrete
- * item, then PR-body claims with no resolved item. Bounded to
- * `MAX_CLAIMS`/`MAX_ITEMS_PER_CLAIM`; never throws. */
+/** Deterministic claim extraction over the PR body and diff. PR-body claims
+ * rank first — they are the PR's headline invariants, and a docs-heavy diff
+ * must never crowd them out of `MAX_CLAIMS` (#898) — body claims that
+ * resolved at least one concrete item before body claims with none, then the
+ * diff-comment claims. Bounded to `MAX_CLAIMS`/`MAX_ITEMS_PER_CLAIM`; never
+ * throws. */
 export function extractClaimsDeterministic(input: { prBody: string; diffText: string }): ClaimsArtifact {
   const errors: string[] = [];
   let commentClaims: Claim[] = [];
@@ -341,7 +552,7 @@ export function extractClaimsDeterministic(input: { prBody: string; diffText: st
   }
   const withItems = bodyClaims.filter((c) => c.items.length > 0);
   const withoutItems = bodyClaims.filter((c) => c.items.length === 0);
-  const ordered = [...commentClaims, ...withItems, ...withoutItems];
+  const ordered = [...withItems, ...withoutItems, ...commentClaims];
 
   const truncated = ordered.length > MAX_CLAIMS || ordered.some((c) => c.itemsTruncated);
   return {

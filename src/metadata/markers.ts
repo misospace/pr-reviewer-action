@@ -95,6 +95,8 @@ export interface RunMarkerContext {
   /** #922: the loop's conversation budget and peak (approx tokens). */
   contextBudget?: number;
   contextPeak?: number;
+  /** #915 build-time stamp; ""/unset means unstamped and is omitted. */
+  actionVersion?: string;
 }
 
 /**
@@ -112,6 +114,7 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
   const chr = context.cacheHitRatio ?? "";
   const cov = context.coverage ?? "";
   const covStop = context.coverageStopReason ?? "";
+  const av = context.actionVersion ?? "";
   let cacheHitRatio: number | null = null;
   if (chr !== "" && chr !== "-") {
     const parsed = Number(chr);
@@ -138,6 +141,7 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
     max_rounds: context.maxRounds ?? null,
     context_budget: context.contextBudget ?? null,
     context_peak: context.contextPeak ?? null,
+    action_version: av === "" ? null : av,
   });
 }
 

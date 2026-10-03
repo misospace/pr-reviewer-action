@@ -353,7 +353,8 @@ export async function ghApi(endpoint: string, ctx: ToolContext): Promise<Obj> {
   }
 }
 
-/** Port of `platform._validate_repo_contents` + `_repo_contents_github`. */
+/** Port of `platform._validate_repo_contents` + `_repo_contents_github`;
+ * file text is returned whole for caller-side masking and truncation. */
 export async function repoContents(
   repoArg: unknown,
   inputPath: unknown,
@@ -485,10 +486,7 @@ export async function repoContents(
   if (Buffer.from(text, "utf8").toString("base64") !== decoded.toString("base64")) {
     return { repo, path: path_, type: "file", binary: true, truncated: false };
   }
-  const encoded = Buffer.from(text, "utf8");
-  const truncated = encoded.length > REPO_CONTENTS_MAX_BYTES;
-  const content = truncated ? encoded.subarray(0, REPO_CONTENTS_MAX_BYTES).toString("utf8") : text;
-  return { repo, path: path_, type: "file", content, truncated };
+  return { repo, path: path_, type: "file", content: text };
 }
 
 /** Contents API file decode for `gh_api` (#913): a file object is one base64
@@ -1092,7 +1090,8 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         const res = await repoContents(repo, contentsPath, args.ref, ctx, maxEntries);
         if (res.error) throw new Error(res.error);
         if (res.type === "file" && "content" in res) {
-          const clipped = maskAndTruncateSource(res.content, Math.min(cap, 12000), contentsPath);
+          // Masking sees the full decoded text; this owns mask-then-truncate (#927).
+          const clipped = maskAndTruncateSource(res.content, Math.min(cap, REPO_CONTENTS_MAX_BYTES), contentsPath);
           result = { ...res, content: clipped.text, truncated: (res.truncated ?? false) || clipped.truncated };
         } else if (res.type === "directory" && cap > 0) {
           const entries: Obj[] = res.entries;
