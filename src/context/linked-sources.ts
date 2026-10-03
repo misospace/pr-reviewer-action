@@ -16,10 +16,10 @@
  * - Payload shaping reproduces Python semantics on hostile JSON, except
  *   where v2 raised out of the whole render (`.get` on a non-dict entry,
  *   slicing None, `.lower()` on a non-string, a URL `urlparse` rejects):
- *   v3 drops just that entry or URL and renders the rest (approved
+ *   v3 drops just that entry or URL and renders the rest (deliberate
  *   divergence).
  * - Fetched text is fenced with more backticks than any run it contains
- *   (approved divergence; v2's fixed three-backtick fence could be closed
+ *   (deliberate divergence; v2's fixed three-backtick fence could be closed
  *   by the page). JSON blocks need no such care: every dumped string starts
  *   with `"` and has its newlines escaped, so no line can open or close a
  *   fence.
@@ -97,7 +97,7 @@ function pySlice(value: unknown, n: number): unknown[] {
 }
 
 /** Map list entries, dropping any entry whose v2 expression would raise
- * (approved divergence: v2 aborted the whole render on the first one). */
+ * (deliberate divergence: v2 aborted the whole render on the first one). */
 function entries<T>(list: readonly unknown[], fn: (entry: unknown) => T): T[] {
   const out: T[] = [];
   for (const entry of list) {
@@ -111,7 +111,7 @@ function entries<T>(list: readonly unknown[], fn: (entry: unknown) => T): T[] {
 }
 
 /** A predicate over an entry; an entry whose v2 expression would raise does
- * not match (approved divergence, as `entries`). */
+ * not match (deliberate divergence, as `entries`). */
 function matches(entry: unknown, predicate: (entry: unknown) => boolean): boolean {
   try {
     return predicate(entry);
@@ -364,7 +364,7 @@ interface Ctx {
 /** Host label rendered for a URL CPython's `urlparse` rejects. */
 export const UNPARSEABLE_URL_HOST = "unparseable URL";
 
-/** `_extract_host(url)`, or null where `urlparse` raises (approved
+/** `_extract_host(url)`, or null where `urlparse` raises (deliberate
  * divergence: v2 aborted the render; v3 skips that one URL). */
 function safeHost(url: string): string | null {
   try {
@@ -385,7 +385,7 @@ function classify(url: string): UrlClassification | null {
   return classifyUrl(url, pyUrlHost);
 }
 
-/** A code fence longer than any backtick run in `text` (approved
+/** A code fence longer than any backtick run in `text` (deliberate
  * divergence: v2 always used three backticks, so fetched text containing
  * a fence could close it and turn the rest of the corpus into code). */
 export function fenceFor(text: string): string {

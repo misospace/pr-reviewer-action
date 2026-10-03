@@ -188,9 +188,8 @@ export function runRequiredCheckCoverageMode(fixturePath: string): void {
  * no workspace artifacts — stays in the range where the v2 flat default
  * and the v3 size-scaled default agree (explicit values and the floor).
  * The scaling itself is pinned by v3-only tests (tests-v3/budget.test.ts),
- * deliberately NOT by new fixture cases: a size-driven case would need an
- * approved v2↔v3 divergence, and the fixture set stays honest pinning the
- * shared contract instead.
+ * deliberately NOT by new fixture cases: the fixture set stays honest
+ * pinning the shared contract instead.
  */
 interface BudgetCase {
   name: string;

@@ -1,6 +1,6 @@
 {
   "fixture": "cgnat-divergence",
-  "description": "An allowlisted hostname resolving into 100.64.0.0/10 (CGNAT): CPython's is_private is False there, so v2 treats it as public and fetches; v3 blocks it (approved divergence).",
+  "description": "An allowlisted hostname resolving into 100.64.0.0/10 (CGNAT): CPython's is_private is False there, so v2 treats it as public and fetches; v3 blocks it (deliberate divergence).",
   "input": {
     "urls": [
       "https://artifacthub.io/cgnat"

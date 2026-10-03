@@ -1,6 +1,6 @@
 {
   "fixture": "malformed-entries",
-  "description": "Malformed API entries mixed with good ones: releases containing null/list/str/non-string-name entries, compare commits: null and files with a null entry. v2 raises out of render_linked_sources on the first bad entry; v3 drops only the entries v2 would raise on (survivable shapes render as v2 would) and renders every other section (approved divergence).",
+  "description": "Malformed API entries mixed with good ones: releases containing null/list/str/non-string-name entries, compare commits: null and files with a null entry. v2 raises out of render_linked_sources on the first bad entry; v3 drops only the entries v2 would raise on (survivable shapes render as v2 would) and renders every other section (deliberate divergence).",
   "input": {
     "urls": [
       "https://github.com/o/r/releases/tag/v1",

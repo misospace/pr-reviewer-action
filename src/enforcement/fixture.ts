@@ -67,8 +67,8 @@ export function runEnforcementFixture(fixturePath: string): {
     const config = fixture.config;
     // The fixture contract's default mirrors the v2 runtime default
     // (VERDICT_POLICY:-model), NOT the v3 contract default ("strict" since
-    // #811): this CLI is the parity oracle for v2 semantics, and every
-    // fixture states its policy explicitly.
+    // #811): this CLI mirrors the v2 runtime default, and every fixture
+    // states its policy explicitly.
     const policy = config.verdict_policy ?? "model";
     const categories = parseNonBlockingCategories(config.non_blocking_finding_categories);
     const securityFlagged = securityRiskFlagged(fixture.classification ?? null);

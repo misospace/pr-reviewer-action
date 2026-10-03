@@ -1,6 +1,6 @@
 {
   "fixture": "redirect-outside-allowed-source-hosts",
-  "description": "A redirect to a host in fetch_url's default allowlist but not in ALLOWED_SOURCE_HOSTS: v2's redirect handler checks only the default set and follows it; v3 re-checks ALLOWED_SOURCE_HOSTS on every hop and refuses (approved divergence).",
+  "description": "A redirect to a host in fetch_url's default allowlist but not in ALLOWED_SOURCE_HOSTS: v2's redirect handler checks only the default set and follows it; v3 re-checks ALLOWED_SOURCE_HOSTS on every hop and refuses (deliberate divergence).",
   "input": {
     "urls": [
       "https://artifacthub.io/moved"

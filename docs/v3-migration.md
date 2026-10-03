@@ -321,13 +321,12 @@ low-budget pivot to blocker hypotheses, `tool-call-budget-exhausted` kept as
 a distinct stop reason); the contract description for `tool-max-requests`
 carries the same semantics.
 
-The behavior is pinned by the `tool-request-budget` parity boundary
+The behavior is pinned by the `tool-request-budget` snapshot boundary
 (#673): `tests/fixtures/parity/tool-budget/tool-budget-tiers.json` carries
-the expected (route, budget) per case, `tests/parity_runners/v2_tool_budget.py`
-runs the real v2 harness resolver, and `src/tools/budget.ts` is the v3 port
-(`PR_REVIEWER_V3_MODE=tool-budget`). Both sides fail closed on any
-expectation mismatch, so #678 cannot regress to a single undifferentiated
-request ceiling.
+the fixture cases, the recorded snapshot pins the (route, budget) each
+resolves to, and `src/tools/budget.ts` is the v3 implementation
+(`PR_REVIEWER_V3_MODE=tool-budget`). A mismatch fails the harness, so #678
+cannot regress to a single undifferentiated request ceiling.
 
 ### Size-scaled default and honest partial coverage (#810)
 
@@ -617,7 +616,9 @@ TypeScript port itself (parity boundaries, port-by-port notes, the removed
 shadow-comparison tooling, and the teardown sequencing). It is not needed to
 upgrade a workflow — see [Upgrading from v2](#upgrading-from-v2) above for
 that. It is kept for anyone auditing how a specific behavior was proven
-equivalent, or bisecting a regression back to its port.
+equivalent, or bisecting a regression back to its port. The v2 scripts and
+`tests/parity_runners/` files it names were removed in the #706 teardown; the
+v3 sources and the recorded snapshots are what remain.
 
 ## Snapshot harness (#924, formerly the parity harness #673)
 

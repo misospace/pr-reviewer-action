@@ -64,7 +64,7 @@ export const V2_PRIVATE_IPV4_EXCEPTIONS = ["192.0.0.9/32", "192.0.0.10/32"] as c
 /** Loopback, link-local, multicast, reserved and unspecified. */
 export const V2_BLOCKED_IPV4 = ["127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4", "240.0.0.0/4", "0.0.0.0/32"] as const;
 
-/** v3 addition (approved divergence): CGNAT shared address space. */
+/** v3 addition (deliberate divergence): CGNAT shared address space. */
 export const V3_EXTRA_BLOCKED_IPV4 = ["100.64.0.0/10"] as const;
 
 /** CPython 3.14 `_IPv6Constants` private networks (`::ffff:0:0/96` is
@@ -113,7 +113,7 @@ export const V2_BLOCKED_IPV6 = [
   "fe00::/9",
 ] as const;
 
-/** v3 addition (approved divergence): deprecated site-local. */
+/** v3 addition (deliberate divergence): deprecated site-local. */
 export const V3_EXTRA_BLOCKED_IPV6 = ["fec0::/10"] as const;
 
 const PRIVATE4 = V2_PRIVATE_IPV4.map(cidr4);
