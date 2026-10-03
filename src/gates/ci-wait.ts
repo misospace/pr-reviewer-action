@@ -30,8 +30,8 @@ import type { ExternalChecksOptions, PlatformReadAdapter } from "../platform/typ
  *   skip); the `ci_status_*` outputs; the atomic `ci-checks-context.md`
  *   evidence file and its temp-file cleanup on TERM/INT.
  *
- * One approved divergence (tests/fixtures/parity/approved-divergences.json,
- * boundary `ci-gate`): reads use `transientAsUnknown`, so a transient read
+ * One deliberate divergence from v2 (pinned by the `ci-gate` snapshot): reads
+ * use `transientAsUnknown`, so a transient read
  * failure is "unknown, retry" rather than the v2 fold to `[]`, which let
  * the wait finalize "none" (or a partial list) while CI was still running.
  */
