@@ -117,6 +117,32 @@ test("malformed-location regression: met citing an enforcement line that does no
   }
 });
 
+test("#954: an unverifiable in-scope trace is recorded separately while strict result stays partial", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([{ id: "req-1", text: "match source SHA", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-1",
+      disposition: "unverifiable",
+      enforcement: [],
+      test: [],
+      reason: "The available evidence does not establish that source SHA is checked.",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.incomplete, true);
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+
+    const art = artifact({ requirement_coverage: claims });
+    applyRequirementTraceEnforcement(art, { enabled: true, ledger, workspace });
+    assert.equal(art.requirement_trace_incomplete, true);
+    assert.equal(art.required_checks, "incomplete");
+    const outcome = applyStrictVerdictPolicy(art, { modelVerdict: "approve", forced: false });
+    assert.equal(outcome.reviewResult, "partial");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("malformed-location regression: met citing a non-existent enforcement file is downgraded", () => {
   const workspace = makeWorkspace();
   try {
@@ -170,6 +196,8 @@ test("#854 reproduction: met citing a line that exists and copies the value with
     const art = artifact({ requirement_coverage: claims });
     const traceResult = applyRequirementTraceEnforcement(art, { enabled: true, ledger, workspace });
     assert.equal(traceResult.trace.rows[0]?.disposition, "unverifiable");
+    assert.equal(traceResult.trace.incomplete, true);
+    assert.equal(art.requirement_trace_incomplete, true);
     assert.equal(art.required_checks, "incomplete");
     const outcome = applyStrictVerdictPolicy(art, { modelVerdict: "approve", forced: false });
     assert.equal(outcome.reviewResult, "partial");

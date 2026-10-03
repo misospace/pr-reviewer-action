@@ -22,6 +22,7 @@ import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, ty
 import { strictReviewResult } from "../enforcement/verdict-policy.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
 import { COVERAGE_NOTICE_MAX_ITEMS, type PartialCoverage } from "../tools/coverage.js";
+import { isIncompleteReason, type IncompleteReason } from "./outputs.js";
 import type { NativeReviewComment, NativeReviewRequest, PublishPlatformApi } from "../platform/publish-api.js";
 
 export type PublishMode = "comment" | "review_comment" | "review_verdict";
@@ -46,6 +47,8 @@ export interface PublishInput {
   broadFingerprint?: string;
   /** Required-checks validation status for the metadata marker. */
   requiredChecks: string;
+  /** #954: why coverage is incomplete (see IncompleteReason). Absent means derive from requiredChecks/partialCoverage (legacy callers). */
+  incompleteReason?: string;
   reviewRoute: string;
   escalationReason: string;
   cacheHitRatio: string;
@@ -117,6 +120,8 @@ const VERDICT_PREFIXES: Record<string, string> = {
  * incomplete: never "APPROVE", since the coverage notice right below it
  * says the review did not finish. */
 const INCOMPLETE_COVERAGE_PREFIX = "🟡 **Automated recommendation: INCOMPLETE — not an approval**";
+const TRACE_INCOMPLETE_PREFIX = "🟡 **Automated recommendation: APPROVAL WITHHELD — requirement trace incomplete**";
+const BOTH_INCOMPLETE_PREFIX = "🟡 **Automated recommendation: APPROVAL WITHHELD — review coverage incomplete**";
 
 /**
  * Sanitize model output: strip reserved metadata markers (the model can
@@ -175,6 +180,24 @@ export function markerReviewResult(input: {
  * or layer produced the approve. */
 export function reviewCoverageIncomplete(reviewResult: string): boolean {
   return reviewResult === "partial";
+}
+
+export function resolveIncompleteReason(input: {
+  requiredChecks: string;
+  incompleteReason?: string | undefined;
+  partialCoverage?: PartialCoverage | undefined;
+  coverageUnknown?: boolean | undefined;
+}): IncompleteReason {
+  const reason = isIncompleteReason(input.incompleteReason) ? input.incompleteReason : undefined;
+  const trace = reason === "requirement_trace" || reason === "both";
+  const execution = reason === "execution" || reason === "both"
+    || (reason === undefined || reason === "none") && input.requiredChecks === "incomplete"
+    || Boolean(input.partialCoverage)
+    || Boolean(input.coverageUnknown);
+  return execution && trace ? "both"
+    : execution ? "execution"
+    : trace ? "requirement_trace"
+    : "none";
 }
 
 /** Build the published body: marker preamble + engine line + the optional
@@ -411,22 +434,28 @@ export function renderFindingsSummary(findings: unknown, linkMode: UpstreamLinkM
   return `\n\n${lines.join("\n")}\n`;
 }
 
-/** The deterministic coverage-gap notice rendered above the findings when
- * required-check validation ended incomplete (#811; #810's tool-loop
- * partial coverage will render beside it once implemented). */
-export function renderCoverageGapNotice(requiredChecks: string): string {
-  if (requiredChecks !== "incomplete") return "";
-  return "\n\n> **Partial coverage**: required-check coverage is incomplete — this review did not resolve every required check and must not be read as a complete pass.\n";
+/** The deterministic coverage-gap notice rendered above the findings, with
+ * separate prose for execution incompleteness and requirement traceability. */
+export function renderCoverageGapNotice(reason: string): string {
+  const execution = "\n\n> **Partial coverage**: required-check coverage is incomplete — this review did not resolve every required check and must not be read as a complete pass.\n";
+  const trace = "\n\n> **Requirement traceability gap**: the review itself completed, but one or more in-scope requirements could not be verified against enforcement or test evidence. Approval is withheld until that requirement is covered.\n";
+  const both = "\n\n> **Partial coverage and requirement traceability gap**: required-check coverage is incomplete, and one or more in-scope requirements could not be verified against enforcement or test evidence. Approval is withheld until both gaps are addressed.\n";
+  switch (reason === "incomplete" ? "execution" : reason) {
+    case "execution": return execution;
+    case "requirement_trace": return trace;
+    case "both": return both;
+    default: return "";
+  }
 }
 
 /** The top-of-body state block for verdict_policy=strict: coverage gap first
  * (it qualifies the whole review), then the findings summary. */
 function renderStrictStateBlock(options: {
-  requiredChecks: string;
+  incompleteReason: string;
   findings: unknown;
   linkMode: UpstreamLinkMode;
 }): string {
-  return renderCoverageGapNotice(options.requiredChecks)
+  return renderCoverageGapNotice(options.incompleteReason)
     + renderFindingsSummary(options.findings, options.linkMode);
 }
 
@@ -546,6 +575,7 @@ export async function publishReview(
   // rely on; the unchanged-diff carry-forward reads this field
   // (findings/partial carry an approve).
   const strict = input.verdictPolicy === "strict";
+  const incompleteReason = resolveIncompleteReason(input);
   const reviewResult = markerReviewResult(input);
   const coverageNotice = input.partialCoverage ? renderPartialCoverageNotice(input.partialCoverage) : "";
   const markerContext: RunMarkerContext = {
@@ -556,6 +586,7 @@ export async function publishReview(
     reviewRoute: input.reviewRoute,
     escalationReason: input.escalationReason,
     cacheHitRatio: input.cacheHitRatio,
+    ...(incompleteReason !== "none" ? { incompleteReason } : {}),
     ...(input.ciState !== undefined && input.ciState !== "" ? { ciState: input.ciState } : {}),
     ...(input.toolBudget !== undefined ? { toolBudget: input.toolBudget } : {}),
     ...(input.toolBudgetSource !== undefined && input.toolBudgetSource !== "" ? { toolBudgetSource: input.toolBudgetSource } : {}),
@@ -622,7 +653,9 @@ export async function publishReview(
       // contradict the body directly below it.
       const prefix = (
         input.verdict === "approve" && reviewCoverageIncomplete(reviewResult)
-          ? INCOMPLETE_COVERAGE_PREFIX
+          ? incompleteReason === "requirement_trace" ? TRACE_INCOMPLETE_PREFIX
+            : incompleteReason === "both" ? BOTH_INCOMPLETE_PREFIX
+            : INCOMPLETE_COVERAGE_PREFIX
           : (VERDICT_PREFIXES[input.verdict] ?? "✅ **Automated recommendation: APPROVE**")
       ) + suffix;
       const body = buildPublishedBody({
@@ -632,7 +665,7 @@ export async function publishReview(
         sanitizedMarkdown: sanitized,
         coverageNotice,
         stateBlock: strict
-          ? renderStrictStateBlock({ requiredChecks: input.requiredChecks, findings: input.findings, linkMode: input.upstreamLinkMode })
+          ? renderStrictStateBlock({ incompleteReason, findings: input.findings, linkMode: input.upstreamLinkMode })
           : undefined,
       });
       const result = await api.upsertStickyComment(input.commentMarker, body);
@@ -647,7 +680,7 @@ export async function publishReview(
         sanitizedMarkdown: sanitized,
         coverageNotice,
         stateBlock: strict
-          ? renderStrictStateBlock({ requiredChecks: input.requiredChecks, findings: input.findings, linkMode: input.upstreamLinkMode })
+          ? renderStrictStateBlock({ incompleteReason, findings: input.findings, linkMode: input.upstreamLinkMode })
           : undefined,
       });
       const result = await api.upsertStickyComment(input.commentMarker, body);
@@ -688,7 +721,7 @@ export async function publishReview(
         sanitizedMarkdown: sanitized,
         coverageNotice,
         stateBlock: strict
-          ? renderStrictStateBlock({ requiredChecks: input.requiredChecks, findings: input.findings, linkMode: input.upstreamLinkMode })
+          ? renderStrictStateBlock({ incompleteReason, findings: input.findings, linkMode: input.upstreamLinkMode })
           : undefined,
       });
       if (input.verdict === "approve" && !canApprove) {
@@ -709,10 +742,16 @@ export async function publishReview(
           // rather than guess it was clean.
           body += `\n> **Approval withheld**: this review's tool-loop coverage could not be verified (no run directory was available to confirm it), so it is publishing as an advisory comment rather than an approval.\n`;
           messages.push(`Withholding native approval for #${input.prNumber} (review coverage unknown)`);
+        } else if (incompleteReason === "requirement_trace") {
+          body += "\n> **Approval withheld**: the review completed, but an in-scope requirement lacks verifiable enforcement or test evidence, so it is publishing as an advisory comment rather than an approval.\n";
+          messages.push(`Withholding native approval for #${input.prNumber} (requirement trace incomplete)`);
+        } else if (incompleteReason === "both") {
+          body += "\n> **Approval withheld**: this review has incomplete execution coverage and an in-scope requirement lacks verifiable enforcement or test evidence, so it is publishing as an advisory comment rather than an approval.\n";
+          messages.push(`Withholding native approval for #${input.prNumber} (execution and requirement trace incomplete)`);
         } else {
           // #873: the guardrails would allow it, but the review's own
-          // coverage signals say it did not finish — fail closed rather
-          // than publish an approval the metadata marker itself disputes.
+          // execution-coverage signals say it did not finish — fail closed
+          // rather than publish an approval the metadata marker itself disputes.
           body += `\n> **Approval withheld**: this review's coverage is incomplete — required-check coverage or the tool-loop investigation did not finish, so it is publishing as an advisory comment rather than an approval.\n`;
           messages.push(`Withholding native approval for #${input.prNumber} (review coverage incomplete)`);
         }
