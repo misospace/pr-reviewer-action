@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "coverage": "{\"checks\": [{\"check\": \"review for path traversal vulnerabilities\", \"rationale\": \"The real check is left explicitly unresolved.\", \"reason\": \"ok\", \"status\": \"unresolved\"}], \"dropped_unknown\": [\"review for path traversal vulnerabilities (as reinterpreted by the model)\", \"verify the model invented this mandatory check\"], \"status\": \"incomplete\", \"structured\": true, \"version\": 1}"

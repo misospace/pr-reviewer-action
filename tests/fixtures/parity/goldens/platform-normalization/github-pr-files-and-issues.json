@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "c00_pr-files": "{\"ok\":true,\"data\":[{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"filename\":\"src/app.py\",\"status\":\"modified\",\"additions\":10,\"deletions\":2,\"changes\":12,\"blob_url\":\"https://github.com/o/r/blob/x/src/app.py\",\"patch\":\"@@ -1 +1 @@\"},{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"filename\":\"docs/\\u00e9t\\u00e9 \\ud83d\\ude00.md\",\"status\":\"added\",\"additions\":3,\"deletions\":0,\"changes\":3,\"blob_url\":\"https://github.com/o/r/blob/x/docs/\\u00e9t\\u00e9 \\ud83d\\ude00.md\",\"patch\":\"@@ -1 +1 @@\"},{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"filename\":\"new/name.ts\",\"status\":\"renamed\",\"additions\":0,\"deletions\":0,\"changes\":0,\"blob_url\":\"https://github.com/o/r/blob/x/new/name.ts\",\"patch\":\"\",\"previous_filename\":\"old/name.ts\"}]}",

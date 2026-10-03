@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "json": "{\"configured\": false, \"has_blocker\": false, \"providers\": [], \"skipped\": true, \"skip_reason\": \"fork-pr\"}\n",

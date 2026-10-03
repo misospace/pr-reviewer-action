@@ -1,13 +1,11 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
-  "c00_github-enrich": "{\"data\":{\"tag_name\":\"v1.2.3\",\"name\":\"v1.2.3 \\ud83d\\ude80\",\"body\":\"## Changes\\n- caf\\u00e9 \\u4e2d\\u6587 \\u05e9\\u05dc\\u05d5\\u05dd \\ud83d\\ude00 \\ud83e\\uddea line\\u2028sep del\\u007fchar\",\"html_url\":\"https://github.com/up/stream/releases/tag/v1.2.3\",\"published_at\":\"2026-09-01T00:00:00Z\"}}",
+  "c00_github-enrich": "{\"data\":{\"tag_name\":\"v1.2.3\",\"name\":\"v1.2.3 \\ud83d\\ude80\",\"body\":\"## Changes\\n- caf\\u00e9 \\u4e2d\\u6587 \\u05e9\\u05dc\\u05d5\\u05dd \\ud83d\\ude00 \\ud83e\\uddea line\\u2028sep del\\u007fchar\",\"html_url\":\"https://github.com/up/stream/releases/tag/v1.2.3\",\"published_at\":\"<TIMESTAMP>\"}}",
   "c01_github-enrich": "{\"data\":[{\"name\":\"v1.2.3\",\"commit\":{\"sha\":\"1111111111111111111111111111111111111111\"}},{\"name\":\"v1.2.2\",\"commit\":{\"sha\":\"2222222222222222222222222222222222222222\"}}]}",
-  "c02_github-enrich": "{\"data\":{\"status\":\"ahead\",\"ahead_by\":2,\"behind_by\":0,\"total_commits\":2,\"html_url\":\"https://github.com/up/stream/compare/v1.2.2...v1.2.3\",\"commits\":[{\"sha\":\"3333333333333333333333333333333333333333\",\"commit\":{\"message\":\"fix: \\u00e9 \\ud83d\\udc1b\\n\\nbody\",\"author\":{\"name\":\"A\",\"date\":\"2026-09-01T00:00:00Z\"}}}],\"files\":[{\"filename\":\"src/x.go\",\"status\":\"modified\",\"changes\":4}]}}",
+  "c02_github-enrich": "{\"data\":{\"status\":\"ahead\",\"ahead_by\":2,\"behind_by\":0,\"total_commits\":2,\"html_url\":\"https://github.com/up/stream/compare/v1.2.2...v1.2.3\",\"commits\":[{\"sha\":\"3333333333333333333333333333333333333333\",\"commit\":{\"message\":\"fix: \\u00e9 \\ud83d\\udc1b\\n\\nbody\",\"author\":{\"name\":\"A\",\"date\":\"<TIMESTAMP>\"}}}],\"files\":[{\"filename\":\"src/x.go\",\"status\":\"modified\",\"changes\":4}]}}",
   "c03_github-enrich": "{\"data\":null}",
   "requests": "[\"GET https://api.github.com/repos/up/stream/releases/tags/v1.2.3 auth=1\",\"GET https://api.github.com/repos/up/stream/tags?per_page=50 auth=0\",\"GET https://api.github.com/repos/up/stream/compare/v1.2.2...v1.2.3 auth=1\",\"GET https://api.github.com/repos/up/stream/releases/tags/v9.9.9 auth=1\"]"
  }

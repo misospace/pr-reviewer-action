@@ -1,12 +1,10 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "exit_code": "1",
   "output:../it's-out.json": "<absent>",
-  "stderr": "Refusing to write \"../it's-out.json\": escapes workspace root '<WORKDIR>/change-anchors-ws' or is otherwise unsafe.\n"
+  "stderr": "Refusing to write \"../it's-out.json\": escapes workspace root '<TMP>' or is otherwise unsafe.\n"
  }
 }

@@ -1,22 +1,8 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
-  "result": {
-   "max_tokens": 4096,
-   "messages": [
-    {
-     "content": "corpus text",
-     "role": "user"
-    }
-   ],
-   "model": "claude-test",
-   "stream": true,
-   "system": "You are a correctness specialist. ## security lane\n\nBe careful.\n## tests lane\n\nCheck coverage.",
-   "temperature": 0.3
-  }
+  "result": "{\"max_tokens\":4096,\"messages\":[{\"content\":\"corpus text\",\"role\":\"user\"}],\"model\":\"claude-test\",\"stream\":true,\"system\":\"You are a correctness specialist. ## security lane\\n\\nBe careful.\\n## tests lane\\n\\nCheck coverage.\",\"temperature\":0.3}"
  }
 }

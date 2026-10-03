@@ -1,12 +1,10 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
-  "engine_annotations": [],
-  "failure_notices": [],
+  "engine_annotations": "[]",
+  "failure_notices": "[]",
   "system_prompt": "# Repo reviewer\n\nReview only the diff.",
   "system_prompt_assembled": "# Repo reviewer\n\nReview only the diff.",
   "system_prompt_is_default": "0",

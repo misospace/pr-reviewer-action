@@ -1,8 +1,6 @@
 {
- "error": "[2026-09-29T21:06:24-0600] ERROR: Invalid SMART_MODEL_CONTEXT_TOKENS: expected a positive integer",
+ "error": "ERROR: Invalid SMART_MODEL_CONTEXT_TOKENS: expected a positive integer",
  "ok": false,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {}
 }

@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "base_sha": "",
@@ -11,6 +9,7 @@
   "head_sha": "",
   "is_fork_pr": "",
   "resolved_platform": "github",
+  "review_result": "clean",
   "should_review": "false",
   "skip_reason": "diff-unchanged",
   "verdict": "approve",

@@ -1,42 +1,8 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
-  "result": {
-   "errors": [
-    "leads[0]: major lead missing trigger; downgraded to minor"
-   ],
-   "leads": [
-    {
-     "category": "",
-     "file": null,
-     "line": null,
-     "message": "claims a race condition but no counterexample given",
-     "severity": "minor"
-    },
-    {
-     "category": "",
-     "consequence": "raises IndexError",
-     "file": null,
-     "line": null,
-     "message": "empty input crashes the parser",
-     "severity": "major",
-     "trigger": "pass an empty string"
-    }
-   ],
-   "role": "correctness",
-   "truncated": false,
-   "truncation": {
-    "omitted_errors": 0,
-    "omitted_leads": 0,
-    "omitted_message_chars": 0,
-    "reasons": [],
-    "truncated": false
-   },
-   "version": 1
-  }
+  "result": "{\"errors\":[\"leads[0]: major lead missing trigger; downgraded to minor\"],\"leads\":[{\"category\":\"\",\"file\":null,\"line\":null,\"message\":\"claims a race condition but no counterexample given\",\"severity\":\"minor\"},{\"category\":\"\",\"consequence\":\"raises IndexError\",\"file\":null,\"line\":null,\"message\":\"empty input crashes the parser\",\"severity\":\"major\",\"trigger\":\"pass an empty string\"}],\"role\":\"correctness\",\"truncated\":false,\"truncation\":{\"omitted_errors\":0,\"omitted_leads\":0,\"omitted_message_chars\":0,\"reasons\":[],\"truncated\":false},\"version\":1}"
  }
 }

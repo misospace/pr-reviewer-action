@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "file:repo-history.truncated.md": "## Term: 0.1.0\n\n### git log context\n```text\n```\n\n## Term: alpha.beta\n\n### git log context\n```text\n```\n\n## Term: chi-psi\n\n### git log context\n```text\n```\n\n## Term: dots\n\n### git log context\n```text\n```\n\n## Term: gamma_delta\n\n### git log context\n```text\n```\n\n## Term: github.com/owner/repo\n\n### git log context\n```text\n```\n\n## Term: kappa\n\n### git log context\n```text\n13ac9f8 (HEAD -> main) null handling for kappa\n```\n\n## Term: lambda-mu\n\n### git log context\n```text\n```\n\n## Term: lib\n\n### git log context\n```text\n```\n\n## Term: nu.xi\n\n### git log context\n```text\n```\n\n## Term: null\n\n### git log context\n```text\n13ac9f8 (HEAD -> main) null handling for kappa\n```\n\n## Term: omega/psi\n\n### git log context\n```text\n```\n\n## Term: omicron\n\n### git log context\n```text\n```\n\n## Term: phi\n\n### git log context\n```text\n```\n\n",

@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "file:linear-issues.json": "[\n  {\n    \"source\": \"linear\",\n    \"ref\": \"ENG-12\",\n    \"identifier\": \"ENG-12\",\n    \"title\": \"Spec `fence` ```\",\n    \"body\": \"Line 1\\n```\\nclose\\n```\",\n    \"url\": \"https://linear.app/x/ENG-12\",\n    \"state\": \"In Progress\",\n    \"priority\": 2,\n    \"priority_label\": \"High\",\n    \"labels\": [\n      {\n        \"name\": \"Security\"\n      }\n    ]\n  }\n]\n",

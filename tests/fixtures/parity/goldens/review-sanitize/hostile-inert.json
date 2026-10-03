@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "all-url-kinds-inert": "upstream acme/app PR 1 upstream acme/app issue 2 upstream acme/app commit deadbee upstream acme/app compare v1...v2",

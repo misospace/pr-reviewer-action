@@ -1,12 +1,10 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "budget_warnings": "0",
-  "markdown": "## Source 1\nURL: https://docs.example.com/release-notes\n\n### Fetched Content (truncated)\n(Failed to fetch allowlisted URL content from docs.example.com)\n\n## Source 2\nURL: https://docs.example.com/moved-out\n\n### Fetched Content (truncated)\n(Failed to fetch allowlisted URL content from docs.example.com)\n\n## Source 3\nURL: https://docs.example.com/moved-in\n\n### Fetched Content (truncated)\n(Failed to fetch allowlisted URL content from docs.example.com)\n\n(1 source skipped — non-allowlisted or non-fetchable hosts: evil.example)\n\n",
-  "requests": "[]"
+  "markdown": "## Source 1\nURL: https://docs.example.com/release-notes\n\n### Fetched Content (truncated)\n```text\nRelease notes v2 & more\n\n```\n\n## Source 2\nURL: https://docs.example.com/moved-out\n\n### Fetched Content (truncated)\n(Failed to fetch allowlisted URL content from docs.example.com)\n\n## Source 3\nURL: https://docs.example.com/moved-in\n\n### Fetched Content (truncated)\n```text\nmirrored notes\n\n```\n\n(1 source skipped — non-allowlisted or non-fetchable hosts: evil.example)\n\n",
+  "requests": "[\"GET https://docs.example.com/moved-in\",\"GET https://docs.example.com/moved-out\",\"GET https://docs.example.com/release-notes\",\"GET https://mirror.example.org/notes\"]"
  }
 }

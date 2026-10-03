@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "budget_primary_max_corpus": "220000",
@@ -28,7 +26,6 @@
   "file:tool-harness.json": "eyJtb2RlIjoib2ZmIiwicGxhbm5lZF9yZXF1ZXN0X2NvdW50IjowLCJleGVjdXRlZF9yZXF1ZXN0X2NvdW50IjowLCJ0b29sX3Jlc3VsdHMiOltdfQo=",
   "file:tool-harness.md": "VG9vbCBoYXJuZXNzIHBsYW5uaW5nIHBlbmRpbmcuCg==",
   "file:tool-harness.smart.md": "!absent",
-  "status:gates": "!absent",
   "status:initial": "0"
  }
 }

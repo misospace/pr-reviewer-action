@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "classification": "{\"changed_files_summary\": [\"src/app/flow.py\", \"src/app/flow.ts\", \"src/app/flow_formatted.py\", \"src/app/flow_open.py\", \"src/app/flow_keywords.py\"], \"linked_issue_labels\": [], \"linked_metadata_uncertain\": false, \"linked_metadata_uncertainty\": [], \"must_check\": [\"review for path traversal vulnerabilities\", \"test with edge-case paths (null bytes, symlinks)\"], \"path_handling_provenance\": {\"discounted\": [], \"fired\": true, \"signals\": [{\"files\": [\"src/app/flow.py\", \"src/app/flow.ts\", \"src/app/flow_formatted.py\", \"src/app/flow_open.py\", \"src/app/flow_keywords.py\"], \"samples\": [\"+target = os.path.join(os.path.dirname(__file__), name)\", \"+const resolved = path.resolve(__dirname, requested);\", \"+target = os.path.join(\"], \"signal\": \"untrusted_source_join\", \"source\": \"diff\"}]}, \"pr_kind\": \"path_handling_changes\", \"risk_flags\": [\"path_handling_changes\"], \"risk_flags_with_files\": {\"path_handling_changes\": []}, \"route_signals\": []}",

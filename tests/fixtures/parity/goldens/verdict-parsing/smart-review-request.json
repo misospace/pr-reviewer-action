@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "parsed": "{\"findings\": [], \"review_markdown\": \"## Recommendation\\nApprove with an open question.\\n\\nThe state transition is defensible but I cannot confidently disposition the auth path from the corpus.\", \"smart_review_reason\": \"cannot confidently disposition the auth path change from the available evidence\", \"smart_review_requested\": true, \"verdict\": \"approve\"}"

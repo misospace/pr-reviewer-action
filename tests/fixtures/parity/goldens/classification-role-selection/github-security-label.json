@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "classification": "{\"changed_files_summary\": [\"src/auth/login.py\"], \"linked_issue_labels\": [\"security\", \"priority/p1\"], \"linked_metadata_uncertain\": false, \"linked_metadata_uncertainty\": [], \"must_check\": [\"review auth flow for regression\", \"verify session token handling is correct\", \"explicitly address the linked security issue\", \"treat as high priority — verify correctness carefully\"], \"path_handling_provenance\": {\"discounted\": [], \"fired\": false, \"signals\": []}, \"pr_kind\": \"auth_changes\", \"risk_flags\": [\"linked_security_issue\", \"linked_priority_p1\", \"auth_changes\"], \"risk_flags_with_files\": {\"auth_changes\": [\"src/auth/login.py\"]}, \"route_signals\": [\"linked_security_issue\", \"linked_priority_p1\", \"auth_changes\"]}",
