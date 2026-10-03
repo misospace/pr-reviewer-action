@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "json_document": "{\n  \"version\": 1,\n  \"files\": [],\n  \"truncated\": true,\n  \"errors\": [\n    \"change-anchor artifact is not a JSON object\"\n  ],\n  \"truncation\": {\n    \"truncated\": true,\n    \"reasons\": [\n      \"invalid_input\"\n    ],\n    \"omitted_symbols\": 0,\n    \"omitted_references\": 0,\n    \"omitted_tests\": 0,\n    \"omitted_manifests\": 0,\n    \"omitted_output_bytes\": 0\n  }\n}\n",

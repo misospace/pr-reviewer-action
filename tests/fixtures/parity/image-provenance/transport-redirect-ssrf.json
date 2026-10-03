@@ -1,6 +1,6 @@
 {
   "fixture": "transport-redirect-ssrf",
-  "description": "SSRF via redirect: an allowlisted registry answers the config-blob reads with redirects to the link-local metadata address and to a hostname resolving to RFC1918. v2's curl -L follows both and renders the internal responses; the v3 fence refuses each hop before any request to it (approved divergence).",
+  "description": "SSRF via redirect: an allowlisted registry answers the config-blob reads with redirects to the link-local metadata address and to a hostname resolving to RFC1918. v2's curl -L follows both and renders the internal responses; the v3 fence refuses each hop before any request to it (deliberate divergence).",
   "transport": true,
   "diff": "diff --git a/deploy/app.yaml b/deploy/app.yaml\n   repository: ghcr.io/acme/app\n-   tag: v1@sha256:1111111111111111111111111111111111111111111111111111111111111111\n+   tag: v1@sha256:2222222222222222222222222222222222222222222222222222222222222222\n",
   "dns": {

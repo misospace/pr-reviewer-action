@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "strip-empty-linked-section": "## Summary\n\nKeep this.\n\n## Next Steps\nKeep this too.",

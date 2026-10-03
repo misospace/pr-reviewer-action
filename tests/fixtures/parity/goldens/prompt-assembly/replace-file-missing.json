@@ -1,8 +1,6 @@
 {
- "error": "[2026-09-29T21:07:14-0600] ERROR: SYSTEM_PROMPT_FILE does not exist: prompts/missing.txt\n",
+ "error": "SYSTEM_PROMPT_FILE does not exist: prompts/missing.txt",
  "ok": false,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {}
 }

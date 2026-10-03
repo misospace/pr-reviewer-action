@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "classification": "{\"changed_files_summary\": [\"package-lock.json\", \"yarn.lock\"], \"linked_issue_labels\": [], \"linked_metadata_uncertain\": false, \"linked_metadata_uncertainty\": [], \"must_check\": [\"verify no functional changes beyond lockfile hashes\"], \"path_handling_provenance\": {\"discounted\": [], \"fired\": false, \"signals\": []}, \"pr_kind\": \"renovate_digest_only\", \"risk_flags\": [], \"risk_flags_with_files\": {}, \"route_signals\": [\"renovate_digest_only\"]}",

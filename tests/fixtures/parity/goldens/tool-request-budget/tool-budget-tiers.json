@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "escalated-default": "escalated/40/tier-default",
@@ -19,11 +17,11 @@
   "invalid-primary-override-falls-to-explicit": "primary/7/explicit",
   "invalid-smart-override-falls-to-explicit": "smart/7/explicit",
   "just-over-hard-ceiling-clamps": "primary/50/explicit",
-  "primary-default": "primary/16/tier-default",
+  "primary-default": "primary/24/tier-default",
   "primary-override-ignored-on-smart": "smart/32/tier-default",
   "primary-override-precedence": "primary/12/primary-override",
   "routed-smart-profile": "smart/32/tier-default",
-  "smart-override-ignored-on-primary": "primary/16/tier-default",
+  "smart-override-ignored-on-primary": "primary/24/tier-default",
   "smart-override-precedence": "smart/10/smart-override",
   "smart-tier-default": "smart/32/tier-default"
  }

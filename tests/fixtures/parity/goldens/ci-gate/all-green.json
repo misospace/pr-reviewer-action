@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "checks_file": "_CI reached a terminal state before this review began (overall: success). These results are from the CI status API for commit 0123456789abcdef0123456789abcdef01234567 and are authoritative evidence of which checks ran and how they concluded._\n\n| Check | State |\n| --- | --- |\n| build | success |\n| lint | success |\n| ci/legacy | success |\n",

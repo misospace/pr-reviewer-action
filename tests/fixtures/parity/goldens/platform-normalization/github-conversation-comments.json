@@ -1,11 +1,9 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
-  "c00_conversation-comments": "{\"ok\":true,\"data\":[{\"id\":40,\"user\":\"dave\",\"created_at\":\"\",\"updated_at\":\"\",\"body\":\"no timestamps\"},{\"id\":12,\"user\":\"alice\",\"created_at\":\"2026-09-01T09:00:00Z\",\"updated_at\":\"2026-09-01T09:00:00Z\",\"body\":\"first\\nmulti-line\\r\\nbody\"},{\"id\":10,\"user\":\"bob\",\"created_at\":\"2026-09-02T09:00:00Z\",\"updated_at\":\"2026-09-05T00:00:00Z\",\"body\":\"\"},{\"id\":11,\"user\":\"\",\"created_at\":\"2026-09-02T09:00:00Z\",\"updated_at\":\"2026-09-02T09:00:00Z\",\"body\":\"ghost author\"},{\"id\":30,\"user\":\"carol\",\"created_at\":\"2026-09-03T10:00:00Z\",\"updated_at\":\"2026-09-03T10:00:00Z\",\"body\":\"third caf\\u00e9 \\u4e2d\\u6587 \\u05e9\\u05dc\\u05d5\\u05dd \\ud83d\\ude00 \\ud83e\\uddea line\\u2028sep del\\u007fchar\"},{\"id\":50,\"user\":\"erin\",\"created_at\":\"2026-09-04T00:00:00Z\",\"updated_at\":\"2026-09-04T00:00:00Z\",\"body\":\"<!-- ai-pr-reviewer --> managed \\ud83e\\udd16\"}]}",
+  "c00_conversation-comments": "{\"ok\":true,\"data\":[{\"id\":40,\"user\":\"dave\",\"created_at\":\"\",\"updated_at\":\"\",\"body\":\"no timestamps\"},{\"id\":12,\"user\":\"alice\",\"created_at\":\"<TIMESTAMP>\",\"updated_at\":\"<TIMESTAMP>\",\"body\":\"first\\nmulti-line\\r\\nbody\"},{\"id\":10,\"user\":\"bob\",\"created_at\":\"<TIMESTAMP>\",\"updated_at\":\"<TIMESTAMP>\",\"body\":\"\"},{\"id\":11,\"user\":\"\",\"created_at\":\"<TIMESTAMP>\",\"updated_at\":\"<TIMESTAMP>\",\"body\":\"ghost author\"},{\"id\":30,\"user\":\"carol\",\"created_at\":\"<TIMESTAMP>\",\"updated_at\":\"<TIMESTAMP>\",\"body\":\"third caf\\u00e9 \\u4e2d\\u6587 \\u05e9\\u05dc\\u05d5\\u05dd \\ud83d\\ude00 \\ud83e\\uddea line\\u2028sep del\\u007fchar\"},{\"id\":50,\"user\":\"erin\",\"created_at\":\"<TIMESTAMP>\",\"updated_at\":\"<TIMESTAMP>\",\"body\":\"<!-- ai-pr-reviewer --> managed \\ud83e\\udd16\"}]}",
   "requests": "[\"POST https://api.github.com/graphql auth=1 {\\\"query\\\":\\\"query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { comments(last: 100) { nodes { databaseId body createdAt updatedAt author { login } } } } } }\\\",\\\"variables\\\":{\\\"name\\\":\\\"r\\\",\\\"number\\\":7,\\\"owner\\\":\\\"o\\\"}}\"]"
  }
 }

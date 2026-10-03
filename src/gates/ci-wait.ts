@@ -30,8 +30,8 @@ import type { ExternalChecksOptions, PlatformReadAdapter } from "../platform/typ
  *   skip); the `ci_status_*` outputs; the atomic `ci-checks-context.md`
  *   evidence file and its temp-file cleanup on TERM/INT.
  *
- * One approved divergence (tests/fixtures/parity/approved-divergences.json,
- * boundary `ci-gate`): reads use `transientAsUnknown`, so a transient read
+ * One deliberate divergence from v2 (pinned by the `ci-gate` snapshot): reads
+ * use `transientAsUnknown`, so a transient read
  * failure is "unknown, retry" rather than the v2 fold to `[]`, which let
  * the wait finalize "none" (or a partial list) while CI was still running.
  */
@@ -110,7 +110,7 @@ const CELL_BREAK_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g;
 /** One Markdown table cell from untrusted check data (check names are
  * chosen by whoever configures CI). v2 interpolated them raw (jq
  * `"| \(.name) | \(.state) |"`), so a name carrying `|` or a newline could
- * split the row or forge a heading in the review corpus; this is an approved
+ * split the row or forge a heading in the review corpus; this is a deliberate
  * `ci-gate` divergence. Non-strings render as compact JSON first, as jq
  * does. Then control runs collapse to one space, `\` / `|` / backticks are
  * backslash-escaped (backslash first, so `\|` cannot un-escape a pipe), and

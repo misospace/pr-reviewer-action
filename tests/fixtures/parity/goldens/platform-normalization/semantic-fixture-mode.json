@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "c00_pr": "{\"number\":7,\"title\":\"Semantic caf\\u00e9 \\u4e2d\\u6587 \\u05e9\\u05dc\\u05d5\\u05dd \\ud83d\\ude00 \\ud83e\\uddea line\\u2028sep del\\u007fchar\",\"body\":\"fixture body\",\"head\":{\"sha\":\"ffffffffffffffffffffffffffffffffffffffff\",\"repo\":{\"full_name\":\"o/r\"}},\"base\":{\"sha\":\"0000000000000000000000000000000000000000\",\"repo\":{\"full_name\":\"o/r\"}}}",

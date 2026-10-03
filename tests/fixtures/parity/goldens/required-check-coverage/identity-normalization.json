@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "coverage": "{\"checks\": [{\"check\": \"Review for path traversal vulnerabilities\", \"rationale\": \"Case-normalized echo still identifies the deterministic check.\", \"reason\": \"ok\", \"status\": \"not_applicable\"}, {\"check\": \"check   secret  rotation impact\", \"rationale\": \"Casing drift in a faithful echo still identifies the check.\", \"reason\": \"ok\", \"status\": \"satisfied\"}], \"dropped_unknown\": [], \"status\": \"complete\", \"structured\": true, \"version\": 1}"

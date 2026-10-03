@@ -1,8 +1,6 @@
 {
  "error": "ERROR: Could not determine Forgejo permission for misospace/demo (server returned 200 but no recognizable permissions field). To proceed anyway, set the 'forgejo_skip_permission_preflight' action input (or the FORGEJO_SKIP_PERMISSION_PREFLIGHT=true env var) to true after verifying the token can publish reviews. Otherwise the model output would be lost.",
  "ok": false,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {}
 }

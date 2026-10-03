@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "classification": "{\"changed_files_summary\": [\"package-lock.json\", \"pnpm-lock.yaml\"], \"linked_issue_labels\": [], \"linked_metadata_uncertain\": false, \"linked_metadata_uncertainty\": [], \"must_check\": [\"check for breaking API changes in updated dependencies\", \"run full test suite after upgrade\"], \"path_handling_provenance\": {\"discounted\": [], \"fired\": false, \"signals\": []}, \"pr_kind\": \"dependency_upgrade\", \"risk_flags\": [], \"risk_flags_with_files\": {}, \"route_signals\": [\"dependency_upgrade\"]}",

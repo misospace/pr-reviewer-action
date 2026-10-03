@@ -1,12 +1,10 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
-  "engine_annotations": [],
-  "failure_notices": [],
+  "engine_annotations": "[]",
+  "failure_notices": "[]",
   "system_prompt": "You are a strict reviewer. |{{VERSION_BUMP_GUIDANCE}}|||{{VERBOSITY_GUIDANCE}}|{{RELATED_CODE_GUIDANCE}}\n",
   "system_prompt_assembled": "You are a strict reviewer. |{{VERSION_BUMP_GUIDANCE}}|||{{VERBOSITY_GUIDANCE}}|{{RELATED_CODE_GUIDANCE}}\n",
   "system_prompt_is_default": "0",

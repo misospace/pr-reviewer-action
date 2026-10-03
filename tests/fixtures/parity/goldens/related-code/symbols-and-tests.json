@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "json_document": "{\n  \"version\": 1,\n  \"files\": [\n    {\n      \"path\": \"src/app.py\",\n      \"symbols\": [\n        {\n          \"name\": \"run_pipeline\",\n          \"references\": [\n            {\n              \"path\": \"src/other.py\",\n              \"line\": 1,\n              \"snippet\": \"def run_pipeline(items):\"\n            },\n            {\n              \"path\": \"src/other.py\",\n              \"line\": 3,\n              \"snippet\": \"def run_pipeline_v2(items):\"\n            },\n            {\n              \"path\": \"src/other.py\",\n              \"line\": 4,\n              \"snippet\": \"    return run_pipeline(items) + [0]\"\n            }\n          ]\n        },\n        {\n          \"name\": \"App\",\n          \"references\": [\n            {\n              \"path\": \"tests/test_app.py\",\n              \"line\": 1,\n              \"snippet\": \"from src.app import App\"\n            },\n            {\n              \"path\": \"tests/test_app.py\",\n              \"line\": 3,\n              \"snippet\": \"    assert App()\"\n            }\n          ]\n        }\n      ],\n      \"tests\": [\n        \"src/app.test.ts\",\n        \"tests/test_app.py\"\n      ],\n      \"manifests\": [\n        \"src/pyproject.toml\",\n        \"pyproject.toml\"\n      ]\n    }\n  ],\n  \"truncated\": false,\n  \"errors\": [],\n  \"truncation\": {\n    \"truncated\": false,\n    \"reasons\": [],\n    \"omitted_symbols\": 0,\n    \"omitted_references\": 0,\n    \"omitted_tests\": 0,\n    \"omitted_manifests\": 0,\n    \"omitted_output_bytes\": 0\n  }\n}\n",

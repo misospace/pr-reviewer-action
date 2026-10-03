@@ -1,8 +1,6 @@
 {
- "error": "Traceback (most recent call last):\n  File \"<stdin>\", line 22, in <module>\nAttributeError: 'list' object has no attribute 'get'\n",
+ "error": "user message build failed: 'risk_flags_with_files' is not a dict",
  "ok": false,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {}
 }

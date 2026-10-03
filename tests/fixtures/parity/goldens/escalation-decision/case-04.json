@@ -1,18 +1,8 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
-  "result": {
-   "escalate": true,
-   "low_confidence": false,
-   "reason": null,
-   "reasons": [
-    "fast_request_changes"
-   ],
-   "requested": false
-  }
+  "result": "{\"escalate\":true,\"low_confidence\":false,\"reason\":null,\"reasons\":[\"fast_request_changes\"],\"requested\":false}"
  }
 }

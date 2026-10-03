@@ -1,8 +1,6 @@
 {
  "error": "ERROR: Review token lacks Forgejo write permission for misospace/demo (got 'read'); refusing to invoke a model whose review could not be published.",
  "ok": false,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {}
 }
