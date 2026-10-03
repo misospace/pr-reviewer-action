@@ -365,14 +365,17 @@ export function resolveEffectiveReviewConfig(
  * `pythonJsonStringify` (sorted keys at every level, byte-exact); set-like
  * path lists are sorted first so reordering them does not churn job
  * identity, while `reviewInstructions` keeps its listed order because
- * instruction precedence is behavior. `enabled`, warnings, and the config
- * file path are deliberately excluded: they gate or describe the run, they
- * are not how the review behaves. */
+ * instruction precedence is behavior. `enabled` is included: #728 names
+ * this fingerprint as the config component of job identity, so a
+ * disable/enable transition on an unchanged PR head must not collide with
+ * an already-consumed generation. Warnings and the config file path remain
+ * excluded: they describe the run; they are not config state. */
 export function effectiveConfigFingerprint(
   config: Omit<EffectiveReviewConfig, "fingerprint"> | EffectiveReviewConfig,
 ): string {
   const material = {
     version: 1,
+    enabled: config.enabled,
     model: config.modelProfile,
     executor: config.executorProfile,
     evidence: config.evidenceProfile,

@@ -224,9 +224,18 @@ test("the fingerprint changes when material behavior changes", () => {
   assert.notEqual(effectiveConfigFingerprint(resolve(moved)), base.fingerprint);
 });
 
-test("the fingerprint is stable across resolution and excludes non-material fields", () => {
+test("the fingerprint is stable across resolution paths", () => {
   const withFile = resolve(instance(), "ignore-paths: [a/**]\n");
   assert.deepEqual(effectiveConfigFingerprint(withFile), withFile.fingerprint);
   // The same material reached with no file vs an empty file must agree.
   assert.equal(resolve(instance()).fingerprint, resolve(instance(), "").fingerprint);
+});
+
+test("the fingerprint includes enabled: a disable transition changes job identity on an unchanged head", () => {
+  // #728 names this fingerprint as the config component of job identity, so
+  // `enabled` must be part of it — otherwise a disable → re-enable cycle on
+  // the same PR head could collide with an already-consumed generation.
+  const enabled = resolve(instance(), "ignore-paths: [a/**]\n");
+  const disabled = resolve(instance(), "ignore-paths: [a/**]\nenabled: false\n");
+  assert.notEqual(disabled.fingerprint, enabled.fingerprint);
 });

@@ -36,6 +36,18 @@ review that judges their own PR by editing the config the review reads.
 Only a maintainer merging a change to the base branch (main) changes what
 repository config future PRs are reviewed under.
 
+A base-ref **read failure** is distinct from genuine absence. If the ref
+cannot be resolved to a commit (unknown/garbage ref), the workspace is not a
+git repository, or git times out, `readRepositoryConfigFromRef` throws
+`RepositoryConfigError` and `resolveRepositoryConfig` degrades to the
+operator's inputs **with the warning surfaced** — the same rule
+`src/context/standards-file-ref.ts` established for the standards file
+(#885), and the #727 rule that a config resolution failure must never be
+silently read as "no repository config". Only a *valid* ref with neither
+candidate file present is the ordinary, silent "no repository config" case.
+`src/config/instructions.ts` applies the same rule when reading the
+operator-mode `review-instructions` files from the same trusted ref.
+
 `resolveRepositoryConfig(contract, operatorRaw, { baseRef, workspace })` is
 the entry point; `baseRef` must be a trusted base commit-ish (for example the
 PR's `base.sha`, as normalized by `src/platform/pr.ts`'s `PrIdentity`) that

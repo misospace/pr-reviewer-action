@@ -59,14 +59,44 @@ export interface RepositoryConfigFile {
   readonly text: string;
 }
 
+/** Whether `ref` resolves to a real commit in this repository. Throws
+ * `RepositoryConfigError` when it does not (unknown/garbage ref, or `cwd`
+ * is not a git repository at all) — that is a base-ref *read failure*, a
+ * categorically different situation from "a candidate path is absent at a
+ * valid ref": silently proceeding as "no repository config" would leave the
+ * review governed by whatever the caller's environment happens to be
+ * instead of the maintainer-approved base tree (#727 "fail conservatively;
+ * surface a bounded diagnostic"; the same rule `standards-file-ref.ts`
+ * established per #885). `git cat-file -e <ref>^{commit}` is a silent
+ * existence check (no stdout) — cheaper than `ls-tree` and unambiguous
+ * about what is being tested. Exported for the shared use of
+ * `src/config/instructions.ts`, which reads from the same trusted base
+ * ref. */
+export function verifyBaseRef(ref: string, cwd: string, timeoutSec: number): void {
+  try {
+    execFileSync("git", ["cat-file", "-e", `${ref}^{commit}`], {
+      cwd,
+      timeout: timeoutSec * 1000,
+      stdio: ["ignore", "ignore", "ignore"],
+      windowsHide: true,
+    });
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException & { code?: string | number | null; killed?: boolean; signal?: string | null };
+    if (typeof err.code === "string" && err.code === "ENOENT") throw new RepositoryConfigError("git executable not found");
+    if (err.killed || err.signal) throw new RepositoryConfigError(`git cat-file timed out after ${timeoutSec}s verifying ref ${ref}`);
+    throw new RepositoryConfigError(`base ref '${ref}' could not be resolved to a commit in ${cwd}`);
+  }
+}
+
 /**
  * Read the repository config file from a specific ref (intended to be the
  * PR's base/merge-base ref) via `git show <ref>:<path>`, never from the
  * working tree. Tries each candidate path in order and returns the first one
- * that exists at that ref. Returns `undefined` when neither candidate exists
- * at the ref (not an error — repository config is optional) and throws
- * `RepositoryConfigError` only for infrastructure failures (git missing,
- * timeout, not a git repository) that are distinct from "no such file".
+ * that exists at that ref. Returns `undefined` only for genuine absence
+ * (the ref resolves, neither candidate exists there — repository config is
+ * optional) and throws `RepositoryConfigError` for resolution failures
+ * (git missing, timeout, unresolvable ref, not a git repository) that must
+ * never be silently read as "no config" (#727).
  */
 export function readRepositoryConfigFromRef(
   ref: string,
@@ -76,6 +106,7 @@ export function readRepositoryConfigFromRef(
   if (ref === "") throw new RepositoryConfigError("readRepositoryConfigFromRef requires a non-empty ref");
   const cwd = workspace ?? process.cwd();
   const timeoutSec = options.gitTimeoutSec ?? DEFAULT_GIT_TIMEOUT_SEC;
+  verifyBaseRef(ref, cwd, timeoutSec);
   for (const path of REPOSITORY_CONFIG_CANDIDATE_PATHS) {
     let stdout: Buffer;
     try {
