@@ -241,10 +241,15 @@ instruction list, and `require-suggested-fix`. Normalization rules:
   reordering them does not churn job identity.
 - `review-instructions` keeps its listed order (instruction precedence is
   behavior), so reordering it is a material change.
-- `enabled` is included: #728 names this fingerprint as the config component
-  of job identity, so a disable → re-enable transition on an unchanged PR
-  head must change identity rather than collide with an already-consumed
-  generation.
+- `enabled` is included because it is config state: #728 names this
+  fingerprint as the config component of job identity, so an enabled and a
+  disabled configuration must not share an identity. The limit is stated
+  plainly: this is a deterministic current-state hash, not history — a full
+  disable → re-enable cycle hashes back to the original fingerprint.
+  Whether resuming review on an unchanged head requires a new generation is
+  [#728](https://github.com/misospace/pr-reviewer-action/issues/728)'s to
+  answer, via an adoption/config generation (or equivalent event-generation)
+  dimension layered on top of this fingerprint.
 - Warnings and the config file path remain excluded: they describe the run;
   they are not config state.
 

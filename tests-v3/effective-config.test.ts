@@ -231,11 +231,16 @@ test("the fingerprint is stable across resolution paths", () => {
   assert.equal(resolve(instance()).fingerprint, resolve(instance(), "").fingerprint);
 });
 
-test("the fingerprint includes enabled: a disable transition changes job identity on an unchanged head", () => {
+test("the fingerprint separates enabled from disabled states (current-state identity, not history)", () => {
   // #728 names this fingerprint as the config component of job identity, so
-  // `enabled` must be part of it — otherwise a disable → re-enable cycle on
-  // the same PR head could collide with an already-consumed generation.
+  // an enabled and a disabled configuration must not share an identity.
+  // A deterministic current-state hash cannot encode history: a full
+  // disable → re-enable cycle hashes back to the original fingerprint, and
+  // whether resuming review on an unchanged head needs a new generation is
+  // #728's to answer (an adoption/config generation dimension), not this
+  // fingerprint's.
   const enabled = resolve(instance(), "ignore-paths: [a/**]\n");
   const disabled = resolve(instance(), "ignore-paths: [a/**]\nenabled: false\n");
   assert.notEqual(disabled.fingerprint, enabled.fingerprint);
+  assert.equal(resolve(instance(), "ignore-paths: [a/**]\n").fingerprint, enabled.fingerprint);
 });
