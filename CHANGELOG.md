@@ -1,5 +1,17 @@
 # Changelog
 
+## [3.2.1](https://github.com/misospace/pr-reviewer-action/compare/source-v3.2.0...source-v3.2.1) (2026-10-03)
+
+
+### Bug Fixes
+
+* **test:** list the dogfood context-window inputs as overrides ([#951](https://github.com/misospace/pr-reviewer-action/issues/951)) ([f32389b](https://github.com/misospace/pr-reviewer-action/commit/f32389b899ca0a9970e45a7efda42b122a68ec10))
+
+
+### Chores
+
+* **ai-review:** declare dogfood context windows ([#949](https://github.com/misospace/pr-reviewer-action/issues/949)) ([69788e1](https://github.com/misospace/pr-reviewer-action/commit/69788e1337a09b0c6b2e988d9d46a5501ac8b1c8))
+
 ## [3.2.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.1.0...source-v3.2.0) (2026-10-03)
 
 
