@@ -2875,6 +2875,56 @@ test("#874 malformed-location regression: a 'met' claim citing a non-existent en
   }
 });
 
+test("#954: completed investigation with an unverifiable requirement exposes trace-only incompleteness", async () => {
+  const server = await startMockServer((_req, body, res) => {
+    const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      requirement_coverage: [{
+        requirement_id: reqId,
+        disposition: "unverifiable",
+        enforcement: [],
+        test: [],
+        reason: "The available evidence does not establish that source SHA is checked.",
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+        "requirement-trace": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+
+    const coverage = JSON.parse(readFileSync(join(runDir, "review-coverage.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(result.outputs.requiredChecks, "incomplete");
+    assert.equal(result.outputs.incompleteReason, "requirement_trace");
+    const ghOutput = readFileSync(join(runDir, "gh-output.txt"), "utf8");
+    assert.match(ghOutput, /^incomplete-reason=requirement_trace$/m);
+    assert.equal(result.outputs.reviewResult, "partial");
+    assert.match(result.marker, /"incomplete_reason":"requirement_trace"/);
+    assert.equal(coverage.incomplete_reason, "requirement_trace");
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
 test("#874 #854-reproduction: a 'met' claim citing a real line that only copies the value (never compares it) is downgraded, coverage goes partial", async () => {
   const server = await startMockServer((_req, body, res) => {
     const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);

@@ -121,7 +121,7 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
     ["diff-fingerprint", pre.diff_fingerprint],
   ]);
   if (pre.should_review !== "true") {
-    writeOutputs(env, [["verdict", pre.verdict], ["verdict-source", pre.verdict_source], ["review-result", pre.review_result]]);
+    writeOutputs(env, [["verdict", pre.verdict], ["verdict-source", pre.verdict_source], ["review-result", pre.review_result], ["incomplete-reason", pre.incomplete_reason]]);
     // #903: this branch used to exit silently — outputs written, no log
     // line, no step summary — so a labeler-triggered skip showed the same
     // green check as a run that crashed before doing anything. The event

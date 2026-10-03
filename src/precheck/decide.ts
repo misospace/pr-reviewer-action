@@ -12,6 +12,7 @@ import {
   fingerprintsMatch,
 } from "./fingerprint.js";
 import { parseMetadata } from "./metadata.js";
+import { isIncompleteReason } from "../publish/outputs.js";
 import { buildSelectionSignature } from "./selection.js";
 
 /** The action's precheck decision path (#674) — TS port of the decision
@@ -153,6 +154,9 @@ export interface PrecheckOutput {
   /** #873: the carried marker's `review_result` state, for the additive
    * `review-result` action output. Undefined when nothing was carried. */
   review_result?: string;
+  /** #954: the carried marker's `incomplete_reason`, for the additive
+   * `incomplete-reason` action output. Undefined when nothing was carried. */
+  incomplete_reason?: string;
 }
 
 /** Extract the broad fingerprint from the last published comment body —
@@ -199,16 +203,30 @@ export function lastManagedBody(
  * unparseable marker → verdict stays empty. #811's strict-policy marker
  * values (`findings` / `partial`) are non-blocking states and carry an
  * approve, exactly like `clean`. */
-export function carriedVerdict(lastCommentBody: string): { verdict: string; verdictSource: string; reviewResult: string } | null {
+export function carriedVerdict(lastCommentBody: string): { verdict: string; verdictSource: string; reviewResult: string; incompleteReason?: string } | null {
   const data = parseMetadata(lastCommentBody);
   if (!data) return null;
   const result = String(data.review_result ?? "").toLowerCase();
-  if (result === "issues") return { verdict: "request_changes", verdictSource: "carry_forward", reviewResult: result };
+  // #954: the marker is untrusted comment content — only a known enum value is
+  // ever carried into the `incomplete-reason` output; anything else is dropped.
+  const incompleteRaw = String(data.incomplete_reason ?? "");
+  const incomplete = isIncompleteReason(incompleteRaw) && incompleteRaw !== "none" ? incompleteRaw : "";
+  if (result === "issues") return {
+    verdict: "request_changes",
+    verdictSource: "carry_forward",
+    reviewResult: result,
+    ...(incomplete !== "" ? { incompleteReason: incomplete } : {}),
+  };
   if (result === "clean" || result === "findings" || result === "partial") {
     // #873: the carried `review-result` output stays honest across a
     // diff-unchanged skip too — a previously-partial review must not
     // silently read as `clean` just because nothing changed.
-    return { verdict: "approve", verdictSource: "carry_forward", reviewResult: result };
+    return {
+      verdict: "approve",
+      verdictSource: "carry_forward",
+      reviewResult: result,
+      ...(incomplete !== "" ? { incompleteReason: incomplete } : {}),
+    };
   }
   return null;
 }
@@ -364,6 +382,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
         output.verdict = carried.verdict;
         output.verdict_source = carried.verdictSource;
         output.review_result = carried.reviewResult;
+        if (carried.incompleteReason !== undefined) output.incomplete_reason = carried.incompleteReason;
       }
       return output;
     }

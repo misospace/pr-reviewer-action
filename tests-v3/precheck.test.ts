@@ -179,6 +179,24 @@ test("metadata markers parse and drive the carried verdict", () => {
     verdictSource: "carry_forward",
     reviewResult: "clean",
   });
+  assert.deepEqual(carriedVerdict(`x\n${buildMetadataMarker({ review_result: "partial", incomplete_reason: "requirement_trace" })}`), {
+    verdict: "approve",
+    verdictSource: "carry_forward",
+    reviewResult: "partial",
+    incompleteReason: "requirement_trace",
+  });
+  assert.deepEqual(carriedVerdict(`x\n${buildMetadataMarker({ review_result: "partial" })}`), {
+    verdict: "approve",
+    verdictSource: "carry_forward",
+    reviewResult: "partial",
+  });
+  // #954: the marker is untrusted comment content; an unknown reason value is
+  // dropped rather than copied into the action output.
+  assert.deepEqual(carriedVerdict(`x\n${buildMetadataMarker({ review_result: "partial", incomplete_reason: "EVIL" })}`), {
+    verdict: "approve",
+    verdictSource: "carry_forward",
+    reviewResult: "partial",
+  });
   assert.equal(carriedVerdict("no marker"), null);
   assert.equal(carriedVerdict("<!-- ai-pr-reviewer:not json -->"), null);
 });
@@ -434,6 +452,22 @@ test("runPrecheck carries the prior verdict forward on a diff-unchanged skip", a
   assert.equal(output.skip_reason, "diff-unchanged");
   assert.equal(output.verdict, "request_changes");
   assert.equal(output.verdict_source, "carry_forward");
+});
+
+test("runPrecheck carries incomplete reason on a diff-unchanged skip", async () => {
+  const fx = fixture("unchanged-diff-skip-issues");
+  const comment = fx.platform.comments?.[0];
+  assert.ok(comment);
+  comment.body = comment.body.replace(/<!-- ai-pr-reviewer:\{.*?\} -->/, buildMetadataMarker({
+    review_result: "partial",
+    incomplete_reason: "requirement_trace",
+  }));
+
+  const output = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", fx.platform) });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "diff-unchanged");
+  assert.equal(output.review_result, "partial");
+  assert.equal(output.incomplete_reason, "requirement_trace");
 });
 
 test("runPrecheck refuses Forgejo publish paths conservatively", async () => {

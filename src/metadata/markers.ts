@@ -76,6 +76,8 @@ export interface RunMarkerContext {
   coverage?: string;
   /** #810: the loop stop reason behind coverage: partial. */
   coverageStopReason?: string;
+  /** #954: why coverage is incomplete ("execution" | "requirement_trace" | "both"); omitted when complete. */
+  incompleteReason?: string;
   /** #812: folded external-CI conclusion at the reviewed head; omitted when
    * CI was not read so complete runs keep their pre-#812 marker bytes. */
   ciState?: string;
@@ -114,6 +116,7 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
   const chr = context.cacheHitRatio ?? "";
   const cov = context.coverage ?? "";
   const covStop = context.coverageStopReason ?? "";
+  const incompleteReason = context.incompleteReason ?? "";
   const av = context.actionVersion ?? "";
   let cacheHitRatio: number | null = null;
   if (chr !== "" && chr !== "-") {
@@ -133,6 +136,7 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
     cache_hit_ratio: cacheHitRatio,
     coverage: cov === "" ? null : cov,
     coverage_stop_reason: covStop === "" ? null : covStop,
+    incomplete_reason: incompleteReason === "" || incompleteReason === "none" ? null : incompleteReason,
     ci_state: context.ciState ?? null,
     tool_budget: context.toolBudget ?? null,
     tool_budget_source: context.toolBudgetSource ?? null,

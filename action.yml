@@ -533,7 +533,9 @@ outputs:
   required-checks:
     description: Required-check validation status ('complete', 'incomplete', or 'none' when validation did not run)
   review-result:
-    description: "The metadata marker's review_result state ('clean', 'findings', 'partial', or 'issues'), from the same still-open findings and coverage the marker records. #873: 'partial' means the review's own coverage is incomplete (required checks or the tool-loop investigation did not finish) — 'verdict: approve' with 'review-result: partial' is not an approval; gate merges on both, never on verdict alone. Has no v2 equivalent."
+    description: "The metadata marker's review_result state ('clean', 'findings', 'partial', or 'issues'), from the same still-open findings and coverage the marker records. #873/#954: 'partial' means the review has an execution or requirement-traceability gap — 'verdict: approve' with 'review-result: partial' is not an approval; gate merges on both, never on verdict alone. Use incomplete-reason to distinguish the gap. Has no v2 equivalent."
+  incomplete-reason:
+    description: "Why the review's coverage is incomplete, distinguishing review-execution gaps from requirement-traceability gaps: 'execution' (tool-loop or required-check coverage did not finish), 'requirement_trace' (the review completed, but an in-scope requirement lacks verifiable enforcement/test evidence), 'both', or 'none' when complete. #954. Has no v2 equivalent."
   review-route:
     description: Model route used for this review ('legacy', 'primary', 'smart', or 'escalated')
   escalation-reason:

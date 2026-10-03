@@ -649,8 +649,9 @@ export interface RequirementTraceEnforcementResult {
  * Apply requirement-trace enforcement to the artifact in place: validate the
  * trace, synthesize findings for unmet requirements the model did not
  * already flag, and — when any in-scope requirement is unverifiable or
- * untraced — escalate `required_checks` to `incomplete` (never relaxing an
- * already-incomplete status from the must_check pass). Run this AFTER
+ * untraced — record that traceability gap separately and escalate
+ * `required_checks` to `incomplete` (never relaxing an already-incomplete
+ * status from the must_check pass). Run this AFTER
  * `applyRequiredCheckValidation` (whose unconditional write would otherwise
  * clobber the escalation) and BEFORE the verdict mapping (strict or
  * findings_severity_gated) that reads `required_checks`/`findings`. No-op
@@ -668,6 +669,7 @@ export function applyRequirementTraceEnforcement(
     return { applied: false, trace, findingsAdded: 0 };
   }
   const findingsAdded = ensureUnmetRequirementFindings(artifact, trace, options.ledger);
+  if (trace.incomplete) artifact.requirement_trace_incomplete = true;
   if (trace.incomplete && artifact.required_checks !== "incomplete") {
     artifact.required_checks = "incomplete";
   }

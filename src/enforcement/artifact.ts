@@ -59,6 +59,8 @@ export interface ReviewArtifact {
   verdict_source?: string;
   /** "complete" | "incomplete" | "none" — written by the completeness pass. */
   required_checks?: string;
+  /** #954: true when the requirement-trace pass found an in-scope requirement that is unverifiable/unmet. Distinct from `required_checks` so a traceability gap is not conflated with review-execution incompleteness. */
+  requirement_trace_incomplete?: boolean;
   /** #750: the model's structured dispositions, when the key was emitted. */
   required_check_dispositions?: Array<Record<string, unknown>>;
   /** #766: replaced with the settled (enforced) records by thread enforcement. */
@@ -133,7 +135,8 @@ export function reviewArtifactFromParsed(parsed: ParsedReviewVerdict): ReviewArt
         }));
   }
   for (const [key, value] of Object.entries(parsed.extra)) {
-    if (!(key in artifact)) {
+    // This field is deterministic enforcement state, never model input.
+    if (key !== "requirement_trace_incomplete" && !(key in artifact)) {
       artifact[key] = value;
     }
   }
