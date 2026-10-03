@@ -87,16 +87,19 @@ jobs:
           ai-base-url: ${{ vars.LITELLM_URL }}
           ai-api-format: ${{ vars.PRIMARY_FORMAT }}
           ai-model: ${{ vars.PRIMARY_MODEL }}
+          primary-model-context-tokens: ${{ vars.PRIMARY_CONTEXT_TOKENS }}
           ai-api-key: ${{ secrets.LITELLM_API_KEY }}
           ai-response-format: json_object
           ai-fallback-base-url: ${{ vars.LITELLM_URL }}
           ai-fallback-api-format: ${{ vars.FALLBACK_FORMAT }}
           ai-fallback-model: ${{ vars.FALLBACK_MODEL }}
+          fallback-model-context-tokens: ${{ vars.FALLBACK_CONTEXT_TOKENS }}
           ai-fallback-api-key: ${{ secrets.LITELLM_API_KEY }}
           review-routing-mode: auto
           ai-smart-base-url: ${{ vars.LITELLM_URL }}
           ai-smart-api-format: ${{ vars.SMART_FORMAT }}
           ai-smart-model: ${{ vars.SMART_MODEL }}
+          smart-model-context-tokens: ${{ vars.SMART_CONTEXT_TOKENS }}
           ai-smart-api-key: ${{ secrets.LITELLM_API_KEY }}
           ci-timeout-sec: "600"
           tool-allowed-gh-api-repos: "*"
