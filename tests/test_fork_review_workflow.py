@@ -624,13 +624,16 @@ def test_dogfood_job_if_semantics() -> None:
         "github.event.pull_request.head.repo.id": repository_id,
         "github.repository_id": repository_id,
         "github.event.pull_request.draft": False,
+        # #914: present (an object) only when the comment is on a PR.
+        "github.event.issue.pull_request": None,
     }
 
-    def ctx(event_name: str, head_repo_id: object, draft: object) -> dict:
+    def ctx(event_name: str, head_repo_id: object, draft: object, issue_pr: object = None) -> dict:  # noqa: ANN001
         local = dict(base)
         local["github.event_name"] = event_name
         local["github.event.pull_request.head.repo.id"] = head_repo_id
         local["github.event.pull_request.draft"] = draft
+        local["github.event.issue.pull_request"] = issue_pr
         return local
 
     # Same-repo, ready PR → the dogfood reviewer runs.
@@ -641,6 +644,11 @@ def test_dogfood_job_if_semantics() -> None:
     assert _eval_github_expr(expr, ctx("pull_request", repository_id, True)) is False
     # workflow_dispatch (no PR context at all) → runs.
     assert _eval_github_expr(expr, ctx("workflow_dispatch", None, None)) is True
+    # #914: a comment on a PR (issue.pull_request relation present) → runs;
+    # fork-ness and authorization are decided API-side (pr-gate + action).
+    assert _eval_github_expr(expr, ctx("issue_comment", None, None, issue_pr={"url": "..."})) is True
+    # A comment on a plain issue (no relation) → no-op.
+    assert _eval_github_expr(expr, ctx("issue_comment", None, None)) is False
 
 
 if __name__ == "__main__":

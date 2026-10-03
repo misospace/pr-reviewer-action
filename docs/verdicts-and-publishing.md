@@ -154,15 +154,35 @@ on:
 
 On a `labeled` event, the action reviews only if the added label matches `rereview-label`; any other label is ignored. After a label-triggered run, the action **removes the label**, so adding it again re-triggers a fresh review. The trigger is self-authorizing — only users with write/triage permission can apply a label — and it rides the normal `pull_request` event, so there's no privileged-checkout exposure.
 
-If your workflow uses `concurrency` with `cancel-in-progress: true`, give `labeled` events their own group — otherwise an auto-applied label (e.g. Renovate labeling a PR at creation) can spawn a `labeled` run that cancels the in-flight `opened` review:
+If your workflow uses `concurrency` with `cancel-in-progress: true`, give `labeled` events and `issue_comment` re-reviews their own groups — otherwise an auto-applied label (e.g. Renovate labeling a PR at creation) can spawn a `labeled` run that cancels the in-flight `opened` review, and a comment can cancel an in-flight push/label review of the same PR (and vice versa):
 
 ```yaml
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event.action == 'labeled' && format('-label-{0}', github.run_id) || '' }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event.action == 'labeled' && format('-label-{0}', github.run_id) || '' }}${{ github.event_name == 'issue_comment' && format('-comment-{0}', github.event.issue.number) || '' }}
   cancel-in-progress: true
 ```
 
+The `-comment-<issue number>` suffix keys comment runs to the issue, so they get their own group and can never cancel an in-flight push review.
+
 For non-interactive callers, `force-review: "true"` bypasses the unchanged-diff guard directly; a `workflow_dispatch`/`repository_dispatch` event only sets it when the consuming workflow explicitly maps its input or payload to `force-review`.
+
+### Comment command
+
+Post a comment on a PR whose body starts with `rereview-command` (default `/ai-review`) and the action re-reviews it in full, even if the diff hasn't changed — the same fresh full review the label triggers, for users who don't have label permissions. To enable it, add `issue_comment` to the workflow's events:
+
+```yaml
+on:
+  issue_comment:
+    types: [created]
+```
+
+The comment body must start with the command (leading whitespace is stripped); anything else is ignored. A comment is not self-authorizing the way a label is — the action checks the commenter's repository permission through the forge API, requiring the label bar (triage-or-higher), and fails closed on lookup errors: GitHub's endpoint reports `write`/`admin` directly but collapses a `triage` user into `permission: "read"` with the role only in `role_name`, so the action reads both fields, and an unrecognized or custom role never authorizes. The lookup runs with the action's token, so that token must be able to read repository collaborators. When a run picks up the comment, the action reacts 👀 to it as the acknowledgement. Same-repository comment runs check out the PR head (the `pr-gate`-resolved head sha, pinned at gate time) so the review covers the current PR. Comments on a **closed** PR are a silent no-op.
+
+Fork PRs never get a review from this path: the action replies to the comment pointing at the `ai-review-fork` label workflow (see [Fork reviews](fork-review.md)) and stops. Comment runs on **draft** PRs are skipped before the action runs (matching how draft PRs are never reviewed), so a draft fork PR gets no reply either.
+
+Set `rereview-command` to an empty string to disable comment-triggered re-reviews. v1 scope is the bare command only — it takes no arguments.
+
+> **SECURITY:** Comment-triggered runs carry base-repo secrets, and the `issue_comment` payload has no head SHA. Resolve the PR through the API *before* any checkout — the dogfood workflow's `pr-gate` step (`.github/workflows/ai-pr-review.yaml`) is the pattern to mirror — and never check out or build a fork PR's head in such a run: compare the PR head's repository id against `github.repository_id` and route fork comments to a base-repo checkout.
 
 ### The unchanged-diff skip
 

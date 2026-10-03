@@ -13,12 +13,22 @@ on:
     # `labeled` enables the one-click re-review: add the `ai-review` label to
     # force a fresh review (only write/triage can label — self-authorizing).
     types: [opened, reopened, synchronize, ready_for_review, labeled]
+  issue_comment:
+    # `created` enables the comment re-review: a PR comment whose body starts
+    # with `rereview-command` (default `/ai-review`) forces a fresh full review.
+    # The commenter needs triage-or-higher repo permission (checked via the
+    # API, failing closed); fork PRs only get a reply pointing at the
+    # `ai-review-fork` label workflow. Empty `rereview-command` disables it.
+    types: [created]
   workflow_dispatch:
 
 concurrency:
   # `labeled` events get their own group so an auto-applied label can't cancel
   # the in-flight opened/synchronize review (see README → Forcing a re-review).
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event.action == 'labeled' && format('-label-{0}', github.run_id) || '' }}
+  # `issue_comment` re-reviews get a `-comment-<issue>` suffix keyed on the
+  # issue number so a comment-triggered run can't cancel an in-flight
+  # push/label review of the same PR (and vice versa).
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event.action == 'labeled' && format('-label-{0}', github.run_id) || '' }}${{ github.event_name == 'issue_comment' && format('-comment-{0}', github.event.issue.number) || '' }}
   cancel-in-progress: true
 
 permissions:
@@ -34,14 +44,55 @@ jobs:
     # pull_request runs never receive secrets — so it now skips them
     # cleanly instead. The two paths are separate security domains: never
     # merge them.
-    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.id == github.repository_id && !github.event.pull_request.draft) }}
+    #
+    # `issue_comment` runs only when the comment is on a PR (the
+    # `issue.pull_request` relation is present); a plain-issue comment is a
+    # no-op. Fork PRs do pass this gate, but the pr-gate step below resolves
+    # the PR through the API and routes them to a base-repo checkout — the
+    # action then replies and no-ops on fork comments.
+    if: ${{ github.event_name != 'pull_request' && github.event_name != 'issue_comment' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.id == github.repository_id && !github.event.pull_request.draft) || (github.event_name == 'issue_comment' && github.event.issue.pull_request) }}
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve PR through the API (pr-gate)
+        id: pr-gate
+        # SECURITY: this must run BEFORE any checkout or build. The
+        # issue_comment payload carries no head SHA, so the action fetches the
+        # PR itself. For a fork PR we must never check out or build its head
+        # code in this privileged (base-repo-secrets) run — resolving the PR
+        # through the API first lets us read the head repo id and route a fork
+        # to a base-repo checkout. The action replies and no-ops on fork
+        # comments, so the base-repo checkout is safe for that path.
+        if: github.event_name == 'issue_comment'
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO_ID: ${{ github.repository_id }}
+        run: |
+          set -euo pipefail
+          pr_json="$(curl -fsS \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${ISSUE_NUMBER}")"
+          echo "head_sha=$(jq -r '.head.sha' <<<"$pr_json")" >> "$GITHUB_OUTPUT"
+          head_repo_id="$(jq -r '.head.repo.id' <<<"$pr_json")"
+          if [ "$head_repo_id" != "$REPO_ID" ]; then
+            echo "is_fork=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_fork=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "is_draft=$(jq -r '.draft' <<<"$pr_json")" >> "$GITHUB_OUTPUT"
+
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Same-repo comment re-review → the PR head sha resolved by the
+          # pr-gate (pinned at gate time, so a mid-run push can't race the
+          # stamp below); fork comment → the base-repo github.sha (never the
+          # fork head); pull_request → the PR head; workflow_dispatch → the
+          # default-branch github.sha. This exact expression is also
+          # PR_REVIEWER_BUILD_SHA below — the stamp must name what is built
+          # (#941).
+          ref: ${{ github.event_name == 'issue_comment' && (steps.pr-gate.outputs.is_fork == 'true' && github.sha || steps.pr-gate.outputs.head_sha) || github.event.pull_request.head.sha || github.sha }}
 
       - name: Generate bot token
         id: app-token
@@ -52,8 +103,10 @@ jobs:
 
       - name: Set up Node 24
         # Only to build the bundle below; the action itself runs on the
-        # runner's own node24 (`runs.using: node24`).
-        if: github.event_name == 'pull_request'
+        # runner's own node24 (`runs.using: node24`). Runs for pull_request
+        # and issue_comment re-reviews; skipped for workflow_dispatch and for
+        # draft comment runs (a draft PR is never reviewed).
+        if: github.event_name != 'workflow_dispatch' && steps.pr-gate.outputs.is_draft != 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
@@ -62,25 +115,30 @@ jobs:
         # The action ships dist/ only on release tags (#787); this dogfood job
         # reviews each PR with its own source, so it builds the bundle first.
         # Consumers of a release tag need none of this.
-        if: github.event_name == 'pull_request'
+        if: github.event_name != 'workflow_dispatch' && steps.pr-gate.outputs.is_draft != 'true'
         env:
           # #915: dogfood builds review PR source; stamp vX.Y.Z-dev+<short sha> so each review names the commit that produced it.
           PR_REVIEWER_BUILD_STAMP: dev
           # The stamp must name what this job checked out: the PR head. For a
           # pull_request event GITHUB_SHA is the synthetic merge ref, not the
-          # source being built, so the build sha is passed explicitly.
-          PR_REVIEWER_BUILD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # source being built, so the build sha is passed explicitly — the
+          # same expression as the checkout ref above (#941).
+          PR_REVIEWER_BUILD_SHA: ${{ github.event_name == 'issue_comment' && (steps.pr-gate.outputs.is_fork == 'true' && github.sha || steps.pr-gate.outputs.head_sha) || github.event.pull_request.head.sha || github.sha }}
         run: |
           npm ci --no-audit --no-fund
           npm run build
 
       - name: Review PR with reusable AI reviewer
-        if: github.event_name == 'pull_request'
+        if: github.event_name != 'workflow_dispatch' && steps.pr-gate.outputs.is_draft != 'true'
         id: review
         # `./` is the checkout at the PR head, where the step above built
         # dist/, so every PR is reviewed by its own in-flight action code.
         # (`$/` would fetch a separate copy of the ref without dist/.) Fork
-        # PRs never reach this step: the job-level `if` skips them.
+        # pull_request runs never reach this step: the job-level `if` skips
+        # them. A `/ai-review` comment on a fork PR does reach it — from the
+        # base-repo checkout the pr-gate routed it to — and the action itself
+        # replies and no-ops there (`comment-fork-pr`); fork code is never
+        # built or executed with base-repo secrets.
         uses: ./
         with:
           github-token: ${{ steps.app-token.outputs.token }}

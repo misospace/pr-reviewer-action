@@ -505,6 +505,10 @@ inputs:
     description: Label that, when added to a PR, forces a fresh review even if nothing changed — the easy re-review trigger (only users with write/triage can label, so it is self-authorizing). On a `labeled` event the action reviews iff the added label matches this, then removes the label so re-adding re-triggers; any other label add is ignored. To enable, add `labeled` to the workflow's pull_request types. Default "ai-review".
     required: false
     default: "ai-review"
+  rereview-command:
+    description: 'Comment command that forces a fresh full review from a `created` `issue_comment` event on a pull request — the comment re-review trigger. The comment body must start with this command, and the commenter must have triage-or-higher repository permission, verified through the forge API and failing closed on lookup errors: a matching command from an unauthorized or unverifiable commenter skips the run even when `force-review` is set. An empty string disables comment-triggered re-reviews. To enable, consumers add `issue_comment: [created]` to their workflow; fork PRs only get a reply pointing at the `ai-review-fork` label workflow. Default "/ai-review".'
+    required: false
+    default: "/ai-review"
   comment-marker:
     description: HTML marker for the managed PR comment
     required: false

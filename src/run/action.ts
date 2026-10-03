@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { validateContract } from "../config/contract.js";
 import { loadConfig } from "../config/load-config.js";
-import { eventLabelName, runPrecheck, type PrecheckOutput } from "../precheck/decide.js";
+import { commentBodyTriggersCommentCommand, eventLabelName, runPrecheck, type PrecheckOutput } from "../precheck/decide.js";
 import { resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
 import { repoScopedUrl } from "../platform/repo-ref.js";
@@ -108,6 +108,32 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
   const { event, headSha: eventHeadSha } = readEvent(env);
   stage.EVENT_HEAD_SHA = eventHeadSha ?? "";
 
+  // ── Comment on a plain issue: clean no-op ─────────────────────────────
+  // #914: a `created` `issue_comment` on a PLAIN issue (the payload's
+  // `issue` has no `pull_request`) is not a re-review request at all.
+  // `runPrecheck` REQUIRES a PR number (it throws without one), so this
+  // must be a clean green no-op HERE, before precheck, not a crash.
+  // `readEvent` only fills PR_NUMBER from `issue.number` when
+  // `issue.pull_request` is present, so an empty PR_NUMBER is the honest
+  // "this comment is not on a PR" signal. The reason is one of this
+  // action's fixed constants; no untrusted text is rendered.
+  if (
+    event?.name === "issue_comment"
+    && event.action === "created"
+    && (stage.PR_NUMBER ?? "") === ""
+  ) {
+    writeOutputs(env, [
+      ["should-review", "false"],
+      ["skip-reason", "comment-not-on-pr"],
+      ["verdict", ""],
+      ["verdict-source", ""],
+      ["review-result", ""],
+    ]);
+    process.stderr.write("[v3] Review skipped: comment-not-on-pr\n");
+    appendStepSummary(env, "**AI PR Review skipped:** `comment-not-on-pr`");
+    return 0;
+  }
+
   // ── Precheck ──────────────────────────────────────────────────────────
   const pre: PrecheckOutput = await runPrecheck({
     env: stage as Record<string, string>,
@@ -141,8 +167,35 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       env,
       `**AI PR Review skipped:** \`${skipReason}\`${carryLabel ? ` (label: ${inlineCodeValue(skipLabel)})` : ""}`,
     );
+    // #914: a matching re-review command on a FORK PR is not reviewable with
+    // a repo token (fork PRs belong to the fork workflow — see
+    // docs/fork-review.md), so the run replies to the comment pointing the
+    // commenter there. The reply body is a fixed constant — no untrusted
+    // content ever reaches it — and the reply is additionally gated on the
+    // comment-body trigger: `comment-fork-pr` is only reachable with a
+    // matched authorized comment, but the gate keeps that invariant honest
+    // at this seam. Best-effort: a failed reply never fails the run. No ack
+    // reaction on this path (no review started).
+    if (pre.skip_reason === "comment-fork-pr" && acceptedViaCommentCommand(stage, event)) {
+      process.stderr.write(`[v3] posting re-review fork reply on PR ${JSON.stringify(stage.PR_NUMBER ?? "")}\n`);
+      await postForkPrCommentReply(stage).catch(() => undefined);
+    }
     await maybeClearRereviewLabel(stage, event);
     return failOnRequestChanges(stage, pre.verdict ?? "");
+  }
+
+  // #914: an accepted comment-command re-review gets an immediate 👀 ack
+  // reaction on the triggering comment, BEFORE the (slow) review stage, so
+  // the commenter knows the run picked the command up. Best-effort: a
+  // failed reaction degrades to a log line, never a failed run.
+  if (pre.should_review === "true" && acceptedViaCommentCommand(stage, event)) {
+    const commentId = event?.comment?.id;
+    if (isUsableCommentId(commentId)) {
+      process.stderr.write(`[v3] posting re-review ack reaction on comment ${JSON.stringify(commentId)}\n`);
+      await postCommentAckReaction(stage, commentId).catch(() => undefined);
+    } else {
+      process.stderr.write(`[v3] re-review ack skipped: comment id ${JSON.stringify(commentId) ?? "null"}\n`);
+    }
   }
 
   // ── Review ────────────────────────────────────────────────────────────
@@ -253,4 +306,82 @@ async function clearRereviewLabel(stage: Env): Promise<void> {
     headers: { Authorization: platform === "forgejo" ? `token ${token}` : `Bearer ${token}`, Accept: "application/json" },
     signal: AbortSignal.timeout(15000),
   });
+}
+
+/** #914: "this run was accepted via the comment command" — a `created`
+ * `issue_comment` whose body starts with the configured command. The command
+ * match here is RECOGNITION only: precheck has already authorized the run
+ * (permission check, fork gate) or skipped it, and a disabled command can
+ * never reach `should_review: "true"` in the first place. */
+function acceptedViaCommentCommand(stage: Env, event: StepEvent | undefined): boolean {
+  return (
+    event?.name === "issue_comment"
+    && event.action === "created"
+    && typeof event.comment?.body === "string"
+    && commentBodyTriggersCommentCommand(event.comment.body, (stage.REREVIEW_COMMAND ?? "").trim())
+  );
+}
+
+/** #914: a comment id that may safely appear in a URL path: a finite number
+ * or an all-digit string (GitHub/Forgejo comment ids). Anything else means
+ * no ack — the run is never degraded by an unusable id. */
+function isUsableCommentId(id: number | string | undefined): id is number | string {
+  if (typeof id === "number") return Number.isFinite(id);
+  if (typeof id === "string") return /^\d+$/.test(id);
+  return false;
+}
+
+/** #914: best-effort 👀 (ack) reaction on the comment that triggered an
+ * accepted re-review. Same seam as `clearRereviewLabel` (resolvePlatform +
+ * requireImplementedBackend, repoScopedUrl, Bearer/token Authorization,
+ * 15 s timeout); the fetch failure is swallowed — the ack must never fail
+ * the run. */
+async function postCommentAckReaction(stage: Env, commentId: number | string): Promise<void> {
+  const platform = resolvePlatform(stage.PLATFORM, stage.FORGEJO_API_URL ?? "", stage.GITHUB_SERVER_URL ?? "", stage.TANGLED_REPO_DID ?? "");
+  requireImplementedBackend(platform);
+  const base = platform === "forgejo"
+    ? `${(stage.FORGEJO_API_URL ?? "").replace(/\/+$/, "")}/api/v1`
+    : (stage.GITHUB_API_URL || "https://api.github.com");
+  const url = repoScopedUrl(base, stage.REPO ?? "", `/issues/comments/${encodeURIComponent(String(commentId))}/reactions`);
+  if (url === null) return;
+  const token = platform === "forgejo" ? (stage.FORGEJO_TOKEN ?? "") : (stage.GH_TOKEN ?? "");
+  await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: platform === "forgejo" ? `token ${token}` : `Bearer ${token}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ content: "eyes" }),
+    signal: AbortSignal.timeout(15000),
+  }).catch(() => undefined);
+}
+
+/** #914: best-effort reply to a re-review command comment on a fork PR,
+ * pointing the commenter at the `ai-review-fork` label workflow. Static
+ * body — no untrusted interpolation. Same seam as the ack reaction; the
+ * fetch failure is swallowed — a failed reply must never fail the run. */
+async function postForkPrCommentReply(stage: Env): Promise<void> {
+  const platform = resolvePlatform(stage.PLATFORM, stage.FORGEJO_API_URL ?? "", stage.GITHUB_SERVER_URL ?? "", stage.TANGLED_REPO_DID ?? "");
+  requireImplementedBackend(platform);
+  const pr = stage.PR_NUMBER ?? "";
+  if (!/^\d+$/.test(pr)) return;
+  const base = platform === "forgejo"
+    ? `${(stage.FORGEJO_API_URL ?? "").replace(/\/+$/, "")}/api/v1`
+    : (stage.GITHUB_API_URL || "https://api.github.com");
+  const url = repoScopedUrl(base, stage.REPO ?? "", `/issues/${pr}/comments`);
+  if (url === null) return;
+  const token = platform === "forgejo" ? (stage.FORGEJO_TOKEN ?? "") : (stage.GH_TOKEN ?? "");
+  await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: platform === "forgejo" ? `token ${token}` : `Bearer ${token}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      body: "The `/ai-review` command does not run on fork PRs. To review a fork PR, a maintainer adds the `ai-review-fork` label — see docs/fork-review.md.",
+    }),
+    signal: AbortSignal.timeout(15000),
+  }).catch(() => undefined);
 }
