@@ -111,10 +111,21 @@ export function decisionToOutputs(decision: ReviewDecision): { shouldReview: boo
  * not hide the object shape the way a plain `string` field did (#892). */
 export type PrecheckEventLabel = string | { name?: string | null } | null | undefined;
 
+/** The `issue_comment` payload's `comment` object, normalized to the flat
+ * shape the #914 re-review command consumes. Each sub-field is nullable
+ * because a malformed / hostile comment must degrade to fewer fields, never
+ * a throw (mirrors `StepEventComment` in `src/run/entrypoints.ts`). */
+export interface PrecheckEventComment {
+  id?: number | string | null;
+  body?: string | null;
+  user?: string | null;
+}
+
 export interface PrecheckEvent {
   name?: string;
   action?: string;
   label?: PrecheckEventLabel;
+  comment?: PrecheckEventComment | null;
 }
 
 /** The label a `labeled` event carries, normalized to its name string
@@ -126,6 +137,44 @@ export function eventLabelName(label: PrecheckEventLabel | unknown): string {
   }
   return "";
 }
+
+/** #914: a comment body triggers the re-review command iff, after leading
+ * whitespace is stripped, it starts with the command AND the next character
+ * is end-of-string, whitespace, or a line break. `/ai-review` and
+ * `/ai-review now` match; `/ai-reviewx`, `please /ai-review`, and
+ * `/AI-Review` do not. The comparison is a literal prefix (never a regex),
+ * so a command containing regex-special characters is matched verbatim. An
+ * empty command never matches (it would match everything). */
+export function commentBodyTriggersCommentCommand(body: string, command: string): boolean {
+  if (command === "") return false;
+  const trimmed = body.replace(/^\s+/, "");
+  if (!trimmed.startsWith(command)) return false;
+  const rest = trimmed.slice(command.length);
+  return rest === "" || /^\s/.test(rest);
+}
+
+/** #914: the repository permission levels that authorize a comment-command
+ * re-review — the `permission` field of the collaborator-permission API at
+ * triage-or-higher: `write`/`maintain`/`admin` on GitHub, `write`/`admin`/
+ * `owner` on Forgejo. A GitHub `triage` user arrives as `permission:
+ * "read"` (the API collapses maintain→write and triage→read in the legacy
+ * `permission` field), so the un-collapsed `role_name` is the second signal;
+ * anything else (`read`, `none`, or an unrecognized value) fails closed. */
+const COMMENT_COMMAND_AUTHORIZED_PERMISSIONS: ReadonlySet<string> = new Set([
+  "admin",
+  "maintain",
+  "write",
+  "triage",
+  "owner",
+]);
+
+/** #914: `role_name` values that prove triage-or-higher when the collapsed
+ * legacy `permission` says `read`. Custom roles are deliberately NOT
+ * authorized here — an unrecognizable role cannot prove the bar. */
+const COMMENT_COMMAND_AUTHORIZED_ROLE_NAMES: ReadonlySet<string> = new Set([
+  "triage",
+  "triage_plus",
+]);
 
 
 export interface PrecheckSpec {
@@ -258,6 +307,145 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
     }
   }
 
+  // ── Comment-command re-review (#914) ──────────────────────────────────
+  // The PR object fetched for the fork gate, threaded to the review path
+  // below so an accepted comment does not re-fetch it.
+  let commentPrObject: unknown | undefined;
+  // A `created` `issue_comment` on a PR carrying the re-review command
+  // forces a fresh review. The commenter is authorized through the forge
+  // API (triage-or-higher), failing closed on any lookup uncertainty — a
+  // comment is NOT self-authorizing the way a label is. Fork PRs are left
+  // to the fork workflow (action.ts owns the reply); we stay side-effect-free.
+  if (event && event.name === "issue_comment" && event.action === "created") {
+    const command = (env.REREVIEW_COMMAND ?? "").trim();
+    if (command === "") {
+      return platformOutputs(
+        { should_review: "false", skip_reason: "comment-disabled" },
+        resolvedPlatform,
+        effectiveForgejoApiUrl,
+      );
+    }
+    const commentBody = event.comment?.body;
+    if (typeof commentBody !== "string" || !commentBodyTriggersCommentCommand(commentBody, command)) {
+      return platformOutputs(
+        { should_review: "false", skip_reason: "unrelated-comment" },
+        resolvedPlatform,
+        effectiveForgejoApiUrl,
+      );
+    }
+    const commenter = event.comment?.user;
+    if (typeof commenter !== "string" || commenter === "") {
+      return platformOutputs(
+        { should_review: "false", skip_reason: "comment-permission-unknown" },
+        resolvedPlatform,
+        effectiveForgejoApiUrl,
+      );
+    }
+    // Fail closed: the commenter's permission is verified through the forge
+    // API. A lookup error, a missing / non-string permission, or an
+    // unrecognized value is never self-authorizing. The action's token must
+    // therefore carry repository-collaborators read (GitHub App installation
+    // token or GITHUB_TOKEN with `members`/repo read); without it every
+    // lookup 403/404s and the command skips fail-closed, never approves.
+    const permissionResult = await spec.adapter.ghApi(
+      `repos/${repo}/collaborators/${encodeURIComponent(commenter)}/permission`,
+    );
+    if (permissionResult.error) {
+      return platformOutputs(
+        { should_review: "false", skip_reason: "comment-permission-unknown" },
+        resolvedPlatform,
+        effectiveForgejoApiUrl,
+      );
+    }
+    const permissionData = permissionResult.data;
+    const permissionRecord =
+      permissionData !== null && typeof permissionData === "object" && !Array.isArray(permissionData)
+        ? (permissionData as Record<string, unknown>)
+        : undefined;
+    const rawPermission = permissionRecord?.permission;
+    if (typeof rawPermission !== "string") {
+      return platformOutputs(
+        { should_review: "false", skip_reason: "comment-permission-unknown" },
+        resolvedPlatform,
+        effectiveForgejoApiUrl,
+      );
+    }
+    const permission = rawPermission.toLowerCase();
+    // Defense in depth for installation-token semantics: if the response
+    // names its subject, the subject must be the commenter — a response
+    // describing someone else (e.g. an echo of the caller's own permission)
+    // can never authorize. A subject-less response (allowed by the schema)
+    // passes through: nothing provable is wrong with it.
+    const subject = permissionRecord?.user;
+    if (subject !== null && subject !== undefined && typeof subject === "object" && !Array.isArray(subject)) {
+      const subjectLogin = (subject as Record<string, unknown>).login;
+      if (typeof subjectLogin === "string" && subjectLogin.toLowerCase() !== commenter.toLowerCase()) {
+        return platformOutputs(
+          { should_review: "false", skip_reason: "comment-permission-unknown" },
+          resolvedPlatform,
+          effectiveForgejoApiUrl,
+        );
+      }
+    }
+    const rawRoleName = permissionRecord?.role_name;
+    const roleName = typeof rawRoleName === "string" ? rawRoleName.toLowerCase() : "";
+    if (COMMENT_COMMAND_AUTHORIZED_PERMISSIONS.has(permission)) {
+      // write-or-higher on either forge (and uncollapsed triage/maintain
+      // values where a server still returns them).
+    } else if (permission === "read" && COMMENT_COMMAND_AUTHORIZED_ROLE_NAMES.has(roleName)) {
+      // GitHub's collapsed shape for a triage user: permission "read",
+      // role_name "triage". Only the role name can prove the bar.
+    } else if (permission === "read" || permission === "none") {
+      return platformOutputs(
+        { should_review: "false", skip_reason: "comment-unauthorized" },
+        resolvedPlatform,
+        effectiveForgejoApiUrl,
+      );
+    } else {
+      // Unrecognized permission value → fail closed.
+      return platformOutputs(
+        { should_review: "false", skip_reason: "comment-permission-unknown" },
+        resolvedPlatform,
+        effectiveForgejoApiUrl,
+      );
+    }
+    // Fork gate: a null PR (lookup failed) fails closed; a fork PR is
+    // deferred to the fork workflow's reply.
+    const prObject = await spec.adapter.getPr();
+    commentPrObject = prObject ?? undefined;
+    if (prObject === null) {
+      return platformOutputs(
+        { should_review: "false", skip_reason: "comment-pr-lookup-failed" },
+        resolvedPlatform,
+        effectiveForgejoApiUrl,
+      );
+    }
+    if (deriveIsFork(prObject)) {
+      return platformOutputs(
+        { should_review: "false", skip_reason: "comment-fork-pr" },
+        resolvedPlatform,
+        effectiveForgejoApiUrl,
+      );
+    }
+    // A closed PR is not reviewable: publishing a fresh verdict onto it is
+    // meaningless (and the command is spam-able). A payload without a state
+    // field is treated as open — the pulls API always supplies one.
+    const prState = typeof (prObject as { state?: unknown }).state === "string"
+      ? String((prObject as { state: string }).state).toLowerCase()
+      : "open";
+    if (prState === "closed") {
+      return platformOutputs(
+        { should_review: "false", skip_reason: "comment-pr-closed" },
+        resolvedPlatform,
+        effectiveForgejoApiUrl,
+      );
+    }
+    forceReview = true;
+    process.stderr.write(
+      `[precheck] ${command} comment command accepted from ${JSON.stringify(commenter)}: forcing a fresh review\n`,
+    );
+  }
+
   // ── Diff content ──────────────────────────────────────────────────────
   const diffContent = await spec.adapter.getPrDiff();
 
@@ -378,7 +566,9 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
   // re-entry): PR object once → SHAs/fork → superseded guard → Forgejo
   // preflight → proceed. `skip_reason` is non-empty only for the re-entry,
   // where it documents WHY the skip was refused (still should_review=true).
-  return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "");
+  // The authorized comment branch already fetched the PR for its fork gate;
+  // reuse it rather than re-fetching (the PR object is identical by then).
+  return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "", commentPrObject);
 }
 
 async function reviewPathOutputs(
@@ -388,9 +578,10 @@ async function reviewPathOutputs(
   effectiveForgejoApiUrl: string,
   broadFingerprint: string,
   staleReason: string,
+  preFetchedPr?: unknown,
 ): Promise<PrecheckOutput> {
   const repo = env.REPO ?? "";
-  const prObject = await spec.adapter.getPr();
+  const prObject = preFetchedPr ?? await spec.adapter.getPr();
   const identity = normalizePrIdentity(prObject ?? {});
 
   if (spec.eventHeadSha && identity.headSha && spec.eventHeadSha !== identity.headSha) {

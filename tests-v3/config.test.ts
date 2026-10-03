@@ -20,7 +20,7 @@ test("current canonical contract validates and maps every input once", () => {
     assert.ok(Object.hasOwn(config, toCamelCase(input.id)), input.id);
     assert.equal(toCamelCase(input.id).includes("_"), false);
   }
-  assert.equal(contract.inputs.length, 130);
+  assert.equal(contract.inputs.length, 131);
   assert.equal(Object.hasOwn(config, "ai_base_url"), false);
 });
 
@@ -126,6 +126,17 @@ test("defaults are contract sourced and parsing is explicit", () => {
   assert.equal(loadConfig(contract, { ...raw, "ai-max-tokens": "12" }).aiMaxTokens, 12);
   assert.equal(config.aiTemperature, 0.1);
   assert.equal(loadConfig(contract, { ...raw, "ai-temperature": "" }).aiTemperature, "");
+  // #914: rereview-command is an empty-string carve-out like ai-temperature —
+  // an explicit "" disables comment-triggered re-reviews, so it must not fall
+  // back to the "/ai-review" default.
+  const noRereviewCommand = { ...raw };
+  delete noRereviewCommand["rereview-command"];
+  assert.equal(loadConfig(contract, noRereviewCommand).rereviewCommand, "/ai-review");
+  assert.equal(loadConfig(contract, { ...raw, "rereview-command": "" }).rereviewCommand, "");
+  assert.equal(loadConfig(contract, { ...raw, "rereview-command": "/rerun" }).rereviewCommand, "/rerun");
+  // The carve-out did not widen: an explicit empty rereview-label still falls
+  // back to its default.
+  assert.equal(loadConfig(contract, { ...raw, "rereview-label": "" }).rereviewLabel, "ai-review");
   assert.equal(config.aiFallbackBaseUrl, config.aiBaseUrl);
   assert.equal(config.aiPrimaryModel, config.aiModel);
   assert.equal(config.aiFallbackStream, config.aiStream);

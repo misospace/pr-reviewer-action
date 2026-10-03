@@ -433,6 +433,7 @@ Inputs with no v2 implementation.
 | `equivalent-paths` | `false` |
 | `equivalent-paths-max-bytes` | `6000` |
 | `fallback-model-context-tokens` | empty |
+| `rereview-command` | `/ai-review` |
 
 ## New outputs
 

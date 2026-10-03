@@ -16,6 +16,13 @@ export const INTEGER_BOUNDS: Readonly<Record<string, readonly [number, number]>>
 
 export type RawInputs = Readonly<Record<string, string | undefined>>;
 
+// For these inputs an explicit empty string is a functional value, not an
+// absent one: it disables what the input configures (ai-temperature: no
+// sampling-temperature override; rereview-command: comment-triggered
+// re-reviews), so the loader must keep it and not substitute the contract
+// default.
+const EMPTY_DISABLING_INPUTS: ReadonlySet<string> = new Set(["ai-temperature", "rereview-command"]);
+
 export function toCamelCase(id: string): string {
   return id.replace(/-([a-z0-9])/g, (_match, char: string) => char.toUpperCase());
 }
@@ -32,7 +39,7 @@ export function loadConfig(contract: ActionContract, raw: RawInputs): RuntimeCon
       : input.default;
     const source = external === undefined
       ? fallback
-      : external === "" && fallback !== undefined && input.id !== "ai-temperature"
+      : external === "" && fallback !== undefined && !EMPTY_DISABLING_INPUTS.has(input.id)
         ? String(fallback)
         : external;
     if (source === undefined) {
