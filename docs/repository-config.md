@@ -56,6 +56,33 @@ orchestrator cutover wires that resolution end to end in `main()`, an unset
 `PR_REVIEWER_BASE_REF` simply skips repository config and reviews run purely
 on the operator's workflow inputs, exactly as before #777.
 
+## Boundary ownership (`.github/pr-reviewer-owners.yml`)
+
+A sibling, optional file with the same trust model declares which
+production/enforcement files own a named security boundary, so
+requirement-trace scope keeps that standard in play on a change to its own
+file even when the diff repeats none of the standard's prose (#958):
+
+```yaml
+requirements:
+  fork-privilege-separation:
+    owners:
+      - .github/workflows/fork-ai-review.yaml
+      - scripts/fork_review_gate.py
+```
+
+The key is a slug whose tokens of three or more characters must all appear in
+the requirement text as whole words; `owners` are exact file paths or narrow
+globs (`*`/`?` within a path segment). `**`, absolute paths, `..`, whitespace,
+and all-wildcard segments (`src/*/*.ts`) are rejected at parse time, and rules
+or paths that fail validation are dropped with a warning. The file is read
+from the same trusted base ref as the repository config (never the PR head),
+so a contributor cannot escape a boundary's trace by editing it on their
+branch; absence is fine, and a malformed file or a resolution failure degrades
+to "no owners" with a surfaced warning — it can never broaden scope or crash
+the review. See [`opt-in-features.md`](opt-in-features.md) under
+`requirement-trace`.
+
 ## Keys
 
 Keys are the v3 kebab-case input ids from

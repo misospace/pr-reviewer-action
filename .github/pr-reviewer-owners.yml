@@ -1,0 +1,44 @@
+# Requirement-trace boundary ownership (#958).
+#
+# A small, base-ref-trusted map: each named security boundary lists the
+# production/enforcement files that own it. A change to a declared owner path
+# keeps that requirement in trace scope even when the diff repeats none of the
+# requirement's prose — the lexical subject matcher cannot tell a boundary's
+# own file from an unrelated file that merely shares a generic word (`model`,
+# `api`, `http`, `data`, …), so ownership is declared rather than inferred.
+#
+# Rules:
+# - The key is a slug; every token (>= 3 chars) must appear in the requirement
+#   text as a whole word (exact form, no stemming). A slug associates with
+#   every requirement whose text contains all its tokens, so pick distinctive
+#   tokens.
+# - Owner paths are exact files or narrow globs (`*`/`?` within a segment).
+#   `**`, absolute paths, `..`, and all-wildcard segments (`src/*/*.ts`) are
+#   rejected.
+# - List production/enforcement surfaces, not tests or docs that merely
+#   mention the concept.
+#
+# This file is read from the PR's base ref, never the PR head, so a
+# contributor cannot escape a boundary's trace by editing it on their branch.
+
+requirements:
+  fork-privilege-separation:
+    owners:
+      - .github/workflows/fork-ai-review.yaml
+      - scripts/fork_review_gate.py
+
+  untrusted-content-is-data:
+    owners:
+      - src/model/conversation.ts
+      - src/context/pr-thread.ts
+      - src/context/review-threads.ts
+      - src/specialists/render.ts
+      - src/claims/render.ts
+      - src/requirements/ledger.ts
+      - src/publish/publish.ts
+
+  model-api-credentials:
+    owners:
+      - src/transport/http.ts
+      - src/transport/sse.ts
+      - src/transport/transport.ts

@@ -2,6 +2,7 @@ import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { validateContract } from "../config/contract.js";
 import { loadConfig, type RawInputs } from "../config/load-config.js";
 import { resolveRepositoryConfig } from "../config/repository-config.js";
+import { resolveRequirementOwners } from "../config/requirement-owners.js";
 import { assertSupportedNode } from "../runtime/node-version.js";
 import { createCancellationScope } from "../runtime/signals.js";
 import { resolveTierBudgets } from "../corpus/budgets.js";
@@ -817,9 +818,13 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // above can rebuild it), so the tool loop, the verdict turn and the
   // validator below all see the same in-scope requirement ids.
   const traceChanged = traceChangedText(ws);
+  const requirementTraceEnabled = (env.REQUIREMENT_TRACE ?? "false").toLowerCase() === "true";
+  const traceOwnership = !requirementTraceEnabled || baseRef === "" ? { rules: [], warnings: [] } : resolveRequirementOwners({ baseRef, workspace });
+  for (const warning of traceOwnership.warnings) errorLog(`requirement owners: ${warning}`);
+  const tracePaths = requirementTraceEnabled ? traceChangedFilePaths(ws) : undefined;
   promptState = applyRequirementTraceFragment(
-    promptState, ws, (env.REQUIREMENT_TRACE ?? "false").toLowerCase() === "true", undefined,
-    requirementTraceScope(safeJson(ws.read("requirement-ledger.json")), traceChanged).inScope.map((entry) => entry.id),
+    promptState, ws, requirementTraceEnabled, undefined,
+    requirementTraceScope(safeJson(ws.read("requirement-ledger.json")), traceChanged, { ownership: traceOwnership.rules, paths: tracePaths }).inScope.map((entry) => entry.id),
   );
   env.SYSTEM_PROMPT = promptState.systemPrompt;
 
@@ -919,7 +924,6 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // advisory requirement_coverage fold below) because a trace escalation
   // must be visible to the verdict mapping, not just recorded afterward.
   const ledgerValue = safeJson(ws.read("requirement-ledger.json"));
-  const requirementTraceEnabled = (env.REQUIREMENT_TRACE ?? "false").toLowerCase() === "true";
   let requirementTraceResult: ReturnType<typeof applyRequirementTraceEnforcement> | null = null;
   let completenessStatus = "none";
   if (analysisEngine === MODEL_UNAVAILABLE_ENGINE) {
@@ -935,7 +939,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     // place before the strict mapping counts open findings.
     const completeness = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completeness.status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completeness.status === "incomplete" && completeness.mode === "fail");
@@ -946,7 +950,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       securityFlagged: isSecurityFlagged(classificationArtifact),
     });
     completenessStatus = applyRequiredCheckValidation(reviewRecord as never, completenessOptions).status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
   }
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(reviewRecord)}\n`, "utf8"));
@@ -1212,6 +1216,16 @@ export function traceChangedText(ws: Pick<RunWorkspace, "readText" | "read">): s
   const diff = ws.readText("pr.diff");
   if (diff === null || diff === undefined || diff === "") return undefined;
   return changedSubjectText(diff, changedFilePaths(safeJsonArray(ws.read("pr-files.json"))));
+}
+
+/** #958: the changed file paths (current and previous names), lowercased, for
+ * owner-glob matching. Undefined when the raw diff is unavailable, mirroring
+ * `traceChangedText`'s fail-closed rule (missing evidence keeps every
+ * requirement in scope rather than treating it as an empty change). */
+export function traceChangedFilePaths(ws: Pick<RunWorkspace, "readText" | "read">): string[] | undefined {
+  const diff = ws.readText("pr.diff");
+  if (diff === null || diff === undefined || diff === "") return undefined;
+  return changedFilePaths(safeJsonArray(ws.read("pr-files.json"))).map((path) => path.toLowerCase());
 }
 
 /** Changed file paths (current and previous names) from `pr-files.json`. */
