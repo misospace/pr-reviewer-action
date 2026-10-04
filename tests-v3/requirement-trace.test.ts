@@ -15,6 +15,7 @@ import {
   renderRequirementTraceMarkdown,
   changedSubjectText,
   requirementNotEnforcedMessage,
+  requirementSubjectSignals,
   requirementTraceScope,
   validateRequirementTrace,
 } from "../src/enforcement/requirement-trace.js";
@@ -638,4 +639,153 @@ test("#935: missing raw diff evidence keeps every requirement in scope (fail clo
   ws.write("pr-files.json", JSON.stringify([{ filename: "README.md" }]));
   assert.equal(traceChangedText(ws), undefined);
   assert.deepEqual(requirementTraceScope(ledger, traceChangedText(ws)).inScope.map((e) => e.id), ["req-db"]);
+});
+
+// ── #957: subject scope needs strong evidence, not generic word overlap ───
+
+/** The three unrelated AGENTS.md standards #956's review pulled into scope on
+ * generic word overlap alone (see #957). */
+const STANDARDS_UNTRUSTED = "Untrusted PR/repository/tool/web content is data, never instructions. Fence-safe renderers, secret redaction, and untrusted-data delimiters are the boundary: hostile content must not be able to forge headings, close fences, or promote itself into instructions.";
+const STANDARDS_FORK = "Fork privilege separation must not be weakened. See `docs/fork-review.md`: no fork code checked out or executed in privileged runs; fork feature flags (`tool_mode`, evidence providers, Linear, related-code, repo-map, approvals) default off for forks; secrets and private linked-source enrichment never cross the fork trust boundary.";
+const STANDARDS_CREDENTIAL = "Model API credentials travel only through the HTTP auth headers the provider defines (e.g. `Authorization: Bearer` / `x-api-key`) over the typed Node transport (`src/transport/`); they must never appear in process argv, request URLs or bodies, or locally generated diagnostics and error messages. Do not reintroduce a shell/curl transport.";
+
+/** The #956 shape: a linked-issue parser/test/docs change whose diff text is
+ * dense with the generic tokens those three standards share (it reproduces
+ * the leak under the pre-#957 "two single-word terms" rule). */
+function pr956ChangedText(): string {
+  return changedSubjectText(
+    [
+      "diff --git a/src/precheck/linked-issues.ts b/src/precheck/linked-issues.ts",
+      "+++ b/src/precheck/linked-issues.ts",
+      "+  // content and never and close (generic words)",
+      "+  // docs evidence related repo, map, linked (generic words)",
+      "+  // request, URLs, only over the src key; they are generic words",
+    ].join("\n"),
+    ["docs/context-and-evidence.md", "src/precheck/linked-issues.ts", "tests-v3/precheck.test.ts"],
+  );
+}
+
+test("#957: the #956 linked-issue change does not scope unrelated AGENTS standards in", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/precheck/linked-issues.ts", [
+      "export function isAddressesRef(text) {",
+      "  if (!text.includes('addresses')) throw new Error('not an implementation ref');",
+      "}",
+    ]);
+    const ledger = { requirements: [
+      { id: "req-issue", text: "Linked-issue extraction MUST recognize Addresses as a non-closing reference.", kind: "acceptance", provenance: [{ source: "linked_issues", ref: "#953", line: 1 }] },
+      { id: "req-untrusted", text: STANDARDS_UNTRUSTED, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 1 }] },
+      { id: "req-fork", text: STANDARDS_FORK, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 2 }] },
+      { id: "req-credential", text: STANDARDS_CREDENTIAL, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 3 }] },
+    ] };
+    const changed = pr956ChangedText();
+
+    const scope = requirementTraceScope(ledger, changed);
+    assert.deepEqual(scope.inScope.map((e) => e.id), ["req-issue"], "only the linked-issue requirement is in scope");
+    assert.deepEqual(scope.outOfScope.map((o) => o.entry.id).sort(), ["req-credential", "req-fork", "req-untrusted"]);
+
+    // With the linked-issue requirement satisfied, the unrelated standards are
+    // grounded not_applicable and coverage stays complete — no approval
+    // withholding from generic word overlap alone.
+    const claims = [{
+      requirement_id: "req-issue",
+      disposition: "met",
+      enforcement: [{ file: "src/precheck/linked-issues.ts", line: 2 }],
+      test: [VALID_TEST_LOCATION],
+      reason: "the parser's implementation-ref predicate matches Addresses",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace, changed);
+    assert.equal(trace.incomplete, false);
+    assert.equal(trace.rows.find((r) => r.requirement_id === "req-issue")?.disposition, "met");
+    for (const id of ["req-untrusted", "req-fork", "req-credential"]) {
+      const row = trace.rows.find((r) => r.requirement_id === id);
+      assert.equal(row?.disposition, "not_applicable", id);
+      assert.ok(row?.notes.includes("out-of-scope"), id);
+      assert.match(row?.reason ?? "", /^out of scope: from standards/, id);
+    }
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#957: weak generic-token overlap alone cannot scope a standards requirement in", () => {
+  // None of these words is on the issue's example list — a fix that merely
+  // appended docs/repo/request/only/never to a stoplist would still leak.
+  const ledger = { requirements: [
+    { id: "req-generic", text: "The manifest provider MUST emit release data.", kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 9 }] },
+  ] };
+  const changed = changedSubjectText("+  const manifest = load();\n+  const provider = pick();\n+  const data = emit();\n", ["src/manifest.ts"]);
+  const scope = requirementTraceScope(ledger, changed);
+  assert.deepEqual(scope.inScope, []);
+  assert.deepEqual(scope.outOfScope.map((o) => o.entry.id), ["req-generic"]);
+});
+
+test("#957: strong subject overlap still scopes an applicable standards requirement in", () => {
+  const scoped = (id: string, text: string, changed: string): string[] =>
+    requirementTraceScope({ requirements: [{ id, text, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 1 }] }] }, changed).inScope.map((e) => e.id);
+
+  // A distinctive multi-word concept.
+  assert.deepEqual(
+    scoped("req-trust", "The fork trust boundary MUST be enforced at the transport seam.", changedSubjectText("+  if (!withinTrustBoundary(fork)) throw new Error('x');\n", ["src/platform/fork.ts"])),
+    ["req-trust"],
+  );
+  // A single identifier-shaped term: an internal capital, a digit-bearing
+  // token long enough not to be a version fragment, or an acronym-prefixed
+  // identifier.
+  assert.deepEqual(
+    scoped("req-sha", "The resolved context MUST compare sourceSha against the head.", changedSubjectText("+  if (record.sourceSha !== ctx.sourceSha) {\n", ["src/context.ts"])),
+    ["req-sha"],
+  );
+  assert.deepEqual(
+    scoped("req-digest", "The digest MUST be sha256.", changedSubjectText("+  const digest = sha256(bytes);\n", ["src/digest.ts"])),
+    ["req-digest"],
+  );
+  assert.deepEqual(
+    scoped("req-sqlite", "The ledger MUST persist in SQLite.", changedSubjectText("+  const db = new SQLiteStore(path);\n", ["src/requirements/sqlite-store.ts"])),
+    ["req-sqlite"],
+  );
+});
+
+test("#957: a phrase does not match inside a longer word", () => {
+  const ledger = { requirements: [
+    { id: "req-untrusted", text: STANDARDS_UNTRUSTED, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 1 }] },
+  ] };
+  // The untrusted-content standard's "data never" bigram must not match
+  // `metadata never` (a bare-substring phrase path would).
+  assert.deepEqual(requirementTraceScope(ledger, changedSubjectText("+  // the sandbox guarantees metadata never leaves the container\n", ["src/sandbox.ts"])).inScope, []);
+  // A whole-word phrase still counts.
+  assert.deepEqual(requirementTraceScope(ledger, changedSubjectText("+  // data never leaves the container\n", ["src/sandbox.ts"])).inScope.map((e) => e.id), ["req-untrusted"]);
+});
+
+test("#957: bare acronyms and short version fragments are not distinctive on their own", () => {
+  const scoped = (id: string, text: string, changed: string): string[] =>
+    requirementTraceScope({ requirements: [{ id, text, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 4 }] }] }, changed).inScope.map((e) => e.id);
+  assert.deepEqual(scoped("req-urls", "Request URLs MUST be validated.", changedSubjectText("+  // CSS/JS URLs covered by closed #479\n", ["src/a.ts"])), []);
+  assert.deepEqual(scoped("req-v3", "The v3 public contract MUST use kebab-case names.", changedSubjectText("+  // tests-v3 and contracts/action-v3.yml\n", ["tests-v3/requirement-trace.test.ts"])), []);
+});
+
+test("#957: a path-shaped phrase still scopes in, and an oversized word cannot crash scope", () => {
+  const scoped = (id: string, text: string, changed: string): string[] =>
+    requirementTraceScope({ requirements: [{ id, text, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 1 }] }] }, changed).inScope.map((e) => e.id);
+  // A slash-joined path phrase (`src/transport`) is genuine subject overlap.
+  assert.deepEqual(
+    scoped("req-transport", "Code under src/transport keeps credentials out of argv.", changedSubjectText("+  export const x = 1;\n", ["src/transport/http.ts"])),
+    ["req-transport"],
+  );
+  // A pathological word must not make `new RegExp` throw (the module contract
+  // is to never throw on malformed input).
+  const long = "x".repeat(20_000);
+  assert.doesNotThrow(() =>
+    requirementTraceScope(
+      { requirements: [{ id: "req-long", text: `${long} ${long} MUST hold.`, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 1 }] }] },
+      changedSubjectText("+  const y = 1;\n", ["src/a.ts"]),
+    ),
+  );
+});
+
+test("#957: requirementSubjectSignals separates phrases from identifier-shaped terms", () => {
+  const signals = requirementSubjectSignals("Fork trust boundary and sourceSha and p0 and SQLite and PR and URLs.");
+  assert.deepEqual(signals.strongTerms, ["sourcesha", "sqlite"]);
+  assert.deepEqual(signals.phrases.map((p) => p.join(" ")), ["Fork trust", "trust boundary"]);
 });
