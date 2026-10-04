@@ -295,6 +295,44 @@ test("linked issue refs: dedupe/merge is by canonical identity (bare #N resolved
   assert.equal(differentRepo.length, 2, "different repos with the same issue number are distinct identities");
 });
 
+test("linked issue refs: Addresses is non-closing; past-tense closing keywords only at line start (#953)", () => {
+  // The miso-gallery#505 shape: the intended target is `Addresses #502`,
+  // while `covered by closed #479` is historical/adjectival prose that must
+  // not be linked at all (not merely demoted to non-closing).
+  const body = "Addresses #502. This is a packaging defect, distinct from the removed nonexistent CSS/JS URLs covered by closed #479.";
+  assert.deepEqual(
+    extractLinkedIssueRefs(body, "o/r").map((ref) => ({ ref: ref.ref, closing: ref.closing })),
+    [{ ref: "#502", closing: false }],
+    "#502 is the implementation target; incidental `closed #479` prose is ignored",
+  );
+
+  assert.deepEqual(
+    extractLinkedIssueRefs("Addresses other/repo#7", "o/r").map((ref) => ({ ref: ref.ref, repo: ref.repo, closing: ref.closing })),
+    [{ ref: "other/repo#7", repo: "other/repo", closing: false }],
+    "Addresses owner/repo#N is the scoped non-closing form",
+  );
+
+  // GitHub's past-participle auto-close forms still count as closing when
+  // they carry strong structural intent: line start, after optional
+  // indentation and a markdown list/blockquote marker.
+  for (const text of ["Fixed #42", "- Fixed #42", "* Resolved owner/repo#42", "Closed #42", "> Closed #42", "1. Fixed #42"]) {
+    const refs = extractLinkedIssueRefs(text, "o/r");
+    assert.equal(refs.length, 1, text);
+    assert.equal(refs[0]!.closing, true, text);
+  }
+
+  // ...but past-participle prose embedded mid-sentence is not a reference.
+  for (const text of ["This PR fixed #42", "covered by closed #479", "unrelated to resolved #12"]) {
+    assert.deepEqual(extractLinkedIssueRefs(text, "o/r"), [], text);
+  }
+
+  // Present/imperative closing keywords keep GitHub's broader behavior and
+  // still match mid-sentence.
+  assert.equal(extractLinkedIssueRefs("This PR fixes #42", "o/r")[0]!.closing, true);
+  assert.equal(extractLinkedIssueRefs("this resolves #42", "o/r")[0]!.closing, true);
+  assert.equal(extractLinkedIssueRefs("Closes #1", "o/r")[0]!.closing, true);
+});
+
 test("linear prefixes and identifiers parse conservatively", () => {
   assert.deepEqual(parsePrefixes("eng, Ops, ENG"), ["ENG", "OPS"]);
   assert.throws(() => parsePrefixes("1bad"), /invalid Linear issue prefix/);

@@ -53,14 +53,19 @@ unchanged behavior.
 
 Closing references in the PR body (`Fixes #40`, `Closes owner/repo#12`) are
 fetched and folded into the review corpus so the model can compare the
-implementation against issue guidance and acceptance criteria.
+implementation against issue guidance and acceptance criteria. The
+past-participle forms (`Closed`/`Fixed`/`Resolved`) are ambiguous with
+ordinary prose ("covered by closed #479"), so they only count as closing when
+they start a line, after optional indentation and a markdown list/blockquote
+marker (`Fixed #42`, `- Fixed #42`).
 
 Non-closing references count too: a title using the `(#N)` convention, or a
-body reference like `Implements`/`Part of`/`Refs`. If a title-linked or
-body-referenced number resolves to a pull request rather than an issue, it's
-rejected before use — a skip notice is recorded instead of issue content, and
-it never reaches the requirement ledger. This only applies to non-closing
-refs; closing keywords (`Closes`/`Fixes`/`Resolves`) behave as before.
+body reference like `Implements`/`Part of`/`Refs`/`Addresses`. If a
+title-linked or body-referenced number resolves to a pull request rather than
+an issue, it's rejected before use — a skip notice is recorded instead of
+issue content, and it never reaches the requirement ledger. This only applies
+to non-closing refs; closing keywords (`Closes`/`Fixes`/`Resolves`) behave as
+before.
 
 Labels on linked issues feed classification: a GitHub `security`, `audit`,
 `priority/p0`, or `priority/p1` label produces the matching `risk_flags`
