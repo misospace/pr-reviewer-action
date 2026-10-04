@@ -67,20 +67,20 @@ function issueCommentEvent(body: string, user: string) {
 
 // ── The comment-body matcher (pure, adversarial-safe) ─────────────────────
 
-test("commentBodyTriggersCommentCommand matches the command prefix and rejects lookalikes", () => {
+test("commentBodyTriggersCommentCommand matches the bare command and rejects lookalikes", () => {
   const cmd = "/ai-review";
   // The command itself as the whole body.
   assert.equal(commentBodyTriggersCommentCommand("/ai-review", cmd), true);
-  // The command with a trailing newline.
+  // The command with a trailing newline (trailing whitespace is tolerated).
   assert.equal(commentBodyTriggersCommentCommand("/ai-review\n", cmd), true);
-  // The command followed by a word.
-  assert.equal(commentBodyTriggersCommentCommand("/ai-review now", cmd), true);
+  // The command followed by a word (v1 takes no arguments).
+  assert.equal(commentBodyTriggersCommentCommand("/ai-review now", cmd), false);
   // A lookalike with no boundary (command + "x").
   assert.equal(commentBodyTriggersCommentCommand("/ai-reviewx", cmd), false);
   // Leading whitespace before the command.
   assert.equal(commentBodyTriggersCommentCommand("   /ai-review", cmd), true);
   // A multi-line body starting with the command.
-  assert.equal(commentBodyTriggersCommentCommand("/ai-review\nmore text", cmd), true);
+  assert.equal(commentBodyTriggersCommentCommand("/ai-review\nmore text", cmd), false);
   // An empty body.
   assert.equal(commentBodyTriggersCommentCommand("", cmd), false);
   // The command embedded, not at the start.
@@ -88,7 +88,9 @@ test("commentBodyTriggersCommentCommand matches the command prefix and rejects l
   // The match is case-sensitive.
   assert.equal(commentBodyTriggersCommentCommand("/AI-Review", cmd), false);
   // Regex-special characters in the command are matched literally.
-  assert.equal(commentBodyTriggersCommentCommand("/ai.review(x) now", "/ai.review(x)"), true);
+  assert.equal(commentBodyTriggersCommentCommand("/ai.review(x)", "/ai.review(x)"), true);
+  // ...and the same command with trailing text does not.
+  assert.equal(commentBodyTriggersCommentCommand("/ai.review(x) now", "/ai.review(x)"), false);
   assert.equal(commentBodyTriggersCommentCommand("/ai.review(y)", "/ai.review(x)"), false);
   // An empty command never matches (it would match everything).
   assert.equal(commentBodyTriggersCommentCommand("/ai-review", ""), false);
@@ -159,7 +161,7 @@ test("#914: write-or-higher permissions authorize the comment command", async ()
     const output = await runPrecheck({
       env,
       adapter: new FixtureAdapter("github", platform),
-      event: issueCommentEvent("/ai-review now", "alice"),
+      event: issueCommentEvent("/ai-review", "alice"),
     });
     assert.equal(output.should_review, "true", `permission=${permission}`);
     assert.equal(output.skip_reason, "", `permission=${permission}`);
@@ -265,9 +267,29 @@ test("#914: a matching comment with no commenter fails closed (comment-permissio
 
 // ── The command gate (before any permission lookup) ───────────────────────
 
+test("#914 v1 scope (bare command only, no arguments): an argument like /ai-review smart from an authorized user is skipped as unrelated-comment without a permission lookup", async () => {
+  const env = baseEnv();
+  const platform: Platform = {
+    diff: DIFF,
+    pr: sameRepoPr(),
+    // An EMPTY gh_api map: any accidental permission lookup would return an
+    // error and flip the skip reason to comment-permission-unknown. Getting
+    // unrelated-comment back proves the adapter was never consulted — the
+    // argument never reaches the authorization step.
+    gh_api: {},
+  };
+  const output = await runPrecheck({
+    env,
+    adapter: new FixtureAdapter("github", platform),
+    event: issueCommentEvent("/ai-review smart", "alice"),
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "unrelated-comment");
+});
+
 test("#914: a non-matching comment body is skipped as unrelated-comment without a permission lookup", async () => {
   const env = baseEnv();
-  for (const body of ["/ai-reviewx", "please /ai-review", "/AI-Review"]) {
+  for (const body of ["/ai-reviewx", "please /ai-review", "/AI-Review", "/ai-review now", "/ai-review\nmore text"]) {
     // An EMPTY gh_api map: any accidental permission lookup would return an
     // error and flip the skip reason to comment-permission-unknown. Getting
     // unrelated-comment back proves the adapter was never consulted.

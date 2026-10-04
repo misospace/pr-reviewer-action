@@ -672,7 +672,7 @@ inputs:
     v2_id: rereview_command
     required: false
     default: "/ai-review"
-    description: "Comment command that forces a fresh full review from a `created` `issue_comment` event on a pull request — the comment re-review trigger. The comment body must start with this command, and the commenter must have triage-or-higher repository permission, verified through the forge API and failing closed on lookup errors: a matching command from an unauthorized or unverifiable commenter skips the run even when `force-review` is set. An empty string disables comment-triggered re-reviews. To enable, consumers add `issue_comment: [created]` to their workflow; fork PRs only get a reply pointing at the `ai-review-fork` label workflow. Default \"/ai-review\"."
+    description: "Comment command that forces a fresh full review from a `created` `issue_comment` event on a pull request — the comment re-review trigger. The comment body must be exactly this command (leading/trailing whitespace ignored; v1 takes no arguments — a comment with trailing text never triggers), and the commenter must have triage-or-higher repository permission, verified through the forge API and failing closed on lookup errors: a matching command from an unauthorized or unverifiable commenter skips the run even when `force-review` is set. An empty string disables comment-triggered re-reviews. To enable, consumers add `issue_comment: [created]` to their workflow; fork PRs only get a reply pointing at the `ai-review-fork` label workflow. Default \"/ai-review\"."
   - id: comment-marker
     v2_id: comment_marker
     required: false

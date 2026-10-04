@@ -14,11 +14,13 @@ on:
     # force a fresh review (only write/triage can label — self-authorizing).
     types: [opened, reopened, synchronize, ready_for_review, labeled]
   issue_comment:
-    # `created` enables the comment re-review: a PR comment whose body starts
-    # with `rereview-command` (default `/ai-review`) forces a fresh full review.
-    # The commenter needs triage-or-higher repo permission (checked via the
-    # API, failing closed); fork PRs only get a reply pointing at the
-    # `ai-review-fork` label workflow. Empty `rereview-command` disables it.
+    # `created` enables the comment re-review: a PR comment whose body is
+    # exactly `rereview-command` (default `/ai-review`; bare command only in
+    # v1, no arguments — trailing text never triggers) forces a fresh full
+    # review. The commenter needs triage-or-higher repo permission (checked
+    # via the API, failing closed); fork PRs only get a reply pointing at
+    # the `ai-review-fork` label workflow. Empty `rereview-command` disables
+    # it.
     types: [created]
   workflow_dispatch:
 
@@ -66,6 +68,7 @@ jobs:
         env:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPO_ID: ${{ github.repository_id }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           pr_json="$(curl -fsS \

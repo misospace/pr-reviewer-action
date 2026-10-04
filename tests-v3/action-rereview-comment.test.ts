@@ -324,12 +324,12 @@ test("#914: an unusable comment id skips the ack but still runs the review", asy
   }
 });
 
-test("#914: the command with trailing text still runs the review and acks (recognition must not require the bare command)", async () => {
-  const result = await runCase({ body: "/ai-review please re-run", onPr: true, permission: "write" });
+test("#914: a trailing newline is tolerated (v1 whitespace policy) — the review runs and the ack posts", async () => {
+  const result = await runCase({ body: "/ai-review\n", onPr: true, permission: "write" });
   try {
     assert.equal(result.exitCode, 0);
     assert.equal(result.outputs["should-review"], "true");
-    assert.equal(result.reactionCalls.length, 1, "the ack fires for a command followed by more text");
+    assert.equal(result.reactionCalls.length, 1, "the ack fires for a command with a trailing newline");
     assert.equal(result.modelRequests, 1);
   } finally {
     await result.cleanup();
@@ -395,12 +395,26 @@ test("#914: an authorized /ai-review comment on a fork PR skips as comment-fork-
   }
 });
 
-test("#914: the fork reply also fires when the command has trailing text", async () => {
-  const result = await runCase({ body: "/ai-review now\n(second comment line)", onPr: true, permission: "write", forkHeadRepo: "forker/r" });
+test("#914: the fork reply also fires for the bare command", async () => {
+  const result = await runCase({ body: "/ai-review", onPr: true, permission: "write", forkHeadRepo: "forker/r" });
   try {
     assert.equal(result.outputs["skip-reason"], "comment-fork-pr");
     const forkReplies = result.replyBodies.filter((b) => b.includes(FORK_REPLY_MARKER));
-    assert.equal(forkReplies.length, 1, "the fork reply fires for a command followed by more text");
+    assert.equal(forkReplies.length, 1, "the fork reply fires for the bare command");
+  } finally {
+    await result.cleanup();
+  }
+});
+
+test("#914 v1 scope (bare command only): a command with an argument (/ai-review please re-run) is skipped as unrelated-comment — no review, no ack, no reply", async () => {
+  const result = await runCase({ body: "/ai-review please re-run", onPr: true, permission: "write" });
+  try {
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.outputs["should-review"], "false");
+    assert.equal(result.outputs["skip-reason"], "unrelated-comment");
+    assert.equal(result.reactionCalls.length, 0, "no ack reaction for a trailing-argument body");
+    assert.equal(result.replyBodies.length, 0, "no reply comment");
+    assert.equal(result.modelRequests, 0, "the model is never called");
   } finally {
     await result.cleanup();
   }

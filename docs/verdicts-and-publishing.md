@@ -168,7 +168,7 @@ For non-interactive callers, `force-review: "true"` bypasses the unchanged-diff 
 
 ### Comment command
 
-Post a comment on a PR whose body starts with `rereview-command` (default `/ai-review`) and the action re-reviews it in full, even if the diff hasn't changed — the same fresh full review the label triggers, for users who don't have label permissions. To enable it, add `issue_comment` to the workflow's events:
+Post a comment on a PR whose body is exactly `rereview-command` (default `/ai-review`) and the action re-reviews it in full, even if the diff hasn't changed — the same fresh full review the label triggers, for users who don't have label permissions. To enable it, add `issue_comment` to the workflow's events:
 
 ```yaml
 on:
@@ -176,7 +176,7 @@ on:
     types: [created]
 ```
 
-The comment body must start with the command (leading whitespace is stripped); anything else is ignored. A comment is not self-authorizing the way a label is — the action checks the commenter's repository permission through the forge API, requiring the label bar (triage-or-higher), and fails closed on lookup errors: GitHub's endpoint reports `write`/`admin` directly but collapses a `triage` user into `permission: "read"` with the role only in `role_name`, so the action reads both fields, and an unrecognized or custom role never authorizes. The lookup runs with the action's token, so that token must be able to read repository collaborators. When a run picks up the comment, the action reacts 👀 to it as the acknowledgement. Same-repository comment runs check out the PR head (the `pr-gate`-resolved head sha, pinned at gate time) so the review covers the current PR. Comments on a **closed** PR are a silent no-op.
+The comment body must be exactly the command (leading/trailing whitespace is ignored; v1 takes no arguments, so trailing text never triggers); anything else is ignored. A comment is not self-authorizing the way a label is — the action checks the commenter's repository permission through the forge API, requiring the label bar (triage-or-higher), and fails closed on lookup errors: GitHub's endpoint reports `write`/`admin` directly but collapses a `triage` user into `permission: "read"` with the role only in `role_name`, so the action reads both fields, and an unrecognized or custom role never authorizes. The lookup runs with the action's token, so that token must be able to read repository collaborators. When a run picks up the comment, the action reacts 👀 to it as the acknowledgement. Same-repository comment runs check out the PR head (the `pr-gate`-resolved head sha, pinned at gate time) so the review covers the current PR. Comments on a **closed** PR are a silent no-op.
 
 Fork PRs never get a review from this path: the action replies to the comment pointing at the `ai-review-fork` label workflow (see [Fork reviews](fork-review.md)) and stops. Comment runs on **draft** PRs are skipped before the action runs (matching how draft PRs are never reviewed), so a draft fork PR gets no reply either.
 

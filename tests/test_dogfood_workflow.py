@@ -225,11 +225,12 @@ def test_public_action_defaults_are_the_recommended_setup() -> None:
         assert defaults.get(name) == want, f"{name}: {defaults.get(name)!r} != {want!r}"
 
 
-# Comment re-review (#914): an `issue_comment` on a PR whose body starts with
-# `rereview-command` (default `/ai-review`) forces a fresh full review. The
-# payload carries no head SHA and the run carries base-repo secrets, so the
-# workflow resolves the PR through the API (pr-gate) before any checkout and
-# routes fork comments to a base-repo checkout.
+# Comment re-review (#914): an `issue_comment` on a PR whose body is exactly
+# the `rereview-command` (default `/ai-review`; bare command only in v1, no
+# arguments) forces a fresh full review. The payload carries no head SHA and
+# the run carries base-repo secrets, so the workflow resolves the PR through
+# the API (pr-gate) before any checkout and routes fork comments to a
+# base-repo checkout.
 
 
 def test_comment_rereview_trigger_is_created() -> None:
@@ -247,6 +248,44 @@ def test_pr_gate_runs_before_checkout() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     assert "id: pr-gate" in text, "pr-gate step id missing"
     assert _step_index("Resolve PR through the API (pr-gate)", text) < _step_index("Checkout repository", text)
+
+
+def _step_block(step_name: str, workflow_text: str) -> str:
+    """Return the full text of the named step, up to (not including) the next step.
+
+    Line-based (no PyYAML): a step runs from its ``- name:`` line to the
+    next step-level ``- name:`` line, so the slice covers its env:/with:/run:
+    body. The break is anchored on the real step indentation (six spaces in
+    this workflow), so ``- name:`` text at a deeper indent inside a step body
+    (e.g. a shell script line) cannot truncate the block early.
+    """
+    lines = workflow_text.splitlines()
+    index = _step_index(step_name, workflow_text)
+    block = [lines[index]]
+    for line in lines[index + 1:]:
+        if line.startswith("      - name:"):
+            break
+        block.append(line)
+    return "\n".join(block)
+
+
+def test_pr_gate_binds_the_token_its_script_uses() -> None:
+    """pr-gate binds GITHUB_TOKEN, which its run script expands under ``set -u``.
+
+    The script calls the API with ``Bearer ${GITHUB_TOKEN}``, but GitHub
+    Actions does not export the job token as a shell variable: without an
+    explicit ``env:`` binding, ``set -euo pipefail`` makes the pre-checkout
+    gate fail on the very first expansion of every real issue_comment run.
+    """
+    text = WORKFLOW.read_text(encoding="utf-8")
+    block = _step_block("Resolve PR through the API (pr-gate)", text)
+    env_lines = [line for line in block.splitlines() if line.strip().startswith("GITHUB_TOKEN:")]
+    assert env_lines, "pr-gate env: must bind GITHUB_TOKEN for its script"
+    value = _unquote(env_lines[0].strip().removeprefix("GITHUB_TOKEN:"))
+    assert "secrets.GITHUB_TOKEN" in value or "github.token" in value, (
+        f"GITHUB_TOKEN must be bound from the job token: {value!r}"
+    )
+    assert "${GITHUB_TOKEN}" in block, "the run script must expand the bound ${GITHUB_TOKEN}"
 
 
 def _checkout_ref(workflow_text: str) -> str:

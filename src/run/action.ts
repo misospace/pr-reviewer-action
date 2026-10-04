@@ -309,7 +309,7 @@ async function clearRereviewLabel(stage: Env): Promise<void> {
 }
 
 /** #914: "this run was accepted via the comment command" — a `created`
- * `issue_comment` whose body starts with the configured command. The command
+ * `issue_comment` whose body is exactly the configured command. The command
  * match here is RECOGNITION only: precheck has already authorized the run
  * (permission check, fork gate) or skipped it, and a disabled command can
  * never reach `should_review: "true"` in the first place. */

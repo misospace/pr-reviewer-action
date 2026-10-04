@@ -138,19 +138,23 @@ export function eventLabelName(label: PrecheckEventLabel | unknown): string {
   return "";
 }
 
-/** #914: a comment body triggers the re-review command iff, after leading
- * whitespace is stripped, it starts with the command AND the next character
- * is end-of-string, whitespace, or a line break. `/ai-review` and
- * `/ai-review now` match; `/ai-reviewx`, `please /ai-review`, and
- * `/AI-Review` do not. The comparison is a literal prefix (never a regex),
- * so a command containing regex-special characters is matched verbatim. An
- * empty command never matches (it would match everything). */
+/** #914 v1 scope: a comment body triggers the re-review command iff, after
+ * leading whitespace is stripped, the remaining text is the command followed
+ * by NOTHING but whitespace. `/ai-review` and `/ai-review\n` match;
+ * `/ai-review now`, `/ai-reviewx`, `please /ai-review`, and `/AI-Review` do
+ * not. Trailing whitespace (including a trailing newline) is tolerated —
+ * documented policy; any trailing non-whitespace text never triggers,
+ * because the argument namespace is intentionally reserved for a future
+ * release and is not parsed in v1. The comparison is a literal prefix
+ * (never a regex), so a command containing regex-special characters is
+ * matched verbatim. An empty command never matches (it would match
+ * everything). */
 export function commentBodyTriggersCommentCommand(body: string, command: string): boolean {
   if (command === "") return false;
   const trimmed = body.replace(/^\s+/, "");
   if (!trimmed.startsWith(command)) return false;
   const rest = trimmed.slice(command.length);
-  return rest === "" || /^\s/.test(rest);
+  return rest.trimEnd() === "";
 }
 
 /** #914: the repository permission levels that authorize a comment-command
