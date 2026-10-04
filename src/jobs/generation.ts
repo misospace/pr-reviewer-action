@@ -10,6 +10,11 @@
  */
 
 import { createHash } from "node:crypto";
+// The ONE definition of the follow-up reference form (event↔job
+// contract): the event normalizers and this builder share it, so the
+// two layers can never drift. `events` never imports `jobs`, so this
+// runtime import creates no cycle.
+import { COMMENT_ID_PATTERN } from "../events/normalize.js";
 import type { CanonicalForgeEvent, ForgeEventKind } from "../events/types.js";
 import type { BuildJobOptions, ReviewJob, ReviewJobKind } from "./types.js";
 
@@ -26,10 +31,18 @@ export interface GenerationIdentity {
   readonly kind: ReviewJobKind;
   /** "" except a manual forced rereview; always "" for follow_up jobs. */
   readonly nonce: string;
+  /** Operator adoption/config-generation reference layered on the
+   * configFingerprint; "" = pre-adoption/absent epoch. */
+  readonly adoptionEpoch: string;
+  /** The follow-up comment id the follow_up job answers; "" for review
+   * jobs (a review's identity never depends on a comment id). */
+  readonly eventReference: string;
 }
 
 /** Fixed serialization order of the identity fields. The order is part of
- * the id contract: changing it re-keys every job. */
+ * the id contract: changing it re-keys every job. Appending
+ * `adoptionEpoch`/`eventReference` after `nonce` does exactly that —
+ * acceptable while the module has no production callers yet. */
 const IDENTITY_FIELDS = [
   "platform",
   "installationId",
@@ -41,10 +54,12 @@ const IDENTITY_FIELDS = [
   "configFingerprint",
   "kind",
   "nonce",
+  "adoptionEpoch",
+  "eventReference",
 ] as const;
 
 /** Canonical identity serialization: a fixed-order `key=value\n` join over
- * the ten identity fields. Unlike `computeConfigHash` — which SORTS its
+ * the twelve identity fields. Unlike `computeConfigHash` — which SORTS its
  * lines — the field order here is fixed by `IDENTITY_FIELDS` and is part
  * of the id contract. The per-line keys make the form unambiguous despite
  * values that may contain `=`. */
@@ -58,10 +73,11 @@ function canonicalIdentity(identity: GenerationIdentity): string {
 
 /** Deterministic generation id: sha256 hex over the canonical identity
  * serialization. Same identity (any source, any producing kind) => same
- * id; any identity-field change (new head, new config, new nonce, review
- * vs follow_up) => a new id.
+ * id; any identity-field change (new head, new config, new nonce, new
+ * adoption epoch, new follow-up comment id, review vs follow_up) => a new
+ * id.
  *
- * Returns `""` (a fail-closed sentinel, not a hash) when ANY of the ten
+ * Returns `""` (a fail-closed sentinel, not a hash) when ANY of the twelve
  * identity values, stringified, contains a `\n` or `\r`: in the
  * `key=value\n` join, a newline inside one value can make two DISTINCT
  * identities serialize to the same byte string (e.g. headSha
@@ -106,6 +122,11 @@ function normalizeSha(sha: string): string {
  * chars) is invalid. */
 const NONCE_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 
+/** A provided adoption epoch (the operator adoption/config-generation
+ * reference) must be exactly this: 1–64 chars of `[A-Za-z0-9._-]`.
+ * Anything else (including a too-long run of valid chars) is invalid. */
+const ADOPTION_EPOCH_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+
 /** Build the immutable job a canonical event spawns, or `null` when the
  * event produces no job. Returns a frozen object.
  *
@@ -125,6 +146,19 @@ const NONCE_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
  * - a provided nonce for a review job must match `NONCE_PATTERN`, else
  *   the build fails (never silently emptied into the identity); an EMPTY
  *   nonce is treated as ABSENT (not validated).
+ * - a provided `adoptionEpoch` (any job kind) must match
+ *   `ADOPTION_EPOCH_PATTERN`, else the build fails (never silently
+ *   emptied into the identity); an EMPTY epoch is treated as ABSENT
+ *   (not validated, becomes "").
+ * - for a `follow_up` job the identity's `eventReference` is the
+ *   event's `eventReference`, which must be non-empty and match
+ *   `COMMENT_ID_PATTERN` (the shared canonical form, imported from
+ *   `src/events/normalize.js`), else the build fails (an
+ *   unidentifiable follow-up cannot be safely deduped); for a `review`
+ *   job it is forced "" (a review's identity must not depend on a
+ *   comment id, even if a stray event carries one). A non-string
+ *   value is stored as `String(...)` after validation, so a type-cast
+ *   number can never land in the string field / persisted payload.
  * - a non-empty `configFingerprint` must match
  *   `CONFIG_FINGERPRINT_PATTERN`.
  * - a provided `deadlineAtMs` must be a safe integer >= 0.
@@ -144,6 +178,28 @@ export function buildReviewJob(
     // An empty nonce is ABSENT: only non-empty values are validated.
     if (!NONCE_PATTERN.test(options.nonce)) return null;
     nonce = options.nonce;
+  }
+
+  // Unlike the nonce (ignored for follow_up), the adoption epoch is an
+  // identity field of every job kind.
+  let adoptionEpoch = "";
+  if (options.adoptionEpoch) {
+    // An empty epoch is ABSENT: only non-empty values are validated.
+    if (!ADOPTION_EPOCH_PATTERN.test(options.adoptionEpoch)) return null;
+    // Store the STRING form: a type-cast non-string can never land in
+    // the string field / persisted payload.
+    adoptionEpoch = String(options.adoptionEpoch);
+  }
+
+  // A follow_up's identity IS the comment it answers: an unidentifiable
+  // one cannot be deduped safely. A review job's identity never depends
+  // on a comment id.
+  let eventReference = "";
+  if (kind === "follow_up") {
+    if (!COMMENT_ID_PATTERN.test(event.eventReference)) return null;
+    // Store the STRING form: a type-cast non-string can never land in
+    // the string field / persisted payload.
+    eventReference = String(event.eventReference);
   }
 
   // Fail-closed SHA handling for hand-built (non-normalizer) events.
@@ -177,6 +233,8 @@ export function buildReviewJob(
     configFingerprint,
     kind,
     nonce,
+    adoptionEpoch,
+    eventReference,
   });
   if (jobId === "") return null;
 
@@ -194,6 +252,8 @@ export function buildReviewJob(
     baseSha,
     configFingerprint,
     nonce,
+    adoptionEpoch,
+    eventReference,
     fork: event.fork,
     deadlineAtMs,
     runId: options.runId ?? "",

@@ -14,13 +14,23 @@
  * - a bare PR object: `{ number, id?, draft?, head: { sha, repo: {
  *   full_name } }, base: { sha, repo: { full_name } }, user? }`
  * - a follow-up comment payload: `{ name|event: "issue_comment"|"comment",
- *   action: "created", issue: { number?, pull_request }, comment: { user:
- *   { login } } }` — in the REAL GitHub `issue_comment` shape
+ *   action: "created", issue: { number?, pull_request }, comment: { id,
+ *   user: { login } } }` — in the REAL GitHub `issue_comment` shape
  *   `issue.pull_request` is `{ url: ... }` only (no number). The PR number
  *   then comes from `issue.number`. Presence of `issue.pull_request` is
  *   still required for `follow_up`. Its headSha/baseSha are "" (the
  *   `url`-only object carries none; the platform adapter hydrates them
  *   later).
+ *
+ * Follow-up reference capture: comment-shaped envelopes
+ * (`issue_comment`/`comment`) additionally project `comment.id` onto
+ * `eventReference` — the provider-neutral follow-up event reference the
+ * job layer fail-closes on when empty. Canonical form: a digits-only
+ * string matching /^[1-9]\d{0,18}$/ after `String()` + trim — a number
+ * must be a SAFE integer first (an unsafe int is rejected outright,
+ * never stringified); a digit string is accepted. 0, negatives,
+ * non-digits, leading zeros, oversized (>19 digits), and floats become
+ * the sentinel "". Every non-comment event shape carries "".
  *
  * The PR is resolved in this order: `pull_request` → `issue.pull_request`
  * → first object of `pull_requests` → the payload itself (bare PR). For
@@ -30,7 +40,9 @@
  * Conservative failure: the normalizers return `null` (and never throw)
  * when the raw value is not an object, the repo full name cannot be
  * determined, or a PR-scoped kind (pr_* / rereview_label / follow_up) has
- * no PR number.
+ * no PR number. A throwing accessor on a captured field (e.g. a hostile
+ * `comment.id` getter) drops the WHOLE event (`null`) — fail closed,
+ * never a degraded field.
  *
  * SHA validation at the normalize boundary: headSha/baseSha are trimmed,
  * lowercased, and must match /^[0-9a-f]{7,64}$/ — anything else becomes
@@ -41,9 +53,12 @@
  * `kind` to `reconciliation_poll` and `source` to "poll", so a poll
  * observation of a PR is identical to the corresponding webhook event in
  * every identity field and differs only in those two. Its optional
- * `options.installationId` (already-validated, digits-only) is used for
- * the event's `installationId` field (default ""), which lets a poller
- * converge with the webhook that carried `installation.id`.
+ * `options.installationId` is validated at the adapter boundary by the SAME
+ * `normalizeInstallationId` guard as the webhook's `installation.id`
+ * (trim + 1–32 digits; a number must be a SAFE integer first; anything
+ * else is the sentinel "") — the boundary never trusts its caller — and
+ * is used for the event's `installationId` field (default ""), which
+ * lets a poller converge with the webhook that carried `installation.id`.
  */
 
 import type {
@@ -196,14 +211,58 @@ function labelNameOf(label: unknown): string {
   return "";
 }
 
-/** `installation.id` as a digits-only string ("42" from 42); "" when
- * absent, or not 1–32 digits after `String()` + trim. */
+/** Digits-only installation identity (1–32 digits) at the adapter
+ * boundary: `String()` + trim, then the digit pattern; "" on any other
+ * input (unknown, non-string/number, empty, non-digit). A numeric value
+ * must be a SAFE integer first — `String(n)` on an unsafe int silently
+ * alters the value while still matching the digit pattern, collapsing
+ * two distinct installation identities (mirrors the `asId` convention).
+ * The boundary never trusts its caller — webhook `installation.id` and
+ * poll `options.installationId` are both funneled through this. */
 const INSTALLATION_ID_PATTERN = /^\d{1,32}$/;
-function installationIdOf(raw: Record<string, unknown>): string {
-  const id = asObject(raw.installation).id;
-  if (typeof id !== "number" && typeof id !== "string") return "";
-  const normalized = String(id).trim();
+function normalizeInstallationId(value: unknown): string {
+  if (typeof value === "number" && !Number.isSafeInteger(value)) return "";
+  if (typeof value !== "number" && typeof value !== "string") return "";
+  const normalized = String(value).trim();
   return INSTALLATION_ID_PATTERN.test(normalized) ? normalized : "";
+}
+
+/** `installation.id` as a digits-only string ("42" from 42); "" when
+ * absent, or not 1–32 digits after `String()` + trim. The payload is
+ * parsed JSON (own properties only); a prototype-injected `id` is not
+ * expected from the forge envelope layer. */
+function installationIdOf(raw: Record<string, unknown>): string {
+  return normalizeInstallationId(asObject(raw.installation).id);
+}
+
+/** The canonical follow-up comment id form: a digits-only string
+ * (1–19 digits, no leading zero). This is the ONE definition of the
+ * form — it is part of the event↔job contract: the event normalizers
+ * produce `eventReference` in this shape and the job builder
+ * (`src/jobs/generation.ts`) fail-closes on anything else, so the two
+ * layers can never drift apart. */
+export const COMMENT_ID_PATTERN = /^[1-9]\d{0,18}$/;
+
+/** A follow-up comment id as `eventReference`: `String()` + trim, then
+ * `COMMENT_ID_PATTERN`; "" when absent, or 0, negative, non-digit,
+ * oversized (>19 digits), or float. A numeric value must be a SAFE
+ * integer first — `String(n)` on an unsafe int silently alters the value
+ * while still matching the digit patterns, collapsing two distinct
+ * comment ids (or a webhook-number vs API-string observation of the same
+ * comment); an unsafe int is the sentinel "". Never throws. */
+function normalizeCommentId(value: unknown): string {
+  if (typeof value === "number" && !Number.isSafeInteger(value)) return "";
+  if (typeof value !== "number" && typeof value !== "string") return "";
+  const normalized = String(value).trim();
+  return COMMENT_ID_PATTERN.test(normalized) ? normalized : "";
+}
+
+/** `comment.id` (from `raw.comment`) as `eventReference`; "" when the
+ * payload has no comment or no canonical id. The payload is parsed JSON
+ * (own properties only); a prototype-injected `id` is not expected from
+ * the forge envelope layer. */
+function commentIdOf(raw: Record<string, unknown>): string {
+  return normalizeCommentId(asObject(raw.comment).id);
 }
 
 /** Repo-scoped fallback: the first well-formed entry of a `repositories`
@@ -280,6 +339,7 @@ interface EventFields {
   fork: boolean;
   labelName: string;
   actor: string;
+  eventReference: string;
 }
 
 function buildEvent(
@@ -328,6 +388,9 @@ function normalizeEvent(
     const actor = isCommentEvent
       ? (commentActor !== "" ? commentActor : senderActor)
       : (senderActor !== "" ? senderActor : prActor);
+    // The follow-up's provider-neutral reference: the comment id for
+    // comment-shaped envelopes; "" for every non-comment event shape.
+    const eventReference = isCommentEvent ? commentIdOf(raw) : "";
 
     return buildEvent(platform, source, kind, {
       installationId: installationIdOf(raw),
@@ -343,6 +406,7 @@ function normalizeEvent(
       fork: pr === null ? true : pr.fork,
       labelName,
       actor: sanitizeDisplay(actor),
+      eventReference,
     });
   } catch {
     return null;
@@ -385,9 +449,12 @@ export function normalizeForgeEvent(
  * to "poll" — the result is identical to the webhook event for the same PR
  * in every identity field, which is what makes webhook/poll dedupe work.
  *
- * `options.installationId` (already-validated, digits-only) is used for
- * the event's `installationId` field (default ""), which lets a poller
- * converge with the webhook that carried `installation.id`. */
+ * `options.installationId` is validated at the boundary by the same
+ * `normalizeInstallationId` guard as the webhook's `installation.id`
+ * (trim + 1–32 digits; anything else is the sentinel "") and used for the
+ * event's `installationId` field (default ""), which lets a poller
+ * converge with the webhook that carried `installation.id`. Polls are
+ * never comment-shaped, so `eventReference` is always "". */
 export function reconciliationPollEvent(
   platform: "github" | "forgejo",
   prPayloadRaw: unknown,
@@ -404,7 +471,10 @@ export function reconciliationPollEvent(
       asString(asObject(prPayloadRaw.user).login) || asString(asObject(prPayloadRaw.sender).login),
     );
     return buildEvent(platform, "poll", "reconciliation_poll", {
-      installationId: options?.installationId ?? "",
+      // Boundary guard: the poll path validates the caller's
+      // installationId exactly like the webhook path — no pass-through of
+      // uncertain identity state.
+      installationId: normalizeInstallationId(options?.installationId),
       repoFullName,
       prNumber: pr.prNumber,
       prId: pr.prId,
@@ -414,6 +484,7 @@ export function reconciliationPollEvent(
       fork: pr.fork,
       labelName: "",
       actor,
+      eventReference: "",
     });
   } catch {
     return null;

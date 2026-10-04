@@ -30,6 +30,7 @@ function makeEvent(overrides: Partial<CanonicalForgeEvent> = {}): CanonicalForge
     fork: false,
     labelName: "",
     actor: "opener",
+    eventReference: "",
     ...overrides,
   });
 }
@@ -124,6 +125,8 @@ test("deriveGenerationId pins the canonical serialization (fixed key=value order
     configFingerprint: "",
     kind: "review",
     nonce: "",
+    adoptionEpoch: "",
+    eventReference: "",
   } as const;
   const canonical =
     "platform=github\n" +
@@ -135,7 +138,9 @@ test("deriveGenerationId pins the canonical serialization (fixed key=value order
     "baseSha=\n" +
     "configFingerprint=\n" +
     "kind=review\n" +
-    "nonce=\n";
+    "nonce=\n" +
+    "adoptionEpoch=\n" +
+    "eventReference=\n";
   const expected = createHash("sha256").update(canonical, "utf8").digest("hex");
   assert.equal(deriveGenerationId(identity), expected);
 });
@@ -152,20 +157,28 @@ test("a newline/CR in any identity value yields the empty id (newline-injection 
     configFingerprint: "",
     kind: "review",
     nonce: "",
+    adoptionEpoch: "",
+    eventReference: "",
   };
   // The exact hostile boundary: two DISTINCT identities that serialize to
-  // the SAME bytes in the `key=value\n` form.
+  // the SAME bytes in the full TWELVE-line `key=value\n` form.
   const serialize = (headSha: string, baseSha: string): string =>
     "platform=github\ninstallationId=42\nrepoFullName=owner/repo\nprNumber=7\nprId=4242\n" +
     `headSha=${headSha}\n` +
     `baseSha=${baseSha}\n` +
-    "configFingerprint=\nkind=review\nnonce=\n";
+    "configFingerprint=\nkind=review\nnonce=\nadoptionEpoch=\neventReference=\n";
   assert.equal(serialize("x\nbaseSha=b", ""), serialize("x", "b\nbaseSha="));
   // With the guard, neither mints an id:
   assert.equal(deriveGenerationId({ ...base, headSha: "x\nbaseSha=b", baseSha: "" }), "");
   assert.equal(deriveGenerationId({ ...base, headSha: "x", baseSha: "b\nbaseSha=" }), "");
   // A \r in any value is rejected too:
   assert.equal(deriveGenerationId({ ...base, nonce: "a\rb" }), "");
+  // The two NEW identity fields (adoptionEpoch, eventReference) are
+  // guarded the same way:
+  assert.equal(deriveGenerationId({ ...base, adoptionEpoch: "a\rb" }), "");
+  assert.equal(deriveGenerationId({ ...base, eventReference: "1\n2" }), "");
+  // ...and one more CR case:
+  assert.equal(deriveGenerationId({ ...base, eventReference: "1\r2" }), "");
   // ...and buildReviewJob refuses to build a job for them:
   assert.equal(buildReviewJob(makeEvent({ headSha: "x\nbaseSha=b", baseSha: "" })), null);
   assert.equal(buildReviewJob(makeEvent({ headSha: "x", baseSha: "b\nbaseSha=" })), null);
@@ -212,7 +225,7 @@ test("irrelevant events: shouldSchedule false and buildReviewJob null", () => {
 });
 
 test("follow_up does not schedule a review generation but does build a job", () => {
-  const ev = makeEvent({ kind: "follow_up" });
+  const ev = makeEvent({ kind: "follow_up", eventReference: "1234" });
   assert.equal(shouldSchedule(ev), false);
   assert.notEqual(buildReviewJob(ev), null);
 });
@@ -267,10 +280,58 @@ test("an invalid provided nonce fails the build (never silently emptied)", () =>
   assert.equal(buildReviewJob(ev, { nonce: "has space" }), null);
 });
 
+// ── Adoption epoch ───────────────────────────────────────────────────────────
+
+test("disable→re-enable: same head+config, a new adoptionEpoch yields a distinct jobId", () => {
+  const ev = makeEvent();
+  const cfg = { configFingerprint: "0123456789abcdef" };
+  const preAdoption = buildReviewJob(ev, cfg);
+  const gen1 = buildReviewJob(ev, { ...cfg, adoptionEpoch: "1" });
+  const gen2 = buildReviewJob(ev, { ...cfg, adoptionEpoch: "2" });
+  assert.notEqual(preAdoption, null);
+  assert.notEqual(gen1, null);
+  assert.notEqual(gen2, null);
+  // The unchanged head+config hashes back to the same configFingerprint,
+  // so the epoch is what re-keys the generation:
+  assert.notEqual(gen2!.jobId, preAdoption!.jobId);
+  assert.notEqual(gen1!.jobId, preAdoption!.jobId);
+  assert.notEqual(gen1!.jobId, gen2!.jobId);
+  // The same epoch twice is stable (idempotent).
+  const gen2b = buildReviewJob(ev, { ...cfg, adoptionEpoch: "2" });
+  assert.notEqual(gen2b, null);
+  assert.equal(gen2!.jobId, gen2b!.jobId);
+  // The job carries the validated value.
+  assert.equal(preAdoption!.adoptionEpoch, "");
+  assert.equal(gen1!.adoptionEpoch, "1");
+  assert.equal(gen2!.adoptionEpoch, "2");
+});
+
+test("an empty adoptionEpoch is ABSENT: it builds the plain job; non-empty epochs are validated", () => {
+  const ev = makeEvent();
+  const base = buildReviewJob(ev);
+  const empty = buildReviewJob(ev, { adoptionEpoch: "" });
+  assert.notEqual(base, null);
+  assert.notEqual(empty, null);
+  assert.equal(empty!.jobId, base!.jobId);
+  assert.equal(empty!.adoptionEpoch, "");
+  // Boundary: exactly 64 valid chars is accepted, 65 is not.
+  assert.notEqual(buildReviewJob(ev, { adoptionEpoch: "a".repeat(64) }), null);
+  assert.equal(buildReviewJob(ev, { adoptionEpoch: "a".repeat(65) }), null);
+});
+
+test("an invalid provided adoptionEpoch fails the build (newline, too long, bad charset)", () => {
+  const ev = makeEvent();
+  assert.equal(buildReviewJob(ev, { adoptionEpoch: "gen\n2" }), null);
+  assert.equal(buildReviewJob(ev, { adoptionEpoch: "gen\r2" }), null);
+  assert.equal(buildReviewJob(ev, { adoptionEpoch: "a".repeat(65) }), null);
+  assert.equal(buildReviewJob(ev, { adoptionEpoch: "!!!" }), null);
+  assert.equal(buildReviewJob(ev, { adoptionEpoch: "has space" }), null);
+});
+
 // ── follow_up isolation ─────────────────────────────────────────────────────
 
 test("follow_up job: kind follow_up, nonce ignored, never shares a review jobId", () => {
-  const fu = makeEvent({ kind: "follow_up" });
+  const fu = makeEvent({ kind: "follow_up", eventReference: "1234" });
   const plain = buildReviewJob(fu);
   const withNonce = buildReviewJob(fu, { nonce: "q-a-1" });
   assert.notEqual(plain, null);
@@ -286,6 +347,69 @@ test("follow_up job: kind follow_up, nonce ignored, never shares a review jobId"
   const review = buildReviewJob(makeEvent({ kind: "synchronize" }));
   assert.notEqual(review, null);
   assert.notEqual(plain!.jobId, review!.jobId);
+});
+
+// ── follow_up eventReference ────────────────────────────────────────────────
+
+test("follow_up: two events differing only by eventReference yield distinct jobIds", () => {
+  const a = buildReviewJob(makeEvent({ kind: "follow_up", eventReference: "1234" }));
+  const b = buildReviewJob(makeEvent({ kind: "follow_up", eventReference: "5678" }));
+  assert.notEqual(a, null);
+  assert.notEqual(b, null);
+  assert.notEqual(a!.jobId, b!.jobId);
+  // The frozen job carries the effective reference.
+  assert.equal(a!.eventReference, "1234");
+  assert.equal(b!.eventReference, "5678");
+});
+
+test("follow_up: the same comment id from any source dedupes to one jobId (source-independent)", () => {
+  // The builder is SOURCE-INDEPENDENT: no real poll path produces a
+  // follow_up today (polls are never comment-shaped), so this pin
+  // documents the id contract, not a real webhook/poll convergence.
+  const webhook = buildReviewJob(
+    makeEvent({ kind: "follow_up", eventReference: "1234", source: "webhook" }),
+  );
+  const poll = buildReviewJob(makeEvent({ kind: "follow_up", eventReference: "1234", source: "poll" }));
+  assert.notEqual(webhook, null);
+  assert.notEqual(poll, null);
+  // Same comment id, any source => one job.
+  assert.equal(webhook!.jobId, poll!.jobId);
+});
+
+test("follow_up: an empty or invalid eventReference fails the build (fail closed)", () => {
+  const fu = { kind: "follow_up" as const };
+  assert.equal(buildReviewJob(makeEvent(fu)), null); // "" (absent)
+  assert.equal(buildReviewJob(makeEvent({ ...fu, eventReference: "0" })), null);
+  // Leading zero: not canonical, fails closed.
+  assert.equal(buildReviewJob(makeEvent({ ...fu, eventReference: "007" })), null);
+  assert.equal(buildReviewJob(makeEvent({ ...fu, eventReference: "-5" })), null);
+  assert.equal(buildReviewJob(makeEvent({ ...fu, eventReference: "abc" })), null);
+  // Newline-injection boundary: the hostile token itself.
+  assert.equal(buildReviewJob(makeEvent({ ...fu, eventReference: "12\n34" })), null);
+  // Oversized: 20 digits fails, 19 is the boundary that passes.
+  assert.equal(buildReviewJob(makeEvent({ ...fu, eventReference: "1".repeat(20) })), null);
+  assert.notEqual(buildReviewJob(makeEvent({ ...fu, eventReference: "1".repeat(19) })), null);
+});
+
+test("a non-string eventReference is stored as its String() form in the frozen job", () => {
+  // A type-cast number can never land in the string field / persisted
+  // payload: after validation the builder stores String(value).
+  const ev = makeEvent({ kind: "follow_up", eventReference: 1234 as unknown as string });
+  const job = buildReviewJob(ev);
+  assert.notEqual(job, null);
+  assert.equal(job!.eventReference, "1234");
+  assert.equal(typeof job!.eventReference, "string");
+});
+
+test("review jobs force eventReference to '': a stray reference changes nothing", () => {
+  const clean = buildReviewJob(makeEvent({ kind: "synchronize", eventReference: "" }));
+  const stray = buildReviewJob(makeEvent({ kind: "synchronize", eventReference: "1234" }));
+  assert.notEqual(clean, null);
+  assert.notEqual(stray, null);
+  // The review generation dedupes across sources even when a stray event
+  // carries a comment id:
+  assert.equal(stray!.jobId, clean!.jobId);
+  assert.equal(stray!.eventReference, "");
 });
 
 // ── Field preservation ──────────────────────────────────────────────────────
@@ -347,7 +471,7 @@ test("a review-kind event without a headSha builds no job", () => {
   assert.equal(buildReviewJob(makeEvent({ kind: "synchronize", headSha: "" })), null);
   assert.equal(buildReviewJob(makeEvent({ kind: "pr_opened", headSha: "" })), null);
   // A follow_up without a head is fine: "" is its sentinel.
-  const fu = buildReviewJob(makeEvent({ kind: "follow_up", headSha: "" }));
+  const fu = buildReviewJob(makeEvent({ kind: "follow_up", headSha: "", eventReference: "1234" }));
   assert.notEqual(fu, null);
   assert.equal(fu!.headSha, "");
 });
@@ -360,7 +484,10 @@ test("buildReviewJob normalizes head/base SHAs and fails closed on malformed one
   assert.equal(buildReviewJob(makeEvent({ headSha: "not-a-sha" })), null);
   assert.equal(buildReviewJob(makeEvent({ headSha: "aa11bb22cc33", baseSha: "zzz" })), null);
   // follow_up: a non-empty head must also be well-formed.
-  assert.equal(buildReviewJob(makeEvent({ kind: "follow_up", headSha: "not-a-sha" })), null);
+  assert.equal(
+    buildReviewJob(makeEvent({ kind: "follow_up", headSha: "not-a-sha", eventReference: "1234" })),
+    null,
+  );
 });
 
 test("a 10KB headSha in a review event builds no job", () => {
@@ -369,7 +496,7 @@ test("a 10KB headSha in a review event builds no job", () => {
 
 // ── Per-field identity distinctness and hostile shapes ─────────────────────
 
-test("each of the ten identity fields, varied alone, yields a distinct jobId", () => {
+test("each of the twelve identity fields, varied alone, yields a distinct jobId", () => {
   const base = buildReviewJob(makeEvent());
   assert.notEqual(base, null);
   const eventFields: Array<[string, Partial<CanonicalForgeEvent>]> = [
@@ -380,20 +507,31 @@ test("each of the ten identity fields, varied alone, yields a distinct jobId", (
     ["prId", { prId: 4243 }],
     ["headSha", { headSha: "dd44ee55ff66" }],
     ["baseSha", { baseSha: "ee55ff66aa77" }],
-    ["kind", { kind: "follow_up" }],
+    // Varying the kind to follow_up also requires a valid eventReference.
+    ["kind", { kind: "follow_up", eventReference: "1234" }],
   ];
   for (const [field, overrides] of eventFields) {
     const job = buildReviewJob(makeEvent(overrides));
     assert.notEqual(job, null, field);
     assert.notEqual(job!.jobId, base!.jobId, field);
   }
-  // configFingerprint and nonce are build options, not event fields.
+  // configFingerprint, nonce and adoptionEpoch are build options, not
+  // event fields.
   const cfg = buildReviewJob(makeEvent(), { configFingerprint: "0123456789abcdef" });
   assert.notEqual(cfg, null, "configFingerprint");
   assert.notEqual(cfg!.jobId, base!.jobId, "configFingerprint");
   const nonce = buildReviewJob(makeEvent(), { nonce: "n-1" });
   assert.notEqual(nonce, null, "nonce");
   assert.notEqual(nonce!.jobId, base!.jobId, "nonce");
+  const epoch = buildReviewJob(makeEvent(), { adoptionEpoch: "2" });
+  assert.notEqual(epoch, null, "adoptionEpoch");
+  assert.notEqual(epoch!.jobId, base!.jobId, "adoptionEpoch");
+  // eventReference is an identity field for follow_up jobs only.
+  const fuBase = buildReviewJob(makeEvent({ kind: "follow_up", eventReference: "1234" }));
+  const fuVaried = buildReviewJob(makeEvent({ kind: "follow_up", eventReference: "5678" }));
+  assert.notEqual(fuBase, null, "eventReference");
+  assert.notEqual(fuVaried, null, "eventReference");
+  assert.notEqual(fuVaried!.jobId, fuBase!.jobId, "eventReference");
 });
 
 test("a __proto__-keyed event object does not throw and does not pollute Object.prototype", () => {
@@ -417,6 +555,8 @@ test("a __proto__-keyed event object does not throw and does not pollute Object.
     configFingerprint: "",
     kind: "review",
     nonce: "",
+    adoptionEpoch: "",
+    eventReference: "",
   };
   Object.defineProperty(identity, "__proto__", {
     value: { polluted: true },

@@ -54,6 +54,11 @@ export interface CanonicalForgeEvent {
   readonly labelName: string;
   /** Triggering user login; "" when absent. */
   readonly actor: string;
+  /** Canonical identifier of the specific forge object that produced the
+   * event when identity-relevant — currently only the follow-up comment id
+   * (GitHub `issue_comment` and Forgejo `comment` webhook envelopes both
+   * carry `comment.id`); "" when absent or not canonical. */
+  readonly eventReference: string;
 }
 
 /** Options for the event normalizers. */

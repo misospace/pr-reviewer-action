@@ -36,8 +36,11 @@ generation identity and the staleness checks agree on SHA form, and
 downstream staleness checks fail closed on `""`. `reconciliationPollEvent`
 runs the same bare-PR extraction and overrides `kind`/`source`, so ALL
 identity fields converge between a webhook and a reconciliation poll of
-the same PR (the poller supplies the same `installationId` the webhook
-carried, via `options.installationId`) and the two differ only in
+the same PR (the poll path validates the caller's
+`options.installationId` at the boundary with the same digits-only
+canonical form as the webhook's `installation.id` — trim + 1–32 digits,
+fail-closed to `""` — and never trusts its caller, so the poller supplies
+the same `installationId` the webhook carried) and the two differ only in
 `source` (`webhook` vs `poll`) and `kind` — the property the webhook/poll
 dedupe below relies on. `actor` is NOT an identity field and may differ
 between the two observations.
@@ -60,6 +63,8 @@ with sentinels in the same style as `CanonicalForgeEvent`:
 | `headSha` / `baseSha` | the head the review is about; effective base/merge-base input (lowercase hex) | `""` |
 | `configFingerprint` | effective reviewer-config fingerprint: `""` or an 8–64 hex digest | `""` |
 | `nonce` | manual forced-rereview nonce | `""` |
+| `adoptionEpoch` | operator adoption/config-generation reference layered on the fingerprint (the #728 epoch dimension); changing it re-keys every job for the same head+config | `""` = pre-adoption/absent |
+| `eventReference` | the follow-up comment id a `follow_up` job answers (1–19 digits, no leading zero); forced `""` for `review` jobs | `""` |
 | `fork` | trust metadata preserved from the event | `false` |
 | `deadlineAtMs` | deadline/cancellation identity | `0` = none |
 | `runId` | assigned run id | `""` = unassigned |
@@ -68,11 +73,12 @@ with sentinels in the same style as `CanonicalForgeEvent`:
 
 `deriveGenerationId` (`src/jobs/generation.ts`) is sha256 over a
 canonical serialization — a fixed-order `key=value\n` line per field — of
-exactly these ten **identity fields**:
+exactly these twelve **identity fields**:
 
 ```
 platform, installationId, repoFullName, prNumber, prId,
-headSha, baseSha, configFingerprint, kind, nonce
+headSha, baseSha, configFingerprint, kind, nonce,
+adoptionEpoch, eventReference
 ```
 
 **Excluded, deliberately:**
@@ -89,9 +95,18 @@ headSha, baseSha, configFingerprint, kind, nonce
   head/config must never share a generation.
 - `nonce` — a manual forced rereview is a new generation of the same
   head.
+- `adoptionEpoch` — the operator adoption/config-generation reference
+  layered on `configFingerprint` (#728): a disable→re-enable cycle on
+  the unchanged head+config hashes back to the same fingerprint, so
+  without the epoch it would dedupe to the same job; the operator
+  transition must trigger a fresh review.
+- `eventReference` — the follow-up comment id: two distinct authorized
+  follow-up comments on the same PR must not collapse into one job.
+  Forced `""` for `review` jobs, so a review's identity never depends on
+  a comment id (webhook/poll/reconcile dedupe of reviews is unchanged).
 
-**Rejected:** if ANY of the ten identity values, stringified, contains a
-`\n` or `\r`, `deriveGenerationId` returns `""` instead of a hash — in
+**Rejected:** if ANY of the twelve identity values, stringified, contains
+a `\n` or `\r`, `deriveGenerationId` returns `""` instead of a hash — in
 the `key=value\n` join, a newline inside one value can make two distinct
 identities serialize to the same bytes and collide their ids.
 `buildReviewJob` then refuses to build the job (fail closed).
@@ -115,6 +130,15 @@ scheduling boundary itself (defense in depth on top of `schedule.ts`):
   exactly; an EMPTY nonce is treated as absent (not validated); a
   provided-but-invalid nonce fails the build rather than being silently
   emptied into the identity;
+- a provided `adoptionEpoch` (any job kind) must match
+  `[A-Za-z0-9._-]{1,64}` exactly; an EMPTY/absent epoch is treated as
+  absent (becomes `""`); a provided-but-invalid epoch fails the build
+  rather than being silently emptied into the identity;
+- a `follow_up` job's `eventReference` is the event's, and must be
+  non-empty and match `/^[1-9]\d{0,18}$/` (1–19 digits, no leading
+  zero), else the build fails — an unidentifiable follow-up cannot be
+  safely deduped; a `review` job's is forced `""` even if a stray event
+  carries a reference;
 - a non-empty `configFingerprint` must be an 8–64 hex digest
   (`/^[0-9a-f]{8,64}$/`);
 - a provided `deadlineAtMs` must be a safe integer >= 0;
@@ -149,16 +173,23 @@ of arbitrary text.
 A `follow_up` (Q&A on an existing review) builds a `follow_up` job that
 must never mutate the managed review/verdict of the `review` job. The
 isolation is structural: `kind` is an identity field, so the two job
-kinds for the same head/config can never share a `jobId`; and the nonce
-is ignored for `follow_up` jobs (a valid one is dropped, an invalid one
-does not fail), so Q&A can never bump a review generation.
+kinds for the same head/config can never share a `jobId`; the nonce is
+ignored for `follow_up` jobs (a valid one is dropped, an invalid one
+does not fail), so Q&A can never bump a review generation; and
+`eventReference` is an identity field for `follow_up` jobs (the comment
+id they answer) while forced `""` for `review` jobs — distinct
+authorized follow-up comments on the same PR each mint their own job,
+while a stray reference on a review event changes nothing.
 
 The real GitHub `issue_comment` payload carries `issue.pull_request` as
 `{ url }` only — the PR number comes from `issue.number`, and no
 head/base SHAs are present in it, so a `follow_up` job's `headSha` is
 `""` at webhook time and is NOT required (unlike `review` jobs, which
 fail closed without a head); the platform adapter hydrates the head/base
-SHAs later.
+SHAs later. The `comment.id` of the follow-up is captured at the adapter
+boundary as the canonical `eventReference` (1–19 digits, no leading zero;
+`""` sentinel) in both the GitHub `issue_comment` and the Forgejo
+`comment` envelope.
 
 ## Staleness
 
@@ -195,12 +226,14 @@ runtime.
 |---|---|
 | webhook + poll of the same PR/config dedupe to one job id; only reason/trigger differ (through the REAL normalizers, same installationId) | `normalizeGitHubEvent` + `reconciliationPollEvent` + `buildReviewJob`; test "webhook and poll … identical jobs" |
 | new headSha / new configFingerprint ⇒ new id | `deriveGenerationId`; tests "a new headSha …", "a different configFingerprint …" |
-| each of the ten identity fields, varied alone ⇒ distinct id | `deriveGenerationId`; test "each of the ten identity fields …" |
+| each of the twelve identity fields, varied alone ⇒ distinct id | `deriveGenerationId`; test "each of the twelve identity fields …" |
 | irrelevant kinds (pr_closed, unknown, visibility_change, …) schedule nothing and build nothing | `shouldSchedule` + `buildReviewJob`; test "irrelevant events …" |
 | headless check_update (no PR number) ⇒ no generation | `shouldSchedule`; test "a headless check_update …" |
 | same head/config: rereview_label ≡ synchronize id; manual nonce breaks it | `deriveGenerationId` (reason out, nonce in); tests "rereview_label and synchronize …", "a manual forced rereview …" |
 | nonce semantics: empty = absent, stable per nonce, distinct per nonce, invalid/65-chars ⇒ null | `buildReviewJob`; tests "an empty nonce is ABSENT …", "an invalid provided nonce …" |
+| adoptionEpoch: disable→re-enable on the unchanged head+config re-keys the generation; empty = absent, invalid/newline/65-chars ⇒ null | `buildReviewJob`; tests "disable→re-enable: …", "an empty adoptionEpoch is ABSENT …", "an invalid provided adoptionEpoch …" |
 | follow_up: own job kind, nonce ignored, id never collides with a review job; `""` head not required | `buildReviewJob`; tests "follow_up job: …", "buildReviewJob normalizes head/base SHAs …" |
+| follow_up eventReference: distinct comment ids ⇒ distinct ids; same id any source dedupes; `""`/`0`/`-5`/`abc`/newline/20-digits ⇒ null; review jobs forced `""` (stray reference changes nothing) | `buildReviewJob`; tests "follow_up: two events differing only by eventReference …", "follow_up: the same comment id from webhook and poll …", "follow_up: an empty or invalid eventReference …", "review jobs force eventReference …" |
 | fork metadata preserved | `buildReviewJob`; test "event fields (including fork) …" |
 | SHA form: builder normalizes trim+lowercase, fails closed on malformed; 10KB headSha ⇒ null | `buildReviewJob`; tests "buildReviewJob normalizes head/base SHAs …", "a 10KB headSha …" |
 | newline/CR in an identity value ⇒ empty id ⇒ no job | `deriveGenerationId` + `buildReviewJob`; test "a newline/CR in any identity value …" |

@@ -246,10 +246,13 @@ instruction list, and `require-suggested-fix`. Normalization rules:
   disabled configuration must not share an identity. The limit is stated
   plainly: this is a deterministic current-state hash, not history — a full
   disable → re-enable cycle hashes back to the original fingerprint.
-  Whether resuming review on an unchanged head requires a new generation is
-  [#728](https://github.com/misospace/pr-reviewer-action/issues/728)'s to
-  answer, via an adoption/config generation (or equivalent event-generation)
-  dimension layered on top of this fingerprint.
+  [#728](https://github.com/misospace/pr-reviewer-action/issues/728)
+  answers the generation question that limit raises as the `adoptionEpoch`
+  identity field of `ReviewJob` (`src/jobs/`, documented in
+  [forge-events-and-review-jobs.md](forge-events-and-review-jobs.md)),
+  layered on top of this fingerprint: a disable → re-enable cycle carries
+  a new epoch and therefore a new generation, while the `ecfg-v1-`
+  fingerprint stays the current-state hash.
 - Warnings and the config file path remain excluded: they describe the run;
   they are not config state.
 

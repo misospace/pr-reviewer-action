@@ -45,6 +45,16 @@ export interface ReviewJob {
   /** Manual forced-rereview nonce; "" unless a manual forced rereview.
    * Always "" for follow_up jobs. */
   readonly nonce: string;
+  /** Operator adoption/config-generation reference layered on the
+   * `configFingerprint` (the #728 epoch dimension); "" =
+   * pre-adoption/absent epoch. Changing it re-keys every job for the
+   * same head+config — a disable→re-enable cycle on the unchanged
+   * head+config must carry a new one so it triggers a fresh review. */
+  readonly adoptionEpoch: string;
+  /** The follow-up comment id the `follow_up` job answers (1–19 digits,
+   * no leading zero); "" for `review` jobs — a review's identity never
+   * depends on a comment id, even if a stray event carries one. */
+  readonly eventReference: string;
   /** Trust metadata preserved from the event. */
   readonly fork: boolean;
   /** Deadline in epoch ms; 0 = no deadline (deadline/cancellation
@@ -59,10 +69,15 @@ export interface BuildJobOptions {
   /** Effective reviewer-config fingerprint. Default "". */
   configFingerprint?: string;
   /** Manual forced-rereview nonce. Must match
-   * `[A-Za-z0-9._-]{1,64}` when provided for a review job (a
-   * provided-but-invalid nonce fails the build); ignored for follow_up
-   * jobs. */
+    * `[A-Za-z0-9._-]{1,64}` when provided for a review job (a
+    * provided-but-invalid nonce fails the build); ignored for follow_up
+    * jobs. */
   nonce?: string;
+  /** Operator adoption/config-generation reference. Must match
+    * `[A-Za-z0-9._-]{1,64}` when provided (a provided-but-invalid epoch
+    * fails the build); an EMPTY/absent epoch is treated as absent
+    * (becomes ""). Default "". Applies to every job kind. */
+  adoptionEpoch?: string;
   /** Deadline in epoch ms. Default 0 (no deadline). */
   deadlineAtMs?: number;
   /** Run id. Default "" (not yet assigned). */

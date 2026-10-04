@@ -23,6 +23,7 @@ function identityOf(event: CanonicalForgeEvent): Record<string, unknown> {
     fork: event.fork,
     labelName: event.labelName,
     actor: event.actor,
+    eventReference: event.eventReference,
   };
 }
 
@@ -72,6 +73,7 @@ test("GitHub and Forgejo payloads normalize to identical identity fields", () =>
     fork: true,
     labelName: "",
     actor: "opener",
+    eventReference: "",
   });
 });
 
@@ -179,6 +181,8 @@ test("issue_comment created on a PR is a follow_up", () => {
   assert.equal(event!.prNumber, 9);
   assert.equal(event!.prId, 55);
   assert.equal(event!.actor, "commenter");
+  // The comment id now surfaces as the canonical event reference.
+  assert.equal(event!.eventReference, "1");
 });
 
 test("issue_comment not on a PR (or not created) is unknown", () => {
@@ -191,6 +195,8 @@ test("issue_comment not on a PR (or not created) is unknown", () => {
   });
   assert.equal(noPr?.kind, "unknown");
   assert.equal(noPr?.prNumber, 0);
+  // Comment-shaped envelope: the id is still captured as the reference.
+  assert.equal(noPr?.eventReference, "1");
 
   const edited = normalizeGitHubEvent({
     name: "issue_comment",
@@ -200,6 +206,163 @@ test("issue_comment not on a PR (or not created) is unknown", () => {
     comment: { id: 1, user: { login: "commenter" } },
   });
   assert.equal(edited?.kind, "unknown");
+  assert.equal(edited?.eventReference, "1");
+});
+
+function commentPayload(
+  name: "issue_comment" | "comment",
+  comment: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    name,
+    action: "created",
+    repository: { full_name: "owner/repo" },
+    issue: {
+      number: 9,
+      pull_request: {
+        id: 55,
+        number: 9,
+        head: { sha: "a1b2c3d", repo: { full_name: "owner/repo" } },
+        base: { sha: "deadbeef", repo: { full_name: "owner/repo" } },
+      },
+    },
+    comment,
+  };
+}
+
+test("follow_up eventReference: number and digit-string comment.id normalize to canonical digits", () => {
+  const ghNumeric = normalizeGitHubEvent(commentPayload("issue_comment", { id: 123456789, user: { login: "commenter" } }));
+  assert.notEqual(ghNumeric, null);
+  assert.equal(ghNumeric!.kind, "follow_up");
+  assert.equal(ghNumeric!.eventReference, "123456789");
+
+  const ghString = normalizeGitHubEvent(commentPayload("issue_comment", { id: "987654321", user: { login: "commenter" } }));
+  assert.equal(ghString?.kind, "follow_up");
+  assert.equal(ghString?.eventReference, "987654321");
+
+  // Trimmed digit string is accepted.
+  const ghTrimmed = normalizeGitHubEvent(commentPayload("issue_comment", { id: "  42  ", user: { login: "commenter" } }));
+  assert.equal(ghTrimmed?.eventReference, "42");
+
+  const fjNumeric = normalizeForgejoEvent(commentPayload("comment", { id: 123456789, user: { login: "commenter" } }));
+  assert.notEqual(fjNumeric, null);
+  assert.equal(fjNumeric!.kind, "follow_up");
+  assert.equal(fjNumeric!.eventReference, "123456789");
+
+  const fjString = normalizeForgejoEvent(commentPayload("comment", { id: "987654321", user: { login: "commenter" } }));
+  assert.equal(fjString?.kind, "follow_up");
+  assert.equal(fjString?.eventReference, "987654321");
+
+  // 19 digits is the upper bound and still canonical.
+  const max = normalizeGitHubEvent(commentPayload("issue_comment", { id: "123456789123456789", user: { login: "commenter" } }));
+  assert.equal(max?.eventReference, "123456789123456789");
+});
+
+test("follow_up eventReference: adversarial comment.id values are '' and never throw", () => {
+  const hostile: unknown[] = [
+    0, // zero
+    -5, // negative
+    "007", // leading zero
+    "abc", // non-digit
+    "1\nbaseSha=x", // newline-injection payload token
+    "1".repeat(20), // oversized (20 digits)
+    1.5, // float
+    "1.5", // float as string
+    // 18-digit NUMERIC: not a safe integer; String() would silently
+    // alter it, so it is the sentinel "" (see the convergence test).
+    123456789123456789,
+    null, // absent
+    undefined, // absent
+    true, // non-string/number
+    { id: 1 }, // id itself an object
+  ];
+  for (const id of hostile) {
+    const event = normalizeGitHubEvent(commentPayload("issue_comment", { id, user: { login: "commenter" } }));
+    assert.notEqual(event, null, `id: ${JSON.stringify(id)}`);
+    assert.equal(event!.eventReference, "", `id: ${JSON.stringify(id)}`);
+  }
+  // Same on the Forgejo `comment` envelope.
+  const fj = normalizeForgejoEvent(commentPayload("comment", { id: "1\nbaseSha=x", user: { login: "commenter" } }));
+  assert.notEqual(fj, null);
+  assert.equal(fj!.eventReference, "");
+
+  // A `__proto__`-keyed comment object (as parsed from a hostile JSON
+  // body): the pollution key must not surface a reference and must not
+  // throw. No own `id` ⇒ "".
+  const polluted = JSON.parse(
+    '{"name":"issue_comment","action":"created","repository":{"full_name":"owner/repo"},"issue":{"number":9,"pull_request":{"id":55,"number":9,"head":{"sha":"a1b2c3d","repo":{"full_name":"owner/repo"}},"base":{"sha":"deadbeef","repo":{"full_name":"owner/repo"}}}},"comment":{"__proto__":{"id":999999,"user":{"login":"polluter"}},"user":{"login":"commenter"}}}',
+  );
+  const polluter = normalizeGitHubEvent(polluted);
+  assert.notEqual(polluter, null);
+  assert.equal(polluter!.eventReference, "");
+
+  // Non-comment event shapes carry no reference, even with a comment key.
+  const prEvent = normalizeGitHubEvent({
+    name: "pull_request",
+    action: "opened",
+    repository: { full_name: "owner/repo" },
+    pull_request: { number: 7 },
+    comment: { id: 1, user: { login: "commenter" } },
+  });
+  assert.equal(prEvent?.eventReference, "");
+});
+
+test("unsafe numeric comment.id is '' while the digit string normalizes to itself (no convergence)", () => {
+  // The numeric literal is NOT a safe integer: String() on it silently
+  // alters the value while still matching the digit patterns, which
+  // would collapse two distinct comment ids. It must be the sentinel "".
+  const numeric = normalizeGitHubEvent(
+    commentPayload("issue_comment", { id: 123456789123456789, user: { login: "commenter" } }),
+  );
+  assert.notEqual(numeric, null);
+  assert.equal(numeric!.eventReference, "");
+  // The digit STRING of the same magnitude still normalizes to itself,
+  // so the two observations do NOT converge:
+  const asString = normalizeGitHubEvent(
+    commentPayload("issue_comment", { id: "123456789123456790", user: { login: "commenter" } }),
+  );
+  assert.notEqual(asString, null);
+  assert.equal(asString!.eventReference, "123456789123456790");
+
+  // Same on the Forgejo `comment` envelope.
+  const fj = normalizeForgejoEvent(
+    commentPayload("comment", { id: 123456789123456789, user: { login: "commenter" } }),
+  );
+  assert.equal(fj?.eventReference, "");
+});
+
+test("GitHub issue_comment and Forgejo comment of the SAME comment normalize identically (eventReference equal)", () => {
+  const issue = {
+    number: 9,
+    pull_request: {
+      id: 55,
+      number: 9,
+      head: { sha: "a1b2c3d", repo: { full_name: "owner/repo" } },
+      base: { sha: "deadbeef", repo: { full_name: "owner/repo" } },
+    },
+  };
+  const gh = normalizeGitHubEvent({
+    name: "issue_comment",
+    action: "created",
+    repository: { full_name: "owner/repo" },
+    issue,
+    comment: { id: 123456789, user: { login: "commenter" } },
+  });
+  const fj = normalizeForgejoEvent({
+    name: "comment",
+    action: "created",
+    repository: { full_name: "owner/repo" },
+    issue,
+    comment: { id: 123456789, user: { login: "commenter" } },
+  });
+  assert.notEqual(gh, null);
+  assert.notEqual(fj, null);
+  assert.equal(gh!.platform, "github");
+  assert.equal(fj!.platform, "forgejo");
+  // Equal in every provider-neutral field, including the event reference.
+  assert.equal(gh!.eventReference, fj!.eventReference);
+  assert.equal(gh!.eventReference, "123456789");
+  assert.deepEqual(identityOf(gh!), identityOf(fj!));
 });
 
 // ── Repo-scoped events ─────────────────────────────────────────────────────
@@ -312,6 +475,45 @@ test("poll observation is forge-agnostic and fails closed without identity", () 
   assert.equal(reconciliationPollEvent("github", { repository: { full_name: "owner/repo" } }), null); // no number
 });
 
+test("poll installationId is validated at the boundary (fail closed on non-digits)", () => {
+  const prPayload = {
+    number: 3,
+    head: { sha: "a1b2c3d", repo: { full_name: "owner/repo" } },
+    base: { sha: "deadbeef", repo: { full_name: "owner/repo" } },
+  };
+  // Valid digits pass through (32 is the upper bound).
+  assert.equal(reconciliationPollEvent("github", prPayload, { installationId: "12345" })?.installationId, "12345");
+  assert.equal(
+    reconciliationPollEvent("github", prPayload, { installationId: "1".repeat(32) })?.installationId,
+    "1".repeat(32),
+  );
+  // Padded valid digits are trimmed and accepted (the documented trim
+  // behavior):
+  assert.equal(reconciliationPollEvent("github", prPayload, { installationId: " 12345 " })?.installationId, "12345");
+  // Empty, whitespace, non-digit, mixed, and oversized become "".
+  const invalid: unknown[] = [
+    "",
+    "   ",
+    "abc",
+    "12a45",
+    "1".repeat(33),
+    // 33-digit NUMERIC: not a safe integer; String() would silently
+    // alter it, so it is the sentinel "".
+    1234567891234567891234567891234567891,
+    null,
+    undefined,
+    true,
+    {},
+  ];
+  for (const id of invalid) {
+    const poll = reconciliationPollEvent("github", prPayload, { installationId: id as string });
+    assert.notEqual(poll, null, `installationId: ${JSON.stringify(id)}`);
+    assert.equal(poll!.installationId, "", `installationId: ${JSON.stringify(id)}`);
+  }
+  // No options at all ⇒ the sentinel "".
+  assert.equal(reconciliationPollEvent("github", prPayload)?.installationId, "");
+});
+
 // ── Conservative failure ───────────────────────────────────────────────────
 
 test("malformed inputs return null and never throw", () => {
@@ -333,6 +535,37 @@ test("malformed inputs return null and never throw", () => {
   for (const input of inputs) {
     assert.equal(normalizeGitHubEvent(input), null, `input: ${JSON.stringify(input)}`);
   }
+});
+
+test("a throwing accessor on a captured field drops the WHOLE event (fail closed, never a degraded field)", () => {
+  // A hostile `comment.id` getter: the throw is caught by the
+  // normalizer's boundary, so the ENTIRE event is null — the field is
+  // never silently degraded.
+  const throwingComment = {
+    user: { login: "commenter" },
+    get id() {
+      throw new Error("hostile getter");
+    },
+  };
+  const commentEvent = commentPayload("issue_comment", throwingComment);
+  assert.doesNotThrow(() => normalizeGitHubEvent(commentEvent));
+  assert.equal(normalizeGitHubEvent(commentEvent), null);
+
+  // Likewise a throwing `installation.id` getter on the webhook path.
+  const throwingInstallation = {
+    get id() {
+      throw new Error("hostile getter");
+    },
+  };
+  const installationEvent = {
+    name: "pull_request",
+    action: "opened",
+    repository: { full_name: "owner/repo" },
+    installation: throwingInstallation,
+    pull_request: PR,
+  };
+  assert.doesNotThrow(() => normalizeGitHubEvent(installationEvent));
+  assert.equal(normalizeGitHubEvent(installationEvent), null);
 });
 
 // ── Fork derivation ────────────────────────────────────────────────────────
@@ -372,6 +605,13 @@ test("installationId is extracted from installation.id; '' when absent", () => {
   };
   const numeric = normalizeGitHubEvent({ ...base, installation: { id: 42 } });
   assert.equal(numeric?.installationId, "42");
+  // 33-digit NUMERIC: not a safe integer; String() would silently alter
+  // it, so it is the sentinel "" (no convergence with the string form).
+  const unsafeNumeric = normalizeGitHubEvent({
+    ...base,
+    installation: { id: 1234567891234567891234567891234567891 },
+  });
+  assert.equal(unsafeNumeric?.installationId, "");
   // Non-digit strings are rejected (digits-only identity field).
   const stringId = normalizeGitHubEvent({ ...base, installation: { id: "abc" } });
   assert.equal(stringId?.installationId, "");
