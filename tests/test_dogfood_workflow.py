@@ -27,6 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "ai-pr-review.yaml"
 ACTION = ROOT / "action.yml"
+CONTRACTS = ROOT / "contracts" / "action-v3.yml"
 
 REVIEW_STEP = "Review PR with reusable AI reviewer"
 
@@ -340,3 +341,111 @@ def test_concurrency_group_separates_comment_runs() -> None:
     assert "github.event.issue.number" in group, f"comment group must key on the issue number: {group!r}"
 
 
+# Comment pre-filter: pr-gate evaluates the action's own matcher on the
+# comment body (read via env, never interpolated into shell) and exits 0 on a
+# PROVABLY non-matching body, so the checkout / token / build / review
+# pipeline is skipped for the common unrelated-comment case.
+
+
+def _contract_input_block(input_id: str, contracts_text: str) -> str:
+    """The text of one ``- id:`` entry in contracts/action-v3.yml.
+
+    Line-based (no PyYAML): an entry runs from its ``- id: <input_id>`` line
+    to the next ``- id:`` line.
+    """
+    lines = contracts_text.splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("- id:") and stripped.removeprefix("- id:").strip() == input_id:
+            block = [line]
+            for follow in lines[index + 1:]:
+                if follow.strip().startswith("- id:"):
+                    break
+                block.append(follow)
+            return "\n".join(block)
+    raise AssertionError(f"input {input_id!r} not found in contracts/action-v3.yml")
+
+
+def _contract_input_default(input_id: str, contracts_text: str) -> str:
+    """The ``default:`` of one contract input entry (line-based, unquoted)."""
+    for line in _contract_input_block(input_id, contracts_text).splitlines():
+        m = re.match(r"^\s*default:\s*(.*)$", line)
+        if m:
+            return _unquote(m.group(1))
+    raise AssertionError(f"input {input_id!r} has no default in contracts/action-v3.yml")
+
+
+def test_pr_gate_prefilters_non_matching_comment_bodies() -> None:
+    """pr-gate exits 0 before the API call when the body provably cannot trigger.
+
+    The pre-filter is the action's own matcher (commentBodyTriggersCommentCommand
+    in src/precheck/decide.ts) run on the body via env, so a skip only ever
+    happens on a body the action itself would not accept.
+    """
+    text = WORKFLOW.read_text(encoding="utf-8")
+    block = _step_block("Resolve PR through the API (pr-gate)", text)
+    assert "COMMENT_BODY" in block, "pr-gate must read the comment body via env"
+    assert 'replace(/^\\s+/' in block, "pre-filter must strip leading whitespace like the action's matcher"
+    assert "startsWith(command)" in block, "pre-filter must use the literal prefix check"
+    assert "trimEnd()" in block, "pre-filter must tolerate only trailing whitespace"
+    assert 'if [ "$may_trigger" != "true" ]' in block, "the early exit must be guarded by may_trigger"
+    block_lines = block.splitlines()
+    exit_index = next((i for i, line in enumerate(block_lines) if line.strip() == "exit 0"), None)
+    assert exit_index is not None, "pr-gate must early-exit on a non-matching body"
+    curl_index = next((i for i, line in enumerate(block_lines) if "curl" in line), None)
+    assert curl_index is not None and curl_index > exit_index, (
+        "the API call must appear after the early exit"
+    )
+
+
+def test_prefilter_command_matches_contract_default() -> None:
+    """The pre-filter's command is the contract default (parsed from both sides)."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+    block = _step_block("Resolve PR through the API (pr-gate)", text)
+    env_line = next(
+        line for line in block.splitlines() if line.strip().startswith("REREVIEW_DEFAULT_COMMAND:")
+    )
+    workflow_command = _unquote(env_line.strip().removeprefix("REREVIEW_DEFAULT_COMMAND:"))
+    contract_command = _contract_input_default("rereview-command", CONTRACTS.read_text(encoding="utf-8"))
+    assert workflow_command == contract_command, (
+        f"workflow pre-filter command {workflow_command!r} != contract default {contract_command!r}"
+    )
+
+
+def test_prefilter_effective_command_assumptions_pinned() -> None:
+    """The pre-filter may only use the contract default.
+
+    Its command is REREVIEW_DEFAULT_COMMAND only because this workflow sets no
+    rereview-command input and the input is not repo-configurable — pin both.
+    """
+    text = WORKFLOW.read_text(encoding="utf-8")
+    with_values = _extract_with_block(REVIEW_STEP, text)
+    assert "rereview-command" not in with_values, "this workflow must not set rereview-command"
+    entry = _contract_input_block("rereview-command", CONTRACTS.read_text(encoding="utf-8"))
+    assert "repo-configurable" not in entry, "rereview-command must not be repo-configurable"
+
+
+def test_pipeline_steps_gate_on_comment_prefilter() -> None:
+    """Every pipeline step after pr-gate is gated on the comment pre-filter."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+    for step in (
+        "Checkout repository",
+        "Generate bot token",
+        "Set up Node 24",
+        "Build the action bundle",
+        REVIEW_STEP,
+    ):
+        expr = _extract_if(step, text)
+        assert "may_trigger == 'true'" in expr, f"{step}: must gate on the comment pre-filter: {expr!r}"
+        # The gate must be an OR-disjunct on issue_comment, never a bare
+        # may_trigger check: pull_request / workflow_dispatch runs skip
+        # pr-gate, so the output is empty there and a bare check would
+        # silently disable every review.
+        assert "github.event_name != 'issue_comment' ||" in expr, (
+            f"{step}: pre-filter gate must keep the non-comment escape hatch: {expr!r}"
+        )
+    for step in ("Set up Node 24", "Build the action bundle", REVIEW_STEP):
+        expr = _extract_if(step, text)
+        assert "workflow_dispatch" in expr and "is_draft" in expr, (
+            f"{step}: must keep its existing dispatch/draft gates: {expr!r}"
+        )

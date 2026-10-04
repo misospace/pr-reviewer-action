@@ -69,8 +69,35 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPO_ID: ${{ github.repository_id }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Untrusted DATA: the comment body is only ever read by node via
+          # env, never interpolated into shell text, logged, or written to
+          # output.
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          REREVIEW_DEFAULT_COMMAND: /ai-review
         run: |
           set -euo pipefail
+          # Pre-filter: skip the rest of the pipeline when this comment
+          # provably cannot be the re-review command.
+          # (a) Skipping only happens on a PROVABLY non-matching body: the
+          #     check below is the action's own matcher, so a body the
+          #     action would accept always passes.
+          # (b) The node one-liner is the same expression as
+          #     commentBodyTriggersCommentCommand in src/precheck/decide.ts
+          #     (strip leading whitespace via /^\s+/, literal
+          #     startsWith(command), remainder trimEnd() === ""; an empty
+          #     command never triggers). A test pins the workflow-side
+          #     primitives; if the TS matcher ever diverges, keep them in
+          #     sync — divergence here fails safe (a dropped re-review
+          #     trigger that relabels/awaits), never a false review.
+          # (c) The effective command is exactly REREVIEW_DEFAULT_COMMAND
+          #     because this workflow sets no rereview-command input and
+          #     rereview-command is not repo-configurable — both assumptions
+          #     are pinned by tests/test_dogfood_workflow.py.
+          may_trigger="$(node -e 'const body = process.env.COMMENT_BODY ?? ""; const command = process.env.REREVIEW_DEFAULT_COMMAND; const trimmed = body.replace(/^\s+/, ""); process.stdout.write(command !== "" && trimmed.startsWith(command) && trimmed.slice(command.length).trimEnd() === "" ? "true" : "false")')"
+          echo "may_trigger=$may_trigger" >> "$GITHUB_OUTPUT"
+          if [ "$may_trigger" != "true" ]; then
+            exit 0
+          fi
           pr_json="$(curl -fsS \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
@@ -85,6 +112,7 @@ jobs:
           echo "is_draft=$(jq -r '.draft' <<<"$pr_json")" >> "$GITHUB_OUTPUT"
 
       - name: Checkout repository
+        if: github.event_name != 'issue_comment' || steps.pr-gate.outputs.may_trigger == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -99,6 +127,7 @@ jobs:
 
       - name: Generate bot token
         id: app-token
+        if: github.event_name != 'issue_comment' || steps.pr-gate.outputs.may_trigger == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ secrets.BOT_CLIENT_ID }}
@@ -109,7 +138,7 @@ jobs:
         # runner's own node24 (`runs.using: node24`). Runs for pull_request
         # and issue_comment re-reviews; skipped for workflow_dispatch and for
         # draft comment runs (a draft PR is never reviewed).
-        if: github.event_name != 'workflow_dispatch' && steps.pr-gate.outputs.is_draft != 'true'
+        if: github.event_name != 'workflow_dispatch' && steps.pr-gate.outputs.is_draft != 'true' && (github.event_name != 'issue_comment' || steps.pr-gate.outputs.may_trigger == 'true')
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
@@ -118,7 +147,7 @@ jobs:
         # The action ships dist/ only on release tags (#787); this dogfood job
         # reviews each PR with its own source, so it builds the bundle first.
         # Consumers of a release tag need none of this.
-        if: github.event_name != 'workflow_dispatch' && steps.pr-gate.outputs.is_draft != 'true'
+        if: github.event_name != 'workflow_dispatch' && steps.pr-gate.outputs.is_draft != 'true' && (github.event_name != 'issue_comment' || steps.pr-gate.outputs.may_trigger == 'true')
         env:
           # #915: dogfood builds review PR source; stamp vX.Y.Z-dev+<short sha> so each review names the commit that produced it.
           PR_REVIEWER_BUILD_STAMP: dev
@@ -132,7 +161,7 @@ jobs:
           npm run build
 
       - name: Review PR with reusable AI reviewer
-        if: github.event_name != 'workflow_dispatch' && steps.pr-gate.outputs.is_draft != 'true'
+        if: github.event_name != 'workflow_dispatch' && steps.pr-gate.outputs.is_draft != 'true' && (github.event_name != 'issue_comment' || steps.pr-gate.outputs.may_trigger == 'true')
         id: review
         # `./` is the checkout at the PR head, where the step above built
         # dist/, so every PR is reviewed by its own in-flight action code.
