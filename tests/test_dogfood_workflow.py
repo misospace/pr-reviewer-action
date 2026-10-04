@@ -449,3 +449,109 @@ def test_pipeline_steps_gate_on_comment_prefilter() -> None:
         assert "workflow_dispatch" in expr and "is_draft" in expr, (
             f"{step}: must keep its existing dispatch/draft gates: {expr!r}"
         )
+
+
+# Forge-API outage resilience: pr-gate retries the lookup, then fails SOFT
+# (may_trigger=false + a fixed-constant summary warning + exit 0) so an
+# outage drops the trigger (recoverable by re-commenting / the ai-review
+# label) instead of turning every command comment into a red job. The
+# fail-safe direction: a dropped trigger can never grant a review.
+
+
+def _pr_gate_failure_branch(workflow_text: str) -> str:
+    """The pr-gate API-lookup failure branch (between the guard and `fi`).
+
+    Line-based (no PyYAML): the branch runs from the line that anchors the
+    `if ! pr_json="$(curl ..."; then` guard to the next `fi`.
+    """
+    block = _step_block("Resolve PR through the API (pr-gate)", workflow_text)
+    lines = block.splitlines()
+    start = next(i for i, line in enumerate(lines) if 'if ! pr_json="$(curl' in line)
+    for end in range(start + 1, len(lines)):
+        if lines[end].strip() == "fi":
+            return "\n".join(lines[start + 1 : end])
+    raise AssertionError("pr-gate failure branch is not closed with fi")
+
+
+def test_pr_gate_retries_then_fails_soft() -> None:
+    """A forge-API outage fails soft: retry the lookup, then skip cleanly.
+
+    The lookup is retried (``--retry 3 --retry-all-errors --retry-delay 2``)
+    and wrapped in an ``if ! pr_json="$(curl ..."; then`` guard; the failure
+    branch writes ``may_trigger=false`` to ``$GITHUB_OUTPUT``, appends a
+    single-quoted fixed-constant warning to ``$GITHUB_STEP_SUMMARY``, and
+    exits 0. The old interpolated ``echo "may_trigger=$may_trigger"`` line is
+    gone — ``may_trigger`` is only ever written as literal true/false.
+    """
+    text = WORKFLOW.read_text(encoding="utf-8")
+    block = _step_block("Resolve PR through the API (pr-gate)", text)
+    # The lookup is wrapped in the `if ! pr_json="$(curl ..."; then` guard.
+    assert 'if ! pr_json="$(curl' in block, (
+        "the lookup must be inside `if ! pr_json=\"$(curl ...\"; then`"
+    )
+    # The curl carries the retry flags.
+    assert "--retry 3 --retry-all-errors --retry-delay 2" in block, (
+        "the lookup must be retried: --retry 3 --retry-all-errors --retry-delay 2"
+    )
+    # The old interpolated line is gone: may_trigger is only literal true/false.
+    assert 'echo "may_trigger=$may_trigger"' not in block, (
+        "may_trigger must be written as literal true/false, not interpolated"
+    )
+    branch = _pr_gate_failure_branch(text)
+    # The failure branch writes may_trigger=false to $GITHUB_OUTPUT.
+    assert 'echo "may_trigger=false" >> "$GITHUB_OUTPUT"' in branch, (
+        "the failure branch must write may_trigger=false to $GITHUB_OUTPUT"
+    )
+    # The failure branch exits 0.
+    assert "exit 0" in branch, "the failure branch must exit 0"
+    # The failure branch appends a single-quoted fixed-constant warning to
+    # the step summary, with no $ interpolation beyond the redirect target.
+    warning_line = next(
+        line for line in branch.splitlines() if '>> "$GITHUB_STEP_SUMMARY"' in line
+    )
+    assert "'pr-gate:" in warning_line and " >> " in warning_line, (
+        f"the warning must be a single-quoted fixed constant: {warning_line!r}"
+    )
+    assert "${{ " not in warning_line, (
+        "the warning line must carry no ${{ }} expression interpolation"
+    )
+    stripped = warning_line.replace("$GITHUB_STEP_SUMMARY", "")
+    assert "$" not in stripped, (
+        "the warning line must carry no $ interpolation other than the "
+        f"$GITHUB_STEP_SUMMARY redirect target: {warning_line!r}"
+    )
+
+
+def test_checkout_and_token_steps_exclude_draft_comment_runs() -> None:
+    """Checkout and token minting never run on a draft-PR comment run.
+
+    The pr-gate resolves ``is_draft`` from the PR; a comment-triggered run on
+    a draft PR must not even check out or mint a token (#914 review). Both
+    steps keep the pre-filter gate and add the draft exclusion.
+    """
+    text = WORKFLOW.read_text(encoding="utf-8")
+    for step in ("Checkout repository", "Generate bot token"):
+        expr = _extract_if(step, text)
+        assert "may_trigger == 'true'" in expr, (
+            f"{step}: must keep the comment pre-filter gate: {expr!r}"
+        )
+        assert "steps.pr-gate.outputs.is_draft != 'true'" in expr, (
+            f"{step}: must exclude draft comment runs: {expr!r}"
+        )
+
+
+def test_review_step_pins_the_gate_head_sha() -> None:
+    """The ``uses: ./`` review step pins the pr-gate head SHA for the guard.
+
+    #914: the precheck compares ``PR_REVIEWER_GATE_HEAD_SHA`` against the head
+    of the freshly fetched PR and skips (superseded-head) when a push raced
+    the gate, so a built action never posts a verdict stamped with a head it
+    did not review.
+    """
+    text = WORKFLOW.read_text(encoding="utf-8")
+    block = _step_block(REVIEW_STEP, text)
+    assert "uses: ./" in block, "the review step must run the in-flight action (uses: ./)"
+    assert "env:" in block, "the review step must carry an env: block"
+    assert "PR_REVIEWER_GATE_HEAD_SHA: ${{ steps.pr-gate.outputs.head_sha }}" in block, (
+        "PR_REVIEWER_GATE_HEAD_SHA must be bound to the pr-gate head_sha output"
+    )

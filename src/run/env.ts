@@ -80,6 +80,10 @@ const AMBIENT_KEYS = [
   // #928: env-only knobs the stages read that are not contract inputs. The
   // eval harness relies on HUMAN_REVIEWS_CONTEXT=false to keep replays blind.
   "HUMAN_REVIEWS_CONTEXT", "DEEP_REVIEW_EXECUTION", "AI_FALLBACK_RETRIES", "AI_SMART_RETRIES",
+  // #914: the head sha pinned by the dogfood workflow's pre-checkout pr-gate;
+  // the comment-command path compares it with the fetched head so a push that
+  // races the gate skips (superseded-head) instead of reviewing a mismatch.
+  "PR_REVIEWER_GATE_HEAD_SHA",
 ] as const;
 
 export function buildStageEnv(

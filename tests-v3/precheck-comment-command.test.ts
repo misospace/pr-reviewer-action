@@ -483,6 +483,78 @@ test("#914: an authorized comment on a closed PR is skipped as comment-pr-closed
   assert.equal(output.skip_reason, "comment-pr-closed");
 });
 
+// ── The superseded-head gate (#914 review) ────────────────────────────────
+//
+// The dogfood workflow pins the head sha it checked out via
+// PR_REVIEWER_GATE_HEAD_SHA. If the PR head moved since, the comment-command
+// path skips fail-closed (superseded-head) instead of reviewing a mismatch.
+// A matching pin, a case-variant of the same sha, and a whitespace-only (or
+// unset) pin all leave the accepted path unchanged.
+
+test("#914: a comment command with the gate pin equal to the PR head is accepted", async () => {
+  const env = baseEnv({ PR_REVIEWER_GATE_HEAD_SHA: "head-abc" });
+  const platform: Platform = {
+    diff: DIFF,
+    pr: sameRepoPr(),
+    gh_api: { "repos/o/r/collaborators/alice/permission": { permission: "write" } },
+  };
+  const output = await runPrecheck({
+    env,
+    adapter: new FixtureAdapter("github", platform),
+    event: issueCommentEvent("/ai-review", "alice"),
+  });
+  assert.equal(output.should_review, "true");
+  assert.equal(output.skip_reason, "");
+});
+
+test("#914: a comment command whose gate pin differs from the PR head is skipped as superseded-head", async () => {
+  const env = baseEnv({ PR_REVIEWER_GATE_HEAD_SHA: "head-DEF" });
+  const platform: Platform = {
+    diff: DIFF,
+    pr: sameRepoPr(),
+    gh_api: { "repos/o/r/collaborators/alice/permission": { permission: "write" } },
+  };
+  const output = await runPrecheck({
+    env,
+    adapter: new FixtureAdapter("github", platform),
+    event: issueCommentEvent("/ai-review", "alice"),
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "superseded-head");
+});
+
+test("#914: a comment command with the gate pin a case-variant of the PR head is accepted", async () => {
+  const env = baseEnv({ PR_REVIEWER_GATE_HEAD_SHA: "HEAD-ABC" });
+  const platform: Platform = {
+    diff: DIFF,
+    pr: sameRepoPr(),
+    gh_api: { "repos/o/r/collaborators/alice/permission": { permission: "write" } },
+  };
+  const output = await runPrecheck({
+    env,
+    adapter: new FixtureAdapter("github", platform),
+    event: issueCommentEvent("/ai-review", "alice"),
+  });
+  assert.equal(output.should_review, "true");
+  assert.equal(output.skip_reason, "");
+});
+
+test("#914: a comment command with a whitespace-only gate pin is accepted", async () => {
+  const env = baseEnv({ PR_REVIEWER_GATE_HEAD_SHA: "   " });
+  const platform: Platform = {
+    diff: DIFF,
+    pr: sameRepoPr(),
+    gh_api: { "repos/o/r/collaborators/alice/permission": { permission: "write" } },
+  };
+  const output = await runPrecheck({
+    env,
+    adapter: new FixtureAdapter("github", platform),
+    event: issueCommentEvent("/ai-review", "alice"),
+  });
+  assert.equal(output.should_review, "true");
+  assert.equal(output.skip_reason, "");
+});
+
 // ── Regression: the label path is untouched ───────────────────────────────
 
 test("#914 regression: a pull_request labeled event still forces a review via the label path", async () => {

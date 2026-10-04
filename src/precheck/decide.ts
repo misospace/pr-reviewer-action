@@ -469,6 +469,29 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
         effectiveForgejoApiUrl,
       );
     }
+    // #914 review: the workflow's pr-gate pinned the head sha it checked out
+    // and built. If the PR head moved since, this run's built code and the
+    // head the diff is fetched for disagree — skip fail-closed. The raced
+    // push fires its own synchronize review, so nothing is lost; an unset or
+    // blank pin (runners without the gate) leaves behavior unchanged. The
+    // guard outranks an explicit `force-review`/accepted command on purpose:
+    // a forced review of a head this build did not check out is exactly what
+    // the pin exists to prevent, and the raced push's own `synchronize`
+    // event re-reviews.
+    const gateHeadSha = (env.PR_REVIEWER_GATE_HEAD_SHA ?? "").trim();
+    const commentHeadSha = (prObject as { head?: { sha?: unknown } }).head?.sha;
+    if (
+      gateHeadSha !== "" &&
+      typeof commentHeadSha === "string" &&
+      commentHeadSha !== "" &&
+      gateHeadSha.toLowerCase() !== commentHeadSha.toLowerCase()
+    ) {
+      return platformOutputs(
+        { should_review: "false", skip_reason: "superseded-head" },
+        resolvedPlatform,
+        effectiveForgejoApiUrl,
+      );
+    }
     forceReview = true;
     process.stderr.write(
       `[precheck] ${command} comment command accepted from ${JSON.stringify(commenter)}: forcing a fresh review\n`,

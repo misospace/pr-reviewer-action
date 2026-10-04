@@ -94,14 +94,25 @@ jobs:
           #     rereview-command is not repo-configurable — both assumptions
           #     are pinned by tests/test_dogfood_workflow.py.
           may_trigger="$(node -e 'const body = process.env.COMMENT_BODY ?? ""; const command = process.env.REREVIEW_DEFAULT_COMMAND; const trimmed = body.replace(/^\s+/, ""); process.stdout.write(command !== "" && trimmed.startsWith(command) && trimmed.slice(command.length).trimEnd() === "" ? "true" : "false")')"
-          echo "may_trigger=$may_trigger" >> "$GITHUB_OUTPUT"
           if [ "$may_trigger" != "true" ]; then
+            echo "may_trigger=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          pr_json="$(curl -fsS \
+          # A forge-API outage must not turn every command comment into a red
+          # job: retry the lookup, then fail SOFT with a clean skip. The
+          # trigger is dropped (recoverable by re-commenting or the ai-review
+          # label), which can never grant a review — the fail-safe direction.
+          # Only fixed-constant text reaches the summary: no payload, id, or
+          # token value.
+          if ! pr_json="$(curl -fsS --retry 3 --retry-all-errors --retry-delay 2 \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
-            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${ISSUE_NUMBER}")"
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${ISSUE_NUMBER}")"; then
+            echo "may_trigger=false" >> "$GITHUB_OUTPUT"
+            echo 'pr-gate: pull request lookup failed after retries; skipping this comment-triggered re-review. Add the ai-review label to force a review.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "may_trigger=true" >> "$GITHUB_OUTPUT"
           echo "head_sha=$(jq -r '.head.sha' <<<"$pr_json")" >> "$GITHUB_OUTPUT"
           head_repo_id="$(jq -r '.head.repo.id' <<<"$pr_json")"
           if [ "$head_repo_id" != "$REPO_ID" ]; then
@@ -112,7 +123,9 @@ jobs:
           echo "is_draft=$(jq -r '.draft' <<<"$pr_json")" >> "$GITHUB_OUTPUT"
 
       - name: Checkout repository
-        if: github.event_name != 'issue_comment' || steps.pr-gate.outputs.may_trigger == 'true'
+        # Draft exclusion mirrors the later steps: a comment-triggered run on a
+        # draft PR must not even check out or mint a token (#914 review).
+        if: github.event_name != 'issue_comment' || (steps.pr-gate.outputs.may_trigger == 'true' && steps.pr-gate.outputs.is_draft != 'true')
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -127,7 +140,9 @@ jobs:
 
       - name: Generate bot token
         id: app-token
-        if: github.event_name != 'issue_comment' || steps.pr-gate.outputs.may_trigger == 'true'
+        # Draft exclusion mirrors the later steps: a comment-triggered run on a
+        # draft PR must not even check out or mint a token (#914 review).
+        if: github.event_name != 'issue_comment' || (steps.pr-gate.outputs.may_trigger == 'true' && steps.pr-gate.outputs.is_draft != 'true')
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ secrets.BOT_CLIENT_ID }}
@@ -171,6 +186,14 @@ jobs:
         # base-repo checkout the pr-gate routed it to — and the action itself
         # replies and no-ops there (`comment-fork-pr`); fork code is never
         # built or executed with base-repo secrets.
+        env:
+          # #914: the head sha the pr-gate resolved and the checkout step
+          # checked out and built. The precheck compares it against the head
+          # of the freshly fetched PR and skips (superseded-head) when a push
+          # raced the gate, so a built action never posts a verdict stamped
+          # with a head it did not review. Empty for non-comment runs: the
+          # guard is inert without a pin.
+          PR_REVIEWER_GATE_HEAD_SHA: ${{ steps.pr-gate.outputs.head_sha }}
         uses: ./
         with:
           github-token: ${{ steps.app-token.outputs.token }}
