@@ -231,6 +231,14 @@ function labelNameOf(label: unknown): string {
   return "";
 }
 
+/** The canonical installation-id form: a digits-only string
+ * (1–32 digits, no leading zero). This is the ONE definition of the
+ * form — it is part of the event↔job contract: the event normalizers
+ * produce `installationId` in this shape and the job builder
+ * (`src/jobs/generation.ts`) fail-closes on anything else, so the two
+ * layers can never drift apart. */
+export const INSTALLATION_ID_PATTERN = /^[1-9]\d{0,31}$/;
+
 /** Digits-only installation identity (1–32 digits, NO leading zero) at
  * the adapter boundary: `String()` + trim, then the digit pattern; "" on
  * any other input (unknown, non-string/number, empty, non-digit, leading
@@ -256,14 +264,6 @@ function normalizeInstallationId(value: unknown): string {
 function installationIdOf(raw: Record<string, unknown>): string {
   return normalizeInstallationId(asObject(raw.installation).id);
 }
-
-/** The canonical installation-id form: a digits-only string
- * (1–32 digits, no leading zero). This is the ONE definition of the
- * form — it is part of the event↔job contract: the event normalizers
- * produce `installationId` in this shape and the job builder
- * (`src/jobs/generation.ts`) fail-closes on anything else, so the two
- * layers can never drift apart. */
-export const INSTALLATION_ID_PATTERN = /^[1-9]\d{0,31}$/;
 
 /** The canonical follow-up comment id form: a digits-only string
  * (1–19 digits, no leading zero). This is the ONE definition of the

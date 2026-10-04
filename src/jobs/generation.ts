@@ -10,7 +10,7 @@
  */
 
 import { createHash } from "node:crypto";
-// The ONE definitions of the follow-up reference and installation-id
+// The single definitions of the follow-up-reference and installation-id
 // forms (event↔job contract): the event normalizers and this builder
 // share them, so the two layers can never drift. `events` never
 // imports `jobs`, so this runtime import creates no cycle.
@@ -91,7 +91,9 @@ function canonicalIdentity(identity: GenerationIdentity): string {
  * Each value is stringified with `String()` for BOTH the newline check
  * and the serialization (`String()` is total over any field value,
  * including a symbol — a template literal would throw a TypeError), so
- * this function never throws for any field value. */
+ * this function never throws for any primitive field value (a hand-built
+ * object with a throwing `toString` is outside that promise;
+ * `buildReviewJob` type-checks the fields it hashes). */
 export function deriveGenerationId(identity: GenerationIdentity): string {
   for (const field of IDENTITY_FIELDS) {
     if (/\n|\r/.test(String(identity[field]))) return "";
@@ -123,6 +125,14 @@ const CONFIG_FINGERPRINT_PATTERN = /^[0-9a-f]{8,64}$/;
 /** Trim + lowercase (the builder's own SHA normalization). */
 function normalizeSha(sha: string): string {
   return sha.trim().toLowerCase();
+}
+
+/** The accepted-type convention (mirrors `normalizeInstallationId` in
+ * `src/events/normalize.js`): the value is a string or a number.
+ * Anything else (symbol, object, boolean, bigint) is refused, so no
+ * untrusted value is ever coerced with `String(...)`. */
+function isStringOrNumber(value: unknown): boolean {
+  return typeof value === "string" || typeof value === "number";
 }
 
 /** A run id for the durable payload: trimmed; "" when empty after trim,
@@ -166,11 +176,18 @@ const ADOPTION_EPOCH_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
  *   `headSha` (fail closed). The normalizers already enforce the SHA
  *   form at the adapter boundary; this is the builder's own fail-closed
  *   guard for hand-built events.
+ * - the builder never throws: every option/event value is type-checked
+ *   before it is tested or stored. `headSha`/`baseSha` must be strings;
+ *   a provided `nonce`/`adoptionEpoch`/`configFingerprint` and a
+ *   `follow_up` `eventReference` must be a string or a number.
+ *   Anything else (symbol, object, boolean, bigint) is refused with
+ *   `null` before any `String(...)` coercion, so a hostile value can
+ *   never raise.
  * - the scoping identity fields are well-formed (the builder's own
  *   fail-closed guard for hand-built events): `platform` is exactly
  *   "github" or "forgejo"; `installationId` is a string and, when
-  *   non-empty, matches `INSTALLATION_ID_PATTERN` (the shared canonical
-  *   installation-id form imported from the event boundary);
+ *   non-empty, matches `INSTALLATION_ID_PATTERN` (the shared canonical
+ *   installation-id form imported from the event boundary);
  *   `repoFullName` is a non-empty string; `prNumber` is a safe integer
  *   > 0; `prId` is a safe integer >= 0; `fork` is a boolean. A
  *   cast-away `undefined` in any of them would otherwise serialize as
@@ -216,6 +233,9 @@ export function buildReviewJob(
   let nonce = "";
   if (kind === "review" && options.nonce) {
     // An empty nonce is ABSENT: only non-empty values are validated.
+    // Accepted type: a string or a number — anything else is refused
+    // before the pattern test, so a hostile value can never raise.
+    if (!isStringOrNumber(options.nonce)) return null;
     if (!NONCE_PATTERN.test(options.nonce)) return null;
     // Store the STRING form: a type-cast non-string can never land in
     // the string field / persisted payload.
@@ -227,6 +247,9 @@ export function buildReviewJob(
   let adoptionEpoch = "";
   if (options.adoptionEpoch) {
     // An empty epoch is ABSENT: only non-empty values are validated.
+    // Accepted type: a string or a number — anything else is refused
+    // before the pattern test, so a hostile value can never raise.
+    if (!isStringOrNumber(options.adoptionEpoch)) return null;
     if (!ADOPTION_EPOCH_PATTERN.test(options.adoptionEpoch)) return null;
     // Store the STRING form: a type-cast non-string can never land in
     // the string field / persisted payload.
@@ -238,6 +261,9 @@ export function buildReviewJob(
   // on a comment id.
   let eventReference = "";
   if (kind === "follow_up") {
+    // Accepted type: a string or a number — anything else is refused
+    // before the pattern test, so a hostile value can never raise.
+    if (!isStringOrNumber(event.eventReference)) return null;
     if (!COMMENT_ID_PATTERN.test(event.eventReference)) return null;
     // Store the STRING form: a type-cast non-string can never land in
     // the string field / persisted payload.
@@ -245,6 +271,12 @@ export function buildReviewJob(
   }
 
   // Fail-closed SHA handling for hand-built (non-normalizer) events.
+  // A SHA is a string by contract: a cast-away non-string (undefined,
+  // a number, a symbol) would make normalizeSha's .trim() throw, so it
+  // is refused before normalization.
+  if (typeof event.headSha !== "string" || typeof event.baseSha !== "string") {
+    return null;
+  }
   const headSha = normalizeSha(event.headSha);
   const baseSha = normalizeSha(event.baseSha);
   if (headSha !== "" && !SHA_PATTERN.test(headSha)) return null;
@@ -266,10 +298,16 @@ export function buildReviewJob(
   if (!Number.isSafeInteger(event.prId) || event.prId < 0) return null;
   if (typeof event.fork !== "boolean") return null;
 
-  const configFingerprint = options.configFingerprint ?? "";
+  let configFingerprint = options.configFingerprint ?? "";
+  // Accepted type: a string or a number — anything else is refused
+  // before the pattern test, so a hostile value can never raise.
+  if (!isStringOrNumber(configFingerprint)) return null;
   if (configFingerprint !== "" && !CONFIG_FINGERPRINT_PATTERN.test(configFingerprint)) {
     return null;
   }
+  // Store the STRING form: a type-cast number can never land in the
+  // string field / persisted payload.
+  configFingerprint = String(configFingerprint);
 
   const deadlineAtMs = options.deadlineAtMs ?? 0;
   if (

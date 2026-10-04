@@ -681,6 +681,119 @@ test("a symbol-valued identity field does not throw (fail closed, never raise)",
   assert.equal(buildReviewJob(makeEvent({ installationId: Symbol("x") as unknown as string })), null);
 });
 
+// ── Accepted-type boundary (fail closed, never throws) ─────────────────────────────────────────────
+
+test("buildReviewJob refuses a cast-away non-string headSha/baseSha without throwing", () => {
+  // A SHA is a string by contract: a cast-away non-string (undefined, a
+  // number) is refused before normalizeSha's .trim() could throw.
+  const cases: Array<Partial<CanonicalForgeEvent>> = [
+    { headSha: undefined as unknown as string },
+    { headSha: 12345 as unknown as string },
+    { baseSha: undefined as unknown as string },
+    { baseSha: 12345 as unknown as string },
+  ];
+  for (const overrides of cases) {
+    assert.doesNotThrow(() => buildReviewJob(makeEvent(overrides)));
+    assert.equal(buildReviewJob(makeEvent(overrides)), null);
+  }
+  // Control: a well-formed event still builds.
+  assert.notEqual(buildReviewJob(makeEvent()), null);
+});
+
+test("a symbol-valued nonce / adoptionEpoch / eventReference is refused without throwing", () => {
+  // Adversarial boundary: the hostile value itself. A symbol makes a
+  // regex .test() throw at coercion, so it is refused (null) before the
+  // pattern test.
+  assert.doesNotThrow(() =>
+    buildReviewJob(makeEvent(), { nonce: Symbol("nonce") as unknown as string }),
+  );
+  assert.equal(
+    buildReviewJob(makeEvent(), { nonce: Symbol("nonce") as unknown as string }),
+    null,
+  );
+  assert.doesNotThrow(() =>
+    buildReviewJob(makeEvent(), { adoptionEpoch: Symbol("epoch") as unknown as string }),
+  );
+  assert.equal(
+    buildReviewJob(makeEvent(), { adoptionEpoch: Symbol("epoch") as unknown as string }),
+    null,
+  );
+  const fu = makeEvent({ kind: "follow_up", eventReference: Symbol("ref") as unknown as string });
+  assert.doesNotThrow(() => buildReviewJob(fu));
+  assert.equal(buildReviewJob(fu), null);
+});
+
+test("an object with a throwing toString for nonce / adoptionEpoch / eventReference is refused without throwing", () => {
+  // Adversarial boundary: an object whose toString throws. The
+  // accepted-type guard refuses it (typeof "object") before any
+  // String() coercion or regex .test() could call toString and throw.
+  const hostile: object = {};
+  Object.defineProperty(hostile, "toString", {
+    value: () => {
+      throw new Error("hostile toString");
+    },
+    configurable: true,
+  });
+  const hostileStr = hostile as unknown as string;
+  assert.doesNotThrow(() => buildReviewJob(makeEvent(), { nonce: hostileStr }));
+  assert.equal(buildReviewJob(makeEvent(), { nonce: hostileStr }), null);
+  assert.doesNotThrow(() => buildReviewJob(makeEvent(), { adoptionEpoch: hostileStr }));
+  assert.equal(buildReviewJob(makeEvent(), { adoptionEpoch: hostileStr }), null);
+  const fu = makeEvent({ kind: "follow_up", eventReference: hostileStr });
+  assert.doesNotThrow(() => buildReviewJob(fu));
+  assert.equal(buildReviewJob(fu), null);
+});
+
+test("a numeric nonce / adoptionEpoch / eventReference normalizes to its String() form", () => {
+  // Accepted-type list: a number is a valid input and is stored as its
+  // String() form (regression guard for the string-or-number list).
+  const withNonce = buildReviewJob(makeEvent(), { nonce: 42 as unknown as string });
+  assert.notEqual(withNonce, null);
+  assert.equal(withNonce!.nonce, "42");
+
+  const withEpoch = buildReviewJob(makeEvent(), { adoptionEpoch: 7 as unknown as string });
+  assert.notEqual(withEpoch, null);
+  assert.equal(withEpoch!.adoptionEpoch, "7");
+
+  const fu = buildReviewJob(
+    makeEvent({ kind: "follow_up", eventReference: 1234 as unknown as string }),
+  );
+  assert.notEqual(fu, null);
+  assert.equal(fu!.eventReference, "1234");
+});
+
+test("a hostile configFingerprint (symbol / throwing toString) is refused without throwing; a numeric one normalizes", () => {
+  // Adversarial boundary: the hostile value itself. A symbol (or an
+  // object whose toString throws) makes a regex .test() throw at
+  // coercion, so it is refused (null) before the pattern test.
+  assert.doesNotThrow(() =>
+    buildReviewJob(makeEvent(), { configFingerprint: Symbol("cfg") as unknown as string }),
+  );
+  assert.equal(
+    buildReviewJob(makeEvent(), { configFingerprint: Symbol("cfg") as unknown as string }),
+    null,
+  );
+  const hostile: object = {};
+  Object.defineProperty(hostile, "toString", {
+    value: () => {
+      throw new Error("hostile toString");
+    },
+    configurable: true,
+  });
+  const hostileStr = hostile as unknown as string;
+  assert.doesNotThrow(() => buildReviewJob(makeEvent(), { configFingerprint: hostileStr }));
+  assert.equal(buildReviewJob(makeEvent(), { configFingerprint: hostileStr }), null);
+  // Accepted-type list: a number is a valid input and is stored as its
+  // String() form (regression guard for the string-or-number list).
+  const withCfg = buildReviewJob(makeEvent(), {
+    configFingerprint: 1234567890123456 as unknown as string,
+  });
+  assert.notEqual(withCfg, null);
+  assert.equal(typeof withCfg!.configFingerprint, "string");
+  assert.equal(withCfg!.configFingerprint, "1234567890123456");
+});
+
+
 // ── Staleness ───────────────────────────────────────────────────────────────
 
 test("isResultStale: differ → stale; case/whitespace-insensitive; malformed/empty → fail closed", () => {

@@ -40,11 +40,10 @@ the same PR (the poll path validates the caller's
 `options.installationId` at the boundary with the same digits-only
 canonical form as the webhook's `installation.id` — trim + 1–32 digits,
 no leading zero, fail-closed to `""` — and never trusts its caller, so
-the poller supplies
-the same `installationId` the webhook carried) and the two differ only in
-`source` (`webhook` vs `poll`) and `kind` — the property the webhook/poll
-dedupe below relies on. `actor` is NOT an identity field and may differ
-between the two observations.
+the poller supplies the same `installationId` the webhook carried) and
+the two differ only in `source` (`webhook` vs `poll`) and `kind` — the
+property the webhook/poll dedupe below relies on. `actor` is NOT an
+identity field and may differ between the two observations.
 
 ## ReviewJob shape
 
@@ -125,8 +124,8 @@ scheduling boundary itself (defense in depth on top of `schedule.ts`):
   one must match `/^[0-9a-f]{7,64}$/`; the job carries the normalized
   values; review jobs additionally require a non-empty `headSha` (fail
   closed). The normalizers already enforce the SHA form at the adapter
-   boundary; this is the builder's own fail-closed guard for hand-built
-   events;
+  boundary; this is the builder's own fail-closed guard for hand-built
+  events;
 - the scoping identity fields are well-formed (the builder's own
   fail-closed guard for hand-built events): `platform` is exactly
   "github" or "forgejo"; `installationId` is a string and, when
@@ -137,6 +136,12 @@ scheduling boundary itself (defense in depth on top of `schedule.ts`):
   would otherwise serialize as the literal text "undefined" in the
   identity and hash identically to a real value of that text (the same
   "two distinct tuples, one id" class the `\n`/`\r` guard prevents);
+- the builder never throws: every option/event value is type-checked
+  before it is tested or stored (a SHA is a string; a provided
+  nonce/adoptionEpoch/configFingerprint and a follow_up's
+  eventReference are a string or a number), so a hostile value (a
+  symbol, an object with a throwing `toString`) is refused, not
+  coerced;
 - a provided nonce for a review job must match `[A-Za-z0-9._-]{1,64}`
   exactly; an EMPTY nonce is treated as absent (not validated); a
   provided-but-invalid nonce fails the build rather than being silently
@@ -161,9 +166,11 @@ scheduling boundary itself (defense in depth on top of `schedule.ts`):
 - `check_update` producing a review job is intended: a relevant CI
   update re-triggers the review. A check-reference entry may carry FLAT
   `head_sha`/`base_sha` instead of nested `head`/`base` objects (a
-  nested SHA wins), and such flat entries carry no repo names, so the
-  fork rule conservatively reports a fork — this is what makes the
-  re-trigger reachable from a real payload.
+  nested SHA wins only when it is well-formed; a malformed nested SHA
+  falls back to the flat field, which is form-checked too), and such
+  flat entries carry no repo names, so the fork rule conservatively
+  reports a fork — this is what makes the re-trigger reachable from a
+  real payload.
 
 `shouldSchedule` (`src/jobs/schedule.ts`) is the single scheduling
 policy: true for `pr_opened`, `pr_reopened`, `synchronize`,
