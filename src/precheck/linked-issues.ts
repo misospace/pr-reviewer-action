@@ -4,17 +4,18 @@
  * convention isn't used: a trailing `(#N)` / `(owner/repo#N)` on the PR
  * TITLE (the conventional-commit / squash-merge title convention), and
  * explicit non-closing implementation references in the body
- * (`Implements`/`Part of`/`Refs`/`Ref #N`). */
+ * (`Implements`/`Part of`/`Refs`/`Ref #N`/`Addresses #N`). */
 
 export interface LinkedIssueRef {
   ref: string;
   repo: string;
   number: number;
-  /** True only for GitHub's own auto-close keyword forms
-   * (Closes/Fixes/Resolves). False for the title's `(#N)` convention and for
-   * non-closing body references (Implements/Part of/Refs) — those still feed
-   * the requirement ledger as context, but must never be treated as "this PR
-   * closes that issue". */
+  /** True for GitHub's own auto-close keyword forms: the present/imperative
+   * `Closes`/`Fixes`/`Resolves` anywhere, and the past-participle
+   * `Closed`/`Fixed`/`Resolved` at a line start (#953). False for the title's
+   * `(#N)` convention and for non-closing body references (Implements/Part
+   * of/Refs/Addresses) — those still feed the requirement ledger as context,
+   * but must never be treated as "this PR closes that issue". */
   closing: boolean;
 }
 
@@ -29,13 +30,21 @@ export const MAX_LINKED_ISSUES = 8;
  * generous (4x the accepted cap) precisely because it is not the real cap. */
 export const MAX_LINKED_ISSUE_CANDIDATES = MAX_LINKED_ISSUES * 4;
 
-const GITHUB_ISSUE_REF_PATTERN = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?[ \t]+((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)/gi;
+/** Closing-keyword body references. The present/imperative forms
+ * (`close`/`closes`, `fix`/`fixes`, `resolve`/`resolves`) match anywhere, as
+ * GitHub's parser does. The past participles (`closed`/`fixed`/`resolved`)
+ * are ambiguous — they double as adjectives in ordinary prose ("the removed
+ * URLs covered by closed #479") — so they only count as closing when they
+ * start a line, after optional indentation and a markdown list/blockquote
+ * marker ("Fixed #42", "- Fixed #42", "* Resolved owner/repo#42"). #953. */
+const GITHUB_ISSUE_REF_PATTERN = /(?:\b(?:close|closes|fix|fixes|resolve|resolves)|(?:^|\n)[ \t]*(?:[-*+>]|\d+[.)])?[ \t]*(?:closed|fixed|resolved))\s*:?[ \t]+((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)/gi;
 
 /** Non-closing implementation references: `Implements`/`Part of`/`Refs`/
- * `Ref #N`. Deliberately excludes incidental mentions ("depends on #583",
- * bare "#12" in prose) and "Related to #N" (ambiguous between an
- * implementation reference and an incidental mention; left unlinked). */
-const IMPLEMENTATION_ISSUE_REF_PATTERN = /\b(?:implements|part of|refs?)\s*:?[ \t]+((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)/gi;
+ * `Ref #N`/`Addresses #N`. Deliberately excludes incidental mentions
+ * ("depends on #583", bare "#12" in prose) and "Related to #N" (ambiguous
+ * between an implementation reference and an incidental mention; left
+ * unlinked). */
+const IMPLEMENTATION_ISSUE_REF_PATTERN = /\b(?:implements|part of|refs?|addresses)\s*:?[ \t]+((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)/gi;
 
 /** A trailing `(#N)` / `(owner/repo#N)` at the very end of the PR title —
  * the conventional-commit / squash-merge title convention. Not anchored
