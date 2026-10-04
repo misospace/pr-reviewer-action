@@ -1,6 +1,6 @@
 /** Immutable ReviewJob contract (#728).
  *
- * The job a canonical forge event (`../events/types.js`) can spawn: the
+ * The job a canonical forge event (`CanonicalForgeEvent`) can spawn: the
  * unit of work a future queue/executor (Operator mode) would schedule.
  * Like `CanonicalForgeEvent`, every field is required and uses an
  * explicit sentinel (""/0/false) instead of an optional, so consumers
