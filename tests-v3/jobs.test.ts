@@ -280,6 +280,20 @@ test("an invalid provided nonce fails the build (never silently emptied)", () =>
   assert.equal(buildReviewJob(ev, { nonce: "has space" }), null);
 });
 
+test("a type-cast numeric nonce is stored as its String() form in the frozen job", () => {
+  // A type-cast number can never land in the string field / persisted
+  // payload: after validation the builder stores String(value).
+  const ev = makeEvent();
+  const job = buildReviewJob(ev, { nonce: 123 as unknown as string });
+  assert.notEqual(job, null);
+  assert.equal(typeof job!.nonce, "string");
+  assert.equal(job!.nonce, "123");
+  // The same id as the string form:
+  const stringJob = buildReviewJob(ev, { nonce: "123" });
+  assert.notEqual(stringJob, null);
+  assert.equal(job!.jobId, stringJob!.jobId);
+});
+
 // ── Adoption epoch ───────────────────────────────────────────────────────────
 
 test("disable→re-enable: same head+config, a new adoptionEpoch yields a distinct jobId", () => {
@@ -448,6 +462,32 @@ test("build options pass through with sentinel defaults; the job is frozen", () 
   assert.equal(defaults!.configFingerprint, "");
 });
 
+test("a runId with control characters, over 128 chars, or a non-string value is sanitized to ''", () => {
+  const ev = makeEvent();
+  // Newline / control character: the hostile tokens themselves.
+  let job = buildReviewJob(ev, { runId: "run\n1" });
+  assert.notEqual(job, null);
+  assert.equal(job!.runId, "");
+  job = buildReviewJob(ev, { runId: "run\u00001" });
+  assert.notEqual(job, null);
+  assert.equal(job!.runId, "");
+  // Boundary: 128 chars (after trim) is accepted, 129 is not.
+  job = buildReviewJob(ev, { runId: "r".repeat(128) });
+  assert.notEqual(job, null);
+  assert.equal(job!.runId, "r".repeat(128));
+  job = buildReviewJob(ev, { runId: "r".repeat(129) });
+  assert.notEqual(job, null);
+  assert.equal(job!.runId, "");
+  // A normal runId is preserved (trimmed).
+  job = buildReviewJob(ev, { runId: " run-1 " });
+  assert.notEqual(job, null);
+  assert.equal(job!.runId, "run-1");
+  // A cast-away non-string becomes "" (never stringified into the payload).
+  job = buildReviewJob(ev, { runId: 42 as unknown as string });
+  assert.notEqual(job, null);
+  assert.equal(job!.runId, "");
+});
+
 test("a provided deadlineAtMs must be a safe integer >= 0", () => {
   const ev = makeEvent();
   assert.equal(buildReviewJob(ev, { deadlineAtMs: Number.NaN }), null);
@@ -492,6 +532,49 @@ test("buildReviewJob normalizes head/base SHAs and fails closed on malformed one
 
 test("a 10KB headSha in a review event builds no job", () => {
   assert.equal(buildReviewJob(makeEvent({ headSha: "a".repeat(10 * 1024) })), null);
+});
+
+test("a hand-built event with a malformed scoping identity field builds no job (each alone)", () => {
+  // Each field, cast away to a malformed value, alone must fail the
+  // build — the builder's own fail-closed guard for hand-built events:
+  const variants: Array<Partial<CanonicalForgeEvent>> = [
+    { installationId: undefined as unknown as string },
+    { repoFullName: "" },
+    { prNumber: 0 },
+    { prId: -1 },
+    { fork: "yes" as unknown as boolean },
+    { platform: "gitlab" as unknown as "github" | "forgejo" },
+  ];
+  for (const overrides of variants) {
+    assert.equal(buildReviewJob(makeEvent(overrides)), null);
+  }
+  // Control: a well-formed event still builds.
+  assert.notEqual(buildReviewJob(makeEvent()), null);
+});
+
+test("a cast-away undefined installationId does not collide with a real 'undefined' installation", () => {
+  // Without the guard, `undefined` serialized as the literal text
+  // "undefined" and hashed identically to a real installation literally
+  // named "undefined" — two distinct tuples, one id.
+  const missing = buildReviewJob(makeEvent({ installationId: undefined as unknown as string }));
+  assert.equal(missing, null);
+  // "undefined" is not a digits-only installation id, so the literal
+  // form is refused too: the two can never share a job id.
+  assert.equal(buildReviewJob(makeEvent({ installationId: "undefined" })), null);
+});
+
+test("a leading-zero installation id fails the build; 32 digits builds, 33 does not", () => {
+  // "" is the absent sentinel: it still builds.
+  assert.notEqual(buildReviewJob(makeEvent({ installationId: "" })), null);
+  // Leading zero: not canonical, fails closed.
+  assert.equal(buildReviewJob(makeEvent({ installationId: "007" })), null);
+  assert.equal(buildReviewJob(makeEvent({ installationId: "0" })), null);
+  // Boundary: exactly 32 digits is accepted, 33 is not.
+  assert.notEqual(
+    buildReviewJob(makeEvent({ installationId: "12345678901234567890123456789012" })),
+    null,
+  );
+  assert.equal(buildReviewJob(makeEvent({ installationId: "1".repeat(33) })), null);
 });
 
 // ── Per-field identity distinctness and hostile shapes ─────────────────────
@@ -568,6 +651,36 @@ test("a __proto__-keyed event object does not throw and does not pollute Object.
   assert.equal(({} as Record<string, unknown>)["polluted"], undefined);
 });
 
+test("a symbol-valued identity field does not throw (fail closed, never raise)", () => {
+  const base: GenerationIdentity = {
+    platform: "github",
+    installationId: "42",
+    repoFullName: "owner/repo",
+    prNumber: 7,
+    prId: 4242,
+    headSha: "aa11bb22cc33",
+    baseSha: "dd44ee55ff66",
+    configFingerprint: "",
+    kind: "review",
+    nonce: "",
+    adoptionEpoch: "",
+    eventReference: "",
+  };
+  // Observed: `String()` is total over any field value (a symbol renders
+  // as "Symbol(nonce)"), which carries no \n/\r, so a symbol-valued field
+  // mints a 64-hex id (NOT the "" sentinel) instead of raising a
+  // TypeError. (A template literal — the pre-fix serialization — DOES
+  // throw on a symbol.)
+  let id = "";
+  assert.doesNotThrow(() => {
+    id = deriveGenerationId({ ...base, nonce: Symbol("nonce") as unknown as string });
+  });
+  assert.match(id, /^[0-9a-f]{64}$/);
+  // A hand-built event with a symbol scoping-identity field fails closed
+  // (null) without throwing too.
+  assert.equal(buildReviewJob(makeEvent({ installationId: Symbol("x") as unknown as string })), null);
+});
+
 // ── Staleness ───────────────────────────────────────────────────────────────
 
 test("isResultStale: differ → stale; case/whitespace-insensitive; malformed/empty → fail closed", () => {
@@ -608,4 +721,20 @@ test("isExpired: 0 deadline never expires; now >= deadline is expired", () => {
   assert.equal(isExpired(due!, 999), false);
   assert.equal(isExpired(due!, 1000), true);
   assert.equal(isExpired(due!, 1001), true);
+});
+
+test("isExpired: a non-finite clock fails closed (expired); the 0-deadline and >= rules are unchanged", () => {
+  const due = buildReviewJob(makeEvent(), { deadlineAtMs: 1000 });
+  assert.notEqual(due, null);
+  // Non-finite clock: the deadline state is unknowable → fail closed.
+  assert.equal(isExpired(due!, Number.NaN), true);
+  assert.equal(isExpired(due!, Number.NEGATIVE_INFINITY), true);
+  // Finite clocks: the documented >= boundary is unchanged.
+  assert.equal(isExpired(due!, 999), false);
+  assert.equal(isExpired(due!, 1000), true);
+  // A 0 deadline never expires, for ANY clock including NaN.
+  const open = buildReviewJob(makeEvent());
+  assert.notEqual(open, null);
+  assert.equal(isExpired(open!, Number.NaN), false);
+  assert.equal(isExpired(open!, Number.NEGATIVE_INFINITY), false);
 });

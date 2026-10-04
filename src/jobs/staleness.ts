@@ -43,8 +43,11 @@ export function resultMatchesJob(
 }
 
 /** True when the job's deadline has passed. A 0 deadline means "no
- * deadline" and never expires. */
+ * deadline" and never expires. A non-finite clock (`NaN`, `±Infinity`)
+ * means the deadline state is unknowable, so the check fails closed:
+ * the job is treated as expired. */
 export function isExpired(job: ReviewJob, nowMs: number): boolean {
   if (job.deadlineAtMs === 0) return false;
+  if (!Number.isFinite(nowMs)) return true;
   return nowMs >= job.deadlineAtMs;
 }

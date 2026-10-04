@@ -10,11 +10,11 @@
  */
 
 import { createHash } from "node:crypto";
-// The ONE definition of the follow-up reference form (event↔job
-// contract): the event normalizers and this builder share it, so the
-// two layers can never drift. `events` never imports `jobs`, so this
-// runtime import creates no cycle.
-import { COMMENT_ID_PATTERN } from "../events/normalize.js";
+// The ONE definitions of the follow-up reference and installation-id
+// forms (event↔job contract): the event normalizers and this builder
+// share them, so the two layers can never drift. `events` never
+// imports `jobs`, so this runtime import creates no cycle.
+import { COMMENT_ID_PATTERN, INSTALLATION_ID_PATTERN } from "../events/normalize.js";
 import type { CanonicalForgeEvent, ForgeEventKind } from "../events/types.js";
 import type { BuildJobOptions, ReviewJob, ReviewJobKind } from "./types.js";
 
@@ -59,14 +59,17 @@ const IDENTITY_FIELDS = [
 ] as const;
 
 /** Canonical identity serialization: a fixed-order `key=value\n` join over
- * the twelve identity fields. Unlike `computeConfigHash` — which SORTS its
- * lines — the field order here is fixed by `IDENTITY_FIELDS` and is part
- * of the id contract. The per-line keys make the form unambiguous despite
- * values that may contain `=`. */
+ * the twelve identity fields, each value stringified with `String()`
+ * (total over any field value — including a symbol — where a template
+ * literal would throw a TypeError). Unlike `computeConfigHash` — which
+ * SORTS its lines — the field order here is fixed by `IDENTITY_FIELDS`
+ * and is part of the id contract. The per-line keys make the form
+ * unambiguous despite values that may contain `=`. */
 function canonicalIdentity(identity: GenerationIdentity): string {
   let out = "";
   for (const field of IDENTITY_FIELDS) {
-    out += `${field}=${identity[field]}\n`;
+    const value = String(identity[field]);
+    out += `${field}=${value}\n`;
   }
   return out;
 }
@@ -83,7 +86,12 @@ function canonicalIdentity(identity: GenerationIdentity): string {
  * identities serialize to the same byte string (e.g. headSha
  * `"x\nbaseSha=b"` + baseSha `""` vs headSha `"x"` + baseSha
  * `"b\nbaseSha="`), which would collide their job ids. `buildReviewJob`
- * refuses to build a job when this returns `""`. */
+ * refuses to build a job when this returns `""`.
+ *
+ * Each value is stringified with `String()` for BOTH the newline check
+ * and the serialization (`String()` is total over any field value,
+ * including a symbol — a template literal would throw a TypeError), so
+ * this function never throws for any field value. */
 export function deriveGenerationId(identity: GenerationIdentity): string {
   for (const field of IDENTITY_FIELDS) {
     if (/\n|\r/.test(String(identity[field]))) return "";
@@ -117,6 +125,21 @@ function normalizeSha(sha: string): string {
   return sha.trim().toLowerCase();
 }
 
+/** A run id for the durable payload: trimmed; "" when empty after trim,
+ * longer than 128 chars, or containing a control character. Mirrors
+ * `sanitizeDisplay` (`src/events/normalize.js`) — kept module-local so
+ * the jobs layer does not import the event boundary's display sanitizer.
+ * A non-string value is "" (never stringified into the payload). */
+const CONTROL_CHAR_PATTERN = /[\u0000-\u001f\u007f]/;
+function sanitizeRunId(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  const trimmed = raw.trim();
+  if (trimmed === "" || trimmed.length > 128 || CONTROL_CHAR_PATTERN.test(trimmed)) {
+    return "";
+  }
+  return trimmed;
+}
+
 /** A provided nonce must be exactly this: 1–64 chars of
  * `[A-Za-z0-9._-]`. Anything else (including a too-long run of valid
  * chars) is invalid. */
@@ -143,9 +166,22 @@ const ADOPTION_EPOCH_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
  *   `headSha` (fail closed). The normalizers already enforce the SHA
  *   form at the adapter boundary; this is the builder's own fail-closed
  *   guard for hand-built events.
+ * - the scoping identity fields are well-formed (the builder's own
+ *   fail-closed guard for hand-built events): `platform` is exactly
+ *   "github" or "forgejo"; `installationId` is a string and, when
+  *   non-empty, matches `INSTALLATION_ID_PATTERN` (the shared canonical
+  *   installation-id form imported from the event boundary);
+ *   `repoFullName` is a non-empty string; `prNumber` is a safe integer
+ *   > 0; `prId` is a safe integer >= 0; `fork` is a boolean. A
+ *   cast-away `undefined` in any of them would otherwise serialize as
+ *   the literal text "undefined" in the identity and hash identically
+ *   to a real value of that text (the same "two distinct tuples, one
+ *   id" class the \n/\r guard prevents), so the build fails.
  * - a provided nonce for a review job must match `NONCE_PATTERN`, else
  *   the build fails (never silently emptied into the identity); an EMPTY
- *   nonce is treated as ABSENT (not validated).
+ *   nonce is treated as ABSENT (not validated); a non-string value is
+ *   stored as `String(...)` after validation, so a type-cast number can
+ *   never land in the string field / persisted payload.
  * - a provided `adoptionEpoch` (any job kind) must match
  *   `ADOPTION_EPOCH_PATTERN`, else the build fails (never silently
  *   emptied into the identity); an EMPTY epoch is treated as ABSENT
@@ -162,6 +198,10 @@ const ADOPTION_EPOCH_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
  * - a non-empty `configFingerprint` must match
  *   `CONFIG_FINGERPRINT_PATTERN`.
  * - a provided `deadlineAtMs` must be a safe integer >= 0.
+ * - the `runId` is sanitized (trim; "" when empty after trim, longer
+ *   than 128 chars, or containing a control character — mirroring
+ *   `sanitizeDisplay` at the adapter boundary; a non-string value is
+ *   "") so the durable payload carries a clean reference.
  * - the build fails when `deriveGenerationId` returns `""` (an identity
  *   value containing a `\n`/`\r`).
  */
@@ -177,7 +217,9 @@ export function buildReviewJob(
   if (kind === "review" && options.nonce) {
     // An empty nonce is ABSENT: only non-empty values are validated.
     if (!NONCE_PATTERN.test(options.nonce)) return null;
-    nonce = options.nonce;
+    // Store the STRING form: a type-cast non-string can never land in
+    // the string field / persisted payload.
+    nonce = String(options.nonce);
   }
 
   // Unlike the nonce (ignored for follow_up), the adoption epoch is an
@@ -208,6 +250,21 @@ export function buildReviewJob(
   if (headSha !== "" && !SHA_PATTERN.test(headSha)) return null;
   if (baseSha !== "" && !SHA_PATTERN.test(baseSha)) return null;
   if (kind === "review" && headSha === "") return null;
+
+  // Fail-closed scoping-identity handling for hand-built (non-normalizer)
+  // events: a cast-away `undefined` in any of these would serialize as
+  // the literal text "undefined" in the identity and hash identically to
+  // a real value of that text (the same "two distinct tuples, one id"
+  // class the \n/\r guard prevents), so the build must not hash them.
+  if (event.platform !== "github" && event.platform !== "forgejo") return null;
+  if (typeof event.installationId !== "string") return null;
+  if (event.installationId !== "" && !INSTALLATION_ID_PATTERN.test(event.installationId)) {
+    return null;
+  }
+  if (typeof event.repoFullName !== "string" || event.repoFullName === "") return null;
+  if (!Number.isSafeInteger(event.prNumber) || event.prNumber <= 0) return null;
+  if (!Number.isSafeInteger(event.prId) || event.prId < 0) return null;
+  if (typeof event.fork !== "boolean") return null;
 
   const configFingerprint = options.configFingerprint ?? "";
   if (configFingerprint !== "" && !CONFIG_FINGERPRINT_PATTERN.test(configFingerprint)) {
@@ -256,6 +313,6 @@ export function buildReviewJob(
     eventReference,
     fork: event.fork,
     deadlineAtMs,
-    runId: options.runId ?? "",
+    runId: sanitizeRunId(options.runId),
   });
 }

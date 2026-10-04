@@ -166,6 +166,34 @@ test("rereviewLabel option overrides the default trigger", () => {
   assert.equal(defaultMiss?.kind, "unknown");
 });
 
+test("an empty rereviewLabel option falls back to the default (parity with the precheck's ||)", () => {
+  const event = normalizeGitHubEvent(
+    { ...LABELED_BASE, label: { name: "ai-review" } },
+    "webhook",
+    { rereviewLabel: "" },
+  );
+  assert.equal(event?.kind, "rereview_label");
+});
+
+test("a padded label does NOT trigger (byte-for-byte parity with the precheck); labelName stays trimmed", () => {
+  // The precheck compares the label EXACTLY (`eventLabelName(event.label)
+  // === rereviewLabel`, no trim) and skips " ai-review" as an unrelated
+  // label — the normalizer must map it to `unknown` the same way, while
+  // the `labelName` display field is still the trimmed value.
+  const padded = normalizeGitHubEvent({ ...LABELED_BASE, label: { name: " ai-review" } });
+  assert.equal(padded?.kind, "unknown");
+  assert.equal(padded?.labelName, "ai-review");
+
+  // Same for a custom (non-default) trigger label: the match is exact,
+  // not trimmed.
+  const custom = normalizeGitHubEvent(
+    { ...LABELED_BASE, label: { name: " re-review" } },
+    "webhook",
+    { rereviewLabel: "re-review" },
+  );
+  assert.equal(custom?.kind, "unknown");
+});
+
 // ── Follow-up comments ─────────────────────────────────────────────────────
 
 test("issue_comment created on a PR is a follow_up", () => {
@@ -254,8 +282,8 @@ test("follow_up eventReference: number and digit-string comment.id normalize to 
   assert.equal(fjString?.eventReference, "987654321");
 
   // 19 digits is the upper bound and still canonical.
-  const max = normalizeGitHubEvent(commentPayload("issue_comment", { id: "123456789123456789", user: { login: "commenter" } }));
-  assert.equal(max?.eventReference, "123456789123456789");
+  const max = normalizeGitHubEvent(commentPayload("issue_comment", { id: "1".repeat(19), user: { login: "commenter" } }));
+  assert.equal(max?.eventReference, "1".repeat(19));
 });
 
 test("follow_up eventReference: adversarial comment.id values are '' and never throw", () => {
@@ -380,6 +408,71 @@ test("check_run / check_suite / status map to check_update", () => {
   }
 });
 
+test("check_run payload with FLAT head_sha/base_sha (no nested head/base) normalizes with SHAs and fork: true", () => {
+  // Real check_run/check_suite payloads can carry `pull_requests[]`
+  // entries as flat objects with `head_sha`/`base_sha` and no nested
+  // `head`/`base` (and no repo names). Without the flat fallback these
+  // normalize with `headSha: ""` and the job layer refuses every such
+  // job, so the documented "a relevant CI update re-triggers the review"
+  // path could never fire.
+  const event = normalizeGitHubEvent({
+    name: "check_run",
+    action: "completed",
+    repository: { full_name: "owner/repo" },
+    check_suite: { id: 9 },
+    pull_requests: [
+      {
+        id: 7,
+        number: 42,
+        head_sha: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+        base_sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+      },
+    ],
+  });
+  assert.notEqual(event, null);
+  assert.equal(event!.kind, "check_update");
+  assert.equal(event!.prNumber, 42);
+  assert.equal(event!.prId, 7);
+  assert.equal(event!.headSha, "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0");
+  assert.equal(event!.baseSha, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+  // No repo names on the flat entry ⇒ missing head repo ⇒ fork
+  // (the conservative derivation rule is unchanged).
+  assert.equal(event!.fork, true);
+});
+
+test("nested head/base SHAs win over flat head_sha/base_sha", () => {
+  const event = normalizeGitHubEvent({
+    name: "check_run",
+    action: "completed",
+    repository: { full_name: "owner/repo" },
+    pull_requests: [
+      {
+        id: 7,
+        number: 42,
+        head: { sha: "a1b2c3d", repo: { full_name: "owner/repo" } },
+        base: { sha: "deadbeef", repo: { full_name: "owner/repo" } },
+        head_sha: "ffffffffffffffffffffffffffffffffffffffff",
+        base_sha: "0000000000000000000000000000000000000000",
+      },
+    ],
+  });
+  assert.notEqual(event, null);
+  assert.equal(event!.headSha, "a1b2c3d");
+  assert.equal(event!.baseSha, "deadbeef");
+});
+
+test("a malformed flat sha is the sentinel ''", () => {
+  const event = normalizeGitHubEvent({
+    name: "check_run",
+    action: "completed",
+    repository: { full_name: "owner/repo" },
+    pull_requests: [{ id: 7, number: 42, head_sha: "xyz", base_sha: "a1b2c3d" }],
+  });
+  assert.notEqual(event, null);
+  assert.equal(event!.headSha, "");
+  assert.equal(event!.baseSha, "a1b2c3d");
+});
+
 test("installation and installation_repositories map to installation_change", () => {
   const event = normalizeGitHubEvent({
     name: "installation_repositories",
@@ -497,9 +590,17 @@ test("poll installationId is validated at the boundary (fail closed on non-digit
     "abc",
     "12a45",
     "1".repeat(33),
-    // 33-digit NUMERIC: not a safe integer; String() would silently
+    // 37-digit NUMERIC: not a safe integer; String() would silently
     // alter it, so it is the sentinel "".
     1234567891234567891234567891234567891,
+    // 9007199254740993 (not representable; the literal parses to 2^53,
+    // which is NOT a safe integer). WITHOUT the safe-integer guard,
+    // String() of it yields "9007199254740992" — 16 digits matching the
+    // digit pattern — and it would be accepted as a canonical id. This
+    // is the case the guard exists for (proven by the mutation check).
+    9007199254740993,
+    "0", // zero is not an installation id
+    "007", // leading zero: the same installation as 7
     null,
     undefined,
     true,
@@ -605,13 +706,22 @@ test("installationId is extracted from installation.id; '' when absent", () => {
   };
   const numeric = normalizeGitHubEvent({ ...base, installation: { id: 42 } });
   assert.equal(numeric?.installationId, "42");
-  // 33-digit NUMERIC: not a safe integer; String() would silently alter
+  // 37-digit NUMERIC: not a safe integer; String() would silently alter
   // it, so it is the sentinel "" (no convergence with the string form).
   const unsafeNumeric = normalizeGitHubEvent({
     ...base,
     installation: { id: 1234567891234567891234567891234567891 },
   });
   assert.equal(unsafeNumeric?.installationId, "");
+  // 9007199254740993 (not representable; the literal parses to 2^53,
+  // which is NOT a safe integer): without the safe-integer guard,
+  // String() of it yields "9007199254740992" — 16 digits matching the
+  // digit pattern — and it would be accepted as a canonical id.
+  const unsafeSmall = normalizeGitHubEvent({
+    ...base,
+    installation: { id: 9007199254740993 },
+  });
+  assert.equal(unsafeSmall?.installationId, "");
   // Non-digit strings are rejected (digits-only identity field).
   const stringId = normalizeGitHubEvent({ ...base, installation: { id: "abc" } });
   assert.equal(stringId?.installationId, "");
@@ -619,6 +729,30 @@ test("installationId is extracted from installation.id; '' when absent", () => {
   assert.equal(absent?.installationId, "");
   const invalid = normalizeGitHubEvent({ ...base, installation: { id: null } });
   assert.equal(invalid?.installationId, "");
+});
+
+test("installationId: no leading zero and no '0' (webhook and poll agree on the canonical form)", () => {
+  const base = {
+    name: "pull_request",
+    action: "opened",
+    repository: { full_name: "owner/repo" },
+    pull_request: { number: 1 },
+  };
+  const prPayload = {
+    number: 3,
+    head: { sha: "a1b2c3d", repo: { full_name: "owner/repo" } },
+    base: { sha: "deadbeef", repo: { full_name: "owner/repo" } },
+  };
+  // Leading zero: "007" and 7 are the SAME installation and must never
+  // split into two canonical values; "0" is not an installation id.
+  for (const id of ["0", "007", "00042"] as const) {
+    assert.equal(normalizeGitHubEvent({ ...base, installation: { id } })?.installationId, "", `webhook ${id}`);
+    assert.equal(reconciliationPollEvent("github", prPayload, { installationId: id })?.installationId, "", `poll ${id}`);
+  }
+  // 32 digits (the bound) is accepted; 33 digits is oversized.
+  assert.equal(normalizeGitHubEvent({ ...base, installation: { id: "1".repeat(32) } })?.installationId, "1".repeat(32));
+  assert.equal(normalizeGitHubEvent({ ...base, installation: { id: "1".repeat(33) } })?.installationId, "");
+  assert.equal(reconciliationPollEvent("github", prPayload, { installationId: "1".repeat(32) })?.installationId, "1".repeat(32));
 });
 
 test("bare PR objects normalize (no envelope) with unknown kind", () => {
@@ -660,4 +794,38 @@ test("returned events are frozen", () => {
   });
   assert.notEqual(event, null);
   assert.ok(Object.isFrozen(event));
+});
+
+// ── Display-string boundaries (sanitizeDisplay) ──────────────────────────
+
+test("display-string boundaries: control chars and length (documented '' sentinel)", () => {
+  const base = {
+    name: "pull_request",
+    action: "opened",
+    repository: { full_name: "owner/repo" },
+    pull_request: { number: 1 },
+  };
+  // Embedded control char (NUL) in the actor ⇒ the documented "".
+  assert.equal(normalizeGitHubEvent({ ...base, sender: { login: "bad\u0000actor" } })?.actor, "");
+  // Newline in the label name ⇒ labelName "" (and no trigger).
+  const nl = normalizeGitHubEvent({ ...LABELED_BASE, label: { name: "ai\nreview" } });
+  assert.equal(nl?.labelName, "");
+  assert.equal(nl?.kind, "unknown");
+  // >128 chars ⇒ "".
+  assert.equal(normalizeGitHubEvent({ ...base, sender: { login: "a".repeat(129) } })?.actor, "");
+  // Exactly 128 chars is accepted.
+  assert.equal(normalizeGitHubEvent({ ...base, sender: { login: "a".repeat(128) } })?.actor, "a".repeat(128));
+  // A comment author whose login fails sanitization falls back to the
+  // envelope sender (candidates are sanitized in priority order; a
+  // hostile author no longer zeroes the actor).
+  const hostileComment = normalizeGitHubEvent({
+    name: "issue_comment",
+    action: "created",
+    repository: { full_name: "owner/repo" },
+    issue: { number: 9, pull_request: { id: 55, number: 9 } },
+    comment: { id: 1, user: { login: "bad\u0000actor" } },
+    sender: { login: "the-sender" },
+  });
+  assert.notEqual(hostileComment, null);
+  assert.equal(hostileComment!.actor, "the-sender");
 });

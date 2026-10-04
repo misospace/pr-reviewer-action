@@ -13,6 +13,11 @@
  *   label? }`
  * - a bare PR object: `{ number, id?, draft?, head: { sha, repo: {
  *   full_name } }, base: { sha, repo: { full_name } }, user? }`
+ * - a flat check-reference list: some `check_run`/`check_suite` payloads
+ *   carry `pull_requests[]` entries as FLAT objects `{ id, number,
+ *   head_sha, base_sha }` — no nested `head`/`base` objects and no repo
+ *   names. When a nested `head`/`base` yields no SHA, the entry's flat
+ *   `head_sha`/`base_sha` is the fallback (still through `normalizeSha`).
  * - a follow-up comment payload: `{ name|event: "issue_comment"|"comment",
  *   action: "created", issue: { number?, pull_request }, comment: { id,
  *   user: { login } } }` — in the REAL GitHub `issue_comment` shape
@@ -30,7 +35,11 @@
  * must be a SAFE integer first (an unsafe int is rejected outright,
  * never stringified); a digit string is accepted. 0, negatives,
  * non-digits, leading zeros, oversized (>19 digits), and floats become
- * the sentinel "". Every non-comment event shape carries "".
+ * the sentinel "". Every non-comment event shape carries "". The
+ * installation-id canonical form (`INSTALLATION_ID_PATTERN`) is the
+ * parallel ONE definition: a digits-only string, 1–32 digits, no
+ * leading zero, after `String()` + trim (0, non-digits, a leading
+ * zero, or >32 digits ⇒ the sentinel ""), imported by the job builder.
  *
  * The PR is resolved in this order: `pull_request` → `issue.pull_request`
  * → first object of `pull_requests` → the payload itself (bare PR). For
@@ -55,8 +64,9 @@
  * every identity field and differs only in those two. Its optional
  * `options.installationId` is validated at the adapter boundary by the SAME
  * `normalizeInstallationId` guard as the webhook's `installation.id`
- * (trim + 1–32 digits; a number must be a SAFE integer first; anything
- * else is the sentinel "") — the boundary never trusts its caller — and
+ * (trim + 1–32 digits, no leading zero; a number must be a SAFE integer
+ * first; anything else is the sentinel "") — the boundary never trusts
+ * its caller — and
  * is used for the event's `installationId` field (default ""), which
  * lets a poller converge with the webhook that carried `installation.id`.
  */
@@ -184,12 +194,22 @@ function resolvePr(raw: Record<string, unknown>): PrExtract | null {
   const base = asObject(pr.base);
   const headRepo = asString(asObject(head.repo).full_name);
   const baseRepo = asString(asObject(base.repo).full_name);
+  // Flat check-reference entries (check_run/check_suite `pull_requests[]`)
+  // can carry `head_sha`/`base_sha` without a nested `head`/`base`
+  // object; fall back to them when the nested form yields no SHA (still
+  // through `normalizeSha`). Such entries carry no repo names, so the
+  // fork derivation below keeps its conservative "missing head repo ⇒
+  // fork" rule for them.
+  const headSha =
+    normalizeSha(asString(head.sha)) || normalizeSha(asString(pr.head_sha));
+  const baseSha =
+    normalizeSha(asString(base.sha)) || normalizeSha(asString(pr.base_sha));
   return {
     origin,
     prNumber: isPrNumber(pr.number) ? pr.number : issueNumber,
     prId: asId(pr.id),
-    headSha: normalizeSha(asString(head.sha)),
-    baseSha: normalizeSha(asString(base.sha)),
+    headSha,
+    baseSha,
     draft: Boolean(pr.draft),
     // The ONE fork derivation (#370 lineage, mirrors `deriveIsFork`): a
     // missing/empty head repo is a fork; a present head against a
@@ -211,15 +231,17 @@ function labelNameOf(label: unknown): string {
   return "";
 }
 
-/** Digits-only installation identity (1–32 digits) at the adapter
- * boundary: `String()` + trim, then the digit pattern; "" on any other
- * input (unknown, non-string/number, empty, non-digit). A numeric value
- * must be a SAFE integer first — `String(n)` on an unsafe int silently
- * alters the value while still matching the digit pattern, collapsing
- * two distinct installation identities (mirrors the `asId` convention).
- * The boundary never trusts its caller — webhook `installation.id` and
- * poll `options.installationId` are both funneled through this. */
-const INSTALLATION_ID_PATTERN = /^\d{1,32}$/;
+/** Digits-only installation identity (1–32 digits, NO leading zero) at
+ * the adapter boundary: `String()` + trim, then the digit pattern; "" on
+ * any other input (unknown, non-string/number, empty, non-digit, leading
+ * zero). A numeric value must be a SAFE integer first — `String(n)` on an
+ * unsafe int silently alters the value while still matching the digit
+ * pattern, which would accept a canonical id for a value the payload did
+ * not actually carry (mirrors the `asId` convention). No leading zero:
+ * "007" and 7 are the SAME installation and must never split into two
+ * canonical values, and "0" is not an installation id at all. The
+ * boundary never trusts its caller — webhook `installation.id` and poll
+ * `options.installationId` are both funneled through this. */
 function normalizeInstallationId(value: unknown): string {
   if (typeof value === "number" && !Number.isSafeInteger(value)) return "";
   if (typeof value !== "number" && typeof value !== "string") return "";
@@ -228,12 +250,20 @@ function normalizeInstallationId(value: unknown): string {
 }
 
 /** `installation.id` as a digits-only string ("42" from 42); "" when
- * absent, or not 1–32 digits after `String()` + trim. The payload is
- * parsed JSON (own properties only); a prototype-injected `id` is not
- * expected from the forge envelope layer. */
+ * absent, or not 1–32 digits without a leading zero after `String()` +
+ * trim. The payload is parsed JSON (own properties only); a
+ * prototype-injected `id` is not expected from the forge envelope layer. */
 function installationIdOf(raw: Record<string, unknown>): string {
   return normalizeInstallationId(asObject(raw.installation).id);
 }
+
+/** The canonical installation-id form: a digits-only string
+ * (1–32 digits, no leading zero). This is the ONE definition of the
+ * form — it is part of the event↔job contract: the event normalizers
+ * produce `installationId` in this shape and the job builder
+ * (`src/jobs/generation.ts`) fail-closes on anything else, so the two
+ * layers can never drift apart. */
+export const INSTALLATION_ID_PATTERN = /^[1-9]\d{0,31}$/;
 
 /** The canonical follow-up comment id form: a digits-only string
  * (1–19 digits, no leading zero). This is the ONE definition of the
@@ -284,7 +314,7 @@ function mapKind(
   name: string,
   action: string,
   pr: PrExtract | null,
-  labelName: string,
+  rawLabelName: string,
   rereviewLabel: string,
 ): ForgeEventKind {
   if (name === "pull_request") {
@@ -300,10 +330,15 @@ function mapKind(
       case "closed":
         return pr !== null && pr.merged ? "pr_merged" : "pr_closed";
       case "labeled":
-        // Exact case-SENSITIVE comparison, matching the shipped precheck
-        // pipeline (`src/precheck/decide.ts`:
-        // `eventLabelName(event.label) === rereviewLabel`).
-        return labelName !== "" && labelName === rereviewLabel ? "rereview_label" : "unknown";
+        // EXACT byte-for-byte, case-SENSITIVE comparison, matching the
+        // shipped precheck pipeline (`src/precheck/decide.ts`:
+        // `eventLabelName(event.label) === rereviewLabel`) — NO trim.
+        // The comparison uses the RAW label name (not the sanitized
+        // display value), so a padded " ai-review" maps to `unknown`
+        // here exactly as the precheck skips it as an unrelated label.
+        // (`rereviewLabel` is never "" — the caller falls back to the
+        // default on an empty option, mirroring the precheck's `||`.)
+        return rawLabelName === rereviewLabel ? "rereview_label" : "unknown";
       default:
         return "unknown";
     }
@@ -361,11 +396,18 @@ function normalizeEvent(
 ): CanonicalForgeEvent | null {
   try {
     if (!isPlainObject(raw)) return null;
-    const rereviewLabel = options.rereviewLabel ?? DEFAULT_REREVIEW_LABEL;
+    // `||` (not `??`): an empty-string option falls back to the default,
+    // mirroring the precheck's `env.REREVIEW_LABEL || "ai-review"` so the
+    // two boundaries can never disagree on the trigger label.
+    const rereviewLabel = options.rereviewLabel || DEFAULT_REREVIEW_LABEL;
     const name = asString(raw.name) || asString(raw.event);
     const action = asString(raw.action);
     const pr = resolvePr(raw);
     const labelName = sanitizeDisplay(labelNameOf(raw.label));
+    // The RAW label name is the comparison input for the trigger label
+    // (byte-for-byte parity with the precheck); the sanitized value above
+    // is only the `labelName` display field.
+    const rawLabelName = labelNameOf(raw.label);
 
     const envelopeRepo = normalizeRepoFullName(asString(asObject(raw.repository).full_name));
     const repoFullName =
@@ -376,14 +418,17 @@ function normalizeEvent(
           : repoFromList(raw);
     if (repoFullName === "") return null;
 
-    const kind = mapKind(name, action, pr, labelName, rereviewLabel);
+    const kind = mapKind(name, action, pr, rawLabelName, rereviewLabel);
     if (PR_SCOPED_KINDS.has(kind) && (pr === null || pr.prNumber === 0)) return null;
 
     // The triggering user: a comment's author for follow-ups, else the
-    // envelope sender, else the PR author.
-    const commentActor = asString(asObject(asObject(raw.comment).user).login);
-    const senderActor = asString(asObject(raw.sender).login);
-    const prActor = pr !== null ? pr.userLogin : "";
+    // envelope sender, else the PR author. Each candidate is SANITIZED in
+    // priority order and the first NON-EMPTY one wins, so a hostile
+    // author login (control char / >128 chars) falls through to the next
+    // candidate instead of zeroing the actor.
+    const commentActor = sanitizeDisplay(asString(asObject(asObject(raw.comment).user).login));
+    const senderActor = sanitizeDisplay(asString(asObject(raw.sender).login));
+    const prActor = sanitizeDisplay(pr !== null ? pr.userLogin : "");
     const isCommentEvent = name === "issue_comment" || name === "comment";
     const actor = isCommentEvent
       ? (commentActor !== "" ? commentActor : senderActor)
@@ -405,7 +450,9 @@ function normalizeEvent(
       // rest).
       fork: pr === null ? true : pr.fork,
       labelName,
-      actor: sanitizeDisplay(actor),
+      // Already sanitized: each candidate went through `sanitizeDisplay`
+      // during the priority-order resolution above.
+      actor,
       eventReference,
     });
   } catch {
@@ -451,10 +498,10 @@ export function normalizeForgeEvent(
  *
  * `options.installationId` is validated at the boundary by the same
  * `normalizeInstallationId` guard as the webhook's `installation.id`
- * (trim + 1–32 digits; anything else is the sentinel "") and used for the
- * event's `installationId` field (default ""), which lets a poller
- * converge with the webhook that carried `installation.id`. Polls are
- * never comment-shaped, so `eventReference` is always "". */
+ * (trim + 1–32 digits, no leading zero; anything else is the sentinel "")
+ * and used for the event's `installationId` field (default ""), which
+ * lets a poller converge with the webhook that carried `installation.id`.
+ * Polls are never comment-shaped, so `eventReference` is always "". */
 export function reconciliationPollEvent(
   platform: "github" | "forgejo",
   prPayloadRaw: unknown,
@@ -467,9 +514,12 @@ export function reconciliationPollEvent(
     const envelopeRepo = normalizeRepoFullName(asString(asObject(prPayloadRaw.repository).full_name));
     const repoFullName = envelopeRepo !== "" ? envelopeRepo : normalizeRepoFullName(pr.baseRepoRaw);
     if (repoFullName === "") return null;
-    const actor = sanitizeDisplay(
-      asString(asObject(prPayloadRaw.user).login) || asString(asObject(prPayloadRaw.sender).login),
-    );
+    // Sanitize each candidate in priority order (user → sender) and take
+    // the first non-empty, so a hostile `user.login` falls through to
+    // `sender` instead of zeroing the actor.
+    const actor =
+      sanitizeDisplay(asString(asObject(prPayloadRaw.user).login)) ||
+      sanitizeDisplay(asString(asObject(prPayloadRaw.sender).login));
     return buildEvent(platform, "poll", "reconciliation_poll", {
       // Boundary guard: the poll path validates the caller's
       // installationId exactly like the webhook path — no pass-through of
