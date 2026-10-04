@@ -94,6 +94,7 @@
   "repoMapMaxBytes": "9000",
   "requiredCheckValidationMode": "warn",
   "requirementTrace": "false",
+  "rereviewCommand": "/ai-review",
   "rereviewLabel": "ai-review",
   "reviewRoutingMode": "auto",
   "reviewThreadsContext": "true",

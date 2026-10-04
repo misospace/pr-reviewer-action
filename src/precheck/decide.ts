@@ -396,12 +396,19 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
     // Defense in depth for installation-token semantics: if the response
     // names its subject, the subject must be the commenter — a response
     // describing someone else (e.g. an echo of the caller's own permission)
-    // can never authorize. A subject-less response (allowed by the schema)
-    // passes through: nothing provable is wrong with it.
+    // can never authorize, and a subject that is not a well-formed user
+    // object with a string `login` matching the commenter is unverifiable,
+    // so it fails closed the same way (a malformed subject — a bare string,
+    // an array, or an object without a usable login — is no proof of
+    // anything). A subject-less response (allowed by the schema) passes
+    // through: nothing provable is wrong with it.
     const subject = permissionRecord?.user;
-    if (subject !== null && subject !== undefined && typeof subject === "object" && !Array.isArray(subject)) {
-      const subjectLogin = (subject as Record<string, unknown>).login;
-      if (typeof subjectLogin === "string" && subjectLogin.toLowerCase() !== commenter.toLowerCase()) {
+    if (subject !== null && subject !== undefined) {
+      const subjectLogin =
+        typeof subject === "object" && !Array.isArray(subject)
+          ? (subject as Record<string, unknown>).login
+          : undefined;
+      if (typeof subjectLogin !== "string" || subjectLogin.toLowerCase() !== commenter.toLowerCase()) {
         return platformOutputs(
           { should_review: "false", skip_reason: "comment-permission-unknown" },
           resolvedPlatform,

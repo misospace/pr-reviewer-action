@@ -170,8 +170,9 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
     // #914: a matching re-review command on a FORK PR is not reviewable with
     // a repo token (fork PRs belong to the fork workflow — see
     // docs/fork-review.md), so the run replies to the comment pointing the
-    // commenter there. The reply body is a fixed constant — no untrusted
-    // content ever reaches it — and the reply is additionally gated on the
+    // commenter there. The reply body is fixed wording plus the
+    // operator-configured command (never comment content) — and the reply is
+    // additionally gated on the
     // comment-body trigger: `comment-fork-pr` is only reachable with a
     // matched authorized comment, but the gate keeps that invariant honest
     // at this seam. Best-effort: a failed reply never fails the run. No ack
@@ -358,9 +359,14 @@ async function postCommentAckReaction(stage: Env, commentId: number | string): P
 }
 
 /** #914: best-effort reply to a re-review command comment on a fork PR,
- * pointing the commenter at the `ai-review-fork` label workflow. Static
- * body — no untrusted interpolation. Same seam as the ack reaction; the
- * fetch failure is swallowed — a failed reply must never fail the run. */
+ * pointing the commenter at the `ai-review-fork` label workflow. The body
+ * names the configured `rereview-command` — trusted operator input, rendered
+ * in backticks only when it is a non-empty run of printable ASCII (no
+ * whitespace, ≤ 80 chars) carrying no backtick of its own (a backtick in
+ * the command would close the code span early); any other value falls back
+ * to backtick-free wording that names no command at all. Same seam as the
+ * ack reaction; the fetch failure is swallowed — a failed reply must never
+ * fail the run. */
 async function postForkPrCommentReply(stage: Env): Promise<void> {
   const platform = resolvePlatform(stage.PLATFORM, stage.FORGEJO_API_URL ?? "", stage.GITHUB_SERVER_URL ?? "", stage.TANGLED_REPO_DID ?? "");
   requireImplementedBackend(platform);
@@ -372,6 +378,12 @@ async function postForkPrCommentReply(stage: Env): Promise<void> {
   const url = repoScopedUrl(base, stage.REPO ?? "", `/issues/${pr}/comments`);
   if (url === null) return;
   const token = platform === "forgejo" ? (stage.FORGEJO_TOKEN ?? "") : (stage.GH_TOKEN ?? "");
+  const command = (stage.REREVIEW_COMMAND ?? "").trim();
+  const namesCommand =
+    command.length > 0 && command.length <= 80 && /^[\x21-\x7E]+$/.test(command) && !command.includes("`");
+  const replyBody = namesCommand
+    ? `The \`${command}\` command does not run on fork PRs. To review a fork PR, a maintainer adds the \`ai-review-fork\` label — see docs/fork-review.md.`
+    : "The re-review command does not run on fork PRs. To review a fork PR, a maintainer adds the ai-review-fork label — see docs/fork-review.md.";
   await fetch(url, {
     method: "POST",
     headers: {
@@ -379,9 +391,7 @@ async function postForkPrCommentReply(stage: Env): Promise<void> {
       Accept: "application/json",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      body: "The `/ai-review` command does not run on fork PRs. To review a fork PR, a maintainer adds the `ai-review-fork` label — see docs/fork-review.md.",
-    }),
+    body: JSON.stringify({ body: replyBody }),
     signal: AbortSignal.timeout(15000),
   }).catch(() => undefined);
 }

@@ -406,6 +406,70 @@ test("#914: the fork reply also fires for the bare command", async () => {
   }
 });
 
+test("#914: a customized rereview-command on a fork PR is named in the reply", async () => {
+  const result = await runCase({ body: "/rerereview", onPr: true, permission: "write", forkHeadRepo: "forker/r", rereviewCommand: "/rerereview" });
+  try {
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.outputs["skip-reason"], "comment-fork-pr");
+    const forkReplies = result.replyBodies.filter((b) => b.includes(FORK_REPLY_MARKER));
+    assert.equal(forkReplies.length, 1, "exactly one fork reply to /issues/7/comments");
+    assert.ok(forkReplies[0]!.includes("`/rerereview`"), "the reply names the configured command in backticks");
+    assert.ok(
+      forkReplies[0]!.includes("maintainer adds the `ai-review-fork` label — see docs/fork-review.md"),
+      "the reply keeps the fork-label guidance alongside the customized command",
+    );
+  } finally {
+    await result.cleanup();
+  }
+});
+
+test("#914: a rereview-command containing a backtick falls back to generic wording with no backticks in the reply", async () => {
+  // A backtick in the command would close the code span early, so it must
+  // not be rendered at all — the reply is the backtick-free generic body.
+  const result = await runCase({ body: "/ai`review", onPr: true, permission: "write", forkHeadRepo: "forker/r", rereviewCommand: "/ai`review" });
+  try {
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.outputs["skip-reason"], "comment-fork-pr");
+    const forkReplies = result.replyBodies.filter((b) => b.includes(FORK_REPLY_MARKER));
+    assert.equal(forkReplies.length, 1, "exactly one fork reply to /issues/7/comments");
+    assert.ok(forkReplies[0]!.includes("The re-review command does not run on fork PRs"), "the reply uses the generic wording");
+    assert.ok(!forkReplies[0]!.includes("`"), "no backtick anywhere in the reply body");
+  } finally {
+    await result.cleanup();
+  }
+});
+
+test("#914: a whitespace-containing rereview-command falls back to the generic fork reply wording", async () => {
+  // "/ai review" is a legal command and can exact-match a comment body, but
+  // the rendered code span must never carry whitespace-run config verbatim.
+  const result = await runCase({ body: "/ai review", onPr: true, permission: "write", forkHeadRepo: "forker/r", rereviewCommand: "/ai review" });
+  try {
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.outputs["skip-reason"], "comment-fork-pr");
+    const forkReplies = result.replyBodies.filter((b) => b.includes(FORK_REPLY_MARKER));
+    assert.equal(forkReplies.length, 1, "exactly one fork reply to /issues/7/comments");
+    assert.ok(forkReplies[0]!.includes("The re-review command does not run on fork PRs"), "the reply uses the generic wording");
+    assert.ok(!forkReplies[0]!.includes("/ai review"), "the configured command is not echoed");
+  } finally {
+    await result.cleanup();
+  }
+});
+
+test("#914: an over-80-char rereview-command falls back to the generic fork reply wording", async () => {
+  const longCommand = `/${"x".repeat(80)}`;
+  const result = await runCase({ body: longCommand, onPr: true, permission: "write", forkHeadRepo: "forker/r", rereviewCommand: longCommand });
+  try {
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.outputs["skip-reason"], "comment-fork-pr");
+    const forkReplies = result.replyBodies.filter((b) => b.includes(FORK_REPLY_MARKER));
+    assert.equal(forkReplies.length, 1, "exactly one fork reply to /issues/7/comments");
+    assert.ok(forkReplies[0]!.includes("The re-review command does not run on fork PRs"), "the reply uses the generic wording");
+    assert.ok(!forkReplies[0]!.includes(longCommand), "the long command is not echoed");
+  } finally {
+    await result.cleanup();
+  }
+});
+
 test("#914 v1 scope (bare command only): a command with an argument (/ai-review please re-run) is skipped as unrelated-comment — no review, no ack, no reply", async () => {
   const result = await runCase({ body: "/ai-review please re-run", onPr: true, permission: "write" });
   try {

@@ -378,6 +378,78 @@ test("#914: a permission response naming a different subject than the commenter 
   assert.equal(output.skip_reason, "comment-permission-unknown");
 });
 
+test("#914: a permission response whose subject has a non-string login fails closed (comment-permission-unknown)", async () => {
+  const env = baseEnv();
+  const platform: Platform = {
+    diff: DIFF,
+    pr: sameRepoPr(),
+    gh_api: {
+      "repos/o/r/collaborators/alice/permission": { permission: "admin", user: { login: 123 } },
+    },
+  };
+  const output = await runPrecheck({
+    env,
+    adapter: new FixtureAdapter("github", platform),
+    event: issueCommentEvent("/ai-review", "alice"),
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "comment-permission-unknown");
+});
+
+test("#914: a permission response whose subject has no login at all fails closed (comment-permission-unknown)", async () => {
+  const env = baseEnv();
+  const platform: Platform = {
+    diff: DIFF,
+    pr: sameRepoPr(),
+    gh_api: {
+      "repos/o/r/collaborators/alice/permission": { permission: "admin", user: {} },
+    },
+  };
+  const output = await runPrecheck({
+    env,
+    adapter: new FixtureAdapter("github", platform),
+    event: issueCommentEvent("/ai-review", "alice"),
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "comment-permission-unknown");
+});
+
+test("#914: a permission response whose subject is a bare string fails closed (comment-permission-unknown)", async () => {
+  const env = baseEnv();
+  const platform: Platform = {
+    diff: DIFF,
+    pr: sameRepoPr(),
+    gh_api: {
+      "repos/o/r/collaborators/alice/permission": { permission: "admin", user: "alice" },
+    },
+  };
+  const output = await runPrecheck({
+    env,
+    adapter: new FixtureAdapter("github", platform),
+    event: issueCommentEvent("/ai-review", "alice"),
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "comment-permission-unknown");
+});
+
+test("#914: a permission response whose subject is an array fails closed (comment-permission-unknown)", async () => {
+  const env = baseEnv();
+  const platform: Platform = {
+    diff: DIFF,
+    pr: sameRepoPr(),
+    gh_api: {
+      "repos/o/r/collaborators/alice/permission": { permission: "admin", user: [{ login: "alice" }] },
+    },
+  };
+  const output = await runPrecheck({
+    env,
+    adapter: new FixtureAdapter("github", platform),
+    event: issueCommentEvent("/ai-review", "alice"),
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "comment-permission-unknown");
+});
+
 test("#914: a permission response naming the commenter herself authorizes normally", async () => {
   const env = baseEnv();
   const platform: Platform = {
