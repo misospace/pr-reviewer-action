@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "classification": "{\"changed_files_summary\": [\"README.md\"], \"linked_issue_labels\": [], \"linked_metadata_uncertain\": true, \"linked_metadata_uncertainty\": [\"github linked issue owner/repo#12 fetch failed\", \"linear TEAM-3 lookup failed\"], \"must_check\": [], \"path_handling_provenance\": {\"discounted\": [], \"fired\": false, \"signals\": []}, \"pr_kind\": \"app_code\", \"risk_flags\": [], \"risk_flags_with_files\": {}, \"route_signals\": []}",

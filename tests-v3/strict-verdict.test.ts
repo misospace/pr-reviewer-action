@@ -7,6 +7,7 @@ import {
   strictReviewResult,
   type StrictReviewResult,
 } from "../src/enforcement/verdict-policy.js";
+import { resolveIncompleteReason } from "../src/publish/publish.js";
 import { applyRequiredCheckValidation } from "../src/enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "../src/enforcement/enforce.js";
 import { applyReviewThreadEnforcement } from "../src/enforcement/threads.js";
@@ -106,6 +107,16 @@ const TABLE: Array<{
 ];
 
 const NOTE = "_Verdict set from open findings (verdict_policy=strict):";
+
+test("#954: incomplete-reason resolver separates trace and execution while retaining fail-closed legacy behavior", () => {
+  assert.equal(resolveIncompleteReason({ requiredChecks: "incomplete", incompleteReason: "requirement_trace" }), "requirement_trace");
+  assert.equal(resolveIncompleteReason({ requiredChecks: "incomplete", incompleteReason: "both" }), "both");
+  assert.equal(resolveIncompleteReason({ requiredChecks: "incomplete", incompleteReason: "none" }), "execution");
+  assert.equal(resolveIncompleteReason({ requiredChecks: "incomplete", incompleteReason: "invalid" }), "execution");
+  assert.equal(resolveIncompleteReason({ requiredChecks: "complete", incompleteReason: "requirement_trace" }), "requirement_trace");
+  assert.equal(resolveIncompleteReason({ requiredChecks: "complete", partialCoverage: { stop_reason: "budget-exhausted" } as never, incompleteReason: "requirement_trace" }), "both");
+  assert.equal(resolveIncompleteReason({ requiredChecks: "complete", incompleteReason: "both" }), "both");
+});
 
 test("verdict table: model verdict x highest open severity x coverage", () => {
   for (const row of TABLE) {
@@ -337,6 +348,52 @@ test("partial coverage renders the gap notice above the review and a partial mar
   assert.ok(body.includes("> **Partial coverage**: required-check coverage is incomplete"));
   assert.ok(body.indexOf("Partial coverage") < body.indexOf("## Review"));
   assert.ok(body.includes('"review_result":"partial"'));
+});
+
+test("#954: trace-only incompleteness renders trace-appropriate prose and preserves partial result", async () => {
+  const api = new MockPublishApi();
+  await publishReview(publishInput({ requiredChecks: "incomplete", incompleteReason: "requirement_trace" }), api, { diffText: "" });
+  const body = api.sticky[0]!.body;
+  assert.ok(body.includes("🟡 **Automated recommendation: APPROVAL WITHHELD — requirement trace incomplete**"));
+  assert.ok(body.includes("**Requirement traceability gap**"));
+  assert.ok(body.includes('"review_result":"partial"'));
+  assert.ok(!body.includes("did not resolve every required check"));
+
+  const native = new MockPublishApi();
+  await publishReview(publishInput({
+    mode: "review_verdict", allowApprove: true,
+    requiredChecks: "incomplete", incompleteReason: "requirement_trace",
+  }), native, { diffText: "" });
+  const nativeBody = native.submitted[0]!.body;
+  assert.ok(nativeBody.includes("**Approval withheld**: the review completed, but an in-scope requirement lacks verifiable enforcement or test evidence"));
+  assert.ok(!nativeBody.includes("required-check coverage or the tool-loop investigation did not finish"));
+});
+
+test("#954: execution plus trace incompleteness gets combined prose", async () => {
+  const api = new MockPublishApi();
+  await publishReview(publishInput({ requiredChecks: "incomplete", incompleteReason: "both" }), api, { diffText: "" });
+  const body = api.sticky[0]!.body;
+  assert.ok(body.includes("🟡 **Automated recommendation: APPROVAL WITHHELD — review coverage incomplete**"));
+  assert.ok(body.includes("**Partial coverage and requirement traceability gap**"));
+  assert.ok(body.includes("required-check coverage is incomplete, and one or more in-scope requirements could not be verified"));
+
+  const native = new MockPublishApi();
+  await publishReview(publishInput({ mode: "review_verdict", allowApprove: true, requiredChecks: "incomplete", incompleteReason: "both" }), native, { diffText: "" });
+  assert.ok(native.submitted[0]!.body.includes("execution coverage and an in-scope requirement lacks verifiable enforcement or test evidence"));
+});
+
+test("#954: execution and legacy incomplete publish callers keep the generic coverage notice", async () => {
+  for (const overrides of [
+    { requiredChecks: "incomplete", incompleteReason: "execution" },
+    { requiredChecks: "incomplete" },
+  ]) {
+    const api = new MockPublishApi();
+    await publishReview(publishInput(overrides), api, { diffText: "" });
+    const body = api.sticky[0]!.body;
+    assert.ok(body.includes("did not resolve every required check"));
+    assert.ok(body.includes("🟡 **Automated recommendation: INCOMPLETE — not an approval**"));
+    assert.ok(!body.includes("Requirement traceability gap"));
+  }
 });
 
 test("blocking strict review shows the blocker beside the verdict and an issues marker", async () => {

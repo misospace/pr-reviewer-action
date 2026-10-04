@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "forged-marker-hostile-form": "stripped=\"prefix suffix\\n\\nend\"",

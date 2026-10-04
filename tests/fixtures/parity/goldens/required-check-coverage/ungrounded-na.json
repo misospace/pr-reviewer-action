@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "coverage": "{\"checks\": [{\"check\": \"check for directory traversal vulnerabilities\", \"rationale\": null, \"reason\": \"malformed-disposition\", \"status\": \"unresolved\"}], \"dropped_unknown\": [], \"status\": \"incomplete\", \"structured\": true, \"version\": 1}"

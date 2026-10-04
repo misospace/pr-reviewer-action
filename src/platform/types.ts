@@ -57,7 +57,7 @@ export interface ExternalChecksOptions extends CiBoundOptions {
   /** `CI_STATUS_CONTEXT` (default `pr-reviewer-action`): our own commit
    * status context is excluded. */
   statusContext?: string | undefined;
-  /** v3 CI gate (#706 PR 6, approved divergence): a transient read failure
+  /** v3 CI gate (#706 PR 6, deliberate divergence): a transient read failure
    * of EITHER underlying read — no response (timeout, transport error,
    * exhausted deadline), HTTP 429/5xx, or a body that is not JSON — yields
    * `null` ("unknown, retry") instead of folding into the checks list. Off

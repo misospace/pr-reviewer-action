@@ -179,6 +179,24 @@ test("metadata markers parse and drive the carried verdict", () => {
     verdictSource: "carry_forward",
     reviewResult: "clean",
   });
+  assert.deepEqual(carriedVerdict(`x\n${buildMetadataMarker({ review_result: "partial", incomplete_reason: "requirement_trace" })}`), {
+    verdict: "approve",
+    verdictSource: "carry_forward",
+    reviewResult: "partial",
+    incompleteReason: "requirement_trace",
+  });
+  assert.deepEqual(carriedVerdict(`x\n${buildMetadataMarker({ review_result: "partial" })}`), {
+    verdict: "approve",
+    verdictSource: "carry_forward",
+    reviewResult: "partial",
+  });
+  // #954: the marker is untrusted comment content; an unknown reason value is
+  // dropped rather than copied into the action output.
+  assert.deepEqual(carriedVerdict(`x\n${buildMetadataMarker({ review_result: "partial", incomplete_reason: "EVIL" })}`), {
+    verdict: "approve",
+    verdictSource: "carry_forward",
+    reviewResult: "partial",
+  });
   assert.equal(carriedVerdict("no marker"), null);
   assert.equal(carriedVerdict("<!-- ai-pr-reviewer:not json -->"), null);
 });
@@ -275,6 +293,44 @@ test("linked issue refs: dedupe/merge is by canonical identity (bare #N resolved
   // A different repo's #584 is a genuinely different identity and must not merge.
   const differentRepo = extractLinkedIssueRefs("Closes other/repo#584", "o/r", "feat: thing (#584)");
   assert.equal(differentRepo.length, 2, "different repos with the same issue number are distinct identities");
+});
+
+test("linked issue refs: Addresses is non-closing; past-tense closing keywords only at line start (#953)", () => {
+  // The miso-gallery#505 shape: the intended target is `Addresses #502`,
+  // while `covered by closed #479` is historical/adjectival prose that must
+  // not be linked at all (not merely demoted to non-closing).
+  const body = "Addresses #502. This is a packaging defect, distinct from the removed nonexistent CSS/JS URLs covered by closed #479.";
+  assert.deepEqual(
+    extractLinkedIssueRefs(body, "o/r").map((ref) => ({ ref: ref.ref, closing: ref.closing })),
+    [{ ref: "#502", closing: false }],
+    "#502 is the implementation target; incidental `closed #479` prose is ignored",
+  );
+
+  assert.deepEqual(
+    extractLinkedIssueRefs("Addresses other/repo#7", "o/r").map((ref) => ({ ref: ref.ref, repo: ref.repo, closing: ref.closing })),
+    [{ ref: "other/repo#7", repo: "other/repo", closing: false }],
+    "Addresses owner/repo#N is the scoped non-closing form",
+  );
+
+  // GitHub's past-participle auto-close forms still count as closing when
+  // they carry strong structural intent: line start, after optional
+  // indentation and a markdown list/blockquote marker.
+  for (const text of ["Fixed #42", "- Fixed #42", "* Resolved owner/repo#42", "Closed #42", "> Closed #42", "1. Fixed #42"]) {
+    const refs = extractLinkedIssueRefs(text, "o/r");
+    assert.equal(refs.length, 1, text);
+    assert.equal(refs[0]!.closing, true, text);
+  }
+
+  // ...but past-participle prose embedded mid-sentence is not a reference.
+  for (const text of ["This PR fixed #42", "covered by closed #479", "unrelated to resolved #12"]) {
+    assert.deepEqual(extractLinkedIssueRefs(text, "o/r"), [], text);
+  }
+
+  // Present/imperative closing keywords keep GitHub's broader behavior and
+  // still match mid-sentence.
+  assert.equal(extractLinkedIssueRefs("This PR fixes #42", "o/r")[0]!.closing, true);
+  assert.equal(extractLinkedIssueRefs("this resolves #42", "o/r")[0]!.closing, true);
+  assert.equal(extractLinkedIssueRefs("Closes #1", "o/r")[0]!.closing, true);
 });
 
 test("linear prefixes and identifiers parse conservatively", () => {
@@ -434,6 +490,22 @@ test("runPrecheck carries the prior verdict forward on a diff-unchanged skip", a
   assert.equal(output.skip_reason, "diff-unchanged");
   assert.equal(output.verdict, "request_changes");
   assert.equal(output.verdict_source, "carry_forward");
+});
+
+test("runPrecheck carries incomplete reason on a diff-unchanged skip", async () => {
+  const fx = fixture("unchanged-diff-skip-issues");
+  const comment = fx.platform.comments?.[0];
+  assert.ok(comment);
+  comment.body = comment.body.replace(/<!-- ai-pr-reviewer:\{.*?\} -->/, buildMetadataMarker({
+    review_result: "partial",
+    incomplete_reason: "requirement_trace",
+  }));
+
+  const output = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", fx.platform) });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "diff-unchanged");
+  assert.equal(output.review_result, "partial");
+  assert.equal(output.incomplete_reason, "requirement_trace");
 });
 
 test("runPrecheck refuses Forgejo publish paths conservatively", async () => {

@@ -1,6 +1,6 @@
 {
   "fixture": "json-number-precision",
-  "description": "The documented JSON.parse limitation: an API payload with integer-valued floats (1.0, 1e5), an integer beyond 2^53 and integer-like object keys. CPython keeps float-vs-int, exact big integers and insertion order; v3 parses with JSON.parse, so they render as 1 / 100000, the nearest double, and integer-like keys first (approved divergence).",
+  "description": "The documented JSON.parse limitation: an API payload with integer-valued floats (1.0, 1e5), an integer beyond 2^53 and integer-like object keys. CPython keeps float-vs-int, exact big integers and insertion order; v3 parses with JSON.parse, so they render as 1 / 100000, the nearest double, and integer-like keys first (deliberate divergence).",
   "input": {
     "urls": [
       "https://github.com/o/r/releases/tag/v1"

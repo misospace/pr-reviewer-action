@@ -1,6 +1,6 @@
 {
   "fixture": "operator-added-host",
-  "description": "Operator-added hosts in ALLOWED_SOURCE_HOSTS: v2 never passed the allowlist to fetch_url, which re-checked against its built-in four-host list, so docs.example.com always failed without a request; v3 fetches and renders it (approved divergence). A host outside the allowlist is still refused, a redirect from the allowed host to a non-allowlisted one is still refused, and a redirect to another allowlisted host is followed.",
+  "description": "Operator-added hosts in ALLOWED_SOURCE_HOSTS: v2 never passed the allowlist to fetch_url, which re-checked against its built-in four-host list, so docs.example.com always failed without a request; v3 fetches and renders it (deliberate divergence). A host outside the allowlist is still refused, a redirect from the allowed host to a non-allowlisted one is still refused, and a redirect to another allowlisted host is followed.",
   "input": {
     "urls": [
       "https://docs.example.com/release-notes",

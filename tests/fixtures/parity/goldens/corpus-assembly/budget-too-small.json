@@ -1,8 +1,6 @@
 {
- "error": "[2026-09-29T21:06:24-0600] ERROR: Model context 9000 cannot fit AI_MAX_TOKENS=8192 plus 2000 tokens of headroom and a 2000-token input budget",
+ "error": "ERROR: Model context 9000 cannot fit AI_MAX_TOKENS=8192 plus 2000 tokens of headroom and a 2000-token input budget",
  "ok": false,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {}
 }

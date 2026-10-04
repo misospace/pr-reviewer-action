@@ -1,13 +1,8 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
-  "result": {
-   "overran": false,
-   "retry_payload": null
-  }
+  "result": "{\"overran\":false,\"retry_payload\":null}"
  }
 }

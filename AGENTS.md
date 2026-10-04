@@ -19,7 +19,7 @@ Do not freeze temporary v2 implementation details into permanent product rules. 
 ## Authority model (normative)
 
 - **Deterministic policy owns deterministic decisions.** The classifier, precheck, verdict policy, required-check validation, and skip logic (`src/classification/`, `src/precheck/`, `src/enforcement/`) are rule-based; models do not override them.
-- **Path-handling classification requires a real untrusted-path surface (#749).** Trusted path scaffolding (`Path(__file__).resolve()` root discovery, `__dirname`/`import.meta` anchors, module specifiers, constant-path pathlib usage) and test-file fixture paths never fire `path_handling_changes` by themselves; traversal literals, containment/sanitization logic, untrusted-source joins, archive extraction, and symlink operations do. Every decision is explainable from the bounded `path_handling_provenance` artifact field. `src/classification/classify.ts` implements the signal model; parity goldens pin it.
+- **Path-handling classification requires a real untrusted-path surface (#749).** Trusted path scaffolding (`Path(__file__).resolve()` root discovery, `__dirname`/`import.meta` anchors, module specifiers, constant-path pathlib usage) and test-file fixture paths never fire `path_handling_changes` by themselves; traversal literals, containment/sanitization logic, untrusted-source joins, archive extraction, and symlink operations do. Every decision is explainable from the bounded `path_handling_provenance` artifact field. `src/classification/classify.ts` implements the signal model; classification snapshots pin it.
 - **The final reviewer owns the model verdict.** Specialist leads, tool-harness output, and evidence-provider findings are advisory evidence sources — they never flip or produce the verdict, and specialist severity is capped below `blocker`.
 - **Fallback is availability recovery, not quality escalation.** A fallback model call exists only to complete a review the primary could not.
 - **Post-primary smart escalation is reviewer-requested only** (#721): after a successful primary review, the sole escalation trigger is the verdict's `smart_review_requested` field. The historical `should_escalate` heuristics are telemetry only.
@@ -43,7 +43,7 @@ Do not freeze temporary v2 implementation details into permanent product rules. 
 | `src/` | The TypeScript runtime — the shipped production path (`node dist/index.js`, entry `src/run/action.ts`): `platform/`, `precheck/`, `prompt/`, `context/`, `classification/`, `requirements/`, `corpus/`, `model/`, `transport/`, `runtime/`, `gates/`, `evidence/` |
 | `scripts/` | Repository tooling (eval, harvest, fork gate, judge, release, v3 build assets); not part of the action |
 | `pr_reviewer/` | Python modules for the semantic-eval and judge tooling; not part of the action |
-| `tests/`, `tests-v3/` | pytest + shell tests (tooling, parity harness, retained gates); node:test for v3; parity fixtures and goldens under `tests/fixtures/parity/` |
+| `tests/`, `tests-v3/` | pytest + shell tests (tooling, snapshot harness, retained gates); node:test for v3; parity fixtures and snapshots under `tests/fixtures/parity/` |
 | `evals/` | graded eval corpora driven by `scripts/eval_harness.py` through the v3 runtime (runbook: `docs/evals.md`) |
 | `.github/workflows/fork-ai-review.yaml` | privilege-separated fork-PR reviewer (`docs/fork-review.md`) |
 
@@ -53,15 +53,15 @@ Full per-module detail, the pipeline architecture, corpus section order, and des
 
 ```bash
 npm ci && npm run typecheck && npm test     # v3 TypeScript (node --test)
-npm run build                                # dist/ is not committed; npm test and the parity harness need it built
-pytest tests/ -v --tb=short                 # Python tests: parity harness, eval tooling, retained gates
-GIT_CONFIG_GLOBAL=/dev/null python3 tests/parity_harness.py   # v2/v3 parity boundaries (needs dist/ built)
+npm run build                                # dist/ is not committed; npm test and the snapshot harness need it built
+pytest tests/ -v --tb=short                 # Python tests: snapshot harness, eval tooling, retained gates
+GIT_CONFIG_GLOBAL=/dev/null python3 tests/parity_harness.py   # v3 snapshots (dist/ required; --update re-baselines)
 ```
 
 ## Development conventions (normative)
 
 - **`dist/` is release-only**: never commit it. CI builds it; releases commit it onto the tagged release commit (off `main`) via `scripts/release/tag-with-dist.sh`.
-- **Parity boundaries are frozen**: `tests/parity_harness.py` compares v3 against v2 goldens recorded before v2 was removed (`tests/fixtures/parity/goldens/`). A deliberate behavior change at a boundary needs an exact entry in `tests/fixtures/parity/approved-divergences.json`; never edit a golden to make a diff pass.
+- **Snapshots are re-baselined, not hand-edited**: `tests/parity_harness.py` runs each boundary's fixtures through v3 and compares recorded snapshots under `tests/fixtures/parity/goldens/`. For a deliberate behavior change, run `python3 tests/parity_harness.py --update` and commit the reviewable diff; never hand-edit snapshots.
 - **Naming**: v2 public contract snake_case (`action.yml`); v3 public contract kebab-case (`contracts/action-v3.yml`). TypeScript internals camelCase; snake_case survives only at persisted/parity serialization boundaries via explicit converters.
 - **Model API credentials travel only through the HTTP auth headers** the provider defines (e.g. `Authorization: Bearer` / `x-api-key`) over the typed Node transport (`src/transport/`); they must never appear in process argv, request URLs or bodies, or locally generated diagnostics and error messages. Do not reintroduce a shell/curl transport.
 - **Versioning**: `vX.Y.Z` semver tags with floating major tags (`v1`, `v2`, …). Follow the README's "Versioning policy" for patch/minor/major criteria; release via **Actions → Manual Release** after CI is green on `main`.

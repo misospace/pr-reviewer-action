@@ -1,12 +1,10 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "budget_warnings": "0",
-  "markdown": "## Source 1\nURL: https://artifacthub.io/cgnat\n\n### Fetched Content (truncated)\n```text\ninternal\n\n```\n\n",
-  "requests": "[\"GET https://artifacthub.io/cgnat\"]"
+  "markdown": "(1 source skipped — non-allowlisted or non-fetchable hosts: artifacthub.io)\n\n",
+  "requests": "[]"
  }
 }

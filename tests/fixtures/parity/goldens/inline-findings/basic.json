@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "added-line": "[{\"body\": \"**⚠️ Major:** Check this\\n\\n_Automated finding from AI PR review._\", \"line\": 2, \"path\": \"src/a.ts\", \"side\": \"RIGHT\"}]",

@@ -15,8 +15,8 @@
  * exactly) and capped at the hard ceiling. The derivation needs workspace
  * artifacts (pr.json / pr-files.json / specialist-*.json); when the caller
  * supplies no size signal the tier default is used as-is — which is exactly
- * what the tool-request-budget parity fixture (#673) exercises, so the
- * fixture keeps pinning v2 and v3 agreement without an approved divergence.
+ * what the tool-request-budget fixture (#673) exercises, so the fixture pins
+ * the tier default with no size signal.
  *
  * This module is the v3 port of `tool_budget_route` /
  * `resolve_tool_max_requests` in scripts/run_tool_harness.py. The two stay
@@ -24,8 +24,8 @@
  * tier defaults: tests/fixtures/parity/tool-budget/ pins the shared behavior
  * through the parity harness (#673) so the #678 migration cannot regress to a
  * single undifferentiated request ceiling. They deliberately differ on the
- * primary tier default (v3 24, v2 16), recorded as approved parity
- * divergences, and the size-scaled default is v3-only (#810).
+ * primary tier default (v3 24, v2 16), pinned by the tool-request-budget
+ * snapshots, and the size-scaled default is v3-only (#810).
  *
  * The Python side reads os.environ; this side takes the environment as a
  * plain record so the resolver is pure and the parity mode can evaluate

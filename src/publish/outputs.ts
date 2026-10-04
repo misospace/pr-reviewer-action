@@ -19,6 +19,7 @@ export const REVIEW_STEP_OUTPUT_IDS = [
   "verdict-source",
   "required-checks",
   "review-result",
+  "incomplete-reason",
   "review-route",
   "escalation-reason",
   "findings",
@@ -30,6 +31,12 @@ export const REVIEW_STEP_OUTPUT_IDS = [
 
 export type ReviewStepOutputId = (typeof REVIEW_STEP_OUTPUT_IDS)[number];
 
+export type IncompleteReason = "none" | "execution" | "requirement_trace" | "both";
+export const INCOMPLETE_REASON_VALUES: readonly IncompleteReason[] = ["none", "execution", "requirement_trace", "both"];
+export function isIncompleteReason(value: unknown): value is IncompleteReason {
+  return typeof value === "string" && INCOMPLETE_REASON_VALUES.includes(value as IncompleteReason);
+}
+
 export interface ReviewStepOutputs {
   verdict: string;
   verdictSource: string;
@@ -39,6 +46,8 @@ export interface ReviewStepOutputs {
    * a partial review still reports verdict "approve" here and the
    * incompleteness surfaces only through this field. */
   reviewResult: string;
+  /** #954: why coverage is incomplete; "none" when complete. */
+  incompleteReason: string;
   reviewRoute: string;
   escalationReason: string;
   /** Compact JSON array of the normalized findings. */
@@ -87,6 +96,7 @@ export function formatReviewStepOutputs(
     ["verdict-source", outputs.verdictSource],
     ["required-checks", outputs.requiredChecks],
     ["review-result", outputs.reviewResult],
+    ["incomplete-reason", outputs.incompleteReason],
     ["review-route", outputs.reviewRoute],
     ["escalation-reason", outputs.escalationReason],
     ["review-markdown", outputs.reviewMarkdown],

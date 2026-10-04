@@ -185,7 +185,8 @@ function writeCoverageArtifact(dir: string, overrides: Partial<{
   enforcement_harness: string | null;
   route: string;
   partial_coverage: unknown;
-  required_checks: string;
+  required_checks: string | undefined;
+  incomplete_reason: string;
 }> = {}): void {
   const artifact = {
     version: 1,
@@ -198,6 +199,37 @@ function writeCoverageArtifact(dir: string, overrides: Partial<{
   };
   writeFileSync(join(dir, "review-coverage.json"), JSON.stringify(artifact));
 }
+
+test("#954: publishInputFromEnv carries valid incomplete reasons and derives execution for legacy artifacts", () => {
+  withRunDir((dir) => {
+    writeCoverageArtifact(dir, { required_checks: "incomplete", incomplete_reason: "requirement_trace" });
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(input.requiredChecks, "incomplete");
+    assert.equal(input.incompleteReason, "requirement_trace");
+  });
+  withRunDir((dir) => {
+    writeCoverageArtifact(dir, { required_checks: "complete", incomplete_reason: "requirement_trace" });
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(input.requiredChecks, "incomplete", "trace reason fail-closes stale complete metadata");
+    assert.equal(input.incompleteReason, "requirement_trace");
+  });
+  withRunDir((dir) => {
+    writeCoverageArtifact(dir, { required_checks: undefined, incomplete_reason: "requirement_trace" });
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(input.coverageUnknown, true, "an artifact missing required_checks remains unknown");
+    assert.equal(input.requiredChecks, "incomplete");
+  });
+  withRunDir((dir) => {
+    writeCoverageArtifact(dir, { required_checks: "incomplete", incomplete_reason: "none" });
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(input.incompleteReason, "execution");
+  });
+  withRunDir((dir) => {
+    writeCoverageArtifact(dir, { required_checks: "incomplete", incomplete_reason: "not-a-reason" });
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(input.incompleteReason, "execution");
+  });
+});
 
 test("#873: publishInputFromEnv reads partial coverage straight from the artifact's own partial_coverage field", () => {
   withRunDir((dir) => {

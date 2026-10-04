@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "file:related-code.md": "# Related Code Context\n\n[related-code context truncated]\n\n## `src/x.md`\n\n````md\n```\nnot a closer for the four-backtick fence\n~~~\n```\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\n````\n\n- Tests: none\n",

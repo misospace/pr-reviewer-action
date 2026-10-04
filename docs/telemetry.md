@@ -21,13 +21,14 @@ Every key below is the literal JSON key in the marker.
 | `version` | number | Marker schema version (currently `1`). |
 | `head_sha` | string | PR head SHA this review is bound to (`"unknown"` if absent). |
 | `base_sha` | string | PR base SHA at review time. |
-| `review_result` | string | `clean`, `findings`, `partial`, or `issues` — derived from the same still-open findings and coverage the published review shows. `partial` means the review's own coverage is incomplete (required checks or the tool-loop investigation didn't finish); `verdict: approve` with this is **not** an approval — gate merges on both, never on the verdict alone. |
+| `review_result` | string | `clean`, `findings`, `partial`, or `issues` — derived from the same still-open findings and coverage the published review shows. `partial` means the review's own coverage is incomplete (required checks, the tool-loop investigation, or an unverifiable requirement trace — see `incomplete_reason` for which); `verdict: approve` with this is **not** an approval — gate merges on both, never on the verdict alone. |
 | `required_checks` | string, omitted | `complete` or `incomplete` — present only when required-check validation ran (omitted for `none`). |
 | `review_route` | string, omitted | Model route used: `primary`, `smart`, or `escalated` (omitted for `legacy`). |
 | `escalation_reason` | string array, omitted | Why an escalated route was taken (e.g. `primary_requested`). Omitted when empty. |
 | `cache_hit_ratio` | number, omitted | Prompt-cache hit ratio for this review, `0.0`–`1.0`. As of v3.1.0 this is **cache reads divided by total prompt tokens** for the run (cached prompt tokens over total prompt tokens, rounded to 3 decimals; `0.0` when there were no prompt tokens to divide by). Omitted when unavailable. |
 | `coverage` | string, omitted | `"partial"` when the #810 tool-loop investigation stopped on a budget with changed files or specialist leads it never read/resolved. Omitted for complete coverage. |
 | `coverage_stop_reason` | string, omitted | The loop stop reason behind a `coverage: "partial"` value — one of the budget-stop reasons in [`docs/tool-loop.md`](tool-loop.md#stop-reasons-and-partial-coverage) (`max-rounds`, `tool-call-budget-exhausted`, `wall-clock-exceeded`). Omitted alongside `coverage`. |
+| `incomplete_reason` | string, omitted | Why the review's coverage is incomplete: `execution` (the tool-loop or required-check coverage did not finish), `requirement_trace` (the review completed, but an in-scope requirement lacks verifiable enforcement/test evidence), or `both`. Omitted when coverage is complete. Added in #954 so a finished review with an unverified requirement is distinguishable from one that stopped early — `review_result` is `partial` for both. |
 | `ci_state` | string, omitted | Folded external-CI conclusion at the reviewed head (`success`/`failure`/`pending`/`none`). Omitted when CI wasn't read. |
 | `tool_budget` | number, omitted | The effective tool-call budget this run resolved (`resolveToolMaxRequests`'s result) — see [`docs/tool-loop.md`](tool-loop.md#tool-call-budget-tier-defaults-size-scaling). Omitted when no tool harness ran. |
 | `tool_budget_source` | string, omitted | Which input won that budget: `primary-override`, `smart-override`, `explicit`, `tier-default`, or `size-scaled`. Omitted alongside `tool_budget`. |
@@ -50,6 +51,7 @@ skip-on-unchanged check reads).
 | `cache-hit-ratio` | Same value as the marker's `required_checks` key — empty when unavailable. |
 | `tool-calls` | JSON array of the read-only tools the native tool harness executed, with each tool's name and status. |
 | `review-result` | Same value as the marker's `review_result`. |
+| `incomplete-reason` | Same value as the marker's `incomplete_reason` key (`none` when the run completed with complete coverage; omitted on a carried skip whose marker carries no reason). |
 | `review-route` | Same value as the marker's `required_checks` key (`legacy` when the marker field is omitted). |
 | `escalation-reason` | Same value as the marker's `required_checks` key, joined. |
 | `required-checks` | Same value as the marker's `required_checks` key (`none` when omitted from the marker). |

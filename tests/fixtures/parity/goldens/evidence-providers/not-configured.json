@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "json": "{\n  \"configured\": false,\n  \"config_path\": \"\",\n  \"sarif_files\": [],\n  \"has_blocker\": false,\n  \"providers\": []\n}\n",

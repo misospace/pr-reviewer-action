@@ -1,12 +1,10 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
-  "c00_issue": "{\"ok\":true,\"data\":{\"body\":\"Details \\ud83d\\ude00\",\"title\":\"Issue caf\\u00e9 \\u4e2d\\u6587 \\u05e9\\u05dc\\u05d5\\u05dd \\ud83d\\ude00 \\ud83e\\uddea line\\u2028sep del\\u007fchar\",\"state\":\"open\",\"created_at\":\"2026-09-01T00:00:00Z\",\"updated_at\":\"2026-09-02T00:00:00Z\"}}",
-  "c01_issue": "{\"ok\":true,\"data\":{\"body\":\"\",\"title\":\"No body key\",\"state\":\"closed\",\"created_at\":\"\",\"updated_at\":\"\"}}",
+  "c00_issue": "{\"ok\":true,\"data\":{\"body\":\"Details \\ud83d\\ude00\",\"title\":\"Issue caf\\u00e9 \\u4e2d\\u6587 \\u05e9\\u05dc\\u05d5\\u05dd \\ud83d\\ude00 \\ud83e\\uddea line\\u2028sep del\\u007fchar\",\"state\":\"open\",\"created_at\":\"<TIMESTAMP>\",\"updated_at\":\"<TIMESTAMP>\",\"pull_request\":null}}",
+  "c01_issue": "{\"ok\":true,\"data\":{\"body\":\"\",\"title\":\"No body key\",\"state\":\"closed\",\"created_at\":\"\",\"updated_at\":\"\",\"pull_request\":null}}",
   "c02_issue": "{\"ok\":true,\"data\":null}",
   "requests": "[\"GET https://forgejo.example/api/v1/repos/o/r/issues/12 auth=1\",\"GET https://forgejo.example/api/v1/repos/other/lib/issues/3 auth=1\",\"GET https://forgejo.example/api/v1/repos/o/r/issues/99 auth=1\"]"
  }

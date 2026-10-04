@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "classification": "{\"changed_files_summary\": [\"src/config.py\", \"src/layout.py\", \"src/app.ts\", \"docs/guide.md\", \"src/comments.py\", \"src/comments.ts\", \"docs/ref.rst\", \"NOTES.txt\", \"src/division.py\"], \"linked_issue_labels\": [], \"linked_metadata_uncertain\": false, \"linked_metadata_uncertainty\": [], \"must_check\": [], \"path_handling_provenance\": {\"discounted\": [], \"fired\": false, \"signals\": []}, \"pr_kind\": \"app_code\", \"risk_flags\": [], \"risk_flags_with_files\": {}, \"route_signals\": []}",

@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "parsed": "{\"confidence\": 0.9, \"findings\": [{\"category\": \"bug\", \"file\": \"src/a.py\", \"line\": 12, \"message\": \"off-by-one\", \"severity\": \"major\"}], \"review_markdown\": \"## Recommendation\\nRequest changes.\\n\\n## Unknowns or Needs Verification\\nCould not verify the upstream changelog.\", \"smart_review_reason\": null, \"smart_review_requested\": false, \"verdict\": \"request_changes\"}"

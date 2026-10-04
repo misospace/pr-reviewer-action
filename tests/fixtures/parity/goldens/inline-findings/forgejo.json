@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "forgejo-added-position": "[{\"body\": \"**🛑 Blocker (security):** [REDACTED]; see upstream acme/project issue 456\\n\\n_Automated finding from AI PR review._\", \"new_position\": 2, \"path\": \"renamed.ts\"}]"

@@ -82,7 +82,7 @@ jobs:
         run: pip install --require-hashes -r requirements.txt
 
       - name: Set up Node.js
-        # Node 24 must be on PATH for the parity harness (tests/test_parity_harness.py
+        # Node 24 must be on PATH for the snapshot harness (tests/test_parity_harness.py
         # runs `node dist/index.js`, and package.json engines requires node >=24).
         # On the pre-split serial job this came from the shared setup-node step;
         # dropping it here made shutil.which("node") resolve the runner image's
@@ -94,7 +94,7 @@ jobs:
           cache-dependency-path: package-lock.json
 
       - name: Build v3 bundle
-        # dist/ is not committed; the parity harness runs the built bundle.
+        # dist/ is not committed; the snapshot harness runs the built bundle.
         run: npm ci && npm run build
 
       - name: Check Python scripts

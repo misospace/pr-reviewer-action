@@ -1,8 +1,6 @@
 {
- "error": "jq: error (at linked-issue.raw.json:1): Cannot index string with string \"name\"",
+ "error": "jq: projection failed: Cannot index string with \"name\"",
  "ok": false,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {}
 }

@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "file:repo-history.truncated.md": "## Term: 1.2.3\n\n### git log context\n```text\n```\n\n## Term: and\n\n### git log context\n```text\n```\n\n## Term: bar.baz\n\n### git log context\n```text\nbe7850a fix: bar.baz config drift\n```\n\n## Term: bump\n\n### git log context\n```text\n```\n\n## Term: config\n\n### git log context\n```text\nbe7850a fix: bar.baz config drift\n```\n\n## Term: foo-lib\n\n### git log context\n```text\n0a1af10 chore: initial import of foo-lib\n```\n\n## Term: unrelated\n\n### git log context\n```text\n8bc12f2 (HEAD -> main) feat: unrelated change\n```\n\n## Term: updates\n\n### git log context\n```text\n```\n\n## Term: v1.2.3\n\n### git log context\n```text\n```\n\n",

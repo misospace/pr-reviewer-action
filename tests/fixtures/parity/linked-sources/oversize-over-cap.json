@@ -1,6 +1,6 @@
 {
   "fixture": "oversize-over-cap",
-  "description": "A raw source body over the v3 5 MiB response cap: v2 reads it unbounded and renders the truncated text; v3 aborts the fetch (approved divergence).",
+  "description": "A raw source body over the v3 5 MiB response cap: v2 reads it unbounded and renders the truncated text; v3 aborts the fetch (deliberate divergence).",
   "input": {
     "urls": [
       "https://artifacthub.io/huge"

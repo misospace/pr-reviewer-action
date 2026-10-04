@@ -1,45 +1,8 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
-  "result": {
-   "errors": [],
-   "leads": [
-    {
-     "category": "sec",
-     "file": "src/auth.py",
-     "line": 42,
-     "message": "Unsanitized query",
-     "severity": "major"
-    },
-    {
-     "category": "",
-     "file": null,
-     "line": null,
-     "message": "Minor logging concern",
-     "severity": "minor"
-    },
-    {
-     "category": "",
-     "file": null,
-     "line": 17,
-     "message": "Consider adding a comment",
-     "severity": "info"
-    }
-   ],
-   "role": "security",
-   "truncated": false,
-   "truncation": {
-    "omitted_errors": 0,
-    "omitted_leads": 0,
-    "omitted_message_chars": 0,
-    "reasons": [],
-    "truncated": false
-   },
-   "version": 1
-  }
+  "result": "{\"errors\":[],\"leads\":[{\"category\":\"sec\",\"file\":\"src/auth.py\",\"line\":42,\"message\":\"Unsanitized query\",\"severity\":\"major\"},{\"category\":\"\",\"file\":null,\"line\":null,\"message\":\"Minor logging concern\",\"severity\":\"minor\"},{\"category\":\"\",\"file\":null,\"line\":17,\"message\":\"Consider adding a comment\",\"severity\":\"info\"}],\"role\":\"security\",\"truncated\":false,\"truncation\":{\"omitted_errors\":0,\"omitted_leads\":0,\"omitted_message_chars\":0,\"reasons\":[],\"truncated\":false},\"version\":1}"
  }
 }

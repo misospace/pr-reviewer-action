@@ -65,6 +65,7 @@ import {
   formatOutputAssignment,
   formatReviewStepOutputs,
   renderStepSummary,
+  type IncompleteReason,
   type ReviewStepOutputs,
 } from "../publish/outputs.js";
 import {
@@ -920,6 +921,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   const ledgerValue = safeJson(ws.read("requirement-ledger.json"));
   const requirementTraceEnabled = (env.REQUIREMENT_TRACE ?? "false").toLowerCase() === "true";
   let requirementTraceResult: ReturnType<typeof applyRequirementTraceEnforcement> | null = null;
+  let completenessStatus = "none";
   if (analysisEngine === MODEL_UNAVAILABLE_ENGINE) {
     // on-model-failure=notice (#863): no model reviewed this PR, so the
     // notice's request_changes is final; no verdict policy may relax it.
@@ -932,6 +934,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     // must not be clobbered by it), and its synthesized findings must be in
     // place before the strict mapping counts open findings.
     const completeness = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
+    completenessStatus = completeness.status;
     requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     const forced = failClosedEnforcementFired(enforcementInputs)
@@ -942,7 +945,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       nonBlockingCategories: new Set(splitCsv(env.NON_BLOCKING_FINDING_CATEGORIES ?? "")),
       securityFlagged: isSecurityFlagged(classificationArtifact),
     });
-    applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
+    completenessStatus = applyRequiredCheckValidation(reviewRecord as never, completenessOptions).status;
     requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
   }
@@ -977,6 +980,12 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // output — persisted immediately below — already reflects a tool-loop
   // coverage gap, not only a completed run's required-check status.
   const partialCoverage = resolvePartialCoverage(harnessForMarker, toolMode === "native_loop", ws.isNonEmpty(enforcementHarness));
+  const executionIncomplete = partialCoverage !== undefined || completenessStatus === "incomplete";
+  const traceIncomplete = reviewRecord.requirement_trace_incomplete === true;
+  const incompleteReason: IncompleteReason = executionIncomplete && traceIncomplete ? "both"
+    : executionIncomplete ? "execution"
+    : traceIncomplete ? "requirement_trace"
+    : "none";
   const outputVerdict = String(reviewRecord.verdict ?? "");
   const outputRequiredChecks = String(reviewRecord.required_checks ?? "none");
   // #873 maintainer follow-up: the standalone `publish` CLI is a separate
@@ -996,6 +1005,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     route: env.REVIEW_ROUTE ?? "legacy",
     partial_coverage: partialCoverage ?? null,
     required_checks: outputRequiredChecks,
+    ...(incompleteReason !== "none" ? { incomplete_reason: incompleteReason } : {}),
   };
   ws.write("review-coverage.json", Buffer.from(`${pyJsonDumps(reviewCoverage)}\n`, "utf8"));
   const outputs: ReviewStepOutputs = {
@@ -1005,6 +1015,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     // #873: additive alongside verdict — a partial review's verdict can
     // still read "approve" (the strict mapping's own contract), so this is
     // the one output that surfaces the coverage gap on its own.
+    incompleteReason,
     reviewResult: markerReviewResult({
       verdictPolicy,
       verdict: outputVerdict,
@@ -1067,6 +1078,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     // Same value the #873 review-result output above already carries.
     reviewResult: outputs.reviewResult,
     requiredChecks: outputs.requiredChecks,
+    ...(incompleteReason !== "none" ? { incompleteReason } : {}),
     reviewRoute: outputs.reviewRoute,
     escalationReason: outputs.escalationReason,
     cacheHitRatio: outputs.cacheHitRatio,

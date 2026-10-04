@@ -1,8 +1,6 @@
 {
  "error": null,
  "ok": true,
- "pre": {},
- "raw": null,
  "unresolved": [],
  "values": {
   "changes": "[{\"file\": \"deploy/metrics.yaml\", \"new_digest\": \"sha256:2222222222222222222222222222222222222222222222222222222222222222\", \"old_digest\": \"sha256:1111111111111111111111111111111111111111111111111111111111111111\", \"repository\": \"ghcr.io/k8s-apps/metrics\", \"tag\": \"metrics\"}, {\"file\": \"deploy/inline.yaml\", \"new_digest\": \"sha256:4444444444444444444444444444444444444444444444444444444444444444\", \"old_digest\": \"sha256:3333333333333333333333333333333333333333333333333333333333333333\", \"repository\": \"ghcr.io/k8s-apps/metrics\", \"tag\": \"v1.2.2\"}]",

@@ -1,55 +1,18 @@
 #!/usr/bin/env python3
-"""v2-to-v3 behavioral parity harness (#673), frozen at the #681 release gate.
+"""V3 snapshot harness (formerly the v2-to-v3 parity harness #673, retired in #924).
 
-Runs v3 runtime stages against the fixtures and compares what consumers
-observe with the recorded v2 behavior, reporting drift as a structured,
-machine-readable report. The harness never compares source code or unit-test
-counts.
+Each boundary runs one fixture through the v3 runtime and compares the result
+with ``tests/fixtures/parity/goldens/<boundary>/<fixture>.json``. ``scrub``
+normalizes only expected-to-vary nondeterminism; secrets are redacted so raw
+secret input values never land in a snapshot. ``--update`` rewrites snapshots,
+so a deliberate behavior change is a reviewable diff.
 
-Structure:
-
-- Boundaries are declared in ``BOUNDARIES`` below. Each boundary runs one
-  fixture through the v3 side (``run_new``) and compares it with the v2
-  golden under ``tests/fixtures/parity/goldens/<boundary>/<fixture>.json``,
-  recorded from the v2 runtime before it was removed. Boundary descriptions
-  name the v2 source each golden was recorded from; those files no longer
-  exist.
-- Fixtures live under ``tests/fixtures/parity/<boundary>/*.json``. Later
-  migration tickets add fixtures (JSON only); they never copy harness logic.
-- Nondeterministic values (temp paths, timestamps, durations, PIDs, request
-  ids) are normalized by ``scrub``; only values the public contract declares
-  irrelevant are ever normalized. Verdicts, risk flags, selected roles,
-  corpus content, security-gate decisions, routing, and error categories are
-  compared as-is.
-- Numeric equality is applied ONLY to keys the contract declares numeric
-  (INTEGER_INPUTS/FLOAT_INPUTS); every other key — including strings that
-  happen to look numeric — compares as an exact canonical string.
-- Error categories compare through the boundary's shared vocabulary. Two
-  errors that both map to no known category never compare equal: their
-  scrubbed texts must match byte-for-byte or the fixture drifts (fail
-  closed), forcing the boundary table to name the category.
-- A divergence is only acceptable when an entry in
-  ``tests/fixtures/parity/approved-divergences.json`` pins the EXACT
-  divergence: boundary + fixture + key + the expected old AND new values
-  (or outcome/error categories). An approved divergence on one fixture or
-  value never approves another; a key drifting to a different wrong value
-  fails the run.
-- A fixture that exists to prove drift detection (a counterexample) must
-  declare its expected divergence signature — every key with its expected
-  old/new values, and nothing beyond them. Missing or undeclared drift
-  fails the run.
-- The #698 production dataflow qualification and the #666/#661 semantic
-  qualification run as migration gates before the boundaries; a gate failure
-  fails the harness regardless of boundary results.
-
-CLI: python3 tests/parity_harness.py [--boundary ID] [--report PATH]
-[--skip-gates]. Exits nonzero on any unapproved drift or failed gate.
+CLI: python3 tests/parity_harness.py [--boundary ID] [--report PATH] [--update].
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import re
@@ -66,7 +29,6 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "tests" / "fixtures" / "parity"
 CONTRACT_PATH = ROOT / "contracts" / "action-v3.yml"
-APPROVED_PATH = FIXTURES / "approved-divergences.json"
 GOLDENS = FIXTURES / "goldens"
 
 # ---------------------------------------------------------------------------
@@ -103,15 +65,8 @@ def canonical(value: Any) -> str:
     return str(value)
 
 
-def numeric_equal(left: str, right: str) -> bool:
-    try:
-        return float(left) == float(right)
-    except ValueError:
-        return False
-
-
 # ---------------------------------------------------------------------------
-# Results and comparison
+# Results and snapshots
 # ---------------------------------------------------------------------------
 
 
@@ -121,38 +76,68 @@ class SideResult:
     values: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     unresolved: list[str] = field(default_factory=list)
-    pre: dict[str, str] = field(default_factory=dict)  # producer-resolved v2 env
-    raw: bytes | None = None  # for byte-level boundaries (e.g. truncation)
-
-
-def _golden_file(boundary_id: str, fixture_name: str) -> Path:
-    return GOLDENS / boundary_id / f"{fixture_name}.json"
-
-
-def read_golden(boundary_id: str, fixture_name: str, workdir: Path) -> SideResult:
-    path = _golden_file(boundary_id, fixture_name)
-    if not path.is_file():
-        raise RuntimeError(f"missing golden {path.relative_to(ROOT)}")
-    text = path.read_text(encoding="utf-8")
-    text = text.replace("<WORKDIR>", str(workdir)).replace("<ROOT>", str(ROOT))
-    data = json.loads(text)
-    raw = data.get("raw")
-    return SideResult(
-        ok=bool(data["ok"]),
-        values=data.get("values") or {},
-        error=data.get("error"),
-        unresolved=data.get("unresolved") or [],
-        pre=data.get("pre") or {},
-        raw=base64.b64decode(raw) if raw is not None else None,
-    )
 
 
 @dataclass
 class FixtureOutcome:
     fixture: str
-    status: str  # match | approved_divergence | expected_drift | drift | runner_error
+    status: str  # match | drift | missing_snapshot | runner_error | updated
     divergences: list[dict[str, Any]] = field(default_factory=list)
     detail: dict[str, Any] = field(default_factory=dict)
+
+
+def _snapshot_file(boundary_id: str, fixture_name: str) -> Path:
+    return GOLDENS / boundary_id / f"{fixture_name}.json"
+
+
+def _restore_placeholders(text: str, workdir: Path) -> str:
+    return (
+        text.replace("<WORKDIR>", str(workdir))
+        .replace("<ROOT>", str(ROOT))
+        .replace("<HOME>", str(Path.home()))
+    )
+
+
+def _store_placeholders(text: str, workdir: Path) -> str:
+    # Most specific first: ROOT and workdir may sit under HOME, and workdir
+    # under ROOT. HOME is included because some runners pass the ambient HOME
+    # to the v3 process (`_v3_parity_env`), so a snapshot must not record it.
+    return (
+        text.replace(str(workdir), "<WORKDIR>")
+        .replace(str(ROOT), "<ROOT>")
+        .replace(str(Path.home()), "<HOME>")
+    )
+
+
+def read_snapshot(boundary_id: str, fixture_name: str, workdir: Path) -> SideResult | None:
+    """The recorded v3 snapshot for a fixture, or None when it has never been
+    recorded. `<WORKDIR>`/`<ROOT>` placeholders are restored to this run's
+    paths so a snapshot recorded anywhere compares cleanly here."""
+    path = _snapshot_file(boundary_id, fixture_name)
+    if not path.is_file():
+        return None
+    data = json.loads(_restore_placeholders(path.read_text(encoding="utf-8"), workdir))
+    return SideResult(
+        ok=bool(data["ok"]),
+        values=data.get("values") or {},
+        error=data.get("error"),
+        unresolved=data.get("unresolved") or [],
+    )
+
+
+def write_snapshot(boundary_id: str, fixture_name: str, result: SideResult, workdir: Path) -> Path:
+    """Record `result` (already normalized) as the fixture's snapshot."""
+    path = _snapshot_file(boundary_id, fixture_name)
+    payload = {
+        "ok": result.ok,
+        "values": result.values,
+        "error": result.error,
+        "unresolved": result.unresolved,
+    }
+    text = json.dumps(payload, indent=1, sort_keys=True, ensure_ascii=False) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_store_placeholders(text, workdir), encoding="utf-8")
+    return path
 
 
 @dataclass
@@ -160,116 +145,12 @@ class Boundary:
     id: str
     description: str
     fixtures_dir: str
-    run_new: Callable[[dict[str, Any], Path], SideResult] | None = None
-    # An explicit (old, new) pair instead of a golden; the harness's own
-    # tests use it to drive the comparison logic with synthetic sides.
-    run: Callable[[dict[str, Any], Path], tuple[SideResult, SideResult]] | None = None
-    error_categories: tuple[tuple[re.Pattern[str], str], ...] = ()
-    key_mapping: dict[str, str] = field(default_factory=dict)  # v3 key -> v2 key
-    canonical_json_keys: set[str] = field(default_factory=set)  # keys compared as canonical JSON (sorted keys)
-    secret_keys: set[str] = field(default_factory=set)  # v3 keys (secrets)
-    numeric_keys: set[str] = field(default_factory=set)  # v3 keys declared numeric
-    scope_rule: str | None = None  # "config": mechanical v2-transport scope
-    static_exclusions: dict[str, str] = field(default_factory=dict)  # v2 key -> reason
+    run: Callable[[dict[str, Any], Path], SideResult]
+    canonical_json_keys: set[str] = field(default_factory=set)  # values compared as sorted-key JSON
+    secret_keys: set[str] = field(default_factory=set)  # v3 keys whose values are redacted
 
-    def sides(self, fixture: dict[str, Any], workdir: Path) -> tuple[SideResult, SideResult]:
-        if self.run is not None:
-            return self.run(fixture, workdir)
-        if self.run_new is None:
-            raise RuntimeError(f"boundary {self.id} has no v3 side")
-        return read_golden(self.id, fixture["fixture"], workdir), self.run_new(fixture, workdir)
-
-    def evaluate(self, fixture: dict[str, Any], workdir: Path) -> FixtureOutcome:
-        try:
-            left, right = self.sides(fixture, workdir)
-        except Exception as error:  # runner infrastructure failure
-            return FixtureOutcome(fixture["fixture"], "runner_error", detail={"error": str(error)})
-        divergences: list[dict[str, Any]] = []
-        excluded: dict[str, str] = {}
-        if left.ok != right.ok:
-            divergences.append({
-                "key": "<outcome>",
-                "old": "ok" if left.ok else f"error:{categorize(left.error or '', self.error_categories)}",
-                "new": "ok" if right.ok else f"error:{categorize(right.error or '', self.error_categories)}",
-                "detail": f"old ok={left.ok} new ok={right.ok}",
-            })
-        elif not left.ok:
-            left_category = categorize(left.error or "", self.error_categories)
-            right_category = categorize(right.error or "", self.error_categories)
-            if left_category != right_category:
-                divergences.append({
-                    "key": "<error-category>",
-                    "old": f"error:{left_category}",
-                    "new": f"error:{right_category}",
-                    "detail": f"old={left_category} new={right_category}",
-                })
-            elif left_category == "uncategorized":
-                # Fail closed: two errors that map to no known category never
-                # compare equal by category. Their scrubbed texts must match
-                # exactly, or the fixture drifts and the boundary table must
-                # learn the category.
-                left_text = self.redact_secrets(fixture, scrub(left.error or ""))
-                right_text = self.redact_secrets(fixture, scrub(right.error or ""))
-                if left_text != right_text:
-                    divergences.append({
-                        "key": "<error-text>",
-                        "old": left_text,
-                        "new": right_text,
-                        "detail": "both errors are uncategorized and their scrubbed texts differ",
-                    })
-        else:
-            excluded = self.compute_exclusions(left)
-            compared = 0
-            for key, right_value in sorted(right.values.items()):
-                v2_key = self.key_mapping.get(key, key)
-                if v2_key in excluded:
-                    continue
-                compared += 1
-                if v2_key not in left.values:
-                    divergences.append({"key": key, "old": "<missing>", "new": self.normalize_key(key, right_value),
-                                        "detail": "missing on old side"})
-                    continue
-                left_text = self.normalize_key(key, left.values[v2_key])
-                right_text = self.normalize_key(key, right_value)
-                if self.values_equal(key, left_text, right_text):
-                    continue
-                divergences.append({"key": key, "old": left_text, "new": right_text,
-                                    "detail": f"old={left_text!r} new={right_text!r}"})
-            if compared == 0:
-                divergences.append({"key": "<scope>", "old": "", "new": "",
-                                    "detail": "no keys left in scope; boundary scope collapsed", "approved": False})
-        status = "match"
-        if divergences:
-            for divergence in divergences:
-                divergence["approved"] = self.approval_for(fixture, divergence) is not None
-            status = "approved_divergence" if all(d["approved"] for d in divergences) else "drift"
-        status, divergences = self.apply_expected_drift(fixture, status, divergences)
-        detail: dict[str, Any] = {}
-        if not left.ok and left.error:
-            detail["old_error"] = self.redact_secrets(fixture, scrub(left.error))[-800:]
-        if not right.ok and right.error:
-            detail["new_error"] = self.redact_secrets(fixture, scrub(right.error))[-800:]
-        if left.unresolved or right.unresolved:
-            detail["unresolved_bindings"] = sorted(set(left.unresolved) | set(right.unresolved))
-        if excluded:
-            detail["excluded_keys"] = excluded
-        return FixtureOutcome(fixture["fixture"], status, divergences=divergences, detail=detail)
-
-    # -- comparison ---------------------------------------------------------
-
-    def values_equal(self, key: str, left: str, right: str) -> bool:
-        """Numeric equality ONLY for keys the contract declares numeric;
-        everything else — including strings that look numeric — is an exact
-        canonical string comparison."""
-        if key in self.numeric_keys and numeric_equal(left, right):
-            return True
-        return left == right
-
-    def normalize_key(self, key: str, value: Any) -> str:
+    def normalize_value(self, key: str, value: Any) -> str:
         if key in self.canonical_json_keys and isinstance(value, (dict, list)):
-            # Boundary-local convention: compare the full structured value as
-            # canonical JSON (sorted keys) — deterministic end to end, so
-            # nothing else is scrubbed.
             text = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
         else:
             text = canonical(value)
@@ -277,132 +158,80 @@ class Boundary:
             return "[REDACTED]" if text != "" else ""
         return scrub(text)
 
+    def normalize(self, result: SideResult, fixture: dict[str, Any]) -> SideResult:
+        """Reduce a result to its comparable, storable form: every value
+        canonicalized (+ canonical JSON for declared keys), secrets redacted,
+        expected-to-vary nondeterminism scrubbed, error text scrubbed and with
+        raw secret fixture values redacted."""
+        return SideResult(
+            ok=result.ok,
+            values={key: self.normalize_value(key, value) for key, value in result.values.items()},
+            error=self.redact_secrets(fixture, scrub(result.error)) if result.error else result.error,
+            unresolved=list(result.unresolved),
+        )
+
     def redact_secrets(self, fixture: dict[str, Any], text: str) -> str:
-        """Replace raw fixture values of secret inputs before any error text
-        is stored in the report. Error paths can echo input values; secret
-        values must never survive into report artifacts."""
         result = text
         for value in secret_raw_values(fixture):
             if value:
                 result = result.replace(value, "[REDACTED]")
         return result
 
-    # -- scope ---------------------------------------------------------------
-
-    def compute_exclusions(self, left: SideResult) -> dict[str, str]:
-        """Keys outside this boundary's comparison scope, with reasons."""
-        excluded = dict(self.static_exclusions)
-        if self.scope_rule == "config":
-            # Mechanical scope: a contract input is inside the config boundary
-            # when the v2 producer actually transported it through the resolved
-            # environment, or when config.sh itself set/changed it. Inputs the
-            # v2 pipeline consumes downstream of the resolved environment
-            # (e.g. publish-step reads of the raw input) belong to those
-            # later boundaries, not to config/default resolution.
-            for v2_key in self.key_mapping.values():
-                transported = v2_key in left.pre
-                mutated = left.values.get(v2_key, "") != left.pre.get(v2_key, "")
-                if not transported and not mutated and v2_key not in excluded:
-                    excluded[v2_key] = "not transported through the v2 resolved environment; consumed downstream of config resolution"
-        return excluded
-
-    # -- approvals -----------------------------------------------------------
-
-    def approval_for(self, fixture: dict[str, Any], divergence: dict[str, Any]) -> dict[str, Any] | None:
-        """An approval must pin the exact divergence: boundary + fixture(s) +
-        key + the expected old AND new values (for outcome/error-category
-        divergences, the "ok" / "error:<category>" tokens). Approval on one
-        fixture, key, or value pair never extends to another."""
-        for entry in load_approved():
-            if entry["boundary"] != self.id or entry["key"] != divergence["key"]:
-                continue
-            if not entry_fixtures(entry).issuperset({fixture["fixture"]}):
-                continue
-            expected = entry.get("expected") or {}
-            old_ok = self.values_equal(divergence["key"], str(expected.get("old", "")), divergence["old"])
-            new_ok = self.values_equal(divergence["key"], str(expected.get("new", "")), divergence["new"])
-            if old_ok and new_ok:
-                return entry
-        return None
-
-    # -- counterexample signatures -------------------------------------------
-
-    def apply_expected_drift(self, fixture: dict[str, Any], status: str,
-                             divergences: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
-        expected = fixture.get("expected") or {}
-        if not isinstance(expected, dict) or expected.get("outcome") != "drift":
-            return status, divergences
-        declared = expected.get("divergences")
-        if not isinstance(declared, list) or not declared:
-            return "drift", [{
-                "key": "<counterexample>",
-                "old": "", "new": "",
-                "detail": 'expected.outcome=drift requires a non-empty "divergences" signature (key + old + new each)',
-                "approved": False,
-            }]
-        problems: list[dict[str, Any]] = []
-        declared_keys: set[str] = set()
-        for spec in declared:
-            key = str(spec.get("key", ""))
-            declared_keys.add(key)
-            actual = next((d for d in divergences if d["key"] == key
-                           and self.values_equal(key, str(spec.get("old", "")), d.get("old", ""))
-                           and self.values_equal(key, str(spec.get("new", "")), d.get("new", ""))), None)
-            if actual is None:
-                observed = next((d for d in divergences if d["key"] == key), None)
-                observed_text = f" (observed old={observed.get('old')!r} new={observed.get('new')!r})" if observed else ""
-                problems.append({
-                    "key": key,
-                    "old": str(spec.get("old", "")), "new": str(spec.get("new", "")),
-                    "detail": f"declared counterexample divergence not observed{observed_text}",
-                    "approved": False,
-                })
-        undeclared = [d for d in divergences if d["key"] not in declared_keys]
-        for d in undeclared:
-            problems.append({"key": d["key"], "old": d.get("old", ""), "new": d.get("new", ""),
-                             "detail": f"undeclared divergence beyond the counterexample signature: {d.get('detail', '')}",
-                             "approved": False})
-        if problems or undeclared:
-            return "drift", problems
-        # The vulnerable variant diverged exactly as the counterexample
-        # requires: the harness detected the broken wiring.
-        return "expected_drift", [{**d, "approved": True,
-                                   "approved_via": "declared counterexample signature"} for d in divergences]
+    def evaluate(self, fixture: dict[str, Any], workdir: Path, *, update: bool = False) -> FixtureOutcome:
+        name = fixture["fixture"]
+        try:
+            observed = self.normalize(self.run(fixture, workdir), fixture)
+        except Exception as error:  # runner infrastructure failure
+            return FixtureOutcome(
+                name, "runner_error",
+                detail={"error": self.redact_secrets(fixture, scrub(str(error)))},
+            )
+        if update:
+            path = write_snapshot(self.id, name, observed, workdir)
+            return FixtureOutcome(name, "updated", detail={"snapshot": str(path.relative_to(ROOT))})
+        snapshot = read_snapshot(self.id, name, workdir)
+        if snapshot is None:
+            return FixtureOutcome(
+                name, "missing_snapshot",
+                detail={"snapshot": str(_snapshot_file(self.id, name).relative_to(ROOT))},
+            )
+        divergences = compare(snapshot, observed)
+        detail: dict[str, Any] = {}
+        if observed.error:
+            detail["error"] = observed.error[-800:]
+        if divergences:
+            detail["snapshot"] = str(_snapshot_file(self.id, name).relative_to(ROOT))
+        return FixtureOutcome(name, "match" if not divergences else "drift", divergences=divergences, detail=detail)
 
 
-def entry_fixtures(entry: dict[str, Any]) -> set[str]:
-    if "fixture" in entry:
-        return {str(entry["fixture"])}
-    if "fixtures" in entry:
-        return {str(f) for f in entry["fixtures"]}
-    return set()
+def compare(snapshot: SideResult, observed: SideResult) -> list[dict[str, Any]]:
+    """Exact comparison of a normalized observed result against its snapshot.
+    Every difference is reported; there is no approval channel."""
+    divergences: list[dict[str, Any]] = []
+    if snapshot.ok != observed.ok:
+        return [{
+            "key": "<outcome>",
+            "snapshot": "ok" if snapshot.ok else f"error:{snapshot.error}",
+            "observed": "ok" if observed.ok else f"error:{observed.error}",
+        }]
+    if not snapshot.ok:
+        if snapshot.error != observed.error:
+            divergences.append({"key": "<error>", "snapshot": snapshot.error, "observed": observed.error})
+        return divergences
+    for key in sorted(set(snapshot.values) | set(observed.values)):
+        left = snapshot.values.get(key)
+        right = observed.values.get(key)
+        if left != right:
+            divergences.append({"key": key, "snapshot": left, "observed": right})
+    if sorted(snapshot.unresolved) != sorted(observed.unresolved):
+        divergences.append({
+            "key": "<unresolved>",
+            "snapshot": sorted(snapshot.unresolved),
+            "observed": sorted(observed.unresolved),
+        })
+    return divergences
 
 
-def categorize(error: str, categories: tuple[tuple[re.Pattern[str], str], ...]) -> str:
-    for pattern, category in categories:
-        if pattern.search(error):
-            return category
-    return "uncategorized"
-
-
-def load_approved() -> list[dict[str, Any]]:
-    if not APPROVED_PATH.exists():
-        return []
-    data = json.loads(APPROVED_PATH.read_text())
-    entries = data.get("entries", [])
-    for entry in entries:
-        for field_name in ("boundary", "key", "reason", "expected"):
-            if not entry.get(field_name):
-                raise RuntimeError(f"approved-divergences entry missing '{field_name}': {entry}")
-        if not entry_fixtures(entry):
-            raise RuntimeError(f"approved-divergences entry must name its fixture(s): {entry}")
-        expected = entry["expected"]
-        if not isinstance(expected, dict) or "old" not in expected or "new" not in expected:
-            raise RuntimeError(f"approved-divergences entry expected must pin old and new: {entry}")
-    return entries
-
-
-# ---------------------------------------------------------------------------
 # Boundary: config/default resolution
 # ---------------------------------------------------------------------------
 
@@ -474,7 +303,6 @@ def run_json_runner(command: list[str], workdir: Path, timeout: int, env: dict[s
         values=payload.get("values", {}),
         error=payload.get("stderr"),
         unresolved=payload.get("unresolved", []),
-        pre=payload.get("pre", {}),
     )
 
 
@@ -513,53 +341,13 @@ def _fixture_path(fixture: dict[str, Any]) -> str:
     return str(path)
 
 
-CONFIG_CATEGORIES = (
-    (re.compile(r"Required input '.*' is missing"), "missing-required"),
-    (re.compile(r"Missing required environment variables|is required when"), "missing-required"),
-    (re.compile(r"Missing GitHub token"), "missing-required"),
-    (re.compile(r"must be one of|expected openai or anthropic|Invalid AI_API_FORMAT|Invalid AI_FALLBACK_API_FORMAT|Invalid AI_PRIMARY_API_FORMAT|Invalid AI_SMART_API_FORMAT"), "invalid-enum"),
-    (re.compile(r"must be an integer|must be a finite number|must be between|must be at least"), "invalid-number"),
-    (re.compile(r"must be 'true' or 'false'"), "invalid-boolean"),
-    (re.compile(r"outside the safe integer range"), "invalid-number"),
-)
-
 CONFIG_BOUNDARY = Boundary(
     id="config-default-resolution",
     description=(
-        "Equivalent config/default resolution: action.yml env-block expression "
-        "resolution plus scripts/sections/config.sh (v2) versus the v3 typed "
-        "loader (dist/index.js)."
+        "Typed configuration loading and default resolution, including input binding, token fallback, validated enums/numbers/booleans, and secret handling."
     ),
     fixtures_dir="config",
-    run_new=run_v3_config,
-    error_categories=CONFIG_CATEGORIES,
-    scope_rule="config",
-    static_exclusions={
-        # The assembled system prompt is prompt-assembly output (its own later
-        # boundary), not config/default resolution: config.sh resolves the
-        # bundled default prompt into SYSTEM_PROMPT, while the v3 config
-        # surface carries the raw input default ("").
-        "SYSTEM_PROMPT": "prompt assembly output, resolved by resolve_system_prompt; separate migration boundary",
-    },
-)
-
-# ---------------------------------------------------------------------------
-# Boundary: #662 dataflow (corpus truncation counterexample)
-# ---------------------------------------------------------------------------
-
-
-TRUNCATION_BOUNDARY = Boundary(
-    id="dataflow-662-corpus-truncation",
-    description=(
-        "#662 corpus-truncation dataflow counterexample: the production "
-        "truncate_clean versus the reconstructed pre-fix broken-arrow variant, "
-        "run against the same oversized-marker fixture. The vulnerable "
-        "fixture must fail parity with exactly its declared divergence "
-        "signature (drift is observable, never normalized away); the fixed "
-        "variant must pass."
-    ),
-    fixtures_dir="dataflow-662",
-    run_new=lambda fixture, workdir: read_golden("dataflow-662-corpus-truncation", fixture["fixture"] + ".new", workdir),
+    run=run_v3_config,
 )
 
 # ---------------------------------------------------------------------------
@@ -605,29 +393,13 @@ def run_v3_precheck(fixture: dict[str, Any], workdir: Path) -> SideResult:
     return _normalize_selection_unavailable(fixture, result)
 
 
-PRECHECK_CATEGORIES = (
-    (re.compile(r"Missing REPO or PR_NUMBER"), "missing-input"),
-    (re.compile(r"unsupported PLATFORM", re.IGNORECASE), "invalid-platform"),
-    (re.compile(r"Could not determine Forgejo permission"), "forgejo-permission-unknown"),
-    (re.compile(r"lacks Forgejo write permission"), "forgejo-permission-denied"),
-)
-
 PRECHECK_BOUNDARY = Boundary(
     id="precheck-decision",
     description=(
-        "Equivalent precheck decisions (#674): the v2 production path "
-        "(scripts/check_review_needed.sh + pr_reviewer.precheck + "
-        "build_selection_fingerprint, platform I/O via the real platform "
-        "seam) versus the v3 TypeScript platform adapters and precheck "
-        "decision modules, driven over the same fixture platform state. "
-        "Covers unchanged/changed fingerprints, linked-issue label and "
-        "Linear priority changes, failed metadata lookups, fork-disabled "
-        "private lookups, forced re-review, unrelated-label no-ops, "
-        "superseded heads, and GitHub vs Forgejo."
+        "Precheck decisions over fixture platform state. Covers unchanged/changed fingerprints, linked-issue label and Linear priority changes, failed metadata lookups, fork-disabled private lookups, forced re-review, unrelated-label no-ops, superseded heads, and GitHub vs Forgejo."
     ),
     fixtures_dir="precheck",
-    run_new=run_v3_precheck,
-    error_categories=PRECHECK_CATEGORIES,
+    run=run_v3_precheck,
 )
 
 
@@ -659,30 +431,16 @@ def run_v3_request(fixture: dict[str, Any], workdir: Path) -> SideResult:
 MODEL_REQUEST_BOUNDARY = Boundary(
     id="model-request-construction",
     description=(
-        "#677 request construction parity: the v2 build_model_request jq "
-        "assembly versus the v3 typed builder, for both api formats across "
-        "shape, temperature omission, token-param selection, structured "
-        "output modes, and streaming options."
+        "Model request construction for both API formats, covering request shape, temperature omission, token-parameter selection, structured-output modes, and streaming options."
     ),
     fixtures_dir="model-request",
-    run_new=run_v3_request,
+    run=run_v3_request,
 )
 
 
 # ---------------------------------------------------------------------------
 # Boundary: verdict parsing (#677)
 # ---------------------------------------------------------------------------
-
-VERDICT_CATEGORIES = (
-    (re.compile(r"Model returned an empty completion"), "empty-completion"),
-    (re.compile(r"Model endpoint returned an error"), "endpoint-error"),
-    (re.compile(r"Expected verdict to be"), "invalid-verdict"),
-    (re.compile(r"missing required key"), "missing-key"),
-    (re.compile(r"Expected JSON object"), "not-object"),
-    (re.compile(r"empty or missing 'review_markdown'"), "empty-markdown"),
-    (re.compile(r"appears flattened"), "flattened"),
-)
-
 
 def run_v3_verdict(fixture: dict[str, Any], workdir: Path) -> SideResult:
     node = os.environ.get("PARITY_NODE") or shutil.which("node")
@@ -704,14 +462,10 @@ def run_v3_verdict(fixture: dict[str, Any], workdir: Path) -> SideResult:
 VERDICT_BOUNDARY = Boundary(
     id="verdict-parsing",
     description=(
-        "#677 verdict parsing parity: the v2 tolerant response parser versus "
-        "the v3 port, over strict/fenced/prose JSON extraction, findings "
-        "normalization, and the typed failure vocabulary (empty completion, "
-        "invalid verdict, flattened markdown, endpoint errors)."
+        "Verdict parsing across strict/fenced/prose JSON extraction, findings normalization, and typed failures for empty completions, invalid verdicts, flattened markdown, and endpoint errors."
     ),
     fixtures_dir="verdict-parsing",
-    run_new=run_v3_verdict,
-    error_categories=VERDICT_CATEGORIES,
+    run=run_v3_verdict,
 )
 
 
@@ -739,15 +493,10 @@ def run_v3_required_checks(fixture: dict[str, Any], workdir: Path) -> SideResult
 COVERAGE_BOUNDARY = Boundary(
     id="required-check-coverage",
     description=(
-        "#750 required-check coverage parity: the v2 structured evaluator "
-        "(pr_reviewer.completeness.evaluate_structured_coverage) versus the "
-        "v3 port (src/enforcement/required-checks.ts) over identity matching "
-        "against the deterministic must_check list, grounded not_applicable "
-        "handling, duplicate/unknown/malformed conservatism, and the "
-        "version-1 coverage artifact."
+        "Structured required-check coverage, including identity matching against the deterministic must_check list, grounded not_applicable handling, duplicate/unknown/malformed conservatism, and the version-1 coverage artifact."
     ),
     fixtures_dir="required-check-coverage",
-    run_new=run_v3_required_checks,
+    run=run_v3_required_checks,
 )
 
 
@@ -776,18 +525,10 @@ def run_v3_tool_budget(fixture: dict[str, Any], workdir: Path) -> SideResult:
 TOOL_BUDGET_BOUNDARY = Boundary(
     id="tool-request-budget",
     description=(
-        "#701 tier-aware native tool-loop request budget: the v2 production "
-        "harness resolver (run through the real run_tool_harness.py "
-        "missing-corpus path) versus the v3 port, over tier defaults "
-        "(primary 24 in v3, 16 in the v2 golden as an approved divergence; smart 32, escalated 40), explicit overrides, "
-        "SMART_TOOL_MAX_REQUESTS precedence, the 1..50 hard ceiling, and the "
-        "#702 budget provenance (source). Both sides enforce the fixture's "
-        "expected (route, budget, source), so the absolute values are "
-        "pinned, not just cross-side agreement — the #678 migration cannot "
-        "regress to a single undifferentiated ceiling."
+        "Tier-aware native tool-loop request budgets: primary (24), smart (32), and escalated (40) defaults, explicit overrides, SMART_TOOL_MAX_REQUESTS precedence, the 1..50 hard ceiling, and #702 budget-source provenance. Fixture expectations pin route, budget, and source."
     ),
     fixtures_dir="tool-budget",
-    run_new=run_v3_tool_budget,
+    run=run_v3_tool_budget,
 )
 
 
@@ -815,21 +556,10 @@ def run_v3_classification(fixture: dict[str, Any], workdir: Path) -> SideResult:
 CLASSIFICATION_BOUNDARY = Boundary(
     id="classification-role-selection",
     description=(
-        "#675 classification parity: the v2 deterministic classifier and the "
-        "specialist role selector versus the v3 TypeScript port, driven over "
-        "the same fixture inputs. Covers kind precedence (renovate digest-only, "
-        "dependency upgrades, k8s manifests, security/path kinds), diff-content "
-        "risk flags and route-signal exclusion, linked-issue label flags, "
-        "Linear native priority mapping, must-check derivation, linked-metadata "
-        "uncertainty, the trivial zero-selection gates (with the summary-cap "
-        "conservatism), and every conservative all-roles fallback (unusable "
-        "input, unknown kind, no-lane kind, undetermined metadata). Includes "
-        "the reconstructed #655 GitHub-label and Linear capability cases from "
-        "#662: enriched canonical labels must reach classification and flip "
-        "risk flags and role selection."
+        "Deterministic classification and specialist role selection over fixture inputs. Covers kind precedence (renovate digest-only, dependency upgrades, k8s manifests, security/path kinds), diff-content risk flags and route-signal exclusion, linked-issue label flags, Linear native priority mapping, must-check derivation, linked-metadata uncertainty, trivial zero-selection gates (with summary-cap conservatism), and all-roles fallbacks (unusable input, unknown/no-lane kind, undetermined metadata). Includes #655 GitHub-label and Linear capability cases: enriched canonical labels reach classification and affect risk flags and role selection."
     ),
     fixtures_dir="classification",
-    run_new=run_v3_classification,
+    run=run_v3_classification,
 )
 
 
@@ -845,17 +575,10 @@ def run_v3_requirement_ledger(fixture: dict[str, Any], workdir: Path) -> SideRes
 REQUIREMENT_LEDGER_BOUNDARY = Boundary(
     id="requirement-ledger",
     description=(
-        "#675 requirement-ledger parity: the v2 deterministic ledger extractor "
-        "and fence-safe markdown renderer versus the v3 TypeScript port, over "
-        "standards/linked-issue/PR-body sources. Covers acceptance/normative/"
-        "invariant extraction rules, fenced-block skipping, content-derived ids, "
-        "cross-source dedup with merged provenance, truncation caps (entry "
-        "count, text length, source capacity with reserved docs, markdown byte "
-        "cap), and hostile-content handling (control characters, backtick runs, "
-        "heading forgery)."
+        "Deterministic requirement-ledger extraction and fence-safe markdown rendering over standards, linked-issue, and PR-body sources. Covers acceptance/normative/invariant extraction, fenced-block skipping, content-derived ids, cross-source deduplication with merged provenance, truncation caps (entry count, text length, source capacity with reserved docs, markdown byte cap), and hostile content (control characters, backtick runs, heading forgery)."
     ),
     fixtures_dir="requirement-ledger",
-    run_new=run_v3_requirement_ledger,
+    run=run_v3_requirement_ledger,
 )
 
 
@@ -871,17 +594,10 @@ def run_v3_enrichment(fixture: dict[str, Any], workdir: Path) -> SideResult:
 ENRICHMENT_BOUNDARY = Boundary(
     id="enrichment-normalization",
     description=(
-        "#675 enrichment-normalization parity: the v2 pure extraction and "
-        "normalization functions (URL extraction with redirect.github.com "
-        "normalization, allowlist string parsing, version hints, target-"
-        "version selection with tail -n1 hint semantics, GHCR image "
-        "extraction, old→new compare-SHA extraction, release/compare URL "
-        "classification) versus the v3 TypeScript port. The DNS resolution / "
-        "public-IP fetch-security functions are out of scope: that is fetch "
-        "policy owned by the platform/tool boundaries and stays in v2."
+        "Pure enrichment normalization: URL extraction with redirect.github.com normalization, allowlist string parsing, version hints, target-version selection with tail -n1 hint semantics, GHCR image extraction, old-to-new compare-SHA extraction, and release/compare URL classification. DNS resolution and public-IP fetch security are outside this boundary; fetch policy belongs to the platform/tool boundaries."
     ),
     fixtures_dir="enrichment-normalization",
-    run_new=run_v3_enrichment,
+    run=run_v3_enrichment,
 )
 
 
@@ -913,17 +629,10 @@ def run_v3_repo_map(fixture: dict[str, Any], workdir: Path) -> SideResult:
 REPO_MAP_BOUNDARY = Boundary(
     id="repo-map",
     description=(
-        "#675 repository-map parity: the v2 deterministic bounded repo-map "
-        "builder (git ls-files seeding, language/important/category "
-        "classification, bounded depth-major tree, visible truncation) and "
-        "its fence-safe JSON/Markdown renderers plus trust framing versus the "
-        "v3 TypeScript port. Covers mixed-language trees, hostile filenames "
-        "(backtick runs, newlines, Unicode, fence strings, display caps), "
-        "every truncation reason, hard markdown byte caps, framed rendering, "
-        "and the clean no-Git failure."
+        "Deterministic bounded repository maps using git ls-files seeding, language/important/category classification, bounded depth-major trees, visible truncation, fence-safe JSON/Markdown rendering, and trust framing. Covers mixed-language trees, hostile filenames (backtick runs, newlines, Unicode, fence strings, display caps), every truncation reason, hard markdown byte caps, framed rendering, and clean no-Git failure."
     ),
     fixtures_dir="repo-map",
-    run_new=run_v3_repo_map,
+    run=run_v3_repo_map,
 )
 
 
@@ -939,15 +648,10 @@ def run_v3_diff_priority(fixture: dict[str, Any], workdir: Path) -> SideResult:
 DIFF_PRIORITY_BOUNDARY = Boundary(
     id="diff-priority",
     description=(
-        "Diff-priority parity: the v2 class-aware, size-fair diff truncation "
-        "(per-file chunking, source/bulk/generated ranking, water-filled "
-        "budget within a rank, newline-safe clips with per-file notes, "
-        "omit-below-minimum, bounded omitted-files manifest, truncate_clean "
-        "fallback for header-less input and tiny budgets) versus the v3 "
-        "TypeScript port. Outputs compare as base64 so invalid UTF-8 survives."
+        "Class-aware, size-fair diff truncation with per-file chunking, source/bulk/generated ranking, water-filled budgets within a rank, newline-safe clips with per-file notes, omit-below-minimum behavior, bounded omitted-files manifest, and truncate_clean fallback for header-less input and tiny budgets. Outputs are base64 so invalid UTF-8 survives."
     ),
     fixtures_dir="diff-priority",
-    run_new=run_v3_diff_priority,
+    run=run_v3_diff_priority,
 )
 
 
@@ -963,13 +667,10 @@ def run_v3_review_threads(fixture: dict[str, Any], workdir: Path) -> SideResult:
 REVIEW_THREADS_BOUNDARY = Boundary(
     id="review-threads",
     description=(
-        "#766 review-thread parity: the v2 unresolved review-thread builder "
-        "(own-finding recognition, unresolved filtering, newest-first "
-        "ordering, per-body hygiene, whole-thread byte budget, enforcement "
-        "view) versus the v3 TypeScript port."
+        "Unresolved review-thread construction with own-finding recognition, unresolved filtering, newest-first ordering, per-body hygiene, whole-thread byte budgets, and the enforcement view."
     ),
     fixtures_dir="review-threads",
-    run_new=run_v3_review_threads,
+    run=run_v3_review_threads,
 )
 
 
@@ -985,14 +686,10 @@ def run_v3_human_reviews(fixture: dict[str, Any], workdir: Path) -> SideResult:
 HUMAN_REVIEWS_BOUNDARY = Boundary(
     id="human-reviews",
     description=(
-        "Outstanding-human-change-request parity: the v2 builder (managed-"
-        "review exclusion by marker, latest-eligible-state-per-reviewer "
-        "selection, COMMENTED/PENDING ignored, newest-first ordering, "
-        "per-body hygiene, whole-entry byte budget, head-moved tri-state, "
-        "enforcement view) versus the v3 TypeScript port."
+        "Outstanding human change-request construction with managed-review exclusion by marker, latest eligible state per reviewer, COMMENTED/PENDING ignored, newest-first ordering, per-body hygiene, whole-entry byte budgets, head-moved tri-state, and the enforcement view."
     ),
     fixtures_dir="human-reviews",
-    run_new=run_v3_human_reviews,
+    run=run_v3_human_reviews,
 )
 
 
@@ -1008,16 +705,10 @@ def run_v3_pr_thread(fixture: dict[str, Any], workdir: Path) -> SideResult:
 PR_THREAD_BOUNDARY = Boundary(
     id="pr-thread",
     description=(
-        "#675 PR-thread parity: the v2 bounded conversation-comment builder "
-        "(timestamp/id ordering with unparseable stamps last, managed-comment "
-        "filtering, marker-line stripping, secret redaction, control-char "
-        "hygiene, per-comment byte truncation, whole-comment byte budget with "
-        "visible omission) versus the v3 TypeScript port. Covers hostile "
-        "bodies (backtick fences, forged markers, credential shapes) and the "
-        "custom managed-marker substring mode."
+        "Bounded PR conversation-comment construction with timestamp/id ordering (unparseable stamps last), managed-comment filtering, marker-line stripping, secret redaction, control-character hygiene, per-comment byte truncation, whole-comment byte budgets with visible omission, and hostile-body handling (backtick fences, forged markers, credential shapes) including custom managed-marker substring mode."
     ),
     fixtures_dir="pr-thread",
-    run_new=run_v3_pr_thread,
+    run=run_v3_pr_thread,
 )
 
 
@@ -1046,16 +737,10 @@ def run_v3_related_code(fixture: dict[str, Any], workdir: Path) -> SideResult:
 RELATED_CODE_BOUNDARY = Boundary(
     id="related-code",
     description=(
-        "#675 related-code parity: the v2 deterministic bounded related-code "
-        "scanner (high-confidence symbol anchors, fixed-string git grep with "
-        "per-symbol/global caps and extra-hit detection, test discovery with "
-        "scored stems, nearest-first manifests, changed/deleted path "
-        "exclusion, secret-redacted snippets, explicit git errors, and the "
-        "structural JSON byte cap) versus the v3 TypeScript port, over "
-        "identical harness-prepared worktrees."
+        "Deterministic bounded related-code scanning with high-confidence symbol anchors, fixed-string git grep and per-symbol/global caps with extra-hit detection, scored-stem test discovery, nearest-first manifests, changed/deleted path exclusion, secret-redacted snippets, explicit git errors, and a structural JSON byte cap over harness-prepared worktrees."
     ),
     fixtures_dir="related-code",
-    run_new=run_v3_related_code,
+    run=run_v3_related_code,
 )
 
 
@@ -1103,18 +788,10 @@ def _change_anchors_run(fixture: dict[str, Any], workdir: Path) -> SideResult:
 CHANGE_ANCHORS_BOUNDARY = Boundary(
     id="change-anchors",
     description=(
-        "#706 change-anchor parity: the v2 deterministic change-anchor "
-        "extractor (unified-diff parsing with C-quoted, renamed and deleted "
-        "paths; per-language symbols and imports; head-line verification; "
-        "#764 enclosing declarations and changed_lines; #791 changed keys, "
-        "branch keys and referenced counterparts; caps, low-value filters and "
-        "truncation flags; symlink/traversal-safe head reads; the persisted "
-        "JSON document and the CLI) versus the v3 TypeScript port, over "
-        "identical harness-prepared workspaces. Fixtures referencing a "
-        "related-code fixture also prove its anchors are the extractor output."
+        "Deterministic change-anchor extraction from unified diffs, including C-quoted, renamed, and deleted paths; per-language symbols and imports; head-line verification; #764 enclosing declarations and changed_lines; #791 changed keys, branch keys, and referenced counterparts; caps, low-value filters, and truncation flags; symlink/traversal-safe head reads; persisted JSON and CLI behavior. Fixtures referencing related-code fixtures also verify the produced anchors."
     ),
     fixtures_dir="change-anchors",
-    run_new=_change_anchors_run,
+    run=_change_anchors_run,
 )
 
 
@@ -1130,19 +807,10 @@ def run_v3_image_provenance(fixture: dict[str, Any], workdir: Path) -> SideResul
 IMAGE_PROVENANCE_BOUNDARY = Boundary(
     id="image-provenance",
     description=(
-        "#675 image-digest provenance parity: the v2 diff parser (repository:/"
-        "tag:/digest:/image: bucketing and old→new pairing), registry target "
-        "routing, manifest/config normalization into OCI label provenance, "
-        "GitHub compare post-processing, compare-repo resolution (OCI source "
-        "labels with mismatch detection and the image-repo heuristic), and "
-        "the rendered document versus the v3 TypeScript port with the same "
-        "fixture-routed transport. Transport fixtures (#706 PR 5a) keep the "
-        "real v2 http_json over a stub curl and the real v3 image transport "
-        "over an injected fetch, and also compare the request log (cached "
-        "registry token, Bearer/Accept headers, unauthenticated compare)."
+        "Image-digest provenance from diff parsing (repository:/tag:/digest:/image: bucketing and old-to-new pairing), registry target routing, manifest/config normalization into OCI label provenance, GitHub compare post-processing, compare-repo resolution (OCI source labels with mismatch detection and image-repo heuristic), and rendered output. Transport fixtures pin injected-fetch request behavior, including cached registry tokens, Bearer/Accept headers, unauthenticated compare, and the request log."
     ),
     fixtures_dir="image-provenance",
-    run_new=run_v3_image_provenance,
+    run=run_v3_image_provenance,
 )
 
 
@@ -1150,31 +818,13 @@ def run_v3_corpus(fixture: dict[str, Any], workdir: Path) -> SideResult:
     return _run_v3_fixture_mode(["corpus-fixture"], fixture, workdir)
 
 
-# Error vocabulary for the corpus boundary's failure contracts. The v2
-# messages arrive prefixed by the common.sh log stamp (scrubbed) and the
-# "ERROR: " marker; both sides map onto the same shared categories.
-CORPUS_CATEGORIES = (
-    (re.compile(r"expected a positive integer"), "invalid-number"),
-    (re.compile(r"cannot fit AI_MAX_TOKENS"), "budget-too-small"),
-    # Projection failures abort the production review (set -euo pipefail):
-    # v2's stderr is jq's own message, the v3 port throws a typed error.
-    (re.compile(r"jq: error|jq: parse error|jq: projection failed"), "projection-failed"),
-    (re.compile(r"exceeds its [0-9]+-byte context budget"), "corpus-over-budget"),
-)
-
 CORPUS_BOUNDARY = Boundary(
     id="corpus-assembly",
     description=(
-        "Equivalent review-corpus assembly: the production corpus.sh pipeline "
-        "(sliced verbatim; #676) versus the v3 TypeScript assembly — section "
-        "order and authority, tier-aware budgets with output-token headroom, "
-        "raw-source smart rebuild (#658/#668), UTF-8-safe truncation, reserved "
-        "standards/ledger/specialist sections, tool-harness placeholder and "
-        "slot semantics, fork gating, and presence signals."
+        "Review-corpus assembly with section order and authority, tier-aware budgets with output-token headroom, raw-source smart rebuild (#658/#668), UTF-8-safe truncation, reserved standards/ledger/specialist sections, tool-harness placeholder and slot semantics, fork gating, and presence signals."
     ),
     fixtures_dir="corpus",
-    run_new=run_v3_corpus,
-    error_categories=CORPUS_CATEGORIES,
+    run=run_v3_corpus,
 )
 
 def _run_v3_cli(cli: str, fixture: dict[str, Any], workdir: Path) -> SideResult:
@@ -1214,135 +864,75 @@ def _specialist_normalize_run(fixture: dict[str, Any], workdir: Path) -> SideRes
 ENFORCEMENT_BOUNDARY = Boundary(
     id="enforcement-pipeline",
     description=(
-        "#680 deterministic enforcement parity: verdict policy (#772/#775 "
-        "non-blocking category capping with the security-flag exemption and "
-        "the unresolved-check gate), #750 structured required-check "
-        "completeness with malformed-disposition conservatism, evidence "
-        "blocker / tool-harness failure / min-successful overlays, #770 "
-        "review-thread settlement (downgrades, re-emitted findings, blocker "
-        "escalation), #774 human change-request settlement, the enforced "
-        "banner normalization, and the #624 requirement-coverage fold."
+        "Deterministic enforcement: verdict policy (#772/#775 non-blocking category capping with the security-flag exemption and unresolved-check gate), #750 structured required-check completeness with malformed-disposition conservatism, evidence-blocker/tool-harness-failure/min-successful overlays, #770 review-thread settlement (downgrades, re-emitted findings, blocker escalation), #774 human change-request settlement, enforced-banner normalization, and the #624 requirement-coverage fold."
     ),
     fixtures_dir="enforcement-pipeline",
-    run_new=lambda fixture, workdir: _run_v3_cli("enforcement-fixture", fixture, workdir),
+    run=lambda fixture, workdir: _run_v3_cli("enforcement-fixture", fixture, workdir),
 )
 
 REQUIREMENT_COVERAGE_BOUNDARY = Boundary(
     id="requirement-coverage",
     description=(
-        "#680/#624 requirement-coverage parity: the tolerant ledger loader "
-        "and the deterministic claim fold (evidence-gated credit, "
-        "not_applicable downgrades, invariant verification kinds, duplicate "
-        "and out-of-ledger errors, visible caps)."
+        "Requirement coverage using the tolerant ledger loader and deterministic claim fold: evidence-gated credit, not_applicable downgrades, invariant verification kinds, duplicate and out-of-ledger errors, and visible caps."
     ),
     fixtures_dir="requirement-coverage",
-    run_new=lambda fixture, workdir: _run_v3_cli("requirement-coverage-fixture", fixture, workdir),
+    run=lambda fixture, workdir: _run_v3_cli("requirement-coverage-fixture", fixture, workdir),
 )
 
 SANITIZE_BOUNDARY = Boundary(
     id="review-sanitize",
     description=(
-        "#680 publication sanitization parity: reserved marker stripping, "
-        "upstream-link neutralization (inert/togithub) with inline-code-span "
-        "preservation, and fence-aware empty-conditional-section stripping."
+        "Publication sanitization: reserved marker stripping, upstream-link neutralization (inert/togithub) with inline-code-span preservation, and fence-aware empty-conditional-section stripping."
     ),
     fixtures_dir="review-sanitize",
-    run_new=lambda fixture, workdir: _run_v3_cli("sanitize-fixture", fixture, workdir),
+    run=lambda fixture, workdir: _run_v3_cli("sanitize-fixture", fixture, workdir),
 )
 
 INLINE_FINDINGS_BOUNDARY = Boundary(
     id="inline-findings",
     description=(
-        "#680 inline-findings anchoring parity: diff-position mapping "
-        "(GitHub side=RIGHT lines and Forgejo new_position), anchor "
-        "validation, thread_id dedup, caps, redaction, and link-mode "
-        "sanitization of comment bodies."
+        "Inline-finding anchoring with diff-position mapping (GitHub side=RIGHT lines and Forgejo new_position), anchor validation, thread_id deduplication, caps, redaction, and link-mode sanitization of comment bodies."
     ),
     fixtures_dir="inline-findings",
-    run_new=lambda fixture, workdir: _run_v3_cli("inline-findings-fixture", fixture, workdir),
+    run=lambda fixture, workdir: _run_v3_cli("inline-findings-fixture", fixture, workdir),
 )
 
 METADATA_MARKERS_BOUNDARY = Boundary(
     id="metadata-markers",
     description=(
-        "#680 managed metadata parity: metadata-marker serialization (fixed "
-        "key order, conditional fields, escalation_reason array, numeric "
-        "cache_hit_ratio), marker preamble emission, managed-body detection "
-        "by content prefix, and reserved-marker stripping that keeps model "
-        "output from forging action-owned markers."
+        "Managed metadata serialization with fixed key order, conditional fields, escalation_reason array, numeric cache_hit_ratio, marker preamble emission, managed-body detection by content prefix, and reserved-marker stripping that prevents model output from forging action-owned markers."
     ),
     fixtures_dir="metadata-markers",
-    run_new=lambda fixture, workdir: _run_v3_cli("metadata-markers-fixture", fixture, workdir),
+    run=lambda fixture, workdir: _run_v3_cli("metadata-markers-fixture", fixture, workdir),
 )
 
 
 PLATFORM_NORMALIZATION_BOUNDARY = Boundary(
     id="platform-normalization",
     description=(
-        "#706 platform read-seam parity: raw GitHub REST/GraphQL and Forgejo "
-        "/api/v1 responses served to the real v2 seam (platform_api.sh jq "
-        "projections, forgejo_backend.py normalizers, the pr-files.json "
-        "projection, _gh_api_bounded) through stub gh/curl binaries, versus "
-        "the v3 adapters over an injected fetch serving the same routes. "
-        "Covers PR files, linked issues, conversation comments, review "
-        "threads, paginated reviews, external checks with self-exclusion and "
-        "bounded timeouts, linked-source enrichment, and the semantic-fixture "
-        "adapter; compares normalized values, byte-significant artifacts, and "
-        "the request log."
+        "Platform read adapters for GitHub REST/GraphQL and Forgejo /api/v1 responses. Covers PR files, linked issues, conversation comments, review threads, paginated reviews, external checks with self-exclusion and bounded timeouts, linked-source enrichment, and the semantic-fixture adapter; pins normalized values, byte-significant artifacts, and request logs."
     ),
     fixtures_dir="platform-normalization",
-    run_new=lambda fixture, workdir: _run_v3_cli("platform-normalization-fixture", fixture, workdir),
+    run=lambda fixture, workdir: _run_v3_cli("platform-normalization-fixture", fixture, workdir),
 )
 
 PROMPT_ASSEMBLY_BOUNDARY = Boundary(
     id="prompt-assembly",
     description=(
-        "#706 prompt and message layer parity: the real v2 shell functions "
-        "(resolve_system_prompt, apply_system_prompt_fragments, "
-        "apply_specialist_leads_fragment, build_user_message, "
-        "handle_model_failure, annotate_analysis_engine) sourced with each "
-        "fixture's env and presence files, versus the v3 src/prompt/ port "
-        "over the build-time-embedded prompt assets. Covers every fragment "
-        "gate on and off, verbosity, replace vs append with SYSTEM_PROMPT / "
-        "SYSTEM_PROMPT_FILE, specialist leads, classification steering, the "
-        "failure notice and the engine annotation; compares exact bytes "
-        "(plus sha256) of the system prompt and user message."
+        "Prompt and message assembly from embedded prompt assets: system-prompt resolution and fragments, specialist-leads fragment, user-message construction, model-failure handling, and analysis-engine annotation. Covers fragment gates on/off, verbosity, replace vs append with SYSTEM_PROMPT/SYSTEM_PROMPT_FILE, specialist leads, classification steering, failure notice, engine annotation, and exact system-prompt/user-message bytes plus sha256."
     ),
     fixtures_dir="prompt-assembly",
-    run_new=lambda fixture, workdir: _run_v3_cli("prompt-assembly-fixture", fixture, workdir),
-    error_categories=(
-        (re.compile(r"SYSTEM_PROMPT_FILE does not exist"), "system_prompt_file_missing"),
-        (re.compile(r"Traceback \(most recent call last\)|user message build failed"), "user_message_build_failed"),
-    ),
+    run=lambda fixture, workdir: _run_v3_cli("prompt-assembly-fixture", fixture, workdir),
     canonical_json_keys={"failure_notices", "engine_annotations"},
-)
-
-# Error vocabulary for the linked-sources boundary: v2 raises out of
-# render_linked_sources on hostile payload types (``.get`` on a non-dict,
-# slicing None, ``.lower()`` on a non-string) and on URLs urlparse rejects;
-# the v3 port throws the same Python exception kinds.
-LINKED_SOURCES_CATEGORIES = (
-    (re.compile(r"^(AttributeError|TypeError): "), "malformed-api-payload"),
-    (re.compile(r"^ValueError: "), "invalid-url-or-text"),
 )
 
 LINKED_SOURCES_BOUNDARY = Boundary(
     id="linked-sources",
     description=(
-        "#706 PR 5b linked-source enrichment parity: the real v2 "
-        "render_linked_sources (fetch_url's urllib opener with the "
-        "allowlist redirect handler, the host_allowed public-DNS gate, "
-        "strip_source_text, gh_api_call and the Forgejo enrich reads, the "
-        "#509 repo gate, BudgetTracker) versus the v3 port (SSRF-safe "
-        "fetchSource, pinned enrich clients), with only the transport seams "
-        "fixture-routed: DNS answers, raw HTTP exchanges, the gh/curl API "
-        "route table, and a fake budget clock. Compares the rendered "
-        "linked-sources.md byte for byte, the sorted request log, and the "
-        "budget-warning count."
+        "Linked-source enrichment with SSRF-safe fetchSource and pinned enrichment clients. Fixture-routed DNS answers, raw HTTP exchanges, GitHub/Forgejo API routes, and a fake budget clock pin linked-sources.md bytes, sorted request logs, and budget-warning counts."
     ),
     fixtures_dir="linked-sources",
-    run_new=lambda fixture, workdir: _run_v3_cli("linked-sources-fixture", fixture, workdir),
-    error_categories=LINKED_SOURCES_CATEGORIES,
+    run=lambda fixture, workdir: _run_v3_cli("linked-sources-fixture", fixture, workdir),
 )
 
 
@@ -1381,135 +971,77 @@ def _context_producers_run(fixture: dict[str, Any], workdir: Path) -> SideResult
 CONTEXT_PRODUCERS_BOUNDARY = Boundary(
     id="context-producers",
     description=(
-        "#706 PR 3 deterministic context producers: the production shell "
-        "slices (context.sh changed-manifest block, classification.sh repo "
-        "impact/history scan, context.sh linked-issue fetch/render/label "
-        "merge with the real Linear adapter and metadata status, "
-        "build_requirement_ledger's presence signal, config.sh "
-        "resolve_standards_file, corpus.sh's fence-safe related-code clip) "
-        "run in a harness-prepared worktree with only external seams "
-        "stubbed, versus the v3 producers over an identical worktree; every "
-        "artifact compared byte for byte."
+        "Deterministic context production over harness-prepared worktrees: changed-manifest generation, repository impact/history scans, linked-issue fetch/render/label merge with Linear metadata, requirement-ledger presence, standards-file resolution, and fence-safe related-code clipping. External seams are stubbed and artifacts are pinned byte-for-byte."
     ),
     fixtures_dir="context-producers",
-    run_new=_context_producers_run,
-    error_categories=(
-        (re.compile(r"jq: error|jq: projection failed"), "projection-failed"),
-    ),
+    run=_context_producers_run,
 )
 
 CI_GATE_BOUNDARY = Boundary(
     id="ci-gate",
     description=(
-        "#706 PR 6 CI gate workload parity: the real scripts/wait_for_ci.sh "
-        "(platform seam, _gh_api_bounded, forgejo_backend.py) over stub "
-        "gh/curl/date/sleep binaries sharing a virtual clock, versus the v3 "
-        "`gate-ci` workload (runCiWait) over an injected fetch and the same "
-        "clock. Compares exit code, $GITHUB_OUTPUT bytes, the "
-        "ci-checks-context.md evidence bytes, leftover temp files, the request "
-        "log, virtual elapsed time and the log lines across green, "
-        "pending-then-green, failure, timeout with/without skip, a head change "
-        "mid-wait, self-exclusion, and the approved transient-read divergence."
+        "CI-gate workload behavior using an injected fetch and virtual clock. Pins exit code, GITHUB_OUTPUT bytes, ci-checks-context.md evidence, leftover temp files, request log, elapsed time, and log lines across green, pending-then-green, failure, timeout with/without skip, mid-wait head change, self-exclusion, and transient-read handling."
     ),
     fixtures_dir="ci-gate",
-    run_new=lambda fixture, workdir: _run_v3_cli("ci-gate-fixture", fixture, workdir),
+    run=lambda fixture, workdir: _run_v3_cli("ci-gate-fixture", fixture, workdir),
 )
 
 SPECIALISTS_GATE_BOUNDARY = Boundary(
     id="specialists-gate",
     description=(
-        "#706 PR 6 specialists gate workload parity: the real "
-        "scripts/run_specialists.py (curl transport) versus the v3 "
-        "`gate-specialists` workload (runSpecialistsGate over the v3 model "
-        "transport), each against a local mock model endpoint serving the "
-        "same canned per-role responses. Compares every artifact byte for "
-        "byte (per-role request/response/contract JSON, specialists.json, "
-        "specialists.md, the presence file), the request bodies the endpoint "
-        "received, exit code and log lines; only wall-clock elapsed values "
-        "and the mock port are normalized. Covers three_call, auto selection "
-        "(including zero roles), streamed Anthropic SSE, a missing corpus, "
-        "a transport retry, the completion-overrun retry, the MAX_CORPUS fit "
-        "check, a role reaped at the phase deadline, combined_scout "
-        "(success and failure), and raw responses whose integer fields share "
-        "names with the contract floats."
+        "Specialists-gate workload behavior against a local mock model endpoint serving canned per-role responses. Pins per-role request/response/contract JSON, specialists.json/.md, presence file, received request bodies, exit code, and logs; normalizes wall-clock elapsed values and mock port. Covers three_call, auto selection (including zero roles), streamed Anthropic SSE, missing corpus, transport retry, completion-overrun retry, MAX_CORPUS fit check, role reaped at phase deadline, combined_scout success/failure, and raw responses with integer fields sharing names with contract floats."
     ),
     fixtures_dir="specialists-gate",
-    run_new=lambda fixture, workdir: _run_v3_cli("specialists-gate-fixture", fixture, workdir),
+    run=lambda fixture, workdir: _run_v3_cli("specialists-gate-fixture", fixture, workdir),
 )
 
 EVIDENCE_PROVIDERS_BOUNDARY = Boundary(
     id="evidence-providers",
     description=(
-        "#706 PR 5a evidence-provider orchestration parity: the real v2 phase "
-        "(classification.sh fork-gate slice, run_evidence_providers.py main "
-        "with a frozen clock, harvest_advisory_phases fallback) versus the v3 "
-        "runEvidenceProvidersPhase over identical workspaces and real provider "
-        "processes. Covers config load/validation errors, argv and bash -lc "
-        "commands, JSON findings parsing, nonzero exits, timeouts, oversize "
-        "output (mask-then-truncate), secret redaction, the parallel pool's "
-        "config-order results, fork gating, crash fallback artifacts, the "
-        "head/tail markdown caps, and the byte-exact .md/.json artifacts."
+        "Evidence-provider orchestration over identical workspaces and real provider processes. Covers config load/validation errors, argv and bash -lc commands, JSON findings parsing, nonzero exits, timeouts, oversize output (mask then truncate), secret redaction, parallel-pool config-order results, fork gating, crash-fallback artifacts, head/tail markdown caps, and byte-exact .md/.json artifacts."
     ),
     fixtures_dir="evidence-providers",
-    run_new=lambda fixture, workdir: _run_v3_cli("evidence-providers-fixture", fixture, workdir),
+    run=lambda fixture, workdir: _run_v3_cli("evidence-providers-fixture", fixture, workdir),
 )
 
 SARIF_BOUNDARY = Boundary(
     id="sarif",
     description=(
-        "#706 PR 5a SARIF ingestion parity: pr_reviewer/sarif.py "
-        "normalize_sarif (level→severity mapping, rule lookup by id/index, "
-        "locations, dedup, message/title/finding/error caps) and the "
-        "run_evidence_providers.py SARIF glue (workspace-bounded paths, "
-        "bounded reads, UTF-8/JSON error text, collective finding cap, secret "
-        "redaction before storage, rendering) versus the v3 port."
+        "SARIF ingestion: normalize_sarif level-to-severity mapping, rule lookup by id/index, locations, deduplication, message/title/finding/error caps, plus evidence-provider SARIF handling of workspace-bounded paths, bounded reads, UTF-8/JSON error text, collective finding cap, secret redaction before storage, and rendering."
     ),
     fixtures_dir="sarif",
-    run_new=lambda fixture, workdir: _run_v3_cli("evidence-providers-fixture", fixture, workdir),
+    run=lambda fixture, workdir: _run_v3_cli("evidence-providers-fixture", fixture, workdir),
 )
 
 NEW_BOUNDARIES = (
-    Boundary(id="conversation-rendering", description="Conversation wire rendering and corpus dedup parity.", fixtures_dir="conversation-rendering", run_new=_conversation_run, canonical_json_keys={"result"}),
-    Boundary(id="escalation-decision", description="Escalation request and telemetry parity.", fixtures_dir="escalation-decision", run_new=_escalation_run, canonical_json_keys={"result"}),
-    Boundary(id="tool-loop", description="Native tool-loop deterministic state-machine parity.", fixtures_dir="tool-loop", run_new=_tool_loop_run, canonical_json_keys={"result"}),
+    Boundary(id="conversation-rendering", description="Conversation wire rendering and corpus deduplication.", fixtures_dir="conversation-rendering", run=_conversation_run, canonical_json_keys={"result"}),
+    Boundary(id="escalation-decision", description="Escalation requests and telemetry decisions.", fixtures_dir="escalation-decision", run=_escalation_run, canonical_json_keys={"result"}),
+    Boundary(id="tool-loop", description="Native tool-loop deterministic state-machine behavior.", fixtures_dir="tool-loop", run=_tool_loop_run, canonical_json_keys={"result"}),
     Boundary(
         id="specialist-corpus",
         description=(
-            "#776 deep-review specialist corpus parity: the deterministic, "
-            "bounded #632 corpus builder (survival-priority section order, "
-            "reserved requirement ledger, per-section caps, hard byte cap) and "
-            "the #758 author-blinded adversarial_correctness variant, byte-exact "
-            "against the v3 TypeScript port."
+            "Deep-review specialist corpus construction: the deterministic bounded #632 corpus builder (survival-priority section order, reserved requirement ledger, per-section caps, hard byte cap) and the #758 author-blinded adversarial_correctness variant, compared byte-for-byte with fixture expectations."
         ),
         fixtures_dir="specialist-corpus",
-        run_new=_specialist_corpus_run,
+        run=_specialist_corpus_run,
         canonical_json_keys={"result"},
     ),
     Boundary(
         id="specialist-payload",
         description=(
-            "#776 deep-review specialist wire-payload parity: the per-role "
-            "OpenAI/Anthropic request builder (json_schema→json_object "
-            "downgrade, max_completion_tokens, stream_options) and the "
-            "one-shot completion-overrun retry payload, byte-exact against "
-            "the v3 TypeScript port."
+            "Deep-review specialist wire payloads: per-role OpenAI/Anthropic request construction (json_schema-to-json_object downgrade, max_completion_tokens, stream_options) and the one-shot completion-overrun retry payload."
         ),
         fixtures_dir="specialist-payload",
-        run_new=_specialist_payload_run,
+        run=_specialist_payload_run,
         canonical_json_keys={"result"},
     ),
     Boundary(
         id="specialist-normalize",
         description=(
-            "#776 deep-review specialist normalize parity: raw model output "
-            "to the normalized version-1 lead artifact (dedupe, caps, "
-            "severity aliasing), the tolerant raw-text parser, the #758 "
-            "adversarial-correctness contract (trigger/consequence major-lead "
-            "demotion, boundaries_challenged), and the completion-overrun "
-            "retry decision, byte-exact against the v3 TypeScript port."
+            "Deep-review specialist normalization from raw model output to the normalized version-1 lead artifact (deduplication, caps, severity aliasing), tolerant raw-text parsing, the #758 adversarial-correctness contract (trigger/consequence major-lead demotion, boundaries_challenged), and completion-overrun retry decisions."
         ),
         fixtures_dir="specialist-normalize",
-        run_new=_specialist_normalize_run,
+        run=_specialist_normalize_run,
         canonical_json_keys={"result"},
     ),
     ENFORCEMENT_BOUNDARY,
@@ -1527,44 +1059,7 @@ NEW_BOUNDARIES = (
     SARIF_BOUNDARY,
 )
 
-BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, TRUNCATION_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, COVERAGE_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, REVIEW_THREADS_BOUNDARY, HUMAN_REVIEWS_BOUNDARY, DIFF_PRIORITY_BOUNDARY, RELATED_CODE_BOUNDARY, CHANGE_ANCHORS_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY, *NEW_BOUNDARIES)
-
-# ---------------------------------------------------------------------------
-# Migration gates (#698 dataflow qualification, #666/#661 semantic qualification)
-# ---------------------------------------------------------------------------
-
-
-def run_gate(name: str, command: list[str], workdir: Path, timeout: int = 900) -> dict[str, Any]:
-    proc = subprocess.run(command, cwd=str(ROOT), capture_output=True, text=True, timeout=timeout)
-    tail = "\n".join((proc.stdout + proc.stderr).strip().splitlines()[-15:])
-    return {
-        "id": name,
-        "ok": proc.returncode == 0,
-        "exit_code": proc.returncode,
-        "output_tail": scrub(tail),
-    }
-
-
-def run_migration_gates(workdir: Path) -> list[dict[str, Any]]:
-    gates = [
-        (
-            "dataflow-qualification-698",
-            [sys.executable, "-m", "pytest", "tests/test_issue_662_dataflow.py", "-q", "--tb=short"],
-        ),
-        (
-            "semantic-qualification-666",
-            [
-                sys.executable,
-                "scripts/run_semantic_eval_ci.py",
-                "--corpus",
-                "evals/corpus-historical-dogfood.json",
-                "--output",
-                str(workdir / "semantic-eval-report.json"),
-            ],
-        ),
-    ]
-    return [run_gate(name, command, workdir) for name, command in gates]
-
+BOUNDARIES: tuple[Boundary, ...] = (CONFIG_BOUNDARY, PRECHECK_BOUNDARY, MODEL_REQUEST_BOUNDARY, VERDICT_BOUNDARY, COVERAGE_BOUNDARY, TOOL_BUDGET_BOUNDARY, CLASSIFICATION_BOUNDARY, REQUIREMENT_LEDGER_BOUNDARY, ENRICHMENT_BOUNDARY, REPO_MAP_BOUNDARY, PR_THREAD_BOUNDARY, REVIEW_THREADS_BOUNDARY, HUMAN_REVIEWS_BOUNDARY, DIFF_PRIORITY_BOUNDARY, RELATED_CODE_BOUNDARY, CHANGE_ANCHORS_BOUNDARY, IMAGE_PROVENANCE_BOUNDARY, CORPUS_BOUNDARY, *NEW_BOUNDARIES)
 
 # ---------------------------------------------------------------------------
 # Driver
@@ -1585,30 +1080,51 @@ def load_fixtures(boundary: Boundary) -> list[dict[str, Any]]:
     return fixtures
 
 
-def evaluate_boundary(boundary: Boundary, workdir: Path) -> dict[str, Any]:
-    surface = config_surface()
-    boundary.key_mapping = surface.mapping
-    boundary.secret_keys = surface.secrets
-    boundary.numeric_keys = surface.numeric
+def evaluate_boundary(boundary: Boundary, workdir: Path, *, update: bool) -> dict[str, Any]:
+    boundary.secret_keys = config_surface().secrets
     outcomes = []
     for fixture in load_fixtures(boundary):
         with tempfile.TemporaryDirectory(prefix="parity-fixture-") as td:
-            outcome = boundary.evaluate(fixture, Path(td))
+            outcome = boundary.evaluate(fixture, Path(td), update=update)
         outcomes.append({"fixture": outcome.fixture, "status": outcome.status,
                          "divergences": outcome.divergences, "detail": outcome.detail})
+    accepted = ("updated",) if update else ("match",)
     return {
         "id": boundary.id,
         "description": boundary.description,
         "fixtures": outcomes,
-        "ok": all(o["status"] in ("match", "approved_divergence", "expected_drift") for o in outcomes),
+        "ok": all(o["status"] in accepted for o in outcomes),
     }
+
+
+def snapshot_gaps() -> dict[str, list[str]]:
+    """Fixtures with no snapshot and snapshots with no fixture (orphans), plus
+    any fixture or snapshot directory not owned by a registered boundary — a
+    retired boundary's leftover snapshots must not sit unpaired and invisible."""
+    missing: list[str] = []
+    orphans: list[str] = []
+    fixture_dirs = {boundary.fixtures_dir for boundary in BOUNDARIES}
+    boundary_ids = {boundary.id for boundary in BOUNDARIES}
+    for boundary in BOUNDARIES:
+        fixtures = {p.stem for p in (FIXTURES / boundary.fixtures_dir).glob("*.json")}
+        snapshots = {p.stem for p in (GOLDENS / boundary.id).glob("*.json")} if (GOLDENS / boundary.id).is_dir() else set()
+        missing += [f"{boundary.id}/{name}" for name in sorted(fixtures - snapshots)]
+        orphans += [f"{boundary.id}/{name}" for name in sorted(snapshots - fixtures)]
+    for path in sorted(FIXTURES.iterdir()):
+        if path.is_dir() and path.name != GOLDENS.name and path.name not in fixture_dirs:
+            orphans += [f"<unregistered-fixtures>/{path.name}"]
+    if GOLDENS.is_dir():
+        for path in sorted(GOLDENS.iterdir()):
+            if path.is_dir() and path.name not in boundary_ids:
+                orphans += [f"<unregistered-snapshots>/{path.name}"]
+    return {"missing": missing, "orphans": orphans}
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--boundary", action="append", help="restrict to these boundary ids")
-    parser.add_argument("--report", help="write the structured parity report JSON here")
-    parser.add_argument("--skip-gates", action="store_true", help="skip the migration gates")
+    parser.add_argument("--report", help="write the structured snapshot report JSON here")
+    parser.add_argument("--update", action="store_true", help="rewrite snapshots from observed v3 results")
     args = parser.parse_args(argv)
     if not (ROOT / "dist" / "index.js").is_file():
         parser.error("dist/index.js is missing; run `npm run build` first")
@@ -1618,48 +1134,43 @@ def main(argv: list[str] | None = None) -> int:
         known = {b.id for b in BOUNDARIES}
         parser.error(f"unknown boundary(s): {sorted(set(args.boundary) - known)}")
 
-    with tempfile.TemporaryDirectory(prefix="parity-harness-") as td:
+    with tempfile.TemporaryDirectory(prefix="snapshot-harness-") as td:
         workdir = Path(td)
-        gates = [] if args.skip_gates else run_migration_gates(workdir)
-        boundaries = [evaluate_boundary(b, workdir) for b in selected]
+        boundaries = [evaluate_boundary(b, workdir, update=args.update) for b in selected]
 
     first_divergent = next(
-        (b["id"] for b in boundaries for f in b["fixtures"] if f["status"] == "drift"),
+        (b["id"] for b in boundaries for f in b["fixtures"] if f["status"] in ("drift", "missing_snapshot", "runner_error")),
         None,
     )
+    statuses = [f["status"] for b in boundaries for f in b["fixtures"]]
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generator": "tests/parity_harness.py",
-        "gates": gates,
         "boundaries": boundaries,
         "first_divergent_boundary": first_divergent,
         "summary": {
-            "fixtures": sum(len(b["fixtures"]) for b in boundaries),
-            "matched": sum(1 for b in boundaries for f in b["fixtures"] if f["status"] == "match"),
-            "approved_divergences": sum(1 for b in boundaries for f in b["fixtures"] if f["status"] == "approved_divergence"),
-            "expected_drift": sum(1 for b in boundaries for f in b["fixtures"] if f["status"] == "expected_drift"),
-            "drifted": sum(1 for b in boundaries for f in b["fixtures"] if f["status"] == "drift"),
-            "runner_errors": sum(1 for b in boundaries for f in b["fixtures"] if f["status"] == "runner_error"),
+            "fixtures": len(statuses),
+            "matched": statuses.count("match"),
+            "drifted": statuses.count("drift"),
+            "missing_snapshots": statuses.count("missing_snapshot"),
+            "runner_errors": statuses.count("runner_error"),
+            "updated": statuses.count("updated"),
         },
     }
-    gates_ok = all(g["ok"] for g in gates)
-    ok = gates_ok and first_divergent is None and not any(
-        f["status"] == "runner_error" for b in boundaries for f in b["fixtures"]
-    )
+    failures = {"runner_error"} if args.update else {"drift", "missing_snapshot", "runner_error"}
+    ok = not any(status in failures for status in statuses)
     if args.report:
-        Path(args.report).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        Path(args.report).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    for gate in gates:
-        print(f"gate {gate['id']}: {'OK' if gate['ok'] else 'FAILED'}")
+    markers = {"match": ".", "drift": "F", "missing_snapshot": "N", "runner_error": "E", "updated": "U"}
     for boundary in boundaries:
         for fixture in boundary["fixtures"]:
-            marker = {"match": ".", "approved_divergence": "A", "expected_drift": "D",
-                      "drift": "F", "runner_error": "E"}[fixture["status"]]
-            print(f"  [{marker}] {boundary['id']}/{fixture['fixture']}: {fixture['status']}")
+            print(f"  [{markers[fixture['status']]}] {boundary['id']}/{fixture['fixture']}: {fixture['status']}")
             for divergence in fixture["divergences"]:
-                print(f"      {divergence['key']}: {divergence['detail']}"
-                      f"{' (approved)' if divergence.get('approved') else ''}")
-    print(f"parity: {'OK' if ok else 'FAILED'} (first divergent boundary: {first_divergent})")
+                snapshot = json.dumps(divergence["snapshot"], ensure_ascii=False, sort_keys=True)
+                observed = json.dumps(divergence["observed"], ensure_ascii=False, sort_keys=True)
+                print(f"      {divergence['key']}: snapshot={snapshot} observed={observed}")
+    print(f"snapshots: {'OK' if ok else 'FAILED'} (first divergent boundary: {first_divergent})")
     return 0 if ok else 1
 
 
