@@ -41,7 +41,7 @@ test("artifact maps verdict, tri-state dispositions, findings, and extra fields"
     requiredCheckDispositionsEmitted: true, requiredCheckDispositions: null,
     threadDispositionsEmitted: true, threadDispositions: [{ threadId: "t1", disposition: "open", evidence: null }],
     humanReviewDispositionsEmitted: false,
-    extra: { custom: 7, verdict: "override" },
+    extra: { custom: 7, verdict: "override", requirement_trace_incomplete: true },
   }));
   assert.equal(result.verdict, "request_changes");
   assert.deepEqual(result.findings[0], { severity: "major", category: "bug", file: "a.ts", line: 8, message: "bad", preliminary_finding: 3 });
@@ -49,6 +49,7 @@ test("artifact maps verdict, tri-state dispositions, findings, and extra fields"
   assert.deepEqual(result.thread_dispositions, [{ thread_id: "t1", disposition: "open", evidence: null }]);
   assert.equal("human_review_dispositions" in result, false);
   assert.equal(result.custom, 7);
+  assert.equal(result.requirement_trace_incomplete, undefined, "model extras cannot forge deterministic trace state");
 });
 
 test("model policy is a no-op and records model source", () => {
@@ -312,6 +313,8 @@ test("coverage evidence vocabulary and caps; payload extraction supports objects
 test("metadata marker preserves exact key order and omits empty/legacy values", () => {
   assert.equal(buildRunMetadataMarker({ headSha: "h", baseSha: "b", reviewResult: "clean", requiredChecks: "complete", reviewRoute: "native", escalationReason: "a,b", cacheHitRatio: "0.5" }),
     '<!-- ai-pr-reviewer:{"version":1,"head_sha":"h","base_sha":"b","review_result":"clean","required_checks":"complete","review_route":"native","escalation_reason":["a","b"],"cache_hit_ratio":0.5} -->');
+  assert.equal(buildRunMetadataMarker({ headSha: "h", baseSha: "b", reviewResult: "partial", incompleteReason: "requirement_trace" }),
+    '<!-- ai-pr-reviewer:{"version":1,"head_sha":"h","base_sha":"b","review_result":"partial","incomplete_reason":"requirement_trace"} -->');
   assert.equal(buildRunMetadataMarker({ headSha: "", baseSha: "", reviewResult: "issues", requiredChecks: "none", reviewRoute: "legacy", escalationReason: "", cacheHitRatio: "-" }),
     '<!-- ai-pr-reviewer:{"version":1,"head_sha":"unknown","base_sha":"","review_result":"issues"} -->');
   assert.throws(() => buildRunMetadataMarker({ headSha: "h", baseSha: "b", reviewResult: "clean", cacheHitRatio: "nope" }), /cache_hit_ratio is not a number/);

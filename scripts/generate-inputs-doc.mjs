@@ -28,7 +28,11 @@ export function render(contract, groups) {
     .sort((a, b) => b.v2_id.length - a.v2_id.length);
   const prose = (text) => {
     let out = String(text ?? "").replace(/\s+/g, " ").trim();
-    for (const entry of renames) out = out.replace(new RegExp(`\\b${entry.v2_id}\\b`, "g"), entry.id);
+    for (const entry of renames) {
+      // Single-quoted tokens are literal enum values, not contract id references.
+      out = out.replace(new RegExp(`\\b${entry.v2_id}\\b`, "g"),
+        (match, offset, whole) => whole[offset - 1] === "'" ? match : entry.id);
+    }
     return cell(out);
   };
   const fmtDefault = (input) => {

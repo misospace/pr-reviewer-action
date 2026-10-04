@@ -43,6 +43,8 @@ const allowlist = new Map<string, string>([
   // blob, distinct from the action's #873 `review-result` output (which
   // carries the same value under the kebab contract name).
   ["review_result", "the metadata marker's raw JSON field, not the action output"],
+  ["incomplete_reason", "the metadata marker's raw JSON field, not the action output"],
+  ["requirement_trace", "the incomplete-reason enum value, which collides with the requirement-trace input's v2 id"],
   // More raw marker JSON keys (src/metadata/markers.ts) that share a v2 id;
   // docs/telemetry.md documents the marker by its literal keys.
   ["required_checks", "the metadata marker's raw JSON field, not the action output"],

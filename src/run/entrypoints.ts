@@ -14,6 +14,7 @@ import type { UpstreamLinkMode } from "../publish/sanitize.js";
 import { nonEmpty } from "./run-dir.js";
 import { partialCoverageOf } from "./review.js";
 import type { PartialCoverage } from "../tools/coverage.js";
+import { isIncompleteReason, type IncompleteReason } from "../publish/outputs.js";
 
 /**
  * Production entrypoints for the #706 composite cutover: the precheck and
@@ -244,6 +245,7 @@ interface CoverageResolution {
   partialCoverage: PartialCoverage | undefined;
   unknown: boolean;
   requiredChecks: string;
+  incompleteReason: string;
 }
 
 /** Validates one field of #873's authoritative `review-coverage.json`
@@ -312,12 +314,14 @@ const ENFORCEMENT_HARNESS_NAMES: ReadonlySet<string> = new Set(["tool-harness.js
  *   cleanly settles the question, either way. */
 function partialCoverageFromRunDir(env: NodeJS.ProcessEnv): CoverageResolution {
   const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
-  if (runDir === undefined) return { partialCoverage: undefined, unknown: true, requiredChecks: "none" };
+  if (runDir === undefined) return { partialCoverage: undefined, unknown: true, requiredChecks: "none", incompleteReason: "none" };
   const artifact = readJsonObject(join(runDir, "review-coverage.json"));
   if (artifact === null || artifact.version !== 1 || typeof artifact.tool_loop_ran !== "boolean") {
-    return { partialCoverage: undefined, unknown: true, requiredChecks: "none" };
+    return { partialCoverage: undefined, unknown: true, requiredChecks: "none", incompleteReason: "none" };
   }
-  const requiredChecks = validateRequiredChecks(artifact.required_checks);
+  let requiredChecks = validateRequiredChecks(artifact.required_checks);
+  const recordedGap = parsePartialCoverageField(artifact.partial_coverage);
+  const recordedReason = isIncompleteReason(artifact.incomplete_reason) ? artifact.incomplete_reason : undefined;
   if (requiredChecks === undefined) {
     // #873 maintainer follow-up: the run writer always emits this field, so
     // an absent or invalid value means the artifact is not one this runtime
@@ -325,20 +329,23 @@ function partialCoverageFromRunDir(env: NodeJS.ProcessEnv): CoverageResolution {
     // instead — coverage unknown, and the publish input carries the
     // conservative "incomplete" so no policy branch can read the
     // required-check dimension as clean.
-    return { partialCoverage: undefined, unknown: true, requiredChecks: "incomplete" };
+    return { partialCoverage: undefined, unknown: true, requiredChecks: "incomplete", incompleteReason: recordedReason ?? "execution" };
   }
-  if (!artifact.tool_loop_ran) return { partialCoverage: undefined, unknown: false, requiredChecks };
+  if (recordedReason === "requirement_trace" || recordedReason === "both") requiredChecks = "incomplete";
+  const incompleteReason: IncompleteReason = recordedReason !== undefined && recordedReason !== "none"
+    ? recordedReason
+    : (requiredChecks === "incomplete" || recordedGap !== undefined) ? "execution" : "none";
+  if (!artifact.tool_loop_ran) return { partialCoverage: undefined, unknown: false, requiredChecks, incompleteReason };
 
-  const recordedGap = parsePartialCoverageField(artifact.partial_coverage);
-  if (recordedGap !== undefined) return { partialCoverage: recordedGap, unknown: false, requiredChecks };
+  if (recordedGap !== undefined) return { partialCoverage: recordedGap, unknown: false, requiredChecks, incompleteReason };
 
   const harnessName = typeof artifact.enforcement_harness === "string" && ENFORCEMENT_HARNESS_NAMES.has(artifact.enforcement_harness)
     ? artifact.enforcement_harness
     : undefined;
-  if (harnessName === undefined) return { partialCoverage: undefined, unknown: true, requiredChecks };
+  if (harnessName === undefined) return { partialCoverage: undefined, unknown: true, requiredChecks, incompleteReason };
   const harness = readJsonObject(join(runDir, harnessName));
-  if (harness === null) return { partialCoverage: undefined, unknown: true, requiredChecks };
-  return { partialCoverage: partialCoverageOf(harness), unknown: false, requiredChecks };
+  if (harness === null) return { partialCoverage: undefined, unknown: true, requiredChecks, incompleteReason };
+  return { partialCoverage: partialCoverageOf(harness), unknown: false, requiredChecks, incompleteReason };
 }
 
 /** The platform publish seam (GitHub REST/GraphQL or Forgejo /api/v1). */
@@ -383,6 +390,7 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
     commentMarker: env.COMMENT_MARKER ?? "",
     ...(env.BROAD_FINGERPRINT !== undefined ? { broadFingerprint: env.BROAD_FINGERPRINT } : {}),
     requiredChecks: coverage.requiredChecks,
+    incompleteReason: coverage.incompleteReason,
     reviewRoute: env.REVIEW_ROUTE ?? "",
     escalationReason: env.ESCALATION_REASON ?? "",
     cacheHitRatio: env.CACHE_HIT_RATIO ?? "",

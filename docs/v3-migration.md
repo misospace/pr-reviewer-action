@@ -440,6 +440,7 @@ Outputs with no v2 implementation.
 | v3 output | Description |
 | --- | --- |
 | `review-result` | The metadata marker's `review_result` state (`clean`/`findings`/`partial`/`issues`), additive alongside `verdict` (#873). `verdict: approve` with `review-result: partial` is not an approval; gate merges on both, never on `verdict` alone. |
+| `incomplete-reason` | Why coverage is incomplete: `execution` / `requirement_trace` / `both` / `none` (#954). Distinguishes a finished review with an unverified requirement from a review that stopped early; `review-result` stays `partial` for both. |
 
 `requirement-trace` depends on a bundled prompt fragment that asks the model to
 emit the trace fields. With `system-prompt-mode=replace` that fragment is
