@@ -1131,6 +1131,10 @@ test("#960: a `../` that appears only in a comment or doc comment is not a trave
     // An unspaced `//` is a comment: its non-comment uses always sit against a
     // non-space character, which the preceding-character rule already refuses.
     ["+//see ../events/types.js\n", "src/jobs/types.ts"],
+    // In a block-comment language a `/*` glued to a preceding token is still a
+    // comment opener (C maximal munch), so it is blanked like any other.
+    ["+a/*see ../events/types.js\n+*/\n", "src/jobs/types.ts"],
+    ["+x=1/*see ../events/types.js\n+*/\n", "src/jobs/types.ts"],
   ];
   for (const [diff, filename] of negatives) {
     const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
@@ -1172,14 +1176,26 @@ test("#960: a traversal literal in real code still fires, including next to an i
     ['+const url = http://host/x; p = open("../../etc/passwd")\n', "src/app.py"],
     // An escaped slash in a regex literal is not a comment marker.
     ['+const re = /a\\//; p = fs.readFileSync("../../etc/passwd");\n', "src/app.ts"],
-    // A shell glob with no closer is not a block comment: it must not blank the
-    // real traversal that follows it.
+    // A shell glob is not a block comment — shell has none. `/*` must not
+    // blank the real traversal that follows it, no closer or closer found.
     ['+rm -rf /*\n+const p = fs.readFileSync("../../etc/passwd");\n', "scripts/build.sh"],
-    // ... and a glob ending a command cannot close over a later closing
-    // marker either: the opener is refused up front (`isBlockOpener`), so no
-    // block can pair the glob's `/*` with the `*/` inside the string and blank
-    // the traversal in between.
-    ['+rm -rf /*\n+cp ../../etc/passwd .\n+echo "*/"\n', "scripts/build.sh"],
+    // ... and a glob whose `/*` is followed by more glob text is no different:
+    // the phantom cannot pair with the closing marker inside the string.
+    ['+rm -rf /*foo\n+cp ../../etc/passwd .\n+echo "*/"\n', "scripts/build.sh"],
+    // `--` is not a comment marker in shell: it ends the options, and the
+    // traversal after it is real code.
+    ['+cp -- ../../etc/passwd ./dest\n', "scripts/build.sh"],
+    // `//` is not a comment marker in Python: spaced floor division is code.
+    ['+chunk = total // workers; save("../etc/passwd")\n', "src/jobs/stats.py"],
+    // An unknown file type gets no comment blanking at all: with no language
+    // there is no basis for treating any marker as a comment.
+    ["+/* note: see ../events/types.js */\n", "jobs/config.weird"],
+    // Markup has no `//` comment: a `//` in HTML text is data, and blanking
+    // it would hide the traversal that follows.
+    ["+<p>note: // see ../../etc/passwd for details</p>\n", "src/page.html"],
+    // `#` is not a comment marker in C: a spaced preprocessor directive is
+    // code, and its macro body is a real path reference.
+    ["+# define DATA_DIR ../etc\n", "src/app.c"],
     // A real one-line comment whose quoted closing marker is followed by code:
     // quotes have no syntax inside a comment, so the FIRST closing marker
     // closes it and the code after it is scanned as code.
@@ -1188,12 +1204,6 @@ test("#960: a traversal literal in real code still fires, including next to an i
     // closing marker, exactly as C/JS/CSS lexes it — its tail is code, and the
     // traversal there must fire.
     ['+/* The token is "*/" and then\n+ * see ../events/types.js\n+ */\n', "src/jobs/types.ts"],
-    // A multi-line `/*` glued to a preceding token is refused as an opener
-    // (`isBlockOpener` refuses identifier-preceded `/*`, which is what keeps
-    // globs like `src/*.py` from pairing with a later closing marker). It is
-    // scanned as code: a false positive, which fails toward detection.
-    ["+a/*see ../events/types.js\n+*/\n", "src/jobs/types.ts"],
-    ["+x=1/*see ../events/types.js\n+*/\n", "src/jobs/types.ts"],
   ];
   for (const [diff, filename] of positives) {
     const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });

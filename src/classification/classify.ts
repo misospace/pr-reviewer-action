@@ -438,39 +438,105 @@ function commentMarkerAt(
   return next === "" || /\s/.test(next);
 }
 
-/** A `/*` opens a cross-line block comment only when it looks like one rather
- * than a token that merely contains the characters. Refused:
- *   - preceded by a backslash — the escaped slash of a regex literal
- *     (`/\*foo\//`);
- *   - preceded by an identifier character — a glob glued to a path token
- *     (`build/*`, `src/*.py`);
- *   - ending the line with an identifier as the nearest preceding token — a
- *     glob that terminates a command (`rm -rf /*`, `chmod 755 /*`); a real
- *     opener there follows a statement terminator or the line start.
- * Whether a surviving candidate really is a comment is still decided by
- * `findBlockClose`: an opener with no closer is left as code rather than
- * blanking what follows. Because the closing-marker search is quote-agnostic
- * (quotes have no syntax inside a block comment, so the first closing marker
- * always closes it, as in C/JS/CSS), these refusals are what keep a glob from
- * pairing its `/*` with a later closing marker — even one inside a string —
- * and blanking the real code in between. The cost is a multi-line `/*` glued
- * to a preceding token (`a/*note`), which is scanned as code: that fails
- * toward detection, the safe direction. */
-function isBlockOpener(chars: readonly string[], i: number, prefix: number): boolean {
-  const prev = i > 0 ? chars[i - 1] ?? "" : "";
-  if (prev === "\\") return false;
-  if (/[A-Za-z0-9_$]/.test(prev)) return false;
-  if ((chars[i + 2] ?? "") !== "") return true;
-  let j = i - 1;
-  while (j >= prefix && /\s/.test(chars[j] ?? "")) j--;
-  if (j < prefix) return true; // code start
-  return STATEMENT_TERMINATORS.has(chars[j] ?? "");
+/** The only `/*` refused outright as a cross-line block opener is one preceded
+ * by a backslash — the escaped slash of a regex literal (`/\*foo\//`). In a
+ * language that actually has `/*` block comments, every other `/*` outside a
+ * string IS a comment (C maximal munch makes `a/*b` a comment opener, and
+ * globs are a shell concept shell never reaches here — see
+ * `commentMarkersFor`). Whether the candidate really is a comment is then
+ * decided by `findBlockClose`: an opener with no closer is left as code rather
+ * than blanking what follows. A single-line `/* ... *​/` is blanked inline
+ * regardless, since its closer is on the same line and cannot leak. */
+function isBlockOpener(chars: readonly string[], i: number): boolean {
+  return (i > 0 ? chars[i - 1] ?? "" : "") !== "\\";
 }
 
 /** Search bound for a block comment's closer. A real comment is far shorter; a
  * phantom opener simply fails to find one and is discarded. */
 const MAX_BLOCK_CARRY_LINES = 200;
 
+/** File-type token used to pick the comment markers: the extension after the
+ * last dot (`ts` for `src/app.ts`, `gitignore` for `.gitignore`), or the whole
+ * basename when there is no dot (`makefile`). */
+function fileKindToken(path: string): string {
+  const base = path.split("/").pop() ?? "";
+  const lower = base.toLowerCase();
+  const dot = lower.lastIndexOf(".");
+  return dot >= 0 ? lower.slice(dot + 1) : lower;
+}
+
+/** Comment syntax is a fact about the file's language, not something local
+ * syntax can decide: `rm -rf /*foo` and `x = 1 /* note` are
+ * character-identical shapes, and only the language tells them apart. A
+ * marker that is not a comment in the file's language must NEVER blank text —
+ * in shell, `/*` is a glob, `--` an end-of-options terminator
+ * (`cp -- ../etc/passwd dest`), and `//` a doubled slash or (in Python) spaced
+ * floor division (`x = total // workers; open("../out")`), so blanking there
+ * hides real code: a false negative. Unknown file types get no comment
+ * blanking at all, which also fails toward detection. `#` is gated too: it is
+ * a comment in most scripting and config languages but a preprocessor
+ * directive in C (`# define X ../y`) and an ID selector in CSS. */
+
+/** `#` line comments: shell family, Python, Ruby, Perl, and the config
+ * languages that borrow the convention. */
+const HASH_LINE_COMMENT_KINDS = new Set([
+  "sh", "bash", "zsh", "ksh", "csh", "tcsh", "fish", "bashrc", "zshrc",
+  "bash_profile", "profile", "py", "pyw", "pyi", "rb", "rake", "gemspec",
+  "raku", "pl", "pm", "r", "jl", "ps1", "psm1", "psd1", "tcl", "yaml", "yml",
+  "toml", "ini", "cfg", "conf", "cnf", "env", "properties", "cmake", "mk",
+  "make", "makefile", "dockerfile", "graphql", "gql", "nim", "nims", "cr",
+  "coffee", "hcl", "tf", "tfvars", "nix", "ex", "exs", "gitignore",
+  "gitattributes", "gitmodules", "gitconfig", "editorconfig", "crontab",
+]);
+
+/** `//` line comments: the C family and languages that borrowed it. Markup
+ * formats (HTML, component templates) are deliberately absent: their comment
+ * syntax is `<!-- -->`, so a `//` there is text, and blanking it would hide
+ * real code — embedded script comments simply fire instead. */
+const SLASH_LINE_COMMENT_KINDS = new Set([
+  "js", "jsx", "mjs", "cjs", "ts", "tsx", "cts", "mts", "c", "h", "cc", "cpp",
+  "cxx", "hpp", "hh", "cs", "java", "go", "rs", "swift", "kt", "kts", "scala",
+  "sc", "dart", "php", "phtml", "zig", "jsonc", "json5", "sass", "scss",
+  "less", "proto", "fbs", "thrift", "groovy", "gradle", "ino", "glsl", "vert",
+  "frag", "comp", "hlsl", "hcl", "tf", "tfvars",
+]);
+
+/** `--` line comments: SQL, Lua, Haskell, Ada, Elm. */
+const DASH_LINE_COMMENT_KINDS = new Set([
+  "sql", "lua", "hs", "lhs", "ada", "adb", "ads", "elm", "vhdl", "vhd",
+]);
+
+/** `/* ... *​/` block comments: the C family, CSS, SQL, and schema/HCL
+ * languages. Markup formats are absent for the same reason as above. */
+const BLOCK_COMMENT_KINDS = new Set([
+  "js", "jsx", "mjs", "cjs", "ts", "tsx", "cts", "mts", "c", "h", "cc", "cpp",
+  "cxx", "hpp", "hh", "cs", "java", "go", "rs", "swift", "kt", "kts", "scala",
+  "sc", "dart", "php", "phtml", "css", "scss", "sass", "less", "sql",
+  "jsonc", "json5", "proto", "fbs", "thrift", "groovy", "gradle", "ino",
+  "glsl", "vert", "frag", "comp", "hlsl", "hcl", "tf", "tfvars", "nix",
+]);
+
+/** Which comment markers the file's language actually has. A null path (a
+ * headerless or synthetic chunk) yields none: with no language there is no
+ * basis for treating any marker as a comment, and scanning everything as code
+ * is the conservative direction. */
+function commentMarkersFor(path: string | null): {
+  hash: boolean;
+  slash: boolean;
+  dash: boolean;
+  block: boolean;
+} {
+  if (path === null) {
+    return { hash: false, slash: false, dash: false, block: false };
+  }
+  const kind = fileKindToken(path);
+  return {
+    hash: HASH_LINE_COMMENT_KINDS.has(kind),
+    slash: SLASH_LINE_COMMENT_KINDS.has(kind),
+    dash: DASH_LINE_COMMENT_KINDS.has(kind),
+    block: BLOCK_COMMENT_KINDS.has(kind),
+  };
+}
 /** The closing marker for a block opened at column `startCol` of the stream
  * line at `startK`, or null when none appears within `MAX_BLOCK_CARRY_LINES`
  * lines. The search is quote-agnostic: the first closing marker wins, because
@@ -496,7 +562,11 @@ function findBlockClose(
  * phantom such as a shell glob or a regex literal) is left as code and can
  * never hide the real traversal that follows it. Returns the replacement text
  * for the lines it touched. */
-function blankStream(lines: readonly string[], indices: readonly number[]): Map<number, string> {
+function blankStream(
+  lines: readonly string[],
+  indices: readonly number[],
+  markers: { hash: boolean; slash: boolean; dash: boolean; block: boolean },
+): Map<number, string> {
   const chars = new Map<number, string[]>();
   const charsFor = (index: number): string[] => {
     let arr = chars.get(index);
@@ -533,14 +603,14 @@ function blankStream(lines: readonly string[], indices: readonly number[]): Map<
         i += 1;
         continue;
       }
-      if (ch === "/" && arr[i + 1] === "*") {
+      if (markers.block && ch === "/" && arr[i + 1] === "*") {
         // Quote-agnostic: the first closing marker wins. Quotes have no
         // syntax inside a block comment, so skipping a quoted one to keep
         // scanning would pair quotes across the executable code that follows
         // and blank it — a false negative.
         const close = line.indexOf("*/", i + 2);
         if (close === -1) {
-          if (isBlockOpener(arr, i, prefix)) {
+          if (isBlockOpener(arr, i)) {
             const end = findBlockClose(lines, indices, k, i + 2);
             if (end !== null) {
               for (let c = i; c < n; c++) arr[c] = " ";
@@ -563,15 +633,25 @@ function blankStream(lines: readonly string[], indices: readonly number[]): Map<
         i = close + 2;
         continue;
       }
-      if (ch === "/" && arr[i + 1] === "/" && commentMarkerAt(arr, i, prefix, 2, false)) {
+      if (
+        markers.slash &&
+        ch === "/" &&
+        arr[i + 1] === "/" &&
+        commentMarkerAt(arr, i, prefix, 2, false)
+      ) {
         for (let c = i; c < n; c++) arr[c] = " ";
         break;
       }
-      if (ch === "#" && commentMarkerAt(arr, i, prefix, 1, true)) {
+      if (markers.hash && ch === "#" && commentMarkerAt(arr, i, prefix, 1, true)) {
         for (let c = i; c < n; c++) arr[c] = " ";
         break;
       }
-      if (ch === "-" && arr[i + 1] === "-" && commentMarkerAt(arr, i, prefix, 2, true)) {
+      if (
+        markers.dash &&
+        ch === "-" &&
+        arr[i + 1] === "-" &&
+        commentMarkerAt(arr, i, prefix, 2, true)
+      ) {
         for (let c = i; c < n; c++) arr[c] = " ";
         break;
       }
@@ -586,10 +666,13 @@ function blankStream(lines: readonly string[], indices: readonly number[]): Map<
 }
 
 /** Blank every comment span in a diff chunk's lines, replacing it with spaces
- * so line structure and character offsets are preserved. Quote-aware (a `#`,
- * `//`, or `--` inside a string literal is data, not a marker) and block-aware,
- * so a JSDoc continuation line — which carries no marker of its own — is
- * blanked along with the `/**` that opened it.
+ * so line structure and character offsets are preserved. Language-aware: only
+ * markers that are comments in the chunk file's language are blanked
+ * (`commentMarkersFor`) — a `/*` in a shell file is a glob, not a comment, and
+ * blanking it would hide the real code that follows. Quote-aware (a `#`,
+ * `//`, or `--` inside a string literal is data, not a marker) and
+ * block-aware, so a JSDoc continuation line — which carries no marker of its
+ * own — is blanked along with the `/**` that opened it.
  *
  * Every rule here fails toward detection, because a false negative (a real
  * traversal hidden) is worse than a false positive (a prose mention fired):
@@ -607,9 +690,15 @@ function blankStream(lines: readonly string[], indices: readonly number[]): Map<
  *     `src/*.py`, `rm -rf /*` — see `isBlockOpener`), because with a
  *     quote-agnostic closer a glob could pair with a later closing marker and
  *     blank the code in between;
+ *   - only markers that are comments in the chunk file's language are blanked
+ *     (`commentMarkersFor`); unknown types blank nothing;
+ *   - quote state is per-line, so a marker inside a string that spans lines —
+ *     a heredoc body, a triple-quoted docstring — is still treated as a
+ *     comment and blanks the rest of its line: a known, accepted limitation;
  *   - an unterminated quote is left as-is, so the rest of the line is still
  *     scanned rather than being swallowed as a comment. */
-function blankCommentSpans(lines: string[]): string[] {
+function blankCommentSpans(lines: string[], path: string | null): string[] {
+  const markers = commentMarkersFor(path);
   const out = lines.slice();
   const streams = new Map<string, number[]>();
   lines.forEach((line, index) => {
@@ -620,7 +709,7 @@ function blankCommentSpans(lines: string[]): string[] {
     else bucket.push(index);
   });
   for (const indices of streams.values()) {
-    for (const [index, text] of blankStream(lines, indices)) out[index] = text;
+    for (const [index, text] of blankStream(lines, indices, markers)) out[index] = text;
   }
   return out;
 }
@@ -1088,7 +1177,12 @@ export function evaluatePathHandlingSignals(
     filenames.length > 0 && filenames.every((name) => isTestPath(name));
   for (const [chunkFile, lines] of splitDiffChunks(diffText)) {
     if (lines.length === 0) continue;
-    const commentFree = blankCommentSpans(lines);
+    // A headerless chunk has no language of its own; fall back to the single
+    // changed file when there is exactly one, and blank nothing otherwise.
+    const commentFree = blankCommentSpans(
+      lines,
+      chunkFile ?? (filenames.length === 1 ? filenames[0] ?? null : null),
+    );
     const neutralized = neutralizeChunkLines(commentFree);
     const isTest =
       chunkFile !== null ? isTestPath(chunkFile) : allFilesAreTests;
