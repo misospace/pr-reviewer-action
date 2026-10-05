@@ -1128,15 +1128,9 @@ test("#960: a `../` that appears only in a comment or doc comment is not a trave
     // An unspaced marker right after a statement terminator is still a comment.
     ["+x=1;//see ../events/types.js\n", "src/jobs/types.ts"],
     ["+x=1;#see ../events/types.js\n", "src/jobs/types.py"],
-    // `/*` attached to a variable or a literal still opens a real comment.
-    ["+a/*see ../events/types.js\n+*/\n", "src/jobs/types.ts"],
-    ["+x=1/*see ../events/types.js\n+*/\n", "src/jobs/types.ts"],
     // An unspaced `//` is a comment: its non-comment uses always sit against a
     // non-space character, which the preceding-character rule already refuses.
     ["+//see ../events/types.js\n", "src/jobs/types.ts"],
-    // A block comment that documents the delimiter must not be cut short at the
-    // quoted `*/`, or its tail would be scanned as code.
-    ['+/* The token is "*/" and then\n+ * see ../events/types.js\n+ */\n', "src/jobs/types.ts"],
   ];
   for (const [diff, filename] of negatives) {
     const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
@@ -1181,8 +1175,25 @@ test("#960: a traversal literal in real code still fires, including next to an i
     // A shell glob with no closer is not a block comment: it must not blank the
     // real traversal that follows it.
     ['+rm -rf /*\n+const p = fs.readFileSync("../../etc/passwd");\n', "scripts/build.sh"],
-    // ... and a quoted `*/` cannot close that phantom opener either.
+    // ... and a glob ending a command cannot close over a later closing
+    // marker either: the opener is refused up front (`isBlockOpener`), so no
+    // block can pair the glob's `/*` with the `*/` inside the string and blank
+    // the traversal in between.
     ['+rm -rf /*\n+cp ../../etc/passwd .\n+echo "*/"\n', "scripts/build.sh"],
+    // A real one-line comment whose quoted closing marker is followed by code:
+    // quotes have no syntax inside a comment, so the FIRST closing marker
+    // closes it and the code after it is scanned as code.
+    ['+/* "*/ const p = fs.readFileSync("../../etc/passwd"); /* "*/\n', "src/app.ts"],
+    // A block comment that documents the delimiter is cut short at the quoted
+    // closing marker, exactly as C/JS/CSS lexes it — its tail is code, and the
+    // traversal there must fire.
+    ['+/* The token is "*/" and then\n+ * see ../events/types.js\n+ */\n', "src/jobs/types.ts"],
+    // A multi-line `/*` glued to a preceding token is refused as an opener
+    // (`isBlockOpener` refuses identifier-preceded `/*`, which is what keeps
+    // globs like `src/*.py` from pairing with a later closing marker). It is
+    // scanned as code: a false positive, which fails toward detection.
+    ["+a/*see ../events/types.js\n+*/\n", "src/jobs/types.ts"],
+    ["+x=1/*see ../events/types.js\n+*/\n", "src/jobs/types.ts"],
   ];
   for (const [diff, filename] of positives) {
     const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });

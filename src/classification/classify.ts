@@ -438,54 +438,44 @@ function commentMarkerAt(
   return next === "" || /\s/.test(next);
 }
 
-/** The only `/*` refused outright as a cross-line block opener is one preceded
- * by a backslash — the escaped slash of a regex literal (`/\*foo\//`).
- * Everything else is considered, and whether it really is a comment is decided
- * by `findBlockClose`: a phantom opener with no closer (a shell glob
- * `rm -rf /*`) is left as code rather than blanking what follows. A
- * single-line `/* ... *​/` is blanked inline regardless, since its closer is on
- * the same line and cannot leak. */
-function isBlockOpener(chars: readonly string[], i: number): boolean {
-  return (i > 0 ? chars[i - 1] ?? "" : "") !== "\\";
+/** A `/*` opens a cross-line block comment only when it looks like one rather
+ * than a token that merely contains the characters. Refused:
+ *   - preceded by a backslash — the escaped slash of a regex literal
+ *     (`/\*foo\//`);
+ *   - preceded by an identifier character — a glob glued to a path token
+ *     (`build/*`, `src/*.py`);
+ *   - ending the line with an identifier as the nearest preceding token — a
+ *     glob that terminates a command (`rm -rf /*`, `chmod 755 /*`); a real
+ *     opener there follows a statement terminator or the line start.
+ * Whether a surviving candidate really is a comment is still decided by
+ * `findBlockClose`: an opener with no closer is left as code rather than
+ * blanking what follows. Because the closing-marker search is quote-agnostic
+ * (quotes have no syntax inside a block comment, so the first closing marker
+ * always closes it, as in C/JS/CSS), these refusals are what keep a glob from
+ * pairing its `/*` with a later closing marker — even one inside a string —
+ * and blanking the real code in between. The cost is a multi-line `/*` glued
+ * to a preceding token (`a/*note`), which is scanned as code: that fails
+ * toward detection, the safe direction. */
+function isBlockOpener(chars: readonly string[], i: number, prefix: number): boolean {
+  const prev = i > 0 ? chars[i - 1] ?? "" : "";
+  if (prev === "\\") return false;
+  if (/[A-Za-z0-9_$]/.test(prev)) return false;
+  if ((chars[i + 2] ?? "") !== "") return true;
+  let j = i - 1;
+  while (j >= prefix && /\s/.test(chars[j] ?? "")) j--;
+  if (j < prefix) return true; // code start
+  return STATEMENT_TERMINATORS.has(chars[j] ?? "");
 }
 
 /** Search bound for a block comment's closer. A real comment is far shorter; a
  * phantom opener simply fails to find one and is discarded. */
 const MAX_BLOCK_CARRY_LINES = 200;
 
-/** Index of the first closing marker (`*` then `/`) at or after `from` that is
- * not inside a string literal, or -1. Inside a block comment a quoted closing
- * marker is still text, so the scan skips quoted spans: otherwise a comment
- * that documents the delimiter would be cut short and its tail scanned as
- * code, re-introducing the false positive this change removes. */
-function indexOfCloser(text: string, from: number): number {
-  let i = from;
-  let quote: string | null = null;
-  while (i < text.length) {
-    const ch = text[i] ?? "";
-    if (quote !== null) {
-      if (ch === "\\" && i + 1 < text.length) {
-        i += 2;
-        continue;
-      }
-      if (ch === quote) quote = null;
-      i += 1;
-      continue;
-    }
-    if (ch === "'" || ch === '"' || ch === "`") {
-      quote = ch;
-      i += 1;
-      continue;
-    }
-    if (ch === "*" && text[i + 1] === "/") return i;
-    i += 1;
-  }
-  return -1;
-}
-
 /** The closing marker for a block opened at column `startCol` of the stream
  * line at `startK`, or null when none appears within `MAX_BLOCK_CARRY_LINES`
- * lines. */
+ * lines. The search is quote-agnostic: the first closing marker wins, because
+ * quotes have no syntax inside a block comment — a quoted one is still text
+ * that closes it (the C/JS/CSS rule). */
 function findBlockClose(
   lines: readonly string[],
   indices: readonly number[],
@@ -494,7 +484,7 @@ function findBlockClose(
 ): { k: number; col: number } | null {
   for (let k = startK; k < indices.length && k <= startK + MAX_BLOCK_CARRY_LINES; k++) {
     const text = lines[indices[k] ?? 0] ?? "";
-    const col = indexOfCloser(text, k === startK ? startCol : 0);
+    const col = text.indexOf("*/", k === startK ? startCol : 0);
     if (col !== -1) return { k, col };
   }
   return null;
@@ -544,9 +534,13 @@ function blankStream(lines: readonly string[], indices: readonly number[]): Map<
         continue;
       }
       if (ch === "/" && arr[i + 1] === "*") {
-        const close = indexOfCloser(line, i + 2);
+        // Quote-agnostic: the first closing marker wins. Quotes have no
+        // syntax inside a block comment, so skipping a quoted one to keep
+        // scanning would pair quotes across the executable code that follows
+        // and blank it — a false negative.
+        const close = line.indexOf("*/", i + 2);
         if (close === -1) {
-          if (isBlockOpener(arr, i)) {
+          if (isBlockOpener(arr, i, prefix)) {
             const end = findBlockClose(lines, indices, k, i + 2);
             if (end !== null) {
               for (let c = i; c < n; c++) arr[c] = " ";
@@ -606,7 +600,13 @@ function blankStream(lines: readonly string[], indices: readonly number[]): Map<
  *     terminator (`commentMarkerAt`), so a CSS hex colour, a URL scheme, an
  *     escaped regex slash, and an unspaced floor division stay code;
  *   - a cross-line block is blanked only when its closer is found
- *     (`findBlockClose`), so a phantom opener cannot blank what follows;
+ *     (`findBlockClose`), so a phantom opener cannot blank what follows, and
+ *     the closer search takes the FIRST closing marker — quotes have no
+ *     syntax inside a comment, so a quoted one still closes it;
+ *   - a cross-line opener must look like a comment, not a glob (`build/*`,
+ *     `src/*.py`, `rm -rf /*` — see `isBlockOpener`), because with a
+ *     quote-agnostic closer a glob could pair with a later closing marker and
+ *     blank the code in between;
  *   - an unterminated quote is left as-is, so the rest of the line is still
  *     scanned rather than being swallowed as a comment. */
 function blankCommentSpans(lines: string[]): string[] {
