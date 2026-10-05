@@ -640,3 +640,92 @@ test("readEvent never sets event.label for a non-labeled event (no stray empty l
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── #914: readEvent's issue_comment payload (the /ai-review re-review) ─────
+//
+// A real GitHub `issue_comment` payload has NO top-level `name` and NO
+// top-level `pull_request`. The PR number, when the comment is on a PR,
+// lives on `issue.number` — and `issue.pull_request` is present ONLY for
+// comments on a PR (absent for comments on a plain issue). That presence is
+// the honest signal the action's workflow/PR check uses to tell a real PR
+// re-review from a no-op: a plain-issue comment must yield NO prNumber.
+// The payload also carries a top-level `comment` (`{ id, body, user: {
+// login } }`) which we parse defensively into `event.comment`.
+
+test("readEvent parses an issue_comment ON A PR: prNumber from issue.number, comment populated, NO headSha", () => {
+  const dir = mkdtempSync(join(tmpdir(), "v3-readevent-issue-comment-pr-"));
+  try {
+    const eventPath = join(dir, "event.json");
+    writeFileSync(eventPath, JSON.stringify({
+      action: "created",
+      // `issue.pull_request` present → this comment is on a PR.
+      issue: { number: 42, pull_request: { url: "https://api.github.com/repos/o/r/pulls/42" } },
+      comment: { id: 123, body: "please re-review", user: { login: "alice" } },
+    }));
+    const { event, prNumber, headSha } = readEvent({
+      GITHUB_EVENT_PATH: eventPath,
+      GITHUB_EVENT_NAME: "issue_comment",
+    } as unknown as NodeJS.ProcessEnv);
+    assert.equal(event?.name, "issue_comment");
+    assert.equal(event?.action, "created");
+    assert.deepEqual(event?.comment, { id: 123, body: "please re-review", user: "alice" });
+    assert.equal(prNumber, "42");
+    // issue_comment payloads genuinely have no head SHA — never fabricated.
+    assert.equal(headSha, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readEvent parses an issue_comment ON A PLAIN ISSUE: comment present, prNumber stays undefined", () => {
+  const dir = mkdtempSync(join(tmpdir(), "v3-readevent-issue-comment-issue-"));
+  try {
+    const eventPath = join(dir, "event.json");
+    // No `issue.pull_request` → this is a comment on a plain issue, not a PR.
+    writeFileSync(eventPath, JSON.stringify({
+      action: "created",
+      issue: { number: 99 },
+      comment: { id: 555, body: "a question", user: { login: "bob" } },
+    }));
+    const { event, prNumber } = readEvent({
+      GITHUB_EVENT_PATH: eventPath,
+      GITHUB_EVENT_NAME: "issue_comment",
+    } as unknown as NodeJS.ProcessEnv);
+    assert.equal(event?.name, "issue_comment");
+    assert.equal(event?.action, "created");
+    assert.deepEqual(event?.comment, { id: 555, body: "a question", user: "bob" });
+    // The honest no-op signal: NO prNumber for a plain-issue comment.
+    assert.equal(prNumber, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readEvent degrades a junky issue_comment payload gracefully (never throws)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "v3-readevent-issue-comment-junk-"));
+  try {
+    const eventPath = join(dir, "event.json");
+    writeFileSync(eventPath, JSON.stringify({
+      action: "created",
+      issue: { number: 42, pull_request: { url: "https://api.github.com/repos/o/r/pulls/42" } },
+      // id is a valid number (kept); body is a non-string (dropped); user
+      // has no login (dropped). A malformed / hostile comment degrades —
+      // it never throws.
+      comment: { id: 123, body: 456, user: {} },
+    }));
+    const { event, prNumber } = readEvent({
+      GITHUB_EVENT_PATH: eventPath,
+      GITHUB_EVENT_NAME: "issue_comment",
+    } as unknown as NodeJS.ProcessEnv);
+    assert.equal(event?.name, "issue_comment");
+    assert.equal(event?.action, "created");
+    assert.ok(event?.comment);
+    assert.equal(event?.comment?.id, 123);
+    assert.equal(event?.comment?.body, undefined);
+    assert.equal(event?.comment?.user, undefined);
+    // prNumber still resolved from the PR-shaped issue.
+    assert.equal(prNumber, "42");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

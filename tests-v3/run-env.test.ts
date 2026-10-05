@@ -192,3 +192,16 @@ test("#928: env-only stage knobs survive buildStageEnv, so blind replays really 
   await buildHumanReviewsSection(seeing, adapter, "a".repeat(40), buildStageEnv(config, base, {}) as never);
   assert.match(seeing.readText("human-reviews.md") ?? "", /ctx\.sourceSha/);
 });
+
+test("#914: the pr-gate's pinned head sha is projected from the ambient env into the stage env", () => {
+  const base: RunContext = {
+    workspace: "/ws", runDir: "/run", repo: "o/r", prNumber: "7", headSha: "",
+    isForkPr: "false", platform: "github", forgejoApiUrl: "", ciChecksFile: "",
+    outputFilePath: "/dev/null", stepSummaryPath: "", baseRef: "",
+  };
+  const config = loadConfig(contract, { "repo": "o/r", "pr-number": "7", "ai-base-url": "http://m/v1", "ai-model": "m" });
+  const pinned = buildStageEnv(config, base, { PR_REVIEWER_GATE_HEAD_SHA: "a".repeat(40) });
+  assert.equal(pinned.PR_REVIEWER_GATE_HEAD_SHA, "a".repeat(40));
+  const unpinned = buildStageEnv(config, base, {});
+  assert.equal(unpinned.PR_REVIEWER_GATE_HEAD_SHA, undefined);
+});

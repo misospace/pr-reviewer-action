@@ -574,6 +574,10 @@ export class ForgejoAdapter implements PlatformReadAdapter {
       return `/api/v1/repos/${repoKey}${rest}`;
     }
     if (rest === "/issues" || rest.startsWith("/issues/")) return `/api/v1/repos/${repoKey}${rest}`;
+    // #914: the commenter-permission lookup for the comment re-review
+    // command. The GitHub-shaped path is byte-identical on Forgejo's API v1
+    // (and its response carries the same `permission` field).
+    if (rest.startsWith("/collaborators/")) return `/api/v1/repos/${repoKey}${rest}`;
     if (rest === "/compare" || rest.startsWith("/compare/")) {
       return `/api/v1/repos/${repoKey}/compare/${rest.slice("/compare/".length)}`;
     }

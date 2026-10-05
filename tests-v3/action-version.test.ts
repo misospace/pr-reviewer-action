@@ -192,5 +192,11 @@ test("#941 review: dogfood workflows stamp the sha they actually checked out", (
   // is not the source the checkout builds (#941 review caught exactly this).
   const sameRepo = loadJob("ai-pr-review.yaml");
   const stampedSha = sameRepo.steps?.find((step) => step.name === stepName)?.env?.PR_REVIEWER_BUILD_SHA;
-  assert.equal(stampedSha, "${{ github.event.pull_request.head.sha || github.sha }}");
+  // The pull_request branch still stamps the PR head; the #914 comment
+  // branch adds the pr-gate-resolved head sha (never the synthetic merge
+  // ref or the default-branch sha on a comment run).
+  assert.equal(
+    stampedSha,
+    "${{ github.event_name == 'issue_comment' && (steps.pr-gate.outputs.is_fork == 'true' && github.sha || steps.pr-gate.outputs.head_sha) || github.event.pull_request.head.sha || github.sha }}",
+  );
 });

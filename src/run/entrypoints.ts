@@ -63,10 +63,21 @@ export function buildAdapter(env: NodeJS.ProcessEnv): PlatformAdapter {
   });
 }
 
+// #914: the `issue_comment` payload's top-level `comment` object, parsed
+// defensively into a flat shape the /ai-review re-review command consumes.
+// Each sub-field is optional because a malformed / hostile comment must
+// degrade to fewer fields, never a throw.
+export interface StepEventComment {
+  id?: number | string;
+  body?: string;
+  user?: string;
+}
+
 export interface StepEvent {
   name?: string;
   action?: string;
   label?: string;
+  comment?: StepEventComment;
 }
 
 export function readEvent(env: NodeJS.ProcessEnv): { event?: StepEvent; headSha?: string; prNumber?: string } {
@@ -78,6 +89,13 @@ export function readEvent(env: NodeJS.ProcessEnv): { event?: StepEvent; headSha?
       action?: string;
       label?: unknown;
       pull_request?: { number?: number; head?: { sha?: string } };
+      // #914: the `issue_comment` payload shape. The comment's `issue`
+      // carries the PR number on `issue.number`, and `issue.pull_request` is
+      // present ONLY for comments on a PR (GitHub includes that key only
+      // then). A top-level `comment` (`{ id, body, user: { login } }`)
+      // carries the comment the re-review command acts on.
+      issue?: { number?: number; pull_request?: unknown };
+      comment?: { id?: unknown; body?: unknown; user?: { login?: unknown } };
     };
     const event: StepEvent = {};
     // #892: the GitHub (and Forgejo act_runner) event payload has no
@@ -92,10 +110,43 @@ export function readEvent(env: NodeJS.ProcessEnv): { event?: StepEvent; headSha?
     // path in action.ts already does, so the precheck gate sees a string.
     const labelName = eventLabelName(parsed.label);
     if (labelName !== "") event.label = labelName;
+    // #914: a real `issue_comment` payload has a top-level `comment`
+    // (`{ id, body, user: { login } }`). Parse it defensively: each
+    // sub-field is kept only when present AND the right type, so a
+    // malformed / hostile comment degrades to fewer fields, never a throw.
+    // `comment` is omitted entirely when the payload has no comment object.
+    const rawComment = parsed.comment;
+    if (rawComment !== null && typeof rawComment === "object" && !Array.isArray(rawComment)) {
+      const comment: StepEventComment = {};
+      const commentId = rawComment.id;
+      if (typeof commentId === "number" || typeof commentId === "string") comment.id = commentId;
+      if (typeof rawComment.body === "string") comment.body = rawComment.body;
+      const commentUser = rawComment.user;
+      if (commentUser !== null && typeof commentUser === "object" && !Array.isArray(commentUser)) {
+        const commentLogin = commentUser.login;
+        if (typeof commentLogin === "string") comment.user = commentLogin;
+      }
+      event.comment = comment;
+    }
+    // #914: an `issue_comment` payload has NO top-level `pull_request`, so
+    // the PR number lives on `issue.number` — but ONLY when the comment is
+    // on a PR, i.e. ONLY when `issue.pull_request` is present. A comment on
+    // a plain issue (no `issue.pull_request`) must yield NO prNumber: that
+    // absence is the honest signal the workflow/PR check uses to no-op.
+    // (headSha is unchanged: issue_comment payloads genuinely have no head
+    // SHA and we never fabricate one — the action fetches the PR later.)
+    const prNumber =
+      typeof parsed.pull_request?.number === "number"
+        ? String(parsed.pull_request.number)
+        : parsed.pull_request === undefined
+          && parsed.issue?.pull_request !== undefined
+          && typeof parsed.issue?.number === "number"
+          ? String(parsed.issue.number)
+          : undefined;
     return {
       ...(Object.keys(event).length > 0 ? { event } : {}),
       ...(parsed.pull_request?.head?.sha !== undefined ? { headSha: parsed.pull_request.head.sha } : {}),
-      ...(typeof parsed.pull_request?.number === "number" ? { prNumber: String(parsed.pull_request.number) } : {}),
+      ...(prNumber !== undefined ? { prNumber } : {}),
     };
   } catch {
     return {};
@@ -115,10 +166,17 @@ function persistOutputs(filePath: string, assignments: ReadonlyArray<[string, st
 /** `node dist/index.js precheck` — the typed successor of
  * `scripts/check_review_needed.sh` in the composite. */
 export async function precheckMain(env: NodeJS.ProcessEnv): Promise<number> {
-  const { event, headSha: eventHeadSha } = readEvent(env);
+  const { event, headSha: eventHeadSha, prNumber } = readEvent(env);
+  // #914: an `issue_comment` payload's only PR-number source is
+  // `issue.number` — the action entry merges it via actionStageEnv; this
+  // CLI subcommand must apply the same fallback or a comment-triggered
+  // precheck would fail on a missing PR_NUMBER.
+  const stage = prNumber !== undefined && (env.PR_NUMBER ?? "") === ""
+    ? { ...env, PR_NUMBER: prNumber }
+    : env;
   const output = await runPrecheck({
-    env: env as Record<string, string>,
-    adapter: buildAdapter(env),
+    env: stage as Record<string, string>,
+    adapter: buildAdapter(stage),
     ...(event !== undefined ? { event: event as never } : {}),
     ...(eventHeadSha !== undefined ? { eventHeadSha } : {}),
   });

@@ -141,6 +141,12 @@ test("forgejo path translation fails closed outside the table", () => {
   assert.equal(ForgejoAdapter.translate("/repos/o/r/pulls/12", "o/r"), "/api/v1/repos/o/r/pulls/12");
   assert.equal(ForgejoAdapter.translate("/repos/o/r/pulls/12.diff", "o/r"), "/api/v1/repos/o/r/pulls/12.diff");
   assert.equal(ForgejoAdapter.translate("/repos/o/r/issues/12/comments", "o/r"), "/api/v1/repos/o/r/issues/12/comments");
+  // #914: the commenter-permission lookup maps through unchanged (the
+  // GitHub-shaped path is identical on Forgejo's API v1).
+  assert.equal(
+    ForgejoAdapter.translate("/repos/o/r/collaborators/alice/permission", "o/r"),
+    "/api/v1/repos/o/r/collaborators/alice/permission",
+  );
   assert.equal(ForgejoAdapter.translate("/repos/o/r/compare/main...head", "o/r"), "/api/v1/repos/o/r/compare/main...head");
   assert.equal(ForgejoAdapter.translate("/search/code?q=foo", ""), "/api/v1/search/code?q=foo");
   assert.equal(ForgejoAdapter.translate("/repos/o/r/actions/secrets", "o/r"), null);

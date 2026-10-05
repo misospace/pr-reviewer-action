@@ -201,6 +201,7 @@
       "skip-if-diff-unchanged",
       "force-review",
       "rereview-label",
+      "rereview-command",
       "ci-status-check",
       "ci-timeout-sec",
       "ci-interval-sec",
