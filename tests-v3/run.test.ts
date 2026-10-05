@@ -3171,6 +3171,147 @@ test("#874: verdict-policy=findings_severity_gated — an unmet trace stops cove
   }
 });
 
+test("#959: a verdict with no trace claim at all gets one bounded repair pass and the trace goes met", async () => {
+  const repairRequests: string[] = [];
+  const server = await startMockServer((_req, body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    const text = String(body);
+    if (text.includes("Requirements to trace:")) {
+      repairRequests.push(text);
+      const reqId = /req-[0-9a-f]{12}/.exec(text)?.[0] ?? "";
+      res.end(verdictBody({
+        requirement_coverage: [{
+          requirement_id: reqId,
+          disposition: "met",
+          enforcement: [{ file: "src/context-resolution.ts", line: 2 }],
+          test: [{ file: "tests/context-resolution.test.ts", line: 1 }],
+          reason: "compares record.sourceSha against ctx.sourceSha and throws on mismatch",
+        }],
+      }));
+      return;
+    }
+    // The primary review verdict: the #947 shape, zero trace claims.
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    mkdirSync(join(runDir, "src"), { recursive: true });
+    mkdirSync(join(runDir, "tests"), { recursive: true });
+    writeFileSync(
+      join(runDir, "src", "context-resolution.ts"),
+      [
+        "export function resolveContext(ctx, record) {",
+        "  if (record.sourceSha !== ctx.sourceSha) {",
+        "    throw new Error('source sha mismatch');",
+        "  }",
+        "  return record;",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
+
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+        "requirement-trace": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+
+    assert.equal(repairRequests.length, 1, "exactly one bounded repair pass");
+    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
+      rows: Array<{ disposition: string; notes: string[] }>;
+      incomplete: boolean;
+    };
+    assert.equal(trace.rows.length, 1);
+    assert.equal(trace.rows[0]!.disposition, "met");
+    assert.deepEqual(trace.rows[0]!.notes, []);
+    assert.equal(trace.incomplete, false);
+    assert.notEqual(result.outputs.requiredChecks, "incomplete");
+    assert.doesNotMatch(result.outputs.reviewMarkdown, /reported no trace/);
+
+    const repairRecord = JSON.parse(readFileSync(join(runDir, "requirement-trace-repair.json"), "utf8")) as {
+      status: string; claims: number; missing_ids: string[];
+    };
+    assert.equal(repairRecord.status, "ok");
+    assert.equal(repairRecord.claims, 1);
+    assert.equal(repairRecord.missing_ids.length, 1);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#959: when the repair pass also yields nothing, the section says so instead of implying no enforcement exists", async () => {
+  let repairAttempts = 0;
+  const server = await startMockServer((_req, body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    if (String(body).includes("Requirements to trace:")) {
+      repairAttempts += 1;
+      // A well-formed repair response that still omits the requirement.
+      res.end(verdictBody({ requirement_coverage: [] }));
+      return;
+    }
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+        "requirement-trace": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+
+    assert.equal(repairAttempts, 1, "still only one bounded repair pass");
+    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
+      rows: Array<{ disposition: string; notes: string[] }>;
+      incomplete: boolean;
+    };
+    assert.equal(trace.rows[0]!.disposition, "unverifiable");
+    assert.ok(trace.rows[0]!.notes.includes("not-traced-by-reviewer"));
+    assert.equal(trace.incomplete, true);
+    assert.match(result.outputs.reviewMarkdown, /the reviewer reported no trace for this requirement/);
+    assert.doesNotMatch(result.outputs.reviewMarkdown, /no valid enforcement location/);
+    assert.equal(result.outputs.requiredChecks, "incomplete");
+
+    const repairRecord = JSON.parse(readFileSync(join(runDir, "requirement-trace-repair.json"), "utf8")) as {
+      status: string; claims: number;
+    };
+    assert.equal(repairRecord.status, "empty");
+    assert.equal(repairRecord.claims, 0);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
 test("#899: a native loop whose harness artifact is unreadable records partial coverage, never complete", () => {
   assert.equal(resolvePartialCoverage(null, true, true)?.stop_reason, "harness-unreadable");
   assert.equal(resolvePartialCoverage(null, false, true), undefined);
@@ -3210,7 +3351,10 @@ for (const direction of ["added", "removed"] as const) {
         persistArtifacts: true, quiet: true,
       });
       const ledger = JSON.parse(readFileSync(join(runDir, "requirement-ledger.json"), "utf8")) as { requirements: { id: string; text: string }[] };
-      const reviewRequest = requests.at(-1) ?? "";
+      // #959: the review prompt is identified by its user-message preamble,
+      // not by position — a missing-trace repair pass (also a model request)
+      // can follow it when the verdict carries no trace claim.
+      const reviewRequest = requests.find((r) => r.includes("Analyze this pull request corpus")) ?? "";
       if (direction === "added") {
         const req = ledger.requirements.find((r) => /source SHA/.test(r.text));
         assert.ok(req, "the refreshed ledger carries the linked-issue requirement");

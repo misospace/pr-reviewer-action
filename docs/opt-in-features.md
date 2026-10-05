@@ -30,6 +30,16 @@ Boundary ownership (#958) is explicit architectural metadata, not inferred from 
 
 Note: this depends on a bundled prompt fragment that asks the model to emit the trace fields (`enforcement`/`test`/`disposition`). A `replace`-mode `system-prompt` that doesn't emit them fails closed — every in-scope requirement becomes `unverifiable` and coverage `incomplete`, which is safe but easy to be surprised by.
 
+**Missing claims (#959):** a verdict that carries no trace claim at all for an in-scope requirement is not the same failure as a claim whose cited location is unusable, and the two no longer render alike. Before publishing, one bounded repair pass (`src/requirements/trace-repair.ts`) re-asks the primary route for exactly the missing ids and merges any claims it returns — never touching an id that already has a claim, so a claim with bad locations still fails closed. If the repair yields nothing, the row renders "the reviewer reported no trace for this requirement" instead of borrowing "no valid enforcement location". The pass is gated on the default prompt (an operator `replace`-mode prompt has no fragment to retry, so it stays fail-closed) and is fail-soft: a transport error, timeout, or malformed reply leaves the artifact unchanged.
+
+**Knobs:**
+
+| Name | Default | Notes |
+| --- | --- | --- |
+| `REQUIREMENT_TRACE_REPAIR_MAX_TOKENS` (env) | `4096` | Repair-pass completion budget |
+| `REQUIREMENT_TRACE_REPAIR_TIMEOUT_SEC` (env) | `180` | Capped by `ai-request-timeout-sec` |
+| `REQUIREMENT_TRACE_REPAIR_INPUT_MAX_BYTES` (env) | `48000` | Repair-pass input cap |
+
 **Status:** default off, experimental. Measured only as part of the three-feature bundle described under `claim-falsification`, which showed no net gain; not yet measured on its own.
 
 ## `equivalent-paths`

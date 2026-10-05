@@ -357,6 +357,14 @@ function ledgerEntriesInScope(ledger: unknown): TracedLedgerEntry[] {
   return ledgerTraceCandidates(ledger).map((candidate) => candidate.entry);
 }
 
+/** #959: the ledger texts for a set of ids (acceptance/normative only, the
+ * same set `requirementTraceScope` scopes), so the repair pass can ask the
+ * model for exactly the missing entries. */
+export function ledgerRequirementsById(ledger: unknown, ids: readonly string[]): TracedLedgerEntry[] {
+  const wanted = new Set(ids);
+  return ledgerEntriesInScope(ledger).filter((entry) => wanted.has(entry.id));
+}
+
 /** #935: the text a change touches: changed file paths plus the added and
  * removed diff lines, lowercased, for the subject test below. */
 export function changedSubjectText(diff: string, files: readonly string[]): string {
@@ -700,6 +708,46 @@ export function validateRequirementTrace(
   return { version: ARTIFACT_VERSION, rows, incomplete, errors };
 }
 
+/** #959: the in-scope ids the coverage payload carried NO claim for — the
+ * `claim === undefined` path in `validateRequirementTrace`, distinct from a
+ * claim whose locations are unusable. Mirrors the validator's own id
+ * extraction (first claim per id wins; malformed entries are skipped) so the
+ * two never disagree about what counts as "present". */
+export function missingTraceRequirementIds(coveragePayload: unknown, inScopeIds: readonly string[]): string[] {
+  const present = new Set<string>();
+  if (Array.isArray(coveragePayload)) {
+    for (const claim of coveragePayload) {
+      if (!claim || typeof claim !== "object" || Array.isArray(claim)) continue;
+      const rid = (claim as { requirement_id?: unknown }).requirement_id;
+      if (typeof rid === "string") present.add(rid);
+    }
+  }
+  return inScopeIds.filter((id) => !present.has(id));
+}
+
+/** #959: append repaired claims after the verdict's own coverage payload,
+ * keeping only ids that had NO claim (never overwriting an existing claim, so
+ * a claim with bad locations stays fail-closed). Returns the merged array.
+ * Defensive on a non-array `repaired` (the "never throws" contract holds even
+ * if a future caller bypasses the types). */
+export function mergeTraceClaims(coveragePayload: unknown, repaired: readonly unknown[] | undefined): unknown[] {
+  const merged: unknown[] = Array.isArray(coveragePayload) ? [...coveragePayload] : [];
+  const present = new Set<string>();
+  for (const claim of merged) {
+    if (!claim || typeof claim !== "object" || Array.isArray(claim)) continue;
+    const rid = (claim as { requirement_id?: unknown }).requirement_id;
+    if (typeof rid === "string") present.add(rid);
+  }
+  for (const claim of Array.isArray(repaired) ? repaired : []) {
+    if (!claim || typeof claim !== "object" || Array.isArray(claim)) continue;
+    const rid = (claim as { requirement_id?: unknown }).requirement_id;
+    if (typeof rid !== "string" || present.has(rid)) continue;
+    present.add(rid);
+    merged.push(claim);
+  }
+  return merged;
+}
+
 /**
  * Deterministic finding text for an unmet (violated) requirement with no
  * finding already covering it — mirrors the violated-obligation and
@@ -762,12 +810,22 @@ const COLLAPSE_THRESHOLD = 5;
  * `not_applicable` ledger has nothing to add to the review the coverage
  * fold and the verdict itself don't already say. Returns `""` when there is
  * nothing to render (the common case), so callers can append unconditionally.
+ *
+ * #959: a row whose claim was missing entirely (the `not-traced-by-reviewer`
+ * note) says so, rather than borrowing the "no valid enforcement location"
+ * wording that belongs to a claim whose cited location is genuinely unusable —
+ * the two are different failures and an author must be able to tell them
+ * apart.
  */
 export function renderRequirementTraceMarkdown(trace: RequirementTraceArtifact): string {
   const notable = trace.rows.filter((row) => row.disposition === "unmet" || row.disposition === "unverifiable");
   if (notable.length === 0) return "";
   const lines = notable.slice(0, MAX_RENDERED_ROWS).map((row) => {
-    const loc = row.enforcement[0] ? `\`${row.enforcement[0].file}:${row.enforcement[0].line}\`` : "no valid enforcement location";
+    const loc = row.enforcement[0]
+      ? `\`${row.enforcement[0].file}:${row.enforcement[0].line}\``
+      : row.notes.includes("not-traced-by-reviewer")
+        ? "the reviewer reported no trace for this requirement"
+        : "no valid enforcement location";
     const reason = row.reason !== "" ? `: ${row.reason}` : "";
     return `- \`${row.requirement_id}\` — **${row.disposition}** (${loc})${reason}`;
   });
