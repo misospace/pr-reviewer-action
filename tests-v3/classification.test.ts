@@ -1324,17 +1324,39 @@ test("#960: commentFree is the sole comment authority — no downstream path re-
   });
   assert.equal(dockerfileComment.prKind, "path_handling_changes");
 
-  // Known accepted residual: jsx/tsx keep `//` blanking (script semantics
-  // dominate those files, and JSX's own comment convention `{/* */}` blanks
-  // correctly), so a `//` that is JSX TEXT can still blank what follows on
-  // its line. Deliberate trade, revisited if it ever shows up in practice.
+  // jsx/tsx get no comment blanking at all: their grammar is mixed, so a
+  // `//` (or a block comment) in JSX text can be literal markup hiding real
+  // code that follows on the line. If the lightweight lexer cannot prove
+  // something is a comment, it is scanned as code — the cost is that genuine
+  // TS comments in .tsx fire, the direction the invariant prefers.
   const jsxText = classifyPr({
     prFiles: files("src/ui/view.tsx"),
     diffText: '+const view = <div> // note {fs.readFileSync("../../etc/passwd")}</div>;\n',
     linkedIssues: [],
   });
-  assert.equal(jsxText.prKind, "app_code");
-  assert.equal(jsxText.pathHandlingProvenance.fired, false);
+  assert.equal(jsxText.prKind, "path_handling_changes");
+  assert.ok(jsxText.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"));
+  const jsxBlock = classifyPr({
+    prFiles: files("src/ui/view.tsx"),
+    diffText: '+const v = <div> /* note */ {fs.readFileSync("../../etc/passwd")}</div>;\n',
+    linkedIssues: [],
+  });
+  assert.equal(jsxBlock.prKind, "path_handling_changes");
+  const tsxComment = classifyPr({
+    prFiles: files("src/ui/view.tsx"),
+    diffText: "+// see ../events/types.js for the shape\n",
+    linkedIssues: [],
+  });
+  assert.equal(tsxComment.prKind, "path_handling_changes");
+
+  // PHP is the same mixed-grammar class: HTML text between `?>` and `<?php`
+  // can carry a literal `//` ahead of a real PHP island on the same line.
+  const phpIsland = classifyPr({
+    prFiles: files("src/page.php"),
+    diffText: '+<div> // note <?php fopen("../etc/passwd", "r"); ?></div>\n',
+    linkedIssues: [],
+  });
+  assert.equal(phpIsland.prKind, "path_handling_changes");
 });
 
 test("#871: a bare `pathname` is a WHATWG URL component, not a path variable, unless the file also touches a filesystem/path-construction API", () => {

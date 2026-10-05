@@ -495,13 +495,16 @@ const HASH_LINE_COMMENT_KINDS = new Set([
 ]);
 
 /** `//` line comments: the C family and languages that borrowed it. Markup
- * formats (HTML, component templates) are deliberately absent: their comment
- * syntax is `<!-- -->`, so a `//` there is text, and blanking it would hide
- * real code — embedded script comments simply fire instead. */
+ * formats (HTML, component templates) and mixed-grammar files (jsx/tsx —
+ * JSX text between elements — and PHP, which interleaves HTML text between
+ * `?>` and `<?php`) are deliberately absent: a `//` there can be literal
+ * text, and blanking it would hide real code that follows on the line. If
+ * the lightweight lexer cannot prove something is a comment, it is scanned
+ * as code; embedded script comments simply fire instead. */
 const SLASH_LINE_COMMENT_KINDS = new Set([
-  "js", "jsx", "mjs", "cjs", "ts", "tsx", "cts", "mts", "c", "h", "cc", "cpp",
+  "js", "mjs", "cjs", "ts", "cts", "mts", "c", "h", "cc", "cpp",
   "cxx", "hpp", "hh", "cs", "java", "go", "rs", "swift", "kt", "kts", "scala",
-  "sc", "dart", "php", "phtml", "zig", "jsonc", "json5", "sass", "scss",
+  "sc", "dart", "zig", "jsonc", "json5", "sass", "scss",
   "less", "proto", "fbs", "thrift", "groovy", "gradle", "ino", "glsl", "vert",
   "frag", "comp", "hlsl", "hcl", "tf", "tfvars",
 ]);
@@ -512,11 +515,12 @@ const DASH_LINE_COMMENT_KINDS = new Set([
 ]);
 
 /** `/* ... *​/` block comments: the C family, CSS, SQL, and schema/HCL
- * languages. Markup formats are absent for the same reason as above. */
+ * languages. Markup and mixed-grammar formats are absent for the same
+ * reason as above. */
 const BLOCK_COMMENT_KINDS = new Set([
-  "js", "jsx", "mjs", "cjs", "ts", "tsx", "cts", "mts", "c", "h", "cc", "cpp",
+  "js", "mjs", "cjs", "ts", "cts", "mts", "c", "h", "cc", "cpp",
   "cxx", "hpp", "hh", "cs", "java", "go", "rs", "swift", "kt", "kts", "scala",
-  "sc", "dart", "php", "phtml", "css", "scss", "sass", "less", "sql",
+  "sc", "dart", "css", "scss", "sass", "less", "sql",
   "jsonc", "json5", "proto", "fbs", "thrift", "groovy", "gradle", "ino",
   "glsl", "vert", "frag", "comp", "hlsl", "hcl", "tf", "tfvars", "nix",
 ]);
