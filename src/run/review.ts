@@ -2,6 +2,7 @@ import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { validateContract } from "../config/contract.js";
 import { loadConfig, type RawInputs } from "../config/load-config.js";
 import { resolveRepositoryConfig } from "../config/repository-config.js";
+import { resolveRequirementOwners } from "../config/requirement-owners.js";
 import { assertSupportedNode } from "../runtime/node-version.js";
 import { createCancellationScope } from "../runtime/signals.js";
 import { resolveTierBudgets } from "../corpus/budgets.js";
@@ -55,7 +56,8 @@ import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "../enforcement/enforce.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
-import { applyRequirementTraceEnforcement, changedSubjectText, requirementTraceScope } from "../enforcement/requirement-trace.js";
+import { applyRequirementTraceEnforcement, changedSubjectText, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope } from "../enforcement/requirement-trace.js";
+import { runRequirementTraceRepairPass } from "../requirements/trace-repair.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
 import { ACTION_VERSION } from "../version.js";
@@ -817,10 +819,18 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // above can rebuild it), so the tool loop, the verdict turn and the
   // validator below all see the same in-scope requirement ids.
   const traceChanged = traceChangedText(ws);
-  promptState = applyRequirementTraceFragment(
-    promptState, ws, (env.REQUIREMENT_TRACE ?? "false").toLowerCase() === "true", undefined,
-    requirementTraceScope(safeJson(ws.read("requirement-ledger.json")), traceChanged).inScope.map((entry) => entry.id),
-  );
+  const requirementTraceEnabled = (env.REQUIREMENT_TRACE ?? "false").toLowerCase() === "true";
+  const traceOwnership = !requirementTraceEnabled || baseRef === "" ? { rules: [], warnings: [] } : resolveRequirementOwners({ baseRef, workspace });
+  for (const warning of traceOwnership.warnings) errorLog(`requirement owners: ${warning}`);
+  const tracePaths = requirementTraceEnabled ? traceChangedFilePaths(ws) : undefined;
+  const ledgerValue = safeJson(ws.read("requirement-ledger.json"));
+  // #959: the in-scope ids are computed once here and reused by the repair
+  // pass below, so the prompt, the repair and the validator all see the same
+  // scope.
+  const traceScopeIds = requirementTraceEnabled
+    ? requirementTraceScope(ledgerValue, traceChanged, { ownership: traceOwnership.rules, paths: tracePaths }).inScope.map((entry) => entry.id)
+    : [];
+  promptState = applyRequirementTraceFragment(promptState, ws, requirementTraceEnabled, undefined, traceScopeIds);
   env.SYSTEM_PROMPT = promptState.systemPrompt;
 
   // ── Native tool harness (corpus.sh tail) ─────────────────────────────
@@ -892,6 +902,84 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     artifact = safeJson(ws.read("ai-output.json")) ?? (artifact as Record<string, unknown>);
   }
 
+  // ── #959: one bounded trace-repair pass ──────────────────────────────
+  // A verdict can carry no trace claim at all for an in-scope requirement
+  // (the #947 shape: `requirement_coverage: null` even though the prose
+  // review cites real locations). Before publishing, re-ask ONCE, for exactly
+  // the missing ids, on the same route as the primary review — mirroring the
+  // claim-falsification pre-pass. Gated on the default prompt (`isDefault`):
+  // the repair IS the trace fragment's retry, so with an operator replace-mode
+  // prompt there is no fragment to retry and the documented fail-closed
+  // behavior stands. Fail-soft: any failure leaves the artifact unchanged, and
+  // the missing rows then render as "the reviewer reported no trace" rather
+  // than implying enforcement does not exist. A claim that IS present with
+  // unusable locations is never repaired, so this cannot become a way to pass
+  // an untraceable change.
+  if (requirementTraceEnabled && promptState.isDefault && analysisEngine !== MODEL_UNAVAILABLE_ENGINE && artifact !== null) {
+    const repairTarget = (artifact ?? {}) as Record<string, unknown>;
+    const missingTraceIds = missingTraceRequirementIds(repairTarget.requirement_coverage, traceScopeIds);
+    const repairRequirements = missingTraceIds.length > 0 ? ledgerRequirementsById(ledgerValue, missingTraceIds) : [];
+    if (repairRequirements.length > 0 && profiles.primary.baseUrl && profiles.primary.model) {
+      const rawTemp = (env.AI_TEMPERATURE ?? "").trim();
+      const temperature = rawTemp === "" || Number.isNaN(Number(rawTemp)) ? null : Number(rawTemp);
+      const repairTimeoutSec = Math.min(
+        Number(env.REQUIREMENT_TRACE_REPAIR_TIMEOUT_SEC ?? "180") || 180,
+        Number(env.AI_REQUEST_TIMEOUT_SEC ?? "180") || 180,
+      );
+      log(`requirement trace: ${repairRequirements.length} in-scope requirement(s) carried no claim; attempting one bounded repair pass`);
+      // Fail-soft at the boundary too, mirroring the claim-falsification
+      // pre-pass: a throw here must never abort the review.
+      let repaired: Awaited<ReturnType<typeof runRequirementTraceRepairPass>> | null = null;
+      try {
+        repaired = await runRequirementTraceRepairPass({
+          requirements: repairRequirements.map((entry) => ({ id: entry.id, text: entry.text })),
+          title: String(pr.title ?? ""),
+          files: safeJson(ws.read("pr-files.json")),
+          diff: ws.readText("pr.diff.truncated") ?? ws.readText("pr.diff") ?? "",
+          config: {
+            apiFormat: profiles.primary.apiFormat,
+            model: profiles.primary.model,
+            baseUrl: profiles.primary.baseUrl,
+            apiKey: profiles.primary.apiKey,
+            maxTokens: Number(env.REQUIREMENT_TRACE_REPAIR_MAX_TOKENS ?? "4096") || 4096,
+            temperature,
+            responseFormat: env.AI_RESPONSE_FORMAT ?? "off",
+            tokensParam: env.AI_TOKENS_PARAM ?? "max_tokens",
+            stream: (env.AI_STREAM ?? "true").toLowerCase() === "true",
+            timeoutSec: repairTimeoutSec,
+            inputMaxBytes: Number(env.REQUIREMENT_TRACE_REPAIR_INPUT_MAX_BYTES ?? "48000") || 48000,
+          },
+          requestFn: specialistRequestFn({
+            baseUrl: profiles.primary.baseUrl,
+            apiKey: profiles.primary.apiKey,
+            anthropicVersion: env.ANTHROPIC_VERSION ?? "2023-06-01",
+          }),
+        });
+      } catch (cause) {
+        log(`WARNING: requirement trace repair pass failed; continuing without repair: ${cause instanceof Error ? cause.message : String(cause)}`);
+      }
+      if (repaired !== null) {
+        // Per-run record, mirroring claim-falsification.json: the merged
+        // claims land in ai-output.json, but the pass's status is otherwise
+        // unobservable.
+        ws.write("requirement-trace-repair.json", Buffer.from(`${pyJsonDumps({
+          status: repaired.status,
+          error_kind: repaired.errorKind,
+          error: repaired.error,
+          missing_ids: missingTraceIds,
+          claims: repaired.claims.length,
+          diff_clipped: repaired.diffClipped,
+        })}\n`, "utf8"));
+        if (repaired.claims.length > 0) {
+          repairTarget.requirement_coverage = mergeTraceClaims(repairTarget.requirement_coverage, repaired.claims);
+          log(`requirement trace: repair pass returned ${repaired.claims.length} claim(s)`);
+        } else {
+          log(`requirement trace: repair pass returned no claims (${repaired.status}${repaired.error ? `: ${repaired.error}` : ""})`);
+        }
+      }
+    }
+  }
+
   // ── Enforcement (review.sh) + requirement coverage ───────────────────
   const reviewRecord = (artifact ?? {}) as Record<string, unknown>;
   const verdictPolicy = env.VERDICT_POLICY ?? "strict";
@@ -915,11 +1003,9 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     humanReviews: safeJsonArray(ws.read("human-reviews.json")) as never,
     verdictPolicy,
   };
-  // #874: read here (rather than after the verdict is decided, like the
-  // advisory requirement_coverage fold below) because a trace escalation
-  // must be visible to the verdict mapping, not just recorded afterward.
-  const ledgerValue = safeJson(ws.read("requirement-ledger.json"));
-  const requirementTraceEnabled = (env.REQUIREMENT_TRACE ?? "false").toLowerCase() === "true";
+  // #874: the ledger (read above for the #959 trace scope) feeds the trace
+  // escalation, which must be visible to the verdict mapping, not just
+  // recorded afterward.
   let requirementTraceResult: ReturnType<typeof applyRequirementTraceEnforcement> | null = null;
   let completenessStatus = "none";
   if (analysisEngine === MODEL_UNAVAILABLE_ENGINE) {
@@ -935,7 +1021,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     // place before the strict mapping counts open findings.
     const completeness = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completeness.status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completeness.status === "incomplete" && completeness.mode === "fail");
@@ -946,7 +1032,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       securityFlagged: isSecurityFlagged(classificationArtifact),
     });
     completenessStatus = applyRequiredCheckValidation(reviewRecord as never, completenessOptions).status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
   }
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(reviewRecord)}\n`, "utf8"));
@@ -1212,6 +1298,16 @@ export function traceChangedText(ws: Pick<RunWorkspace, "readText" | "read">): s
   const diff = ws.readText("pr.diff");
   if (diff === null || diff === undefined || diff === "") return undefined;
   return changedSubjectText(diff, changedFilePaths(safeJsonArray(ws.read("pr-files.json"))));
+}
+
+/** #958: the changed file paths (current and previous names), lowercased, for
+ * owner-glob matching. Undefined when the raw diff is unavailable, mirroring
+ * `traceChangedText`'s fail-closed rule (missing evidence keeps every
+ * requirement in scope rather than treating it as an empty change). */
+export function traceChangedFilePaths(ws: Pick<RunWorkspace, "readText" | "read">): string[] | undefined {
+  const diff = ws.readText("pr.diff");
+  if (diff === null || diff === undefined || diff === "") return undefined;
+  return changedFilePaths(safeJsonArray(ws.read("pr-files.json"))).map((path) => path.toLowerCase());
 }
 
 /** Changed file paths (current and previous names) from `pr-files.json`. */

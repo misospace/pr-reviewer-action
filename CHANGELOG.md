@@ -1,5 +1,25 @@
 # Changelog
 
+## [3.3.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.2.0...source-v3.3.0) (2026-10-05)
+
+
+### Features
+
+* **rereview:** /ai-review comment command to force a re-review ([#914](https://github.com/misospace/pr-reviewer-action/issues/914)) ([#952](https://github.com/misospace/pr-reviewer-action/issues/952)) ([9e7519b](https://github.com/misospace/pr-reviewer-action/commit/9e7519b877c80b9b1b51ddcc14100f95b37efb33))
+
+
+### Bug Fixes
+
+* **precheck:** recognize Addresses and scope past-tense closing keywords ([#953](https://github.com/misospace/pr-reviewer-action/issues/953)) ([#956](https://github.com/misospace/pr-reviewer-action/issues/956)) ([5a659f7](https://github.com/misospace/pr-reviewer-action/commit/5a659f7b9578a80a671325d782ca400eee8e5e92))
+* **requirement-trace:** require strong subject evidence for scope ([#957](https://github.com/misospace/pr-reviewer-action/issues/957)) ([#958](https://github.com/misospace/pr-reviewer-action/issues/958)) ([bcae3d3](https://github.com/misospace/pr-reviewer-action/commit/bcae3d3d68f245c7ad9206936c7a079a19412448))
+* **test:** list the dogfood context-window inputs as overrides ([#951](https://github.com/misospace/pr-reviewer-action/issues/951)) ([f32389b](https://github.com/misospace/pr-reviewer-action/commit/f32389b899ca0a9970e45a7efda42b122a68ec10))
+* **v3:** split trace gap from execution gap ([#954](https://github.com/misospace/pr-reviewer-action/issues/954)) ([#955](https://github.com/misospace/pr-reviewer-action/issues/955)) ([f891b14](https://github.com/misospace/pr-reviewer-action/commit/f891b14d2529f15fcbb0c69f38b8e8ae6a06327b))
+
+
+### Chores
+
+* **ai-review:** declare dogfood context windows ([#949](https://github.com/misospace/pr-reviewer-action/issues/949)) ([69788e1](https://github.com/misospace/pr-reviewer-action/commit/69788e1337a09b0c6b2e988d9d46a5501ac8b1c8))
+
 ## [3.2.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.1.0...source-v3.2.0) (2026-10-03)
 
 
