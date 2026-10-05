@@ -403,6 +403,24 @@ test("follow_up: an empty or invalid eventReference fails the build (fail closed
   // Oversized: 20 digits fails, 19 is the boundary that passes.
   assert.equal(buildReviewJob(makeEvent({ ...fu, eventReference: "1".repeat(20) })), null);
   assert.notEqual(buildReviewJob(makeEvent({ ...fu, eventReference: "1".repeat(19) })), null);
+  // Adversarial boundary: the hostile token itself — a type-cast unsafe
+  // integer coerces to a different comment id, so the builder refuses it
+  // instead of minting a job for an identity nobody supplied.
+  assert.equal(
+    buildReviewJob(
+      makeEvent({
+        ...fu,
+        eventReference: 9007199254740993 as unknown as string,
+      }),
+    ),
+    null,
+  );
+  // Safe numeric control: coercion stays faithful to the caller's value.
+  const safeNumeric = buildReviewJob(
+    makeEvent({ ...fu, eventReference: 1234 as unknown as string }),
+  );
+  assert.notEqual(safeNumeric, null);
+  assert.equal(safeNumeric!.eventReference, "1234");
 });
 
 test("a non-string eventReference is stored as its String() form in the frozen job", () => {

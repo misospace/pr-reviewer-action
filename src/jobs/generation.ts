@@ -264,6 +264,16 @@ export function buildReviewJob(
     // Accepted type: a string or a number — anything else is refused
     // before the pattern test, so a hostile value can never raise.
     if (!isStringOrNumber(event.eventReference)) return null;
+    // A number must be a safe integer BEFORE coercion: the same rule the
+    // event boundary (src/events) applies to comment.id. An unsafe integer
+    // coerces to a "different" comment id (9007199254740993 ->
+    // "9007199254740992"), so it is refused, never stored.
+    if (
+      typeof event.eventReference === "number" &&
+      !Number.isSafeInteger(event.eventReference)
+    ) {
+      return null;
+    }
     if (!COMMENT_ID_PATTERN.test(event.eventReference)) return null;
     // Store the STRING form: a type-cast non-string can never land in
     // the string field / persisted payload.
