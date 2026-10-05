@@ -195,25 +195,35 @@ const ADOPTION_EPOCH_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
  *   to a real value of that text (the same "two distinct tuples, one
  *   id" class the \n/\r guard prevents), so the build fails.
  * - a provided nonce for a review job must match `NONCE_PATTERN`, else
- *   the build fails (never silently emptied into the identity); an EMPTY
- *   nonce is treated as ABSENT (not validated); a non-string value is
- *   stored as `String(...)` after validation, so a type-cast number can
- *   never land in the string field / persisted payload.
+ *   the build fails (a provided-but-invalid value is never silently
+ *   emptied into the identity); only the EMPTY string (or absent) is
+ *   ABSENT (not validated) — a cast numeric 0 is PROVIDED and
+ *   validates as "0"; a number must be a safe integer BEFORE
+ *   pattern/coercion (the same rule the event boundary applies); a
+ *   non-string value is stored as `String(...)` after validation, so a
+ *   type-cast number can never land in the string field / persisted
+ *   payload.
  * - a provided `adoptionEpoch` (any job kind) must match
- *   `ADOPTION_EPOCH_PATTERN`, else the build fails (never silently
- *   emptied into the identity); an EMPTY epoch is treated as ABSENT
- *   (not validated, becomes "").
+ *   `ADOPTION_EPOCH_PATTERN`, else the build fails (a
+ *   provided-but-invalid value is never silently emptied into the
+ *   identity); only the EMPTY string (or absent) is ABSENT (not
+ *   validated, becomes "") — a cast numeric 0 is PROVIDED; a number
+ *   must be a safe integer BEFORE pattern/coercion (the same rule the
+ *   event boundary applies).
  * - for a `follow_up` job the identity's `eventReference` is the
  *   event's `eventReference`, which must be non-empty and match
  *   `COMMENT_ID_PATTERN` (the shared canonical form, imported from
  *   `src/events/normalize.js`), else the build fails (an
  *   unidentifiable follow-up cannot be safely deduped); for a `review`
  *   job it is forced "" (a review's identity must not depend on a
- *   comment id, even if a stray event carries one). A non-string
- *   value is stored as `String(...)` after validation, so a type-cast
- *   number can never land in the string field / persisted payload.
+ *   comment id, even if a stray event carries one). A number must be a
+ *   safe integer BEFORE pattern/coercion (the same rule the event
+ *   boundary applies); a non-string value is stored as `String(...)`
+ *   after validation, so a type-cast number can never land in the
+ *   string field / persisted payload.
  * - a non-empty `configFingerprint` must match
- *   `CONFIG_FINGERPRINT_PATTERN`.
+ *   `CONFIG_FINGERPRINT_PATTERN`; a number must be a safe integer
+ *   BEFORE pattern/coercion (the same rule the event boundary applies).
  * - a provided `deadlineAtMs` must be a safe integer >= 0.
  * - the `runId` is sanitized (trim; "" when empty after trim, longer
  *   than 128 chars, or containing a control character — mirroring
@@ -231,11 +241,27 @@ export function buildReviewJob(
   if (event.kind !== "follow_up" && NO_JOB_KINDS.has(event.kind)) return null;
 
   let nonce = "";
-  if (kind === "review" && options.nonce) {
-    // An empty nonce is ABSENT: only non-empty values are validated.
+  if (
+    kind === "review" &&
+    options.nonce !== undefined &&
+    options.nonce !== null &&
+    options.nonce !== ""
+  ) {
+    // Only the empty string (or undefined/null) is ABSENT: a cast
+    // numeric 0 is PROVIDED and validates as "0".
     // Accepted type: a string or a number — anything else is refused
     // before the pattern test, so a hostile value can never raise.
     if (!isStringOrNumber(options.nonce)) return null;
+    // A number must be a safe integer BEFORE coercion: the same rule the
+    // event boundary (src/events) applies. An unsafe integer coerces to a
+    // "different" value (9007199254740993 -> "9007199254740992"), which
+    // would split one identity across two values, so it is refused.
+    if (
+      typeof options.nonce === "number" &&
+      !Number.isSafeInteger(options.nonce)
+    ) {
+      return null;
+    }
     if (!NONCE_PATTERN.test(options.nonce)) return null;
     // Store the STRING form: a type-cast non-string can never land in
     // the string field / persisted payload.
@@ -245,11 +271,26 @@ export function buildReviewJob(
   // Unlike the nonce (ignored for follow_up), the adoption epoch is an
   // identity field of every job kind.
   let adoptionEpoch = "";
-  if (options.adoptionEpoch) {
-    // An empty epoch is ABSENT: only non-empty values are validated.
+  if (
+    options.adoptionEpoch !== undefined &&
+    options.adoptionEpoch !== null &&
+    options.adoptionEpoch !== ""
+  ) {
+    // Only the empty string (or undefined/null) is ABSENT: a cast
+    // numeric 0 is PROVIDED and validates as "0".
     // Accepted type: a string or a number — anything else is refused
     // before the pattern test, so a hostile value can never raise.
     if (!isStringOrNumber(options.adoptionEpoch)) return null;
+    // A number must be a safe integer BEFORE coercion: the same rule the
+    // event boundary (src/events) applies. An unsafe integer coerces to a
+    // "different" value (9007199254740993 -> "9007199254740992"), which
+    // would split one identity across two values, so it is refused.
+    if (
+      typeof options.adoptionEpoch === "number" &&
+      !Number.isSafeInteger(options.adoptionEpoch)
+    ) {
+      return null;
+    }
     if (!ADOPTION_EPOCH_PATTERN.test(options.adoptionEpoch)) return null;
     // Store the STRING form: a type-cast non-string can never land in
     // the string field / persisted payload.
@@ -312,6 +353,13 @@ export function buildReviewJob(
   // Accepted type: a string or a number — anything else is refused
   // before the pattern test, so a hostile value can never raise.
   if (!isStringOrNumber(configFingerprint)) return null;
+  // A lossy number coerces to a different fingerprint: refuse it.
+  if (
+    typeof configFingerprint === "number" &&
+    !Number.isSafeInteger(configFingerprint)
+  ) {
+    return null;
+  }
   if (configFingerprint !== "" && !CONFIG_FINGERPRINT_PATTERN.test(configFingerprint)) {
     return null;
   }

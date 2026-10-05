@@ -143,20 +143,26 @@ scheduling boundary itself (defense in depth on top of `schedule.ts`):
   symbol, an object with a throwing `toString`) is refused, not
   coerced;
 - a provided nonce for a review job must match `[A-Za-z0-9._-]{1,64}`
-  exactly; an EMPTY nonce is treated as absent (not validated); a
+  exactly; only the EMPTY string (or absent) is absent (not validated) —
+  a numeric 0 is PROVIDED (validates as "0"); a number must be a safe
+  integer before pattern/coercion (the event-boundary rule); a
   provided-but-invalid nonce fails the build rather than being silently
   emptied into the identity;
 - a provided `adoptionEpoch` (any job kind) must match
-  `[A-Za-z0-9._-]{1,64}` exactly; an EMPTY/absent epoch is treated as
-  absent (becomes `""`); a provided-but-invalid epoch fails the build
-  rather than being silently emptied into the identity;
+  `[A-Za-z0-9._-]{1,64}` exactly; only the EMPTY string (or absent) is
+  absent (becomes `""`) — a numeric 0 is PROVIDED; a number must be a
+  safe integer before pattern/coercion (the event-boundary rule); a
+  provided-but-invalid epoch fails the build rather than being silently
+  emptied into the identity;
 - a `follow_up` job's `eventReference` is the event's, and must be
   non-empty and match `/^[1-9]\d{0,18}$/` (1–19 digits, no leading
-  zero), else the build fails — an unidentifiable follow-up cannot be
-  safely deduped; a `review` job's is forced `""` even if a stray event
-  carries a reference;
+  zero); a number must be a safe integer before pattern/coercion (the
+  event-boundary rule); else the build fails — an unidentifiable
+  follow-up cannot be safely deduped; a `review` job's is forced `""`
+  even if a stray event carries a reference;
 - a non-empty `configFingerprint` must be an 8–64 hex digest
-  (`/^[0-9a-f]{8,64}$/`);
+  (`/^[0-9a-f]{8,64}$/`); a number must be a safe integer before
+  pattern/coercion (the event-boundary rule);
 - a provided `deadlineAtMs` must be a safe integer >= 0;
 - the build fails when `deriveGenerationId` returns `""` (an identity
   value containing a `\n`/`\r`);

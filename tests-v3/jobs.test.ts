@@ -294,6 +294,45 @@ test("a type-cast numeric nonce is stored as its String() form in the frozen job
   assert.equal(job!.jobId, stringJob!.jobId);
 });
 
+test("a numeric 0 nonce/adoptionEpoch is provided, not silently the absent sentinel", () => {
+  const absent = buildReviewJob(makeEvent());
+  assert.notEqual(absent, null);
+  const zeroNonce = buildReviewJob(makeEvent(), {
+    nonce: 0 as unknown as string,
+  });
+  assert.notEqual(zeroNonce, null);
+  assert.equal(zeroNonce!.nonce, "0");
+  assert.notEqual(zeroNonce!.jobId, absent!.jobId);
+  // Convergence: the string form dedupes with the numeric form.
+  const stringNonce = buildReviewJob(makeEvent(), { nonce: "0" });
+  assert.equal(stringNonce!.jobId, zeroNonce!.jobId);
+  const zeroEpoch = buildReviewJob(makeEvent(), {
+    adoptionEpoch: 0 as unknown as string,
+  });
+  assert.notEqual(zeroEpoch, null);
+  assert.equal(zeroEpoch!.adoptionEpoch, "0");
+  assert.notEqual(zeroEpoch!.jobId, absent!.jobId);
+  // Empty string stays the documented ABSENT sentinel.
+  const emptyNonce = buildReviewJob(makeEvent(), { nonce: "" });
+  assert.equal(emptyNonce!.jobId, absent!.jobId);
+});
+
+test("non-safe-integer numbers are refused for nonce/adoptionEpoch/configFingerprint", () => {
+  for (const bad of [
+    Number.NaN,
+    1.5,
+    Number.POSITIVE_INFINITY,
+    9007199254740993,
+  ] as unknown as string[]) {
+    assert.equal(buildReviewJob(makeEvent(), { nonce: bad }), null);
+    assert.equal(buildReviewJob(makeEvent(), { adoptionEpoch: bad }), null);
+    assert.equal(
+      buildReviewJob(makeEvent(), { configFingerprint: bad }),
+      null,
+    );
+  }
+});
+
 // ── Adoption epoch ───────────────────────────────────────────────────────────
 
 test("disable→re-enable: same head+config, a new adoptionEpoch yields a distinct jobId", () => {
@@ -415,6 +454,26 @@ test("follow_up: an empty or invalid eventReference fails the build (fail closed
     ),
     null,
   );
+  // The boundary rule is safe-integer, not string-faithfulness: 2**53
+  // stringifies faithfully but is not a safe integer.
+  assert.equal(
+    buildReviewJob(
+      makeEvent({
+        ...fu,
+        eventReference: 2 ** 53 as unknown as string,
+      }),
+    ),
+    null,
+  );
+  assert.equal(
+    buildReviewJob(
+      makeEvent({
+        ...fu,
+        eventReference: Number.NaN as unknown as string,
+      }),
+    ),
+    null,
+  );
   // Safe numeric control: coercion stays faithful to the caller's value.
   const safeNumeric = buildReviewJob(
     makeEvent({ ...fu, eventReference: 1234 as unknown as string }),
@@ -521,6 +580,12 @@ test("a non-empty configFingerprint must be an 8–64 hex digest", () => {
   assert.notEqual(buildReviewJob(ev, { configFingerprint: "0123456789abcdef" }), null);
   assert.notEqual(buildReviewJob(ev, { configFingerprint: "a".repeat(64) }), null);
   assert.equal(buildReviewJob(ev, { configFingerprint: "a".repeat(65) }), null);
+  // Safe numeric control: a safe integer stringifies faithfully.
+  const numeric = buildReviewJob(ev, {
+    configFingerprint: 12345678 as unknown as string,
+  });
+  assert.notEqual(numeric, null);
+  assert.equal(numeric!.configFingerprint, "12345678");
 });
 
 // ── Malformed event paths (fail closed) ────────────────────────────────────
