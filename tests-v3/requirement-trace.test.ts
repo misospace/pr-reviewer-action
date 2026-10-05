@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -850,6 +851,55 @@ test("#958: resolveRequirementOwners degrades to no owners on an unresolvable re
   assert.deepEqual(result.rules, []);
   assert.equal(result.warnings.length, 1);
   assert.equal(result.sourcePath, null);
+});
+
+test("#958: the owner map is read from the base commit, not the PR head", () => {
+  // The trust property the whole mechanism rests on: a PR must not be able to
+  // edit the ownership metadata used to review itself. Base commit A, head
+  // replaces it with B (then deletes it); the resolver called with the base
+  // SHA must return A regardless of the working tree / head state.
+  const repo = mkdtempSync(join(tmpdir(), "req-owners-git-"));
+  const git = (...args: string[]): string =>
+    execFileSync("git", ["-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", ...args], {
+      cwd: repo,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+    }).toString();
+  const writeMap = (owners: string): void => {
+    mkdirSync(join(repo, ".github"), { recursive: true });
+    writeFileSync(join(repo, ".github", "pr-reviewer-owners.yml"), owners);
+  };
+  const expected = (owner: string): unknown => [{ match: ["fork", "privilege", "separation"], owners: [owner] }];
+  try {
+    git("init", "-q");
+    writeMap("requirements:\n  fork-privilege-separation:\n    owners:\n      - .github/workflows/base-only.yaml\n");
+    git("add", "-A");
+    git("commit", "-q", "-m", "base");
+    const baseSha = git("rev-parse", "HEAD").trim();
+
+    // The PR head replaces the owner map with a different one...
+    writeMap("requirements:\n  fork-privilege-separation:\n    owners:\n      - .github/workflows/head-only.yaml\n");
+    git("add", "-A");
+    git("commit", "-q", "-m", "head");
+    const headSha = git("rev-parse", "HEAD").trim();
+
+    // ...and a later commit removes it entirely.
+    git("rm", "-q", ".github/pr-reviewer-owners.yml");
+    git("commit", "-q", "-m", "delete");
+    const deletedSha = git("rev-parse", "HEAD").trim();
+
+    // The working tree is at head; reading the base ref must still yield the
+    // base map — never the head's replacement or its deletion.
+    assert.deepEqual(resolveRequirementOwners({ baseRef: baseSha, workspace: repo }).rules, expected(".github/workflows/base-only.yaml"));
+    // Sanity: the resolver really does read the ref it is given.
+    assert.deepEqual(resolveRequirementOwners({ baseRef: headSha, workspace: repo }).rules, expected(".github/workflows/head-only.yaml"));
+    // A ref where the file is absent is genuine absence, not a head injection.
+    const deleted = resolveRequirementOwners({ baseRef: deletedSha, workspace: repo });
+    assert.deepEqual(deleted.rules, []);
+    assert.equal(deleted.sourcePath, null);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
 });
 
 test("#957: weak generic-token overlap alone cannot scope a standards requirement in", () => {
