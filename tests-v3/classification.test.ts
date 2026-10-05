@@ -1072,17 +1072,169 @@ test("#749: lexical material classes need executable context", () => {
     const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
     assert.equal(result.prKind, "path_handling_changes", diff);
   }
-  // Other classes keep their existing semantics: traversal literals and
-  // archive operations are meaningful even in comments and docs.
+  // #960: a comment is not executable, so the non-lexical classes no longer
+  // fire from a comment-only mention either — the neutralizer blanks comment
+  // spans before every content class scans. This is a deliberate spec change:
+  // this block previously asserted that `+# blocks ../traversal` and
+  // `+# uses extractall` FIRE. The decision stays visible as a discounted
+  // `diff_comment` signal, never a silent drop.
+  const commentNeutralized: [string, string, string][] = [
+    ["+# blocks ../traversal\n", "src/app.py", "traversal_literal"],
+    ["+# uses extractall\n", "src/app.py", "archive_extraction"],
+    ["+// see ../etc/passwd\n", "src/app.ts", "traversal_literal"],
+  ];
+  for (const [diff, filename, signal] of commentNeutralized) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "app_code", diff);
+    assert.equal(result.pathHandlingProvenance.fired, false, diff);
+    assert.ok(
+      result.pathHandlingProvenance.discounted.some((s) => s.signal === signal && s.source === "diff_comment"),
+      `${diff}: expected a discounted ${signal} signal, got ${JSON.stringify(result.pathHandlingProvenance.discounted)}`,
+    );
+  }
+  // A documentation FILE is prose, not a comment: a doc line that names a
+  // real traversal keeps its existing semantics.
   const preserved: [string, string][] = [
-    ["+# blocks ../traversal\n", "src/app.py"],
     ["+see ../etc/passwd\n", "README.md"],
-    ["+# uses extractall\n", "src/app.py"],
   ];
   for (const [diff, filename] of preserved) {
     const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
     assert.equal(result.prKind, "path_handling_changes", diff);
   }
+});
+
+// ── #960: a `../` module reference in a doc comment is not traversal ──────
+
+test("#960: a `../` that appears only in a comment or doc comment is not a traversal literal", () => {
+  const negatives: [string, string][] = [
+    // The #947 repro: a JSDoc continuation line carries no marker of its own,
+    // so only block-comment state can recognize it.
+    [
+      "+/**\n+ * The job a canonical forge event (`../events/types.js`) can spawn: the\n+ */\n",
+      "src/jobs/types.ts",
+    ],
+    // A backtick-quoted module reference in a `#` comment.
+    ["+# See `../events/types.js` for the shape.\n", "src/jobs/types.py"],
+    // ... in a `--` comment.
+    ["+-- see ../events/types.js for the shape\n", "src/jobs/query.lua"],
+    // ... in a `//` line comment.
+    ["+// see ../events/types.js for the shape\n", "src/jobs/types.ts"],
+    // ... and in a one-line block comment.
+    ["+/* see ../events/types.js */\n", "src/jobs/types.ts"],
+    // A plain multi-line block comment with no space after the opener, and a
+    // mid-line opener: both are real comments, not phantom blocks.
+    ["+/*hello world\n+see ../events/types.js\n+*/\n", "src/jobs/types.ts"],
+    ["+func() /*\n+see ../events/types.js\n+*/\n", "src/jobs/types.ts"],
+    // An unspaced marker right after a statement terminator is still a comment.
+    ["+x=1;//see ../events/types.js\n", "src/jobs/types.ts"],
+    ["+x=1;#see ../events/types.js\n", "src/jobs/types.py"],
+    // `/*` attached to a variable or a literal still opens a real comment.
+    ["+a/*see ../events/types.js\n+*/\n", "src/jobs/types.ts"],
+    ["+x=1/*see ../events/types.js\n+*/\n", "src/jobs/types.ts"],
+    // An unspaced `//` is a comment: its non-comment uses always sit against a
+    // non-space character, which the preceding-character rule already refuses.
+    ["+//see ../events/types.js\n", "src/jobs/types.ts"],
+    // A block comment that documents the delimiter must not be cut short at the
+    // quoted `*/`, or its tail would be scanned as code.
+    ['+/* The token is "*/" and then\n+ * see ../events/types.js\n+ */\n', "src/jobs/types.ts"],
+  ];
+  for (const [diff, filename] of negatives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "app_code", diff);
+    assert.ok(!result.riskFlags.includes("path_handling_changes"), diff);
+    assert.equal(result.pathHandlingProvenance.fired, false, diff);
+    // The decision is recorded, not silently dropped.
+    assert.ok(
+      result.pathHandlingProvenance.discounted.some(
+        (s) => s.signal === "traversal_literal" && s.source === "diff_comment",
+      ),
+      `${diff}: expected a discounted traversal_literal, got ${JSON.stringify(result.pathHandlingProvenance.discounted)}`,
+    );
+  }
+});
+
+test("#960: a traversal literal in real code still fires, including next to an import and past a string-literal marker", () => {
+  const positives: [string, string][] = [
+    // Plain code, no comment anywhere.
+    ["+const p = path.join(base, '../../etc/passwd');\n", "src/app.ts"],
+    // Same line as an import specifier: the specifier is neutralized, the real
+    // traversal is not.
+    ['+import { a } from "../lib"; fs.readFileSync("../../etc/passwd");\n', "src/app.ts"],
+    // Adversarial (#252): the `//` inside the string literal is data, not a
+    // comment marker — it must not truncate the line and hide the traversal.
+    ['+const url = "https://example.com"; fs.readFileSync("../../etc/passwd");\n', "src/app.ts"],
+    // Adversarial: a `#` inside a string literal must not comment out the code
+    // that follows it.
+    ['+const tag = "#heading"; p = open("../../etc/passwd")\n', "src/app.py"],
+    // A real comment on the same line as code leaves the code intact.
+    ['+x = 1  # note: see ../docs\n+with open("../../etc/passwd") as fh:\n', "src/app.py"],
+    // `--` that is a decrement, not a comment marker.
+    ['+i--; fs.readFileSync("../../etc/passwd");\n', "src/app.ts"],
+    // A CSS hex colour is not a `#` comment: the relative url() is real.
+    ["+background: #fff url(../../img/bg.png);\n", "src/styles/app.css"],
+    // An unspaced floor division is not a `//` comment.
+    ['+n = total//count; p = open("../../etc/passwd")\n', "src/app.py"],
+    // An unquoted URL's `//` is not a comment marker.
+    ['+const url = http://host/x; p = open("../../etc/passwd")\n', "src/app.py"],
+    // An escaped slash in a regex literal is not a comment marker.
+    ['+const re = /a\\//; p = fs.readFileSync("../../etc/passwd");\n', "src/app.ts"],
+    // A shell glob with no closer is not a block comment: it must not blank the
+    // real traversal that follows it.
+    ['+rm -rf /*\n+const p = fs.readFileSync("../../etc/passwd");\n', "scripts/build.sh"],
+    // ... and a quoted `*/` cannot close that phantom opener either.
+    ['+rm -rf /*\n+cp ../../etc/passwd .\n+echo "*/"\n', "scripts/build.sh"],
+  ];
+  for (const [diff, filename] of positives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", diff);
+    assert.ok(result.riskFlags.includes("path_handling_changes"), diff);
+    assert.ok(
+      result.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"),
+      `${diff}: expected a fired traversal_literal, got ${JSON.stringify(result.pathHandlingProvenance.signals)}`,
+    );
+  }
+});
+
+test("#960: block-comment state is tracked per diff stream, so it never hides real code", () => {
+  // A removed line that opens a block comment must not blank an added line's
+  // real traversal — a false negative would be worse than the false positive
+  // this change fixes.
+  const removedOpener = classifyPr({
+    prFiles: files("src/app.ts"),
+    diffText: '-/* legacy note about ../old\n+const p = fs.readFileSync("../../etc/passwd");\n',
+    linkedIssues: [],
+  });
+  assert.equal(removedOpener.prKind, "path_handling_changes");
+  assert.ok(removedOpener.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"));
+
+  // The mirror case: an ADDED opener blanks a context continuation line, which
+  // sits inside the block in the new file. Both are the new-file stream.
+  const addedOpener = classifyPr({
+    prFiles: files("src/app.ts"),
+    diffText: '+/*\n const p = fs.readFileSync("../../etc/passwd");\n+*/\n',
+    linkedIssues: [],
+  });
+  assert.equal(addedOpener.prKind, "app_code");
+  assert.equal(addedOpener.pathHandlingProvenance.fired, false);
+
+  // A regex literal's `/*` is not a block opener: it must not open a phantom
+  // block and swallow the real traversal on the next line.
+  const regexLiteral = classifyPr({
+    prFiles: files("src/app.ts"),
+    diffText: '+const re = /\\/*foo\\//g;\n+const p = fs.readFileSync("../../etc/passwd");\n',
+    linkedIssues: [],
+  });
+  assert.equal(regexLiteral.prKind, "path_handling_changes");
+  assert.ok(regexLiteral.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"));
+
+  // A shell glob cannot open one either.
+  const glob = classifyPr({
+    prFiles: files("scripts/build.sh"),
+    diffText: "+rm -rf build/*\n+cp ../../etc/passwd .\n",
+    linkedIssues: [],
+  });
+  assert.equal(glob.prKind, "path_handling_changes");
+  assert.ok(glob.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"));
 });
 
 test("#871: a bare `pathname` is a WHATWG URL component, not a path variable, unless the file also touches a filesystem/path-construction API", () => {
