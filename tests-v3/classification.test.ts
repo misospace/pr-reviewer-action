@@ -1258,6 +1258,85 @@ test("#960: block-comment state is tracked per diff stream, so it never hides re
   assert.ok(glob.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"));
 });
 
+test("#960: commentFree is the sole comment authority — no downstream path re-interprets markers", () => {
+  // Spaced Python floor division is not a `//` comment: the lexical
+  // code-only class after it must still fire. The retired generic stripper
+  // truncated at the first `#`/`//` and hid `sanitize_path` behind it.
+  const floorDivision = classifyPr({
+    prFiles: files("src/jobs/stats.py"),
+    diffText: '+x = total // workers; sanitize_path(p)\n',
+    linkedIssues: [],
+  });
+  assert.equal(floorDivision.prKind, "path_handling_changes");
+  assert.ok(
+    floorDivision.pathHandlingProvenance.signals.some(
+      (s) => s.signal === "path_containment_or_sanitization",
+    ),
+    JSON.stringify(floorDivision.pathHandlingProvenance.signals),
+  );
+
+  // Same marker, same lesson, inside a construction call's operand list: the
+  // operand after the floor division is real input for untrusted_source_join.
+  const flowOperand = classifyPr({
+    prFiles: files("src/jobs/stats.py"),
+    diffText: '+dest = path.join(root, total // workers, request.args["path"])\n',
+    linkedIssues: [],
+  });
+  assert.equal(flowOperand.prKind, "path_handling_changes");
+  assert.ok(
+    flowOperand.pathHandlingProvenance.signals.some((s) => s.signal === "untrusted_source_join"),
+    JSON.stringify(flowOperand.pathHandlingProvenance.signals),
+  );
+
+  // Tcl's `#` is a comment only in command position; mid-command it is an
+  // argument, so it must not blank the traversal after it.
+  const tcl = classifyPr({
+    prFiles: files("lib/setup.tcl"),
+    diffText: "+set p [file join # ../../etc/passwd]\n",
+    linkedIssues: [],
+  });
+  assert.equal(tcl.prKind, "path_handling_changes");
+  assert.ok(tcl.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"));
+
+  // Dockerfile `#` is likewise position-sensitive (a comment line vs an
+  // instruction argument), so it gets no blanking either.
+  const dockerfile = classifyPr({
+    prFiles: files("deploy/Dockerfile"),
+    diffText: "+LABEL notes # see ../../etc/passwd\n",
+    linkedIssues: [],
+  });
+  assert.equal(dockerfile.prKind, "path_handling_changes");
+  assert.ok(dockerfile.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"));
+
+  // The cost of refusing position-sensitive `#` languages is explicit:
+  // genuine comments in Tcl and Dockerfile now fire — a false positive,
+  // which is the direction the invariant prefers.
+  const tclComment = classifyPr({
+    prFiles: files("lib/setup.tcl"),
+    diffText: "+proc foo {} {\n+    # see ../../etc/passwd\n+}\n",
+    linkedIssues: [],
+  });
+  assert.equal(tclComment.prKind, "path_handling_changes");
+  const dockerfileComment = classifyPr({
+    prFiles: files("deploy/Dockerfile"),
+    diffText: "+# build steps for ../../etc/passwd\n",
+    linkedIssues: [],
+  });
+  assert.equal(dockerfileComment.prKind, "path_handling_changes");
+
+  // Known accepted residual: jsx/tsx keep `//` blanking (script semantics
+  // dominate those files, and JSX's own comment convention `{/* */}` blanks
+  // correctly), so a `//` that is JSX TEXT can still blank what follows on
+  // its line. Deliberate trade, revisited if it ever shows up in practice.
+  const jsxText = classifyPr({
+    prFiles: files("src/ui/view.tsx"),
+    diffText: '+const view = <div> // note {fs.readFileSync("../../etc/passwd")}</div>;\n',
+    linkedIssues: [],
+  });
+  assert.equal(jsxText.prKind, "app_code");
+  assert.equal(jsxText.pathHandlingProvenance.fired, false);
+});
+
 test("#871: a bare `pathname` is a WHATWG URL component, not a path variable, unless the file also touches a filesystem/path-construction API", () => {
   // Negative: URL .pathname in a network/URL-only file (#854's shape) never
   // fires path_handling_changes — the file never calls a filesystem/path API

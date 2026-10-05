@@ -478,13 +478,18 @@ function fileKindToken(path: string): string {
  * directive in C (`# define X ../y`) and an ID selector in CSS. */
 
 /** `#` line comments: shell family, Python, Ruby, Perl, and the config
- * languages that borrow the convention. */
+ * languages that borrow the convention. Tcl and Dockerfile are deliberately
+ * absent: there `#` is a comment only in command position (start of command /
+ * comment line), which the shared standalone-or-terminator placement rule
+ * cannot express — blanking a mid-line `#` there would hide real arguments
+ * (`set p [file join # ../etc/passwd]`). No blanking fails toward
+ * detection. */
 const HASH_LINE_COMMENT_KINDS = new Set([
   "sh", "bash", "zsh", "ksh", "csh", "tcsh", "fish", "bashrc", "zshrc",
   "bash_profile", "profile", "py", "pyw", "pyi", "rb", "rake", "gemspec",
-  "raku", "pl", "pm", "r", "jl", "ps1", "psm1", "psd1", "tcl", "yaml", "yml",
+  "raku", "pl", "pm", "r", "jl", "ps1", "psm1", "psd1", "yaml", "yml",
   "toml", "ini", "cfg", "conf", "cnf", "env", "properties", "cmake", "mk",
-  "make", "makefile", "dockerfile", "graphql", "gql", "nim", "nims", "cr",
+  "make", "makefile", "graphql", "gql", "nim", "nims", "cr",
   "coffee", "hcl", "tf", "tfvars", "nix", "ex", "exs", "gitignore",
   "gitattributes", "gitmodules", "gitconfig", "editorconfig", "crontab",
 ]);
@@ -691,7 +696,12 @@ function blankStream(
  *     quote-agnostic closer a glob could pair with a later closing marker and
  *     blank the code in between;
  *   - only markers that are comments in the chunk file's language are blanked
- *     (`commentMarkersFor`); unknown types blank nothing;
+ *     (`commentMarkersFor`); unknown types blank nothing, and languages whose
+ *     marker placement is stricter than the shared rule (Tcl, Dockerfile `#`)
+ *     blank nothing rather than guess;
+ *   - commentFree is the SOLE comment authority: every downstream scan
+ *     (lexical classes, fs evidence, operand extraction) consumes these
+ *     comment-free lines and never re-interprets markers itself;
  *   - quote state is per-line, so a marker inside a string that spans lines —
  *     a heredoc body, a triple-quoted docstring — is still treated as a
  *     comment and blanks the rest of its line: a known, accepted limitation;
@@ -949,28 +959,13 @@ function pathSample(line: string): string {
   return cleaned.trim().slice(0, MAX_PATH_SAMPLE_CHARS);
 }
 
-/** Truncate a quote-stripped line at its first comment marker (`#` or `//`).
- * String literals are already stripped, so a residual marker is a real
- * comment; interpolation-shaped literals may retain one (conservative
- * truncation of contrived content only). */
-function stripLineComment(line: string): string {
-  let cut = line.length;
-  for (const marker of ["#", "//"]) {
-    const pos = line.indexOf(marker);
-    if (pos !== -1 && pos < cut) cut = pos;
-  }
-  return line.slice(0, cut);
-}
-
-/** Line reduced to its executable-code text for the LEXICAL code-only
- * material classes: quoted spans are blanked whole (escape-aware — a `#` or
- * `//` inside a string literal is data, not a comment marker, and string
- * contents — including interpolation-shaped literals — are data, not code
- * identifiers), and the line is truncated at the first comment marker (`#`
- * or `//`) outside quotes. The distinction these classes need is
- * executable-vs-prose context: `function sanitizePath(p)` is code,
- * `// sanitize_path helper` and `log.info("sanitize_path ran")` are prose. */
-function stripCodeComments(line: string): string {
+/** Lexical view of a line for the code-only material classes: every quoted
+ * span is removed (quote chars doubled, contents dropped — string contents,
+ * interpolation included, are data, not code identifiers). Comments are NOT
+ * handled here: the comment-free lines from `blankCommentSpans` are the sole
+ * comment authority, so this runs only on text that has already been through
+ * them. */
+function stripQuotedSpans(line: string): string {
   const out: string[] = [];
   let i = 0;
   const n = line.length;
@@ -991,7 +986,6 @@ function stripCodeComments(line: string): string {
       i = j < n ? j + 1 : n;
       continue;
     }
-    if (ch === "#" || (ch === "/" && i + 1 < n && line[i + 1] === "/")) break;
     out.push(ch);
     i += 1;
   }
@@ -1046,13 +1040,14 @@ function pathlibDivisionTail(line: string, start = 0): number | null {
  * `index`: complete one-level-nested argument lists, and — for a call left
  * open across the line break — the balanced continuation lines up to and
  * including the closing paren. Only call arguments are included: trailing
- * comments (cut at the first `#`/`//`) and sibling statements after the
- * closer are excluded, and nested parentheses are tracked so an inner `)`
- * never ends the scan while outer operands remain. Static quoted literals
- * are stripped before extraction. Empty string when the line constructs no
- * path. */
+ * comments (already blanked in the comment-free lines this consumes —
+ * `blankCommentSpans` is the sole comment authority) and sibling statements
+ * after the closer are excluded, and nested parentheses are tracked so an
+ * inner `)` never ends the scan while outer operands remain. Static quoted
+ * literals are stripped before extraction. Empty string when the line
+ * constructs no path. */
 function constructionOperandSpans(lines: string[], index: number): string {
-  const line = stripLineComment(stripStaticStringLiterals(lines[index] ?? ""));
+  const line = stripStaticStringLiterals(lines[index] ?? "");
   const spans: string[] = [];
   for (const { pattern, isPathlib } of PATH_CONSTRUCTION_HEAD_PATTERNS) {
     for (const m of line.matchAll(pattern)) {
@@ -1066,7 +1061,7 @@ function constructionOperandSpans(lines: string[], index: number): string {
         let depth = 1 + (piece.match(/\(/g) ?? []).length - (piece.match(/\)/g) ?? []).length;
         let accumulated = piece;
         for (let j = index + 1; j < Math.min(index + 1 + MAX_CONSTRUCTION_CONTINUATION_LINES, lines.length); j++) {
-          const continuation = stripLineComment(stripStaticStringLiterals(lines[j] ?? ""));
+          const continuation = stripStaticStringLiterals(lines[j] ?? "");
           const c = balancedClose(continuation, depth);
           if (c === null) {
             accumulated += `\n${continuation}`;
@@ -1204,9 +1199,10 @@ export function evaluatePathHandlingSignals(
       let fired = false;
       for (let index = 0; index < neutralized.length; index++) {
         const raw = lines[index] ?? "";
-        const scanLine = codeOnly
-          ? stripCodeComments(neutralized[index] ?? "")
-          : (neutralized[index] ?? "");
+        // commentFree is the sole comment authority; the lexical view only
+        // additionally strips quoted spans.
+        const base = neutralized[index] ?? "";
+        const scanLine = codeOnly ? stripQuotedSpans(base) : base;
         if (matchesAny(scanLine, patterns)) {
           if (!fired) {
             recordSignal(buckets, className, source, chunkFile, pathSample(raw));
@@ -1233,11 +1229,11 @@ export function evaluatePathHandlingSignals(
     // `location.pathname`) as a filesystem path variable (#854/#749).
     if (!isDocumentation) {
       const fsEvidence = lines.some((_line, index) =>
-        FS_API_EVIDENCE_PATTERN.test(stripCodeComments(stripStaticStringLiterals(commentFree[index] ?? ""))),
+        FS_API_EVIDENCE_PATTERN.test(stripQuotedSpans(commentFree[index] ?? "")),
       );
       if (fsEvidence) {
         for (let index = 0; index < neutralized.length; index++) {
-          const scanLine = stripCodeComments(neutralized[index] ?? "");
+          const scanLine = stripQuotedSpans(neutralized[index] ?? "");
           if (!PATHNAME_IDENTIFIER_PATTERN.test(scanLine)) continue;
           recordSignal(buckets, "path_reference_identifier", source, chunkFile, pathSample(lines[index] ?? ""));
           break;
@@ -1253,7 +1249,7 @@ export function evaluatePathHandlingSignals(
     // inside the call's operands). Co-occurrence never fires.
     for (let index = 0; index < lines.length; index++) {
       const rawLine = lines[index] ?? "";
-      const flowText = constructionOperandSpans(lines, index);
+      const flowText = constructionOperandSpans(commentFree, index);
       if (!flowText) continue;
       if (matchesAny(flowText, UNTRUSTED_SOURCE_PATTERNS)) {
         recordSignal(buckets, "untrusted_source_join", source, chunkFile, pathSample(rawLine));
@@ -1261,7 +1257,7 @@ export function evaluatePathHandlingSignals(
       }
       for (const adjIndex of [index - 1, index + 1]) {
         if (adjIndex < 0 || adjIndex >= lines.length) continue;
-        const target = untrustedAssignmentTarget(lines[adjIndex] ?? "");
+        const target = untrustedAssignmentTarget(commentFree[adjIndex] ?? "");
         if (target && mentionsIdentifier(flowText, target)) {
           recordSignal(buckets, "untrusted_source_join", source, chunkFile, pathSample(rawLine));
           break;
