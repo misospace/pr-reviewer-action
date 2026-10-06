@@ -269,7 +269,7 @@ test("#977: reconciles the banner after a verification thread is withdrawn", () 
   assert.doesNotMatch(a.review_markdown, /Request changes/);
 });
 
-test("#977: keeps the banner when a real blocking finding remains", () => {
+test("#977: a non-forcing thread settlement never claims the enforcement banner", () => {
   const a = artifact({
     verdict: "request_changes",
     findings: [finding("major", "bug")],
@@ -277,7 +277,42 @@ test("#977: keeps the banner when a real blocking finding remains", () => {
   });
   applyAllEnforcement(a, enforcementInputs([unresolvedVerificationThread]));
   assert.equal(relaxVerificationOnlyVerdict(a, { forced: false }), false);
-  reconcileEnforcedReviewMarkdown(a);
+  assert.equal(a.verdict, "request_changes");
+  assert.doesNotMatch(a.review_markdown, /Final Recommendation/);
+  assert.match(a.review_markdown, /## Unresolved Review Threads/);
+});
+
+test("#977: an evidence blocker that forced request_changes still writes the banner", () => {
+  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  applyAllEnforcement(a, {
+    ...enforcementInputs([unresolvedVerificationThread]),
+    evidenceBlockerEnabled: true,
+    evidence: { has_blocker: true, providers: [{ id: "scanner", provider_severity: "blocker" }] },
+  });
   assert.equal(a.verdict, "request_changes");
   assert.match(a.review_markdown, /## Final Recommendation/);
+  assert.match(a.review_markdown, /^- Evidence provider blocker detected: scanner\./m);
+  assert.doesNotMatch(a.review_markdown, /- review threads:/);
+});
+
+test("#977: a thread settlement that escalated the verdict does contribute to the banner", () => {
+  const a = artifact({ verdict: "approve", findings: [], thread_dispositions: [] });
+  const blockerThread = { ...unresolvedVerificationThread, severity: "blocker", category: "bug" };
+  applyAllEnforcement(a, {
+    ...enforcementInputs([blockerThread]),
+    verdictPolicy: "findings_severity_gated",
+  });
+  assert.equal(a.verdict, "request_changes");
+  assert.match(a.review_markdown, /## Final Recommendation/);
+  assert.match(a.review_markdown, /- review threads:/);
+});
+
+test("#977: human-review settlement never contributes to the banner", () => {
+  const a = artifact({ verdict: "request_changes", findings: [], human_review_dispositions: [] });
+  applyAllEnforcement(a, {
+    ...enforcementInputs([]),
+    humanReviews: [{ review_id: "h", login: "x", commit_id: null, head_moved: "unknown", submitted_at: null }],
+  });
+  assert.equal(a.verdict, "request_changes");
+  assert.doesNotMatch(a.review_markdown, /Final Recommendation/);
 });

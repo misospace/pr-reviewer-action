@@ -233,15 +233,30 @@ export function failClosedEnforcementFired(inputs: Pick<
  * enforcement actions applied. The banner is reconciled against the final
  * verdict afterwards by `reconcileEnforcedReviewMarkdown`.
  */
+/**
+ * Apply all configured enforcement rules in sequence (port of
+ * `apply_all_enforcement`): evidence blockers, tool-harness failure (with
+ * the min-successful fallback), review-thread settlement, human change-request
+ * settlement, then the banner normalization. Returns the number of
+ * enforcement actions applied.
+ *
+ * #977: only a rule that actually FORCED request_changes may create or
+ * contribute to the enforcement banner. Its text attributes the block to
+ * enforcement, so a settlement that merely changes bookkeeping — thread and
+ * human-review settlement never force a verdict — must not claim it. The
+ * banner is reconciled against the final verdict afterwards by
+ * `reconcileEnforcedReviewMarkdown`.
+ */
 export function applyAllEnforcement(artifact: ReviewArtifact, inputs: EnforcementInputs): number {
   let applied = 0;
-  const reasons: string[] = [];
+  // Only the forcing rules contribute here; `applied` counts every action.
+  const forcingReasons: string[] = [];
 
   if (inputs.evidenceBlockerEnabled) {
     const outcome = applyEvidenceBlockerEnforcement(artifact, inputs.evidence);
     if (outcome.applied) {
       applied += 1;
-      reasons.push(outcome.reason);
+      forcingReasons.push(outcome.reason);
     }
   }
 
@@ -249,30 +264,36 @@ export function applyAllEnforcement(artifact: ReviewArtifact, inputs: Enforcemen
     const outcome = applyToolHarnessFailureEnforcement(artifact, inputs.toolHarness);
     if (outcome.applied) {
       applied += 1;
-      reasons.push(outcome.reason);
+      forcingReasons.push(outcome.reason);
     } else if (inputs.toolMinSuccessful > 0) {
       const minOutcome = applyToolMinSuccessfulEnforcement(artifact, inputs.toolMinSuccessful, inputs.toolHarness);
       if (minOutcome.applied) {
         applied += 1;
-        reasons.push(minOutcome.reason);
+        forcingReasons.push(minOutcome.reason);
       }
     }
   }
 
+  const verdictBeforeThreads = artifact.verdict;
   const threads = applyReviewThreadEnforcement(artifact, inputs.threads, inputs.verdictPolicy);
   if (threads.applied) {
     applied += 1;
-    reasons.push(threads.reason);
+    // Settlement is bookkeeping, except under findings_severity_gated where a
+    // re-emitted blocker escalates the verdict — that escalation did force it.
+    if (verdictBeforeThreads !== "request_changes" && artifact.verdict === "request_changes") {
+      forcingReasons.push(threads.reason);
+    }
   }
 
   const humanReviews = applyHumanReviewEnforcement(artifact, inputs.humanReviews);
   if (humanReviews.applied) {
     applied += 1;
-    reasons.push(humanReviews.reason);
+    // Human change-request settlement never forces a verdict, so it never
+    // contributes to the banner.
   }
 
-  if (applied > 0) {
-    normalizeEnforcedReviewMarkdown(artifact, reasons.length > 0 ? reasons : null);
+  if (forcingReasons.length > 0) {
+    normalizeEnforcedReviewMarkdown(artifact, forcingReasons);
   }
 
   return applied;

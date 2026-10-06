@@ -148,16 +148,20 @@ test("runs the full review end to end: artifacts, outputs, marker", async () => 
   }
 });
 
-async function runVerificationThreadVerdict(verdict: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function runVerificationThreadVerdict(
+  modelVerdict: Record<string, unknown>,
+  options: { policy?: string; threadBody?: string } = {},
+): Promise<Record<string, unknown>> {
+  const policy = options.policy ?? "model";
   const server = await startMockServer((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
-    res.end(verdictBody(baseVerdict(verdict)));
+    res.end(verdictBody(baseVerdict(modelVerdict)));
   });
   const { runDir, cleanup } = withRunDir();
   try {
-    const body = `**⚠️ Major (verification):** confirm the production metric exists\n\n${FINDING_TRAILER}`;
+    const body = options.threadBody ?? `**⚠️ Major (verification):** confirm the production metric exists\n\n${FINDING_TRAILER}`;
     await runReview({
-      env: { VERDICT_POLICY: "model" },
+      env: { VERDICT_POLICY: policy },
       inputs: {
         "github-token": "tok",
         repo: "o/r",
@@ -166,7 +170,7 @@ async function runVerificationThreadVerdict(verdict: Record<string, unknown>): P
         "ai-model": "m",
         "ai-stream": "false",
         "ai-api-key": "k",
-        "verdict-policy": "model",
+        "verdict-policy": policy,
       },
       runDir,
       workspace: runDir,
@@ -224,11 +228,27 @@ test("#977: runReview removes the enforcement banner after a verification thread
   assert.match(String(artifact.review_markdown), /_Verdict relaxed from structured findings \(#977\)/);
 });
 
-test("#977: runReview preserves the banner when a real defect keeps request_changes", async () => {
+test("#977: runReview does not attribute a non-forcing settlement to enforcement", async () => {
   const artifact = await runVerificationThreadVerdict({
     verdict: "request_changes",
-    review_markdown: "Please confirm the metric exists.\n",
+    review_markdown: "Please fix the real defect.\n",
     findings: [{ severity: "major", category: "bug", file: null, line: null, message: "real defect" }],
+  }, {
+    policy: "model",
+    threadBody: `**⚠️ Major (bug):** real defect\n\n${FINDING_TRAILER}`,
+  });
+  assert.equal(artifact.verdict, "request_changes");
+  assert.doesNotMatch(String(artifact.review_markdown), /Final Recommendation/);
+});
+
+test("#977: runReview keeps the banner when thread settlement actually escalates", async () => {
+  const artifact = await runVerificationThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [],
+  }, {
+    policy: "findings_severity_gated",
+    threadBody: `**🛑 Blocker (bug):** real defect\n\n${FINDING_TRAILER}`,
   });
   assert.equal(artifact.verdict, "request_changes");
   assert.match(String(artifact.review_markdown), /## Final Recommendation/);
