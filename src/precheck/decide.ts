@@ -268,7 +268,7 @@ export function lastManagedBody(
 /** #970: select the last managed body whose author is the run's own
  * forge-authenticated identity. Only such a body may supply the stored skip
  * fingerprint or a carried verdict. When a marker-bearing body exists but the
- * identity cannot be proven (a failed `/user` read, a token that posts as
+ * identity cannot be proven (a failed identity read, a token that posts as
  * nobody, or an unusable payload), or when no body was authored by it, the
  * result is empty — the run then re-reviews rather than trusting an
  * unauthenticated marker. The identity is only resolved when a candidate
