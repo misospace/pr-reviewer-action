@@ -25,6 +25,7 @@ import { completionOverran, extractResponseText, extractResponseUsage, mergeUsag
 import { renderSpecialistLeadsSection } from "./render.js";
 import { maskDiagnostic, maskKnownSecrets, redactText } from "../context/redact.js";
 import { pyStr } from "../platform/py.js";
+import type { SpecialistRoleModel, SpecialistModelSource } from "../routing/tiers.js";
 
 /** v2's `redact_text(str(response["error"]))[:500]` for an error body,
  * plus #868's `maskKnownSecrets` pass: a 200 reply whose body carries an
@@ -108,6 +109,10 @@ export interface SpecialistRoleEntry {
    * roles run through `_run_role`'s three_call/prime_then_fanout path
    * (combined_scout and skipped roles never carry it, matching v2). */
   corpus_source?: "standard" | "adversarial";
+  /** Present only when model overrides are configured; absent for skipped roles and the no-override path. */
+  model?: string;
+  /** Present with `model`: role-override is per-role, specialist-profile is shared, primary is fallback. */
+  model_source?: SpecialistModelSource;
 }
 
 export interface SpecialistArtifacts {
@@ -146,6 +151,8 @@ export interface SpecialistRunInput {
   rolesToRun: readonly string[];
   /** Reason each role NOT in `rolesToRun` was skipped. */
   skippedReasons: Record<string, string>;
+  /** Optional model choice per role. When absent, preserve the legacy profile exactly. */
+  roleModels?: Record<string, SpecialistRoleModel>;
   /** Each role's system prompt fragment; a missing entry is an `input`
    * failure for that role (mirrors an unreadable prompt fragment file). */
   rolePrompts: Partial<Record<string, string>>;
@@ -221,6 +228,7 @@ function roleEntry(
     corpusSource?: "standard" | "adversarial";
     errorStatus?: number | undefined;
     errorDetail?: string | undefined;
+    roleModel?: SpecialistRoleModel;
   } = {},
 ): SpecialistRoleEntry {
   return {
@@ -237,6 +245,7 @@ function roleEntry(
     ...(options.corpusSource !== undefined ? { corpus_source: options.corpusSource } : {}),
     ...(options.errorStatus !== undefined ? { error_status: options.errorStatus } : {}),
     ...(options.errorDetail !== undefined ? { error_detail: options.errorDetail } : {}),
+    ...(options.roleModel !== undefined ? { model: options.roleModel.model, model_source: options.roleModel.source } : {}),
   };
 }
 
@@ -302,6 +311,7 @@ interface RoleRunOptions {
   cancelled: { value: boolean };
   /** #758: telemetry-only tag for which corpus this role ran against. */
   corpusSource: "standard" | "adversarial";
+  roleModel?: SpecialistRoleModel;
   /** Called once the wire payload exists, before any attempt: v2 writes
    * `specialist-<role>.request.json` at that point, so a role later reaped
    * at the phase deadline still leaves its request artifact. */
@@ -343,6 +353,7 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
       corpusSource,
       errorStatus,
       errorDetail,
+      ...(options.roleModel !== undefined ? { roleModel: options.roleModel } : {}),
     }),
     request,
     response,
@@ -355,9 +366,10 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
     return finish(failureArtifact, "error", "input", null, null, { error: "input: role prompt fragment unavailable" });
   }
 
+  const roleModel = options.roleModel;
   const payload = buildSpecialistPayload({
     apiFormat: config.apiFormat,
-    model: config.model,
+    model: roleModel?.model ?? config.model,
     system,
     user: userMessage,
     maxTokens: config.maxTokens,
@@ -738,6 +750,7 @@ export async function runSpecialists(input: SpecialistRunInput): Promise<Special
             requestFn: meteredRequestFn,
             cancelled: roleCancel.get(role)!,
             corpusSource: useAdversarial ? "adversarial" : "standard",
+            ...(input.roleModels?.[role] !== undefined ? { roleModel: input.roleModels[role] } : {}),
             onRequest: (payload) => {
               artifacts.requests[role] = payload;
             },
@@ -796,6 +809,17 @@ export async function runSpecialists(input: SpecialistRunInput): Promise<Special
     }
   }
 
+  const roleModels = input.roleModels;
+  if (roleModels !== undefined) {
+    entries = entries.map((entry) => {
+      if (entry.status === "skipped") return entry;
+      const roleModel = roleModels[entry.role];
+      return roleModel === undefined
+        ? entry
+        : { ...entry, model: roleModel.model, model_source: roleModel.source };
+    });
+  }
+
   cancelled.value = true; // no further writes from any straggler after this point
   const aggregateElapsed = now() - phaseStarted;
   const totalLeads = entries.reduce((sum, entry) => sum + entry.lead_count, 0);
@@ -810,6 +834,7 @@ export async function runSpecialists(input: SpecialistRunInput): Promise<Special
     request_bytes: meter.bytes,
     usage_totals: meter.usage,
     model: `${config.model}@${config.baseUrl} (${config.apiFormat})`,
+    ...(input.roleModels !== undefined ? { specialist_overrides: true } : {}),
     aggregate_elapsed_sec: Math.round(aggregateElapsed * 1000) / 1000,
     specialist_corpus_bytes: input.corpusBytes,
     // #758: whether the adversarial-correctness arm was active and which

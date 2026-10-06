@@ -60,6 +60,22 @@ jobs:
 
 That is the whole setup: an OpenAI-compatible endpoint (set `ai-api-format: anthropic` for an Anthropic-compatible one), its key, and a model. The defaults are the recommended configuration: the native tool loop gathers evidence from the checkout, specialist leads run when the change warrants them, CI results are folded in as evidence, and findings post as a non-blocking review anchored to the diff. `github-token` defaults to the job token. The `if:` guard on the job is a cheap early exit, not the authority — the action's precheck skips draft PRs deterministically, so a workflow that forgot it still never reviews a draft.
 
+### Specialist model overrides
+
+Deep-review specialists inherit the primary model by default. These workflow inputs opt into a shared specialist profile and optional model-only role overrides; the profile's endpoint and credentials are shared by all three roles.
+
+| Input | Purpose |
+|---|---|
+| `ai-specialist-model` | Enable a specialist model profile; blank keeps the current primary-profile behavior. |
+| `ai-specialist-base-url` | Optional profile endpoint; blank inherits the primary endpoint. Requires `ai-specialist-model`. |
+| `ai-specialist-api-format` | Optional profile format (`openai` or `anthropic`); blank inherits the primary format. Requires `ai-specialist-model`. |
+| `ai-specialist-api-key` | Optional profile key; blank inherits the primary key. Requires `ai-specialist-model`. |
+| `ai-specialist-correctness-model` | Model-only override for the correctness role. |
+| `ai-specialist-security-model` | Model-only override for the security role. |
+| `ai-specialist-tests-model` | Model-only override for the tests role. |
+
+Role overrides share the profile transport and are ignored with a warning for `DEEP_REVIEW_EXECUTION=combined_scout`, which makes a single shared model call. See [Models and routing](docs/models-and-routing.md#specialist-profile-overrides) for precedence and examples.
+
 **Requirements:** it is a JavaScript action (`runs.using: node24`), so GitHub-hosted runners need nothing installed; the runner provides Node. The repository under review must be checked out (`fetch-depth: 0` gives the history context). `checks: read` lets the review wait for CI; without it the CI evidence is skipped. On Forgejo, use runner 9 or newer with a job image that has Node 22+ and `git`.
 
 ## ⚙️ How it works

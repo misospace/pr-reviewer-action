@@ -19,6 +19,7 @@ import {
 import { DEFAULT_SPECIALIST_MAX_TOKENS, MAX_INPUT_BYTES, SPECIALIST_ROLES_ORDER, type SpecialistArtifact } from "../specialists/types.js";
 import { guardedWrite, resolveArtifactPath, resolveRoot } from "./guarded-write.js";
 import { specialistRequestFn } from "./specialist-transport.js";
+import { resolveSpecialistProfiles } from "../routing/tiers.js";
 
 /**
  * Specialists gate workload (#706 PR 6): the glue around `runSpecialists`
@@ -338,10 +339,11 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
     stdout(note);
   }
 
-  const baseUrl = envStr(env, "AI_BASE_URL");
-  const apiFormat = envStr(env, "AI_API_FORMAT", "openai").trim().toLowerCase();
-  const model = envStr(env, "AI_MODEL");
-  const apiKey = envStr(env, "AI_API_KEY");
+  const profiles = resolveSpecialistProfiles(env);
+  const configuredRoleOverrides = ["CORRECTNESS", "SECURITY", "TESTS"].some((role) =>
+    envStr(env, `AI_SPECIALIST_${role}_MODEL`).trim() !== "",
+  );
+  const { baseUrl, apiFormat, model, apiKey } = profiles.transport;
   const maxTokens = envInt(env, "DEEP_REVIEW_MAX_TOKENS", DEFAULT_SPECIALIST_MAX_TOKENS);
   const temperature = envTemperature(env);
   const responseFormat = envStr(env, "AI_RESPONSE_FORMAT", "off").trim().toLowerCase();
@@ -363,6 +365,13 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
   if (adversarialActive && execution === "combined_scout") {
     execution = "three_call";
     stdout("WARNING: adversarial correctness corpus is incompatible with DEEP_REVIEW_EXECUTION=combined_scout; forcing three_call");
+  }
+  for (const warning of profiles.warnings) stdout(`WARNING: ${warning}`);
+  const roleModels = profiles.overridesActive && !(execution === "combined_scout" && configuredRoleOverrides)
+    ? profiles.roleModels
+    : undefined;
+  if (execution === "combined_scout" && configuredRoleOverrides) {
+    stdout("WARNING: specialist model overrides ignored under DEEP_REVIEW_EXECUTION=combined_scout; the scout call runs on the specialist profile (or primary) model");
   }
 
   // #875: an optional correctness-only "Equivalent Paths to Compare"
@@ -415,6 +424,7 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
     rolesToRun,
     skippedReasons,
     rolePrompts,
+    ...(roleModels !== undefined ? { roleModels } : {}),
     requestFn,
     ...(selectionArtifact !== undefined ? { selectionArtifact } : {}),
     deepReviewMode: deepMode,

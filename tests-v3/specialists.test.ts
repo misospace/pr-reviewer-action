@@ -359,6 +359,40 @@ function baseInput(overrides: Partial<SpecialistRunInput> = {}): SpecialistRunIn
   };
 }
 
+test("runSpecialists: role model overrides reach payloads and opt-in telemetry only", async () => {
+  const calls: { role: string; model: string }[] = [];
+  const input = baseInput({
+    roleModels: {
+      correctness: { model: "correctness-model", source: "role-override" },
+      security: { model: "specialist-model", source: "specialist-profile" },
+      tests: { model: "primary-model", source: "primary" },
+    },
+    requestFn: async (payload) => {
+      const system = (payload.messages as { content: string }[])[0]!.content;
+      const role = system === "be correct" ? "correctness" : system === "be secure" ? "security" : "tests";
+      calls.push({ role, model: String(payload.model) });
+      return { ok: true, raw: { choices: [{ message: { content: JSON.stringify({ leads: [] }) }, finish_reason: "stop" }] } };
+    },
+  });
+  const result = await runSpecialists(input);
+  assert.deepEqual(calls.sort((a, b) => a.role.localeCompare(b.role)), [
+    { role: "correctness", model: "correctness-model" },
+    { role: "security", model: "specialist-model" },
+    { role: "tests", model: "primary-model" },
+  ]);
+  assert.equal(result.aggregate.specialist_overrides, true);
+  const roles = result.aggregate.roles as Array<{ role: string; model?: string; model_source?: string }>;
+  assert.deepEqual(roles.map(({ role, model, model_source }) => ({ role, model, model_source })), [
+    { role: "correctness", model: "correctness-model", model_source: "role-override" },
+    { role: "security", model: "specialist-model", model_source: "specialist-profile" },
+    { role: "tests", model: "primary-model", model_source: "primary" },
+  ]);
+
+  const legacy = await runSpecialists(baseInput());
+  assert.equal("specialist_overrides" in legacy.aggregate, false);
+  assert.ok((legacy.aggregate.roles as Array<Record<string, unknown>>).every((entry) => !("model" in entry) && !("model_source" in entry)));
+});
+
 test("runSpecialists: three_call happy path produces per-role artifacts and an ok aggregate", async () => {
   const result = await runSpecialists(baseInput());
   assert.equal(result.aggregate.execution, "three_call");

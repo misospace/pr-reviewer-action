@@ -60,9 +60,12 @@ test("config hashing sorts lines, drops comments, and honors the verbosity dial"
   // The dial only invalidates on a genuine switch to concise.
   const normal = collectConfigLines({ AI_MODEL: "m", REVIEW_VERBOSITY: "normal" });
   assert.ok(!normal.some((line) => line.startsWith("REVIEW_VERBOSITY")));
-  // Secrets are excluded from the sweep: a rotated key never changes review
-  // behavior and must not enter hash inputs.
-  assert.ok(!collectConfigLines({ AI_MODEL: "m", AI_API_KEY: "sk-secret" }).some((line) => line.includes("sk-secret")));
+  // Specialist models affect requests and therefore enter the fingerprint;
+  // specialist API keys are excluded just like every other AI_*_API_KEY.
+  const specialistLines = collectConfigLines({ AI_SPECIALIST_MODEL: "specialist", AI_SPECIALIST_CORRECTNESS_MODEL: "correctness" });
+  assert.ok(specialistLines.includes("AI_SPECIALIST_MODEL=specialist"));
+  assert.ok(specialistLines.includes("AI_SPECIALIST_CORRECTNESS_MODEL=correctness"));
+  assert.ok(!collectConfigLines({ AI_MODEL: "m", AI_API_KEY: "sk-secret", AI_SPECIALIST_API_KEY: "specialist-secret" }).some((line) => line.includes("secret")));
 });
 
 test("marker fingerprints round-trip the empty-diff placeholder and first marker wins", () => {

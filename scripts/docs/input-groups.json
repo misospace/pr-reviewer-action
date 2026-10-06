@@ -61,7 +61,14 @@
       "ai-smart-model",
       "ai-smart-base-url",
       "ai-smart-api-format",
-      "ai-smart-api-key"
+      "ai-smart-api-key",
+      "ai-specialist-model",
+      "ai-specialist-base-url",
+      "ai-specialist-api-format",
+      "ai-specialist-api-key",
+      "ai-specialist-correctness-model",
+      "ai-specialist-security-model",
+      "ai-specialist-tests-model"
     ]
   },
   {

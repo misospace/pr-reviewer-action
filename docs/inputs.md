@@ -75,6 +75,13 @@ Primary/smart model split and escalation triggers.
 | `ai-smart-base-url` | empty | Base URL for the smart model. Defaults to ai-base-url. |
 | `ai-smart-api-format` | empty | API format for the smart model (openai or anthropic). Defaults to ai-api-format. |
 | `ai-smart-api-key` | empty | API key for the smart model. Defaults to ai-api-key. |
+| `ai-specialist-model` | empty | Model for deep-review specialist calls. Empty (default) inherits the primary profile exactly as before (#966). When set, it activates the specialist profile: specialist transport resolves ai-specialist-* fields with unset fields inheriting the primary route's values. |
+| `ai-specialist-base-url` | empty | Base URL for the specialist profile. Empty inherits the primary route's base URL. Requires ai-specialist-model. |
+| `ai-specialist-api-format` | empty | API format for the specialist profile (openai or anthropic). Empty inherits the primary route's format. Requires ai-specialist-model. |
+| `ai-specialist-api-key` | empty | API key for the specialist profile. Empty inherits the primary route's API key. Requires ai-specialist-model. |
+| `ai-specialist-correctness-model` | empty | Model override for the correctness specialist only. Empty inherits the specialist profile (or the primary profile when no specialist profile is set). Model-only: the shared specialist transport (base URL / API format / key) is not overridden per role; distinct endpoints per role are a documented follow-up. Ignored (with a warning) under DEEP_REVIEW_EXECUTION=combined_scout. |
+| `ai-specialist-security-model` | empty | Model override for the security specialist only. Empty inherits the specialist profile (or the primary profile when no specialist profile is set). Model-only: the shared specialist transport (base URL / API format / key) is not overridden per role; distinct endpoints per role are a documented follow-up. Ignored (with a warning) under DEEP_REVIEW_EXECUTION=combined_scout. |
+| `ai-specialist-tests-model` | empty | Model override for the tests specialist only. Empty inherits the specialist profile (or the primary profile when no specialist profile is set). Model-only: the shared specialist transport (base URL / API format / key) is not overridden per role; distinct endpoints per role are a documented follow-up. Ignored (with a warning) under DEEP_REVIEW_EXECUTION=combined_scout. |
 
 ### Publishing
 

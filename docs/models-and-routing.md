@@ -55,7 +55,7 @@ Set `ai-api-format: anthropic` to post to `/messages` instead of `/chat/completi
     publish-review-comment: "true"
 ```
 
-`ai-api-format` has a matching sibling for every model slot: `ai-fallback-api-format`, `ai-primary-api-format`, `ai-smart-api-format`. Each defaults to blank, which inherits `ai-api-format` — so a smart endpoint on a different provider format must set its own.
+`ai-api-format` has a matching sibling for every model slot: `ai-fallback-api-format`, `ai-primary-api-format`, `ai-smart-api-format`, and `ai-specialist-api-format`. Each defaults to blank and inherits the primary `ai-api-format` unless that profile is active with its own format — so a model on a different provider format must set its own.
 
 ### Fallback model
 
@@ -97,6 +97,22 @@ Set `ai-api-format: anthropic` to post to `/messages` instead of `/chat/completi
 - Deterministic classification (`route_signals` — the `pr_kind` plus file-backed risk flags) remains available for specialist role selection, required-check validation, and telemetry. It never routes the model. Since #965 the `escalate-on-risk-flags` input no longer exists: there is no pre-primary smart route to configure.
 - The fast config defaults to the primary `ai-*` inputs. The smart config's endpoint/format/key also default to those same primary inputs, but the smart **model** is opt-in (`ai-smart-model`) — with no smart model configured, an escalation request logs and the primary review publishes rather than failing.
 - The chosen route is reported by the `review-route` output, the step summary, and the managed metadata marker. Routing config is part of the precheck fingerprint, so changing it forces a fresh review.
+
+## Specialist profile overrides (#966)
+
+Deep-review specialists keep inheriting the primary route unless `ai-specialist-model` is set. That model activates a shared specialist profile; blank endpoint, format, and key values inherit from the primary route. The API format must be `openai` or `anthropic`; an invalid value disables the whole specialist profile and emits a warning, while role-only overrides still use the primary transport.
+
+```yaml
+- uses: misospace/pr-reviewer-action@v3
+  with:
+    ai-specialist-model: qwen3-32b
+    ai-specialist-base-url: http://llama-server.internal:8080/v1
+    ai-specialist-api-key: ${{ secrets.LOCAL_MODEL_KEY }}
+    ai-specialist-correctness-model: qwen3-coder
+    ai-specialist-tests-model: qwen3-14b
+```
+
+Precedence is per role: role override, then `ai-specialist-model`, then primary model. Endpoint/format/key selection remains shared across roles; per-role endpoints are a follow-up. Overrides are model selection only and do not change prompts, selection, advisory authority, concurrency, or retry behavior. `combined_scout` issues one shared call, so it ignores role model overrides with a warning and uses the specialist-profile model (or primary if there is no profile). These trusted values come from workflow inputs, not repository config.
 
 ## Escalation of insufficient primary reviews (#721)
 

@@ -96,6 +96,7 @@ def test_removed_fields_are_documented_and_have_no_aliases():
         entry["v2_id"]
         for kind in ("inputs", "outputs")
         for entry in contract[kind]
+        if "v2_id" in entry
     }
     removed_ids = {entry["v2_id"] for entry in contract["removed"]}
     assert not (removed_ids & active_v2_ids)
@@ -132,7 +133,7 @@ def test_migration_tables_cover_all_contract_mappings():
         expected = {
             (entry["v2_id"], entry["id"])
             for entry in contract[kind]
-            if entry["id"] not in new_ids[kind]
+            if entry["id"] not in new_ids[kind] and "v2_id" in entry
         }
         assert pairs == expected, f"{section} migration table differs from contract"
 
@@ -159,6 +160,7 @@ def test_live_action_metadata_is_the_kebab_contract_after_cutover():
 NEVER_REPO_CONFIGURABLE = {
     "github_token", "ai_base_url", "ai_model", "ai_api_key",
     "ai_fallback_base_url", "ai_fallback_api_key", "ai_primary_api_key", "ai_smart_api_key",
+    "ai-specialist-api-key",
     "linear_api_key", "tool_mcp_token", "forgejo_token",
     "allowed_source_hosts", "tool_mode", "tool_enable_for_forks", "tool_mcp_servers",
     "evidence_enable_for_forks", "linear_enable_for_forks", "allow_approve", "approve_forks",
@@ -171,25 +173,37 @@ def test_repo_configurable_inputs_never_include_credentials_or_hard_security_pol
     for entry in contract["inputs"]:
         if entry.get("repo-configurable"):
             assert entry["required"] is False, entry["id"]
-            assert entry["v2_id"] not in NEVER_REPO_CONFIGURABLE, entry["id"]
+            assert entry.get("v2_id", entry["id"]) not in NEVER_REPO_CONFIGURABLE, entry["id"]
 
 
-# Tier-resolved budgets (#777, revised): their contract default is an empty
-# string on purpose ("resolve a tier-aware budget at harness time"), so
-# there is no config-time ceiling for repository config to narrow against.
-# They must stay operator-only workflow inputs, never repo-configurable —
-# a repository must never be able to raise a budget the operator's own
-# workflow never granted (see docs/repository-config.md).
+# Tier-resolved and specialist transport inputs stay operator-only workflow
+# inputs; repository config must not select model endpoints or credentials.
 TIER_RESOLVED_NOT_REPO_CONFIGURABLE = {
     "primary_tool_max_requests",
     "smart_tool_max_requests",
 }
+TIER_RESOLVED_V3_ONLY_NOT_REPO_CONFIGURABLE = {
+    "ai-specialist-model",
+    "ai-specialist-base-url",
+    "ai-specialist-api-format",
+}
+SPECIALIST_SECRET_NOT_REPO_CONFIGURABLE = {"ai-specialist-api-key"}
 
 
-def test_tier_resolved_budgets_stay_operator_only_workflow_inputs():
+def test_tier_resolved_inputs_stay_operator_only_workflow_inputs():
     contract = _load()
-    by_v2 = {entry["v2_id"]: entry for entry in contract["inputs"]}
+    by_v2 = {entry["v2_id"]: entry for entry in contract["inputs"] if "v2_id" in entry}
+    by_id = {entry["id"]: entry for entry in contract["inputs"]}
     for v2_id in TIER_RESOLVED_NOT_REPO_CONFIGURABLE:
         entry = by_v2[v2_id]
         assert not entry.get("repo-configurable"), v2_id
         assert "default" in entry, v2_id
+    for input_id in TIER_RESOLVED_V3_ONLY_NOT_REPO_CONFIGURABLE:
+        entry = by_id[input_id]
+        assert not entry.get("repo-configurable"), input_id
+        assert "default" in entry, input_id
+    for input_id in SPECIALIST_SECRET_NOT_REPO_CONFIGURABLE:
+        entry = by_id[input_id]
+        assert input_id in NEVER_REPO_CONFIGURABLE
+        assert not entry.get("repo-configurable"), input_id
+        assert "default" in entry, input_id

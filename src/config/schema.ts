@@ -51,7 +51,7 @@ export const ENUM_INPUTS: Readonly<Record<string, readonly string[]>> = Object.f
 export const FLOAT_INPUTS = new Set(["ai-temperature"]);
 
 export const SECRET_INPUTS = new Set([
-  "github-token", "ai-api-key", "ai-fallback-api-key", "ai-primary-api-key", "ai-smart-api-key",
+  "github-token", "ai-api-key", "ai-fallback-api-key", "ai-primary-api-key", "ai-smart-api-key", "ai-specialist-api-key",
   "linear-api-key", "tool-mcp-token", "forgejo-token",
 ]);
 
