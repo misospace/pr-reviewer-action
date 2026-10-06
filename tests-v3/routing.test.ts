@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { isLowConfidence, reviewerRequestedEscalation, shouldEscalate } from "../src/routing/escalation.js";
-import { resolveReviewRoute, resolveTierProfiles, tierRequestShape } from "../src/routing/tiers.js";
+import { resolveReviewRoute, resolveSpecialistProfiles, resolveTierProfiles, tierRequestShape } from "../src/routing/tiers.js";
 
 const flags = { onIncomplete: true, onRequestChanges: true, onLowConfidence: true, onBlockers: true, onPlanningFailure: true };
 const longReview = "The change is reviewed carefully and the behavior appears correct. No concerns identified in the touched paths.";
@@ -57,6 +57,54 @@ test("resolveReviewRoute always starts auto routing on the primary profile", () 
   for (const routingMode of ["auto", "AUTO", " auto "]) {
     assert.deepEqual(resolveReviewRoute({ routingMode }), auto);
   }
+});
+
+test("specialist profiles resolve role, profile, and primary model precedence", () => {
+  const resolved = resolveSpecialistProfiles({
+    AI_BASE_URL: " https://primary ", AI_MODEL: " primary-model ", AI_API_KEY: " primary-key ",
+    AI_SPECIALIST_MODEL: " specialist-model ", AI_SPECIALIST_BASE_URL: " https://specialist ",
+    AI_SPECIALIST_API_FORMAT: " ANTHROPIC ", AI_SPECIALIST_API_KEY: " specialist-key ",
+    AI_SPECIALIST_CORRECTNESS_MODEL: " correctness-model ", AI_SPECIALIST_TESTS_MODEL: "  ",
+  });
+  assert.equal(resolved.profileActive, true);
+  assert.deepEqual(resolved.transport, { baseUrl: "https://specialist", model: "specialist-model", apiFormat: "anthropic", apiKey: "specialist-key" });
+  assert.deepEqual(resolved.roleModels, {
+    correctness: { model: "correctness-model", source: "role-override" },
+    security: { model: "specialist-model", source: "specialist-profile" },
+    tests: { model: "specialist-model", source: "specialist-profile" },
+  });
+  assert.equal(resolved.overridesActive, true);
+  assert.deepEqual(resolved.warnings, []);
+
+  const primary = resolveSpecialistProfiles({ AI_BASE_URL: " primary-url ", AI_MODEL: " primary-model ", AI_API_FORMAT: " OpenAI ", AI_API_KEY: " key ", AI_SPECIALIST_SECURITY_MODEL: " security-model " });
+  assert.equal(primary.profileActive, false);
+  assert.deepEqual(primary.transport, { baseUrl: "primary-url", model: "primary-model", apiFormat: "openai", apiKey: "key" });
+  assert.deepEqual(primary.roleModels, {
+    correctness: { model: "primary-model", source: "primary" },
+    security: { model: "security-model", source: "role-override" },
+    tests: { model: "primary-model", source: "primary" },
+  });
+  assert.equal(primary.overridesActive, true);
+});
+
+test("specialist profiles reject invalid formats and report orphan transport fields", () => {
+  const invalid = resolveSpecialistProfiles({
+    AI_MODEL: "primary", AI_SPECIALIST_MODEL: "specialist", AI_SPECIALIST_API_FORMAT: "bogus",
+    AI_SPECIALIST_CORRECTNESS_MODEL: " role-model ",
+  });
+  assert.equal(invalid.profileActive, false);
+  assert.deepEqual(invalid.transport, { baseUrl: "", model: "primary", apiFormat: "openai", apiKey: "" });
+  assert.equal(invalid.roleModels.correctness.model, "role-model");
+  assert.equal(invalid.roleModels.correctness.source, "role-override");
+  assert.deepEqual(invalid.warnings, ["specialist profile ignored: AI_SPECIALIST_API_FORMAT must be openai or anthropic"]);
+
+  const orphan = resolveSpecialistProfiles({
+    AI_MODEL: "primary", AI_SPECIALIST_BASE_URL: " url ", AI_SPECIALIST_API_KEY: " secret ",
+  });
+  assert.equal(orphan.profileActive, false);
+  assert.equal(orphan.overridesActive, false);
+  assert.deepEqual(orphan.warnings, ["specialist profile ignored: ai-specialist-base-url/ai-specialist-api-key set without ai-specialist-model"]);
+  assert.deepEqual(Object.keys(orphan.roleModels), ["correctness", "security", "tests"]);
 });
 
 test("tier profiles bind model defaults, retry/stream settings, and request shapes", () => {

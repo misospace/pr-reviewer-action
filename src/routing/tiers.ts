@@ -27,7 +27,22 @@ export interface TierProfiles {
   smart: ResolvedTier;
   fallback: ResolvedTier;
 }
+
+export type SpecialistModelSource = "role-override" | "specialist-profile" | "primary";
+export interface SpecialistRoleModel {
+  model: string;
+  source: SpecialistModelSource;
+}
+export interface SpecialistProfiles {
+  profileActive: boolean;
+  transport: { baseUrl: string; model: string; apiFormat: string; apiKey: string };
+  roleModels: Record<"correctness" | "security" | "tests", SpecialistRoleModel>;
+  overridesActive: boolean;
+  warnings: string[];
+}
+
 function value(env: EnvLike, key: string, fallback = ""): string { return env[key] || fallback; }
+function trimmed(env: EnvLike, key: string): string { return (env[key] ?? "").trim(); }
 function numberValue(env: EnvLike, key: string, fallback: number): number {
   const parsed = Number.parseInt(env[key] ?? "", 10);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -43,6 +58,54 @@ function trueValue(raw: string | undefined): boolean { return (raw ?? "").trim()
 export function resolveReviewRoute(input: { routingMode: string }): { route: ReviewRoute; reason: string } {
   if (input.routingMode.trim().toLowerCase() !== "auto") return { route: "legacy", reason: "routing off" };
   return { route: "primary", reason: "primary-first: the primary reviews first; smart is reviewer-requested only (#721)" };
+}
+
+export function resolveSpecialistProfiles(env: EnvLike): SpecialistProfiles {
+  const warnings: string[] = [];
+  const primary = {
+    baseUrl: trimmed(env, "AI_BASE_URL"),
+    model: trimmed(env, "AI_MODEL"),
+    apiFormat: trimmed(env, "AI_API_FORMAT").toLowerCase() || "openai",
+    apiKey: trimmed(env, "AI_API_KEY"),
+  };
+  const specialistModel = trimmed(env, "AI_SPECIALIST_MODEL");
+  const specialistBaseUrl = trimmed(env, "AI_SPECIALIST_BASE_URL");
+  const specialistApiFormat = trimmed(env, "AI_SPECIALIST_API_FORMAT");
+  const specialistApiKey = trimmed(env, "AI_SPECIALIST_API_KEY");
+  const configuredFormat = specialistApiFormat.toLowerCase();
+  const hasTransportWithoutModel = specialistBaseUrl !== "" || specialistApiFormat !== "" || specialistApiKey !== "";
+
+  let profileActive = specialistModel !== "";
+  if (specialistApiFormat !== "" && configuredFormat !== "openai" && configuredFormat !== "anthropic") {
+    profileActive = false;
+    warnings.push("specialist profile ignored: AI_SPECIALIST_API_FORMAT must be openai or anthropic");
+  } else if (!profileActive && hasTransportWithoutModel) {
+    const configuredKeys = [
+      specialistBaseUrl !== "" ? "ai-specialist-base-url" : "",
+      specialistApiFormat !== "" ? "ai-specialist-api-format" : "",
+      specialistApiKey !== "" ? "ai-specialist-api-key" : "",
+    ].filter(Boolean);
+    warnings.push(`specialist profile ignored: ${configuredKeys.join("/")} set without ai-specialist-model`);
+  }
+
+  const transport = profileActive
+    ? {
+        baseUrl: specialistBaseUrl || primary.baseUrl,
+        model: specialistModel,
+        apiFormat: specialistApiFormat ? configuredFormat : primary.apiFormat,
+        apiKey: specialistApiKey || primary.apiKey,
+      }
+    : primary;
+  const roles = ["correctness", "security", "tests"] as const;
+  const roleModels = Object.fromEntries(roles.map((role) => {
+    const override = trimmed(env, `AI_SPECIALIST_${role.toUpperCase()}_MODEL`);
+    if (override !== "") return [role, { model: override, source: "role-override" as const }];
+    if (profileActive) return [role, { model: specialistModel, source: "specialist-profile" as const }];
+    return [role, { model: primary.model, source: "primary" as const }];
+  })) as SpecialistProfiles["roleModels"];
+  const overridesActive = profileActive || Object.values(roleModels).some((role) => role.source === "role-override");
+
+  return { profileActive, transport, roleModels, overridesActive, warnings };
 }
 
 export function resolveTierProfiles(env: EnvLike): TierProfiles {

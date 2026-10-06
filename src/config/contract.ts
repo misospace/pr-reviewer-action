@@ -2,7 +2,8 @@ import { SECRET_INPUTS } from "./schema.js";
 
 export interface ContractInput {
   readonly id: string;
-  readonly v2_id: string;
+  // New v3-only inputs have no legacy v2 identifier.
+  readonly v2_id?: string;
   readonly required: boolean;
   readonly default?: string | number | boolean;
   readonly description: string;
@@ -50,17 +51,20 @@ export function validateContract(value: unknown): ActionContract {
   const outputs = root.outputs.map((item, i) => validateOutput(item, `outputs[${i}]`));
   const removed = root.removed.map((item, i) => validateRemoved(item, `removed[${i}]`));
   unique([...inputs.map(({ id }) => id), ...outputs.map(({ id }) => id)], "canonical id");
-  unique([...inputs.map(({ v2_id }) => v2_id), ...outputs.map(({ v2_id }) => v2_id)], "active v2_id");
+  unique([...inputs.flatMap(({ v2_id }) => v2_id === undefined ? [] : [v2_id]), ...outputs.map(({ v2_id }) => v2_id)], "active v2_id");
   unique(removed.map(({ v2_id }) => v2_id), "removed v2_id");
   const activeIds = new Set([...inputs.map(({ id }) => id), ...outputs.map(({ id }) => id)]);
-  const activeV2Ids = new Set([...inputs.map(({ v2_id }) => v2_id), ...outputs.map(({ v2_id }) => v2_id)]);
+  const activeV2Ids = new Set([...inputs.flatMap(({ v2_id }) => v2_id === undefined ? [] : [v2_id]), ...outputs.map(({ v2_id }) => v2_id)]);
   for (const entry of removed) {
     if (!/^[a-z][a-z0-9_]*$/.test(entry.v2_id)) throw new Error(`removed ${entry.kind} v2_id '${entry.v2_id}' is invalid`);
     if (activeV2Ids.has(entry.v2_id)) throw new Error(`removed ${entry.kind} v2_id collides with active field`);
     const canonical = entry.v2_id.replaceAll("_", "-");
     if (activeIds.has(canonical)) throw new Error(`removed ${entry.kind} field collides with active id '${canonical}'`);
   }
-  for (const input of inputs) validateNames(input.id, input.v2_id, "input");
+  for (const input of inputs) {
+    if (input.v2_id !== undefined) validateNames(input.id, input.v2_id, "input");
+    else validateInputId(input.id);
+  }
   for (const output of outputs) validateNames(output.id, output.v2_id, "output");
   for (const input of inputs) {
     if (input["repo-configurable"] && input.required) {
@@ -76,6 +80,11 @@ export function validateContract(value: unknown): ActionContract {
   return Object.freeze({ schema_version: 1, contract: "github-action", inputs, outputs, removed });
 }
 
+function validateInputId(id: string): void {
+  if (id.includes("_")) throw new Error(`input id '${id}' must not contain underscores`);
+  if (!/^[a-z][a-z0-9-]*$/.test(id)) throw new Error(`input id '${id}' is not a valid Action identifier`);
+}
+
 function validateNames(id: string, v2Id: string, label: string): void {
   if (id.includes("_")) throw new Error(`${label} id '${id}' must not contain underscores`);
   if (!/^[a-z][a-z0-9-]*$/.test(id)) throw new Error(`${label} id '${id}' is not a valid Action identifier`);
@@ -87,7 +96,7 @@ function validateInput(value: unknown, path: string): ContractInput {
   const item = objectAt(value, path);
   rejectUnknown(item, ["id", "v2_id", "required", "default", "description", "repo-configurable", "repo-policy"], path);
   const id = stringAt(item.id, `${path}.id`);
-  const v2_id = stringAt(item.v2_id, `${path}.v2_id`);
+  const v2_id = item.v2_id === undefined ? undefined : stringAt(item.v2_id, `${path}.v2_id`);
   if (typeof item.required !== "boolean") throw new Error(`${path}.required must be a boolean`);
   const description = stringAt(item.description, `${path}.description`);
   if ("default" in item && !["string", "number", "boolean"].includes(typeof item.default)) {
@@ -102,7 +111,7 @@ function validateInput(value: unknown, path: string): ContractInput {
   }
   return Object.freeze({
     id,
-    v2_id,
+    ...(v2_id === undefined ? {} : { v2_id }),
     required: item.required,
     ...("default" in item ? { default: item.default as string | number | boolean } : {}),
     description,

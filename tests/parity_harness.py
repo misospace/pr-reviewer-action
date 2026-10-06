@@ -266,7 +266,8 @@ def config_surface() -> ConfigSurface:
         camel = to_camel_case(item["id"])
         # The v2 pipeline binds the token input to GH_TOKEN (with the ambient
         # GITHUB_TOKEN as config.sh's fallback), never to GITHUB_TOKEN itself.
-        mapping[camel] = "GH_TOKEN" if item["id"] == "github-token" else item["v2_id"].upper()
+        v2_id = item.get("v2_id")
+        mapping[camel] = "GH_TOKEN" if item["id"] == "github-token" else (v2_id.upper() if v2_id else item["id"].upper().replace("-", "_"))
         if item["id"] in secret_ids:
             secrets.add(camel)
         if item["id"] in numeric_ids:
@@ -275,7 +276,7 @@ def config_surface() -> ConfigSurface:
         mapping=mapping,
         secrets=secrets,
         numeric=numeric,
-        secret_v2_ids={item["v2_id"] for item in contract["inputs"] if item["id"] in secret_ids},
+        secret_v2_ids={item["v2_id"] for item in contract["inputs"] if item["id"] in secret_ids and item.get("v2_id")},
     )
 
 
@@ -290,7 +291,8 @@ def secret_raw_values(fixture: dict[str, Any]) -> list[str]:
     """Raw fixture values of secret inputs, for report redaction."""
     surface = config_surface()
     raw = fixture.get("raw", {})
-    return [str(raw[v2_id]) for v2_id in surface.secret_v2_ids if v2_id in raw]
+    specialist_api_key = raw.get("ai-specialist-api-key")
+    return [str(raw[v2_id]) for v2_id in surface.secret_v2_ids if v2_id in raw] + ([str(specialist_api_key)] if specialist_api_key else [])
 
 
 def run_json_runner(command: list[str], workdir: Path, timeout: int, env: dict[str, str] | None = None, stdin_text: str | None = None) -> SideResult:
@@ -318,8 +320,9 @@ def run_v3_config(fixture: dict[str, Any], workdir: Path) -> SideResult:
     }
     raw = fixture.get("raw", {})
     for item in contract["inputs"]:
-        if item["v2_id"] in raw:
-            env[f"INPUT_{item['v2_id'].upper()}"] = str(raw[item["v2_id"]])
+        v2_id = item.get("v2_id")
+        if v2_id and v2_id in raw:
+            env[f"INPUT_{v2_id.upper()}"] = str(raw[v2_id])
     proc = subprocess.run(
         [node, "dist/index.js", "config"],
         cwd=str(ROOT),

@@ -145,6 +145,34 @@ inputs:
     description: API key for the smart model. Defaults to ai_api_key.
     required: false
     default: ""
+  ai-specialist-model:
+    description: "Model for deep-review specialist calls. Empty (default) inherits the primary profile exactly as before (#966). When set, it activates the specialist profile: specialist transport resolves ai-specialist-* fields with unset fields inheriting the primary route's values."
+    required: false
+    default: ""
+  ai-specialist-base-url:
+    description: Base URL for the specialist profile. Empty inherits the primary route's base URL. Requires ai-specialist-model.
+    required: false
+    default: ""
+  ai-specialist-api-format:
+    description: API format for the specialist profile (openai or anthropic). Empty inherits the primary route's format. Requires ai-specialist-model.
+    required: false
+    default: ""
+  ai-specialist-api-key:
+    description: API key for the specialist profile. Empty inherits the primary route's API key. Requires ai-specialist-model.
+    required: false
+    default: ""
+  ai-specialist-correctness-model:
+    description: "Model override for the correctness specialist only. Empty inherits the specialist profile (or the primary profile when no specialist profile is set). Model-only: the shared specialist transport (base URL / API format / key) is not overridden per role; distinct endpoints per role are a documented follow-up. Ignored (with a warning) under DEEP_REVIEW_EXECUTION=combined_scout."
+    required: false
+    default: ""
+  ai-specialist-security-model:
+    description: "Model override for the security specialist only. Empty inherits the specialist profile (or the primary profile when no specialist profile is set). Model-only: the shared specialist transport (base URL / API format / key) is not overridden per role; distinct endpoints per role are a documented follow-up. Ignored (with a warning) under DEEP_REVIEW_EXECUTION=combined_scout."
+    required: false
+    default: ""
+  ai-specialist-tests-model:
+    description: "Model override for the tests specialist only. Empty inherits the specialist profile (or the primary profile when no specialist profile is set). Model-only: the shared specialist transport (base URL / API format / key) is not overridden per role; distinct endpoints per role are a documented follow-up. Ignored (with a warning) under DEEP_REVIEW_EXECUTION=combined_scout."
+    required: false
+    default: ""
   ai-stream:
     description: If true, use streaming responses to avoid timeouts behind proxies with short read timeouts (e.g. Cloudflare 100s edge timer)
     required: false

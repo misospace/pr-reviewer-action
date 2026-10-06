@@ -44,7 +44,7 @@ interface Run {
   read: (name: string) => string;
 }
 
-async function run(env: Record<string, string>, options: Partial<SpecialistsGateDeps> & { corpus?: string | null; setup?: (root: string) => void } = {}): Promise<Run> {
+async function run(env: Record<string, string>, options: Partial<SpecialistsGateDeps> & { corpus?: string | null; setup?: (root: string) => void; productionTransport?: boolean } = {}): Promise<Run> {
   const root = mkdtempSync(join(tmpdir(), "specialists-gate-test-"));
   if (options.corpus !== null) writeFileSync(join(root, "specialist-corpus.md"), options.corpus ?? CORPUS);
   options.setup?.(root);
@@ -54,7 +54,7 @@ async function run(env: Record<string, string>, options: Partial<SpecialistsGate
     env: { AI_MODEL: "m", AI_BASE_URL: "http://model.invalid/v1", AI_STREAM: "false", GITHUB_WORKSPACE: root, ...env },
     argv: options.argv ?? [],
     cwd: root,
-    requestFn: options.requestFn ?? mockTransport(),
+    ...(options.productionTransport ? {} : { requestFn: options.requestFn ?? mockTransport() }),
     stdout: (line) => out.push(line),
     stderr: (line) => err.push(line),
     ...(options.sleep !== undefined ? { sleep: options.sleep } : {}),
@@ -86,12 +86,75 @@ test("true mode: every role runs through the injected transport and every artifa
     const artifact = JSON.parse(result.read(`specialist-${role}.json`)) as { leads: unknown[] };
     assert.equal(artifact.leads.length, 1);
   }
-  const aggregate = JSON.parse(result.read("specialists.json")) as { total_leads: number; roles: { request_bytes: number }[] };
+  const aggregate = JSON.parse(result.read("specialists.json")) as { total_leads: number; roles: { request_bytes: number; model?: string; model_source?: string }[]; specialist_overrides?: boolean };
   assert.equal(aggregate.total_leads, 3);
+  assert.equal("specialist_overrides" in aggregate, false);
+  assert.ok(aggregate.roles.every((entry) => entry.model === undefined && entry.model_source === undefined));
   assert.ok(result.read("specialists.md").startsWith("# Specialist Review Leads"));
   assert.equal(result.read("specialist-leads-present.txt"), `${Buffer.byteLength(result.read("specialists.md"))}\n`);
   assert.match(result.out.at(-1) ?? "", /^deep review complete: 3 lead\(s\) across 3 roles in [0-9.]+s$/);
   rmSync(result.root, { recursive: true, force: true });
+});
+
+test("specialist profile and per-role models use one profile transport and report the resolved models", async () => {
+  const server = await startMockServer((_req, body, res) => {
+    const payload = JSON.parse(body) as { model: string };
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(leadsResponse([{ severity: "minor", category: "x", file: null, line: null, message: payload.model }])));
+  });
+  try {
+    const result = await run({
+      DEEP_REVIEW: "true",
+      AI_SPECIALIST_MODEL: " specialist-default ",
+      AI_SPECIALIST_BASE_URL: `${server.url}/v1`,
+      AI_SPECIALIST_API_KEY: "specialist-profile-secret",
+      AI_SPECIALIST_CORRECTNESS_MODEL: " correctness-override ",
+      AI_SPECIALIST_SECURITY_MODEL: " security-override ",
+      AI_SPECIALIST_TESTS_MODEL: " tests-override ",
+    }, { productionTransport: true });
+    assert.equal(result.code, 0);
+    assert.equal(server.requests.length, 3);
+    const sent = server.requests.map(({ body }) => JSON.parse(body) as { model: string });
+    assert.deepEqual(sent.map((payload) => payload.model).sort(), ["correctness-override", "security-override", "tests-override"].sort());
+    assert.ok(server.requests.every(({ headers }) => headers.authorization === "Bearer specialist-profile-secret"));
+    const aggregateText = result.read("specialists.json");
+    const aggregate = JSON.parse(aggregateText) as { model: string; specialist_overrides: boolean; roles: { role: string; model: string; model_source: string }[] };
+    assert.equal(aggregate.model, `specialist-default@${server.url}/v1 (openai)`);
+    assert.equal(aggregate.specialist_overrides, true);
+    assert.deepEqual(aggregate.roles.map(({ role, model, model_source }) => ({ role, model, model_source })), [
+      { role: "correctness", model: "correctness-override", model_source: "role-override" },
+      { role: "security", model: "security-override", model_source: "role-override" },
+      { role: "tests", model: "tests-override", model_source: "role-override" },
+    ]);
+    assert.ok(![...result.out, ...result.err, aggregateText, ...["correctness", "security", "tests"].map((role) => result.read(`specialist-${role}.request.json`))].join("\n").includes("specialist-profile-secret"));
+    rmSync(result.root, { recursive: true, force: true });
+  } finally {
+    await server.close();
+  }
+});
+
+test("invalid specialist format warns and falls back to the primary transport", async () => {
+  const seen: { url: string; model: string }[] = [];
+  const server = await startMockServer((req, body, res) => {
+    seen.push({ url: req.url ?? "", model: (JSON.parse(body) as { model: string }).model });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(leadsResponse([])));
+  });
+  try {
+    const result = await run({
+      DEEP_REVIEW: "true",
+      AI_BASE_URL: `${server.url}/v1`,
+      AI_SPECIALIST_MODEL: "specialist",
+      AI_SPECIALIST_API_FORMAT: "bogus",
+    }, { productionTransport: true });
+    assert.equal(result.code, 0);
+    assert.ok(result.out.includes("WARNING: specialist profile ignored: AI_SPECIALIST_API_FORMAT must be openai or anthropic"));
+    assert.equal(seen.length, 3);
+    assert.ok(seen.every((request) => request.url === "/v1/chat/completions" && request.model === "m"));
+    rmSync(result.root, { recursive: true, force: true });
+  } finally {
+    await server.close();
+  }
 });
 
 test("auto mode: classification drives selection; skipped roles keep v2's exact entry (elapsed 0.0, no usage)", async () => {

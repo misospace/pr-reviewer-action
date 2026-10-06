@@ -20,7 +20,7 @@ test("current canonical contract validates and maps every input once", () => {
     assert.ok(Object.hasOwn(config, toCamelCase(input.id)), input.id);
     assert.equal(toCamelCase(input.id).includes("_"), false);
   }
-  assert.equal(contract.inputs.length, 130);
+  assert.equal(contract.inputs.length, 137);
   assert.equal(Object.hasOwn(config, "ai_base_url"), false);
 });
 
@@ -94,6 +94,21 @@ test("contract defaults and typed parsing agree for every input", () => {
     assert.throws(() => loadConfig(contract, missing), new RegExp(`Required input '${input.id}' is missing`));
     assert.throws(() => loadConfig(contract, { ...required, [input.id]: "" }), new RegExp(`Required input '${input.id}' is missing`));
   }
+});
+
+test("contract accepts v3-only inputs and validates legacy mappings", () => {
+  const makeContract = (input: Record<string, unknown>): unknown => ({
+    schema_version: 1,
+    contract: "github-action",
+    inputs: [input],
+    outputs: [],
+    removed: [],
+  });
+  const base = { id: "new-v3-input", required: false, description: "v3-only input" };
+  assert.equal(validateContract(makeContract(base)).inputs[0]?.v2_id, undefined);
+
+  const withLegacyId = validateContract(makeContract({ ...base, id: "legacy-input", v2_id: "legacy_input" }));
+  assert.equal(withLegacyId.inputs[0]?.v2_id, "legacy_input");
 });
 
 test("contract validation rejects malformed schema and collisions", () => {
