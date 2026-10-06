@@ -69,7 +69,7 @@ export const TRACE_REPAIR_SYSTEM_PROMPT =
   + "production code. `met` requires BOTH a valid enforcement location and a valid test location, and the "
   + "enforcement line must contain a real predicate — a comparison, guard, throw/assert, or match call — "
   + "not just an assignment or object-literal property that copies the value (naming the field is not "
-  + "enforcing it). `not_applicable`, `unmet`, and `unverifiable` all require a `reason`. A `met` claim for a requirement listed as distributed must cite one enforcement location in each named seam. Return strict "
+  + "enforcing it). `not_applicable`, `unmet`, and `unverifiable` all require a `reason`. A `met` claim for a requirement listed as distributed must cite one enforcement location and one matching test in each named seam. Return strict "
   + 'JSON only — no prose, no markdown, no code fences: {"requirement_coverage":[ ... ]}.';
 
 function fitUtf8(text: string, maxBytes: number): [string, boolean] {

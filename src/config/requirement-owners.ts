@@ -37,7 +37,7 @@ import { execFileSync } from "node:child_process";
 import { parse as parseYaml } from "yaml";
 import { RepositoryConfigError, verifyBaseRef } from "./repository-config.js";
 import {
-  MAX_GROUPS_PER_RULE,
+  MAX_DECLARED_GROUPS_PER_RULE,
   MAX_GROUP_NAME_CHARS,
   MIN_DISTRIBUTED_GROUPS,
 } from "../enforcement/requirement-trace.js";
@@ -240,25 +240,21 @@ export function parseRequirementOwners(text: string, path: string): ParsedRequir
 
           const rawTests = rawGroup["tests"];
           const groupTests: string[] = [];
-          if (Object.hasOwn(rawGroup, "tests")) {
-            if (!Array.isArray(rawTests)) {
-              warnings.push(`Requirement owners '${path}' rule '${slug}' group '${name}' has a 'tests' key that yields no valid globs.`);
-            } else {
-              if (rawTests.length > MAX_OWNERS_PER_RULE) {
-                warnings.push(`Requirement owners '${path}' rule '${slug}' group '${name}' lists more than ${MAX_OWNERS_PER_RULE} test paths; extra paths ignored.`);
-              }
-              for (const test of rawTests) {
-                if (groupTests.length >= MAX_OWNERS_PER_RULE) break;
-                if (typeof test !== "string" || !isValidOwnerPattern(test)) {
-                  warnings.push(`Requirement owners '${path}' rule '${slug}' group '${name}' has an invalid test path; ignoring it.`);
-                  continue;
-                }
-                groupTests.push(test.toLowerCase());
-              }
-              if (groupTests.length === 0) {
-                warnings.push(`Requirement owners '${path}' rule '${slug}' group '${name}' has a 'tests' key that yields no valid globs.`);
-              }
+          if (Array.isArray(rawTests)) {
+            if (rawTests.length > MAX_OWNERS_PER_RULE) {
+              warnings.push(`Requirement owners '${path}' rule '${slug}' group '${name}' lists more than ${MAX_OWNERS_PER_RULE} test paths; extra paths ignored.`);
             }
+            for (const test of rawTests) {
+              if (groupTests.length >= MAX_OWNERS_PER_RULE) break;
+              if (typeof test !== "string" || !isValidOwnerPattern(test)) {
+                warnings.push(`Requirement owners '${path}' rule '${slug}' group '${name}' has an invalid test path; ignoring it.`);
+                continue;
+              }
+              groupTests.push(test.toLowerCase());
+            }
+          }
+          if (groupTests.length === 0) {
+            warnings.push(`Requirement owners '${path}' rule '${slug}' group '${name}' has no valid test globs.`);
           }
 
           const existing = parsedGroups.find((group) => group.name === name);
@@ -276,11 +272,11 @@ export function parseRequirementOwners(text: string, path: string): ParsedRequir
         warnings.push(`Requirement owners '${path}' rule '${slug}' has a 'groups' key that is not a list; ignoring it.`);
       }
       const sortedGroups = parsedGroups.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
-      if (sortedGroups.length > MAX_GROUPS_PER_RULE) {
-        const dropped = sortedGroups.slice(MAX_GROUPS_PER_RULE).map((group) => group.name);
-        warnings.push(`Requirement owners '${path}' rule '${slug}' exceeds ${MAX_GROUPS_PER_RULE} groups; dropped: ${dropped.join(", ")}.`);
+      if (sortedGroups.length > MAX_DECLARED_GROUPS_PER_RULE) {
+        const dropped = sortedGroups.slice(MAX_DECLARED_GROUPS_PER_RULE).map((group) => group.name);
+        warnings.push(`Requirement owners '${path}' rule '${slug}' exceeds ${MAX_DECLARED_GROUPS_PER_RULE} declared groups; dropped: ${dropped.join(", ")}.`);
       }
-      const cappedGroups = sortedGroups.slice(0, MAX_GROUPS_PER_RULE);
+      const cappedGroups = sortedGroups.slice(0, MAX_DECLARED_GROUPS_PER_RULE);
       const ownerSets = new Set<string>();
       const warnedOwnerPairs = new Set<string>();
       for (const group of cappedGroups) {

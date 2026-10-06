@@ -192,7 +192,7 @@ export function applyRequirementTraceFragment(
   }
   if (distributedHints && distributedHints.length > 0) {
     const cleanName = (name: string): string => name.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_GROUP_NAME_CHARS);
-    const hintLine = `Distributed requirements — cite one enforcement location in each declared seam (a single location cannot satisfy them): ${distributedHints
+    const hintLine = `Distributed requirements — cite one enforcement location and one matching test in each declared seam (a single location cannot satisfy them): ${distributedHints
       .slice(0, MAX_DISTRIBUTED_HINTS)
       .map((hint) => `\`${cleanName(hint.requirementId)}\` → ${hint.groups.slice(0, MAX_GROUPS_PER_RULE).map(cleanName).join(", ")}`)
       .join("; ")}`;

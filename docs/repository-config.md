@@ -114,14 +114,16 @@ requirements:
 The model never declares a group and never supplies a glob: topology is
 base-ref-trusted config, so a PR contributor cannot promote a requirement to
 "distributed", and citing many irrelevant locations cannot satisfy a seam whose
-surface the citations never touch. Groups are capped at four per rule (so the
-existing five-citation bound always suffices); a group whose `tests` key is
-absent or yields no valid globs carries no per-seam test obligation. A rule
-whose `groups` block yields fewer than two valid groups is retained as a plain
-ownership rule with a warning, and the union of groups across matching rules is
-capped with a warning naming any dropped group. The full contract — the
-collective validation algorithm, the anti-abuse properties, and the fail-soft /
-fail-closed matrix — is pinned in
+surface the citations never touch. Every group must declare both an enforcement
+surface (`owners`) and a test surface (`tests`), and each seam must be covered by
+a distinct enforcement citation **and** a distinct test citation — so a generic
+or unrelated test file elsewhere cannot satisfy a distributed requirement.
+Groups are capped at four representable seams per requirement; declaring more
+fails the trace closed rather than validating a truncated proof. A rule whose
+`groups` block yields fewer than two valid groups is retained as a plain
+ownership rule with a warning. The full contract — the collective validation
+algorithm, the anti-abuse properties, and the fail-soft / fail-closed matrix —
+is pinned in
 [`architecture/distributed-requirement-proof.md`](architecture/distributed-requirement-proof.md).
 
 ## Keys

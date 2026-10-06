@@ -55,7 +55,9 @@ export const TRACE_DISPOSITIONS: readonly string[] = ["met", "unmet", "not_appli
 
 export const MAX_TRACE_LOCATIONS = 5;
 export const MAX_GROUPS_PER_RULE = MAX_TRACE_LOCATIONS - 1;
+export const MAX_DECLARED_GROUPS_PER_RULE = 16;
 export const MAX_GROUP_NAME_CHARS = 60;
+export const MAX_RENDERED_ID_CHARS = 64;
 export const MIN_DISTRIBUTED_GROUPS = 2;
 export const MAX_DISTRIBUTED_HINTS = 20;
 export const MAX_REASON_CHARS = 300;
@@ -497,7 +499,8 @@ function ownerPatternRegex(pattern: string): RegExp {
 
 interface DistributedGroupSet {
   groups: RequirementGroup[];
-  dropped: string[];
+  overflow: boolean;
+  excess: string[];
 }
 
 function ruleMatchesRequirement(rule: RequirementOwnership, text: string): boolean {
@@ -537,8 +540,11 @@ function distributedGroupsForText(
   const sorted = [...byName.values()]
     .filter((group) => group.owners.length > 0)
     .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
-  const groups = sorted.slice(0, MAX_GROUPS_PER_RULE);
-  return { groups, dropped: sorted.slice(MAX_GROUPS_PER_RULE).map((group) => group.name) };
+  return {
+    groups: sorted.slice(0, MAX_DECLARED_GROUPS_PER_RULE),
+    overflow: sorted.length > MAX_GROUPS_PER_RULE,
+    excess: sorted.slice(MAX_GROUPS_PER_RULE).map((group) => group.name),
+  };
 }
 
 /** Resolve trusted distributed topology for the requested ledger ids. */
@@ -555,15 +561,15 @@ export function distributedRequirementHints(
     seenScopeIds.add(requirementId);
     const entry = entries.get(requirementId);
     if (!entry) continue;
-    const { groups } = distributedGroupsForText(entry.text, ownership);
-    if (groups.length < MIN_DISTRIBUTED_GROUPS) continue;
+    const { groups, overflow } = distributedGroupsForText(entry.text, ownership);
+    if (overflow || groups.length < MIN_DISTRIBUTED_GROUPS) continue;
     hints.push({ requirementId, groups: groups.map((group) => group.name) });
     if (hints.length >= MAX_DISTRIBUTED_HINTS) break;
   }
   return hints;
 }
 
-/** Warning diagnostics for group unions capped while resolving a requirement. */
+/** Warning diagnostics for effective distributed topology that exceeds the representable cap. */
 export function distributedRequirementWarnings(
   ledger: unknown,
   ownership: readonly RequirementOwnership[] | undefined,
@@ -577,9 +583,9 @@ export function distributedRequirementWarnings(
     seenScopeIds.add(requirementId);
     const entry = entries.get(requirementId);
     if (!entry) continue;
-    const { dropped } = distributedGroupsForText(entry.text, ownership);
-    if (dropped.length > 0) {
-      warnings.push(`requirement '${requirementId}' exceeds ${MAX_GROUPS_PER_RULE} distributed groups; dropped: ${dropped.join(", ")}.`);
+    const { overflow, excess } = distributedGroupsForText(entry.text, ownership);
+    if (overflow) {
+      warnings.push(`requirement '${requirementId}' exceeds ${MAX_GROUPS_PER_RULE} distributed groups; excess: ${excess.join(", ")}.`);
     }
   }
   return warnings;
@@ -775,7 +781,8 @@ export function validateRequirementTrace(
   for (const entry of inScope) {
     const claim = claimsById.get(entry.id);
     const notes: string[] = [];
-    const distributedGroups = distributedGroupsForText(entry.text, context.ownership).groups;
+    const distributedSet = distributedGroupsForText(entry.text, context.ownership);
+    const distributedGroups = distributedSet.groups;
     const isDistributed = distributedGroups.length >= MIN_DISTRIBUTED_GROUPS;
     let disposition: string;
     let enforcement: TraceLocation[];
@@ -807,7 +814,7 @@ export function validateRequirementTrace(
           notes.push("missing-reason");
         }
       } else if (disposition === "met") {
-        if (isDistributed) {
+        if (isDistributed && !distributedSet.overflow) {
           const validEnforcementLocations = enforcement.filter((loc) => locationValid(loc, cache));
           const enforcementMatches = matchCitationsToGroups(distributedGroups, validEnforcementLocations, (group) => group.owners);
           const uncoveredEnforcement = distributedGroups.filter((group) => !enforcementMatches.has(group.name));
@@ -816,13 +823,12 @@ export function validateRequirementTrace(
           }
 
           const validTests = test.filter((loc) => isTestPath(loc.file) && locationValid(loc, cache));
-          const testGroups = distributedGroups.filter((group) => group.tests.length > 0);
-          const testMatches = matchCitationsToGroups(testGroups, validTests, (group) => group.tests);
-          for (const group of testGroups) {
+          const testMatches = matchCitationsToGroups(distributedGroups, validTests, (group) => group.tests);
+          for (const group of distributedGroups) {
             if (!testMatches.has(group.name)) notes.push(`distributed-test-group-uncovered:${group.name}`);
           }
           if (validTests.length === 0) notes.push("distributed-test-location-uncovered");
-          if (uncoveredEnforcement.length > 0 || testGroups.some((group) => !testMatches.has(group.name)) || validTests.length === 0) {
+          if (uncoveredEnforcement.length > 0 || distributedGroups.some((group) => !testMatches.has(group.name)) || validTests.length === 0) {
             disposition = "unverifiable";
           } else {
             const terms = extractRequirementTerms(entry.text);
@@ -835,7 +841,7 @@ export function validateRequirementTrace(
               notes.push("enforcement-location-copies-without-comparing");
             }
           }
-        } else {
+        } else if (!isDistributed) {
           // Full narrow trace required: a valid enforcement location AND a
           // valid test location, then a predicate near a requirement term.
           if (!anyLocationValid(enforcement, cache)) {
@@ -856,6 +862,11 @@ export function validateRequirementTrace(
           }
         }
       }
+    }
+
+    if (distributedSet.overflow && isDistributed) {
+      disposition = "unverifiable";
+      notes.push("distributed-topology-overflow");
     }
 
     // #874 maintainer follow-up: a well-formed `unmet` is a KNOWN gap, not
@@ -998,6 +1009,7 @@ export function renderRequirementTraceMarkdown(trace: RequirementTraceArtifact):
   const notable = trace.rows.filter((row) => row.disposition === "unmet" || row.disposition === "unverifiable");
   if (notable.length === 0) return "";
   const cleanSeam = (name: string): string => name.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_GROUP_NAME_CHARS);
+  const cleanRequirementId = (id: string): string => id.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_RENDERED_ID_CHARS);
   const seamNames = (row: RequirementTraceRow, prefix: string): string[] => [...new Set(
     row.notes.filter((note) => note.startsWith(prefix)).map((note) => cleanSeam(note.slice(prefix.length))).filter(Boolean),
   )].slice(0, MAX_GROUPS_PER_RULE);
@@ -1010,18 +1022,22 @@ export function renderRequirementTraceMarkdown(trace: RequirementTraceArtifact):
         ? "the reviewer reported no trace for this requirement"
         : "no valid enforcement location";
     const details: string[] = [];
-    if (enforcementMisses.length > 0) {
-      if (row.enforcement.length > 0) details.push(loc);
-      details.push(`uncovered enforcement seams: ${enforcementMisses.map((name) => `\`${name}\``).join(", ")}`);
+    if (row.notes.includes("distributed-topology-overflow")) {
+      details.push(`distributed topology exceeds the ${MAX_GROUPS_PER_RULE} representable seams`);
     } else {
-      details.push(loc);
+      if (enforcementMisses.length > 0) {
+        if (row.enforcement.length > 0) details.push(loc);
+        details.push(`uncovered enforcement seams: ${enforcementMisses.map((name) => `\`${name}\``).join(", ")}`);
+      } else {
+        details.push(loc);
+      }
+      if (testMisses.length > 0) {
+        details.push(`uncovered test seams: ${testMisses.map((name) => `\`${name}\``).join(", ")}`);
+      }
+      if (row.notes.includes("distributed-test-location-uncovered")) details.push("no test location cited");
     }
-    if (testMisses.length > 0) {
-      details.push(`uncovered test seams: ${testMisses.map((name) => `\`${name}\``).join(", ")}`);
-    }
-    if (row.notes.includes("distributed-test-location-uncovered")) details.push("no test location cited");
     const reason = row.reason !== "" ? `: ${row.reason}` : "";
-    return `- \`${row.requirement_id}\` — **${row.disposition}** (${details.join("; ")})${reason}`;
+    return `- \`${cleanRequirementId(row.requirement_id)}\` — **${row.disposition}** (${details.join("; ")})${reason}`;
   });
   if (notable.length > MAX_RENDERED_ROWS) lines.push(`- …and ${notable.length - MAX_RENDERED_ROWS} more`);
   const summary = `${notable.length} of ${trace.rows.length} requirement(s) not fully traced to enforcement and a test:`;
