@@ -496,17 +496,33 @@ test("#961: a draft PR is skipped deterministically in the shared review path", 
   assert.ok(output.diff_fingerprint.length > 0);
 });
 
-test("#961: a ready PR reviews and an absent draft field keeps reviewing", async () => {
+test("#961: a ready PR reviews; an absent draft field fails closed", async () => {
   const fx = fixture("changed-diff-reviews");
   const explicit = await runPrecheck({
     env: fx.env,
     adapter: new FixtureAdapter("github", { ...fx.platform, pr: { ...(fx.platform.pr as object), state: "open", draft: false } }),
   });
   assert.equal(explicit.should_review, "true");
-  // The parity fixtures' PR objects carry no draft field at all; the
-  // pulls API always supplies one, so absence reads as not-draft.
-  const absent = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", fx.platform) });
-  assert.equal(absent.should_review, "true");
+  // Only an explicit boolean draft value is authoritative. A payload
+  // without one cannot prove the PR is reviewable — skip.
+  const absentPr = { ...(fx.platform.pr as Record<string, unknown>) };
+  delete absentPr.draft;
+  const absent = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", { ...fx.platform, pr: absentPr }) });
+  assert.equal(absent.should_review, "false");
+  assert.equal(absent.skip_reason, "pr-draft");
+});
+
+test("#961: a shared-path PR lookup failure fails closed as pr-draft", async () => {
+  const fx = fixture("changed-diff-reviews");
+  const output = await runPrecheck({
+    env: fx.env,
+    adapter: new FixtureAdapter("github", { ...fx.platform, pr_error: true }),
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "pr-draft");
+  // The lookup failed, so there is no identity to report.
+  assert.equal(output.head_sha, "");
+  assert.equal(output.base_sha, "");
 });
 
 test("#961: an unrecognizable draft value fails closed", async () => {
@@ -600,7 +616,7 @@ function skipAdapter812(external: ExternalCheck[] | null, body: string, options:
   return {
     readCount: () => reads,
     platform: "github",
-    getPr: () => Promise.resolve(options.pr ?? { number: 42, head: { sha: "head-new", ref: "f" }, base: { ref: "main", sha: "base-new" }, user: { login: "u" } }),
+    getPr: () => Promise.resolve(options.pr ?? { number: 42, state: "open", draft: false, head: { sha: "head-new", ref: "f" }, base: { ref: "main", sha: "base-new" }, user: { login: "u" } }),
     getPrDiff: () => Promise.resolve("diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n"),
     listIssueComments: () => Promise.resolve([{ id: 1, body, created_at: "2024-01-01T00:00:00Z" }]),
     listPrReviews: () => Promise.resolve([]),

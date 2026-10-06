@@ -53,24 +53,16 @@ export type DraftState = "draft" | "not-draft" | "unknown";
 
 /**
  * The ONE draft derivation (#961): a PR the forge reports as a draft is
- * never reviewed. `draft` is `true` only for an unambiguous draft (the
- * boolean the pulls APIs send, or the string form a shell/jq seam
- * produces), `not-draft` for an unambiguous non-draft — including an
- * absent field, mirroring the closed-PR check's treatment of a missing
- * `state` (the forge APIs always supply the flag; adapters that do not
- * surface it keep working) — and `unknown` when the payload carries a
- * draft value no forge ever sends. Callers decide which side uncertainty
- * fails to; the precheck fails closed.
+ * never reviewed. Only an explicit boolean `draft` value is authoritative:
+ * `true` → draft, `false` → not-draft (the Forgejo adapter normalizes its
+ * payload to a boolean at the seam; the GitHub pulls API sends one). A
+ * missing, null, or unrecognizable draft value is `unknown` — the caller
+ * decides which side uncertainty fails to, and the precheck fails closed:
+ * a PR whose reviewability cannot be PROVEN is not reviewed.
  */
 export function deriveDraftState(raw: unknown): DraftState {
   const value = asObject(raw).draft;
   if (value === true) return "draft";
   if (value === false) return "not-draft";
-  if (typeof value === "string") {
-    const lowered = value.trim().toLowerCase();
-    if (lowered === "true") return "draft";
-    if (lowered === "false" || lowered === "") return "not-draft";
-  }
-  if (value === undefined || value === null) return "not-draft";
   return "unknown";
 }

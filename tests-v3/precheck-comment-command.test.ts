@@ -34,9 +34,13 @@ function baseEnv(overrides: Record<string, string> = {}): Record<string, string>
   };
 }
 
-/** A same-repo PR (NOT a fork): head and base full names match. */
+/** A same-repo PR (NOT a fork): head and base full names match. The draft
+ * flag is explicit — only an explicit boolean is authoritative (#961), so
+ * an absent field would fail closed. */
 function sameRepoPr(): unknown {
   return {
+    state: "open",
+    draft: false,
     head: { sha: "head-abc", repo: { full_name: "o/r" } },
     base: { sha: "base-abc", repo: { full_name: "o/r" } },
   };

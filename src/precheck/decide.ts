@@ -470,9 +470,10 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
       );
     }
     // #961: a draft PR is never reviewed — the command cannot pull a draft
-    // into review any more than it could a closed one. Same read as the
-    // state check above: the pulls API always supplies the draft flag, and
-    // a payload reporting an unrecognizable draft value fails closed.
+    // into review any more than it could a closed one. Only an explicit
+    // boolean draft value is authoritative; an uncertain one fails closed,
+    // and a failed PR lookup never reaches this check (comment-pr-lookup-
+    // failed above).
     if (deriveDraftState(prObject) !== "not-draft") {
       return platformOutputs(
         { should_review: "false", skip_reason: "comment-pr-draft" },
@@ -652,11 +653,13 @@ async function reviewPathOutputs(
   // A draft PR is never reviewed, deterministically: a consumer whose
   // workflow forgot the `if: !github.event.pull_request.draft` guard no
   // longer gets a draft reviewed. Checked with the PR object already in
-  // hand (no extra fetch). The forge APIs always supply the draft flag;
-  // a payload reporting an unrecognizable draft value fails closed. The
-  // gate outranks even a forced re-review (the #231 label, an accepted
-  // #914 command) on purpose — marking the PR ready for review is what
-  // re-opens it, and the ready transition fires its own review.
+  // hand (no extra fetch). Only an explicit boolean draft value is
+  // authoritative; a missing or unrecognizable one fails closed — a PR
+  // whose reviewability cannot be proven is not reviewed — and so does a
+  // failed PR lookup (getPr null derives unknown). The gate outranks even
+  // a forced re-review (the #231 label, an accepted #914 command) on
+  // purpose — marking the PR ready for review is what re-opens it, and
+  // the ready transition fires its own review.
   if (deriveDraftState(prObject) !== "not-draft") {
     return platformOutputs(
       {
