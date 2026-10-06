@@ -39,6 +39,10 @@ export function isIncompleteReason(value: unknown): value is IncompleteReason {
 
 export interface ReviewStepOutputs {
   verdict: string;
+  /** #978: the review gathered no evidence (tool loop issued no calls) or is
+   * the model-failure notice. Read in-process by the fail-on-request-changes
+   * gate; deliberately NOT a published output id. */
+  degraded: boolean;
   verdictSource: string;
   requiredChecks: string;
   /** #873: the metadata marker's review_result state (clean/findings/
@@ -88,7 +92,7 @@ export function formatOutputAssignment(
  * are derived from `REVIEW_STEP_OUTPUT_IDS` so the constant and the writer
  * cannot drift apart. */
 export function formatReviewStepOutputs(
-  outputs: ReviewStepOutputs,
+  outputs: Omit<ReviewStepOutputs, "degraded">,
   randomBytes?: () => Uint8Array,
 ): string {
   const assignments: Array<[string, string]> = [

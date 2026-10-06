@@ -116,6 +116,7 @@ test("runs the full review end to end: artifacts, outputs, marker", async () => 
     });
     // Verdict surfaced through the typed outputs.
     assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.outputs.degraded, false);
     assert.equal(result.outputs.reviewRoute, "legacy");
     assert.equal(result.outputs.analysisEngine, "m@http://127.0.0.1:" + new URL(server.url).port + " (openai)");
     assert.match(result.outputs.analysisEngine, /^m@http/);
@@ -389,6 +390,7 @@ for (const withFallback of [false, true]) {
         quiet: true,
       });
       assert.equal(result.outputs.verdict, "request_changes");
+      assert.equal(result.outputs.degraded, true);
       const artifact = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as { verdict: string; review_markdown: string };
       assert.equal(artifact.verdict, "request_changes");
       assert.match(artifact.review_markdown, /automated notice, not a substantive review/);
@@ -550,6 +552,7 @@ test("#867: primary and fallback both classify a non-2xx reply as transport, and
       `the parse-retry path must not be taken on either route, got: ${JSON.stringify(errors)}`,
     );
     assert.equal(result.outputs.verdict, "request_changes");
+    assert.equal(result.outputs.degraded, true);
     const artifact = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as { verdict: string; review_markdown: string };
     assert.equal(artifact.verdict, "request_changes");
     assert.match(artifact.review_markdown, /automated notice, not a substantive review/);
@@ -766,7 +769,7 @@ test("#965: auto routing starts on primary even for an auth-risk PR", async () =
   }
 });
 
-test("primary failure uses primary retries and the availability fallback", async () => {
+test("primary non-retryable failure fast-fails to the availability fallback", async () => {
   const primaryServer = await startMockServer((_req, _body, res) => {
     res.statusCode = 400;
     res.setHeader("Content-Type", "application/json");
@@ -792,15 +795,15 @@ test("primary failure uses primary retries and the availability fallback", async
         "ai-smart-base-url": smartServer.url, "ai-smart-model": "smart-m", "ai-smart-api-key": "smart-key",
         "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
         "ai-stream": "false", "review-routing-mode": "auto",
-        "ai-primary-retries": "2", "ai-primary-retry-delay-sec": "0", "ai-connect-timeout-sec": "2",
+        "ai-primary-retries": "8", "ai-primary-retry-delay-sec": "0", "ai-connect-timeout-sec": "2",
         "ai-request-timeout-sec": "2", "tool-mode": "off", "deep-review": "false",
       },
       runDir, workspace: runDir,
       platformAdapter: mockPlatform({ files: [{ filename: "src/auth/login.ts", status: "modified", additions: 1, deletions: 1, changes: 2 }] }),
-      sleep: async () => {}, quiet: true,
+      sleep: async () => { assert.fail("HTTP 400 must not incur retry backoff"); }, quiet: true,
     });
     assert.equal(result.outputs.reviewRoute, "primary");
-    assert.equal(primaryServer.requests.length, 2, "primary retries must be used before fallback");
+    assert.equal(primaryServer.requests.length, 1, "non-retryable HTTP 400 gets one primary attempt before fallback");
     assert.equal(smartCalls, 0, "risk flags alone must not route a failure to smart");
     assert.ok(primaryServer.requests.every((request) => request.headers.authorization === "Bearer primary-key"));
     assert.equal(fallbackServer.requests.length, 1);
@@ -811,6 +814,107 @@ test("primary failure uses primary retries and the availability fallback", async
   } finally {
     await primaryServer.close();
     await smartServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
+test("#978: a 403 gets one primary request before fallback and publishes the fallback verdict", async () => {
+  let primaryReviewAttempts = 0;
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    primaryReviewAttempts += 1;
+    res.setHeader("Content-Type", "text/plain");
+    res.statusCode = 403;
+    res.end("model forbidden\n::warning::echoed key known-primary-api-key-978");
+  });
+  const fallbackServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ review_markdown: "Fallback review after forbidden primary.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const sleeps: number[] = [];
+  const annotations: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "known-primary-api-key-978",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "off", "deep-review": "false",
+        "ai-primary-retries": "8", "ai-primary-retry-delay-sec": "15",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async (seconds) => { sleeps.push(seconds); },
+      annotate: (line) => { annotations.push(line); },
+      quiet: true,
+    });
+    assert.equal(primaryServer.requests.length, 1, "HTTP 403 must make exactly one primary request despite the retry budget of 8");
+    assert.equal(primaryReviewAttempts, 1);
+    assert.equal(fallbackServer.requests.length, 1, "the fallback must run after the primary 403");
+    assert.deepEqual(sleeps, [], "a non-retryable 403 must not incur backoff");
+    assert.equal(annotations.length, 1, "the primary 403 should emit exactly one workflow annotation");
+    assert.match(annotations[0]!, /::error::.*HTTP 403/);
+    assert.ok(!annotations[0]!.includes("known-primary-api-key-978"), "the annotation must not expose the configured API key");
+    assert.ok(!/[\r\n]/.test(annotations[0]!), "provider body text must not break out of the annotation line");
+    assert.ok(!annotations[0]!.includes("::warning::"), "provider body text must not inject another workflow command");
+    assert.equal(result.outputs.verdict, "approve");
+    assert.match(result.outputs.analysisEngine, /fallback-m@.*fallback \(primary failed\)/);
+    assert.match(result.outputs.reviewMarkdown, /Fallback review after forbidden primary\./);
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
+test("#978: degraded native-loop fallback request_changes passes the gate by default", async () => {
+  const primaryServer = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      // The planning turn gets no tool calls and records native_loop_degraded.
+      res.end(verdictBody(baseVerdict()));
+      return;
+    }
+    res.statusCode = 500;
+    res.end(JSON.stringify({ error: "primary unavailable" }));
+  });
+  const fallbackServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ verdict: "request_changes", review_markdown: "Fallback request-changes review.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop", "tool-max-requests": "1",
+        "verdict-policy": "model", "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2", "deep-review": "false",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      quiet: true,
+    });
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_degraded?: string };
+    assert.equal(harness.native_loop_degraded, "no-tool-calls", "the planning turn must exercise degraded native-loop coverage");
+    assert.ok(primaryServer.requests.length >= 2, "the primary must serve its native-loop turn and fail over to the fallback");
+    assert.equal(fallbackServer.requests.length, 1, "fallback must provide the final verdict");
+    assert.equal(result.outputs.verdict, "request_changes");
+    assert.match(result.outputs.analysisEngine, /fallback-m@.*fallback \(primary failed\)/);
+    assert.match(result.outputs.reviewMarkdown, /Fallback request-changes review\./);
+    assert.equal(result.outputs.degraded, true, "the native loop issued no tool calls");
+  } finally {
+    await primaryServer.close();
     await fallbackServer.close();
     cleanup();
   }

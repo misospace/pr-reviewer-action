@@ -76,6 +76,72 @@ test("transport failures consume the budget with doubling backoff capped at 120s
   assert.deepEqual(sleeps, [15, 30, 60]);
 });
 
+test("#978: non-retryable HTTP statuses fast-fail regardless of the tier retry budget", async () => {
+  for (const status of [400, 401, 403, 404]) {
+    let calls = 0;
+    const sleeps: number[] = [];
+    const outcome = await callModelTier(profile({ retries: 8 }), CONTEXT, {
+      sleep: async (seconds) => { sleeps.push(seconds); },
+      call: async () => {
+        calls++;
+        return {
+          status: "failure",
+          failure: new TransportFailure("http_status", `HTTP ${status}`, { status }),
+        };
+      },
+    });
+    assert.equal(outcome.status, "transport_exhausted", `status ${status}`);
+    if (outcome.status === "transport_exhausted") {
+      assert.equal(outcome.nonRetryable, true, `status ${status}`);
+      assert.equal(outcome.attempts, 1, `status ${status}`);
+    }
+    assert.equal(calls, 1, `status ${status}`);
+    assert.deepEqual(sleeps, [], `status ${status}`);
+  }
+});
+
+test("#978: retryable HTTP statuses still consume the retry budget", async () => {
+  for (const status of [429, 500]) {
+    let calls = 0;
+    const sleeps: number[] = [];
+    const outcome = await callModelTier(profile({ retries: 3, retryDelaySec: 15 }), CONTEXT, {
+      sleep: async (seconds) => { sleeps.push(seconds); },
+      call: async () => {
+        calls++;
+        return {
+          status: "failure",
+          failure: new TransportFailure("http_status", `HTTP ${status}`, { status }),
+        };
+      },
+    });
+    assert.equal(outcome.status, "transport_exhausted", `status ${status}`);
+    assert.equal(calls, 3, `status ${status}`);
+    assert.deepEqual(sleeps, [15, 30], `status ${status}`);
+    if (outcome.status === "transport_exhausted") assert.equal(outcome.nonRetryable, undefined);
+  }
+});
+
+test("#978: network failures and HTTP failures with unknown status still retry", async () => {
+  for (const failure of [
+    new TransportFailure("network", "network down"),
+    new TransportFailure("http_status", "HTTP status unavailable"),
+  ]) {
+    let calls = 0;
+    const sleeps: number[] = [];
+    const outcome = await callModelTier(profile({ retries: 3, retryDelaySec: 15 }), CONTEXT, {
+      sleep: async (seconds) => { sleeps.push(seconds); },
+      call: async () => {
+        calls++;
+        return { status: "failure", failure };
+      },
+    });
+    assert.equal(outcome.status, "transport_exhausted");
+    assert.equal(calls, 3);
+    assert.deepEqual(sleeps, [15, 30]);
+    if (outcome.status === "transport_exhausted") assert.equal(outcome.nonRetryable, undefined);
+  }
+});
+
 test("#867: retries: 0 still makes one real attempt, classified as transport_exhausted (never the synthetic parse default)", async () => {
   let calls = 0;
   const sleeps: number[] = [];

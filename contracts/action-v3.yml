@@ -99,7 +99,14 @@ inputs:
     v2_id: fail_on_request_changes
     required: false
     default: "false"
-    description: "If true, fail the action step when the final verdict is request_changes, so the review can act as a CI merge gate without a GitHub App. The gate runs after publishing, so the review comment and inline findings still land on the PR. It reads the same final verdict the `verdict` output reports (post-verdict_policy, post-evidence-blocker and tool-failure enforcement), not the raw model verdict. on_model_failure=notice still passes: a model outage produces no verdict and must not wedge merges. Default false — existing consumers see no behaviour change."
+    description: "If true, fail the action step when the final verdict is request_changes, so the review can act as a CI merge gate without a GitHub App. The gate runs after publishing, so the review comment and inline findings still land on the PR. It reads the same final verdict the `verdict` output reports (post-verdict_policy, post-evidence-blocker and tool-failure enforcement), not the raw model verdict. on_model_failure=notice still passes: a model outage produces no verdict and must not wedge merges. Default false — existing consumers see no behaviour change. A degraded review warns and passes unless fail-on-degraded-review is true."
+    repo-configurable: true
+    repo-policy: true
+  - id: fail-on-degraded-review
+    v2_id: fail_on_degraded_review
+    required: false
+    default: "false"
+    description: "If true, the fail-on-request-changes gate also fails when the final verdict is request_changes but the review was degraded — the tool loop gathered no evidence, or the verdict is the model-failure notice (on-model-failure=notice). Default false: a review that could not gather evidence, or that never ran because the endpoint was unreachable, must not wedge a merge on a request_changes it could not substantiate. Ignored unless fail-on-request-changes is true."
     repo-configurable: true
     repo-policy: true
   - id: verdict-policy
@@ -339,7 +346,7 @@ inputs:
     v2_id: allow_repo_policy_overrides
     required: false
     default: "false"
-    description: "If true, a repository config file may set policy inputs (marked repo-policy in the v3 contract: verdict policy, blocking categories, required-check and evidence enforcement, fail-on-request-changes, system prompt mode) that the workflow left unset. Defaults to false, so a repository cannot loosen a gate its operator enforces. v3 only."
+    description: "If true, a repository config file may set policy inputs (marked repo-policy in the v3 contract: verdict policy, blocking categories, required-check and evidence enforcement, fail-on-request-changes, fail-on-degraded-review, system prompt mode) that the workflow left unset. Defaults to false, so a repository cannot loosen a gate its operator enforces. v3 only."
   - id: approve-forks
     v2_id: approve_forks
     required: false

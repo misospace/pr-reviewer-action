@@ -135,6 +135,7 @@ export interface RunReviewOptions {
   sleep?: (seconds: number) => Promise<void>;
   log?: (line: string) => void;
   error?: (line: string) => void;
+  annotate?: (line: string) => void;
   /** Override the CI gate branch (tests). Explicit null disables the gate
    * even when ci-status-check is on; undefined = the default subprocess
    * branch re-entering the bundle. */
@@ -202,6 +203,14 @@ const NO_GATE_OUTCOME = (gate: GateName): GateOutcome => ({
 /** Scratch file the CI gate child writes its step outputs to. */
 const CI_GATE_OUTPUT_FILE = "ci-gate-outputs.txt";
 
+/** #978: the annotation is a workflow-command line, so untrusted provider
+ * body text must not be able to break out of it — a newline would emit a
+ * second line GitHub parses as its own command, and `::` reads as a command
+ * separator. Control characters collapse to spaces; `::` is split. */
+function annotationSafe(text: string): string {
+  return text.replace(/[\x00-\x1f\x7f]+/g, " ").replace(/::/g, ": :").trim();
+}
+
 /** The CI gate's `ci_status_final` / `ci_status_skipped` step outputs as the
  * contract's kebab-case output assignments. */
 export function ciGateOutputs(path: string): string {
@@ -267,6 +276,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   };
   const errorLog = (line: string): void =>
     (options.error ?? ((text) => process.stderr.write(`[v3] ERROR: ${text}\n`)))(line);
+  const annotate = options.annotate ?? ((line: string): void => { process.stdout.write(`${line}\n`); });
 
   assertSupportedNode(process.versions.node);
   if (options.env[GATE_CHILD_ENV] === "1") {
@@ -854,7 +864,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // ── Review stage (review.sh) ─────────────────────────────────────────
   const userMessage = buildUserMessage(ws, "classification.json");
   const primary = await producePrimaryReview({
-    env, ws, profiles, streamBool, userMessage, log, errorLog, clock, sleep: options.sleep, budgets,
+    env, ws, profiles, streamBool, userMessage, log, errorLog, annotate, clock, sleep: options.sleep, budgets,
   });
   let analysisEngine = primary.analysisEngine;
   let primaryProduced = primary.fromPrimary;
@@ -876,7 +886,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ws.write("ai-output.primary.json", ws.read("ai-output.json") ?? new Uint8Array(0));
     env.TOOL_ESCALATION = "true";
     const smart = await runSmartReview({
-      env, ws, profiles, streamBool, userMessage, log, errorLog, clock, sleep: options.sleep,
+      env, ws, profiles, streamBool, userMessage, log, errorLog, annotate, clock, sleep: options.sleep,
       budgets, generatedPaths, standards, runDir, workspace,
     });
     delete env.TOOL_ESCALATION;
@@ -1076,6 +1086,13 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     : "none";
   const outputVerdict = String(reviewRecord.verdict ?? "");
   const outputRequiredChecks = String(reviewRecord.required_checks ?? "none");
+  // #978: a review that gathered no evidence (the tool loop issued no calls,
+  // so the corpus was reviewed directly) or that is the model-failure notice
+  // cannot substantiate a request_changes verdict; the gate must not block a
+  // merge on it. The harness field is the authoritative "no evidence" record.
+  const nativeLoopDegraded = (harnessForMarker as { native_loop_degraded?: unknown } | null)?.native_loop_degraded;
+  const degraded = analysisEngine === MODEL_UNAVAILABLE_ENGINE
+    || (typeof nativeLoopDegraded === "string" && nativeLoopDegraded.length > 0);
   // #873 maintainer follow-up: the standalone `publish` CLI is a separate
   // process that cannot see `toolMode`/`enforcementHarness` — trusting the
   // ambient TOOL_MODE/REVIEW_ROUTE stage env it re-derives them from is
@@ -1098,6 +1115,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   ws.write("review-coverage.json", Buffer.from(`${pyJsonDumps(reviewCoverage)}\n`, "utf8"));
   const outputs: ReviewStepOutputs = {
     verdict: outputVerdict,
+    degraded,
     verdictSource: String(reviewRecord.verdict_source ?? "model"),
     requiredChecks: outputRequiredChecks,
     // #873: additive alongside verdict — a partial review's verdict can
@@ -1412,6 +1430,7 @@ interface ReviewCallInput {
   userMessage: string;
   log: (line: string) => void;
   errorLog: (line: string) => void;
+  annotate: (line: string) => void;
   clock: () => number;
   readonly sleep?: ((seconds: number) => Promise<void>) | undefined;
 }
@@ -1448,7 +1467,7 @@ async function callTier(
   requestArtifact: string,
   responseArtifact: string,
 ): Promise<{ ok: boolean; artifact: Record<string, unknown> | null; rawResponse: unknown }> {
-  const { env, ws, log, errorLog } = input;
+  const { env, ws, log, errorLog, annotate } = input;
   const corpusText = ws.readText(corpusName) ?? "";
   // Persist the request artifact before the first attempt (v2 writes it once).
   const requestPayload = buildModelRequest({
@@ -1504,6 +1523,9 @@ async function callTier(
     // configured key unconditionally, on top of `redactText`'s heuristics.
     const detail = describeTransportFailure(outcome.failure, { secrets: [profile.apiKey] });
     errorLog(`${profile.label}: transport failures exhausted (${detail})`);
+    if (outcome.nonRetryable === true) {
+      annotate(`::error::${profile.label}: model endpoint returned a non-retryable HTTP status; failing over without retrying (${annotationSafe(detail)})`);
+    }
     ws.write(responseArtifact, pyJsonDumps({ error: detail }));
   }
   return { ok: false, artifact: null, rawResponse: null };

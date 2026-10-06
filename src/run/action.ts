@@ -263,18 +263,27 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
   // ── Re-review label ───────────────────────────────────────────────────
   await maybeClearRereviewLabel(stage, event);
 
-  const gate = failOnRequestChanges(stage, review.outputs.verdict);
+  const gate = failOnRequestChanges(
+    stage,
+    review.outputs.verdict,
+    review.outputs.degraded,
+    (stage.FAIL_ON_DEGRADED_REVIEW ?? "false").toLowerCase() === "true",
+  );
   return publishFailed ? Math.max(gate, 1) : gate;
 }
 
-function failOnRequestChanges(stage: Env, verdict: string): number {
+export function failOnRequestChanges(stage: Env, verdict: string, degraded = false, failOnDegraded = false): number {
   if ((stage.FAIL_ON_REQUEST_CHANGES ?? "false").toLowerCase() !== "true") return 0;
-  if (verdict === "request_changes") {
-    process.stdout.write("::error::Final verdict is request_changes; failing the step (fail-on-request-changes=true).\n");
-    return 1;
+  if (verdict !== "request_changes") {
+    process.stdout.write(`Final verdict is '${verdict || "<none>"}'; not blocking (fail-on-request-changes=true).\n`);
+    return 0;
   }
-  process.stdout.write(`Final verdict is '${verdict || "<none>"}'; not blocking (fail-on-request-changes=true).\n`);
-  return 0;
+  if (degraded && !failOnDegraded) {
+    process.stdout.write("::warning::Final verdict is request_changes, but the review was degraded (no evidence gathered, or a model-failure notice); not blocking (fail-on-request-changes=true, fail-on-degraded-review=false).\n");
+    return 0;
+  }
+  process.stdout.write("::error::Final verdict is request_changes; failing the step (fail-on-request-changes=true).\n");
+  return 1;
 }
 
 /** Clears the rerun label whenever this run was actually triggered by it —

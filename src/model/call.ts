@@ -9,12 +9,13 @@ import type {
 import { VerdictParseFailure } from "./types.js";
 import { buildModelRequest } from "./request.js";
 import { parseVerdictResponse } from "./verdict.js";
-import { runChatRequest, type ChatRequestOutcome } from "../transport/transport.js";
+import { RETRYABLE_HTTP_STATUSES, runChatRequest, type ChatRequestOutcome } from "../transport/transport.js";
 import { describeTransportFailure, TransportFailure } from "../transport/http.js";
 
 /**
  * Port of the v2 `call_model_tier` retry loop (scripts/model_call.sh): one
  * tier, one retry budget, typed failures. Semantics preserved exactly:
+ * - non-retryable HTTP statuses fail fast to fallback without a tier retry;
  * - transport/HTTP failures consume the retry budget with doubling backoff
  *   capped at 120 s;
  * - parse/validate failures cap at 2 attempts total regardless of budget
@@ -73,7 +74,7 @@ export type ModelCallOutcome =
   | { status: "ok"; verdict: ParsedReviewVerdict; rawResponse: unknown; attempts: number }
   | { status: "empty_completion"; attempts: number; failure: VerdictParseFailure }
   | { status: "parse_exhausted"; attempts: number; failure: VerdictParseFailure }
-  | { status: "transport_exhausted"; attempts: number; failure: TransportFailure };
+  | { status: "transport_exhausted"; attempts: number; failure: TransportFailure; nonRetryable?: boolean };
 
 function requestConfig(profile: TierProfile, context: ModelCallContext, stream: boolean): ModelRequestConfig {
   return {
@@ -93,6 +94,18 @@ function requestConfig(profile: TierProfile, context: ModelCallContext, stream: 
 
 async function defaultSleep(seconds: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, seconds * 1000));
+}
+
+/** #978: the transport only retries 429/500/502/503/504; any other HTTP
+ * status is final. Retrying it spends the tier's whole backoff budget
+ * (8 attempts, capped at 120 s) on an error that cannot change — a 403
+ * "model not allowed for this API key" cost ~10 minutes before fallback.
+ * Non-HTTP failures (timeouts, network) and an unknown status keep the
+ * existing retry behaviour. */
+function isRetryableTransportFailure(failure: TransportFailure): boolean {
+  if (failure.kind !== "http_status") return true;
+  if (failure.status === undefined) return true;
+  return RETRYABLE_HTTP_STATUSES.has(failure.status);
 }
 
 export async function callModelTier(
@@ -130,6 +143,9 @@ export async function callModelTier(
     });
 
     if (outcome.status === "failure") {
+      if (!isRetryableTransportFailure(outcome.failure)) {
+        return { status: "transport_exhausted", attempts: attempt, failure: outcome.failure, nonRetryable: true };
+      }
       // Transport or HTTP error: consume the retry budget with doubling
       // backoff, capped at 120 s. Only sleep/back off when another attempt
       // is actually coming — a final failed attempt (no budget left) must
