@@ -280,14 +280,41 @@ export class GitHubAdapter implements PlatformReadAdapter {
     }
   }
 
-  /** #970: resolve the login this token posts as. `GET /user` answers for a
-   * PAT, `GITHUB_TOKEN`, and a GitHub App installation token alike (the
-   * latter returns the app's `<slug>[bot]` account), so the action's own
-   * managed bodies are recognised without hardcoding an identity. Any
-   * failure — missing token, transport error, non-200, or an unusable
-   * payload — is `null`, and the precheck then fails closed. */
+  /** #970: `query { viewer { login } }` — the login this credential
+   * authenticates as. GraphQL is the only self-identity source that answers
+   * for a GitHub App installation token: REST `GET /user` returns 403
+   * "Resource not accessible by integration" for installation and
+   * `GITHUB_TOKEN` credentials. GraphQL returns the app's `<slug>[bot]`
+   * account, `github-actions[bot]` for `GITHUB_TOKEN`, and the user login for
+   * a PAT/OAuth token — so the action's own managed bodies are recognised
+   * without hardcoding an identity. */
+  private async graphqlViewerLogin(): Promise<string | null> {
+    try {
+      const { status, text } = await requestText(this.graphqlUrl(), {
+        ...this.options(),
+        method: "POST",
+        body: JSON.stringify({ query: "query { viewer { login } }" }),
+      });
+      if (status < 200 || status >= 300) return null;
+      const parsed = parseJson(text);
+      if (!parsed.ok) return null;
+      const viewer = (parsed.data as { data?: { viewer?: { login?: unknown } } } | null)?.data?.viewer;
+      const login = viewer?.login;
+      return typeof login === "string" && login !== "" ? login : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** #970: resolve the login this token posts as, failing closed (`null`) on
+   * any error — a missing token, transport failure, non-2xx answer, or an
+   * unusable payload. GraphQL `viewer` is tried first because it is the only
+   * source that works for installation tokens; REST `GET /user` is a fallback
+   * for credentials where GraphQL is unavailable. */
   async authenticatedIdentity(): Promise<string | null> {
     if (!this.token) return null;
+    const viewer = await this.graphqlViewerLogin();
+    if (viewer !== null) return viewer;
     try {
       const { status, data } = await requestJson(this.url("/user"), this.options("application/vnd.github.v3+json"));
       if (status !== 200 || data === null || typeof data !== "object" || Array.isArray(data)) return null;

@@ -396,21 +396,37 @@ test("#970: GitHub managed reads carry the forge-reported author login", async (
   assert.equal((await new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl: bare }).listIssueComments())[0]?.author, undefined);
 });
 
-test("#970: GitHub authenticatedIdentity resolves the token's login and fails closed otherwise", async () => {
-  const ok = recorder(() => json({ login: "pr-reviewer[bot]", type: "Bot" }));
-  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl: ok.fetchImpl });
-  assert.equal(await adapter.authenticatedIdentity(), "pr-reviewer[bot]");
-  assert.ok(ok.seen[0]?.url.endsWith("/user"));
+test("#970: GitHub authenticatedIdentity uses GraphQL viewer (installation-token safe) with a REST /user fallback", async () => {
+  // GraphQL `viewer` answers for installation tokens, GITHUB_TOKEN, and PATs;
+  // REST GET /user 403s for installation tokens, so it must be tried second.
+  const gql = recorder((url) => url.pathname === "/graphql"
+    ? json({ data: { viewer: { login: "its-saffron[bot]" } } })
+    : json({ message: "Resource not accessible by integration" }, 403));
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl: gql.fetchImpl });
+  assert.equal(await adapter.authenticatedIdentity(), "its-saffron[bot]");
+  assert.ok(gql.seen[0]?.url.endsWith("/graphql"));
+  assert.equal(gql.seen.length, 1, "no REST /user call is needed when GraphQL answers");
+
+  // REST /user fallback for credentials where GraphQL is unavailable.
+  const rest = recorder((url) => url.pathname === "/graphql"
+    ? json({ errors: [{ message: "GraphQL not available" }] })
+    : json({ login: "joryirving", type: "User" }));
+  const fallback = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl: rest.fetchImpl });
+  assert.equal(await fallback.authenticatedIdentity(), "joryirving");
+  assert.ok(rest.seen.some((entry) => entry.url.endsWith("/user")));
 
   // No token: nothing to authenticate as.
-  assert.equal(await new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl: ok.fetchImpl }).authenticatedIdentity(), null);
-  // Transport failure.
+  assert.equal(await new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl: gql.fetchImpl }).authenticatedIdentity(), null);
+  // Transport failure on both.
   const failing = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl: (async () => { throw new Error("boom"); }) as never });
   assert.equal(await failing.authenticatedIdentity(), null);
-  // A 200 payload without a usable login.
-  const nonLogin = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl: recorder(() => json({ id: 1 })).fetchImpl });
-  assert.equal(await nonLogin.authenticatedIdentity(), null);
-  // A non-200 answer.
+  // GraphQL 200 without a viewer; REST 200 without a usable login.
+  const unusable = new GitHubAdapter({
+    repo: "o/r", prNumber: "7", token: "Bearer t",
+    fetchImpl: recorder((url) => url.pathname === "/graphql" ? json({ data: {} }) : json({ id: 1 })).fetchImpl,
+  });
+  assert.equal(await unusable.authenticatedIdentity(), null);
+  // Both sources reject.
   const denied = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl: recorder(() => json({ message: "Bad credentials" }, 401)).fetchImpl });
   assert.equal(await denied.authenticatedIdentity(), null);
 });
