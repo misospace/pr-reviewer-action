@@ -300,7 +300,7 @@ export class GitHubAdapter implements PlatformReadAdapter {
       if (!parsed.ok) return null;
       const viewer = (parsed.data as { data?: { viewer?: { login?: unknown } } } | null)?.data?.viewer;
       const login = viewer?.login;
-      return typeof login === "string" && login !== "" ? login : null;
+      return typeof login === "string" && login.trim() !== "" ? login : null;
     } catch {
       return null;
     }
@@ -319,7 +319,7 @@ export class GitHubAdapter implements PlatformReadAdapter {
       const { status, data } = await requestJson(this.url("/user"), this.options("application/vnd.github.v3+json"));
       if (status !== 200 || data === null || typeof data !== "object" || Array.isArray(data)) return null;
       const login = (data as Record<string, unknown>).login;
-      return typeof login === "string" && login !== "" ? login : null;
+      return typeof login === "string" && login.trim() !== "" ? login : null;
     } catch {
       return null;
     }

@@ -394,6 +394,9 @@ test("#970: GitHub managed reads carry the forge-reported author login", async (
   // A body with no usable user object is unproven, never a fabricated author.
   const { fetchImpl: bare } = recorder(() => json([{ id: 3, body: "x" }]));
   assert.equal((await new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl: bare }).listIssueComments())[0]?.author, undefined);
+  // GitHub returns `user: null` for a deleted author — still unproven.
+  const { fetchImpl: deleted } = recorder(() => json([{ id: 4, body: "x", user: null }]));
+  assert.equal((await new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl: deleted }).listIssueComments())[0]?.author, undefined);
 });
 
 test("#970: GitHub authenticatedIdentity uses GraphQL viewer (installation-token safe) with a REST /user fallback", async () => {
@@ -426,6 +429,12 @@ test("#970: GitHub authenticatedIdentity uses GraphQL viewer (installation-token
     fetchImpl: recorder((url) => url.pathname === "/graphql" ? json({ data: {} }) : json({ id: 1 })).fetchImpl,
   });
   assert.equal(await unusable.authenticatedIdentity(), null);
+  // An explicit `viewer: null` falls through to REST, which then decides.
+  const nullViewer = new GitHubAdapter({
+    repo: "o/r", prNumber: "7", token: "Bearer t",
+    fetchImpl: recorder((url) => url.pathname === "/graphql" ? json({ data: { viewer: null } }) : json({ login: "fallback-user" })).fetchImpl,
+  });
+  assert.equal(await nullViewer.authenticatedIdentity(), "fallback-user");
   // Both sources reject.
   const denied = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl: recorder(() => json({ message: "Bad credentials" }, 401)).fetchImpl });
   assert.equal(await denied.authenticatedIdentity(), null);

@@ -225,9 +225,11 @@ export function extractStoredFingerprint(body: string): string {
 }
 
 /** #970: is a forge-reported author login the run's own authenticated
- * identity? Logins are compared case-insensitively (both forges treat them
- * that way). An empty/missing author, or an unproven (null/blank) identity,
- * never matches — uncertain ownership fails closed. */
+ * identity? Logins are compared case-insensitively, which is safe on both
+ * forges: GitHub and Forgejo enforce case-insensitive username uniqueness,
+ * so no second account can differ from the trusted identity only by case.
+ * An empty/missing author, or an unproven (null/blank) identity, never
+ * matches — uncertain ownership fails closed. */
 export function authorMatchesTrustedIdentity(author: string | undefined, trustedIdentity: string | null): boolean {
   const authorLogin = typeof author === "string" ? author.trim().toLowerCase() : "";
   const identityLogin = typeof trustedIdentity === "string" ? trustedIdentity.trim().toLowerCase() : "";
@@ -290,7 +292,7 @@ async function selectAuthenticatedManagedBody(
   }
   if (identity === null || identity.trim() === "") {
     process.stderr.write(
-      "warning: could not authenticate the action's own forge identity; refusing to skip or carry a verdict from an unauthenticated managed body (fail closed)\n",
+      `warning: could not authenticate the action's own forge identity on ${adapter.platform}; refusing to skip or carry a verdict from an unauthenticated managed body (fail closed)\n`,
     );
     return "";
   }
