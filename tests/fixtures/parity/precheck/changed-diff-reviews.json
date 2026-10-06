@@ -12,7 +12,8 @@
         "id": 1,
         "body": "<!-- ai-pr-reviewer -->\n<!-- ai-pr-review-fingerprint:STORED_MARKER -->\n## Review\nBody text.\n<!-- ai-pr-reviewer:{\"version\":1,\"head_sha\":\"head-old\",\"base_sha\":\"base-old\",\"review_result\":\"clean\"} -->\n",
         "created_at": "2024-01-01T00:00:00Z",
-        "updated_at": "2024-01-02T00:00:00Z"
+        "updated_at": "2024-01-02T00:00:00Z",
+        "author": "pr-reviewer[bot]"
       }
     ],
     "reviews": [],
@@ -30,7 +31,8 @@
           "full_name": "misospace/demo"
         }
       }
-    }
+    },
+    "identity": "pr-reviewer[bot]"
   },
   "fixture": "changed-diff-reviews",
   "description": "parity fixture for precheck-decision boundary (#674): changed-diff-reviews"

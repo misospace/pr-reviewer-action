@@ -46,6 +46,10 @@ function mockPlatform(options: { diff?: string; files?: unknown[]; title?: strin
     listIssueComments: () => Promise.resolve([]),
     listPrReviews: () => Promise.resolve([]),
     repoPermission: () => Promise.resolve(null),
+    // #970: no forge identity is provable here, so a managed body can never
+    // authorize a skip in this mock (explicit rather than relying on the
+    // missing-method catch).
+    authenticatedIdentity: () => Promise.resolve(null),
     ghApi: () => Promise.resolve({ error: "not served" }),
     externalChecks: () => Promise.resolve([]),
   } as unknown as PlatformReadAdapter;
