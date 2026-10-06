@@ -1,6 +1,6 @@
 import type { PlatformReadAdapter } from "../platform/types.js";
 import type { ExternalCheck } from "../platform/normalize.js";
-import { deriveIsFork, normalizePrIdentity } from "../platform/pr.js";
+import { deriveDraftState, deriveIsFork, normalizePrIdentity } from "../platform/pr.js";
 import { resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
 import type { PlatformAdapter } from "../platform/types.js";
@@ -469,6 +469,17 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
         effectiveForgejoApiUrl,
       );
     }
+    // #961: a draft PR is never reviewed — the command cannot pull a draft
+    // into review any more than it could a closed one. Same read as the
+    // state check above: the pulls API always supplies the draft flag, and
+    // a payload reporting an unrecognizable draft value fails closed.
+    if (deriveDraftState(prObject) !== "not-draft") {
+      return platformOutputs(
+        { should_review: "false", skip_reason: "comment-pr-draft" },
+        resolvedPlatform,
+        effectiveForgejoApiUrl,
+      );
+    }
     // #914 review: the workflow's pr-gate pinned the head sha it checked out
     // and built. If the PR head moved since, this run's built code and the
     // head the diff is fetched for disagree — skip fail-closed. The raced
@@ -636,6 +647,30 @@ async function reviewPathOutputs(
   const repo = env.REPO ?? "";
   const prObject = preFetchedPr ?? await spec.adapter.getPr();
   const identity = normalizePrIdentity(prObject ?? {});
+
+  // ── #961 draft gate ──────────────────────────────────────────────────
+  // A draft PR is never reviewed, deterministically: a consumer whose
+  // workflow forgot the `if: !github.event.pull_request.draft` guard no
+  // longer gets a draft reviewed. Checked with the PR object already in
+  // hand (no extra fetch). The forge APIs always supply the draft flag;
+  // a payload reporting an unrecognizable draft value fails closed. The
+  // gate outranks even a forced re-review (the #231 label, an accepted
+  // #914 command) on purpose — marking the PR ready for review is what
+  // re-opens it, and the ready transition fires its own review.
+  if (deriveDraftState(prObject) !== "not-draft") {
+    return platformOutputs(
+      {
+        should_review: "false",
+        skip_reason: "pr-draft",
+        diff_fingerprint: broadFingerprint,
+        head_sha: identity.headSha,
+        base_sha: identity.baseSha,
+        is_fork_pr: String(deriveIsFork(prObject ?? {})),
+      },
+      resolvedPlatform,
+      effectiveForgejoApiUrl,
+    );
+  }
 
   if (spec.eventHeadSha && identity.headSha && spec.eventHeadSha !== identity.headSha) {
     return platformOutputs(

@@ -38,6 +38,8 @@ import { FixtureAdapter, fixtureLinearCollector, type PrecheckFixture } from "..
 
 const DIFF = "diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n";
 
+type Platform = PrecheckFixture["platform"];
+
 // ── Fingerprinting ───────────────────────────────────────────────────────
 
 test("diff fingerprints hash content and treat empty diffs as empty", () => {
@@ -478,6 +480,52 @@ test("runPrecheck reproduces the label no-op and superseded guard", async () => 
   assert.equal(superseded.skip_reason, "superseded-head");
   assert.equal(superseded.head_sha, "head-abc");
   assert.equal(superseded.is_fork_pr, "false");
+});
+
+test("#961: a draft PR is skipped deterministically in the shared review path", async () => {
+  const fx = fixture("changed-diff-reviews");
+  const platform: Platform = { ...fx.platform, pr: { ...(fx.platform.pr as object), state: "open", draft: true } };
+  const output = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", platform) });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "pr-draft");
+  // The skip still reports the identity it skipped on (the PR object was
+  // already in hand — no extra fetch).
+  assert.equal(output.head_sha, "head-abc");
+  assert.equal(output.base_sha, "base-abc");
+  assert.equal(output.is_fork_pr, "false");
+  assert.ok(output.diff_fingerprint.length > 0);
+});
+
+test("#961: a ready PR reviews and an absent draft field keeps reviewing", async () => {
+  const fx = fixture("changed-diff-reviews");
+  const explicit = await runPrecheck({
+    env: fx.env,
+    adapter: new FixtureAdapter("github", { ...fx.platform, pr: { ...(fx.platform.pr as object), state: "open", draft: false } }),
+  });
+  assert.equal(explicit.should_review, "true");
+  // The parity fixtures' PR objects carry no draft field at all; the
+  // pulls API always supplies one, so absence reads as not-draft.
+  const absent = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", fx.platform) });
+  assert.equal(absent.should_review, "true");
+});
+
+test("#961: an unrecognizable draft value fails closed", async () => {
+  const fx = fixture("changed-diff-reviews");
+  const platform: Platform = { ...fx.platform, pr: { ...(fx.platform.pr as object), state: "open", draft: "yes" } };
+  const output = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", platform) });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "pr-draft");
+});
+
+test("#961: even a forced re-review skips a draft PR", async () => {
+  const fx = fixture("changed-diff-reviews");
+  const platform: Platform = { ...fx.platform, pr: { ...(fx.platform.pr as object), state: "open", draft: true } };
+  const output = await runPrecheck({
+    env: { ...fx.env, FORCE_REVIEW: "true" },
+    adapter: new FixtureAdapter("github", platform),
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "pr-draft");
 });
 
 test("runPrecheck carries the prior verdict forward on a diff-unchanged skip", async () => {

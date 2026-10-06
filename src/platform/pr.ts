@@ -47,3 +47,30 @@ export function deriveIsFork(raw: unknown): boolean {
   if (!identity.headRepoFullName) return true;
   return identity.headRepoFullName !== identity.baseRepoFullName;
 }
+
+/** Which side a caller should fail to when the draft state is uncertain. */
+export type DraftState = "draft" | "not-draft" | "unknown";
+
+/**
+ * The ONE draft derivation (#961): a PR the forge reports as a draft is
+ * never reviewed. `draft` is `true` only for an unambiguous draft (the
+ * boolean the pulls APIs send, or the string form a shell/jq seam
+ * produces), `not-draft` for an unambiguous non-draft — including an
+ * absent field, mirroring the closed-PR check's treatment of a missing
+ * `state` (the forge APIs always supply the flag; adapters that do not
+ * surface it keep working) — and `unknown` when the payload carries a
+ * draft value no forge ever sends. Callers decide which side uncertainty
+ * fails to; the precheck fails closed.
+ */
+export function deriveDraftState(raw: unknown): DraftState {
+  const value = asObject(raw).draft;
+  if (value === true) return "draft";
+  if (value === false) return "not-draft";
+  if (typeof value === "string") {
+    const lowered = value.trim().toLowerCase();
+    if (lowered === "true") return "draft";
+    if (lowered === "false" || lowered === "") return "not-draft";
+  }
+  if (value === undefined || value === null) return "not-draft";
+  return "unknown";
+}

@@ -483,6 +483,54 @@ test("#914: an authorized comment on a closed PR is skipped as comment-pr-closed
   assert.equal(output.skip_reason, "comment-pr-closed");
 });
 
+test("#961: an authorized comment on a draft PR is skipped as comment-pr-draft", async () => {
+  const env = baseEnv();
+  const platform: Platform = {
+    diff: DIFF,
+    pr: { ...sameRepoPr() as object, state: "open", draft: true },
+    gh_api: { "repos/o/r/collaborators/alice/permission": { permission: "write" } },
+  };
+  const output = await runPrecheck({
+    env,
+    adapter: new FixtureAdapter("github", platform),
+    event: issueCommentEvent("/ai-review", "alice"),
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "comment-pr-draft");
+});
+
+test("#961: the closed check outranks the draft check on a comment", async () => {
+  const env = baseEnv();
+  const platform: Platform = {
+    diff: DIFF,
+    pr: { ...sameRepoPr() as object, state: "closed", draft: true },
+    gh_api: { "repos/o/r/collaborators/alice/permission": { permission: "write" } },
+  };
+  const output = await runPrecheck({
+    env,
+    adapter: new FixtureAdapter("github", platform),
+    event: issueCommentEvent("/ai-review", "alice"),
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "comment-pr-closed");
+});
+
+test("#961: an unrecognizable draft value fails closed on a comment too", async () => {
+  const env = baseEnv();
+  const platform: Platform = {
+    diff: DIFF,
+    pr: { ...sameRepoPr() as object, state: "open", draft: 1 },
+    gh_api: { "repos/o/r/collaborators/alice/permission": { permission: "write" } },
+  };
+  const output = await runPrecheck({
+    env,
+    adapter: new FixtureAdapter("github", platform),
+    event: issueCommentEvent("/ai-review", "alice"),
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "comment-pr-draft");
+});
+
 // ── The superseded-head gate (#914 review) ────────────────────────────────
 //
 // The dogfood workflow pins the head sha it checked out via
