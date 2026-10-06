@@ -36,7 +36,12 @@
 import { execFileSync } from "node:child_process";
 import { parse as parseYaml } from "yaml";
 import { RepositoryConfigError, verifyBaseRef } from "./repository-config.js";
-import type { RequirementOwnership } from "../enforcement/requirement-trace.js";
+import {
+  MAX_GROUPS_PER_RULE,
+  MAX_GROUP_NAME_CHARS,
+  MIN_DISTRIBUTED_GROUPS,
+} from "../enforcement/requirement-trace.js";
+import type { RequirementGroup, RequirementOwnership } from "../enforcement/requirement-trace.js";
 
 /** Candidate owner-config paths, in precedence order (mirrors the repository
  * config file family). */
@@ -195,7 +200,105 @@ export function parseRequirementOwners(text: string, path: string): ParsedRequir
       warnings.push(`Requirement owners '${path}' rule '${slug}' has no valid owner paths; ignoring it.`);
       continue;
     }
-    rules.push({ match, owners });
+
+    let groups: RequirementGroup[] | undefined;
+    if (Object.hasOwn(value, "groups")) {
+      const rawGroups = value["groups"];
+      const parsedGroups: RequirementGroup[] = [];
+      if (Array.isArray(rawGroups)) {
+        for (const rawGroup of rawGroups) {
+          if (!isPlainObject(rawGroup)) {
+            warnings.push(`Requirement owners '${path}' rule '${slug}' has an invalid group; ignoring it.`);
+            continue;
+          }
+          const name = rawGroup["name"];
+          if (typeof name !== "string" || name.length === 0 || name.length > MAX_GROUP_NAME_CHARS || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) {
+            warnings.push(`Requirement owners '${path}' rule '${slug}' has an invalid group name; ignoring the group.`);
+            continue;
+          }
+          const rawGroupOwners = rawGroup["owners"];
+          if (!Array.isArray(rawGroupOwners)) {
+            warnings.push(`Requirement owners '${path}' rule '${slug}' group '${name}' must have an 'owners' list; ignoring it.`);
+            continue;
+          }
+          if (rawGroupOwners.length > MAX_OWNERS_PER_RULE) {
+            warnings.push(`Requirement owners '${path}' rule '${slug}' group '${name}' lists more than ${MAX_OWNERS_PER_RULE} owners; extra owners ignored.`);
+          }
+          const groupOwners: string[] = [];
+          for (const owner of rawGroupOwners) {
+            if (groupOwners.length >= MAX_OWNERS_PER_RULE) break;
+            if (typeof owner !== "string" || !isValidOwnerPattern(owner)) {
+              warnings.push(`Requirement owners '${path}' rule '${slug}' group '${name}' has an invalid owner path; ignoring it.`);
+              continue;
+            }
+            groupOwners.push(owner.toLowerCase());
+          }
+          if (groupOwners.length === 0) {
+            warnings.push(`Requirement owners '${path}' rule '${slug}' group '${name}' has no valid owner paths; ignoring it.`);
+            continue;
+          }
+
+          const rawTests = rawGroup["tests"];
+          const groupTests: string[] = [];
+          if (Object.hasOwn(rawGroup, "tests")) {
+            if (!Array.isArray(rawTests)) {
+              warnings.push(`Requirement owners '${path}' rule '${slug}' group '${name}' has a 'tests' key that yields no valid globs.`);
+            } else {
+              if (rawTests.length > MAX_OWNERS_PER_RULE) {
+                warnings.push(`Requirement owners '${path}' rule '${slug}' group '${name}' lists more than ${MAX_OWNERS_PER_RULE} test paths; extra paths ignored.`);
+              }
+              for (const test of rawTests) {
+                if (groupTests.length >= MAX_OWNERS_PER_RULE) break;
+                if (typeof test !== "string" || !isValidOwnerPattern(test)) {
+                  warnings.push(`Requirement owners '${path}' rule '${slug}' group '${name}' has an invalid test path; ignoring it.`);
+                  continue;
+                }
+                groupTests.push(test.toLowerCase());
+              }
+              if (groupTests.length === 0) {
+                warnings.push(`Requirement owners '${path}' rule '${slug}' group '${name}' has a 'tests' key that yields no valid globs.`);
+              }
+            }
+          }
+
+          const existing = parsedGroups.find((group) => group.name === name);
+          if (existing) {
+            parsedGroups.splice(parsedGroups.indexOf(existing), 1, {
+              name,
+              owners: [...new Set([...existing.owners, ...groupOwners])],
+              tests: [...new Set([...existing.tests, ...groupTests])],
+            });
+          } else {
+            parsedGroups.push({ name, owners: groupOwners, tests: groupTests });
+          }
+        }
+      } else {
+        warnings.push(`Requirement owners '${path}' rule '${slug}' has a 'groups' key that is not a list; ignoring it.`);
+      }
+      const sortedGroups = parsedGroups.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+      if (sortedGroups.length > MAX_GROUPS_PER_RULE) {
+        const dropped = sortedGroups.slice(MAX_GROUPS_PER_RULE).map((group) => group.name);
+        warnings.push(`Requirement owners '${path}' rule '${slug}' exceeds ${MAX_GROUPS_PER_RULE} groups; dropped: ${dropped.join(", ")}.`);
+      }
+      const cappedGroups = sortedGroups.slice(0, MAX_GROUPS_PER_RULE);
+      const ownerSets = new Set<string>();
+      const warnedOwnerPairs = new Set<string>();
+      for (const group of cappedGroups) {
+        for (const owner of new Set(group.owners)) {
+          if (ownerSets.has(owner) && !warnedOwnerPairs.has(owner)) {
+            warnings.push(`Requirement owners '${path}' rule '${slug}' has groups sharing owner glob '${owner}'.`);
+            warnedOwnerPairs.add(owner);
+          }
+          ownerSets.add(owner);
+        }
+      }
+      if (cappedGroups.length < MIN_DISTRIBUTED_GROUPS) {
+        warnings.push(`Requirement owners '${path}' rule '${slug}' has fewer than ${MIN_DISTRIBUTED_GROUPS} valid groups; keeping it as a plain ownership rule.`);
+      } else {
+        groups = cappedGroups;
+      }
+    }
+    rules.push(groups ? { match, owners, groups } : { match, owners });
   }
   return { rules, warnings };
 }

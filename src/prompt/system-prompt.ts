@@ -18,6 +18,7 @@
  * (`src/tools/harness.ts` `resolveReviewSystemPrompt`). */
 
 import { BUNDLED_PROMPT_ASSETS, rawFragment, type PromptAssets } from "./assets.js";
+import { MAX_DISTRIBUTED_HINTS, MAX_GROUPS_PER_RULE, MAX_GROUP_NAME_CHARS } from "../enforcement/requirement-trace.js";
 import { bashCapture, bashLowerCapture, bashReadCapture, bashReplaceFirst, jqRawPrKind, type PromptWorkspace } from "./bash.js";
 
 /** Workspace artifacts the fragment gates read, written by earlier phases. */
@@ -174,6 +175,7 @@ export function applyRequirementTraceFragment(
   enabled: boolean,
   assets: PromptAssets = BUNDLED_PROMPT_ASSETS,
   scopeIds?: readonly string[],
+  distributedHints?: readonly { requirementId: string; groups: readonly string[] }[],
 ): SystemPromptState {
   if (!state.isDefault || !enabled) return state;
   if (!workspace.isNonEmpty(PROMPT_PRESENCE_FILES.requirementLedger)) return state;
@@ -187,6 +189,14 @@ export function applyRequirementTraceFragment(
       "For every acceptance/normative requirement in the Requirement Ledger,",
       `For every requirement in trace scope (${scopeIds.join(", ")}); other ledger requirements need no trace,`,
     );
+  }
+  if (distributedHints && distributedHints.length > 0) {
+    const cleanName = (name: string): string => name.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_GROUP_NAME_CHARS);
+    const hintLine = `Distributed requirements — cite one enforcement location in each declared seam (a single location cannot satisfy them): ${distributedHints
+      .slice(0, MAX_DISTRIBUTED_HINTS)
+      .map((hint) => `\`${cleanName(hint.requirementId)}\` → ${hint.groups.slice(0, MAX_GROUPS_PER_RULE).map(cleanName).join(", ")}`)
+      .join("; ")}`;
+    trace += `\n${hintLine}`;
   }
   if (state.systemPrompt.includes(trace)) return state;
   return { ...state, systemPrompt: `${state.systemPrompt}\n${trace}` };
