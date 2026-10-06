@@ -56,7 +56,7 @@ import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "../enforcement/enforce.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
-import { applyRequirementTraceEnforcement, changedSubjectText, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope } from "../enforcement/requirement-trace.js";
+import { applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope } from "../enforcement/requirement-trace.js";
 import { runRequirementTraceRepairPass } from "../requirements/trace-repair.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
@@ -825,7 +825,11 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   const traceScopeIds = requirementTraceEnabled
     ? requirementTraceScope(ledgerValue, traceChanged, { ownership: traceOwnership.rules, paths: tracePaths }).inScope.map((entry) => entry.id)
     : [];
-  promptState = applyRequirementTraceFragment(promptState, ws, requirementTraceEnabled, undefined, traceScopeIds);
+  const distributedHints = distributedRequirementHints(ledgerValue, traceOwnership.rules, traceScopeIds);
+  for (const warning of distributedRequirementWarnings(ledgerValue, traceOwnership.rules, traceScopeIds)) {
+    errorLog(`requirement owners: ${warning}`);
+  }
+  promptState = applyRequirementTraceFragment(promptState, ws, requirementTraceEnabled, undefined, traceScopeIds, distributedHints);
   env.SYSTEM_PROMPT = promptState.systemPrompt;
 
   // ── Native tool harness (corpus.sh tail) ─────────────────────────────
@@ -927,7 +931,10 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       let repaired: Awaited<ReturnType<typeof runRequirementTraceRepairPass>> | null = null;
       try {
         repaired = await runRequirementTraceRepairPass({
-          requirements: repairRequirements.map((entry) => ({ id: entry.id, text: entry.text })),
+          requirements: repairRequirements.map((entry) => {
+            const groups = distributedHints.find((hint) => hint.requirementId === entry.id)?.groups;
+            return { id: entry.id, text: entry.text, ...(groups ? { groups } : {}) };
+          }),
           title: String(pr.title ?? ""),
           files: safeJson(ws.read("pr-files.json")),
           diff: ws.readText("pr.diff.truncated") ?? ws.readText("pr.diff") ?? "",

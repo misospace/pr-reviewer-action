@@ -12,6 +12,9 @@ import { applyStrictVerdictPolicy } from "../src/enforcement/verdict-policy.js";
 import { isValidOwnerPattern, parseRequirementOwners, resolveRequirementOwners } from "../src/config/requirement-owners.js";
 import {
   applyRequirementTraceEnforcement,
+  MAX_DECLARED_GROUPS_PER_RULE,
+  MAX_DISTRIBUTED_HINTS,
+  distributedRequirementHints,
   ensureUnmetRequirementFindings,
   extractRequirementTerms,
   ledgerRequirementsById,
@@ -23,6 +26,7 @@ import {
   requirementSubjectSignals,
   requirementTraceScope,
   validateRequirementTrace,
+  type RequirementOwnership,
 } from "../src/enforcement/requirement-trace.js";
 import { buildTraceRepairUserMessage, normalizeTraceRepairPayload, runRequirementTraceRepairPass } from "../src/requirements/trace-repair.js";
 
@@ -1189,4 +1193,759 @@ test("#959: runRequirementTraceRepairPass is fail-soft and bounded", async () =>
   });
   assert.equal(ok.status, "ok");
   assert.equal(ok.claims.length, 1);
+});
+
+// ── #962: trusted distributed-enforcement proof topology ────────────────
+
+const FORK_TEST_LOCATIONS = [
+  { file: "tests-v3/fork-privileged-checkout.test.ts", line: 1 },
+  { file: "tests-v3/fork-feature-defaults.test.ts", line: 1 },
+  { file: "tests-v3/fork-secret-boundary.test.ts", line: 1 },
+];
+
+const FORK_GROUPS = [
+  { name: "privileged-checkout", owners: ["src/fork/privileged-checkout.ts"], tests: ["tests-v3/fork-privileged-checkout.test.ts"] },
+  { name: "feature-defaults", owners: ["src/fork/feature-defaults.ts"], tests: ["tests-v3/fork-feature-defaults.test.ts"] },
+  {
+    name: "secret-boundary",
+    owners: ["src/fork/secret-boundary.ts"],
+    tests: ["tests-v3/fork-secret-boundary.test.ts"],
+  },
+] satisfies NonNullable<RequirementOwnership["groups"]>;
+
+const FORK_DISTRIBUTED_OWNERSHIP: RequirementOwnership[] = [{
+  match: ["fork", "privilege", "separation"],
+  owners: [".github/workflows/fork-ai-review.yaml"],
+  groups: FORK_GROUPS,
+}];
+
+const UNTRUSTED_TEST_LOCATIONS = [
+  { file: "tests-v3/untrusted-redaction.test.ts", line: 1 },
+  { file: "tests-v3/untrusted-fence-safe-rendering.test.ts", line: 1 },
+  { file: "tests-v3/untrusted-instruction-separation.test.ts", line: 1 },
+];
+
+const UNTRUSTED_GROUPS = [
+  { name: "redaction", owners: ["src/context/redact.ts"], tests: ["tests-v3/untrusted-redaction.test.ts"] },
+  { name: "fence-safe-rendering", owners: ["src/render/fence-safe.ts"], tests: ["tests-v3/untrusted-fence-safe-rendering.test.ts"] },
+  { name: "instruction-separation", owners: ["src/prompt/instruction-separation.ts"], tests: ["tests-v3/untrusted-instruction-separation.test.ts"] },
+] satisfies NonNullable<RequirementOwnership["groups"]>;
+
+const UNTRUSTED_DISTRIBUTED_OWNERSHIP: RequirementOwnership[] = [{
+  match: ["untrusted", "content", "data"],
+  owners: ["src/context/redact.ts", "src/render/fence-safe.ts", "src/prompt/instruction-separation.ts"],
+  groups: UNTRUSTED_GROUPS,
+}];
+
+function traceLedger(id: string, text: string): unknown {
+  return ledgerWith([{ id, text, kind: "normative" }]);
+}
+
+function metTraceClaim(
+  requirementId: string,
+  enforcement: Array<{ file: string; line: number }>,
+  testLocations: Array<{ file: string; line: number }> = [VALID_TEST_LOCATION],
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    requirement_id: requirementId,
+    disposition: "met",
+    enforcement,
+    test: testLocations,
+    reason: "the cited enforcement and regression-test seams cover the requirement",
+    ...extra,
+  };
+}
+
+function writeForkEnforcementFixture(workspace: string): Array<{ file: string; line: number }> {
+  writeFile(workspace, "src/fork/privileged-checkout.ts", [
+    "if (fork !== true) throw new Error('fork checkout must not be privileged');",
+  ]);
+  writeFile(workspace, "src/fork/feature-defaults.ts", [
+    "export const forkFeatureDefaults = { toolMode: false, relatedCode: false };",
+  ]);
+  writeFile(workspace, "src/fork/secret-boundary.ts", [
+    "if (isFork && secretsEnabled) throw new Error('fork secrets are blocked');",
+  ]);
+  writeFile(workspace, "tests-v3/fork-privileged-checkout.test.ts", [
+    "assert.equal(privilegedForkCheckout, false);",
+  ]);
+  writeFile(workspace, "tests-v3/fork-feature-defaults.test.ts", [
+    "assert.equal(forkFeatureDefaults.toolMode, false);",
+  ]);
+  writeFile(workspace, "tests-v3/fork-secret-boundary.test.ts", [
+    "assert.equal(secretsForFork, undefined);",
+  ]);
+  return [
+    { file: "src/fork/privileged-checkout.ts", line: 1 },
+    { file: "src/fork/feature-defaults.ts", line: 1 },
+    { file: "src/fork/secret-boundary.ts", line: 1 },
+  ];
+}
+
+function writeUntrustedTestFixtures(workspace: string): void {
+  writeFile(workspace, "tests-v3/untrusted-redaction.test.ts", ["assert.equal(redact(untrusted), safeContent);"]);
+  writeFile(workspace, "tests-v3/untrusted-fence-safe-rendering.test.ts", ["assert.equal(renderedFence, safeFence);"]);
+  writeFile(workspace, "tests-v3/untrusted-instruction-separation.test.ts", ["assert.notEqual(instructions, untrustedData);"]);
+}
+
+function writeUntrustedEnforcementFixture(workspace: string): Array<{ file: string; line: number }> {
+  writeFile(workspace, "src/context/redact.ts", [
+    "if (content !== sanitizedContent) throw new Error('unredacted content');",
+  ]);
+  writeFile(workspace, "src/render/fence-safe.ts", [
+    "if (content !== fencedContent) throw new Error('unsafe fence rendering');",
+  ]);
+  writeFile(workspace, "src/prompt/instruction-separation.ts", [
+    "if (instructions !== separatedData.instructions) throw new Error('instructions were not separated');",
+  ]);
+  writeFile(workspace, "tests-v3/untrusted-redaction.test.ts", ["assert.equal(redact(untrusted), safeContent);"]);
+  writeFile(workspace, "tests-v3/untrusted-fence-safe-rendering.test.ts", ["assert.equal(renderedFence, safeFence);"]);
+  writeFile(workspace, "tests-v3/untrusted-instruction-separation.test.ts", ["assert.notEqual(instructions, untrustedData);"]);
+  return [
+    { file: "src/context/redact.ts", line: 1 },
+    { file: "src/render/fence-safe.ts", line: 1 },
+    { file: "src/prompt/instruction-separation.ts", line: 1 },
+  ];
+}
+
+function assertUnverifiableWithNotes(
+  trace: ReturnType<typeof validateRequirementTrace>,
+  requirementId: string,
+  notes: string[],
+): void {
+  const row = trace.rows.find((candidate) => candidate.requirement_id === requirementId);
+  assert.equal(row?.disposition, "unverifiable");
+  assert.deepEqual(row?.notes, notes);
+  assert.equal(trace.incomplete, true);
+}
+
+test("#962.1: fork privilege separation is met across three declared seams", () => {
+  const workspace = makeWorkspace();
+  try {
+    const enforcement = writeForkEnforcementFixture(workspace);
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-fork", enforcement, FORK_TEST_LOCATIONS)],
+      traceLedger("req-fork", STANDARDS_FORK),
+      workspace,
+      undefined,
+      { ownership: FORK_DISTRIBUTED_OWNERSHIP },
+    );
+    assert.equal(trace.rows[0]?.disposition, "met");
+    assert.deepEqual(trace.rows[0]?.notes, []);
+    assert.equal(trace.incomplete, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#962.2: untrusted content is data requires separate redaction and rendering seams", () => {
+  const workspace = makeWorkspace();
+  try {
+    const enforcement = writeUntrustedEnforcementFixture(workspace);
+    writeUntrustedTestFixtures(workspace);
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-untrusted", enforcement, UNTRUSTED_TEST_LOCATIONS)],
+      traceLedger("req-untrusted", STANDARDS_UNTRUSTED),
+      workspace,
+      undefined,
+      { ownership: UNTRUSTED_DISTRIBUTED_OWNERSHIP },
+    );
+    assert.equal(trace.rows[0]?.disposition, "met");
+    assert.deepEqual(trace.rows[0]?.notes, []);
+    assert.equal(trace.incomplete, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#962.3: gateForkForForks() alone leaves two fork seams uncovered", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/gates/fork-gate.ts", ["gateForkForForks();"]);
+    writeForkEnforcementFixture(workspace);
+    const groups = FORK_GROUPS.map((group) => group.name === "privileged-checkout"
+      ? { ...group, owners: ["src/gates/fork-gate.ts"] }
+      : group);
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-fork", [{ file: "src/gates/fork-gate.ts", line: 1 }], FORK_TEST_LOCATIONS)],
+      traceLedger("req-fork", STANDARDS_FORK),
+      workspace,
+      undefined,
+      { ownership: [{ ...FORK_DISTRIBUTED_OWNERSHIP[0]!, groups }] },
+    );
+    assertUnverifiableWithNotes(trace, "req-fork", [
+      "distributed-enforcement-group-uncovered:feature-defaults",
+      "distributed-enforcement-group-uncovered:secret-boundary",
+    ]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#962.4: redact.ts alone leaves the rendering and instruction seams uncovered", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/context/redact.ts", ["const content = redact(untrustedContent);"]);
+    writeUntrustedTestFixtures(workspace);
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-untrusted", [{ file: "src/context/redact.ts", line: 1 }], UNTRUSTED_TEST_LOCATIONS)],
+      traceLedger("req-untrusted", STANDARDS_UNTRUSTED),
+      workspace,
+      undefined,
+      { ownership: UNTRUSTED_DISTRIBUTED_OWNERSHIP },
+    );
+    assertUnverifiableWithNotes(trace, "req-untrusted", [
+      "distributed-enforcement-group-uncovered:fence-safe-rendering",
+      "distributed-enforcement-group-uncovered:instruction-separation",
+    ]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#962.5: four valid citations outside all group globs do not buy coverage", () => {
+  const workspace = makeWorkspace();
+  try {
+    const irrelevant = [
+      "src/unrelated/a.ts",
+      "src/unrelated/b.ts",
+      "src/unrelated/c.ts",
+      "src/unrelated/d.ts",
+    ];
+    for (const file of irrelevant) writeFile(workspace, file, ["export const unrelated = true;"]);
+    writeForkEnforcementFixture(workspace);
+    const ownership = [{
+      ...FORK_DISTRIBUTED_OWNERSHIP[0]!,
+      groups: FORK_GROUPS,
+    }];
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-fork", irrelevant.map((file) => ({ file, line: 1 })), FORK_TEST_LOCATIONS)],
+      traceLedger("req-fork", STANDARDS_FORK),
+      workspace,
+      undefined,
+      { ownership },
+    );
+    assertUnverifiableWithNotes(trace, "req-fork", [
+      "distributed-enforcement-group-uncovered:feature-defaults",
+      "distributed-enforcement-group-uncovered:privileged-checkout",
+      "distributed-enforcement-group-uncovered:secret-boundary",
+    ]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#962.6: an off-seam predicate cannot launder value copies across covered seams", () => {
+  const workspace = makeWorkspace();
+  try {
+    const copyFiles = [
+      "src/context/redact.ts",
+      "src/render/fence-safe.ts",
+      "src/prompt/instruction-separation.ts",
+    ];
+    for (const file of copyFiles) writeFile(workspace, file, ["content: other.content,"]);
+    writeFile(workspace, "src/unrelated/content-check.ts", ["if (content !== safeContent) throw new Error('mismatch');"]);
+    writeUntrustedTestFixtures(workspace);
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-untrusted", [
+        ...copyFiles.map((file) => ({ file, line: 1 })),
+        { file: "src/unrelated/content-check.ts", line: 1 },
+      ], UNTRUSTED_TEST_LOCATIONS)],
+      traceLedger("req-untrusted", STANDARDS_UNTRUSTED),
+      workspace,
+      undefined,
+      { ownership: UNTRUSTED_DISTRIBUTED_OWNERSHIP },
+    );
+    assertUnverifiableWithNotes(trace, "req-untrusted", ["enforcement-location-copies-without-comparing"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#962.7: a model-supplied symbol cannot make copied seam values predicate evidence", () => {
+  const workspace = makeWorkspace();
+  try {
+    const copyFiles = [
+      "src/context/redact.ts",
+      "src/render/fence-safe.ts",
+      "src/prompt/instruction-separation.ts",
+    ];
+    for (const file of copyFiles) {
+      writeFile(workspace, file, [
+        "export const record = {",
+        "  opaqueValue: input.opaqueValue,",
+        "  if (opaqueValue !== expectedValue) throw new Error('mismatch');",
+      ]);
+    }
+    writeUntrustedTestFixtures(workspace);
+    const trace = validateRequirementTrace(
+      [metTraceClaim(
+        "req-untrusted",
+        copyFiles.map((file) => ({ file, line: 2 })),
+        UNTRUSTED_TEST_LOCATIONS,
+        { symbol: "opaqueValue" },
+      )],
+      traceLedger("req-untrusted", STANDARDS_UNTRUSTED),
+      workspace,
+      undefined,
+      { ownership: UNTRUSTED_DISTRIBUTED_OWNERSHIP },
+    );
+    assertUnverifiableWithNotes(trace, "req-untrusted", ["enforcement-location-copies-without-comparing"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#962.8: overlapping owner globs still require distinct citations per seam", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/fork/gate.ts", ["if (forkPrivilege !== true) throw new Error('blocked');"]);
+    writeFile(workspace, "tests/alpha.test.ts", ["assert.equal(alpha, true);"]);
+    writeFile(workspace, "tests/beta.test.ts", ["assert.equal(beta, true);"]);
+    const ownership: RequirementOwnership[] = [{
+      match: ["injective", "coverage"],
+      owners: ["src/fork/*.ts"],
+      groups: [
+        { name: "alpha-seam", owners: ["src/fork/*.ts"], tests: ["tests/alpha.test.ts"] },
+        { name: "beta-seam", owners: ["src/fork/*.ts"], tests: ["tests/beta.test.ts"] },
+      ],
+    }];
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-injective", [{ file: "src/fork/gate.ts", line: 1 }], [
+        { file: "tests/alpha.test.ts", line: 1 },
+        { file: "tests/beta.test.ts", line: 1 },
+      ])],
+      traceLedger("req-injective", "Injective coverage requires a separate citation for each fork privilege seam."),
+      workspace,
+      undefined,
+      { ownership },
+    );
+    assertUnverifiableWithNotes(trace, "req-injective", ["distributed-enforcement-group-uncovered:beta-seam"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#962.9: a missing group-specific test citation leaves that test seam uncovered", () => {
+  const workspace = makeWorkspace();
+  try {
+    const enforcement = writeForkEnforcementFixture(workspace);
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-fork", enforcement, FORK_TEST_LOCATIONS.slice(0, 2))],
+      traceLedger("req-fork", STANDARDS_FORK),
+      workspace,
+      undefined,
+      { ownership: FORK_DISTRIBUTED_OWNERSHIP },
+    );
+    assertUnverifiableWithNotes(trace, "req-fork", ["distributed-test-group-uncovered:secret-boundary"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#962.10: distributed met rows never emit the narrow missing-location notes", () => {
+  const workspace = makeWorkspace();
+  try {
+    const enforcement = writeForkEnforcementFixture(workspace);
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-fork", enforcement, FORK_TEST_LOCATIONS)],
+      traceLedger("req-fork", STANDARDS_FORK),
+      workspace,
+      undefined,
+      { ownership: FORK_DISTRIBUTED_OWNERSHIP },
+    );
+    assert.equal(trace.rows[0]?.disposition, "met");
+    const notes = JSON.stringify(trace.rows[0]?.notes ?? []);
+    assert.equal(notes, "[]");
+    assert.equal(notes.includes("downgraded-no-valid-enforcement-location"), false);
+    assert.equal(notes.includes("downgraded-no-valid-test-location"), false);
+    assert.equal(trace.incomplete, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#962.11: fewer than two valid config groups warn and retain plain ownership", () => {
+  const parsed = parseRequirementOwners([
+    "requirements:",
+    "  fork-privilege-separation:",
+    "    owners:",
+    "      - src/fork/owner.ts",
+    "    groups:",
+    "      - name: privileged-checkout",
+    "        owners:",
+    "          - src/fork/privileged.ts",
+  ].join("\n"), ".github/pr-reviewer-owners.yml");
+  assert.ok(!("malformed" in parsed));
+  if ("malformed" in parsed) return;
+  assert.deepEqual(parsed.rules, [{
+    match: ["fork", "privilege", "separation"],
+    owners: ["src/fork/owner.ts"],
+  }]);
+  assert.ok(parsed.warnings.some((warning) => warning.includes("fewer than 2 valid groups")), JSON.stringify(parsed.warnings));
+});
+
+test("#962.12: identical owner globs across distributed groups warn", () => {
+  const parsed = parseRequirementOwners([
+    "requirements:",
+    "  fork-privilege-separation:",
+    "    owners:",
+    "      - src/fork/owner.ts",
+    "    groups:",
+    "      - name: alpha-seam",
+    "        owners:",
+    "          - src/fork/shared.ts",
+    "      - name: beta-seam",
+    "        owners:",
+    "          - src/fork/shared.ts",
+  ].join("\n"), ".github/pr-reviewer-owners.yml");
+  assert.ok(!("malformed" in parsed));
+  if ("malformed" in parsed) return;
+  assert.deepEqual(parsed.rules[0]?.groups?.map((group) => group.name), ["alpha-seam", "beta-seam"]);
+  assert.ok(parsed.warnings.some((warning) => warning.includes("groups sharing owner glob 'src/fork/shared.ts'")), JSON.stringify(parsed.warnings));
+});
+
+test("#962.13: invalid group names and owner globs are dropped while valid groups remain", () => {
+  const parsed = parseRequirementOwners([
+    "requirements:",
+    "  fork-privilege-separation:",
+    "    owners:",
+    "      - src/fork/owner.ts",
+    "    groups:",
+    "      - name: alpha-seam",
+    "        owners:",
+    "          - src/fork/alpha.ts",
+    "      - name: invalid_name",
+    "        owners:",
+    "          - src/fork/invalid-name.ts",
+    "      - name: beta-seam",
+    "        owners:",
+    "          - ../escape.ts",
+    "      - name: gamma-seam",
+    "        owners:",
+    "          - src/fork/gamma.ts",
+  ].join("\n"), ".github/pr-reviewer-owners.yml");
+  assert.ok(!("malformed" in parsed));
+  if ("malformed" in parsed) return;
+  assert.deepEqual(parsed.rules[0]?.groups?.map((group) => group.name), ["alpha-seam", "gamma-seam"]);
+  assert.ok(parsed.warnings.some((warning) => warning.includes("invalid group name")), JSON.stringify(parsed.warnings));
+  assert.ok(parsed.warnings.some((warning) => warning.includes("invalid owner path")), JSON.stringify(parsed.warnings));
+});
+
+test("#962.14: distributed hints include only distributed ids in the requested scope", () => {
+  const ledger = ledgerWith([
+    { id: "req-fork", text: STANDARDS_FORK, kind: "normative" },
+    { id: "req-narrow", text: SOURCE_SHA_REQUIREMENT, kind: "acceptance" },
+  ]);
+  assert.deepEqual(
+    distributedRequirementHints(ledger, FORK_DISTRIBUTED_OWNERSHIP, ["req-fork", "req-narrow", "req-missing"]),
+    [{ requirementId: "req-fork", groups: ["feature-defaults", "privileged-checkout", "secret-boundary"] }],
+  );
+});
+
+test("#962.15: prompt hints append seam names, while empty hints preserve the no-hints prompt byte-for-byte", () => {
+  const dir = mkdtempSync(join(tmpdir(), "req-trace-distributed-prompt-"));
+  try {
+    writeFileSync(join(dir, "requirement-ledger-present.txt"), "1\n");
+    const workspace = workspaceAt(dir);
+    const base = { systemPrompt: "BASE", isDefault: true, addendum: "" };
+    const hints = [{ requirementId: "req-fork", groups: ["privileged-checkout", "feature-defaults", "secret-boundary"] }];
+    const hinted = applyRequirementTraceFragment(base, workspace, true, undefined, ["req-fork"], hints).systemPrompt;
+    const withoutHints = applyRequirementTraceFragment(base, workspace, true, undefined, ["req-fork"]).systemPrompt;
+    const emptyHints = applyRequirementTraceFragment(base, workspace, true, undefined, ["req-fork"], []).systemPrompt;
+    assert.match(hinted, /Distributed requirements.*`req-fork` → privileged-checkout, feature-defaults, secret-boundary/);
+    assert.equal(emptyHints, withoutHints);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#962.16: trace repair messages name the declared distributed seams", () => {
+  const [user] = buildTraceRepairUserMessage({
+    requirements: [{ id: "req-fork", text: "Fork privilege separation must hold.", groups: ["privileged-checkout", "feature-defaults", "secret-boundary"] }],
+    title: "t",
+    files: [],
+    diff: "",
+  });
+  assert.match(user, /req-fork: Fork privilege separation must hold\.; distributed seams: privileged-checkout, feature-defaults, secret-boundary/);
+});
+
+test("#962.17: claim-supplied groups cannot promote a narrow requirement", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/source-sha-check.ts", [
+      "if (record.sourceSha !== context.sourceSha) throw new Error('source SHA mismatch');",
+    ]);
+    const trace = validateRequirementTrace(
+      [metTraceClaim(
+        "req-sha",
+        [{ file: "src/source-sha-check.ts", line: 1 }],
+        [VALID_TEST_LOCATION],
+        { groups: [{ name: "invented-seam", owners: ["src/**"] }] },
+      )],
+      traceLedger("req-sha", SOURCE_SHA_REQUIREMENT),
+      workspace,
+      undefined,
+      { ownership: [{ match: ["source", "sha"], owners: ["src/source-sha-check.ts"] }] },
+    );
+    assert.equal(trace.rows[0]?.disposition, "met");
+    assert.deepEqual(trace.rows[0]?.notes, []);
+    assert.equal(trace.incomplete, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#962.18: a distributed all-stopword requirement still needs a predicate", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/stopwords/first.ts", ["value: other.value,"]);
+    writeFile(workspace, "src/stopwords/second.ts", ["value: other.value,"]);
+    writeFile(workspace, "tests/stopwords-first.test.ts", ["assert.equal(first.value, other.value);"]);
+    writeFile(workspace, "tests/stopwords-second.test.ts", ["assert.equal(second.value, other.value);"]);
+    const ownership: RequirementOwnership[] = [{
+      match: ["must", "check"],
+      owners: ["src/stopwords/*.ts"],
+      groups: [
+        { name: "first-seam", owners: ["src/stopwords/first.ts"], tests: ["tests/stopwords-first.test.ts"] },
+        { name: "second-seam", owners: ["src/stopwords/second.ts"], tests: ["tests/stopwords-second.test.ts"] },
+      ],
+    }];
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-stopwords", [
+        { file: "src/stopwords/first.ts", line: 1 },
+        { file: "src/stopwords/second.ts", line: 1 },
+      ], [
+        { file: "tests/stopwords-first.test.ts", line: 1 },
+        { file: "tests/stopwords-second.test.ts", line: 1 },
+      ])],
+      traceLedger("req-stopwords", "must check"),
+      workspace,
+      undefined,
+      { ownership },
+    );
+    assertUnverifiableWithNotes(trace, "req-stopwords", ["enforcement-location-copies-without-comparing"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#962.19: distributed prompt hints respect the 20-requirement cap", () => {
+  const count = MAX_DISTRIBUTED_HINTS + 1;
+  const entries = Array.from({ length: count }, (_unused, index) => ({
+    id: `req-distributed-${index}`,
+    text: `Distributed topology-${index} must hold.`,
+    kind: "normative",
+  }));
+  const ownership: RequirementOwnership[] = entries.map((_entry, index) => ({
+    match: [`topology-${index}`],
+    owners: [`src/topology/${index}.ts`],
+    groups: [
+      { name: `seam-${index}-a`, owners: [`src/topology/${index}-a.ts`], tests: [] },
+      { name: `seam-${index}-b`, owners: [`src/topology/${index}-b.ts`], tests: [] },
+    ],
+  }));
+  const ledger = ledgerWith(entries);
+  const scopeIds = entries.map((entry) => entry.id);
+  const hints = distributedRequirementHints(ledger, ownership, scopeIds);
+  assert.equal(hints.length, MAX_DISTRIBUTED_HINTS);
+
+  const dir = mkdtempSync(join(tmpdir(), "req-trace-hint-cap-"));
+  try {
+    writeFileSync(join(dir, "requirement-ledger-present.txt"), "1\n");
+    const state = applyRequirementTraceFragment(
+      { systemPrompt: "BASE", isDefault: true, addendum: "" },
+      workspaceAt(dir),
+      true,
+      undefined,
+      scopeIds,
+      hints,
+    );
+    const hintLine = state.systemPrompt.split("\n").find((line) => line.startsWith("Distributed requirements"));
+    assert.ok(hintLine);
+    assert.equal((hintLine.match(/→/g) ?? []).length, MAX_DISTRIBUTED_HINTS);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#962.20: hostile requirement ids and seam names are neutralized in prompt and rendering", () => {
+  const workspace = makeWorkspace();
+  const dir = mkdtempSync(join(tmpdir(), "req-trace-hostile-seam-"));
+  const hostileId = "req-\u0001bad`tick";
+  const hostileGroup = "secret`-boundary";
+  try {
+    writeFile(workspace, "src/hostile/one.ts", ["if (secret !== safeSecret) throw new Error('mismatch');"]);
+    writeFile(workspace, "src/hostile/two.ts", ["if (boundary !== safeBoundary) throw new Error('mismatch');"]);
+    writeFile(workspace, "tests/hostile-one.test.ts", ["assert.equal(secret, safeSecret);"]);
+    writeFile(workspace, "tests/hostile-two.test.ts", ["assert.equal(boundary, safeBoundary);"]);
+    const ownership: RequirementOwnership[] = [{
+      match: ["untrusted", "content", "data"],
+      owners: ["src/hostile/one.ts", "src/hostile/two.ts"],
+      groups: [
+        { name: hostileGroup, owners: ["src/hostile/one.ts"], tests: [] },
+        { name: "safe-seam", owners: ["src/hostile/two.ts"], tests: ["tests/hostile-two.test.ts"] },
+      ],
+    }];
+    const ledger = traceLedger(hostileId, STANDARDS_UNTRUSTED);
+    const hints = distributedRequirementHints(ledger, ownership, [hostileId]);
+    assert.equal(hints.length, 1);
+
+    writeFileSync(join(dir, "requirement-ledger-present.txt"), "1\n");
+    const prompt = applyRequirementTraceFragment(
+      { systemPrompt: "BASE", isDefault: true, addendum: "" },
+      workspaceAt(dir),
+      true,
+      undefined,
+      undefined,
+      hints,
+    ).systemPrompt;
+    assert.equal(prompt.includes("\u0001"), false);
+    assert.equal(prompt.includes(hostileId), false);
+    assert.equal(prompt.includes("bad`tick"), false);
+    assert.equal(prompt.includes("secret`-boundary"), false);
+
+    const trace = validateRequirementTrace(
+      [{
+        requirement_id: hostileId,
+        disposition: "met",
+        enforcement: [
+          { file: "src/hostile/one.ts", line: 1 },
+          { file: "src/hostile/two.ts", line: 1 },
+        ],
+        test: [
+          { file: "tests/hostile-one.test.ts", line: 1 },
+          { file: "tests/hostile-two.test.ts", line: 1 },
+        ],
+        reason: "the trusted seams are cited",
+      }],
+      ledger,
+      workspace,
+      undefined,
+      { ownership },
+    );
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.equal(trace.rows[0]?.notes.includes("distributed-test-group-uncovered:secret`-boundary"), true);
+    assert.equal(trace.incomplete, true);
+
+    const failedTrace = {
+      ...trace,
+      incomplete: true,
+      rows: [{
+        requirement_id: hostileId,
+        disposition: "unverifiable",
+        enforcement: [{ file: "src/hostile/one.ts", line: 1 }],
+        test: [],
+        reason: "missing a seam",
+        notes: [`distributed-enforcement-group-uncovered:${hostileGroup}`],
+      }],
+    };
+    const rendered = renderRequirementTraceMarkdown(failedTrace);
+    assert.equal(rendered.includes("secret`-boundary"), false);
+    assert.equal(rendered.includes("\u0001"), false);
+    assert.equal(rendered.includes("bad`tick"), false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#962.21: a group without test globs cannot use generic test evidence", () => {
+  const workspace = makeWorkspace();
+  try {
+    const enforcement = writeForkEnforcementFixture(workspace);
+    const ownership: RequirementOwnership[] = [{
+      ...FORK_DISTRIBUTED_OWNERSHIP[0]!,
+      groups: FORK_GROUPS.map((group) => group.name === "secret-boundary" ? { ...group, tests: [] } : group),
+    }];
+    const testLocations = [...FORK_TEST_LOCATIONS.slice(0, 2), VALID_TEST_LOCATION];
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-fork", enforcement, testLocations)],
+      traceLedger("req-fork", STANDARDS_FORK),
+      workspace,
+      undefined,
+      { ownership },
+    );
+    assertUnverifiableWithNotes(trace, "req-fork", ["distributed-test-group-uncovered:secret-boundary"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#962.22: topology overflow fails closed despite a complete five-seam proof", () => {
+  const workspace = makeWorkspace();
+  try {
+    const groups = Array.from({ length: 5 }, (_unused, index) => {
+      const seam = `seam-${index + 1}`;
+      const enforcementFile = `src/overflow/${seam}.ts`;
+      const testFile = `tests-v3/overflow/${seam}.test.ts`;
+      writeFile(workspace, enforcementFile, ["if (topology !== expectedTopology) throw new Error('mismatch');"]);
+      writeFile(workspace, testFile, ["assert.ok(topology);"]);
+      return { name: seam, owners: [enforcementFile], tests: [testFile] };
+    });
+    const trace = validateRequirementTrace(
+      [metTraceClaim(
+        "req-overflow",
+        groups.map((group) => ({ file: group.owners[0]!, line: 1 })),
+        groups.map((group) => ({ file: group.tests[0]!, line: 1 })),
+      )],
+      traceLedger("req-overflow", "Overflow topology enforcement must remain protected."),
+      workspace,
+      undefined,
+      { ownership: [{ match: ["overflow", "topology"], owners: ["src/overflow/**"], groups }] },
+    );
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.deepEqual(trace.rows[0]?.notes, ["distributed-topology-overflow"]);
+    assert.equal(trace.incomplete, true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#962.23: distributed hints omit overflowed requirements from the same ledger", () => {
+  const overflowGroups = Array.from({ length: 5 }, (_unused, index) => ({
+    name: `overflow-seam-${index + 1}`,
+    owners: [`src/overflow/seam-${index + 1}.ts`],
+    tests: [`tests-v3/overflow/seam-${index + 1}.test.ts`],
+  }));
+  const ownership: RequirementOwnership[] = [
+    { match: ["overflow", "topology"], owners: ["src/overflow/**"], groups: overflowGroups },
+    ...FORK_DISTRIBUTED_OWNERSHIP,
+  ];
+  const ledger = ledgerWith([
+    { id: "req-overflow", text: "Overflow topology must remain protected.", kind: "normative" },
+    { id: "req-fork", text: STANDARDS_FORK, kind: "normative" },
+  ]);
+  assert.deepEqual(
+    distributedRequirementHints(ledger, ownership, ["req-overflow", "req-fork"]),
+    [{ requirementId: "req-fork", groups: ["feature-defaults", "privileged-checkout", "secret-boundary"] }],
+  );
+});
+
+test("#962.24: parseRequirementOwners caps declared groups and warns with dropped names", () => {
+  const groups = Array.from({ length: MAX_DECLARED_GROUPS_PER_RULE + 1 }, (_unused, index) => {
+    const name = `group-${String(index + 1).padStart(2, "0")}`;
+    return [
+      `      - name: ${name}`,
+      `        owners:`,
+      `          - src/groups/${name}.ts`,
+      `        tests:`,
+      `          - tests/groups/${name}.test.ts`,
+    ];
+  }).flat();
+  const parsed = parseRequirementOwners([
+    "requirements:",
+    "  distributed-rule:",
+    "    owners:",
+    "      - src/groups/owner.ts",
+    "    groups:",
+    ...groups,
+  ].join("\n"), ".github/pr-reviewer-owners.yml");
+  assert.ok(!("malformed" in parsed));
+  if ("malformed" in parsed) return;
+  assert.equal(parsed.rules[0]?.groups?.length, MAX_DECLARED_GROUPS_PER_RULE);
+  assert.ok(parsed.warnings.some((warning) =>
+    warning.includes(`exceeds ${MAX_DECLARED_GROUPS_PER_RULE} declared groups`) && warning.includes("dropped: group-17"),
+  ), JSON.stringify(parsed.warnings));
 });

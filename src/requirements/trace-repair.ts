@@ -19,6 +19,7 @@
  * or changes the verdict beyond the missing-claim rows it was asked to fill.
  * Mirrors `src/claims/model.ts`. */
 
+import { MAX_GROUPS_PER_RULE, MAX_GROUP_NAME_CHARS } from "../enforcement/requirement-trace.js";
 import { extractSpecialistJson } from "../specialists/normalize.js";
 import { buildSpecialistPayload, type SpecialistPayload } from "../specialists/payload.js";
 import type { SpecialistRequestFn } from "../specialists/runner.js";
@@ -39,6 +40,7 @@ const MAX_FENCE_BYTES = 12;
 export interface TraceRepairRequirement {
   id: string;
   text: string;
+  groups?: readonly string[];
 }
 
 export interface TraceRepairModelConfig {
@@ -67,7 +69,7 @@ export const TRACE_REPAIR_SYSTEM_PROMPT =
   + "production code. `met` requires BOTH a valid enforcement location and a valid test location, and the "
   + "enforcement line must contain a real predicate — a comparison, guard, throw/assert, or match call — "
   + "not just an assignment or object-literal property that copies the value (naming the field is not "
-  + "enforcing it). `not_applicable`, `unmet`, and `unverifiable` all require a `reason`. Return strict "
+  + "enforcing it). `not_applicable`, `unmet`, and `unverifiable` all require a `reason`. A `met` claim for a requirement listed as distributed must cite one enforcement location and one matching test in each named seam. Return strict "
   + 'JSON only — no prose, no markdown, no code fences: {"requirement_coverage":[ ... ]}.';
 
 function fitUtf8(text: string, maxBytes: number): [string, boolean] {
@@ -141,7 +143,12 @@ export function buildTraceRepairUserMessage(input: {
     "",
     "PR title: " + escapeControlChars((input.title || "").slice(0, MAX_TITLE_CHARS)),
     "",
-    fenced("Requirements to trace:", input.requirements.map((r) => `${r.id}: ${escapeControlChars(r.text)}`).join("\n") || "(none)"),
+    fenced("Requirements to trace:", input.requirements.map((r) => {
+      const seams = r.groups && r.groups.length > 0
+        ? `; distributed seams: ${r.groups.slice(0, MAX_GROUPS_PER_RULE).map((name) => escapeControlChars(name.replace(/[\x00-\x1f\x7f]/g, "").slice(0, MAX_GROUP_NAME_CHARS))).join(", ")}`
+        : "";
+      return `${r.id}: ${escapeControlChars(r.text)}${seams}`;
+    }).join("\n") || "(none)"),
     "",
     fenced("Changed files:", input.files.map((n) => escapeControlChars(n)).join("\n") || "(none)"),
     "",

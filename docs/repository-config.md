@@ -83,6 +83,49 @@ to "no owners" with a surfaced warning — it can never broaden scope or crash
 the review. See [`opt-in-features.md`](opt-in-features.md) under
 `requirement-trace`.
 
+### Distributed enforcement (`groups`)
+
+A rule may also declare `groups`: the named seams across which a cross-cutting
+requirement is enforced (#962). Presence of two or more valid groups makes the
+requirement **distributed**, and requirement-trace then requires the model's
+citations to cover **every** declared seam — one distinct citation per group,
+matched by the same anchored, lowercased full-path glob rules as `owners`.
+
+```yaml
+requirements:
+  fork-privilege-separation:
+    owners:                       # unchanged: scopes the requirement in (#958)
+      - .github/workflows/fork-ai-review.yaml
+      - scripts/fork_review_gate.py
+    groups:                       # new: the proof topology (#962)
+      - name: privileged-checkout
+        owners:
+          - .github/workflows/fork-ai-review.yaml
+      - name: feature-defaults
+        owners:
+          - src/config/repository-config.ts
+      - name: secret-boundary
+        owners:
+          - src/publish/publish.ts
+        tests:                    # optional per-seam test globs
+          - tests-v3/publish.test.ts
+```
+
+The model never declares a group and never supplies a glob: topology is
+base-ref-trusted config, so a PR contributor cannot promote a requirement to
+"distributed", and citing many irrelevant locations cannot satisfy a seam whose
+surface the citations never touch. Every group must declare both an enforcement
+surface (`owners`) and a test surface (`tests`), and each seam must be covered by
+a distinct enforcement citation **and** a distinct test citation — so a generic
+or unrelated test file elsewhere cannot satisfy a distributed requirement.
+Groups are capped at four representable seams per requirement; declaring more
+fails the trace closed rather than validating a truncated proof. A rule whose
+`groups` block yields fewer than two valid groups is retained as a plain
+ownership rule with a warning. The full contract — the collective validation
+algorithm, the anti-abuse properties, and the fail-soft / fail-closed matrix —
+is pinned in
+[`architecture/distributed-requirement-proof.md`](architecture/distributed-requirement-proof.md).
+
 ## Keys
 
 Keys are the v3 kebab-case input ids from

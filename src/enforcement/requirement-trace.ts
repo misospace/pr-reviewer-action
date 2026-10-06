@@ -54,6 +54,12 @@ import { isTestPath } from "../context/change-anchors.js";
 export const TRACE_DISPOSITIONS: readonly string[] = ["met", "unmet", "not_applicable", "unverifiable"];
 
 export const MAX_TRACE_LOCATIONS = 5;
+export const MAX_GROUPS_PER_RULE = MAX_TRACE_LOCATIONS - 1;
+export const MAX_DECLARED_GROUPS_PER_RULE = 16;
+export const MAX_GROUP_NAME_CHARS = 60;
+export const MAX_RENDERED_ID_CHARS = 64;
+export const MIN_DISTRIBUTED_GROUPS = 2;
+export const MAX_DISTRIBUTED_HINTS = 20;
 export const MAX_REASON_CHARS = 300;
 /** Hard cap on the artifact's `errors` diagnostics, so a hostile payload
  * cannot bloat the persisted artifact with unbounded parser noise. */
@@ -288,6 +294,16 @@ function windowLines(lines: readonly string[], line1Based: number, radius: numbe
   return lines.slice(start, end);
 }
 
+/** True when a predicate-shaped line occurs near one of the given citations. */
+function predicateSignalFound(locations: readonly TraceLocation[], cache: FileTextCache): boolean {
+  for (const loc of locations) {
+    const lines = cache.lines(loc.file);
+    if (lines === null || loc.line > lines.length) continue;
+    if (windowLines(lines, loc.line, PREDICATE_WINDOW_RADIUS).some(linePredicateSignal)) return true;
+  }
+  return false;
+}
+
 /**
  * True when at least one of the given (already location-valid) enforcement
  * locations has a term from `terms` and a predicate signal on the SAME
@@ -451,9 +467,16 @@ function termWordMatch(term: string, changed: string): boolean {
  * narrow path globs whose changed files own that requirement. A requirement
  * whose subject prose the diff never repeats stays in scope when a changed
  * file is one of its declared owners. */
+export interface RequirementGroup {
+  name: string;
+  owners: readonly string[];
+  tests: readonly string[];
+}
+
 export interface RequirementOwnership {
   match: readonly string[];
   owners: readonly string[];
+  groups?: readonly RequirementGroup[];
 }
 
 /** Compile a requirement's `match` tokens and owner globs once, so a large
@@ -472,6 +495,140 @@ function ownerPatternRegex(pattern: string): RegExp {
     .map((part) => part.split("?").map((chunk) => escapeRegExp(chunk)).join("[^/]"))
     .join("[^/]*");
   return new RegExp(`^${source}$`);
+}
+
+interface DistributedGroupSet {
+  groups: RequirementGroup[];
+  overflow: boolean;
+  excess: string[];
+}
+
+function ruleMatchesRequirement(rule: RequirementOwnership, text: string): boolean {
+  if (!Array.isArray(rule.match) || rule.match.length === 0) return false;
+  const haystack = text.toLowerCase();
+  return rule.match.every((token) => {
+    if (typeof token !== "string" || token === "") return false;
+    try {
+      return new RegExp(`\\b${escapeRegExp(token.toLowerCase())}\\b`).test(haystack);
+    } catch {
+      return false;
+    }
+  });
+}
+
+function distributedGroupsForText(
+  text: string,
+  ownership: readonly RequirementOwnership[] | undefined,
+): DistributedGroupSet {
+  const byName = new Map<string, RequirementGroup>();
+  for (const rule of ownership ?? []) {
+    if (!rule || !ruleMatchesRequirement(rule, text) || !Array.isArray(rule.groups) || rule.groups.length < MIN_DISTRIBUTED_GROUPS) continue;
+    for (const group of rule.groups) {
+      if (!group || typeof group.name !== "string" || !Array.isArray(group.owners) || !Array.isArray(group.tests)) continue;
+      const current = byName.get(group.name);
+      byName.set(group.name, current ? {
+        name: group.name,
+        owners: [...new Set([...current.owners, ...(group.owners as readonly unknown[]).filter((value): value is string => typeof value === "string" && value !== "")])],
+        tests: [...new Set([...current.tests, ...(group.tests as readonly unknown[]).filter((value): value is string => typeof value === "string" && value !== "")])],
+      } : {
+        name: group.name,
+        owners: [...new Set((group.owners as readonly unknown[]).filter((value): value is string => typeof value === "string" && value !== ""))],
+        tests: [...new Set((group.tests as readonly unknown[]).filter((value): value is string => typeof value === "string" && value !== ""))],
+      });
+    }
+  }
+  const sorted = [...byName.values()]
+    .filter((group) => group.owners.length > 0)
+    .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  return {
+    groups: sorted.slice(0, MAX_DECLARED_GROUPS_PER_RULE),
+    overflow: sorted.length > MAX_GROUPS_PER_RULE,
+    excess: sorted.slice(MAX_GROUPS_PER_RULE).map((group) => group.name),
+  };
+}
+
+/** Resolve trusted distributed topology for the requested ledger ids. */
+export function distributedRequirementHints(
+  ledger: unknown,
+  ownership: readonly RequirementOwnership[] | undefined,
+  scopeIds: readonly string[],
+): { requirementId: string; groups: readonly string[] }[] {
+  const entries = new Map(ledgerEntriesInScope(ledger).map((entry) => [entry.id, entry]));
+  const hints: { requirementId: string; groups: readonly string[] }[] = [];
+  const seenScopeIds = new Set<string>();
+  for (const requirementId of scopeIds) {
+    if (seenScopeIds.has(requirementId)) continue;
+    seenScopeIds.add(requirementId);
+    const entry = entries.get(requirementId);
+    if (!entry) continue;
+    const { groups, overflow } = distributedGroupsForText(entry.text, ownership);
+    if (overflow || groups.length < MIN_DISTRIBUTED_GROUPS) continue;
+    hints.push({ requirementId, groups: groups.map((group) => group.name) });
+    if (hints.length >= MAX_DISTRIBUTED_HINTS) break;
+  }
+  return hints;
+}
+
+/** Warning diagnostics for effective distributed topology that exceeds the representable cap. */
+export function distributedRequirementWarnings(
+  ledger: unknown,
+  ownership: readonly RequirementOwnership[] | undefined,
+  scopeIds: readonly string[],
+): string[] {
+  const entries = new Map(ledgerEntriesInScope(ledger).map((entry) => [entry.id, entry]));
+  const warnings: string[] = [];
+  const seenScopeIds = new Set<string>();
+  for (const requirementId of scopeIds) {
+    if (seenScopeIds.has(requirementId)) continue;
+    seenScopeIds.add(requirementId);
+    const entry = entries.get(requirementId);
+    if (!entry) continue;
+    const { overflow, excess } = distributedGroupsForText(entry.text, ownership);
+    if (overflow) {
+      warnings.push(`requirement '${requirementId}' exceeds ${MAX_GROUPS_PER_RULE} distributed groups; excess: ${excess.join(", ")}.`);
+    }
+  }
+  return warnings;
+}
+
+function citationMatchesPatterns(loc: TraceLocation, patterns: readonly string[]): boolean {
+  const file = loc.file.toLowerCase();
+  return patterns.some((pattern) => {
+    try {
+      return ownerPatternRegex(pattern).test(file);
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** Maximum matching, with each concrete file:line citation usable once. */
+function matchCitationsToGroups(
+  groups: readonly RequirementGroup[],
+  citations: readonly TraceLocation[],
+  patternsFor: (group: RequirementGroup) => readonly string[],
+): Map<string, TraceLocation> {
+  const unique = [...new Map(citations.map((location) => [`${location.file}\0${location.line}`, location])).values()];
+  const citationToGroup = new Map<number, number>();
+  const assign = (groupIndex: number, visited: Set<number>): boolean => {
+    const group = groups[groupIndex]!;
+    for (let citationIndex = 0; citationIndex < unique.length; citationIndex += 1) {
+      if (visited.has(citationIndex) || !citationMatchesPatterns(unique[citationIndex]!, patternsFor(group))) continue;
+      visited.add(citationIndex);
+      const prior = citationToGroup.get(citationIndex);
+      if (prior === undefined || assign(prior, visited)) {
+        citationToGroup.set(citationIndex, groupIndex);
+        return true;
+      }
+    }
+    return false;
+  };
+  for (let index = 0; index < groups.length; index += 1) assign(index, new Set());
+  const groupToCitation = new Map<string, TraceLocation>();
+  for (const [citationIndex, groupIndex] of citationToGroup) {
+    groupToCitation.set(groups[groupIndex]!.name, unique[citationIndex]!);
+  }
+  return groupToCitation;
 }
 
 function compileOwnership(ownership: readonly RequirementOwnership[]): CompiledOwnership[] {
@@ -624,6 +781,9 @@ export function validateRequirementTrace(
   for (const entry of inScope) {
     const claim = claimsById.get(entry.id);
     const notes: string[] = [];
+    const distributedSet = distributedGroupsForText(entry.text, context.ownership);
+    const distributedGroups = distributedSet.groups;
+    const isDistributed = distributedGroups.length >= MIN_DISTRIBUTED_GROUPS;
     let disposition: string;
     let enforcement: TraceLocation[];
     let test: TraceLocation[];
@@ -654,31 +814,59 @@ export function validateRequirementTrace(
           notes.push("missing-reason");
         }
       } else if (disposition === "met") {
-        // Full trace required: a valid enforcement location AND a valid
-        // test location (one in a real test/fixture file, per isTestPath) —
-        // either missing downgrades on its own, and both notes can apply.
-        if (!anyLocationValid(enforcement, cache)) {
-          disposition = "unverifiable";
-          notes.push("downgraded-no-valid-enforcement-location");
-        }
-        if (!anyTestLocationValid(test, cache)) {
-          disposition = "unverifiable";
-          notes.push("downgraded-no-valid-test-location");
-        }
-        if (disposition === "met") {
-          // Location existence is not enforcement proof (#854: the cited
-          // line existed and even named the field, but only copied it).
-          // Require a predicate — comparison/guard/assertion/match — near
-          // one of the requirement's key terms at one of the valid
-          // enforcement locations.
-          const terms = extractRequirementTerms(entry.text, symbol);
+        if (isDistributed && !distributedSet.overflow) {
           const validEnforcementLocations = enforcement.filter((loc) => locationValid(loc, cache));
-          if (!enforcementPredicateFound(validEnforcementLocations, terms, cache)) {
+          const enforcementMatches = matchCitationsToGroups(distributedGroups, validEnforcementLocations, (group) => group.owners);
+          const uncoveredEnforcement = distributedGroups.filter((group) => !enforcementMatches.has(group.name));
+          for (const group of uncoveredEnforcement) {
+            notes.push(`distributed-enforcement-group-uncovered:${group.name}`);
+          }
+
+          const validTests = test.filter((loc) => isTestPath(loc.file) && locationValid(loc, cache));
+          const testMatches = matchCitationsToGroups(distributedGroups, validTests, (group) => group.tests);
+          for (const group of distributedGroups) {
+            if (!testMatches.has(group.name)) notes.push(`distributed-test-group-uncovered:${group.name}`);
+          }
+          if (validTests.length === 0) notes.push("distributed-test-location-uncovered");
+          if (uncoveredEnforcement.length > 0 || distributedGroups.some((group) => !testMatches.has(group.name)) || validTests.length === 0) {
             disposition = "unverifiable";
-            notes.push("enforcement-location-copies-without-comparing");
+          } else {
+            const terms = extractRequirementTerms(entry.text);
+            const matchedLocations = [...enforcementMatches.values()];
+            const predicateFound = terms.length === 0
+              ? predicateSignalFound(matchedLocations, cache)
+              : enforcementPredicateFound(matchedLocations, terms, cache);
+            if (!predicateFound) {
+              disposition = "unverifiable";
+              notes.push("enforcement-location-copies-without-comparing");
+            }
+          }
+        } else if (!isDistributed) {
+          // Full narrow trace required: a valid enforcement location AND a
+          // valid test location, then a predicate near a requirement term.
+          if (!anyLocationValid(enforcement, cache)) {
+            disposition = "unverifiable";
+            notes.push("downgraded-no-valid-enforcement-location");
+          }
+          if (!anyTestLocationValid(test, cache)) {
+            disposition = "unverifiable";
+            notes.push("downgraded-no-valid-test-location");
+          }
+          if (disposition === "met") {
+            const terms = extractRequirementTerms(entry.text, symbol);
+            const validEnforcementLocations = enforcement.filter((loc) => locationValid(loc, cache));
+            if (!enforcementPredicateFound(validEnforcementLocations, terms, cache)) {
+              disposition = "unverifiable";
+              notes.push("enforcement-location-copies-without-comparing");
+            }
           }
         }
       }
+    }
+
+    if (distributedSet.overflow && isDistributed) {
+      disposition = "unverifiable";
+      notes.push("distributed-topology-overflow");
     }
 
     // #874 maintainer follow-up: a well-formed `unmet` is a KNOWN gap, not
@@ -820,14 +1008,36 @@ const COLLAPSE_THRESHOLD = 5;
 export function renderRequirementTraceMarkdown(trace: RequirementTraceArtifact): string {
   const notable = trace.rows.filter((row) => row.disposition === "unmet" || row.disposition === "unverifiable");
   if (notable.length === 0) return "";
+  const cleanSeam = (name: string): string => name.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_GROUP_NAME_CHARS);
+  const cleanRequirementId = (id: string): string => id.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_RENDERED_ID_CHARS);
+  const seamNames = (row: RequirementTraceRow, prefix: string): string[] => [...new Set(
+    row.notes.filter((note) => note.startsWith(prefix)).map((note) => cleanSeam(note.slice(prefix.length))).filter(Boolean),
+  )].slice(0, MAX_GROUPS_PER_RULE);
   const lines = notable.slice(0, MAX_RENDERED_ROWS).map((row) => {
+    const enforcementMisses = seamNames(row, "distributed-enforcement-group-uncovered:");
+    const testMisses = seamNames(row, "distributed-test-group-uncovered:");
     const loc = row.enforcement[0]
       ? `\`${row.enforcement[0].file}:${row.enforcement[0].line}\``
       : row.notes.includes("not-traced-by-reviewer")
         ? "the reviewer reported no trace for this requirement"
         : "no valid enforcement location";
+    const details: string[] = [];
+    if (row.notes.includes("distributed-topology-overflow")) {
+      details.push(`distributed topology exceeds the ${MAX_GROUPS_PER_RULE} representable seams`);
+    } else {
+      if (enforcementMisses.length > 0) {
+        if (row.enforcement.length > 0) details.push(loc);
+        details.push(`uncovered enforcement seams: ${enforcementMisses.map((name) => `\`${name}\``).join(", ")}`);
+      } else {
+        details.push(loc);
+      }
+      if (testMisses.length > 0) {
+        details.push(`uncovered test seams: ${testMisses.map((name) => `\`${name}\``).join(", ")}`);
+      }
+      if (row.notes.includes("distributed-test-location-uncovered")) details.push("no test location cited");
+    }
     const reason = row.reason !== "" ? `: ${row.reason}` : "";
-    return `- \`${row.requirement_id}\` — **${row.disposition}** (${loc})${reason}`;
+    return `- \`${cleanRequirementId(row.requirement_id)}\` — **${row.disposition}** (${details.join("; ")})${reason}`;
   });
   if (notable.length > MAX_RENDERED_ROWS) lines.push(`- …and ${notable.length - MAX_RENDERED_ROWS} more`);
   const summary = `${notable.length} of ${trace.rows.length} requirement(s) not fully traced to enforcement and a test:`;
