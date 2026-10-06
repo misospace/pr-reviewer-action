@@ -47,7 +47,8 @@
       "repos/misospace/demo/issues/12": {
         "error": "GitHub API error: 500"
       }
-    }
+    },
+    "identity": "pr-reviewer[bot]"
   },
   "fixture": "auto-linked-issue-failure",
   "description": "parity fixture for precheck-decision boundary (#674): auto-linked-issue-failure"

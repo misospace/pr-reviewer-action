@@ -11,7 +11,8 @@
     "reviews": [
       {
         "body": "<!-- ai-pr-reviewer -->\n<!-- ai-pr-review-fingerprint:3be6193409646aae05d5319a7ed87a0531aaec5f32783eba9661e926299cc474|cfg:dd7c82b6b211fa0ef17693822887e061aa6a94ce03645cb7e9b88ac6dcc60f4b -->\n## Review\nBody text.\n<!-- ai-pr-reviewer:{\"version\":1,\"head_sha\":\"head-old\",\"base_sha\":\"base-old\",\"review_result\":\"clean\"} -->\n",
-        "submitted_at": "2024-01-02T00:00:00Z"
+        "submitted_at": "2024-01-02T00:00:00Z",
+        "author": "pr-reviewer[bot]"
       }
     ],
     "pr": {
@@ -27,7 +28,8 @@
           "full_name": "misospace/demo"
         }
       }
-    }
+    },
+    "identity": "pr-reviewer[bot]"
   },
   "fixture": "unchanged-skip-review-verdict",
   "description": "parity fixture for precheck-decision boundary (#674): unchanged-skip-review-verdict"

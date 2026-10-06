@@ -64,7 +64,8 @@
           "Feature"
         ]
       }
-    }
+    },
+    "identity": "pr-reviewer[bot]"
   },
   "fixture": "auto-linear-priority-changed",
   "description": "parity fixture for precheck-decision boundary (#674): auto-linear-priority-changed"

@@ -3,7 +3,7 @@ import type { ExternalCheck } from "../platform/normalize.js";
 import { deriveIsFork, normalizePrIdentity } from "../platform/pr.js";
 import { resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
-import type { PlatformAdapter } from "../platform/types.js";
+import type { ManagedComment, ManagedReview, PlatformAdapter } from "../platform/types.js";
 import {
   buildMarkerFingerprint,
   collectConfigLines,
@@ -224,30 +224,77 @@ export function extractStoredFingerprint(body: string): string {
   return "";
 }
 
+/** #970: is a forge-reported author login the run's own authenticated
+ * identity? Logins are compared case-insensitively (both forges treat them
+ * that way). An empty/missing author, or an unproven (null/blank) identity,
+ * never matches — uncertain ownership fails closed. */
+export function authorMatchesTrustedIdentity(author: string | undefined, trustedIdentity: string | null): boolean {
+  const authorLogin = typeof author === "string" ? author.trim().toLowerCase() : "";
+  const identityLogin = typeof trustedIdentity === "string" ? trustedIdentity.trim().toLowerCase() : "";
+  return authorLogin !== "" && identityLogin !== "" && authorLogin === identityLogin;
+}
+
 /** Latest managed comment/review body selection by publish mode: the
- * review_verdict mode reads PR reviews, everything else reads issue
- * comments. Selection is latest-by-timestamp among bodies containing the
- * marker, mirroring the v2 jq. */
+ * review_verdict mode reads PR reviews, everything else reads issue comments.
+ * Selection is latest-by-timestamp among bodies that BOTH carry the marker
+ * AND were authored by the run's forge-authenticated identity (#970): a
+ * contributor can forge the marker, fingerprint, and metadata — all body
+ * content — but cannot forge the author the forge reports. */
 export function lastManagedBody(
-  comments: { body: string; updated_at?: string | undefined; created_at?: string | undefined }[],
-  reviews: { body: string; submitted_at?: string | undefined }[],
+  comments: readonly ManagedComment[],
+  reviews: readonly ManagedReview[],
   publishMode: string,
   commentMarker: string,
+  trustedIdentity: string | null,
 ): string {
   const marker = commentMarker || "<!-- ai-pr-reviewer -->";
   const mode = (publishMode ?? "").toLowerCase();
   if (mode === "review_verdict") {
-    const matching = reviews.filter((review) => (review.body ?? "").includes(marker));
+    const matching = reviews.filter((review) => (review.body ?? "").includes(marker) && authorMatchesTrustedIdentity(review.author, trustedIdentity));
     matching.sort((a, b) => (a.submitted_at ?? "") < (b.submitted_at ?? "") ? -1 : (a.submitted_at ?? "") > (b.submitted_at ?? "") ? 1 : 0);
     return matching.length ? matching[matching.length - 1]!.body : "";
   }
-  const matching = comments.filter((comment) => (comment.body ?? "").includes(marker));
+  const matching = comments.filter((comment) => (comment.body ?? "").includes(marker) && authorMatchesTrustedIdentity(comment.author, trustedIdentity));
   matching.sort((a, b) => {
     const aKey = a.updated_at ?? a.created_at ?? "";
     const bKey = b.updated_at ?? b.created_at ?? "";
     return aKey < bKey ? -1 : aKey > bKey ? 1 : 0;
   });
   return matching.length ? matching[matching.length - 1]!.body : "";
+}
+
+/** #970: select the last managed body whose author is the run's own
+ * forge-authenticated identity. Only such a body may supply the stored skip
+ * fingerprint or a carried verdict. When a marker-bearing body exists but the
+ * identity cannot be proven (a failed `/user` read, a token that posts as
+ * nobody, or an unusable payload), or when no body was authored by it, the
+ * result is empty — the run then re-reviews rather than trusting an
+ * unauthenticated marker. The identity is only resolved when a candidate
+ * exists, so a fresh PR costs no extra API call. */
+async function selectAuthenticatedManagedBody(
+  adapter: PlatformAdapter,
+  comments: readonly ManagedComment[],
+  reviews: readonly ManagedReview[],
+  publishMode: string,
+  commentMarker: string,
+): Promise<string> {
+  const marker = commentMarker || "<!-- ai-pr-reviewer -->";
+  const mode = (publishMode ?? "").toLowerCase();
+  const candidates: readonly { body?: string | undefined }[] = mode === "review_verdict" ? reviews : comments;
+  if (!candidates.some((entry) => (entry.body ?? "").includes(marker))) return "";
+  let identity: string | null = null;
+  try {
+    identity = await adapter.authenticatedIdentity();
+  } catch {
+    identity = null;
+  }
+  if (identity === null || identity.trim() === "") {
+    process.stderr.write(
+      "warning: could not authenticate the action's own forge identity; refusing to skip or carry a verdict from an unauthenticated managed body (fail closed)\n",
+    );
+    return "";
+  }
+  return lastManagedBody(comments, reviews, publishMode, commentMarker, identity);
 }
 
 /** Carry the previous review's verdict forward on a diff-unchanged skip so
@@ -502,13 +549,16 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
   const diffContent = await spec.adapter.getPrDiff();
 
   // ── Last managed review body lookup ───────────────────────────────────
+  // #970: only a body whose author is the run's forge-authenticated identity
+  // may supply the stored fingerprint or a carried verdict. A forged marker
+  // cannot authorize a skip (see selectAuthenticatedManagedBody).
   const publishMode = env.PUBLISH_MODE || "comment";
   const commentMarker = env.COMMENT_MARKER || "<!-- ai-pr-reviewer -->";
   const [comments, reviews] = await Promise.all([
     spec.adapter.listIssueComments(),
     spec.adapter.listPrReviews(),
   ]);
-  const lastCommentBody = lastManagedBody(comments, reviews, publishMode, commentMarker);
+  const lastCommentBody = await selectAuthenticatedManagedBody(spec.adapter, comments, reviews, publishMode, commentMarker);
   const storedFingerprint = extractStoredFingerprint(lastCommentBody);
   const previousFingerprints = storedFingerprint ? [storedFingerprint] : [];
 

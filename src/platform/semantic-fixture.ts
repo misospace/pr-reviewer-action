@@ -73,6 +73,13 @@ export class SemanticFixtureAdapter implements PlatformReadAdapter {
     return [];
   }
 
+  /** #970: fixture mode never reaches a forge, so the run's own identity is
+   * unprovable — `null` makes the precheck fail closed, exactly as it would
+   * against an unreachable forge. */
+  async authenticatedIdentity(): Promise<string | null> {
+    return null;
+  }
+
   /** Not intercepted by the shell seam: GitHub answers "unknown"; Forgejo
    * would query the API, which fixture mode never does. */
   async repoPermission(): Promise<string | null> {

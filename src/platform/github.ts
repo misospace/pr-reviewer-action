@@ -39,6 +39,17 @@ function parseJson(text: string): { ok: true; data: unknown } | { ok: false } {
   }
 }
 
+/** #970: the forge-reported author login of a raw comment/review object
+ * (`user.login`). Never reads body content; a missing or non-string login is
+ * `undefined` (unproven ownership, which callers fail closed on). */
+function githubAuthor(item: unknown): string | undefined {
+  if (item === null || typeof item !== "object" || Array.isArray(item)) return undefined;
+  const user = (item as Record<string, unknown>).user;
+  if (user === null || typeof user !== "object" || Array.isArray(user)) return undefined;
+  const login = (user as Record<string, unknown>).login;
+  return typeof login === "string" && login !== "" ? login : undefined;
+}
+
 /** The `rel="next"` target of an RFC 8288 Link header, if any. */
 export function nextLink(header: string | null): string | null {
   if (!header) return null;
@@ -229,7 +240,18 @@ export class GitHubAdapter implements PlatformReadAdapter {
         url,
         this.options(),
       );
-      return status === 200 && Array.isArray(data) ? (data as ManagedComment[]) : [];
+      if (status !== 200 || !Array.isArray(data)) return [];
+      return data.map((item): ManagedComment => {
+        const record = item !== null && typeof item === "object" && !Array.isArray(item) ? (item as Record<string, unknown>) : {};
+        const comment: ManagedComment = {
+          body: typeof record.body === "string" ? record.body : "",
+          author: githubAuthor(item),
+        };
+        if (typeof record.id === "number" || typeof record.id === "string") comment.id = record.id;
+        if (typeof record.created_at === "string") comment.created_at = record.created_at;
+        if (typeof record.updated_at === "string") comment.updated_at = record.updated_at;
+        return comment;
+      });
     } catch {
       return [];
     }
@@ -243,9 +265,36 @@ export class GitHubAdapter implements PlatformReadAdapter {
         url,
         this.options(),
       );
-      return status === 200 && Array.isArray(data) ? (data as ManagedReview[]) : [];
+      if (status !== 200 || !Array.isArray(data)) return [];
+      return data.map((item): ManagedReview => {
+        const record = item !== null && typeof item === "object" && !Array.isArray(item) ? (item as Record<string, unknown>) : {};
+        const review: ManagedReview = {
+          body: typeof record.body === "string" ? record.body : "",
+          author: githubAuthor(item),
+        };
+        if (typeof record.submitted_at === "string") review.submitted_at = record.submitted_at;
+        return review;
+      });
     } catch {
       return [];
+    }
+  }
+
+  /** #970: resolve the login this token posts as. `GET /user` answers for a
+   * PAT, `GITHUB_TOKEN`, and a GitHub App installation token alike (the
+   * latter returns the app's `<slug>[bot]` account), so the action's own
+   * managed bodies are recognised without hardcoding an identity. Any
+   * failure — missing token, transport error, non-200, or an unusable
+   * payload — is `null`, and the precheck then fails closed. */
+  async authenticatedIdentity(): Promise<string | null> {
+    if (!this.token) return null;
+    try {
+      const { status, data } = await requestJson(this.url("/user"), this.options("application/vnd.github.v3+json"));
+      if (status !== 200 || data === null || typeof data !== "object" || Array.isArray(data)) return null;
+      const login = (data as Record<string, unknown>).login;
+      return typeof login === "string" && login !== "" ? login : null;
+    } catch {
+      return null;
     }
   }
 

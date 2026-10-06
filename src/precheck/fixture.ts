@@ -35,6 +35,10 @@ export interface PrecheckFixture {
     pr_error?: boolean;
     comments?: ManagedComment[];
     reviews?: ManagedReview[];
+    /** #970: the login the fixture's token posts as (the value
+     * `authenticatedIdentity()` returns). Omitted → unproven ownership, so a
+     * marker-bearing body can never authorize a skip. */
+    identity?: string;
     permission?: string | null;
     permission_error?: boolean;
     /** Responses for the validated `ghApi` seam, keyed by endpoint. */
@@ -71,6 +75,10 @@ export class FixtureAdapter implements PlatformAdapter {
 
   async listPrReviews(): Promise<ManagedReview[]> {
     return this.spec.reviews ?? [];
+  }
+
+  async authenticatedIdentity(): Promise<string | null> {
+    return this.spec.identity ?? null;
   }
 
   async repoPermission(): Promise<string | null> {

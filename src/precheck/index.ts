@@ -1,4 +1,5 @@
 export {
+  authorMatchesTrustedIdentity,
   carriedVerdict,
   decisionToOutputs,
   envFlag,

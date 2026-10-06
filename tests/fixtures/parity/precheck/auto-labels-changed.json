@@ -50,7 +50,8 @@
           }
         ]
       }
-    }
+    },
+    "identity": "pr-reviewer[bot]"
   },
   "fixture": "auto-labels-changed",
   "description": "parity fixture for precheck-decision boundary (#674): auto-labels-changed"
