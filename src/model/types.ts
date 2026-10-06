@@ -144,7 +144,7 @@ export interface NormalizedRequiredCheckDisposition {
  * the v2 enforcement pass treats it as missing. */
 export interface NormalizedThreadDisposition {
   threadId: string;
-  disposition: "fixed" | "open" | "disputed" | "invalid";
+  disposition: "fixed" | "open" | "disputed" | "withdrawn" | "invalid";
   evidence: string | null;
 }
 

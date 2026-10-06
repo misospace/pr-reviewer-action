@@ -50,7 +50,7 @@ import { callModelTier, type TierProfile } from "../model/call.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, publicAnalysisEngine, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
 import { reviewArtifactFromParsed } from "../enforcement/artifact.js";
-import { applyStrictVerdictPolicy, applyVerdictPolicy } from "../enforcement/verdict-policy.js";
+import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
 import { markerReviewResult } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
@@ -1036,6 +1036,13 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     completenessStatus = applyRequiredCheckValidation(reviewRecord as never, completenessOptions).status;
     requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
+    // #977: the model's own request_changes is relaxed only when every
+    // still-open finding is a verification ask and no independent
+    // deterministic gate fired. The overlays above have already run, so
+    // their blocks are visible here.
+    relaxVerificationOnlyVerdict(reviewRecord as never, {
+      forced: failClosedEnforcementFired(enforcementInputs),
+    });
   }
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(reviewRecord)}\n`, "utf8"));
 
