@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "coverage": "{\"checks\": [], \"dropped_unknown\": [], \"status\": \"none\", \"structured\": true, \"version\": 1}"
- }
-}

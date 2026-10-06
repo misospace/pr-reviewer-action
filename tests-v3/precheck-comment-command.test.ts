@@ -11,8 +11,7 @@ import { FixtureAdapter, type PrecheckFixture } from "../src/precheck/fixture.js
 
 // #914: the `issue_comment` /ai-review re-review command, decided in the
 // precheck. Fixtures are built inline (FixtureAdapter + inline platform
-// objects) — NOT under tests/fixtures/parity/, which the parity harness
-// replays against the v2 goldens.
+// objects) to keep this test independent of external fixture files.
 
 const DIFF = "diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n";
 

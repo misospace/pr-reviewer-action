@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "artifact": "{\n  \"version\": 1,\n  \"files\": [\n    {\n      \"path\": \"src/bad_bytes.py\",\n      \"language\": \"python\",\n      \"symbols\": [\n        {\n          \"name\": \"decode_me\",\n          \"kind\": \"enclosing\",\n          \"confidence\": \"high\",\n          \"line\": 1\n        }\n      ],\n      \"imports\": [],\n      \"identifiers\": [],\n      \"changed_lines\": [\n        [\n          2,\n          2\n        ],\n        [\n          4,\n          5\n        ]\n      ]\n    }\n  ],\n  \"anchors\": [\n    {\n      \"value\": \"src/bad_bytes.py\",\n      \"kind\": \"file\",\n      \"source\": \"src/bad_bytes.py\",\n      \"confidence\": \"low\"\n    },\n    {\n      \"value\": \"decode_me\",\n      \"kind\": \"symbol\",\n      \"source\": \"src/bad_bytes.py\",\n      \"confidence\": \"high\"\n    }\n  ],\n  \"truncated\": false\n}\n"
- }
-}

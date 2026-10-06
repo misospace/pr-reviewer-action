@@ -1,7 +1,0 @@
-{
-  "fixture": "presence-human-reviews-only",
-  "description": "Only human-reviews-present.txt: its guidance alone is substituted.",
-  "files": {
-    "human-reviews-present.txt": "1"
-  }
-}

@@ -1,9 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "classification": "{\"changed_files_summary\": [\"README.md\"], \"linked_issue_labels\": [], \"linked_metadata_uncertain\": true, \"linked_metadata_uncertainty\": [\"github linked issue owner/repo#12 fetch failed\", \"linear TEAM-3 lookup failed\"], \"must_check\": [], \"path_handling_provenance\": {\"discounted\": [], \"fired\": false, \"signals\": []}, \"pr_kind\": \"app_code\", \"risk_flags\": [], \"risk_flags_with_files\": {}, \"route_signals\": []}",
-  "role_selection": "{\"classification_available\": true, \"decisions\": [{\"reason\": \"selected: linked-issue/Linear selection metadata could not be fully determined (github linked issue owner/repo#12 fetch failed; linear TEAM-3 lookup failed) — defaulting to all roles (conservative fallback: missing signals are not absent signals)\", \"role\": \"correctness\", \"selected\": true, \"signals\": []}, {\"reason\": \"selected: linked-issue/Linear selection metadata could not be fully determined (github linked issue owner/repo#12 fetch failed; linear TEAM-3 lookup failed) — defaulting to all roles (conservative fallback: missing signals are not absent signals)\", \"role\": \"security\", \"selected\": true, \"signals\": []}, {\"reason\": \"selected: linked-issue/Linear selection metadata could not be fully determined (github linked issue owner/repo#12 fetch failed; linear TEAM-3 lookup failed) — defaulting to all roles (conservative fallback: missing signals are not absent signals)\", \"role\": \"tests\", \"selected\": true, \"signals\": []}], \"metadata_uncertain\": true, \"metadata_uncertainty_reasons\": [\"github linked issue owner/repo#12 fetch failed\", \"linear TEAM-3 lookup failed\"], \"mode\": \"auto\", \"pr_kind\": \"app_code\", \"risk_flags\": [], \"selected_roles\": [\"correctness\", \"security\", \"tests\"], \"skipped_roles\": [], \"version\": 1, \"zero_selection_reason\": \"\"}"
- }
-}

@@ -4,8 +4,8 @@ import type { ModelRequestConfig, TransportWirePayload } from "./types.js";
  * The strict OpenAI verdict schema. VERDICT-TURN CONTRACT (#362): this must
  * stay semantically identical to `_OPENAI_VERDICT_JSON_SCHEMA` in
  * pr_reviewer/conversation.py and to the inline `rf_json` literal in
- * scripts/model_call.sh — the parity harness `model-request-construction`
- * boundary and tests/v3-schema-contract.test.ts pin it. `findings` and
+ * scripts/model_call.sh — the schema remains pinned by
+ * `tests-v3/request.test.ts`. `findings` and
  * `requirement_coverage` are nullable-but-required: OpenAI strict mode
  * requires every property to be listed in `required`, so optionality is
  * expressed via the null type. The parser tolerates null/absent/malformed

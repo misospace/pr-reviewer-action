@@ -8,10 +8,10 @@
  * release/compare URLs through the Forgejo enrich client. Every owner/repo
  * query goes through the single #509 `repoAllowed` gate.
  *
- * Parity notes:
+ * Behavioral notes:
  * - The wall-clock `BudgetTracker` is consulted at exactly the points v2
- *   consults it, in the same order (the parity harness drives it with a fake
- *   clock), and network work runs concurrently (8 at a time) without
+ *   consults it, in the same order (tests inject a fake clock), and network
+ *   work runs concurrently (8 at a time) without
  *   changing the source-ordered output.
  * - Payload shaping reproduces Python semantics on hostile JSON, except
  *   where v2 raised out of the whole render (`.get` on a non-dict entry,

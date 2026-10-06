@@ -1,9 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "json": "{\n  \"configured\": true,\n  \"config_path\": \"providers.json\",\n  \"sarif_files\": [\n    \"scan.sarif\"\n  ],\n  \"has_blocker\": false,\n  \"providers\": [\n    {\n      \"id\": \"cmd\",\n      \"status\": \"ok\",\n      \"command\": \"printf 'cmd output'\",\n      \"duration_sec\": 0.0,\n      \"exit_code\": 0,\n      \"provider_severity\": \"info\",\n      \"findings\": [],\n      \"stdout\": \"cmd output\",\n      \"stderr\": \"\",\n      \"stdout_truncated\": false,\n      \"stderr_truncated\": false,\n      \"output_format\": \"text\"\n    },\n    {\n      \"id\": \"sarif-1\",\n      \"kind\": \"sarif\",\n      \"status\": \"ok\",\n      \"command\": \"\",\n      \"duration_sec\": 0.0,\n      \"exit_code\": null,\n      \"provider_severity\": \"major\",\n      \"findings\": [\n        {\n          \"severity\": \"major\",\n          \"message\": \"bad thing [R1] (src/a.py:3)\",\n          \"source\": \"scan.sarif (scanner)\",\n          \"tool_name\": \"scanner\",\n          \"tool_version\": \"1.0\",\n          \"rule_id\": \"R1\",\n          \"title\": \"R1\",\n          \"file\": \"src/a.py\",\n          \"line\": 3,\n          \"help_uri\": \"\"\n        }\n      ],\n      \"stdout\": \"\",\n      \"stderr\": \"\",\n      \"stdout_truncated\": false,\n      \"stderr_truncated\": false,\n      \"source\": \"scan.sarif\",\n      \"output_format\": \"sarif-2.1.0\"\n    }\n  ],\n  \"provider_count\": 2\n}\n",
-  "markdown": "Evidence providers executed before final review synthesis.\n\n## cmd\n- status: ok; severity: info; exit_code: 0; duration_sec: 0.0\n- command: `printf 'cmd output'`\n- stdout:\n```text\ncmd output\n```\n\n## sarif-1\n- status: ok; severity: major; exit_code: None; duration_sec: 0.0\n- SARIF source: `scan.sarif`\n- findings:\n  - [major] bad thing [R1] (src/a.py:3) (scan.sarif (scanner))\n"
- }
-}

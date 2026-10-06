@@ -1,9 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "ledger": "{\"requirements\": [{\"id\": \"<REQUEST-ID>\", \"kind\": \"normative\", \"provenance\": [{\"line\": 3, \"ref\": \"pr\", \"source\": \"pr_body\"}], \"text\": \"System MUST reject `code` and ````runs```` payloads\", \"truncated\": false, \"verification_required\": false}, {\"id\": \"<REQUEST-ID>\", \"kind\": \"normative\", \"provenance\": [{\"line\": 4, \"ref\": \"pr\", \"source\": \"pr_body\"}], \"text\": \"Line with \\u0007 bell and tab characters MUST normalize\", \"truncated\": false, \"verification_required\": false}], \"sha\": \"b97019e7d8bd9b1a\", \"truncation\": {\"omitted_requirements\": 0, \"omitted_sources\": 0, \"truncated\": false}, \"version\": 1}",
-  "markdown": "## Requirement Ledger\n\n- (<REQUEST-ID>) ````` System MUST reject `code` and ````runs```` payloads ````` [normative] (via `pr`)\n- (<REQUEST-ID>) `Line with \\u0007 bell and tab characters MUST normalize` [normative] (via `pr`)\n"
- }
-}

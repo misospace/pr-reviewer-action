@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "result": "{\"boundaries_challenged\":[\"boundary 1: empty input\",\"boundary 2: max-length input\",\"boundary 3: unicode input\",\"boundary 4: concurrent writers\",\"boundary 5: negative counts\",\"boundary 6: null byte in path\"],\"errors\":[],\"leads\":[],\"role\":\"correctness\",\"truncated\":true,\"truncation\":{\"omitted_boundaries_challenged\":2,\"omitted_errors\":0,\"omitted_leads\":0,\"omitted_message_chars\":0,\"reasons\":[\"boundary_cap\"],\"truncated\":true},\"version\":1}"
- }
-}

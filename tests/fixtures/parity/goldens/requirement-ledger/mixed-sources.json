@@ -1,9 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "ledger": "{\"requirements\": [{\"id\": \"<REQUEST-ID>\", \"kind\": \"acceptance\", \"provenance\": [{\"line\": 5, \"ref\": \"AGENTS.md\", \"source\": \"standards\"}], \"text\": \"every change ships with tests\", \"truncated\": false, \"verification_required\": false}, {\"id\": \"<REQUEST-ID>\", \"kind\": \"acceptance\", \"provenance\": [{\"line\": 6, \"ref\": \"AGENTS.md\", \"source\": \"standards\"}], \"text\": \"handlers MUST validate input\", \"truncated\": false, \"verification_required\": false}, {\"id\": \"<REQUEST-ID>\", \"kind\": \"normative\", \"provenance\": [{\"line\": 11, \"ref\": \"AGENTS.md\", \"source\": \"standards\"}], \"text\": \"list item with lowercase shall is normative\", \"truncated\": false, \"verification_required\": false}, {\"id\": \"<REQUEST-ID>\", \"kind\": \"normative\", \"provenance\": [{\"line\": 2, \"ref\": \"owner/repo#42\", \"source\": \"linked_issues\"}], \"text\": \"results SHALL be deterministic\", \"truncated\": false, \"verification_required\": false}, {\"id\": \"<REQUEST-ID>\", \"kind\": \"normative\", \"provenance\": [{\"line\": 2, \"ref\": \"pr\", \"source\": \"pr_body\"}], \"text\": \"The exporter MUST NOT crash on malformed input.\", \"truncated\": false, \"verification_required\": false}], \"sha\": \"f4e79b3cdc981fb5\", \"truncation\": {\"omitted_requirements\": 0, \"omitted_sources\": 0, \"truncated\": false}, \"version\": 1}",
-  "markdown": "## Requirement Ledger\n\n- (<REQUEST-ID>) `every change ships with tests` [acceptance] (via `AGENTS.md`)\n- (<REQUEST-ID>) `handlers MUST validate input` [acceptance] (via `AGENTS.md`)\n- (<REQUEST-ID>) `list item with lowercase shall is normative` [normative] (via `AGENTS.md`)\n- (<REQUEST-ID>) `results SHALL be deterministic` [normative] (via `owner/repo#42`)\n- (<REQUEST-ID>) `The exporter MUST NOT crash on malformed input.` [normative] (via `pr`)\n"
- }
-}

@@ -1,8 +1,0 @@
-{
-  "fixture": "context-dials-case-and-junk",
-  "description": "RELATED_CODE_CONTEXT=TRUE is lowercased on; PR_THREAD_CONTEXT=yes is off.",
-  "env": {
-    "RELATED_CODE_CONTEXT": "TRUE",
-    "PR_THREAD_CONTEXT": "yes"
-  }
-}

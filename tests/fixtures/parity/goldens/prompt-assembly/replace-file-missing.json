@@ -1,6 +1,0 @@
-{
- "error": "SYSTEM_PROMPT_FILE does not exist: prompts/missing.txt",
- "ok": false,
- "unresolved": [],
- "values": {}
-}

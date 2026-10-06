@@ -45,8 +45,8 @@ export interface SelectionOptions {
   linearTimeoutSec?: number | undefined;
   fetchImpl?: import("../platform/http.js").FetchLike | undefined;
   /** Injected Linear collector — the mirror of v2's `linear_collect`
-   * injection in `build_signature`; parity fixtures and tests supply a
-   * fixture-driven collector instead of the network GraphQL call. */
+   * injection in `build_signature`; tests supply a fixture-driven collector
+   * instead of the network GraphQL call. */
   linearCollect?: typeof collectFromPr | undefined;
 }
 
@@ -107,8 +107,8 @@ export async function buildSelectionSignature(
   if (linearState.error) return { signature: null, error: linearState.error };
 
   // The payload serialization must match Python's
-  // `json.dumps(..., sort_keys=True, ensure_ascii=False)` byte for byte —
-  // the v2/v3 parity boundary compares the resulting hashes.
+  // `json.dumps(..., sort_keys=True, ensure_ascii=False)` byte for byte, so
+  // the resulting hashes stay identical to v2 (pinned by precheck.test.ts).
   const payload = pythonJsonStringify({
     title,
     body,
@@ -123,11 +123,11 @@ export async function buildSelectionSignature(
 // Selection-signature serialization boundary (snake_case, hashed byte form)
 // ---------------------------------------------------------------------------
 
-/** The signature payload shapes are persisted/parity boundaries: the v2
- * builder (`scripts/build_selection_fingerprint.py`) hashes the identical
- * `json.dumps(sort_keys=True)` payload, so these converters are the EXPLICIT
- * canonical→boundary mapping — the internal types stay camelCase (#669) and
- * the hashed bytes stay byte-equivalent. */
+/** The signature payload shapes are v2-identical serialization boundaries:
+ * the v2 builder (`scripts/build_selection_fingerprint.py`) hashes the
+ * identical `json.dumps(sort_keys=True)` payload, so these converters are the
+ * EXPLICIT canonical→boundary mapping — the internal types stay camelCase
+ * (#669) and the hashed bytes stay byte-equivalent. */
 
 /** Boundary shape for one GitHub linked issue: identity comes from the
  * extracted reference (v2 hashes the raw `#N` / `owner/repo#N` text), the

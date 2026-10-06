@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "coverage": "{\"checks\": [{\"check\": \"review auth flow for regression\", \"rationale\": null, \"reason\": \"malformed-disposition\", \"status\": \"unresolved\"}, {\"check\": \"verify session token handling is correct\", \"rationale\": null, \"reason\": \"ok\", \"status\": \"satisfied\"}, {\"check\": \"check secret rotation impact\", \"rationale\": null, \"reason\": \"malformed-disposition\", \"status\": \"unresolved\"}], \"dropped_unknown\": [], \"status\": \"incomplete\", \"structured\": true, \"version\": 1}"
- }
-}

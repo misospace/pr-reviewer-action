@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "result": "{\"escalate\":true,\"low_confidence\":false,\"reason\":null,\"reasons\":[\"incomplete_required_checks\"],\"requested\":false}"
- }
-}

@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "coverage": "{\"checks\": [{\"check\": \"review for path traversal vulnerabilities\", \"rationale\": null, \"reason\": \"malformed-disposition\", \"status\": \"unresolved\"}], \"dropped_unknown\": [], \"status\": \"incomplete\", \"structured\": true, \"version\": 1}"
- }
-}

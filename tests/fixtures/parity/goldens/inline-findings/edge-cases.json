@@ -1,9 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "edge-cases": "[]",
-  "limited": "[{\"body\": \"**Info:** one\\n\\n_Automated finding from AI PR review._\", \"line\": 1, \"path\": \"src/a.ts\", \"side\": \"RIGHT\"}]"
- }
-}

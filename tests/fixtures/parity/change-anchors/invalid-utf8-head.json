@@ -1,8 +1,0 @@
-{
- "fixture": "invalid-utf8-head",
- "description": "Head files are decoded as UTF-8 with replacement exactly as Python does (surrogate encodings, truncated and overlong sequences, a kept BOM) and trailing CR stripped, so a diff carrying the replacement characters matches and yields enclosing symbols.",
- "diff": "diff --git a/src/bad_bytes.py b/src/bad_bytes.py\n--- a/src/bad_bytes.py\n+++ b/src/bad_bytes.py\n@@ -1,2 +1,5 @@\n def decode_me(a):\n+    x = '����'\n     return a\n+﻿def tail():\n+    return '��'\n",
- "repo_files_b64": {
-  "src/bad_bytes.py": "ZGVmIGRlY29kZV9tZShhKToKICAgIHggPSAn7aCA8J+YJwogICAgcmV0dXJuIGENCu+7v2RlZiB0YWlsKCk6CiAgICByZXR1cm4gJ8CvJwo="
- }
-}

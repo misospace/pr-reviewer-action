@@ -43,7 +43,7 @@ Do not freeze temporary v2 implementation details into permanent product rules. 
 | `src/` | The TypeScript runtime — the shipped production path (`node dist/index.js`, entry `src/run/action.ts`): `platform/`, `precheck/`, `prompt/`, `context/`, `classification/`, `requirements/`, `corpus/`, `model/`, `transport/`, `runtime/`, `gates/`, `evidence/` |
 | `scripts/` | Repository tooling (eval, harvest, fork gate, judge, release, v3 build assets); not part of the action |
 | `pr_reviewer/` | Python modules for the semantic-eval and judge tooling; not part of the action |
-| `tests/`, `tests-v3/` | pytest + shell tests (tooling, snapshot harness, retained gates); node:test for v3; parity fixtures and snapshots under `tests/fixtures/parity/` |
+| `tests/`, `tests-v3/` | pytest + shell tests (retained tooling and gates); node:test for v3; shared JSON fixtures under `tests/fixtures/` |
 | `evals/` | graded eval corpora driven by `scripts/eval_harness.py` through the v3 runtime (runbook: `docs/evals.md`) |
 | `.github/workflows/fork-ai-review.yaml` | privilege-separated fork-PR reviewer (`docs/fork-review.md`) |
 
@@ -53,15 +53,13 @@ Full per-module detail, the pipeline architecture, corpus section order, and des
 
 ```bash
 npm ci && npm run typecheck && npm test     # v3 TypeScript (node --test)
-npm run build                                # dist/ is not committed; npm test and the snapshot harness need it built
-pytest tests/ -v --tb=short                 # Python tests: snapshot harness, eval tooling, retained gates
-GIT_CONFIG_GLOBAL=/dev/null python3 tests/parity_harness.py   # v3 snapshots (dist/ required; --update re-baselines)
+npm run build                                # dist/ is not committed
+pytest tests/ -v --tb=short                 # Python tests: eval tooling, retained gates
 ```
 
 ## Development conventions (normative)
 
 - **`dist/` is release-only**: never commit it. CI builds it; releases commit it onto the tagged release commit (off `main`) via `scripts/release/tag-with-dist.sh`.
-- **Snapshots are re-baselined, not hand-edited**: `tests/parity_harness.py` runs each boundary's fixtures through v3 and compares recorded snapshots under `tests/fixtures/parity/goldens/`. For a deliberate behavior change, run `python3 tests/parity_harness.py --update` and commit the reviewable diff; never hand-edit snapshots.
 - **Naming**: v2 public contract snake_case (`action.yml`); v3 public contract kebab-case (`contracts/action-v3.yml`). TypeScript internals camelCase; snake_case survives only at persisted/parity serialization boundaries via explicit converters.
 - **Model API credentials travel only through the HTTP auth headers** the provider defines (e.g. `Authorization: Bearer` / `x-api-key`) over the typed Node transport (`src/transport/`); they must never appear in process argv, request URLs or bodies, or locally generated diagnostics and error messages. Do not reintroduce a shell/curl transport.
 - **Versioning**: `vX.Y.Z` semver tags with floating major tags (`v1`, `v2`, …). Follow the README's "Versioning policy" for patch/minor/major criteria; release via **Actions → Manual Release** after CI is green on `main`.

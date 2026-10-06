@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "payload": "{\"max_tokens\":8192,\"messages\":[{\"content\":\"## Corpus\\n\\nLine one.\\n\\n\\nReview this PR.\",\"role\":\"user\"}],\"model\":\"claude-x\",\"stream\":false,\"system\":\"SYSTEM PROMPT\"}"
- }
-}

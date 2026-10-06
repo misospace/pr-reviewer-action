@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "file:manifest-context.md": "# Changed Manifest Context (modified files only)\n\n## File: apps/deployment.yaml\n(not embedded: not a regular file inside the checked-out tree, or reached through a symlink)\n\n## File: linked/kustomization.yaml\n(not embedded: not a regular file inside the checked-out tree, or reached through a symlink)\n\n## File: ok/../../outside/helmrelease.yaml\n(not embedded: not a regular file inside the checked-out tree, or reached through a symlink)\n\n## File: ok/statefulset.yaml (1 lines)\n```yaml\nkind: StatefulSet\n```\n\n## File: inner/deployment.yaml\n(not embedded: not a regular file inside the checked-out tree, or reached through a symlink)\n\n"
- }
-}

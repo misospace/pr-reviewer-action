@@ -1,9 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "json": "{\n  \"configured\": true,\n  \"config_path\": \"missing/providers.json\",\n  \"sarif_files\": [],\n  \"has_blocker\": false,\n  \"providers\": [],\n  \"error\": \"Config file not found: missing/providers.json\",\n  \"provider_count\": 0\n}\n",
-  "markdown": "Evidence providers executed before final review synthesis.\n\nEvidence providers config was not found: `missing/providers.json`\n"
- }
-}

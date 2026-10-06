@@ -9,10 +9,10 @@ import type {
  * every downstream consumer reads: enforcement mutates it, the outputs step
  * serializes it, the publish step renders it.
  *
- * This is a persisted/parity serialization boundary, so the field names stay
+ * This is a persisted-shape serialization boundary, so the field names stay
  * snake_case exactly as v2 writes them (see AGENTS.md naming rules): consumers
- * like `jq -r '.verdict'`, the metadata marker builder, and the parity
- * fixtures compare these bytes. The working object is this artifact itself —
+ * like `jq -r '.verdict'`, the metadata marker builder, and the focused
+ * artifact tests compare these bytes. The working object is this artifact itself —
  * v2 enforcement mutates `ai-output.json` in place, and #680 keeps that
  * observable contract while moving the mutation into typed functions.
  */

@@ -16,8 +16,8 @@
  * (event head SHA no longer the PR's current head) makes the run skip as
  * superseded but must still clear the label it was triggered by. The
  * diff-unchanged bypass itself (`forceReview`) is proven precisely at the
- * `runPrecheck` unit level in `tests-v3/precheck.test.ts`, against the
- * exact-fingerprint `rereview-label-forces` parity fixture. */
+ * `runPrecheck` unit level in `tests-v3/precheck.test.ts`, which verifies
+ * that the exact-fingerprint re-review label forces a fresh review. */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

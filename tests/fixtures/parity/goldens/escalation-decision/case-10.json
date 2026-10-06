@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "result": "{\"escalate\":true,\"low_confidence\":false,\"reason\":null,\"reasons\":[\"tool_or_evidence_blockers\",\"tool_planning_failed\"],\"requested\":false}"
- }
-}

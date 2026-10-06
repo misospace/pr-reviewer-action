@@ -1,9 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "classification": "{\"changed_files_summary\": [\"src/auth/login.py\"], \"linked_issue_labels\": [\"security\", \"priority/p1\"], \"linked_metadata_uncertain\": false, \"linked_metadata_uncertainty\": [], \"must_check\": [\"review auth flow for regression\", \"verify session token handling is correct\", \"explicitly address the linked security issue\", \"treat as high priority — verify correctness carefully\"], \"path_handling_provenance\": {\"discounted\": [], \"fired\": false, \"signals\": []}, \"pr_kind\": \"auth_changes\", \"risk_flags\": [\"linked_security_issue\", \"linked_priority_p1\", \"auth_changes\"], \"risk_flags_with_files\": {\"auth_changes\": [\"src/auth/login.py\"]}, \"route_signals\": [\"linked_security_issue\", \"linked_priority_p1\", \"auth_changes\"]}",
-  "role_selection": "{\"classification_available\": true, \"decisions\": [{\"reason\": \"selected: correctness-lane signals matched: risk_flag=linked_priority_p1\", \"role\": \"correctness\", \"selected\": true, \"signals\": [\"risk_flag=linked_priority_p1\"]}, {\"reason\": \"selected: security-lane signals matched: pr_kind=auth_changes, risk_flag=linked_security_issue, risk_flag=auth_changes\", \"role\": \"security\", \"selected\": true, \"signals\": [\"pr_kind=auth_changes\", \"risk_flag=linked_security_issue\", \"risk_flag=auth_changes\"]}, {\"reason\": \"skipped: no tests-lane signal in classification (pr_kind=auth_changes; risk_flags=linked_security_issue,linked_priority_p1,auth_changes)\", \"role\": \"tests\", \"selected\": false, \"signals\": []}], \"metadata_uncertain\": false, \"metadata_uncertainty_reasons\": [], \"mode\": \"auto\", \"pr_kind\": \"auth_changes\", \"risk_flags\": [\"linked_security_issue\", \"linked_priority_p1\", \"auth_changes\"], \"selected_roles\": [\"correctness\", \"security\"], \"skipped_roles\": [\"tests\"], \"version\": 1, \"zero_selection_reason\": \"\"}"
- }
-}

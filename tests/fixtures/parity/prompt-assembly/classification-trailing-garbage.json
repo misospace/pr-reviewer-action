@@ -1,7 +1,0 @@
-{
-  "fixture": "classification-trailing-garbage",
-  "description": "A kind followed by an unparseable tail: jq emits the kind before the parse error; json.load falls back to the base.",
-  "files": {
-    "classification.json": "{\"pr_kind\": \"renovate_digest_only\"} tru"
-  }
-}

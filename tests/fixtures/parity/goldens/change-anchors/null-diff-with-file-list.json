@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "artifact": "{\n  \"version\": 1,\n  \"files\": [\n    {\n      \"path\": \"src/app.py\",\n      \"language\": \"python\",\n      \"symbols\": [],\n      \"imports\": [],\n      \"identifiers\": []\n    },\n    {\n      \"path\": \"docs/x.md\",\n      \"language\": \"non_source\",\n      \"symbols\": [],\n      \"imports\": [],\n      \"identifiers\": []\n    },\n    {\n      \"path\": \"gone.go\",\n      \"language\": \"go\",\n      \"symbols\": [],\n      \"imports\": [],\n      \"identifiers\": [],\n      \"deleted\": true\n    }\n  ],\n  \"anchors\": [\n    {\n      \"value\": \"src/app.py\",\n      \"kind\": \"file\",\n      \"source\": \"src/app.py\",\n      \"confidence\": \"low\"\n    },\n    {\n      \"value\": \"gone.go\",\n      \"kind\": \"file\",\n      \"source\": \"gone.go\",\n      \"confidence\": \"low\"\n    }\n  ],\n  \"truncated\": false\n}\n"
- }
-}

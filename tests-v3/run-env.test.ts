@@ -18,10 +18,9 @@ import { RunWorkspace } from "../src/run/workspace.js";
 
 /**
  * The kebab→SCREAMING_SNAKE projection the orchestrator feeds the ported
- * stages (#809). The `config-default-resolution` parity boundary pins the
- * v2 side; this pins the v3 projection itself — every contract input lands
- * under the exact stage-ABI name the ported stages read, secrets arrive as
- * revealed values, and the GH_TOKEN binding follows config.sh's fallback.
+ * stages (#809): every contract input lands under the exact stage-ABI name
+ * the ported stages read, secrets arrive as revealed values, and the
+ * GH_TOKEN binding follows config.sh's fallback.
  */
 
 const contract = validateContract(V3_CONTRACT);

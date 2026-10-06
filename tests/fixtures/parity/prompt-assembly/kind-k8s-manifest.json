@@ -1,7 +1,0 @@
-{
-  "fixture": "kind-k8s-manifest",
-  "description": "k8s_manifest (the Talos founding case) substitutes version-bump and release-notes guidance.",
-  "files": {
-    "classification.json": "{\"pr_kind\": \"k8s_manifest\", \"risk_flags\": [], \"must_check\": []}"
-  }
-}

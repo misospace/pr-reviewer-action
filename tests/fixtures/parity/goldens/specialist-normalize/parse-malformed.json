@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "result": "{\"errors\":[\"malformed JSON: no decodable lead object found\"],\"leads\":[],\"role\":\"security\",\"truncated\":false,\"truncation\":{\"omitted_errors\":0,\"omitted_leads\":0,\"omitted_message_chars\":0,\"reasons\":[],\"truncated\":false},\"version\":1}"
- }
-}

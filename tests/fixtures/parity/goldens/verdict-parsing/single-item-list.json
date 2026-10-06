@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "parsed": "{\"findings\": [], \"review_markdown\": \"## Wrapped\\n\\nOk.\", \"smart_review_reason\": null, \"smart_review_requested\": false, \"verdict\": \"approve\"}"
- }
-}

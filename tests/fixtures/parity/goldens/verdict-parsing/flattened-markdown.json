@@ -1,6 +1,0 @@
-{
- "error": "Parsed JSON 'review_markdown' appears flattened: contains multiple '## ' heading markers but no newlines. This is a known artefact of grammar-constrained decoding under ai_response_format: json_schema (e.g., Fireworks). Retry with ai_response_format: json_object or increase ai_max_tokens.",
- "ok": false,
- "unresolved": [],
- "values": {}
-}

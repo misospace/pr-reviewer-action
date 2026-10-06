@@ -203,8 +203,8 @@ function omissionNote(count: number): string {
  * markdown is empty when nothing is unresolved or nothing fits.
  * `supersededBefore` (#812, v3 run pipeline only) is the PR's last-edit
  * instant: thread comments older than it are labeled `SUPERSEDED_LABEL` and
- * the section header carries the authoritative-context note. Parity fixtures
- * never pass it, so the default rendering stays byte-identical to v2. */
+ * the section header carries the authoritative-context note. When omitted,
+ * the default rendering stays byte-identical to v2. */
 export function renderReviewThreads(
   threads: readonly ReviewThread[],
   maxThreads: number = MAX_THREADS_DEFAULT,

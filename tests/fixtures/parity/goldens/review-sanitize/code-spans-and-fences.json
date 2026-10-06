@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "fenced-sanitized-inline-preserved": "Outside PR 123 and @​user.\n\nInline `#456 @inline` remains unchanged.\n\n```text\nPR 789 @​fenced\n## Standards\nstill inside fence\n```\n\n## After\nDone."
- }
-}

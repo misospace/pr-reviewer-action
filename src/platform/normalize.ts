@@ -1,7 +1,7 @@
 /** Pure normalizers for the platform read seams (#706 PR 1).
  *
- * Each function is the port of one v2 projection and is pinned by the
- * `platform-normalization` parity boundary:
+ * Each function is the port of one v2 projection and is pinned by
+ * `tests-v3/platform.test.ts` / `platform-reads.test.ts`:
  *
  * - GitHub: the jq programs in `scripts/platform_api.sh`
  *   (`platform_pr_review_comments`, `platform_review_threads`,

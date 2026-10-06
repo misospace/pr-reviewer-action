@@ -88,8 +88,8 @@ export interface ExternalChecksOptions extends CiBoundOptions {
 /**
  * The read seams the v3 orchestrator consumes (#706 PR 1). Every method
  * matches the v2 seam's output shape (`scripts/platform_api.sh` /
- * `pr_reviewer/forgejo_backend.py`) byte for byte at the value level; the
- * `platform-normalization` parity boundary pins it.
+ * `pr_reviewer/forgejo_backend.py`) byte for byte at the value level; pinned
+ * by `tests-v3/platform.test.ts` / `platform-reads.test.ts`.
  */
 export interface PlatformReadAdapter extends PlatformAdapter {
   /** `platform_pr_files`: first page (100) of changed files — GitHub REST

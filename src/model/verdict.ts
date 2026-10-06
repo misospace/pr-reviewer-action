@@ -5,8 +5,7 @@ import { maskDiagnostic } from "../context/redact.js";
 /**
  * Port of pr_reviewer/response_parser.py: tolerant model-output parsing and
  * strict verdict validation. Error messages match the v2 strings byte for
- * byte — the parity harness `verdict-parsing` boundary compares error
- * categories derived from them.
+ * byte; `tests-v3/verdict.test.ts` pins the error categories derived from them.
  */
 
 const APPROVE_VERDICTS = new Set(["approve", "approved", "approval", "lgtm"]);
@@ -689,8 +688,8 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
  * this call, if known to the caller) is masked into the message via
  * `maskDiagnostic` — `kind`/`truncated` (and the `emptyCompletion` it
  * derives) are preserved so every caller's failure-kind branching is
- * unaffected. Callers with no key in scope (e.g. the parity harness) may
- * omit `secrets`; the v2-parity message text is untouched in that case.
+ * unaffected. Callers with no key in scope may omit `secrets`; the
+ * v2-identical message text is untouched in that case.
  */
 export function parseVerdictResponse(response: unknown, secrets: readonly (string | null | undefined)[] = []): ParsedReviewVerdict {
   try {

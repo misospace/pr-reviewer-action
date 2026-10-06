@@ -1,6 +1,0 @@
-{
- "error": "Expected verdict to be 'approve' or 'request_changes', got 'maybe'",
- "ok": false,
- "unresolved": [],
- "values": {}
-}

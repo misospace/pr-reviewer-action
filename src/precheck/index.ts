@@ -37,4 +37,4 @@ export {
 } from "./linear.js";
 export { buildMetadataMarker, parseMetadata, pythonJsonStringify } from "./metadata.js";
 export { buildSelectionSignature, type SelectionSignatureResult } from "./selection.js";
-export { FixtureAdapter, outputKeys, runPrecheckFixture, type PrecheckFixture } from "./fixture.js";
+export { FixtureAdapter, type PrecheckFixture } from "./fixture.js";

@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "coverage": "{\"checks\": [{\"check\": \"review auth flow for regression\", \"rationale\": \"Auth middleware is untouched; the only change is the login page copy.\", \"reason\": \"ok\", \"status\": \"satisfied\"}, {\"check\": \"verify session token handling is correct\", \"rationale\": \"No session issuance, refresh, or validation code appears in the diff.\", \"reason\": \"ok\", \"status\": \"not_applicable\"}, {\"check\": \"check secret rotation impact\", \"rationale\": \"The new config plumbing could read rotated secrets but the corpus does not show the runtime path.\", \"reason\": \"ok\", \"status\": \"unresolved\"}], \"dropped_unknown\": [], \"status\": \"incomplete\", \"structured\": true, \"version\": 1}"
- }
-}

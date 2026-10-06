@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "payload": "{\"max_tokens\":8192,\"messages\":[{\"content\":\"SYSTEM PROMPT\",\"role\":\"system\"},{\"content\":\"## Corpus\\n\\nLine one.\\n\\n\\nReview this PR.\",\"role\":\"user\"}],\"model\":\"qwen3-32b\",\"stream\":false,\"temperature\":0.1}"
- }
-}

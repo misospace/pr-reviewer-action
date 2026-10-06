@@ -1,9 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "classification": "{\"changed_files_summary\": [\"k8s/deployment.yaml\", \"helm/values.yaml\", \"requirements.txt\", \"secrets.yaml\", \"src/auth/service.py\"], \"linked_issue_labels\": [], \"linked_metadata_uncertain\": false, \"linked_metadata_uncertainty\": [], \"must_check\": [\"validate manifest against target cluster version\", \"check for resource quota / limit changes\", \"verify secrets are not logged or exposed in diffs\", \"check secret rotation impact\"], \"path_handling_provenance\": {\"discounted\": [], \"fired\": false, \"signals\": []}, \"pr_kind\": \"k8s_manifest\", \"risk_flags\": [\"secret_handling_changes\"], \"risk_flags_with_files\": {\"secret_handling_changes\": [\"secrets.yaml\"]}, \"route_signals\": [\"secret_handling_changes\", \"k8s_manifest\"]}",
-  "role_selection": "{\"classification_available\": true, \"decisions\": [{\"reason\": \"selected: correctness-lane signals matched: pr_kind=k8s_manifest\", \"role\": \"correctness\", \"selected\": true, \"signals\": [\"pr_kind=k8s_manifest\"]}, {\"reason\": \"selected: security-lane signals matched: risk_flag=secret_handling_changes\", \"role\": \"security\", \"selected\": true, \"signals\": [\"risk_flag=secret_handling_changes\"]}, {\"reason\": \"skipped: no tests-lane signal in classification (pr_kind=k8s_manifest; risk_flags=secret_handling_changes)\", \"role\": \"tests\", \"selected\": false, \"signals\": []}], \"metadata_uncertain\": false, \"metadata_uncertainty_reasons\": [], \"mode\": \"auto\", \"pr_kind\": \"k8s_manifest\", \"risk_flags\": [\"secret_handling_changes\"], \"selected_roles\": [\"correctness\", \"security\"], \"skipped_roles\": [\"tests\"], \"version\": 1, \"zero_selection_reason\": \"\"}"
- }
-}

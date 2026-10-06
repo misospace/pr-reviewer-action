@@ -1,14 +1,13 @@
 import type { FetchLike } from "../platform/http.js";
 import type { GhApiResult, ManagedComment, ManagedReview, PlatformAdapter } from "../platform/types.js";
 import { type LinkedIssue } from "../context/types.js";
-import { runPrecheck, type PrecheckEventComment, type PrecheckEventLabel, type PrecheckOutput } from "./decide.js";
+import { type PrecheckEventComment, type PrecheckEventLabel } from "./decide.js";
 import { extractIssueIdentifiers, LINEAR_PRIORITY_LABELS, type CollectResult } from "./linear.js";
 
-/** Fixture-driven precheck for the #673 parity harness (#674): a
- * PlatformAdapter whose responses come from the fixture JSON, plus the CLI
- * entry both the v3 parity runner and tests-v3 use. The fixture adapter
- * consumes the SAME platform responses the v2 runner replays through its
- * gh/curl stubs, so both implementations observe identical platform state. */
+/** Fixture-driven precheck (#674): a PlatformAdapter whose responses come
+ * from the fixture JSON, plus the CLI entry tests-v3 use. The fixture adapter
+ * consumes the same platform responses the v2 implementation saw through its
+ * gh/curl stubs, so both observe identical platform state. */
 
 export interface PrecheckFixture {
   fixture?: string;
@@ -136,33 +135,4 @@ export function fixtureLinearCollector(spec: PrecheckFixture["platform"]): (titl
     return { issues, errors };
   };
 }
-
-export async function runPrecheckFixture(fixturePath: string): Promise<{ ok: boolean; values?: PrecheckOutput; stderr?: string }> {
-  const { readFileSync } = await import("node:fs");
-  const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as PrecheckFixture;
-  const platform = fixture.env.PLATFORM === "forgejo" || fixture.env.FORGEJO_API_URL
-    ? "forgejo" as const
-    : "github" as const;
-  const adapter = new FixtureAdapter(platform, fixture.platform ?? {});
-  try {
-    const output = await runPrecheck({
-      env: fixture.env ?? {},
-      adapter,
-      event: fixture.event ?? undefined,
-      eventHeadSha: fixture.event_head_sha,
-      linearCollect: fixtureLinearCollector(fixture.platform ?? {}),
-    });
-    return { ok: true, values: output };
-  } catch (error) {
-    return { ok: false, stderr: error instanceof Error ? error.message : String(error) };
-  }
-}
-
-/** The parity-relevant v2 output surface for a fixture, used by tests-v3 to
- * assert against the same key set the v2 GITHUB_OUTPUT file carries. */
-export function outputKeys(output: PrecheckOutput): string[] {
-  return Object.keys(output).sort();
-}
-
-// Re-exported output key surface used by tests-v3.
 

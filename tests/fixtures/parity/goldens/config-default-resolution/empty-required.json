@@ -1,6 +1,0 @@
-{
- "error": "v3 runtime configuration error: Required input 'ai-base-url' is missing",
- "ok": false,
- "unresolved": [],
- "values": {}
-}

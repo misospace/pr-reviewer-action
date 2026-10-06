@@ -8,7 +8,8 @@
  * truncation flags. It performs no repository-wide search, no network calls
  * and no model calls, and never executes parsed content.
  *
- * Byte parity with v2 is the contract (the `change-anchors` parity boundary):
+ * Byte-for-byte identity with v2 is the contract, pinned by
+ * `tests-v3/change-anchors.test.ts`:
  * - Lengths, caps and slices count code points, as Python `len`/slicing do.
  * - Regexes are written in Python syntax and translated by `pyRe`, which maps
  *   `\s`, `\w`, `\b`, `\d`, `.` and `$` to Python `re` semantics.

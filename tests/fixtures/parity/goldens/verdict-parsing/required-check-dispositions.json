@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "parsed": "{\"findings\": [], \"required_check_dispositions\": [{\"check\": \"review for path traversal vulnerabilities\", \"rationale\": \"The diff touches only workflow trigger wiring; no code resolves filesystem paths.\", \"status\": \"not_applicable\"}, {\"check\": \"verify file path sanitization\", \"rationale\": \"Paths are bounded to the data root.\", \"status\": \"satisfied\"}, {\"check\": \"check secret rotation impact\", \"rationale\": null, \"status\": \"unresolved\"}], \"review_markdown\": \"## Review\\n\\nAll checks dispositioned.\", \"smart_review_reason\": null, \"smart_review_requested\": false, \"verdict\": \"approve\"}"
- }
-}

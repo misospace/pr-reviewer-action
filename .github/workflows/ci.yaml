@@ -82,11 +82,8 @@ jobs:
         run: pip install --require-hashes -r requirements.txt
 
       - name: Set up Node.js
-        # Node 24 must be on PATH for the snapshot harness (tests/test_parity_harness.py
-        # runs `node dist/index.js`, and package.json engines requires node >=24).
-        # On the pre-split serial job this came from the shared setup-node step;
-        # dropping it here made shutil.which("node") resolve the runner image's
-        # older default node and fail every v3 parity fixture.
+        # The semantic-eval dataflow gate compiles tsconfig.test.json with tsc
+        # and runs node --test; retained runtime integration tests also use Node.
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
@@ -94,7 +91,7 @@ jobs:
           cache-dependency-path: package-lock.json
 
       - name: Build v3 bundle
-        # dist/ is not committed; the snapshot harness runs the built bundle.
+        # dist/ is not committed; retained runtime integration tests need it.
         run: npm ci && npm run build
 
       - name: Check Python scripts

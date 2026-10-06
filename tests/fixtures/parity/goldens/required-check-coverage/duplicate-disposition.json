@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "coverage": "{\"checks\": [{\"check\": \"verify file path sanitization\", \"rationale\": null, \"reason\": \"duplicate-dispositions\", \"status\": \"unresolved\"}], \"dropped_unknown\": [], \"status\": \"incomplete\", \"structured\": true, \"version\": 1}"
- }
-}

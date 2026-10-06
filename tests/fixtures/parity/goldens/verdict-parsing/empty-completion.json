@@ -1,6 +1,0 @@
-{
- "error": "Model returned an empty completion (0 completion tokens, finish_reason='stop'). Nothing to parse.",
- "ok": false,
- "unresolved": [],
- "values": {}
-}

@@ -1,6 +1,0 @@
-{
- "error": "jq: projection failed: Cannot index string with \"name\"",
- "ok": false,
- "unresolved": [],
- "values": {}
-}

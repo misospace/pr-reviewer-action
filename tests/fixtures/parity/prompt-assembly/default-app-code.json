@@ -1,7 +1,0 @@
-{
-  "fixture": "default-app-code",
-  "description": "Bundled default, config defaults, app_code classification: only the context-dial fragments (related code, PR thread) and the trace sentence; kind-gated and presence-gated fragments dropped.",
-  "files": {
-    "classification.json": "{\"pr_kind\": \"app_code\", \"risk_flags\": [], \"must_check\": []}"
-  }
-}

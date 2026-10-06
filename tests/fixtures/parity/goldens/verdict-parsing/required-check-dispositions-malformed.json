@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "parsed": "{\"findings\": [], \"required_check_dispositions\": [{\"check\": \"review for path traversal vulnerabilities\", \"rationale\": null, \"status\": \"invalid\"}, {\"check\": \"verify file path sanitization\", \"rationale\": \"no path surface in this change\", \"status\": \"not_applicable\"}, {\"check\": \"check secret rotation impact\", \"rationale\": null, \"status\": \"invalid\"}, {\"check\": \"review auth flow for regression [31m\", \"rationale\": \"control chars collapse in the echo\", \"status\": \"satisfied\"}, {\"check\": \"check for unintended public endpoints\", \"rationale\": \"padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padd\", \"status\": \"satisfied\"}, {\"check\": \"verify session token handling is correct\", \"rationale\": null, \"status\": \"satisfied\"}], \"review_markdown\": \"## Review\\n\\nBody.\", \"smart_review_reason\": null, \"smart_review_requested\": false, \"verdict\": \"approve\"}"
- }
-}

@@ -1,9 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "changes": "[{\"file\": \"k8s/deploy.yaml\", \"new_digest\": \"sha256:2222222222222222222222222222222222222222222222222222222222222222\", \"old_digest\": \"sha256:1111111111111111111111111111111111111111111111111111111111111111\", \"repository\": \"quay.io/k8s/app\", \"tag\": \"1.0\"}]",
-  "markdown": "# Image Digest Provenance Analysis\n\n## Image 1: quay.io/k8s/app\n- File: `k8s/deploy.yaml`\n- Tag/variant: `1.0`\n- Old digest: `sha256:1111111111111111111111111111111111111111111111111111111111111111`\n- New digest: `sha256:2222222222222222222222222222222222222222222222222222222222222222`\n- Old revision: `(unknown)`\n- New revision: `(unknown)`\n- Old created: `(unknown)`\n- New created: `(unknown)`\n- Old source: `(unknown)`\n- New source: `(unknown)`\n- Revision changed: **unknown** (missing OCI revision labels)\n- Root repo for commit compare: `(unknown)` (source: `none`)\n- Compare lookup: **unavailable** (repo unavailable)\n- Old digest metadata error: `unsupported registry for repo quay.io/k8s/app`\n- New digest metadata error: `unsupported registry for repo quay.io/k8s/app`\n\n"
- }
-}

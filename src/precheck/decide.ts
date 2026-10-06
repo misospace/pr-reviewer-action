@@ -188,8 +188,8 @@ export interface PrecheckSpec {
   event?: PrecheckEvent | undefined;
   /** The event's head SHA (EVENT_HEAD_SHA), for the superseded-run guard. */
   eventHeadSha?: string | undefined;
-  /** Injected Linear collector for the selection signature (parity
-   * fixtures and tests; production uses the real GraphQL adapter). */
+  /** Injected Linear collector for the selection signature (tests;
+   * production uses the real GraphQL adapter). */
   linearCollect?: typeof import("./linear.js").collectFromPr | undefined;
 }
 
@@ -626,7 +626,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
       // unknown conclusion forces a fresh review (fail closed), so CI
       // turning green — or a transient API failure — can never leave a
       // stale CHANGES_REQUESTED stuck until the next push. Adapters
-      // without the seam (the parity fixture surface, the base
+      // without the seam (including FixtureAdapter and the base
       // PlatformAdapter) keep the exact v2 skip behavior; a carried
       // approve is never re-checked (the CI check itself gates merges).
       if (carried?.verdict === "request_changes") {

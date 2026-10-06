@@ -318,8 +318,8 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
       }
     }
     // #871: the persisted classification.json never carries
-    // substantialCodeChange (see PRClassification's field doc — the parity
-    // boundary compares that artifact as one opaque string per fixture).
+    // substantialCodeChange (see PRClassification's field doc — the persisted
+    // artifact keeps its v2-compatible shape).
     // review.ts threads the in-memory signal here via this env var instead,
     // set from the same classification the run already computed.
     const rebuilt = classificationFromArtifact(classification);

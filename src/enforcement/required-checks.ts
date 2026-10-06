@@ -24,8 +24,8 @@ import type { NormalizedRequiredCheckDisposition, RequiredCheckStatus } from "..
  *   module never produces or flips a verdict.
  *
  * This is a faithful mirror of `pr_reviewer/completeness.py::
- * evaluate_structured_coverage`; the `required-check-coverage` parity
- * boundary pins the artifacts byte for byte.
+ * evaluate_structured_coverage`; its serialized artifact stays byte-identical
+ * to v2 and is pinned by `tests-v3/required-checks.test.ts`.
  */
 
 export interface RequiredCheckRow {
@@ -75,8 +75,8 @@ function validateDisposition(
     return { identity, invalid: true };
   }
   // Rationale is passed through unchanged: the parser already sanitized and
-  // bounded it, and the evaluator must not re-shape model text (byte parity
-  // with pr_reviewer/completeness.py).
+  // bounded it, and the evaluator must not re-shape model text; the bytes
+  // match pr_reviewer/completeness.py.
   return { identity, invalid: false, status: rawStatus, rationale };
 }
 
@@ -146,7 +146,7 @@ export function evaluateRequiredCheckCoverage(
   };
 }
 
-/** Snake_case artifact serializer (v2-identical, parity boundary shape). */
+/** Snake_case artifact serializer for the v2-identical persisted shape. */
 export function requiredCheckCoverageToArtifact(coverage: RequiredCheckCoverage): Record<string, unknown> {
   return {
     version: coverage.version,

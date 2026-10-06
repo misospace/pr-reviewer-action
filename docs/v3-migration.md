@@ -609,8 +609,7 @@ coverage-gap notice, and the model verdict passthrough (with
 `findings_severity_gated`'s existing blocker escalation). The `verdict`
 output remains `approve` | `request_changes` under every policy.
 
-The default change is pinned by the `config-default-resolution` snapshots in
-[`tests/fixtures/parity/goldens/config-default-resolution/`](../tests/fixtures/parity/goldens/config-default-resolution/).
+The default change is pinned by `tests-v3/config.test.ts`.
 The publish-side rendering and marker states are v3-only behavior covered by
 `tests-v3/strict-verdict.test.ts`; the enforcement-pipeline boundary exercises
 the unchanged policies.
@@ -622,31 +621,18 @@ TypeScript port itself (parity boundaries, port-by-port notes, the removed
 shadow-comparison tooling, and the teardown sequencing). It is not needed to
 upgrade a workflow — see [Upgrading from v2](#upgrading-from-v2) above for
 that. It is kept for anyone auditing how a specific behavior was proven
-equivalent, or bisecting a regression back to its port. The v2 scripts and
-`tests/parity_runners/` files it names were removed in the #706 teardown; the
-v3 sources and the recorded snapshots are what remain.
+equivalent, or bisecting a regression back to its port. The v2 scripts,
+`tests/parity_runners/` files, and the snapshot harness it names were removed
+in the #706 teardown and #974; the v3 sources and the focused `tests-v3/`
+suites are what remain.
 
-## Snapshot harness (#924, formerly the parity harness #673)
+## Boundary fixtures (historical; harness retired in #974)
 
-The v2 goldens were recorded before v2 was removed (#706 wave 2); they are
-now re-baselined to v3. `tests/parity_harness.py` runs each boundary's
-fixtures through the v3 runtime (`node dist/index.js …`) and compares the
-observed result with the recorded snapshot at
-`tests/fixtures/parity/goldens/<boundary>/<fixture>.json`. The harness
-normalizes only expected-to-vary nondeterminism (temp paths, timestamps,
-durations, PIDs, request ids); secret input values are redacted and never
-written to snapshots. Comparison is exact, with no approvals channel,
-counterexample-signature channel, error-category table, or numeric-equality
-leniency. A structured report identifies any snapshot mismatch.
-
-- **Boundaries** are declared in `BOUNDARIES` in the harness; each boundary
-  runs its fixtures through v3. The `dataflow-662-corpus-truncation` boundary
-  is retired.
-- **Fixtures** live under `tests/fixtures/parity/<boundary>/*.json`.
-- **Updating snapshots**: a deliberate v3 behavior change is a reviewable
-  snapshot diff. Run `python3 tests/parity_harness.py --update` and commit
-  the resulting snapshots; never hand-edit them.
-- **CLI**: `python3 tests/parity_harness.py [--boundary ID] [--report PATH] [--update]`.
+The v2→v3 boundary fixtures under `tests/fixtures/parity/` and the snapshot
+harness that compared them (`tests/parity_harness.py`) were retired in #974.
+The per-boundary notes below record what each boundary proved while the port
+was in flight; they are history, not a live contract. Current behavior is
+pinned by the focused `tests-v3/` suites.
 
 The `config-default-resolution` fixtures resolve v2 `action.yml` env-block
 expressions (plain `inputs.x`, `a || b` chains, the `x != '' && x || y`
@@ -886,8 +872,8 @@ the v3 adapters through an injected fetch (`node dist/index.js
 platform-normalization-fixture`). Both sides emit each read's `{ok, data}`
 as order-preserving ASCII JSON, the byte-significant artifacts (the
 `pr-files.json` line, the external-checks line, the raw diff), and the
-request log. Each fixture also records its expected output, pinned against
-the v2 side by `tests/test_platform_normalization_goldens.py`.
+request log. Each fixture also recorded its expected output, pinned against
+the v2 side by the since-removed `tests/test_platform_normalization_goldens.py`.
 
 v2 quirks retained by v3: a failed Forgejo issue fetch is a successful
 read of `null`; a failed Forgejo file, comment or review listing is an empty
@@ -978,8 +964,8 @@ urllib's `http(s)_open`, stub `gh`/`curl` binaries, and the budget clock
 resolver, the `Exchange` transport, the enrich clients' fetch, and the
 `BudgetTracker` clock. Both emit the rendered `linked-sources.md`, the
 sorted request log, and the budget-warning count;
-`tests/test_linked_sources_goldens.py` pins each fixture's recorded v2
-output.
+The since-removed `tests/test_linked_sources_goldens.py` pinned each fixture's
+recorded v2 output.
 
 The v3 fetch (`src/platform/safe-fetch.ts`) resolves each hop once, requires
 every address to be public (`src/platform/ip-policy.ts`, CPython 3.14's
@@ -1241,6 +1227,7 @@ Teardown then proceeded in waves per
 `scripts/eval_harness.py` and the Forgejo E2E smoke at the v3 runtime; wave 1
 deleted the v2 production runtime and its tests; wave 2 froze the parity
 boundaries on recorded goldens and deleted the remaining v2 code. All three
-waves are complete — the "Parity harness" and per-boundary sections above
-describe what was proven equivalent before each deletion, not a live v2
-runtime.
+waves are complete — the per-boundary sections above describe what was proven
+equivalent before each deletion, not a live v2 runtime. The snapshot harness
+and its goldens were themselves retired later (#974); current behavior is
+pinned by the focused `tests-v3/` suites.

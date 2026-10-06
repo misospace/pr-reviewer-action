@@ -1,6 +1,0 @@
-{
- "error": "v3 runtime configuration error: Input 'ai-response-format' must be one of: off, json_object, json_schema",
- "ok": false,
- "unresolved": [],
- "values": {}
-}

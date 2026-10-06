@@ -1,6 +1,0 @@
-{
- "error": "user message build failed: 'risk_flags_with_files' is not a dict",
- "ok": false,
- "unresolved": [],
- "values": {}
-}

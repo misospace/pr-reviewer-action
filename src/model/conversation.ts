@@ -976,7 +976,7 @@ export class Conversation {
    * `{"type": "tool_use", "id", "name", "input"}` content blocks.
    * `includeTurnNotes=false` (verdict turn) drops driver budget notes. */
   /** Render neutral events as an Anthropic-format messages list. (Public for
-   * tests/parity; v2 renders these through the private method — identical
+   * tests; v2 renders these through the private method with identical
    * output.) */
   renderAnthropicMessages(includeTurnNotes = true): WireMessage[] {
     const messages: WireMessage[] = [];

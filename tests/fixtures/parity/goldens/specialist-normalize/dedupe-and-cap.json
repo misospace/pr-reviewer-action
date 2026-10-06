@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "result": "{\"errors\":[],\"leads\":[{\"category\":\"\",\"file\":null,\"line\":null,\"message\":\"missing edge case\",\"severity\":\"info\"},{\"category\":\"\",\"file\":null,\"line\":null,\"message\":\"no coverage for retries\",\"severity\":\"info\"},{\"category\":\"\",\"file\":null,\"line\":null,\"message\":\"flaky test ordering\",\"severity\":\"minor\"}],\"role\":\"tests\",\"truncated\":true,\"truncation\":{\"omitted_errors\":0,\"omitted_leads\":1,\"omitted_message_chars\":0,\"reasons\":[\"lead_cap\"],\"truncated\":true},\"version\":1}"
- }
-}

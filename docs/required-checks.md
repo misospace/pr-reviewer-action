@@ -84,7 +84,7 @@ a miss, never a pass.
 
 `src/enforcement/completeness.ts` `structuredCoverage` folds the
 dispositions against the supplied check list into the version-1 coverage
-artifact (`required-check-coverage` parity boundary, byte-identical with
+artifact (`tests-v3/required-checks.test.ts`, byte-identical with
 `src/enforcement/required-checks.ts`):
 
 - **zero `must_check` entries** → `none` (the model cannot invent an
@@ -148,9 +148,8 @@ contract so a grounded N/A is not misreported.
   `requiredCheckCoverageToArtifact` (`src/enforcement/required-checks.ts`)
   — the pure completeness fold, ready to wire into the #681 orchestrator;
 - the verdict-turn contract now carries `required_check_dispositions` in
-  the strict schema (all three duplicated copies pinned byte-identical by
-  `tests/test_verdict_contract_equivalence.py` and the
-  `model-request-construction` parity boundary).
+  the strict schema (the duplicated copies pinned byte-identical by
+  `tests-v3/request.test.ts`).
 
 ## What #680 still owns
 
@@ -164,10 +163,10 @@ contract so a grounded N/A is not misreported.
 
 ## Regression coverage
 
-- PR #748-shaped deterministic fixture:
-  `tests/fixtures/parity/required-check-coverage/path-checks-grounded-na.json`
-  (path checks over a change with no untrusted path surface; grounded N/A →
-  complete) and the unit tests mirroring it on both sides;
+- PR #748-shaped deterministic case (path checks over a change with no
+  untrusted path surface; grounded N/A → complete), pinned by
+  `tests-v3/required-checks.test.ts` and the inline inputs of
+  `tests-v3/requirement-coverage.test.ts`;
 - ungrounded-N/A converse: semantic scenarios #7480 (N/A wave over a real
   path risk is `not_found`) and #7481 (grounded N/A on a clean docs change
   is not flagged) in `evals/corpus-historical-dogfood.json`.

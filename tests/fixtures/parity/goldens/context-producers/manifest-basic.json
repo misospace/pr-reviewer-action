@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "file:manifest-context.md": "# Changed Manifest Context (modified files only)\n\n## File: apps/web/deployment.yaml (4 lines)\n```yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n```\n\n## File: apps/web/HelmRelease.YAML (1 lines)\n```yaml\nkind: HelmRelease\n```\n\n## File: apps/gone/kustomization.yml\n(file not present in checked-out tree at this ref)\n\n## File: apps/db/statefulset.yml (3 lines)\n```yaml\nkind: StatefulSet\nspec:\n  replicas: 1\n```\n\n"
- }
-}

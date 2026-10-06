@@ -4,9 +4,8 @@
  * action's own managed comments, redacts and fence-safely renders the rest
  * into the corpus section. Reads in-memory data only — no network, no model
  * calls, nothing executed. Internal shapes are camelCase (#669); the
- * renderer output is the persisted artifact and is compared byte-for-byte by
- * the #675 parity harness, so the rendering must stay in lockstep with the
- * Python original. */
+ * renderer output is the persisted artifact and must stay byte-for-byte
+ * identical to the Python original. */
 
 import { redactText } from "./redact.js";
 
@@ -196,8 +195,7 @@ export const AUTHORITATIVE_CONTEXT_NOTE =
  * publishing a placeholder. `supersededBefore` (#812, v3 run pipeline only)
  * is the PR's last-edit instant: comments older than it are labeled
  * `SUPERSEDED_LABEL` and the section header carries the authoritative-context
- * note. Parity fixtures never pass it, so the default rendering stays
- * byte-identical to v2. */
+ * note. When omitted, the default rendering stays byte-identical to v2. */
 export function renderPrThread(
   comments: readonly unknown[],
   marker: string = DEFAULT_MANAGED_MARKER,

@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "artifact": "{\n  \"version\": 1,\n  \"files\": [],\n  \"anchors\": [],\n  \"truncated\": false\n}\n"
- }
-}

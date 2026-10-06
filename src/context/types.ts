@@ -8,9 +8,9 @@
  * unnoticed: there is exactly one representation per concept.
  *
  * Naming follows the #669 contract: TypeScript internal types and properties
- * are camelCase. Legacy snake_case survives only at persisted/parity
- * serialization boundaries (artifacts byte-compared against the v2 Python
- * implementation), reached through explicit converters — never by renaming
+ * are camelCase. Legacy snake_case survives only at persisted-shape
+ * serialization boundaries (artifacts that must stay byte-identical to the v2
+ * Python implementation), reached through explicit converters — never by renaming
  * the internal shape.
  *
  * Producers stay pure normalizers: network fetch policy and security stay in

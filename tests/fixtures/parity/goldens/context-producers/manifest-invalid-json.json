@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "file:manifest-context.md": "No common manifest files changed in this PR.\n"
- }
-}

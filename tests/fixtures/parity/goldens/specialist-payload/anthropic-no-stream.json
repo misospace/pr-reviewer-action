@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "result": "{\"max_tokens\":4096,\"messages\":[{\"content\":\"corpus text\",\"role\":\"user\"}],\"model\":\"claude-test\",\"stream\":false,\"system\":\"You are a security specialist.\"}"
- }
-}

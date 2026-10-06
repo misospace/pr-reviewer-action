@@ -1,9 +1,0 @@
-{
- "fixture": "newline-path-semantics",
- "description": "Python re '$' also matches before a trailing newline: a C-quoted path ending in \\n still reads as a test file (_test.go$), so its keys are not scanned, while the non-test sibling with the same content records the env key.",
- "diff": "diff --git \"a/src/run_test.go\\n\" \"b/src/run_test.go\\n\"\n@@ -1,2 +1,3 @@\n run() {\n+  export REVIEW_QUEUE_DEPTH=5\n }\ndiff --git \"a/src/run_live.go\\n\" \"b/src/run_live.go\\n\"\n@@ -1,2 +1,3 @@\n run() {\n+  export REVIEW_QUEUE_DEPTH=5\n }\n",
- "repo_files": {
-  "src/run_test.go\n": "run() {\n  export REVIEW_QUEUE_DEPTH=5\n}\n",
-  "src/run_live.go\n": "run() {\n  export REVIEW_QUEUE_DEPTH=5\n}\n"
- }
-}

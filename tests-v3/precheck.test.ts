@@ -351,8 +351,8 @@ test("linear prefixes and identifiers parse conservatively", () => {
 
 test("selection signature serialization matches the v2 Python hash byte for byte", async () => {
   // The expected hash below was produced by the v2 implementation
-  // (scripts/build_selection_fingerprint.py) over the same inputs; the
-  // parity harness re-proves it end to end via the precheck boundary.
+  // (scripts/build_selection_fingerprint.py) over the same inputs; this
+  // pins the byte-identical signature serialization.
   const fixture: PrecheckFixture = JSON.parse(
     readFileSync("tests/fixtures/parity/precheck/auto-linear-unchanged-skip.json", "utf8"),
   );

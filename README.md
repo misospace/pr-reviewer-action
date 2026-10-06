@@ -162,7 +162,6 @@ Stop reading the removed incremental outputs (`effective_review_scope`, `previou
 
 ```bash
 npm ci && npm run typecheck && npm test   # v3 suite, end-to-end against mock platform and model servers
-GIT_CONFIG_GLOBAL=/dev/null python3 tests/parity_harness.py   # v3 snapshot boundaries over deterministic fixtures (add --update to re-baseline)
 pytest tests/ -q                           # retained Python gates and tooling
 ```
 

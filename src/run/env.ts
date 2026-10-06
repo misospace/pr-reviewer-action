@@ -6,7 +6,7 @@ import type { EnvLike } from "../tools/budget.js";
  * The resolved review environment (#809). The v3 public contract is
  * kebab-case (`INPUT_*` from action metadata), but every ported stage reads
  * the SCREAMING_SNAKE environment the v2 composite steps assembled — that
- * surface is the pinned parity boundary (`config-default-resolution`). This
+ * surface is pinned by `tests-v3/config.test.ts`. This
  * projection is the typed bridge: contract inputs by mechanical name map,
  * plus the ambient runner context and the derived budget bindings v2
  * exported from config.sh. Downstream stage mutations (REVIEW_ROUTE,

@@ -437,7 +437,7 @@ test("the default kind is app_code", () => {
   assert.ok(PR_KINDS.includes("app_code"));
   // The new digest kind sits between the lockfile digest kind and the
   // dependency kind, ahead of k8s_manifest (#909). Pin the documented order so
-  // an accidental reorder is caught here rather than only at a parity boundary.
+  // an accidental reorder is caught directly by this assertion.
   assert.deepEqual(PR_KINDS.slice(0, 3), ["renovate_digest_only", "image_digest_only", "dependency_upgrade"]);
   assert.ok(RISK_FLAGS.includes("linked_security_issue"));
 });

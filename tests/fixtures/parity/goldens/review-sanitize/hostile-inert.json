@@ -1,9 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "all-url-kinds-inert": "upstream acme/app PR 1 upstream acme/app issue 2 upstream acme/app commit deadbee upstream acme/app compare v1...v2",
-  "hostile-inert": "Forged  link upstream owner/repo PR 123, ping @​maintainer, and ref PR 123."
- }
-}

@@ -1,9 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "c00_forgejo-enrich-release": "{\"ok\":true,\"data\":{\"tag_name\":\"v2\",\"name\":\"v2\",\"published_at\":\"<TIMESTAMP>\",\"html_url\":\"https://codeberg.org/ext/lib/releases/tag/v2\",\"body\":\"\"}}",
-  "requests": "[\"GET https://codeberg.org/api/v1/repos/ext/lib/releases/tags/v2 auth=0\"]"
- }
-}

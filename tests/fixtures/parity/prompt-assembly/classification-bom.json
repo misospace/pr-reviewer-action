@@ -1,7 +1,0 @@
-{
-  "fixture": "classification-bom",
-  "description": "A UTF-8 BOM: jq strips it and matches the kind; Python json.load rejects the BOM and returns the base message.",
-  "files": {
-    "classification.json": "﻿{\"pr_kind\": \"dependency_upgrade\", \"risk_flags\": [\"x\"], \"must_check\": []}"
-  }
-}

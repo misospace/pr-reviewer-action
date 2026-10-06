@@ -1,9 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "classification": "{\"changed_files_summary\": [\"README.md\", \"docs/usage.md\", \".github/CODEOWNERS\", \"LICENSE\"], \"linked_issue_labels\": [], \"linked_metadata_uncertain\": false, \"linked_metadata_uncertainty\": [], \"must_check\": [], \"path_handling_provenance\": {\"discounted\": [], \"fired\": false, \"signals\": []}, \"pr_kind\": \"app_code\", \"risk_flags\": [], \"risk_flags_with_files\": {}, \"route_signals\": []}",
-  "role_selection": "{\"classification_available\": true, \"decisions\": [{\"reason\": \"skipped: trivial class: only docs/meta files changed with no risk signals — no role has a meaningful lane (documented zero-selection gate)\", \"role\": \"correctness\", \"selected\": false, \"signals\": []}, {\"reason\": \"skipped: trivial class: only docs/meta files changed with no risk signals — no role has a meaningful lane (documented zero-selection gate)\", \"role\": \"security\", \"selected\": false, \"signals\": []}, {\"reason\": \"skipped: trivial class: only docs/meta files changed with no risk signals — no role has a meaningful lane (documented zero-selection gate)\", \"role\": \"tests\", \"selected\": false, \"signals\": []}], \"metadata_uncertain\": false, \"metadata_uncertainty_reasons\": [], \"mode\": \"auto\", \"pr_kind\": \"app_code\", \"risk_flags\": [], \"selected_roles\": [], \"skipped_roles\": [\"correctness\", \"security\", \"tests\"], \"version\": 1, \"zero_selection_reason\": \"trivial class: only docs/meta files changed with no risk signals — no role has a meaningful lane (documented zero-selection gate)\"}"
- }
-}

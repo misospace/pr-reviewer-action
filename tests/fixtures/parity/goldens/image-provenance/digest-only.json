@@ -1,9 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "changes": "[]",
-  "markdown": "No image digest changes detected in PR diff.\n"
- }
-}

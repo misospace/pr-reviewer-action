@@ -1,7 +1,0 @@
-{
-  "fixture": "kind-dependency-upgrade",
-  "description": "dependency_upgrade substitutes version-bump and release-notes guidance, not the digest guidance.",
-  "files": {
-    "classification.json": "{\"pr_kind\": \"dependency_upgrade\", \"risk_flags\": [\"dependency_change\"], \"must_check\": [], \"risk_flags_with_files\": {\"dependency_change\": [\"package.json\"]}}"
-  }
-}

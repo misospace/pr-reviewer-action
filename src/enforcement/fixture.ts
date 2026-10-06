@@ -1,5 +1,5 @@
 /**
- * Fixture-mode enforcement CLI for the #680 parity harness and tests-v3.
+ * Fixture-mode enforcement CLI for tests-v3 (#680).
  *
  * `node dist/index.js enforcement-fixture <fixture.json>` runs the exact
  * production enforcement pipeline — verdict policy → completeness

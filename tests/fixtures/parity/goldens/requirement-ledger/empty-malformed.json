@@ -1,9 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "ledger": "{\"requirements\": [], \"sha\": \"4f53cda18c2baa0c\", \"truncation\": {\"omitted_requirements\": 0, \"omitted_sources\": 0, \"truncated\": false}, \"version\": 1}",
-  "markdown": ""
- }
-}

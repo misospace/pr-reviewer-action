@@ -1,9 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "json": "{\n  \"configured\": true,\n  \"config_path\": \"providers.json\",\n  \"sarif_files\": [],\n  \"has_blocker\": false,\n  \"providers\": [],\n  \"error\": \"Invalid JSON config: Expecting ',' delimiter: line 3 column 16 (char 34)\",\n  \"provider_count\": 0\n}\n",
-  "markdown": "Evidence providers executed before final review synthesis.\n\nEvidence providers config could not be parsed: `Expecting ',' delimiter: line 3 column 16 (char 34)`\n"
- }
-}

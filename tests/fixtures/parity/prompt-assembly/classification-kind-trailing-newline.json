@@ -1,7 +1,0 @@
-{
-  "fixture": "classification-kind-trailing-newline",
-  "description": "pr_kind with trailing newlines still gates (the shell capture strips them); the steering line keeps them inline.",
-  "files": {
-    "classification.json": "{\"pr_kind\": \"k8s_manifest\\n\\n\", \"must_check\": [\"Check the rollout.\\n\\n\"]}"
-  }
-}

@@ -1,9 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "json": "{\"configured\": false, \"has_blocker\": false, \"providers\": [], \"error\": \"execution failed\"}\n",
-  "markdown": "Evidence providers failed to run in this review.\n"
- }
-}

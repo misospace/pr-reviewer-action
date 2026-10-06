@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "parsed": "{\"findings\": [], \"required_check_dispositions\": [{\"check\": \"review for path traversal vulnerabilities\", \"rationale\": \"bounded to the data root\", \"status\": \"satisfied\"}, {\"check\": \"review for path traversal vulnerabilities\", \"rationale\": null, \"status\": \"invalid\"}], \"review_markdown\": \"## Review\\n\\nBody.\", \"smart_review_reason\": null, \"smart_review_requested\": false, \"verdict\": \"approve\"}"
- }
-}

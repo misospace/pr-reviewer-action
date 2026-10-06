@@ -83,7 +83,7 @@ export interface EvidenceRunOptions {
   /** The review working directory: relative config paths resolve here,
    * providers run here, and artifacts are written here (v2: process cwd). */
   cwd: string;
-  /** Monotonic clock in ms (the parity fixtures freeze it). */
+  /** Monotonic clock in ms (tests freeze it). */
   clock?: () => number;
   log?: (line: string) => void;
   /** Test seam: replace the per-provider executor. */

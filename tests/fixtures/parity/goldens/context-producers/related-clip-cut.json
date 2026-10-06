@@ -1,9 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "file:related-code.md": "# Related Code Context\n\n## `src/a.py`\n\n```python\ndef a():\n    return 1\n```\n\n- Tests: none\n- Manifests: none\n\n# Related Code Context\n\n## `src/a.py`\n\n```python\ndef a():\n    return 1\n```\n\n- Tests: none\n- Manifests: none\n\n# Related Code Context\n\n## `src/a.py`\n\n```python\ndef a():\n    return 1\n```\n\n- Tests: none\n- Manifests: none\n\n",
-  "file:related-code.truncated.md": "# Related Code Context\n\n## `src/a.py`\n\n```python\ndef a():\n    return 1\n```\n\n- Tests: none\n- Manifests: none\n\n[related-code context truncated]\n"
- }
-}

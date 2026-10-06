@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "file:manifest-context.md": "# Changed Manifest Context (modified files only)\n\n## File: svc/helmrelease.yaml (1 lines)\n```yaml\nkind: HelmRelease\n```\n\n## File: svc/dir/deployment.yaml\n(not embedded: not a regular file inside the checked-out tree, or reached through a symlink)\n\n"
- }
-}

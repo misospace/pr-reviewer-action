@@ -1,9 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "ledger": "{\"requirements\": [{\"id\": \"<REQUEST-ID>\", \"kind\": \"acceptance\", \"provenance\": [{\"line\": 3, \"ref\": \"standards.md\", \"source\": \"standards\"}], \"text\": \"first requirement with unicode ✓ marks and é accents\", \"truncated\": false, \"verification_required\": false}, {\"id\": \"<REQUEST-ID>\", \"kind\": \"acceptance\", \"provenance\": [{\"line\": 4, \"ref\": \"standards.md\", \"source\": \"standards\"}], \"text\": \"second requirement MUST be short\", \"truncated\": false, \"verification_required\": false}, {\"id\": \"<REQUEST-ID>\", \"kind\": \"acceptance\", \"provenance\": [{\"line\": 5, \"ref\": \"standards.md\", \"source\": \"standards\"}], \"text\": \"third requirement is long enough to push the rendered document past the tiny configured byte cap on its own with plenty of prose padding padding padding padding\", \"truncated\": false, \"verification_required\": false}], \"sha\": \"9cfabf567f9264b7\", \"truncation\": {\"omitted_requirements\": 0, \"omitted_sources\": 0, \"truncated\": false}, \"version\": 1}",
-  "markdown": "## Requirement Ledger\n\n- (<REQUEST-ID>) `first requirement with unicode ✓ marks and é accents` [acceptance] (via `standards.md`)\n(+2 requirements omitted for length)\n"
- }
-}

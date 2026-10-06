@@ -1,8 +1,7 @@
-/** `prompt-assembly` parity CLI (#706 PR 4):
+/** Prompt-assembly fixture CLI (#706 PR 4):
  * `node dist/index.js prompt-assembly-fixture <fixture.json>` prints one JSON
- * line `{ok, values, stderr}`. The v2 side
- * (`tests/parity_runners/v2_prompt_assembly.py`) sources the real shell
- * functions over the same scratch workspace and emits the same keys.
+ * line `{ok, values, stderr}`. The keys stay byte-identical to what the v2
+ * shell functions emit over the same scratch workspace.
  *
  * Fixture shape: `env` (the raw v2 environment: SYSTEM_PROMPT,
  * SYSTEM_PROMPT_FILE, SYSTEM_PROMPT_MODE, REVIEW_VERBOSITY,

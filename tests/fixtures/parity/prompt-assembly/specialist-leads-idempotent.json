@@ -1,8 +1,0 @@
-{
-  "fixture": "specialist-leads-idempotent",
-  "description": "apply_specialist_leads_fragment called twice appends the guidance once.",
-  "files": {
-    "specialist-leads-present.txt": "1\n"
-  },
-  "specialist_leads_calls": 2
-}

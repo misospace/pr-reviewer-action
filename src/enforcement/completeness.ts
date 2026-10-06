@@ -15,8 +15,9 @@
  * malformed disposition.
  *
  * The version-1 coverage artifact itself is `evaluateRequiredCheckCoverage`
- * in `src/enforcement/required-checks.ts` (the #750 parity boundary); this
- * module composes it and owns the mode handling and markdown consequences.
+ * in `src/enforcement/required-checks.ts` (the #750 structured-coverage
+ * boundary); this module composes it and owns the mode handling and markdown
+ * consequences.
  */
 import type { ReviewArtifact } from "./artifact.js";
 import {

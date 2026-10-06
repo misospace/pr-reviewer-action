@@ -1,9 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "classification": "{\"changed_files_summary\": [\"src/utils/path_join.py\"], \"linked_issue_labels\": [], \"linked_metadata_uncertain\": false, \"linked_metadata_uncertainty\": [], \"must_check\": [\"review for path traversal vulnerabilities\", \"test with edge-case paths (null bytes, symlinks)\"], \"path_handling_provenance\": {\"discounted\": [], \"fired\": true, \"signals\": [{\"files\": [\"src/utils/path_join.py\"], \"samples\": [], \"signal\": \"path_identifier_filename\", \"source\": \"filename\"}]}, \"pr_kind\": \"path_handling_changes\", \"risk_flags\": [\"path_handling_changes\"], \"risk_flags_with_files\": {\"path_handling_changes\": [\"src/utils/path_join.py\"]}, \"route_signals\": [\"path_handling_changes\"]}",
-  "role_selection": "{\"classification_available\": true, \"decisions\": [{\"reason\": \"selected: substantial non-test source change (a new source module, or over 200 non-test source lines changed) — correctness runs regardless of pr_kind (#871)\", \"role\": \"correctness\", \"selected\": true, \"signals\": []}, {\"reason\": \"selected: security-lane signals matched: pr_kind=path_handling_changes, risk_flag=path_handling_changes\", \"role\": \"security\", \"selected\": true, \"signals\": [\"pr_kind=path_handling_changes\", \"risk_flag=path_handling_changes\"]}, {\"reason\": \"skipped: no tests-lane signal in classification (pr_kind=path_handling_changes; risk_flags=path_handling_changes)\", \"role\": \"tests\", \"selected\": false, \"signals\": []}], \"metadata_uncertain\": false, \"metadata_uncertainty_reasons\": [], \"mode\": \"auto\", \"pr_kind\": \"path_handling_changes\", \"risk_flags\": [\"path_handling_changes\"], \"selected_roles\": [\"correctness\", \"security\"], \"skipped_roles\": [\"tests\"], \"version\": 1, \"zero_selection_reason\": \"\"}"
- }
-}

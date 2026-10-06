@@ -1,10 +1,8 @@
-/** Unit tests for the #676 corpus-assembly migration. The cross-implementation
- * contract is pinned byte-for-byte by the parity harness
- * (tests/fixtures/parity/corpus/); these tests pin the invariants that must
- * hold for ANY input, including hostile content: UTF-8-safe truncation, the
- * reservation/authority order, the smart-rebuild seam, budget derivation with
- * output-token headroom, jq failure semantics, and the harness-findings
- * section surgery. */
+/** Unit tests for the #676 corpus-assembly migration. These tests pin the
+ * invariants that must hold for any input, including hostile content:
+ * UTF-8-safe truncation, reservation/authority order, the smart-rebuild seam,
+ * budget derivation with output-token headroom, jq failure semantics, and
+ * the harness-findings section surgery. */
 
 import test from "node:test";
 import assert from "node:assert/strict";

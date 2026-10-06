@@ -1,9 +1,0 @@
-{
-  "fixture": "ledger-present-no-sha",
-  "description": "A ledger without a sha writes `1`.",
-  "producer": "ledger-signal",
-  "ledger_md": "- [R1] Must validate input\n- [R2] Must log errors\n",
-  "ledger_json": "{\"version\": 1}",
-  "max_corpus": 10000,
-  "repo_files": {}
-}

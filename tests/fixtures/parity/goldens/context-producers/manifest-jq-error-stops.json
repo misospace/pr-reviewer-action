@@ -1,8 +1,0 @@
-{
- "error": null,
- "ok": true,
- "unresolved": [],
- "values": {
-  "file:manifest-context.md": "# Changed Manifest Context (modified files only)\n\n## File: k/kustomization.yaml (1 lines)\n```yaml\nresources:\n  - a.yaml```\n\n"
- }
-}

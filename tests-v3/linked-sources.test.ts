@@ -1,5 +1,5 @@
-/** Unit tests for the linked-sources port (#706 PR 5b); the byte-level
- * contract against v2 lives in the `linked-sources` parity boundary. */
+/** Unit tests for the linked-sources port (#706 PR 5b), including its
+ * byte-level output contract against v2. */
 
 import test from "node:test";
 import { readdirSync, readFileSync } from "node:fs";

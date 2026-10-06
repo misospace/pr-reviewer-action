@@ -3,7 +3,7 @@
  * related-code builders feed untrusted bodies and grep snippets through this
  * before anything reaches the corpus, exactly like their v2 counterparts.
  * The patterns, their application order, and the `[REDACTED]` marker are
- * contractual (v2/v3 parity compares the redacted bytes), so this module must
+ * contractual (redacted bytes stay byte-identical to v2), so this module must
  * stay in lockstep with the Python original — it is a normalization seam, not
  * a security-policy one: no network, no process, no policy decisions. */
 

@@ -1342,10 +1342,9 @@ export interface PRClassification {
    * path_handling match (too weak to route, per routeSignals) cannot also
    * be the sole reason correctness gets skipped on a real, sizable change.
    * Deliberately NOT part of `classificationToArtifact`'s persisted shape:
-   * v2 has no equivalent field, and the parity harness's classification
-   * boundary compares that artifact as one opaque canonical-JSON string per
-   * fixture — adding a key there would touch every existing golden. The
-   * production run instead threads this signal to the specialists gate via
+   * v2 has no equivalent field, and the artifact must remain byte-identical
+   * to v2. Tests pin that serialized shape. The production run instead
+   * threads this signal to the specialists gate via
    * the `SUBSTANTIAL_CODE_CHANGE` env var (see run/review.ts and
    * gates/specialists-gate.ts), entirely outside classification.json. */
   substantialCodeChange: boolean;
@@ -1384,8 +1383,8 @@ function evaluateSubstantialCodeChange(files: readonly ChangedFile[]): boolean {
 
 /** Serialize the internal classification to the persisted v2-identical
  * snake_case artifact (`classification.json`). Key order mirrors the v2
- * dataclass; the parity harness compares `sort_keys` canonical JSON, so the
- * artifact bytes are v2-identical regardless. */
+ * dataclass; canonical JSON serialization keeps the artifact bytes
+ * v2-identical. */
 export function classificationToArtifact(classification: PRClassification): Record<string, unknown> {
   return {
     pr_kind: classification.prKind,

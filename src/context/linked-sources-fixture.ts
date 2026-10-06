@@ -1,15 +1,13 @@
-/** Fixture CLI for the `linked-sources` parity boundary (#706 PR 5b):
- * `node dist/index.js linked-sources-fixture <fixture.json>`.
+/** Fixture harness for linked-source enrichment tests (#706 PR 5b), driven
+ * directly by `tests-v3/linked-sources.test.ts`.
  *
- * Runs the REAL v3 render (`renderLinkedSources`), SSRF-safe fetch policy
+ * Runs the real v3 render (`renderLinkedSources`), SSRF-safe fetch policy
  * (`fetchSource`: scheme/host/redirect/cap checks, public-DNS gate) and
  * enrich clients, with only the transport seams replaced by the fixture:
  * DNS answers (`dns`), raw-source HTTP exchanges (`http`), the GitHub /
  * Forgejo API route table (`routes`, shared with platform-normalization),
- * and a fake budget clock. The v2 runner
- * (`tests/parity_runners/v2_linked_sources.py`) patches the same seams under
- * `render_linked_sources` and must reproduce `markdown` byte for byte, the
- * sorted request log, and the budget-warning count. */
+ * and a fake budget clock. The output includes rendered markdown, a sorted
+ * request log, and the budget-warning count for deterministic tests. */
 
 import { readFileSync } from "node:fs";
 import { ForgejoEnrichClient, GitHubEnrichClient } from "../platform/enrich.js";

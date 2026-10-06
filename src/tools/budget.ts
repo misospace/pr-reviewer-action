@@ -14,22 +14,19 @@
  * route's tier default (so a small PR's budget matches the pre-#810 value
  * exactly) and capped at the hard ceiling. The derivation needs workspace
  * artifacts (pr.json / pr-files.json / specialist-*.json); when the caller
- * supplies no size signal the tier default is used as-is — which is exactly
- * what the tool-request-budget fixture (#673) exercises, so the fixture pins
- * the tier default with no size signal.
+ * supplies no size signal the tier default is used as-is, as tested in
+ * tests-v3/budget.test.ts.
  *
  * This module is the v3 port of `tool_budget_route` /
  * `resolve_tool_max_requests` in scripts/run_tool_harness.py. The two stay
  * in lockstep on the explicit/override precedence and the smart/escalated
- * tier defaults: tests/fixtures/parity/tool-budget/ pins the shared behavior
- * through the parity harness (#673) so the #678 migration cannot regress to a
- * single undifferentiated request ceiling. They deliberately differ on the
- * primary tier default (v3 24, v2 16), pinned by the tool-request-budget
- * snapshots, and the size-scaled default is v3-only (#810).
+ * tier defaults, so the #678 migration cannot regress to a single
+ * undifferentiated request ceiling. They deliberately differ on the primary
+ * tier default (v3 24, v2 16), while the size-scaled default is v3-only (#810).
  *
  * The Python side reads os.environ; this side takes the environment as a
- * plain record so the resolver is pure and the parity mode can evaluate
- * fixture cases without process-global state. The production caller passes
+ * plain record so the resolver is pure and tests can evaluate cases without
+ * process-global state. The production caller passes
  * `process.env`.
  */
 
@@ -38,9 +35,9 @@ import { SPECIALIST_ROLES_ORDER } from "../specialists/types.js";
 export type ToolBudgetTier = "primary" | "smart" | "escalated";
 
 /**
- * Where the effective ceiling came from (#702 budget provenance). Part of
- * the telemetry contract the parity fixture pins: primary-override / smart-override >
- * explicit > tier-default, matching resolve_tool_budget in
+ * Where the effective ceiling came from (#702 budget provenance). The
+ * telemetry contract is primary-override / smart-override > explicit >
+ * tier-default, matching resolve_tool_budget in
  * scripts/run_tool_harness.py. `size-scaled` (#810) replaces `tier-default`
  * only when the PR-size derivation strictly exceeds the tier default; when
  * the floor binds, the tier default is what won and the source says so.

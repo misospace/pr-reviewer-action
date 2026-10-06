@@ -33,9 +33,8 @@ REMOVED_OUTPUTS = {
 # and v2's action.yml. Everything not listed here must stay byte-identical.
 # Each entry pins the EXACT old (v2) and new (v3) values for the diverging
 # default and permits the description rewrite that documents it; the change
-# is documented in docs/v3-migration.md and the resolved-value drift is
-# pinned by the config-default-resolution snapshots in
-# tests/fixtures/parity/goldens/config-default-resolution/.
+# is documented in docs/v3-migration.md; the resolved-value drift is covered
+# by the configuration-default resolution tests.
 CONTRACT_METADATA_DIVERGENCES = {
     # #811: the v3 default for verdict-policy is "strict" — the published
     # verdict is derived from the still-open findings and coverage. v2's

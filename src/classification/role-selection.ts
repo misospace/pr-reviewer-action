@@ -125,9 +125,8 @@ export interface SpecialistSelection {
 }
 
 /** Serialize the internal selection to the persisted v2-identical snake_case
- * artifact (`role-selection.json`). Key order mirrors the v2 artifact; the
- * parity harness compares `sort_keys` canonical JSON, so the bytes are
- * v2-identical regardless. */
+ * artifact (`role-selection.json`). Key order mirrors the v2 artifact; after
+ * canonical JSON serialization, the bytes remain v2-identical. */
 export function selectionToArtifact(selection: SpecialistSelection): Record<string, unknown> {
   return {
     version: selection.version,
