@@ -1,0 +1,16 @@
+{
+  "env": {
+    "REPO": "misospace/demo",
+    "PR_NUMBER": "42",
+    "PUBLISH_MODE": "comment",
+    "AI_MODEL": "test-model"
+  },
+  "platform": {
+    "diff": "diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n",
+    "comments": [],
+    "reviews": [],
+    "pr_error": true
+  },
+  "fixture": "pr-lookup-failed-draft-unknown",
+  "description": "parity fixture for precheck-decision boundary (#674): pr-lookup-failed-draft-unknown — a failed PR lookup cannot prove reviewability and fails closed as pr-draft (#961)"
+}

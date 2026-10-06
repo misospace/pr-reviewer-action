@@ -34,9 +34,13 @@ function baseEnv(overrides: Record<string, string> = {}): Record<string, string>
   };
 }
 
-/** A same-repo PR (NOT a fork): head and base full names match. */
+/** A same-repo PR (NOT a fork): head and base full names match. The draft
+ * flag is explicit — only an explicit boolean is authoritative (#961), so
+ * an absent field would fail closed. */
 function sameRepoPr(): unknown {
   return {
+    state: "open",
+    draft: false,
     head: { sha: "head-abc", repo: { full_name: "o/r" } },
     base: { sha: "base-abc", repo: { full_name: "o/r" } },
   };
@@ -481,6 +485,54 @@ test("#914: an authorized comment on a closed PR is skipped as comment-pr-closed
   });
   assert.equal(output.should_review, "false");
   assert.equal(output.skip_reason, "comment-pr-closed");
+});
+
+test("#961: an authorized comment on a draft PR is skipped as comment-pr-draft", async () => {
+  const env = baseEnv();
+  const platform: Platform = {
+    diff: DIFF,
+    pr: { ...sameRepoPr() as object, state: "open", draft: true },
+    gh_api: { "repos/o/r/collaborators/alice/permission": { permission: "write" } },
+  };
+  const output = await runPrecheck({
+    env,
+    adapter: new FixtureAdapter("github", platform),
+    event: issueCommentEvent("/ai-review", "alice"),
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "comment-pr-draft");
+});
+
+test("#961: the closed check outranks the draft check on a comment", async () => {
+  const env = baseEnv();
+  const platform: Platform = {
+    diff: DIFF,
+    pr: { ...sameRepoPr() as object, state: "closed", draft: true },
+    gh_api: { "repos/o/r/collaborators/alice/permission": { permission: "write" } },
+  };
+  const output = await runPrecheck({
+    env,
+    adapter: new FixtureAdapter("github", platform),
+    event: issueCommentEvent("/ai-review", "alice"),
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "comment-pr-closed");
+});
+
+test("#961: an unrecognizable draft value fails closed on a comment too", async () => {
+  const env = baseEnv();
+  const platform: Platform = {
+    diff: DIFF,
+    pr: { ...sameRepoPr() as object, state: "open", draft: 1 },
+    gh_api: { "repos/o/r/collaborators/alice/permission": { permission: "write" } },
+  };
+  const output = await runPrecheck({
+    env,
+    adapter: new FixtureAdapter("github", platform),
+    event: issueCommentEvent("/ai-review", "alice"),
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "comment-pr-draft");
 });
 
 // ── The superseded-head gate (#914 review) ────────────────────────────────

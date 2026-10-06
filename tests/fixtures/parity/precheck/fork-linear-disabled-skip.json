@@ -22,6 +22,7 @@
     ],
     "reviews": [],
     "pr": {
+      "draft": false,
       "title": "Fix ENG-42 bug",
       "body": "Fixes #12",
       "head": {

@@ -239,6 +239,8 @@ function precheckAdapter(opts: {
   comments: { body: string; created_at: string; updated_at: string; author?: string }[];
 }): PlatformAdapter {
   const prObject = {
+    state: "open",
+    draft: false,
     title: opts.title ?? "OPS-42: fix the thing",
     body: opts.body ?? "Fixes #12",
     head: { sha: "a".repeat(40), repo: { full_name: opts.headRepo } },

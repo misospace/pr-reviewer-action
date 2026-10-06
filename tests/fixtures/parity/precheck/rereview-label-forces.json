@@ -26,6 +26,7 @@
     ],
     "reviews": [],
     "pr": {
+      "draft": false,
       "head": {
         "sha": "head-abc",
         "repo": {

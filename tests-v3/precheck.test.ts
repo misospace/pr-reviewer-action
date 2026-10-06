@@ -40,6 +40,8 @@ import type { ManagedComment, ManagedReview } from "../src/platform/types.js";
 
 const DIFF = "diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n";
 
+type Platform = PrecheckFixture["platform"];
+
 // ── Fingerprinting ───────────────────────────────────────────────────────
 
 test("diff fingerprints hash content and treat empty diffs as empty", () => {
@@ -482,6 +484,68 @@ test("runPrecheck reproduces the label no-op and superseded guard", async () => 
   assert.equal(superseded.is_fork_pr, "false");
 });
 
+test("#961: a draft PR is skipped deterministically in the shared review path", async () => {
+  const fx = fixture("changed-diff-reviews");
+  const platform: Platform = { ...fx.platform, pr: { ...(fx.platform.pr as object), state: "open", draft: true } };
+  const output = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", platform) });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "pr-draft");
+  // The skip still reports the identity it skipped on (the PR object was
+  // already in hand — no extra fetch).
+  assert.equal(output.head_sha, "head-abc");
+  assert.equal(output.base_sha, "base-abc");
+  assert.equal(output.is_fork_pr, "false");
+  assert.ok(output.diff_fingerprint.length > 0);
+});
+
+test("#961: a ready PR reviews; an absent draft field fails closed", async () => {
+  const fx = fixture("changed-diff-reviews");
+  const explicit = await runPrecheck({
+    env: fx.env,
+    adapter: new FixtureAdapter("github", { ...fx.platform, pr: { ...(fx.platform.pr as object), state: "open", draft: false } }),
+  });
+  assert.equal(explicit.should_review, "true");
+  // Only an explicit boolean draft value is authoritative. A payload
+  // without one cannot prove the PR is reviewable — skip.
+  const absentPr = { ...(fx.platform.pr as Record<string, unknown>) };
+  delete absentPr.draft;
+  const absent = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", { ...fx.platform, pr: absentPr }) });
+  assert.equal(absent.should_review, "false");
+  assert.equal(absent.skip_reason, "pr-draft");
+});
+
+test("#961: a shared-path PR lookup failure fails closed as pr-draft", async () => {
+  const fx = fixture("changed-diff-reviews");
+  const output = await runPrecheck({
+    env: fx.env,
+    adapter: new FixtureAdapter("github", { ...fx.platform, pr_error: true }),
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "pr-draft");
+  // The lookup failed, so there is no identity to report.
+  assert.equal(output.head_sha, "");
+  assert.equal(output.base_sha, "");
+});
+
+test("#961: an unrecognizable draft value fails closed", async () => {
+  const fx = fixture("changed-diff-reviews");
+  const platform: Platform = { ...fx.platform, pr: { ...(fx.platform.pr as object), state: "open", draft: "yes" } };
+  const output = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", platform) });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "pr-draft");
+});
+
+test("#961: even a forced re-review skips a draft PR", async () => {
+  const fx = fixture("changed-diff-reviews");
+  const platform: Platform = { ...fx.platform, pr: { ...(fx.platform.pr as object), state: "open", draft: true } };
+  const output = await runPrecheck({
+    env: { ...fx.env, FORCE_REVIEW: "true" },
+    adapter: new FixtureAdapter("github", platform),
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "pr-draft");
+});
+
 test("runPrecheck carries the prior verdict forward on a diff-unchanged skip", async () => {
   const fx = fixture("unchanged-diff-skip-issues");
   const output = await runPrecheck({
@@ -549,12 +613,12 @@ interface SkipAdapter extends PlatformAdapter {
   externalChecks: (sha: string) => Promise<ExternalCheck[] | null>;
 }
 
-function skipAdapter812(external: ExternalCheck[] | null, body: string): SkipAdapter & { readCount(): number } {
+function skipAdapter812(external: ExternalCheck[] | null, body: string, options: { pr?: unknown } = {}): SkipAdapter & { readCount(): number } {
   let reads = 0;
   return {
     readCount: () => reads,
     platform: "github",
-    getPr: () => Promise.resolve({ number: 42, head: { sha: "head-new", ref: "f" }, base: { ref: "main", sha: "base-new" }, user: { login: "u" } }),
+    getPr: () => Promise.resolve(options.pr ?? { number: 42, state: "open", draft: false, head: { sha: "head-new", ref: "f" }, base: { ref: "main", sha: "base-new" }, user: { login: "u" } }),
     getPrDiff: () => Promise.resolve("diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n"),
     listIssueComments: () => Promise.resolve([{ id: 1, body, created_at: "2024-01-01T00:00:00Z", author: "pr-reviewer[bot]" }]),
     listPrReviews: () => Promise.resolve([]),
@@ -579,6 +643,22 @@ test("#812: CI turned green under a carried request_changes — the review is no
   const output = await runPrecheck({ env: skipEnv812(), adapter });
   assert.equal(output.should_review, "true");
   assert.equal(output.skip_reason, "ci-stale-carried-verdict");
+});
+
+test("#961: the draft gate outranks the #812 stale re-entry — a draft is never re-reviewed", async () => {
+  // The PR went back to draft after the request_changes marker was
+  // published and CI has since gone green. The stale re-entry wants a
+  // fresh review, but the deterministic draft gate wins: reviewing a
+  // draft is exactly what #961 forbids. The state self-heals — marking
+  // the PR ready fires its own run, whose diff-unchanged path re-checks
+  // CI staleness and re-enters the review path with draft gone.
+  const adapter = skipAdapter812([{ name: "ci", state: "success" }], issuesCommentBody812("issues", "failure"), {
+    pr: { number: 42, state: "open", draft: true, head: { sha: "head-new", ref: "f" }, base: { ref: "main", sha: "base-new" }, user: { login: "u" } },
+  });
+  const output = await runPrecheck({ env: skipEnv812(), adapter });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "pr-draft");
+  assert.equal(output.head_sha, "head-new");
 });
 
 test("#812: diff, config and CI all unchanged — still skipped with the carried verdict", async () => {
