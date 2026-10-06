@@ -60,6 +60,11 @@ test("precheck entrypoint writes the precheck ABI outputs", async () => {
   }
 });
 
+test("publishInputFromEnv reads the internal degraded stage signal", () => {
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", DEGRADED: "true" } as NodeJS.ProcessEnv, "github").degraded, true);
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", DEGRADED: "false" } as NodeJS.ProcessEnv, "github").degraded, false);
+});
+
 test("publish entrypoint rejects an invalid publish mode fail-closed", async () => {
   await assert.rejects(
     publishMain({

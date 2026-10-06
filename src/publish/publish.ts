@@ -88,6 +88,8 @@ export interface PublishInput {
    * publish could not confirm completeness, so it fails closed exactly like
    * a confirmed gap — see `markerReviewResult`. */
   coverageUnknown?: boolean;
+  /** #978: real degraded signal from the in-process review stage. */
+  degraded?: boolean;
   /** #847: the #810/#702 tool-loop request budget this run resolved, so the
    * size-scaled default can be measured from published reviews alone.
    * Omitted when no tool harness ran. */
@@ -588,6 +590,7 @@ export async function publishReview(
     cacheHitRatio: input.cacheHitRatio,
     ...(incompleteReason !== "none" ? { incompleteReason } : {}),
     ...(input.ciState !== undefined && input.ciState !== "" ? { ciState: input.ciState } : {}),
+    degraded: input.degraded === true,
     ...(input.toolBudget !== undefined ? { toolBudget: input.toolBudget } : {}),
     ...(input.toolBudgetSource !== undefined && input.toolBudgetSource !== "" ? { toolBudgetSource: input.toolBudgetSource } : {}),
     ...(input.toolCalls !== undefined ? { toolCalls: input.toolCalls } : {}),

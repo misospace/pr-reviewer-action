@@ -37,6 +37,7 @@ import {
 } from "../src/precheck/decide.js";
 import { FixtureAdapter, fixtureLinearCollector, type PrecheckFixture } from "../src/precheck/fixture.js";
 import type { ManagedComment, ManagedReview } from "../src/platform/types.js";
+import { failOnRequestChanges } from "../src/run/action.js";
 
 const DIFF = "diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n";
 
@@ -176,26 +177,45 @@ test("evaluatePrecheck skips only on a marker match and force review bypasses", 
 
 // ── Metadata markers / carry-forward verdict ─────────────────────────────
 
-test("metadata markers parse and drive the carried verdict", () => {
+test("metadata markers preserve degraded and drive the carried verdict", () => {
+  const degradedMarker = buildMetadataMarker({ review_result: "issues", degraded: true });
+  const degradedBody = `text\n${degradedMarker}\n`;
+  const degradedData = parseMetadata(degradedBody);
+  assert.equal(degradedData?.review_result, "issues");
+  assert.equal(degradedData?.degraded, true);
+  assert.deepEqual(carriedVerdict(degradedBody), {
+    verdict: "request_changes", verdictSource: "carry_forward", reviewResult: "issues", degraded: true,
+  });
+
+  for (const options of [{ review_result: "issues" }, { review_result: "issues", degraded: false }]) {
+    const marker = buildMetadataMarker(options);
+    assert.equal(Object.hasOwn(parseMetadata(marker) ?? {}, "degraded"), false);
+    assert.equal(carriedVerdict(marker)?.degraded, false);
+  }
+  assert.equal(buildMetadataMarker({ review_result: "issues", degraded: false }), buildMetadataMarker({ review_result: "issues" }));
+
   const body = `text\n${buildMetadataMarker({ head_sha: "h", base_sha: "b", review_result: "issues" })}\n`;
   const data = parseMetadata(body);
   assert.equal(data?.review_result, "issues");
-  assert.deepEqual(carriedVerdict(body), { verdict: "request_changes", verdictSource: "carry_forward", reviewResult: "issues" });
+  assert.deepEqual(carriedVerdict(body), { verdict: "request_changes", verdictSource: "carry_forward", reviewResult: "issues", degraded: false });
   assert.deepEqual(carriedVerdict(`x\n${buildMetadataMarker({ review_result: "clean" })}`), {
     verdict: "approve",
     verdictSource: "carry_forward",
     reviewResult: "clean",
+    degraded: false,
   });
   assert.deepEqual(carriedVerdict(`x\n${buildMetadataMarker({ review_result: "partial", incomplete_reason: "requirement_trace" })}`), {
     verdict: "approve",
     verdictSource: "carry_forward",
     reviewResult: "partial",
+    degraded: false,
     incompleteReason: "requirement_trace",
   });
   assert.deepEqual(carriedVerdict(`x\n${buildMetadataMarker({ review_result: "partial" })}`), {
     verdict: "approve",
     verdictSource: "carry_forward",
     reviewResult: "partial",
+    degraded: false,
   });
   // #954: the marker is untrusted comment content; an unknown reason value is
   // dropped rather than copied into the action output.
@@ -203,6 +223,7 @@ test("metadata markers parse and drive the carried verdict", () => {
     verdict: "approve",
     verdictSource: "carry_forward",
     reviewResult: "partial",
+    degraded: false,
   });
   assert.equal(carriedVerdict("no marker"), null);
   assert.equal(carriedVerdict("<!-- ai-pr-reviewer:not json -->"), null);
@@ -549,8 +570,14 @@ test("#961: even a forced re-review skips a draft PR", async () => {
   assert.equal(output.skip_reason, "pr-draft");
 });
 
-test("runPrecheck carries the prior verdict forward on a diff-unchanged skip", async () => {
+test("runPrecheck carries the prior verdict and degraded signal on a diff-unchanged skip", async () => {
   const fx = fixture("unchanged-diff-skip-issues");
+  const comment = fx.platform.comments?.[0];
+  assert.ok(comment);
+  comment.body = comment.body.replace(/<!-- ai-pr-reviewer:\{.*?\} -->/, buildMetadataMarker({
+    review_result: "issues",
+    degraded: true,
+  }));
   const output = await runPrecheck({
     env: fx.env,
     adapter: new FixtureAdapter("github", fx.platform),
@@ -559,6 +586,20 @@ test("runPrecheck carries the prior verdict forward on a diff-unchanged skip", a
   assert.equal(output.skip_reason, "diff-unchanged");
   assert.equal(output.verdict, "request_changes");
   assert.equal(output.verdict_source, "carry_forward");
+  assert.equal(output.degraded, true);
+  assert.equal(
+    failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, output.verdict ?? "", output.degraded, false),
+    0,
+    "request_changes from a degraded carried marker warns and passes by default",
+  );
+});
+
+test("runPrecheck carries non-degraded request_changes and it still blocks", async () => {
+  const fx = fixture("unchanged-diff-skip-issues");
+  const output = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", fx.platform) });
+  assert.equal(output.verdict, "request_changes");
+  assert.equal(output.degraded, false);
+  assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, output.verdict ?? "", output.degraded, false), 1);
 });
 
 test("runPrecheck carries incomplete reason on a diff-unchanged skip", async () => {

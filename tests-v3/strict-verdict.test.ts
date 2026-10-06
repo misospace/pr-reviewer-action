@@ -269,10 +269,10 @@ test("strict marker values carry an approve through the unchanged-diff skip", ()
   const marker = (reviewResult: string) => buildRunMetadataMarker({ headSha: "h", baseSha: "b", reviewResult });
   for (const result of ["findings", "partial"]) {
     const carried = carriedVerdict(`${marker(result)}\nbody`);
-    assert.deepEqual(carried, { verdict: "approve", verdictSource: "carry_forward", reviewResult: result }, result);
+    assert.deepEqual(carried, { verdict: "approve", verdictSource: "carry_forward", reviewResult: result, degraded: false }, result);
   }
-  assert.deepEqual(carriedVerdict(`${marker("issues")}\nbody`), { verdict: "request_changes", verdictSource: "carry_forward", reviewResult: "issues" });
-  assert.deepEqual(carriedVerdict(`${marker("clean")}\nbody`), { verdict: "approve", verdictSource: "carry_forward", reviewResult: "clean" });
+  assert.deepEqual(carriedVerdict(`${marker("issues")}\nbody`), { verdict: "request_changes", verdictSource: "carry_forward", reviewResult: "issues", degraded: false });
+  assert.deepEqual(carriedVerdict(`${marker("clean")}\nbody`), { verdict: "approve", verdictSource: "carry_forward", reviewResult: "clean", degraded: false });
 });
 
 // ---------------------------------------------------------------------------

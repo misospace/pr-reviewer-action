@@ -182,7 +182,12 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       await postForkPrCommentReply(stage).catch(() => undefined);
     }
     await maybeClearRereviewLabel(stage, event);
-    return failOnRequestChanges(stage, pre.verdict ?? "");
+    return failOnRequestChanges(
+      stage,
+      pre.verdict ?? "",
+      pre.degraded === true,
+      (stage.FAIL_ON_DEGRADED_REVIEW ?? "false").toLowerCase() === "true",
+    );
   }
 
   // #914: an accepted comment-command re-review gets an immediate 👀 ack
@@ -234,6 +239,7 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       FINDINGS: review.outputs.findings,
       ANALYSIS_ENGINE: review.outputs.analysisEngine,
       CACHE_HIT_RATIO: review.outputs.cacheHitRatio,
+      DEGRADED: review.outputs.degraded ? "true" : "false",
       VERDICT_POLICY: review.verdictPolicy,
     };
     const seam = buildPublishApi(publishEnv as NodeJS.ProcessEnv);

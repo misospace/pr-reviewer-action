@@ -210,6 +210,8 @@ export interface PrecheckOutput {
   /** #954: the carried marker's `incomplete_reason`, for the additive
    * `incomplete-reason` action output. Undefined when nothing was carried. */
   incomplete_reason?: string;
+  /** #978: carried real degraded signal, consumed in-process by the gate. */
+  degraded?: boolean;
 }
 
 /** Extract the broad fingerprint from the last published comment body —
@@ -305,10 +307,11 @@ async function selectAuthenticatedManagedBody(
  * unparseable marker → verdict stays empty. #811's strict-policy marker
  * values (`findings` / `partial`) are non-blocking states and carry an
  * approve, exactly like `clean`. */
-export function carriedVerdict(lastCommentBody: string): { verdict: string; verdictSource: string; reviewResult: string; incompleteReason?: string } | null {
+export function carriedVerdict(lastCommentBody: string): { verdict: string; verdictSource: string; reviewResult: string; degraded: boolean; incompleteReason?: string } | null {
   const data = parseMetadata(lastCommentBody);
   if (!data) return null;
   const result = String(data.review_result ?? "").toLowerCase();
+  const degraded = data.degraded === true;
   // #954: the marker is untrusted comment content — only a known enum value is
   // ever carried into the `incomplete-reason` output; anything else is dropped.
   const incompleteRaw = String(data.incomplete_reason ?? "");
@@ -317,6 +320,7 @@ export function carriedVerdict(lastCommentBody: string): { verdict: string; verd
     verdict: "request_changes",
     verdictSource: "carry_forward",
     reviewResult: result,
+    degraded,
     ...(incomplete !== "" ? { incompleteReason: incomplete } : {}),
   };
   if (result === "clean" || result === "findings" || result === "partial") {
@@ -327,6 +331,7 @@ export function carriedVerdict(lastCommentBody: string): { verdict: string; verd
       verdict: "approve",
       verdictSource: "carry_forward",
       reviewResult: result,
+      degraded,
       ...(incomplete !== "" ? { incompleteReason: incomplete } : {}),
     };
   }
@@ -668,6 +673,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
         output.verdict = carried.verdict;
         output.verdict_source = carried.verdictSource;
         output.review_result = carried.reviewResult;
+        output.degraded = carried.degraded;
         if (carried.incompleteReason !== undefined) output.incomplete_reason = carried.incompleteReason;
       }
       return output;

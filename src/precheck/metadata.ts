@@ -82,6 +82,8 @@ export interface MetadataOptions {
   /** #915: build-time action release stamp, appended last under the additive
    * key discipline of #810/#847/#895/#922; unstamped builds preserve pre-#915 bytes. */
   action_version?: string | null;
+  /** #978: true when the real degraded-review signal is set; false/absent is omitted. */
+  degraded?: boolean | null;
 }
 
 /** Build a metadata marker string for insertion into managed comments
@@ -147,6 +149,11 @@ export function buildMetadataMarker(options: MetadataOptions = {}): string {
   // above — an unstamped build serializes byte-identically to pre-#915.
   if (options.action_version !== null && options.action_version !== undefined && options.action_version !== "") {
     data.action_version = options.action_version;
+  }
+  // #978 additive key: older markers omit it; append it without moving any
+  // existing fields. Persist only true; false and absent preserve old bytes.
+  if (options.degraded === true) {
+    data.degraded = true;
   }
   return `<!-- ai-pr-reviewer:${jsonCompact(data)} -->`;
 }
