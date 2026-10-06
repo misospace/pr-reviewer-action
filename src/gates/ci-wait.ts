@@ -3,7 +3,7 @@ import { ciAttemptTimeoutMs } from "../platform/bounded.js";
 import { ForgejoAdapter } from "../platform/forgejo.js";
 import { GitHubAdapter } from "../platform/github.js";
 import { jqCompact } from "../platform/jq.js";
-import type { ExternalCheck } from "../platform/normalize.js";
+import { forgejoSelfRunOrigin, type ExternalCheck } from "../platform/normalize.js";
 import { resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
 import type { ExternalChecksOptions, PlatformReadAdapter } from "../platform/types.js";
@@ -30,9 +30,9 @@ import type { ExternalChecksOptions, PlatformReadAdapter } from "../platform/typ
  *   skip); the `ci_status_*` outputs; the atomic `ci-checks-context.md`
  *   evidence file and its temp-file cleanup on TERM/INT.
  *
- * One deliberate divergence from v2 (pinned by the `ci-gate` snapshot): reads
- * use `transientAsUnknown`, so a transient read
- * failure is "unknown, retry" rather than the v2 fold to `[]`, which let
+ * One deliberate divergence from v2 (covered by the retained node:test
+ * regression): reads use `transientAsUnknown`, so a transient read failure is
+ * "unknown, retry" rather than the v2 fold to `[]`, which let
  * the wait finalize "none" (or a partial list) while CI was still running.
  */
 
@@ -148,7 +148,7 @@ export async function runCiWait(deps: CiWaitDeps): Promise<number> {
   const prNumber = env(deps, "PR_NUMBER");
   const headShaHint = env(deps, "PR_HEAD_SHA");
   const runId = env(deps, "GITHUB_RUN_ID");
-  const statusContext = envOr(deps, "CI_STATUS_CONTEXT", "pr-reviewer-action");
+  const explicitStatusContext = env(deps, "CI_STATUS_CONTEXT");
   const statusCheck = envOr(deps, "CI_STATUS_CHECK", "false");
   const timeoutRaw = envOr(deps, "CI_TIMEOUT_SEC", "300");
   const timeoutSec = intOr(timeoutRaw, 300);
@@ -182,6 +182,29 @@ export async function runCiWait(deps: CiWaitDeps): Promise<number> {
     error(`CI status platform unavailable: ${cause instanceof Error ? cause.message : String(cause)}`);
     return 2;
   }
+  const autoSelfStatus = adapter.platform === "forgejo" && explicitStatusContext.trim() === "";
+  const selfRunNumbers = autoSelfStatus
+    ? [...new Set(["FORGEJO_RUN_NUMBER", "GITHUB_RUN_NUMBER"]
+      .map((key) => env(deps, key).trim()).filter((value) => /^\d+$/.test(value)))]
+    : undefined;
+  const selfRunId = autoSelfStatus
+    ? [deps.env.FORGEJO_RUN_ID, deps.env.GITHUB_RUN_ID]
+      .map((value) => value?.trim() ?? "").find((value) => /^\d+$/.test(value)) ?? ""
+    : "";
+  const selfRunRepo = autoSelfStatus ? env(deps, "FORGEJO_REPOSITORY") || env(deps, "GITHUB_REPOSITORY") : undefined;
+  const selfRunOrigin = autoSelfStatus
+    ? forgejoSelfRunOrigin(env(deps, "FORGEJO_API_URL"), env(deps, "GITHUB_SERVER_URL"))
+    : undefined;
+  const statusContext = explicitStatusContext !== ""
+    ? explicitStatusContext
+    : adapter.platform === "github" ? "pr-reviewer-action" : "";
+  const selfStatusDiscovery = autoSelfStatus
+    ? {
+        found: false, ambiguous: false, matchCount: 0, context: null as string | null,
+        runJobs: "unknown" as "unknown" | "single" | "multi" | "unavailable", runJobCount: null as number | null,
+        runJobCountExact: false, runJobHtmlUrl: null as string | null, runJobsUnavailableReason: null as string | null,
+      }
+    : undefined;
 
   // One absolute outer deadline, established BEFORE the head-SHA lookup so
   // that request draws from the same budget as the poll loop.
@@ -190,6 +213,7 @@ export async function runCiWait(deps: CiWaitDeps): Promise<number> {
   const bounds: ExternalChecksOptions = {
     runId,
     statusContext,
+    ...(selfRunNumbers === undefined ? {} : { selfRunNumbers, selfRunId, selfRunRepo, selfRunOrigin, selfStatusDiscovery }),
     apiTimeoutSec: env(deps, "CI_API_TIMEOUT_SEC"),
     ciTimeoutSec: timeoutRaw,
     deadlineEpoch: String(deadline),
@@ -206,6 +230,11 @@ export async function runCiWait(deps: CiWaitDeps): Promise<number> {
 
   let checks: ExternalCheck[] | null = null;
   let elapsed = 0;
+  let selfStatusDiscovered = false;
+  let selfStatusDiscoveryLogged = false;
+  let selfStatusAmbiguityLogged = false;
+  let selfStatusMultiJobLogged = false;
+  let selfStatusUnavailableLogged = false;
 
   const renderEvidence = (finalState: string): void => {
     if (checksFile === "") return;
@@ -258,6 +287,10 @@ export async function runCiWait(deps: CiWaitDeps): Promise<number> {
     for (;;) {
       if (elapsed >= timeoutSec || nowSec() >= deadline) {
         log(`Timeout reached after ${nowSec() - startedAt}s`);
+        if (autoSelfStatus && selfStatusDiscovery && !selfStatusDiscovered && !selfStatusAmbiguityLogged
+          && !selfStatusUnavailableLogged) {
+          log("Warning: could not identify this run's own Forgejo status; it may have blocked the CI gate (set CI_STATUS_CONTEXT to disambiguate)");
+        }
         if (skipOnTimeout.toLowerCase() === "true") {
           log("ci_skip_on_timeout=true — proceeding without CI context");
           renderEvidence(CI_EVIDENCE_TIMEOUT_STATE);
@@ -272,6 +305,34 @@ export async function runCiWait(deps: CiWaitDeps): Promise<number> {
       const attemptStart = nowSec();
       checks = await adapter.externalChecks(sha, bounds);
       elapsed += nowSec() - attemptStart;
+      if (selfStatusDiscovery?.found) {
+        selfStatusDiscovered = true;
+        if (!selfStatusDiscoveryLogged) {
+          if (selfStatusDiscovery.context !== null) {
+            const context = selfStatusDiscovery.context.replace(CELL_BREAK_RE, " ").slice(0, 200);
+            log(`CI self status excluded by run match (context: ${context})`);
+          } else {
+            log("CI self status excluded by run match (context: unknown)");
+          }
+          selfStatusDiscoveryLogged = true;
+        }
+      }
+      if (selfStatusDiscovery?.runJobs === "unavailable" && !selfStatusUnavailableLogged
+        && selfStatusDiscovery.matchCount === 1 && selfStatusDiscovery.runJobsUnavailableReason !== null) {
+        const reason = selfStatusDiscovery.runJobsUnavailableReason.replace(CELL_BREAK_RE, " ").slice(0, 160);
+        log(`Warning: Forgejo run-jobs API unavailable (${reason}); cannot auto-exclude this run's own status — set CI_STATUS_CONTEXT to disambiguate`);
+        selfStatusUnavailableLogged = true;
+      }
+      if (selfStatusDiscovery?.ambiguous && !selfStatusAmbiguityLogged) {
+        log(`Warning: ${selfStatusDiscovery.matchCount} statuses matched this run's Forgejo run number; excluding none to avoid hiding sibling CI (set CI_STATUS_CONTEXT to disambiguate)`);
+        selfStatusAmbiguityLogged = true;
+      }
+      if (selfStatusDiscovery?.runJobs === "multi" && !selfStatusMultiJobLogged) {
+        const count = selfStatusDiscovery.runJobCount;
+        const renderedCount = count === null ? "at least one" : String(count);
+        log(`Warning: this Forgejo workflow run has ${renderedCount} jobs; auto-discovery only supports single-job runs, set CI_STATUS_CONTEXT to disambiguate`);
+        selfStatusMultiJobLogged = true;
+      }
 
       if (checks === null) {
         // Under transientAsUnknown every null is a transient read failure

@@ -302,6 +302,169 @@ export interface ExternalCheck {
   state: string;
 }
 
+function trimmedRunNumbers(runNumbers: readonly string[]): string[] {
+  return [...new Set(runNumbers.map((value) => value.trim()).filter((value) => /^\d+$/.test(value)))];
+}
+
+function escapeRepoPart(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function forgejoSelfRunOrigin(forgejoApiUrl: string, githubServerUrl: string): string {
+  for (const value of [forgejoApiUrl, githubServerUrl]) {
+    if (value.trim() === "") continue;
+    try {
+      const parsed = new URL(value);
+      if ((parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.host !== "") return parsed.origin;
+    } catch {
+      // Try the fallback URL when the preferred runner URL is malformed.
+    }
+  }
+  return "";
+}
+
+function forgejoRunUrlPattern(runNumber: string, repo: string): RegExp | null {
+  const parts = repo.split("/");
+  if (parts.length !== 2 || parts.some((part) => part === "")) return null;
+  const escapedRepo = parts.map(escapeRepoPart).join("/");
+  const escapedRunNumber = runNumber.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|/)${escapedRepo}/actions/runs/${escapedRunNumber}(/|$)`);
+}
+
+function forgejoTargetPath(targetUrl: string, selfRunOrigin: string): string | null {
+  const hasScheme = /^[a-z][a-z\d+.-]*:/i.test(targetUrl);
+  let trustedOrigin: string | null = null;
+  if (selfRunOrigin !== "") {
+    try {
+      const trusted = new URL(selfRunOrigin);
+      if ((trusted.protocol === "http:" || trusted.protocol === "https:") && trusted.host !== "") {
+        trustedOrigin = trusted.origin;
+      }
+    } catch {
+      // Absolute target URLs cannot be trusted without a valid runner origin.
+    }
+  }
+  if (/^[a-z][a-z\d+.-]*:\/\//i.test(targetUrl)) {
+    try {
+      const parsed = new URL(targetUrl);
+      if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || trustedOrigin === null) return null;
+      if (parsed.origin !== trustedOrigin) return null;
+      return parsed.pathname;
+    } catch {
+      return null;
+    }
+  }
+  if (targetUrl.startsWith("//")) {
+    try {
+      const parsed = new URL(`https:${targetUrl}`);
+      if (trustedOrigin === null || parsed.origin !== trustedOrigin) return null;
+      return parsed.pathname;
+    } catch {
+      return null;
+    }
+  }
+  if (hasScheme) return null;
+  const path = targetUrl.split(/[?#]/, 1)[0] ?? "";
+  try {
+    return new URL(path, "https://relative.invalid").pathname;
+  } catch {
+    return null;
+  }
+}
+
+function forgejoStatusState(status: Record<string, unknown>): unknown {
+  return status.state ?? status.status;
+}
+
+function forgejoStatusMatchesRun(
+  status: unknown,
+  runNumbers: readonly string[],
+  repo: string,
+  selfRunOrigin: string,
+): boolean {
+  if (!isPlainObject(status) || typeof status.target_url !== "string") return false;
+  if (forgejoStatusState(status) !== "pending") return false;
+  const path = forgejoTargetPath(status.target_url, selfRunOrigin);
+  if (path === null) return false;
+  return runNumbers.some((runNumber) => forgejoRunUrlPattern(runNumber, repo)?.test(path) === true);
+}
+
+export interface ForgejoSelfStatusMatches {
+  count: number;
+  index: number | null;
+  context: string | null;
+}
+
+export type ForgejoRunJobsNormalization =
+  | { state: "single"; count: 1; exact: true; htmlUrl: string }
+  | { state: "multi"; count: number; exact: boolean }
+  | { state: "unavailable"; count: null; exact: false };
+
+/** Normalize the Forgejo jobs API's documented plain-array shape and
+ * defensive total_count envelopes. Never call a truncated page single-job. */
+export function normalizeForgejoRunJobs(data: unknown, pageSize = 50): ForgejoRunJobsNormalization {
+  const envelope = isPlainObject(data) ? data : null;
+  const jobs = Array.isArray(data) ? data : envelope && Array.isArray(envelope.jobs) ? envelope.jobs : null;
+  if (jobs === null) return { state: "unavailable", count: null, exact: false };
+
+  const hasTotal = envelope !== null && Object.hasOwn(envelope, "total_count");
+  const totalCount = envelope?.total_count;
+  const validTotal = typeof totalCount === "number" && Number.isSafeInteger(totalCount) && totalCount >= 0;
+  if (hasTotal && !validTotal) return { state: "unavailable", count: null, exact: false };
+  const hasMore = envelope?.has_more === true || envelope?.hasMore === true
+    || (typeof envelope?.next_page === "number" && envelope.next_page > 0)
+    || (typeof envelope?.nextPage === "number" && envelope.nextPage > 0);
+  if (validTotal && totalCount > jobs.length) {
+    return { state: "multi", count: totalCount, exact: true };
+  }
+  if (hasMore || jobs.length >= pageSize) {
+    const lowerBound = Math.max(validTotal ? totalCount : 0, jobs.length + (hasMore ? 1 : 0));
+    return { state: "multi", count: lowerBound, exact: false };
+  }
+
+  if (validTotal && totalCount !== jobs.length) return { state: "unavailable", count: null, exact: false };
+  if (jobs.length > 1) return { state: "multi", count: jobs.length, exact: true };
+  if (jobs.length === 0) return { state: "unavailable", count: null, exact: false };
+  const only = jobs[0];
+  if (!isPlainObject(only) || typeof only.html_url !== "string") {
+    return { state: "unavailable", count: null, exact: false };
+  }
+  return { state: "single", count: 1, exact: true, htmlUrl: only.html_url };
+}
+
+/** Both URLs must be same-origin (when absolute) and resolve to the same
+ * normalized path before a single-job result can identify the status. */
+export function forgejoJobStatusPathsMatch(jobHtmlUrl: string, targetUrl: string, selfRunOrigin: string): boolean {
+  const jobPath = forgejoTargetPath(jobHtmlUrl, selfRunOrigin);
+  const statusPath = forgejoTargetPath(targetUrl, selfRunOrigin);
+  return jobPath !== null && statusPath !== null && jobPath === statusPath;
+}
+
+/** Find pending Forgejo statuses scoped to this repository and runner origin.
+ * Terminal statuses cannot be this still-running job, so stale terminal entries
+ * are ignored and sibling failures stay visible. A pending sibling can still be
+ * the sole visible match before our status is published; the multi-job
+ * ambiguity guard cannot resolve that race, so the gate's two-interval empty
+ * finalize rule remains the last protection. */
+export function forgejoSelfStatusMatches(
+  statuses: readonly unknown[],
+  runNumbers: readonly string[],
+  repo: string,
+  selfRunOrigin = "",
+): ForgejoSelfStatusMatches {
+  const candidates = trimmedRunNumbers(runNumbers);
+  const matches = candidates.length === 0 || repo === ""
+    ? []
+    : statuses.flatMap((status, index) => forgejoStatusMatchesRun(status, candidates, repo, selfRunOrigin) ? [index] : []);
+  const index = matches.length === 1 ? matches[0]! : null;
+  const matchedStatus = index === null ? null : statuses[index];
+  return {
+    count: matches.length,
+    index,
+    context: isPlainObject(matchedStatus) && typeof matchedStatus.context === "string" ? matchedStatus.context : null,
+  };
+}
+
 /** `platform_external_checks`: fold the two captured stdouts (check-runs,
  * combined commit status) into `[{name, state}]` with self-exclusion.
  *
@@ -316,6 +479,10 @@ export function normalizeExternalChecks(
   combinedText: string,
   runId: string,
   statusContext: string,
+  opts?: {
+    selfRunNumbers?: readonly string[] | undefined;
+    selfStatusIndex?: number | undefined;
+  },
 ): ExternalCheck[] | null {
   const runsCapture = runsText.replace(/\n+$/, "");
   const combinedCapture = combinedText.replace(/\n+$/, "");
@@ -328,6 +495,7 @@ export function normalizeExternalChecks(
   } catch {
     return [];
   }
+  const autoSelfExclusion = opts?.selfRunNumbers !== undefined;
   const ctx = statusContext === "" ? "pr-reviewer-action" : statusContext;
   try {
     let selfRun: RegExp | null = null;
@@ -342,11 +510,18 @@ export function normalizeExternalChecks(
       .filter((run) => selfRun === null
         || !(jqTest(jqAlt(jqField(run, "details_url"), ""), selfRun) || jqTest(jqAlt(jqField(run, "html_url"), ""), selfRun)))
       .map((run): ExternalCheck => ({ name: jqAlt(jqField(run, "name"), "(unnamed)"), state: checkRunState(run) }));
-    const statuses = jqEachOpt(jqField(combined, "statuses"))
-      .filter((status) => jqCompare(jqField(status, "context"), ctx) !== 0)
+    const statusEntries = jqEachOpt(jqField(combined, "statuses"));
+    const selfStatusIndex = opts?.selfStatusIndex;
+    const excludedSelfStatus = autoSelfExclusion && selfStatusIndex !== undefined
+      && selfStatusIndex >= 0 && selfStatusIndex < statusEntries.length;
+    const statuses = statusEntries
+      .filter((status, index) => autoSelfExclusion
+        ? index !== selfStatusIndex
+        : jqCompare(jqField(status, "context"), ctx) !== 0)
       .map((status): ExternalCheck => ({ name: jqAlt(jqField(status, "context"), "(status)"), state: statusState(status) }));
     const external = [...checkRuns, ...statuses];
     if (external.length > 0) return external;
+    if (excludedSelfStatus) return [];
     const total = jqAlt(jqField(combined, "total_count"), 0);
     const aggregate = jqAlt(jqField(combined, "state"), "pending");
     if (jqCompare(total, 0) > 0 && (aggregate === "success" || aggregate === "failure" || aggregate === "error")) {

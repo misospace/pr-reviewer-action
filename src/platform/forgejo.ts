@@ -4,6 +4,9 @@ import { PlatformRequestError, requestJson, requestText, type FetchLike } from "
 import {
   forgejoReviewCommentId,
   groupForgejoReviewThreads,
+  forgejoSelfStatusMatches,
+  forgejoJobStatusPathsMatch,
+  normalizeForgejoRunJobs,
   normalizeExternalChecks,
   normalizeForgejoCommitStatus,
   normalizeForgejoConversationComments,
@@ -11,6 +14,7 @@ import {
   normalizeForgejoPrFiles,
   normalizeForgejoReviews,
   pyJsonDecode,
+  type ForgejoRunJobsNormalization,
   type ExternalCheck,
 } from "./normalize.js";
 import { parseRepoRef, repoScopedUrl } from "./repo-ref.js";
@@ -36,6 +40,7 @@ function errorText(error: unknown): string {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 25_000;
+const FORGEJO_RUN_JOBS_PAGE_SIZE = 50;
 const JWT_TTL_SECONDS = 2700;
 
 export interface ForgejoAdapterOptions {
@@ -323,12 +328,16 @@ export class ForgejoAdapter implements PlatformReadAdapter {
    * failure reported as status 0 (v2: curl's nonzero exit code stands in
    * for the HTTP status, so it is never 200). A credential failure (the
    * authorized-integration JWT exchange) throws: v2's CLI raises there. */
-  private async curl(url: string, timeoutMs?: number): Promise<{ status: number; text: string }> {
+  private async curl(url: string, timeoutMs?: number, preserveRedirectStatus = false): Promise<{ status: number; text: string }> {
     const options = await this.options();
     try {
       const { status, text } = await requestText(url, { ...options, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
       return { status, text };
-    } catch {
+    } catch (error) {
+      if (preserveRedirectStatus && error instanceof PlatformRequestError
+        && error.kind === "redirect-blocked" && error.status !== null) {
+        return { status: error.status, text: "" };
+      }
       return { status: 0, text: "" };
     }
   }
@@ -418,6 +427,17 @@ export class ForgejoAdapter implements PlatformReadAdapter {
    * GitHub CI reads (#663); a timeout or exhausted deadline counts as that
    * same failed read. */
   async externalChecks(sha: string, options: ExternalChecksOptions = {}): Promise<ExternalCheck[] | null> {
+    if (options.selfRunNumbers !== undefined && options.selfStatusDiscovery) {
+      options.selfStatusDiscovery.found = false;
+      options.selfStatusDiscovery.ambiguous = false;
+      options.selfStatusDiscovery.matchCount = 0;
+      options.selfStatusDiscovery.context = null;
+      options.selfStatusDiscovery.runJobs ??= "unknown";
+      options.selfStatusDiscovery.runJobCount ??= null;
+      options.selfStatusDiscovery.runJobCountExact ??= false;
+      options.selfStatusDiscovery.runJobHtmlUrl ??= null;
+      options.selfStatusDiscovery.runJobsUnavailableReason ??= null;
+    }
     if (!SHA_RE.test(sha)) return null;
     if (options.transientAsUnknown === true) return this.externalChecksStrict(sha, options);
     const status = await this.read(async (at) => {
@@ -430,7 +450,10 @@ export class ForgejoAdapter implements PlatformReadAdapter {
     });
     // A raising CLI prints nothing (`|| echo ""`).
     const combinedText = status.ok ? status.data : "";
-    return normalizeExternalChecks(FORGEJO_EMPTY_CHECK_RUNS, combinedText, options.runId ?? "", options.statusContext ?? "");
+    if (options.selfRunNumbers === undefined) {
+      return normalizeExternalChecks(FORGEJO_EMPTY_CHECK_RUNS, combinedText, options.runId ?? "", options.statusContext ?? "");
+    }
+    return this.normalizeAutoSelfStatus(combinedText, options);
   }
 
   /** `externalChecks` under the v3 CI gate's transient-read rule: no
@@ -451,7 +474,108 @@ export class ForgejoAdapter implements PlatformReadAdapter {
     });
     if (status.ok && status.data === null) return null;
     const combinedText = status.ok ? status.data ?? "" : "";
-    return normalizeExternalChecks(FORGEJO_EMPTY_CHECK_RUNS, combinedText, options.runId ?? "", options.statusContext ?? "");
+    if (options.selfRunNumbers === undefined) {
+      return normalizeExternalChecks(FORGEJO_EMPTY_CHECK_RUNS, combinedText, options.runId ?? "", options.statusContext ?? "");
+    }
+    return this.normalizeAutoSelfStatus(combinedText, options);
+  }
+
+  private async readRunJobs(options: ExternalChecksOptions): Promise<ForgejoRunJobsNormalization | null> {
+    const runId = options.selfRunId?.trim() ?? "";
+    if (!NUMBER_RE.test(runId)) {
+      if (options.selfStatusDiscovery) options.selfStatusDiscovery.runJobsUnavailableReason = "run-id environment variable is missing or non-numeric";
+      return { state: "unavailable", count: null, exact: false };
+    }
+    const timeoutMs = ciAttemptTimeoutMs(options);
+    if (timeoutMs === null) return null;
+    let response: { status: number; text: string };
+    try {
+      const { owner, repo } = parseRepo(this.repo);
+      const url = this.apiPath(`/repos/${owner}/${repo}/actions/runs/${runId}/jobs`);
+      response = await this.curl(url, timeoutMs, true);
+    } catch {
+      if (options.selfStatusDiscovery) options.selfStatusDiscovery.runJobsUnavailableReason = "invalid repository for run-jobs endpoint";
+      return { state: "unavailable", count: null, exact: false };
+    }
+
+    // Unlike the shared CI-read rule, a jobs lookup treats timeout/early
+    // request responses as retryable rather than proof that the endpoint is absent.
+    if (response.status === 0 || response.status === 408 || response.status === 425
+      || response.status === 429 || response.status >= 500
+      || (response.status === 200 && isTransientCiRead(response.status, response.text))) return null;
+    if (response.status !== 200) {
+      if (options.selfStatusDiscovery) {
+        options.selfStatusDiscovery.runJobsUnavailableReason = `run-jobs endpoint returned HTTP ${response.status}`;
+      }
+      return { state: "unavailable", count: null, exact: false };
+    }
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(response.text);
+    } catch {
+      return null;
+    }
+    const result = normalizeForgejoRunJobs(decoded, FORGEJO_RUN_JOBS_PAGE_SIZE);
+    if (result.state === "unavailable" && options.selfStatusDiscovery) {
+      options.selfStatusDiscovery.runJobsUnavailableReason = "run-jobs response could not prove the run's job count";
+    }
+    return result;
+  }
+
+  private async normalizeAutoSelfStatus(combinedText: string, options: ExternalChecksOptions): Promise<ExternalCheck[] | null> {
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(combinedText.replace(/\n+$/, ""));
+    } catch {
+      if (options.selfStatusDiscovery) {
+        options.selfStatusDiscovery.found = false;
+        options.selfStatusDiscovery.ambiguous = false;
+        options.selfStatusDiscovery.matchCount = 0;
+        options.selfStatusDiscovery.context = null;
+      }
+      return [];
+    }
+    const statuses = isObject(decoded) && Array.isArray(decoded.statuses) ? decoded.statuses : [];
+    const matches = forgejoSelfStatusMatches(
+      statuses,
+      options.selfRunNumbers ?? [],
+      options.selfRunRepo ?? "",
+      options.selfRunOrigin ?? "",
+    );
+    const matchedStatus = matches.index === null ? null : statuses[matches.index];
+    const targetUrl = isObject(matchedStatus) && typeof matchedStatus.target_url === "string" ? matchedStatus.target_url : null;
+    const discovery = options.selfStatusDiscovery;
+    const ambiguous = matches.count > 1;
+    let excludeIndex: number | undefined;
+
+    // Ambiguity in the status payload is conclusive: do not spend a jobs API
+    // read or try to hide one of the sibling checks.
+    if (!ambiguous && matches.count === 1 && discovery?.runJobs === "unknown") {
+      const jobs = await this.readRunJobs(options);
+      if (jobs === null) return null;
+      discovery.runJobs = jobs.state;
+      discovery.runJobCount = jobs.count;
+      discovery.runJobCountExact = jobs.state === "single" || jobs.state === "multi" && jobs.exact;
+      discovery.runJobHtmlUrl = jobs.state === "single" ? jobs.htmlUrl : null;
+    }
+
+    if (discovery) {
+      discovery.found = false;
+      discovery.ambiguous = ambiguous;
+      discovery.matchCount = matches.count;
+      discovery.context = matches.context;
+      if (!ambiguous && matches.count === 1 && discovery.runJobs === "single"
+        && targetUrl !== null && discovery.runJobHtmlUrl !== null
+        && forgejoJobStatusPathsMatch(discovery.runJobHtmlUrl, targetUrl, options.selfRunOrigin ?? "")) {
+        discovery.found = true;
+        excludeIndex = matches.index ?? undefined;
+      }
+    }
+
+    return normalizeExternalChecks(FORGEJO_EMPTY_CHECK_RUNS, combinedText, options.runId ?? "", options.statusContext ?? "", {
+      selfRunNumbers: options.selfRunNumbers,
+      selfStatusIndex: excludeIndex,
+    });
   }
 
   /** Linked-source enrichment client whose configured-host credential is

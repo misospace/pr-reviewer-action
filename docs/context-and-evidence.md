@@ -249,7 +249,18 @@ run reviews in an isolated environment.
 Set `ci-status-check: true` to wait for all CI checks to reach a terminal
 state before the AI review starts, so the review considers final results
 instead of in-progress ones. This needs the `checks: read` permission —
-without it, CI evidence is silently skipped.
+without it, CI evidence is silently skipped. On Forgejo, auto-discovery first
+uses `FORGEJO_RUN_NUMBER` or `GITHUB_RUN_NUMBER` to find a pending status whose
+URL is scoped to this repository and the runner's origin (`FORGEJO_API_URL`, or
+`GITHUB_SERVER_URL` fallback). It excludes that status only when the run-jobs
+API, queried with numeric `FORGEJO_RUN_ID` (or `GITHUB_RUN_ID` fallback), proves
+the run has exactly one job and the job's `html_url` path exactly matches the
+status `target_url` path. Run IDs are never status-URL candidates. Multi-job,
+mismatched, and unavailable cases leave statuses visible. Automatic discovery
+requires Forgejo v16.0+, which introduced the run-jobs API; older instances warn
+immediately and fall back to bounded waiting. Set `CI_STATUS_CONTEXT` on older
+instances and in multi-job reviewer workflows to avoid a self-deadlock; a
+whitespace-only value is treated as unset and enables auto-discovery.
 
 ```yaml
 permissions:

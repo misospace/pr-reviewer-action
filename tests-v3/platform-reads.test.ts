@@ -9,7 +9,7 @@ import { ForgejoAdapter } from "../src/platform/forgejo.js";
 import { GitHubAdapter, nextLink } from "../src/platform/github.js";
 import type { FetchLike } from "../src/platform/http.js";
 import { compareCodePoints, jqCompact } from "../src/platform/jq.js";
-import { GITHUB_CONVERSATION_COMMENTS_QUERY, GITHUB_PR_BODY_REVISION_QUERY, GITHUB_REVIEW_THREADS_QUERY, normalizeExternalChecks, projectPrFiles } from "../src/platform/normalize.js";
+import { forgejoJobStatusPathsMatch, forgejoSelfStatusMatches, forgejoSelfRunOrigin, GITHUB_CONVERSATION_COMMENTS_QUERY, GITHUB_PR_BODY_REVISION_QUERY, GITHUB_REVIEW_THREADS_QUERY, normalizeExternalChecks, normalizeForgejoRunJobs, projectPrFiles } from "../src/platform/normalize.js";
 import { pyQuote, pyStr } from "../src/platform/py.js";
 import { parseRepoRef, repoScopedUrl } from "../src/platform/repo-ref.js";
 import { SemanticFixtureAdapter, semanticFixtureDir } from "../src/platform/semantic-fixture.js";
@@ -114,6 +114,114 @@ test("github externalChecks: error bodies are relayed like gh's stdout and HTTP 
   const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "1", fetchImpl });
   assert.deepEqual(await adapter.externalChecks("abc"), []);
   assert.equal(await adapter.externalChecks("../evil"), null);
+});
+
+test("Forgejo run-jobs normalization is pagination-conservative and joins the exact job URL", () => {
+  assert.deepEqual(normalizeForgejoRunJobs([{ html_url: "/o/r/actions/runs/171447/jobs/11" }]), {
+    state: "single", count: 1, exact: true, htmlUrl: "/o/r/actions/runs/171447/jobs/11",
+  });
+  assert.deepEqual(normalizeForgejoRunJobs([{ html_url: "/one" }, { html_url: "/two" }]), {
+    state: "multi", count: 2, exact: true,
+  });
+  assert.deepEqual(normalizeForgejoRunJobs({ total_count: 2, jobs: [{ html_url: "/one" }] }), {
+    state: "multi", count: 2, exact: true,
+  });
+  assert.deepEqual(normalizeForgejoRunJobs({ total_count: 1, jobs: [{ html_url: "/one" }] }), {
+    state: "single", count: 1, exact: true, htmlUrl: "/one",
+  });
+  assert.deepEqual(normalizeForgejoRunJobs({ has_more: true, jobs: [{ html_url: "/one" }] }), {
+    state: "multi", count: 2, exact: false,
+  });
+  assert.deepEqual(normalizeForgejoRunJobs(Array.from({ length: 50 }, () => ({ html_url: "/job" }))), {
+    state: "multi", count: 50, exact: false,
+  });
+  assert.equal(forgejoJobStatusPathsMatch(
+    "https://forgejo.example/o/r/actions/runs/171447/jobs/11",
+    "/o/r/actions/runs/171447/jobs/11", "https://forgejo.example",
+  ), true);
+  assert.equal(forgejoJobStatusPathsMatch(
+    "/o/r/actions/runs/171447/jobs/12", "/o/r/actions/runs/171447/jobs/11", "https://forgejo.example",
+  ), false);
+  assert.equal(forgejoJobStatusPathsMatch(
+    "https://forgejo.example:443/o/r/actions/runs/171447/jobs/11",
+    "https://forgejo.example/o/r/actions/runs/171447/jobs/11", "https://forgejo.example",
+  ), true);
+  assert.equal(forgejoJobStatusPathsMatch(
+    "https://forgejo.example:444/o/r/actions/runs/171447/jobs/11",
+    "https://forgejo.example/o/r/actions/runs/171447/jobs/11", "https://forgejo.example",
+  ), false);
+});
+
+test("Forgejo self-status candidates are pending-only, unique, repo-scoped, and same-origin", () => {
+  const runNumbers = ["", "abc", " 171447 "];
+  const runRepo = "o/r";
+  const origin = forgejoSelfRunOrigin("https://forgejo.example/api/v1", "");
+  const one = [{ context: "reviewer", status: "pending", target_url: "/o/r/actions/runs/171447/jobs/11" }];
+  assert.deepEqual(forgejoSelfStatusMatches(one, runNumbers, runRepo, origin), { count: 1, index: 0, context: "reviewer" });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    { context: "run-one", status: "pending", target_url: "/o/r/actions/runs/171447/jobs/1" },
+    { context: "run-two", status: "pending", target_url: "/o/r/actions/runs/171448/jobs/1" },
+  ], ["171447", "171448"], runRepo, origin), { count: 2, index: null, context: null });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    ...one,
+    { context: "unit", status: "failure", target_url: "/o/r/actions/runs/171447/jobs/1" },
+    { context: "security", state: "pending", target_url: "/o/r/actions/runs/171447/jobs/2" },
+  ], runNumbers, runRepo, origin), { count: 2, index: null, context: null });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    { context: "unit", status: "failure", target_url: "/o/r/actions/runs/171447/jobs/1" },
+  ], runNumbers, runRepo, origin), { count: 0, index: null, context: null });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    { context: "wrong-host", status: "pending", target_url: "https://elsewhere.example/o/r/actions/runs/171447/jobs/1" },
+    { context: "wrong-repo", status: "pending", target_url: "/x/r/actions/runs/171447/jobs/1" },
+    { context: "query-redirect", status: "pending", target_url: "https://forgejo.example/?redirect=/o/r/actions/runs/171447/jobs/1" },
+  ], runNumbers, runRepo, origin), { count: 0, index: null, context: null });
+  assert.deepEqual(forgejoSelfStatusMatches(one, ["171447"], "o/r", ""), { count: 1, index: 0, context: "reviewer" });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    { context: "dot-segment", status: "pending", target_url: "/o/r/../x/r/actions/runs/171447/jobs/1" },
+  ], ["171447"], runRepo, origin), { count: 0, index: null, context: null });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    { context: "relative-no-leading-slash", status: "pending", target_url: "o/r/actions/runs/171447/jobs/1" },
+  ], ["171447"], runRepo, origin), { count: 1, index: 0, context: "relative-no-leading-slash" });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    { context: "absolute-needs-origin", status: "pending", target_url: "https://forgejo.example/o/r/actions/runs/171447/jobs/1" },
+  ], ["171447"], runRepo, ""), { count: 0, index: null, context: null });
+  assert.deepEqual(forgejoSelfStatusMatches(one, [], runRepo, origin), { count: 0, index: null, context: null });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    { context: "literal", state: "pending", target_url: "/org.name/repo+/actions/runs/171447/jobs/1" },
+  ], ["171447"], "org.name/repo+", origin), { count: 1, index: 0, context: "literal" });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    { context: "regex-wildcard", state: "pending", target_url: "/orgXname/repoo/actions/runs/171447/jobs/1" },
+  ], ["171447"], "org.name/repo+", origin), { count: 0, index: null, context: null });
+  assert.deepEqual(forgejoSelfStatusMatches(one, ["171447"], "", origin), { count: 0, index: null, context: null });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    { context: "reviewer", state: "pending", target_url: "/o/r/actions/runs/1714470/jobs/1" },
+  ], ["171447"], runRepo, origin), { count: 0, index: null, context: null });
+});
+
+test("external-check auto mode excludes only the uniquely identified pending status", () => {
+  const combined = JSON.stringify({ statuses: [
+    { context: "pr-reviewer-action", state: "pending" },
+    { context: "self", state: "pending", status: "pending", target_url: "/o/r/actions/runs/171447/jobs/11" },
+    { context: "external", state: "success", status: "success" },
+  ] });
+  assert.deepEqual(normalizeExternalChecks("{}", combined, "", "", { selfRunNumbers: ["171447"], selfStatusIndex: 1 }), [
+    { name: "pr-reviewer-action", state: "pending" },
+    { name: "external", state: "success" },
+  ]);
+  assert.deepEqual(normalizeExternalChecks("{}", combined, "", "", { selfRunNumbers: ["171447"] }), [
+    { name: "pr-reviewer-action", state: "pending" },
+    { name: "self", state: "pending" },
+    { name: "external", state: "success" },
+  ]);
+  assert.deepEqual(normalizeExternalChecks("{}", combined, "", "", { selfRunNumbers: [] }), [
+    { name: "pr-reviewer-action", state: "pending" },
+    { name: "self", state: "pending" },
+    { name: "external", state: "success" },
+  ]);
+  assert.deepEqual(normalizeExternalChecks("{}", combined, "", ""), [
+    { name: "self", state: "pending" },
+    { name: "external", state: "success" },
+  ]);
 });
 
 test("external-check fold: self-exclusion, state mapping, combined fallback, transient vs degraded", () => {
