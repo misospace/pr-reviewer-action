@@ -33,6 +33,8 @@ function mockAdapter(): PlatformReadAdapter {
     listIssueComments: () => Promise.resolve([]),
     listPrReviews: () => Promise.resolve([]),
     repoPermission: () => Promise.resolve(null),
+    // #970: unprovable identity — a managed body can never authorize a skip.
+    authenticatedIdentity: () => Promise.resolve(null),
     ghApi: () => Promise.resolve({ error: "n/a" }),
     externalChecks: () => Promise.resolve([]),
   } as unknown as PlatformReadAdapter;

@@ -15,6 +15,7 @@
     "comments": [],
     "reviews": [],
     "pr": {
+      "draft": false,
       "title": "Fix ENG-42 bug",
       "body": "Fixes #12",
       "head": {
@@ -57,7 +58,8 @@
     },
     "linear_fail": [
       "ENG-42"
-    ]
+    ],
+    "identity": "pr-reviewer[bot]"
   },
   "fixture": "auto-linear-failure",
   "description": "parity fixture for precheck-decision boundary (#674): auto-linear-failure"

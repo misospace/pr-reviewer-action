@@ -57,6 +57,15 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** #970: the forge-reported author login of a Forgejo comment/review `user`
+ * object. Never reads body content; a missing or non-string login is
+ * `undefined` (unproven ownership, which callers fail closed on). */
+function forgejoAuthor(user: unknown): string | undefined {
+  if (!isObject(user)) return undefined;
+  const login = user.login;
+  return typeof login === "string" && login !== "" ? login : undefined;
+}
+
 function parseRepo(repo: string): { owner: string; repo: string } {
   const ref = parseRepoRef(repo);
   if (ref === null) throw new Error(`Invalid repo full name: ${repo}`);
@@ -263,6 +272,7 @@ export class ForgejoAdapter implements PlatformReadAdapter {
           body: typeof comment.body === "string" ? comment.body : "",
           created_at: typeof comment.created_at === "string" ? comment.created_at : typeof comment.created_on === "string" ? comment.created_on : undefined,
           updated_at: typeof comment.updated_at === "string" ? comment.updated_at : typeof comment.updated_on === "string" ? comment.updated_on : undefined,
+          author: forgejoAuthor(comment.user),
         });
       }
       if (comments.length < 50) break;
@@ -290,7 +300,23 @@ export class ForgejoAdapter implements PlatformReadAdapter {
         body: typeof review.body === "string" ? review.body : "",
         submitted_at:
           typeof review.submitted_at === "string" ? review.submitted_at : typeof review.updated_at === "string" ? review.updated_at : undefined,
+        author: forgejoAuthor(review.user),
       }));
+  }
+
+  /** #970: resolve the login this token posts as (`GET /user`). The
+   * authorized-integration mode's OIDC JWT may not resolve to a user there;
+   * any failure is `null` and the precheck fails closed rather than trusting
+   * an unauthenticated marker. */
+  async authenticatedIdentity(): Promise<string | null> {
+    try {
+      const { status, data } = await requestJson(this.apiPath("/user"), await this.options("application/json"));
+      if (status !== 200 || !isObject(data)) return null;
+      const login = data.login;
+      return typeof login === "string" && login.trim() !== "" ? login : null;
+    } catch {
+      return null;
+    }
   }
 
   /** `_curl` semantics for a read: `{status, text}`, with a transport

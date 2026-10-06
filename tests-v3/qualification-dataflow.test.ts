@@ -236,9 +236,11 @@ function precheckAdapter(opts: {
   baseRepo: string;
   title?: string;
   body?: string;
-  comments: { body: string; created_at: string; updated_at: string }[];
+  comments: { body: string; created_at: string; updated_at: string; author?: string }[];
 }): PlatformAdapter {
   const prObject = {
+    state: "open",
+    draft: false,
     title: opts.title ?? "OPS-42: fix the thing",
     body: opts.body ?? "Fixes #12",
     head: { sha: "a".repeat(40), repo: { full_name: opts.headRepo } },
@@ -251,6 +253,7 @@ function precheckAdapter(opts: {
     listIssueComments: async () => opts.comments,
     listPrReviews: async () => [],
     repoPermission: async () => "write",
+    authenticatedIdentity: async () => "pr-reviewer[bot]",
     ghApi: async (endpoint: string) => {
       if (endpoint.endsWith("/pulls/7")) return { data: prObject };
       if (endpoint.endsWith("/issues/12")) return { data: { number: 12, labels: [{ name: "security" }] } };
@@ -299,6 +302,7 @@ test("linear-composite-precheck: identical inputs with the stored marker skip (b
     body: `<!-- ai-pr-reviewer -->\n<!-- ai-pr-review-fingerprint:${run1.diff_fingerprint} -->`,
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
+    author: "pr-reviewer[bot]",
   }];
   const run2 = await runPrecheck({
     env: baseEnv(),
@@ -334,6 +338,7 @@ test("linear-composite-precheck: an unavailable Linear lookup forces a fresh rev
     body: `<!-- ai-pr-reviewer -->\n<!-- ai-pr-review-fingerprint:${run1.diff_fingerprint} -->`,
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
+    author: "pr-reviewer[bot]",
   }];
   const stderrWrite = process.stderr.write.bind(process.stderr);
   let warned = "";
@@ -374,6 +379,7 @@ test("linear-composite-precheck: non-auto modes never invoke the Linear builder,
     body: `<!-- ai-pr-reviewer -->\n<!-- ai-pr-review-fingerprint:${run1.diff_fingerprint} -->`,
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
+    author: "pr-reviewer[bot]",
   }];
   const run2 = await runPrecheck({
     env: baseEnv({ DEEP_REVIEW: "false" }),

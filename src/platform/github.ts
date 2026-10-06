@@ -39,6 +39,17 @@ function parseJson(text: string): { ok: true; data: unknown } | { ok: false } {
   }
 }
 
+/** #970: the forge-reported author login of a raw comment/review object
+ * (`user.login`). Never reads body content; a missing or non-string login is
+ * `undefined` (unproven ownership, which callers fail closed on). */
+function githubAuthor(item: unknown): string | undefined {
+  if (item === null || typeof item !== "object" || Array.isArray(item)) return undefined;
+  const user = (item as Record<string, unknown>).user;
+  if (user === null || typeof user !== "object" || Array.isArray(user)) return undefined;
+  const login = (user as Record<string, unknown>).login;
+  return typeof login === "string" && login !== "" ? login : undefined;
+}
+
 /** The `rel="next"` target of an RFC 8288 Link header, if any. */
 export function nextLink(header: string | null): string | null {
   if (!header) return null;
@@ -108,6 +119,31 @@ export class GitHubAdapter implements PlatformReadAdapter {
     return this.baseUrl.endsWith("/api/v3") ? `${this.baseUrl.slice(0, -"/v3".length)}/graphql` : `${this.baseUrl}/graphql`;
   }
 
+
+  /** `gh api <path> --paginate` (#971): follow every Link target, merging
+   * array pages in order. Any failed page fails the whole read. */
+  private async paginatedRestArray(url: string | null): Promise<ReadResult<unknown[]>> {
+    if (url === null) return { ok: false, error: "Refusing a request outside the repository" };
+    const merged: unknown[] = [];
+    for (let page = 0; url !== null; page += 1) {
+      if (page >= MAX_PAGES) return { ok: false, error: `pagination exceeded ${MAX_PAGES} pages` };
+      try {
+        // requestText binds every page (including Link targets) to the
+        // validated origin, so a hostile Link header cannot redirect the token.
+        const target: string = url;
+        const captured = await requestText(target, this.options());
+        if (captured.status < 200 || captured.status >= 300) return { ok: false, error: `GitHub API error: ${captured.status}` };
+        const parsed = parseJson(captured.text);
+        if (!parsed.ok || !Array.isArray(parsed.data)) return { ok: false, error: "GitHub API returned a non-array page" };
+        merged.push(...parsed.data);
+        const next = nextLink(captured.headers.get("link"));
+        url = next === null ? null : new URL(next, target).toString();
+      } catch (error) {
+        return { ok: false, error: errorText(error) };
+      }
+    }
+    return { ok: true, data: merged };
+  }
 
   /** `gh api <path>`: ok only on a 2xx JSON body (gh exits nonzero on HTTP
    * errors, and the seam's callers treat that as a failed read). */
@@ -224,28 +260,79 @@ export class GitHubAdapter implements PlatformReadAdapter {
   async listIssueComments(): Promise<ManagedComment[]> {
     const url = this.repoUrl("/issues/", `${this.prNumber}/comments?per_page=100`);
     if (url === null) return [];
-    try {
-      const { status, data } = await requestJson(
-        url,
-        this.options(),
-      );
-      return status === 200 && Array.isArray(data) ? (data as ManagedComment[]) : [];
-    } catch {
-      return [];
-    }
+    const result = await this.paginatedRestArray(url);
+    if (!result.ok) return [];
+    return result.data.map((item): ManagedComment => {
+      const record = item !== null && typeof item === "object" && !Array.isArray(item) ? (item as Record<string, unknown>) : {};
+      const comment: ManagedComment = {
+        body: typeof record.body === "string" ? record.body : "",
+        author: githubAuthor(item),
+      };
+      if (typeof record.id === "number" || typeof record.id === "string") comment.id = record.id;
+      if (typeof record.created_at === "string") comment.created_at = record.created_at;
+      if (typeof record.updated_at === "string") comment.updated_at = record.updated_at;
+      return comment;
+    });
   }
 
   async listPrReviews(): Promise<ManagedReview[]> {
     const url = this.repoUrl("/pulls/", `${this.prNumber}/reviews?per_page=100`);
     if (url === null) return [];
+    const result = await this.paginatedRestArray(url);
+    if (!result.ok) return [];
+    return result.data.map((item): ManagedReview => {
+      const record = item !== null && typeof item === "object" && !Array.isArray(item) ? (item as Record<string, unknown>) : {};
+      const review: ManagedReview = {
+        body: typeof record.body === "string" ? record.body : "",
+        author: githubAuthor(item),
+      };
+      if (typeof record.submitted_at === "string") review.submitted_at = record.submitted_at;
+      return review;
+    });
+  }
+
+  /** #970: `query { viewer { login } }` — the login this credential
+   * authenticates as. GraphQL is the only self-identity source that answers
+   * for a GitHub App installation token: REST `GET /user` returns 403
+   * "Resource not accessible by integration" for installation and
+   * `GITHUB_TOKEN` credentials. GraphQL returns the app's `<slug>[bot]`
+   * account, `github-actions[bot]` for `GITHUB_TOKEN`, and the user login for
+   * a PAT/OAuth token — so the action's own managed bodies are recognised
+   * without hardcoding an identity. */
+  private async graphqlViewerLogin(): Promise<string | null> {
     try {
-      const { status, data } = await requestJson(
-        url,
-        this.options(),
-      );
-      return status === 200 && Array.isArray(data) ? (data as ManagedReview[]) : [];
+      const { status, text } = await requestText(this.graphqlUrl(), {
+        ...this.options(),
+        method: "POST",
+        body: JSON.stringify({ query: "query { viewer { login } }" }),
+      });
+      if (status < 200 || status >= 300) return null;
+      const parsed = parseJson(text);
+      if (!parsed.ok) return null;
+      const viewer = (parsed.data as { data?: { viewer?: { login?: unknown } } } | null)?.data?.viewer;
+      const login = viewer?.login;
+      return typeof login === "string" && login.trim() !== "" ? login : null;
     } catch {
-      return [];
+      return null;
+    }
+  }
+
+  /** #970: resolve the login this token posts as, failing closed (`null`) on
+   * any error — a missing token, transport failure, non-2xx answer, or an
+   * unusable payload. GraphQL `viewer` is tried first because it is the only
+   * source that works for installation tokens; REST `GET /user` is a fallback
+   * for credentials where GraphQL is unavailable. */
+  async authenticatedIdentity(): Promise<string | null> {
+    if (!this.token) return null;
+    const viewer = await this.graphqlViewerLogin();
+    if (viewer !== null) return viewer;
+    try {
+      const { status, data } = await requestJson(this.url("/user"), this.options("application/vnd.github.v3+json"));
+      if (status !== 200 || data === null || typeof data !== "object" || Array.isArray(data)) return null;
+      const login = (data as Record<string, unknown>).login;
+      return typeof login === "string" && login.trim() !== "" ? login : null;
+    } catch {
+      return null;
     }
   }
 
@@ -282,27 +369,7 @@ export class GitHubAdapter implements PlatformReadAdapter {
    * `per_page=100`, follows `Link: rel="next"`, and merges the page arrays
    * into one array. Any failed page fails the read (gh exits nonzero). */
   async listPrReviewsPaginated(): Promise<ReadResult<unknown[]>> {
-    const merged: unknown[] = [];
-    let url: string | null = this.repoUrl("/pulls/", `${this.prNumber}/reviews?per_page=100`);
-    if (url === null) return { ok: false, error: "Refusing a request outside the repository" };
-    for (let page = 0; url !== null; page += 1) {
-      if (page >= MAX_PAGES) return { ok: false, error: `pagination exceeded ${MAX_PAGES} pages` };
-      try {
-        // requestText binds every page (including Link targets) to the
-        // validated origin, so a hostile Link header cannot redirect the token.
-        const target: string = url;
-        const captured = await requestText(target, this.options());
-        if (captured.status < 200 || captured.status >= 300) return { ok: false, error: `GitHub API error: ${captured.status}` };
-        const parsed = parseJson(captured.text);
-        if (!parsed.ok || !Array.isArray(parsed.data)) return { ok: false, error: "GitHub API returned a non-array review page" };
-        merged.push(...parsed.data);
-        const next = nextLink(captured.headers.get("link"));
-        url = next === null ? null : new URL(next, target).toString();
-      } catch (error) {
-        return { ok: false, error: errorText(error) };
-      }
-    }
-    return { ok: true, data: merged };
+    return this.paginatedRestArray(this.repoUrl("/pulls/", `${this.prNumber}/reviews?per_page=100`));
   }
 
   /** `platform_external_checks`: bounded check-runs + combined-status reads

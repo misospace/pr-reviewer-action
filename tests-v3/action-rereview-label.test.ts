@@ -78,6 +78,8 @@ function startGithubMock(options: {
       }
       res.end(JSON.stringify({
         number: 7,
+        state: "open",
+        draft: false,
         title: "Some PR",
         body: "",
         head: { sha: options.headSha, ref: "feature", repo: { full_name: "o/r" } },

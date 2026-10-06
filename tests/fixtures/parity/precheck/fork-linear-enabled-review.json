@@ -15,6 +15,7 @@
     "comments": [],
     "reviews": [],
     "pr": {
+      "draft": false,
       "title": "Fix ENG-42 bug",
       "body": "Fixes #12",
       "head": {
@@ -65,7 +66,8 @@
           "Feature"
         ]
       }
-    }
+    },
+    "identity": "pr-reviewer[bot]"
   },
   "fixture": "fork-linear-enabled-review",
   "description": "parity fixture for precheck-decision boundary (#674): fork-linear-enabled-review"

@@ -7,11 +7,17 @@ export interface ManagedComment {
   body: string;
   created_at?: string | undefined;
   updated_at?: string | undefined;
+  /** #970: the forge-reported author login (never body content). Undefined
+   * when the forge did not report one — treated as unproven ownership. */
+  author?: string | undefined;
 }
 
 export interface ManagedReview {
   body: string;
   submitted_at?: string | undefined;
+  /** #970: the forge-reported author login (never body content). Undefined
+   * when the forge did not report one — treated as unproven ownership. */
+  author?: string | undefined;
 }
 
 export interface GhApiResult {
@@ -27,6 +33,18 @@ export interface PlatformAdapter {
   getPrDiff(): Promise<string>;
   listIssueComments(): Promise<ManagedComment[]>;
   listPrReviews(): Promise<ManagedReview[]>;
+  /** #970: the forge-authenticated login this run's token posts as. GitHub
+   * resolves it from GraphQL `query { viewer { login } }` — the only source
+   * that answers for a GitHub App installation token or `GITHUB_TOKEN` (REST
+   * `GET /user` returns 403 "Resource not accessible by integration" for
+   * both) — with REST `/user` as a fallback; Forgejo uses `/user`. It returns
+   * the app's bot account (`<slug>[bot]`), `github-actions[bot]` for
+   * `GITHUB_TOKEN`, and the user login for a PAT/OAuth token, so it survives
+   * supported token/identity changes and is never inferred from a comment
+   * body. `null` when ownership cannot be proven (no token, transport/auth
+   * failure, or an unusable payload) — callers must fail closed rather than
+   * treat an unproven identity as trusted. */
+  authenticatedIdentity(): Promise<string | null>;
   /** "read" | "write" | "admin" | "unknown" | null (transport failure).
    * GitHub returns "unknown": coarse repo permission cannot infer the
    * unit-scoped GitHub App token permissions. */
