@@ -824,6 +824,9 @@ function provenancePlatform(opts: {
     pr: {
       number: 42,
       state: "open",
+      // #961: an explicit boolean draft value is authoritative; the real
+      // pulls API always sends one, and an absent field fails closed.
+      draft: false,
       head: { sha: "head-abc", ref: "f", repo: { full_name: "misospace/demo" } },
       base: { sha: "base-abc", ref: "main", repo: { full_name: "misospace/demo" } },
     },
