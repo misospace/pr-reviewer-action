@@ -6,7 +6,8 @@ import {
   applyVerdictPolicy,
   relaxVerificationOnlyVerdict,
 } from "../src/enforcement/verdict-policy.js";
-import { applyReviewThreadEnforcement } from "../src/enforcement/threads.js";
+import { applyReviewThreadEnforcement, type EnforcementThread } from "../src/enforcement/threads.js";
+import { applyAllEnforcement, normalizeEnforcedReviewMarkdown, reconcileEnforcedReviewMarkdown } from "../src/enforcement/enforce.js";
 
 function artifact(overrides: Record<string, unknown> = {}): ReviewArtifact {
   return { verdict: "approve", review_markdown: "review", findings: [], ...overrides } as ReviewArtifact;
@@ -178,4 +179,105 @@ test("question threads can also be withdrawn with evidence", () => {
   const rows = a.thread_dispositions as Array<Record<string, unknown>>;
   assert.equal(rows[0]!.disposition, "withdrawn");
   assert.equal(a.findings.some((item) => item.thread_id === "q"), false);
+});
+
+test("reconciliation strips the action-authored banner with reasons from an approve", () => {
+  const original = "Original model prose.\n";
+  const a = artifact({ verdict: "request_changes", review_markdown: original });
+  normalizeEnforcedReviewMarkdown(a, ["verification enforcement"]);
+  a.verdict = "approve";
+  reconcileEnforcedReviewMarkdown(a);
+  assert.equal(a.review_markdown, original);
+  assert.doesNotMatch(a.review_markdown, /Final Recommendation/);
+});
+
+test("reconciliation strips the action-authored banner without reasons from an approve", () => {
+  const original = "Original model prose.\n";
+  const a = artifact({ verdict: "request_changes", review_markdown: original });
+  normalizeEnforcedReviewMarkdown(a, null);
+  a.verdict = "approve";
+  reconcileEnforcedReviewMarkdown(a);
+  assert.equal(a.review_markdown, original);
+  assert.doesNotMatch(a.review_markdown, /Final Recommendation/);
+});
+
+test("reconciliation is a byte-identical no-op while the verdict requests changes", () => {
+  const a = artifact({ verdict: "request_changes", review_markdown: "Original model prose.\n" });
+  normalizeEnforcedReviewMarkdown(a, ["verification enforcement"]);
+  const withBanner = a.review_markdown;
+  reconcileEnforcedReviewMarkdown(a);
+  assert.equal(a.review_markdown, withBanner);
+  assert.match(a.review_markdown, /Final Recommendation/);
+});
+
+test("reconciliation preserves model-authored Final Recommendation prose", () => {
+  const markdown = "## Final Recommendation\nRequest changes because the API is wrong.";
+  const a = artifact({ verdict: "approve", review_markdown: markdown });
+  reconcileEnforcedReviewMarkdown(a);
+  assert.equal(a.review_markdown, markdown);
+});
+
+function enforcementInputs(threads: EnforcementThread[]) {
+  return {
+    evidenceBlockerEnabled: false,
+    toolFailureEnabled: false,
+    toolMinSuccessful: 0,
+    evidence: null,
+    toolHarness: null,
+    threads,
+    humanReviews: null,
+    verdictPolicy: "model",
+  };
+}
+
+const unresolvedVerificationThread = {
+  thread_id: "t",
+  path: "src/a.ts",
+  line: 4,
+  severity: "major",
+  message: "confirm the metric exists",
+  category: "verification",
+  own_finding: true,
+  replies: 0,
+};
+
+test("#977: reconciles the banner after an unresolved verification thread relaxes the verdict", () => {
+  const a = artifact({
+    verdict: "request_changes",
+    findings: [finding("major", "verification")],
+    thread_dispositions: [],
+  });
+  applyAllEnforcement(a, enforcementInputs([unresolvedVerificationThread]));
+  assert.equal(relaxVerificationOnlyVerdict(a, { forced: false }), true);
+  reconcileEnforcedReviewMarkdown(a);
+  assert.equal(a.verdict, "approve");
+  assert.doesNotMatch(a.review_markdown, /Final Recommendation/);
+  assert.doesNotMatch(a.review_markdown, /Request changes/);
+});
+
+test("#977: reconciles the banner after a verification thread is withdrawn", () => {
+  const a = artifact({
+    verdict: "request_changes",
+    findings: [finding("major", "verification")],
+    thread_dispositions: [{ thread_id: "t", disposition: "withdrawn", evidence: "human confirmed the metric exists" }],
+  });
+  applyAllEnforcement(a, enforcementInputs([unresolvedVerificationThread]));
+  assert.equal(relaxVerificationOnlyVerdict(a, { forced: false }), true);
+  reconcileEnforcedReviewMarkdown(a);
+  assert.equal(a.verdict, "approve");
+  assert.doesNotMatch(a.review_markdown, /Final Recommendation/);
+  assert.doesNotMatch(a.review_markdown, /Request changes/);
+});
+
+test("#977: keeps the banner when a real blocking finding remains", () => {
+  const a = artifact({
+    verdict: "request_changes",
+    findings: [finding("major", "bug")],
+    thread_dispositions: [],
+  });
+  applyAllEnforcement(a, enforcementInputs([unresolvedVerificationThread]));
+  assert.equal(relaxVerificationOnlyVerdict(a, { forced: false }), false);
+  reconcileEnforcedReviewMarkdown(a);
+  assert.equal(a.verdict, "request_changes");
+  assert.match(a.review_markdown, /## Final Recommendation/);
 });

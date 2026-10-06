@@ -54,7 +54,7 @@ import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxVerificationOnlyVerd
 import { markerReviewResult } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
-import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "../enforcement/enforce.js";
+import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope } from "../enforcement/requirement-trace.js";
 import { runRequirementTraceRepairPass } from "../requirements/trace-repair.js";
@@ -1028,6 +1028,9 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completeness.status === "incomplete" && completeness.mode === "fail");
     applyStrictVerdictPolicy(reviewRecord as never, { modelVerdict, forced });
+    // The strict mapping can derive an approve after the enforcement banner
+    // was written; reconcile the markdown with the final verdict.
+    reconcileEnforcedReviewMarkdown(reviewRecord as never);
   } else {
     applyVerdictPolicy(reviewRecord as never, verdictPolicy, {
       nonBlockingCategories: new Set(splitCsv(env.NON_BLOCKING_FINDING_CATEGORIES ?? "")),
@@ -1043,6 +1046,10 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     relaxVerificationOnlyVerdict(reviewRecord as never, {
       forced: failClosedEnforcementFired(enforcementInputs),
     });
+    // #977: the relaxation can flip the model's request_changes to approve
+    // after the enforcement banner was written; reconcile the markdown with
+    // the final verdict.
+    reconcileEnforcedReviewMarkdown(reviewRecord as never);
   }
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(reviewRecord)}\n`, "utf8"));
 

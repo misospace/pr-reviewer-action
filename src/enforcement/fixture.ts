@@ -12,9 +12,9 @@ import { readFileSync } from "node:fs";
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { ledgerToArtifact, loadLedgerFromValue } from "../requirements/ledger.js";
 import { reviewArtifactFromParsed, type ReviewArtifact } from "./artifact.js";
-import { applyVerdictPolicy, applyStrictVerdictPolicy, parseNonBlockingCategories, securityRiskFlagged } from "./verdict-policy.js";
+import { applyVerdictPolicy, applyStrictVerdictPolicy, relaxVerificationOnlyVerdict, parseNonBlockingCategories, securityRiskFlagged } from "./verdict-policy.js";
 import { applyRequiredCheckValidation, type RequiredCheckValidationResult } from "./completeness.js";
-import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "./enforce.js";
+import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "./enforce.js";
 import type { EnforcementThread } from "./threads.js";
 import type { EnforcementHumanReview } from "./human-reviews.js";
 import { normalizeRequirementCoverage, extractCoveragePayload } from "./requirement-coverage.js";
@@ -106,6 +106,7 @@ export function runEnforcementFixture(fixturePath: string): {
       const forced = failClosedEnforcementFired(inputs)
         || (completeness.status === "incomplete" && completeness.mode === "fail");
       applyStrictVerdictPolicy(artifact, { modelVerdict, forced });
+      reconcileEnforcedReviewMarkdown(artifact);
     } else {
       // Order mirrors apply_all_enforcement_wrapper: verdict policy, then
       // completeness validation, then enforcement overlays.
@@ -126,6 +127,8 @@ export function runEnforcementFixture(fixturePath: string): {
         verdictPolicy: policy,
       };
       applied = applyAllEnforcement(artifact, inputs);
+      relaxVerificationOnlyVerdict(artifact, { forced: failClosedEnforcementFired(inputs) });
+      reconcileEnforcedReviewMarkdown(artifact);
     }
 
     // Requirement-coverage fold (#624): advisory, never a verdict.

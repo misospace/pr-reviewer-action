@@ -169,6 +169,28 @@ export function normalizeEnforcedReviewMarkdown(
   artifact.review_markdown = markdown;
 }
 
+/**
+ * The action-authored banner `normalizeEnforcedReviewMarkdown` prepends,
+ * matched exactly (both sentence forms, with or without the reason bullets).
+ * Anchored at the start: the banner is always prepended, and only this
+ * module's own text matches, so model-authored prose is never stripped.
+ */
+const ENFORCED_BANNER_RE =
+  /^## Final Recommendation\nRequest changes\. (?:The following enforcement check\(s\) require this PR to be treated as blocking even if the model's initial review text was approving:\n\n(?:- [^\n]*\n)*\n|One or more configured enforcement checks require this PR to be treated as blocking even if the model's initial review text was approving\.\n\n)/;
+
+/**
+ * #977: the enforcement banner is written while the verdict is still the
+ * model's, but the strict mapping and the verification-only relaxation can
+ * both change the verdict afterwards. Reconcile the markdown with the FINAL
+ * verdict so an approve can never ship an action-authored banner saying the
+ * final recommendation is request changes. Purely subtractive: it never adds
+ * a banner, so every other case keeps the output it has today.
+ */
+export function reconcileEnforcedReviewMarkdown(artifact: ReviewArtifact): void {
+  if (artifact.verdict === "request_changes") return;
+  artifact.review_markdown = (artifact.review_markdown || "").replace(ENFORCED_BANNER_RE, "");
+}
+
 export interface EnforcementInputs {
   evidenceBlockerEnabled: boolean;
   toolFailureEnabled: boolean;
@@ -208,7 +230,8 @@ export function failClosedEnforcementFired(inputs: Pick<
  * `apply_all_enforcement`): evidence blockers, tool-harness failure (with
  * the min-successful fallback), review-thread settlement, human change-request
  * settlement, then the banner normalization. Returns the number of
- * enforcement actions applied.
+ * enforcement actions applied. The banner is reconciled against the final
+ * verdict afterwards by `reconcileEnforcedReviewMarkdown`.
  */
 export function applyAllEnforcement(artifact: ReviewArtifact, inputs: EnforcementInputs): number {
   let applied = 0;

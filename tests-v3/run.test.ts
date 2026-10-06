@@ -11,12 +11,13 @@ import { forkGate } from "../src/gates/gates.js";
 import { startMockServer } from "./helpers.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { publishReview } from "../src/publish/publish.js";
+import { FINDING_TRAILER } from "../src/context/review-threads.js";
 import type { NativeReviewRequest, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
 
 /** A minimal in-memory platform adapter: the reads a small PR needs, served
  * without network. Everything else must not be reached by the pipeline with
  * the feature flags the tests set. */
-function mockPlatform(options: { diff?: string; files?: unknown[]; title?: string; body?: string; additions?: number; deletions?: number } = {}): PlatformReadAdapter {
+function mockPlatform(options: { diff?: string; files?: unknown[]; title?: string; body?: string; additions?: number; deletions?: number; threads?: unknown[] } = {}): PlatformReadAdapter {
   return {
     platform: "github",
     getPr: () => {
@@ -41,7 +42,7 @@ function mockPlatform(options: { diff?: string; files?: unknown[]; title?: strin
     },
     getIssue: () => Promise.resolve({ ok: false, error: "not served" }),
     listPrConversationComments: () => Promise.resolve({ ok: true, data: [] }),
-    listReviewThreads: () => Promise.resolve({ ok: true, data: [] }),
+    listReviewThreads: () => Promise.resolve({ ok: true, data: options.threads ?? [] }),
     listPrReviewsPaginated: () => Promise.resolve({ ok: true, data: [] }),
     listIssueComments: () => Promise.resolve([]),
     listPrReviews: () => Promise.resolve([]),
@@ -145,6 +146,92 @@ test("runs the full review end to end: artifacts, outputs, marker", async () => 
     await server.close();
     cleanup();
   }
+});
+
+async function runVerificationThreadVerdict(verdict: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict(verdict)));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const body = `**⚠️ Major (verification):** confirm the production metric exists\n\n${FINDING_TRAILER}`;
+    await runReview({
+      env: { VERDICT_POLICY: "model" },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "verdict-policy": "model",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform({
+        threads: [{
+          thread_id: "PRRT_1",
+          path: "README.md",
+          line: 1,
+          original_line: 1,
+          resolved: false,
+          outdated: false,
+          comments: [{
+            id: 1,
+            user: { login: "bot" },
+            created_at: "2026-10-01T00:00:00Z",
+            updated_at: "2026-10-01T00:00:00Z",
+            body,
+          }],
+        }],
+      }),
+      persistArtifacts: true,
+      quiet: true,
+    });
+    return JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as Record<string, unknown>;
+  } finally {
+    await server.close();
+    cleanup();
+  }
+}
+
+test("#977: runReview removes the enforcement banner after unresolved verification relaxes the verdict", async () => {
+  const artifact = await runVerificationThreadVerdict({
+    verdict: "request_changes",
+    review_markdown: "Please confirm the metric exists.\n",
+    findings: [{ severity: "major", category: "verification", file: null, line: null, message: "confirm the production metric exists" }],
+  });
+  assert.equal(artifact.verdict, "approve");
+  assert.doesNotMatch(String(artifact.review_markdown), /Final Recommendation/);
+  assert.doesNotMatch(String(artifact.review_markdown), /Request changes/);
+  // Prove the model-policy relaxation ran (not the strict derivation, which
+  // would also approve): only the #977 relaxation writes this note.
+  assert.match(String(artifact.review_markdown), /_Verdict relaxed from structured findings \(#977\)/);
+});
+
+test("#977: runReview removes the enforcement banner after a verification thread withdrawal", async () => {
+  const artifact = await runVerificationThreadVerdict({
+    verdict: "request_changes",
+    review_markdown: "Please confirm the metric exists.\n",
+    findings: [{ severity: "major", category: "verification", file: null, line: null, message: "confirm the production metric exists" }],
+    thread_dispositions: [{ thread_id: "PRRT_1", disposition: "withdrawn", evidence: "human confirmed the metric exists" }],
+  });
+  assert.equal(artifact.verdict, "approve");
+  assert.doesNotMatch(String(artifact.review_markdown), /Final Recommendation/);
+  assert.doesNotMatch(String(artifact.review_markdown), /Request changes/);
+  assert.match(String(artifact.review_markdown), /_Verdict relaxed from structured findings \(#977\)/);
+});
+
+test("#977: runReview preserves the banner when a real defect keeps request_changes", async () => {
+  const artifact = await runVerificationThreadVerdict({
+    verdict: "request_changes",
+    review_markdown: "Please confirm the metric exists.\n",
+    findings: [{ severity: "major", category: "bug", file: null, line: null, message: "real defect" }],
+  });
+  assert.equal(artifact.verdict, "request_changes");
+  assert.match(String(artifact.review_markdown), /## Final Recommendation/);
 });
 
 test("#838: with no runDir/PR_REVIEWER_RUN_DIR, run never treats the checkout (cwd) as its own artifacts", async () => {

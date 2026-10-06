@@ -85,6 +85,34 @@ test("enforcement fixture runs the #811 strict pipeline: relax, coverage gap, an
   });
 });
 
+test("enforcement fixture reconciles the banner after verification-only relaxation", () => {
+  withFixtures((dir) => {
+    const result = runEnforcementFixture(writeJson(dir, "verification.json", {
+      contract: "enforcement-pipeline/v1",
+      artifact: {
+        verdict: "request_changes",
+        review_markdown: "review",
+        findings: [{ severity: "major", category: "verification", file: null, line: null, message: "confirm the metric" }],
+      },
+      threads: [{
+        thread_id: "t",
+        path: "src/a.ts",
+        line: 4,
+        severity: "major",
+        message: "confirm the metric exists",
+        category: "verification",
+        own_finding: true,
+        replies: 0,
+      }],
+      config: { verdict_policy: "model" },
+    }));
+    assert.equal(result.ok, true);
+    const artifact = JSON.parse(result.values!.artifact!);
+    assert.equal(artifact.verdict, "approve");
+    assert.doesNotMatch(artifact.review_markdown, /Final Recommendation/);
+  });
+});
+
 test("requirement-coverage fixture credits grounded evidence and exposes bad ledgers", () => {
   withFixtures((dir) => {
     const result = runRequirementCoverageFixture(writeJson(dir, "coverage.json", {
