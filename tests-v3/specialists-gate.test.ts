@@ -252,6 +252,34 @@ test("the adversarial corpus runs correctness on the adversarial prompt only", a
   rmSync(result.root, { recursive: true, force: true });
 });
 
+test("combined_scout adversarial downgrade enables role model overrides", async () => {
+  const calls: { model: string; system: string }[] = [];
+  const result = await run({
+    DEEP_REVIEW: "true",
+    DEEP_REVIEW_EXECUTION: "combined_scout",
+    AI_SPECIALIST_CORRECTNESS_MODEL: "correctness-override-model",
+  }, {
+    requestFn: async (payload) => {
+      const messages = payload.messages as { content: string }[];
+      calls.push({ model: String(payload.model), system: messages[0]!.content });
+      return { ok: true, raw: leadsResponse([]) };
+    },
+    argv: ["--adversarial-corpus", "adv.md"],
+    setup: (root) => writeFileSync(join(root, "adv.md"), "# blinded\n"),
+  });
+  assert.equal(result.code, 0);
+  assert.equal((JSON.parse(result.read("specialists.json")) as { execution: string }).execution, "three_call");
+  const adversarialPrompt = readFileSync("scripts/prompt_fragments/specialist_correctness_adversarial.txt", "utf8");
+  assert.deepEqual(calls.map(({ model, system }) => ({ model, adversarial: system === adversarialPrompt })), [
+    { model: "correctness-override-model", adversarial: true },
+    { model: "m", adversarial: false },
+    { model: "m", adversarial: false },
+  ]);
+  assert.ok(result.out.some((line) => line.includes("forcing three_call")));
+  assert.ok(!result.out.some((line) => line.includes("specialist model overrides ignored")));
+  rmSync(result.root, { recursive: true, force: true });
+});
+
 test("parseSpecialistsArgs mirrors the run_specialists.py argparse surface", () => {
   assert.deepEqual(parseSpecialistsArgs([]), {
     corpus: "specialist-corpus.md", adversarialCorpus: "", equivalentPaths: "", workspaceRoot: "", classification: "classification.json",
