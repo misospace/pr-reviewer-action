@@ -595,12 +595,12 @@ interface SkipAdapter extends PlatformAdapter {
   externalChecks: (sha: string) => Promise<ExternalCheck[] | null>;
 }
 
-function skipAdapter812(external: ExternalCheck[] | null, body: string): SkipAdapter & { readCount(): number } {
+function skipAdapter812(external: ExternalCheck[] | null, body: string, options: { pr?: unknown } = {}): SkipAdapter & { readCount(): number } {
   let reads = 0;
   return {
     readCount: () => reads,
     platform: "github",
-    getPr: () => Promise.resolve({ number: 42, head: { sha: "head-new", ref: "f" }, base: { ref: "main", sha: "base-new" }, user: { login: "u" } }),
+    getPr: () => Promise.resolve(options.pr ?? { number: 42, head: { sha: "head-new", ref: "f" }, base: { ref: "main", sha: "base-new" }, user: { login: "u" } }),
     getPrDiff: () => Promise.resolve("diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n"),
     listIssueComments: () => Promise.resolve([{ id: 1, body, created_at: "2024-01-01T00:00:00Z" }]),
     listPrReviews: () => Promise.resolve([]),
@@ -624,6 +624,22 @@ test("#812: CI turned green under a carried request_changes — the review is no
   const output = await runPrecheck({ env: skipEnv812(), adapter });
   assert.equal(output.should_review, "true");
   assert.equal(output.skip_reason, "ci-stale-carried-verdict");
+});
+
+test("#961: the draft gate outranks the #812 stale re-entry — a draft is never re-reviewed", async () => {
+  // The PR went back to draft after the request_changes marker was
+  // published and CI has since gone green. The stale re-entry wants a
+  // fresh review, but the deterministic draft gate wins: reviewing a
+  // draft is exactly what #961 forbids. The state self-heals — marking
+  // the PR ready fires its own run, whose diff-unchanged path re-checks
+  // CI staleness and re-enters the review path with draft gone.
+  const adapter = skipAdapter812([{ name: "ci", state: "success" }], issuesCommentBody812("issues", "failure"), {
+    pr: { number: 42, state: "open", draft: true, head: { sha: "head-new", ref: "f" }, base: { ref: "main", sha: "base-new" }, user: { login: "u" } },
+  });
+  const output = await runPrecheck({ env: skipEnv812(), adapter });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "pr-draft");
+  assert.equal(output.head_sha, "head-new");
 });
 
 test("#812: diff, config and CI all unchanged — still skipped with the carried verdict", async () => {
