@@ -372,7 +372,7 @@ const BEHAVIORAL_VETO_RE = /\b(when|whenever|if|unless|upon|during|while|fail|fa
  * prose is not recoverable with a regex, so the shape is pinned by the phrase
  * itself. A text that matches both sets (or neither) is ambiguous and stays
  * on the strict path. */
-const CONTENT_VERBS = "contain|contains|include|includes|list|lists|declare|declares|have|has|exclude|excludes|reference|references|mention|mentions|name|names|equal|equals|specify|specifies|define|defines";
+const CONTENT_VERBS = "contain|contains|include|includes|list|lists|declare|declares|have|has|exclude|excludes|reference|references|mention|mentions|name|names|specify|specifies|define|defines";
 const NEGATIVE_CONTENT_VERBS = "omit|omits|remove|removes|drop|drops|strip|strips|delete|deletes|forbid|forbids|ban|bans";
 
 /** Content assertions, checked against the named file's lines. */
@@ -397,6 +397,22 @@ const ASSERTION_PHRASES: readonly RegExp[] = [
 
 const QUOTED_TOKEN_RE = /`([^`\n]+)`|"([^"\n]+)"|'([^'\n]+)'/g;
 const CONFIG_EXT_RE = /\.(json|ya?ml|toml|ini|cfg|conf|lock|txt|md|xml|csv|env|properties|editorconfig)$/i;
+
+/** A checkout-relative path: absolute paths and `..` components are refused,
+ * so a structural proof can only ever read repository state — the same rule
+ * the #805 checkout guard applies. */
+function isRepoRelativePath(token: string): boolean {
+  const trimmed = token.trim();
+  if (trimmed === "" || trimmed.startsWith("/")) return false;
+  return !trimmed.split("/").includes("..");
+}
+
+/** Containment-aware existence. `workspacePathExists` alone does not refuse
+ * `..` or absolute paths, so an existence claim could otherwise be satisfied
+ * from runner filesystem state outside the reviewed checkout. */
+function repoPathExists(workspace: string, path: string): boolean {
+  return isRepoRelativePath(path) && workspacePathExists(workspace, path);
+}
 
 /** A path-shaped token: names a file the checkout can be read for. Bare
  * (unquoted) tokens are accepted for the FILE target only — the asserted
@@ -474,6 +490,10 @@ export function structuralStateClaim(text: string): StructuralClaim | null {
   // Dockerfile, Makefile) is excluded too — it admits code.
   const candidates = [...new Set([...quoted, ...bare])]
     .filter(looksLikePath)
+    // The proof is repository-state proof, so a target that escapes the
+    // checkout (`../outside.json`, `/tmp/outside.json`) is never a structural
+    // target — otherwise runner filesystem state could satisfy it.
+    .filter(isRepoRelativePath)
     // Ignore files are non-source by construction even when the shared
     // extension list does not enumerate them (`.npmignore`, `.eslintignore`).
     .filter((token) => detectLanguage(token) === "non_source" || isIgnoreFile(token));
@@ -492,24 +512,33 @@ export function structuralStateClaim(text: string): StructuralClaim | null {
   const assertionIndex = firstAssertionIndex(text);
   if (fileIndex < 0 || assertionIndex < 0 || fileIndex > assertionIndex) return null;
 
-  // Existence mode only when there is no content clause to check as well —
-  // otherwise "must exist and must contain `k`" would drop the containment
-  // half and pass on an empty file.
+  // The claim must represent the WHOLE assertion. A compound requirement can
+  // only be partially re-derived from one literal, so it stays on the strict
+  // path rather than certifying a subset of what it asserts.
+  const existenceAsserted = EXISTENCE_PRESENT_RE.test(text) || EXISTENCE_ABSENT_RE.test(text);
+  const contentVerbPresent = new RegExp(`\\b(${CONTENT_VERBS}|${NEGATIVE_CONTENT_VERBS})\\b`, "i").test(text);
+  // "must exist and contain `k`" (no repeated modal) would otherwise collapse
+  // to an existence-only proof and drop the containment half.
+  if (existenceAsserted && contentVerbPresent) return null;
+
+  // Quoted tokens other than the file are the asserted literals.
+  const literals = quoted.filter((token) => token.trim() !== "" && token !== file);
+
+  // Existence mode only when there is no content clause to check as well.
   if (!contentPresent && !contentAbsent) {
+    // An existence claim asserts exactly one thing about exactly one path.
+    if (literals.length !== 0) return null;
     return { file, literal: file, presence: present, mode: "exists" };
   }
 
-  const literal = quoted.find((token) => {
-    const trimmed = token.trim();
-    return trimmed !== ""
-      && trimmed !== file
-      && trimmed.length <= MAX_STRUCTURAL_LITERAL_CHARS
-      // The literal must not itself be a config file target, or a requirement
-      // naming two config files degrades into a file-existence check.
-      && detectLanguage(trimmed) !== "non_source"
-      && !isIgnoreFile(trimmed);
-  });
-  if (literal === undefined) return null;
+  // A content claim asserts exactly one literal: "must contain `a` and `b`"
+  // cannot be certified by proving `a` alone.
+  if (literals.length !== 1) return null;
+  const literal = literals[0] as string;
+  if (literal.length > MAX_STRUCTURAL_LITERAL_CHARS) return null;
+  // The literal must not itself be a config file target, or a requirement
+  // naming two config files degrades into a file-existence check.
+  if (detectLanguage(literal) === "non_source" || isIgnoreFile(literal)) return null;
   return { file, literal, presence: present, mode: "content" };
 }
 
@@ -624,10 +653,9 @@ function structuralProofHolds(
   cache: FileTextCache,
   workspace: string,
 ): boolean {
-  // The citation identifies the FILE; the file's content (or existence) is the
-  // evidence. A cited line number is therefore not required to be in range —
-  // an empty ignore file is a perfectly good "does not exclude X" proof.
-  if (claim.mode === "exists") return workspacePathExists(workspace, claim.file) === claim.presence;
+  // An existence claim's evidence is the path itself, contained to the
+  // checkout.
+  if (claim.mode === "exists") return repoPathExists(workspace, claim.file) === claim.presence;
   const lines = cache.lines(claim.file);
   if (lines === null) return false;
   const ignoreFile = isIgnoreFile(claim.file);
@@ -635,6 +663,17 @@ function structuralProofHolds(
     ? lineMentionsLiteral(line, claim.literal)
     : lineExcludesLiteral(line, claim.literal, ignoreFile));
   return claim.presence ? mentioned : !mentioned;
+}
+
+/** A structural citation names the FILE — the line is not the evidence, so the
+ * citation is accepted as file-level provenance. A non-empty file must still
+ * have the cited line in range, so a fabricated line number cannot persist on
+ * a `met` row; an empty file, and a satisfied "must be absent" (no file to
+ * cite), are the deliberate exceptions. */
+function structuralCitationLineInRange(cited: TraceLocation, claim: StructuralClaim, cache: FileTextCache): boolean {
+  const count = cache.lineCount(claim.file);
+  if (count === null) return true;
+  return count === 0 || cited.line <= count;
 }
 
 function normalizeRepoPath(path: string): string {
@@ -1176,10 +1215,13 @@ export function validateRequirementTrace(
             // so the proof is the cited state itself — re-derived here, not
             // asserted by the model — and a dedicated regression test is not
             // required. A requirement that ALSO demands test coverage gets it.
-            const citedFile = enforcement.some((loc) => normalizeRepoPath(loc.file) === normalizeRepoPath(structural.file));
-            if (!citedFile) {
+            const cited = enforcement.find((loc) => normalizeRepoPath(loc.file) === normalizeRepoPath(structural.file));
+            if (cited === undefined) {
               disposition = "unverifiable";
               notes.push("downgraded-no-valid-enforcement-location");
+            } else if (!structuralCitationLineInRange(cited, structural, cache)) {
+              disposition = "unverifiable";
+              notes.push("structural-citation-line-out-of-range");
             } else if (!structuralProofHolds(structural, cache, workspace)) {
               disposition = "unverifiable";
               notes.push("structural-proof-unconfirmed");
@@ -1389,6 +1431,9 @@ export function renderRequirementTraceMarkdown(trace: RequirementTraceArtifact):
     // indistinguishable from a missing citation at the rendered level.
     if (row.notes.includes("structural-proof-unconfirmed")) {
       details.push("the cited state does not satisfy the requirement");
+    }
+    if (row.notes.includes("structural-citation-line-out-of-range")) {
+      details.push("the cited line is outside the cited file");
     }
     const reason = row.reason !== "" ? `: ${row.reason}` : "";
     return `- \`${cleanRequirementId(row.requirement_id)}\` — **${row.disposition}** (${details.join("; ")})${reason}`;

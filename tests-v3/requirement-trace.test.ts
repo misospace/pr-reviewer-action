@@ -29,6 +29,7 @@ import {
   explicitlyRequiresTest,
   validateRequirementTrace,
   type RequirementOwnership,
+  type RequirementTraceArtifact,
 } from "../src/enforcement/requirement-trace.js";
 import { buildTraceRepairUserMessage, normalizeTraceRepairPayload, runRequirementTraceRepairPass } from "../src/requirements/trace-repair.js";
 
@@ -2363,12 +2364,15 @@ test("#985: a file named after the assertion is only a locator, not a state clai
   }
 });
 
-test("#985: a co-asserted content clause is checked alongside file existence", () => {
+test("#985: a compound existence-plus-content claim stays on the strict path", () => {
   const workspace = makeWorkspace();
   try {
     mkdirSync(join(workspace, "config"), { recursive: true });
     writeFileSync(join(workspace, "config", "settings.yaml"), "");
     const text = "`config/settings.yaml` must exist and must contain `secret_key`";
+    // The claim cannot represent both conjuncts, so the validator declines the
+    // structural shape rather than certifying a subset of what it asserts.
+    assert.equal(structuralStateClaim(text), null);
     const ledger = ledgerWith([{ id: "req-settings", text, kind: "acceptance" }]);
     const claims = [{
       requirement_id: "req-settings",
@@ -2379,12 +2383,14 @@ test("#985: a co-asserted content clause is checked alongside file existence", (
     }];
     const emptyTrace = validateRequirementTrace(claims, ledger, workspace);
     assert.equal(emptyTrace.rows[0]?.disposition, "unverifiable");
-    assert.equal(emptyTrace.rows[0]?.proof, "structural_state");
+    assert.equal(emptyTrace.rows[0]?.proof, "runtime_behavior");
 
+    // Populating the file does not change the classification — the shape is
+    // still compound, so the strict path still applies.
     writeFile(workspace, "config/settings.yaml", ["secret_key: abc"]);
     const populatedTrace = validateRequirementTrace(claims, ledger, workspace);
-    assert.equal(populatedTrace.rows[0]?.disposition, "met");
-    assert.equal(populatedTrace.rows[0]?.proof, "structural_state");
+    assert.equal(populatedTrace.rows[0]?.disposition, "unverifiable");
+    assert.equal(populatedTrace.rows[0]?.proof, "runtime_behavior");
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -2571,6 +2577,172 @@ test("#985: an extensionless -ignore file falls back to runtime proof", () => {
     const trace = validateRequirementTrace(claims, ledger, workspace);
     assert.equal(trace.rows[0]?.disposition, "unverifiable");
     assert.equal(trace.rows[0]?.proof, "runtime_behavior");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: structural targets must stay inside the checkout", () => {
+  assert.equal(structuralStateClaim("`../outside.json` must exist"), null);
+  assert.equal(structuralStateClaim("`/tmp/outside.json` must exist"), null);
+
+  const workspace = makeWorkspace();
+  const outsideFile = join(workspace, "..", "985-escape-outside.json");
+  try {
+    writeFile(join(workspace, ".."), "985-escape-outside.json", ["EXISTS"]);
+    const ledger = ledgerWith([
+      { id: "req-outside-exists", text: "`../985-escape-outside.json` must exist", kind: "acceptance" },
+      { id: "req-outside-absent", text: "`../985-escape-outside.json` must be absent", kind: "acceptance" },
+    ]);
+    const claims = [
+      {
+        requirement_id: "req-outside-exists",
+        disposition: "met",
+        enforcement: [{ file: "../985-escape-outside.json", line: 1 }],
+        test: [VALID_TEST_LOCATION],
+        reason: "the sibling file exists",
+      },
+      {
+        requirement_id: "req-outside-absent",
+        disposition: "met",
+        enforcement: [{ file: "../985-escape-outside.json", line: 1 }],
+        test: [VALID_TEST_LOCATION],
+        reason: "the sibling file is absent",
+      },
+    ];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    const exists = trace.rows.find((row) => row.requirement_id === "req-outside-exists");
+    const absent = trace.rows.find((row) => row.requirement_id === "req-outside-absent");
+    assert.equal(exists?.disposition, "unverifiable");
+    assert.equal(exists?.proof, "runtime_behavior");
+    assert.equal(absent?.disposition, "unverifiable");
+    assert.equal(absent?.proof, "runtime_behavior");
+  } finally {
+    rmSync(outsideFile, { force: true });
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: structural classifiers reject compound and equality assertions", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "config.json", ["foo"]);
+    writeFileSync(join(workspace, "config2.json"), "");
+    writeFile(workspace, "config3.json", ['{"note":"foo","other":1}']);
+
+    const requirements = [
+      { id: "req-two-literals", text: "`config.json` must contain `foo` and `bar`", kind: "acceptance" },
+      { id: "req-exists-and-content", text: "`config2.json` must exist and contain `foo`", kind: "acceptance" },
+      { id: "req-equality", text: "`config3.json` must equal `foo`", kind: "acceptance" },
+    ];
+    const claims = [
+      {
+        requirement_id: "req-two-literals",
+        disposition: "met",
+        enforcement: [{ file: "config.json", line: 1 }],
+        test: [VALID_TEST_LOCATION],
+        reason: "the file contains foo and bar",
+      },
+      {
+        requirement_id: "req-exists-and-content",
+        disposition: "met",
+        enforcement: [{ file: "config2.json", line: 1 }],
+        test: [VALID_TEST_LOCATION],
+        reason: "the file exists and contains foo",
+      },
+      {
+        requirement_id: "req-equality",
+        disposition: "met",
+        enforcement: [{ file: "config3.json", line: 1 }],
+        test: [VALID_TEST_LOCATION],
+        reason: "the file equals foo",
+      },
+    ];
+    const trace = validateRequirementTrace(claims, ledgerWith(requirements), workspace);
+    for (const id of ["req-two-literals", "req-exists-and-content", "req-equality"]) {
+      const row = trace.rows.find((candidate) => candidate.requirement_id === id);
+      assert.equal(row?.disposition, "unverifiable", id);
+      assert.equal(row?.proof, "runtime_behavior", id);
+    }
+
+    // A single-literal containment claim and a pure existence claim still
+    // classify; only the compound and equality shapes decline.
+    assert.equal(structuralStateClaim("`config2.json` must exist and contain `foo`"), null);
+    assert.equal(structuralStateClaim("`config3.json` must equal `foo`"), null);
+    assert.notEqual(structuralStateClaim("`config.json` must contain `foo`"), null);
+    assert.notEqual(structuralStateClaim("`config2.json` must exist"), null);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: structural citations require an in-range line unless the file is empty", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, ".dockerignore", ["node_modules/", "dist/"]);
+    const text = "`.dockerignore` must not exclude `assets/`";
+    const ledger = ledgerWith([
+      { id: "req-bad-line", text, kind: "acceptance" },
+      { id: "req-good-line", text, kind: "acceptance" },
+    ]);
+    const claims = [
+      {
+        requirement_id: "req-bad-line",
+        disposition: "met",
+        enforcement: [{ file: ".dockerignore", line: 999999 }],
+        test: [],
+        reason: "assets/ is not excluded",
+      },
+      {
+        requirement_id: "req-good-line",
+        disposition: "met",
+        enforcement: [{ file: ".dockerignore", line: 1 }],
+        test: [],
+        reason: "assets/ is not excluded",
+      },
+    ];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    const badLine = trace.rows.find((row) => row.requirement_id === "req-bad-line");
+    const goodLine = trace.rows.find((row) => row.requirement_id === "req-good-line");
+    assert.equal(badLine?.disposition, "unverifiable");
+    assert.ok(badLine?.notes.includes("structural-citation-line-out-of-range"));
+    assert.equal(goodLine?.disposition, "met");
+
+    const renderedTrace: RequirementTraceArtifact = {
+      version: 1,
+      rows: [{
+        requirement_id: "req-bad-line",
+        disposition: "unverifiable",
+        proof: "structural_state",
+        enforcement: [{ file: ".dockerignore", line: 999999 }],
+        test: [],
+        reason: "",
+        notes: ["structural-citation-line-out-of-range"],
+      }],
+      incomplete: true,
+      errors: [],
+    };
+    assert.ok(renderRequirementTraceMarkdown(renderedTrace).includes("the cited line is outside the cited file"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: an empty ignore file accepts file-level structural provenance", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFileSync(join(workspace, ".dockerignore"), "");
+    const ledger = ledgerWith([{ id: "req-empty-ignore", text: "`.dockerignore` must not exclude `assets/`", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-empty-ignore",
+      disposition: "met",
+      enforcement: [{ file: ".dockerignore", line: 1 }],
+      test: [],
+      reason: "the empty ignore file excludes no paths",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, "met");
+    assert.deepEqual(trace.rows[0]?.notes, []);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
