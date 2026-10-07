@@ -198,6 +198,7 @@ Set any of them explicitly to keep the v2 behavior; the `config-default-resoluti
 | `ai_primary_retry_delay_sec` | `ai-primary-retry-delay-sec` |
 | `on_model_failure` | `on-model-failure` |
 | `fail_on_request_changes` | `fail-on-request-changes` |
+| `fail_on_degraded_review` | `fail-on-degraded-review` |
 | `verdict_policy` | `verdict-policy` |
 | `non_blocking_finding_categories` | `non-blocking-finding-categories` |
 | `inline_findings` | `inline-findings` |

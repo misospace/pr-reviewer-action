@@ -117,6 +117,19 @@ export class SemanticFixtureAdapter implements PlatformReadAdapter {
   }
 
   async externalChecks(_sha: string, options: ExternalChecksOptions = {}): Promise<ExternalCheck[] | null> {
-    return normalizeExternalChecks(FIXTURE_CHECK_RUNS, FIXTURE_COMMIT_STATUS, options.runId ?? "", options.statusContext ?? "");
+    if (options.selfRunNumbers !== undefined && options.selfStatusDiscovery) {
+      options.selfStatusDiscovery.found = false;
+      options.selfStatusDiscovery.ambiguous = false;
+      options.selfStatusDiscovery.matchCount = 0;
+      options.selfStatusDiscovery.context = null;
+      options.selfStatusDiscovery.runJobs = "unavailable";
+      options.selfStatusDiscovery.runJobsUnavailableReason = "semantic fixture does not expose the Forgejo jobs API";
+      options.selfStatusDiscovery.runJobCount = null;
+      options.selfStatusDiscovery.runJobCountExact = false;
+      options.selfStatusDiscovery.runJobHtmlUrl = null;
+    }
+    return normalizeExternalChecks(FIXTURE_CHECK_RUNS, FIXTURE_COMMIT_STATUS, options.runId ?? "", options.statusContext ?? "", {
+      selfRunNumbers: options.selfRunNumbers,
+    });
   }
 }

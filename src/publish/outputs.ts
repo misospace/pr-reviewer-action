@@ -127,6 +127,10 @@ export function isIncompleteReason(value: unknown): value is IncompleteReason {
 
 export interface ReviewStepOutputs {
   verdict: string;
+  /** #978: this verdict is eligible for the fail-on-request-changes bypass.
+   * Read in-process by the gate and marker carry-forward; deliberately NOT a
+   * published output id. */
+  degradedGateBypass: boolean;
   verdictSource: string;
   requiredChecks: string;
   /** #873: the metadata marker's review_result state (clean/findings/
@@ -176,7 +180,7 @@ export function formatOutputAssignment(
  * are derived from `REVIEW_STEP_OUTPUT_IDS` so the constant and the writer
  * cannot drift apart. */
 export function formatReviewStepOutputs(
-  outputs: ReviewStepOutputs,
+  outputs: Omit<ReviewStepOutputs, "degradedGateBypass">,
   randomBytes?: () => Uint8Array,
 ): string {
   const assignments: Array<[string, string]> = [

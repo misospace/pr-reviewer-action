@@ -79,8 +79,8 @@ test("enforcement view parses severity and message from the finding body", () =>
   const t = normalizeThread(thread("PRRT_1", [comment(1, "bot", "2026-09-25T22:32:00Z", OWN_FINDING), comment(2, "dev", "2026-09-26T02:00:00Z", "reply")]))!;
   const human = normalizeThread(thread("H", [comment(3, "alice", "2026-09-26T03:00:00Z", "Should this handle None?")], { path: "a.py", line: 4 }))!;
   assert.deepEqual(enforcementView([t, human]), [
-    { thread_id: "PRRT_1", path: "pr_reviewer/tool_executors.py", line: 593, severity: "major", message: "retry drops the `--` separator", own_finding: true, replies: 1 },
-    { thread_id: "H", path: "a.py", line: 4, severity: "minor", message: "Should this handle None?", own_finding: false, replies: 0 },
+    { thread_id: "PRRT_1", path: "pr_reviewer/tool_executors.py", line: 593, severity: "major", message: "retry drops the `--` separator", category: "bug", own_finding: true, replies: 1 },
+    { thread_id: "H", path: "a.py", line: 4, severity: "minor", message: "Should this handle None?", category: null, own_finding: false, replies: 0 },
   ]);
 });
 

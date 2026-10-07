@@ -149,6 +149,7 @@ still also set them as a workflow `with:` input:
 | Key | Type | Narrowing rule |
 | --- | --- | --- |
 | `fail-on-request-changes` | boolean | operator-explicit wins |
+| `fail-on-degraded-review` | boolean | operator-explicit wins |
 | `verdict-policy` | enum | operator-explicit wins |
 | `non-blocking-finding-categories` | string (CSV) | operator-explicit wins |
 | `inline-findings` | boolean | operator-explicit wins |
@@ -224,7 +225,7 @@ simply not marking that input `repo-configurable` in the first place.
 
 Inputs marked `repo-policy` in the contract change what blocks a merge or
 what the reviewer is told, not just how much work it does:
-`fail-on-request-changes`, `verdict-policy`, `non-blocking-finding-categories`,
+`fail-on-request-changes`, `fail-on-degraded-review`, `verdict-policy`, `non-blocking-finding-categories`,
 `validate-required-checks`, `required-check-validation-mode`,
 `evidence-blocker-enforcement`, and `system-prompt-mode`. Under rule 2 a
 repository could loosen them whenever the workflow leaves them unset, which

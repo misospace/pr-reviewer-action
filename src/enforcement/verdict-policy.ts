@@ -29,6 +29,31 @@ export const NON_BLOCKING_ELIGIBLE: ReadonlySet<string> = new Set([
   "tests", "docs", "style", "question", "performance", "bug", "other",
 ]);
 
+/**
+ * #977: finding categories that can never request changes, under every
+ * verdict policy. A `verification` finding asks the author to confirm
+ * something the review tools cannot reach (a production metric, a flag, an
+ * external service, a value in another repository); it cannot be satisfied
+ * by a code change, so it must never block. It stays visible as an open
+ * finding — under strict it publishes as an approve carrying findings.
+ */
+export const ALWAYS_NON_BLOCKING_CATEGORIES: ReadonlySet<string> = new Set(["verification"]);
+
+/** True when a finding's category is unconditionally non-blocking (#977). */
+export function isAlwaysNonBlockingCategory(category: unknown): boolean {
+  return typeof category === "string" && ALWAYS_NON_BLOCKING_CATEGORIES.has(category);
+}
+
+/** The severities that can request changes on their own (#811): blocker and major. */
+export function isBlockingSeverity(severity: unknown): boolean {
+  return severity === "blocker" || severity === "major";
+}
+
+/** A finding that can be counted as blocking: blocker/major and not #977. */
+function isBlockingFinding(finding: ArtifactFinding): boolean {
+  return isBlockingSeverity(finding.severity) && !isAlwaysNonBlockingCategory(finding.category);
+}
+
 export const SECURITY_RISK_FLAGS: ReadonlySet<string> = new Set([
   "auth_changes", "public_route_changes", "file_serving_changes",
   "path_handling_changes", "secret_handling_changes", "db_or_migration_changes",
@@ -85,7 +110,7 @@ export function capNonBlockingFindings(
 }
 
 function noBlockingFindings(findings: ArtifactFinding[]): boolean {
-  return !findings.some((f) => f.severity === "blocker" || f.severity === "major");
+  return !findings.some(isBlockingFinding);
 }
 
 /**
@@ -97,6 +122,37 @@ function hasUnresolvedRequiredCheck(artifact: ReviewArtifact): boolean {
   const rows = artifact.required_check_dispositions;
   return Array.isArray(rows)
     && rows.some((row) => (row as { status?: unknown } | null)?.status === "unresolved");
+}
+
+/**
+ * #977: relax a model-authored request_changes whose ONLY still-open findings
+ * are verification asks — the author has nothing to change.
+ *
+ * Deliberately narrow. It never fires for a zero-finding request_changes, a
+ * mixed finding set, or when any independent deterministic gate is in play:
+ * a fail-closed enforcement layer, an unresolved required check, incomplete
+ * required-check coverage, or an unmet requirement trace. Everywhere else the
+ * model pass-through contract is unchanged.
+ */
+export function relaxVerificationOnlyVerdict(
+  artifact: ReviewArtifact,
+  options: { forced: boolean },
+): boolean {
+  if (artifact.verdict !== "request_changes") return false;
+  if (options.forced) return false;
+  if (hasUnresolvedRequiredCheck(artifact)) return false;
+  if (artifact.required_checks === "incomplete") return false;
+  if (artifact.requirement_trace_incomplete === true) return false;
+  const findings = artifact.findings;
+  if (!Array.isArray(findings) || findings.length === 0) return false;
+  if (!findings.every((finding) => isAlwaysNonBlockingCategory(finding.category))) return false;
+  artifact.review_markdown = (artifact.review_markdown || "")
+    + "\n\n_Verdict relaxed from structured findings (#977): every open finding is a "
+    + "verification request the review tools cannot check, so the author has nothing to "
+    + "change. The findings remain listed above._";
+  artifact.verdict = "approve";
+  artifact.verdict_source = "findings";
+  return true;
 }
 
 export interface VerdictPolicyResult {
@@ -139,7 +195,7 @@ export function applyVerdictPolicy(
       artifact.verdict = "approve";
       source = "findings";
     }
-    const blockers = findings.filter((finding) => finding.severity === "blocker");
+    const blockers = findings.filter((finding) => finding.severity === "blocker" && !isAlwaysNonBlockingCategory(finding.category));
     if (blockers.length > 0 && artifact.verdict !== "request_changes") {
       artifact.review_markdown += (
         "\n\n_Verdict escalated from structured findings "
@@ -176,7 +232,9 @@ export type StrictReviewResult = "issues" | "partial" | "findings" | "clean";
 export function hasBlockingOpenFinding(findings: unknown): boolean {
   return Array.isArray(findings) && findings.some((finding) => {
     const severity = (finding as { severity?: unknown } | null)?.severity;
-    return severity === "blocker" || severity === "major";
+    const category = (finding as { category?: unknown } | null)?.category;
+    return (severity === "blocker" || severity === "major")
+      && !isAlwaysNonBlockingCategory(category);
   });
 }
 
@@ -212,7 +270,7 @@ export interface StrictVerdictOutcome {
 function severityCounts(findings: ArtifactFinding[]): { blocking: number; total: number } {
   let blocking = 0;
   for (const finding of findings) {
-    if (finding.severity === "blocker" || finding.severity === "major") blocking += 1;
+    if (isBlockingFinding(finding)) blocking += 1;
   }
   return { blocking, total: findings.length };
 }

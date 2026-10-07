@@ -69,12 +69,39 @@ export interface CiBoundOptions {
   now?: (() => number) | undefined;
 }
 
+export interface ForgejoSelfStatusDiscovery {
+  found: boolean;
+  ambiguous: boolean;
+  matchCount: number;
+  context: string | null;
+  runJobs: "unknown" | "single" | "multi" | "unavailable";
+  runJobCount: number | null;
+  runJobCountExact: boolean;
+  runJobHtmlUrl: string | null;
+  runJobsUnavailableReason: string | null;
+}
+
 export interface ExternalChecksOptions extends CiBoundOptions {
   /** `GITHUB_RUN_ID`: our own workflow run's check runs are excluded. */
   runId?: string | undefined;
   /** `CI_STATUS_CONTEXT` (default `pr-reviewer-action`): our own commit
    * status context is excluded. */
   statusContext?: string | undefined;
+  /** Forgejo auto mode: candidate per-repository run numbers. When provided,
+   * context-based exclusion and its guessed default are disabled because
+   * Forgejo contexts are unstable. */
+  selfRunNumbers?: readonly string[] | undefined;
+  /** Trusted Forgejo origin for absolute target-URL host validation. */
+  selfRunOrigin?: string | undefined;
+  /** Forgejo workflow run database ID used only for the Actions jobs API,
+   * never as a target-URL matching candidate. */
+  selfRunId?: string | undefined;
+  /** Repo full name used to scope Forgejo Actions target URLs. */
+  selfRunRepo?: string | undefined;
+  /** Mutable per-gate discovery cache filled by the Forgejo adapter in auto
+   * mode. `runJobs` is retried while unknown and cached after a definitive
+   * single/multi/unavailable result; `runJobHtmlUrl` is the exact-join key. */
+  selfStatusDiscovery?: ForgejoSelfStatusDiscovery | undefined;
   /** v3 CI gate (#706 PR 6, deliberate divergence): a transient read failure
    * of EITHER underlying read — no response (timeout, transport error,
    * exhausted deadline), HTTP 429/5xx, or a body that is not JSON — yields

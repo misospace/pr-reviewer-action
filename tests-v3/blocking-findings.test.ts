@@ -205,6 +205,8 @@ test("failOnRequestChanges: blocking verdict fails, annotations precede the gate
     const code = failOnRequestChanges(
       { FAIL_ON_REQUEST_CHANGES: "true", GITHUB_STEP_SUMMARY: summaryFile },
       "request_changes",
+      false,
+      false,
       findings,
       pointer,
     );
@@ -243,6 +245,8 @@ test("failOnRequestChanges: no findings and no pointer — the gate says so and 
     const code = failOnRequestChanges(
       { FAIL_ON_REQUEST_CHANGES: "true", GITHUB_STEP_SUMMARY: summaryFile },
       "request_changes",
+      false,
+      false,
     );
     assert.equal(code, 1);
     assert.equal(captured.join(""), "::error::fail-on-request-changes=true and the final verdict is request_changes: no blocker/major finding was recorded\n");
@@ -261,11 +265,11 @@ test("failOnRequestChanges: malformed findings degrade to no findings, and an un
     return true;
   }) as unknown) as typeof process.stdout.write;
   try {
-    assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, "request_changes", "{not json"), 1);
+    assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, "request_changes", false, false, "{not json"), 1);
     assert.equal(captured.join(""), "::error::fail-on-request-changes=true and the final verdict is request_changes: no blocker/major finding was recorded\n");
     captured.length = 0;
     // A pointer with a raw newline must not split the command line.
-    assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, "request_changes", "[]", "p1\np2"), 1);
+    assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, "request_changes", false, false, "[]", "p1\np2"), 1);
     assert.equal(captured.join(""), "::error::fail-on-request-changes=true and the final verdict is request_changes: no blocker/major finding was recorded p1 p2\n");
   } finally {
     process.stdout.write = originalWrite;
@@ -283,6 +287,8 @@ test("failOnRequestChanges: a non-blocking verdict never fails the step", () => 
     assert.equal(failOnRequestChanges(
       { FAIL_ON_REQUEST_CHANGES: "true" },
       "approve",
+      false,
+      false,
       JSON.stringify([{ severity: "blocker", file: "a.ts", line: 1, message: "x" }]),
       "pointer",
     ), 0);
@@ -306,7 +312,7 @@ test("failOnRequestChanges: the disabled gate returns 0 and writes no ::error at
     const findings = JSON.stringify([{ severity: "blocker", file: "a.ts", line: 1, message: "x" }]);
     for (const flag of ["false", "FALSE", undefined]) {
       captured.length = 0;
-      const code = failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: flag }, "request_changes", findings, "pointer");
+      const code = failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: flag }, "request_changes", false, false, findings, "pointer");
       assert.equal(code, 0);
       assert.equal(captured.length, 0, `flag ${String(flag)} must be silent`);
     }
@@ -336,6 +342,8 @@ test("#975 #252: a literal %0A in a finding message cannot forge a line on the g
     const code = failOnRequestChanges(
       { FAIL_ON_REQUEST_CHANGES: "true" },
       "request_changes",
+      false,
+      false,
       findings,
     );
     assert.equal(code, 1);
@@ -389,6 +397,8 @@ test("#975 #252: the carried-failure step-summary line wraps the untrusted findi
     const code = failOnRequestChanges(
       { FAIL_ON_REQUEST_CHANGES: "true", GITHUB_STEP_SUMMARY: summaryFile },
       "request_changes",
+      false,
+      false,
       findings,
       pointer,
     );

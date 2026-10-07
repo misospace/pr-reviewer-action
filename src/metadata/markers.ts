@@ -99,6 +99,8 @@ export interface RunMarkerContext {
   contextPeak?: number;
   /** #915 build-time stamp; ""/unset means unstamped and is omitted. */
   actionVersion?: string;
+  /** #978: true when the final verdict is eligible for the gate bypass. */
+  degradedGateBypass?: boolean;
 }
 
 /**
@@ -146,6 +148,7 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
     context_budget: context.contextBudget ?? null,
     context_peak: context.contextPeak ?? null,
     action_version: av === "" ? null : av,
+    degradedGateBypass: context.degradedGateBypass === true ? true : null,
   });
 }
 

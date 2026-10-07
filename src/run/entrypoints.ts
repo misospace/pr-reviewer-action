@@ -411,6 +411,7 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
     },
     ...(env.REREVIEW_LABEL ? { rerunLabel: env.REREVIEW_LABEL } : {}),
     ...(env.VERDICT_POLICY ? { verdictPolicy: env.VERDICT_POLICY } : {}),
+    degradedGateBypass: env.DEGRADED_GATE_BYPASS === "true",
     // #873: the same coverage-gap record `run` computed, read back from its
     // persisted artifact so a partial-coverage run can never publish
     // APPROVE through the standalone `publish` CLI path either. `unknown`

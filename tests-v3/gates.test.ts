@@ -114,23 +114,23 @@ test("parent cancellation mid-flight terminates both gates, join still resolves"
   assert.equal(result.specialists.ok, false);
 });
 
-// The v2 `_CI_GATE_ENV_KEYS` list from scripts/sections/gating.sh, frozen
-// when the v2 runtime was removed (#706 wave 2).
-const V2_CI_GATE_ENV_KEYS = [
+// Deliberate snapshot of the CI gate env allowlist. The v2 bash source was
+// removed in the v3 migration; extend this snapshot deliberately with env.ts.
+const CI_GATE_ENV_KEYS_SNAPSHOT = [
   "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL", "ALL_PROXY",
   "CI_API_TIMEOUT_SEC", "CI_CHECKS_FILE", "CI_INTERVAL_SEC", "CI_SKIP_ON_TIMEOUT",
   "CI_STATUS_CHECK", "CI_STATUS_CONTEXT", "CI_TIMEOUT_SEC", "CURL_CA_BUNDLE", "FORGEJO_API_URL",
   "FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE", "FORGEJO_AUTH_METHOD",
-  "FORGEJO_SKIP_PERMISSION_PREFLIGHT", "FORGEJO_TOKEN", "GH_CONFIG_DIR", "GH_ENTERPRISE_TOKEN",
+  "FORGEJO_SKIP_PERMISSION_PREFLIGHT", "FORGEJO_TOKEN", "FORGEJO_RUN_ID", "FORGEJO_RUN_NUMBER", "FORGEJO_REPOSITORY", "GH_CONFIG_DIR", "GH_ENTERPRISE_TOKEN",
   "GH_HOST", "GH_TOKEN", "GITHUB_API_URL", "GITHUB_ENTERPRISE_TOKEN", "GITHUB_OUTPUT",
-  "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_SERVER_URL", "GITHUB_TOKEN", "HOME", "HTTPS_PROXY",
+  "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_NUMBER", "GITHUB_SERVER_URL", "GITHUB_TOKEN", "HOME", "HTTPS_PROXY",
   "HTTP_PROXY", "NO_PROXY", "PATH", "PLATFORM", "PR_HEAD_SHA", "PR_NUMBER",
   "PR_REVIEWER_GATE_CHILD", "REPO", "RUNNER_TRACKING_ID", "SSL_CERT_DIR", "SSL_CERT_FILE",
   "TANGLED_REPO_DID", "XDG_CONFIG_HOME", "all_proxy", "http_proxy", "https_proxy", "no_proxy",
 ];
 
-test("CI allowlist matches the frozen v2 _CI_GATE_ENV_KEYS list exactly", () => {
-  assert.deepEqual([...CI_GATE_ENV_KEYS].sort(), [...V2_CI_GATE_ENV_KEYS].sort());
+test("CI allowlist matches its deliberate snapshot exactly", () => {
+  assert.deepEqual([...CI_GATE_ENV_KEYS].sort(), [...CI_GATE_ENV_KEYS_SNAPSHOT].sort());
 });
 
 test("CI/specialist forbidden key sets are excluded from their allowlists", () => {

@@ -37,6 +37,8 @@ export const SECTION_HEADER = "# Unresolved Review Threads";
 // "**🛑 Blocker (bug):** message" — the inline-comment shape
 // build_review_comments.py emits. The label word is what carries severity.
 const FINDING_LABEL_RE = /^\*\*[^A-Za-z0-9_*]*(blocker|major|minor|info)(?![A-Za-z0-9_])[^*]*\*\*:?\s*/i;
+const FINDING_CATEGORY_RE = /\(\s*([a-z][a-z_]*)\s*\)/i;
+const THREAD_FINDING_CATEGORIES: ReadonlySet<string> = new Set(["bug", "security", "performance", "style", "docs", "tests", "question", "other", "verification"]);
 const MAX_MESSAGE_CHARS = 500;
 
 export interface ReviewThreadComment extends PrThreadComment {
@@ -59,6 +61,7 @@ export interface ReviewThreadView {
   line: number | null;
   severity: string;
   message: string;
+  category: string | null;
   own_finding: boolean;
   replies: number;
 }
@@ -88,15 +91,19 @@ function collapseWhitespace(text: string): string {
   return text.split(/\s+/).filter((part) => part !== "").join(" ");
 }
 
-function findingFields(body: string): [string, string] {
+function findingFields(body: string): [string, string, string | null] {
   let text = body.replaceAll(FINDING_TRAILER, "").trim();
   let severity = "minor";
+  let category: string | null = null;
   const match = FINDING_LABEL_RE.exec(text);
   if (match) {
     severity = match[1]!.toLowerCase();
+    const categoryMatch = FINDING_CATEGORY_RE.exec(match[0]);
+    const candidate = categoryMatch?.[1]?.toLowerCase();
+    if (candidate && THREAD_FINDING_CATEGORIES.has(candidate)) category = candidate;
     text = text.slice(match[0].length);
   }
-  return [severity, codepointSlice(collapseWhitespace(text), MAX_MESSAGE_CHARS)];
+  return [severity, codepointSlice(collapseWhitespace(text), MAX_MESSAGE_CHARS), category];
 }
 
 export function normalizeThread(raw: unknown, marker: string = DEFAULT_MANAGED_MARKER): ReviewThread | null {
@@ -240,11 +247,13 @@ export function enforcementView(threads: readonly ReviewThread[]): ReviewThreadV
     const root = thread.comments[0]!;
     let severity: string;
     let message: string;
+    let category: string | null;
     if (root.own) {
-      [severity, message] = findingFields(cleanBody(root.body));
+      [severity, message, category] = findingFields(cleanBody(root.body));
     } else {
       severity = "minor";
       message = codepointSlice(collapseWhitespace(cleanBody(root.body)), MAX_MESSAGE_CHARS);
+      category = null;
     }
     return {
       thread_id: thread.threadId,
@@ -252,6 +261,7 @@ export function enforcementView(threads: readonly ReviewThread[]): ReviewThreadV
       line: thread.line,
       severity,
       message,
+      category,
       own_finding: root.own,
       replies: thread.comments.length - 1,
     };

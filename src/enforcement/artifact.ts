@@ -39,7 +39,7 @@ export interface ArtifactFinding {
 
 export interface ArtifactThreadDisposition {
   thread_id: string;
-  disposition: "fixed" | "open" | "disputed";
+  disposition: "fixed" | "open" | "disputed" | "withdrawn";
   evidence: string | null;
   /** Downgrade note recorded by enforcement ("no disposition given", …). */
   enforced?: string;

@@ -103,12 +103,12 @@ The action works on **GitHub** and **Forgejo** (1.4.x), with **Tangled** resolva
 | Native review verdicts (`review_verdict`) | ✅ Full | ⚠️ Degraded — approve/request_changes via REST |
 | Cleanup: dismiss stale reviews | ✅ Full | ✅ Full (REST) |
 | Cleanup: minimizeComment (hide outdated) | ✅ Full | ❌ Skipped (no GraphQL) |
-| CI status check polling | ✅ Full | ✅ Commit-status polling (Forgejo REST) |
+| CI status check polling | ✅ Full | ✅ Commit-status polling (Forgejo REST; own single-job status auto-discovered by run-jobs API) |
 | Evidence providers | ✅ Full | ✅ Full |
 | Tool harness | ✅ Full | ✅ Full |
 | Reviewer-requested smart escalation | ✅ Full | ✅ Full |
 
-> **Note:** On Forgejo, features requiring GitHub's GraphQL API (review minimization) are skipped with a clear log line. The core review pipeline and all REST-based features work fully.
+> **Note:** On Forgejo, features requiring GitHub's GraphQL API (review minimization) are skipped with a clear log line. CI auto-discovery requires Forgejo v16.0+ (the first release with the run-jobs API) and excludes a pending status only when that API proves this is a single-job run and that job's `html_url` path exactly matches the status `target_url` path on the runner's origin. `FORGEJO_RUN_NUMBER`/`GITHUB_RUN_NUMBER` identify candidate status URLs; `FORGEJO_RUN_ID` (or `GITHUB_RUN_ID` fallback) is used only to query the jobs API. Multi-job, mismatched, and unavailable cases leave statuses visible; older Forgejo instances warn immediately and fall back to bounded waiting, so set `CI_STATUS_CONTEXT` to avoid self-deadlock; a whitespace-only value is treated as unset and enables auto-discovery. Multi-job reviewer workflows also need `CI_STATUS_CONTEXT`. The core review pipeline and all REST-based features work fully.
 
 ## 📚 Documentation
 

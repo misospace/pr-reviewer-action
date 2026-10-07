@@ -3,15 +3,13 @@ import type { EnvAllowlist } from "../runtime/env.js";
 /**
  * Explicit per-gate child-environment allowlists (#679).
  *
- * `CI_GATE_ENV_KEYS` mirrors `_CI_GATE_ENV_KEYS` in
- * `scripts/sections/gating.sh` key-for-key: the CI child keeps exactly the
- * pre-#634 standalone-step authority (runner basics, transport config,
- * GitHub/Forgejo/Tangled identity + repository auth, the CI-wait controls)
- * and never
- * sees the review step's model/tool/Linear secrets. Deliberately NOT
- * included: AI_*_API_KEY, TOOL_MCP_TOKEN, LINEAR_API_KEY,
- * AI_REQUEST_TIMEOUT_SEC. `tests-v3/gates.test.ts` cross-checks this list
- * against the bash source so the two cannot drift while v2/v3 coexist.
+ * `CI_GATE_ENV_KEYS` is the deliberate snapshot of the CI child authority:
+ * runner basics, transport config, GitHub/Forgejo/Tangled identity + repository
+ * auth, and CI-wait controls, without the review step's model/tool/Linear
+ * secrets. Deliberately NOT included: AI_*_API_KEY, TOOL_MCP_TOKEN,
+ * LINEAR_API_KEY, AI_REQUEST_TIMEOUT_SEC. The v2 bash source was removed in
+ * the v3 migration; extend this allowlist and its test snapshot deliberately,
+ * documenting why any new authority is needed.
  *
  * `SPECIALIST_GATE_ENV_KEYS` is deliberately NARROWER than production (the
  * bash gate inherits the full review environment): the specialist phase only
@@ -43,7 +41,11 @@ export const CI_GATE_ENV_KEYS: EnvAllowlist = [
   // Runner metadata: outputs, self-exclusion identity, OIDC request vars.
   "GITHUB_OUTPUT",
   "GITHUB_RUN_ID",
+  "FORGEJO_RUN_ID", // Jobs API database key only; never a target-URL match candidate.
+  "GITHUB_RUN_NUMBER",
+  "FORGEJO_RUN_NUMBER",
   "GITHUB_REPOSITORY",
+  "FORGEJO_REPOSITORY",
   "GITHUB_SERVER_URL",
   "GITHUB_API_URL",
   "GH_HOST",

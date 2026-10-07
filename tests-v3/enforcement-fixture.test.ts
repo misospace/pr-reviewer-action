@@ -34,6 +34,28 @@ test("enforcement fixture runs model no-op and blocker escalation pipelines", ()
     assert.equal(escalated.verdict, "request_changes");
     assert.equal(escalated.verdict_source, "findings");
     assert.ok(escalated.review_markdown.includes("Verdict escalated from structured findings"));
+
+    const evidenceBlocker = runEnforcementFixture(writeJson(dir, "evidence-blocker.json", {
+      contract: "enforcement-pipeline/v1",
+      artifact: { verdict: "approve", review_markdown: "review", findings: [] },
+      evidence: { has_blocker: true, providers: [{ id: "scanner", provider_severity: "blocker" }] },
+      threads: [{
+        thread_id: "t",
+        path: "src/a.ts",
+        line: 4,
+        severity: "major",
+        message: "confirm the metric exists",
+        category: "verification",
+        own_finding: true,
+        replies: 0,
+      }],
+      config: { verdict_policy: "model", evidence_blocker_enforcement: true },
+    }));
+    assert.equal(evidenceBlocker.ok, true);
+    const evidenceArtifact = JSON.parse(evidenceBlocker.values!.artifact!);
+    assert.equal(evidenceArtifact.verdict, "request_changes");
+    assert.match(evidenceArtifact.review_markdown, /## Final Recommendation/);
+    assert.match(evidenceArtifact.review_markdown, /- Evidence provider blocker detected: scanner\./);
   });
 });
 
@@ -82,6 +104,34 @@ test("enforcement fixture runs the #811 strict pipeline: relax, coverage gap, an
     assert.equal(forcedArtifact.verdict_source, "enforcement");
     assert.ok(forcedArtifact.review_markdown.includes("fail-closed enforcement layer forced request_changes"));
     assert.ok(forcedArtifact.review_markdown.includes("## Tool Harness Failure"));
+  });
+});
+
+test("enforcement fixture reconciles the banner after verification-only relaxation", () => {
+  withFixtures((dir) => {
+    const result = runEnforcementFixture(writeJson(dir, "verification.json", {
+      contract: "enforcement-pipeline/v1",
+      artifact: {
+        verdict: "request_changes",
+        review_markdown: "review",
+        findings: [{ severity: "major", category: "verification", file: null, line: null, message: "confirm the metric" }],
+      },
+      threads: [{
+        thread_id: "t",
+        path: "src/a.ts",
+        line: 4,
+        severity: "major",
+        message: "confirm the metric exists",
+        category: "verification",
+        own_finding: true,
+        replies: 0,
+      }],
+      config: { verdict_policy: "model" },
+    }));
+    assert.equal(result.ok, true);
+    const artifact = JSON.parse(result.values!.artifact!);
+    assert.equal(artifact.verdict, "approve");
+    assert.doesNotMatch(artifact.review_markdown, /Final Recommendation/);
   });
 });
 

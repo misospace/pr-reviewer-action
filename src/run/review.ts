@@ -50,11 +50,11 @@ import { callModelTier, type TierProfile } from "../model/call.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, publicAnalysisEngine, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
 import { reviewArtifactFromParsed } from "../enforcement/artifact.js";
-import { applyStrictVerdictPolicy, applyVerdictPolicy } from "../enforcement/verdict-policy.js";
+import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
 import { markerReviewResult } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
-import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "../enforcement/enforce.js";
+import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope } from "../enforcement/requirement-trace.js";
 import { runRequirementTraceRepairPass } from "../requirements/trace-repair.js";
@@ -135,6 +135,7 @@ export interface RunReviewOptions {
   sleep?: (seconds: number) => Promise<void>;
   log?: (line: string) => void;
   error?: (line: string) => void;
+  annotate?: (line: string) => void;
   /** Override the CI gate branch (tests). Explicit null disables the gate
    * even when ci-status-check is on; undefined = the default subprocess
    * branch re-entering the bundle. */
@@ -202,6 +203,14 @@ const NO_GATE_OUTCOME = (gate: GateName): GateOutcome => ({
 /** Scratch file the CI gate child writes its step outputs to. */
 const CI_GATE_OUTPUT_FILE = "ci-gate-outputs.txt";
 
+/** #978: the annotation is a workflow-command line, so untrusted provider
+ * body text must not be able to break out of it — a newline would emit a
+ * second line GitHub parses as its own command, and `::` reads as a command
+ * separator. Control characters collapse to spaces; `::` is split. */
+function annotationSafe(text: string): string {
+  return text.replace(/[\x00-\x1f\x7f]+/g, " ").replace(/::/g, ": :").trim();
+}
+
 /** The CI gate's `ci_status_final` / `ci_status_skipped` step outputs as the
  * contract's kebab-case output assignments. */
 export function ciGateOutputs(path: string): string {
@@ -267,6 +276,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   };
   const errorLog = (line: string): void =>
     (options.error ?? ((text) => process.stderr.write(`[v3] ERROR: ${text}\n`)))(line);
+  const annotate = options.annotate ?? ((line: string): void => { process.stdout.write(`${line}\n`); });
 
   assertSupportedNode(process.versions.node);
   if (options.env[GATE_CHILD_ENV] === "1") {
@@ -854,7 +864,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // ── Review stage (review.sh) ─────────────────────────────────────────
   const userMessage = buildUserMessage(ws, "classification.json");
   const primary = await producePrimaryReview({
-    env, ws, profiles, streamBool, userMessage, log, errorLog, clock, sleep: options.sleep, budgets,
+    env, ws, profiles, streamBool, userMessage, log, errorLog, annotate, clock, sleep: options.sleep, budgets,
   });
   let analysisEngine = primary.analysisEngine;
   let primaryProduced = primary.fromPrimary;
@@ -876,7 +886,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ws.write("ai-output.primary.json", ws.read("ai-output.json") ?? new Uint8Array(0));
     env.TOOL_ESCALATION = "true";
     const smart = await runSmartReview({
-      env, ws, profiles, streamBool, userMessage, log, errorLog, clock, sleep: options.sleep,
+      env, ws, profiles, streamBool, userMessage, log, errorLog, annotate, clock, sleep: options.sleep,
       budgets, generatedPaths, standards, runDir, workspace,
     });
     delete env.TOOL_ESCALATION;
@@ -1009,10 +1019,12 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // escalation, which must be visible to the verdict mapping, not just
   // recorded afterward.
   let requirementTraceResult: ReturnType<typeof applyRequirementTraceEnforcement> | null = null;
+  let completenessResult: ReturnType<typeof applyRequiredCheckValidation> | null = null;
   let completenessStatus = "none";
   if (analysisEngine === MODEL_UNAVAILABLE_ENGINE) {
     // on-model-failure=notice (#863): no model reviewed this PR, so the
     // notice's request_changes is final; no verdict policy may relax it.
+    // No enforcement overlay runs on this branch, so its block is entirely notice-derived.
   } else if (verdictPolicy === "strict") {
     // #811 composition (same order as the enforcement-pipeline fixture):
     // coverage, then the enforcement overlays, then the strict mapping over
@@ -1021,21 +1033,36 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     // `required_checks` write to have already happened (its own escalation
     // must not be clobbered by it), and its synthesized findings must be in
     // place before the strict mapping counts open findings.
-    const completeness = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
-    completenessStatus = completeness.status;
+    completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
+    completenessStatus = completenessResult.status;
     requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     const forced = failClosedEnforcementFired(enforcementInputs)
-      || (completeness.status === "incomplete" && completeness.mode === "fail");
+      || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
     applyStrictVerdictPolicy(reviewRecord as never, { modelVerdict, forced });
+    // The strict mapping can derive an approve after the enforcement banner
+    // was written; reconcile the markdown with the final verdict.
+    reconcileEnforcedReviewMarkdown(reviewRecord as never);
   } else {
     applyVerdictPolicy(reviewRecord as never, verdictPolicy, {
       nonBlockingCategories: new Set(splitCsv(env.NON_BLOCKING_FINDING_CATEGORIES ?? "")),
       securityFlagged: isSecurityFlagged(classificationArtifact),
     });
-    completenessStatus = applyRequiredCheckValidation(reviewRecord as never, completenessOptions).status;
+    completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
+    completenessStatus = completenessResult.status;
     requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
+    // #977: the model's own request_changes is relaxed only when every
+    // still-open finding is a verification ask and no independent
+    // deterministic gate fired. The overlays above have already run, so
+    // their blocks are visible here.
+    relaxVerificationOnlyVerdict(reviewRecord as never, {
+      forced: failClosedEnforcementFired(enforcementInputs),
+    });
+    // #977: the relaxation can flip the model's request_changes to approve
+    // after the enforcement banner was written; reconcile the markdown with
+    // the final verdict.
+    reconcileEnforcedReviewMarkdown(reviewRecord as never);
   }
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(reviewRecord)}\n`, "utf8"));
 
@@ -1076,6 +1103,31 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     : "none";
   const outputVerdict = String(reviewRecord.verdict ?? "");
   const outputRequiredChecks = String(reviewRecord.required_checks ?? "none");
+  // #978: persist whether this verdict can bypass fail-on-request-changes,
+  // not merely whether some part of the tool loop degraded.
+  const nativeLoopDegraded = (harnessForMarker as { native_loop_degraded?: unknown } | null)?.native_loop_degraded;
+  const noEvidenceGathered = typeof nativeLoopDegraded === "string" && nativeLoopDegraded.length > 0;
+  // The authoritative trace-incomplete flag covers both unmet and
+  // unverifiable rows. Policy and enforcement have finished before this
+  // snapshot, so the final verdict and provenance are authoritative here.
+  const verdictSource = String(reviewRecord.verdict_source ?? "model");
+  const deterministicBlock = computeDeterministicBlock({
+    enforcementInputs,
+    completeness: completenessResult,
+    requirementTraceIncomplete: traceIncomplete,
+    finalVerdict: outputVerdict,
+    verdictSource,
+  });
+  // The notice branch skips every enforcement overlay, so its request_changes
+  // is entirely notice-derived and there is no deterministic block to override.
+  // No-evidence eligibility is deliberately fallback-only: primary corpus
+  // reviews after zero tool calls do not inherit #978's exemption.
+  const degradedGateBypass = resolveDegradedGateBypass({
+    notice: analysisEngine === MODEL_UNAVAILABLE_ENGINE,
+    fromFallback: primary.fromFallback,
+    noEvidenceGathered,
+    deterministicBlock,
+  });
   // #873 maintainer follow-up: the standalone `publish` CLI is a separate
   // process that cannot see `toolMode`/`enforcementHarness` — trusting the
   // ambient TOOL_MODE/REVIEW_ROUTE stage env it re-derives them from is
@@ -1098,6 +1150,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   ws.write("review-coverage.json", Buffer.from(`${pyJsonDumps(reviewCoverage)}\n`, "utf8"));
   const outputs: ReviewStepOutputs = {
     verdict: outputVerdict,
+    degradedGateBypass,
     verdictSource: String(reviewRecord.verdict_source ?? "model"),
     requiredChecks: outputRequiredChecks,
     // #873: additive alongside verdict — a partial review's verdict can
@@ -1180,6 +1233,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ...(toolBudgetTelemetry.contextBudget !== undefined ? { contextBudget: toolBudgetTelemetry.contextBudget } : {}),
     ...(toolBudgetTelemetry.contextPeak !== undefined ? { contextPeak: toolBudgetTelemetry.contextPeak } : {}),
     actionVersion: ACTION_VERSION,
+    degradedGateBypass: outputs.degradedGateBypass,
   });
   return {
     outputs,
@@ -1215,6 +1269,43 @@ function cachedProjectNumber(bytes: Uint8Array): number | null {
   const value = safeJson(bytes);
   const number = value?.number;
   return typeof number === "number" ? number : null;
+}
+
+/** #978: whether a deterministic, rule-based layer owns the final verdict.
+ * A fail-closed enforcement layer, a required-check fail mode, incomplete
+ * requirement-trace coverage, or any verdict policy/enforcement escalation
+ * (`verdict_source !== "model"`) outranks the degraded gate exemption — an
+ * operator who enabled one of those meant it. `requirement_trace_incomplete`
+ * is authoritative for both `unmet` and `unverifiable` rows, and strictly
+ * subsumes findingsAdded because findings are synthesized only for `unmet`.
+ * A model-originated `request_changes` keeps `verdict_source === "model"` and stays eligible. */
+export function computeDeterministicBlock(input: {
+  enforcementInputs: EnforcementInputs;
+  completeness: { status: string; mode: string } | null;
+  requirementTraceIncomplete: boolean;
+  finalVerdict: string;
+  verdictSource: string;
+}): boolean {
+  return failClosedEnforcementFired(input.enforcementInputs)
+    || (input.completeness !== null && input.completeness.status === "incomplete" && input.completeness.mode === "fail")
+    || input.requirementTraceIncomplete
+    // verdict_source records whether policy/enforcement forced the final
+    // verdict; a model-originated request_changes remains eligible for #978.
+    || (input.finalVerdict === "request_changes" && input.verdictSource !== "model");
+}
+
+/** #978: whether a final request_changes may bypass fail-on-request-changes.
+ * Only a block the degraded MODEL produced is eligible: a deterministic
+ * fail-closed layer outranks the exemption, and the no-evidence case is
+ * deliberately fallback-only (#978 asked for the fallback with no gathered
+ * evidence, not a primary corpus review after zero tool calls). */
+export function resolveDegradedGateBypass(input: {
+  notice: boolean;
+  fromFallback: boolean;
+  noEvidenceGathered: boolean;
+  deterministicBlock: boolean;
+}): boolean {
+  return input.notice || (input.fromFallback && input.noEvidenceGathered && !input.deterministicBlock);
 }
 
 /** #873: exported so the standalone `publish` CLI entrypoint (a separate
@@ -1412,6 +1503,7 @@ interface ReviewCallInput {
   userMessage: string;
   log: (line: string) => void;
   errorLog: (line: string) => void;
+  annotate: (line: string) => void;
   clock: () => number;
   readonly sleep?: ((seconds: number) => Promise<void>) | undefined;
 }
@@ -1448,7 +1540,7 @@ async function callTier(
   requestArtifact: string,
   responseArtifact: string,
 ): Promise<{ ok: boolean; artifact: Record<string, unknown> | null; rawResponse: unknown }> {
-  const { env, ws, log, errorLog } = input;
+  const { env, ws, log, errorLog, annotate } = input;
   const corpusText = ws.readText(corpusName) ?? "";
   // Persist the request artifact before the first attempt (v2 writes it once).
   const requestPayload = buildModelRequest({
@@ -1504,6 +1596,9 @@ async function callTier(
     // configured key unconditionally, on top of `redactText`'s heuristics.
     const detail = describeTransportFailure(outcome.failure, { secrets: [profile.apiKey] });
     errorLog(`${profile.label}: transport failures exhausted (${detail})`);
+    if (outcome.nonRetryable === true) {
+      annotate(`::error::${profile.label}: model endpoint returned a non-retryable HTTP status; failing over without retrying (${annotationSafe(detail)})`);
+    }
     ws.write(responseArtifact, pyJsonDumps({ error: detail }));
   }
   return { ok: false, artifact: null, rawResponse: null };

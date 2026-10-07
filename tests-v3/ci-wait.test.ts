@@ -43,6 +43,13 @@ function github(routes: Record<string, Reply[]>, log?: string[]): GitHubAdapter 
 
 const strict: ExternalChecksOptions = { transientAsUnknown: true, apiTimeoutSec: "5" };
 
+function discoveryState(): NonNullable<ExternalChecksOptions["selfStatusDiscovery"]> {
+  return {
+    found: false, ambiguous: false, matchCount: 0, context: null,
+    runJobs: "unknown", runJobCount: null, runJobCountExact: false, runJobHtmlUrl: null, runJobsUnavailableReason: null,
+  };
+}
+
 test("isTransientCiRead: no response, 429, 5xx and non-JSON bodies are transient; 2xx/4xx JSON answers are not", () => {
   assert.equal(isTransientCiRead(null, ""), true);
   assert.equal(isTransientCiRead(0, ""), true);
@@ -71,6 +78,90 @@ test("GitHub externalChecks: a transient check-runs read is unknown too (no part
 test("GitHub externalChecks: a 4xx JSON answer is persistent, not transient — strict mode still folds it", async () => {
   const routes = { [RUNS]: [{ status: 403, body: { message: "Resource not accessible by integration" } }], [STATUS]: [greenStatus] };
   assert.deepEqual(await github(routes).externalChecks(SHA, strict), [{ name: "ci/x", state: "success" }]);
+});
+
+test("Forgejo externalChecks: auto mode discovers and excludes statuses by target URL", async () => {
+  const path = `/api/v1/repos/o/r/commits/${SHA}/status`;
+  const jobsPath = "/api/v1/repos/o/r/actions/runs/987654/jobs";
+  const requests: string[] = [];
+  const adapter = new ForgejoAdapter({
+    repo: "o/r", prNumber: "7", baseUrl: "https://forgejo.example", token: "t",
+    fetchImpl: sequenceFetch({
+      [path]: [{ body: { state: "pending", statuses: [
+        { context: "ci/reviewer-generated", status: "pending", target_url: "/o/r/actions/runs/171447/jobs/11" },
+        { context: "pr-reviewer-action", status: "pending" },
+        { context: "ci/external", status: "success" },
+      ] } }],
+      [jobsPath]: [{ body: [{ html_url: "https://forgejo.example/o/r/actions/runs/171447/jobs/11" }] }],
+    }, requests),
+  });
+  const discovery = discoveryState();
+  assert.deepEqual(await adapter.externalChecks(SHA, {
+    ...strict, selfRunNumbers: ["171447"], selfRunId: "987654", selfRunRepo: "o/r",
+    selfRunOrigin: "https://forgejo.example", selfStatusDiscovery: discovery,
+  }), [
+    { name: "pr-reviewer-action", state: "pending" },
+    { name: "ci/external", state: "success" },
+  ]);
+  assert.equal(discovery.found, true);
+  assert.equal(discovery.runJobs, "single");
+  assert.equal(discovery.runJobHtmlUrl, "https://forgejo.example/o/r/actions/runs/171447/jobs/11");
+  assert.deepEqual(requests, [path, jobsPath]);
+});
+
+test("Forgejo externalChecks: transient jobs lookup retries but a definitive 404 is cached unavailable", async () => {
+  const statusPath = `/api/v1/repos/o/r/commits/${SHA}/status`;
+  const jobsPath = "/api/v1/repos/o/r/actions/runs/987654/jobs";
+  const status = { body: { state: "pending", statuses: [
+    { context: "reviewer", status: "pending", target_url: "/o/r/actions/runs/171447/jobs/11" },
+  ] } };
+  const transientRequests: string[] = [];
+  const transient = new ForgejoAdapter({
+    repo: "o/r", prNumber: "7", baseUrl: "https://forgejo.example", token: "t",
+    fetchImpl: sequenceFetch({
+      [statusPath]: [status, status, status],
+      [jobsPath]: [{ status: 500, body: {} }, { body: [{ html_url: "/o/r/actions/runs/171447/jobs/11" }] }],
+    }, transientRequests),
+  });
+  const transientDiscovery = discoveryState();
+  const opts = { ...strict, selfRunNumbers: ["171447"], selfRunId: "987654", selfRunRepo: "o/r", selfRunOrigin: "https://forgejo.example", selfStatusDiscovery: transientDiscovery };
+  assert.equal(await transient.externalChecks(SHA, opts), null, "a transient jobs read makes the combined observation unknown");
+  assert.equal(transientDiscovery.runJobs, "unknown");
+  assert.deepEqual(await transient.externalChecks(SHA, opts), []);
+  assert.equal(transientDiscovery.runJobs, "single");
+  assert.deepEqual(await transient.externalChecks(SHA, opts), []);
+  assert.equal(transientDiscovery.found, true);
+  assert.deepEqual(transientRequests, [statusPath, jobsPath, statusPath, jobsPath, statusPath]);
+
+  const unavailableRequests: string[] = [];
+  const unavailable = new ForgejoAdapter({
+    repo: "o/r", prNumber: "7", baseUrl: "https://forgejo.example", token: "t",
+    fetchImpl: sequenceFetch({ [statusPath]: [status, status], [jobsPath]: [{ status: 404, body: { message: "not found" } }] }, unavailableRequests),
+  });
+  const unavailableDiscovery = discoveryState();
+  const unavailableOpts = { ...opts, selfStatusDiscovery: unavailableDiscovery };
+  assert.deepEqual(await unavailable.externalChecks(SHA, unavailableOpts), [{ name: "reviewer", state: "pending" }]);
+  assert.deepEqual(await unavailable.externalChecks(SHA, unavailableOpts), [{ name: "reviewer", state: "pending" }]);
+  assert.equal(unavailableDiscovery.runJobs, "unavailable");
+  assert.equal(unavailableDiscovery.runJobsUnavailableReason, "run-jobs endpoint returned HTTP 404");
+  assert.deepEqual(unavailableRequests, [statusPath, jobsPath, statusPath]);
+});
+
+test("Forgejo externalChecks: terminal sibling failure stays visible in auto mode", async () => {
+  const path = `/api/v1/repos/o/r/commits/${SHA}/status`;
+  const adapter = new ForgejoAdapter({
+    repo: "o/r", prNumber: "7", baseUrl: "https://forgejo.example", token: "t",
+    fetchImpl: sequenceFetch({ [path]: [{ body: { state: "failure", total_count: 1, statuses: [
+      { context: "unit-tests", status: "failure", target_url: "/o/r/actions/runs/171447/jobs/2" },
+    ] } }] }),
+  });
+  const discovery = discoveryState();
+  assert.deepEqual(await adapter.externalChecks(SHA, {
+    ...strict, selfRunNumbers: ["171447"], selfRunRepo: "o/r", selfRunOrigin: "https://forgejo.example", selfStatusDiscovery: discovery,
+  }), [{ name: "unit-tests", state: "failure" }]);
+  assert.equal(discovery.matchCount, 0);
+  assert.equal(discovery.found, false);
+  assert.equal(discovery.runJobs, "unknown", "a terminal match does not need the jobs endpoint");
 });
 
 test("Forgejo externalChecks: transientAsUnknown retries transport/5xx/undecodable reads; a 404 keeps the v2 fold", async () => {
@@ -129,12 +220,12 @@ function harness(adapter: PlatformReadAdapter, env: Record<string, string> = {})
   };
 }
 
-function fakeAdapter(replies: ({ name: string; state: string }[] | null)[], pr: unknown = null): PlatformReadAdapter & { calls: ExternalChecksOptions[] } {
+function fakeAdapter(replies: ({ name: string; state: string }[] | null)[], pr: unknown = null, platform: "github" | "forgejo" = "github"): PlatformReadAdapter & { calls: ExternalChecksOptions[] } {
   const calls: ExternalChecksOptions[] = [];
   let index = 0;
   return {
     calls,
-    platform: "github",
+    platform,
     getPr: async () => pr,
     externalChecks: async (_sha: string, options?: ExternalChecksOptions) => {
       calls.push(options ?? {});
@@ -170,6 +261,286 @@ test("runCiWait: every read uses transientAsUnknown and the shared deadline", as
   assert.equal(options.statusContext, "mine");
   assert.equal(options.apiTimeoutSec, "3");
   assert.equal(options.deadlineEpoch, String(1_767_225_600 + 60));
+  rmSync(h.dir, { recursive: true, force: true });
+});
+
+test("runCiWait: Forgejo auto mode passes run number candidates and the numeric jobs API key", async () => {
+  const adapter = fakeAdapter([[{ name: "ci/external", state: "success" }]], null, "forgejo");
+  const h = harness(adapter, {
+    FORGEJO_RUN_NUMBER: " 171447 ", FORGEJO_RUN_ID: " 98 ", GITHUB_RUN_NUMBER: "171447",
+    GITHUB_RUN_ID: " 99 ", FORGEJO_REPOSITORY: "o/r", FORGEJO_API_URL: "https://forgejo.example/api/v1",
+  });
+  assert.equal(await runCiWait(h.deps), 0);
+  assert.deepEqual(adapter.calls[0]?.selfRunNumbers, ["171447"]);
+  assert.equal(adapter.calls[0]?.selfRunId, "98", "numeric FORGEJO_RUN_ID takes precedence over GITHUB_RUN_ID");
+  assert.equal(adapter.calls[0]?.selfRunRepo, "o/r");
+  assert.equal(adapter.calls[0]?.selfRunOrigin, "https://forgejo.example");
+  assert.equal(adapter.calls[0]?.statusContext, "");
+  rmSync(h.dir, { recursive: true, force: true });
+  const fallbackIdAdapter = fakeAdapter([[{ name: "ci/external", state: "success" }]], null, "forgejo");
+  const fallbackId = harness(fallbackIdAdapter, {
+    FORGEJO_RUN_ID: "invalid", GITHUB_RUN_ID: "99", FORGEJO_RUN_NUMBER: "171447",
+  });
+  assert.equal(await runCiWait(fallbackId.deps), 0);
+  assert.equal(fallbackIdAdapter.calls[0]?.selfRunId, "99", "a non-numeric Forgejo run ID falls back to the numeric GitHub ID");
+  rmSync(fallbackId.dir, { recursive: true, force: true });
+  const idOnlyAdapter = fakeAdapter([[{ name: "ci/external", state: "success" }]], null, "forgejo");
+  const idOnly = harness(idOnlyAdapter, { FORGEJO_RUN_ID: "171447" });
+  assert.equal(await runCiWait(idOnly.deps), 0);
+  assert.deepEqual(idOnlyAdapter.calls[0]?.selfRunNumbers, []);
+  rmSync(idOnly.dir, { recursive: true, force: true });
+});
+
+test("runCiWait: a multi-job singleton status stays visible when the job URL does not match", async () => {
+  const statusPath = `/api/v1/repos/o/r/commits/${SHA}/status`;
+  const jobsPath = "/api/v1/repos/o/r/actions/runs/987654/jobs";
+  const requests: string[] = [];
+  const sibling = { context: "unit-tests", status: "pending", target_url: "/o/r/actions/runs/171447/jobs/2" };
+  const adapter = new ForgejoAdapter({
+    repo: "o/r", prNumber: "7", baseUrl: "https://forgejo.example", token: "t",
+    fetchImpl: sequenceFetch({
+      [statusPath]: [
+        { body: { state: "pending", total_count: 1, statuses: [sibling] } },
+        { body: { state: "pending", total_count: 1, statuses: [sibling] } },
+        { body: { state: "pending", total_count: 1, statuses: [sibling] } },
+        { body: { state: "success", total_count: 1, statuses: [{ ...sibling, status: "success" }] } },
+      ],
+      [jobsPath]: [{ body: [
+        { html_url: "https://forgejo.example/o/r/actions/runs/171447/jobs/11" },
+        { html_url: "https://forgejo.example/o/r/actions/runs/171447/jobs/12" },
+      ] }],
+    }, requests),
+  });
+  const h = harness(adapter, {
+    FORGEJO_RUN_NUMBER: "171447", FORGEJO_RUN_ID: "987654", FORGEJO_REPOSITORY: "o/r",
+    FORGEJO_API_URL: "https://forgejo.example/api/v1", CI_TIMEOUT_SEC: "60", CI_INTERVAL_SEC: "10",
+  });
+  assert.equal(await runCiWait(h.deps), 0);
+  assert.equal(readFileSync(h.outputFile, "utf8"), "ci_status_final=success\nci_status_skipped=false\n");
+  assert.match(readFileSync(h.checksFile, "utf8"), /\| unit-tests \| success \|/);
+  assert.equal(h.out.some((line) => line.includes("finalizing none")), false);
+  assert.equal(h.out.filter((line) => line.includes("workflow run has 2 jobs")).length, 1);
+  assert.deepEqual(requests, [statusPath, jobsPath, statusPath, statusPath, statusPath]);
+  rmSync(h.dir, { recursive: true, force: true });
+});
+
+test("runCiWait: multi-job pending sibling survives the no-check grace and later goes green", async () => {
+  const statusPath = `/api/v1/repos/o/r/commits/${SHA}/status`;
+  const jobsPath = "/api/v1/repos/o/r/actions/runs/987654/jobs";
+  const requests: string[] = [];
+  const sibling = { context: "unit-tests", status: "pending", target_url: "/o/r/actions/runs/171447/jobs/2" };
+  const adapter = new ForgejoAdapter({
+    repo: "o/r", prNumber: "7", baseUrl: "https://forgejo.example", token: "t",
+    fetchImpl: sequenceFetch({
+      [statusPath]: [
+        { body: { state: "pending", total_count: 1, statuses: [sibling] } },
+        { body: { state: "pending", total_count: 1, statuses: [sibling] } },
+        { body: { state: "pending", total_count: 1, statuses: [sibling] } },
+        { body: { state: "success", total_count: 1, statuses: [{ ...sibling, status: "success" }] } },
+      ],
+      [jobsPath]: [{ body: [
+        { html_url: "https://forgejo.example/o/r/actions/runs/171447/jobs/1" },
+        { html_url: "https://forgejo.example/o/r/actions/runs/171447/jobs/2" },
+      ] }],
+    }, requests),
+  });
+  const h = harness(adapter, {
+    FORGEJO_RUN_NUMBER: "171447", FORGEJO_RUN_ID: "987654", FORGEJO_REPOSITORY: "o/r",
+    FORGEJO_API_URL: "https://forgejo.example/api/v1", CI_TIMEOUT_SEC: "60", CI_INTERVAL_SEC: "10",
+  });
+  assert.equal(await runCiWait(h.deps), 0);
+  assert.equal(readFileSync(h.outputFile, "utf8"), "ci_status_final=success\nci_status_skipped=false\n");
+  assert.match(readFileSync(h.checksFile, "utf8"), /\| unit-tests \| success \|/);
+  assert.equal(h.out.some((line) => line.includes("finalizing none")), false);
+  assert.equal(h.out.filter((line) => line.includes("workflow run has 2 jobs")).length, 1);
+  assert.deepEqual(requests, [statusPath, jobsPath, statusPath, statusPath, statusPath]);
+  rmSync(h.dir, { recursive: true, force: true });
+});
+
+test("runCiWait: ambiguous pending jobs leave a sibling failure visible", async () => {
+  const path = `/api/v1/repos/o/r/commits/${SHA}/status`;
+  const adapter = new ForgejoAdapter({
+    repo: "o/r", prNumber: "7", baseUrl: "https://forgejo.example", token: "t",
+    fetchImpl: sequenceFetch({ [path]: [{ body: { state: "failure", total_count: 3, statuses: [
+      { context: "reviewer", status: "pending", target_url: "/o/r/actions/runs/171447/jobs/1" },
+      { context: "unit-tests", status: "failure", target_url: "/o/r/actions/runs/171447/jobs/2" },
+      { context: "security", status: "pending", target_url: "/o/r/actions/runs/171447/jobs/3" },
+    ] } }] }),
+  });
+  const h = harness(adapter, {
+    FORGEJO_RUN_NUMBER: "171447", FORGEJO_REPOSITORY: "o/r", FORGEJO_API_URL: "https://forgejo.example/api/v1",
+  });
+  assert.equal(await runCiWait(h.deps), 0);
+  assert.equal(h.out.filter((line) => line.includes("Warning: 2 statuses matched this run's Forgejo run number")).length, 1);
+  assert.equal(h.out.some((line) => line.includes("CI self status excluded by run match")), false);
+  assert.equal(h.out.some((line) => line.includes("Detected 1 failed check(s)")), true);
+  assert.match(readFileSync(h.checksFile, "utf8"), /\| unit-tests \| failure \|/);
+  rmSync(h.dir, { recursive: true, force: true });
+});
+
+test("runCiWait: Forgejo publication race discovers its status on a later poll", async () => {
+  const statusPath = `/api/v1/repos/o/r/commits/${SHA}/status`;
+  const jobsPath = "/api/v1/repos/o/r/actions/runs/987654/jobs";
+  const external = { context: "ci/external", status: "pending" };
+  const own = {
+    context: "ci/reviewer-generated",
+    status: "pending",
+    target_url: "https://forgejo.example/o/r/actions/runs/171447/jobs/11",
+  };
+  const requests: string[] = [];
+  const adapter = new ForgejoAdapter({
+    repo: "o/r", prNumber: "7", baseUrl: "https://forgejo.example", token: "t",
+    fetchImpl: sequenceFetch({
+      [statusPath]: [
+        { body: { state: "pending", total_count: 1, statuses: [external] } },
+        { body: { state: "pending", total_count: 2, statuses: [own, external] } },
+        { body: { state: "success", total_count: 2, statuses: [own, { ...external, status: "success" }] } },
+      ],
+      [jobsPath]: [{ body: [{ html_url: "https://forgejo.example/o/r/actions/runs/171447/jobs/11" }] }],
+    }, requests),
+  });
+  const h = harness(adapter, {
+    FORGEJO_RUN_NUMBER: "171447", FORGEJO_RUN_ID: "987654", FORGEJO_REPOSITORY: "o/r",
+    FORGEJO_API_URL: "https://forgejo.example/api/v1", CI_TIMEOUT_SEC: "60", CI_INTERVAL_SEC: "10",
+  });
+  assert.equal(await runCiWait(h.deps), 0);
+  const discoveryLine = h.out.findIndex((line) => line.includes("CI self status excluded by run match"));
+  const pendingLines = h.out.flatMap((line, index) => line.includes("Pending: 1/1 external check(s)") ? [index] : []);
+  assert.equal(discoveryLine >= 0, true);
+  assert.equal(h.out.filter((line) => line.includes("CI self status excluded by run match")).length, 1);
+  assert.equal(pendingLines.length, 2);
+  assert.equal(pendingLines[0]! < discoveryLine && discoveryLine < pendingLines[1]!, true);
+  assert.match(h.out[discoveryLine] ?? "", /context: ci\/reviewer-generated/);
+  assert.equal(readFileSync(h.outputFile, "utf8"), "ci_status_final=success\nci_status_skipped=false\n");
+  assert.match(readFileSync(h.checksFile, "utf8"), /\| ci\/external \| success \|/);
+  assert.deepEqual(requests, [statusPath, statusPath, jobsPath, statusPath]);
+  rmSync(h.dir, { recursive: true, force: true });
+});
+
+test("runCiWait: HTTP 408 Forgejo jobs lookup retries without an unavailable warning", async () => {
+  const statusPath = `/api/v1/repos/o/r/commits/${SHA}/status`;
+  const jobsPath = "/api/v1/repos/o/r/actions/runs/987654/jobs";
+  const status = { body: { state: "pending", total_count: 1, statuses: [
+    { context: "reviewer", status: "pending", target_url: "/o/r/actions/runs/171447/jobs/11" },
+  ] } };
+  const requests: string[] = [];
+  const adapter = new ForgejoAdapter({
+    repo: "o/r", prNumber: "7", baseUrl: "https://forgejo.example", token: "t",
+    fetchImpl: sequenceFetch({
+      [statusPath]: [status, status, status],
+      [jobsPath]: [{ status: 408, body: {} }, { body: [{ html_url: "/o/r/actions/runs/171447/jobs/11" }] }],
+    }, requests),
+  });
+  const h = harness(adapter, {
+    FORGEJO_RUN_NUMBER: "171447", FORGEJO_RUN_ID: "987654", FORGEJO_REPOSITORY: "o/r",
+    FORGEJO_API_URL: "https://forgejo.example/api/v1", CI_TIMEOUT_SEC: "60", CI_INTERVAL_SEC: "10",
+  });
+  assert.equal(await runCiWait(h.deps), 0);
+  assert.equal(h.out.some((line) => line.includes("Forgejo run-jobs API unavailable")), false);
+  assert.equal(h.out.filter((line) => line.includes("CI status read failed transiently")).length, 1);
+  assert.deepEqual(requests, [statusPath, jobsPath, statusPath, jobsPath, statusPath]);
+  assert.equal(readFileSync(h.outputFile, "utf8"), "ci_status_final=none\nci_status_skipped=false\n");
+  rmSync(h.dir, { recursive: true, force: true });
+});
+
+test("runCiWait: Forgejo jobs API 307 warns immediately once and keeps its singleton visible", async () => {
+  const statusPath = `/api/v1/repos/o/r/commits/${SHA}/status`;
+  const jobsPath = "/api/v1/repos/o/r/actions/runs/987654/jobs";
+  const status = { body: { state: "pending", total_count: 1, statuses: [
+    { context: "reviewer", status: "pending", target_url: "/o/r/actions/runs/171447/jobs/11" },
+  ] } };
+  const adapter = new ForgejoAdapter({
+    repo: "o/r", prNumber: "7", baseUrl: "https://forgejo.example", token: "t",
+    fetchImpl: sequenceFetch({ [statusPath]: [status, status, status], [jobsPath]: [{ status: 307, body: { message: "redirect" } }] }),
+  });
+  const h = harness(adapter, {
+    FORGEJO_RUN_NUMBER: "171447", FORGEJO_RUN_ID: "987654", FORGEJO_REPOSITORY: "o/r",
+    FORGEJO_API_URL: "https://forgejo.example/api/v1", CI_TIMEOUT_SEC: "25", CI_SKIP_ON_TIMEOUT: "true",
+  });
+  assert.equal(await runCiWait(h.deps), 1);
+  const warnings = h.out.filter((line) => line.includes("Warning: Forgejo run-jobs API unavailable"));
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0] ?? "", /HTTP 307/);
+  assert.match(warnings[0] ?? "", /set CI_STATUS_CONTEXT to disambiguate/);
+  assert.deepEqual(h.sleeps, [10, 10, 5]);
+  assert.match(readFileSync(h.checksFile, "utf8"), /\| reviewer \| pending \|/);
+  assert.match(readFileSync(h.outputFile, "utf8"), /ci_status_skipped=true/);
+  rmSync(h.dir, { recursive: true, force: true });
+});
+
+test("runCiWait: missing numeric Forgejo run ID warns immediately when the jobs proof is needed", async () => {
+  const statusPath = `/api/v1/repos/o/r/commits/${SHA}/status`;
+  const status = { body: { state: "pending", total_count: 1, statuses: [
+    { context: "reviewer", status: "pending", target_url: "/o/r/actions/runs/171447/jobs/11" },
+  ] } };
+  const requests: string[] = [];
+  const adapter = new ForgejoAdapter({
+    repo: "o/r", prNumber: "7", baseUrl: "https://forgejo.example", token: "t",
+    fetchImpl: sequenceFetch({ [statusPath]: [status, status, status] }, requests),
+  });
+  const h = harness(adapter, {
+    FORGEJO_RUN_NUMBER: "171447", FORGEJO_REPOSITORY: "o/r", FORGEJO_API_URL: "https://forgejo.example/api/v1",
+    CI_TIMEOUT_SEC: "25", CI_SKIP_ON_TIMEOUT: "true",
+  });
+  assert.equal(await runCiWait(h.deps), 1);
+  const warning = h.out.findIndex((line) => line.includes("Forgejo run-jobs API unavailable"));
+  assert.equal(warning, 1, "the definitive unavailable reason is logged on the first poll, before waiting");
+  assert.match(h.out[warning] ?? "", /run-id environment variable is missing or non-numeric/);
+  assert.match(h.out[warning] ?? "", /set CI_STATUS_CONTEXT to disambiguate/);
+  assert.equal(h.out.filter((line) => line.includes("Forgejo run-jobs API unavailable")).length, 1);
+  assert.deepEqual(requests, [statusPath, statusPath, statusPath], "missing run id never produces an unscoped jobs request");
+  assert.deepEqual(h.sleeps, [10, 10, 5]);
+  rmSync(h.dir, { recursive: true, force: true });
+});
+
+test("runCiWait: missing Forgejo self-status discovery warns only at timeout", async () => {
+  const adapter = fakeAdapter([[{ name: "own", state: "pending" }]], null, "forgejo");
+  const h = harness(adapter, { FORGEJO_RUN_NUMBER: "171447", FORGEJO_REPOSITORY: "o/r", FORGEJO_API_URL: "https://forgejo.example/api/v1", CI_TIMEOUT_SEC: "25", CI_SKIP_ON_TIMEOUT: "true" });
+  assert.equal(await runCiWait(h.deps), 1);
+  assert.equal(h.out.filter((line) => line.includes("could not identify this run's own Forgejo status")).length, 1);
+  assert.match(h.out.find((line) => line.includes("could not identify this run's own Forgejo status")) ?? "", /set CI_STATUS_CONTEXT to disambiguate/);
+  assert.match(readFileSync(h.outputFile, "utf8"), /ci_status_skipped=true/);
+  assert.deepEqual(adapter.calls[0]?.selfRunNumbers, ["171447"]);
+  assert.equal(adapter.calls[0]?.selfRunRepo, "o/r");
+  const noRunAdapter = fakeAdapter([[{ name: "own", state: "pending" }]], null, "forgejo");
+  const noRunNumber = harness(noRunAdapter, {
+    FORGEJO_RUN_ID: "171447", CI_TIMEOUT_SEC: "1", CI_INTERVAL_SEC: "1", CI_SKIP_ON_TIMEOUT: "false",
+  });
+  assert.equal(await runCiWait(noRunNumber.deps), 2);
+  assert.deepEqual(noRunAdapter.calls[0]?.selfRunNumbers, []);
+  assert.equal(noRunNumber.out.some((line) => line.includes("could not identify this run's own Forgejo status")), true);
+  rmSync(h.dir, { recursive: true, force: true });
+  rmSync(noRunNumber.dir, { recursive: true, force: true });
+});
+
+test("runCiWait: Forgejo explicit context overrides automatic run matching", async () => {
+  const adapter = fakeAdapter([[{ name: "ci/explicit", state: "success" }]], null, "forgejo");
+  const h = harness(adapter, { FORGEJO_RUN_NUMBER: "171447", CI_STATUS_CONTEXT: "explicit" });
+  assert.equal(await runCiWait(h.deps), 0);
+  assert.equal(adapter.calls[0]?.statusContext, "explicit");
+  assert.equal(adapter.calls[0]?.selfRunNumbers, undefined);
+  assert.equal(adapter.calls[0]?.selfStatusDiscovery, undefined);
+  assert.equal(h.out.some((line) => line.includes("CI self status excluded")), false);
+  rmSync(h.dir, { recursive: true, force: true });
+});
+
+test("runCiWait: whitespace-only Forgejo context enables automatic run matching", async () => {
+  const adapter = fakeAdapter([[{ name: "ci/external", state: "success" }]], null, "forgejo");
+  const h = harness(adapter, { FORGEJO_RUN_NUMBER: "171447", CI_STATUS_CONTEXT: "   " });
+  assert.equal(await runCiWait(h.deps), 0);
+  assert.equal(adapter.calls[0]?.statusContext, "   ");
+  assert.deepEqual(adapter.calls[0]?.selfRunNumbers, ["171447"]);
+  assert.equal(adapter.calls[0]?.selfStatusDiscovery?.found, false);
+  assert.equal(adapter.calls[0]?.selfStatusDiscovery?.ambiguous, false);
+  rmSync(h.dir, { recursive: true, force: true });
+});
+
+test("runCiWait: GitHub retains the default status context when unset", async () => {
+  const adapter = fakeAdapter([[{ name: "ci/x", state: "success" }]]);
+  const h = harness(adapter);
+  assert.equal(await runCiWait(h.deps), 0);
+  assert.equal(adapter.calls[0]?.statusContext, "pr-reviewer-action");
+  assert.equal(adapter.calls[0]?.selfRunNumbers, undefined);
   rmSync(h.dir, { recursive: true, force: true });
 });
 

@@ -60,6 +60,11 @@ test("precheck entrypoint writes the precheck ABI outputs", async () => {
   }
 });
 
+test("publishInputFromEnv reads internal degraded gate-bypass eligibility", () => {
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", DEGRADED_GATE_BYPASS: "true" } as NodeJS.ProcessEnv, "github").degradedGateBypass, true);
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", DEGRADED_GATE_BYPASS: "false" } as NodeJS.ProcessEnv, "github").degradedGateBypass, false);
+});
+
 test("publish entrypoint rejects an invalid publish mode fail-closed", async () => {
   await assert.rejects(
     publishMain({

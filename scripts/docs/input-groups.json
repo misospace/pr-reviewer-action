@@ -43,6 +43,7 @@
       "verdict-policy",
       "non-blocking-finding-categories",
       "fail-on-request-changes",
+      "fail-on-degraded-review",
       "inline-findings",
       "inline-findings-max",
       "validate-required-checks",

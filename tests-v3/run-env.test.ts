@@ -60,6 +60,7 @@ test("projection values: defaults, numbers, booleans, and revealed secrets", () 
   assert.equal(env.AI_API_FORMAT, "anthropic");
   assert.equal(env.AI_MAX_TOKENS, "4096");
   assert.equal(env.CI_STATUS_CHECK, "true");
+  assert.equal(env.FAIL_ON_DEGRADED_REVIEW, "false");
   assert.equal(env.GITHUB_TOKEN, "tok", "secrets are revealed on the stage ABI, never redacted");
   assert.equal(env.AI_TEMPERATURE, "0.1", "contract default applies when the input is unset");
 });

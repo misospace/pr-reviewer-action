@@ -5,18 +5,21 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { resolvePartialCoverage, runReview } from "../src/run/review.js";
+import { failOnRequestChanges } from "../src/run/action.js";
+import { parseMetadata } from "../src/precheck/metadata.js";
 import { authoritativeBodyRevision, harnessTransportAdapter, type PrBodyRevision } from "../src/run/stages.js";
 import type { StageEnv } from "../src/run/env.js";
 import { forkGate } from "../src/gates/gates.js";
 import { startMockServer } from "./helpers.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { publishReview } from "../src/publish/publish.js";
+import { FINDING_TRAILER } from "../src/context/review-threads.js";
 import type { NativeReviewRequest, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
 
 /** A minimal in-memory platform adapter: the reads a small PR needs, served
  * without network. Everything else must not be reached by the pipeline with
  * the feature flags the tests set. */
-function mockPlatform(options: { diff?: string; files?: unknown[]; title?: string; body?: string; additions?: number; deletions?: number } = {}): PlatformReadAdapter {
+function mockPlatform(options: { diff?: string; files?: unknown[]; title?: string; body?: string; additions?: number; deletions?: number; threads?: unknown[] } = {}): PlatformReadAdapter {
   return {
     platform: "github",
     getPr: () => {
@@ -41,7 +44,7 @@ function mockPlatform(options: { diff?: string; files?: unknown[]; title?: strin
     },
     getIssue: () => Promise.resolve({ ok: false, error: "not served" }),
     listPrConversationComments: () => Promise.resolve({ ok: true, data: [] }),
-    listReviewThreads: () => Promise.resolve({ ok: true, data: [] }),
+    listReviewThreads: () => Promise.resolve({ ok: true, data: options.threads ?? [] }),
     listPrReviewsPaginated: () => Promise.resolve({ ok: true, data: [] }),
     listIssueComments: () => Promise.resolve([]),
     listPrReviews: () => Promise.resolve([]),
@@ -116,6 +119,7 @@ test("runs the full review end to end: artifacts, outputs, marker", async () => 
     });
     // Verdict surfaced through the typed outputs.
     assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.outputs.degradedGateBypass, false);
     assert.equal(result.outputs.reviewRoute, "legacy");
     assert.equal(result.outputs.analysisEngine, "m@http://127.0.0.1:" + new URL(server.url).port + " (openai)");
     assert.match(result.outputs.analysisEngine, /^m@http/);
@@ -186,6 +190,112 @@ test("#975: the step summary renders the findings table and counts for a finding
     await server.close();
     cleanup();
   }
+});
+
+async function runVerificationThreadVerdict(
+  modelVerdict: Record<string, unknown>,
+  options: { policy?: string; threadBody?: string } = {},
+): Promise<Record<string, unknown>> {
+  const policy = options.policy ?? "model";
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict(modelVerdict)));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const body = options.threadBody ?? `**⚠️ Major (verification):** confirm the production metric exists\n\n${FINDING_TRAILER}`;
+    await runReview({
+      env: { VERDICT_POLICY: policy },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "verdict-policy": policy,
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform({
+        threads: [{
+          thread_id: "PRRT_1",
+          path: "README.md",
+          line: 1,
+          original_line: 1,
+          resolved: false,
+          outdated: false,
+          comments: [{
+            id: 1,
+            user: { login: "bot" },
+            created_at: "2026-10-01T00:00:00Z",
+            updated_at: "2026-10-01T00:00:00Z",
+            body,
+          }],
+        }],
+      }),
+      persistArtifacts: true,
+      quiet: true,
+    });
+    return JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as Record<string, unknown>;
+  } finally {
+    await server.close();
+    cleanup();
+  }
+}
+
+test("#977: runReview removes the enforcement banner after unresolved verification relaxes the verdict", async () => {
+  const artifact = await runVerificationThreadVerdict({
+    verdict: "request_changes",
+    review_markdown: "Please confirm the metric exists.\n",
+    findings: [{ severity: "major", category: "verification", file: null, line: null, message: "confirm the production metric exists" }],
+  });
+  assert.equal(artifact.verdict, "approve");
+  assert.doesNotMatch(String(artifact.review_markdown), /Final Recommendation/);
+  assert.doesNotMatch(String(artifact.review_markdown), /Request changes/);
+  // Prove the model-policy relaxation ran (not the strict derivation, which
+  // would also approve): only the #977 relaxation writes this note.
+  assert.match(String(artifact.review_markdown), /_Verdict relaxed from structured findings \(#977\)/);
+});
+
+test("#977: runReview removes the enforcement banner after a verification thread withdrawal", async () => {
+  const artifact = await runVerificationThreadVerdict({
+    verdict: "request_changes",
+    review_markdown: "Please confirm the metric exists.\n",
+    findings: [{ severity: "major", category: "verification", file: null, line: null, message: "confirm the production metric exists" }],
+    thread_dispositions: [{ thread_id: "PRRT_1", disposition: "withdrawn", evidence: "human confirmed the metric exists" }],
+  });
+  assert.equal(artifact.verdict, "approve");
+  assert.doesNotMatch(String(artifact.review_markdown), /Final Recommendation/);
+  assert.doesNotMatch(String(artifact.review_markdown), /Request changes/);
+  assert.match(String(artifact.review_markdown), /_Verdict relaxed from structured findings \(#977\)/);
+});
+
+test("#977: runReview does not attribute a non-forcing settlement to enforcement", async () => {
+  const artifact = await runVerificationThreadVerdict({
+    verdict: "request_changes",
+    review_markdown: "Please fix the real defect.\n",
+    findings: [{ severity: "major", category: "bug", file: null, line: null, message: "real defect" }],
+  }, {
+    policy: "model",
+    threadBody: `**⚠️ Major (bug):** real defect\n\n${FINDING_TRAILER}`,
+  });
+  assert.equal(artifact.verdict, "request_changes");
+  assert.doesNotMatch(String(artifact.review_markdown), /Final Recommendation/);
+});
+
+test("#977: runReview keeps the banner when thread settlement actually escalates", async () => {
+  const artifact = await runVerificationThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [],
+  }, {
+    policy: "findings_severity_gated",
+    threadBody: `**🛑 Blocker (bug):** real defect\n\n${FINDING_TRAILER}`,
+  });
+  assert.equal(artifact.verdict, "request_changes");
+  assert.match(String(artifact.review_markdown), /## Final Recommendation/);
 });
 
 test("#838: with no runDir/PR_REVIEWER_RUN_DIR, run never treats the checkout (cwd) as its own artifacts", async () => {
@@ -430,6 +540,7 @@ for (const withFallback of [false, true]) {
         quiet: true,
       });
       assert.equal(result.outputs.verdict, "request_changes");
+      assert.equal(result.outputs.degradedGateBypass, true);
       const artifact = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as { verdict: string; review_markdown: string };
       assert.equal(artifact.verdict, "request_changes");
       assert.match(artifact.review_markdown, /automated notice, not a substantive review/);
@@ -591,6 +702,7 @@ test("#867: primary and fallback both classify a non-2xx reply as transport, and
       `the parse-retry path must not be taken on either route, got: ${JSON.stringify(errors)}`,
     );
     assert.equal(result.outputs.verdict, "request_changes");
+    assert.equal(result.outputs.degradedGateBypass, true);
     const artifact = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as { verdict: string; review_markdown: string };
     assert.equal(artifact.verdict, "request_changes");
     assert.match(artifact.review_markdown, /automated notice, not a substantive review/);
@@ -807,7 +919,7 @@ test("#965: auto routing starts on primary even for an auth-risk PR", async () =
   }
 });
 
-test("primary failure uses primary retries and the availability fallback", async () => {
+test("primary non-retryable failure fast-fails to the availability fallback", async () => {
   const primaryServer = await startMockServer((_req, _body, res) => {
     res.statusCode = 400;
     res.setHeader("Content-Type", "application/json");
@@ -833,15 +945,15 @@ test("primary failure uses primary retries and the availability fallback", async
         "ai-smart-base-url": smartServer.url, "ai-smart-model": "smart-m", "ai-smart-api-key": "smart-key",
         "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
         "ai-stream": "false", "review-routing-mode": "auto",
-        "ai-primary-retries": "2", "ai-primary-retry-delay-sec": "0", "ai-connect-timeout-sec": "2",
+        "ai-primary-retries": "8", "ai-primary-retry-delay-sec": "0", "ai-connect-timeout-sec": "2",
         "ai-request-timeout-sec": "2", "tool-mode": "off", "deep-review": "false",
       },
       runDir, workspace: runDir,
       platformAdapter: mockPlatform({ files: [{ filename: "src/auth/login.ts", status: "modified", additions: 1, deletions: 1, changes: 2 }] }),
-      sleep: async () => {}, quiet: true,
+      sleep: async () => { assert.fail("HTTP 400 must not incur retry backoff"); }, quiet: true,
     });
     assert.equal(result.outputs.reviewRoute, "primary");
-    assert.equal(primaryServer.requests.length, 2, "primary retries must be used before fallback");
+    assert.equal(primaryServer.requests.length, 1, "non-retryable HTTP 400 gets one primary attempt before fallback");
     assert.equal(smartCalls, 0, "risk flags alone must not route a failure to smart");
     assert.ok(primaryServer.requests.every((request) => request.headers.authorization === "Bearer primary-key"));
     assert.equal(fallbackServer.requests.length, 1);
@@ -855,6 +967,357 @@ test("primary failure uses primary retries and the availability fallback", async
     await fallbackServer.close();
     cleanup();
   }
+});
+
+test("#978: a 403 gets one primary request before fallback and publishes the fallback verdict", async () => {
+  let primaryReviewAttempts = 0;
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    primaryReviewAttempts += 1;
+    res.setHeader("Content-Type", "text/plain");
+    res.statusCode = 403;
+    res.end("model forbidden\n::warning::echoed key known-primary-api-key-978");
+  });
+  const fallbackServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ review_markdown: "Fallback review after forbidden primary.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const sleeps: number[] = [];
+  const annotations: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "known-primary-api-key-978",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "off", "deep-review": "false",
+        "ai-primary-retries": "8", "ai-primary-retry-delay-sec": "15",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async (seconds) => { sleeps.push(seconds); },
+      annotate: (line) => { annotations.push(line); },
+      quiet: true,
+    });
+    assert.equal(primaryServer.requests.length, 1, "HTTP 403 must make exactly one primary request despite the retry budget of 8");
+    assert.equal(primaryReviewAttempts, 1);
+    assert.equal(fallbackServer.requests.length, 1, "the fallback must run after the primary 403");
+    assert.deepEqual(sleeps, [], "a non-retryable 403 must not incur backoff");
+    assert.equal(annotations.length, 1, "the primary 403 should emit exactly one workflow annotation");
+    assert.match(annotations[0]!, /::error::.*HTTP 403/);
+    assert.ok(!annotations[0]!.includes("known-primary-api-key-978"), "the annotation must not expose the configured API key");
+    assert.ok(!/[\r\n]/.test(annotations[0]!), "provider body text must not break out of the annotation line");
+    assert.ok(!annotations[0]!.includes("::warning::"), "provider body text must not inject another workflow command");
+    assert.equal(result.outputs.verdict, "approve");
+    assert.match(result.outputs.analysisEngine, /fallback-m@.*fallback \(primary failed\)/);
+    assert.match(result.outputs.reviewMarkdown, /Fallback review after forbidden primary\./);
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
+test("#978: native-loop fallback request_changes without deterministic blockers passes the gate by default", async () => {
+  const primaryServer = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      // The planning turn gets no tool calls and records native_loop_degraded.
+      res.end(verdictBody(baseVerdict()));
+      return;
+    }
+    res.statusCode = 500;
+    res.end(JSON.stringify({ error: "primary unavailable" }));
+  });
+  const fallbackServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ verdict: "request_changes", review_markdown: "Fallback request-changes review.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop", "tool-max-requests": "1",
+        "verdict-policy": "model", "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2", "deep-review": "false",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      quiet: true,
+    });
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_degraded?: string };
+    assert.equal(harness.native_loop_degraded, "no-tool-calls", "the planning turn must exercise degraded native-loop coverage");
+    assert.ok(primaryServer.requests.length >= 2, "the primary must serve its native-loop turn and fail over to the fallback");
+    assert.equal(fallbackServer.requests.length, 1, "fallback must provide the final verdict");
+    assert.equal(result.outputs.verdict, "request_changes");
+    assert.equal(result.outputs.verdictSource, "model", "the fallback itself returned request_changes");
+    assert.match(result.outputs.analysisEngine, /fallback-m@.*fallback \(primary failed\)/);
+    assert.match(result.outputs.reviewMarkdown, /Fallback request-changes review\./);
+    assert.equal(result.outputs.degradedGateBypass, true, "the fallback received no evidence and no deterministic block fired");
+    assert.equal(parseMetadata(result.marker)?.degraded_gate_bypass, true);
+    assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 0);
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
+test("#978: primary no-evidence review does not qualify for the fallback gate bypass", async () => {
+  const server = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(Array.isArray(request.tools) && request.tools.length > 0
+      ? baseVerdict()
+      : baseVerdict({ verdict: "request_changes", review_markdown: "Primary corpus-only review.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": server.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop", "tool-max-requests": "1",
+        "verdict-policy": "model", "ai-primary-retries": "0", "deep-review": "false",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      quiet: true,
+    });
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_degraded?: string };
+    assert.equal(harness.native_loop_degraded, "no-tool-calls");
+    assert.equal(result.outputs.verdict, "request_changes");
+    assert.equal(result.outputs.degradedGateBypass, false);
+    assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 1);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#978: fallback no-evidence does not bypass when requirement-trace enforcement adds a finding", async () => {
+  const primaryServer = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      res.end(verdictBody(baseVerdict()));
+      return;
+    }
+    res.statusCode = 500;
+    res.end(JSON.stringify({ error: "primary unavailable" }));
+  });
+  const fallbackServer = await startMockServer((_req, body, res) => {
+    const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      verdict: "request_changes",
+      review_markdown: "Fallback request-changes review.\n",
+      requirement_coverage: [{
+        requirement_id: reqId,
+        disposition: "unmet",
+        enforcement: [],
+        test: [],
+        reason: "no code path compares source SHA or target branch at all",
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    const platform = requirementTracePlatform();
+    platform.getPrDiff = async () => `diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+world\n`;
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop", "tool-max-requests": "1",
+        "verdict-policy": "model", "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2", "deep-review": "false",
+        "ci-status-check": "false", "requirement-trace": "true",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: platform,
+      sleep: async () => {},
+      quiet: true,
+    });
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_degraded?: string };
+    assert.equal(harness.native_loop_degraded, "no-tool-calls");
+    assert.match(result.outputs.analysisEngine, /fallback-m@.*fallback \(primary failed\)/);
+    assert.equal(result.outputs.verdict, "request_changes");
+    const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
+    assert.ok(findings.some((finding) => finding.severity === "major" && finding.message.startsWith("requirement not enforced: ")));
+    assert.equal(result.outputs.degradedGateBypass, false, "the synthesized requirement finding is a deterministic block");
+    assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 1);
+    assert.equal(parseMetadata(result.marker)?.degraded_gate_bypass, undefined, "ineligible bypass state must not be persisted");
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
+test("#978: fallback no-evidence unverifiable trace blocks bypass without synthesizing a finding", async () => {
+  const primaryServer = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      res.end(verdictBody(baseVerdict()));
+      return;
+    }
+    res.statusCode = 500;
+    res.end(JSON.stringify({ error: "primary unavailable" }));
+  });
+  const fallbackServer = await startMockServer((_req, body, res) => {
+    const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      verdict: "request_changes",
+      review_markdown: "Fallback request-changes review with unverifiable trace.\n",
+      requirement_coverage: [{
+        requirement_id: reqId,
+        disposition: "unverifiable",
+        enforcement: [],
+        test: [],
+        reason: "The available evidence does not establish that source SHA is checked.",
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    const platform = requirementTracePlatform();
+    platform.getPrDiff = async () => `diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+world\n`;
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop", "tool-max-requests": "1",
+        "verdict-policy": "model", "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2", "deep-review": "false",
+        "ci-status-check": "false", "requirement-trace": "true",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: platform,
+      sleep: async () => {},
+      quiet: true,
+    });
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_degraded?: string };
+    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as { rows: Array<{ disposition: string }>; incomplete: boolean };
+    assert.equal(harness.native_loop_degraded, "no-tool-calls");
+    assert.equal(trace.incomplete, true);
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.equal(result.reviewArtifact.requirement_trace_incomplete, true);
+    assert.match(result.outputs.analysisEngine, /fallback-m@.*fallback \(primary failed\)/);
+    assert.equal(result.outputs.verdict, "request_changes");
+    const findings = JSON.parse(result.outputs.findings) as Array<{ message: string }>;
+    assert.ok(!findings.some((finding) => finding.message.startsWith("requirement not enforced: ")), "unverifiable claims do not synthesize unmet findings");
+    assert.equal(result.outputs.degradedGateBypass, false);
+    assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 1);
+    assert.equal(parseMetadata(result.marker)?.degraded_gate_bypass, undefined, "ineligible bypass state must not be persisted");
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
+async function runFallbackFindingEscalation(
+  verdictPolicy: "strict" | "findings_severity_gated",
+  severity: "major" | "blocker",
+) {
+  const primaryServer = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      res.end(verdictBody(baseVerdict()));
+      return;
+    }
+    res.statusCode = 500;
+    res.end(JSON.stringify({ error: "primary unavailable" }));
+  });
+  const fallbackServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      verdict: "approve",
+      review_markdown: "Fallback approve with a blocking finding.\n",
+      findings: [{
+        severity,
+        category: "bug",
+        title: `${severity} fallback finding`,
+        detail: "A blocking issue.",
+        file: "README.md",
+        line: 2,
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    return await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop", "tool-max-requests": "1",
+        "verdict-policy": verdictPolicy, "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2", "deep-review": "false",
+        "ci-status-check": "false",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      quiet: true,
+    });
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+}
+
+test("#978: strict blocker finding from fallback cannot bypass fail-on-request-changes", async () => {
+  const result = await runFallbackFindingEscalation("strict", "major");
+  const harness = JSON.parse(result.artifacts.get("tool-harness.json")?.toString() ?? "{}") as { native_loop_degraded?: string };
+  assert.equal(harness.native_loop_degraded, "no-tool-calls");
+  assert.equal(result.outputs.verdict, "request_changes");
+  assert.equal(result.outputs.verdictSource, "findings");
+  assert.equal(result.outputs.degradedGateBypass, false);
+  assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 1);
+  assert.equal(parseMetadata(result.marker)?.degraded_gate_bypass, undefined, "ineligible bypass state must not be persisted");
+});
+
+test("#978: findings_severity_gated blocker from fallback cannot bypass fail-on-request-changes", async () => {
+  const result = await runFallbackFindingEscalation("findings_severity_gated", "blocker");
+  const harness = JSON.parse(result.artifacts.get("tool-harness.json")?.toString() ?? "{}") as { native_loop_degraded?: string };
+  assert.equal(harness.native_loop_degraded, "no-tool-calls");
+  assert.equal(result.outputs.verdict, "request_changes");
+  assert.equal(result.outputs.verdictSource, "findings");
+  assert.equal(result.outputs.degradedGateBypass, false);
+  assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 1);
+  assert.equal(parseMetadata(result.marker)?.degraded_gate_bypass, undefined, "ineligible bypass state must not be persisted");
 });
 
 test("#940: the declared fallback capacity bounds primary and recovery corpora", async () => {
