@@ -1,5 +1,43 @@
 # Changelog
 
+## [3.4.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.3.0...source-v3.4.0) (2026-10-07)
+
+
+### Features
+
+* **precheck:** skip draft PRs deterministically ([#972](https://github.com/misospace/pr-reviewer-action/issues/972)) ([3634ed5](https://github.com/misospace/pr-reviewer-action/commit/3634ed5ef2ec87bc377a83c9798509db166b535a))
+* **requirement-trace:** support distributed enforcement ([#981](https://github.com/misospace/pr-reviewer-action/issues/981)) ([306d92c](https://github.com/misospace/pr-reviewer-action/commit/306d92c3692b2f45b7d0b6b469eda51ce60cd8cd)), closes [#962](https://github.com/misospace/pr-reviewer-action/issues/962)
+* **specialists:** trusted model-profile overrides ([#966](https://github.com/misospace/pr-reviewer-action/issues/966)) ([#979](https://github.com/misospace/pr-reviewer-action/issues/979)) ([d791545](https://github.com/misospace/pr-reviewer-action/commit/d791545b57c93eb5b11265e52aa5f641cdbbe26c))
+
+
+### Bug Fixes
+
+* **ci-evidence:** carry raw check conclusions ([#995](https://github.com/misospace/pr-reviewer-action/issues/995)) ([97a24ba](https://github.com/misospace/pr-reviewer-action/commit/97a24bafa9234553fffde3b49665000375ce6e79))
+* **classification:** ignore `../` inside comments ([#960](https://github.com/misospace/pr-reviewer-action/issues/960)) ([#968](https://github.com/misospace/pr-reviewer-action/issues/968)) ([811dfcc](https://github.com/misospace/pr-reviewer-action/commit/811dfccc1007f28b0db389a4d5a2e684a36be06e))
+* **corpus:** stop labelling every PR diff as truncated ([#992](https://github.com/misospace/pr-reviewer-action/issues/992)) ([605b7ee](https://github.com/misospace/pr-reviewer-action/commit/605b7eef7ea0dbe94b538122097e3abbb4eb9590))
+* **forgejo:** auto-discover own CI status ([#984](https://github.com/misospace/pr-reviewer-action/issues/984)) ([e579697](https://github.com/misospace/pr-reviewer-action/commit/e5796977b9aeb3dcff0c4a79b06fd31f123bba75))
+* **gate:** put the blocking findings on the failed check and in the step summary ([#975](https://github.com/misospace/pr-reviewer-action/issues/975)) ([#988](https://github.com/misospace/pr-reviewer-action/issues/988)) ([e5106a1](https://github.com/misospace/pr-reviewer-action/commit/e5106a1820f6fc539045fad2a06068066ce68d76))
+* **model:** stop retrying non-retryable HTTP errors, unblock degraded verdicts ([#987](https://github.com/misospace/pr-reviewer-action/issues/987)) ([0911d88](https://github.com/misospace/pr-reviewer-action/commit/0911d88f1a2d7959b859700f220f1f11785aecd2)), closes [#978](https://github.com/misospace/pr-reviewer-action/issues/978)
+* **precheck:** authenticate managed-body provenance before skips ([#973](https://github.com/misospace/pr-reviewer-action/issues/973)) ([0f5ef1f](https://github.com/misospace/pr-reviewer-action/commit/0f5ef1fb1239b5e5e3a7138e0fbdf5f16de97f7c))
+* **precheck:** paginate GitHub managed reads ([#971](https://github.com/misospace/pr-reviewer-action/issues/971)) ([aac8a77](https://github.com/misospace/pr-reviewer-action/commit/aac8a77e0034a446eeb959ecd1c88acb7cb28f39))
+* **precheck:** paginate GitHub managed reads ([#971](https://github.com/misospace/pr-reviewer-action/issues/971)) ([fa8903c](https://github.com/misospace/pr-reviewer-action/commit/fa8903c0b96320fd8d6beec3c07c5c544874290f))
+* **redact:** mask dashed sk- key families in source evidence ([#997](https://github.com/misospace/pr-reviewer-action/issues/997)) ([54436f3](https://github.com/misospace/pr-reviewer-action/commit/54436f360bec016dd77ff9f216f75e1a3b7b8417))
+* **redact:** mask OpenAI-style sk- keys in published prose ([#991](https://github.com/misospace/pr-reviewer-action/issues/991)) ([ad8fa7f](https://github.com/misospace/pr-reviewer-action/commit/ad8fa7f53c83614ba31c997f16dcc6576ed14437)), closes [#989](https://github.com/misospace/pr-reviewer-action/issues/989)
+* **redact:** mask remaining verified sk- families ([#1002](https://github.com/misospace/pr-reviewer-action/issues/1002)) ([fcdf907](https://github.com/misospace/pr-reviewer-action/commit/fcdf9077bd8a2f7946fed2039121ec67d02c6d9e))
+* **requirement-trace:** accept deterministic state proofs ([#985](https://github.com/misospace/pr-reviewer-action/issues/985)) ([#990](https://github.com/misospace/pr-reviewer-action/issues/990)) ([ce437eb](https://github.com/misospace/pr-reviewer-action/commit/ce437ebecf43f08c676df8184cc614e9607abfc6))
+* **requirement-trace:** repair a verdict with no trace claims ([#959](https://github.com/misospace/pr-reviewer-action/issues/959)) ([#963](https://github.com/misospace/pr-reviewer-action/issues/963)) ([079f485](https://github.com/misospace/pr-reviewer-action/commit/079f4856efd223d457fa7ed13a08f06a5ecd7786))
+* **requirements:** treat hyphenated code spans as atomic subject terms ([#1001](https://github.com/misospace/pr-reviewer-action/issues/1001)) ([9ef0c65](https://github.com/misospace/pr-reviewer-action/commit/9ef0c656720c26ea4640459d7745485b349acb59))
+* **routing:** drop direct-smart pre-routing ([#965](https://github.com/misospace/pr-reviewer-action/issues/965)) ([200ef91](https://github.com/misospace/pr-reviewer-action/commit/200ef916496962e887e3a77fc52d57154618e1fc))
+* **routing:** drop direct-smart pre-routing ([#965](https://github.com/misospace/pr-reviewer-action/issues/965)) ([bbea21c](https://github.com/misospace/pr-reviewer-action/commit/bbea21cbd87325941cebdc82d4e7dad9004267d3))
+* **routing:** encode primary-only first pass in code ([735f664](https://github.com/misospace/pr-reviewer-action/commit/735f6647a62d6e11fbe86e68f60f7480387b36aa))
+* **routing:** prebuild smart corpus for escalation ([f1070f2](https://github.com/misospace/pr-reviewer-action/commit/f1070f25732160bc024deb9c699343d1fcddfd56))
+* **verdict:** verification asks never block a PR ([#986](https://github.com/misospace/pr-reviewer-action/issues/986)) ([9b488d4](https://github.com/misospace/pr-reviewer-action/commit/9b488d492d60e4f26a2ea781afddc832ac887a4f))
+
+
+### Chores
+
+* remove the retired parity/snapshot harness ([#983](https://github.com/misospace/pr-reviewer-action/issues/983)) ([cbc8f47](https://github.com/misospace/pr-reviewer-action/commit/cbc8f47867e13626f58ce96f9a4ec467d9139c57))
+
 ## [3.3.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.2.0...source-v3.3.0) (2026-10-05)
 
 
