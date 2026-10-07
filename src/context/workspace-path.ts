@@ -64,23 +64,19 @@ export function workspacePathExists(workspace: string, path: string): boolean {
   }
 }
 
-/** `[ -e ]` under the #805 containment rule: refuses absolute paths, `..`
- * components and any symlink component, then requires the target to exist.
- * `workspacePathExists` alone follows symlinks, so a checkout symlink pointing
- * at runner state would satisfy an existence check. */
-export function workspacePathExistsContained(workspace: string, path: string): boolean {
-  if (path === "" || path.startsWith("/")) return false;
+/** True when any component of a checkout-relative `path` is a symlink, or when
+ * the path is absolute or contains a `..` component. Used to refuse paths
+ * whose resolution the containment guard cannot vouch for: such a path may
+ * resolve into runner filesystem state, so neither its existence nor its
+ * absence can be asserted from the checkout. */
+export function workspacePathHasSymlinkComponent(workspace: string, path: string): boolean {
+  if (path === "" || path.startsWith("/")) return true;
   let current = workspace;
   for (const part of path.split("/")) {
-    if (part === "..") return false;
+    if (part === "..") return true;
     if (part === "" || part === ".") continue;
     current = `${current}/${part}`;
-    if (isSymlink(current)) return false;
+    if (isSymlink(current)) return true;
   }
-  try {
-    statSync(current);
-    return true;
-  } catch {
-    return false;
-  }
+  return false;
 }

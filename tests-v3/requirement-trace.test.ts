@@ -32,7 +32,7 @@ import {
   type RequirementTraceArtifact,
 } from "../src/enforcement/requirement-trace.js";
 import { buildTraceRepairUserMessage, normalizeTraceRepairPayload, runRequirementTraceRepairPass } from "../src/requirements/trace-repair.js";
-import { workspacePathExistsContained } from "../src/context/workspace-path.js";
+import { workspacePathHasSymlinkComponent } from "../src/context/workspace-path.js";
 
 function artifact(overrides: Record<string, unknown> = {}): ReviewArtifact {
   return { verdict: "approve", review_markdown: "review", findings: [], ...overrides } as ReviewArtifact;
@@ -2992,7 +2992,7 @@ test("#985: real existence and genuine absence still satisfy structural claims",
   }
 });
 
-test("#985: workspacePathExistsContained rejects symlinks and escaping paths", () => {
+test("#985: workspacePathHasSymlinkComponent refuses symlinks and escaping paths", () => {
   const workspace = makeWorkspace();
   try {
     writeFile(workspace, "real.json", ["{}"]);
@@ -3002,15 +3002,55 @@ test("#985: workspacePathExistsContained rejects symlinks and escaping paths", (
     symlinkSync(join(workspace, "missing-target-985"), join(workspace, "dangling-link.json"));
     symlinkSync(join(workspace, "real-dir"), join(workspace, "component-link"), "dir");
 
-    assert.equal(workspacePathExistsContained(workspace, "real.json"), true);
-    assert.equal(workspacePathExistsContained(workspace, "real-dir"), true);
-    assert.equal(workspacePathExistsContained(workspace, "file-link.json"), false);
-    assert.equal(workspacePathExistsContained(workspace, "dir-link"), false);
-    assert.equal(workspacePathExistsContained(workspace, "dangling-link.json"), false);
-    assert.equal(workspacePathExistsContained(workspace, "/etc/hosts"), false);
-    assert.equal(workspacePathExistsContained(workspace, "../"), false);
-    assert.equal(workspacePathExistsContained(workspace, "component-link/inside.json"), false);
+    assert.equal(workspacePathHasSymlinkComponent(workspace, "real.json"), false);
+    assert.equal(workspacePathHasSymlinkComponent(workspace, "real-dir"), false);
+    assert.equal(workspacePathHasSymlinkComponent(workspace, "file-link.json"), true);
+    assert.equal(workspacePathHasSymlinkComponent(workspace, "dir-link"), true);
+    assert.equal(workspacePathHasSymlinkComponent(workspace, "dangling-link.json"), true);
+    assert.equal(workspacePathHasSymlinkComponent(workspace, "/etc/hosts"), true);
+    assert.equal(workspacePathHasSymlinkComponent(workspace, "../"), true);
+    assert.equal(workspacePathHasSymlinkComponent(workspace, "component-link/inside.json"), true);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: an intermediate symlinked directory cannot prove absence either", () => {
+  const workspace = makeWorkspace();
+  const outside = join(workspace, "..", "985-outside-dir");
+  try {
+    // `linked/` resolves outside the checkout, so nothing about
+    // `linked/missing.json` can be asserted from repository state — neither
+    // its absence nor its existence.
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "real.json"), "{}\n");
+    symlinkSync(outside, join(workspace, "linked"), "dir");
+
+    const ledger = ledgerWith([{ id: "req-linked-absent", text: "`linked/missing.json` must be absent", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-linked-absent",
+      disposition: "met",
+      enforcement: [{ file: "linked/missing.json", line: 1 }],
+      test: [VALID_TEST_LOCATION],
+      reason: "nothing there",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.equal(trace.rows[0]?.proof, "structural_state");
+
+    // The same holds when the outside target does exist.
+    const populatedLedger = ledgerWith([{ id: "req-linked-exists", text: "`linked/real.json` must exist", kind: "acceptance" }]);
+    const populated = validateRequirementTrace([{
+      requirement_id: "req-linked-exists",
+      disposition: "met",
+      enforcement: [{ file: "linked/real.json", line: 1 }],
+      test: [VALID_TEST_LOCATION],
+      reason: "the outside file exists",
+    }], populatedLedger, workspace);
+    assert.equal(populated.rows[0]?.disposition, "unverifiable");
+    assert.equal(populated.rows[0]?.proof, "structural_state");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });

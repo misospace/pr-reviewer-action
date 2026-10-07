@@ -48,7 +48,7 @@
  */
 import { readFileSync } from "node:fs";
 import type { ArtifactFinding, ReviewArtifact } from "./artifact.js";
-import { workspaceRegularFile, workspaceFsPath, workspacePathExists, workspacePathExistsContained } from "../context/workspace-path.js";
+import { workspaceRegularFile, workspaceFsPath, workspacePathExists, workspacePathHasSymlinkComponent } from "../context/workspace-path.js";
 import { detectLanguage, isTestPath } from "../context/change-anchors.js";
 
 export const TRACE_DISPOSITIONS: readonly string[] = ["met", "unmet", "not_applicable", "unverifiable"];
@@ -427,15 +427,20 @@ function isRepoRelativePath(token: string): boolean {
 
 /** Containment-aware existence for a structural claim.
  *
- * `presence: true` ("must exist") requires a contained, symlink-free entry, so
- * a checkout symlink pointing at runner state cannot satisfy it. `presence:
- * false` ("must be absent") requires that nothing at all is there — a dangling
- * symlink is still an entry, so it cannot be called absent. */
+ * A symlinked component — a direct symlink, a dangling one, or an intermediate
+ * directory — makes the path resolve into state the containment guard cannot
+ * vouch for, so NEITHER existence nor absence can be asserted from it: fail
+ * closed. That is what closes `linked -> outside-dir` plus
+ * "`linked/missing.json` must be absent", which would otherwise prove absence
+ * by looking through a symlink into external filesystem state.
+ *
+ * Without symlink traversal, "must exist" is simply the presence of the entry
+ * and "must be absent" its absence — a dangling symlink is still an entry, so
+ * it cannot be called absent. */
 function repoPathSatisfies(presence: boolean, workspace: string, path: string): boolean {
-  if (!isRepoRelativePath(path)) return false;
-  return presence
-    ? workspacePathExistsContained(workspace, path)
-    : !workspacePathExists(workspace, path);
+  if (workspacePathHasSymlinkComponent(workspace, path)) return false;
+  const exists = workspacePathExists(workspace, path);
+  return presence ? exists : !exists;
 }
 
 /** A path-shaped token: names a file the checkout can be read for. Bare
