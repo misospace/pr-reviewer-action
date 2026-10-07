@@ -48,7 +48,7 @@
  */
 import { readFileSync } from "node:fs";
 import type { ArtifactFinding, ReviewArtifact } from "./artifact.js";
-import { workspaceRegularFile, workspaceFsPath, workspacePathExists } from "../context/workspace-path.js";
+import { workspaceRegularFile, workspaceFsPath, workspacePathExists, workspacePathExistsContained } from "../context/workspace-path.js";
 import { detectLanguage, isTestPath } from "../context/change-anchors.js";
 
 export const TRACE_DISPOSITIONS: readonly string[] = ["met", "unmet", "not_applicable", "unverifiable"];
@@ -425,11 +425,17 @@ function isRepoRelativePath(token: string): boolean {
   return !trimmed.split("/").includes("..");
 }
 
-/** Containment-aware existence. `workspacePathExists` alone does not refuse
- * `..` or absolute paths, so an existence claim could otherwise be satisfied
- * from runner filesystem state outside the reviewed checkout. */
-function repoPathExists(workspace: string, path: string): boolean {
-  return isRepoRelativePath(path) && workspacePathExists(workspace, path);
+/** Containment-aware existence for a structural claim.
+ *
+ * `presence: true` ("must exist") requires a contained, symlink-free entry, so
+ * a checkout symlink pointing at runner state cannot satisfy it. `presence:
+ * false` ("must be absent") requires that nothing at all is there — a dangling
+ * symlink is still an entry, so it cannot be called absent. */
+function repoPathSatisfies(presence: boolean, workspace: string, path: string): boolean {
+  if (!isRepoRelativePath(path)) return false;
+  return presence
+    ? workspacePathExistsContained(workspace, path)
+    : !workspacePathExists(workspace, path);
 }
 
 /** A path-shaped token: names a file the checkout can be read for. Bare
@@ -742,7 +748,7 @@ function structuralProofHolds(
 ): boolean {
   // An existence claim's evidence is the path itself, contained to the
   // checkout.
-  if (claim.mode === "exists") return repoPathExists(workspace, claim.file) === claim.presence;
+  if (claim.mode === "exists") return repoPathSatisfies(claim.presence, workspace, claim.file);
   const lines = cache.lines(claim.file);
   if (lines === null) return false;
   const ignoreFile = isIgnoreFile(claim.file);

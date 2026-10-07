@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ReviewArtifact } from "../src/enforcement/artifact.js";
@@ -32,6 +32,7 @@ import {
   type RequirementTraceArtifact,
 } from "../src/enforcement/requirement-trace.js";
 import { buildTraceRepairUserMessage, normalizeTraceRepairPayload, runRequirementTraceRepairPass } from "../src/requirements/trace-repair.js";
+import { workspacePathExistsContained } from "../src/context/workspace-path.js";
 
 function artifact(overrides: Record<string, unknown> = {}): ReviewArtifact {
   return { verdict: "approve", review_markdown: "review", findings: [], ...overrides } as ReviewArtifact;
@@ -2852,6 +2853,163 @@ test("#985: the conjunctive tail must BE the test-demand adjunct, not merely con
     ]) {
       assert.notEqual(structuralStateClaim("`config.json` must contain `foo` " + adjunct), null, adjunct);
     }
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: an outside-file symlink cannot satisfy a structural existence claim", () => {
+  const workspace = makeWorkspace();
+  const outsidePath = join(workspace, "..", "985-outside.json");
+  try {
+    writeFileSync(outsidePath, "{}\n");
+    symlinkSync(outsidePath, join(workspace, "link.json"));
+    const trace = validateRequirementTrace(
+      [{
+        requirement_id: "r",
+        disposition: "met",
+        enforcement: [{ file: "link.json", line: 1 }],
+        test: [VALID_TEST_LOCATION],
+        reason: "link.json exists",
+      }],
+      ledgerWith([{ id: "r", text: "`link.json` must exist", kind: "normative" }]),
+      workspace,
+    );
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.equal(trace.rows[0]?.proof, "structural_state");
+  } finally {
+    rmSync(outsidePath, { force: true });
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: an in-workspace file symlink cannot satisfy structural existence", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "real.json", ["{}"]);
+    symlinkSync(join(workspace, "real.json"), join(workspace, "alias.json"));
+    const trace = validateRequirementTrace(
+      [{
+        requirement_id: "r",
+        disposition: "met",
+        enforcement: [{ file: "alias.json", line: 1 }],
+        test: [VALID_TEST_LOCATION],
+        reason: "alias.json exists",
+      }],
+      ledgerWith([{ id: "r", text: "`alias.json` must exist", kind: "normative" }]),
+      workspace,
+    );
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.equal(trace.rows[0]?.proof, "structural_state");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: a symlinked directory component cannot satisfy structural existence", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "nested/real.json", ["{}"]);
+    symlinkSync(join(workspace, "nested"), join(workspace, "linked"), "dir");
+    const trace = validateRequirementTrace(
+      [{
+        requirement_id: "r",
+        disposition: "met",
+        enforcement: [{ file: "linked/real.json", line: 1 }],
+        test: [VALID_TEST_LOCATION],
+        reason: "linked/real.json exists",
+      }],
+      ledgerWith([{ id: "r", text: "`linked/real.json` must exist", kind: "normative" }]),
+      workspace,
+    );
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.equal(trace.rows[0]?.proof, "structural_state");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: a dangling symlink cannot satisfy a structural absence claim", () => {
+  const workspace = makeWorkspace();
+  try {
+    symlinkSync(join(workspace, "does-not-exist-985"), join(workspace, "dangling.json"));
+    const trace = validateRequirementTrace(
+      [{
+        requirement_id: "r",
+        disposition: "met",
+        enforcement: [{ file: "dangling.json", line: 1 }],
+        test: [VALID_TEST_LOCATION],
+        reason: "dangling.json is absent",
+      }],
+      ledgerWith([{ id: "r", text: "`dangling.json` must be absent", kind: "normative" }]),
+      workspace,
+    );
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.equal(trace.rows[0]?.proof, "structural_state");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: real existence and genuine absence still satisfy structural claims", () => {
+  const existingWorkspace = makeWorkspace();
+  try {
+    writeFile(existingWorkspace, ".dockerignore", ["node_modules/"]);
+    const trace = validateRequirementTrace(
+      [{
+        requirement_id: "r",
+        disposition: "met",
+        enforcement: [{ file: ".dockerignore", line: 1 }],
+        test: [VALID_TEST_LOCATION],
+        reason: ".dockerignore exists",
+      }],
+      ledgerWith([{ id: "r", text: "`.dockerignore` must exist", kind: "normative" }]),
+      existingWorkspace,
+    );
+    assert.equal(trace.rows[0]?.disposition, "met");
+    assert.equal(trace.rows[0]?.proof, "structural_state");
+  } finally {
+    rmSync(existingWorkspace, { recursive: true, force: true });
+  }
+
+  const absentWorkspace = makeWorkspace();
+  try {
+    const trace = validateRequirementTrace(
+      [{
+        requirement_id: "r",
+        disposition: "met",
+        enforcement: [{ file: "absent.json", line: 1 }],
+        test: [VALID_TEST_LOCATION],
+        reason: "absent.json is absent",
+      }],
+      ledgerWith([{ id: "r", text: "`absent.json` must be absent", kind: "normative" }]),
+      absentWorkspace,
+    );
+    assert.equal(trace.rows[0]?.disposition, "met");
+    assert.equal(trace.rows[0]?.proof, "structural_state");
+  } finally {
+    rmSync(absentWorkspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: workspacePathExistsContained rejects symlinks and escaping paths", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "real.json", ["{}"]);
+    writeFile(workspace, "real-dir/inside.json", ["{}"]);
+    symlinkSync(join(workspace, "real.json"), join(workspace, "file-link.json"));
+    symlinkSync(join(workspace, "real-dir"), join(workspace, "dir-link"), "dir");
+    symlinkSync(join(workspace, "missing-target-985"), join(workspace, "dangling-link.json"));
+    symlinkSync(join(workspace, "real-dir"), join(workspace, "component-link"), "dir");
+
+    assert.equal(workspacePathExistsContained(workspace, "real.json"), true);
+    assert.equal(workspacePathExistsContained(workspace, "real-dir"), true);
+    assert.equal(workspacePathExistsContained(workspace, "file-link.json"), false);
+    assert.equal(workspacePathExistsContained(workspace, "dir-link"), false);
+    assert.equal(workspacePathExistsContained(workspace, "dangling-link.json"), false);
+    assert.equal(workspacePathExistsContained(workspace, "/etc/hosts"), false);
+    assert.equal(workspacePathExistsContained(workspace, "../"), false);
+    assert.equal(workspacePathExistsContained(workspace, "component-link/inside.json"), false);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
