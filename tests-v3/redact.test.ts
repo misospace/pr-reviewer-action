@@ -42,6 +42,39 @@ test("#876: redactText (the heuristic prose/log policy) still over-redacts the s
   assert.equal(redactText("token: opts.token"), "[REDACTED]");
 });
 
+test("#989: masks OpenAI-style provider keys without matching hyphenated prose", () => {
+  const keys = [
+    "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+    "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+    "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+    "sk-or-v1-abcdef0123456789abcdef0123456789",
+  ];
+  for (const key of keys) {
+    const result = redactText(`credential ${key}`);
+    assert.ok(result.includes("[REDACTED]"), `expected marker for ${key}`);
+    assert.ok(!result.includes(key), `raw key survived: ${result}`);
+  }
+
+  const ordinaryProse = [
+    "the task-runner-with-a-long-name ran",
+    "risk-assessment-of-the-change",
+  ];
+  for (const prose of ordinaryProse) {
+    assert.equal(redactText(prose), prose, "the leading word boundary must prevent matching within hyphenated prose");
+  }
+
+  const key = keys[0]!;
+  for (const framed of [`key=${key}`, `"${key}"`, `${key}\nnext line`]) {
+    const result = redactText(framed);
+    assert.ok(!result.includes(key), `raw key survived framing: ${result}`);
+    assert.ok(result.includes("[REDACTED]"));
+  }
+  assert.equal(redactText("api_key=zzzzzzzzzzzz"), "[REDACTED]");
+
+  const masked = redactText(`token ${key}`);
+  assert.equal(redactText(masked), masked, "redaction should be idempotent for masked provider keys");
+});
+
 test("#876 maintainer-review: only the VALUE is replaced — key, delimiter, quotes, and trailing punctuation survive", () => {
   assert.equal(redactSourceText('apiKey: "hunter2hunter2",'), `apiKey: "${REDACTED_SOURCE}",`);
   assert.match(redactSourceText('apiKey: "hunter2hunter2",'), /^apiKey: "⟦redacted:credential⟧",$/);
