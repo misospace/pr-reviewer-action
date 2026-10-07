@@ -139,6 +139,7 @@ Findings that can't be anchored to a diff line stay in the review body only.
 - Runs **after** publishing — the review comment and inline findings still land on the PR either way.
 - Reads the same final verdict the `verdict` output reports: post-`verdict-policy`, post-evidence-blocker and tool-failure enforcement — not the model's raw verdict.
 - `on-model-failure: notice` still passes the step: a model outage produces no verdict and must never wedge merges.
+- A **degraded** review warns and passes — but only in two narrow cases: the verdict is the `on-model-failure: notice`, or the review ran on the **fallback** model with no evidence gathered and its own verdict was `request_changes`. A **primary** review that gathered no evidence still fails, and a `request_changes` forced by a deterministic layer (evidence blocker, tool-failure enforcement, required-check `mode: fail`, an incomplete requirement trace, or a verdict-policy escalation) always fails — degradation never outranks fail-closed policy. Set `fail-on-degraded-review: "true"` to fail on the two degraded cases as well.
 
 ## Re-reviews
 
@@ -192,5 +193,5 @@ Set `rereview-command` to an empty string to disable comment-triggered re-review
 
 `on-model-failure` controls what happens when both the primary and fallback models fail to return a usable review:
 
-- `notice` (default): publishes a visible `request_changes` notice explaining the review could not run. It never auto-approves, and the `verdict` output is `request_changes`, so `fail-on-request-changes: "true"` (or your own gate on `verdict`) fails the job during a model outage.
+- `notice` (default): publishes a visible `request_changes` notice explaining the review could not run. It never auto-approves and the `verdict` output is `request_changes`, but the notice counts as a degraded review, so `fail-on-request-changes: "true"` warns and passes it (set `fail-on-degraded-review: "true"` to fail instead). A gate of your own on the `verdict` output still sees `request_changes`.
 - `fail`: fails the action step instead.

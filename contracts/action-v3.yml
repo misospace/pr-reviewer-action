@@ -99,14 +99,14 @@ inputs:
     v2_id: fail_on_request_changes
     required: false
     default: "false"
-    description: "If true, fail the action step when the final verdict is request_changes, so the review can act as a CI merge gate without a GitHub App. The gate runs after publishing, so the review comment and inline findings still land on the PR. It reads the same final verdict the `verdict` output reports (post-verdict_policy, post-evidence-blocker and tool-failure enforcement), not the raw model verdict. on_model_failure=notice still passes: a model outage produces no verdict and must not wedge merges. Default false — existing consumers see no behaviour change. A degraded review warns and passes unless fail-on-degraded-review is true."
+    description: "If true, fail the action step when the final verdict is request_changes, so the review can act as a CI merge gate without a GitHub App. The gate runs after publishing, so the review comment and inline findings still land on the PR. It reads the same final verdict the `verdict` output reports (post-verdict_policy, post-evidence-blocker and tool-failure enforcement), not the raw model verdict. on_model_failure=notice still passes: a model outage produces no verdict and must not wedge merges. Default false — existing consumers see no behaviour change. A degraded review warns and passes only in the narrow cases listed under fail-on-degraded-review; set that input to true to fail on those too."
     repo-configurable: true
     repo-policy: true
   - id: fail-on-degraded-review
     v2_id: fail_on_degraded_review
     required: false
     default: "false"
-    description: "If true, the fail-on-request-changes gate also fails when the final verdict is request_changes but the review was degraded — the tool loop gathered no evidence, or the verdict is the model-failure notice (on-model-failure=notice). Default false: a review that could not gather evidence, or that never ran because the endpoint was unreachable, must not wedge a merge on a request_changes it could not substantiate. Ignored unless fail-on-request-changes is true."
+    description: "If true, the fail-on-request-changes gate also fails a degraded review that would otherwise warn and pass. Default false. The exemption is deliberately narrow and provenance-aware: it applies only when the blocking verdict came from the model, and only in two cases — the verdict is the on-model-failure=notice, or the review ran on the fallback model with no evidence gathered. A primary review that gathered no evidence still fails the gate, and a request_changes forced by a deterministic layer (evidence blocker, tool-failure enforcement, required-check fail mode, an incomplete requirement trace, or a verdict-policy escalation) fails the gate regardless of this input. Ignored unless fail-on-request-changes is true."
     repo-configurable: true
     repo-policy: true
   - id: verdict-policy
