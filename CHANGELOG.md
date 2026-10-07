@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.4.1](https://github.com/misospace/pr-reviewer-action/compare/source-v3.4.0...source-v3.4.1) (2026-10-07)
+
+
+### Bug Fixes
+
+* **model:** keep 5xx on the tier retry budget ([#1006](https://github.com/misospace/pr-reviewer-action/issues/1006)) ([#1007](https://github.com/misospace/pr-reviewer-action/issues/1007)) ([106f284](https://github.com/misospace/pr-reviewer-action/commit/106f284271f4f77dfbb0b3d3da659dcab61348e2))
+
 ## [3.4.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.3.0...source-v3.4.0) (2026-10-07)
 
 
