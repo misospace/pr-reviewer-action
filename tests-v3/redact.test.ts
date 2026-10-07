@@ -127,6 +127,24 @@ const PROJ_KEY = "sk-proj-T3BlbkFJ9abcdefghijklmnopqrstuvwxyz012345";
 const ANT_KEY = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCD";
 const OR_KEY = `sk-or-v1-${"0123456789abcdef".repeat(4)}`;
 
+// #999 fixtures mirror verified scanner/provider shapes. OpenAI body lengths
+// remain loose (58–74 chars across observed gitleaks generations); the fixed
+// marker, mixed case, and digits are the source-rule anchors.
+const openAiBody = (length: number): string => {
+  const marker = "T3BlbkFJ";
+  const before = "aB3dE5".repeat(3);
+  const after = "zY8xW7_6".repeat(20).slice(0, length - before.length - marker.length);
+  return `${before}${marker}${after}`;
+};
+const base64urlBody = (length: number): string => "Ab3dEf6G".repeat(Math.ceil(length / 8)).slice(0, length);
+const SVCACCT_KEY = `sk-svcacct-${openAiBody(58)}`;
+const ADMIN_KEY = `sk-admin-${openAiBody(74)}`;
+const NONE_KEY = `sk-None-${openAiBody(64)}`;
+const anthropicBody = (first: "-" | "_"): string => `${first}${base64urlBody(92)}`;
+const ANT_API03_KEY = `sk-ant-api03-${anthropicBody("-")}AA`;
+const ANT_ADMIN01_KEY = `sk-ant-admin01-${anthropicBody("_")}AA`;
+const ANT_OAT01_KEY = `sk-ant-oat01-${"Ab3dEf6G".repeat(5)}`;
+
 test("#996: every named sk- family is masked in source evidence, and only the token changes", () => {
   assert.equal(redactSourceText(PROJ_KEY), REDACTED_SOURCE);
   assert.equal(redactSourceText(ANT_KEY), REDACTED_SOURCE);
@@ -170,6 +188,15 @@ test("#996 adversarial: the sk- rule must not eat ordinary kebab-case source", (
     "sk-proj-card-with-title-and-actions",
     "docs/sk-or-v1-migration-and-release-notes",
     "sk-ant-api03-configuration-reference",
+    // #999: verified OpenAI prefixes stay safe without a marker; Anthropic
+    // prefixes require their pinned token shape, and admin without `01` is prose.
+    "sk-admin-configuration-reference",
+    "sk-None-value-check",
+    "sk-svcacct-deployment-runbook-notes",
+    "sk-ant-oat01-configuration-reference",
+    "sk-ant-admin01-configuration-reference",
+    "sk-ant-admin-configuration-reference",
+    "sk-Proj-configuration-reference",
     // Review round 3: containing a 20-character word is not enough either —
     // the run must sit directly after the family prefix, or a path with one
     // long English word is a key.
@@ -287,6 +314,130 @@ test("#996: maskAndTruncateSource inherits the dashed-family masking", () => {
   assert.equal(result.text, `token = "${REDACTED_SOURCE}"`);
   // The config-file unquoted-literal path masks it too.
   assert.equal(redactSourceText(`token: ${PROJ_KEY}`, "config/values.yaml"), `token: ${REDACTED_SOURCE}`);
+});
+
+// #999: Route B anchors OpenAI families on their shared scanner-verified
+// marker; Route C pins Anthropic keys to provider/scanner body shapes.
+test("#999: verified remaining OpenAI and Anthropic families mask only the token", () => {
+  const openAiKeys = [SVCACCT_KEY, ADMIN_KEY, NONE_KEY];
+  const anthropicKeys = [ANT_API03_KEY, ANT_ADMIN01_KEY, ANT_OAT01_KEY];
+  for (const key of [...openAiKeys, ...anthropicKeys]) {
+    assert.equal(redactSourceText(key), REDACTED_SOURCE, `expected ${key.slice(0, 24)}... to mask`);
+    assert.equal(redactSourceText(key, "src/model/call.ts"), REDACTED_SOURCE);
+  }
+
+  for (const key of openAiKeys) {
+    assert.equal(redactSourceText(`const k = "${key}";`), `const k = "${REDACTED_SOURCE}";`);
+    assert.equal(redactSourceText(`API_KEY=${key}`), `API_KEY=${REDACTED_SOURCE}`);
+  }
+  for (const key of anthropicKeys) {
+    assert.equal(redactSourceText(`{"apiKey": "${key}",}`), `{"apiKey": "${REDACTED_SOURCE}",}`);
+    assert.equal(redactSourceText(`${key}\n`), `${REDACTED_SOURCE}\n`);
+  }
+});
+
+test("#999: api03 shape pin closes the early-separator residual", () => {
+  // The first body character is a legal base64url separator; #997's generic
+  // run requires 20 adjacent alphanumerics directly after the family prefix.
+  assert.equal(ANT_API03_KEY.slice("sk-ant-api03-".length, "sk-ant-api03-".length + 20).includes("-"), true);
+  assert.equal(redactSourceText(ANT_API03_KEY), REDACTED_SOURCE);
+});
+
+test("#999: excluded or unverified families remain source text", () => {
+  const survivors = [
+    `sk-ant-api04-${anthropicBody("-")}AA`,
+    `sk-ant-ort01-${base64urlBody(48)}`,
+    `sk-ant-sid01-${base64urlBody(48)}`,
+    "sk-service-configuration-reference",
+  ];
+  for (const value of survivors) {
+    assert.equal(redactSourceText(value), value);
+    assert.equal(redactSourceText(value, "src/model/call.ts"), value);
+  }
+});
+
+test("#999: Anthropic pinned-shape floors are exact", () => {
+  const adminPrefix = "sk-ant-admin01-";
+  const oatPrefix = "sk-ant-oat01-";
+  const shortAdmin = `${adminPrefix}${base64urlBody(92)}AA`;
+  const exactAdmin = `${adminPrefix}${base64urlBody(93)}AA`;
+  const shortOat = `${oatPrefix}${base64urlBody(39)}`;
+  const exactOat = `${oatPrefix}${base64urlBody(40)}`;
+  assert.equal(shortAdmin.slice(adminPrefix.length, -2).length, 92);
+  assert.equal(exactAdmin.slice(adminPrefix.length, -2).length, 93);
+  assert.equal(shortOat.slice(oatPrefix.length).length, 39);
+  assert.equal(redactSourceText(shortAdmin), shortAdmin);
+  assert.equal(redactSourceText(exactAdmin), REDACTED_SOURCE);
+  assert.equal(redactSourceText(shortOat), shortOat);
+  assert.equal(redactSourceText(exactOat), REDACTED_SOURCE);
+});
+
+test("#999: the Anthropic fixed shape is exact on the upper edge, not just the floor", () => {
+  // `admin01` is not in #997's enumerated alternation, so these cases exercise
+  // the shape pin alone. Exactly 93 base64url chars + `AA` IS the token; one
+  // more base64url character means it is not this shape, and must survive whole
+  // rather than being redacted through its first 95 body chars (a partial mask
+  // would leave the tail behind).
+  const adminPrefix = "sk-ant-admin01-";
+  const exact = `${adminPrefix}${base64urlBody(93)}AA`;
+  assert.equal(redactSourceText(exact), REDACTED_SOURCE);
+  assert.equal(redactSourceText(`const k = "${exact}";`), `const k = "${REDACTED_SOURCE}";`);
+  for (const longer of [`${exact}B`, `${exact}AAA`, `${exact}-tail`]) {
+    assert.equal(redactSourceText(longer), longer, `expected ${longer.slice(-6)} to survive whole`);
+  }
+});
+
+test("#999: marker near-misses and ordinary tokens survive", () => {
+  const nearMiss = `sk-svcacct-T3BlbkFI${"Ab3dEf6G".repeat(5)}`;
+  const bareMarker = "T3BlbkFJ";
+  const ordinary = "sk-svcacct-deployment-runbook-notes";
+  for (const value of [nearMiss, bareMarker, ordinary]) {
+    assert.equal(redactSourceText(value), value);
+  }
+});
+
+test("#999 adversarial: marker scanning stays bounded and misses markers past the prefix cap cleanly", () => {
+  const size = 1_200_000;
+  const matching = `sk-svcacct-${"a".repeat(120)}T3BlbkFJ${"b".repeat(size - 11 - 120 - 8)}`;
+  // Avoid the preserved legacy bare rule, which intentionally sees the
+  // `sk-<20+ alnum>` prefix shape before this newer scoped-family rule.
+  const nonMatching = `sk-svcacct-${"a".repeat(2)}-${"b".repeat(size - 13)}`;
+  // Unbounded pre-marker scanning took 4.3s / 17.6s / 70.2s at 90k / 180k /
+  // 360k repeated-prefix chars (quadratic). At 120k, that regression fails in
+  // about 8s; <1000ms is ~25x the measured bounded cost and avoids machine-speed
+  // sensitivity. An unbounded trailing run adds no measurable cost.
+  const repeatedPrefixes = "sk-".repeat(40_000);
+  const markerBeyondBound = `sk-svcacct-${"a".repeat(300)}T3BlbkFJ${"b".repeat(40)}`;
+  const started = process.hrtime.bigint();
+  assert.equal(redactSourceText(matching), REDACTED_SOURCE, "a marker-bearing token is masked whole, tail included");
+  assert.equal(redactSourceText(nonMatching), nonMatching);
+  assert.equal(redactSourceText(repeatedPrefixes), repeatedPrefixes);
+  assert.equal(redactSourceText(markerBeyondBound), markerBeyondBound, "a marker past the pre-marker cap is a clean miss");
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1_000_000;
+  assert.ok(elapsedMs < 1_000, `redaction adversarial cases took ${elapsedMs.toFixed(0)}ms`);
+});
+
+test("#999: marker-bearing tokens are masked whole while quotes survive", () => {
+  const key = `sk-svcacct-${"a".repeat(20)}T3BlbkFJ${"b".repeat(400)}`;
+  assert.equal(redactSourceText(key), REDACTED_SOURCE);
+  assert.equal(redactSourceText(`const k = "${key}";`), `const k = "${REDACTED_SOURCE}";`);
+});
+
+test("#999: oat01 token boundary preserves the terminator and following source", () => {
+  const key = `sk-ant-oat01-${"Ab3dEf6G".repeat(5)}`;
+  const source = `${key}.XYZ more prose\nnext`;
+  assert.equal(redactSourceText(source), `${REDACTED_SOURCE}.XYZ more prose\nnext`);
+});
+
+test("#999: masking is idempotent, preserves line shape, and reaches truncation helper", () => {
+  const once = redactSourceText(`const k = "${SVCACCT_KEY}";\nAPI_KEY=${ANT_ADMIN01_KEY}`);
+  assert.equal(redactSourceText(once), once, "the marker must never be re-matched");
+  assert.equal(once.split("\n").length, 2);
+  const snippet = `const k = "${ANT_OAT01_KEY}";\n`;
+  assert.equal(redactSourceText(snippet).split("\n").length, snippet.split("\n").length);
+  const truncated = maskAndTruncateSource(`token = "${ANT_OAT01_KEY}"`, 4096);
+  assert.equal(truncated.truncated, false);
+  assert.equal(truncated.text, `token = "${REDACTED_SOURCE}"`);
 });
 
 test("#876: the source-safe marker is distinct from the heuristic [REDACTED] marker", () => {

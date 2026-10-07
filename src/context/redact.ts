@@ -206,6 +206,73 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
     REDACTED_SOURCE,
   );
 
+  /* #999: close verified OpenAI/Anthropic families without broadening #997's
+   * generic family heuristic. OpenAI keys (legacy plus `proj`, `svcacct`,
+   * `admin`, and niche `None`) carry the fixed `T3BlbkFJ` fragment: gitleaks
+   * and TruffleHog keyword-anchor on it, and OpenAI docs cover project and
+   * service-account shapes. `admin` is detector-backed; `None` is community-
+   * only (OpenAI forum thread 879912), so this anchored rule avoids making
+   * either prefix alone a reason to redact. The marker makes ordinary path,
+   * class, or identifier over-redaction structurally impossible. The pre-marker
+   * `{0,256}` bound is load-bearing: without it, marker-free repeated `sk-`
+   * input is quadratic (4.3s / 17.6s / 70.2s at 90k / 180k / 360k characters);
+   * the bounded rule takes ~0.4s at 1.2M characters. The trailing run is
+   * deliberately unbounded, like #997's, so a real key is masked whole. A
+   * marker more than 256 characters into a token is not reached at all: this is
+   * an accepted clean miss, never a partial mask. Observed bodies are 58–148
+   * characters total, with the marker roughly 20–80 characters in, so 256
+   * gives >2x headroom.
+   *
+   * Anthropic's `api03` and `admin01` rules pin gitleaks/TruffleHog and provider-
+   * documented shapes: exactly 93 base64url characters plus `AA`. `AA` ends
+   * the token, so the trailing guard keeps the shape exact on the upper edge:
+   * a longer base64url token survives whole rather than being redacted through
+   * its first 95 body characters (which would leave the tail behind). The `oat01`
+   * rule follows provider docs and gitleaks PR #2159: a base64url OAuth access
+   * token with at least 40 characters. For real keys, these shape pins cover a
+   * superset of #997's generic first-run heuristic matches. The pin's
+   * contribution is #997's documented early-separator miss: a `-`/`_` inside
+   * the body's first 20 characters, which #997's `[A-Za-z0-9]{20,}` cannot
+   * cross. If an api03 body's first 20 characters are unbroken alphanumerics,
+   * #997 already matches it and the pin is a no-op. #997's two `sk-` rules
+   * remain byte-identical as required by this issue. `ant-api03` is
+   * version-bearing: a future `apiNN` bump is a one-line edit.
+   *
+   * Deliberate exclusions and evidence tiers: `sk-ant-api04-` is unverifiable
+   * (CSDN/JP blog noise only; absent from Anthropic docs, gitleaks, TruffleHog,
+   * and GitHub secret-scanning patterns); `sk-ant-ort01-` (OAuth refresh) and
+   * `sk-ant-sid01-` (Claude.ai session) are real but excluded pending the same
+   * provider-doc or published-scanner evidence bar. `sk-service-` is only a
+   * TruffleHog regex alias with no OpenAI source. No capitalized-prefix rule is
+   * added for `sk-Proj-`, but the marker rule is prefix-agnostic: a
+   * `sk-Proj-…T3BlbkFJ…` token is still masked because the marker, not the
+   * prefix, is the discriminator. The surviving
+   * `sk-Proj-configuration-reference` kebab case is pinned by test. Keep
+   * `sk-ant-admin-` (without `01`) out of the rules; tests pin it as a survivor.
+   *
+   * Accepted shape residual: an `oat01` token followed by 40+ characters of
+   * hyphenated kebab text is indistinguishable from a body and will be masked.
+   * A token ends at the first character outside the base64url charset; that
+   * character and everything after it are preserved (`sk-ant-oat01-<40>.XYZ`
+   * becomes `⟦redacted:credential⟧.XYZ`). This is the same boundary contract
+   * followed by every bare-token rule (`ghp_`, `AKIA`, `sk-`), not a partial
+   * leak: a base64url body cannot contain `.`, whitespace, or quotes. The
+   * api03/admin01 shape is exact on both edges: a token continuing past `AA`
+   * with further base64url characters is not that shape and survives whole,
+   * since matching it partially would leak the tail. */
+  redacted = redacted.replace(
+    /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{0,256}T3BlbkFJ[A-Za-z0-9_-]*/g,
+    REDACTED_SOURCE,
+  );
+  redacted = redacted.replace(
+    /(?<![A-Za-z0-9])sk-ant-(?:api03|admin01)-[A-Za-z0-9_-]{93}AA(?![A-Za-z0-9_-])/g,
+    REDACTED_SOURCE,
+  );
+  redacted = redacted.replace(
+    /(?<![A-Za-z0-9])sk-ant-oat01-[A-Za-z0-9_-]{40,}/g,
+    REDACTED_SOURCE,
+  );
+
   // Bearer / Basic auth headers: keep the scheme word, mask only the token.
   redacted = redacted.replace(
     /\b(Bearer|Basic)(\s+)([A-Za-z0-9._+/=-]{20,})/gi,
