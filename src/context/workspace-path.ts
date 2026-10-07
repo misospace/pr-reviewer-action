@@ -63,3 +63,20 @@ export function workspacePathExists(workspace: string, path: string): boolean {
     return isSymlink(full);
   }
 }
+
+/** True when any component of a checkout-relative `path` is a symlink, or when
+ * the path is absolute or contains a `..` component. Used to refuse paths
+ * whose resolution the containment guard cannot vouch for: such a path may
+ * resolve into runner filesystem state, so neither its existence nor its
+ * absence can be asserted from the checkout. */
+export function workspacePathHasSymlinkComponent(workspace: string, path: string): boolean {
+  if (path === "" || path.startsWith("/")) return true;
+  let current = workspace;
+  for (const part of path.split("/")) {
+    if (part === "..") return true;
+    if (part === "" || part === ".") continue;
+    current = `${current}/${part}`;
+    if (isSymlink(current)) return true;
+  }
+  return false;
+}
