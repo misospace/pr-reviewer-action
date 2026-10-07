@@ -877,12 +877,94 @@ function isStrongTerm(word: string): boolean {
   return true; // identifier: sourceSha, repoDid, SQLite, HTTPServer, GitHub
 }
 
+/** #1000: a code span carrying `-` or `/` is ONE literal compound identifier,
+ * not prose. Splitting `x-api-key` into the words "api" and "key" fabricated
+ * the phrase "api key", whose joined form `apikey` then matched the generic
+ * `apiKey`/`API_KEY` vocabulary of any credentials-adjacent diff — scoping
+ * the unrelated credential-transport standard into #997's redaction-only
+ * change and driving `required_checks: incomplete`.
+ *
+ * A qualifying span (at least two non-empty separator-separated segments,
+ * at least five chars — a 3-char token like `a-b` would bare-substring-match
+ * `a-b-c` in any diff — and within the term-size
+ * bounds) is extracted as a single atomic term and replaced in the prose
+ * stream by a one-letter placeholder: the placeholder occupies a raw-word
+ * index, keeping the words on either side non-adjacent, and is itself
+ * dropped from `kept` (length < 2). A span that does not qualify — a
+ * trailing-hyphen fragment like `sk-`, an oversized span — passes through
+ * unchanged, keeping the pre-#1000 prose behavior byte-for-byte. Spans
+ * without a separator (`sourceSha`, `source SHA`) are never touched.
+ *
+ * Spans are paired by splitting on backticks rather than by a regex that
+ * *requires* a separator inside the match: such a regex backtracks across a
+ * span boundary and pairs the gap BETWEEN two spans ("` / `") as a span,
+ * consuming the next span's opening backtick and leaving its content in the
+ * prose stream. An odd backtick count (a stray or lost closing backtick —
+ * common in copy-pasted issue text) leaves the final segment unterminated;
+ * it is scanned the same way, so "`x-api-key header name MUST not…" cannot
+ * resurrect the fabricated phrase through a missing backtick.
+ *
+ * Within a span body, each whitespace-delimited token is normalized (edge
+ * punctuation and edge separators stripped, so `x-api-key,` and
+ * `---x-api-key` both yield `x-api-key`) and atomized when it qualifies;
+ * tokens that do not qualify pass through byte-identically, keeping the
+ * pre-#1000 prose behavior for spans like `sk-` and `source SHA`.
+ *
+ * Deliberate residual: an UNBACKTICKED hyphenated mention ("the api-key
+ * header") still splits into prose words and can form the joined form —
+ * tokenizing prose hyphens generally would break kebab identifiers that are
+ * legitimately subjects. And `extractRequirementTerms` below still splits
+ * spans the old way on purpose: it matches requirement terms against cited
+ * enforcement lines (where the broader spelling net is wanted), not against
+ * the whole diff for scope. */
+const ATOMIC_CODE_SPAN_MIN_LENGTH = 5;
+const PROSE_PLACEHOLDER = "\u0000q\u0000";
+
+/** The atomic term a span-body token contributes, or null when it does not
+ * qualify: no `-`/`/` separator after edge normalization, shorter than
+ * {@link ATOMIC_CODE_SPAN_MIN_LENGTH} (a 3-char token like `a-b` would
+ * bare-substring-match `a-b-c` in any diff), over the term-size bound, or
+ * fewer than two non-empty separator-separated segments. */
+function atomicCodeSpanTerm(raw: string): string | null {
+  const token = raw.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, "");
+  if (!/[-/]/.test(token)) return null;
+  if (token.length < ATOMIC_CODE_SPAN_MIN_LENGTH || token.length > MAX_SUBJECT_TERM_CHARS) return null;
+  if (token.split(/[-/]/).filter((segment) => segment !== "").length < 2) return null;
+  return token.toLowerCase();
+}
+
 /** Split a requirement's text into its subject-overlap signals. Adjacency is
  * over the raw word stream, so a stopword between two kept words (as in
  * "compare the source SHA") breaks the phrase rather than gluing its halves
  * together. */
 export function requirementSubjectSignals(text: string): RequirementSubjectSignals {
-  const rawWords = text.match(/[A-Za-z][A-Za-z0-9]*/g) ?? [];
+  const atomic = new Set<string>();
+  const segments = text.split("`");
+  let prose = "";
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index]!;
+    if (index % 2 === 0) {
+      prose += segment;
+      continue;
+    }
+    const terminated = index < segments.length - 1;
+    let rebuilt = "";
+    for (const part of segment.split(/(\s+)/)) {
+      if (part === "" || /^\s+$/.test(part)) {
+        rebuilt += part;
+        continue;
+      }
+      const term = atomicCodeSpanTerm(part);
+      if (term === null) {
+        rebuilt += part;
+      } else {
+        atomic.add(term);
+        rebuilt += PROSE_PLACEHOLDER;
+      }
+    }
+    prose += terminated ? `\`${rebuilt}\`` : `\`${rebuilt}`;
+  }
+  const rawWords = prose.match(/[A-Za-z][A-Za-z0-9]*/g) ?? [];
   const kept: { word: string; index: number }[] = [];
   rawWords.forEach((word, index) => {
     if (word.length < 2) return;
@@ -894,6 +976,7 @@ export function requirementSubjectSignals(text: string): RequirementSubjectSigna
   for (let i = 0; i < kept.length - 1; i += 1) {
     if (kept[i + 1]!.index === kept[i]!.index + 1) phrases.push([kept[i]!.word, kept[i + 1]!.word]);
   }
+  for (const term of atomic) phrases.push([term]);
   const strongTerms = kept.filter((entry) => isStrongTerm(entry.word)).map((entry) => entry.word.toLowerCase());
   return { phrases, strongTerms };
 }
