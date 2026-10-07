@@ -230,14 +230,6 @@ export function failClosedEnforcementFired(inputs: Pick<
  * `apply_all_enforcement`): evidence blockers, tool-harness failure (with
  * the min-successful fallback), review-thread settlement, human change-request
  * settlement, then the banner normalization. Returns the number of
- * enforcement actions applied. The banner is reconciled against the final
- * verdict afterwards by `reconcileEnforcedReviewMarkdown`.
- */
-/**
- * Apply all configured enforcement rules in sequence (port of
- * `apply_all_enforcement`): evidence blockers, tool-harness failure (with
- * the min-successful fallback), review-thread settlement, human change-request
- * settlement, then the banner normalization. Returns the number of
  * enforcement actions applied.
  *
  * #977: only a rule that actually FORCED request_changes may create or
