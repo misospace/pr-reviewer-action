@@ -176,10 +176,11 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
   //    (`docs/sk-proj-internationalization-notes`).
   //
   // The entropy test is base64url-INFORMED, not base64url-correct: base64url
-  // does NOT guarantee an uppercase letter or digit in any 20-character window.
-  // A window without one is vanishingly unlikely in a real key body, so the
-  // resulting miss is accepted rather than traded for the false positive a
-  // longer or looser rule would cost. The trailing `[A-Za-z0-9_-]*` still
+  // does NOT guarantee an uppercase letter or digit in a body, or in any
+  // window of one. A first alphanumeric segment that carries neither is
+  // vanishingly unlikely in a real key body, so that miss is accepted rather
+  // than traded for the false positive a longer or looser rule would cost. The
+  // trailing `[A-Za-z0-9_-]*` still
   // consumes the rest of a `-`/`_`-bearing body, so a real key is masked as ONE
   // literal. `ant-api03` is version-bearing: a future `apiNN` bump is a
   // one-line change here.
