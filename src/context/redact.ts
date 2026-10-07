@@ -152,21 +152,27 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
   // module's stated preference over a leaked credential.
   redacted = redacted.replace(/sk-[A-Za-z0-9]{20,}/g, REDACTED_SOURCE);
 
-  // The dash-separated families (#996), ENUMERATED, with the body required to
-  // contain a long UNBROKEN alphanumeric run. That run — not the prefix — is
-  // the discriminator a real key body has and a kebab token does not, so the
-  // prefix alone must never be sufficient: `docs/sk-proj-deployment-runbook-notes`
-  // and `sk-proj-card-with-title-and-actions` are a path and a class, and every
-  // segment of both is a short word, so no 20-character run exists in either.
-  // The run is allowed anywhere in the body rather than only at its start
-  // because real bodies are base64url and may carry `-`/`_` early
-  // (`sk-proj-ab-<40 alnum>` is a key, not a path) — the leading
-  // `[A-Za-z0-9_-]*` covers that case while the trailing one still consumes
-  // the rest of a `-`/`_`-bearing body, so a real key is masked as ONE literal
-  // instead of leaking its tail. `ant-api03` is version-bearing: a future
-  // `apiNN` bump is a one-line change here.
+  // The dash-separated families (#996), ENUMERATED, with the long unbroken
+  // alphanumeric run required to sit DIRECTLY after the family prefix. That
+  // adjacency is the whole discriminator: every segment of a kebab token is a
+  // short word, so `docs/sk-proj-card-internationalization-notes` survives
+  // even though it contains a 20-character word — the run may not be hunted
+  // for anywhere in the body, because a token that merely CONTAINS one long
+  // word is source, not a key. The trailing `[A-Za-z0-9_-]*` still consumes
+  // the rest of a `-`/`_`-bearing body, so a real key is masked as ONE
+  // literal instead of leaking its tail. `ant-api03` is version-bearing: a
+  // future `apiNN` bump is a one-line change here.
+  //
+  // Accepted residual, recorded rather than hidden: a real body carrying
+  // `-`/`_` inside its FIRST 20 characters is not masked
+  // (`sk-proj-ab-<40 alnum>`). Hunting the run anywhere in the body would
+  // cover it, at the cost of masking the path above, and source-safety wins
+  // that tie. Pre-#997 left those bodies alone too, so this is no regression
+  // against the baseline. Closing it needs a stronger signal than segment
+  // shape (framing/context, or an entropy test on the run) — deliberately out
+  // of scope here.
   redacted = redacted.replace(
-    /(?<![A-Za-z0-9])sk-(?:proj|ant-api03|or-v1)-[A-Za-z0-9_-]*[A-Za-z0-9]{20,}[A-Za-z0-9_-]*/g,
+    /(?<![A-Za-z0-9])sk-(?:proj|ant-api03|or-v1)-[A-Za-z0-9]{20,}[A-Za-z0-9_-]*/g,
     REDACTED_SOURCE,
   );
 

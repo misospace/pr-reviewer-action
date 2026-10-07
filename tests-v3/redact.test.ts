@@ -170,6 +170,11 @@ test("#996 adversarial: the sk- rule must not eat ordinary kebab-case source", (
     "sk-proj-card-with-title-and-actions",
     "docs/sk-or-v1-migration-and-release-notes",
     "sk-ant-api03-configuration-reference",
+    // Review round 3: containing a 20-character word is not enough either —
+    // the run must sit directly after the family prefix, or a path with one
+    // long English word is a key.
+    "docs/sk-proj-card-internationalization-notes",
+    "sk-ant-api03-card-internationalization-notes",
   ];
   for (const line of survivors) {
     assert.equal(redactSourceText(line), line, `expected ${JSON.stringify(line)} to survive`);
@@ -194,11 +199,16 @@ test("#996 adversarial: a body containing the separator charset is masked whole,
   // An uppercase/underscore-bearing base64url body (`-`/`_` are legal in it).
   const underscored = `sk-or-v1-${"aB3dE5".repeat(6)}_more_body`;
   assert.ok(!redactSourceText(underscored).includes("more_body"));
+});
 
-  // A separator EARLY in the body must not defeat the rule: the requirement is
-  // that a long run exists in the body, not that the body starts with one.
+test("#996 accepted residual: a separator inside the body's first 20 characters is left alone", () => {
+  // Hunting the run anywhere in the body covers this shape, and an earlier
+  // revision of this rule did mask it — but the same relaxation also masked
+  // `docs/sk-proj-card-internationalization-notes`, which is source, and
+  // source-safety wins that tie. Pre-#997 left this shape alone too, so this
+  // is no regression against the baseline.
   const dashEarly = `sk-proj-ab-${"abcdefghijklmnopqrstuvwxyz012345"}`;
-  assert.equal(redactSourceText(dashEarly), REDACTED_SOURCE);
+  assert.equal(redactSourceText(dashEarly), dashEarly);
 });
 
 test("#996 adversarial: masking is idempotent and the marker is never re-matched", () => {
