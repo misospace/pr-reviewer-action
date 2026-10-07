@@ -25,6 +25,8 @@ import {
   requirementNotEnforcedMessage,
   requirementSubjectSignals,
   requirementTraceScope,
+  structuralStateClaim,
+  explicitlyRequiresTest,
   validateRequirementTrace,
   type RequirementOwnership,
 } from "../src/enforcement/requirement-trace.js";
@@ -459,12 +461,12 @@ test("ensureUnmetRequirementFindings: does not duplicate a finding the model alr
 });
 
 test("renderRequirementTraceMarkdown: nothing to render when everything is met", () => {
-  assert.equal(renderRequirementTraceMarkdown({ version: 1, rows: [{ requirement_id: "r", disposition: "met", enforcement: [], test: [], reason: "", notes: [] }], incomplete: false, errors: [] }), "");
+  assert.equal(renderRequirementTraceMarkdown({ version: 1, rows: [{ requirement_id: "r", disposition: "met", proof: "runtime_behavior", enforcement: [], test: [], reason: "", notes: [] }], incomplete: false, errors: [] }), "");
 });
 
 test("renderRequirementTraceMarkdown: collapses behind <details> once the ledger is large", () => {
   const rows = Array.from({ length: 6 }, (_unused, i) => ({
-    requirement_id: `r${i}`, disposition: i === 0 ? "unmet" : "met", enforcement: [], test: [], reason: "gap", notes: [],
+    requirement_id: `r${i}`, disposition: i === 0 ? "unmet" : "met", proof: "runtime_behavior", enforcement: [], test: [], reason: "gap", notes: [],
   }));
   const rendered = renderRequirementTraceMarkdown({ version: 1, rows, incomplete: false, errors: [] });
   assert.ok(rendered.includes("<details>"));
@@ -1838,6 +1840,7 @@ test("#962.20: hostile requirement ids and seam names are neutralized in prompt 
         enforcement: [{ file: "src/hostile/one.ts", line: 1 }],
         test: [],
         reason: "missing a seam",
+        proof: "distributed",
         notes: [`distributed-enforcement-group-uncovered:${hostileGroup}`],
       }],
     };
@@ -1948,4 +1951,627 @@ test("#962.24: parseRequirementOwners caps declared groups and warns with droppe
   assert.ok(parsed.warnings.some((warning) =>
     warning.includes(`exceeds ${MAX_DECLARED_GROUPS_PER_RULE} declared groups`) && warning.includes("dropped: group-17"),
   ), JSON.stringify(parsed.warnings));
+});
+
+// ── #985: deterministic structural-state proofs ─────────────────────────
+
+test("#985: a satisfied structural negative-state claim needs no test", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, ".dockerignore", ["node_modules/", "dist/"]);
+    const ledger = ledgerWith([{ id: "req-ignore", text: "`.dockerignore` must not exclude `assets/`", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-ignore",
+      disposition: "met",
+      enforcement: [{ file: ".dockerignore", line: 1 }],
+      test: [],
+      reason: "assets/ is not excluded by the ignore file",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, "met");
+    assert.equal(trace.rows[0]?.proof, "structural_state");
+    assert.deepEqual(trace.rows[0]?.notes, []);
+    assert.equal(trace.incomplete, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: a met structural trace does not withhold approval", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, ".dockerignore", ["node_modules/", "dist/"]);
+    const ledger = ledgerWith([{ id: "req-ignore", text: "`.dockerignore` must not exclude `assets/`", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-ignore",
+      disposition: "met",
+      enforcement: [{ file: ".dockerignore", line: 1 }],
+      test: [],
+      reason: "assets/ is not excluded by the ignore file",
+    }];
+    const art = artifact({ requirement_coverage: claims });
+    const result = applyRequirementTraceEnforcement(art, { enabled: true, ledger, workspace });
+    assert.equal(result.trace.rows[0]?.disposition, "met");
+    assert.notEqual(art.requirement_trace_incomplete, true);
+    assert.notEqual(art.required_checks, "incomplete");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: a structural negative-state claim is refuted by an excluding entry", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, ".dockerignore", ["node_modules/", "assets/"]);
+    const ledger = ledgerWith([{ id: "req-ignore", text: "`.dockerignore` must not exclude `assets/`", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-ignore",
+      disposition: "met",
+      enforcement: [{ file: ".dockerignore", line: 1 }],
+      test: [],
+      reason: "assets/ should not be excluded",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.ok(trace.rows[0]?.notes.includes("structural-proof-unconfirmed"));
+    assert.equal(trace.incomplete, true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: a satisfied structural positive-state claim needs no test", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "package.json", ['{"dependencies":{"left-pad":"1.0.0"}}']);
+    const ledger = ledgerWith([{ id: "req-package", text: "`package.json` must contain `left-pad`", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-package",
+      disposition: "met",
+      enforcement: [{ file: "package.json", line: 1 }],
+      test: [],
+      reason: "left-pad is listed in package.json",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, "met");
+    assert.equal(trace.rows[0]?.proof, "structural_state");
+    assert.deepEqual(trace.rows[0]?.notes, []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: a structural positive-state claim is refuted when its literal is absent", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "package.json", ['{"dependencies":{"left-pad":"1.0.0"}}']);
+    const ledger = ledgerWith([{ id: "req-package", text: "`package.json` must contain `right-pad`", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-package",
+      disposition: "met",
+      enforcement: [{ file: "package.json", line: 1 }],
+      test: [],
+      reason: "right-pad is listed in package.json",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.ok(trace.rows[0]?.notes.includes("structural-proof-unconfirmed"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: a structural requirement that explicitly demands a test needs one", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, ".dockerignore", ["node_modules/", "dist/"]);
+    const text = "`.dockerignore` must not exclude `assets/` and must be covered by a regression test";
+    const ledger = ledgerWith([{ id: "req-ignore-test", text, kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-ignore-test",
+      disposition: "met",
+      enforcement: [{ file: ".dockerignore", line: 1 }],
+      test: [],
+      reason: "assets/ is absent from the ignore file",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.proof, "structural_state");
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.ok(trace.rows[0]?.notes.includes("downgraded-no-valid-test-location"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: an explicitly test-required structural claim passes with a valid test citation", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, ".dockerignore", ["node_modules/", "dist/"]);
+    const text = "`.dockerignore` must not exclude `assets/` and must be covered by a regression test";
+    const ledger = ledgerWith([{ id: "req-ignore-test", text, kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-ignore-test",
+      disposition: "met",
+      enforcement: [{ file: ".dockerignore", line: 1 }],
+      test: [VALID_TEST_LOCATION],
+      reason: "assets/ is absent and a regression test covers the rule",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, "met");
+    assert.equal(trace.rows[0]?.proof, "structural_state");
+    assert.deepEqual(trace.rows[0]?.notes, []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: the runtime predicate guard still rejects a value copy with a valid test", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/context-resolution.ts", ["sourceSha: ctx.sourceSha,"]);
+    const ledger = ledgerWith([{ id: "req-sha", text: SOURCE_SHA_REQUIREMENT, kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-sha",
+      disposition: "met",
+      enforcement: [{ file: "src/context-resolution.ts", line: 1 }],
+      test: [VALID_TEST_LOCATION],
+      reason: "copies sourceSha to the resolved pull",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.proof, "runtime_behavior");
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.ok(trace.rows[0]?.notes.includes("enforcement-location-copies-without-comparing"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: naming a source file keeps the requirement on the strict path", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([{ id: "req-source", text: "`src/real.ts` must contain `foo`", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-source",
+      disposition: "met",
+      enforcement: [{ file: "src/real.ts", line: 1 }],
+      test: [],
+      reason: "foo is present in the source file",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.proof, "runtime_behavior");
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.ok(trace.rows[0]?.notes.includes("downgraded-no-valid-test-location"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: a subordinate-clause negation is not structural state", () => {
+  const workspace = makeWorkspace();
+  try {
+    const text = "The loader must fail when `config.yaml` does not contain `api_key`";
+    const ledger = ledgerWith([{ id: "req-loader", text, kind: "acceptance" }]);
+    const trace = validateRequirementTrace([], ledger, workspace);
+    assert.equal(trace.rows[0]?.proof, "runtime_behavior");
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: an unquoted literal cannot create a vacuous structural claim", () => {
+  const workspace = makeWorkspace();
+  try {
+    const text = "`config/production.yaml` must omit debug logging";
+    const ledger = ledgerWith([{ id: "req-config", text, kind: "acceptance" }]);
+    const trace = validateRequirementTrace([], ledger, workspace);
+    assert.equal(trace.rows[0]?.proof, "runtime_behavior");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: an extensionless script is not a structural-state file target", () => {
+  const workspace = makeWorkspace();
+  try {
+    const text = "`scripts/entrypoint` must not include `curl`";
+    const ledger = ledgerWith([{ id: "req-script", text, kind: "acceptance" }]);
+    const trace = validateRequirementTrace([], ledger, workspace);
+    assert.equal(trace.rows[0]?.proof, "runtime_behavior");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: a matching gitignore glob prevents a negative-state proof", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, ".gitignore", ["**/dist/"]);
+    const ledger = ledgerWith([{ id: "req-ignore", text: "`.gitignore` must not list `dist/`", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-ignore",
+      disposition: "met",
+      enforcement: [{ file: ".gitignore", line: 1 }],
+      test: [],
+      reason: "dist/ is not listed literally",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.proof, "structural_state");
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.ok(trace.rows[0]?.notes.includes("structural-proof-unconfirmed"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: an un-ignore pattern does not count as an exclusion", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, ".gitignore", ["!assets/"]);
+    const ledger = ledgerWith([{ id: "req-ignore", text: "`.gitignore` must not exclude `assets/`", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-ignore",
+      disposition: "met",
+      enforcement: [{ file: ".gitignore", line: 1 }],
+      test: [],
+      reason: "assets/ is explicitly un-ignored",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, "met");
+    assert.equal(trace.rows[0]?.proof, "structural_state");
+    assert.deepEqual(trace.rows[0]?.notes, []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: a citation to the wrong file cannot prove a structural state", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "package.json", ['{"private":true}']);
+    writeFile(workspace, "tests/fixtures/package.json", ['{"dependencies":{"left-pad":"1.0.0"}}']);
+    const ledger = ledgerWith([{ id: "req-package", text: "Root `package.json` must not list `left-pad`", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-package",
+      disposition: "met",
+      enforcement: [{ file: "tests/fixtures/package.json", line: 1 }],
+      test: [],
+      reason: "the fixture package lists left-pad",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    // The citation must name the file the requirement names, so a citation to
+    // a different (fixture) file is no valid enforcement location at all.
+    assert.ok(trace.rows[0]?.notes.includes("downgraded-no-valid-enforcement-location"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: existence and absence assertions are checked against the workspace", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "package.json", ['{"private":true}']);
+    const existsLedger = ledgerWith([{ id: "req-exists", text: "`package.json` must exist", kind: "acceptance" }]);
+    const existsClaims = [{
+      requirement_id: "req-exists",
+      disposition: "met",
+      enforcement: [{ file: "package.json", line: 1 }],
+      test: [],
+      reason: "package.json exists in the checkout",
+    }];
+    const existsTrace = validateRequirementTrace(existsClaims, existsLedger, workspace);
+    assert.equal(existsTrace.rows[0]?.proof, "structural_state");
+    assert.equal(existsTrace.rows[0]?.disposition, "met");
+
+    const absentLedger = ledgerWith([{ id: "req-absent", text: "`package.json` must be absent", kind: "acceptance" }]);
+    const absentClaims = [{
+      requirement_id: "req-absent",
+      disposition: "met",
+      enforcement: [{ file: "package.json", line: 1 }],
+      test: [],
+      reason: "package.json is absent",
+    }];
+    const absentTrace = validateRequirementTrace(absentClaims, absentLedger, workspace);
+    assert.equal(absentTrace.rows[0]?.proof, "structural_state");
+    assert.equal(absentTrace.rows[0]?.disposition, "unverifiable");
+    assert.ok(absentTrace.rows[0]?.notes.includes("structural-proof-unconfirmed"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: every trace row has a proof kind and out-of-scope rows are not applicable", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = {
+      requirements: [
+        { id: "req-issue", text: SOURCE_SHA_REQUIREMENT, kind: "acceptance", provenance: [{ source: "linked_issues", ref: "#985", line: 1 }] },
+        { id: "req-package", text: "`package.json` must contain `left-pad`", kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 2 }] },
+      ],
+    };
+    const changed = changedSubjectText("+  const unrelated = true;\n", ["src/unrelated.ts"]);
+    const trace = validateRequirementTrace([], ledger, workspace, changed);
+    assert.equal(trace.rows.length, 2);
+    assert.ok(trace.rows.every((row) => typeof row.proof === "string" && row.proof.length > 0));
+    assert.equal(trace.rows.find((row) => row.requirement_id === "req-package")?.proof, "not_applicable");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: exported proof classifiers pin polarity, vetoes, and explicit test demands", () => {
+  assert.deepEqual(structuralStateClaim("`package.json` must contain `left-pad`"), {
+    file: "package.json", literal: "left-pad", presence: true, mode: "content",
+  });
+  assert.deepEqual(structuralStateClaim("`package.json` must not contain `left-pad`"), {
+    file: "package.json", literal: "left-pad", presence: false, mode: "content",
+  });
+  assert.deepEqual(structuralStateClaim("`.gitignore` must omit `dist/`"), {
+    file: ".gitignore", literal: "dist/", presence: false, mode: "content",
+  });
+  assert.deepEqual(structuralStateClaim("`.gitignore` must not omit `dist/`"), {
+    file: ".gitignore", literal: "dist/", presence: true, mode: "content",
+  });
+  assert.equal(structuralStateClaim("The loader must fail when `config.yaml` does not contain `api_key`"), null);
+  assert.equal(structuralStateClaim("`config/production.yaml` must omit debug logging"), null);
+  assert.equal(explicitlyRequiresTest("`.dockerignore` must not exclude `assets/`"), false);
+  assert.equal(explicitlyRequiresTest("`.dockerignore` must not exclude `assets/` and must be covered by a regression test"), true);
+});
+
+test("#985: multiple named config files do not form a vacuous structural claim", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "a.json", ["b.json"]);
+    writeFile(workspace, "b.json", ["{}"]);
+    const text = "`a.json` and `b.json` must contain `x`";
+    const ledger = ledgerWith([{ id: "req-multiple-configs", text, kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-multiple-configs",
+      disposition: "met",
+      enforcement: [{ file: "a.json", line: 1 }],
+      test: [VALID_TEST_LOCATION],
+      reason: "the named config files contain x",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.equal(trace.rows[0]?.proof, "runtime_behavior");
+    assert.equal(structuralStateClaim(text), null);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: a file named after the assertion is only a locator, not a state claim", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "sample-error.json", ['{"code":500}']);
+    const text = "Error responses must not include `stack_trace` in `sample-error.json`";
+    const ledger = ledgerWith([{ id: "req-error-response", text, kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-error-response",
+      disposition: "met",
+      enforcement: [{ file: "sample-error.json", line: 1 }],
+      test: [VALID_TEST_LOCATION],
+      reason: "the sample error response omits stack_trace",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.equal(trace.rows[0]?.proof, "runtime_behavior");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: a co-asserted content clause is checked alongside file existence", () => {
+  const workspace = makeWorkspace();
+  try {
+    mkdirSync(join(workspace, "config"), { recursive: true });
+    writeFileSync(join(workspace, "config", "settings.yaml"), "");
+    const text = "`config/settings.yaml` must exist and must contain `secret_key`";
+    const ledger = ledgerWith([{ id: "req-settings", text, kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-settings",
+      disposition: "met",
+      enforcement: [{ file: "config/settings.yaml", line: 1 }],
+      test: [VALID_TEST_LOCATION],
+      reason: "the settings file exists and contains secret_key",
+    }];
+    const emptyTrace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(emptyTrace.rows[0]?.disposition, "unverifiable");
+    assert.equal(emptyTrace.rows[0]?.proof, "structural_state");
+
+    writeFile(workspace, "config/settings.yaml", ["secret_key: abc"]);
+    const populatedTrace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(populatedTrace.rows[0]?.disposition, "met");
+    assert.equal(populatedTrace.rows[0]?.proof, "structural_state");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: an unmodellable ignore pattern fails closed", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, ".gitignore", ["[a]ssets/"]);
+    const ledger = ledgerWith([{ id: "req-no-assets-ignore", text: "`.gitignore` must not exclude `assets/`", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-no-assets-ignore",
+      disposition: "met",
+      enforcement: [{ file: ".gitignore", line: 1 }],
+      test: [],
+      reason: "assets/ is not excluded",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.ok(trace.rows[0]?.notes.includes("structural-proof-unconfirmed"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: an ignore negation cannot prove positive content but permits a negative claim", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, ".npmignore", ["!build/"]);
+    const positiveText = "`.npmignore` must not omit `build/`";
+    const positiveLedger = ledgerWith([{ id: "req-build-present", text: positiveText, kind: "acceptance" }]);
+    const positiveClaims = [{
+      requirement_id: "req-build-present",
+      disposition: "met",
+      enforcement: [{ file: ".npmignore", line: 1 }],
+      test: [],
+      reason: "build/ is present",
+    }];
+    const positiveTrace = validateRequirementTrace(positiveClaims, positiveLedger, workspace);
+    assert.equal(positiveTrace.rows[0]?.disposition, "unverifiable");
+
+    const negativeText = "`.npmignore` must not exclude `build/`";
+    const negativeLedger = ledgerWith([{ id: "req-build-not-excluded", text: negativeText, kind: "acceptance" }]);
+    const negativeClaims = [{
+      requirement_id: "req-build-not-excluded",
+      disposition: "met",
+      enforcement: [{ file: ".npmignore", line: 1 }],
+      test: [],
+      reason: "the negation line does not exclude build/",
+    }];
+    const negativeTrace = validateRequirementTrace(negativeClaims, negativeLedger, workspace);
+    assert.equal(negativeTrace.rows[0]?.disposition, "met");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: an empty ignore file satisfies a negative-state claim", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFileSync(join(workspace, ".dockerignore"), "");
+    const ledger = ledgerWith([{ id: "req-no-assets-ignore", text: "`.dockerignore` must not exclude `assets/`", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-no-assets-ignore",
+      disposition: "met",
+      enforcement: [{ file: ".dockerignore", line: 1 }],
+      test: [],
+      reason: "the empty ignore file excludes no paths",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, "met");
+    assert.equal(trace.rows[0]?.proof, "structural_state");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: an ignore file outside the shared extension list is a structural target", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, ".npmignore", ["node_modules/"]);
+    const ledger = ledgerWith([{ id: "req-no-assets-ignore", text: "`.npmignore` must not exclude `assets/`", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-no-assets-ignore",
+      disposition: "met",
+      enforcement: [{ file: ".npmignore", line: 1 }],
+      test: [],
+      reason: "assets/ is not excluded by the npm ignore file",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, "met");
+    assert.equal(trace.rows[0]?.proof, "structural_state");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: an over-long literal is not a structural-state claim", () => {
+  assert.equal(structuralStateClaim("`.dockerignore` must not exclude `" + "z".repeat(300) + "`"), null);
+});
+
+test("#985: rendered structural-state traces explain a failed check", () => {
+  const trace = {
+    version: 1,
+    rows: [{
+      requirement_id: "req-x",
+      disposition: "unverifiable",
+      proof: "structural_state",
+      enforcement: [{ file: ".dockerignore", line: 1 }],
+      test: [],
+      reason: "",
+      notes: ["structural-proof-unconfirmed"],
+    }],
+    incomplete: true,
+    errors: [],
+  };
+  assert.ok(renderRequirementTraceMarkdown(trace).includes("does not satisfy the requirement"));
+});
+
+test("#985: positive structural content uses token-bounded literals", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "policy.yaml", ["enable_audit_logger: false"]);
+    const ledger = ledgerWith([{ id: "req-policy", text: "`policy.yaml` must contain `enable_audit_log`", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-policy",
+      disposition: "met",
+      enforcement: [{ file: "policy.yaml", line: 1 }],
+      test: [],
+      reason: "enable_audit_log is present in policy.yaml",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.ok(trace.rows[0]?.notes.includes("structural-proof-unconfirmed"));
+
+    writeFile(workspace, "policy2.yaml", ["enable_audit_log: true"]);
+    const controlLedger = ledgerWith([{ id: "req-policy-control", text: "`policy2.yaml` must contain `enable_audit_log`", kind: "acceptance" }]);
+    const controlClaims = [{
+      requirement_id: "req-policy-control",
+      disposition: "met",
+      enforcement: [{ file: "policy2.yaml", line: 1 }],
+      test: [],
+      reason: "enable_audit_log is present in policy2.yaml",
+    }];
+    const control = validateRequirementTrace(controlClaims, controlLedger, workspace);
+    assert.equal(control.rows[0]?.disposition, "met");
+    assert.equal(control.rows[0]?.proof, "structural_state");
+
+    writeFile(workspace, ".dockerignore", ["foo/assets/bar"]);
+    const pathLedger = ledgerWith([{ id: "req-assets", text: "`.dockerignore` must contain `assets/`", kind: "acceptance" }]);
+    const pathClaims = [{
+      requirement_id: "req-assets",
+      disposition: "met",
+      enforcement: [{ file: ".dockerignore", line: 1 }],
+      test: [],
+      reason: "assets/ occurs within the ignored path",
+    }];
+    const pathTrace = validateRequirementTrace(pathClaims, pathLedger, workspace);
+    assert.equal(pathTrace.rows[0]?.disposition, "met");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#985: only dot-prefixed ignore files qualify as structural targets", () => {
+  assert.equal(structuralStateClaim("`db-ignore` must contain `Flask`"), null);
+  assert.deepEqual(structuralStateClaim("`.npmignore` must not exclude `assets/`"), {
+    file: ".npmignore", literal: "assets/", presence: false, mode: "content",
+  });
+});
+
+test("#985: an extensionless -ignore file falls back to runtime proof", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "db-ignore", ['print("hi")']);
+    const ledger = ledgerWith([{ id: "req-db-ignore", text: "`db-ignore` must contain `Flask`", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-db-ignore",
+      disposition: "met",
+      enforcement: [{ file: "db-ignore", line: 1 }],
+      test: [VALID_TEST_LOCATION],
+      reason: "Flask is present in db-ignore",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.equal(trace.rows[0]?.proof, "runtime_behavior");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
 });

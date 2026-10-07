@@ -48,8 +48,8 @@
  */
 import { readFileSync } from "node:fs";
 import type { ArtifactFinding, ReviewArtifact } from "./artifact.js";
-import { workspaceRegularFile, workspaceFsPath } from "../context/workspace-path.js";
-import { isTestPath } from "../context/change-anchors.js";
+import { workspaceRegularFile, workspaceFsPath, workspacePathExists } from "../context/workspace-path.js";
+import { detectLanguage, isTestPath } from "../context/change-anchors.js";
 
 export const TRACE_DISPOSITIONS: readonly string[] = ["met", "unmet", "not_applicable", "unverifiable"];
 
@@ -74,6 +74,12 @@ export interface TraceLocation {
 export interface RequirementTraceRow {
   requirement_id: string;
   disposition: string;
+  /** #985: the deterministic proof shape this requirement was validated
+   * against — `runtime_behavior` | `structural_state` | `test_required` |
+   * `distributed`, or `not_applicable` for an out-of-scope row. Derived from
+   * the ledger requirement text by this module, never from a model field, so
+   * it is explainable from the artifact alone. */
+  proof: string;
   enforcement: TraceLocation[];
   test: TraceLocation[];
   reason: string;
@@ -335,6 +341,317 @@ export function enforcementPredicateFound(
     }
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// #985: deterministic proof classification.
+//
+// #874/#854 require a `met` to carry a real runtime predicate plus a
+// regression test. That is right for BEHAVIOURAL requirements, but wrong for
+// requirements whose truth is a property of repository STATE: "`.dockerignore`
+// must not exclude `assets/`" is provable by reading the checkout, and
+// withholding approval because it has no dedicated test is a false gap.
+//
+// The classification is derived from the ledger requirement text by THIS
+// module — never from a model-supplied field. The model supplies citations
+// only, so it cannot authorise itself out of the test requirement. The
+// classifier is deliberately narrow and fail-closed: anything it cannot parse
+// unambiguously falls through to `runtime_behavior`, the strict path.
+// ---------------------------------------------------------------------------
+
+export type RequirementProofKind = "runtime_behavior" | "structural_state" | "test_required" | "distributed";
+
+/** Behavioural markers: if the requirement describes what the code DOES (when
+ * it fails, what it compares, what it loads), its truth is not a property of
+ * file content and must never be classified structural. This veto is what
+ * stops a subordinate clause ("must fail when `config.yaml` does not contain
+ * `api_key`") from being misread as a state assertion about `config.yaml`. */
+const BEHAVIORAL_VETO_RE = /\b(when|whenever|if|unless|upon|during|while|fail|fails|failing|reject|rejects|retry|retries|block|blocks|abort|aborts|throw|throws|load|loads|run|runs|execute|executes|handle|handles|process|processes|validate|validates|enforce|enforces|compare|compares|match|matches|check|checks|verify|verifies|ensure|ensures|assert|asserts|detect|detects|prevent|prevents|allow|allows|permit|permits|emit|emits|invoke|invokes|parse|parses|compute|computes|render|renders|send|sends|fetch|fetches|request|requests|respond|responds|return|returns|exit|exits|crash|crashes|timeout|await|awaits)\b/i;
+
+/** Assertion phrases, matched whole rather than parsed: negation scope in
+ * prose is not recoverable with a regex, so the shape is pinned by the phrase
+ * itself. A text that matches both sets (or neither) is ambiguous and stays
+ * on the strict path. */
+const CONTENT_VERBS = "contain|contains|include|includes|list|lists|declare|declares|have|has|exclude|excludes|reference|references|mention|mentions|name|names|equal|equals|specify|specifies|define|defines";
+const NEGATIVE_CONTENT_VERBS = "omit|omits|remove|removes|drop|drops|strip|strips|delete|deletes|forbid|forbids|ban|bans";
+
+/** Content assertions, checked against the named file's lines. */
+const CONTENT_PRESENT_PHRASES: readonly RegExp[] = [
+  new RegExp(`\\b(must|shall|should)\\s+(${CONTENT_VERBS})\\b`, "i"),
+  new RegExp(`\\b(must|shall|should)\\s+not\\s+(${NEGATIVE_CONTENT_VERBS})\\b`, "i"),
+];
+const CONTENT_ABSENT_PHRASES: readonly RegExp[] = [
+  new RegExp(`\\b(must|shall|should)\\s+not\\s+(${CONTENT_VERBS})\\b`, "i"),
+  new RegExp(`\\b(must|shall|should)\\s+(${NEGATIVE_CONTENT_VERBS})\\b`, "i"),
+];
+/** Existence assertions, checked against the named path itself. */
+const EXISTENCE_PRESENT_RE = /\b(must|shall|should)\s+(exist|be\s+present|be\s+defined)\b/i;
+const EXISTENCE_ABSENT_RE = /\b(must|shall|should)\s+(not\s+exist|not\s+be\s+present|be\s+absent|be\s+missing)\b/i;
+/** Every assertion phrase, for locating where the assertion starts. */
+const ASSERTION_PHRASES: readonly RegExp[] = [
+  ...CONTENT_PRESENT_PHRASES,
+  ...CONTENT_ABSENT_PHRASES,
+  EXISTENCE_PRESENT_RE,
+  EXISTENCE_ABSENT_RE,
+];
+
+const QUOTED_TOKEN_RE = /`([^`\n]+)`|"([^"\n]+)"|'([^'\n]+)'/g;
+const CONFIG_EXT_RE = /\.(json|ya?ml|toml|ini|cfg|conf|lock|txt|md|xml|csv|env|properties|editorconfig)$/i;
+
+/** A path-shaped token: names a file the checkout can be read for. Bare
+ * (unquoted) tokens are accepted for the FILE target only — the asserted
+ * literal must be a quoted/backticked token from the requirement text, so the
+ * classifier can never invent a literal out of prose and mark a vacuous
+ * requirement `met`. */
+function looksLikePath(token: string): boolean {
+  const trimmed = token.trim();
+  if (trimmed === "" || /\s/.test(trimmed) || trimmed.length > 200) return false;
+  if (trimmed.includes("/")) return true;
+  if (trimmed.startsWith(".")) return true;
+  return CONFIG_EXT_RE.test(trimmed);
+}
+
+/** The requirement text's backticked/quoted spans (candidate literals and
+ * file targets) and its bare word-ish tokens (candidate file targets only). */
+function verbatimTokens(text: string): { quoted: string[]; bare: string[] } {
+  const quoted: string[] = [];
+  for (const match of text.matchAll(QUOTED_TOKEN_RE)) {
+    const token = (match[1] ?? match[2] ?? match[3] ?? "").trim();
+    if (token !== "") quoted.push(token);
+  }
+  const bare = (text.match(/[A-Za-z0-9_.@/+-]+/g) ?? [])
+    .map((token) => token.replace(/[.,;:]+$/, ""))
+    .filter((token) => token !== "");
+  return { quoted, bare };
+}
+
+export interface StructuralClaim {
+  /** The file the requirement names — must equal the cited location's file. */
+  file: string;
+  /** The asserted content (verbatim from the requirement), or `file` itself
+   * for an existence assertion. */
+  literal: string;
+  /** true: the literal must be present / the path must exist. */
+  presence: boolean;
+  mode: "content" | "exists";
+}
+
+/** Bounds the asserted literal, so a hostile requirement text cannot push an
+ * unbounded subject into the pattern-anchored structural check. */
+const MAX_STRUCTURAL_LITERAL_CHARS = 200;
+
+/** The index where the requirement's assertion phrase starts, or -1. */
+function firstAssertionIndex(text: string): number {
+  let first = -1;
+  for (const phrase of ASSERTION_PHRASES) {
+    const index = text.search(phrase);
+    if (index >= 0 && (first < 0 || index < first)) first = index;
+  }
+  return first;
+}
+
+/**
+ * Derive a structural state claim from a requirement, or `null` when the text
+ * is not unambiguously one. Everything that fails to parse — behavioural
+ * language, no single named config file, no quoted literal, ambiguous
+ * polarity, the file appearing only as a locator after the assertion — returns
+ * `null`, which routes the requirement to the strict runtime path.
+ */
+export function structuralStateClaim(text: string): StructuralClaim | null {
+  if (BEHAVIORAL_VETO_RE.test(text)) return null;
+
+  const contentPresent = CONTENT_PRESENT_PHRASES.some((re) => re.test(text));
+  const contentAbsent = CONTENT_ABSENT_PHRASES.some((re) => re.test(text));
+  const present = contentPresent || EXISTENCE_PRESENT_RE.test(text);
+  const absent = contentAbsent || EXISTENCE_ABSENT_RE.test(text);
+  // Both or neither ⇒ the polarity is not recoverable; stay strict.
+  if (present === absent) return null;
+
+  const { quoted, bare } = verbatimTokens(text);
+  // `detectLanguage(...) === "non_source"` is the safety gate: a requirement
+  // naming executable source (`src/foo.ts`) is behavioural by construction and
+  // never structural, and the `unknown` bucket (extensionless scripts,
+  // Dockerfile, Makefile) is excluded too — it admits code.
+  const candidates = [...new Set([...quoted, ...bare])]
+    .filter(looksLikePath)
+    // Ignore files are non-source by construction even when the shared
+    // extension list does not enumerate them (`.npmignore`, `.eslintignore`).
+    .filter((token) => detectLanguage(token) === "non_source" || isIgnoreFile(token));
+  // Exactly one named file. Two candidates means one of them would be read as
+  // the other's literal ("`a.json` and `b.json` must contain `x`" would check
+  // a.json for the string "b.json"), which is how a multi-file requirement
+  // turns into a vacuous `met`.
+  if (candidates.length !== 1) return null;
+  const file = candidates[0] as string;
+
+  // The file must be the SUBJECT of the assertion, not a locator. In
+  // "`config.yaml` must contain `x`" the file precedes the assertion; in
+  // "error responses must not include `stack_trace` in `sample.json`" it
+  // follows it, and the assertion is about runtime behaviour, not that file.
+  const fileIndex = text.indexOf(file);
+  const assertionIndex = firstAssertionIndex(text);
+  if (fileIndex < 0 || assertionIndex < 0 || fileIndex > assertionIndex) return null;
+
+  // Existence mode only when there is no content clause to check as well —
+  // otherwise "must exist and must contain `k`" would drop the containment
+  // half and pass on an empty file.
+  if (!contentPresent && !contentAbsent) {
+    return { file, literal: file, presence: present, mode: "exists" };
+  }
+
+  const literal = quoted.find((token) => {
+    const trimmed = token.trim();
+    return trimmed !== ""
+      && trimmed !== file
+      && trimmed.length <= MAX_STRUCTURAL_LITERAL_CHARS
+      // The literal must not itself be a config file target, or a requirement
+      // naming two config files degrades into a file-existence check.
+      && detectLanguage(trimmed) !== "non_source"
+      && !isIgnoreFile(trimmed);
+  });
+  if (literal === undefined) return null;
+  return { file, literal, presence: present, mode: "content" };
+}
+
+/** Bounds the pattern lines fed to the glob matcher, so a pathological
+ * checkout line cannot drive the regex engine into backtracking. Over-long
+ * lines are treated as a match instead (see below). */
+const MAX_GLOB_PATTERN_CHARS = 500;
+
+/** Ignore-style files — dotfiles whose name ends in `ignore` — whose lines are
+ * glob patterns rather than literals. The leading dot is required: an
+ * extensionless file that merely ends in `-ignore` is not an ignore file and
+ * must not slip past the non-source gate. */
+function isIgnoreFile(file: string): boolean {
+  const trimmed = file.trim().toLowerCase();
+  return /^\.[a-z0-9-]*ignore$/.test(trimmed.slice(trimmed.lastIndexOf("/") + 1));
+}
+
+/** A literal occurrence that is not merely part of a longer identifier:
+ * `enable_audit_log` must not be satisfied by `enable_audit_logger`. The
+ * boundary is only required on the side where the literal itself is
+ * identifier-shaped, so a path like `assets/` still matches `foo/assets/bar`. */
+function containsLiteralToken(line: string, literal: string): boolean {
+  const identifierChar = /[A-Za-z0-9_]/;
+  const needsBefore = identifierChar.test(literal.charAt(0));
+  const needsAfter = identifierChar.test(literal.charAt(literal.length - 1));
+  for (let index = line.indexOf(literal); index >= 0; index = line.indexOf(literal, index + 1)) {
+    const before = index === 0 ? "" : (line[index - 1] as string);
+    const after = index + literal.length >= line.length ? "" : (line[index + literal.length] as string);
+    if ((!needsBefore || !identifierChar.test(before)) && (!needsAfter || !identifierChar.test(after))) return true;
+  }
+  return false;
+}
+
+/**
+ * `presence: true` — the literal must genuinely appear, so this is a
+ * containment test: a hit is real evidence, and a miss fails closed. Blank,
+ * comment and `!`-negation lines assert no content of their own, so they never
+ * count, and the match is token-bounded so a key is not satisfied by a longer
+ * key that merely begins with it.
+ */
+function lineMentionsLiteral(line: string, literal: string): boolean {
+  const trimmed = line.trim();
+  if (trimmed === "" || trimmed.startsWith("#") || trimmed.startsWith("//") || trimmed.startsWith("!")) return false;
+  return containsLiteralToken(line, literal);
+}
+
+/**
+ * `presence: false` — the literal must genuinely be ABSENT, so this
+ * OVER-approximates "mentions": comments and `!`-un-ignore lines cannot
+ * exclude anything, a line whose glob metacharacters stripped away names the
+ * literal (`dist*` excludes `dist/`), and — in an ignore file, where lines ARE
+ * patterns — an unmodellable or over-long pattern counts too.
+ * Over-approximating here can only ever cost a fail-closed `unverifiable`,
+ * never a wrong `met`.
+ */
+function lineExcludesLiteral(line: string, literal: string, ignoreFile: boolean): boolean {
+  const trimmed = line.trim();
+  if (trimmed === "" || trimmed.startsWith("#") || trimmed.startsWith("!")) return false;
+  if (line.includes(literal)) return true;
+  const bare = trimmed.replace(/\/+$/, "");
+  const target = literal.replace(/\/+$/, "");
+  if (bare !== "" && bare === target) return true;
+  // `dist*` / `dist**` / `**/dist/` all name the literal once the wildcards go.
+  const stripped = trimmed.replace(/[*?]/g, "");
+  if (target !== "" && (stripped === target || stripped === `/${target}` || stripped.startsWith(`${target}/`) || stripped.startsWith(`/${target}/`))) {
+    return true;
+  }
+  if (!ignoreFile) return false;
+  // A pattern this matcher cannot model could still match — assume it does.
+  if (trimmed.includes("[") || trimmed.includes("\\") || trimmed.length > MAX_GLOB_PATTERN_CHARS) return true;
+  return target !== "" && (globPatternMatches(trimmed, target) || globPatternMatches(bare, target));
+}
+
+/** gitignore-ish glob match: a double star crosses `/`, `*` and `?` do not,
+ * a leading double-star slash group is optional, and a leading slash anchors
+ * to the root. An approximation used only in the fail-closed direction
+ * (`lineExcludesLiteral`). */
+function globPatternMatches(pattern: string, target: string): boolean {
+  const anchored = pattern.startsWith("/");
+  const body = anchored ? pattern.slice(1) : pattern;
+  let source = "";
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body[index] as string;
+    if (char === "*") {
+      if (body[index + 1] === "*") {
+        if (body[index + 2] === "/") { source += "(?:.*/)?"; index += 2; }
+        else { source += ".*"; index += 1; }
+      } else {
+        source += "[^/]*";
+      }
+    } else if (char === "?") {
+      source += "[^/]";
+    } else {
+      source += escapeRegExp(char);
+    }
+  }
+  const prefix = anchored ? "^" : "^(?:.*/)?";
+  try {
+    return new RegExp(`${prefix}${source}(?:/.*)?$`).test(target);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The #985 structural proof: the cited location must be the file the
+ * requirement names, and the requirement's assertion must actually hold in the
+ * checkout. The model contributes the citation; the truth is re-derived here.
+ */
+function structuralProofHolds(
+  claim: StructuralClaim,
+  cache: FileTextCache,
+  workspace: string,
+): boolean {
+  // The citation identifies the FILE; the file's content (or existence) is the
+  // evidence. A cited line number is therefore not required to be in range —
+  // an empty ignore file is a perfectly good "does not exclude X" proof.
+  if (claim.mode === "exists") return workspacePathExists(workspace, claim.file) === claim.presence;
+  const lines = cache.lines(claim.file);
+  if (lines === null) return false;
+  const ignoreFile = isIgnoreFile(claim.file);
+  const mentioned = lines.some((line) => claim.presence
+    ? lineMentionsLiteral(line, claim.literal)
+    : lineExcludesLiteral(line, claim.literal, ignoreFile));
+  return claim.presence ? mentioned : !mentioned;
+}
+
+function normalizeRepoPath(path: string): string {
+  return path.replace(/^\.\//, "");
+}
+
+/** The requirement text explicitly demands a test. Detected independently of
+ * the structural classification, so a requirement can be BOTH structural and
+ * test-demanding — the state check then replaces the predicate requirement and
+ * the test evidence is additionally required. Over-eager matching is the safe
+ * direction: it can only add a test requirement, never remove one. */
+export function explicitlyRequiresTest(text: string): boolean {
+  const demand = /\b(must|shall|should|required?|needs?|requires?|mandatory|have to|has to)\b/i.test(text);
+  if (!demand) return false;
+  if (/\btests?\s+coverage\b/i.test(text)) return true;
+  if (/\bcovered\s+by\s+(a|an|the)?\s*(regression|adversarial|unit|integration|end-to-end|e2e)?\s*tests?\b/i.test(text)) return true;
+  return /\b(must|shall|should|required?|needs?|requires?|have|has|include|includes|add|adds|provide|provides)\b[^.;]{0,60}\b(regression|adversarial|unit|integration|end-to-end|e2e)?\s*tests?\b(?![\s/]*(job|step|fixture|fixtures|data|runner|harness|matrix|dir|directory|folder))/i.test(text);
 }
 
 /** Duck-typed in-scope ledger entry: the persisted artifact shape
@@ -784,6 +1101,18 @@ export function validateRequirementTrace(
     const distributedSet = distributedGroupsForText(entry.text, context.ownership);
     const distributedGroups = distributedSet.groups;
     const isDistributed = distributedGroups.length >= MIN_DISTRIBUTED_GROUPS;
+    // #985: the deterministic proof shape for this requirement, derived from
+    // its text (never from a model field) — recorded on the row so the
+    // decision is explainable from the artifact alone.
+    const structural = structuralStateClaim(entry.text);
+    const requiresTest = explicitlyRequiresTest(entry.text);
+    const proof: RequirementProofKind = isDistributed
+      ? "distributed"
+      : structural !== null
+        ? "structural_state"
+        : requiresTest
+          ? "test_required"
+          : "runtime_behavior";
     let disposition: string;
     let enforcement: TraceLocation[];
     let test: TraceLocation[];
@@ -842,22 +1171,42 @@ export function validateRequirementTrace(
             }
           }
         } else if (!isDistributed) {
-          // Full narrow trace required: a valid enforcement location AND a
-          // valid test location, then a predicate near a requirement term.
-          if (!anyLocationValid(enforcement, cache)) {
-            disposition = "unverifiable";
-            notes.push("downgraded-no-valid-enforcement-location");
-          }
-          if (!anyTestLocationValid(test, cache)) {
-            disposition = "unverifiable";
-            notes.push("downgraded-no-valid-test-location");
-          }
-          if (disposition === "met") {
-            const terms = extractRequirementTerms(entry.text, symbol);
-            const validEnforcementLocations = enforcement.filter((loc) => locationValid(loc, cache));
-            if (!enforcementPredicateFound(validEnforcementLocations, terms, cache)) {
+          if (structural !== null) {
+            // #985: a state requirement's truth is a property of the checkout,
+            // so the proof is the cited state itself — re-derived here, not
+            // asserted by the model — and a dedicated regression test is not
+            // required. A requirement that ALSO demands test coverage gets it.
+            const citedFile = enforcement.some((loc) => normalizeRepoPath(loc.file) === normalizeRepoPath(structural.file));
+            if (!citedFile) {
               disposition = "unverifiable";
-              notes.push("enforcement-location-copies-without-comparing");
+              notes.push("downgraded-no-valid-enforcement-location");
+            } else if (!structuralProofHolds(structural, cache, workspace)) {
+              disposition = "unverifiable";
+              notes.push("structural-proof-unconfirmed");
+            }
+            if (requiresTest && !anyTestLocationValid(test, cache)) {
+              disposition = "unverifiable";
+              notes.push("downgraded-no-valid-test-location");
+            }
+          } else {
+            // runtime_behavior / test_required: full narrow trace required — a
+            // valid enforcement location AND a valid test location, then a
+            // predicate near a requirement term (#854).
+            if (!anyLocationValid(enforcement, cache)) {
+              disposition = "unverifiable";
+              notes.push("downgraded-no-valid-enforcement-location");
+            }
+            if (!anyTestLocationValid(test, cache)) {
+              disposition = "unverifiable";
+              notes.push("downgraded-no-valid-test-location");
+            }
+            if (disposition === "met") {
+              const terms = extractRequirementTerms(entry.text, symbol);
+              const validEnforcementLocations = enforcement.filter((loc) => locationValid(loc, cache));
+              if (!enforcementPredicateFound(validEnforcementLocations, terms, cache)) {
+                disposition = "unverifiable";
+                notes.push("enforcement-location-copies-without-comparing");
+              }
             }
           }
         }
@@ -877,7 +1226,7 @@ export function validateRequirementTrace(
     // pass; findings_severity_gated/model map before it).
     if (disposition === "unverifiable" || disposition === "unmet") incomplete = true;
 
-    rows.push({ requirement_id: entry.id, disposition, enforcement, test, reason, notes });
+    rows.push({ requirement_id: entry.id, disposition, proof, enforcement, test, reason, notes });
   }
 
   // #935: an out-of-scope requirement is grounded not_applicable and never
@@ -887,9 +1236,9 @@ export function validateRequirementTrace(
     const claimedUnmet = typeof claim?.disposition === "string" && claim.disposition.toLowerCase() === "unmet" && capReason(claim.reason) !== "";
     if (claimedUnmet) {
       incomplete = true;
-      rows.push({ requirement_id: entry.id, disposition: "unmet", enforcement: parseLocations(claim!.enforcement), test: parseLocations(claim!.test), reason: capReason(claim!.reason), notes: ["out-of-scope-reported-unmet"] });
+      rows.push({ requirement_id: entry.id, disposition: "unmet", proof: "not_applicable", enforcement: parseLocations(claim!.enforcement), test: parseLocations(claim!.test), reason: capReason(claim!.reason), notes: ["out-of-scope-reported-unmet"] });
     } else {
-      rows.push({ requirement_id: entry.id, disposition: "not_applicable", enforcement: [], test: [], reason, notes: ["out-of-scope"] });
+      rows.push({ requirement_id: entry.id, disposition: "not_applicable", proof: "not_applicable", enforcement: [], test: [], reason, notes: ["out-of-scope"] });
     }
   }
 
@@ -1035,6 +1384,11 @@ export function renderRequirementTraceMarkdown(trace: RequirementTraceArtifact):
         details.push(`uncovered test seams: ${testMisses.map((name) => `\`${name}\``).join(", ")}`);
       }
       if (row.notes.includes("distributed-test-location-uncovered")) details.push("no test location cited");
+    }
+    // #985: a structural row whose state check failed is otherwise
+    // indistinguishable from a missing citation at the rendered level.
+    if (row.notes.includes("structural-proof-unconfirmed")) {
+      details.push("the cited state does not satisfy the requirement");
     }
     const reason = row.reason !== "" ? `: ${row.reason}` : "";
     return `- \`${cleanRequirementId(row.requirement_id)}\` — **${row.disposition}** (${details.join("; ")})${reason}`;
