@@ -154,31 +154,47 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
 
   // The dash-separated families (#996), ENUMERATED, with the body's first
   // segment required to be a 20-character run carrying at least one DIGIT or
-  // UPPERCASE character. All three parts are discriminators between a key and
-  // ordinary source, and each exists because its absence let source through as
-  // a key: the prefix is closed to families a provider actually issues (a
-  // generic `sk-<seg>-` chain ate `docs/sk-deployment-internationalization-notes`);
-  // the run must be the body's FIRST segment, because a token that merely
-  // CONTAINS a long word is still a path (`docs/sk-proj-card-internationalization-notes`);
-  // and the run must not be all-lowercase, because `internationalization` is
-  // itself 20 characters and `docs/sk-proj-internationalization-notes` is a
-  // path. Real bodies are base64url, so a digit or uppercase is certain across
-  // any 20-character window — the entropy test costs real keys nothing worth
-  // noticing. The trailing `[A-Za-z0-9_-]*` still consumes the rest of a
-  // `-`/`_`-bearing body, so a real key is masked as ONE literal.
-  // `ant-api03` is version-bearing: a future `apiNN` bump is a one-line change
-  // here.
+  // UPPERCASE character.
   //
-  // Accepted residuals, recorded rather than hidden: a real body carrying
-  // `-`/`_` inside its first 20 characters is not masked (`sk-proj-ab-<40
-  // alnum>`) — covering it needs the run hunted anywhere in the body, which
-  // reopens the path above; and a 20+ character segment that is entirely
-  // lowercase (an all-letter hex body, say) is not masked either. Pre-#997
-  // left both of those alone. The rule's remaining FALSE-positive class is a
-  // 20+ character segment carrying a digit or uppercase that is not a
-  // credential (`sk-proj-internationalization2024-notes`); no shape-only rule
-  // closes that without parsing words, which is the framing/context signal
-  // deliberately kept out of scope here.
+  // This is a HIGH-CONFIDENCE HEURISTIC with explicitly bounded tradeoffs, not
+  // a classifier. No shape-only rule can both mask every real family body and
+  // spare every kebab token that begins with a family prefix, because the two
+  // are the same token shape: `sk-proj-internationalization2024-notes` is a
+  // path, `sk-proj-<24-char base64url body>` is a key, and they differ only in
+  // whether the segment is an English word. Each part below exists because its
+  // absence let ordinary source through as a key:
+  //  - the prefix is closed to families a provider actually issues (a generic
+  //    `sk-<seg>-` chain ate `docs/sk-deployment-internationalization-notes`);
+  //  - the run must be the body's FIRST segment, because a token that merely
+  //    CONTAINS a long word is still a path
+  //    (`docs/sk-proj-card-internationalization-notes`);
+  //  - the run must carry a digit or uppercase, because `internationalization`
+  //    is itself 20 lowercase characters
+  //    (`docs/sk-proj-internationalization-notes`).
+  //
+  // The entropy test is base64url-INFORMED, not base64url-correct: base64url
+  // does NOT guarantee an uppercase letter or digit in any 20-character window.
+  // A window without one is vanishingly unlikely in a real key body, so the
+  // resulting miss is accepted rather than traded for the false positive a
+  // longer or looser rule would cost. The trailing `[A-Za-z0-9_-]*` still
+  // consumes the rest of a `-`/`_`-bearing body, so a real key is masked as ONE
+  // literal. `ant-api03` is version-bearing: a future `apiNN` bump is a
+  // one-line change here.
+  //
+  // Accepted boundaries, each pinned by test in `tests-v3/redact.test.ts`:
+  //  - FALSE NEGATIVE — a real body whose first 20 characters are all
+  //    lowercase (`sk-or-v1-<all-letter hex>`) is not masked. Syntactically
+  //    valid base64url; practically unobserved in real keys.
+  //  - FALSE NEGATIVE — a real body carrying `-`/`_` inside its first 20
+  //    characters (`sk-proj-ab-<40 alnum>`) is not masked; covering it needs
+  //    the run hunted anywhere in the body, which reopens the path above.
+  //  - FALSE POSITIVE — a kebab token whose segment after the family prefix is
+  //    20+ characters AND carries a digit or uppercase
+  //    (`docs/sk-proj-internationalization2024-notes`) is masked. Closing this
+  //    needs parsing words — the framing/context signal deliberately kept out
+  //    of scope; #996's acceptance is amended to accept it instead.
+  // Pre-#997 left all three classes alone; the amended #996 acceptance trades
+  // them for covering the three families.
   redacted = redacted.replace(
     /(?<![A-Za-z0-9])sk-(?:proj|ant-api03|or-v1)-(?=[A-Za-z0-9]*[0-9A-Z])[A-Za-z0-9]{20,}[A-Za-z0-9_-]*/g,
     REDACTED_SOURCE,

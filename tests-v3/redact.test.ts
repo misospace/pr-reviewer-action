@@ -187,19 +187,21 @@ test("#996 adversarial: the sk- rule must not eat ordinary kebab-case source", (
   }
 });
 
-test("#996 adversarial: the legacy bare floor is 19/20; the family body needs 20 characters AND entropy", () => {
-  // Legacy bare shape, unchanged.
+test("#996 adversarial: the legacy bare floor is exact — 19 characters survive, 20 mask", () => {
   assert.equal(redactSourceText(`sk-${"a".repeat(19)}`), `sk-${"a".repeat(19)}`);
   assert.equal(redactSourceText(`sk-${"a".repeat(20)}`), REDACTED_SOURCE);
-  // A family body needs the length AND a non-lowercase character: round 4 is
-  // exactly `internationalization` — 20 lowercase characters, a path, not a key.
+});
+
+test("#996 adversarial: a family body needs BOTH 20 characters and entropy — neither alone is enough", () => {
+  // Length without entropy survives (the accepted false negative below).
   assert.equal(redactSourceText(`sk-proj-${"a".repeat(20)}`), `sk-proj-${"a".repeat(20)}`);
-  assert.equal(redactSourceText("docs/sk-proj-internationalization-notes"), "docs/sk-proj-internationalization-notes");
-  assert.equal(redactSourceText(`sk-proj-0${"a".repeat(19)}`), REDACTED_SOURCE);
-  assert.equal(redactSourceText(`sk-proj-${"a".repeat(19)}A`), REDACTED_SOURCE);
-  // Same shape behind the other two families.
   assert.equal(redactSourceText(`sk-ant-api03-${"a".repeat(20)}`), `sk-ant-api03-${"a".repeat(20)}`);
   assert.equal(redactSourceText(`sk-or-v1-${"a".repeat(20)}`), `sk-or-v1-${"a".repeat(20)}`);
+  // Entropy without length survives.
+  assert.equal(redactSourceText(`sk-proj-${"a".repeat(18)}A`), `sk-proj-${"a".repeat(18)}A`);
+  // Both together mask.
+  assert.equal(redactSourceText(`sk-proj-0${"a".repeat(19)}`), REDACTED_SOURCE);
+  assert.equal(redactSourceText(`sk-proj-${"a".repeat(19)}A`), REDACTED_SOURCE);
   assert.equal(redactSourceText(`sk-ant-api03-${"0".repeat(20)}`), REDACTED_SOURCE);
 });
 
@@ -214,14 +216,43 @@ test("#996 adversarial: a body containing the separator charset is masked whole,
   assert.ok(!redactSourceText(underscored).includes("more_body"));
 });
 
-test("#996 accepted residual: a separator inside the body's first 20 characters is left alone", () => {
-  // Hunting the run anywhere in the body covers this shape, and an earlier
+// #996 (acceptance as amended by review): the sk- family rule is a
+// HIGH-CONFIDENCE HEURISTIC with explicitly bounded tradeoffs, not a
+// classifier. No shape-only rule can both mask every real family body and
+// spare every kebab token that begins with a family prefix —
+// `sk-proj-internationalization2024-notes` is a path and
+// `sk-proj-<24-char base64url body>` is a key, and they differ only in whether
+// the segment is an English word. The three tests below pin the accepted
+// boundaries; pre-#997 left all three classes alone.
+
+test("#996 accepted boundary (false negative): a body whose first 20 characters are all lowercase is not masked", () => {
+  // Syntactically valid base64url — base64url does NOT guarantee an uppercase
+  // or digit in any 20-character window — but practically unobserved in real
+  // keys, so the miss is accepted rather than traded for the false positive a
+  // looser rule would cost.
+  const lowercaseBody = `sk-or-v1-${"abcdef".repeat(11)}`;
+  assert.equal(redactSourceText(lowercaseBody), lowercaseBody);
+  assert.equal(redactSourceText(`sk-proj-${"a".repeat(20)}`), `sk-proj-${"a".repeat(20)}`);
+});
+
+test("#996 accepted boundary (false negative): a separator inside the body's first 20 characters is left alone", () => {
+  // Hunting the run anywhere in the body covers this shape — an earlier
   // revision of this rule did mask it — but the same relaxation also masked
-  // `docs/sk-proj-card-internationalization-notes`, which is source, and
-  // source-safety wins that tie. Pre-#997 left this shape alone too, so this
-  // is no regression against the baseline.
+  // `docs/sk-proj-card-internationalization-notes`, so the miss is accepted.
   const dashEarly = `sk-proj-ab-${"abcdefghijklmnopqrstuvwxyz012345"}`;
   assert.equal(redactSourceText(dashEarly), dashEarly);
+});
+
+test("#996 accepted boundary (false positive): a 20+ character kebab segment carrying a digit is masked", () => {
+  // `internationalization2024` satisfies the entropy heuristic, so this path is
+  // masked where pre-#997 leaves it alone. Closing this class needs parsing
+  // words — the framing/context signal deliberately out of scope; #996's
+  // acceptance is amended to accept it in exchange for covering the families.
+  assert.equal(
+    redactSourceText("docs/sk-proj-internationalization2024-notes"),
+    `docs/${REDACTED_SOURCE}`,
+  );
+  assert.equal(redactSourceText("sk-proj-internationalization2024-notes"), REDACTED_SOURCE);
 });
 
 test("#996 adversarial: masking is idempotent and the marker is never re-matched", () => {
