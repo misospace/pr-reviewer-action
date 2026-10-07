@@ -115,6 +115,97 @@ test("#876: bare token-shape secrets (no key to preserve) still replace the whol
   assert.equal(redactSourceText("sk-abcdefghijklmnopqrstuvwxyz"), REDACTED_SOURCE);
 });
 
+// #996: the dashed `sk-` families (`sk-proj-…`, `sk-ant-api03-…`,
+// `sk-or-v1-…`) are the same class of provider key as the bare form, but the
+// old `sk-[A-Za-z0-9]{20,}` stopped at the first `-` and let all three through
+// in source evidence. The fix keeps the rule source-safe rather than copying
+// the prose rule: a body must still contain a long UNBROKEN alphanumeric run,
+// which is what distinguishes a key body from the kebab-case identifiers,
+// paths and CSS classes that `-`/`_` in the prose rule's body would swallow.
+
+const PROJ_KEY = "sk-proj-T3BlbkFJ9abcdefghijklmnopqrstuvwxyz012345";
+const ANT_KEY = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCD";
+const OR_KEY = `sk-or-v1-${"0123456789abcdef".repeat(4)}`;
+
+test("#996: every named sk- family is masked in source evidence, and only the token changes", () => {
+  assert.equal(redactSourceText(PROJ_KEY), REDACTED_SOURCE);
+  assert.equal(redactSourceText(ANT_KEY), REDACTED_SOURCE);
+  assert.equal(redactSourceText(OR_KEY), REDACTED_SOURCE);
+
+  // The marker is the ONLY change — quote, separator, comma and terminator
+  // survive, exactly as the source redactor's contract requires.
+  assert.equal(redactSourceText(`const k = "${PROJ_KEY}";`), `const k = "${REDACTED_SOURCE}";`);
+  assert.equal(redactSourceText(`{"apiKey": "${PROJ_KEY}",}`), `{"apiKey": "${REDACTED_SOURCE}",}`);
+  assert.equal(redactSourceText(`API_KEY=${ANT_KEY}`), `API_KEY=${REDACTED_SOURCE}`);
+  assert.equal(redactSourceText(`${PROJ_KEY}\n`), `${REDACTED_SOURCE}\n`);
+  // Path-independent, like the other bare-token shapes.
+  assert.equal(redactSourceText(PROJ_KEY, "src/model/call.ts"), REDACTED_SOURCE);
+});
+
+test("#996 adversarial: the sk- rule must not eat ordinary kebab-case source", () => {
+  // Every one of these has the shape a naive `sk-[A-Za-z0-9_-]{16,}` body
+  // would mask, which is why the rule keeps the long-unbroken-run requirement.
+  const survivors = [
+    "docs/sk-deployment-runbook-notes",
+    "sk-button-primary-large",
+    "src/sk-configuration-reference.ts",
+    'class="sk-card-with-title-and-actions"',
+    "--sk-skip-verification-notes",
+    "x-sk-tracker-component-v2",
+    // A dashed family prefix with a too-short body is not a key.
+    "sk-ant-api03-abc",
+    // `sk-` preceded by a letter is the hyphenated-prose guard (the existing
+    // `risk-`/`disk-` class): the anchor rejects these outright.
+    "risk-assessment-of-the-change",
+    "disk-usage-report-for-the-cluster",
+    "// the task-runner-with-a-long-name helper",
+  ];
+  for (const line of survivors) {
+    assert.equal(redactSourceText(line), line, `expected ${JSON.stringify(line)} to survive`);
+    assert.equal(redactSourceText(line, "src/x.ts"), line);
+  }
+});
+
+test("#996 adversarial: the run-length floor is exact — 19 characters survive, 20 mask", () => {
+  assert.equal(redactSourceText(`sk-${"a".repeat(19)}`), `sk-${"a".repeat(19)}`);
+  assert.equal(redactSourceText(`sk-${"a".repeat(20)}`), REDACTED_SOURCE);
+  // Same floor behind a family prefix.
+  assert.equal(redactSourceText(`sk-proj-${"a".repeat(19)}`), `sk-proj-${"a".repeat(19)}`);
+  assert.equal(redactSourceText(`sk-proj-${"a".repeat(20)}`), REDACTED_SOURCE);
+});
+
+test("#996 adversarial: a body containing the separator charset is masked whole, with no tail left behind", () => {
+  const dashedBody = `sk-ant-api03-${"abc123".repeat(8)}-tail-seg`;
+  const masked = redactSourceText(dashedBody);
+  assert.equal(masked, REDACTED_SOURCE);
+  assert.ok(!masked.includes("tail-seg"), `key tail leaked: ${masked}`);
+
+  // An uppercase/underscore-bearing base64url body (`-`/`_` are legal in it).
+  const underscored = `sk-or-v1-${"aB3dE5".repeat(6)}_more_body`;
+  assert.ok(!redactSourceText(underscored).includes("more_body"));
+});
+
+test("#996 adversarial: masking is idempotent and the marker is never re-matched", () => {
+  const once = redactSourceText(`key=${PROJ_KEY}`);
+  assert.equal(once, `key=${REDACTED_SOURCE}`);
+  assert.equal(redactSourceText(once), once);
+});
+
+test("#996: line shape is preserved — redaction never adds or removes lines", () => {
+  const snippet = ["{", `  "apiKey": "${PROJ_KEY}",`, `  "nested": {"k": "${ANT_KEY}"}`, "}"].join("\n");
+  const out = redactSourceText(snippet, "config.json");
+  assert.equal(out.split("\n").length, snippet.split("\n").length);
+  assert.equal(out, ["{", `  "apiKey": "${REDACTED_SOURCE}",`, `  "nested": {"k": "${REDACTED_SOURCE}"}`, "}"].join("\n"));
+});
+
+test("#996: maskAndTruncateSource inherits the dashed-family masking", () => {
+  const result = maskAndTruncateSource(`token = "${PROJ_KEY}"`, 4096);
+  assert.equal(result.truncated, false);
+  assert.equal(result.text, `token = "${REDACTED_SOURCE}"`);
+  // The config-file unquoted-literal path masks it too.
+  assert.equal(redactSourceText(`token: ${PROJ_KEY}`, "config/values.yaml"), `token: ${REDACTED_SOURCE}`);
+});
+
 test("#876: the source-safe marker is distinct from the heuristic [REDACTED] marker", () => {
   assert.notEqual(REDACTED_SOURCE, "[REDACTED]");
   assert.doesNotMatch(REDACTED_SOURCE, /\[REDACTED\]/);

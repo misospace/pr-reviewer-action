@@ -145,7 +145,30 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
   redacted = redacted.replace(/ghp_[A-Za-z0-9]{30,}/g, REDACTED_SOURCE);
   redacted = redacted.replace(/github_pat_[A-Za-z0-9_]{20,}/g, REDACTED_SOURCE);
   redacted = redacted.replace(/AKIA[0-9A-Z]{16}/g, REDACTED_SOURCE);
-  redacted = redacted.replace(/sk-[A-Za-z0-9]{20,}/g, REDACTED_SOURCE);
+  // OpenAI-style `sk-` provider keys (#989/#996): the bare form
+  // (`sk-<alnum>`) plus the dash-separated families — `sk-proj-…`,
+  // `sk-ant-api03-…`, `sk-or-v1-…`. The body must still contain a long
+  // UNBROKEN alphanumeric run. That run is this rule's high-entropy signal
+  // and it is what keeps the rule source-safe: the prose rule's FREE
+  // `[A-Za-z0-9_-]{16,}` body would also swallow ordinary kebab-case
+  // identifiers, paths and CSS classes here (`docs/sk-deployment-runbook-notes`,
+  // `sk-button-primary-large`, `src/sk-configuration-reference.ts`), which must
+  // survive byte-for-byte. The `{1,12}` segment bound allows the family
+  // prefixes (`proj`, `ant`+`api03`, `or`+`v1`) without letting a run of
+  // ordinary kebab words reach the length floor. The trailing
+  // `[A-Za-z0-9_-]*` keeps a body that itself contains `-`/`_` (base64url)
+  // masked as ONE literal, instead of stopping at its first internal
+  // separator and leaking the tail of the key.
+  //
+  // Accepted residual, not special-cased: a kebab token that both starts with
+  // `sk-` and contains a single ≥20-character word
+  // (`sk-internationalization-notes`) is masked. That shape is indistinguishable
+  // from the bare form this rule has always masked, and a real key body is
+  // exactly such a run.
+  redacted = redacted.replace(
+    /(?<![A-Za-z0-9])sk-(?:[a-z0-9]{1,12}-){0,4}[A-Za-z0-9]{20,}[A-Za-z0-9_-]*/g,
+    REDACTED_SOURCE,
+  );
 
   // Bearer / Basic auth headers: keep the scheme word, mask only the token.
   redacted = redacted.replace(
