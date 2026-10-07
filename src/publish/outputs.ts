@@ -55,10 +55,22 @@ export function severityCountsLabel(findings: unknown): string {
  * delimiter is one backtick longer than the longest backtick run inside the
  * body, so embedded backticks (escaped to `\`` by `escapeTableCell`) or
  * Markdown link syntax cannot close the span and render clickable. Same
- * fail-closed strategy as `inlineCodeValue` (#903). */
+ * fail-closed strategy as `inlineCodeValue` (#903).
+ *
+ * A backtick-bearing body is additionally SPACE-PADDED (`delim + " " + body
+ * + " " + delim`). Without the padding, a trailing escaped backtick runs
+ * straight into the closing delimiter and merges with it into a longer run
+ * (the 1-backtick escape + the 2-backtick fence = a 3-run) that no
+ * CommonMark/GFM parser accepts as the equal-length closing delimiter, so
+ * the span is left unterminated and the payload renders as live Markdown.
+ * CommonMark strips exactly one leading+trailing space, so the visible span
+ * content is unchanged. A backtick-free body stays an unpadded single-backtick
+ * fence, byte-identical to `inlineCodeValue`. */
 function fenceInlineCode(body: string): string {
+  if (!body.includes("`")) return `\`${body}\``;
   const longest = Math.max(0, ...(body.match(/`+/g) ?? []).map((run) => run.length));
-  return "`".repeat(longest + 1) + body + "`".repeat(longest + 1);
+  const delim = "`".repeat(longest + 1);
+  return `${delim} ${body} ${delim}`;
 }
 
 /** A path (model-controlled) as one bounded code span: whitespace collapsed
@@ -303,7 +315,10 @@ export interface StepSummaryTelemetry {
    * counts row; empty/absent renders nothing (byte-identical to the v2 table). */
   findings?: unknown;
   /** #975: upstream-link neutralization for finding messages, mirroring the
-   * strict publish body's link mode. */
+   * strict publish body's link mode. The step summary additionally fences each
+   * non-empty message cell in an inline-code span (see `renderFindingsSummary`)
+   * so model-controlled Markdown links/autolinks can never render clickable on
+   * this surface, independent of the link-mode choice. */
   upstreamLinkMode?: UpstreamLinkMode;
   requirementCoverage?: { total: number; unknown: number };
   primaryTools: HarnessSummaryTelemetry;

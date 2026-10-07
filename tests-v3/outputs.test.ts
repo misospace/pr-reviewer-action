@@ -199,6 +199,36 @@ function assertFencedCodeSpan(cell: string, payload: string): void {
   assert.ok(body.includes(payload), "the hostile payload stays inside the inert code span");
 }
 
+// #903 / #988: pin the PADDed fence shape that stops a trailing escaped
+// backtick from merging into the closing delimiter. When the escaped body
+// contains a backtick, the cell is `delim + " " + body + " " + delim` — equal
+// open/close runs with exactly one space after the opening and before the
+// closing delimiter. CommonMark strips one leading+trailing space from the
+// code-span content, so the visible payload is unchanged while the span stays
+// terminated.
+function assertPaddedFencedCodeSpan(cell: string, payload: string): void {
+  assertFencedCodeSpan(cell, payload);
+  const openLen = cell.match(/^`+/)![0].length;
+  const closeLen = /`+$/.exec(cell)![0].length;
+  assert.equal(openLen, closeLen, "equal opening/closing backtick run lengths");
+  assert.equal(cell[openLen], " ", "one space after the opening delimiter");
+  assert.equal(cell[cell.length - closeLen - 1], " ", "one space before the closing delimiter");
+  const inner = cell.slice(openLen + 1, -closeLen - 1);
+  const longestInner = Math.max(0, ...(inner.match(/`+/g) ?? []).map((run) => run.length));
+  assert.ok(openLen > longestInner, "the padded delimiter is longer than any backtick run in the body");
+  assert.ok(inner.includes(payload), "the hostile payload stays inside the inert code span");
+}
+
+// #988: the LOCATION column is the middle cell of a finding row — between the
+// first " | " (after the severity label) and the next " | " (after the
+// location). Severity labels never contain a raw pipe, and pipes inside the
+// location are escaped to `\|`, so the two separators are unambiguous.
+function findingLocationCell(row: string): string {
+  const first = row.indexOf(" | ");
+  const second = row.indexOf(" | ", first + 3);
+  return row.slice(first + 3, second);
+}
+
 // #252 adversarial-boundary test: feed the hostile token itself — a pipe that
 // could split the cell, a `###` that could forge a heading, a markdown link,
 // a credential-shaped key — and pin that the row stays one bounded line, the
@@ -247,4 +277,59 @@ test("#988: a backtick-ringed hostile link in the step summary cannot break the 
   // longest backtick run in the cell body, so the payload cannot close the
   // span early and render https://evil.example as a clickable link.
   assertFencedCodeSpan(cell, "https://evil.example");
+});
+
+// #988 / #903: a message whose escaped body both STARTS and ENDS with a
+// backtick (a backtick-ringed Markdown link) is the exact failure the no-
+// padding fence had — the trailing escaped backtick merged into the closing
+// delimiter, leaving the span unterminated and the link live. The space
+// padding keeps the delimiter an equal, maximal run, so the span terminates
+// and the payload renders inert.
+test("#988: a backtick-ringed link (backticks at both ends) stays a terminated, inert span", () => {
+  const hostile = {
+    severity: "blocker",
+    file: "x",
+    line: 1,
+    message: "`[click](https://evil.example)`",
+  };
+  const stepRow = renderStepSummary(telemetry({ findings: [hostile] }))
+    .split("\n").filter((line) => line.startsWith("| 🛑 Blocker |"));
+  assert.equal(stepRow.length, 1, "the both-ends-backtick finding renders exactly one step-summary row");
+  const cell = findingMessageCell(stepRow[0]!);
+  assertFencedCodeSpan(cell, "https://evil.example");
+  assertPaddedFencedCodeSpan(cell, "https://evil.example");
+});
+
+// #988 / #903: a trailing backtick immediately after a bare autolink. The
+// autolink is a bare URL (no brackets), but the trailing escaped backtick still
+// merged into the closing delimiter without the padding, leaving the URL live.
+test("#988: a trailing backtick after a bare autolink stays a terminated, inert span", () => {
+  const hostile = {
+    severity: "blocker",
+    file: "x",
+    line: 1,
+    message: "see https://evil.example`",
+  };
+  const stepRow = renderStepSummary(telemetry({ findings: [hostile] }))
+    .split("\n").filter((line) => line.startsWith("| 🛑 Blocker |"));
+  assert.equal(stepRow.length, 1, "the trailing-backtick autolink renders exactly one step-summary row");
+  const cell = findingMessageCell(stepRow[0]!);
+  assertFencedCodeSpan(cell, "https://evil.example");
+  assertPaddedFencedCodeSpan(cell, "https://evil.example");
+});
+
+// #988 / #903: the same trailing-backtick boundary in the LOCATION column, not
+// just the message column — the file value is model-controlled, and a backtick
+// at the end of the path would merge into the closing delimiter the same way.
+test("#988: a backtick-bearing location path stays a terminated, inert span", () => {
+  const hostile = {
+    severity: "blocker",
+    file: "[x](https://evil.example)`",
+  };
+  const stepRow = renderStepSummary(telemetry({ findings: [hostile] }))
+    .split("\n").filter((line) => line.startsWith("| 🛑 Blocker |"));
+  assert.equal(stepRow.length, 1, "the backtick-bearing location renders exactly one step-summary row");
+  const cell = findingLocationCell(stepRow[0]!);
+  assertFencedCodeSpan(cell, "https://evil.example");
+  assertPaddedFencedCodeSpan(cell, "https://evil.example");
 });
