@@ -22,7 +22,7 @@ import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, ty
 import { strictReviewResult } from "../enforcement/verdict-policy.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
 import { COVERAGE_NOTICE_MAX_ITEMS, type PartialCoverage } from "../tools/coverage.js";
-import { isIncompleteReason, type IncompleteReason } from "./outputs.js";
+import { isIncompleteReason, renderFindingsSummary, severityCountsLabel, type IncompleteReason } from "./outputs.js";
 import type { NativeReviewComment, NativeReviewRequest, PublishPlatformApi } from "../platform/publish-api.js";
 
 export type PublishMode = "comment" | "review_comment" | "review_verdict";
@@ -313,6 +313,7 @@ export function buildInlineComments(options: {
 
 /** Resolve the cleanup flag exactly like `resolve_cleanup_flag`. */
 export { resolveCleanupFlag } from "./cleanup.js";
+export { renderFindingsSummary, severityCountsLabel, FINDINGS_SUMMARY_MAX_ROWS } from "./outputs.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -359,80 +360,6 @@ export function renderOutsideDiffSection(findings: unknown, linkMode: UpstreamLi
 // verdict_policy=strict, so an approve with findings never reads as clean.
 // Opt-out policies keep today's bodies byte-for-byte.
 // ---------------------------------------------------------------------------
-
-/** Rows rendered before the visible "N more" cap keeps the body bounded
- * (50 findings of up to 2000 characters each would overrun a comment). */
-export const FINDINGS_SUMMARY_MAX_ROWS = 50;
-
-const SEVERITY_RANK = ["blocker", "major", "minor", "info"] as const;
-
-/** Per-severity counts in rank order, zero entries omitted: `2 major, 4 minor`. */
-export function severityCountsLabel(findings: unknown): string {
-  if (!Array.isArray(findings)) return "";
-  const counts = new Map<string, number>();
-  for (const finding of findings) {
-    const severity = isRecord(finding) && typeof finding.severity === "string"
-      ? finding.severity
-      : "info";
-    counts.set(severity, (counts.get(severity) ?? 0) + 1);
-  }
-  const ordered = [
-    ...SEVERITY_RANK.filter((severity) => counts.has(severity)),
-    ...[...counts.keys()].filter((severity) => !(SEVERITY_RANK as readonly string[]).includes(severity)).sort(),
-  ];
-  return ordered.map((severity) => `${counts.get(severity)} ${severity}`).join(", ");
-}
-
-/** A path (model-controlled) as one bounded code span: whitespace collapsed
- * and fenced by a backtick run longer than any inside it, so it cannot open
- * markdown structure; pipes are escaped because GFM tables split cells even
- * inside code spans. */
-function locationCell(finding: Record<string, unknown>): string {
-  const file = typeof finding.file === "string" ? finding.file : "";
-  const line = typeof finding.line === "number" && Number.isFinite(finding.line) ? String(finding.line) : "";
-  if (file === "" && line === "") return "";
-  const raw = file === "" ? line : line === "" ? file : `${file}:${line}`;
-  const body = escapeTableCell(raw.replace(/\s+/g, " ").trim());
-  const longest = Math.max(0, ...(body.match(/`+/g) ?? []).map((run) => run.length));
-  return "`".repeat(longest + 1) + body + "`".repeat(longest + 1);
-}
-
-/**
- * The `### Findings (…)` section: one row per normalized still-open finding
- * — severity, `file:line` (or `file`, or blank), message — the same array
- * the verdict was decided on, so the body is the one place a reader sees the
- * whole set. Messages get redact_text, upstream-link neutralization,
- * whitespace collapse, a length cap, and table-cell escaping; a hostile
- * message cannot split the row or forge headings. Returns "" when there is
- * nothing to render.
- */
-export function renderFindingsSummary(findings: unknown, linkMode: UpstreamLinkMode): string {
-  if (!Array.isArray(findings)) return "";
-  const rows = findings.filter((item): item is Record<string, unknown> => isRecord(item));
-  if (rows.length === 0) return "";
-  const counts = severityCountsLabel(rows);
-  const lines = [
-    `### Findings${counts ? ` (${counts})` : ""}`,
-    "",
-    "| Severity | Location | Finding |",
-    "| --- | --- | --- |",
-  ];
-  for (const finding of rows.slice(0, FINDINGS_SUMMARY_MAX_ROWS)) {
-    const rawSeverity = typeof finding.severity === "string" ? finding.severity : "info";
-    const label = Object.hasOwn(SEVERITY_LABELS, rawSeverity) ? SEVERITY_LABELS[rawSeverity]! : rawSeverity;
-    const message = escapeTableCell(
-      sanitizeMarkdown(redactText(String(finding.message ?? "")), linkMode)
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, 300),
-    );
-    lines.push(`| ${escapeTableCell(label)} | ${locationCell(finding)} | ${message} |`);
-  }
-  if (rows.length > FINDINGS_SUMMARY_MAX_ROWS) {
-    lines.push("", `_…and ${rows.length - FINDINGS_SUMMARY_MAX_ROWS} more finding(s) not listed._`);
-  }
-  return `\n\n${lines.join("\n")}\n`;
-}
 
 /** The deterministic coverage-gap notice rendered above the findings, with
  * separate prose for execution incompleteness and requirement traceability. */

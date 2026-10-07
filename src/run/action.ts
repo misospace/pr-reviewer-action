@@ -12,6 +12,7 @@ import { stageEnvFromConfig } from "./env.js";
 import { buildAdapter, buildPublishApi, publishInputFromEnv, publishWith, readEvent, type StepEvent } from "./entrypoints.js";
 import { rawInputsFromEnv, runReview } from "./review.js";
 import { createRunDir } from "./run-dir.js";
+import { blockingGateSummary, renderBlockingAnnotations } from "./blocking-findings.js";
 
 export { createRunDir };
 
@@ -182,7 +183,14 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       await postForkPrCommentReply(stage).catch(() => undefined);
     }
     await maybeClearRereviewLabel(stage, event);
-    return failOnRequestChanges(stage, pre.verdict ?? "");
+    // #975: a carried request_changes verdict means the last review — of
+    // `pre.head_sha`, trusted precheck metadata — already recorded the
+    // findings; this run has none of its own, so nothing is carried as
+    // findings, and the pointer names the run to look at.
+    const carriedPointer = pre.verdict === "request_changes"
+      ? `The verdict was carried from the review of ${pre.head_sha !== "" ? pre.head_sha : "<unknown>"}; its findings are in that run's step summary.`
+      : "";
+    return failOnRequestChanges(stage, pre.verdict ?? "", "", carriedPointer);
   }
 
   // #914: an accepted comment-command re-review gets an immediate 👀 ack
@@ -263,14 +271,49 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
   // ── Re-review label ───────────────────────────────────────────────────
   await maybeClearRereviewLabel(stage, event);
 
-  const gate = failOnRequestChanges(stage, review.outputs.verdict);
+  const gate = failOnRequestChanges(stage, review.outputs.verdict, review.outputs.findings, "");
   return publishFailed ? Math.max(gate, 1) : gate;
 }
 
-function failOnRequestChanges(stage: Env, verdict: string): number {
+/** #975: the fail-on-request-changes gate. Exported for tests (the
+ * blocking-finding renderer it calls is pure — see
+ * `./blocking-findings.ts`). A blocking verdict writes the blocking
+ * findings FIRST, as `::error file=...::` workflow-command annotations, so
+ * they land on the failed check and the Files tab; then the gate line
+ * itself, whose one-line summary names the blocking count and the first
+ * finding. `carriedPointer` (a run skipped by precheck that carries a
+ * `request_changes` verdict from an earlier review — this run recorded no
+ * findings of its own) is appended, space-separated, to BOTH the gate line
+ * and the step summary, so the (otherwise empty) summary still points at
+ * the run whose findings explain the failure. */
+export function failOnRequestChanges(stage: Env, verdict: string, findingsJson = "", carriedPointer = ""): number {
   if ((stage.FAIL_ON_REQUEST_CHANGES ?? "false").toLowerCase() !== "true") return 0;
   if (verdict === "request_changes") {
-    process.stdout.write("::error::Final verdict is request_changes; failing the step (fail-on-request-changes=true).\n");
+    let parsed: unknown = [];
+    if (findingsJson !== "") {
+      try {
+        const value = JSON.parse(findingsJson);
+        if (Array.isArray(value)) parsed = value;
+      } catch {
+        parsed = [];
+      }
+    }
+    for (const line of renderBlockingAnnotations(parsed)) {
+      process.stdout.write(line + "\n");
+    }
+    const summary = blockingGateSummary(parsed);
+    const gate = summary !== "" ? summary : "no blocking finding with a location was recorded";
+    const suffix = carriedPointer !== "" ? ` ${carriedPointer}` : "";
+    // One-line discipline for both surfaces: the summary is already
+    // flattened and the pointer is fixed wording plus trusted precheck
+    // metadata, but a stray control character would split the `::error::`
+    // command and the summary line, so flatten rather than trust.
+    const message = `fail-on-request-changes=true and the final verdict is request_changes: ${gate}${suffix}`
+      .replace(/[\u0000-\u001f\u007f]+/g, " ");
+    process.stdout.write(`::error::${message}\n`);
+    if (carriedPointer !== "") {
+      appendStepSummary(stage, `**AI PR Review failed:** ${message}`);
+    }
     return 1;
   }
   process.stdout.write(`Final verdict is '${verdict || "<none>"}'; not blocking (fail-on-request-changes=true).\n`);

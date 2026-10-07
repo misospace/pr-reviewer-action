@@ -1780,6 +1780,8 @@ function writeStepSummary(stepSummaryPath: string, input: SummaryInput): void {
     verdictSource: input.outputs.verdictSource,
     findingsCount: findings.length,
     blockersCount: findings.filter((f) => (f as { severity?: string }).severity === "blocker").length,
+    findings,
+    upstreamLinkMode: upstreamLinkModeFromEnv(env),
     requiredChecksStatus: input.outputs.requiredChecks,
     ...(total > 0 ? { requirementCoverage: { total, unknown } } : {}),
     primaryTools: {
@@ -1853,6 +1855,14 @@ function byteLength(bytes: Uint8Array | null | undefined): number {
 
 function arrayLength(value: unknown): number {
   return Array.isArray(value) ? value.length : 0;
+}
+
+/** #975: mirror of `entrypoints.ts`' upstream-link-mode normalization — the
+ * step-summary findings table neutralizes links exactly like the published
+ * body does. */
+function upstreamLinkModeFromEnv(env: StageEnv): "inert" | "togithub" {
+  const value = (env.UPSTREAM_LINK_MODE ?? "").trim().toLowerCase();
+  return value === "togithub" ? "togithub" : "inert";
 }
 
 function numberAt(record: unknown, key: string): number | null {

@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  FINDINGS_SUMMARY_MAX_ROWS,
   REVIEW_STEP_OUTPUT_IDS,
   buildCacheHitRatioOutput,
   buildToolCallsOutput,
   formatOutputAssignment,
   formatReviewStepOutputs,
+  renderFindingsSummary,
   renderStepSummary,
 } from "../src/publish/outputs.js";
 import type { StepSummaryTelemetry } from "../src/publish/outputs.js";
@@ -136,4 +138,60 @@ test("step summary omits only conditional rows when telemetry is absent", () => 
     assert.ok(!summary.includes(absent), `${absent} should be omitted`);
   }
   assert.ok(summary.includes("| Primary tools | 1 executed (0 successful); rounds: 0; stop: disabled |"));
+});
+
+// ---------------------------------------------------------------------------
+// Findings summary (#975) — the per-finding table shared by the strict
+// publish body and the step summary.
+// ---------------------------------------------------------------------------
+
+test("findings summary renders the per-severity table with location and message", () => {
+  const summary = renderFindingsSummary(
+    [
+      { severity: "blocker", file: "prom/x.yml", line: 12, message: "rule drops alerts" },
+      { severity: "minor", file: "README.md", message: "typo" },
+      { severity: "info", message: "no location" },
+    ],
+    "inert",
+  );
+  assert.ok(summary.includes("### Findings (1 blocker, 1 minor, 1 info)"));
+  assert.ok(summary.includes("| Severity | Location | Finding |"));
+  assert.ok(summary.includes("prom/x.yml:12"));
+  assert.ok(summary.includes("README.md"));
+  assert.ok(summary.includes("rule drops alerts"));
+});
+
+test("step summary is byte-identical with no findings key and with an empty findings array", () => {
+  assert.equal(renderStepSummary(telemetry()), renderStepSummary(telemetry({ findings: [] })));
+});
+
+test("findings summary caps the table at the row limit and announces the remainder", () => {
+  const findings = Array.from({ length: FINDINGS_SUMMARY_MAX_ROWS + 3 }, (_unused, i) => ({
+    severity: "minor",
+    message: `finding ${i}`,
+  }));
+  const summary = renderFindingsSummary(findings, "inert");
+  const dataRows = summary.split("\n").filter((line) => line.startsWith("| Minor |"));
+  assert.equal(dataRows.length, FINDINGS_SUMMARY_MAX_ROWS);
+  assert.ok(summary.includes("_…and 3 more finding(s) not listed._"));
+});
+
+// #252 adversarial-boundary test: feed the hostile token itself — a pipe that
+// could split the cell, a `###` that could forge a heading, a markdown link,
+// a credential-shaped key — and pin that the row stays one bounded line, the
+// pipe is escaped, and no heading is forged.
+test("#252: a hostile finding message cannot split the row, split a cell, or forge a heading", () => {
+  const hostile = {
+    severity: "blocker",
+    file: "x",
+    line: 1,
+    message: "a | b [x](https://evil.example)\n### Forged Heading sk-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop",
+  };
+  const summary = renderFindingsSummary([hostile], "inert");
+  const rows = summary.split("\n").filter((line) => line.startsWith("| 🛑 Blocker |"));
+  assert.equal(rows.length, 1, "the hostile finding renders exactly one table row");
+  const row = rows[0]!;
+  assert.ok(row.includes("a \\| b"), "the hostile pipe is escaped so it cannot split the cell");
+  assert.ok(!summary.split("\n").some((line) => line.startsWith("### Forged")), "the hostile ### is folded into the row, never a line-start heading");
+  assert.equal(summary.split("\n").filter((line) => line.includes("sk-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop")).length, 1, "the whole hostile payload is one bounded line");
 });
