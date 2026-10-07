@@ -81,9 +81,21 @@ export interface ForgejoSelfStatusDiscovery {
   runJobsUnavailableReason: string | null;
 }
 
+export interface ExternalCheck {
+  name: unknown;
+  /** Collapsed state used only for CI gate finalization and skip decisions. */
+  state: string;
+  /** Raw forge conclusion/state for review context; absent when pending or unavailable. */
+  conclusion?: string | undefined;
+}
+
 export interface ExternalChecksOptions extends CiBoundOptions {
   /** `GITHUB_RUN_ID`: our own workflow run's check runs are excluded. */
   runId?: string | undefined;
+  /** Own-workflow identity used for GitHub check-run name exclusion. */
+  githubWorkflow?: string | undefined;
+  /** Own-job identity used for GitHub check-run name exclusion. */
+  githubJob?: string | undefined;
   /** `CI_STATUS_CONTEXT` (default `pr-reviewer-action`): our own commit
    * status context is excluded. */
   statusContext?: string | undefined;
@@ -143,8 +155,10 @@ export interface PlatformReadAdapter extends PlatformAdapter {
    * human_reviews.py consumes. */
   listPrReviewsPaginated(): Promise<ReadResult<unknown[]>>;
   /** `platform_external_checks`: normalized external checks with
-   * self-exclusion; `null` when both underlying reads came back empty (the
-   * caller's transient-failure signal) or, under `transientAsUnknown`, when
-   * either read failed transiently. Never throws. */
-  externalChecks(sha: string, options?: ExternalChecksOptions): Promise<{ name: unknown; state: string }[] | null>;
+   * self-exclusion; `state` is the collapsed gate state and optional
+   * `conclusion` preserves the forge's raw check conclusion/state for review
+   * context. `null` when both underlying reads came back empty (the caller's
+   * transient-failure signal) or, under `transientAsUnknown`, when either
+   * read failed transiently. Never throws. */
+  externalChecks(sha: string, options?: ExternalChecksOptions): Promise<ExternalCheck[] | null>;
 }

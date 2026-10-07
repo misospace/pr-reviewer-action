@@ -107,6 +107,44 @@ test("enforcement fixture runs the #811 strict pipeline: relax, coverage gap, an
   });
 });
 
+test("enforcement fixture requires a CI-only conclusion restatement to relax request_changes", () => {
+  withFixtures((dir) => {
+    const ciOnly = runEnforcementFixture(writeJson(dir, "ci-only.json", {
+      contract: "enforcement-pipeline/v1",
+      artifact: {
+        verdict: "request_changes",
+        review_markdown: "review",
+        findings: [{ severity: "major", category: "bug", file: null, line: null, message: "validate-toml has a terminal failure" }],
+      },
+      ci_checks_content: "_Other checks shown for context only._\n\n| Check | State |\n| --- | --- |\n| validate-toml | cancelled |\n",
+      config: { verdict_policy: "model" },
+    }));
+    assert.equal(ciOnly.ok, true);
+    const cappedArtifact = JSON.parse(ciOnly.values!.artifact!);
+    assert.equal(cappedArtifact.verdict, "approve");
+    assert.equal(cappedArtifact.findings[0].severity, "info");
+    assert.equal(cappedArtifact.findings[0].ci_capped, true);
+    assert.equal(cappedArtifact.findings[0].capped_from, "major");
+    assert.match(cappedArtifact.review_markdown, /Verdict relaxed from CI-only findings/);
+
+    const repoWide = runEnforcementFixture(writeJson(dir, "repo-wide.json", {
+      contract: "enforcement-pipeline/v1",
+      artifact: {
+        verdict: "request_changes",
+        review_markdown: "review",
+        findings: [{ severity: "blocker", category: "bug", file: null, line: null, message: "the build script mishandles env vars repo-wide" }],
+      },
+      ci_checks_content: "| Check | State |\n| --- | --- |\n| build | failure |\n",
+      config: { verdict_policy: "model" },
+    }));
+    assert.equal(repoWide.ok, true);
+    const uncappedArtifact = JSON.parse(repoWide.values!.artifact!);
+    assert.equal(uncappedArtifact.verdict, "request_changes");
+    assert.equal(uncappedArtifact.findings[0].severity, "blocker");
+    assert.equal(uncappedArtifact.findings[0].ci_capped, undefined);
+  });
+});
+
 test("enforcement fixture reconciles the banner after verification-only relaxation", () => {
   withFixtures((dir) => {
     const result = runEnforcementFixture(writeJson(dir, "verification.json", {

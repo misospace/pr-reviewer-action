@@ -995,6 +995,140 @@ test("#957: requirementSubjectSignals separates phrases from identifier-shaped t
   assert.deepEqual(signals.phrases.map((p) => p.join(" ")), ["Fork trust", "trust boundary"]);
 });
 
+// ── #1000: hyphenated/slash-bearing code spans are atomic subject terms ──
+
+test("#1000: a hyphenated code span is not split into a fabricated prose phrase", () => {
+  // The production leak (observed on the #997 review at 2ce2708f): the
+  // credential-transport standard's parenthetical example `x-api-key` was
+  // split into the words "api" and "key", and the joined form `apikey`
+  // matched the generic `apiKey`/`API_KEY` vocabulary of the PR's added
+  // redaction-test lines — scoping the standard into a redaction-only diff
+  // and driving `required_checks: incomplete` on an unrelated change.
+  const ledger = { requirements: [
+    {
+      id: "req-creds",
+      text: "Model API credentials travel only through the HTTP auth headers the provider defines (e.g. `Authorization: Bearer` / `x-api-key`) over the typed Node transport; they must never appear in process argv, request URLs or bodies.",
+      kind: "normative",
+      provenance: [{ source: "standards", ref: "AGENTS.md", line: 30 }],
+    },
+  ] };
+  const changed = changedSubjectText(
+    '+  assert.equal(redactSourceText(`{"apiKey": "sk-proj-x"}`), `{"apiKey": "[REDACTED]"}`);\n' +
+    '+  assert.equal(redactSourceText("API_KEY=sk-ant-y"), "API_KEY=[REDACTED]");\n',
+    ["src/context/redact.ts", "tests-v3/redact.test.ts"],
+  );
+  const scope = requirementTraceScope(ledger, changed);
+  assert.deepEqual(scope.inScope, []);
+  assert.deepEqual(scope.outOfScope.map((o) => o.entry.id), ["req-creds"]);
+});
+
+test("#1000: an atomic code span still matches its literal in the change", () => {
+  // The span is the requirement's ONLY subject signal here — no prose phrase
+  // and no identifier-shaped term — so the match proves the atomic path.
+  const scoped = (id: string, text: string, changed: string): string[] =>
+    requirementTraceScope({ requirements: [{ id, text, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 1 }] }] }, changed).inScope.map((e) => e.id);
+  assert.deepEqual(
+    scoped("req-span", "The `x-api-key` header name must never be logged.", changedSubjectText('+  headers.set("x-api-key", key);\n', ["src/transport/http.ts"])),
+    ["req-span"],
+  );
+});
+
+test("#1000: genuine transport prose still scopes the standard in", () => {
+  // Tightening must not break real subject overlap: the standard's own prose
+  // reaching the diff is scope evidence independent of any code span.
+  const ledger = { requirements: [
+    {
+      id: "req-creds",
+      text: "Model API credentials travel only through the HTTP auth headers the provider defines (e.g. `Authorization: Bearer` / `x-api-key`) over the typed Node transport.",
+      kind: "normative",
+      provenance: [{ source: "standards", ref: "AGENTS.md", line: 30 }],
+    },
+  ] };
+  const changed = changedSubjectText("+  // forward the auth headers to the provider unchanged\n", ["src/transport/http.ts"]);
+  assert.deepEqual(requirementTraceScope(ledger, changed).inScope.map((e) => e.id), ["req-creds"]);
+});
+
+test("#1000: spans that do not qualify keep the existing prose behavior", () => {
+  // A trailing-hyphen fragment is not an atomic term and stays in the prose
+  // stream exactly as before #1000.
+  assert.deepEqual(requirementSubjectSignals("The `sk-` families MUST be masked.").phrases.map((p) => p.join(" ")), ["sk families"]);
+  // A separator-less span is untouched.
+  assert.deepEqual(requirementSubjectSignals("Compare `sourceSha` against the head.").strongTerms, ["sourcesha"]);
+  // An oversized span must not build a huge match pattern (never-throw).
+  const long = "x".repeat(20_000);
+  assert.doesNotThrow(() => requirementSubjectSignals(`The \`${long}-${long}\` value MUST hold.`));
+});
+
+test("#1000: two spans separated by a separator survive span pairing", () => {
+  // The span scan must pair backticks, not let a required separator fuse the
+  // gap between two spans ("` / `") and swallow the next span's opening
+  // backtick — the first cut of this fix did exactly that, leaving
+  // `x-api-key` in the prose stream and the leak open.
+  const signals = requirementSubjectSignals("e.g. `Authorization: Bearer` / `x-api-key` over the seam");
+  assert.deepEqual(signals.phrases.map((p) => p.join(" ")), ["Authorization Bearer", "x-api-key"]);
+  assert.deepEqual(signals.strongTerms, []);
+});
+
+test("#1000: an unbalanced backtick cannot resurrect the fabricated phrase", () => {
+  // A stray or lost closing backtick is common in copy-pasted issue text.
+  // With the span unpaired, `x-api-key` used to stay in the prose stream and
+  // the original "api key" -> `apikey` fabrication returned (verified
+  // end-to-end against the first cut of this fix).
+  const scoped = (id: string, text: string, changed: string): string[] =>
+    requirementTraceScope({ requirements: [{ id, text, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 1 }] }] }, changed).inScope.map((e) => e.id);
+  assert.deepEqual(
+    scoped(
+      "req-stray",
+      "The `x-api-key header name MUST not appear in logs.",
+      changedSubjectText('+  redactSourceText(`{"apiKey": "sk-x"}`);\n', ["src/context/redact.ts"]),
+    ),
+    [],
+  );
+  // The span's surviving head still matches its literal.
+  assert.deepEqual(
+    scoped(
+      "req-stray-head",
+      "The `x-api-key header name MUST not appear in logs.",
+      changedSubjectText('+  headers.set("x-api-key", key);\n', ["src/transport/http.ts"]),
+    ),
+    ["req-stray-head"],
+  );
+});
+
+test("#1000: a short separator-bearing span is not a loose substring term", () => {
+  // `a-b` is 3 chars: below the atomic floor, it must stay prose (where its
+  // words are dropped as single characters) rather than become a bare
+  // substring term that matches `a-b-c` in any diff.
+  const scoped = (id: string, text: string, changed: string): string[] =>
+    requirementTraceScope({ requirements: [{ id, text, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 1 }] }] }, changed).inScope.map((e) => e.id);
+  assert.deepEqual(
+    scoped("req-ab", "The `a-b` connector MUST be deprecated.", changedSubjectText('+  // version: a-b-c\n', ["src/a.ts"])),
+    [],
+  );
+});
+
+test("#1000: span tokens are normalized before qualifying", () => {
+  // Edge separators and punctuation must not survive into the atomic term:
+  // `---x-api-key` and `x-api-key,` both yield the term `x-api-key`, which
+  // matches the literal in a diff.
+  const signals = requirementSubjectSignals("see `---x-api-key and` plus `x-api-key,` headers");
+  assert.deepEqual(signals.phrases.map((p) => p.join(" ")), ["x-api-key"]);
+});
+
+test("#1000: a terminated span with embedded prose yields its identifier, not a sentence", () => {
+  // `x-api-key and` (sloppy span, trailing prose inside the backticks) must
+  // contribute the identifier as an atomic term and return the prose to the
+  // stream — not fuse the whole body into one unmatchable literal, and not
+  // fabricate "api key" either.
+  const signals = requirementSubjectSignals("The `x-api-key and` header MUST be masked.");
+  assert.deepEqual(signals.phrases.map((p) => p.join(" ")), ["x-api-key"]);
+  const scoped = requirementTraceScope(
+    { requirements: [{ id: "req-span", text: "The `x-api-key and` header MUST be masked.", kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 1 }] }] },
+    changedSubjectText('+  headers.set("x-api-key", key);\n', ["src/transport/http.ts"]),
+  );
+  assert.deepEqual(scoped.inScope.map((e) => e.id), ["req-span"]);
+});
+
 // ── #959: a verdict with zero trace claims ──────────────────────────────
 
 test("#959: a missing-claim row renders its own reason, not 'no valid enforcement location'", () => {
