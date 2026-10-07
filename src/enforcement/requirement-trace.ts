@@ -391,6 +391,8 @@ const EXISTENCE_ABSENT_RE = /\b(must|shall|should)\s+(not\s+exist|not\s+be\s+pre
 const ASSERTION_VERB_ALTERNATION = `${CONTENT_VERBS}|${NEGATIVE_CONTENT_VERBS}|exist|exists|be\\s+present|be\\s+absent|be\\s+missing|be\\s+defined`;
 const ASSERTION_VERB_RE = new RegExp(`\\b(${ASSERTION_VERB_ALTERNATION})\\b`, "i");
 const BOUND_ASSERTION_VERB_RE = new RegExp(`\\b(must|shall|should)\\s+(not\\s+)?(${ASSERTION_VERB_ALTERNATION})\\b`, "gi");
+/** A conjunction inside the assertion region introduces a further clause. */
+const CONJUNCTION_RE = /[,;]|\b(and|or|nor|plus|but)\b/i;
 /** Every assertion phrase, for locating where the assertion starts. */
 const ASSERTION_PHRASES: readonly RegExp[] = [
   ...CONTENT_PRESENT_PHRASES,
@@ -482,11 +484,35 @@ function firstAssertionIndex(text: string): number {
  *
  * Quoted spans are ignored, so a backticked literal that happens to name a verb
  * ("must contain the `omit` key") does not trip it.
+ *
+ * This is a NAMED-VERB net, so it only catches clauses whose verb it knows.
+ * `conjunctiveTailIsRepresentable` is the syntactic rule that actually closes
+ * the class; this one is a secondary net over the verbs the grammar models.
  */
 function hasExactlyOneRepresentableAssertion(text: string): boolean {
   const unquoted = text.replace(QUOTED_TOKEN_RE, " ");
   if ((unquoted.match(BOUND_ASSERTION_VERB_RE) ?? []).length !== 1) return false;
   return !ASSERTION_VERB_RE.test(unquoted.replace(BOUND_ASSERTION_VERB_RE, " "));
+}
+
+/**
+ * The syntactic counterpart: a conjunction anywhere inside the assertion
+ * region introduces a further clause, and the only such clause the grammar
+ * models is an explicit test demand — which asserts no additional state.
+ *
+ * This is deliberately not a verb list. "must contain `foo` and enable debug
+ * logging" is caught because `and` starts a clause the grammar cannot
+ * represent, whatever verb follows it — the same rule covers `use`, `set`,
+ * `keep`, `disable` and anything else. Leading prose before the assertion is
+ * exempt (it is not part of the claim), and a bare trailing noun
+ * ("must contain the `omit` key") has no conjunction, so it stays valid.
+ */
+function conjunctiveTailIsRepresentable(text: string): boolean {
+  const from = firstAssertionIndex(text);
+  const region = from < 0 ? text : text.slice(from);
+  const conjunction = region.search(CONJUNCTION_RE);
+  if (conjunction < 0) return true;
+  return explicitlyRequiresTest(region.slice(conjunction));
 }
 
 /**
@@ -509,6 +535,10 @@ export function structuralStateClaim(text: string): StructuralClaim | null {
   const absent = contentAbsent || EXISTENCE_ABSENT_RE.test(text);
   // Both or neither ⇒ the polarity is not recoverable; stay strict.
   if (present === absent) return null;
+
+  // A conjunctive tail is a further clause; unless it is the one modeled
+  // adjunct it cannot be represented, so the whole claim stays strict.
+  if (!conjunctiveTailIsRepresentable(text)) return null;
 
   const { quoted, bare } = verbatimTokens(text);
   // `detectLanguage(...) === "non_source"` is the safety gate: a requirement

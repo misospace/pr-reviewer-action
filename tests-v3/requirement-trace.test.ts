@@ -2782,3 +2782,38 @@ test("#985: a second assertion clause the grammar cannot represent stays strict"
     rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test("#985: a conjunctive tail is rejected syntactically, not by a verb list", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "config.json", ['{"foo":1}']);
+    // The class is closed by the conjunction, so the trailing verb is
+    // irrelevant: none of these may be certified by proving `foo` alone.
+    for (const verb of ["enable", "use", "set", "keep", "disable", "require", "configure", "emit", "log"]) {
+      const text = "`config.json` must contain `foo` and " + verb + " debug logging";
+      assert.equal(structuralStateClaim(text), null, verb);
+      const trace = validateRequirementTrace(
+        [{
+          requirement_id: "r",
+          disposition: "met",
+          enforcement: [{ file: "config.json", line: 1 }],
+          test: [VALID_TEST_LOCATION],
+          reason: "foo is present",
+        }],
+        ledgerWith([{ id: "r", text, kind: "acceptance" }]),
+        workspace,
+      );
+      assert.equal(trace.rows[0]?.disposition, "unverifiable", verb);
+      assert.equal(trace.rows[0]?.proof, "runtime_behavior", verb);
+    }
+
+    // A bare trailing noun carries no conjunction, so it stays structural.
+    assert.notEqual(structuralStateClaim("`config.json` must contain `foo` key"), null);
+    // Leading prose sits before the assertion and is not part of the claim.
+    assert.notEqual(structuralStateClaim("Per policy, `config.json` must contain `foo`"), null);
+    // The one modeled adjunct is a test demand, which asserts no further state.
+    assert.notEqual(structuralStateClaim("`config.json` must contain `foo` and must be covered by a regression test"), null);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
