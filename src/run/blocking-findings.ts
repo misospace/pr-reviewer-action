@@ -63,7 +63,7 @@ function normalize(value: unknown): NormalizedFinding | null {
   return {
     severity,
     file: safePath(value.file) ? value.file : "",
-    line: typeof line === "number" && Number.isInteger(line) && line > 0 ? line : 0,
+    line: typeof line === "number" && Number.isSafeInteger(line) && line > 0 ? line : 0,
     message: typeof value.message === "string" ? value.message : "",
   };
 }
@@ -116,6 +116,7 @@ export function blockingGateSummary(findings: unknown): string {
   const first = blocking[0]!;
   const message = flattenMessage(first.message, 200);
   const location = first.file === "" ? "" : first.file + (first.line > 0 ? `:${first.line}` : "");
-  const entry = location === "" ? `[${first.severity}] ${message}` : `[${first.severity}] ${location} — ${message}`;
-  return `${blocking.length} blocking finding(s): ${entry.replace(/\s+$/g, "")}`;
+  const head = location === "" ? `[${first.severity}]` : `[${first.severity}] ${location}`;
+  const entry = message === "" ? head : `${head} — ${message}`;
+  return `${blocking.length} blocking finding(s): ${entry}`;
 }

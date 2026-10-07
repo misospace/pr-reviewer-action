@@ -12,7 +12,7 @@ import { stageEnvFromConfig } from "./env.js";
 import { buildAdapter, buildPublishApi, publishInputFromEnv, publishWith, readEvent, type StepEvent } from "./entrypoints.js";
 import { rawInputsFromEnv, runReview } from "./review.js";
 import { createRunDir } from "./run-dir.js";
-import { blockingGateSummary, renderBlockingAnnotations } from "./blocking-findings.js";
+import { blockingGateSummary, escapeWorkflowData, renderBlockingAnnotations } from "./blocking-findings.js";
 
 export { createRunDir };
 
@@ -302,17 +302,27 @@ export function failOnRequestChanges(stage: Env, verdict: string, findingsJson =
       process.stdout.write(line + "\n");
     }
     const summary = blockingGateSummary(parsed);
-    const gate = summary !== "" ? summary : "no blocking finding with a location was recorded";
+    // `blockingGateSummary` returns "" only when no blocker/major finding
+    // exists at all — a locationless blocker still counts there.
+    const gate = summary !== "" ? summary : "no blocker/major finding was recorded";
     const suffix = carriedPointer !== "" ? ` ${carriedPointer}` : "";
-    // One-line discipline for both surfaces: the summary is already
-    // flattened and the pointer is fixed wording plus trusted precheck
-    // metadata, but a stray control character would split the `::error::`
-    // command and the summary line, so flatten rather than trust.
+    // The finding text is model-controlled, so both surfaces get their own
+    // escaping: control-character flattening keeps every rendered string one
+    // line, `escapeWorkflowData` on the command data (percent LAST would
+    // re-encode, so it runs percent-first inside the helper) stops a literal
+    // `%0A`/`%25` surviving into the runner's decode as a forged newline or
+    // command, and the Markdown step summary gets the file's fence-safe
+    // `inlineCodeValue` code span — one line, and it cannot open a link,
+    // heading, or fence (#903 precedent for untrusted text on this surface).
+    // `sanitizeMarkdown(..., "inert")` used to be this fence, but its inert
+    // mode is an identity for non-GitHub markdown links, so a hostile
+    // `](https://…)` payload stayed a clickable untrusted link on the
+    // summary.
     const message = `fail-on-request-changes=true and the final verdict is request_changes: ${gate}${suffix}`
       .replace(/[\u0000-\u001f\u007f]+/g, " ");
-    process.stdout.write(`::error::${message}\n`);
+    process.stdout.write(`::error::${escapeWorkflowData(message)}\n`);
     if (carriedPointer !== "") {
-      appendStepSummary(stage, `**AI PR Review failed:** ${message}`);
+      appendStepSummary(stage, `**AI PR Review failed:** ${inlineCodeValue(message)}`);
     }
     return 1;
   }
