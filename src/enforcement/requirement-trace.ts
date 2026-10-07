@@ -393,6 +393,18 @@ const ASSERTION_VERB_RE = new RegExp(`\\b(${ASSERTION_VERB_ALTERNATION})\\b`, "i
 const BOUND_ASSERTION_VERB_RE = new RegExp(`\\b(must|shall|should)\\s+(not\\s+)?(${ASSERTION_VERB_ALTERNATION})\\b`, "gi");
 /** A conjunction inside the assertion region introduces a further clause. */
 const CONJUNCTION_RE = /[,;]|\b(and|or|nor|plus|but)\b/i;
+const CONJUNCTION_GLOBAL_RE = /[,;]|\b(and|or|nor|plus|but)\b/gi;
+/** The clause shapes that demand test coverage, stripped to test the tail. */
+const TEST_DEMAND_CLAUSE_RE = new RegExp(
+  "\\b(?:must|shall|should|needs?\\s+to|has\\s+to|have\\s+to|is|are|requires?|needs?)?\\s*"
+  + "(?:also\\s+)?(?:be\\s+)?(?:covered\\s+by|verified\\s+by|validated\\s+by|checked\\s+by|tested|"
+  + "have|has|add|adds|include|includes|provide|provides|require|requires|need|needs)?\\s*"
+  + "(?:a|an|the)?\\s*(?:dedicated\\s+|new\\s+|regression\\s+|adversarial\\s+|unit\\s+|integration\\s+|end-to-end\\s+|e2e\\s+)*"
+  + "(?:tests?|test\\s+coverage|coverage)\\b",
+  "gi",
+);
+/** Connectives, punctuation and whitespace — nothing on their own. */
+const TAIL_FILLER_RE = /[\s,;.:!?]+|\b(?:and|or|nor|plus|but)\b/gi;
 /** Every assertion phrase, for locating where the assertion starts. */
 const ASSERTION_PHRASES: readonly RegExp[] = [
   ...CONTENT_PRESENT_PHRASES,
@@ -496,23 +508,41 @@ function hasExactlyOneRepresentableAssertion(text: string): boolean {
 }
 
 /**
- * The syntactic counterpart: a conjunction anywhere inside the assertion
- * region introduces a further clause, and the only such clause the grammar
- * models is an explicit test demand — which asserts no additional state.
+ * Split the claim core from the one trailing adjunct the grammar models.
  *
- * This is deliberately not a verb list. "must contain `foo` and enable debug
- * logging" is caught because `and` starts a clause the grammar cannot
- * represent, whatever verb follows it — the same rule covers `use`, `set`,
- * `keep`, `disable` and anything else. Leading prose before the assertion is
- * exempt (it is not part of the claim), and a bare trailing noun
- * ("must contain the `omit` key") has no conjunction, so it stays valid.
+ * A conjunction anywhere inside the assertion region introduces a further
+ * clause, and the only such clause the grammar represents is an explicit test
+ * demand — which asserts no additional state. The tail must be EXACTLY that
+ * adjunct, not merely contain one: once every test-demand clause is stripped,
+ * nothing but connectives and punctuation may remain. So
+ *
+ *   `config.json` must contain `foo`
+ *   and enable debug logging
+ *   and must add a regression test
+ *
+ * is refused — the `enable debug logging` clause survives the strip — while
+ * `must contain \`foo\` and must have a regression test` keeps its claim.
+ *
+ * This is deliberately not a verb list: `and enable`, `and use`, `and set`,
+ * `and disable` are all caught because `and` starts a clause the grammar
+ * cannot represent, whatever verb follows it. Leading prose before the
+ * assertion is exempt (it is not part of the claim), and a bare trailing noun
+ * ("must contain the `omit` key") carries no conjunction, so it stays valid.
+ *
+ * Returns the claim text with the adjunct removed, or `null` when the tail is
+ * unrepresentable.
  */
-function conjunctiveTailIsRepresentable(text: string): boolean {
+function claimCoreWithoutAdjunct(text: string): string | null {
   const from = firstAssertionIndex(text);
   const region = from < 0 ? text : text.slice(from);
   const conjunction = region.search(CONJUNCTION_RE);
-  if (conjunction < 0) return true;
-  return explicitlyRequiresTest(region.slice(conjunction));
+  if (conjunction < 0) return text;
+  const tail = region.slice(conjunction);
+  // A second conjunction means a second clause.
+  if ((tail.match(CONJUNCTION_GLOBAL_RE) ?? []).length > 1) return null;
+  const residual = tail.replace(TEST_DEMAND_CLAUSE_RE, " ").replace(TAIL_FILLER_RE, " ").trim();
+  if (residual !== "") return null;
+  return text.slice(0, from + conjunction);
 }
 
 /**
@@ -525,20 +555,20 @@ function conjunctiveTailIsRepresentable(text: string): boolean {
  */
 export function structuralStateClaim(text: string): StructuralClaim | null {
   if (BEHAVIORAL_VETO_RE.test(text)) return null;
+  // Split off the one modeled adjunct first: it asserts no state of its own,
+  // so every remaining check runs against the claim core alone.
+  const core = claimCoreWithoutAdjunct(text);
+  if (core === null) return null;
   // The claim must be representable in full — one modal-bound assertion and
   // nothing else asserted.
-  if (!hasExactlyOneRepresentableAssertion(text)) return null;
+  if (!hasExactlyOneRepresentableAssertion(core)) return null;
 
-  const contentPresent = CONTENT_PRESENT_PHRASES.some((re) => re.test(text));
-  const contentAbsent = CONTENT_ABSENT_PHRASES.some((re) => re.test(text));
-  const present = contentPresent || EXISTENCE_PRESENT_RE.test(text);
-  const absent = contentAbsent || EXISTENCE_ABSENT_RE.test(text);
+  const contentPresent = CONTENT_PRESENT_PHRASES.some((re) => re.test(core));
+  const contentAbsent = CONTENT_ABSENT_PHRASES.some((re) => re.test(core));
+  const present = contentPresent || EXISTENCE_PRESENT_RE.test(core);
+  const absent = contentAbsent || EXISTENCE_ABSENT_RE.test(core);
   // Both or neither ⇒ the polarity is not recoverable; stay strict.
   if (present === absent) return null;
-
-  // A conjunctive tail is a further clause; unless it is the one modeled
-  // adjunct it cannot be represented, so the whole claim stays strict.
-  if (!conjunctiveTailIsRepresentable(text)) return null;
 
   const { quoted, bare } = verbatimTokens(text);
   // `detectLanguage(...) === "non_source"` is the safety gate: a requirement
@@ -572,8 +602,8 @@ export function structuralStateClaim(text: string): StructuralClaim | null {
   // The claim must represent the WHOLE assertion. A compound requirement can
   // only be partially re-derived from one literal, so it stays on the strict
   // path rather than certifying a subset of what it asserts.
-  const existenceAsserted = EXISTENCE_PRESENT_RE.test(text) || EXISTENCE_ABSENT_RE.test(text);
-  const contentVerbPresent = new RegExp(`\\b(${CONTENT_VERBS}|${NEGATIVE_CONTENT_VERBS})\\b`, "i").test(text);
+  const existenceAsserted = EXISTENCE_PRESENT_RE.test(core) || EXISTENCE_ABSENT_RE.test(core);
+  const contentVerbPresent = new RegExp(`\\b(${CONTENT_VERBS}|${NEGATIVE_CONTENT_VERBS})\\b`, "i").test(core);
   // "must exist and contain `k`" (no repeated modal) would otherwise collapse
   // to an existence-only proof and drop the containment half.
   if (existenceAsserted && contentVerbPresent) return null;

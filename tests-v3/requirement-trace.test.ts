@@ -2817,3 +2817,42 @@ test("#985: a conjunctive tail is rejected syntactically, not by a verb list", (
     rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test("#985: the conjunctive tail must BE the test-demand adjunct, not merely contain one", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "config.json", ['{"foo":1}']);
+    // A tail carrying an unmodeled clause *and* a test demand must not be
+    // admitted just because a test demand appears somewhere inside it.
+    const repro = "`config.json` must contain `foo`\nand enable debug logging\nand must add a regression test";
+    assert.equal(structuralStateClaim(repro), null);
+    const trace = validateRequirementTrace(
+      [{
+        requirement_id: "r",
+        disposition: "met",
+        enforcement: [{ file: "config.json", line: 1 }],
+        test: [VALID_TEST_LOCATION],
+        reason: "foo is present",
+      }],
+      ledgerWith([{ id: "r", text: repro, kind: "acceptance" }]),
+      workspace,
+    );
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.equal(trace.rows[0]?.proof, "test_required");
+
+    // The same class in single-line and reversed order.
+    assert.equal(structuralStateClaim("`config.json` must contain `foo` and enable debug logging and must add a regression test"), null);
+    assert.equal(structuralStateClaim("`config.json` must contain `foo` and must add a regression test and enable debug logging"), null);
+
+    // Exactly the adjunct, in several phrasings, still classifies.
+    for (const adjunct of [
+      "and must be covered by a regression test",
+      "and must add a regression test",
+      "and must have a regression test",
+    ]) {
+      assert.notEqual(structuralStateClaim("`config.json` must contain `foo` " + adjunct), null, adjunct);
+    }
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
