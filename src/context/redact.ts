@@ -152,18 +152,21 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
   // module's stated preference over a leaked credential.
   redacted = redacted.replace(/sk-[A-Za-z0-9]{20,}/g, REDACTED_SOURCE);
 
-  // The dash-separated families (#996), ENUMERATED. The prefix is what
-  // discriminates here, so it must be a shape a provider actually issues:
-  // accepting any `sk-<seg>-` chain swallows ordinary kebab-case source —
-  // `docs/sk-deployment-internationalization-notes` is a PATH, not a
-  // credential, and it matches every generic dashed-prefix form. Naming the
-  // three families keeps the rule to `sk-proj-…`, `sk-ant-api03-…` and
-  // `sk-or-v1-…`. The body charset stays free base64url (`[A-Za-z0-9_-]`), so
-  // a real body containing `-`/`_` is masked whole rather than up to its
-  // first internal separator. `ant-api03` is version-bearing: a future
+  // The dash-separated families (#996), ENUMERATED, with the body required to
+  // contain a long UNBROKEN alphanumeric run. That run — not the prefix — is
+  // the discriminator a real key body has and a kebab token does not, so the
+  // prefix alone must never be sufficient: `docs/sk-proj-deployment-runbook-notes`
+  // and `sk-proj-card-with-title-and-actions` are a path and a class, and every
+  // segment of both is a short word, so no 20-character run exists in either.
+  // The run is allowed anywhere in the body rather than only at its start
+  // because real bodies are base64url and may carry `-`/`_` early
+  // (`sk-proj-ab-<40 alnum>` is a key, not a path) — the leading
+  // `[A-Za-z0-9_-]*` covers that case while the trailing one still consumes
+  // the rest of a `-`/`_`-bearing body, so a real key is masked as ONE literal
+  // instead of leaking its tail. `ant-api03` is version-bearing: a future
   // `apiNN` bump is a one-line change here.
   redacted = redacted.replace(
-    /(?<![A-Za-z0-9])sk-(?:proj|ant-api03|or-v1)-[A-Za-z0-9_-]{20,}/g,
+    /(?<![A-Za-z0-9])sk-(?:proj|ant-api03|or-v1)-[A-Za-z0-9_-]*[A-Za-z0-9]{20,}[A-Za-z0-9_-]*/g,
     REDACTED_SOURCE,
   );
 

@@ -163,6 +163,13 @@ test("#996 adversarial: the sk- rule must not eat ordinary kebab-case source", (
     // `sk-<seg>-` allowance masked this path, so the families are enumerated.
     "docs/sk-deployment-internationalization-notes",
     "sk-deployment-abcdefghijklmnopqrstuvwxyz012345",
+    // Review round 2: a real family PREFIX alone must still not be enough —
+    // the body has to carry the long unbroken run that separates a key from a
+    // path or a class. Every segment here is a short word, so none qualifies.
+    "docs/sk-proj-deployment-runbook-notes",
+    "sk-proj-card-with-title-and-actions",
+    "docs/sk-or-v1-migration-and-release-notes",
+    "sk-ant-api03-configuration-reference",
   ];
   for (const line of survivors) {
     assert.equal(redactSourceText(line), line, `expected ${JSON.stringify(line)} to survive`);
@@ -187,6 +194,11 @@ test("#996 adversarial: a body containing the separator charset is masked whole,
   // An uppercase/underscore-bearing base64url body (`-`/`_` are legal in it).
   const underscored = `sk-or-v1-${"aB3dE5".repeat(6)}_more_body`;
   assert.ok(!redactSourceText(underscored).includes("more_body"));
+
+  // A separator EARLY in the body must not defeat the rule: the requirement is
+  // that a long run exists in the body, not that the body starts with one.
+  const dashEarly = `sk-proj-ab-${"abcdefghijklmnopqrstuvwxyz012345"}`;
+  assert.equal(redactSourceText(dashEarly), REDACTED_SOURCE);
 });
 
 test("#996 adversarial: masking is idempotent and the marker is never re-matched", () => {
