@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { callModelTier, produceVerdict, PARSE_FAIL_CAP, MAX_RETRY_DELAY_SEC } from "../src/model/call.js";
 import type { TierProfile } from "../src/model/call.js";
-import type { ChatRequestOutcome } from "../src/transport/transport.js";
+import { RETRYABLE_HTTP_STATUSES, type ChatRequestOutcome } from "../src/transport/transport.js";
 import { TransportFailure } from "../src/transport/http.js";
 import { VerdictParseFailure } from "../src/model/types.js";
 
@@ -97,6 +97,28 @@ test("#978: non-retryable HTTP statuses fast-fail regardless of the tier retry b
     }
     assert.equal(calls, 1, `status ${status}`);
     assert.deepEqual(sleeps, [], `status ${status}`);
+  }
+});
+
+test("#1006: 5xx outside the transport's retry set keep the tier retry budget", async () => {
+  assert.equal(RETRYABLE_HTTP_STATUSES.has(524), false, "524 must remain outside the transport's same-request retry set");
+  for (const status of [524, 501, 507]) {
+    let calls = 0;
+    const sleeps: number[] = [];
+    const outcome = await callModelTier(profile({ retries: 3, retryDelaySec: 15 }), CONTEXT, {
+      sleep: async (seconds) => { sleeps.push(seconds); },
+      call: async () => {
+        calls++;
+        return {
+          status: "failure",
+          failure: new TransportFailure("http_status", `HTTP ${status}`, { status }),
+        };
+      },
+    });
+    assert.equal(outcome.status, "transport_exhausted", `status ${status}`);
+    assert.equal(calls, 3, `status ${status}`);
+    assert.deepEqual(sleeps, [15, 30], `status ${status}`);
+    if (outcome.status === "transport_exhausted") assert.equal(outcome.nonRetryable, undefined, `status ${status}`);
   }
 });
 

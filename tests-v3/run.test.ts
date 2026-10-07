@@ -1020,6 +1020,51 @@ test("#978: a 403 gets one primary request before fallback and publishes the fal
   }
 });
 
+test("#1006: a primary HTTP 524 consumes the configured tier retry budget before fallback", async () => {
+  let primaryReviewAttempts = 0;
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    primaryReviewAttempts += 1;
+    res.setHeader("Content-Type", "application/json");
+    res.statusCode = 524;
+    res.end(JSON.stringify({ error: "primary gateway timeout" }));
+  });
+  const fallbackServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ review_markdown: "Fallback review after primary 524.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const sleeps: number[] = [];
+  const annotations: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "ai-primary-retries": "3", "ai-primary-retry-delay-sec": "15",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "off", "deep-review": "false",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async (seconds) => { sleeps.push(seconds); },
+      annotate: (line) => { annotations.push(line); },
+      quiet: true,
+    });
+    assert.equal(primaryServer.requests.length, 3, "HTTP 524 must consume all three configured primary attempts");
+    assert.equal(primaryReviewAttempts, 3);
+    assert.deepEqual(sleeps, [15, 30]);
+    assert.ok(!annotations.some((line) => /non-retryable/.test(line)), "HTTP 524 must not emit a non-retryable annotation");
+    assert.equal(fallbackServer.requests.length, 1, "fallback must run once after primary retries are exhausted");
+    assert.match(result.outputs.reviewMarkdown, /Fallback review after primary 524\./);
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
 test("#978: native-loop fallback request_changes without deterministic blockers passes the gate by default", async () => {
   const primaryServer = await startMockServer((_req, body, res) => {
     const request = JSON.parse(body) as { tools?: unknown[] };
