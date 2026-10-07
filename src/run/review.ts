@@ -50,11 +50,11 @@ import { callModelTier, type TierProfile } from "../model/call.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, publicAnalysisEngine, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
 import { reviewArtifactFromParsed } from "../enforcement/artifact.js";
-import { applyStrictVerdictPolicy, applyVerdictPolicy } from "../enforcement/verdict-policy.js";
+import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
 import { markerReviewResult } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
-import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "../enforcement/enforce.js";
+import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope } from "../enforcement/requirement-trace.js";
 import { runRequirementTraceRepairPass } from "../requirements/trace-repair.js";
@@ -1040,6 +1040,9 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
     applyStrictVerdictPolicy(reviewRecord as never, { modelVerdict, forced });
+    // The strict mapping can derive an approve after the enforcement banner
+    // was written; reconcile the markdown with the final verdict.
+    reconcileEnforcedReviewMarkdown(reviewRecord as never);
   } else {
     applyVerdictPolicy(reviewRecord as never, verdictPolicy, {
       nonBlockingCategories: new Set(splitCsv(env.NON_BLOCKING_FINDING_CATEGORIES ?? "")),
@@ -1049,6 +1052,17 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     completenessStatus = completenessResult.status;
     requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
+    // #977: the model's own request_changes is relaxed only when every
+    // still-open finding is a verification ask and no independent
+    // deterministic gate fired. The overlays above have already run, so
+    // their blocks are visible here.
+    relaxVerificationOnlyVerdict(reviewRecord as never, {
+      forced: failClosedEnforcementFired(enforcementInputs),
+    });
+    // #977: the relaxation can flip the model's request_changes to approve
+    // after the enforcement banner was written; reconcile the markdown with
+    // the final verdict.
+    reconcileEnforcedReviewMarkdown(reviewRecord as never);
   }
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(reviewRecord)}\n`, "utf8"));
 

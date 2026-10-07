@@ -22,7 +22,7 @@ const SEVERITY_ALIASES: Readonly<Record<string, NormalizedFinding["severity"]>> 
   info: "info", note: "info", nit: "info", suggestion: "info",
 };
 
-const FINDING_CATEGORIES = new Set(["bug", "security", "performance", "style", "docs", "tests", "question", "other"]);
+const FINDING_CATEGORIES = new Set(["bug", "security", "performance", "style", "docs", "tests", "question", "other", "verification"]);
 
 const MAX_FINDINGS = 50;
 const MAX_FINDING_MESSAGE_CHARS = 2000;
@@ -55,6 +55,8 @@ const THREAD_DISPOSITION_ALIASES: Readonly<Record<string, NormalizedThreadDispos
   disputed: "disputed",
   disagree: "disputed",
   rejected: "disputed",
+  withdrawn: "withdrawn",
+  answered: "withdrawn",
 });
 const MAX_THREAD_DISPOSITIONS = 100;
 const MAX_THREAD_ID_CHARS = 200;
