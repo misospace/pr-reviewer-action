@@ -42,6 +42,49 @@ test("#876: redactText (the heuristic prose/log policy) still over-redacts the s
   assert.equal(redactText("token: opts.token"), "[REDACTED]");
 });
 
+test("#989: masks OpenAI-style provider keys without matching hyphenated prose", () => {
+  const keys = [
+    "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+    "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+    "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+    "sk-or-v1-abcdef0123456789abcdef0123456789",
+  ];
+  for (const key of keys) {
+    const result = redactText(`credential ${key}`);
+    assert.ok(result.includes("[REDACTED]"), `expected marker for ${key}`);
+    assert.ok(!result.includes(key), `raw key survived: ${result}`);
+  }
+
+  const ordinaryProse = [
+    "the task-runner-with-a-long-name ran",
+    "risk-assessment-of-the-change",
+  ];
+  for (const prose of ordinaryProse) {
+    assert.equal(redactText(prose), prose, "a letter before `sk-` means mid-word prose, not a key");
+  }
+
+  const key = keys[0]!;
+  for (const framed of [`key=${key}`, `"${key}"`, `${key}\nnext line`]) {
+    const result = redactText(framed);
+    assert.ok(!result.includes(key), `raw key survived framing: ${result}`);
+    assert.ok(result.includes("[REDACTED]"));
+  }
+  // A separator immediately before the key must still mask it. This is why the
+  // rule uses a lookbehind rather than `\b`: `_` is a word character, so `\b`
+  // would let a key written straight after one through.
+  for (const separator of ["_", "-", ":", "/", "|", "(", "["]) {
+    const framed = `${separator}${key}`;
+    assert.ok(!redactText(framed).includes(key), `raw key survived after ${JSON.stringify(separator)}`);
+  }
+  // `_` is in the body charset, so a trailing one is absorbed into the mask —
+  // harmless over-redaction, and the key itself is gone.
+  assert.equal(redactText(`_${key}_`), "_[REDACTED]", "underscore emphasis around a key must still mask it");
+  assert.equal(redactText("api_key=zzzzzzzzzzzz"), "[REDACTED]");
+
+  const masked = redactText(`token ${key}`);
+  assert.equal(redactText(masked), masked, "redaction should be idempotent for masked provider keys");
+});
+
 test("#876 maintainer-review: only the VALUE is replaced — key, delimiter, quotes, and trailing punctuation survive", () => {
   assert.equal(redactSourceText('apiKey: "hunter2hunter2",'), `apiKey: "${REDACTED_SOURCE}",`);
   assert.match(redactSourceText('apiKey: "hunter2hunter2",'), /^apiKey: "⟦redacted:credential⟧",$/);

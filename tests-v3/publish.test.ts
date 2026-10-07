@@ -5,6 +5,8 @@ import {
   evaluateApprovalGuardrails,
   markerReviewResult,
   publishReview,
+  renderFindingsSummary,
+  renderOutsideDiffSection,
   renderPartialCoverageNotice,
   resolveCleanupFlag,
 } from "../src/publish/publish.js";
@@ -105,6 +107,20 @@ test("comment publication appends findings tagged outside the diff", async () =>
   assert.ok(body.includes("## Findings Outside This Diff"));
   assert.ok(body.includes("(outside this diff) Caller breaks"));
   assert.ok(!body.includes("(outside this diff) A finding"));
+});
+
+test("#989: provider keys are redacted in published findings and outside-diff lines", () => {
+  const key = "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345";
+  const finding = { file: "a.ts", line: 2, severity: "major", message: `Leaked ${key}`, outside_diff: true };
+
+  const summary = renderFindingsSummary([finding], "inert");
+  assert.ok(summary.includes("### Findings"));
+  assert.ok(summary.includes("[REDACTED]"));
+  assert.ok(!summary.includes(key));
+
+  const appendix = renderOutsideDiffSection([finding], "inert");
+  assert.ok(appendix.includes("(outside this diff) Leaked [REDACTED]"));
+  assert.ok(!appendix.includes(key));
 });
 
 test("comment publication upserts a marked body with verdict and sanitized markdown", async () => {

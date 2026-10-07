@@ -1,16 +1,16 @@
-/** Shared secret-redaction for v3 context producers (#675): a verbatim
- * TypeScript port of `scripts/redact.py`'s `redact_text`. The pr-thread and
+/** Shared secret-redaction for v3 context producers (#675).
+ * TypeScript is now the sole authoritative implementation; the v2 Python
+ * original is gone, so there is no Python side to stay in lockstep with. The
+ * `[REDACTED]` marker and pattern application order remain the contract callers
+ * rely on, and new patterns may be added here directly. The pr-thread and
  * related-code builders feed untrusted bodies and grep snippets through this
- * before anything reaches the corpus, exactly like their v2 counterparts.
- * The patterns, their application order, and the `[REDACTED]` marker are
- * contractual (redacted bytes stay byte-identical to v2), so this module must
- * stay in lockstep with the Python original — it is a normalization seam, not
- * a security-policy one: no network, no process, no policy decisions. */
+ * before anything reaches the corpus. This is a normalization seam, not a
+ * security-policy one: no network, no process, no policy decisions. */
 
 const REDACTED = "[REDACTED]";
 
-// In application order (same as scripts/redact.py). Each pattern replaces
-// every occurrence; later patterns see the already-redacted text.
+// In application order. Each pattern replaces every occurrence; later
+// patterns see the already-redacted text.
 const MASKERS: readonly RegExp[] = [
   // GitHub personal access tokens (classic & fine-grained)
   /ghp_[A-Za-z0-9]{30,}/g,
@@ -22,13 +22,20 @@ const MASKERS: readonly RegExp[] = [
   /(api[_-]?key|token|password|secret|access[_-]?key|auth[_-]?token)\s*[:=]\s*['"]?[^\s'"]{8,}/gi,
   // AWS-style access keys
   /AKIA[0-9A-Z]{16}/g,
+  // OpenAI-style provider keys (`sk-`, `sk-proj-`, `sk-ant-…`, `sk-or-v1-…`).
+  // The lookbehind rejects a preceding letter or digit, so the rule cannot
+  // match inside ordinary hyphenated prose (`task-runner-with-a-long-name`) or
+  // a longer identifier. It is deliberately NOT `\b`: `_` is a word character,
+  // so `\b` would skip a key written straight after one — e.g. the underscore
+  // emphasis a model reaches for when quoting a key, `_sk-…`.
+  /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}/g,
   // Kubernetes / kubeconfig credentials (credential-bearing keys only — the
   // old (server|username|...) form destroyed ordinary `server:` YAML context)
   /(password|client-certificate-data|client-key-data|certificate-authority-data|bearer[_-]?token)\s*:\s*\S+/gi,
 ];
 
 /** Return *text* with credential-like values replaced by `[REDACTED]`.
- * Best-effort heuristic redaction, exactly like the Python original. */
+ * Best-effort heuristic redaction for untrusted prose and logs. */
 export function redactText(text: string | null | undefined): string {
   if (!text) return "";
   let redacted = text;
@@ -220,10 +227,11 @@ export const KNOWN_SECRET_REDACTED = "⟦•⟧";
  * #846/security-review: mask every literal occurrence of a caller-supplied
  * secret (an operator's configured model API key), plus its URL-encoded and
  * base64 forms. This is deliberately separate from `redactText`'s
- * pattern-based heuristics (parity-locked, see the module doc) — a known
+ * pattern-based heuristics (see the module doc) — a known
  * exact secret must be nuked unconditionally, even when it doesn't happen to
- * match any heuristic pattern (e.g. an opaque key like `sk-...` echoed bare
- * in a provider's error body, with no `key=`/`Bearer `/etc. framing).
+ * match any heuristic pattern (e.g. a short or oddly-shaped opaque key
+ * echoed bare in a provider's error body, with no `key=`/`Bearer `/etc.
+ * framing).
  * Case-sensitive substring replacement; every non-empty secret is masked
  * regardless of length — `ai-api-key` has no configured minimum, a
  * one-character local key is plausible, and over-redaction in a diagnostic
@@ -293,7 +301,7 @@ export function maskDiagnostic(
 }
 
 /**
- * Port of `scripts/redact.py`'s `mask_and_truncate`: redact secrets, then
+ * Originally ported from v2's `mask_and_truncate`: redact secrets, then
  * truncate to *maxBytes* UTF-8 bytes with a visible `\n[truncated]` marker.
  * Truncation happens after masking so the byte length reflects the redacted
  * content. The tool-executor layer applies this to every tool result before

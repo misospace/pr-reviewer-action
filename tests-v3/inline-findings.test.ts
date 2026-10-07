@@ -37,6 +37,7 @@ test("#680: Forgejo uses diff-relative positions and ignores metadata slots", ()
 test("#561: labels, categories, backticks, secret redaction and inert upstream links", () => {
   assert.equal(findingToBody({ severity: "mystery", category: "other", message: " `#42`" }, "inert"), "**mystery:** `#42`\n\n_Automated finding from AI PR review._");
   assert.equal(findingToBody({ severity: "major", category: "security", message: "Bearer abcdefghijklmnopqrstuvwxyz https://github.com/upstream/repo/pull/123" }, "inert"), "**⚠️ Major (security):** [REDACTED] upstream upstream/repo PR 123\n\n_Automated finding from AI PR review._");
+  assert.equal(findingToBody({ message: "credential sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345" }, "inert"), "**Info:** credential [REDACTED]\n\n_Automated finding from AI PR review._");
   assert.equal(findingToBody({ message: "https://github.com/upstream/repo/pull/123" }, "unknown"), "**Info:** upstream upstream/repo PR 123\n\n_Automated finding from AI PR review._");
 });
 
