@@ -227,14 +227,25 @@ test("#996 adversarial: a body containing the separator charset is masked whole,
 // the segment is an English word. The three tests below pin the accepted
 // boundaries; pre-#997 left all three classes alone.
 
-test("#996 accepted boundary (false negative): a body whose first 20 characters are all lowercase is not masked", () => {
+test("#996 accepted boundary (false negative): a body whose first alphanumeric segment carries no digit or uppercase is not masked", () => {
+  // The entropy scan covers the body's FIRST alphanumeric segment only.
   // Syntactically valid base64url — base64url does NOT guarantee an uppercase
   // or digit in any 20-character window — but practically unobserved in real
   // keys, so the miss is accepted rather than traded for the false positive a
-  // looser rule would cost.
+  // looser rule would cost. It holds wherever the segment ends, and whatever
+  // later segments contain.
   const lowercaseBody = `sk-or-v1-${"abcdef".repeat(11)}`;
   assert.equal(redactSourceText(lowercaseBody), lowercaseBody);
   assert.equal(redactSourceText(`sk-proj-${"a".repeat(20)}`), `sk-proj-${"a".repeat(20)}`);
+  assert.equal(redactSourceText(`sk-proj-${"a".repeat(20)}-B`), `sk-proj-${"a".repeat(20)}-B`);
+});
+
+test("#996: the entropy character may sit anywhere in the body's first alphanumeric segment", () => {
+  // Review round 5: `sk-proj-<20 lowercase>A` is masked, while the docs claimed
+  // the accepted miss was "first 20 characters all lowercase" — the scan is not
+  // bounded to 20 characters, so the docs were narrower than the regex. Pinned
+  // here as a masking positive, with the boundary above restated to match.
+  assert.equal(redactSourceText("sk-proj-aaaaaaaaaaaaaaaaaaaaA"), REDACTED_SOURCE);
 });
 
 test("#996 accepted boundary (false negative): a separator inside the body's first 20 characters is left alone", () => {

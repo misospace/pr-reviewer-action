@@ -153,8 +153,11 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
   redacted = redacted.replace(/sk-[A-Za-z0-9]{20,}/g, REDACTED_SOURCE);
 
   // The dash-separated families (#996), ENUMERATED, with the body's first
-  // segment required to be a 20-character run carrying at least one DIGIT or
-  // UPPERCASE character.
+  // segment required to be an alphanumeric run of at least 20 characters that
+  // carries at least one DIGIT or UPPERCASE character — and that entropy
+  // character may sit ANYWHERE in the segment, not only within its first 20
+  // characters: the scan covers the whole first alphanumeric segment, so
+  // `sk-proj-<20 lowercase><uppercase>` is masked.
   //
   // This is a HIGH-CONFIDENCE HEURISTIC with explicitly bounded tradeoffs, not
   // a classifier. No shape-only rule can both mask every real family body and
@@ -182,9 +185,11 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
   // one-line change here.
   //
   // Accepted boundaries, each pinned by test in `tests-v3/redact.test.ts`:
-  //  - FALSE NEGATIVE — a real body whose first 20 characters are all
-  //    lowercase (`sk-or-v1-<all-letter hex>`) is not masked. Syntactically
-  //    valid base64url; practically unobserved in real keys.
+  //  - FALSE NEGATIVE — a real body whose FIRST alphanumeric segment carries
+  //    no digit or uppercase is not masked, wherever that segment ends
+  //    (`sk-or-v1-<all-letter hex>`, or `sk-proj-<20 lowercase>-<entropy in a
+  //    later segment>`). Syntactically valid base64url; practically unobserved
+  //    in real keys.
   //  - FALSE NEGATIVE — a real body carrying `-`/`_` inside its first 20
   //    characters (`sk-proj-ab-<40 alnum>`) is not masked; covering it needs
   //    the run hunted anywhere in the body, which reopens the path above.
