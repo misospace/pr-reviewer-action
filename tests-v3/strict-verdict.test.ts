@@ -183,7 +183,7 @@ test("computeDeterministicBlock covers every fail-closed source and final verdic
   const base = {
     enforcementInputs: NO_ENFORCEMENT,
     completeness: null,
-    requirementTraceFindingsAdded: 0,
+    requirementTraceIncomplete: false,
     finalVerdict: "approve",
     verdictSource: "model",
   };
@@ -193,7 +193,7 @@ test("computeDeterministicBlock covers every fail-closed source and final verdic
     ...base,
     completeness: { status: "incomplete", mode: "fail" },
   }), true);
-  assert.equal(computeDeterministicBlock({ ...base, requirementTraceFindingsAdded: 1 }), true);
+  assert.equal(computeDeterministicBlock({ ...base, requirementTraceIncomplete: true }), true, "trace incompleteness independently blocks the degraded bypass");
   assert.equal(computeDeterministicBlock({
     ...base,
     finalVerdict: "request_changes",
@@ -243,7 +243,7 @@ test("evidence blocker prevents the degraded fallback gate bypass", () => {
   const deterministicBlock = computeDeterministicBlock({
     enforcementInputs: enforcement,
     completeness: null,
-    requirementTraceFindingsAdded: 0,
+    requirementTraceIncomplete: false,
     finalVerdict: String(a.verdict),
     verdictSource: String(a.verdict_source ?? "model"),
   });
@@ -277,7 +277,7 @@ test("required-check mode=fail incompleteness prevents the degraded fallback gat
   const deterministicBlock = computeDeterministicBlock({
     enforcementInputs: NO_ENFORCEMENT,
     completeness,
-    requirementTraceFindingsAdded: 0,
+    requirementTraceIncomplete: false,
     finalVerdict: String(a.verdict),
     verdictSource: String(a.verdict_source ?? "model"),
   });

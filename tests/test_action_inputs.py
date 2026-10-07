@@ -237,14 +237,16 @@ def _run_gate_body(body: str, final_verdict: str) -> int:
 def test_fail_on_request_changes_input():
     """fail-on-request-changes gates merges without a GitHub App (issue #518).
 
-    Declared with default "false"; the v3 action entry fails the step only on
-    a final request_changes verdict, after publishing, so the review lands on
-    the PR before the step goes red.
+    Both gate inputs default off. When enabled, only a final request_changes
+    fails; degraded reviews warn and pass unless fail-on-degraded-review is
+    true. Publishing happens first so the review lands before the step goes red.
     """
     action = yaml.safe_load((_REPO_ROOT / "action.yml").read_text())
     assert action["inputs"]["fail-on-request-changes"]["default"] == "false"
+    assert action["inputs"]["fail-on-degraded-review"]["default"] == "false"
     entry = (_REPO_ROOT / "src" / "run" / "action.ts").read_text()
-    assert 'if (verdict === "request_changes")' in entry
-    assert entry.index("await publishWith(") < entry.index("failOnRequestChanges(stage, review.outputs.verdict)")
+    assert 'if (verdict !== "request_changes") {\n    process.stdout.write' in entry
+    assert "::error::Final verdict is request_changes; failing the step" in entry
+    assert entry.index("await publishWith(") < entry.index("const gate = failOnRequestChanges(")
 
 

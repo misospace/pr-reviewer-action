@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { resolveDegradedGateBypass, resolvePartialCoverage, runReview } from "../src/run/review.js";
+import { resolvePartialCoverage, runReview } from "../src/run/review.js";
 import { failOnRequestChanges } from "../src/run/action.js";
 import { parseMetadata } from "../src/precheck/metadata.js";
 import { authoritativeBodyRevision, harnessTransportAdapter, type PrBodyRevision } from "../src/run/stages.js";
@@ -1017,6 +1017,74 @@ test("#978: fallback no-evidence does not bypass when requirement-trace enforcem
     const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
     assert.ok(findings.some((finding) => finding.severity === "major" && finding.message.startsWith("requirement not enforced: ")));
     assert.equal(result.outputs.degradedGateBypass, false, "the synthesized requirement finding is a deterministic block");
+    assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 1);
+    assert.equal(parseMetadata(result.marker)?.degraded_gate_bypass, undefined, "ineligible bypass state must not be persisted");
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
+test("#978: fallback no-evidence unverifiable trace blocks bypass without synthesizing a finding", async () => {
+  const primaryServer = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      res.end(verdictBody(baseVerdict()));
+      return;
+    }
+    res.statusCode = 500;
+    res.end(JSON.stringify({ error: "primary unavailable" }));
+  });
+  const fallbackServer = await startMockServer((_req, body, res) => {
+    const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      verdict: "request_changes",
+      review_markdown: "Fallback request-changes review with unverifiable trace.\n",
+      requirement_coverage: [{
+        requirement_id: reqId,
+        disposition: "unverifiable",
+        enforcement: [],
+        test: [],
+        reason: "The available evidence does not establish that source SHA is checked.",
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    const platform = requirementTracePlatform();
+    platform.getPrDiff = async () => `diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+world\n`;
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop", "tool-max-requests": "1",
+        "verdict-policy": "model", "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2", "deep-review": "false",
+        "ci-status-check": "false", "requirement-trace": "true",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: platform,
+      sleep: async () => {},
+      quiet: true,
+    });
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_degraded?: string };
+    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as { rows: Array<{ disposition: string }>; incomplete: boolean };
+    assert.equal(harness.native_loop_degraded, "no-tool-calls");
+    assert.equal(trace.incomplete, true);
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.equal(result.reviewArtifact.requirement_trace_incomplete, true);
+    assert.match(result.outputs.analysisEngine, /fallback-m@.*fallback \(primary failed\)/);
+    assert.equal(result.outputs.verdict, "request_changes");
+    const findings = JSON.parse(result.outputs.findings) as Array<{ message: string }>;
+    assert.ok(!findings.some((finding) => finding.message.startsWith("requirement not enforced: ")), "unverifiable claims do not synthesize unmet findings");
+    assert.equal(result.outputs.degradedGateBypass, false);
     assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 1);
     assert.equal(parseMetadata(result.marker)?.degraded_gate_bypass, undefined, "ineligible bypass state must not be persisted");
   } finally {

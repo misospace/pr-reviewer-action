@@ -1093,15 +1093,14 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // not merely whether some part of the tool loop degraded.
   const nativeLoopDegraded = (harnessForMarker as { native_loop_degraded?: unknown } | null)?.native_loop_degraded;
   const noEvidenceGathered = typeof nativeLoopDegraded === "string" && nativeLoopDegraded.length > 0;
-  // Requirement-trace enforcement synthesizes major findings for unmet rows;
-  // findingsAdded is therefore a blocking signal even without an enforcement banner.
-  // Policy and enforcement have all finished before this snapshot: both the
-  // final verdict and its provenance are authoritative for the bypass check.
+  // The authoritative trace-incomplete flag covers both unmet and
+  // unverifiable rows. Policy and enforcement have finished before this
+  // snapshot, so the final verdict and provenance are authoritative here.
   const verdictSource = String(reviewRecord.verdict_source ?? "model");
   const deterministicBlock = computeDeterministicBlock({
     enforcementInputs,
     completeness: completenessResult,
-    requirementTraceFindingsAdded: requirementTraceResult?.findingsAdded ?? 0,
+    requirementTraceIncomplete: traceIncomplete,
     finalVerdict: outputVerdict,
     verdictSource,
   });
@@ -1259,21 +1258,23 @@ function cachedProjectNumber(bytes: Uint8Array): number | null {
 }
 
 /** #978: whether a deterministic, rule-based layer owns the final verdict.
- * A fail-closed enforcement layer, a required-check fail mode, a
- * requirement-trace finding, or any verdict policy/enforcement escalation
+ * A fail-closed enforcement layer, a required-check fail mode, incomplete
+ * requirement-trace coverage, or any verdict policy/enforcement escalation
  * (`verdict_source !== "model"`) outranks the degraded gate exemption — an
- * operator who enabled one of those meant it. A model-originated
- * `request_changes` keeps `verdict_source === "model"` and stays eligible. */
+ * operator who enabled one of those meant it. `requirement_trace_incomplete`
+ * is authoritative for both `unmet` and `unverifiable` rows, and strictly
+ * subsumes findingsAdded because findings are synthesized only for `unmet`.
+ * A model-originated `request_changes` keeps `verdict_source === "model"` and stays eligible. */
 export function computeDeterministicBlock(input: {
   enforcementInputs: EnforcementInputs;
   completeness: { status: string; mode: string } | null;
-  requirementTraceFindingsAdded: number;
+  requirementTraceIncomplete: boolean;
   finalVerdict: string;
   verdictSource: string;
 }): boolean {
   return failClosedEnforcementFired(input.enforcementInputs)
     || (input.completeness !== null && input.completeness.status === "incomplete" && input.completeness.mode === "fail")
-    || input.requirementTraceFindingsAdded > 0
+    || input.requirementTraceIncomplete
     // verdict_source records whether policy/enforcement forced the final
     // verdict; a model-originated request_changes remains eligible for #978.
     || (input.finalVerdict === "request_changes" && input.verdictSource !== "model");
