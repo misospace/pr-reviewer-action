@@ -175,6 +175,11 @@ test("#996 adversarial: the sk- rule must not eat ordinary kebab-case source", (
     // long English word is a key.
     "docs/sk-proj-card-internationalization-notes",
     "sk-ant-api03-card-internationalization-notes",
+    // Review round 4: `internationalization` is itself exactly 20 lowercase
+    // characters, so the run must also carry a digit or uppercase — English
+    // words do not, base64url bodies always do.
+    "docs/sk-proj-internationalization-notes",
+    "sk-proj-internationalization-notes",
   ];
   for (const line of survivors) {
     assert.equal(redactSourceText(line), line, `expected ${JSON.stringify(line)} to survive`);
@@ -182,12 +187,20 @@ test("#996 adversarial: the sk- rule must not eat ordinary kebab-case source", (
   }
 });
 
-test("#996 adversarial: the run-length floor is exact — 19 characters survive, 20 mask", () => {
+test("#996 adversarial: the legacy bare floor is 19/20; the family body needs 20 characters AND entropy", () => {
+  // Legacy bare shape, unchanged.
   assert.equal(redactSourceText(`sk-${"a".repeat(19)}`), `sk-${"a".repeat(19)}`);
   assert.equal(redactSourceText(`sk-${"a".repeat(20)}`), REDACTED_SOURCE);
-  // Same floor behind a family prefix.
-  assert.equal(redactSourceText(`sk-proj-${"a".repeat(19)}`), `sk-proj-${"a".repeat(19)}`);
-  assert.equal(redactSourceText(`sk-proj-${"a".repeat(20)}`), REDACTED_SOURCE);
+  // A family body needs the length AND a non-lowercase character: round 4 is
+  // exactly `internationalization` — 20 lowercase characters, a path, not a key.
+  assert.equal(redactSourceText(`sk-proj-${"a".repeat(20)}`), `sk-proj-${"a".repeat(20)}`);
+  assert.equal(redactSourceText("docs/sk-proj-internationalization-notes"), "docs/sk-proj-internationalization-notes");
+  assert.equal(redactSourceText(`sk-proj-0${"a".repeat(19)}`), REDACTED_SOURCE);
+  assert.equal(redactSourceText(`sk-proj-${"a".repeat(19)}A`), REDACTED_SOURCE);
+  // Same shape behind the other two families.
+  assert.equal(redactSourceText(`sk-ant-api03-${"a".repeat(20)}`), `sk-ant-api03-${"a".repeat(20)}`);
+  assert.equal(redactSourceText(`sk-or-v1-${"a".repeat(20)}`), `sk-or-v1-${"a".repeat(20)}`);
+  assert.equal(redactSourceText(`sk-ant-api03-${"0".repeat(20)}`), REDACTED_SOURCE);
 });
 
 test("#996 adversarial: a body containing the separator charset is masked whole, with no tail left behind", () => {

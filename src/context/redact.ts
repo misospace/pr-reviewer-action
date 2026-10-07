@@ -152,27 +152,35 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
   // module's stated preference over a leaked credential.
   redacted = redacted.replace(/sk-[A-Za-z0-9]{20,}/g, REDACTED_SOURCE);
 
-  // The dash-separated families (#996), ENUMERATED, with the long unbroken
-  // alphanumeric run required to sit DIRECTLY after the family prefix. That
-  // adjacency is the whole discriminator: every segment of a kebab token is a
-  // short word, so `docs/sk-proj-card-internationalization-notes` survives
-  // even though it contains a 20-character word — the run may not be hunted
-  // for anywhere in the body, because a token that merely CONTAINS one long
-  // word is source, not a key. The trailing `[A-Za-z0-9_-]*` still consumes
-  // the rest of a `-`/`_`-bearing body, so a real key is masked as ONE
-  // literal instead of leaking its tail. `ant-api03` is version-bearing: a
-  // future `apiNN` bump is a one-line change here.
+  // The dash-separated families (#996), ENUMERATED, with the body's first
+  // segment required to be a 20-character run carrying at least one DIGIT or
+  // UPPERCASE character. All three parts are discriminators between a key and
+  // ordinary source, and each exists because its absence let source through as
+  // a key: the prefix is closed to families a provider actually issues (a
+  // generic `sk-<seg>-` chain ate `docs/sk-deployment-internationalization-notes`);
+  // the run must be the body's FIRST segment, because a token that merely
+  // CONTAINS a long word is still a path (`docs/sk-proj-card-internationalization-notes`);
+  // and the run must not be all-lowercase, because `internationalization` is
+  // itself 20 characters and `docs/sk-proj-internationalization-notes` is a
+  // path. Real bodies are base64url, so a digit or uppercase is certain across
+  // any 20-character window — the entropy test costs real keys nothing worth
+  // noticing. The trailing `[A-Za-z0-9_-]*` still consumes the rest of a
+  // `-`/`_`-bearing body, so a real key is masked as ONE literal.
+  // `ant-api03` is version-bearing: a future `apiNN` bump is a one-line change
+  // here.
   //
-  // Accepted residual, recorded rather than hidden: a real body carrying
-  // `-`/`_` inside its FIRST 20 characters is not masked
-  // (`sk-proj-ab-<40 alnum>`). Hunting the run anywhere in the body would
-  // cover it, at the cost of masking the path above, and source-safety wins
-  // that tie. Pre-#997 left those bodies alone too, so this is no regression
-  // against the baseline. Closing it needs a stronger signal than segment
-  // shape (framing/context, or an entropy test on the run) — deliberately out
-  // of scope here.
+  // Accepted residuals, recorded rather than hidden: a real body carrying
+  // `-`/`_` inside its first 20 characters is not masked (`sk-proj-ab-<40
+  // alnum>`) — covering it needs the run hunted anywhere in the body, which
+  // reopens the path above; and a 20+ character segment that is entirely
+  // lowercase (an all-letter hex body, say) is not masked either. Pre-#997
+  // left both of those alone. The rule's remaining FALSE-positive class is a
+  // 20+ character segment carrying a digit or uppercase that is not a
+  // credential (`sk-proj-internationalization2024-notes`); no shape-only rule
+  // closes that without parsing words, which is the framing/context signal
+  // deliberately kept out of scope here.
   redacted = redacted.replace(
-    /(?<![A-Za-z0-9])sk-(?:proj|ant-api03|or-v1)-[A-Za-z0-9]{20,}[A-Za-z0-9_-]*/g,
+    /(?<![A-Za-z0-9])sk-(?:proj|ant-api03|or-v1)-(?=[A-Za-z0-9]*[0-9A-Z])[A-Za-z0-9]{20,}[A-Za-z0-9_-]*/g,
     REDACTED_SOURCE,
   );
 
