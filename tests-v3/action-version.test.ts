@@ -47,16 +47,16 @@ test("#915: action version appears in the engine line and metadata marker only w
   assert.doesNotMatch(redactedUrl, /user:pass|@host/);
 });
 
-test("#915/#978: action_version stays last and degraded is appended only when true", () => {
+test("#915/#978: action_version stays last and gate-bypass eligibility is appended only when true", () => {
   assert.equal(
     buildMetadataMarker({ head_sha: "h", base_sha: "b", review_result: "clean", action_version: "v3.1.0" }),
     '<!-- ai-pr-reviewer:{"version":1,"head_sha":"h","base_sha":"b","review_result":"clean","action_version":"v3.1.0"} -->',
   );
-  const degradedMarker = buildRunMetadataMarker({ headSha: "h", baseSha: "b", reviewResult: "issues", degraded: true });
-  assert.equal(degradedMarker, '<!-- ai-pr-reviewer:{"version":1,"head_sha":"h","base_sha":"b","review_result":"issues","degraded":true} -->');
-  assert.equal(parseMetadata(degradedMarker)?.degraded, true);
-  assert.equal("degraded" in (parseMetadata(buildMetadataMarker({ review_result: "issues", degraded: false })) ?? {}), false);
-  assert.equal("degraded" in (parseMetadata(buildMetadataMarker({ review_result: "issues" })) ?? {}), false);
+  const bypassMarker = buildRunMetadataMarker({ headSha: "h", baseSha: "b", reviewResult: "issues", degradedGateBypass: true });
+  assert.equal(bypassMarker, '<!-- ai-pr-reviewer:{"version":1,"head_sha":"h","base_sha":"b","review_result":"issues","degraded_gate_bypass":true} -->');
+  assert.equal(parseMetadata(bypassMarker)?.degraded_gate_bypass, true);
+  assert.equal("degraded_gate_bypass" in (parseMetadata(buildMetadataMarker({ review_result: "issues", degradedGateBypass: false })) ?? {}), false);
+  assert.equal("degraded_gate_bypass" in (parseMetadata(buildMetadataMarker({ review_result: "issues" })) ?? {}), false);
   assert.equal(
     buildMetadataMarker({
       head_sha: "h", base_sha: "b", review_result: "clean", tool_budget: 32,

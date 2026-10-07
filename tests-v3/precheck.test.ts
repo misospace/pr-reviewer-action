@@ -177,53 +177,51 @@ test("evaluatePrecheck skips only on a marker match and force review bypasses", 
 
 // ── Metadata markers / carry-forward verdict ─────────────────────────────
 
-test("metadata markers preserve degraded and drive the carried verdict", () => {
-  const degradedMarker = buildMetadataMarker({ review_result: "issues", degraded: true });
-  const degradedBody = `text\n${degradedMarker}\n`;
-  const degradedData = parseMetadata(degradedBody);
-  assert.equal(degradedData?.review_result, "issues");
-  assert.equal(degradedData?.degraded, true);
-  assert.deepEqual(carriedVerdict(degradedBody), {
-    verdict: "request_changes", verdictSource: "carry_forward", reviewResult: "issues", degraded: true,
+test("metadata markers preserve gate-bypass eligibility and drive the carried verdict", () => {
+  const bypassMarker = buildMetadataMarker({ review_result: "issues", degradedGateBypass: true });
+  const bypassBody = `text\n${bypassMarker}\n`;
+  const bypassData = parseMetadata(bypassBody);
+  assert.equal(bypassData?.review_result, "issues");
+  assert.equal(bypassData?.degraded_gate_bypass, true);
+  assert.deepEqual(carriedVerdict(bypassBody), {
+    verdict: "request_changes", verdictSource: "carry_forward", reviewResult: "issues", degradedGateBypass: true,
   });
 
-  for (const options of [{ review_result: "issues" }, { review_result: "issues", degraded: false }]) {
+  for (const options of [{ review_result: "issues" }, { review_result: "issues", degradedGateBypass: false }]) {
     const marker = buildMetadataMarker(options);
-    assert.equal(Object.hasOwn(parseMetadata(marker) ?? {}, "degraded"), false);
-    assert.equal(carriedVerdict(marker)?.degraded, false);
+    assert.equal(Object.hasOwn(parseMetadata(marker) ?? {}, "degraded_gate_bypass"), false);
+    assert.equal(carriedVerdict(marker)?.degradedGateBypass, false);
   }
-  assert.equal(buildMetadataMarker({ review_result: "issues", degraded: false }), buildMetadataMarker({ review_result: "issues" }));
+  assert.equal(buildMetadataMarker({ review_result: "issues", degradedGateBypass: false }), buildMetadataMarker({ review_result: "issues" }));
 
   const body = `text\n${buildMetadataMarker({ head_sha: "h", base_sha: "b", review_result: "issues" })}\n`;
   const data = parseMetadata(body);
   assert.equal(data?.review_result, "issues");
-  assert.deepEqual(carriedVerdict(body), { verdict: "request_changes", verdictSource: "carry_forward", reviewResult: "issues", degraded: false });
+  assert.deepEqual(carriedVerdict(body), { verdict: "request_changes", verdictSource: "carry_forward", reviewResult: "issues", degradedGateBypass: false });
   assert.deepEqual(carriedVerdict(`x\n${buildMetadataMarker({ review_result: "clean" })}`), {
     verdict: "approve",
     verdictSource: "carry_forward",
     reviewResult: "clean",
-    degraded: false,
+    degradedGateBypass: false,
   });
   assert.deepEqual(carriedVerdict(`x\n${buildMetadataMarker({ review_result: "partial", incomplete_reason: "requirement_trace" })}`), {
     verdict: "approve",
     verdictSource: "carry_forward",
     reviewResult: "partial",
-    degraded: false,
+    degradedGateBypass: false,
     incompleteReason: "requirement_trace",
   });
   assert.deepEqual(carriedVerdict(`x\n${buildMetadataMarker({ review_result: "partial" })}`), {
     verdict: "approve",
     verdictSource: "carry_forward",
     reviewResult: "partial",
-    degraded: false,
+    degradedGateBypass: false,
   });
   // #954: the marker is untrusted comment content; an unknown reason value is
   // dropped rather than copied into the action output.
   assert.deepEqual(carriedVerdict(`x\n${buildMetadataMarker({ review_result: "partial", incomplete_reason: "EVIL" })}`), {
     verdict: "approve",
-    verdictSource: "carry_forward",
-    reviewResult: "partial",
-    degraded: false,
+    verdictSource: "carry_forward", reviewResult: "partial", degradedGateBypass: false,
   });
   assert.equal(carriedVerdict("no marker"), null);
   assert.equal(carriedVerdict("<!-- ai-pr-reviewer:not json -->"), null);
@@ -570,13 +568,13 @@ test("#961: even a forced re-review skips a draft PR", async () => {
   assert.equal(output.skip_reason, "pr-draft");
 });
 
-test("runPrecheck carries the prior verdict and degraded signal on a diff-unchanged skip", async () => {
+test("runPrecheck carries bypass eligibility on an unchanged skip and the gate honors it", async () => {
   const fx = fixture("unchanged-diff-skip-issues");
   const comment = fx.platform.comments?.[0];
   assert.ok(comment);
   comment.body = comment.body.replace(/<!-- ai-pr-reviewer:\{.*?\} -->/, buildMetadataMarker({
     review_result: "issues",
-    degraded: true,
+    degradedGateBypass: true,
   }));
   const output = await runPrecheck({
     env: fx.env,
@@ -586,20 +584,20 @@ test("runPrecheck carries the prior verdict and degraded signal on a diff-unchan
   assert.equal(output.skip_reason, "diff-unchanged");
   assert.equal(output.verdict, "request_changes");
   assert.equal(output.verdict_source, "carry_forward");
-  assert.equal(output.degraded, true);
+  assert.equal(output.degradedGateBypass, true);
   assert.equal(
-    failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, output.verdict ?? "", output.degraded, false),
+    failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, output.verdict ?? "", output.degradedGateBypass, false),
     0,
-    "request_changes from a degraded carried marker warns and passes by default",
+    "eligible request_changes from a carried marker warns and passes by default",
   );
 });
 
-test("runPrecheck carries non-degraded request_changes and it still blocks", async () => {
+test("runPrecheck carries ineligible request_changes and it still blocks", async () => {
   const fx = fixture("unchanged-diff-skip-issues");
   const output = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", fx.platform) });
   assert.equal(output.verdict, "request_changes");
-  assert.equal(output.degraded, false);
-  assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, output.verdict ?? "", output.degraded, false), 1);
+  assert.equal(output.degradedGateBypass, false);
+  assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, output.verdict ?? "", output.degradedGateBypass, false), 1);
 });
 
 test("runPrecheck carries incomplete reason on a diff-unchanged skip", async () => {

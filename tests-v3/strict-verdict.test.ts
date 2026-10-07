@@ -8,6 +8,8 @@ import {
   type StrictReviewResult,
 } from "../src/enforcement/verdict-policy.js";
 import { resolveIncompleteReason } from "../src/publish/publish.js";
+import { failOnRequestChanges } from "../src/run/action.js";
+import { computeDeterministicBlock, resolveDegradedGateBypass } from "../src/run/review.js";
 import { applyRequiredCheckValidation } from "../src/enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "../src/enforcement/enforce.js";
 import { applyReviewThreadEnforcement } from "../src/enforcement/threads.js";
@@ -45,10 +47,14 @@ function runStrictPipeline(
   modelVerdict: string,
   findings: Array<Record<string, unknown>>,
   options: { coverage?: "complete" | "incomplete"; mode?: string; enforcement?: Partial<EnforcementInputs> } = {},
-): { artifact: ReviewArtifact; outcome: ReturnType<typeof applyStrictVerdictPolicy> } {
+): {
+  artifact: ReviewArtifact;
+  completeness: ReturnType<typeof applyRequiredCheckValidation>;
+  outcome: ReturnType<typeof applyStrictVerdictPolicy>;
+} {
   const a = artifact(modelVerdict, findings);
   const mode = options.mode ?? "warn";
-  applyRequiredCheckValidation(a, {
+  const completeness = applyRequiredCheckValidation(a, {
     enabled: "auto",
     mode,
     mustCheck: options.coverage === "incomplete" ? ["run the test suite"] : [],
@@ -60,8 +66,8 @@ function runStrictPipeline(
   const inputs: EnforcementInputs = { ...NO_ENFORCEMENT, ...options.enforcement };
   applyAllEnforcement(a, inputs);
   const forced = failClosedEnforcementFired(inputs)
-    || (options.coverage === "incomplete" && mode === "fail");
-  return { artifact: a, outcome: applyStrictVerdictPolicy(a, { modelVerdict, forced }) };
+    || (completeness.status === "incomplete" && completeness.mode === "fail");
+  return { artifact: a, completeness, outcome: applyStrictVerdictPolicy(a, { modelVerdict, forced }) };
 }
 
 const HIGHEST: Record<string, Array<Record<string, unknown>>> = {
@@ -168,6 +174,43 @@ test("mapping agrees with the model verdict: no note, model source", () => {
   assert.equal(agreedForced.artifact.verdict_source, "model");
 });
 
+test("computeDeterministicBlock covers every fail-closed source and final verdict provenance", () => {
+  const forcedEnforcement: EnforcementInputs = {
+    ...NO_ENFORCEMENT,
+    evidenceBlockerEnabled: true,
+    evidence: { has_blocker: true, providers: [{ id: "scanner", provider_severity: "blocker" }] },
+  };
+  const base = {
+    enforcementInputs: NO_ENFORCEMENT,
+    completeness: null,
+    requirementTraceFindingsAdded: 0,
+    finalVerdict: "approve",
+    verdictSource: "model",
+  };
+  assert.equal(computeDeterministicBlock(base), false);
+  assert.equal(computeDeterministicBlock({ ...base, enforcementInputs: forcedEnforcement }), true);
+  assert.equal(computeDeterministicBlock({
+    ...base,
+    completeness: { status: "incomplete", mode: "fail" },
+  }), true);
+  assert.equal(computeDeterministicBlock({ ...base, requirementTraceFindingsAdded: 1 }), true);
+  assert.equal(computeDeterministicBlock({
+    ...base,
+    finalVerdict: "request_changes",
+    verdictSource: "findings",
+  }), true);
+  assert.equal(computeDeterministicBlock({
+    ...base,
+    finalVerdict: "request_changes",
+    verdictSource: "model",
+  }), false, "a model-originated request_changes remains eligible for #978");
+  assert.equal(computeDeterministicBlock({
+    ...base,
+    finalVerdict: "approve",
+    verdictSource: "findings",
+  }), false, "non-model provenance only blocks when the final verdict is request_changes");
+});
+
 test("enforcement-forced request_changes discloses the forced provenance", () => {
   const { artifact: a, outcome } = runStrictPipeline("approve", [], {
     coverage: "complete",
@@ -188,6 +231,31 @@ test("enforcement-forced request_changes discloses the forced provenance", () =>
   assert.ok(a.review_markdown.includes("## Evidence Provider Blockers"));
 });
 
+test("evidence blocker prevents the degraded fallback gate bypass", () => {
+  const enforcement: EnforcementInputs = {
+    ...NO_ENFORCEMENT,
+    evidenceBlockerEnabled: true,
+    evidence: { has_blocker: true, providers: [{ id: "scanner", provider_severity: "blocker" }] },
+  };
+  const { artifact: a } = runStrictPipeline("approve", [], { coverage: "complete", enforcement });
+  assert.equal(a.verdict, "request_changes");
+
+  const deterministicBlock = computeDeterministicBlock({
+    enforcementInputs: enforcement,
+    completeness: null,
+    requirementTraceFindingsAdded: 0,
+    finalVerdict: String(a.verdict),
+    verdictSource: String(a.verdict_source ?? "model"),
+  });
+  assert.equal(deterministicBlock, true);
+  const degradedGateBypass = resolveDegradedGateBypass({
+    notice: false, fromFallback: true, noEvidenceGathered: true, deterministicBlock,
+  });
+  assert.equal(degradedGateBypass, false);
+  assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, "request_changes", degradedGateBypass, false), 1);
+  assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, "request_changes", degradedGateBypass, true), 1);
+});
+
 test("required_check_validation_mode=fail still forces request_changes under strict", () => {
   const { artifact: a, outcome } = runStrictPipeline("approve", [finding("minor")], {
     coverage: "incomplete", mode: "fail",
@@ -197,6 +265,26 @@ test("required_check_validation_mode=fail still forces request_changes under str
   // The model said approve; the forced verdict is the enforcement layer's.
   assert.equal(a.verdict_source, "enforcement");
   assert.ok(a.review_markdown.includes("fail-closed enforcement layer forced request_changes"));
+});
+
+test("required-check mode=fail incompleteness prevents the degraded fallback gate bypass", () => {
+  const { artifact: a, completeness } = runStrictPipeline("approve", [finding("minor")], {
+    coverage: "incomplete", mode: "fail",
+  });
+  assert.equal(a.verdict, "request_changes");
+  assert.equal(completeness.status, "incomplete");
+  assert.equal(completeness.mode, "fail");
+  const deterministicBlock = computeDeterministicBlock({
+    enforcementInputs: NO_ENFORCEMENT,
+    completeness,
+    requirementTraceFindingsAdded: 0,
+    finalVerdict: String(a.verdict),
+    verdictSource: String(a.verdict_source ?? "model"),
+  });
+  assert.equal(deterministicBlock, true);
+  assert.equal(resolveDegradedGateBypass({
+    notice: false, fromFallback: true, noEvidenceGathered: true, deterministicBlock,
+  }), false);
 });
 
 test("a fail-closed layer firing beside a model request_changes is never relaxed", () => {
@@ -269,10 +357,10 @@ test("strict marker values carry an approve through the unchanged-diff skip", ()
   const marker = (reviewResult: string) => buildRunMetadataMarker({ headSha: "h", baseSha: "b", reviewResult });
   for (const result of ["findings", "partial"]) {
     const carried = carriedVerdict(`${marker(result)}\nbody`);
-    assert.deepEqual(carried, { verdict: "approve", verdictSource: "carry_forward", reviewResult: result, degraded: false }, result);
+    assert.deepEqual(carried, { verdict: "approve", verdictSource: "carry_forward", reviewResult: result, degradedGateBypass: false }, result);
   }
-  assert.deepEqual(carriedVerdict(`${marker("issues")}\nbody`), { verdict: "request_changes", verdictSource: "carry_forward", reviewResult: "issues", degraded: false });
-  assert.deepEqual(carriedVerdict(`${marker("clean")}\nbody`), { verdict: "approve", verdictSource: "carry_forward", reviewResult: "clean", degraded: false });
+  assert.deepEqual(carriedVerdict(`${marker("issues")}\nbody`), { verdict: "request_changes", verdictSource: "carry_forward", reviewResult: "issues", degradedGateBypass: false });
+  assert.deepEqual(carriedVerdict(`${marker("clean")}\nbody`), { verdict: "approve", verdictSource: "carry_forward", reviewResult: "clean", degradedGateBypass: false });
 });
 
 // ---------------------------------------------------------------------------

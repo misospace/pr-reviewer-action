@@ -1019,10 +1019,12 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // escalation, which must be visible to the verdict mapping, not just
   // recorded afterward.
   let requirementTraceResult: ReturnType<typeof applyRequirementTraceEnforcement> | null = null;
+  let completenessResult: ReturnType<typeof applyRequiredCheckValidation> | null = null;
   let completenessStatus = "none";
   if (analysisEngine === MODEL_UNAVAILABLE_ENGINE) {
     // on-model-failure=notice (#863): no model reviewed this PR, so the
     // notice's request_changes is final; no verdict policy may relax it.
+    // No enforcement overlay runs on this branch, so its block is entirely notice-derived.
   } else if (verdictPolicy === "strict") {
     // #811 composition (same order as the enforcement-pipeline fixture):
     // coverage, then the enforcement overlays, then the strict mapping over
@@ -1031,19 +1033,20 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     // `required_checks` write to have already happened (its own escalation
     // must not be clobbered by it), and its synthesized findings must be in
     // place before the strict mapping counts open findings.
-    const completeness = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
-    completenessStatus = completeness.status;
+    completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
+    completenessStatus = completenessResult.status;
     requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     const forced = failClosedEnforcementFired(enforcementInputs)
-      || (completeness.status === "incomplete" && completeness.mode === "fail");
+      || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
     applyStrictVerdictPolicy(reviewRecord as never, { modelVerdict, forced });
   } else {
     applyVerdictPolicy(reviewRecord as never, verdictPolicy, {
       nonBlockingCategories: new Set(splitCsv(env.NON_BLOCKING_FINDING_CATEGORIES ?? "")),
       securityFlagged: isSecurityFlagged(classificationArtifact),
     });
-    completenessStatus = applyRequiredCheckValidation(reviewRecord as never, completenessOptions).status;
+    completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
+    completenessStatus = completenessResult.status;
     requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
   }
@@ -1086,13 +1089,32 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     : "none";
   const outputVerdict = String(reviewRecord.verdict ?? "");
   const outputRequiredChecks = String(reviewRecord.required_checks ?? "none");
-  // #978: a review that gathered no evidence (the tool loop issued no calls,
-  // so the corpus was reviewed directly) or that is the model-failure notice
-  // cannot substantiate a request_changes verdict; the gate must not block a
-  // merge on it. The harness field is the authoritative "no evidence" record.
+  // #978: persist whether this verdict can bypass fail-on-request-changes,
+  // not merely whether some part of the tool loop degraded.
   const nativeLoopDegraded = (harnessForMarker as { native_loop_degraded?: unknown } | null)?.native_loop_degraded;
-  const degraded = analysisEngine === MODEL_UNAVAILABLE_ENGINE
-    || (typeof nativeLoopDegraded === "string" && nativeLoopDegraded.length > 0);
+  const noEvidenceGathered = typeof nativeLoopDegraded === "string" && nativeLoopDegraded.length > 0;
+  // Requirement-trace enforcement synthesizes major findings for unmet rows;
+  // findingsAdded is therefore a blocking signal even without an enforcement banner.
+  // Policy and enforcement have all finished before this snapshot: both the
+  // final verdict and its provenance are authoritative for the bypass check.
+  const verdictSource = String(reviewRecord.verdict_source ?? "model");
+  const deterministicBlock = computeDeterministicBlock({
+    enforcementInputs,
+    completeness: completenessResult,
+    requirementTraceFindingsAdded: requirementTraceResult?.findingsAdded ?? 0,
+    finalVerdict: outputVerdict,
+    verdictSource,
+  });
+  // The notice branch skips every enforcement overlay, so its request_changes
+  // is entirely notice-derived and there is no deterministic block to override.
+  // No-evidence eligibility is deliberately fallback-only: primary corpus
+  // reviews after zero tool calls do not inherit #978's exemption.
+  const degradedGateBypass = resolveDegradedGateBypass({
+    notice: analysisEngine === MODEL_UNAVAILABLE_ENGINE,
+    fromFallback: primary.fromFallback,
+    noEvidenceGathered,
+    deterministicBlock,
+  });
   // #873 maintainer follow-up: the standalone `publish` CLI is a separate
   // process that cannot see `toolMode`/`enforcementHarness` — trusting the
   // ambient TOOL_MODE/REVIEW_ROUTE stage env it re-derives them from is
@@ -1115,7 +1137,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   ws.write("review-coverage.json", Buffer.from(`${pyJsonDumps(reviewCoverage)}\n`, "utf8"));
   const outputs: ReviewStepOutputs = {
     verdict: outputVerdict,
-    degraded,
+    degradedGateBypass,
     verdictSource: String(reviewRecord.verdict_source ?? "model"),
     requiredChecks: outputRequiredChecks,
     // #873: additive alongside verdict — a partial review's verdict can
@@ -1198,6 +1220,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ...(toolBudgetTelemetry.contextBudget !== undefined ? { contextBudget: toolBudgetTelemetry.contextBudget } : {}),
     ...(toolBudgetTelemetry.contextPeak !== undefined ? { contextPeak: toolBudgetTelemetry.contextPeak } : {}),
     actionVersion: ACTION_VERSION,
+    degradedGateBypass: outputs.degradedGateBypass,
   });
   return {
     outputs,
@@ -1233,6 +1256,41 @@ function cachedProjectNumber(bytes: Uint8Array): number | null {
   const value = safeJson(bytes);
   const number = value?.number;
   return typeof number === "number" ? number : null;
+}
+
+/** #978: whether a deterministic, rule-based layer owns the final verdict.
+ * A fail-closed enforcement layer, a required-check fail mode, a
+ * requirement-trace finding, or any verdict policy/enforcement escalation
+ * (`verdict_source !== "model"`) outranks the degraded gate exemption — an
+ * operator who enabled one of those meant it. A model-originated
+ * `request_changes` keeps `verdict_source === "model"` and stays eligible. */
+export function computeDeterministicBlock(input: {
+  enforcementInputs: EnforcementInputs;
+  completeness: { status: string; mode: string } | null;
+  requirementTraceFindingsAdded: number;
+  finalVerdict: string;
+  verdictSource: string;
+}): boolean {
+  return failClosedEnforcementFired(input.enforcementInputs)
+    || (input.completeness !== null && input.completeness.status === "incomplete" && input.completeness.mode === "fail")
+    || input.requirementTraceFindingsAdded > 0
+    // verdict_source records whether policy/enforcement forced the final
+    // verdict; a model-originated request_changes remains eligible for #978.
+    || (input.finalVerdict === "request_changes" && input.verdictSource !== "model");
+}
+
+/** #978: whether a final request_changes may bypass fail-on-request-changes.
+ * Only a block the degraded MODEL produced is eligible: a deterministic
+ * fail-closed layer outranks the exemption, and the no-evidence case is
+ * deliberately fallback-only (#978 asked for the fallback with no gathered
+ * evidence, not a primary corpus review after zero tool calls). */
+export function resolveDegradedGateBypass(input: {
+  notice: boolean;
+  fromFallback: boolean;
+  noEvidenceGathered: boolean;
+  deterministicBlock: boolean;
+}): boolean {
+  return input.notice || (input.fromFallback && input.noEvidenceGathered && !input.deterministicBlock);
 }
 
 /** #873: exported so the standalone `publish` CLI entrypoint (a separate

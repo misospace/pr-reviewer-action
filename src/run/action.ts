@@ -185,7 +185,7 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
     return failOnRequestChanges(
       stage,
       pre.verdict ?? "",
-      pre.degraded === true,
+      pre.degradedGateBypass === true,
       (stage.FAIL_ON_DEGRADED_REVIEW ?? "false").toLowerCase() === "true",
     );
   }
@@ -239,7 +239,7 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       FINDINGS: review.outputs.findings,
       ANALYSIS_ENGINE: review.outputs.analysisEngine,
       CACHE_HIT_RATIO: review.outputs.cacheHitRatio,
-      DEGRADED: review.outputs.degraded ? "true" : "false",
+      DEGRADED_GATE_BYPASS: review.outputs.degradedGateBypass ? "true" : "false",
       VERDICT_POLICY: review.verdictPolicy,
     };
     const seam = buildPublishApi(publishEnv as NodeJS.ProcessEnv);
@@ -272,20 +272,20 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
   const gate = failOnRequestChanges(
     stage,
     review.outputs.verdict,
-    review.outputs.degraded,
+    review.outputs.degradedGateBypass,
     (stage.FAIL_ON_DEGRADED_REVIEW ?? "false").toLowerCase() === "true",
   );
   return publishFailed ? Math.max(gate, 1) : gate;
 }
 
-export function failOnRequestChanges(stage: Env, verdict: string, degraded = false, failOnDegraded = false): number {
+export function failOnRequestChanges(stage: Env, verdict: string, degradedGateBypassEligible = false, failOnDegraded = false): number {
   if ((stage.FAIL_ON_REQUEST_CHANGES ?? "false").toLowerCase() !== "true") return 0;
   if (verdict !== "request_changes") {
     process.stdout.write(`Final verdict is '${verdict || "<none>"}'; not blocking (fail-on-request-changes=true).\n`);
     return 0;
   }
-  if (degraded && !failOnDegraded) {
-    process.stdout.write("::warning::Final verdict is request_changes, but the review was degraded (no evidence gathered, or a model-failure notice); not blocking (fail-on-request-changes=true, fail-on-degraded-review=false).\n");
+  if (degradedGateBypassEligible && !failOnDegraded) {
+    process.stdout.write("::warning::Final verdict is request_changes, but this review is eligible for the degraded gate bypass (fallback with no evidence, or model-failure notice); not blocking (fail-on-request-changes=true, fail-on-degraded-review=false).\n");
     return 0;
   }
   process.stdout.write("::error::Final verdict is request_changes; failing the step (fail-on-request-changes=true).\n");
