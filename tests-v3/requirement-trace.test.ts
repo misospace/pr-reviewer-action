@@ -2747,3 +2747,38 @@ test("#985: an empty ignore file accepts file-level structural provenance", () =
     rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test("#985: a second assertion clause the grammar cannot represent stays strict", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "config.json", ['{"foo":1}']);
+    // The second clause is unbound, so the grammar cannot represent it —
+    // proving `foo` is present must not certify the whole requirement.
+    const text = "`config.json` must contain `foo` and omit debug logging";
+    assert.equal(structuralStateClaim(text), null);
+
+    const ledger = ledgerWith([{ id: "req-compound-verb", text, kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-compound-verb",
+      disposition: "met",
+      enforcement: [{ file: "config.json", line: 1 }],
+      test: [VALID_TEST_LOCATION],
+      reason: "foo is present",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.equal(trace.rows[0]?.proof, "runtime_behavior");
+
+    // Two modal-bound clauses are equally unrepresentable.
+    assert.equal(structuralStateClaim("`config.json` must contain `foo` and must omit `bar`"), null);
+    // So is a second clause whose object is itself quoted.
+    assert.equal(structuralStateClaim("`config.json` must contain `foo` and omit `bar`"), null);
+    // A verb appearing only inside a backticked literal does not trip the guard,
+    // and neither does a clause carrying no assertion verb.
+    assert.notEqual(structuralStateClaim("`config.json` must contain `omit`"), null);
+    assert.notEqual(structuralStateClaim("`config.json` must contain `foo`"), null);
+    assert.notEqual(structuralStateClaim("`config.json` must contain `foo` and must be covered by a regression test"), null);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});

@@ -387,6 +387,10 @@ const CONTENT_ABSENT_PHRASES: readonly RegExp[] = [
 /** Existence assertions, checked against the named path itself. */
 const EXISTENCE_PRESENT_RE = /\b(must|shall|should)\s+(exist|be\s+present|be\s+defined)\b/i;
 const EXISTENCE_ABSENT_RE = /\b(must|shall|should)\s+(not\s+exist|not\s+be\s+present|be\s+absent|be\s+missing)\b/i;
+/** Every verb the structural grammar can assert, bound and unbound. */
+const ASSERTION_VERB_ALTERNATION = `${CONTENT_VERBS}|${NEGATIVE_CONTENT_VERBS}|exist|exists|be\\s+present|be\\s+absent|be\\s+missing|be\\s+defined`;
+const ASSERTION_VERB_RE = new RegExp(`\\b(${ASSERTION_VERB_ALTERNATION})\\b`, "i");
+const BOUND_ASSERTION_VERB_RE = new RegExp(`\\b(must|shall|should)\\s+(not\\s+)?(${ASSERTION_VERB_ALTERNATION})\\b`, "gi");
 /** Every assertion phrase, for locating where the assertion starts. */
 const ASSERTION_PHRASES: readonly RegExp[] = [
   ...CONTENT_PRESENT_PHRASES,
@@ -467,14 +471,37 @@ function firstAssertionIndex(text: string): number {
 }
 
 /**
+ * The structural grammar represents exactly ONE modal-bound assertion, with no
+ * other assertion verb anywhere in the text.
+ *
+ * "must contain `foo` and omit debug logging" names a second clause the grammar
+ * cannot represent; proving `foo` is present must not certify the whole
+ * requirement. The same guard rejects "must exist and contain `foo`" (an
+ * unbound `contain`) and two modal-bound clauses
+ * ("must contain `foo` and must omit `bar`").
+ *
+ * Quoted spans are ignored, so a backticked literal that happens to name a verb
+ * ("must contain the `omit` key") does not trip it.
+ */
+function hasExactlyOneRepresentableAssertion(text: string): boolean {
+  const unquoted = text.replace(QUOTED_TOKEN_RE, " ");
+  if ((unquoted.match(BOUND_ASSERTION_VERB_RE) ?? []).length !== 1) return false;
+  return !ASSERTION_VERB_RE.test(unquoted.replace(BOUND_ASSERTION_VERB_RE, " "));
+}
+
+/**
  * Derive a structural state claim from a requirement, or `null` when the text
  * is not unambiguously one. Everything that fails to parse — behavioural
  * language, no single named config file, no quoted literal, ambiguous
- * polarity, the file appearing only as a locator after the assertion — returns
- * `null`, which routes the requirement to the strict runtime path.
+ * polarity, the file appearing only as a locator after the assertion, or any
+ * assertion clause the grammar cannot represent — returns `null`, which routes
+ * the requirement to the strict runtime path.
  */
 export function structuralStateClaim(text: string): StructuralClaim | null {
   if (BEHAVIORAL_VETO_RE.test(text)) return null;
+  // The claim must be representable in full — one modal-bound assertion and
+  // nothing else asserted.
+  if (!hasExactlyOneRepresentableAssertion(text)) return null;
 
   const contentPresent = CONTENT_PRESENT_PHRASES.some((re) => re.test(text));
   const contentAbsent = CONTENT_ABSENT_PHRASES.some((re) => re.test(text));
