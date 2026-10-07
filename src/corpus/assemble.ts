@@ -380,9 +380,8 @@ export function buildReviewCorpus(
     pushSection(undefined, bytes(ws.humanReviewsMd));
   }
   if (opts.ciChecksFile !== "" && nonEmpty(ws.ciChecksContent)) {
-    // Exact-head external checks are authoritative evidence: ahead of the
-    // bulky diff so a body-budget truncation cannot turn a completed check
-    // into "not verified".
+    // Exact-head external-check context stays ahead of the bulky diff so a
+    // body-budget truncation cannot hide the independently gated status.
     pushSection("# CI Check Results", bytes(ws.ciChecksContent));
   }
   pushSection("# PR Files (truncated)", filesContent, "json");

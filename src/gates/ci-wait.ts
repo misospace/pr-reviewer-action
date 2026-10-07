@@ -128,7 +128,7 @@ export function escapeTableCell(value: unknown): string {
 }
 
 function renderRows(checks: readonly ExternalCheck[]): string {
-  return checks.map((check) => `| ${escapeTableCell(check.name)} | ${escapeTableCell(check.state)} |`).join("\n");
+  return checks.map((check) => `| ${escapeTableCell(check.name)} | ${escapeTableCell(check.conclusion ?? check.state)} |`).join("\n");
 }
 
 class Finished {
@@ -213,6 +213,8 @@ export async function runCiWait(deps: CiWaitDeps): Promise<number> {
   const bounds: ExternalChecksOptions = {
     runId,
     statusContext,
+    githubWorkflow: env(deps, "GITHUB_WORKFLOW"),
+    githubJob: env(deps, "GITHUB_JOB"),
     ...(selfRunNumbers === undefined ? {} : { selfRunNumbers, selfRunId, selfRunRepo, selfRunOrigin, selfStatusDiscovery }),
     apiTimeoutSec: env(deps, "CI_API_TIMEOUT_SEC"),
     ciTimeoutSec: timeoutRaw,
@@ -249,7 +251,7 @@ export async function runCiWait(deps: CiWaitDeps): Promise<number> {
     const tmp = `${checksFile}.tmp.${deps.pid ?? process.pid}`;
     deps.onTmpChange?.(tmp);
     const body =
-      `_CI reached a terminal state before this review began (overall: ${finalState}). These results are from the CI status API for commit ${sha} and are authoritative evidence of which checks ran and how they concluded._\n` +
+      `_Other checks on commit ${sha} (${finalState}): shown for context only — these checks gate the merge on their own. A check conclusion is not by itself a review finding; do not raise blockers or majors whose only basis is a row below._\n` +
       "\n| Check | State |\n| --- | --- |\n" +
       `${rows}\n`;
     try {

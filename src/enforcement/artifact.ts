@@ -30,6 +30,8 @@ export interface ArtifactFinding {
   thread_id?: string;
   /** #775: original severity when the non-blocking category cap reduced it. */
   capped_from?: string;
+  /** #976: this finding was capped because it relied only on a CI conclusion. */
+  ci_capped?: boolean;
   /** v3-only, no v2 counterpart: set by the deterministic outside-diff pass
    * when the finding's file isn't in the diff, or its line falls outside
    * every hunk's new-side range. Content-level only — never changes

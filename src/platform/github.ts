@@ -384,11 +384,17 @@ export class GitHubAdapter implements PlatformReadAdapter {
       const runsRead = await this.boundedRead(runsUrl, options);
       const statusRead = await this.boundedRead(statusUrl, options);
       if (isTransientCiRead(runsRead.status, runsRead.text) || isTransientCiRead(statusRead.status, statusRead.text)) return null;
-      return normalizeExternalChecks(runsRead.text, statusRead.text, options.runId ?? "", options.statusContext ?? "");
+      return normalizeExternalChecks(runsRead.text, statusRead.text, options.runId ?? "", options.statusContext ?? "", {
+        githubWorkflow: options.githubWorkflow,
+        githubJob: options.githubJob,
+      });
     }
     const runs = await this.boundedStdout(runsUrl, options);
     const combined = await this.boundedStdout(statusUrl, options);
-    return normalizeExternalChecks(runs, combined, options.runId ?? "", options.statusContext ?? "");
+    return normalizeExternalChecks(runs, combined, options.runId ?? "", options.statusContext ?? "", {
+      githubWorkflow: options.githubWorkflow,
+      githubJob: options.githubJob,
+    });
   }
 
   /** GitHub App/GITHUB_TOKEN permissions are unit-scoped and cannot be

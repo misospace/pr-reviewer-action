@@ -8,6 +8,7 @@ import { ciAdapterFromEnv, escapeTableCell, runCiWait, type CiWaitDeps } from ".
 import { isTransientCiRead } from "../src/platform/bounded.js";
 import { ForgejoAdapter } from "../src/platform/forgejo.js";
 import { GitHubAdapter } from "../src/platform/github.js";
+import { normalizeExternalChecks } from "../src/platform/normalize.js";
 import type { FetchLike } from "../src/platform/http.js";
 import type { ExternalChecksOptions, PlatformReadAdapter } from "../src/platform/types.js";
 
@@ -72,12 +73,12 @@ test("GitHub externalChecks: transientAsUnknown turns a failed status read into 
 test("GitHub externalChecks: a transient check-runs read is unknown too (no partial fold onto statuses)", async () => {
   const routes = { [RUNS]: [{ transport: true } as Reply], [STATUS]: [greenStatus] };
   assert.equal(await github(routes).externalChecks(SHA, strict), null);
-  assert.deepEqual(await github(routes).externalChecks(SHA, {}), [{ name: "ci/x", state: "success" }]);
+  assert.deepEqual(await github(routes).externalChecks(SHA, {}), [{ name: "ci/x", state: "success", conclusion: "success" }]);
 });
 
 test("GitHub externalChecks: a 4xx JSON answer is persistent, not transient — strict mode still folds it", async () => {
   const routes = { [RUNS]: [{ status: 403, body: { message: "Resource not accessible by integration" } }], [STATUS]: [greenStatus] };
-  assert.deepEqual(await github(routes).externalChecks(SHA, strict), [{ name: "ci/x", state: "success" }]);
+  assert.deepEqual(await github(routes).externalChecks(SHA, strict), [{ name: "ci/x", state: "success", conclusion: "success" }]);
 });
 
 test("Forgejo externalChecks: auto mode discovers and excludes statuses by target URL", async () => {
@@ -100,8 +101,8 @@ test("Forgejo externalChecks: auto mode discovers and excludes statuses by targe
     ...strict, selfRunNumbers: ["171447"], selfRunId: "987654", selfRunRepo: "o/r",
     selfRunOrigin: "https://forgejo.example", selfStatusDiscovery: discovery,
   }), [
-    { name: "pr-reviewer-action", state: "pending" },
-    { name: "ci/external", state: "success" },
+    { name: "pr-reviewer-action", state: "pending", conclusion: "pending" },
+    { name: "ci/external", state: "success", conclusion: "success" },
   ]);
   assert.equal(discovery.found, true);
   assert.equal(discovery.runJobs, "single");
@@ -140,8 +141,8 @@ test("Forgejo externalChecks: transient jobs lookup retries but a definitive 404
   });
   const unavailableDiscovery = discoveryState();
   const unavailableOpts = { ...opts, selfStatusDiscovery: unavailableDiscovery };
-  assert.deepEqual(await unavailable.externalChecks(SHA, unavailableOpts), [{ name: "reviewer", state: "pending" }]);
-  assert.deepEqual(await unavailable.externalChecks(SHA, unavailableOpts), [{ name: "reviewer", state: "pending" }]);
+  assert.deepEqual(await unavailable.externalChecks(SHA, unavailableOpts), [{ name: "reviewer", state: "pending", conclusion: "pending" }]);
+  assert.deepEqual(await unavailable.externalChecks(SHA, unavailableOpts), [{ name: "reviewer", state: "pending", conclusion: "pending" }]);
   assert.equal(unavailableDiscovery.runJobs, "unavailable");
   assert.equal(unavailableDiscovery.runJobsUnavailableReason, "run-jobs endpoint returned HTTP 404");
   assert.deepEqual(unavailableRequests, [statusPath, jobsPath, statusPath]);
@@ -158,7 +159,7 @@ test("Forgejo externalChecks: terminal sibling failure stays visible in auto mod
   const discovery = discoveryState();
   assert.deepEqual(await adapter.externalChecks(SHA, {
     ...strict, selfRunNumbers: ["171447"], selfRunRepo: "o/r", selfRunOrigin: "https://forgejo.example", selfStatusDiscovery: discovery,
-  }), [{ name: "unit-tests", state: "failure" }]);
+  }), [{ name: "unit-tests", state: "failure", conclusion: "failure" }]);
   assert.equal(discovery.matchCount, 0);
   assert.equal(discovery.found, false);
   assert.equal(discovery.runJobs, "unknown", "a terminal match does not need the jobs endpoint");
@@ -176,7 +177,7 @@ test("Forgejo externalChecks: transientAsUnknown retries transport/5xx/undecodab
   assert.deepEqual(await forgejo({ status: 404, body: { message: "nope" } }).externalChecks(SHA, strict), []);
   assert.deepEqual(
     await forgejo({ body: { state: "success", statuses: [{ context: "ci/w", status: "success" }] } }).externalChecks(SHA, strict),
-    [{ name: "ci/w", state: "success" }],
+    [{ name: "ci/w", state: "success", conclusion: "success" }],
   );
 });
 
@@ -248,6 +249,15 @@ test("runCiWait: missing token/repo/PR is a soft skip on stderr", async () => {
   assert.equal(await runCiWait(h.deps), 0);
   assert.deepEqual(h.err, ["Missing GH_TOKEN, REPO, or PR_NUMBER for CI status check"]);
   assert.equal(readFileSync(h.outputFile, "utf8"), "ci_status_skipped=true\n");
+  rmSync(h.dir, { recursive: true, force: true });
+});
+
+test("runCiWait: own workflow identity reaches check-run normalization", async () => {
+  const adapter = fakeAdapter([[{ name: "b", state: "success" }]]);
+  const h = harness(adapter, { GITHUB_WORKFLOW: "Build workflow", GITHUB_JOB: "test" });
+  assert.equal(await runCiWait(h.deps), 0);
+  assert.equal(adapter.calls[0]?.githubWorkflow, "Build workflow");
+  assert.equal(adapter.calls[0]?.githubJob, "test");
   rmSync(h.dir, { recursive: true, force: true });
 });
 
@@ -558,7 +568,7 @@ test("runCiWait: the poll sleep is clamped to the remaining deadline", async () 
   assert.equal(await runCiWait(h.deps), 1);
   assert.deepEqual(h.sleeps, [10, 10, 5], "the last sleep takes only the 5s left, never a full interval past the deadline");
   assert.equal(readFileSync(h.outputFile, "utf8"), "ci_status_skipped=true\n");
-  assert.match(readFileSync(h.checksFile, "utf8"), /overall: timeout \(CI did not finish in time\)/);
+  assert.match(readFileSync(h.checksFile, "utf8"), /\(timeout \(CI did not finish in time\)\)/);
   rmSync(h.dir, { recursive: true, force: true });
 });
 
@@ -579,7 +589,69 @@ test("runCiWait: the head SHA is looked up once and pinned for the whole wait", 
   const h = harness(adapter, { PR_HEAD_SHA: "" });
   assert.equal(await runCiWait(h.deps), 0);
   assert.equal(lookups, 1);
-  assert.match(readFileSync(h.checksFile, "utf8"), new RegExp(`for commit ${SHA} `));
+  assert.match(readFileSync(h.checksFile, "utf8"), new RegExp(`on commit ${SHA} `));
+  rmSync(h.dir, { recursive: true, force: true });
+});
+
+test("runCiWait: raw conclusions render in the evidence table while collapsed state still finalizes failure", async () => {
+  const cancelled = { name: "cancelled-only", state: "failure", conclusion: "cancelled" };
+  const skipped = { name: "optional", state: "success", conclusion: "skipped" };
+  const neutral = { name: "neutral-check", state: "success", conclusion: "neutral" };
+  const h = harness(fakeAdapter([[cancelled, skipped, neutral]]));
+  assert.equal(await runCiWait(h.deps), 0);
+  assert.match(readFileSync(h.outputFile, "utf8"), /ci_status_final=failure/);
+  const evidence = readFileSync(h.checksFile, "utf8");
+  assert.match(evidence, /\| cancelled-only \| cancelled \|/);
+  assert.match(evidence, /\| optional \| skipped \|/);
+  assert.match(evidence, /\| neutral-check \| neutral \|/);
+  assert.doesNotMatch(evidence, /authoritative/);
+  assert.match(evidence, /shown for context only/);
+  rmSync(h.dir, { recursive: true, force: true });
+});
+
+test("runCiWait: superseded cancelled run is omitted when a passing rerun exists", async () => {
+  const runs = JSON.stringify({ check_runs: [
+    { name: "validate-toml", status: "completed", conclusion: "cancelled", started_at: "2026-01-01T00:00:00Z", completed_at: "2026-01-01T00:01:00Z" },
+    { name: "validate-toml", status: "completed", conclusion: "success", started_at: "2026-01-01T00:02:00Z", completed_at: "2026-01-01T00:03:00Z" },
+  ] });
+  const checks = normalizeExternalChecks(runs, "{}", "", "");
+  assert.deepEqual(checks, [{ name: "validate-toml", state: "success", conclusion: "success" }]);
+  const h = harness(fakeAdapter([checks]));
+  assert.equal(await runCiWait(h.deps), 0);
+  const evidence = readFileSync(h.checksFile, "utf8");
+  assert.match(evidence, /\| validate-toml \| success \|/);
+  assert.doesNotMatch(evidence, /cancelled/);
+  rmSync(h.dir, { recursive: true, force: true });
+});
+
+test("runCiWait: a newer completed rerun displaces an older stuck pending run", async () => {
+  const runs = JSON.stringify({ check_runs: [
+    { name: "validate-toml", status: "in_progress", conclusion: null, started_at: "2026-01-01T00:00:00Z" },
+    { name: "validate-toml", status: "completed", conclusion: "failure", started_at: "2026-01-01T00:02:00Z", completed_at: "2026-01-01T00:03:00Z" },
+  ] });
+  const checks = normalizeExternalChecks(runs, "{}", "", "");
+  assert.deepEqual(checks, [{ name: "validate-toml", state: "failure", conclusion: "failure" }]);
+  const h = harness(fakeAdapter([checks]));
+  assert.equal(await runCiWait(h.deps), 0);
+  assert.deepEqual(h.sleeps, [], "the newer terminal run finalizes immediately instead of timing out");
+  assert.match(readFileSync(h.outputFile, "utf8"), /ci_status_final=failure/);
+  const evidence = readFileSync(h.checksFile, "utf8");
+  assert.match(evidence, /\\| validate-toml \\| failure \\|/);
+  assert.doesNotMatch(evidence, /pending/);
+  rmSync(h.dir, { recursive: true, force: true });
+});
+
+test("runCiWait: a genuinely newer pending rerun keeps the gate waiting", async () => {
+  const runs = JSON.stringify({ check_runs: [
+    { name: "unit", status: "completed", conclusion: "cancelled", started_at: "2026-01-01T00:01:00Z", completed_at: "2026-01-01T00:02:00Z" },
+    { name: "unit", status: "in_progress", conclusion: null, started_at: "2026-01-01T00:04:00Z" },
+  ] });
+  const checks = normalizeExternalChecks(runs, "{}", "", "");
+  assert.deepEqual(checks, [{ name: "unit", state: "pending" }]);
+  const h = harness(fakeAdapter([checks]), { CI_TIMEOUT_SEC: "25", CI_SKIP_ON_TIMEOUT: "true" });
+  assert.equal(await runCiWait(h.deps), 1);
+  assert.deepEqual(h.sleeps, [10, 10, 5]);
+  assert.match(readFileSync(h.checksFile, "utf8"), /\\| unit \\| pending \\|/);
   rmSync(h.dir, { recursive: true, force: true });
 });
 

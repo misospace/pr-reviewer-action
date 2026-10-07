@@ -78,11 +78,56 @@ export function securityRiskFlagged(classification: unknown): boolean {
 }
 
 /**
- * Cap blocker/major findings in the configured non-blocking categories at
- * minor, in place, recording the original severity. Returns whether anything
- * changed. (#775: the category list is opt-in; #772's fixed baseline is the
- * `tests,docs,style,question` configuration the repository itself sets.)
+ * #976 accepts only an anchored list of pure check-status restatements.
+ * The maintainer's invariant is "status-only syntax, not merely status-only vocabulary";
+ * false negatives are preferable to deterministic false approvals.
  */
+const CI_STATUS_RESTATEMENT_PREDICATES = [
+  "failed", "has failed", "is failing", "is still failing", "still failing",
+  "keeps failing", "keeps on failing", "has a terminal failure", "is red", "went red",
+  "timed out", "was cancelled", "was canceled", "is cancelled", "is canceled",
+  "cancelled", "canceled", "did not pass", "has not passed", "was superseded",
+  "is broken", "is stuck", "is pending", "is not passing",
+] as const;
+
+export function capCiOnlyFindings(
+  findings: ArtifactFinding[],
+  checkNames: ReadonlySet<string>,
+): boolean {
+  const names = [...checkNames]
+    .filter((name) => name.trim() !== "")
+    .sort((a, b) => b.length - a.length)
+    .map(escapeRegExp);
+  if (names.length === 0) return false;
+
+  const nameSlot = `(?<![\\p{L}\\p{N}_])(?:${names.join("|")})(?![\\p{L}\\p{N}_])`;
+  const namePhrase = `${nameSlot}(?:\\s*(?:,|\\band\\b|\\bor\\b)\\s*${nameSlot})*`;
+  const predicates = CI_STATUS_RESTATEMENT_PREDICATES.map(escapeRegExp).join("|");
+  const restatement = new RegExp(
+    `^(?:(?:the|a|an)\\s+)?${namePhrase}\\s+(?:again\\s+|still\\s+)?(?:${predicates})(?:\\s+again)?[.!]?$`,
+    "iu",
+  );
+
+  let capped = false;
+  for (const finding of findings) {
+    if (
+      finding.file !== null
+      || !isBlockingSeverity(finding.severity)
+      || !restatement.test(finding.message.trim())
+    ) continue;
+
+    finding.capped_from = finding.severity;
+    finding.severity = "info";
+    finding.ci_capped = true;
+    capped = true;
+  }
+  return capped;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export function capNonBlockingFindings(
   findings: ArtifactFinding[],
   categories: ReadonlySet<string>,
@@ -113,6 +158,13 @@ function noBlockingFindings(findings: ArtifactFinding[]): boolean {
   return !findings.some(isBlockingFinding);
 }
 
+function canRelaxForCiOnly(artifact: ReviewArtifact, forced: boolean): boolean {
+  return !forced
+    && !hasUnresolvedRequiredCheck(artifact)
+    && artifact.required_checks !== "incomplete"
+    && artifact.requirement_trace_incomplete !== true;
+}
+
 /**
  * #770 interplay: the MODEL's own structured `unresolved` dispositions also
  * hold the relaxation gate — a review that left a required check unresolved
@@ -139,10 +191,7 @@ export function relaxVerificationOnlyVerdict(
   options: { forced: boolean },
 ): boolean {
   if (artifact.verdict !== "request_changes") return false;
-  if (options.forced) return false;
-  if (hasUnresolvedRequiredCheck(artifact)) return false;
-  if (artifact.required_checks === "incomplete") return false;
-  if (artifact.requirement_trace_incomplete === true) return false;
+  if (!canRelaxForCiOnly(artifact, options.forced)) return false;
   const findings = artifact.findings;
   if (!Array.isArray(findings) || findings.length === 0) return false;
   if (!findings.every((finding) => isAlwaysNonBlockingCategory(finding.category))) return false;
@@ -150,6 +199,31 @@ export function relaxVerificationOnlyVerdict(
     + "\n\n_Verdict relaxed from structured findings (#977): every open finding is a "
     + "verification request the review tools cannot check, so the author has nothing to "
     + "change. The findings remain listed above._";
+  artifact.verdict = "approve";
+  artifact.verdict_source = "findings";
+  return true;
+}
+
+/**
+ * #976: relax a model-authored request_changes when every open finding is
+ * either #977 verification or a CI-only conclusion capped to info. It keeps
+ * the same forced/unresolved-check safeguards but is separate from #977's
+ * verification-only contract.
+ */
+export function relaxCiOnlyVerdict(
+  artifact: ReviewArtifact,
+  options: { forced: boolean },
+): boolean {
+  if (artifact.verdict !== "request_changes") return false;
+  if (!canRelaxForCiOnly(artifact, options.forced)) return false;
+  const findings = artifact.findings;
+  if (!Array.isArray(findings) || findings.length === 0) return false;
+  const allRelaxable = findings.every((finding) =>
+    isAlwaysNonBlockingCategory(finding.category)
+    || (finding.ci_capped === true && finding.severity === "info"));
+  if (!allRelaxable) return false;
+  artifact.review_markdown = (artifact.review_markdown || "")
+    + "\n\n_Verdict relaxed from CI-only findings (#976): check conclusions are shown for context and gate the merge independently; they are not review blockers._";
   artifact.verdict = "approve";
   artifact.verdict_source = "findings";
   return true;

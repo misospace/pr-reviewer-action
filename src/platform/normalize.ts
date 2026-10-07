@@ -18,6 +18,8 @@
 
 import { isPlainObject, jqAlt, jqCompact, jqCompare, jqEach, jqEachOpt, jqField, JqError, jqPath, jqSortBy } from "./jq.js";
 import { pyCompareTuples, pyDict, pyGet, pyIsInt, pyOr, PyError, pyStr, pyTruthy } from "./py.js";
+import type { ExternalCheck } from "./types.js";
+export type { ExternalCheck } from "./types.js";
 
 // ── GraphQL queries (verbatim from scripts/platform_api.sh) ─────────────
 
@@ -285,6 +287,10 @@ function checkRunState(run: unknown): string {
     : "success";
 }
 
+function rawConclusion(value: unknown): string | undefined {
+  return typeof value === "string" && value !== "" ? value : undefined;
+}
+
 function statusState(status: unknown): string {
   const state = jqField(status, "state");
   if (state === "failure" || state === "error") return "failure";
@@ -295,11 +301,6 @@ function statusState(status: unknown): string {
 function jqTest(value: unknown, pattern: RegExp): boolean {
   if (typeof value !== "string") throw new JqError(`${typeof value} cannot be matched, as it is not a string`);
   return pattern.test(value);
-}
-
-export interface ExternalCheck {
-  name: unknown;
-  state: string;
 }
 
 function trimmedRunNumbers(runNumbers: readonly string[]): string[] {
@@ -482,6 +483,8 @@ export function normalizeExternalChecks(
   opts?: {
     selfRunNumbers?: readonly string[] | undefined;
     selfStatusIndex?: number | undefined;
+    githubWorkflow?: string | undefined;
+    githubJob?: string | undefined;
   },
 ): ExternalCheck[] | null {
   const runsCapture = runsText.replace(/\n+$/, "");
@@ -506,10 +509,85 @@ export function normalizeExternalChecks(
         throw new JqError("invalid regex");
       }
     }
-    const checkRuns = jqEachOpt(jqField(runs, "check_runs"))
-      .filter((run) => selfRun === null
-        || !(jqTest(jqAlt(jqField(run, "details_url"), ""), selfRun) || jqTest(jqAlt(jqField(run, "html_url"), ""), selfRun)))
-      .map((run): ExternalCheck => ({ name: jqAlt(jqField(run, "name"), "(unnamed)"), state: checkRunState(run) }));
+    const allCheckRuns = jqEachOpt(jqField(runs, "check_runs"));
+    const currentRunMatches = (run: unknown): boolean => selfRun !== null
+      && (jqTest(jqAlt(jqField(run, "details_url"), ""), selfRun)
+        || jqTest(jqAlt(jqField(run, "html_url"), ""), selfRun));
+    const nestedField = (value: unknown, parent: string, field: string): unknown => {
+      if (!isPlainObject(value) || !isPlainObject(value[parent])) return undefined;
+      return value[parent][field];
+    };
+    const workflow = opts?.githubWorkflow?.trim() ?? "";
+    const job = opts?.githubJob?.trim() ?? "";
+    const nameExcluded = (run: unknown): boolean => {
+      if (workflow === "" && job === "") return false;
+      const appSlug = nestedField(run, "app", "slug");
+      if (appSlug !== "github-actions") return false;
+      const name = jqAlt(jqField(run, "name"), "");
+      if (typeof name !== "string") return false;
+      const trimmed = name.trim();
+      return (workflow !== "" && trimmed.startsWith(`${workflow} / `))
+        || (job !== "" && (trimmed === job || trimmed.startsWith(`${job} (`)));
+    };
+    const currentRun = allCheckRuns.filter(currentRunMatches);
+    const ownWorkflowRuns = allCheckRuns.filter(nameExcluded);
+    const ownSuiteIds = new Set<string>();
+    for (const run of [...currentRun, ...ownWorkflowRuns]) {
+      const suiteId = nestedField(run, "check_suite", "id");
+      if (typeof suiteId === "string" || typeof suiteId === "number") ownSuiteIds.add(String(suiteId));
+      const suiteUrl = nestedField(run, "check_suite", "url");
+      if (typeof suiteUrl === "string") {
+        const match = suiteUrl.match(/\/check-suites\/(\d+)(?:\b|$)/);
+        if (match) ownSuiteIds.add(match[1]!);
+      }
+    }
+    const survivingRuns = allCheckRuns.filter((run) => {
+      if (currentRunMatches(run) || nameExcluded(run)) return false;
+      const suiteId = nestedField(run, "check_suite", "id");
+      if ((typeof suiteId === "string" || typeof suiteId === "number") && ownSuiteIds.has(String(suiteId))) return false;
+      const suiteUrl = nestedField(run, "check_suite", "url");
+      if (typeof suiteUrl === "string") {
+        const match = suiteUrl.match(/\/check-suites\/(\d+)(?:\b|$)/);
+        if (match && ownSuiteIds.has(match[1]!)) return false;
+      }
+      return true;
+    });
+    const latestByName = new Map<string, { run: unknown; index: number }>();
+    const timestamp = (value: unknown): number => {
+      if (typeof value !== "string" || value === "") return Number.NEGATIVE_INFINITY;
+      const parsed = Date.parse(value);
+      return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+    };
+    const isPending = (run: unknown): boolean => jqField(run, "status") !== "completed";
+    const compareTimestamp = (left: unknown, right: unknown): number => {
+      const a = timestamp(left);
+      const b = timestamp(right);
+      return a === b ? 0 : a > b ? 1 : -1;
+    };
+    const newer = (candidate: unknown, existing: unknown): boolean => {
+      const started = compareTimestamp(jqField(candidate, "started_at"), jqField(existing, "started_at"));
+      if (started !== 0) return started > 0;
+      const completed = compareTimestamp(jqField(candidate, "completed_at"), jqField(existing, "completed_at"));
+      if (completed !== 0) return completed > 0;
+      return isPending(candidate) && !isPending(existing);
+    };
+    for (const [index, run] of survivingRuns.entries()) {
+      const name = jqAlt(jqField(run, "name"), "(unnamed)");
+      const key = `${typeof name}:${JSON.stringify(name)}`;
+      const existing = latestByName.get(key);
+      if (!existing || newer(run, existing.run)) latestByName.set(key, { run, index });
+    }
+    const checkRuns = [...latestByName.values()]
+      .sort((a, b) => a.index - b.index)
+      .map(({ run }): ExternalCheck => {
+        const completed = jqField(run, "status") === "completed";
+        const conclusion = completed ? rawConclusion(jqField(run, "conclusion")) : undefined;
+        return {
+          name: jqAlt(jqField(run, "name"), "(unnamed)"),
+          state: checkRunState(run),
+          ...(conclusion === undefined ? {} : { conclusion }),
+        };
+      });
     const statusEntries = jqEachOpt(jqField(combined, "statuses"));
     const selfStatusIndex = opts?.selfStatusIndex;
     const excludedSelfStatus = autoSelfExclusion && selfStatusIndex !== undefined
@@ -518,7 +596,14 @@ export function normalizeExternalChecks(
       .filter((status, index) => autoSelfExclusion
         ? index !== selfStatusIndex
         : jqCompare(jqField(status, "context"), ctx) !== 0)
-      .map((status): ExternalCheck => ({ name: jqAlt(jqField(status, "context"), "(status)"), state: statusState(status) }));
+      .map((status): ExternalCheck => {
+        const conclusion = rawConclusion(jqField(status, "state"));
+        return {
+          name: jqAlt(jqField(status, "context"), "(status)"),
+          state: statusState(status),
+          ...(conclusion === undefined ? {} : { conclusion }),
+        };
+      });
     const external = [...checkRuns, ...statuses];
     if (external.length > 0) return external;
     if (excludedSelfStatus) return [];

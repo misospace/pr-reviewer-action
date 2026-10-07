@@ -38,8 +38,10 @@ export const CI_GATE_ENV_KEYS: EnvAllowlist = [
   "CURL_CA_BUNDLE",
   "GH_CONFIG_DIR",
   "XDG_CONFIG_HOME",
-  // Runner metadata: outputs, self-exclusion identity, OIDC request vars.
+  // Runner metadata: outputs, self-exclusion identity (including workflow/job), OIDC request vars.
   "GITHUB_OUTPUT",
+  "GITHUB_WORKFLOW",
+  "GITHUB_JOB",
   "GITHUB_RUN_ID",
   "FORGEJO_RUN_ID", // Jobs API database key only; never a target-URL match candidate.
   "GITHUB_RUN_NUMBER",
