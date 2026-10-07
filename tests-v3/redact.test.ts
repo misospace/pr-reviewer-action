@@ -60,7 +60,7 @@ test("#989: masks OpenAI-style provider keys without matching hyphenated prose",
     "risk-assessment-of-the-change",
   ];
   for (const prose of ordinaryProse) {
-    assert.equal(redactText(prose), prose, "the leading word boundary must prevent matching within hyphenated prose");
+    assert.equal(redactText(prose), prose, "a letter before `sk-` means mid-word prose, not a key");
   }
 
   const key = keys[0]!;
@@ -69,6 +69,16 @@ test("#989: masks OpenAI-style provider keys without matching hyphenated prose",
     assert.ok(!result.includes(key), `raw key survived framing: ${result}`);
     assert.ok(result.includes("[REDACTED]"));
   }
+  // A separator immediately before the key must still mask it. This is why the
+  // rule uses a lookbehind rather than `\b`: `_` is a word character, so `\b`
+  // would let a key written straight after one through.
+  for (const separator of ["_", "-", ":", "/", "|", "(", "["]) {
+    const framed = `${separator}${key}`;
+    assert.ok(!redactText(framed).includes(key), `raw key survived after ${JSON.stringify(separator)}`);
+  }
+  // `_` is in the body charset, so a trailing one is absorbed into the mask —
+  // harmless over-redaction, and the key itself is gone.
+  assert.equal(redactText(`_${key}_`), "_[REDACTED]", "underscore emphasis around a key must still mask it");
   assert.equal(redactText("api_key=zzzzzzzzzzzz"), "[REDACTED]");
 
   const masked = redactText(`token ${key}`);

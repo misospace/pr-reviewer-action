@@ -22,9 +22,13 @@ const MASKERS: readonly RegExp[] = [
   /(api[_-]?key|token|password|secret|access[_-]?key|auth[_-]?token)\s*[:=]\s*['"]?[^\s'"]{8,}/gi,
   // AWS-style access keys
   /AKIA[0-9A-Z]{16}/g,
-  // OpenAI-style provider keys; the word boundary avoids matching within
-  // ordinary hyphenated prose (e.g. `task-runner-with-a-long-name`).
-  /\bsk-[A-Za-z0-9_-]{16,}/g,
+  // OpenAI-style provider keys (`sk-`, `sk-proj-`, `sk-ant-…`, `sk-or-v1-…`).
+  // The lookbehind rejects a preceding letter or digit, so the rule cannot
+  // match inside ordinary hyphenated prose (`task-runner-with-a-long-name`) or
+  // a longer identifier. It is deliberately NOT `\b`: `_` is a word character,
+  // so `\b` would skip a key written straight after one — e.g. the underscore
+  // emphasis a model reaches for when quoting a key, `_sk-…`.
+  /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}/g,
   // Kubernetes / kubeconfig credentials (credential-bearing keys only — the
   // old (server|username|...) form destroyed ordinary `server:` YAML context)
   /(password|client-certificate-data|client-key-data|certificate-authority-data|bearer[_-]?token)\s*:\s*\S+/gi,
@@ -225,8 +229,9 @@ export const KNOWN_SECRET_REDACTED = "⟦•⟧";
  * base64 forms. This is deliberately separate from `redactText`'s
  * pattern-based heuristics (see the module doc) — a known
  * exact secret must be nuked unconditionally, even when it doesn't happen to
- * match any heuristic pattern (e.g. an opaque key like `sk-...` echoed bare
- * in a provider's error body, with no `key=`/`Bearer `/etc. framing).
+ * match any heuristic pattern (e.g. a short or oddly-shaped opaque key
+ * echoed bare in a provider's error body, with no `key=`/`Bearer `/etc.
+ * framing).
  * Case-sensitive substring replacement; every non-empty secret is masked
  * regardless of length — `ai-api-key` has no configured minimum, a
  * one-character local key is plausible, and over-redaction in a diagnostic
