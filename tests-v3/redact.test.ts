@@ -176,8 +176,10 @@ test("#996 adversarial: the sk- rule must not eat ordinary kebab-case source", (
     "docs/sk-proj-card-internationalization-notes",
     "sk-ant-api03-card-internationalization-notes",
     // Review round 4: `internationalization` is itself exactly 20 lowercase
-    // characters, so the run must also carry a digit or uppercase — English
-    // words do not, base64url bodies always do.
+    // characters, so the run must also carry a digit or uppercase — a
+    // high-confidence signal, not a guarantee. English words have neither;
+    // real base64url bodies almost always do, and the lowercase-body miss is
+    // the accepted residual for the ones that do not.
     "docs/sk-proj-internationalization-notes",
     "sk-proj-internationalization-notes",
   ];
