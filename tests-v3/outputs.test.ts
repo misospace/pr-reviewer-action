@@ -193,5 +193,6 @@ test("#252: a hostile finding message cannot split the row, split a cell, or for
   const row = rows[0]!;
   assert.ok(row.includes("a \\| b"), "the hostile pipe is escaped so it cannot split the cell");
   assert.ok(!summary.split("\n").some((line) => line.startsWith("### Forged")), "the hostile ### is folded into the row, never a line-start heading");
-  assert.equal(summary.split("\n").filter((line) => line.includes("sk-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop")).length, 1, "the whole hostile payload is one bounded line");
+  assert.equal(summary.split("\n").filter((line) => line.includes("sk-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop")).length, 0, "the OpenAI-style key (#991) is redacted, never rendered raw");
+  assert.ok(row.includes("[REDACTED]"), "the redaction marker lands in the single rendered table row");
 });
