@@ -796,6 +796,25 @@ test("#975: a carried skip whose marker head is not a sha leaves head_sha empty"
   }
 });
 
+test("#975: case-insensitive hex — an uppercase marker head propagates", async () => {
+  // The #975 shape check accepts 7-64 hex digits case-insensitively, so an
+  // UPPERCASE sha is accepted and propagates verbatim into the carried
+  // pointer. The externalChecks seam is removed (the #812 v2-skip shape)
+  // since its assert binds the call to the lowercase sha constant.
+  const body = issuesCommentBody812("issues", "failure").replace(
+    `"head_sha":"${MARKER_HEAD_812}"`,
+    `"head_sha":"${MARKER_HEAD_812.toUpperCase()}"`,
+  );
+  const adapter = skipAdapter812([], body);
+  delete (adapter as { externalChecks?: unknown }).externalChecks;
+  const output = await runPrecheck({ env: skipEnv812(), adapter });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "diff-unchanged");
+  assert.equal(output.verdict, "request_changes");
+  assert.equal(output.verdict_source, "carry_forward");
+  assert.equal(output.head_sha, MARKER_HEAD_812.toUpperCase());
+});
+
 test("#812: externalChecksConclusion folds the check states", () => {
   assert.equal(externalChecksConclusion([{ name: "a", state: "failure" }, { name: "b", state: "success" }]), "failure");
   assert.equal(externalChecksConclusion([{ name: "a", state: "pending" }, { name: "b", state: "success" }]), "pending");
