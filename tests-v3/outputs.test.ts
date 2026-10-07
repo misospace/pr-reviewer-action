@@ -176,6 +176,29 @@ test("findings summary caps the table at the row limit and announces the remaind
   assert.ok(summary.includes("_…and 3 more finding(s) not listed._"));
 });
 
+// #988: the findings-table message cell is the last column of a finding row.
+// Every pipe inside it is escaped to a backslash-pipe by `escapeTableCell`, so
+// a raw " | " (the column separator) never appears within the cell: it is
+// everything after the final " | " separator, before the trailing " |".
+function findingMessageCell(row: string): string {
+  return row.slice(row.lastIndexOf(" | ") + 3, -2);
+}
+
+// #988: pin a cell is a well-formed, fence-safe inline-code span — equal
+// opening/closing backtick runs, the delimiter one longer than any backtick
+// run inside the body, so an embedded Markdown link or backtick payload cannot
+// close the span early and render clickable. Same code-span-safety assertion
+// style as equivalent-paths.test.ts (#252 "never break a code span").
+function assertFencedCodeSpan(cell: string, payload: string): void {
+  const openLen = cell.match(/^`+/)![0].length;
+  const closeLen = /`+$/.exec(cell)![0].length;
+  assert.equal(openLen, closeLen, "equal opening/closing backtick run lengths");
+  const body = cell.slice(openLen, -closeLen);
+  const longestInner = Math.max(0, ...(body.match(/`+/g) ?? []).map((run) => run.length));
+  assert.ok(openLen > longestInner, "the delimiter is longer than any backtick run in the body");
+  assert.ok(body.includes(payload), "the hostile payload stays inside the inert code span");
+}
+
 // #252 adversarial-boundary test: feed the hostile token itself — a pipe that
 // could split the cell, a `###` that could forge a heading, a markdown link,
 // a credential-shaped key — and pin that the row stays one bounded line, the
@@ -195,4 +218,33 @@ test("#252: a hostile finding message cannot split the row, split a cell, or for
   assert.ok(!summary.split("\n").some((line) => line.startsWith("### Forged")), "the hostile ### is folded into the row, never a line-start heading");
   assert.equal(summary.split("\n").filter((line) => line.includes("sk-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop")).length, 0, "the OpenAI-style key (#991) is redacted, never rendered raw");
   assert.ok(row.includes("[REDACTED]"), "the redaction marker lands in the single rendered table row");
+
+  // #988: the same hostile message through the step summary must be fenced as
+  // inline code, so the external Markdown link/autolink can never render
+  // clickable — fail closed, like this PR's carried-failure line.
+  const stepRow = renderStepSummary(telemetry({ findings: [hostile] }))
+    .split("\n").filter((line) => line.startsWith("| 🛑 Blocker |"));
+  assert.equal(stepRow.length, 1, "the hostile finding renders exactly one step-summary row");
+  assertFencedCodeSpan(findingMessageCell(stepRow[0]!), "https://evil.example");
+});
+
+// #988 fence-hostile: a payload with a run of backticks around a Markdown link
+// cannot close the span early — escapeTableCell turns each backtick into
+// `\`` (breaking the run), so the generated delimiter stays one longer than any
+// backtick run in the escaped body and the link renders inert.
+test("#988: a backtick-ringed hostile link in the step summary cannot break the fence", () => {
+  const hostile = {
+    severity: "blocker",
+    file: "x",
+    line: 1,
+    message: "x``[click](https://evil.example)",
+  };
+  const stepRow = renderStepSummary(telemetry({ findings: [hostile] }))
+    .split("\n").filter((line) => line.startsWith("| 🛑 Blocker |"));
+  assert.equal(stepRow.length, 1, "the backtick-ringed finding renders exactly one step-summary row");
+  const cell = findingMessageCell(stepRow[0]!);
+  // (a) the cell is fenced; (b) the opening delimiter is longer than the
+  // longest backtick run in the cell body, so the payload cannot close the
+  // span early and render https://evil.example as a clickable link.
+  assertFencedCodeSpan(cell, "https://evil.example");
 });

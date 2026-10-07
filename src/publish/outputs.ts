@@ -51,6 +51,16 @@ export function severityCountsLabel(findings: unknown): string {
   return ordered.map((severity) => `${counts.get(severity)} ${severity}`).join(", ");
 }
 
+/** Wrap an already-escaped body in a fence-safe inline-code span: the
+ * delimiter is one backtick longer than the longest backtick run inside the
+ * body, so embedded backticks (escaped to `\`` by `escapeTableCell`) or
+ * Markdown link syntax cannot close the span and render clickable. Same
+ * fail-closed strategy as `inlineCodeValue` (#903). */
+function fenceInlineCode(body: string): string {
+  const longest = Math.max(0, ...(body.match(/`+/g) ?? []).map((run) => run.length));
+  return "`".repeat(longest + 1) + body + "`".repeat(longest + 1);
+}
+
 /** A path (model-controlled) as one bounded code span: whitespace collapsed
  * and fenced by a backtick run longer than any inside it, so it cannot open
  * markdown structure; pipes are escaped because GFM tables split cells even
@@ -60,9 +70,7 @@ function locationCell(finding: Record<string, unknown>): string {
   const line = typeof finding.line === "number" && Number.isFinite(finding.line) ? String(finding.line) : "";
   if (file === "" && line === "") return "";
   const raw = file === "" ? line : line === "" ? file : `${file}:${line}`;
-  const body = escapeTableCell(raw.replace(/\s+/g, " ").trim());
-  const longest = Math.max(0, ...(body.match(/`+/g) ?? []).map((run) => run.length));
-  return "`".repeat(longest + 1) + body + "`".repeat(longest + 1);
+  return fenceInlineCode(escapeTableCell(raw.replace(/\s+/g, " ").trim()));
 }
 
 /**
@@ -73,8 +81,21 @@ function locationCell(finding: Record<string, unknown>): string {
  * whitespace collapse, a length cap, and table-cell escaping; a hostile
  * message cannot split the row or forge headings. Returns "" when there is
  * nothing to render.
+ *
+ * Per-surface policy for the message cell (#975 / #988): the strict
+ * published body (publish.ts) calls this with no opts, keeping the operator's
+ * `upstream-link-mode` (linkMode) rendering verbatim; the step summary
+ * (renderStepSummary) passes `messageAsInlineCode: true` and additionally
+ * fences each non-empty message in a code span, so model-controlled Markdown
+ * links/autolinks (e.g. `[x](https://evil.example)`) can never render
+ * clickable. Maintainer review on PR #988 (head 43a0808); same fail-closed
+ * rationale as `inlineCodeValue` (#903).
  */
-export function renderFindingsSummary(findings: unknown, linkMode: UpstreamLinkMode): string {
+export function renderFindingsSummary(
+  findings: unknown,
+  linkMode: UpstreamLinkMode,
+  opts?: { messageAsInlineCode?: boolean },
+): string {
   if (!Array.isArray(findings)) return "";
   const rows = findings.filter((item): item is Record<string, unknown> => isRecord(item));
   if (rows.length === 0) return "";
@@ -88,12 +109,14 @@ export function renderFindingsSummary(findings: unknown, linkMode: UpstreamLinkM
   for (const finding of rows.slice(0, FINDINGS_SUMMARY_MAX_ROWS)) {
     const rawSeverity = typeof finding.severity === "string" ? finding.severity : "info";
     const label = Object.hasOwn(SEVERITY_LABELS, rawSeverity) ? SEVERITY_LABELS[rawSeverity]! : rawSeverity;
-    const message = escapeTableCell(
+    const body = escapeTableCell(
       sanitizeMarkdown(redactText(String(finding.message ?? "")), linkMode)
         .replace(/\s+/g, " ")
         .trim()
         .slice(0, 300),
     );
+    // #988: fence only non-empty messages; an empty message stays an empty cell.
+    const message = opts?.messageAsInlineCode === true && body !== "" ? fenceInlineCode(body) : body;
     lines.push(`| ${escapeTableCell(label)} | ${locationCell(finding)} | ${message} |`);
   }
   if (rows.length > FINDINGS_SUMMARY_MAX_ROWS) {
@@ -376,6 +399,6 @@ export function renderStepSummary(telemetry: StepSummaryTelemetry): string {
   rows.push(`| Completion tokens | ${telemetry.completionTokens} |`);
 
   const lines = ["### AI PR Review", "", "| Field | Value |", "| --- | --- |", ...rows, ""];
-  const block = renderFindingsSummary(telemetry.findings ?? [], telemetry.upstreamLinkMode ?? "inert");
+  const block = renderFindingsSummary(telemetry.findings ?? [], telemetry.upstreamLinkMode ?? "inert", { messageAsInlineCode: true });
   return lines.join("\n") + block;
 }
