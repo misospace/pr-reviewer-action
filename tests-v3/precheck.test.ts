@@ -640,7 +640,7 @@ import type { PlatformAdapter } from "../src/platform/types.js";
 import type { ExternalCheck } from "../src/platform/normalize.js";
 
 const FP_812 = "3be6193409646aae05d5319a7ed87a0531aaec5f32783eba9661e926299cc474|cfg:dd7c82b6b211fa0ef17693822887e061aa6a94ce03645cb7e9b88ac6dcc60f4b";
-const MARKER_HEAD_812 = "head-old";
+const MARKER_HEAD_812 = "e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6";
 
 /** The published managed comment: fingerprint matches the fixed diff,
  * marker carries review_result=issues bound to a CI state under test. */
@@ -712,6 +712,9 @@ test("#812: diff, config and CI all unchanged — still skipped with the carried
   assert.equal(output.skip_reason, "diff-unchanged");
   assert.equal(output.verdict, "request_changes");
   assert.equal(output.verdict_source, "carry_forward");
+  // #975: the carried pointer names the head whose review recorded the
+  // findings — the marker's sha-shaped head propagates into the output.
+  assert.equal(output.head_sha, MARKER_HEAD_812);
 });
 
 test("#812: a transient external-checks read fails closed — fresh review, never a silent skip", async () => {
@@ -737,6 +740,9 @@ test("#812: a carried approve is never re-checked (zero extra API reads)", async
   assert.equal(output.skip_reason, "diff-unchanged");
   assert.equal(output.verdict, "approve");
   assert.equal(output.verdict_source, "carry_forward");
+  // #975: any carried verdict names the marker's head, not only
+  // request_changes.
+  assert.equal(output.head_sha, MARKER_HEAD_812);
   assert.equal(adapter.readCount(), 0);
 });
 
@@ -760,11 +766,34 @@ test("#812: stored ci_state=none transitioning to a real conclusion forces a fre
 test("#812: a marker without head_sha fails closed — fresh review, not a silent skip", async () => {
   const adapter = skipAdapter812(
     [{ name: "ci", state: "failure" }],
-    issuesCommentBody812("issues", "failure").replace('"head_sha":"head-old"', '"head_sha":""'),
+    issuesCommentBody812("issues", "failure").replace(`"head_sha":"${MARKER_HEAD_812}"`, '"head_sha":""'),
   );
   const output = await runPrecheck({ env: skipEnv812(), adapter });
   assert.equal(output.should_review, "true");
   assert.equal(output.skip_reason, "ci-stale-carried-verdict");
+});
+
+test("#975: a carried skip whose marker head is not a sha leaves head_sha empty", async () => {
+  // The #812 re-check only requires a NON-EMPTY head binding, so a
+  // non-hex value still skips — but the #975 pointer refuses to print
+  // an unshaped value and stays on the platform default. The externalChecks
+  // seam is removed (the #812 v2-skip shape), since its assert binds the
+  // call to the sha-shaped constant.
+  const badBodies = [
+    issuesCommentBody812("issues", "failure").replace(`"head_sha":"${MARKER_HEAD_812}"`, '"head_sha":"head-old"'),
+    // A JSON-escaped control char and a comment opener inside the value.
+    issuesCommentBody812("issues", "failure").replace(`"head_sha":"${MARKER_HEAD_812}"`, '"head_sha":"a\\nb<!--c"'),
+  ];
+  for (const body of badBodies) {
+    const adapter = skipAdapter812([], body);
+    delete (adapter as { externalChecks?: unknown }).externalChecks;
+    const output = await runPrecheck({ env: skipEnv812(), adapter });
+    assert.equal(output.should_review, "false");
+    assert.equal(output.skip_reason, "diff-unchanged");
+    assert.equal(output.verdict, "request_changes");
+    assert.equal(output.verdict_source, "carry_forward");
+    assert.equal(output.head_sha, "");
+  }
 });
 
 test("#812: externalChecksConclusion folds the check states", () => {

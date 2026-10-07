@@ -675,6 +675,16 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
         output.review_result = carried.reviewResult;
         output.degradedGateBypass = carried.degradedGateBypass;
         if (carried.incompleteReason !== undefined) output.incomplete_reason = carried.incompleteReason;
+        // #975: name the head whose review recorded the carried findings,
+        // for the carried-pointer line downstream. The marker's head_sha is
+        // untrusted comment content: only a commit-sha-shaped value (7-64
+        // hex digits, case-insensitive) is ever accepted; anything else
+        // leaves `head_sha` empty and the pointer says `<unknown>`.
+        const marker = parseMetadata(lastCommentBody);
+        const markerHead = typeof marker?.head_sha === "string" ? marker.head_sha : "";
+        if (/^[0-9a-f]{7,64}$/i.test(markerHead)) {
+          output.head_sha = markerHead;
+        }
       }
       return output;
     }
