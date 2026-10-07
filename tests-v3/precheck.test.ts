@@ -640,6 +640,9 @@ import type { PlatformAdapter } from "../src/platform/types.js";
 import type { ExternalCheck } from "../src/platform/normalize.js";
 
 const FP_812 = "3be6193409646aae05d5319a7ed87a0531aaec5f32783eba9661e926299cc474|cfg:dd7c82b6b211fa0ef17693822887e061aa6a94ce03645cb7e9b88ac6dcc60f4b";
+/** The fixture is sha-shaped because the carried-verdict precheck gate only accepts a
+ * `head_sha` marker matching /^[0-9a-f]{7,64}$/i (src/precheck/decide.ts);
+ * the rejection cases below replace it with unshaped values ("" and "head-old"). */
 const MARKER_HEAD_812 = "e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6";
 
 /** The published managed comment: fingerprint matches the fixed diff,
