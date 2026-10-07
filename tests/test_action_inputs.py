@@ -246,7 +246,8 @@ def test_fail_on_request_changes_input():
     assert action["inputs"]["fail-on-degraded-review"]["default"] == "false"
     entry = (_REPO_ROOT / "src" / "run" / "action.ts").read_text()
     assert 'if (verdict !== "request_changes") {\n    process.stdout.write' in entry
-    assert "::error::Final verdict is request_changes; failing the step" in entry
+    assert "fail-on-request-changes=true and the final verdict is request_changes" in entry
+    assert "::error::${escapeWorkflowData(message)}" in entry
     assert entry.index("await publishWith(") < entry.index("const gate = failOnRequestChanges(")
 
 
