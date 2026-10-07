@@ -159,6 +159,10 @@ test("#996 adversarial: the sk- rule must not eat ordinary kebab-case source", (
     "risk-assessment-of-the-change",
     "disk-usage-report-for-the-cluster",
     "// the task-runner-with-a-long-name helper",
+    // Review round: a dashed prefix we do NOT issue is not a key. A generic
+    // `sk-<seg>-` allowance masked this path, so the families are enumerated.
+    "docs/sk-deployment-internationalization-notes",
+    "sk-deployment-abcdefghijklmnopqrstuvwxyz012345",
   ];
   for (const line of survivors) {
     assert.equal(redactSourceText(line), line, `expected ${JSON.stringify(line)} to survive`);

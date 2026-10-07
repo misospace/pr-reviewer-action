@@ -145,28 +145,25 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
   redacted = redacted.replace(/ghp_[A-Za-z0-9]{30,}/g, REDACTED_SOURCE);
   redacted = redacted.replace(/github_pat_[A-Za-z0-9_]{20,}/g, REDACTED_SOURCE);
   redacted = redacted.replace(/AKIA[0-9A-Z]{16}/g, REDACTED_SOURCE);
-  // OpenAI-style `sk-` provider keys (#989/#996): the bare form
-  // (`sk-<alnum>`) plus the dash-separated families — `sk-proj-…`,
-  // `sk-ant-api03-…`, `sk-or-v1-…`. The body must still contain a long
-  // UNBROKEN alphanumeric run. That run is this rule's high-entropy signal
-  // and it is what keeps the rule source-safe: the prose rule's FREE
-  // `[A-Za-z0-9_-]{16,}` body would also swallow ordinary kebab-case
-  // identifiers, paths and CSS classes here (`docs/sk-deployment-runbook-notes`,
-  // `sk-button-primary-large`, `src/sk-configuration-reference.ts`), which must
-  // survive byte-for-byte. The `{1,12}` segment bound allows the family
-  // prefixes (`proj`, `ant`+`api03`, `or`+`v1`) without letting a run of
-  // ordinary kebab words reach the length floor. The trailing
-  // `[A-Za-z0-9_-]*` keeps a body that itself contains `-`/`_` (base64url)
-  // masked as ONE literal, instead of stopping at its first internal
-  // separator and leaking the tail of the key.
-  //
-  // Accepted residual, not special-cased: a kebab token that both starts with
-  // `sk-` and contains a single ≥20-character word
-  // (`sk-internationalization-notes`) is masked. That shape is indistinguishable
-  // from the bare form this rule has always masked, and a real key body is
-  // exactly such a run.
+  // OpenAI-style `sk-` legacy bare shape (`sk-<20+ alnum>`), retained exactly
+  // as it was. Its one ambiguity — a kebab token whose leading word is 20+
+  // characters (`sk-internationalization-notes`) is masked — is pre-existing
+  // and irreducible without weakening the pin, and over-redaction is the
+  // module's stated preference over a leaked credential.
+  redacted = redacted.replace(/sk-[A-Za-z0-9]{20,}/g, REDACTED_SOURCE);
+
+  // The dash-separated families (#996), ENUMERATED. The prefix is what
+  // discriminates here, so it must be a shape a provider actually issues:
+  // accepting any `sk-<seg>-` chain swallows ordinary kebab-case source —
+  // `docs/sk-deployment-internationalization-notes` is a PATH, not a
+  // credential, and it matches every generic dashed-prefix form. Naming the
+  // three families keeps the rule to `sk-proj-…`, `sk-ant-api03-…` and
+  // `sk-or-v1-…`. The body charset stays free base64url (`[A-Za-z0-9_-]`), so
+  // a real body containing `-`/`_` is masked whole rather than up to its
+  // first internal separator. `ant-api03` is version-bearing: a future
+  // `apiNN` bump is a one-line change here.
   redacted = redacted.replace(
-    /(?<![A-Za-z0-9])sk-(?:[a-z0-9]{1,12}-){0,4}[A-Za-z0-9]{20,}[A-Za-z0-9_-]*/g,
+    /(?<![A-Za-z0-9])sk-(?:proj|ant-api03|or-v1)-[A-Za-z0-9_-]{20,}/g,
     REDACTED_SOURCE,
   );
 
