@@ -177,6 +177,13 @@ test("resolveAuthorPdsEndpoint: other DID methods and malformed DIDs are invalid
     "did:web::2584", // empty host
     "did:web:example.com/evil", // path in the method-specific-id
     "did:plc:", // empty method-specific id
+    // method-specific ids that smuggle URL path/query/fragment syntax
+    "did:plc:abc/../admin", // traversal: must never reach https://plc.directory/admin
+    "did:plc:a?b", // query character
+    "did:plc:a#b", // fragment character
+    "did:plc:a%20b", // percent character
+    "did:plc:a b", // whitespace
+    "did:web:a/../admin", // traversal in a did:web id
     "not-a-did",
     "",
   ];
@@ -191,6 +198,54 @@ test("resolveAuthorPdsEndpoint: other DID methods and malformed DIDs are invalid
     );
     assert.equal(calls.length, 0, `no request may leave for ${did}`);
   }
+});
+
+test("resolveAuthorPdsEndpoint: malformed did:web hosts and ports are a TangledBlobError, never a raw TypeError", async () => {
+  const bad = [
+    "did:web:999.999.999.999", // IPv4 octets above 255
+    "did:web:256.1.1.1", // one octet above 255
+    "did:web:1.2.3.4.5", // numeric, but not a 4-octet IPv4 literal
+    "did:web:example.com:99999", // port above 65535
+    "did:web:example.com:0", // port below 1
+    "did:web:example.com:00080", // leading zeros
+    "did:web:example.com:80:90", // more than one port
+  ];
+  for (const did of bad) {
+    const { fetchImpl, calls } = makeFetch(() => {
+      throw new Error("no network for an invalid did:web DID");
+    });
+    await assert.rejects(
+      resolveAuthorPdsEndpoint(did, { fetchImpl }),
+      (e: unknown) =>
+        e instanceof TangledBlobError &&
+        e.kind === "invalid-did" &&
+        !(e instanceof TypeError),
+      `${did} must be a typed TangledBlobError`,
+    );
+    assert.equal(calls.length, 0, `no request may leave for ${did}`);
+  }
+});
+
+test("resolveAuthorPdsEndpoint: a valid explicit port (443) and a plain host still resolve", async () => {
+  const { fetchImpl, calls } = makeFetch(() =>
+    didDoc("did:web:example.com:443", [pdsService("https://pds.example.com")]),
+  );
+  assert.equal(
+    await resolveAuthorPdsEndpoint("did:web:example.com:443", { fetchImpl }),
+    "https://pds.example.com",
+  );
+  assert.equal(calls[0]!.url, "https://example.com/.well-known/did.json", "the default port is normalized away");
+  assert.equal(calls[0]!.auth, null);
+
+  const { fetchImpl: f2, calls: c2 } = makeFetch(() =>
+    didDoc("did:web:example.com", [pdsService("https://pds.example.com")]),
+  );
+  assert.equal(
+    await resolveAuthorPdsEndpoint("did:web:example.com", { fetchImpl: f2 }),
+    "https://pds.example.com",
+  );
+  assert.equal(c2[0]!.url, "https://example.com/.well-known/did.json");
+  assert.equal(c2[0]!.auth, null);
 });
 
 test("resolveAuthorPdsEndpoint: a transport failure is pds-resolution-failed", async () => {
@@ -333,14 +388,102 @@ test("fetchAtprotoBlob: an invalid CID is rejected before any network call", asy
 });
 
 test("fetchAtprotoBlob: an invalid DID is rejected before any network call", async () => {
-  const { fetchImpl, calls } = makeFetch(() => {
-    throw new Error("no network for an invalid DID");
-  });
-  await assert.rejects(
-    fetchAtprotoBlob("did:key:z6MkiAjFzAjiiwRg7f9jwLo4hRb", "bafybeiblob0", { fetchImpl }),
-    (e: unknown) => e instanceof TangledBlobError && e.kind === "invalid-did",
+  const bad = [
+    "did:key:z6MkiAjFzAjiiwRg7f9jwLo4hRb",
+    "did:plc:abc/../admin", // traversal must not reach https://plc.directory/admin
+    "did:plc:a?b",
+    "did:plc:a#b",
+    "did:plc:a%20b",
+    "did:web:999.999.999.999",
+    "did:web:example.com:99999",
+  ];
+  for (const did of bad) {
+    const { fetchImpl, calls } = makeFetch(() => {
+      throw new Error("no network for an invalid DID");
+    });
+    await assert.rejects(
+      fetchAtprotoBlob(did, "bafybeiblob0", { fetchImpl, token: `Bearer ${SECRET}` }),
+      (e: unknown) => e instanceof TangledBlobError && e.kind === "invalid-did",
+      did,
+    );
+    assert.equal(calls.length, 0, `no request may leave for ${did}`);
+  }
+});
+
+test("fetchAtprotoBlob: a plaintext http PDS endpoint never receives the Authorization token", async () => {
+  const blob = new Uint8Array([1, 2, 3]);
+  const { fetchImpl, calls } = twoHop(
+    didDoc(DID, [pdsService("http://localhost:2584")]),
+    () => new Response(blob),
   );
-  assert.equal(calls.length, 0);
+  const bytes = await fetchAtprotoBlob(DID, "bafybeiblob0", { fetchImpl, token: `Bearer ${SECRET}` });
+  assert.deepEqual(bytes, blob, "the blob still comes back over plaintext http loopback");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0]!.url, "https://plc.directory/did:plc:25f71a64d40d1479c059b236");
+  assert.equal(calls[0]!.auth, null, "the DID document request never carries the token");
+  assert.equal(calls[1]!.url, "http://localhost:2584/xrpc/com.atproto.sync.getBlob?did=did%3Aplc%3A25f71a64d40d1479c059b236&cid=bafybeiblob0");
+  assert.equal(
+    calls[1]!.auth,
+    null,
+    "a plaintext http PDS endpoint is public: the token is dropped silently",
+  );
+  for (const call of calls) {
+    assert.ok(!call.url.includes(SECRET), "the token must never appear in a request URL");
+  }
+});
+
+test("fetchAtprotoBlob: a 200 with a zero-byte body is a read-failed empty blob, not a success", async () => {
+  const { fetchImpl } = twoHop(
+    didDoc(DID, [pdsService("https://pds.example.com")]),
+    () => new Response(null, { status: 200 }),
+  );
+  await assert.rejects(
+    fetchAtprotoBlob(DID, "bafybeiblob0", { fetchImpl, token: `Bearer ${SECRET}` }),
+    (e: unknown) =>
+      e instanceof TangledBlobError &&
+      e.kind === "read-failed" &&
+      e.message.includes("empty blob"),
+    "no zero-byte success at the fetch boundary",
+  );
+});
+
+test("every new failure path: TangledBlobError messages never contain the token", async () => {
+  const noNetwork = makeFetch(() => {
+    throw new Error("no network for an invalid DID");
+  }).fetchImpl;
+  const emptyBlob = twoHop(
+    didDoc(DID, [pdsService("https://pds.example.com")]),
+    () => new Response(null, { status: 200 }),
+  ).fetchImpl;
+  const httpLoopback = twoHop(
+    didDoc(DID, [pdsService("http://localhost:2584")]),
+    () => new Response(null, { status: 200 }), // empty blob over http, token passed
+  ).fetchImpl;
+  const scenarios: Array<() => Promise<unknown>> = [
+    () => fetchAtprotoBlob("did:plc:abc/../admin", "bafybeiblob0", { fetchImpl: noNetwork, token: `Bearer ${SECRET}` }),
+    () => fetchAtprotoBlob("did:plc:a?b", "bafybeiblob0", { fetchImpl: noNetwork, token: `Bearer ${SECRET}` }),
+    () => fetchAtprotoBlob("did:plc:a#b", "bafybeiblob0", { fetchImpl: noNetwork, token: `Bearer ${SECRET}` }),
+    () => fetchAtprotoBlob("did:plc:a%20b", "bafybeiblob0", { fetchImpl: noNetwork, token: `Bearer ${SECRET}` }),
+    () => fetchAtprotoBlob("did:web:999.999.999.999", "bafybeiblob0", { fetchImpl: noNetwork, token: `Bearer ${SECRET}` }),
+    () => fetchAtprotoBlob("did:web:example.com:99999", "bafybeiblob0", { fetchImpl: noNetwork, token: `Bearer ${SECRET}` }),
+    () => resolveAuthorPdsEndpoint("did:web:999.999.999.999", { fetchImpl: noNetwork }),
+    () => resolveAuthorPdsEndpoint("did:web:example.com:99999", { fetchImpl: noNetwork }),
+    () => fetchAtprotoBlob(DID, "bafybeiblob0", { fetchImpl: emptyBlob, token: `Bearer ${SECRET}` }),
+    () => fetchAtprotoBlob(DID, "bafybeiblob0", { fetchImpl: httpLoopback, token: `Bearer ${SECRET}` }),
+  ];
+  for (const run of scenarios) {
+    await assert.rejects(
+      run(),
+      (e: unknown) => {
+        assert.ok(
+          e instanceof TangledBlobError,
+          `expected a TangledBlobError, got ${e instanceof Error ? `${e.name}: ${e.message}` : typeof e}`,
+        );
+        assert.ok(!e.message.includes(SECRET), `the error message must not contain the token: ${e.message}`);
+        return true;
+      },
+    );
+  }
 });
 
 test("fetchAtprotoBlob: a PDS resolution failure propagates from the blob fetch", async () => {

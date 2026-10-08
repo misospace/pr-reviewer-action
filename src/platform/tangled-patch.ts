@@ -175,12 +175,19 @@ export function decodeTangledPatchBlob(bytes: Uint8Array, maxBytes?: number): st
 const MAX_PATCH_CHARS = 32 * 1024 * 1024;
 
 /** The one accepted envelope line: the git format-patch mbox `From` line.
- * The year 1997 is the canonical constant (the optional `[+-]\d{4}`
- * timezone is tolerated); the SHA is a 40-hex commit id. */
-const FROM_LINE = /^From ([0-9a-f]{40}) Mon Sep 17 00:00:00 1997(?: [+-]\d{4})?$/;
+ * Any ctime date/year is accepted (git's canonical shape is
+ * `Mon Sep 17 00:00:00 1997`, with the optional `[+-]\d{4}` timezone
+ * tolerated); the SHA is a 40-hex commit id. A line is a mail-unit
+ * boundary ONLY if it matches here AND the immediately following line is
+ * a real mail header (`From: ` / `Date: ` / `Subject: `) — untrusted
+ * commit-message text can contain fake `From` lines and git does not
+ * escape them. */
+const FROM_LINE =
+  /^From ([0-9a-f]{40}) \w{3} \w{3} \d{1,2} \d{2}:\d{2}:\d{2} \d{4}( [+-]\d{4})?$/;
+/** The three real mail-header prefixes that must follow a `From` line for
+ * it to count as a mail-unit boundary. */
+const MAIL_HEADER_STARTS = ["From: ", "Date: ", "Subject: "];
 const DIFF_GIT = "diff --git ";
-/** The trailing line of git's signature trailer, e.g. "2.45.2". */
-const SIGNATURE_VERSION = /^\d{1,3}(\.\d{1,3})+([.\-][0-9A-Za-z]+)*$/;
 
 export interface TangledChangedFile {
   filename: string;
@@ -204,27 +211,39 @@ export interface TangledNormalizedPatch {
  *
  * Grammar (one unambiguous shape, fail-closed — the only thrown error is
  * `TangledPatchError`):
- * - text longer than `MAX_PATCH_CHARS` (32 MiB) → "malformed-patch";
- * - non-whitespace text before the first `From <sha> Mon Sep 17 00:00:00
- *   1997` line → "malformed-patch" (bare diffs without the mail envelope
- *   are NOT accepted);
- * - each mail unit runs to the next `From` line (or end of text); its diff
- *   body starts at the first `diff --git ` line and runs to the end of the
- *   unit, minus the git signature trailer (`-- ` + version line) when it is
- *   the very last two lines;
+ * - text longer than `MAX_PATCH_CHARS` (32 MiB) → "patch-too-large" before
+ *   any parsing is attempted;
+ * - non-whitespace text before the first VALID mail boundary →
+ *   "malformed-patch" (bare diffs without the mail envelope are NOT
+ *   accepted); a boundary is a `From <40-hex> <ctime>` line whose
+ *   immediately following line is a real mail header (`From: `/`Date: `/
+ *   `Subject: `) — fake `From` lines inside commit messages do not count;
+ * - each mail unit runs to the next valid boundary (or end of text); its
+ *   diff body starts at the first `diff --git ` line and runs to the end
+ *   of the unit, minus the git signature trailer (a `--`/`-- ` marker line
+ *   followed by the version line, e.g. "2.39.5 (Apple Git-154)") when that
+ *   pair is the very last two lines and the last line does not look like
+ *   hunk content (space/`+`/`-`/`@`/`\`), so hunk content is never
+ *   stripped;
  * - a unit with no `diff --git ` section (cover letter / empty commit)
  *   contributes nothing; if no unit yields one → "empty-patch" (never an
  *   empty diff as a success);
- * - `headSha` is the SHA in the LAST mail unit's `From` line;
+ * - `headSha` is the SHA of the LAST valid boundary;
  * - file sections split the concatenated diff bodies at each line starting
- *   with `diff --git `; per section: C-style quoted paths are decoded
- *   (\\, \", \n, \t, \NNN octal → UTF-8; unparseable → "malformed-patch"),
- *   `a/`/`b/` prefixes are stripped, and the extended headers
- *   (`new file mode`, `deleted file mode`, `rename from`/`rename to`) fix
- *   the status (an incomplete rename pair → "malformed-patch");
- *   additions/deletions count `+`/`-` hunk lines (excluding `+++`/`---`),
- *   binary sections ("GIT binary patch" / "Binary files … differ") keep
- *   zero counts;
+ *   with `diff --git `; per section: the per-file old/new names come from
+ *   the section's `--- ` / `+++ ` lines (C-style quoting decoded,
+ *   `a/`/`b/` prefixes stripped, a `/dev/null` side takes the other
+ *   side's name); the `diff --git` header is split ONLY as a fallback when
+ *   no `---`/`+++` pair is present (binary sections); quoted paths decode
+ *   \\, \", \a \b \v \f \r, \n, \t, \NNN octal → UTF-8 (unparseable →
+ *   "malformed-patch"); the extended headers (`new file mode`,
+ *   `deleted file mode`, `rename from`/`rename to`) fix the status, with
+ *   the rename lines staying authoritative for renames (an incomplete
+ *   rename pair → "malformed-patch");
+ *   additions/deletions count `+`/`-` lines; the `+++`/`---` exclusion
+ *   applies only BEFORE the first `@@` (inside hunks every `+`/`-` line
+ *   counts, and `\` lines are excluded naturally); binary sections
+ *   ("GIT binary patch" / "Binary files … differ") keep zero counts;
  * - `diff` is the file sections joined, each ending in exactly one "\n", so
  *   re-splitting at lines that start with `diff --git ` recovers the
  *   sections; it carries no mail headers, no signature, no diffstat.
@@ -232,29 +251,38 @@ export interface TangledNormalizedPatch {
 export function normalizeGitFormatPatch(patchText: string): TangledNormalizedPatch {
   if (patchText.length > MAX_PATCH_CHARS) {
     throw new TangledPatchError(
-      "malformed-patch",
+      "patch-too-large",
       `patch text is ${patchText.length} characters, over the ${MAX_PATCH_CHARS} hard cap`,
     );
   }
   const lines = patchText.split(/\r\n|\n/);
 
+  // A line is a mail-unit boundary ONLY if it matches the mbox `From` line
+  // AND the immediately following line is a real mail header: untrusted
+  // commit-message text can contain fake `From` lines (git does not
+  // escape them), so a `From` line with no header after it is data, not a
+  // boundary.
   const fromLineAt: number[] = [];
   for (let i = 0; i < lines.length; i++) {
-    if (FROM_LINE.test(lines[i]!)) fromLineAt.push(i);
+    if (!FROM_LINE.test(lines[i]!)) continue;
+    const next = lines[i + 1];
+    if (next === undefined) continue;
+    if (MAIL_HEADER_STARTS.some((h) => next.startsWith(h))) fromLineAt.push(i);
   }
   if (fromLineAt.length === 0) {
-    // No mail envelope at all. Bare diffs are not an accepted input.
+    // No valid mail envelope at all. Bare diffs are not an accepted input.
     if (lines.some((l) => l.trim() !== "")) {
       throw new TangledPatchError(
         "malformed-patch",
-        'no "From <sha> Mon Sep 17 00:00:00 1997" mail envelope; bare diffs are not accepted',
+        'no valid "From <sha> <ctime>" mail boundary (a From line must be followed by a From:/Date:/Subject: header); bare diffs are not accepted',
       );
     }
     throw new TangledPatchError("empty-patch", "patch text is empty");
   }
 
-  // Only whitespace may precede the first envelope line (e.g. a stray
-  // leading blank). Anything else is a malformed stream.
+  // Only whitespace may precede the first valid boundary (e.g. a stray
+  // leading blank). Anything else — including a fake `From` line — is a
+  // malformed stream.
   const firstFrom = fromLineAt[0]!;
   for (let i = 0; i < firstFrom; i++) {
     const l = lines[i]!;
@@ -289,11 +317,16 @@ export function normalizeGitFormatPatch(patchText: string): TangledNormalizedPat
     let body = unit.slice(bodyStart);
     while (body.length > 0 && body[body.length - 1] === "") body.pop(); // line-terminator blanks
     // Git's trailing signature trailer, when it is the very last two lines
-    // of the unit (handles \r\n and \n via the split above).
+    // of the unit (handles \r\n and \n via the split above): a `--`/`-- `
+    // marker line followed by the version line, e.g. "2.39.5 (Apple Git-
+    // 154)". The last line must not look like hunk content (a line
+    // starting with a space, `+`, `-`, `@`, or `\`), so a hunk that ends
+    // in such a line is never stripped — `-- ` in particular must not be
+    // mistaken for a deletion.
     if (
       body.length >= 2 &&
-      body[body.length - 2] === "-- " &&
-      SIGNATURE_VERSION.test(body[body.length - 1]!)
+      (body[body.length - 2] === "-- " || body[body.length - 2] === "--") &&
+      !isHunkContentLine(body[body.length - 1]!)
     ) {
       body = body.slice(0, body.length - 2);
     }
@@ -322,13 +355,23 @@ export function normalizeGitFormatPatch(patchText: string): TangledNormalizedPat
   };
 }
 
+/** True for a line that looks like unified-diff hunk content: a context
+ * line (leading space), an addition (`+`), a deletion (`-`), a hunk
+ * header (`@`), or an escape marker (`\`, e.g. "no newline at end of
+ * file"). An empty line is treated as hunk content too, so a trailer
+ * strip never removes one. */
+function isHunkContentLine(line: string): boolean {
+  if (line === "") return true;
+  const c = line.charAt(0);
+  return c === " " || c === "+" || c === "-" || c === "@" || c === "\\";
+}
+
 /** Parse one file section (from a `diff --git ` line to the next). */
 function parseFileSection(sectionIn: string[]): TangledChangedFile {
   let end = sectionIn.length;
   while (end > 0 && sectionIn[end - 1] === "") end--; // trailing blanks are not content
   const section = sectionIn.slice(0, end);
   const header = section[0]!;
-  const { oldPath, newPath } = parseDiffGitPaths(header.slice(DIFF_GIT.length));
 
   // Extended headers are the lines between the `diff --git` line and the
   // first hunk (`@@`); a section without a hunk (mode change, binary) has
@@ -345,11 +388,34 @@ function parseFileSection(sectionIn: string[]): TangledChangedFile {
   let removed = false;
   let renameFrom: string | undefined;
   let renameTo: string | undefined;
+  let minusPath: string | undefined;
+  let plusPath: string | undefined;
   for (const line of extended) {
     if (/^new file mode \d{6}$/.test(line)) added = true;
     else if (/^deleted file mode \d{6}$/.test(line)) removed = true;
-    else if (line.startsWith("rename from ")) renameFrom = line.slice("rename from ".length);
-    else if (line.startsWith("rename to ")) renameTo = line.slice("rename to ".length);
+    else if (line.startsWith("rename from "))
+      renameFrom = decodeRenameValue(line.slice("rename from ".length));
+    else if (line.startsWith("rename to "))
+      renameTo = decodeRenameValue(line.slice("rename to ".length));
+    else if (line.startsWith("--- ")) minusPath = parseSidePath(line.slice("--- ".length));
+    else if (line.startsWith("+++ ")) plusPath = parseSidePath(line.slice("+++ ".length));
+  }
+
+  let oldPath: string;
+  let newPath: string;
+  if (minusPath !== undefined && plusPath !== undefined) {
+    // The `--- ` / `+++ ` file-header lines are the unambiguous per-file
+    // names (exactly one path per line); the `diff --git` header is
+    // ambiguous for unquoted paths that contain spaces (e.g. a file named
+    // `x b/y`). A `/dev/null` side carries no name: take the other side.
+    oldPath = minusPath;
+    newPath = plusPath;
+    if (oldPath === "/dev/null") oldPath = newPath;
+    if (newPath === "/dev/null") newPath = oldPath;
+  } else {
+    // No `---`/`+++` pair (binary / header-only section): fall back to
+    // the `diff --git` header split.
+    ({ oldPath, newPath } = parseDiffGitPaths(header.slice(DIFF_GIT.length)));
   }
 
   const label = stripSide(newPath) || stripSide(oldPath);
@@ -384,9 +450,19 @@ function parseFileSection(sectionIn: string[]): TangledChangedFile {
   let additions = 0;
   let deletions = 0;
   if (!binary) {
-    for (const line of section) {
-      if (line.startsWith("+") && !line.startsWith("+++")) additions++;
-      else if (line.startsWith("-") && !line.startsWith("---")) deletions++;
+    // The `+++`/`---` file-header exclusion applies only BEFORE the first
+    // hunk; inside hunks every `+`/`-` line counts (a `+++` in a hunk is a
+    // deletion of a `+` line), and `\` lines (e.g. "no newline") are
+    // excluded naturally.
+    for (let i = 0; i < section.length; i++) {
+      const line = section[i]!;
+      if (hunkStart === -1 || i < hunkStart) {
+        if (line.startsWith("+") && !line.startsWith("+++")) additions++;
+        else if (line.startsWith("-") && !line.startsWith("---")) deletions++;
+      } else {
+        if (line.startsWith("+")) additions++;
+        else if (line.startsWith("-")) deletions++;
+      }
     }
   }
 
@@ -489,8 +565,42 @@ function parseDiffGitPaths(rest: string): { oldPath: string; newPath: string } {
   return { oldPath: rest.slice(0, sp), newPath: rest.slice(sp + 1) };
 }
 
+/** Parse the single path of a `--- ` / `+++ ` file-header line. Git
+ * appends a trailing tab when the path is quoted or carries a space; a
+ * quoted path goes through the C-style decoder and must be the whole
+ * (tab-stripped) value. */
+function parseSidePath(raw: string): string {
+  const rest = raw.endsWith("\t") ? raw.slice(0, -1) : raw;
+  if (!rest.startsWith('"')) return rest;
+  const r = decodeQuotedPath(rest, 0);
+  if (r.end !== rest.length) {
+    throw new TangledPatchError(
+      "malformed-patch",
+      `trailing content after quoted path in file-header line: ${raw}`,
+    );
+  }
+  return r.value;
+}
+
+/** Decode a `rename from` / `rename to` value: a value starting with `"`
+ * goes through the C-style quoted-path decoder (and must be fully
+ * consumed); unquoted values pass through unchanged. */
+function decodeRenameValue(raw: string): string {
+  if (!raw.startsWith('"')) return raw;
+  const r = decodeQuotedPath(raw, 0);
+  if (r.end !== raw.length) {
+    throw new TangledPatchError(
+      "malformed-patch",
+      `trailing content after quoted path in rename line: ${raw}`,
+    );
+  }
+  return r.value;
+}
+
 /** Decode a C-style quoted path starting at `from` (which must be `"`).
- * Returns the decoded string and the index just past the closing quote. */
+ * Recognized escapes: `\\`, `"`, `\a`, `\b`, `\v`, `\f`, `\r`, `\n`,
+ * `\t`, and `\NNN` octal. Returns the decoded string and the index just
+ * past the closing quote. */
 function decodeQuotedPath(s: string, from: number): { value: string; end: number } {
   if (s.charAt(from) !== '"') {
     throw new TangledPatchError("malformed-patch", "unparseable path quoting (missing open quote)");
@@ -506,8 +616,7 @@ function decodeQuotedPath(s: string, from: number): { value: string; end: number
       break;
     }
     if (c !== "\\") {
-      pushCharUtf8(bytes, c);
-      i += 1;
+      i += pushCodePointUtf8(bytes, s, i);
       continue;
     }
     const n = s.charAt(i + 1);
@@ -517,6 +626,21 @@ function decodeQuotedPath(s: string, from: number): { value: string; end: number
       i += 2;
     } else if (n === "t") {
       bytes.push(0x09);
+      i += 2;
+    } else if (n === "r") {
+      bytes.push(0x0d);
+      i += 2;
+    } else if (n === "a") {
+      bytes.push(0x07);
+      i += 2;
+    } else if (n === "b") {
+      bytes.push(0x08);
+      i += 2;
+    } else if (n === "v") {
+      bytes.push(0x0b);
+      i += 2;
+    } else if (n === "f") {
+      bytes.push(0x0c);
       i += 2;
     } else if (n === '"') {
       bytes.push(0x22);
@@ -558,11 +682,15 @@ function decodeQuotedPath(s: string, from: number): { value: string; end: number
   return { value, end: i + 1 };
 }
 
-/** Append the UTF-8 bytes of one character (surrogates pass through as
- * their lone code units; a lone surrogate then fails the fatal UTF-8
- * decode above, which is the fail-closed outcome). */
-function pushCharUtf8(bytes: number[], c: string): void {
-  const cp = c.codePointAt(0)!;
+/** Append the UTF-8 bytes of the code point at index `i` of `s` and
+ * return the number of UTF-16 units consumed (1, or 2 for a surrogate
+ * pair). Code points — not code units — are the unit of encoding (as
+ * `Array.from` sees the string), so astral characters (emoji, …) survive
+ * the fatal UTF-8 decode; a lone surrogate still encodes to invalid
+ * UTF-8 and fails that decode, which is the fail-closed outcome. */
+function pushCodePointUtf8(bytes: number[], s: string, i: number): number {
+  const cp = s.codePointAt(i)!;
+  const consumed = cp >= 0x10000 ? 2 : 1;
   if (cp < 0x80) bytes.push(cp);
   else if (cp < 0x800) bytes.push(0xc0 | (cp >> 6), 0x80 | (cp & 0x3f));
   else if (cp < 0x10000)
@@ -574,4 +702,5 @@ function pushCharUtf8(bytes: number[], c: string): void {
       0x80 | ((cp >> 6) & 0x3f),
       0x80 | (cp & 0x3f),
     );
+  return consumed;
 }

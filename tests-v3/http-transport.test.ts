@@ -17,6 +17,7 @@ interface Call {
   url: string;
   auth: string | null;
   userAgent: string | null;
+  method: string | undefined;
   redirect: string | undefined;
   signal: AbortSignal | null | undefined;
 }
@@ -32,6 +33,7 @@ function makeFetch(
       url: url.toString(),
       auth: headers.get("authorization"),
       userAgent: headers.get("user-agent"),
+      method: init?.method,
       redirect: init?.redirect as string | undefined,
       signal: init?.signal,
     });
@@ -154,6 +156,16 @@ test("requestBytes: a non-2xx status returns the status with the body read the s
     (e: unknown) => e instanceof PlatformRequestError && e.kind === "too-large",
     "the cap applies to error responses too",
   );
+});
+
+test("requestBytes: is a read-only GET by construction (no body, method fixed)", async () => {
+  const { fetchImpl, calls } = makeFetch(() => new Response(new Uint8Array([1])));
+  await requestBytes("https://pds.example.com/blob", {
+    ...base(),
+    fetchImpl,
+  });
+  assert.equal(calls[0]!.method, "GET", "the binary read helper is a GET regardless of caller input");
+  assert.equal(calls[0]!.auth, null, "no token means no Authorization header");
 });
 
 // ── the security boundary ──────────────────────────────────────────────────

@@ -16,6 +16,12 @@ import { PlatformRequestError, requestBytes, requestJson, type FetchLike } from 
  * (via `requestBytes`'s `allowedOrigin`), never in the URL, argv, or
  * diagnostics.
  *
+ * Credential boundary (pinned): the resolved PDS endpoint is author-resolved
+ * metadata. `https` endpoints keep the token; a plaintext `http` endpoint —
+ * accepted here only for loopback hosts — is public by construction, so the
+ * token is dropped silently before the request and never delivered over an
+ * unencrypted channel. Public blob reads are unauthenticated.
+ *
  * DID resolution is deliberately narrow and fails closed:
  * - `did:plc` resolves through the PLC directory (`https://plc.directory/<did>`);
  * - `did:web` resolves through the host's `.well-known/did.json`
@@ -69,10 +75,15 @@ export interface BlobFetchOptions {
  * Mirrors `tangled.ts`'s loopback policy. */
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
-const DID_RE = /^did:(plc|web):(.+)$/;
+// The method-specific id is non-empty and must contain none of /, ?, #, %,
+// backslash, or whitespace — exactly the characters that let a DID smuggle a
+// path/query/fragment past the `did:method:` prefix (e.g.
+// `did:plc:abc/../admin` reaching `https://plc.directory/admin`). Fail
+// closed before any URL is built.
+const DID_RE = /^did:(plc|web):([^\/?#%\\\s]+)$/;
 
 const WEB_HOST_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
-const IPV4_RE = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
 
 /** The `#atproto_pds` service entry in a DID document. */
 const PDS_SERVICE_ID = "#atproto_pds";
@@ -94,7 +105,14 @@ function parseDid(did: string): { method: "plc" | "web"; methodSpecificId: strin
   const method =
     did.startsWith("did:") && did.indexOf(":", 4) !== -1 ? did.slice(4, did.indexOf(":", 4)) : undefined;
   if (method === "plc" || method === "web") {
-    throw new TangledBlobError("invalid-did", `DID has an empty method-specific id: ${did}`);
+    const id = did.slice(did.indexOf(":", 4) + 1);
+    if (id === "") {
+      throw new TangledBlobError("invalid-did", `DID has an empty method-specific id: ${did}`);
+    }
+    throw new TangledBlobError(
+      "invalid-did",
+      `DID method-specific id must not contain /, ?, #, %, \\, or whitespace: ${did}`,
+    );
   }
   if (method !== undefined) {
     throw new TangledBlobError(
@@ -106,8 +124,10 @@ function parseDid(did: string): { method: "plc" | "web"; methodSpecificId: strin
 }
 
 /** A did:web method-specific-id is `host[:port]`: a hostname or IPv4
- * literal, optional explicit port, and nothing else (no embedded path,
- * query, or fragment characters). Fail closed on anything else. */
+ * literal (octets <= 255), an optional port in 1..65535, and nothing else
+ * (no embedded path, query, or fragment characters). All-numeric hosts that
+ * are not a 4-octet IPv4 literal are rejected too, so a numeric label can
+ * never masquerade as a hostname. Fail closed on anything else. */
 function didWebHost(did: string, methodSpecificId: string): string {
   const colon = methodSpecificId.indexOf(":");
   const host = colon === -1 ? methodSpecificId : methodSpecificId.slice(0, colon);
@@ -115,14 +135,30 @@ function didWebHost(did: string, methodSpecificId: string): string {
   if (host === "") {
     throw new TangledBlobError("invalid-did", `invalid did:web DID (empty host): ${did}`);
   }
-  const hostOk = IPV4_RE.test(host) || host.split(".").every((label) => label !== "" && WEB_HOST_LABEL_RE.test(label));
+  const allNumeric = /^\d+(?:\.\d+)*$/.test(host);
+  const hostOk =
+    isIPv4Literal(host) ||
+    (!allNumeric && host.split(".").every((label) => label !== "" && WEB_HOST_LABEL_RE.test(label)));
   if (!hostOk) {
     throw new TangledBlobError("invalid-did", `invalid did:web host (only hostnames and IPv4 literals are supported): ${did}`);
   }
-  if (port !== undefined && !/^\d{1,5}$/.test(port)) {
-    throw new TangledBlobError("invalid-did", `invalid did:web port: ${did}`);
+  if (port !== undefined && !validDidWebPort(port)) {
+    throw new TangledBlobError("invalid-did", `invalid did:web port (must be an integer in 1-65535): ${did}`);
   }
   return port === undefined ? host : `${host}:${port}`;
+}
+
+/** IPv4 literal with every octet <= 255 (e.g. `999.999.999.999` fails). */
+function isIPv4Literal(host: string): boolean {
+  const match = IPV4_RE.exec(host);
+  if (match === null) return false;
+  return [match[1], match[2], match[3], match[4]].every((octet) => Number(octet) <= 255);
+}
+
+/** Port in 1..65535: decimal digits only, no leading zeros, in range. */
+function validDidWebPort(port: string): boolean {
+  if (!/^[1-9]\d{0,4}$/.test(port)) return false;
+  return Number(port) <= 65535;
 }
 
 /**
@@ -147,7 +183,18 @@ export async function resolveAuthorPdsEndpoint(
     method === "plc"
       ? `${PLC_DIRECTORY_URL}/${did}`
       : `https://${didWebHost(did, methodSpecificId)}/.well-known/did.json`;
-  const target = new URL(docUrl);
+  let target: URL;
+  try {
+    target = new URL(docUrl);
+  } catch (error) {
+    // Defense in depth: the strict validation above should already have
+    // rejected this, but anything the URL parser still refuses is a typed
+    // resolution failure, never a raw TypeError.
+    throw new TangledBlobError(
+      "pds-resolution-failed",
+      `DID document resolution failed for ${did}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   let result: { status: number; data: unknown };
   try {
     result = await requestJson(target.toString(), {
@@ -245,6 +292,12 @@ export async function resolveAuthorPdsEndpoint(
  * transport's hard byte cap (`options.maxBytes`, default
  * `MAX_PATCH_BLOB_BYTES`). The token never appears in the URL or in any
  * error message; messages may include the did, cid, and HTTP status.
+ *
+ * Credential boundary: the PDS endpoint is author-resolved. When it is
+ * plaintext `http` (accepted only for loopback hosts), the token is dropped
+ * silently — public blob reads are unauthenticated and a credential is never
+ * delivered over an unencrypted channel. `https` keeps the token. A 2xx
+ * zero-byte body is a "read-failed" empty-blob error, never a success.
  */
 export async function fetchAtprotoBlob(
   did: string,
@@ -272,12 +325,15 @@ export async function fetchAtprotoBlob(
   const target = new URL(`${pdsUrl.origin}/xrpc/com.atproto.sync.getBlob`);
   target.searchParams.set("did", did);
   target.searchParams.set("cid", cid);
+  // Credential boundary: a plaintext http PDS endpoint (loopback-only) is
+  // public — the token is dropped silently and never travels over http.
+  const token = pdsUrl.protocol === "http:" ? undefined : options?.token;
   let result: { status: number; bytes: Uint8Array };
   try {
     result = await requestBytes(target.toString(), {
       allowedOrigin: pdsUrl.origin,
       fetchImpl: options?.fetchImpl,
-      token: options?.token,
+      token,
       timeoutMs: options?.timeoutMs,
       accept: "application/octet-stream",
       maxBytes,
@@ -305,6 +361,11 @@ export async function fetchAtprotoBlob(
   }
   if (result.status < 200 || result.status >= 300) {
     throw new TangledBlobError("read-failed", `getBlob for ${cid} returned HTTP ${result.status}`);
+  }
+  if (result.bytes.byteLength === 0) {
+    // No zero-byte success at the fetch boundary: an empty body means the
+    // blob did not actually come back.
+    throw new TangledBlobError("read-failed", `getBlob for ${cid} returned an empty blob (0 bytes)`);
   }
   return result.bytes;
 }

@@ -37,7 +37,12 @@ function buildHeaders(opts: RequestOptions, withAuth: boolean): Record<string, s
   return headers;
 }
 
-export interface BytesRequestOptions extends Omit<RequestOptions, "body"> {
+/**
+ * Read-only by construction: `body` and `method` are omitted, so a caller
+ * can never turn the binary read helper into a write (no payload, method
+ * fixed to GET).
+ */
+export interface BytesRequestOptions extends Omit<RequestOptions, "body" | "method"> {
   /** Hard cap on the total body size in bytes. */
   maxBytes: number;
 }
@@ -98,7 +103,8 @@ export async function requestText(url: string, opts: RequestOptions): Promise<{ 
  * `application/octet-stream` PDS blob downloads. Same security policy as
  * `requestText`: the origin must equal `allowedOrigin`, the credential is
  * only ever the Authorization header bound to that origin, redirects are
- * refused, and the default timeout is the same. The body is read through
+ * refused, and the default timeout is the same. It is a read-only GET by
+ * construction (`BytesRequestOptions` omits `body` and `method`). The body is read through
  * the stream with a hard `maxBytes` cap (see `readCappedBody`), so an
  * oversized or hostile response can never be buffered unboundedly.
  *
@@ -117,7 +123,7 @@ export async function requestBytes(url: string, opts: BytesRequestOptions): Prom
   const headers = buildHeaders(opts, true);
   const doFetch = opts.fetchImpl ?? fetch;
   const init: RequestInit = {
-    method: opts.method ?? "GET",
+    method: "GET",
     headers,
     redirect: "manual",
     signal: AbortSignal.timeout(opts.timeoutMs ?? 25_000),
