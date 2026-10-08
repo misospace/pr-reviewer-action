@@ -6,6 +6,7 @@ import { PlatformRequestError, requestText } from "../src/platform/http.js";
 import { deriveIsFork } from "../src/platform/pr.js";
 import { resolvePlatform, type ResolvedPlatform } from "../src/platform/resolve.js";
 import type { PlatformAdapter } from "../src/platform/types.js";
+import type { PublishPlatformName } from "../src/platform/publish-api.js";
 import { validateEndpoint } from "../src/platform/endpoint.js";
 import { parsePlatformBaseUrl, PlatformUrlError, GITHUB_API_BASE } from "../src/platform/urls.js";
 import type { FetchLike } from "../src/platform/http.js";
@@ -107,17 +108,21 @@ test("a Spindle identity resolves tangled before the Forgejo/GitHub signals (#58
   );
 });
 
-test("adapter types stay narrower than resolved identities", () => {
-  // "tangled" is a resolved identity (#583), not an implemented backend:
-  // the adapter/publish seams keep rejecting it at compile time.
+test("the adapter backend union now admits the Tangled read backend while the publish union still rejects it", () => {
+  // "tangled" is a resolved identity (#583) and, as of #585, an implemented
+  // read-side backend: the adapter seam admits it. The publish seam still
+  // rejects it at compile time (PublishPlatformName stays github/forgejo),
+  // which is what keeps publish fail-loud.
   const identity: ResolvedPlatform = "tangled";
   assert.equal(identity, "tangled");
   type Backend = PlatformAdapter["platform"];
-  // @ts-expect-error — a resolved tangled identity is not an adapter backend
+  // Tangled is now a read backend: the assignment is valid (no type error).
   const backend: Backend = "tangled";
-  // Compile-time pin only: the assignment above must stay a type error, or
-  // the adapter seam has silently widened to the unimplemented backend.
-  void backend;
+  assert.equal(backend, "tangled");
+  type PublishName = PublishPlatformName;
+  // @ts-expect-error — Tangled is not a publish backend (#585 is read-side only).
+  const publish: PublishName = "tangled";
+  void publish;
 });
 
 // ── Endpoint validation (cross-backend security decisions) ──────────────

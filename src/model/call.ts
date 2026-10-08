@@ -9,13 +9,14 @@ import type {
 import { VerdictParseFailure } from "./types.js";
 import { buildModelRequest } from "./request.js";
 import { parseVerdictResponse } from "./verdict.js";
-import { RETRYABLE_HTTP_STATUSES, runChatRequest, type ChatRequestOutcome } from "../transport/transport.js";
+import { runChatRequest, type ChatRequestOutcome } from "../transport/transport.js";
 import { describeTransportFailure, TransportFailure } from "../transport/http.js";
 
 /**
  * Port of the v2 `call_model_tier` retry loop (scripts/model_call.sh): one
  * tier, one retry budget, typed failures. Semantics preserved exactly:
- * - non-retryable HTTP statuses fail fast to fallback without a tier retry;
+ * - the tier's permanent HTTP set (400/401/403/404) fails fast to fallback;
+ *   all other statuses, including 5xx such as 524, consume the retry budget;
  * - transport/HTTP failures consume the retry budget with doubling backoff
  *   capped at 120 s;
  * - parse/validate failures cap at 2 attempts total regardless of budget
@@ -37,6 +38,14 @@ import { describeTransportFailure, TransportFailure } from "../transport/http.js
 export const EMPTY_COMPLETION_EXIT = 3;
 export const PARSE_FAIL_CAP = 2;
 export const MAX_RETRY_DELAY_SEC = 120;
+
+/** #1006: Tier-level permanent HTTP statuses, distinct from the transport's
+ * same-request retry allowlist. #987 borrowed that transport set as the tier's
+ * permanence rule, so statuses it does not retry (including transient 524)
+ * bypassed the configured tier retry budget. These four are the #978 set: an
+ * authentication/model/configuration error a later attempt cannot fix. Every
+ * other status (all 5xx, 429, other 4xx, unknown status) keeps the tier budget. */
+const TIER_PERMANENT_HTTP_STATUSES: ReadonlySet<number> = new Set([400, 401, 403, 404]);
 
 export interface TierProfile {
   label: string;
@@ -96,16 +105,12 @@ async function defaultSleep(seconds: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, seconds * 1000));
 }
 
-/** #978: the transport only retries 429/500/502/503/504; any other HTTP
- * status is final. Retrying it spends the tier's whole backoff budget
- * (8 attempts, capped at 120 s) on an error that cannot change — a 403
- * "model not allowed for this API key" cost ~10 minutes before fallback.
- * Non-HTTP failures (timeouts, network) and an unknown status keep the
- * existing retry behaviour. */
+/** #1006: Only the tier-level permanent set skips the retry budget. The
+ * transport's same-request retry policy is independent. */
 function isRetryableTransportFailure(failure: TransportFailure): boolean {
   if (failure.kind !== "http_status") return true;
   if (failure.status === undefined) return true;
-  return RETRYABLE_HTTP_STATUSES.has(failure.status);
+  return !TIER_PERMANENT_HTTP_STATUSES.has(failure.status);
 }
 
 export async function callModelTier(

@@ -13,7 +13,7 @@ import { forgejoJobStatusPathsMatch, forgejoSelfStatusMatches, forgejoSelfRunOri
 import { pyQuote, pyStr } from "../src/platform/py.js";
 import { parseRepoRef, repoScopedUrl } from "../src/platform/repo-ref.js";
 import { SemanticFixtureAdapter, semanticFixtureDir } from "../src/platform/semantic-fixture.js";
-import { TangledNotImplementedError } from "../src/platform/tangled.js";
+import { TangledAdapter } from "../src/platform/tangled-adapter.js";
 import { buildPlatformReadAdapter } from "../src/run/platform.js";
 
 interface Seen {
@@ -919,20 +919,21 @@ test("github getPrBodyRevision returns body and lastEditedAt from ONE GraphQL do
   assert.equal(await new GitHubAdapter({ repo: "o/r", prNumber: "1", fetchImpl: failing.fetchImpl }).getPrBodyRevision(), null);
 });
 
-test("a resolved tangled platform fails closed before fixture interception (#583)", () => {
-  // Same ordering as `_platform_tangled_guard` in scripts/platform_api.sh:
-  // the guard runs before the eval fixture seam, so tangled can never fall
-  // back into any adapter construction path, fixture or real.
+test("a resolved tangled platform builds the Tangled read adapter before fixture interception (#585)", () => {
+  // Same ordering as the v2 shell seam's tangled guard: the Tangled branch
+  // runs before the fixture seam, so a resolved Tangled run never falls back
+  // into the fixture path (or any github/forgejo adapter) — it gets the
+  // read-only TangledAdapter. Tangled addresses repos by DID, not owner/repo,
+  // so the env carries no REPO/PR_NUMBER.
   const dir = mkdtempSync(join(tmpdir(), "semantic-"));
   try {
     mkdirSync(join(dir, ".semantic-fixture"));
     writeFileSync(join(dir, ".semantic-fixture", "pr.json"), "{}");
     const env: Record<string, string> = {
-      REPO: "o/r", PR_NUMBER: "9",
       PLATFORM: "tangled", TANGLED_REPO_DID: "did:plc:repo",
       SEMANTIC_FIXTURE_MODE: "true", SEMANTIC_FIXTURE_DIR: dir,
     };
-    assert.throws(() => buildPlatformReadAdapter(env), TangledNotImplementedError);
+    assert.ok(buildPlatformReadAdapter(env) instanceof TangledAdapter);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

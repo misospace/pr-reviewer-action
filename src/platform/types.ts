@@ -1,6 +1,12 @@
 /** Platform adapter contract (#674): the typed seam every host-forge
  * interaction goes through. Shapes mirror the v2 platform seam so callers
- * cannot tell which platform served a payload. */
+ * cannot tell which platform served a payload.
+ *
+ * `platform` names the backend that served the payload. GitHub and Forgejo
+ * are full read/write backends; Tangled (#585) is a read-only, metadata-only
+ * backend — it resolves the canonical pull and projects it into the same
+ * GitHub-REST pull shape, and everything beyond metadata reads fails closed.
+ */
 
 export interface ManagedComment {
   id?: number | string | undefined;
@@ -26,7 +32,7 @@ export interface GhApiResult {
 }
 
 export interface PlatformAdapter {
-  readonly platform: "github" | "forgejo";
+  readonly platform: "github" | "forgejo" | "tangled";
   /** PR object (GitHub REST shape) or null when the fetch fails. */
   getPr(): Promise<unknown | null>;
   /** Raw unified diff text; "" when unavailable. */
