@@ -55,6 +55,11 @@ export class TangledAdapter implements PlatformReadAdapter {
   /** The resolved canonical pull, bound once and reused by every `getPr`
    * call and exposed via `pullIdentity`. `null` until a resolution succeeds. */
   private identity: TangledPullIdentity | null = null;
+  /** The in-flight `resolveTangledPull` call, shared by concurrent `getPr`
+   * calls so exactly one Bobbin round-trip happens. `null` when idle or once
+   * the resolution settles: a success binds `identity`, a failure clears the
+   * slot so a later call retries. */
+  private inFlight: Promise<TangledPullIdentity> | null = null;
 
   constructor(options: TangledAdapterOptions) {
     this.context = options.context;
@@ -71,19 +76,34 @@ export class TangledAdapter implements PlatformReadAdapter {
   }
 
   /** Resolve the canonical pull once, project it into the GitHub-REST shape,
-   * and cache both. Any resolver or transport failure resolves to `null`
-   * (the `getPr` contract) rather than throwing. */
+   * and cache both. Concurrency-safe: the first `getPr` starts the single
+   * `resolveTangledPull` round-trip and concurrent calls await that same
+   * in-flight promise, so only one Bobbin call happens. Any resolver or
+   * transport failure resolves to `null` (the `getPr` contract) rather than
+   * throwing, and clears the in-flight slot so a later call retries. */
   async getPr(): Promise<unknown | null> {
     if (this.identity !== null) return this.project(this.identity);
-    const options: ResolveTangledPullOptions = { fetchImpl: this.fetchImpl };
-    if (this.token !== undefined) options.token = this.token;
-    if (this.timeoutMs !== undefined) options.timeoutMs = this.timeoutMs;
+    if (this.inFlight === null) {
+      const options: ResolveTangledPullOptions = { fetchImpl: this.fetchImpl };
+      if (this.token !== undefined) options.token = this.token;
+      if (this.timeoutMs !== undefined) options.timeoutMs = this.timeoutMs;
+      this.inFlight = (async () => {
+        try {
+          const resolved = await resolveTangledPull(this.context, options);
+          this.identity = resolved;
+          return resolved;
+        } finally {
+          this.inFlight = null;
+        }
+      })();
+    }
+    const pending = this.inFlight;
     try {
-      this.identity = await resolveTangledPull(this.context, options);
+      await pending;
     } catch {
       return null;
     }
-    return this.project(this.identity);
+    return this.identity !== null ? this.project(this.identity) : null;
   }
 
   /** Project a resolved pull into the GitHub-REST pull shape consumed by
@@ -103,12 +123,7 @@ export class TangledAdapter implements PlatformReadAdapter {
     const createdAtValue = typeof createdAt === "string" ? createdAt : null;
     const pr: Record<string, unknown> = {
       title: typeof record.title === "string" ? record.title : "",
-      body:
-        typeof record.description === "string"
-          ? record.description
-          : typeof record.body === "string"
-            ? record.body
-            : null,
+      body: typeof record.description === "string" ? record.description : null,
       state: identity.state ?? "",
       user: { login: identity.authorDid },
       head: {
@@ -126,7 +141,6 @@ export class TangledAdapter implements PlatformReadAdapter {
       },
       merged_at: null,
       created_at: createdAtValue,
-      updated_at: createdAtValue,
       // The canonical AT-URI is the stable reference; the knot web route is
       // unknown and must not be invented.
       url: identity.uri,
@@ -135,7 +149,11 @@ export class TangledAdapter implements PlatformReadAdapter {
     };
     // `number` is intentionally absent: Tangled pulls have no numeric
     // identity, and `canonicalPullRequest` already coerces a missing number
-    // to 0 — we never synthesize one.
+    // to 0 — we never synthesize one. The draft flag is written only when
+    // the record carries a real boolean; an honest absence means
+    // `deriveDraftState` returns "unknown" (the later precheck-integration
+    // ticket decides which side that fails to), and the precheck guard still
+    // rejects tangled today.
     const draft = record.draft;
     if (typeof draft === "boolean") pr.draft = draft;
     return pr;
@@ -192,9 +210,12 @@ export class TangledAdapter implements PlatformReadAdapter {
     return { ok: false, error: tangledCapabilityError("paginated review reads").message };
   }
 
-  /** External checks are unavailable; `null` is the seam's "unknown / both
-   * reads empty" signal, so a Tangled run never fabricates a check result. */
+  /** External check reads fail loud, never `null`: the seam's `null` return
+   * is the transient-retry signal (a read that failed and may succeed on a
+   * later attempt), not a capability-absent one, so returning it here would
+   * make the CI gate retry a capability that does not exist yet. Throws the
+   * scoped capability error until the gate ticket wires real Tangled checks. */
   async externalChecks(_sha: string, _options?: ExternalChecksOptions): Promise<ExternalCheck[] | null> {
-    return null;
+    throw tangledCapabilityError("external check reads");
   }
 }

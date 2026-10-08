@@ -108,7 +108,7 @@ test("getPr resolves the canonical pull and projects it to the GitHub-REST shape
   assert.deepEqual(base.repo, { full_name: "did:plc:repo" });
   assert.equal(pr.merged_at, null);
   assert.equal(pr.created_at, "2026-01-02T03:04:05Z");
-  assert.equal(pr.updated_at, "2026-01-02T03:04:05Z");
+  assert.equal("updated_at" in pr, false, "tangled has no update timestamp; only created_at is projected");
   assert.equal(pr.url, PULL_URI);
   assert.equal(pr.html_url, PULL_URI);
   assert.deepEqual(pr.labels, []);
@@ -186,6 +186,50 @@ test("the canonical pull is resolved once and cached across repeated getPr calls
   assert.equal(calls.length, 1, "repeated reads must not re-resolve");
 });
 
+test("concurrent getPr calls share a single resolver round-trip", async () => {
+  const { fetchImpl, calls } = makeFetch(() => json(listOne()));
+  const adapter = new TangledAdapter({ context: makeCtx(), fetchImpl });
+  const [a, b] = await Promise.all([adapter.getPr(), adapter.getPr()]);
+  assert.deepEqual(a, b);
+  assert.equal(calls.length, 1, "concurrent reads must share one in-flight resolution");
+});
+
+test("a failed getPr is not cached: a later call re-resolves and succeeds", async () => {
+  let fail = true;
+  const { fetchImpl, calls } = makeFetch(() => {
+    if (fail) {
+      fail = false;
+      throw new TypeError("transient network");
+    }
+    return json(listOne());
+  });
+  const adapter = new TangledAdapter({ context: makeCtx(), fetchImpl });
+  assert.equal(await adapter.getPr(), null, "the failed read resolves to null");
+  assert.equal(adapter.pullIdentity, null, "a failed resolution caches nothing");
+  const pr = recordOf(await adapter.getPr());
+  assert.equal(pr.title, "Add tangled read adapter", "the retry resolves normally");
+  assert.equal(calls.length, 2, "one failed attempt plus one successful retry");
+});
+
+test("a record missing optional fields projects empty/null values, never guesses", async () => {
+  const sparse = makeFetch(() =>
+    json({
+      items: [
+        listItem(
+          { target: { branch: "main", repo: "did:plc:repo" }, source: { branch: "feat/x", repo: "did:plc:repo" } },
+          "open",
+        ),
+      ],
+      cursor: null,
+    }),
+  );
+  const pr = recordOf(await new TangledAdapter({ context: makeCtx(), fetchImpl: sparse.fetchImpl }).getPr());
+  assert.equal(pr.title, "", "a missing title projects empty, never a guess");
+  assert.equal(pr.body, null, "a missing description projects null body");
+  assert.equal(pr.created_at, null, "a missing createdAt projects null");
+  assert.equal("updated_at" in pr, false);
+});
+
 // ── unimplemented capabilities ───────────────────────────────────────────
 
 test("every non-metadata read fails closed with a capability-scoped error", async () => {
@@ -228,8 +272,12 @@ test("every non-metadata read fails closed with a capability-scoped error", asyn
     assert.equal(r.ok, false);
     if (!r.ok) assert.ok(r.error !== "", "every ReadResult failure carries a capability message");
   }
-  // externalChecks is unavailable → null ("unknown"), never a fabricated result.
-  assert.equal(await adapter.externalChecks("deadbeef"), null);
+  // externalChecks fails loud: null is the seam's transient-retry signal,
+  // and a permanently-missing capability must not masquerade as a retryable read.
+  await assert.rejects(
+    () => adapter.externalChecks("deadbeef"),
+    (e: unknown) => e instanceof TangledNotImplementedError && /external check/.test(e.message),
+  );
 });
 
 // ── identity retention ───────────────────────────────────────────────────
