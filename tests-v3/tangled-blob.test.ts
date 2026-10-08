@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  type BlobFetchOptions,
   fetchAtprotoBlob,
   MAX_DID_DOCUMENT_BYTES,
   MAX_PATCH_BLOB_BYTES,
@@ -21,7 +22,7 @@ import type { Resolver } from "../src/platform/safe-fetch.js";
  */
 
 const DID = "did:plc:25f71a64d40d1479c059b236";
-const SECRET = "s3cr3t-pds-token";
+const CANARY = "s3cr3t-pds-token";
 
 /** Test seam: a "public" resolution for any non-literal host. IP-literal
  * hosts never call the resolver (they are validated directly). */
@@ -431,7 +432,15 @@ test("fetchAtprotoBlob: fetches the blob by CID from the resolved PDS with the c
     didDoc(DID, [pdsService("https://pds.example.com")]),
     () => new Response(payload),
   );
-  const bytes = await fetchAtprotoBlob(DID, "bafybeiblob0", { fetchImpl, resolver: publicResolver });
+  const bytes = await fetchAtprotoBlob(DID, "bafybeiblob0", {
+    fetchImpl,
+    resolver: publicResolver,
+    token: CANARY,
+  } as unknown as BlobFetchOptions);
+  assert.ok(
+    !calls.some((c) => c.url.includes(CANARY) || (c.auth ?? "").includes(CANARY)),
+    "the removed token option must never reach the author-resolved PDS",
+  );
   assert.deepEqual(bytes, payload);
   assert.equal(calls.length, 2);
   assert.equal(calls[0]!.url, "https://plc.directory/did:plc:25f71a64d40d1479c059b236");

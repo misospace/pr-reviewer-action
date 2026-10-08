@@ -263,15 +263,15 @@ test("requestBytes: a redirect is refused with the redirect-blocked error", asyn
 });
 
 test("requestBytes: the token travels only as Authorization to the allowed origin, never in the URL", async () => {
-  const secret = "s3cr3t-value";
+  const canary = "s3cr3t-value";
   const { fetchImpl, calls } = makeFetch(() => new Response("ok"));
   await requestBytes("https://pds.example.com/blob", {
     ...base(),
-    token: `Bearer ${secret}`,
+    token: `Bearer ${canary}`,
     fetchImpl,
   });
-  assert.equal(calls[0]!.auth, `Bearer ${secret}`);
-  assert.ok(!calls[0]!.url.includes(secret), "the token must not appear in the request URL");
+  assert.equal(calls[0]!.auth, `Bearer ${canary}`);
+  assert.ok(!calls[0]!.url.includes(canary), "the token must not appear in the request URL");
 
   const noToken = makeFetch(() => new Response("ok"));
   await requestBytes("https://pds.example.com/blob", { ...base(), fetchImpl: noToken.fetchImpl });
