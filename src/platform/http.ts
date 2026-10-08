@@ -37,6 +37,11 @@ function buildHeaders(opts: RequestOptions, withAuth: boolean): Record<string, s
   return headers;
 }
 
+export interface BytesRequestOptions extends Omit<RequestOptions, "body"> {
+  /** Hard cap on the total body size in bytes. */
+  maxBytes: number;
+}
+
 /**
  * Single transport for both platform adapters (#674).
  *
@@ -86,6 +91,103 @@ export async function requestText(url: string, opts: RequestOptions): Promise<{ 
     );
   }
   return { status: response.status, text: await response.text(), headers: response.headers };
+}
+
+/**
+ * Binary GET sibling of `requestText` (#586) for raw-byte endpoints such as
+ * `application/octet-stream` PDS blob downloads. Same security policy as
+ * `requestText`: the origin must equal `allowedOrigin`, the credential is
+ * only ever the Authorization header bound to that origin, redirects are
+ * refused, and the default timeout is the same. The body is read through
+ * the stream with a hard `maxBytes` cap (see `readCappedBody`), so an
+ * oversized or hostile response can never be buffered unboundedly.
+ *
+ * Like `requestText`, non-2xx statuses are returned as `{ status, bytes }`
+ * with the body read the same capped way, so the caller maps the status.
+ */
+export async function requestBytes(url: string, opts: BytesRequestOptions): Promise<{ status: number; bytes: Uint8Array }> {
+  const target = new URL(url);
+  if (target.origin !== opts.allowedOrigin) {
+    throw new PlatformRequestError(
+      `Refusing to send a request to an origin outside the validated platform base (${target.origin} != ${opts.allowedOrigin})`,
+      null,
+      "origin-mismatch",
+    );
+  }
+  const headers = buildHeaders(opts, true);
+  const doFetch = opts.fetchImpl ?? fetch;
+  const init: RequestInit = {
+    method: opts.method ?? "GET",
+    headers,
+    redirect: "manual",
+    signal: AbortSignal.timeout(opts.timeoutMs ?? 25_000),
+  };
+  let response: Response;
+  try {
+    response = await doFetch(target, init);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new PlatformRequestError(`Platform request failed: ${message}`, null, "transport");
+  }
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers.get("location") ?? "unknown";
+    throw new PlatformRequestError(
+      `Redirect blocked (${response.status} -> ${location}); credentials are never forwarded to another origin`,
+      response.status,
+      "redirect-blocked",
+    );
+  }
+  let bytes: Uint8Array;
+  try {
+    bytes = await readCappedBody(response, opts.maxBytes);
+  } catch (error) {
+    if (error instanceof PlatformRequestError) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new PlatformRequestError(`Platform request body read failed: ${message}`, response.status, "transport");
+  }
+  return { status: response.status, bytes };
+}
+
+/**
+ * Reads `response.body` chunk by chunk with a hard cap. The moment the
+ * running total would exceed `maxBytes` (strictly greater — a body of
+ * exactly `maxBytes` bytes is fine) the stream is cancelled and a
+ * `PlatformRequestError` of kind "too-large" is thrown, so the cap is
+ * enforced as the bytes arrive rather than after an unbounded read. An
+ * absent (null) body is an empty payload; a non-2xx body is read the same
+ * capped way so error responses can never blow past the budget either.
+ */
+async function readCappedBody(response: Response, maxBytes: number): Promise<Uint8Array> {
+  if (response.body === null) return new Uint8Array(0);
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const result = await reader.read();
+      if (result.done) break;
+      const chunk: Uint8Array = result.value ?? new Uint8Array(0);
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new PlatformRequestError(
+          `Response body exceeds the ${maxBytes}-byte cap (at least ${total} bytes received)`,
+          response.status,
+          "too-large",
+        );
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
 }
 
 export async function requestJson(url: string, opts: RequestOptions): Promise<{ status: number; data: unknown }> {
