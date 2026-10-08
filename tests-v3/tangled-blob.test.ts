@@ -36,6 +36,7 @@ const allowAll = () => true;
 interface Call {
   url: string;
   auth: string | null;
+  headerDump: string;
 }
 
 function makeFetch(
@@ -45,7 +46,8 @@ function makeFetch(
   const fetchImpl: FetchLike = async (input, init) => {
     const url = new URL(String(input));
     const headers = new Headers(init?.headers);
-    calls.push({ url: url.toString(), auth: headers.get("authorization") });
+    const headerDump = [...headers.entries()].map(([k, v]) => `${k}: ${v}`).join("; ");
+    calls.push({ url: url.toString(), auth: headers.get("authorization"), headerDump });
     return responder(url, init);
   };
   return { fetchImpl, calls };
@@ -432,15 +434,7 @@ test("fetchAtprotoBlob: fetches the blob by CID from the resolved PDS with the c
     didDoc(DID, [pdsService("https://pds.example.com")]),
     () => new Response(payload),
   );
-  const bytes = await fetchAtprotoBlob(DID, "bafybeiblob0", {
-    fetchImpl,
-    resolver: publicResolver,
-    token: CANARY,
-  } as unknown as BlobFetchOptions);
-  assert.ok(
-    !calls.some((c) => c.url.includes(CANARY) || (c.auth ?? "").includes(CANARY)),
-    "the removed token option must never reach the author-resolved PDS",
-  );
+  const bytes = await fetchAtprotoBlob(DID, "bafybeiblob0", { fetchImpl, resolver: publicResolver });
   assert.deepEqual(bytes, payload);
   assert.equal(calls.length, 2);
   assert.equal(calls[0]!.url, "https://plc.directory/did:plc:25f71a64d40d1479c059b236");
@@ -457,13 +451,28 @@ test("fetchAtprotoBlob: fetches the blob by CID from the resolved PDS with the c
 });
 
 test("fetchAtprotoBlob: no request ever carries an Authorization header", async () => {
+  // The caller supplies the removed legacy `token` option via cast to pin that it stays inert.
   const { fetchImpl, calls } = twoHop(
     didDoc(DID, [pdsService("https://pds.example.com")]),
     () => new Response(new Uint8Array([1])),
   );
-  await fetchAtprotoBlob(DID, "bafybeiblob0", { fetchImpl, resolver: publicResolver });
+  await fetchAtprotoBlob(DID, "bafybeiblob0", {
+    fetchImpl,
+    resolver: publicResolver,
+    token: CANARY,
+  } as unknown as BlobFetchOptions);
   assert.equal(calls[0]!.auth, null, "the DID document request is never authenticated");
   assert.equal(calls[1]!.auth, null, "the getBlob request to the author-resolved PDS is never authenticated");
+  for (const call of calls) {
+    assert.ok(
+      !call.url.includes(CANARY),
+      "the removed token option must never reach the author-resolved PDS origin: no canary in any URL",
+    );
+    assert.ok(
+      !call.headerDump.includes(CANARY),
+      "the removed token option must never reach the author-resolved PDS origin: no canary in any header",
+    );
+  }
 });
 
 test("fetchAtprotoBlob: a 404 maps to read-failed naming the missing blob", async () => {
