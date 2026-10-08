@@ -22,12 +22,17 @@ import { TangledBlobError } from "../src/platform/tangled-blob.js";
 import { TangledPatchError } from "../src/platform/tangled-patch.js";
 import type { TangledPullIdentity } from "../src/platform/tangled-bobbin.js";
 import type { FetchLike } from "../src/platform/http.js";
+import type { Resolver } from "../src/platform/safe-fetch.js";
 
 // ── fixtures ─────────────────────────────────────────────────────────
 
 const DID = "did:plc:25f71a64d40d1479c059b236";
 const PDS = "https://pds.example.com";
 const SECRET = "s3cr3t-diff-token";
+
+/** Test seam: a "public" resolution for the non-literal PDS host so the
+ * always-on SSRF gate passes with the mocked transport (no real DNS). */
+const publicResolver: Resolver = async () => ["93.184.216.34"];
 
 /** The 40-hex sha in the fixture patch's `From` line. */
 const SHA = "8f1c3b0e47e6a2d5f8c0b9a4d1e2f3a6c7b8d9e0";
@@ -131,13 +136,15 @@ test("fetchTangledPullRoundDiff: end-to-end over the real fetchAtprotoBlob defau
   const { fetchImpl, calls } = twoHop(doc, () => new Response(GZIP_PATCH));
   const result = await fetchTangledPullRoundDiff(
     makeIdentity({ rounds: [roundWith("bafybeicurrent")] }),
-    { fetchImpl },
+    { fetchImpl, resolver: publicResolver },
   );
 
   // The two hops: the unauthenticated public DID document, then getBlob on
   // the resolved PDS with the author DID + the round CID bound to the URL.
   assert.equal(calls.length, 2);
   assert.equal(calls[0]!.url, "https://plc.directory/did:plc:25f71a64d40d1479c059b236");
+  assert.equal(calls[0]!.auth, null, "the DID document request is never authenticated");
+  assert.equal(calls[1]!.auth, null, "the getBlob request to the author-resolved PDS is never authenticated");
   assert.equal(
     calls[1]!.url,
     `${PDS}/xrpc/com.atproto.sync.getBlob?did=${encodeURIComponent(DID)}&cid=bafybeicurrent`,
@@ -201,7 +208,7 @@ test("fetchTangledPullRoundDiff: a multi-round record fetches the LAST round's C
   const record = {
     rounds: [roundWith("bafybeicidold", "2026-01-04T09:00:00Z"), roundWith("bafybeicurrent")],
   };
-  const result = await fetchTangledPullRoundDiff(makeIdentity(record), { fetchImpl });
+  const result = await fetchTangledPullRoundDiff(makeIdentity(record), { fetchImpl, resolver: publicResolver });
   assert.equal(calls.length, 2);
   assert.equal(
     calls[1]!.url,
@@ -230,7 +237,10 @@ test("fetchTangledPullRoundDiff: a non-gzip blob rejects undecodable-blob", asyn
   const doc = didDoc(DID, [pdsService(PDS)]);
   const { fetchImpl } = twoHop(doc, () => new Response(new TextEncoder().encode("definitely not gzip")));
   await assert.rejects(
-    fetchTangledPullRoundDiff(makeIdentity({ rounds: [roundWith("bafybeicorrupt")] }), { fetchImpl }),
+    fetchTangledPullRoundDiff(makeIdentity({ rounds: [roundWith("bafybeicorrupt")] }), {
+      fetchImpl,
+      resolver: publicResolver,
+    }),
     (e: unknown) => e instanceof TangledPatchError && e.kind === "undecodable-blob",
   );
 });
@@ -239,7 +249,10 @@ test("fetchTangledPullRoundDiff: a 404 getBlob rejects read-failed", async () =>
   const doc = didDoc(DID, [pdsService(PDS)]);
   const { fetchImpl } = twoHop(doc, () => json({ error: "notFound", message: "blob not found" }, 404));
   await assert.rejects(
-    fetchTangledPullRoundDiff(makeIdentity({ rounds: [roundWith("bafybeimissing")] }), { fetchImpl }),
+    fetchTangledPullRoundDiff(makeIdentity({ rounds: [roundWith("bafybeimissing")] }), {
+      fetchImpl,
+      resolver: publicResolver,
+    }),
     (e: unknown) =>
       e instanceof TangledBlobError &&
       e.kind === "read-failed" &&
@@ -271,18 +284,21 @@ test("fetchTangledPullRoundDiff: an injected fetchBlob replaces the network (zer
   assert.equal(result.declaredHeadSha, SHA);
 });
 
-test("fetchTangledPullRoundDiff: a token reaches only the getBlob request as Authorization, never the URLs", async () => {
+test("fetchTangledPullRoundDiff: no request ever carries an Authorization header", async () => {
+  // The PDS origin is author-selected metadata: the only requests this
+  // chain makes are unauthenticated public reads. SECRET is a canary that
+  // must not appear in any request, authenticated or not.
   const doc = didDoc(DID, [pdsService(PDS)]);
   const { fetchImpl, calls } = twoHop(doc, () => new Response(GZIP_PATCH));
   const result = await fetchTangledPullRoundDiff(
     makeIdentity({ rounds: [roundWith("bafybeicitok")] }),
-    { fetchImpl, token: `Bearer ${SECRET}` },
+    { fetchImpl, resolver: publicResolver },
   );
   assert.equal(calls.length, 2);
-  assert.equal(calls[0]!.auth, null, "the DID document request never carries the token");
-  assert.equal(calls[1]!.auth, `Bearer ${SECRET}`, "the getBlob request carries the token as Authorization");
+  assert.equal(calls[0]!.auth, null, "the DID document request is never authenticated");
+  assert.equal(calls[1]!.auth, null, "the getBlob request to the author-resolved PDS is never authenticated");
   for (const call of calls) {
-    assert.ok(!call.url.includes(SECRET), "the token must never appear in a request URL");
+    assert.ok(!call.url.includes(SECRET), "no credential ever travels in a request URL");
   }
-  assert.equal(result.declaredHeadSha, SHA, "the reviewable diff is unaffected by the token");
+  assert.equal(result.declaredHeadSha, SHA, "the reviewable diff is unaffected");
 });

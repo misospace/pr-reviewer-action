@@ -88,9 +88,8 @@ export async function requestText(url: string, opts: RequestOptions): Promise<{ 
     throw new PlatformRequestError(`Platform request failed: ${message}`, null, "transport");
   }
   if (response.status >= 300 && response.status < 400) {
-    const location = response.headers.get("location") ?? "unknown";
     throw new PlatformRequestError(
-      `Redirect blocked (${response.status} -> ${location}); credentials are never forwarded to another origin`,
+      `Redirect blocked (${response.status}); credentials are never forwarded to another origin and redirect targets are not reported`,
       response.status,
       "redirect-blocked",
     );
@@ -136,9 +135,8 @@ export async function requestBytes(url: string, opts: BytesRequestOptions): Prom
     throw new PlatformRequestError(`Platform request failed: ${message}`, null, "transport");
   }
   if (response.status >= 300 && response.status < 400) {
-    const location = response.headers.get("location") ?? "unknown";
     throw new PlatformRequestError(
-      `Redirect blocked (${response.status} -> ${location}); credentials are never forwarded to another origin`,
+      `Redirect blocked (${response.status}); credentials are never forwarded to another origin and redirect targets are not reported`,
       response.status,
       "redirect-blocked",
     );

@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import {
   PlatformRequestError,
   requestBytes,
+  requestText,
   type BytesRequestOptions,
   type FetchLike,
+  type RequestOptions,
 } from "../src/platform/http.js";
 import { USER_AGENT } from "../src/platform/user-agent.js";
 
@@ -100,6 +102,63 @@ test("requestBytes: an absent or empty body is an empty Uint8Array", async () =>
   });
   assert.equal(empty.status, 200);
   assert.equal(empty.bytes.byteLength, 0);
+});
+
+// ── the redirect-blocked error never leaks the Location header ───────────
+
+const CANARY = "s3cr3t-reflection-token";
+const EVIL_ORIGIN = "evil.invalid";
+const evilLocation = `https://${EVIL_ORIGIN}/reflection?tok=${CANARY}`;
+
+function hostileRedirect() {
+  return new Response(null, { status: 302, headers: { location: evilLocation } });
+}
+
+// A hostile server that received (or guessed) a credential reflects it into
+// the Location header. The redirect-blocked error must carry only the status
+// and kind — never the raw Location (or any header value) — because that
+// error flows into action logs/diagnostics.
+
+test("requestBytes: a 302 whose Location reflects a credential never leaks the header", async () => {
+  const { fetchImpl, calls } = makeFetch(() => hostileRedirect());
+  await assert.rejects(
+    requestBytes("https://pds.example.com/blob", {
+      ...base({ token: "Bearer s3cr3t-credential" }),
+      fetchImpl,
+    }),
+    (e: unknown) => {
+      assert.ok(e instanceof PlatformRequestError, "expected a PlatformRequestError");
+      assert.equal(e.kind, "redirect-blocked");
+      assert.equal(e.status, 302);
+      assert.ok(!e.message.includes(CANARY), "the raw Location value must not appear in the error message");
+      assert.ok(!e.message.includes(EVIL_ORIGIN), "the redirect target host must not appear in the error message");
+      return true;
+    },
+  );
+  // the credential really did go out to the allowed origin — this is the
+  // scenario the hostile server can reflect.
+  assert.equal(calls[0]!.auth, "Bearer s3cr3t-credential");
+});
+
+test("requestText: a 302 whose Location reflects a credential never leaks the header", async () => {
+  const { fetchImpl, calls } = makeFetch(() => hostileRedirect());
+  const opts: RequestOptions = {
+    allowedOrigin: "https://pds.example.com",
+    token: "Bearer s3cr3t-credential",
+    fetchImpl,
+  };
+  await assert.rejects(
+    requestText("https://pds.example.com/issue", opts),
+    (e: unknown) => {
+      assert.ok(e instanceof PlatformRequestError, "expected a PlatformRequestError");
+      assert.equal(e.kind, "redirect-blocked");
+      assert.equal(e.status, 302);
+      assert.ok(!e.message.includes(CANARY), "the raw Location value must not appear in the error message");
+      assert.ok(!e.message.includes(EVIL_ORIGIN), "the redirect target host must not appear in the error message");
+      return true;
+    },
+  );
+  assert.equal(calls[0]!.auth, "Bearer s3cr3t-credential");
 });
 
 // ── the byte cap ───────────────────────────────────────────────────────────

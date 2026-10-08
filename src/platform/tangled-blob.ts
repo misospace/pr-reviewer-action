@@ -1,4 +1,12 @@
 import { PlatformRequestError, requestBytes, requestJson, type FetchLike } from "./http.js";
+import { isPublicAddress } from "./ip-policy.js";
+import {
+  resolvePublicAddresses,
+  safeFetchLike,
+  systemResolver,
+  type AddressPolicy,
+  type Resolver,
+} from "./safe-fetch.js";
 
 /**
  * Read-only AT-Protocol blob client for Tangled pull rounds (#586).
@@ -10,17 +18,35 @@ import { PlatformRequestError, requestBytes, requestJson, type FetchLike } from 
  * `com.atproto.sync.getBlob` XRPC surface. Nothing here publishes, updates,
  * or deletes anything — every request is a read-only GET.
  *
- * Credential policy: the DID document is public metadata and its request
- * is NEVER authenticated. The `getBlob` request MAY carry a caller-supplied
- * token, only as the Authorization header bound to the validated PDS origin
- * (via `requestBytes`'s `allowedOrigin`), never in the URL, argv, or
- * diagnostics.
+ * Credential policy (pinned): the PDS origin is author-selected metadata, so
+ * NO credential is ever sent to an author-resolved origin. Both the DID
+ * document request and the getBlob request are unauthenticated public reads
+ * (auth: none); there is no token option anywhere on this module's API.
  *
- * Credential boundary (pinned): the resolved PDS endpoint is author-resolved
- * metadata. `https` endpoints keep the token; a plaintext `http` endpoint —
- * accepted here only for loopback hosts — is public by construction, so the
- * token is dropped silently before the request and never delivered over an
- * unencrypted channel. Public blob reads are unauthenticated.
+ * SSRF policy (pinned): every network hop whose HOST comes from untrusted
+ * (pull-author-controlled) metadata — (a) the did:web DID-document host and
+ * (b) the resolved PDS serviceEndpoint host, for BOTH the did:plc and the
+ * did:web paths — must resolve to PUBLIC addresses only, checked with
+ * `resolvePublicAddresses` + `isPublicAddress` from the shared SSRF
+ * infrastructure (`safe-fetch.ts` / `ip-policy.ts`) before any connection is
+ * opened (a failed gate is a typed `pds-resolution-failed`; IP-literal hosts
+ * are validated directly, no DNS). When no `fetchImpl` is injected, the
+ * default transport for these requests is `safeFetchLike` from
+ * `safe-fetch.ts`: the connection is pinned to the validated addresses at
+ * the socket level (no DNS-rebinding window) and redirects are never
+ * followed.
+ *
+ * The did:plc DID-document request itself goes to the constant,
+ * operator-known origin `https://plc.directory` — a trusted platform
+ * service, not author-controlled metadata — so no address gate applies to
+ * that hop (the DID string is still strictly validated below against path
+ * smuggling). It rides on the same `safeFetchLike` default transport as an
+ * extra layer (pinned public-only resolution, no redirect following).
+ *
+ * The resolved PDS endpoint must be `https:` — plaintext `http` is refused
+ * unconditionally. There is no loopback exception: a local test instance is
+ * reachable through the test-only `resolver`/`addressPolicy` seams with an
+ * `https` endpoint.
  *
  * DID resolution is deliberately narrow and fails closed:
  * - `did:plc` resolves through the PLC directory (`https://plc.directory/<did>`);
@@ -35,15 +61,18 @@ import { PlatformRequestError, requestBytes, requestJson, type FetchLike } from 
  * - every other DID method is rejected as "invalid-did";
  * - a DID document whose `id` does not exactly match the requested DID is
  *   corrupt or hostile and is rejected, never trusted;
- * - the resolved PDS endpoint must be `https`, with plaintext `http`
- *   accepted for loopback hosts only (mirroring `tangled.ts`).
+ * - the resolved PDS endpoint must be https, and its host must resolve to
+ *   public addresses only;
+ * - DID document responses are capped at `MAX_DID_DOCUMENT_BYTES` (1 MiB)
+ *   by the default transport.
  *
  * Raw AT-Protocol wire shapes (DID documents, `getBlob` responses) stay
  * behind this boundary: callers only ever see a PDS endpoint string or the
  * raw blob bytes — never the wire objects.
  *
  * No new npm dependencies: this module is the stdlib `URL` parser plus the
- * shared `requestJson`/`requestBytes` transport.
+ * shared `requestJson`/`requestBytes` transport and the shared
+ * `safe-fetch.ts` SSRF infrastructure.
  */
 
 export type TangledBlobFailure =
@@ -68,17 +97,20 @@ export const PLC_DIRECTORY_URL = "https://plc.directory";
 /** Cap for a pull round's gzipped patch blob: 16 MiB. */
 export const MAX_PATCH_BLOB_BYTES = 16 * 1024 * 1024;
 
+/** Cap for a DID document response: 1 MiB. A real document is small;
+ * anything larger is not a document and is refused by the default
+ * transport before it can be parsed. */
+export const MAX_DID_DOCUMENT_BYTES = 1024 * 1024;
+
 export interface BlobFetchOptions {
   fetchImpl?: FetchLike | undefined;
-  /** Optional PDS credential; Authorization header only, bound to the resolved PDS origin. */
-  token?: string | undefined;
   timeoutMs?: number | undefined;
   maxBytes?: number | undefined;
+  /** Test seam only; production uses `systemResolver`. */
+  resolver?: Resolver | undefined;
+  /** Test seam only; production uses `isPublicAddress`. */
+  addressPolicy?: AddressPolicy | undefined;
 }
-
-/** Plaintext http is accepted for these hosts only (local test instances).
- * Mirrors `tangled.ts`'s loopback policy. */
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
 // The method-specific id is non-empty and must contain none of /, ?, #, %,
 // backslash, or whitespace — exactly the characters that let a DID smuggle a
@@ -171,23 +203,49 @@ function validDidWebPort(port: string): boolean {
  *
  * `did:plc` resolves through the PLC directory; `did:web` through the host's
  * `.well-known/did.json`. The DID document request is unauthenticated public
- * metadata: no token is ever sent. The document must be a JSON object whose
- * `id` exactly matches the requested DID, carry a `service` array, and
- * include an `#atproto_pds` entry (falling back to an
+ * metadata: no credential is ever sent. The document must be a JSON object
+ * whose `id` exactly matches the requested DID, carry a `service` array,
+ * and include an `#atproto_pds` entry (falling back to an
  * `AtprotoPersonalDataServer` type entry) whose `serviceEndpoint` is an
- * https URL — or http for a loopback host. Every other outcome (transport
- * failure, HTTP error, invalid JSON, mismatched id, missing or invalid
- * service) is a "pds-resolution-failed".
+ * https URL. The did:web document host and the PDS endpoint host both come
+ * from author-controlled metadata and must resolve to public addresses only
+ * (SSRF gate; IP literals are validated directly, no DNS). The did:plc
+ * document hop is exempt: it always goes to the constant operator-known
+ * origin `https://plc.directory`. Every other outcome (gate failure,
+ * transport failure, HTTP error, invalid JSON, mismatched id, missing or
+ * invalid service) is a "pds-resolution-failed".
+ *
+ * `resolver`/`addressPolicy` are test seams only; production resolves with
+ * `systemResolver` + `isPublicAddress`.
  */
 export async function resolveAuthorPdsEndpoint(
   did: string,
-  options?: { fetchImpl?: FetchLike | undefined; timeoutMs?: number | undefined } | undefined,
+  options?: {
+    fetchImpl?: FetchLike | undefined;
+    timeoutMs?: number | undefined;
+    /** Test seam only; production uses `systemResolver`. */
+    resolver?: Resolver | undefined;
+    /** Test seam only; production uses `isPublicAddress`. */
+    addressPolicy?: AddressPolicy | undefined;
+  } | undefined,
 ): Promise<string> {
+  const resolver = options?.resolver ?? systemResolver;
+  const policy = options?.addressPolicy ?? isPublicAddress;
   const { method, methodSpecificId } = parseDid(did);
-  const docUrl =
-    method === "plc"
-      ? `${PLC_DIRECTORY_URL}/${did}`
-      : `https://${didWebHost(did, methodSpecificId)}/.well-known/did.json`;
+  let docUrl: string;
+  let docHost: string;
+  if (method === "plc") {
+    // No address gate for this hop: the URL is built from the constant,
+    // operator-known origin PLC_DIRECTORY_URL — a trusted platform service
+    // that never points at author-controlled metadata. (The DID string is
+    // already strictly validated by parseDid against path smuggling.)
+    docUrl = `${PLC_DIRECTORY_URL}/${did}`;
+    docHost = new URL(PLC_DIRECTORY_URL).hostname;
+  } else {
+    const hostWithPort = didWebHost(did, methodSpecificId);
+    docUrl = `https://${hostWithPort}/.well-known/did.json`;
+    docHost = hostWithPort.split(":")[0] ?? "";
+  }
   let target: URL;
   try {
     target = new URL(docUrl);
@@ -200,11 +258,34 @@ export async function resolveAuthorPdsEndpoint(
       `DID document resolution failed for ${did}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  // SSRF gate: the did:web document host is author-controlled metadata. It
+  // must resolve to public addresses only before any connection is opened;
+  // IP-literal hosts are validated directly (no DNS). The did:plc hop is
+  // exempt (constant operator-known origin, see above).
+  if (method === "web") {
+    if (await resolvePublicAddresses(docHost, resolver, policy) === null) {
+      throw new TangledBlobError(
+        "pds-resolution-failed",
+        `DID document host ${docHost} for ${did} does not resolve to public addresses only`,
+      );
+    }
+  }
+  // Default transport (no injected fetchImpl): the shared SSRF-safe fetch —
+  // pinned to the validated addresses (no rebinding window), public-only,
+  // no redirect following, body capped at MAX_DID_DOCUMENT_BYTES.
+  const docFetch: FetchLike =
+    options?.fetchImpl ??
+    safeFetchLike({
+      resolver,
+      addressPolicy: policy,
+      timeoutMs: options?.timeoutMs,
+      maxBytes: MAX_DID_DOCUMENT_BYTES,
+    });
   let result: { status: number; data: unknown };
   try {
-    result = await requestJson(target.toString(), {
+    result = await requestJson(docUrl, {
       allowedOrigin: target.origin,
-      fetchImpl: options?.fetchImpl,
+      fetchImpl: docFetch,
       timeoutMs: options?.timeoutMs,
     });
   } catch (error) {
@@ -271,17 +352,22 @@ export async function resolveAuthorPdsEndpoint(
   } catch {
     throw new TangledBlobError("pds-resolution-failed", `DID document for ${did} has a malformed PDS serviceEndpoint`);
   }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+  // No loopback exception: the PDS origin is author-controlled, so plaintext
+  // http is refused unconditionally.
+  if (parsed.protocol !== "https:") {
     throw new TangledBlobError(
       "pds-resolution-failed",
-      `PDS endpoint for ${did} must be an http(s) URL`,
+      `PDS endpoint for ${did} must be https (plaintext http is refused: the PDS origin is author-controlled)`,
     );
   }
-  const hostname = parsed.hostname.replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
-  if (parsed.protocol === "http:" && !LOOPBACK_HOSTS.has(hostname)) {
+  // SSRF gate: the PDS endpoint host is author-controlled metadata. Every
+  // resolved address must be public before we will connect to it; IP
+  // literals are validated directly (no DNS).
+  const pdsHost = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (await resolvePublicAddresses(pdsHost, resolver, policy) === null) {
     throw new TangledBlobError(
       "pds-resolution-failed",
-      `PDS endpoint for ${did} must be https (plaintext http is accepted for loopback hosts only)`,
+      `PDS endpoint host ${pdsHost} for ${did} does not resolve to public addresses only`,
     );
   }
   return endpoint.replace(/\/+$/, "");
@@ -291,18 +377,19 @@ export async function resolveAuthorPdsEndpoint(
  * Fetch the pull round's blob by CID from the pull author's PDS
  * (read-only: `GET <pds>/xrpc/com.atproto.sync.getBlob?did=<did>&cid=<cid>`).
  *
- * The author's PDS is resolved first via `resolveAuthorPdsEndpoint`. The
- * request carries the token (if any) only as the Authorization header bound
- * to the resolved PDS origin, and the body is read through the shared
- * transport's hard byte cap (`options.maxBytes`, default
- * `MAX_PATCH_BLOB_BYTES`). The token never appears in the URL or in any
- * error message; messages may include the did, cid, and HTTP status.
+ * The author's PDS is resolved first via `resolveAuthorPdsEndpoint` (which
+ * gates both the did:web document host and the PDS endpoint host to public
+ * addresses only). The request is unauthenticated: the PDS origin is
+ * author-resolved metadata, so no credential is ever sent to it — the only
+ * requests this module makes are with auth: none. The body is read through
+ * the shared transport's hard byte cap (`options.maxBytes`, default
+ * `MAX_PATCH_BLOB_BYTES`); when no `fetchImpl` is injected the default
+ * transport is `safeFetchLike` (pinned public-only DNS, no redirect
+ * following). A 2xx zero-byte body is a "read-failed" empty-blob error,
+ * never a success.
  *
- * Credential boundary: the PDS endpoint is author-resolved. When it is
- * plaintext `http` (accepted only for loopback hosts), the token is dropped
- * silently — public blob reads are unauthenticated and a credential is never
- * delivered over an unencrypted channel. `https` keeps the token. A 2xx
- * zero-byte body is a "read-failed" empty-blob error, never a success.
+ * `resolver`/`addressPolicy` are test seams only; production resolves with
+ * `systemResolver` + `isPublicAddress`.
  */
 export async function fetchAtprotoBlob(
   did: string,
@@ -317,9 +404,14 @@ export async function fetchAtprotoBlob(
     throw new TangledBlobError("invalid-cid", `invalid CID (expected an alphanumeric string): ${JSON.stringify(cid)}`);
   }
   const maxBytes = options?.maxBytes ?? MAX_PATCH_BLOB_BYTES;
+  // Test seams only; production uses the system resolver + public-only policy.
+  const resolver = options?.resolver ?? systemResolver;
+  const policy = options?.addressPolicy ?? isPublicAddress;
   const pds = await resolveAuthorPdsEndpoint(did, {
     fetchImpl: options?.fetchImpl,
     timeoutMs: options?.timeoutMs,
+    resolver,
+    addressPolicy: policy,
   });
   let pdsUrl: URL;
   try {
@@ -330,15 +422,23 @@ export async function fetchAtprotoBlob(
   const target = new URL(`${pdsUrl.origin}/xrpc/com.atproto.sync.getBlob`);
   target.searchParams.set("did", did);
   target.searchParams.set("cid", cid);
-  // Credential boundary: a plaintext http PDS endpoint (loopback-only) is
-  // public — the token is dropped silently and never travels over http.
-  const token = pdsUrl.protocol === "http:" ? undefined : options?.token;
+  // The PDS origin is author-selected metadata: an unauthenticated public
+  // read. No Authorization header is sent to it — and the options no longer
+  // carry a token that could be. Default transport (no injected fetchImpl):
+  // pinned public-only DNS, no redirect following, capped at maxBytes.
+  const blobFetch: FetchLike =
+    options?.fetchImpl ??
+    safeFetchLike({
+      resolver,
+      addressPolicy: policy,
+      timeoutMs: options?.timeoutMs,
+      maxBytes,
+    });
   let result: { status: number; bytes: Uint8Array };
   try {
     result = await requestBytes(target.toString(), {
       allowedOrigin: pdsUrl.origin,
-      fetchImpl: options?.fetchImpl,
-      token,
+      fetchImpl: blobFetch,
       timeoutMs: options?.timeoutMs,
       accept: "application/octet-stream",
       maxBytes,

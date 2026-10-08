@@ -1,4 +1,5 @@
 import type { FetchLike } from "./http.js";
+import type { AddressPolicy, Resolver } from "./safe-fetch.js";
 import { fetchAtprotoBlob, type BlobFetchOptions } from "./tangled-blob.js";
 import {
   decodeTangledPatchBlob,
@@ -25,10 +26,12 @@ import type { TangledPullIdentity } from "./tangled-bobbin.js";
  *      "no-round"/"invalid-round" TangledPatchError THROWN BEFORE ANY
  *      NETWORK CALL;
  *   2. bytes = (options.fetchBlob ?? fetchAtprotoBlob)(
- *        identity.authorDid, round.blobCid, { fetchImpl, token, timeoutMs })
+ *        identity.authorDid, round.blobCid, { fetchImpl, timeoutMs,
+ *        resolver, addressPolicy })
  *      — the round's gzipped patch blob, read from the pull AUTHOR's PDS
  *      via the public `com.atproto.sync.getBlob` XRPC surface (the PDS is
- *      resolved first from the author's public DID document);
+ *      resolved first from the author's public DID document, and its host
+ *      must resolve to public addresses only);
  *   3. patchText = decodeTangledPatchBlob(bytes) — the gzip + size-cap +
  *      UTF-8/BOM handling all lives there;
  *   4. normalized = normalizeGitFormatPatch(patchText) — the mail-envelope
@@ -36,9 +39,10 @@ import type { TangledPullIdentity } from "./tangled-bobbin.js";
  *   5. return { diff, files, declaredHeadSha, round }.
  *
  * Trust posture: strictly read-only. Nothing here publishes, updates, or
- * deletes; the DID document request is unauthenticated public metadata, and
- * a caller-supplied token travels only as the Authorization header bound
- * to the validated PDS origin (never in the URL, argv, or diagnostics).
+ * deletes. The PDS origin is author-selected metadata, so NO credential is
+ * ever sent to an author-resolved origin — the only requests `tangled-blob`
+ * makes are with auth: none (the DID document and the getBlob read are both
+ * unauthenticated public reads; there is no token option).
  * The record, blob bytes, and patch text are UNTRUSTED data: they are
  * decoded and parsed, never executed or followed as instructions.
  * `declaredHeadSha` in the returned diff is ADVISORY metadata decoded from
@@ -56,6 +60,9 @@ import type { TangledPullIdentity } from "./tangled-bobbin.js";
  * `options.fetchBlob` is a test seam only: it replaces `fetchAtprotoBlob`
  * with an injected byte provider so tests never need a PDS. Production
  * callers leave it unset and take the real two-hop PDS path.
+ * `options.resolver` / `options.addressPolicy` are test seams only, passed
+ * through to `fetchAtprotoBlob`: production resolves with
+ * `systemResolver` + `isPublicAddress` from the shared SSRF infrastructure.
  *
  * Pipeline wiring is deliberately absent: `tangled.ts`'
  * `requireImplementedBackend` guard stays in force, and no review-pipeline
@@ -65,8 +72,11 @@ import type { TangledPullIdentity } from "./tangled-bobbin.js";
 
 export interface TangledRoundDiffOptions {
   fetchImpl?: FetchLike | undefined;
-  token?: string | undefined;
   timeoutMs?: number | undefined;
+  /** Test seam only; production uses `systemResolver`. */
+  resolver?: Resolver | undefined;
+  /** Test seam only; production uses `isPublicAddress`. */
+  addressPolicy?: AddressPolicy | undefined;
   /** Test seam; defaults to fetchAtprotoBlob from ./tangled-blob.js */
   fetchBlob?:
     | ((did: string, cid: string, options?: BlobFetchOptions) => Promise<Uint8Array>)
@@ -92,8 +102,9 @@ export async function fetchTangledPullRoundDiff(
   const fetchBlob = options?.fetchBlob ?? fetchAtprotoBlob;
   const bytes = await fetchBlob(identity.authorDid, round.blobCid, {
     fetchImpl: options?.fetchImpl,
-    token: options?.token,
     timeoutMs: options?.timeoutMs,
+    resolver: options?.resolver,
+    addressPolicy: options?.addressPolicy,
   });
   // Step 3: gunzip + caps + UTF-8 live in decodeTangledPatchBlob.
   const patchText = decodeTangledPatchBlob(bytes);
