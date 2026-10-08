@@ -1,7 +1,7 @@
 /**
  * Tangled pull round diff (#586) — tests for `src/platform/tangled-diff.ts`,
  * the thin orchestrator that turns a resolved `TangledPullIdentity` into the
- * reviewable `{ diff, files, headSha, round }`.
+ * reviewable `{ diff, files, declaredHeadSha, round }`.
  *
  * The end-to-end path runs the REAL `fetchAtprotoBlob` default (no
  * `fetchBlob` injection) over an injected mock transport that plays the two
@@ -192,7 +192,7 @@ test("fetchTangledPullRoundDiff: end-to-end over the real fetchAtprotoBlob defau
     mimeType: MIME,
     size: 1234,
   });
-  assert.equal(result.headSha, SHA, "headSha is the sha in the From line");
+  assert.equal(result.declaredHeadSha, SHA, "declaredHeadSha is the sha in the From line (advisory)");
 });
 
 test("fetchTangledPullRoundDiff: a multi-round record fetches the LAST round's CID", async () => {
@@ -268,7 +268,7 @@ test("fetchTangledPullRoundDiff: an injected fetchBlob replaces the network (zer
     "the seam receives the author DID and the LAST round's CID",
   );
   assert.equal(result.round.blobCid, "bafybeicidnew");
-  assert.equal(result.headSha, SHA);
+  assert.equal(result.declaredHeadSha, SHA);
 });
 
 test("fetchTangledPullRoundDiff: a token reaches only the getBlob request as Authorization, never the URLs", async () => {
@@ -284,5 +284,5 @@ test("fetchTangledPullRoundDiff: a token reaches only the getBlob request as Aut
   for (const call of calls) {
     assert.ok(!call.url.includes(SECRET), "the token must never appear in a request URL");
   }
-  assert.equal(result.headSha, SHA, "the reviewable diff is unaffected by the token");
+  assert.equal(result.declaredHeadSha, SHA, "the reviewable diff is unaffected by the token");
 });

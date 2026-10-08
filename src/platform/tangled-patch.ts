@@ -10,7 +10,14 @@ import { gunzipSync } from "node:zlib";
  *
  *   pull record ── selectLatestPullRound ──▶ TangledPullRound
  *   blob bytes  ── decodeTangledPatchBlob ─▶ patch text (UTF-8, BOM-stripped)
- *   patch text  ── normalizeGitFormatPatch─▶ { diff, files, headSha }
+ *   patch text  ── normalizeGitFormatPatch─▶ { diff, files, declaredHeadSha }
+ *
+ * `declaredHeadSha` is the 40-hex envelope sha of the last valid mail
+ * boundary; it is ADVISORY metadata decoded from untrusted patch content
+ * and forgeable by crafted commit-message text (git does not escape body
+ * From-lines); it must never be an authorization or exact-head input — a
+ * verified head requires re-checking trusted knot/record state in a later
+ * ticket.
  *
  * Tangled/AT-Protocol facts this module relies on (verified, do not
  * re-derive):
@@ -202,7 +209,12 @@ export interface TangledChangedFile {
 export interface TangledNormalizedPatch {
   diff: string;
   files: TangledChangedFile[];
-  headSha: string | undefined;
+  /** The 40-hex envelope sha of the LAST valid mail boundary. ADVISORY
+   * metadata decoded from untrusted patch content; forgeable by crafted
+   * commit-message text (git does not escape body From-lines). Must never
+   * be an authorization or exact-head input — a verified head requires
+   * re-checking trusted knot/record state in a later ticket. */
+  declaredHeadSha: string | undefined;
 }
 
 /**
@@ -228,7 +240,9 @@ export interface TangledNormalizedPatch {
  * - a unit with no `diff --git ` section (cover letter / empty commit)
  *   contributes nothing; if no unit yields one → "empty-patch" (never an
  *   empty diff as a success);
- * - `headSha` is the SHA of the LAST valid boundary;
+ * - `declaredHeadSha` is the SHA of the LAST valid boundary (ADVISORY:
+ *   decoded from untrusted patch content, forgeable by crafted
+ *   commit-message text; never an authorization or exact-head input);
  * - file sections split the concatenated diff bodies at each line starting
  *   with `diff --git `; per section: the per-file old/new names come from
  *   the section's `--- ` / `+++ ` lines (C-style quoting decoded,
@@ -296,14 +310,14 @@ export function normalizeGitFormatPatch(patchText: string): TangledNormalizedPat
 
   // Mail units: each runs from its From line to the next From line (or EOF).
   const bodies: string[][] = [];
-  let headSha: string | undefined;
+  let declaredHeadSha: string | undefined;
   for (let u = 0; u < fromLineAt.length; u++) {
     const start = fromLineAt[u]!;
     const end = u + 1 < fromLineAt.length ? fromLineAt[u + 1]! : lines.length;
     const unit = lines.slice(start, end);
     const fromMatch = FROM_LINE.exec(unit[0]!);
     const fromSha = fromMatch?.[1];
-    if (fromSha !== undefined) headSha = fromSha;
+    if (fromSha !== undefined) declaredHeadSha = fromSha;
 
     let bodyStart = -1;
     for (let i = 0; i < unit.length; i++) {
@@ -351,7 +365,7 @@ export function normalizeGitFormatPatch(patchText: string): TangledNormalizedPat
   return {
     diff: files.map((f) => f.patch).join(""),
     files,
-    headSha,
+    declaredHeadSha,
   };
 }
 

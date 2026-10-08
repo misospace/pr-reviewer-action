@@ -4,7 +4,7 @@
  * Three steps, all deterministic and I/O-free:
  *   pull record ── selectLatestPullRound ──▶ TangledPullRound
  *   blob bytes  ── decodeTangledPatchBlob ─▶ patch text (UTF-8, BOM-stripped)
- *   patch text  ── normalizeGitFormatPatch─▶ { diff, files, headSha }
+ *   patch text  ── normalizeGitFormatPatch─▶ { diff, files, declaredHeadSha }
  *
  * The git-format-patch fixtures below are REAL `git format-patch` output
  * (captured with `git init` + commits + `format-patch` in a scratch repo),
@@ -78,11 +78,13 @@ const F_BINARY = "From a51e34999b0131084b6afe3905b265065374f5f3 Mon Sep 17 00:00
 const F2001_MODIFY = "From 8974ba852cffe9366225127739cbc31d4d12c4af Mon Sep 17 00:00:00 2001\nFrom: Courier <courier@localhost>\nDate: Thu, 8 Oct 2026 03:18:29 +0000\nSubject: [PATCH] modify file\n\n---\n file.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n\ndiff --git a/file.txt b/file.txt\nindex 4a58007..65b2df8 100644\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-alpha\n+beta\n-- \n2.39.5\n\n";
 const F2001_ADD = "From 836bf99246c907d0e886caad6250ed6f46666e93 Mon Sep 17 00:00:00 2001\nFrom: Courier <courier@localhost>\nDate: Thu, 8 Oct 2026 03:18:52 +0000\nSubject: [PATCH] add file\n\n---\n brand-new.txt | 2 ++\n 1 file changed, 2 insertions(+)\n create mode 100644 brand-new.txt\n\ndiff --git a/brand-new.txt b/brand-new.txt\nnew file mode 100644\nindex 0000000..94954ab\n--- /dev/null\n+++ b/brand-new.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n-- \n2.39.5\n\n";
 const F2001_RENAME = "From ed76b538cb6e130b446d3cdf0fe89bfd979e51ac Mon Sep 17 00:00:00 2001\nFrom: Courier <courier@localhost>\nDate: Thu, 8 Oct 2026 03:18:57 +0000\nSubject: [PATCH] rename and edit\n\n---\n original.txt => renamed.txt | 1 +\n 1 file changed, 1 insertion(+)\n rename original.txt => renamed.txt (57%)\n\ndiff --git a/original.txt b/renamed.txt\nsimilarity index 57%\nrename from original.txt\nrename to renamed.txt\nindex 814f4a4..4cb29ea 100644\n--- a/original.txt\n+++ b/renamed.txt\n@@ -1,2 +1,3 @@\n one\n two\n+three\n-- \n2.39.5\n\n";
-// REAL git: a commit whose message BODY embeds a line that looks like an
-// mbox `From` boundary (a 56-hex sha, and no mail header follows it). It
-// must be treated as data, never a unit boundary, so there is no phantom
-// file and headSha stays the real commit sha.
-const F_HOSTILE = "From 89f9e08aff96e243656897aa1ecfd33278af9858 Mon Sep 17 00:00:00 2001\nFrom: Courier <courier@localhost>\nDate: Thu, 8 Oct 2026 03:19:16 +0000\nSubject: [PATCH] hostile subject\n\nFrom 0123456789abcdef0123456789abcdef0123456789abcdef01234567 Mon Sep 17 00:00:00 1997\njust normal prose in the body, not a mail header\n---\n h.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n\ndiff --git a/h.txt b/h.txt\nindex df967b9..5ea2ed4 100644\n--- a/h.txt\n+++ b/h.txt\n@@ -1 +1 @@\n-base\n+changed\n-- \n2.39.5\n\n";
+// REAL git: a commit whose message BODY embeds a `From` line that
+// QUALIFIES as a mail-unit boundary — a genuine 40-hex sha + git's 1997
+// ctime, immediately followed by a `Subject: ` line. Git does not escape
+// body From-lines, so the parser must treat it as a real boundary: the
+// forged sha lands in the advisory declaredHeadSha (never an
+// authorization/exact-head input), while the diff/files stay complete.
+const F_HOSTILE = "From 89f9e08aff96e243656897aa1ecfd33278af9858 Mon Sep 17 00:00:00 2001\nFrom: Courier <courier@localhost>\nDate: Thu, 8 Oct 2026 03:19:16 +0000\nSubject: [PATCH] hostile subject\n\nFrom 0123456789abcdef0123456789abcdef01234567 Mon Sep 17 00:00:00 1997\nSubject: forged\n---\n h.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n\ndiff --git a/h.txt b/h.txt\nindex df967b9..5ea2ed4 100644\n--- a/h.txt\n+++ b/h.txt\n@@ -1 +1 @@\n-base\n+changed\n-- \n2.39.5\n\n";
 // REAL git: an unquoted path containing a space in a nested dir. The
 // `diff --git a/x b/y b/x b/y` header is ambiguous (three tokens, one
 // space each), so the per-file name must come from the `---`/`+++` lines
@@ -205,9 +207,9 @@ test("decodeTangledPatchBlob strips a leading UTF-8 BOM", () => {
 // normalizeGitFormatPatch — single-commit fixtures (real git output)
 // ═══════════════════════════════════════════════════════════════════════
 
-test("normalizeGitFormatPatch: single modify -> modified, counts, headSha, clean diff", () => {
+test("normalizeGitFormatPatch: single modify -> modified, counts, declaredHeadSha, clean diff", () => {
   const n = normalizeGitFormatPatch(F_MODIFY);
-  assert.equal(n.headSha, "9e413cdfd8a7c2d93a41dfeb3a6c7c82f9314208");
+  assert.equal(n.declaredHeadSha, "9e413cdfd8a7c2d93a41dfeb3a6c7c82f9314208");
   assert.equal(n.files.length, 1);
   const f = n.files[0]!;
   assert.equal(f.filename, "file.txt");
@@ -218,7 +220,7 @@ test("normalizeGitFormatPatch: single modify -> modified, counts, headSha, clean
   assert.equal(f.previous_filename, null);
   // The diff is a pure unified diff: no mail From line, no signature trailer,
   // no diffstat, exactly one file section.
-  assert.ok(!n.diff.includes(`From ${n.headSha} Mon Sep 17`));
+  assert.ok(!n.diff.includes(`From ${n.declaredHeadSha} Mon Sep 17`));
   assert.ok(!n.diff.includes("-- \n2.39.5"));
   assert.ok(!/ file[s]? changed,/.test(n.diff));
   assert.equal((n.diff.match(/^diff --git /gm) ?? []).length, 1);
@@ -229,7 +231,7 @@ test("normalizeGitFormatPatch: single modify -> modified, counts, headSha, clean
 
 test("normalizeGitFormatPatch: add -> added (b side name, +++/--- excluded from counts)", () => {
   const n = normalizeGitFormatPatch(F_ADD);
-  assert.equal(n.headSha, "ecc83624543eb092d086382719942003b31895d7");
+  assert.equal(n.declaredHeadSha, "ecc83624543eb092d086382719942003b31895d7");
   const f = n.files[0]!;
   assert.equal(f.filename, "brand-new.txt");
   assert.equal(f.status, "added");
@@ -241,7 +243,7 @@ test("normalizeGitFormatPatch: add -> added (b side name, +++/--- excluded from 
 
 test("normalizeGitFormatPatch: delete -> removed (name from the a side, /dev/null b side)", () => {
   const n = normalizeGitFormatPatch(F_DELETE);
-  assert.equal(n.headSha, "a00233b67505e9fa630dd07ea4047a607777b4de");
+  assert.equal(n.declaredHeadSha, "a00233b67505e9fa630dd07ea4047a607777b4de");
   const f = n.files[0]!;
   assert.equal(f.filename, "doomed.txt");
   assert.equal(f.status, "removed");
@@ -253,7 +255,7 @@ test("normalizeGitFormatPatch: delete -> removed (name from the a side, /dev/nul
 
 test("normalizeGitFormatPatch: rename with edit -> renamed (rename to/from fix name + previous)", () => {
   const n = normalizeGitFormatPatch(F_RENAME);
-  assert.equal(n.headSha, "91043625f37f7c060e50eb3fadfaf94a9496d694");
+  assert.equal(n.declaredHeadSha, "91043625f37f7c060e50eb3fadfaf94a9496d694");
   const f = n.files[0]!;
   assert.equal(f.filename, "renamed.txt");
   assert.equal(f.status, "renamed");
@@ -269,7 +271,7 @@ test("normalizeGitFormatPatch: rename with edit -> renamed (rename to/from fix n
 
 test("normalizeGitFormatPatch: multi-file single commit -> one section per file, each isolated", () => {
   const n = normalizeGitFormatPatch(F_MULTI);
-  assert.equal(n.headSha, "d93be07b7322d6fd51f89370aac6d7f5e5f51a04");
+  assert.equal(n.declaredHeadSha, "d93be07b7322d6fd51f89370aac6d7f5e5f51a04");
   assert.equal(n.files.length, 2);
   const [f0, f1] = [n.files[0]!, n.files[1]!];
   assert.equal(f0.filename, "one.txt");
@@ -287,15 +289,15 @@ test("normalizeGitFormatPatch: multi-file single commit -> one section per file,
   assert.ok(!f1.patch.includes("one.txt"));
   // the joined diff has exactly two sections, no mail headers / trailer / diffstat
   assert.equal((n.diff.match(/^diff --git /gm) ?? []).length, 2);
-  assert.ok(!n.diff.includes(`From ${n.headSha} Mon Sep 17`));
+  assert.ok(!n.diff.includes(`From ${n.declaredHeadSha} Mon Sep 17`));
   assert.ok(!n.diff.includes("-- \n2.39.5"));
   assert.ok(!/ file[s]? changed,/.test(n.diff));
 });
 
-test("normalizeGitFormatPatch: two-commit range -> headSha is the LAST commit, one section per commit", () => {
+test("normalizeGitFormatPatch: two-commit range -> declaredHeadSha is the LAST commit, one section per commit", () => {
   const n = normalizeGitFormatPatch(F_TWO);
-  // headSha must be the SECOND commit's sha, not the first
-  assert.equal(n.headSha, "63e2c71688d654f5186ca42d9d7a115e6b24e484");
+  // declaredHeadSha must be the SECOND commit's sha, not the first
+  assert.equal(n.declaredHeadSha, "63e2c71688d654f5186ca42d9d7a115e6b24e484");
   assert.equal(n.files.length, 2);
   // first commit added x.txt; second commit modified x.txt
   assert.equal(n.files[0]!.status, "added");
@@ -315,7 +317,7 @@ test("normalizeGitFormatPatch: two-commit range -> headSha is the LAST commit, o
 
 test("normalizeGitFormatPatch: filename with a space is unquoted and preserved", () => {
   const n = normalizeGitFormatPatch(F_SPACE);
-  assert.equal(n.headSha, "c3c7a56588e443aff202789398899247aac28178");
+  assert.equal(n.declaredHeadSha, "c3c7a56588e443aff202789398899247aac28178");
   const f = n.files[0]!;
   assert.equal(f.filename, "base file.txt"); // the space survives
   assert.equal(f.status, "modified");
@@ -325,7 +327,7 @@ test("normalizeGitFormatPatch: filename with a space is unquoted and preserved",
 
 test("normalizeGitFormatPatch: non-ASCII octal-quoted path decodes to the real name", () => {
   const n = normalizeGitFormatPatch(F_UTF8);
-  assert.equal(n.headSha, "e292aaecdf7a6b594490468ee5f85ddcbc61520d");
+  assert.equal(n.declaredHeadSha, "e292aaecdf7a6b594490468ee5f85ddcbc61520d");
   const f = n.files[0]!;
   assert.equal(f.filename, "café.txt"); // octal \303\251 -> é (U+00E9)
   assert.equal(f.status, "modified");
@@ -335,7 +337,7 @@ test("normalizeGitFormatPatch: non-ASCII octal-quoted path decodes to the real n
 
 test("normalizeGitFormatPatch: binary add -> added with zero line counts", () => {
   const n = normalizeGitFormatPatch(F_BINARY);
-  assert.equal(n.headSha, "a51e34999b0131084b6afe3905b265065374f5f3");
+  assert.equal(n.declaredHeadSha, "a51e34999b0131084b6afe3905b265065374f5f3");
   const f = n.files[0]!;
   assert.equal(f.filename, "blob.bin");
   assert.equal(f.status, "added");
@@ -395,7 +397,7 @@ test("normalizeGitFormatPatch: text over the 32 MiB hard cap -> patch-too-large 
 
 test("normalizeGitFormatPatch: 2001-dated modify normalizes like 1997", () => {
   const n = normalizeGitFormatPatch(F2001_MODIFY);
-  assert.equal(n.headSha, "8974ba852cffe9366225127739cbc31d4d12c4af");
+  assert.equal(n.declaredHeadSha, "8974ba852cffe9366225127739cbc31d4d12c4af");
   const f = n.files[0]!;
   assert.equal(f.filename, "file.txt");
   assert.equal(f.status, "modified");
@@ -409,7 +411,7 @@ test("normalizeGitFormatPatch: 2001-dated modify normalizes like 1997", () => {
 
 test("normalizeGitFormatPatch: 2001-dated add normalizes like 1997", () => {
   const n = normalizeGitFormatPatch(F2001_ADD);
-  assert.equal(n.headSha, "836bf99246c907d0e886caad6250ed6f46666e93");
+  assert.equal(n.declaredHeadSha, "836bf99246c907d0e886caad6250ed6f46666e93");
   const f = n.files[0]!;
   assert.equal(f.filename, "brand-new.txt");
   assert.equal(f.status, "added");
@@ -420,7 +422,7 @@ test("normalizeGitFormatPatch: 2001-dated add normalizes like 1997", () => {
 
 test("normalizeGitFormatPatch: 2001-dated rename+edit normalizes like 1997", () => {
   const n = normalizeGitFormatPatch(F2001_RENAME);
-  assert.equal(n.headSha, "ed76b538cb6e130b446d3cdf0fe89bfd979e51ac");
+  assert.equal(n.declaredHeadSha, "ed76b538cb6e130b446d3cdf0fe89bfd979e51ac");
   const f = n.files[0]!;
   assert.equal(f.filename, "renamed.txt");
   assert.equal(f.status, "renamed");
@@ -430,31 +432,49 @@ test("normalizeGitFormatPatch: 2001-dated rename+edit normalizes like 1997", () 
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-// normalizeGitFormatPatch — hostile `From` lines (data, never a boundary)
+// normalizeGitFormatPatch — hostile `From` lines
+// (a non-qualifying fake is data, never a boundary; a qualifying 40-hex
+// fake is indistinguishable from a real boundary and forges the advisory
+// declaredHeadSha)
 // ═══════════════════════════════════════════════════════════════════════
 
-test("normalizeGitFormatPatch: a From-like line inside a REAL commit body yields no phantom unit", () => {
-  // The commit message body embeds a 56-hex `From ...` line with no mail
-  // header after it. It is not a mail-unit boundary, so the patch has exactly
-  // one file and headSha is the real commit sha.
+test("normalizeGitFormatPatch: a qualifying forged boundary in a commit body forges declaredHeadSha; diff/files stay complete", () => {
+  // The commit message body embeds a GENUINE 40-hex `From <sha> <ctime>`
+  // line (git's 1997 ctime) immediately followed by a `Subject: ` line —
+  // exactly the shape of a real mail-unit boundary, and git does not
+  // escape body From-lines, so the parser must treat it as one. The
+  // forged sha lands in declaredHeadSha instead of the real commit sha
+  // (89f9e08a…): this demonstrates the field is ADVISORY metadata
+  // decoded from untrusted content — never an authorization or
+  // exact-head input (a verified head requires re-checking trusted
+  // knot/record state in a later ticket). The diff/files remain
+  // complete: the single h.txt section parses with its real counts.
   const n = normalizeGitFormatPatch(F_HOSTILE);
-  assert.equal(n.headSha, "89f9e08aff96e243656897aa1ecfd33278af9858");
   assert.equal(n.files.length, 1);
-  assert.equal(n.files[0]!.filename, "h.txt");
-  assert.equal(n.files[0]!.status, "modified");
-  // The fake line and its prose survive only outside the diff; they must not
-  // appear in the normalized diff.
-  assert.ok(!n.diff.includes("0123456789abcdef0123456789abcdef0123456789abcdef01234567"));
+  const f = n.files[0]!;
+  assert.equal(f.filename, "h.txt");
+  assert.equal(f.status, "modified");
+  assert.equal(f.additions, 1);
+  assert.equal(f.deletions, 1);
+  assert.equal(f.changes, 2);
+  // The forged boundary's sha — NOT the real commit sha 89f9e08a…:
+  // advisory and forgeable, never an authorization or exact-head input.
+  assert.equal(n.declaredHeadSha, "0123456789abcdef0123456789abcdef01234567");
+  // Neither the forged From line nor its 1997 ctime survives into the
+  // normalized diff; the hunk content is intact.
+  assert.ok(!n.diff.includes("0123456789abcdef0123456789abcdef01234567"));
   assert.ok(!/Mon Sep 17 00:00:00 1997/.test(n.diff));
+  assert.ok(n.diff.includes("-base"));
+  assert.ok(n.diff.includes("+changed"));
 });
 
 test("normalizeGitFormatPatch: a fake 40-hex From in the first mail body still yields exactly 2 units", () => {
   // This fake line MATCHES the boundary regex (40-hex sha + ctime), but the
   // line that follows it is prose, not a `From:`/`Date:`/`Subject:` header —
   // so it is not a boundary. Exactly two units (one per real commit) survive,
-  // and headSha is the second (last) real commit.
+  // and declaredHeadSha is the second (last) real commit.
   const n = normalizeGitFormatPatch(F_TWO_FAKE_BOUNDARY);
-  assert.equal(n.headSha, "63e2c71688d654f5186ca42d9d7a115e6b24e484");
+  assert.equal(n.declaredHeadSha, "63e2c71688d654f5186ca42d9d7a115e6b24e484");
   assert.equal(n.files.length, 2);
   assert.equal(n.files[0]!.status, "added");
   assert.equal(n.files[1]!.status, "modified");
@@ -468,7 +488,7 @@ test("normalizeGitFormatPatch: a fake 40-hex From in the first mail body still y
 
 test("normalizeGitFormatPatch: Apple-git `2.39.5 (Apple Git-154)` trailer is stripped and does not inflate deletions", () => {
   const n = normalizeGitFormatPatch(F_APPLE);
-  assert.equal(n.headSha, "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678");
+  assert.equal(n.declaredHeadSha, "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678");
   const f = n.files[0]!;
   assert.equal(f.filename, "file.txt");
   assert.equal(f.status, "modified");
@@ -488,7 +508,7 @@ test("normalizeGitFormatPatch: Apple-git `2.39.5 (Apple Git-154)` trailer is str
 
 test("normalizeGitFormatPatch: ambiguous unquoted space path `x b/y` resolves via ---/+++ to the exact name", () => {
   const n = normalizeGitFormatPatch(F_SPACEPATH);
-  assert.equal(n.headSha, "cc459fbf4b06e5aae9ff07cc3cb2158270c190f4");
+  assert.equal(n.declaredHeadSha, "cc459fbf4b06e5aae9ff07cc3cb2158270c190f4");
   const f = n.files[0]!;
   assert.equal(f.filename, "x b/y"); // not "x", "b/y", or a joined blob
   assert.equal(f.status, "modified");
@@ -498,7 +518,7 @@ test("normalizeGitFormatPatch: ambiguous unquoted space path `x b/y` resolves vi
 
 test("normalizeGitFormatPatch: non-ASCII rename decodes octal-quoted rename from/to to the real names", () => {
   const n = normalizeGitFormatPatch(F_UTF8_RENAME);
-  assert.equal(n.headSha, "c7083225c00d4e30a777109388e43bf73b9949e6");
+  assert.equal(n.declaredHeadSha, "c7083225c00d4e30a777109388e43bf73b9949e6");
   const f = n.files[0]!;
   assert.equal(f.status, "renamed");
   assert.equal(f.filename, "café-renamed.txt"); // \303\251 -> é (U+00E9)
@@ -509,7 +529,7 @@ test("normalizeGitFormatPatch: non-ASCII rename decodes octal-quoted rename from
 
 test("normalizeGitFormatPatch: an added line whose content starts with `+` counts as exactly 1 addition", () => {
   const n = normalizeGitFormatPatch(F_COUNTER);
-  assert.equal(n.headSha, "da74c0ed06346c9a7c11bbde616f7cedd3ab1fae");
+  assert.equal(n.declaredHeadSha, "da74c0ed06346c9a7c11bbde616f7cedd3ab1fae");
   const f = n.files[0]!;
   assert.equal(f.filename, "c.txt");
   assert.equal(f.status, "modified");

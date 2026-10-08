@@ -27,6 +27,11 @@ import { PlatformRequestError, requestBytes, requestJson, type FetchLike } from 
  * - `did:web` resolves through the host's `.well-known/did.json`
  *   (`https://<host>[:port]/.well-known/did.json`); an explicit port is
  *   allowed, embedded path characters are not;
+ * - the accepted DID subset is exactly `did:plc` / `did:web`, with no `/`,
+ *   `?`, `#`, `%`, `\`, or whitespace in the method-specific id; spec-legal
+ *   percent-encoded did:web ports (`did:web:example.com%3A8443`) are
+ *   deliberately rejected fail-closed, while a plain `host:port` id is
+ *   accepted;
  * - every other DID method is rejected as "invalid-did";
  * - a DID document whose `id` does not exactly match the requested DID is
  *   corrupt or hostile and is rejected, never trusted;

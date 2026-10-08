@@ -32,8 +32,8 @@ import type { TangledPullIdentity } from "./tangled-bobbin.js";
  *   3. patchText = decodeTangledPatchBlob(bytes) — the gzip + size-cap +
  *      UTF-8/BOM handling all lives there;
  *   4. normalized = normalizeGitFormatPatch(patchText) — the mail-envelope
- *      grammar → { diff, files, headSha };
- *   5. return { diff, files, headSha, round }.
+ *      grammar → { diff, files, declaredHeadSha };
+ *   5. return { diff, files, declaredHeadSha, round }.
  *
  * Trust posture: strictly read-only. Nothing here publishes, updates, or
  * deletes; the DID document request is unauthenticated public metadata, and
@@ -41,6 +41,10 @@ import type { TangledPullIdentity } from "./tangled-bobbin.js";
  * to the validated PDS origin (never in the URL, argv, or diagnostics).
  * The record, blob bytes, and patch text are UNTRUSTED data: they are
  * decoded and parsed, never executed or followed as instructions.
+ * `declaredHeadSha` in the returned diff is ADVISORY metadata decoded from
+ * that untrusted patch content (forgeable by crafted commit-message text);
+ * it must never be an authorization or exact-head input — a verified head
+ * requires re-checking trusted knot/record state in a later ticket.
  *
  * Failure model: no empty-success path. Every failure propagates as the
  * typed error of the step that produced it — "no-round"/"invalid-round"
@@ -69,6 +73,11 @@ export interface TangledRoundDiffOptions {
     | undefined;
 }
 
+/** The reviewable pull round: the normalized `{ diff, files,
+ * declaredHeadSha }` plus the selected round. `declaredHeadSha` (inherited
+ * from TangledNormalizedPatch) is advisory metadata from the untrusted
+ * patch — never an authorization or exact-head input; a verified head
+ * requires re-checking trusted knot/record state in a later ticket. */
 export interface TangledPullRoundDiff extends TangledNormalizedPatch {
   round: TangledPullRound;
 }
@@ -95,7 +104,7 @@ export async function fetchTangledPullRoundDiff(
   return {
     diff: normalized.diff,
     files: normalized.files,
-    headSha: normalized.headSha,
+    declaredHeadSha: normalized.declaredHeadSha,
     round,
   };
 }
