@@ -34,7 +34,10 @@ import {
  * default transport for these requests is `safeFetchLike` from
  * `safe-fetch.ts`: the connection is pinned to the validated addresses at
  * the socket level (no DNS-rebinding window) and redirects are never
- * followed.
+ * followed. Per hop the host is resolved twice deliberately, as defense in
+ * depth: the explicit gate fails closed with a typed error before any
+ * connect, and `safeFetchLike`'s pinned re-resolution closes the rebinding
+ * window at connect time.
  *
  * The did:plc DID-document request itself goes to the constant,
  * operator-known origin `https://plc.directory` — a trusted platform
@@ -99,7 +102,10 @@ export const MAX_PATCH_BLOB_BYTES = 16 * 1024 * 1024;
 
 /** Cap for a DID document response: 1 MiB. A real document is small;
  * anything larger is not a document and is refused by the default
- * transport before it can be parsed. */
+ * transport before it can be parsed. Kind-label divergence (both fail
+ * closed): on the DEFAULT `safeFetchLike` transport the cap is enforced at
+ * the socket level, so an oversize document surfaces as a transport-level
+ * refusal mapped to "pds-resolution-failed", not the "too-large" kind. */
 export const MAX_DID_DOCUMENT_BYTES = 1024 * 1024;
 
 export interface BlobFetchOptions {
@@ -233,18 +239,15 @@ export async function resolveAuthorPdsEndpoint(
   const policy = options?.addressPolicy ?? isPublicAddress;
   const { method, methodSpecificId } = parseDid(did);
   let docUrl: string;
-  let docHost: string;
   if (method === "plc") {
     // No address gate for this hop: the URL is built from the constant,
     // operator-known origin PLC_DIRECTORY_URL — a trusted platform service
     // that never points at author-controlled metadata. (The DID string is
     // already strictly validated by parseDid against path smuggling.)
     docUrl = `${PLC_DIRECTORY_URL}/${did}`;
-    docHost = new URL(PLC_DIRECTORY_URL).hostname;
   } else {
     const hostWithPort = didWebHost(did, methodSpecificId);
     docUrl = `https://${hostWithPort}/.well-known/did.json`;
-    docHost = hostWithPort.split(":")[0] ?? "";
   }
   let target: URL;
   try {
@@ -263,6 +266,10 @@ export async function resolveAuthorPdsEndpoint(
   // IP-literal hosts are validated directly (no DNS). The did:plc hop is
   // exempt (constant operator-known origin, see above).
   if (method === "web") {
+    // The gate host is the hostname part of the `host[:port]`
+    // method-specific id, exactly the form didWebHost validated above.
+    const colon = methodSpecificId.indexOf(":");
+    const docHost = colon === -1 ? methodSpecificId : methodSpecificId.slice(0, colon);
     if (await resolvePublicAddresses(docHost, resolver, policy) === null) {
       throw new TangledBlobError(
         "pds-resolution-failed",
@@ -387,6 +394,12 @@ export async function resolveAuthorPdsEndpoint(
  * transport is `safeFetchLike` (pinned public-only DNS, no redirect
  * following). A 2xx zero-byte body is a "read-failed" empty-blob error,
  * never a success.
+ *
+ * Kind-label divergence for the byte cap (both fail closed): on the DEFAULT
+ * `safeFetchLike` transport the cap is enforced at the socket level, so an
+ * over-cap blob surfaces as a transport-level refusal mapped to
+ * "read-failed"; the "too-large" kind comes from `requestBytes`' own cap
+ * check and is reachable via the injected-`fetchImpl` path.
  *
  * `resolver`/`addressPolicy` are test seams only; production resolves with
  * `systemResolver` + `isPublicAddress`.
