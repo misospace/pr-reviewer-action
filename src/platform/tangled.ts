@@ -48,6 +48,25 @@ export function requireImplementedBackend(
   if (platform === "tangled") throw new TangledNotImplementedError();
 }
 
+/** A Tangled read capability that #585 has not wired yet. The message names
+ * the specific capability so a caller can see exactly what is missing; the
+ * class stays in the `TangledNotImplementedError` family so existing
+ * `instanceof` guards keep matching. Unlike the zero-arg guard error above,
+ * the capability is caller-supplied. */
+export class TangledCapabilityError extends TangledNotImplementedError {
+  constructor(capability: string) {
+    super();
+    this.message = `tangled ${capability} is not implemented yet (#585 wires metadata reads only)`;
+    this.name = "TangledCapabilityError";
+  }
+}
+
+/** Build a capability-scoped `TangledNotImplementedError` for one specific
+ * unimplemented Tangled read (see `TangledAdapter`). */
+export function tangledCapabilityError(capability: string): TangledCapabilityError {
+  return new TangledCapabilityError(capability);
+}
+
 /** Plaintext http is accepted for these hosts only (local test instances). */
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 

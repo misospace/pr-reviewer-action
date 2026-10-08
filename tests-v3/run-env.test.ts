@@ -8,7 +8,7 @@ import { validateContract } from "../src/config/contract.js";
 import { loadConfig } from "../src/config/load-config.js";
 import { GitHubAdapter } from "../src/platform/github.js";
 import { SemanticFixtureAdapter } from "../src/platform/semantic-fixture.js";
-import { TangledNotImplementedError } from "../src/platform/tangled.js";
+import { TangledAdapter } from "../src/platform/tangled-adapter.js";
 import { buildPlatformReadAdapter } from "../src/run/platform.js";
 import { resolveLoopLimits } from "../src/tools/harness.js";
 import { adaptiveLoopBudgets } from "../src/tools/loop.js";
@@ -149,8 +149,8 @@ test("the Tangled identity signal survives the stage-env projection (#583)", () 
   });
   assert.equal(env.TANGLED_REPO_DID, "did:plc:repo");
   // End to end through the real adapter boundary: the projected DID flips
-  // auto to tangled, which fails loudly instead of constructing an adapter.
-  assert.throws(() => buildPlatformReadAdapter(env), TangledNotImplementedError);
+  // auto to the Tangled read adapter (#585) instead of the GitHub fallback.
+  assert.ok(buildPlatformReadAdapter(env) instanceof TangledAdapter);
   // Without the signal the same projection builds the GitHub adapter.
   const plain = buildPlatformReadAdapter(
     buildStageEnv(config, base, { REPO: "o/r", PR_NUMBER: "9", GITHUB_TOKEN: "tok" }),

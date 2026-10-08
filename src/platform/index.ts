@@ -5,11 +5,14 @@ export { deriveIsFork, normalizePrIdentity, type PrIdentity } from "./pr.js";
 export { resolvePlatform, type ResolvedPlatform } from "./resolve.js";
 export {
   TANGLED_NOT_IMPLEMENTED,
+  TangledCapabilityError,
   TangledContext,
   TangledNotImplementedError,
   requireImplementedBackend,
+  tangledCapabilityError,
   tangledContextFromEnv,
 } from "./tangled.js";
+export { TangledAdapter, type TangledAdapterOptions } from "./tangled-adapter.js";
 export { resolveTangledPull, TangledResolverError, type ResolveTangledPullOptions, type TangledPullIdentity, type TangledResolverFailure } from "./tangled-bobbin.js";
 export { USER_AGENT } from "./user-agent.js";
 export { GITHUB_API_BASE, LINKED_SOURCE_GITHUB_BASE, parsePlatformBaseUrl, PlatformUrlError } from "./urls.js";

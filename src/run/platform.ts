@@ -2,7 +2,8 @@ import type { FetchLike } from "../platform/http.js";
 import { ForgejoAdapter } from "../platform/forgejo.js";
 import { GitHubAdapter } from "../platform/github.js";
 import { resolvePlatform } from "../platform/resolve.js";
-import { requireImplementedBackend } from "../platform/tangled.js";
+import { requireImplementedBackend, tangledContextFromEnv } from "../platform/tangled.js";
+import { TangledAdapter } from "../platform/tangled-adapter.js";
 import { SemanticFixtureAdapter, semanticFixtureDir } from "../platform/semantic-fixture.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
 import type { StageEnv } from "./env.js";
@@ -21,6 +22,17 @@ import type { StageEnv } from "./env.js";
  */
 export function buildPlatformReadAdapter(env: StageEnv, fetchImpl?: FetchLike): PlatformReadAdapter {
   const platform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "", env.TANGLED_REPO_DID ?? "");
+  // Tangled (#585) is the first read-only backend, so it is built here instead
+  // of failing at the guard below: it resolves the run's pull from the DID in
+  // the stage env and projects it into the GitHub-REST shape, and every
+  // non-metadata read fails closed rather than driving a GitHub/Forgejo
+  // fallback.
+  if (platform === "tangled") {
+    return new TangledAdapter({
+      context: tangledContextFromEnv(env),
+      ...(fetchImpl !== undefined ? { fetchImpl } : {}),
+    });
+  }
   // Fail closed before anything else — fixture interception included — the
   // same ordering `_platform_tangled_guard` gives the v2 shell seam.
   requireImplementedBackend(platform);
