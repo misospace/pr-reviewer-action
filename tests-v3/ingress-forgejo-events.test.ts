@@ -323,3 +323,15 @@ test("boundary: a top-level __proto__ own-property in the payload does not pollu
   assert.equal(Object.getPrototypeOf(out), Object.prototype);
   assert.equal(Object.prototype.hasOwnProperty.call(Object.prototype, "polluted"), false);
 });
+
+test("adversarial: a throwing payload getter degrades to the passthrough shape without throwing", () => {
+  // A hostile getter on a payload field: the rule body reads it and throws;
+  // the projection must degrade to the passthrough shape, never propagate.
+  const hostile: Record<string, unknown> = {
+    get action() {
+      throw new Error("x");
+    },
+  };
+  const out = projectForgejoWebhookPayload("pull_request", "", hostile, {});
+  assert.equal(out.name, "pull_request");
+});

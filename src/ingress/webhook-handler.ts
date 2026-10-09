@@ -125,7 +125,11 @@ export function createForgejoWebhookHandler(
 
       // The specific-type header is trusted like the event header (it is part
       // of the HMAC-verified delivery) but is accepted only if it passes the
-      // same shape guard; anything else is treated as absent.
+      // same shape guard; anything else is treated as absent. Deliberate
+      // degradation: a duplicate header (array value) or non-conforming value
+      // is treated as ABSENT (the grouped header alone still drives routing)
+      // — unlike `X-Gitea-Event`, where a duplicate is rejected 400 — because
+      // absence can only narrow, never mis-route.
       const typeHeader = req.headers["x-gitea-event-type"];
       const eventTypeHeader =
         typeof typeHeader === "string" && EVENT_HEADER.test(typeHeader) ? typeHeader : "";
@@ -133,13 +137,15 @@ export function createForgejoWebhookHandler(
       // X-Gitea-Event (and the type header) are authoritative; a hostile
       // payload name cannot re-route the delivery. The projection maps the
       // native Gitea/Forgejo vocabulary onto the GitHub-shaped envelope the
-      // normalizer accepts before it runs.
+      // normalizer accepts before it runs and never mutates its input, so
+      // the parsed body (guarded above to a non-null, non-array object) is
+      // passed through directly.
       const normalizeOptions =
         options.rereviewLabel === undefined ? {} : { rereviewLabel: options.rereviewLabel };
       const payload = projectForgejoWebhookPayload(
         eventHeader,
         eventTypeHeader,
-        { ...parsed },
+        parsed as Record<string, unknown>,
         normalizeOptions,
       );
       const event = normalizeForgejoEvent(payload, "webhook", normalizeOptions);

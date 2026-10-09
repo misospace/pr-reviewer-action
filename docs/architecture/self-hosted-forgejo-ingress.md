@@ -35,8 +35,10 @@ and own their own HTTP server, queue, and worker lifecycle.
   arrays and the GitHub `sha256=` prefixed form are rejected before any
   comparison (`ingress-signature.test.ts`).
 - The `X-Gitea-Event` and `X-Gitea-Event-Type` headers are authoritative:
-  both shape-check against a strict pattern and only these (never a payload
-  field) decide the projected event kind, so a hostile payload
+  both shape-check against a strict pattern, and the headers decide the
+  projected `name` — only the four whitelisted payload actions
+  (`synchronized`, `reopened`, `label_updated`, `created`) refine it, and
+  payload text never reaches a synthesized field — so a hostile payload
   `name`/`event` cannot re-route a delivery. The payload is untrusted and no
   untrusted string is copied into a synthesized field: the only value the
   projection synthesizes is the trusted re-review-label constant, matched
@@ -78,8 +80,8 @@ header is ignored — the grouped header alone drives projection.
 |---|---|---|
 | `pull_request` + action `synchronized` (or header/type `pull_request_sync`) | `pull_request` + `synchronize` | `synchronize` |
 | `pull_request` + action `reopened` | `pull_request` + `reopen` | `pr_reopened` |
-| `pull_request` + type `pull_request_label` + action `label_updated` | `pull_request` + `labeled`, `label` synthesized | `rereview_label` when the trigger label is present, else ignored |
-| `issue_comment` + type `pull_request_comment` + action `created` (top-level `pull_request`) | `issue_comment` with `pull_request` re-nested under `issue` (top-level key removed) | `follow_up` |
+| `pull_request` + type `pull_request_label` (or ungrouped header) + action `label_updated` | `pull_request` + `labeled`, `label` synthesized | `rereview_label` when the trigger label is present, else ignored |
+| `issue_comment` + type `pull_request_comment` (or ungrouped header) + action `created` (top-level `pull_request`) | `issue_comment` with `pull_request` re-nested under `issue` (top-level key removed) | `follow_up` |
 
 Label synthesis caveat: a native `label_updated` carries no top-level
 `label`, so the projection fires `rereview_label` only when the re-review
@@ -90,9 +92,11 @@ same-head re-review generations converge to the ONE #728 job id via the
 generation ledger (see Dedupe and convergence).
 
 Fail-closed: unknown events, labels, and comments project to shapes the
-normalizer maps to `unknown` — acked 200-ignored, never a mis-route. Both
-headers are trusted only because they are covered by the preceding
-signature verification.
+normalizer maps to `unknown` — those are still acked (202) and forwarded to
+the canonical-event callback, and the kind-gating consumer (dispatch) drops
+them; only a null normalization is acked 200-ignored. Neither path is ever a
+mis-route. Both headers are trusted only because they are covered by the
+preceding signature verification.
 
 ## Endpoint and credential model
 

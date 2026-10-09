@@ -35,8 +35,9 @@
 //   pull_request_comment-> header `issue_comment` + `action: "created"`
 //
 // Failure mode is fail-closed throughout: an unrecognizable label or comment
-// projects to a shape the normalizer maps to `unknown`, which the handler acks
-// (200) without dispatching a PR-specific pipeline.
+// projects to a shape the normalizer maps to `unknown` — the handler still
+// acks (202) and forwards it, and the kind-gating consumer (dispatch) drops
+// unknown kinds; only a null normalization is acked 200-ignored.
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -61,8 +62,9 @@ function rereviewLabelOf(options: { rereviewLabel?: string }): string {
  * the FIRST entry whose `name` is EXACTLY (case-sensitive, no trim) the
  * trusted rereview label; on a match `label` is synthesized as the trusted
  * constant (NEVER a copy of the payload text), and on no match `label` is the
- * sentinel `""` (which the normalizer maps to `unknown` → 200-ignored, fail
- * closed).
+  * sentinel `""` (which the normalizer maps to `unknown` — still acked 202
+ * and forwarded, dropped by the kind-gating consumer; only a null
+ * normalization is 200-ignored).
  *
  * Rationale for synthesizing on a "label already present" delivery: a
  * `label_updated` while the trigger label merely ALREADY EXISTS on the PR can
@@ -166,51 +168,61 @@ export function projectForgejoWebhookPayload(
   payload: Record<string, unknown>,
   options: { rereviewLabel?: string } = {},
 ): Record<string, unknown> {
-  // The specific type: the dedicated header when it carries one, else the
-  // grouped header (an undivided delivery's type defaults to its group).
-  const specific = eventTypeHeader !== "" ? eventTypeHeader : eventHeader;
+  try {
+    // The specific type: the dedicated header when it carries one, else the
+    // grouped header (an undivided delivery's type defaults to its group).
+    const specific = eventTypeHeader !== "" ? eventTypeHeader : eventHeader;
 
-  // Rule 1 — PR sync: the older ungrouped `pull_request_sync` header, or the
-  // grouped `pull_request` + `pull_request_sync` type. The header forces the
-  // kind regardless of the payload's own `action`.
-  if (eventHeader === "pull_request_sync" || specific === "pull_request_sync") {
-    return { ...payload, name: "pull_request", action: "synchronize" };
-  }
-
-  // Rule 2 — grouped `pull_request`: dispatch on the payload's action.
-  if (eventHeader === "pull_request") {
-    const action = typeof payload.action === "string" ? payload.action : "";
-    if (action === "synchronized") {
+    // Rule 1 — PR sync: the older ungrouped `pull_request_sync` header, or the
+    // grouped `pull_request` + `pull_request_sync` type. The header forces the
+    // kind regardless of the payload's own `action`.
+    if (eventHeader === "pull_request_sync" || specific === "pull_request_sync") {
       return { ...payload, name: "pull_request", action: "synchronize" };
     }
-    if (action === "reopened") {
-      return { ...payload, name: "pull_request", action: "reopen" };
+
+    // Rule 2 — grouped `pull_request`: dispatch on the payload's action.
+    if (eventHeader === "pull_request") {
+      const action = typeof payload.action === "string" ? payload.action : "";
+      if (action === "synchronized") {
+        return { ...payload, name: "pull_request", action: "synchronize" };
+      }
+      if (action === "reopened") {
+        return { ...payload, name: "pull_request", action: "reopen" };
+      }
+      if (action === "label_updated") {
+        return projectLabelEvent(payload, options);
+      }
+      // opened / closed / ready_for_review / ... pass through with the header
+      // as the authoritative name; the normalizer maps the action as usual.
+      return { ...payload, name: "pull_request" };
     }
-    if (action === "label_updated") {
+
+    // Rule 4 — the ungrouped/older `pull_request_label` shape: always a label
+    // event, regardless of the payload's action.
+    if (eventHeader === "pull_request_label") {
       return projectLabelEvent(payload, options);
     }
-    // opened / closed / ready_for_review / ... pass through with the header as
-    // the authoritative name; the normalizer maps the action as usual.
-    return { ...payload, name: "pull_request" };
-  }
 
-  // Rule 4 — the ungrouped/older `pull_request_label` shape: always a label
-  // event, regardless of the payload's action.
-  if (eventHeader === "pull_request_label") {
-    return projectLabelEvent(payload, options);
-  }
+    // Rule 5 — PR comments: the ungrouped `pull_request_comment`, the grouped
+    // `issue_comment` + `pull_request_comment` type, and a plain `issue_comment`
+    // all normalize to the GitHub `issue_comment` envelope.
+    if (
+      eventHeader === "issue_comment" ||
+      eventHeader === "pull_request_comment" ||
+      specific === "pull_request_comment"
+    ) {
+      return projectCommentEvent(payload);
+    }
 
-  // Rule 5 — PR comments: the ungrouped `pull_request_comment`, the grouped
-  // `issue_comment` + `pull_request_comment` type, and a plain `issue_comment`
-  // all normalize to the GitHub `issue_comment` envelope.
-  if (
-    eventHeader === "issue_comment" ||
-    eventHeader === "pull_request_comment" ||
-    specific === "pull_request_comment"
-  ) {
-    return projectCommentEvent(payload);
+    // Rule 6 — anything else: pass through with the (trusted) header as name.
+    return { ...payload, name: eventHeader };
+  } catch {
+    // Fail closed, mirroring the normalizeEvent try/catch: any throw degrades
+    // to the passthrough; a throwing copy falls back to the bare trusted name.
+    try {
+      return { ...payload, name: eventHeader };
+    } catch {
+      return { name: eventHeader };
+    }
   }
-
-  // Rule 6 — anything else: pass through with the (trusted) header as name.
-  return { ...payload, name: eventHeader };
 }
