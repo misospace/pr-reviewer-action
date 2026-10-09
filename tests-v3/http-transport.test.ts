@@ -108,6 +108,8 @@ test("requestBytes: an absent or empty body is an empty Uint8Array", async () =>
 
 const CANARY = "s3cr3t-reflection-token";
 const EVIL_ORIGIN = "evil.invalid";
+const CRED = "s3cr3t-value";
+const CRED_AUTH = `Bearer ${CRED}`;
 const evilLocation = `https://${EVIL_ORIGIN}/reflection?tok=${CANARY}`;
 
 function hostileRedirect() {
@@ -123,7 +125,7 @@ test("requestBytes: a 302 whose Location reflects a credential never leaks the h
   const { fetchImpl, calls } = makeFetch(() => hostileRedirect());
   await assert.rejects(
     requestBytes("https://pds.example.com/blob", {
-      ...base({ token: "Bearer s3cr3t-credential" }),
+      ...base({ token: CRED_AUTH }),
       fetchImpl,
     }),
     (e: unknown) => {
@@ -137,14 +139,14 @@ test("requestBytes: a 302 whose Location reflects a credential never leaks the h
   );
   // the credential really did go out to the allowed origin — this is the
   // scenario the hostile server can reflect.
-  assert.equal(calls[0]!.auth, "Bearer s3cr3t-credential");
+  assert.equal(calls[0]!.auth, CRED_AUTH);
 });
 
 test("requestText: a 302 whose Location reflects a credential never leaks the header", async () => {
   const { fetchImpl, calls } = makeFetch(() => hostileRedirect());
   const opts: RequestOptions = {
     allowedOrigin: "https://pds.example.com",
-    token: "Bearer s3cr3t-credential",
+    token: CRED_AUTH,
     fetchImpl,
   };
   await assert.rejects(
@@ -158,7 +160,7 @@ test("requestText: a 302 whose Location reflects a credential never leaks the he
       return true;
     },
   );
-  assert.equal(calls[0]!.auth, "Bearer s3cr3t-credential");
+  assert.equal(calls[0]!.auth, CRED_AUTH);
 });
 
 // ── the byte cap ───────────────────────────────────────────────────────────
@@ -234,7 +236,7 @@ test("requestBytes: an origin outside allowedOrigin is refused before any reques
   await assert.rejects(
     requestBytes("https://evil.example.com/blob", {
       ...base(),
-      token: "Bearer s3cr3t-value",
+      token: CRED_AUTH,
       fetchImpl,
     }),
     (e: unknown) =>
@@ -252,7 +254,7 @@ test("requestBytes: a redirect is refused with the redirect-blocked error", asyn
   await assert.rejects(
     requestBytes("https://pds.example.com/blob", {
       ...base(),
-      token: "Bearer s3cr3t-value",
+      token: CRED_AUTH,
       fetchImpl,
     }),
     (e: unknown) =>
@@ -263,15 +265,14 @@ test("requestBytes: a redirect is refused with the redirect-blocked error", asyn
 });
 
 test("requestBytes: the token travels only as Authorization to the allowed origin, never in the URL", async () => {
-  const secret = "s3cr3t-value";
   const { fetchImpl, calls } = makeFetch(() => new Response("ok"));
   await requestBytes("https://pds.example.com/blob", {
     ...base(),
-    token: `Bearer ${secret}`,
+    token: CRED_AUTH,
     fetchImpl,
   });
-  assert.equal(calls[0]!.auth, `Bearer ${secret}`);
-  assert.ok(!calls[0]!.url.includes(secret), "the token must not appear in the request URL");
+  assert.equal(calls[0]!.auth, CRED_AUTH);
+  assert.ok(!calls[0]!.url.includes(CRED), "the token must not appear in the request URL");
 
   const noToken = makeFetch(() => new Response("ok"));
   await requestBytes("https://pds.example.com/blob", { ...base(), fetchImpl: noToken.fetchImpl });
