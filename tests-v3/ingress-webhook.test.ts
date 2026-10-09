@@ -461,3 +461,160 @@ test("size cap: after a 413 the same server still answers a valid request with 2
   assert.deepEqual(JSON.parse(res.text), { status: "accepted", kind: "pr_opened" });
   assert.equal(h.events.length, 1);
 });
+
+// ── 20. native Gitea/Forgejo event vocabulary projection ────────────────────
+//
+// The native forge does not use GitHub's event vocabulary: a delivery carries
+// a GROUPED `X-Gitea-Event` header plus a specific `X-Gitea-Event-Type` header
+// and a payload whose shape differs from GitHub's (e.g. a PR on a TOP-LEVEL
+// `pull_request` object instead of `issue.pull_request`). The handler projects
+// the delivery onto the GitHub-shaped envelope before normalizeForgejoEvent
+// runs. These drive that projection end-to-end.
+
+function makeNativePrPayload(action: string): Record<string, unknown> {
+  return {
+    action,
+    repository: { full_name: "org/repo" },
+    pull_request: {
+      number: 7,
+      id: 700,
+      head: { sha: HEAD_SHA, repo: { full_name: "org/repo" } },
+      base: { sha: BASE_SHA, repo: { full_name: "org/repo" } },
+      user: { login: "octo" },
+    },
+    sender: { login: "octo" },
+  };
+}
+
+function makeNativeLabelPayload(labels: unknown): Record<string, unknown> {
+  return {
+    action: "label_updated",
+    repository: { full_name: "org/repo" },
+    pull_request: {
+      number: 7,
+      id: 700,
+      head: { sha: HEAD_SHA, repo: { full_name: "org/repo" } },
+      base: { sha: BASE_SHA, repo: { full_name: "org/repo" } },
+      labels,
+    },
+    sender: { login: "octo" },
+  };
+}
+
+interface PostTypedOptions {
+  event: string;
+  eventType?: string;
+  body: string;
+  signature: string;
+}
+
+// A `post` variant that can also set the `X-Gitea-Event-Type` header (the
+// specific-type header the native forge sends alongside the grouped
+// `X-Gitea-Event` header).
+async function postTyped(
+  url: string,
+  opts: PostTypedOptions,
+): Promise<{ status: number; text: string }> {
+  const headers: Record<string, string> = { "x-gitea-event": opts.event };
+  if (opts.eventType !== undefined) headers["x-gitea-event-type"] = opts.eventType;
+  headers["x-gitea-signature"] = opts.signature;
+  const res = await fetch(url, { method: "POST", headers, body: opts.body });
+  return { status: res.status, text: await res.text() };
+}
+
+test("native: pull_request + action 'synchronized' (full PR object) → 202 synchronize", async (t) => {
+  const h = await startTestHandler();
+  t.after(() => h.close());
+  const body = JSON.stringify(makeNativePrPayload("synchronized"));
+  const res = await postTyped(h.url, { event: "pull_request", body, signature: sign(body) });
+  assert.equal(res.status, 202);
+  assert.deepEqual(JSON.parse(res.text), { status: "accepted", kind: "synchronize" });
+  assert.equal(h.events.length, 1);
+  assert.equal(h.events[0]!.kind, "synchronize");
+  assert.equal(h.events[0]!.prNumber, 7);
+  assert.equal(h.events[0]!.headSha, HEAD_SHA);
+  assert.equal(h.events[0]!.baseSha, BASE_SHA);
+});
+
+test("native: older pull_request_sync header forces synchronize regardless of the payload action → 202 synchronize", async (t) => {
+  const h = await startTestHandler();
+  t.after(() => h.close());
+  // The payload says "opened", but the ungrouped header forces the kind.
+  const body = JSON.stringify(makeNativePrPayload("opened"));
+  const res = await postTyped(h.url, { event: "pull_request_sync", body, signature: sign(body) });
+  assert.equal(res.status, 202);
+  assert.deepEqual(JSON.parse(res.text), { status: "accepted", kind: "synchronize" });
+  assert.equal(h.events[0]!.kind, "synchronize");
+});
+
+test("native: pull_request + action 'reopened' → 202 pr_reopened", async (t) => {
+  const h = await startTestHandler();
+  t.after(() => h.close());
+  const body = JSON.stringify(makeNativePrPayload("reopened"));
+  const res = await postTyped(h.url, { event: "pull_request", body, signature: sign(body) });
+  assert.equal(res.status, 202);
+  assert.deepEqual(JSON.parse(res.text), { status: "accepted", kind: "pr_reopened" });
+  assert.equal(h.events[0]!.kind, "pr_reopened");
+});
+
+test("native: label_updated with the rereview label in pull_request.labels → 202 rereview_label; without → 202 unknown", async (t) => {
+  const h = await startTestHandler();
+  t.after(() => h.close());
+
+  const withTrigger = JSON.stringify(makeNativeLabelPayload([{ name: "ai-review", color: "00ff00" }]));
+  const resWith = await postTyped(h.url, {
+    event: "pull_request",
+    eventType: "pull_request_label",
+    body: withTrigger,
+    signature: sign(withTrigger),
+  });
+  assert.equal(resWith.status, 202);
+  assert.deepEqual(JSON.parse(resWith.text), { status: "accepted", kind: "rereview_label" });
+  assert.equal(h.events.length, 1);
+  assert.equal(h.events[0]!.kind, "rereview_label");
+  assert.equal(h.events[0]!.labelName, "ai-review");
+
+  const withoutTrigger = JSON.stringify(makeNativeLabelPayload([{ name: "docs", color: "00ff00" }]));
+  const resWithout = await postTyped(h.url, {
+    event: "pull_request",
+    eventType: "pull_request_label",
+    body: withoutTrigger,
+    signature: sign(withoutTrigger),
+  });
+  // No trigger in labels → synthesized label "" → kind unknown. The handler
+  // still forwards the non-null event to onEvent (it acks rather than 200s).
+  assert.equal(resWithout.status, 202);
+  assert.deepEqual(JSON.parse(resWithout.text), { status: "accepted", kind: "unknown" });
+  assert.equal(h.events.length, 2);
+  assert.equal(h.events[1]!.kind, "unknown");
+});
+
+test("native: issue_comment + pull_request_comment type, top-level pull_request + comment.id → 202 follow_up", async (t) => {
+  const h = await startTestHandler();
+  t.after(() => h.close());
+  const body = JSON.stringify({
+    action: "created",
+    repository: { full_name: "org/repo" },
+    comment: { id: 55, user: { login: "dev" } },
+    issue: { number: 7, title: "a PR" },
+    pull_request: {
+      number: 7,
+      id: 700,
+      head: { sha: HEAD_SHA, repo: { full_name: "org/repo" } },
+      base: { sha: BASE_SHA, repo: { full_name: "org/repo" } },
+    },
+    sender: { login: "dev" },
+  });
+  const res = await postTyped(h.url, {
+    event: "issue_comment",
+    eventType: "pull_request_comment",
+    body,
+    signature: sign(body),
+  });
+  assert.equal(res.status, 202);
+  assert.deepEqual(JSON.parse(res.text), { status: "accepted", kind: "follow_up" });
+  assert.equal(h.events.length, 1);
+  assert.equal(h.events[0]!.kind, "follow_up");
+  assert.equal(h.events[0]!.prNumber, 7);
+  assert.equal(h.events[0]!.eventReference, "55");
+});

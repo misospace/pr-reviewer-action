@@ -1,12 +1,17 @@
 // Forgejo webhook ingress for self-hosted Operator mode (#730).
 // X-Gitea-Signature is HMAC-SHA256 hex over the RAW body — verified BEFORE any
 // JSON.parse; fail closed. Response bodies are fixed and short: payload, secret,
-// signature, and error text are never echoed back to the caller. Raw payloads
-// stop at normalizeForgejoEvent — this seam never inspects untrusted content
-// beyond the event-header shape and the canonical event's kind.
+// signature, and error text are never echoed back to the caller. After the
+// signature is verified, the delivery is projected (see forgejo-events.ts) from
+// native Gitea/Forgejo event vocabulary onto the GitHub-shaped envelope the
+// FROZEN #728 normalizer (normalizeForgejoEvent) already accepts; the normalizer
+// remains the only consumer of the (projected) body and this seam never
+// inspects untrusted content beyond the event-header shape and the canonical
+// event's kind.
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { normalizeForgejoEvent } from "../events/normalize.js";
 import type { CanonicalForgeEvent } from "../events/types.js";
+import { projectForgejoWebhookPayload } from "./forgejo-events.js";
 import { verifyForgejoWebhookSignature } from "./signature.js";
 
 export const DEFAULT_MAX_WEBHOOK_BODY_BYTES = 1_048_576;
@@ -35,8 +40,10 @@ function send(res: ServerResponse, status: number, body: string): void {
  * - every rejection is a fixed status + fixed body — the payload, the secret,
  *   the signature header, and any error text are never reflected;
  * - oversize bodies are refused mid-stream and buffering stops immediately;
- * - the `X-Gitea-Event` header is authoritative over any `name` the payload
- *   carries; `normalizeForgejoEvent` is the only consumer of the parsed body.
+ * - the `X-Gitea-Event` header (and the `X-Gitea-Event-Type` header) are
+ *   authoritative over any `name`/`event` the payload carries; the delivery is
+ *   projected by `projectForgejoWebhookPayload` onto the GitHub-shaped envelope
+ *   and `normalizeForgejoEvent` is the only consumer of the (projected) body.
  */
 export function createForgejoWebhookHandler(
   options: ForgejoWebhookHandlerOptions,
@@ -116,14 +123,26 @@ export function createForgejoWebhookHandler(
         return;
       }
 
-      // X-Gitea-Event is authoritative; a hostile payload name cannot re-route
-      // the delivery.
-      const payload = { ...parsed, name: eventHeader };
-      const event = normalizeForgejoEvent(
-        payload,
-        "webhook",
-        options.rereviewLabel === undefined ? {} : { rereviewLabel: options.rereviewLabel },
+      // The specific-type header is trusted like the event header (it is part
+      // of the HMAC-verified delivery) but is accepted only if it passes the
+      // same shape guard; anything else is treated as absent.
+      const typeHeader = req.headers["x-gitea-event-type"];
+      const eventTypeHeader =
+        typeof typeHeader === "string" && EVENT_HEADER.test(typeHeader) ? typeHeader : "";
+
+      // X-Gitea-Event (and the type header) are authoritative; a hostile
+      // payload name cannot re-route the delivery. The projection maps the
+      // native Gitea/Forgejo vocabulary onto the GitHub-shaped envelope the
+      // normalizer accepts before it runs.
+      const normalizeOptions =
+        options.rereviewLabel === undefined ? {} : { rereviewLabel: options.rereviewLabel };
+      const payload = projectForgejoWebhookPayload(
+        eventHeader,
+        eventTypeHeader,
+        { ...parsed },
+        normalizeOptions,
       );
+      const event = normalizeForgejoEvent(payload, "webhook", normalizeOptions);
       if (event === null) {
         // Ack so the forge stops redelivering a permanently unroutable delivery.
         settle(200, '{"status":"ignored"}');

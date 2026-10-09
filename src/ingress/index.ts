@@ -3,6 +3,7 @@
 //
 // Module map:
 //   signature.ts         - X-Gitea-Signature HMAC-SHA256 verification (fail closed)
+//   forgejo-events.ts    - native Gitea/Forgejo event projection onto the #728 envelope
 //   webhook-handler.ts   - Node http webhook ingress (verify before parse, fixed bodies)
 //   endpoints.ts         - REST/web endpoint resolution from a configured platform base URL
 //   api-client.ts        - read-only authenticated Forgejo REST client
@@ -17,6 +18,7 @@ export {
   createForgejoWebhookHandler,
 } from "./webhook-handler.js";
 export { computeForgejoWebhookSignature, verifyForgejoWebhookSignature } from "./signature.js";
+export { projectForgejoWebhookPayload } from "./forgejo-events.js";
 
 export type { ForgejoEndpoints, RepositoryEndpoints } from "./endpoints.js";
 export { resolveForgejoEndpoints, resolveRepositoryEndpoints } from "./endpoints.js";

@@ -16,7 +16,8 @@ and own their own HTTP server, queue, and worker lifecycle.
 | module | role |
 |---|---|
 | `signature.ts` | `X-Gitea-Signature` computation/verification: lowercase-hex HMAC-SHA256 over the raw body, constant-time compare |
-| `webhook-handler.ts` | Node `http` request handler for Forgejo webhook deliveries: size cap, verify-before-parse, fixed response bodies, canonical-event callback |
+| `webhook-handler.ts` | Node `http` request handler for Forgejo webhook deliveries: size cap, verify-before-parse, fixed response bodies, then the native→canonical projection and the #728 normalizer, and the canonical-event callback |
+| `forgejo-events.ts` | `projectForgejoWebhookPayload`: native Forgejo/Gitea webhook vocabulary → the GitHub-compatible envelope the #728 normalizer expects; runs after signature verification + JSON parse, before `normalizeForgejoEvent` |
 | `endpoints.ts` | Resolve REST API / web / repo-scoped / clone URLs from a configured platform base URL |
 | `api-client.ts` | `ForgejoIngressClient`: read-only authenticated REST reads (`getJson`, `listOpenPullRequests`, `getPullRequest`) |
 | `clone-credentials.ts` | Build a git clone credential as an HTTP Basic `Authorization` header pair |
@@ -33,17 +34,65 @@ and own their own HTTP server, queue, and worker lifecycle.
   (even a request signed with the empty secret), and duplicate-header
   arrays and the GitHub `sha256=` prefixed form are rejected before any
   comparison (`ingress-signature.test.ts`).
-- The `X-Gitea-Event` header is authoritative: it shape-checks against a
-  strict pattern and is injected as `payload.name`, so a hostile payload
-  `name` cannot re-route a delivery.
+- The `X-Gitea-Event` and `X-Gitea-Event-Type` headers are authoritative:
+  both shape-check against a strict pattern and only these (never a payload
+  field) decide the projected event kind, so a hostile payload
+  `name`/`event` cannot re-route a delivery. The payload is untrusted and no
+  untrusted string is copied into a synthesized field: the only value the
+  projection synthesizes is the trusted re-review-label constant, matched
+  byte-for-byte against `pull_request.labels` and re-emitted as that constant
+  — never as a copy of the payload text — so a hostile label cannot forge the
+  trigger.
 - Every response is a fixed status + fixed body; the payload, secret,
   signature, and error text are never reflected. Oversize bodies are
   refused mid-stream (413) and buffering stops immediately; `ping` and
   permanently unroutable deliveries are acked as ignored so the forge
   stops redelivering.
-- Raw payloads stop at `normalizeForgejoEvent` (#728's adapter boundary);
-  nothing in `src/ingress/` interprets untrusted content beyond the
-  event-header shape and the canonical event's `kind`.
+- Raw payloads stop at the projection (`projectForgejoWebhookPayload`,
+  `forgejo-events.ts`), which runs after the HMAC signature check and
+  `JSON.parse` and before the #728 `normalizeForgejoEvent`; it reads only
+   the two trusted headers and a small set of field shapes (to remap
+   native vocabulary) and forwards everything else untouched, so the
+   frozen provider-neutral normalizer still sees only the
+   GitHub-compatible envelope.
+
+### Native event projection (`forgejo-events.ts`)
+
+Why it exists: native Gitea/Forgejo deliveries do not speak GitHub's
+event vocabulary, so `projectForgejoWebhookPayload` re-maps them into the
+GitHub-compatible envelope the #728 normalizer expects. It runs after
+HMAC verification + `JSON.parse` and before the frozen #728
+`normalizeForgejoEvent`. That normalizer is a frozen provider-neutral
+contract shared with GitHub, so provider vocabulary is the ingress
+adapter's concern: GitHub deliveries are already in the canonical
+envelope and are projected unchanged — GitHub behavior stays
+byte-identical (`ingress-webhook.test.ts`).
+
+Header quirk: `X-Gitea-Event` carries the **grouped** event name;
+`X-Gitea-Event-Type` carries the specific type. Grouping:
+`pull_request_sync`/`pull_request_label` → `pull_request`, and
+`pull_request_comment` → `issue_comment`. An invalid or missing type
+header is ignored — the grouped header alone drives projection.
+
+| Native delivery | Projected envelope | Canonical kind |
+|---|---|---|
+| `pull_request` + action `synchronized` (or header/type `pull_request_sync`) | `pull_request` + `synchronize` | `synchronize` |
+| `pull_request` + action `reopened` | `pull_request` + `reopen` | `pr_reopened` |
+| `pull_request` + type `pull_request_label` + action `label_updated` | `pull_request` + `labeled`, `label` synthesized | `rereview_label` when the trigger label is present, else ignored |
+| `issue_comment` + type `pull_request_comment` + action `created` (top-level `pull_request`) | `issue_comment` with `pull_request` re-nested under `issue` (top-level key removed) | `follow_up` |
+
+Label synthesis caveat: a native `label_updated` carries no top-level
+`label`, so the projection fires `rereview_label` only when the re-review
+label appears in `pull_request.labels`, synthesizing the operator's
+trusted constant (never payload text). An unrelated-label update while
+the trigger label already exists can over-trigger — harmless, because
+same-head re-review generations converge to the ONE #728 job id via the
+generation ledger (see Dedupe and convergence).
+
+Fail-closed: unknown events, labels, and comments project to shapes the
+normalizer maps to `unknown` — acked 200-ignored, never a mis-route. Both
+headers are trusted only because they are covered by the preceding
+signature verification.
 
 ## Endpoint and credential model
 
