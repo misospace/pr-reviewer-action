@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import eval_lanes
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -2096,6 +2098,9 @@ def run_review_for_pr(
             env["REQUIREMENT_TRACE"] = "true"
         else:
             env.pop("REQUIREMENT_TRACE", None)
+        if model_config.get("lane_active"):
+            for key in eval_lanes.SPECIALIST_ENV_KEYS:
+                env.pop(key, None)
         env.update(model_config.get("extra_env") or {})
 
         # Run the review through the TypeScript runtime (the v3 `run`
@@ -3048,19 +3053,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model",
         type=str,
-        default=os.getenv("AI_MODEL", ""),
+        default=None,
         help="Model name for review runs",
     )
     parser.add_argument(
         "--base-url",
         type=str,
-        default=os.getenv("AI_BASE_URL", ""),
+        default=None,
         help="AI API base URL",
     )
     parser.add_argument(
         "--api-key",
         type=str,
-        default=os.getenv("AI_API_KEY", ""),
+        default=None,
         help="AI API key",
     )
     parser.add_argument(
@@ -3160,6 +3165,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--lanes-file",
+        type=Path,
+        default=None,
+        help="Operator lane-plan JSON for #967 controls 1-3",
+    )
+    parser.add_argument(
+        "--lane",
+        type=str,
+        default=None,
+        help="Lane id to select from --lanes-file",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print planned runs without executing",
@@ -3197,6 +3214,28 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _main_real_pr_corpus(args: argparse.Namespace) -> int:
     """The real-PR corpus (#779) CLI path: score hits/FPs, not known_findings."""
+    lane_plan = None
+    lane = None
+    lane_resolved = None
+    if args.lanes_file is not None:
+        try:
+            lane_plan = eval_lanes.load_lane_plan(args.lanes_file)
+            lane = eval_lanes.select_lane(lane_plan, args.lane)
+        except eval_lanes.LaneConfigError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if any(value is not None for value in (args.model, args.base_url, args.api_key)):
+            print("Error: --model/--base-url/--api-key cannot be combined with --lanes-file", file=sys.stderr)
+            return 1
+        if args.dry_run:
+            print(eval_lanes.format_lane(lane_plan, lane), file=sys.stderr)
+        else:
+            try:
+                lane_resolved = eval_lanes.resolve_lane(lane_plan, lane, os.environ)
+            except eval_lanes.LaneConfigError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
+
     try:
         corpus = RealPRCorpus.from_file(args.corpus)
     except ValueError as exc:
@@ -3207,11 +3246,22 @@ def _main_real_pr_corpus(args: argparse.Namespace) -> int:
         return 1
 
     model_config = {
-        "model": args.model,
-        "base_url": args.base_url,
-        "api_key": args.api_key,
+        "model": args.model if args.model is not None else os.getenv("AI_MODEL", ""),
+        "base_url": args.base_url if args.base_url is not None else os.getenv("AI_BASE_URL", ""),
+        "api_key": args.api_key if args.api_key is not None else os.getenv("AI_API_KEY", ""),
         "github_token": args.github_token,
     }
+    if lane_resolved is not None:
+        model_config.update({
+            "model": lane_resolved.model,
+            "base_url": lane_resolved.base_url,
+            "api_key": lane_resolved.api_key,
+            "lane_active": True,
+        })
+        extra = dict(model_config.get("extra_env") or {})
+        extra["AI_API_FORMAT"] = lane_resolved.api_format
+        extra.update(lane_resolved.specialist_env)
+        model_config["extra_env"] = extra
     # #875 A/B arm: main()'s fixture-path application never runs for the
     # real-PR split (main() dispatches here first), so the arm must be
     # applied here too — without it both supposed A/B arms run the runtime's
@@ -3228,7 +3278,8 @@ def _main_real_pr_corpus(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     print(f"Modes: {args.modes}", file=sys.stderr)
-    print(f"Model: {args.model or '(not set)'}", file=sys.stderr)
+    display_model = lane_plan.profiles[lane.primary_profile].model if lane is not None else model_config["model"]
+    print(f"Model: {display_model or '(not set)'}", file=sys.stderr)
     print(f"Claim falsification: {args.claim_falsification}", file=sys.stderr)
     if args.runs_per_mode > 1:
         print(f"Runs per mode: {args.runs_per_mode}", file=sys.stderr)
@@ -3250,6 +3301,8 @@ def _main_real_pr_corpus(args: argparse.Namespace) -> int:
 
     if args.dry_run:
         return 0
+    if lane_resolved is not None:
+        report["metadata"]["lane"] = dict(lane_resolved.public)
 
     # #840: surface timeout counts per mode prominently.
     timeout_lines = [
@@ -3288,6 +3341,28 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
+    lane_plan = None
+    lane = None
+    lane_resolved = None
+    if args.lanes_file is not None:
+        try:
+            lane_plan = eval_lanes.load_lane_plan(args.lanes_file)
+            lane = eval_lanes.select_lane(lane_plan, args.lane)
+        except eval_lanes.LaneConfigError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if any(value is not None for value in (args.model, args.base_url, args.api_key)):
+            print("Error: --model/--base-url/--api-key cannot be combined with --lanes-file", file=sys.stderr)
+            return 1
+        if args.dry_run:
+            print(eval_lanes.format_lane(lane_plan, lane), file=sys.stderr)
+        else:
+            try:
+                lane_resolved = eval_lanes.resolve_lane(lane_plan, lane, os.environ)
+            except eval_lanes.LaneConfigError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
+
     # Load corpus
     if not args.corpus.exists():
         print(f"Error: corpus file not found: {args.corpus}", file=sys.stderr)
@@ -3315,11 +3390,22 @@ def main() -> int:
     prs = corpus.prs[:args.max_prs] if args.max_prs else corpus.prs
 
     model_config = {
-        "model": args.model,
-        "base_url": args.base_url,
-        "api_key": args.api_key,
+        "model": args.model if args.model is not None else os.getenv("AI_MODEL", ""),
+        "base_url": args.base_url if args.base_url is not None else os.getenv("AI_BASE_URL", ""),
+        "api_key": args.api_key if args.api_key is not None else os.getenv("AI_API_KEY", ""),
         "github_token": args.github_token,
     }
+    if lane_resolved is not None:
+        model_config.update({
+            "model": lane_resolved.model,
+            "base_url": lane_resolved.base_url,
+            "api_key": lane_resolved.api_key,
+            "lane_active": True,
+        })
+        extra = dict(model_config.get("extra_env") or {})
+        extra["AI_API_FORMAT"] = lane_resolved.api_format
+        extra.update(lane_resolved.specialist_env)
+        model_config["extra_env"] = extra
     if args.system_prompt is not None:
         model_config["system_prompt"] = args.system_prompt
     if args.system_prompt_file is not None:
@@ -3338,13 +3424,18 @@ def main() -> int:
     print(f"Deep review: {args.deep_review}", file=sys.stderr)
     print(f"Deep execution: {args.deep_execution}", file=sys.stderr)
     print(f"Claim falsification: {args.claim_falsification}", file=sys.stderr)
-    print(f"Model: {args.model or '(not set)'}", file=sys.stderr)
+    display_model = lane_plan.profiles[lane.primary_profile].model if lane is not None else model_config["model"]
+    print(f"Model: {display_model or '(not set)'}", file=sys.stderr)
     claim_falsification = args.claim_falsification == "true"
 
     runs_per_mode = max(1, args.runs_per_mode)
-    deep_variants = (
-        [False, True] if args.deep_review == "both" else [args.deep_review == "true"]
-    )
+    if lane is not None:
+        deep_variants = [lane.kind != "primary_only"]
+        print("Deep-review is set by the selected lane.", file=sys.stderr)
+    else:
+        deep_variants = (
+            [False, True] if args.deep_review == "both" else [args.deep_review == "true"]
+        )
 
     if args.dry_run:
         for pr in prs:
@@ -3406,6 +3497,8 @@ def main() -> int:
 
     # Generate report
     report = generate_report(results, corpus, equivalent_paths=args.equivalent_paths)
+    if lane_resolved is not None:
+        report["metadata"]["lane"] = dict(lane_resolved.public)
     report["metadata"]["corpus_source"] = str(args.corpus)
     report["metadata"]["claim_falsification"] = claim_falsification
     report["metadata"]["requirement_trace"] = args.requirement_trace == "true"
