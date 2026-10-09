@@ -4,6 +4,8 @@ Design of the #728 event/job layer: `src/events/` (the provider-neutral
 canonical event model) and `src/jobs/` (the immutable ReviewJob contract
 it feeds). The job layer is a **contract for a future queue/executor
 (Operator mode)** — it is not wired into the running action pipeline.
+The scheduling semantics for that queue have since landed in `src/queue/`
+([durable-review-queue.md](durable-review-queue.md)).
 
 ## Canonical event model
 

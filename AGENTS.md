@@ -106,6 +106,7 @@ Name only paths you are confident about. An issue that names files the diff does
 - [`docs/architecture/v3-typescript-runtime.md`](docs/architecture/v3-typescript-runtime.md) — composite/Node runtime decision and platform boundary
 - [`docs/architecture/deep-review-execution-shape.md`](docs/architecture/deep-review-execution-shape.md) — specialist execution-shape ADR
 - [`docs/architecture/distributed-requirement-proof.md`](docs/architecture/distributed-requirement-proof.md) — #962 distributed-enforcement proof contract: trusted seam topology, collective validation, anti-abuse
+- [`docs/architecture/durable-review-queue.md`](docs/architecture/durable-review-queue.md) — #731 durable review-queue semantics: lifecycle state machine, supersession, leases, recovery (library for the future controller daemon)
 - [`docs/fork-review.md`](docs/fork-review.md) — fork PR privilege separation, threat model, `FORK_*` configuration
 - [`docs/v3-migration.md`](docs/v3-migration.md) — v2→v3 migration state and contract mapping
 - [`docs/repository-config.md`](docs/repository-config.md) — v3 repository config file: keys, base-side trust, narrowing precedence
