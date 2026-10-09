@@ -140,6 +140,8 @@ def test_missing_credentials_name_env_only(tmp_path: Path) -> None:
     (lambda d: d.update(profiles={}), "profiles"),
     (lambda d: d.update(lanes=[]), "lanes"),
     (lambda d: d["profiles"]["primary"].update(model=4), "model"),
+    (lambda d: d["lanes"][0].update(role_models={"security": "x"}), "role_models"),
+    (lambda d: d["lanes"][0].update(id="bad id"), "id"),
 ])
 def test_invalid_plans(tmp_path: Path, mutate, message: str) -> None:
     data = plan_data()
@@ -156,5 +158,38 @@ def test_redacted_summaries_and_format(tmp_path: Path) -> None:
         eval_lanes.format_lane(plan, lane),
         json.dumps(resolved.public),
         str(plan),
+        str(resolved),
     )
     assert all(SECRET not in output for output in public_outputs)
+
+
+def test_digest_ignores_json_formatting(tmp_path: Path) -> None:
+    data = plan_data()
+    compact = tmp_path / "compact.json"
+    pretty = tmp_path / "pretty.json"
+    compact.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+    pretty.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    assert (
+        eval_lanes.load_lane_plan(compact).source_digest
+        == eval_lanes.load_lane_plan(pretty).source_digest
+    )
+
+
+def test_legacy_model_defaults_preserved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps({"benchmark_corpus": [{
+        "number": 1, "repo_full_name": "test/repo", "known_findings": [],
+    }]}), encoding="utf-8")
+    monkeypatch.setenv("AI_MODEL", "env-model")
+
+    monkeypatch.setattr(sys, "argv", [
+        "eval_harness.py", "--corpus", str(corpus), "--dry-run",
+    ])
+    assert eval_harness.main() == 0
+    assert "Model: env-model" in capsys.readouterr().err
+
+    monkeypatch.setattr(sys, "argv", [
+        "eval_harness.py", "--corpus", str(corpus), "--dry-run", "--model", "explicit-model",
+    ])
+    assert eval_harness.main() == 0
+    assert "Model: explicit-model" in capsys.readouterr().err

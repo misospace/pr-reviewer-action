@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -16,6 +16,7 @@ SPECIALIST_ENV_KEYS = (
     "AI_SPECIALIST_API_KEY", "AI_SPECIALIST_CORRECTNESS_MODEL",
     "AI_SPECIALIST_SECURITY_MODEL", "AI_SPECIALIST_TESTS_MODEL",
 )
+LANE_ID_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
 
 
 class LaneConfigError(ValueError):
@@ -55,9 +56,9 @@ class ResolvedLane:
     model: str
     base_url: str
     api_format: str
-    api_key: str
+    api_key: str = field(repr=False)
     deep_review: bool
-    specialist_env: Mapping[str, str]
+    specialist_env: Mapping[str, str] = field(repr=False)
     public: Mapping[str, Any]
 
 
@@ -113,6 +114,8 @@ def load_lane_plan(path: Path) -> LanePlan:
         if not isinstance(raw, dict):
             raise LaneConfigError(f"lane {index} must be an object")
         lane_id = _nonempty(raw.get("id"), f"lane {index} id")
+        if not LANE_ID_PATTERN.fullmatch(lane_id):
+            raise LaneConfigError(f"lane {index} id must match {LANE_ID_PATTERN.pattern}")
         kind = raw.get("kind")
         allowed = {"id", "kind", "primary_profile", "role_models"}
         if kind == "heterogeneous_specialists":

@@ -30,11 +30,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import eval_lanes
-
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+SCRIPT_DIR = Path(__file__).resolve().parent
+for _p in (str(ROOT), str(SCRIPT_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+import eval_lanes
 
 from pr_reviewer.semantic_eval import (
     SemanticCorpus,
@@ -3235,6 +3237,14 @@ def _main_real_pr_corpus(args: argparse.Namespace) -> int:
             except eval_lanes.LaneConfigError as exc:
                 print(f"Error: {exc}", file=sys.stderr)
                 return 1
+        if lane_resolved is not None and lane_resolved.deep_review:
+            print(
+                "Warning: the selected lane requires deep review, but the real-PR "
+                "corpus path does not run specialists; only the primary review will "
+                "execute. Use a fixture corpus (e.g. evals/corpus-specialists.json) "
+                "for specialist/heterogeneous lanes.",
+                file=sys.stderr,
+            )
 
     try:
         corpus = RealPRCorpus.from_file(args.corpus)
