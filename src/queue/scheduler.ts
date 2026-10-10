@@ -712,6 +712,17 @@ export class ReviewQueueController {
       return;
     }
     this.publishInFlight.add(jobId);
+    // CRITICAL: persist the durable result BEFORE awaiting the external
+    // publisher. If the process dies during the publish, the next
+    // `recover()` keeps the `publishing` record (with `resultHeadSha`
+    // populated) and a later `tick()`'s `retryPublishes` retries the
+    // publish — the executor is never rerun. The lease is NOT cleared
+    // here so the post-await `current.leaseOwner !== token` check
+    // can still detect a late resolution from an abandoned
+    // generation. `reconcileRecoveredSnapshot` clears the lease for
+    // `publishing`-with-result records on recovery, so a crashed
+    // mid-publish never strands a live lease.
+    this.save();
     let published: boolean;
     try {
       published = await publisher.publish(publishing);

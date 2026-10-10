@@ -7,9 +7,13 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import path from "node:path";
+import { tmpdir } from "node:os";
 
 import {
   InMemoryQueueStore,
+  JsonFileQueueStore,
   ReviewQueueController,
   newJobRecord,
   type ExecutionOutcome,
@@ -481,6 +485,196 @@ test("publish throw: a throwing publisher retries like false and never crashes t
   assert.equal(done.state, "completed");
   assert.equal(calls.length, 2, "the pass retried after the backoff");
   assert.equal(executor.invocations.length, 1, "still no executor rerun");
+});
+
+// ── crash durability at the executor->publisher handoff ────────────────
+
+test("crash during pending publish: durable result persists before await, restart retries publish without rerunning executor", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "queue-crash-publish-"));
+  const file = path.join(dir, "queue.json");
+  try {
+    // First publisher: hangs on its single call to simulate a crash
+    // mid-publish. The returned promise is never resolved before the
+    // first controller is discarded; the test deliberately does NOT
+    // resolve it (resolving it would let the abandoned controller's
+    // continuation race the fresh controller).
+    const firstCalls: JobRecord[] = [];
+    const firstDeferredRef: { current: ((b: boolean) => void) | null } = {
+      current: null,
+    };
+    const firstPublisher: JobPublisher = {
+      async publish(record: JobRecord): Promise<boolean> {
+        firstCalls.push(record);
+        return new Promise<boolean>((resolve) => {
+          firstDeferredRef.current = resolve;
+        });
+      },
+    };
+
+    // Second publisher: called by the fresh controller after the
+    // simulated crash. Returns true to complete the record.
+    const secondCalls: JobRecord[] = [];
+    const secondPublisher: JobPublisher = {
+      async publish(record: JobRecord): Promise<boolean> {
+        secondCalls.push(record);
+        return true;
+      },
+    };
+
+    // A separate executor for the second controller to prove the
+    // executor is never invoked again.
+    const secondExecutor = new ControllableExecutor();
+
+    // First run: enqueue, dispatch, settle (with a deferred publisher).
+    const clock: Clock = { t: 1_000_000 };
+    const firstStore = new JsonFileQueueStore(file);
+    const firstExecutor = new ControllableExecutor();
+    const firstController = new ReviewQueueController(
+      firstStore,
+      { ...baseOptions(firstExecutor), publisher: firstPublisher },
+      () => clock.t,
+    );
+    firstController.recover();
+
+    firstController.enqueue(makeJob("job-a"));
+    await firstController.tick();
+    firstExecutor.last().settle(DONE);
+    await flush();
+
+    assert.equal(firstCalls.length, 1, "the first publisher received the publish call");
+    assert.ok(
+      firstDeferredRef.current !== null,
+      "the first publisher is awaiting (the publish promise is in flight)",
+    );
+
+    // The critical assertion: the durable state on disk has
+    // `publishing` with the durable result COMMITTED before the
+    // publish call. A naive implementation would still see `running`
+    // here, and a restart would requeue the executor and lose the
+    // result.
+    const onDisk = new JsonFileQueueStore(file).load();
+    assert.equal(onDisk.records.length, 1);
+    const persisted = onDisk.records[0]!;
+    assert.equal(persisted.state, "publishing", "durable state committed before the publish await");
+    assert.equal(persisted.resultHeadSha, HEAD_SHA, "the durable result is on disk before the side effect");
+    assert.equal(persisted.attempt, 1, "the dispatch was counted exactly once");
+    // The lease is still on the record at this moment (it is cleared
+    // only AFTER the publish resolves); `reconcileRecoveredSnapshot`
+    // clears it on recovery for `publishing`-with-result records.
+    assert.notEqual(persisted.leaseOwner, "", "the dispatch lease is still on the record");
+    assert.ok(persisted.leaseExpiresAtMs > clock.t, "the lease has not yet expired");
+
+    // Simulate a crash: discard the first controller. The first
+    // publisher's deferred is left dangling — in a real crash the
+    // process is gone, so the in-flight publish promise is never
+    // resolved. This test deliberately does NOT resolve the deferred,
+    // because that would let the abandoned controller's continuation
+    // write a `nextRetryAtMs` to disk and race the fresh controller.
+
+    // Second run: a fresh controller over the same store, with a
+    // fresh executor and a fresh publisher.
+    const secondStore = new JsonFileQueueStore(file);
+    const secondController = new ReviewQueueController(
+      secondStore,
+      { ...baseOptions(secondExecutor), publisher: secondPublisher },
+      () => clock.t,
+    );
+    const recovered = secondController.recover();
+    assert.deepEqual(recovered.requeued, [], "the publishing record is not requeued");
+    assert.deepEqual(recovered.failed, [], "the publishing record is not failed");
+    const reloaded = secondController.recordFor("job-a")!;
+    assert.equal(reloaded.state, "publishing", "recover keeps the durable publishing record");
+    assert.equal(reloaded.resultHeadSha, HEAD_SHA, "the durable result survives the restart");
+    assert.equal(reloaded.attempt, 1, "the attempt count survives the restart");
+
+    await secondController.tick();
+    await flush();
+
+    assert.equal(secondCalls.length, 1, "the second publisher is called by retryPublishes");
+    assert.equal(secondExecutor.invocations.length, 0, "the executor is NEVER rerun on restart");
+    const finished = secondController.recordFor("job-a")!;
+    assert.equal(finished.state, "completed", "the fresh controller completes the publish");
+    assert.equal(finished.resultHeadSha, HEAD_SHA);
+
+    // And the durable state confirms completion.
+    const finalDisk = new JsonFileQueueStore(file).load();
+    assert.equal(finalDisk.records[0]!.state, "completed");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("crash durability: idempotent publish — restart with a completed record never re-publishes", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "queue-crash-after-"));
+  const file = path.join(dir, "queue.json");
+  try {
+    const calls: JobRecord[] = [];
+    let throwOnce = true;
+    const publisher: JobPublisher = {
+      async publish(record: JobRecord): Promise<boolean> {
+        calls.push(record);
+        if (throwOnce) {
+          throwOnce = false;
+          return false;
+        }
+        return true;
+      },
+    };
+
+    const clock: Clock = { t: 1_000_000 };
+    const firstStore = new JsonFileQueueStore(file);
+    const firstExecutor = new ControllableExecutor();
+    const firstController = new ReviewQueueController(
+      firstStore,
+      { ...baseOptions(firstExecutor), publisher },
+      () => clock.t,
+    );
+    firstController.recover();
+    firstController.enqueue(makeJob("job-a"));
+    await firstController.tick();
+    firstExecutor.last().settle(DONE);
+    await flush();
+    assert.equal(calls.length, 1, "the publish was attempted once");
+    assert.equal(firstController.recordFor("job-a")!.state, "publishing");
+
+    // Simulate a restart AFTER the durable result was committed but
+    // BEFORE the next publish retry succeeded.
+    const secondStore = new JsonFileQueueStore(file);
+    const secondController = new ReviewQueueController(
+      secondStore,
+      { ...baseOptions(new ControllableExecutor()), publisher },
+      () => clock.t,
+    );
+    secondController.recover();
+    const reloaded = secondController.recordFor("job-a")!;
+    assert.equal(reloaded.state, "publishing", "the durable result survives the restart");
+    assert.equal(reloaded.resultHeadSha, HEAD_SHA);
+
+    clock.t += 100; // past the publish-retry backoff
+    await secondController.tick();
+    await flush();
+    const done = secondController.recordFor("job-a")!;
+    assert.equal(done.state, "completed");
+    assert.equal(calls.length, 2, "exactly one retry after the restart");
+
+    // A SECOND restart, now that the record is `completed`, must not
+    // call the publisher again — the durable result is already
+    // published, the executor is long-since finished.
+    const thirdStore = new JsonFileQueueStore(file);
+    const thirdExecutor = new ControllableExecutor();
+    const thirdController = new ReviewQueueController(
+      thirdStore,
+      { ...baseOptions(thirdExecutor), publisher },
+      () => clock.t,
+    );
+    thirdController.recover();
+    await thirdController.tick();
+    await flush();
+    assert.equal(calls.length, 2, "completed records never re-publish");
+    assert.equal(thirdExecutor.invocations.length, 0, "completed records never re-execute");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── bounded retry on failure ────────────────────────────────────────────

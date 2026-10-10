@@ -14,6 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { tmpdir } from "node:os";
 
 import {
   emptyQueueSnapshot,
@@ -88,7 +89,7 @@ function makeSnapshot(records: readonly JobRecord[]): QueueSnapshot {
   return Object.freeze(snapshot);
 }
 
-const SCRATCH = mkdtempSync(path.join("/var/tmp/courier-scratch", "queue-store-"));
+const SCRATCH = mkdtempSync(path.join(tmpdir(), "queue-store-"));
 
 /** A fresh scratch subdirectory. Tests clean it up in a `finally`. */
 function makeDir(tag: string): string {
