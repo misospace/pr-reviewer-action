@@ -775,36 +775,36 @@ export class ReviewQueueController {
   }
 
 /** The newest non-terminal sibling generation (same prKey, other
- * jobId) enqueued strictly after `record` — or, on an exact enqueue tie,
- * only when the sibling's jobId is lexicographically greater (a
- * deterministic tie-break, so tied records cannot mutually block).
- * Returns its jobId, or null. */
-private findSupersedingSibling(record: JobRecord): string | null {
-  let winner: string | null = null;
-  let winnerEnqueued = -1;
-  for (const other of this.records.values()) {
-    if (other.prKey !== record.prKey) continue;
-    const otherId = other.job.jobId;
-    if (otherId === record.job.jobId) continue;
-    if (isTerminalState(other.state)) continue;
-    if (other.enqueuedAtMs < record.enqueuedAtMs) continue;
-    if (
-      other.enqueuedAtMs === record.enqueuedAtMs &&
-      otherId <= record.job.jobId
-    ) {
-      continue;
+   * jobId) enqueued strictly after `record` — or, on an exact enqueue tie,
+   * only when the sibling's jobId is lexicographically greater (a
+   * deterministic tie-break, so tied records cannot mutually block).
+   * Returns its jobId, or null. */
+  private findSupersedingSibling(record: JobRecord): string | null {
+    let winner: string | null = null;
+    let winnerEnqueued = -1;
+    for (const other of this.records.values()) {
+      if (other.prKey !== record.prKey) continue;
+      const otherId = other.job.jobId;
+      if (otherId === record.job.jobId) continue;
+      if (isTerminalState(other.state)) continue;
+      if (other.enqueuedAtMs < record.enqueuedAtMs) continue;
+      if (
+        other.enqueuedAtMs === record.enqueuedAtMs &&
+        otherId <= record.job.jobId
+      ) {
+        continue;
+      }
+      if (
+        winner === null ||
+        other.enqueuedAtMs > winnerEnqueued ||
+        (other.enqueuedAtMs === winnerEnqueued && otherId > winner)
+      ) {
+        winner = otherId;
+        winnerEnqueued = other.enqueuedAtMs;
+      }
     }
-    if (
-      winner === null ||
-      other.enqueuedAtMs > winnerEnqueued ||
-      (other.enqueuedAtMs === winnerEnqueued && otherId > winner)
-    ) {
-      winner = otherId;
-      winnerEnqueued = other.enqueuedAtMs;
-    }
+    return winner;
   }
-  return winner;
-}
 
   /** The one shared publish-retry delay:
    * `min(max(retryBaseMs, 0), retryMaxMs)`. */
