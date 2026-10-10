@@ -257,3 +257,92 @@ test("default limits are exported and echoed into the manifest as snake_case", (
     max_cross_partition_scan_bytes: DEFAULT_PARTITION_LIMITS.maxCrossPartitionScanBytes,
   });
 });
+
+test("partial limit overrides keep defaults for every unset field", () => {
+  const diff = rawDiff(chunk("a.ts"));
+  const manifest = planPartitions({
+    changedFiles: [changed("a.ts")],
+    diff,
+    headSha: HEAD,
+    baseSha: BASE,
+    limits: { maxParts: 5 },
+  });
+  assert.equal(manifest.limits.max_parts, 5);
+  assert.equal(manifest.limits.max_files_per_part, DEFAULT_PARTITION_LIMITS.maxFilesPerPart);
+  assert.equal(manifest.limits.max_bytes_per_part, DEFAULT_PARTITION_LIMITS.maxBytesPerPart);
+});
+
+test("the byte cap closes a partition and starts a new one", () => {
+  const diff = rawDiff(chunk("a.ts"), chunk("b.ts"));
+  const files = [changed("a.ts"), changed("b.ts")];
+  const manifest = planPartitions({
+    changedFiles: files,
+    diff,
+    headSha: HEAD,
+    baseSha: BASE,
+    limits: { maxBytesPerPart: 100, maxFileBytes: 100_000 },
+  });
+  assert.equal(manifest.parts.length, 2);
+  assert.equal(manifest.coverage.complete, true);
+});
+
+test("a single file above the soft byte cap but under the hard cap stays complete", () => {
+  const diff = rawDiff(chunk("a.ts"));
+  const manifest = planPartitions({
+    changedFiles: [changed("a.ts")],
+    diff,
+    headSha: HEAD,
+    baseSha: BASE,
+    limits: { maxBytesPerPart: 10, maxFileBytes: 100_000 },
+  });
+  assert.equal(manifest.parts.length, 1);
+  assert.equal(manifest.parts[0]?.truncated, false);
+  assert.equal(manifest.parts[0]?.files[0]?.oversized, false);
+  assert.equal(manifest.coverage.complete, true);
+});
+
+test("empty input and a zero-chunk diff are handled without error", () => {
+  const empty = planPartitions({ changedFiles: [], diff: rawDiff(), headSha: HEAD, baseSha: BASE });
+  assert.deepEqual(empty.parts, []);
+  assert.equal(empty.coverage.changed_files_total, 0);
+  assert.equal(empty.coverage.complete, true);
+
+  const noChunks = planPartitions({
+    changedFiles: [changed("src/a.bin"), changed("src/b.bin")],
+    diff: rawDiff(),
+    headSha: HEAD,
+    baseSha: BASE,
+  });
+  assert.deepEqual(noChunks.coverage.no_diff_files, ["src/a.bin", "src/b.bin"]);
+  assert.equal(noChunks.coverage.complete, true);
+  assert.equal(noChunks.coverage.assigned_files, 2);
+});
+
+test("positive control: a cross-partition defect pair is surfaced and preserved", () => {
+  const diff = rawDiff(chunk("a.ts", ['+import "./b.ts"']), chunk("b.ts", ["+export const b = 1"]));
+  const manifest = planPartitions({
+    changedFiles: [changed("a.ts"), changed("b.ts")],
+    diff,
+    headSha: HEAD,
+    baseSha: BASE,
+    limits: { maxFilesPerPart: 1 },
+  });
+  const finding: PartitionFinding = { partition: 0, file: "a.ts", line: 1, severity: "major", title: "Bug" };
+  const merged = mergePartitionFindings([{ index: 0, findings: [finding] }, { index: 1, findings: [] }]);
+  assert.equal(merged.findings.length, 1);
+  const cross = crossPartitionFindings(manifest, merged.findings);
+  assert.deepEqual(cross.map((entry) => entry.referenced), ["b.ts"]);
+});
+
+test("negative control: a finding in a partition with no outgoing reference yields no pair", () => {
+  const diff = rawDiff(chunk("a.ts", ['+import "./b.ts"']), chunk("b.ts", ["+export const b = 1"]));
+  const manifest = planPartitions({
+    changedFiles: [changed("a.ts"), changed("b.ts")],
+    diff,
+    headSha: HEAD,
+    baseSha: BASE,
+    limits: { maxFilesPerPart: 1 },
+  });
+  const finding: PartitionFinding = { partition: 1, file: "b.ts", line: 1, severity: "major", title: "Bug" };
+  assert.deepEqual(crossPartitionFindings(manifest, [finding]), []);
+});

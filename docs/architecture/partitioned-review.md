@@ -43,14 +43,18 @@ The manifest records:
 - `unassigned_files`, the eligible files not placed in a partition because
   the part cap was reached;
 - `limits`, a snake_case echo of the applied bounds (`max_parts`,
-  `max_files_per_part`, `max_bytes_per_part`, `max_file_bytes`, and the
-  cross-partition scan caps), so the allocation is auditable.
+  `max_files_per_part`, `max_bytes_per_part`, `max_file_bytes`,
+  `max_cross_partition_refs_per_part`, `max_cross_partition_scan_bytes`), so the
+  allocation is auditable.
 
 Partition identities and file order are deterministic. Files are ordered by
 rank and then filename before assignment. A file that exceeds
 `max_file_bytes` receives its own partition with truncated diff content; it is
-not silently dropped or combined with another file. If the part cap prevents
-further assignments, remaining files are recorded in `unassigned_files`.
+not silently dropped or combined with another file. The part cap takes
+precedence: when it is already reached, an oversized file is recorded in
+`unassigned_files` (and still listed in `oversized_files`), so the shortfall
+stays visible rather than being isolated. If the part cap prevents further
+assignments, remaining files are recorded in `unassigned_files`.
 
 The accounting invariant is:
 
@@ -65,9 +69,16 @@ This is an input to cross-file invariant verification, not a finding generator
 or verdict authority.
 
 `partitionDiffBytes(part, diff)` measures a partition's diff contribution;
-`diffFingerprint(diff)` supplies a stable diff identity. The fingerprint and
-head/base SHAs travel with the manifest and outcomes so stale data cannot be
-mistaken for evidence about the current review.
+`diffFingerprint(diff)` supplies a stable diff identity. Staleness is keyed on
+`head_sha` (`isManifestStale`); `base_sha` and `diff_fingerprint` are carried on
+the manifest for audit and provenance so a plan can be tied back to the exact
+reviewed diff.
+
+A changed file with no textual diff chunk (binary, mode-only, or a diff the
+forge omitted) is recorded in `no_diff_files` and is informational at the
+planning layer — there is no changed line to partition. The deferred execution
+layer must account for such files explicitly (a tool read, or an explicit
+unread entry) rather than treating them as reviewed by default.
 
 ## Coverage and publication honesty
 
