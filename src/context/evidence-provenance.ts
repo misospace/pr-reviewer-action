@@ -20,8 +20,8 @@ export function sanitizedSourceProvenance(redactionCount: number, file?: string 
   return { representation: "sanitized_source", synthesized: count > 0, redactionCount: count, file: file ?? null, revision: revision ?? null };
 }
 
-export function untrustedTextProvenance(): EvidenceProvenance {
-  return { representation: "untrusted_text", synthesized: false, redactionCount: 0, file: null, revision: null };
+export function untrustedTextProvenance(file?: string | null): EvidenceProvenance {
+  return { representation: "untrusted_text", synthesized: false, redactionCount: 0, file: file ?? null, revision: null };
 }
 
 export function authorizesLiteralClaim(

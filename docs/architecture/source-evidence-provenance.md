@@ -24,6 +24,18 @@ A literal or structural claim about committed source is authorized only for unsy
 
 Callers bind evidence to the exact head or blob revision they fetched. This module records and checks that binding but performs no repository or network access itself.
 
+### Byte-identity binding for source-derived reads
+
+The provenance the harness attaches is only meaningful when the bytes the masker saw are byte-equal to the blob at the recorded revision. A checkout at HEAD can have tracked files modified on disk during build/test/preparation; reading those working-tree bytes and stamping them `committed_source @ HEAD` would let `authorizesLiteralClaim(provenance, HEAD)` succeed for a literal that does not exist at HEAD — directly defeating the literal-claim guarantee.
+
+To keep the guarantee honest, the source-derived tool executors (`read_file`, `git_grep`, `git_blame`) bind their reads to the recorded revision when one is available:
+
+- `read_file` reads from `git show <sourceRevision>:<path>` and stamps `committed_source` only when that call returned the bytes. A failure to bind (no SHA, file not in tree, git transport refused) falls through to the working tree read so the model still sees content, but the provenance is degraded to `untrusted_text` so a downstream literal-claim verifier cannot authorize on unverified bytes.
+- `git_grep` searches the tree at `<sourceRevision>` (`git grep <pattern> <rev>`); without a SHA it preserves the historical whole-worktree shape byte-for-byte so existing byte-exact assertions stay green. The `-z` output prefix `<rev>:` on every path is stripped so the redaction policy and the model-visible match line see the real workspace-relative path.
+- `git_blame` attributes against `<sourceRevision>` (`git blame <rev> -- <path>`), so the line content is read from that revision's tree rather than the working tree.
+
+A SHA is treated as an exact revision only when it parses as a full 40/64-character hex token; a branch name, ref, or unparseable string fails closed to a working-tree read with `untrusted_text` provenance. The regression test `source reads bind to the committed tree, never the working tree` exercises this end-to-end against a real git repo.
+
 ## Safe span verification
 
 When a claim needs verification after masking, the caller may fetch source at the exact expected revision and check whether a requested span occurs in that fetched text. The verification result is only `{ present: boolean }`; it never returns or echoes the span or source text. The call is bounded to already-fetched evidence and does not add an alternate retrieval route. A blank or whitespace-only span is reported absent rather than matching everything.

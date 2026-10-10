@@ -72,3 +72,31 @@ test("provenance attributes cannot inject envelope attributes", () => {
   assert.ok(!rendered.includes('" injected='));
   assert.equal(provenanceAttributes(untrustedTextProvenance()), "");
 });
+
+test("provenance module is forge-agnostic and cannot be weakened by fork-context (#1015 / fork privilege separation)", async () => {
+  // Regression-style guard for the fork privilege separation invariant:
+  // #1015's evidence-provenance primitives must not reference fork-specific
+  // code paths (FORK_*, `is_fork`, fork label handling, etc.) or weaken the
+  // fork trust boundary. The new module is the verification primitive for
+  // verdict policy and is shared between fork and same-repo runs; a fork
+  // author must not be able to influence a literal-claim authorization by
+  // referencing fork-only flags. This test reads the source as text — the
+  // #1015 module is small, pure, and has no I/O dependencies to substitute.
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  const here = path.dirname(__filename);
+  // `tests-v3/evidence-provenance.test.ts` lives at the repo root; the
+  // module source sits at `src/context/evidence-provenance.ts`. We resolve
+  // from the test file's directory so the assertion stays correct under
+  // both the source tree (`tsc -p tsconfig.test.json`) and the compiled
+  // test-build mirror (`.test-build/tests-v3/...`).
+  const modulePath = path.resolve(here, "../../src/context/evidence-provenance.ts");
+  const source = await fs.readFile(modulePath, "utf8");
+  // The module MUST stay forge-agnostic: a fork-only flag, fork label, or
+  // FORK_* token would let a fork author reach into the authorization
+  // primitives. The grep below is the assertion; any new line that adds
+  // such a token fails the test.
+  for (const token of ["FORK_PRIMARY", "FORK_SMART", "FORK_LITELLM", "ai-review-fork", "isFork", "is_fork", "pull_request_target"]) {
+    assert.ok(!source.includes(token), `evidence-provenance.ts must not reference fork-specific token: ${token}`);
+  }
+});
