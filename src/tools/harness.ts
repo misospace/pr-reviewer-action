@@ -1378,6 +1378,28 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     trackedIndex = null;
   }
 
+  // #1015: bind source-derived workspace reads to the ACTUAL checked-out
+  // revision, not the event's PR head. A consumer may check out the merge ref
+  // (or the base) rather than the head, so stamping PR_HEAD_SHA here would
+  // assert a revision the working tree does not hold and could wrongly
+  // authorize a literal claim. Fail closed to null when HEAD is unavailable.
+  let sourceRevision: string | null = null;
+  try {
+    const head = await runProcess({
+      file: "git",
+      args: ["rev-parse", "HEAD"],
+      cwd: input.workspaceRoot,
+      env: env as NodeJS.ProcessEnv,
+      timeoutMs: 15000,
+    }).result;
+    if (head.status === "exited" && head.exitCode === 0) {
+      const sha = head.stdout.toString("utf8").trim();
+      if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) sourceRevision = sha;
+    }
+  } catch {
+    sourceRevision = null;
+  }
+
   const toolCtx: ToolContext = {
     workspaceRoot: input.workspaceRoot,
     trackedIndex,
@@ -1388,7 +1410,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     requestTimeout: input.requestTimeout,
     searchUrl,
     maxSearchResults,
-    sourceRevision: ((env.PR_HEAD_SHA ?? "").trim() || null),
+    sourceRevision,
     deps: { env: env as NodeJS.ProcessEnv },
   };
 
