@@ -61,6 +61,15 @@ function codeUnitCompare(a: string, b: string): number {
   return 0;
 }
 
+/** Stable identity hash for a partition: lower-hex sha256 of the sorted
+ * filenames. A re-plan that rebalances files into a different set produces a
+ * different identity so stale `PartitionOutcome`s cannot accidentally satisfy
+ * the new manifest. */
+function computePartitionIdentity(filenames: readonly string[]): string {
+  const sorted = [...filenames].sort(codeUnitCompare);
+  return createHash("sha256").update(sorted.join("\n")).digest("hex");
+}
+
 function basename(path: string): string {
   const idx = path.lastIndexOf("/");
   return idx >= 0 ? path.slice(idx + 1) : path;
@@ -115,6 +124,16 @@ function collectEligible(
   return eligible;
 }
 
+function makePart(index: number, files: PartitionFileRef[], bytes: number, truncated: boolean): PartitionPart {
+  return {
+    index,
+    files,
+    bytes,
+    truncated,
+    identity: computePartitionIdentity(files.map((file) => file.filename)),
+  };
+}
+
 function assignParts(
   eligible: readonly EligibleFile[],
   limits: PartitionLimits,
@@ -123,13 +142,14 @@ function assignParts(
   const unassigned: string[] = [];
   const oversizedFiles: string[] = [];
   const noDiffFiles: string[] = [];
-  let current: PartitionPart | null = null;
+  let currentFiles: PartitionFileRef[] = [];
+  let currentBytes = 0;
 
   const flush = (): void => {
-    if (current !== null) {
-      parts.push(current);
-      current = null;
-    }
+    if (currentFiles.length === 0) return;
+    parts.push(makePart(parts.length, currentFiles, currentBytes, false));
+    currentFiles = [];
+    currentBytes = 0;
   };
 
   for (const file of eligible) {
@@ -152,26 +172,24 @@ function assignParts(
         unassigned.push(file.filename);
         continue;
       }
-      parts.push({ index: parts.length, files: [ref], bytes: file.bytes, truncated: true });
+      parts.push(makePart(parts.length, [ref], file.bytes, true));
       continue;
     }
-    const needNew = current === null
-      || current.files.length >= limits.maxFilesPerPart
-      || (current.bytes + file.bytes > limits.maxBytesPerPart && current.files.length > 0);
+    const needNew = currentFiles.length >= limits.maxFilesPerPart
+      || (currentBytes + file.bytes > limits.maxBytesPerPart && currentFiles.length > 0);
     if (needNew) {
       flush();
       if (parts.length >= limits.maxParts) {
         unassigned.push(file.filename);
         continue;
       }
-      current = { index: parts.length, files: [], bytes: 0, truncated: false };
     }
-    if (current === null) {
+    if (parts.length >= limits.maxParts) {
       unassigned.push(file.filename);
       continue;
     }
-    current.files.push(ref);
-    current.bytes += file.bytes;
+    currentFiles.push(ref);
+    currentBytes += file.bytes;
   }
   flush();
   return { parts, unassigned, oversizedFiles, noDiffFiles };
@@ -251,6 +269,7 @@ export function planPartitions(input: PlanInput): PartitionManifest {
   const reasons: string[] = [];
   if (unassigned.length > 0) reasons.push("part-cap");
   if (oversizedFiles.length > 0) reasons.push("oversized-file");
+  if (noDiffFiles.length > 0) reasons.push("no-diff-file");
   reasons.sort(codeUnitCompare);
 
   const assignedFiles = parts.reduce((count, part) => count + part.files.length, 0);

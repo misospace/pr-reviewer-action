@@ -39,7 +39,9 @@ The manifest records:
 - `head_sha`, `base_sha`, and `diff_fingerprint`, binding the plan to the exact
   reviewed diff rather than a moving PR state;
 - `parts`, a deterministic ordered list of partition records, each identifying
-  its files and whether its diff content was truncated;
+  its files, its stable identity token (lower-hex sha256 of sorted filenames)
+  the executor stamps onto its outcome for binding, and whether its diff
+  content was truncated;
 - `unassigned_files`, the eligible files not placed in a partition because
   the part cap was reached;
 - `limits`, a snake_case echo of the applied bounds (`max_parts`,
@@ -75,19 +77,34 @@ the manifest for audit and provenance so a plan can be tied back to the exact
 reviewed diff.
 
 A changed file with no textual diff chunk (binary, mode-only, or a diff the
-forge omitted) is recorded in `no_diff_files` and is informational at the
-planning layer — there is no changed line to partition. The deferred execution
-layer must account for such files explicitly (a tool read, or an explicit
-unread entry) rather than treating them as reviewed by default.
+forge omitted) is recorded in `no_diff_files` and makes the manifest
+**incomplete** at the planning layer — assigning a partition is not the same
+as having seen the changed bytes. The manifest records the `no-diff-file`
+reason in `coverage.reasons` and the deferred execution layer must provide an
+explicit per-file evidence disposition (a workspace read, or an explicit
+unread entry) before the affected partition can be reported `complete`.
 
 ## Coverage and publication honesty
 
 `partitionCoverageGap(manifest, outcomes, currentHead)` returns a
 `PartialCoverage`-shaped gap with stop reason `partition-incomplete`, or `null`
-only when all assigned work is complete for the current head and the manifest
-has no unassigned files. Missing, failed, timed-out, truncated, stale, or
-superseded partition outcomes make coverage incomplete. A completion from a
-prior head cannot satisfy the current manifest.
+only when the manifest is complete for the current head and every partition
+outcome binds to that exact planning round. Missing, failed, timed-out,
+truncated, stale, superseded, ambiguous (duplicate/conflicting index), or
+otherwise unverifiable partition outcomes make coverage incomplete. A
+completion from a prior head cannot satisfy the current manifest; neither can a
+re-plan that keeps the same numeric index but rebalances files (the
+partition identity changes).
+
+Every `PartitionOutcome` is bound to the planning round that produced it
+through three fields: `headSha` (must equal `manifest.head_sha`),
+`diffFingerprint` (must equal `manifest.diff_fingerprint`), and
+`partitionIdentity` (must equal `manifest.parts[index].identity`). The
+executor stamps these verbatim from the manifest it consumed; an outcome
+whose binding does not match the manifest under evaluation is rejected as
+missing. Duplicate outcomes for the same numeric index — even when their
+statuses agree — are treated as ambiguous and fail closed, because the
+caller cannot prove they were not silently replayed against a stale state.
 
 When integrated, this gap must enter the existing coverage path rather than
 being treated as advisory text. The run result carries it as `PartialCoverage`;
@@ -120,12 +137,23 @@ The following work is not done:
    off.
 2. In partitioned mode, assemble bounded per-part corpora and run the existing
    tool harness/model flow for each partition, recording head-bound outcomes.
-3. Merge partition findings into the single `reviewRecord` before enforcement.
+   The executor stamps `head_sha` / `diff_fingerprint` / `partitionIdentity`
+   from the manifest it consumed onto every `PartitionOutcome` so a re-plan
+   cannot be satisfied by stale results and a duplicate / conflicting
+   outcome fails closed.
+3. Provide an explicit per-file evidence disposition for every
+   `no_diff_files` entry (a workspace read of the changed bytes, or an
+   explicit unread entry). The foundation refuses to certify coverage
+   complete while any such disposition is open, and a disposition must
+   travel with the partition outcome it applies to so it cannot outlive its
+   head.
+4. Merge partition findings into the single `reviewRecord` before enforcement.
    Preserve each finding's partition provenance, deduplicate without a finding
    cap, and retain the final reviewer as the sole owner of the verdict.
-4. Fold manifest/outcome coverage through `PartialCoverage` and the existing
-   enforcement and publication guards. Unassigned files remain incomplete.
-5. Add an eval-harness `--modes partitioned` arm so the treatment can be run
+5. Fold manifest/outcome coverage through `PartialCoverage` and the existing
+   enforcement and publication guards. Unassigned files remain incomplete;
+   partitions whose evidence disposition is open remain incomplete.
+6. Add an eval-harness `--modes partitioned` arm so the treatment can be run
    beside whole-PR mode using the established `--modes` A/B mechanism described
    in [`docs/evals.md`](../evals.md).
 

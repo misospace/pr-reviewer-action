@@ -11,6 +11,7 @@ import {
   partitionDiffBytes,
   planPartitions,
   type PartitionFinding,
+  type PartitionManifest,
   type PartitionOutcome,
 } from "../src/partition/index.js";
 import { markerReviewResult, reviewCoverageIncomplete } from "../src/publish/publish.js";
@@ -67,13 +68,42 @@ test("manifest covers every eligible changed file exactly once with provenance",
   assert.deepEqual(again, manifest);
 });
 
-test("a file with no diff chunk is informational, not a coverage gap", () => {
+test("a file with no diff chunk makes coverage incomplete and is reported as unread", () => {
   const diff = rawDiff(chunk("src/a.ts"));
   const files = [changed("src/a.ts"), changed("src/renamed.ts", "renamed")];
   const manifest = planPartitions({ changedFiles: files, diff, headSha: HEAD, baseSha: BASE });
   assert.deepEqual(manifest.coverage.no_diff_files, ["src/renamed.ts"]);
-  assert.equal(manifest.coverage.complete, true);
+  assert.equal(manifest.coverage.complete, false);
+  assert.deepEqual(manifest.coverage.reasons, ["no-diff-file"]);
   assert.equal(manifest.coverage.assigned_files, 2);
+
+  // Even with a complete outcome per partition, the no-diff file is
+  // unread until the execution layer provides an explicit per-file
+  // evidence disposition (deferred integration): the gap is non-null and
+  // pins the file so an approve cannot publish.
+  const outcomes: PartitionOutcome[] = manifest.parts.map((part) => ({
+    index: part.index,
+    status: "complete",
+    headSha: HEAD,
+    diffFingerprint: manifest.diff_fingerprint,
+    partitionIdentity: part.identity,
+  }));
+  const gap = partitionCoverageGap(manifest, outcomes, HEAD);
+  assert.ok(gap !== null);
+  assert.deepEqual(gap?.unread_files, ["src/renamed.ts"]);
+  assert.equal(gap?.stop_reason, "partition-incomplete");
+
+  for (const verdictPolicy of ["strict", "legacy"]) {
+    const result = markerReviewResult({
+      verdictPolicy,
+      verdict: "approve",
+      findings: [],
+      requiredChecks: "none",
+      partialCoverage: gap,
+    });
+    assert.equal(result, "partial");
+    assert.equal(reviewCoverageIncomplete(result), true);
+  }
 });
 
 test("a 100+ file PR stays bounded and reports the part-cap overflow", () => {
@@ -189,12 +219,24 @@ test("crossPartitionFindings pairs findings with the referenced file", () => {
   assert.equal(cross[0]?.finding, finding);
 });
 
+function boundOutcome(manifest: PartitionManifest, index: number, status: PartitionOutcome["status"]): PartitionOutcome {
+  const part = manifest.parts.find((candidate) => candidate.index === index);
+  assert.ok(part !== undefined, `missing part ${index}`);
+  return {
+    index,
+    status,
+    headSha: manifest.head_sha,
+    diffFingerprint: manifest.diff_fingerprint,
+    partitionIdentity: part.identity,
+  };
+}
+
 test("coverage gap is null only when complete, and non-null for every shortfall", () => {
   const diff = rawDiff(chunk("a.ts"), chunk("b.ts"));
   const files = [changed("a.ts"), changed("b.ts")];
   const manifest = planPartitions({ changedFiles: files, diff, headSha: HEAD, baseSha: BASE, limits: { maxFilesPerPart: 1 } });
   assert.equal(manifest.parts.length, 2);
-  const allComplete: PartitionOutcome[] = manifest.parts.map((part) => ({ index: part.index, status: "complete" }));
+  const allComplete: PartitionOutcome[] = manifest.parts.map((part) => boundOutcome(manifest, part.index, "complete"));
 
   assert.equal(partitionCoverageGap(manifest, allComplete, HEAD), null);
   assert.equal(isManifestStale(manifest, HEAD), false);
@@ -204,13 +246,16 @@ test("coverage gap is null only when complete, and non-null for every shortfall"
   assert.equal(stale?.stop_reason, "partition-incomplete");
 
   for (const status of ["failed", "timeout", "truncated", "missing", "superseded"] as const) {
-    const outcomes: PartitionOutcome[] = [{ index: 0, status }, { index: 1, status: "complete" }];
+    const outcomes: PartitionOutcome[] = [
+      { ...boundOutcome(manifest, 0, status) },
+      boundOutcome(manifest, 1, "complete"),
+    ];
     const gap = partitionCoverageGap(manifest, outcomes, HEAD);
     assert.ok(gap !== null, `expected a gap for ${status}`);
     assert.deepEqual(gap?.unread_files, ["a.ts"]);
   }
 
-  const missingOutcome = partitionCoverageGap(manifest, [{ index: 0, status: "complete" }], HEAD);
+  const missingOutcome = partitionCoverageGap(manifest, [boundOutcome(manifest, 0, "complete")], HEAD);
   assert.ok(missingOutcome !== null);
   assert.deepEqual(missingOutcome?.unread_files, ["b.ts"]);
 });
@@ -224,7 +269,11 @@ test("an incomplete partition can never publish as APPROVE", () => {
     baseSha: BASE,
     limits: { maxFilesPerPart: 1 },
   });
-  const gap = partitionCoverageGap(manifest, [{ index: 0, status: "failed" }, { index: 1, status: "complete" }], HEAD);
+  const gap = partitionCoverageGap(
+    manifest,
+    [boundOutcome(manifest, 0, "failed"), boundOutcome(manifest, 1, "complete")],
+    HEAD,
+  );
   assert.ok(gap !== null);
 
   for (const verdictPolicy of ["strict", "legacy"]) {
@@ -314,8 +363,16 @@ test("empty input and a zero-chunk diff are handled without error", () => {
     baseSha: BASE,
   });
   assert.deepEqual(noChunks.coverage.no_diff_files, ["src/a.bin", "src/b.bin"]);
-  assert.equal(noChunks.coverage.complete, true);
+  // No-diff files (binary / mode-only / forge-omitted) make coverage
+  // incomplete until the execution layer provides per-file evidence.
+  assert.equal(noChunks.coverage.complete, false);
+  assert.deepEqual(noChunks.coverage.reasons, ["no-diff-file"]);
   assert.equal(noChunks.coverage.assigned_files, 2);
+
+  const outcomes: PartitionOutcome[] = noChunks.parts.map((part) => boundOutcome(noChunks, part.index, "complete"));
+  const gap = partitionCoverageGap(noChunks, outcomes, HEAD);
+  assert.ok(gap !== null);
+  assert.deepEqual(gap?.unread_files, ["src/a.bin", "src/b.bin"]);
 });
 
 test("positive control: a cross-partition defect pair is surfaced and preserved", () => {
@@ -345,4 +402,134 @@ test("negative control: a finding in a partition with no outgoing reference yiel
   });
   const finding: PartitionFinding = { partition: 1, file: "b.ts", line: 1, severity: "major", title: "Bug" };
   assert.deepEqual(crossPartitionFindings(manifest, [finding]), []);
+});
+
+test("partition identity is a deterministic hash of the partition's sorted filenames", () => {
+  const diff = rawDiff(chunk("a.ts"), chunk("b.ts"));
+  const files = [changed("a.ts"), changed("b.ts")];
+  const manifest = planPartitions({
+    changedFiles: files,
+    diff,
+    headSha: HEAD,
+    baseSha: BASE,
+    limits: { maxFilesPerPart: 1 },
+  });
+  for (const part of manifest.parts) {
+    assert.match(part.identity, /^[0-9a-f]{64}$/);
+  }
+  const again = planPartitions({
+    changedFiles: files,
+    diff,
+    headSha: HEAD,
+    baseSha: BASE,
+    limits: { maxFilesPerPart: 1 },
+  });
+  for (let i = 0; i < manifest.parts.length; i += 1) {
+    assert.equal(manifest.parts[i]?.identity, again.parts[i]?.identity);
+  }
+});
+
+test("a previous head's outcome cannot satisfy the current manifest", () => {
+  const diff = rawDiff(chunk("a.ts"), chunk("b.ts"));
+  const files = [changed("a.ts"), changed("b.ts")];
+  const HEAD_A = "a".repeat(40);
+  const HEAD_B = "d".repeat(40);
+  const manifestA = planPartitions({ changedFiles: files, diff, headSha: HEAD_A, baseSha: BASE, limits: { maxFilesPerPart: 1 } });
+  const manifestB = planPartitions({ changedFiles: files, diff, headSha: HEAD_B, baseSha: BASE, limits: { maxFilesPerPart: 1 } });
+
+  // Head A's outcomes bound to head A's manifest satisfy it cleanly...
+  const outcomesFromA = manifestA.parts.map((part) => boundOutcome(manifestA, part.index, "complete"));
+  assert.equal(partitionCoverageGap(manifestA, outcomesFromA, HEAD_A), null);
+
+  // ...but applying them against the new head B manifest fails closed.
+  const gap = partitionCoverageGap(manifestB, outcomesFromA, HEAD_B);
+  assert.ok(gap !== null);
+  assert.equal(gap?.stop_reason, "partition-incomplete");
+  assert.deepEqual(gap?.unread_files, ["a.ts", "b.ts"]);
+});
+
+test("a stale diff fingerprint or mismatched partition identity fails closed", () => {
+  const diff = rawDiff(chunk("a.ts"), chunk("b.ts"));
+  const files = [changed("a.ts"), changed("b.ts")];
+  const manifest = planPartitions({ changedFiles: files, diff, headSha: HEAD, baseSha: BASE, limits: { maxFilesPerPart: 1 } });
+
+  // Re-plan with the same head but different files: identity changes even
+  // though the numeric index of partition 0 stays 0.
+  const manifestReplan = planPartitions({
+    changedFiles: [changed("a.ts"), changed("c.ts")],
+    diff: rawDiff(chunk("a.ts"), chunk("c.ts")),
+    headSha: HEAD,
+    baseSha: BASE,
+    limits: { maxFilesPerPart: 1 },
+  });
+  const staleIdentityOutcome: PartitionOutcome = {
+    index: 0,
+    status: "complete",
+    headSha: manifest.head_sha,
+    diffFingerprint: manifest.diff_fingerprint,
+    partitionIdentity: manifest.parts[0]!.identity,
+  };
+  const gapIdentity = partitionCoverageGap(manifestReplan, [staleIdentityOutcome], HEAD);
+  assert.ok(gapIdentity !== null);
+
+  // A stale diff fingerprint is likewise rejected even when the head matches.
+  const staleFingerprintOutcome: PartitionOutcome = {
+    index: 0,
+    status: "complete",
+    headSha: manifestReplan.head_sha,
+    diffFingerprint: "0".repeat(64),
+    partitionIdentity: manifestReplan.parts[0]!.identity,
+  };
+  const gapFingerprint = partitionCoverageGap(manifestReplan, [staleFingerprintOutcome], HEAD);
+  assert.ok(gapFingerprint !== null);
+});
+
+test("duplicate or conflicting outcomes for the same index fail closed", () => {
+  const diff = rawDiff(chunk("a.ts"), chunk("b.ts"));
+  const files = [changed("a.ts"), changed("b.ts")];
+  const manifest = planPartitions({ changedFiles: files, diff, headSha: HEAD, baseSha: BASE, limits: { maxFilesPerPart: 1 } });
+
+  // Same index twice — ambiguous, treated as missing. The whole partition
+  // (both files of part 0) becomes unread; part 1 still resolves cleanly.
+  const good = boundOutcome(manifest, 0, "complete");
+  const duplicate = boundOutcome(manifest, 0, "failed");
+  const gap = partitionCoverageGap(manifest, [good, duplicate, boundOutcome(manifest, 1, "complete")], HEAD);
+  assert.ok(gap !== null);
+  assert.deepEqual(gap?.unread_files, ["a.ts"]);
+
+  // Order does not matter: a duplicate that comes first still fail-closes.
+  const reordered = partitionCoverageGap(manifest, [
+    boundOutcome(manifest, 0, "failed"),
+    boundOutcome(manifest, 0, "complete"),
+    boundOutcome(manifest, 1, "complete"),
+  ], HEAD);
+  assert.ok(reordered !== null);
+  assert.deepEqual(reordered?.unread_files, ["a.ts"]);
+
+  // Even identical duplicates (the same outcome repeated) fail closed: the
+  // caller cannot prove it was not silently replayed against a stale state.
+  const sameTwice = partitionCoverageGap(manifest, [
+    boundOutcome(manifest, 0, "complete"),
+    boundOutcome(manifest, 0, "complete"),
+    boundOutcome(manifest, 1, "complete"),
+  ], HEAD);
+  assert.ok(sameTwice !== null);
+  assert.deepEqual(sameTwice?.unread_files, ["a.ts"]);
+});
+
+test("outcomes for unknown partition indices are ignored fail-closed", () => {
+  const diff = rawDiff(chunk("a.ts"), chunk("b.ts"));
+  const files = [changed("a.ts"), changed("b.ts")];
+  const manifest = planPartitions({ changedFiles: files, diff, headSha: HEAD, baseSha: BASE, limits: { maxFilesPerPart: 1 } });
+
+  const orphan: PartitionOutcome = {
+    index: 99,
+    status: "complete",
+    headSha: manifest.head_sha,
+    diffFingerprint: manifest.diff_fingerprint,
+    partitionIdentity: "f".repeat(64),
+  };
+  const gap = partitionCoverageGap(manifest, [orphan, boundOutcome(manifest, 1, "complete")], HEAD);
+  assert.ok(gap !== null);
+  assert.deepEqual(gap?.unread_files, ["a.ts"]);
 });

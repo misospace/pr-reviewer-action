@@ -69,11 +69,20 @@ export interface PartitionPart {
   bytes: number;
   /** True when the partition contains at least one oversized file. */
   truncated: boolean;
+  /**
+   * Stable identity token: lower-hex sha256 of the sorted filenames in this
+   * partition. The executor must stamp this verbatim onto every
+   * `PartitionOutcome` it produces for this part so a fresh plan that keeps
+   * the same numeric index but rebalances files (different identity) cannot
+   * accidentally satisfy a stale outcome. Internal camelCase; not part of the
+   * snake_case persisted boundary shape except as a serializable token.
+   */
+  identity: string;
 }
 
 export interface PartitionCoverage {
   complete: boolean;
-  /** Sorted unique reasons coverage is incomplete (`part-cap`, `oversized-file`). */
+  /** Sorted unique reasons coverage is incomplete (`part-cap`, `oversized-file`, `no-diff-file`). */
   reasons: string[];
   changed_files_total: number;
   assigned_files: number;
@@ -117,7 +126,23 @@ export type PartitionOutcomeStatus =
   | "missing"
   | "superseded";
 
+/**
+ * Result of executing a single partition. Every field except `status` is a
+ * fail-closed binding to the planning round that produced it: an outcome whose
+ * `headSha`/`diffFingerprint`/`partitionIdentity` do not match the manifest
+ * being evaluated is rejected by `partitionCoverageGap` and the partition is
+ * treated as missing. `partitionIdentity` is the `PartitionPart.identity`
+ * token from the manifest; a re-plan that keeps the same numeric index but
+ * rebalances files produces a different identity and cannot satisfy an
+ * outcome from the previous round.
+ */
 export interface PartitionOutcome {
   index: number;
   status: PartitionOutcomeStatus;
+  /** Exact head SHA this outcome was produced at; must equal `manifest.head_sha`. */
+  headSha: string;
+  /** Exact diff fingerprint this outcome was produced at; must equal `manifest.diff_fingerprint`. */
+  diffFingerprint: string;
+  /** Stable partition identity from `manifest.parts[index].identity`; mismatches fail closed. */
+  partitionIdentity: string;
 }
