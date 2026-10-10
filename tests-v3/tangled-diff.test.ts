@@ -17,7 +17,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { gzipSync } from "node:zlib";
-import { fetchTangledPullRoundDiff } from "../src/platform/tangled-diff.js";
+import { fetchTangledPullRoundDiff, type TangledRoundDiffOptions } from "../src/platform/tangled-diff.js";
 import { TangledBlobError } from "../src/platform/tangled-blob.js";
 import { TangledPatchError } from "../src/platform/tangled-patch.js";
 import type { TangledPullIdentity } from "../src/platform/tangled-bobbin.js";
@@ -28,7 +28,7 @@ import type { Resolver } from "../src/platform/safe-fetch.js";
 
 const DID = "did:plc:25f71a64d40d1479c059b236";
 const PDS = "https://pds.example.com";
-const SECRET = "s3cr3t-diff-token";
+const CANARY = "s3cr3t-diff-token";
 
 /** Test seam: a "public" resolution for the non-literal PDS host so the
  * always-on SSRF gate passes with the mocked transport (no real DNS). */
@@ -81,6 +81,7 @@ const GZIP_PATCH = gzipSync(Buffer.from(PATCH, "utf8"));
 interface Call {
   url: string;
   auth: string | null;
+  headerDump: string;
 }
 
 function makeFetch(responder: (url: URL) => Response): { fetchImpl: FetchLike; calls: Call[] } {
@@ -88,7 +89,8 @@ function makeFetch(responder: (url: URL) => Response): { fetchImpl: FetchLike; c
   const fetchImpl: FetchLike = async (input, init) => {
     const url = new URL(String(input));
     const headers = new Headers(init?.headers);
-    calls.push({ url: url.toString(), auth: headers.get("authorization") });
+    const headerDump = [...headers.entries()].map(([k, v]) => k + ": " + v).join("; ");
+    calls.push({ url: url.toString(), auth: headers.get("authorization"), headerDump });
     return responder(url);
   };
   return { fetchImpl, calls };
@@ -264,7 +266,9 @@ test("fetchTangledPullRoundDiff: an injected fetchBlob replaces the network (zer
   const calls: Call[] = [];
   const fetchImpl: FetchLike = async (input, init) => {
     const url = new URL(String(input));
-    calls.push({ url: url.toString(), auth: new Headers(init?.headers).get("authorization") });
+    const headers = new Headers(init?.headers);
+    const headerDump = [...headers.entries()].map(([k, v]) => k + ": " + v).join("; ");
+    calls.push({ url: url.toString(), auth: headers.get("authorization"), headerDump });
     throw new Error("no network expected when fetchBlob is injected");
   };
   const seen: Array<{ did: string; cid: string }> = [];
@@ -285,20 +289,21 @@ test("fetchTangledPullRoundDiff: an injected fetchBlob replaces the network (zer
 });
 
 test("fetchTangledPullRoundDiff: no request ever carries an Authorization header", async () => {
-  // The PDS origin is author-selected metadata: the only requests this
-  // chain makes are unauthenticated public reads. SECRET is a canary that
-  // must not appear in any request, authenticated or not.
+  // The pinned regression: a caller supplying the removed `token` option
+  // never gets it onto the author-resolved PDS origin — no Authorization
+  // header, and the canary stays absent from every URL and header.
   const doc = didDoc(DID, [pdsService(PDS)]);
   const { fetchImpl, calls } = twoHop(doc, () => new Response(GZIP_PATCH));
   const result = await fetchTangledPullRoundDiff(
     makeIdentity({ rounds: [roundWith("bafybeicitok")] }),
-    { fetchImpl, resolver: publicResolver },
+    { fetchImpl, resolver: publicResolver, token: CANARY } as unknown as TangledRoundDiffOptions,
   );
   assert.equal(calls.length, 2);
   assert.equal(calls[0]!.auth, null, "the DID document request is never authenticated");
   assert.equal(calls[1]!.auth, null, "the getBlob request to the author-resolved PDS is never authenticated");
   for (const call of calls) {
-    assert.ok(!call.url.includes(SECRET), "no credential ever travels in a request URL");
+    assert.ok(!call.url.includes(CANARY), "no credential ever travels in a request URL");
+    assert.ok(!call.headerDump.includes(CANARY), "no credential ever travels in a request header");
   }
   assert.equal(result.declaredHeadSha, SHA, "the reviewable diff is unaffected");
 });
