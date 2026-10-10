@@ -24,10 +24,6 @@ export function untrustedTextProvenance(): EvidenceProvenance {
   return { representation: "untrusted_text", synthesized: false, redactionCount: 0, file: null, revision: null };
 }
 
-export function isSynthesized(provenance: EvidenceProvenance): boolean {
-  return provenance.synthesized;
-}
-
 export function authorizesLiteralClaim(
   provenance: EvidenceProvenance,
   expectedRevision: string | null | undefined,

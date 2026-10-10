@@ -36,6 +36,10 @@ Evidence envelopes can render provenance as space-prefixed attributes. The rende
 
 The provenance module is pure: no I/O, no network, no repository access, and no import of the redactor. It records and checks the origin and transform facts that callers supply; fetching and masking stay in their existing seams.
 
+This change carries provenance on the **tool-evidence path** (file reads, grep, blame, repository-contents reads, and decoded API file reads) into the model-visible `untrusted_tool_result` envelope. It deliberately does **not** wire the authority predicates into a verdict-side gate: #1015 owns the provenance and safe verification *inputs*, not final verdict policy. `authorizesLiteralClaim` and `verifySourceSpan` are the boundary primitives a later policy consumer calls.
+
+Two source surfaces are intentionally out of scope here and are tracked separately: the related-code **corpus snippets** (`src/context/related-context.ts`), which redact via `redactSourceText` but render into the corpus rather than a tool envelope, and the **PR diff** (`pr.diff`), which is the literal bytes the author committed and is treated as untrusted text, never re-redacted.
+
 ## Source-safe compatibility
 
 The source-safe redactor continues to mask credential values while preserving syntax and expression references. In particular, `apiKey: config.apiKey` remains unchanged, as do delimiters and surrounding code structure. This preserves the #876 guarantee while ensuring that actual redaction is visible to downstream authority checks instead of being misrepresented as committed bytes.
