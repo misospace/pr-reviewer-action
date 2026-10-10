@@ -888,3 +888,201 @@ test("fairness: round-robin across prKeys dispatches one per prKey per pass", as
     "the newer generation wins: the stale older siblings are defensively skipped",
   );
 });
+
+// ── liveness & fairness under a hung publisher ──────────────────────────
+
+test("liveness: a never-resolving publisher for A does not block B's dispatch on another prKey", async () => {
+  // A enters `publishing` with a durable result, and the publisher
+  // hangs. B is queued for a different prKey. The next `tick()` must
+  // dispatch B's executor even though A's publish is in flight, because
+  // (a) `countActive()` excludes `publishing` and (b) the publish path
+  // is fire-and-forget so the tick never awaits the hung publisher.
+  const deferred: { current: ((b: boolean) => void) | null } = { current: null };
+  const hungPublisher: JobPublisher = {
+    async publish(_record: JobRecord): Promise<boolean> {
+      return new Promise<boolean>((resolve) => {
+        deferred.current = resolve;
+      });
+    },
+  };
+  const { executor, controller } = setup({ publisher: hungPublisher });
+
+  controller.enqueue(makeJob("job-a", { prNumber: 1 }));
+  await controller.tick();
+  executor.last().settle(DONE);
+  await flush();
+  assert.equal(controller.recordFor("job-a")!.state, "publishing");
+  assert.ok(deferred.current !== null, "A's publish is in flight");
+
+  controller.enqueue(makeJob("job-b", { prNumber: 2 }));
+  await controller.tick();
+  assert.equal(
+    executor.invocations.length,
+    2,
+    "B dispatches even though A's publish is hung (publishing is not a worker slot)",
+  );
+  assert.equal(executor.invocations[1]!.record.job.jobId, "job-b");
+  assert.equal(
+    controller.recordFor("job-a")!.state,
+    "publishing",
+    "A's durable result is preserved while the publish is hung",
+  );
+
+  // Unblock A's publisher: the next tick should complete A without
+  // re-running the executor.
+  deferred.current!(true);
+  await flush();
+  assert.equal(controller.recordFor("job-a")!.state, "completed", "A completes once the publisher resolves");
+  assert.equal(executor.invocations.length, 2, "the executor is never rerun");
+});
+
+test("liveness: dispatch is not blocked by a hung publish on the initial-publish path (settleCompleted)", async () => {
+  // Same liveness contract as above, but exercised via the
+  // settleCompleted path: A's executor settles, the durable
+  // `publishing` snapshot is committed, the publish fires and hangs,
+  // and B's dispatch must still proceed on a later tick.
+  const deferred: { current: ((b: boolean) => void) | null } = { current: null };
+  const hungPublisher: JobPublisher = {
+    async publish(_record: JobRecord): Promise<boolean> {
+      return new Promise<boolean>((resolve) => {
+        deferred.current = resolve;
+      });
+    },
+  };
+  const { clock, executor, controller } = setup({ publisher: hungPublisher });
+
+  controller.enqueue(makeJob("job-a", { prNumber: 1 }));
+  await controller.tick();
+  executor.last().settle(DONE);
+  // Flush so the settle chain (settleCompleted -> this.save() -> fire
+  // publish) runs to completion; the publish promise then hangs.
+  await flush();
+  assert.equal(controller.recordFor("job-a")!.state, "publishing");
+  assert.ok(deferred.current !== null, "A's publish is in flight (and hung)");
+
+  clock.t += 10;
+  controller.enqueue(makeJob("job-b", { prNumber: 2 }));
+  await controller.tick();
+  assert.equal(executor.invocations.length, 2, "B dispatches even though A's publish is hung on the initial-publish path");
+  assert.equal(executor.invocations[1]!.record.job.jobId, "job-b");
+  assert.equal(
+    controller.recordFor("job-a")!.state,
+    "publishing",
+    "A's durable state is preserved (publishing + resultHeadSha)",
+  );
+  assert.equal(
+    controller.recordFor("job-a")!.resultHeadSha,
+    HEAD_SHA,
+    "A's durable result is on the in-memory record",
+  );
+
+  // Cleanup: resolve the hung publisher so the test can exit cleanly.
+  deferred.current!(true);
+  await flush();
+});
+
+test("liveness: shutdown(drainMs) resolves within bound even with a hung publish; durable result is preserved", async () => {
+  // A is in `publishing` with a durable result and a hung publisher.
+  // `shutdown(drainMs)` must (a) return without waiting on the hung
+  // publish, (b) preserve the publishing record so a later boot can
+  // retry, and (c) still be bounded by its `drainMs` budget.
+  const deferred: { current: ((b: boolean) => void) | null } = { current: null };
+  const hungPublisher: JobPublisher = {
+    async publish(_record: JobRecord): Promise<boolean> {
+      return new Promise<boolean>((resolve) => {
+        deferred.current = resolve;
+      });
+    },
+  };
+  const { executor, controller } = setup({ publisher: hungPublisher });
+
+  controller.enqueue(makeJob("job-a"));
+  await controller.tick();
+  executor.last().settle(DONE);
+  await flush();
+  assert.equal(controller.recordFor("job-a")!.state, "publishing");
+  assert.ok(deferred.current !== null, "A's publish is in flight");
+
+  // The bounded drain must not block on the hung publish. The clock
+  // does not advance: the only way `shutdown` can return is via the
+  // countActive() === 0 early-break on the publishing record.
+  const t0 = Date.now();
+  await controller.shutdown(5000);
+  const elapsed = Date.now() - t0;
+
+  assert.ok(
+    elapsed < 1000,
+    `shutdown returned in ${elapsed}ms — must not wait on the hung publish`,
+  );
+  assert.equal(controller.intakeClosed, true);
+  assert.equal(
+    controller.recordFor("job-a")!.state,
+    "publishing",
+    "publishing-with-result is preserved across shutdown",
+  );
+  assert.equal(
+    controller.recordFor("job-a")!.resultHeadSha,
+    HEAD_SHA,
+    "the durable result is preserved across shutdown",
+  );
+
+  // Cleanup: resolve the publisher so the background promise can run.
+  deferred.current!(true);
+  await flush();
+});
+
+test("liveness: a stuck publish does not block tick() or dispatch of other prKeys across multiple passes", async () => {
+  // Drive several ticks while a publisher hangs. Each tick must
+  // dispatch whatever is queued (up to `maxConcurrent` per pass) and
+  // not be trapped behind the hung publish. This is the property
+  // `#731` calls "poison jobs cannot starve unrelated repos".
+  // Use per-call deferreds so multiple records can each hang
+  // independently.
+  const deferreds: Array<(b: boolean) => void> = [];
+  const hungPublisher: JobPublisher = {
+    async publish(_record: JobRecord): Promise<boolean> {
+      return new Promise<boolean>((resolve) => {
+        deferreds.push(resolve);
+      });
+    },
+  };
+  const { clock, executor, controller } = setup({
+    publisher: hungPublisher,
+    maxConcurrent: 1,
+  });
+
+  // Pass 1: A in `publishing` (hung).
+  controller.enqueue(makeJob("job-a", { prNumber: 1 }));
+  await controller.tick();
+  executor.last().settle(DONE);
+  await flush();
+  assert.equal(controller.recordFor("job-a")!.state, "publishing");
+  assert.equal(deferreds.length, 1, "A's publish is in flight (and hung)");
+
+  // Pass 2: B enqueued; the next tick must dispatch B even though A's
+  // publish is hung, because `countActive()` excludes `publishing`.
+  controller.enqueue(makeJob("job-b", { prNumber: 2 }));
+  await controller.tick();
+  assert.equal(executor.invocations.length, 2, "B dispatches alongside the hung A");
+
+  // Pass 3: settle B, which fires B's publish and hangs too. Then
+  // enqueue C: the next tick must dispatch C even though BOTH A and
+  // B are now in `publishing` (hung).
+  executor.invocations[1]!.settle(DONE);
+  await flush();
+  assert.equal(controller.recordFor("job-b")!.state, "publishing");
+  assert.equal(deferreds.length, 2, "B's publish is also in flight (and hung)");
+
+  controller.enqueue(makeJob("job-c", { prNumber: 3 }));
+  await controller.tick();
+  assert.equal(
+    executor.invocations.length,
+    3,
+    "C dispatches alongside two hung publishes — publishing is never a worker slot",
+  );
+
+  // Cleanup: resolve all hung publishers so the background promises
+  // can run.
+  for (const resolve of deferreds) resolve(true);
+  await flush();
+});

@@ -118,6 +118,38 @@ the #736 PostgreSQL backend will slot in behind the same interface.
   `resultHeadSha`; a publisher returning `false` ("retry later") is
   retried by later ticks **without rerunning the executor**.
 
+## Liveness & fairness
+
+The publish path is **nonblocking**: `tick()` fires
+`publisher.publish(record)` in the background, never `await`s the
+publisher's promise, and `countActive()` excludes `publishing` records
+from the global worker bound. Concretely:
+
+- `settleCompleted` persists the durable `publishing` snapshot
+  **before** firing the publisher (the same persist-before-side-effect
+  invariant as the in-memory case), then returns without awaiting.
+  `retryPublishes` does the same: eligible records are fired
+  concurrently, the loop returns immediately, and the in-flight slot
+  is tracked in `publishInFlight` so a later `tick()` skips the record
+  until the background promise settles.
+- `countActive()` counts only `starting`/`running` records. A
+  `publishing` record holds its durable result and is just waiting for
+  a forge side-effect — it does **not** consume a worker/model slot,
+  and a hung `publisher.publish` therefore cannot block dispatch of
+  unrelated prKeys under `maxConcurrent` (a poison publisher cannot
+  starve the rest of the queue).
+- `shutdown(drainMs)` drains active work by driving `tick()` and
+  flushing microtasks; because `tick()` is nonblocking on the publish
+  path, a hung publisher cannot trap the drain loop. A `publishing`
+  record holding its durable result is never cancelled (it stays
+  `publishing` for the next boot to retry).
+
+The `publishInFlight` set guarantees no two publish calls for the
+same record are in flight at once. The post-publish state update is
+gated on `state === "publishing"` (and on a lease-token match for the
+in-process path) so a late resolution from an abandoned generation
+never mutates a re-dispatched record.
+
 ## Safety invariants
 
 - **Stale resolutions are revoked.** Each dispatch carries a lease-owner

@@ -14,6 +14,16 @@
  * revoked (no-op), never resurrecting a requeued generation; the
  * supersession gate is checked before EVERY publish attempt. All
  * uncertain state fails closed.
+ *
+ * Liveness: `countActive()` excludes `publishing` records (a publishing
+ * record holds its durable result and is just waiting for a forge
+ * side-effect — it is NOT a worker slot), and the publish path is
+ * fire-and-forget (`tick()` never awaits `publisher.publish`). A hung
+ * publisher therefore cannot block `tick()`, dispatch of unrelated
+ * prKeys, or `shutdown(drainMs)`'s drain loop — a poison publisher
+ * cannot starve the rest of the queue. The in-flight slot is tracked
+ * in `publishInFlight` so a record is never published twice
+ * concurrently.
  */
 
 import type { ReviewJob } from "../jobs/types.js";
@@ -259,13 +269,20 @@ export class ReviewQueueController {
 
   /** One scheduling pass: lease expiry, deadline expiry, publish
    * retries, then dispatch (only while intake is open). Idempotent; safe
-   * on a timer or after every event. Persists once at the end. */
+   * on a timer or after every event. Persists once at the end.
+   *
+   * Publish retries are FIRE-AND-FORGET: a hung `publisher.publish`
+   * never blocks `tick()`. The durable result is committed before the
+   * external call is fired (so a process death during a publish leaves
+   * the record `publishing` for `recover()` to keep), and the in-flight
+   * publish slot is tracked in `publishInFlight` so the next `tick()`
+   * skips that record until the background promise settles. */
   async tick(): Promise<void> {
     this.ensureLoaded();
     const now = this.nowMsFn();
     this.expireLeases(now);
     this.expireDeadlines(now);
-    await this.retryPublishes(now);
+    this.retryPublishes(now);
     // Once intake is closed no new work may start; the lease/publish
     // maintenance above still runs.
     if (!this.closed) this.dispatchEligible(now);
@@ -372,9 +389,19 @@ export class ReviewQueueController {
   }
 
   private countActive(): number {
+    // A `publishing` record holds its durable result and is just
+    // waiting for a forge side-effect (the publish call), which is NOT
+    // a worker/model slot. Counting it here would let a hung publisher
+    // starve unrelated prKeys under `maxConcurrent` and trap
+    // `shutdown(drainMs)`'s drain loop behind a stuck external call.
+    // Only `starting`/`running` records consume a worker slot;
+    // `publishing` is excluded so a never-resolving publish cannot
+    // monopolize executor concurrency.
     let count = 0;
     for (const record of this.records.values()) {
-      if (isActiveState(record.state)) count += 1;
+      if (record.state === "starting" || record.state === "running") {
+        count += 1;
+      }
     }
     return count;
   }
@@ -478,7 +505,7 @@ export class ReviewQueueController {
     }
   }
 
-  private async retryPublishes(now: number): Promise<void> {
+  private retryPublishes(now: number): void {
     const publisher = this.options.publisher;
     if (publisher === undefined) return;
     for (const [jobId, record] of [...this.records.entries()]) {
@@ -503,43 +530,13 @@ export class ReviewQueueController {
         );
         continue;
       }
-      this.publishInFlight.add(jobId);
-      let published: boolean;
-      try {
-        published = await publisher.publish(record);
-      } catch {
-        // A throwing publisher behaves exactly like a `false` return:
-        // bounded backoff retry, never a crashed pass.
-        published = false;
-      } finally {
-        this.publishInFlight.delete(jobId);
-      }
-      const current = this.records.get(jobId);
-      if (current === undefined || current.state !== "publishing") continue;
-      if (published) {
-        this.records.set(
-          jobId,
-          Object.freeze({
-            ...withState(current, "completed", now),
-            nextRetryAtMs: 0,
-            leaseOwner: "",
-            leaseExpiresAtMs: 0,
-          }),
-        );
-      } else {
-        this.records.set(
-          jobId,
-          Object.freeze({
-            ...current,
-            nextRetryAtMs: now + this.publishRetryDelayMs(),
-            updatedAtMs: now,
-            // Publishing-with-result is lease-exempt: a dead worker
-            // must never be able to heartbeat this record.
-            leaseOwner: "",
-            leaseExpiresAtMs: 0,
-          }),
-        );
-      }
+      // Fire-and-forget: a hung publisher must not block `tick()`,
+      // dispatch of unrelated prKeys, or `shutdown(drainMs)`'s drain
+      // loop. The background promise eventually settles, mutates the
+      // record, and `save()`s; the next `tick()` that finds
+      // `publishInFlight.has(jobId) === false` will re-fire if the
+      // backoff has elapsed.
+      this.firePublishRetry(jobId, record, now);
     }
   }
 
@@ -712,40 +709,89 @@ export class ReviewQueueController {
       return;
     }
     this.publishInFlight.add(jobId);
-    // CRITICAL: persist the durable result BEFORE awaiting the external
+    // CRITICAL: persist the durable result BEFORE firing the external
     // publisher. If the process dies during the publish, the next
     // `recover()` keeps the `publishing` record (with `resultHeadSha`
     // populated) and a later `tick()`'s `retryPublishes` retries the
     // publish — the executor is never rerun. The lease is NOT cleared
-    // here so the post-await `current.leaseOwner !== token` check
-    // can still detect a late resolution from an abandoned
-    // generation. `reconcileRecoveredSnapshot` clears the lease for
-    // `publishing`-with-result records on recovery, so a crashed
-    // mid-publish never strands a live lease.
+    // here so the post-publish `current.leaseOwner !== token` check
+    // in the background promise can still detect a late resolution
+    // from an abandoned generation. `reconcileRecoveredSnapshot`
+    // clears the lease for `publishing`-with-result records on
+    // recovery, so a crashed mid-publish never strands a live lease.
     this.save();
+    // Fire-and-forget: a hung `publisher.publish` must not block the
+    // settle chain, `tick()`, dispatch of unrelated prKeys, or
+    // `shutdown(drainMs)`. The background promise settles, mutates
+    // the record, and `save()`s.
+    this.firePublishSettle(jobId, token, publishing, now);
+  }
+
+  /** Background publish from `retryPublishes`: any caller on any prKey
+   * may fire. The post-publish state update is gated on
+   * `record.state === "publishing"` only (no lease check — the record
+   * may be a fresh `recover()`-d generation with a cleared lease, or
+   * a retry where the lease was already cleared on the prior
+   * completion cycle). */
+  private firePublishRetry(
+    jobId: string,
+    record: JobRecord,
+    now: number,
+  ): void {
+    this.publishInFlight.add(jobId);
+    void this.runPublish(jobId, "", record, now, /*requireLeaseMatch*/ false);
+  }
+
+  /** Background publish from `settleCompleted`: the in-process
+   * generation owns a live lease token. The post-publish update
+   * re-checks `leaseOwner === token` so a late resolution from an
+   * abandoned generation cannot mutate a re-dispatched record. */
+  private firePublishSettle(
+    jobId: string,
+    token: string,
+    record: JobRecord,
+    now: number,
+  ): void {
+    void this.runPublish(jobId, token, record, now, /*requireLeaseMatch*/ true);
+  }
+
+  /** Shared background publish driver. Always mutates the record
+   * and `save()`s when the post-conditions match; otherwise leaves
+   * the record (and the durable snapshot) untouched. The `token`
+   * gates the in-process generation; a `requireLeaseMatch === false`
+   * call ignores the token (used for `retryPublishes`, where
+   * recovered/retry generations have a cleared lease anyway). */
+  private async runPublish(
+    jobId: string,
+    token: string,
+    record: JobRecord,
+    now: number,
+    requireLeaseMatch: boolean,
+  ): Promise<void> {
+    const publisher = this.options.publisher;
+    if (publisher === undefined) {
+      this.publishInFlight.delete(jobId);
+      return;
+    }
     let published: boolean;
     try {
-      published = await publisher.publish(publishing);
+      published = await publisher.publish(record);
     } catch {
       // A throwing publisher behaves exactly like a `false` return:
-      // bounded backoff retry, never a crashed settle.
+      // bounded backoff retry, never a crashed pass.
       published = false;
     } finally {
       this.publishInFlight.delete(jobId);
     }
     const current = this.records.get(jobId);
-    if (
-      current === undefined ||
-      isTerminalState(current.state) ||
-      current.leaseOwner !== token
-    ) {
-      return;
-    }
+    if (current === undefined || current.state !== "publishing") return;
+    if (requireLeaseMatch && current.leaseOwner !== token) return;
     if (published) {
       this.records.set(
         jobId,
         Object.freeze({
           ...withState(current, "completed", now),
+          nextRetryAtMs: 0,
           leaseOwner: "",
           leaseExpiresAtMs: 0,
         }),
@@ -757,13 +803,14 @@ export class ReviewQueueController {
           ...current,
           nextRetryAtMs: now + this.publishRetryDelayMs(),
           updatedAtMs: now,
-          // Publishing-with-result is lease-exempt: a dead worker must
-          // never be able to heartbeat this record.
+          // Publishing-with-result is lease-exempt: a dead worker
+          // must never be able to heartbeat this record.
           leaseOwner: "",
           leaseExpiresAtMs: 0,
         }),
       );
     }
+    this.save();
   }
 
   /** The supersession gate: a record may attempt to publish only when
