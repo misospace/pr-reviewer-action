@@ -229,6 +229,38 @@ export function relaxCiOnlyVerdict(
   return true;
 }
 
+/**
+ * #1016: relax a model-authored request_changes whose every still-open finding
+ * is non-blocking because the deterministic blocker-verification boundary could
+ * not confirm it (grounding_status set to refuted/unverified/unsupported) —
+ * alongside #977 verification and #976 CI-only findings. Same forced/
+ * unresolved-check safeguards as #977; never fires for zero findings, a mixed
+ * finding set, or any independent deterministic gate.
+ */
+export function relaxUnverifiedBlockerVerdict(
+  artifact: ReviewArtifact,
+  options: { forced: boolean },
+): boolean {
+  if (artifact.verdict !== "request_changes") return false;
+  if (!canRelaxForCiOnly(artifact, options.forced)) return false;
+  const findings = artifact.findings;
+  if (!Array.isArray(findings) || findings.length === 0) return false;
+  const groundingDemoted = (finding: ArtifactFinding): boolean =>
+    typeof (finding as { grounding_status?: unknown }).grounding_status === "string"
+    && (finding as { grounding_status?: string }).grounding_status !== "grounded";
+  const allRelaxable = findings.every((finding) =>
+    isAlwaysNonBlockingCategory(finding.category)
+    || groundingDemoted(finding)
+    || (finding.ci_capped === true && finding.severity === "info"));
+  if (!allRelaxable) return false;
+  if (!findings.some(groundingDemoted)) return false;
+  artifact.review_markdown = (artifact.review_markdown || "")
+    + "\n\n_Verdict relaxed from structured findings (#1016): every open finding was either a verification request or a source claim the deterministic blocker-verification boundary could not confirm against exact-head source; the findings remain listed above and deterministic gates are unaffected._";
+  artifact.verdict = "approve";
+  artifact.verdict_source = "findings";
+  return true;
+}
+
 export interface VerdictPolicyResult {
   /** "model" | "findings" | "enforcement" — the applied verdict source:
    * "findings" when the strict mapping overrode the model verdict from the

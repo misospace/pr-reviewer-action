@@ -50,7 +50,9 @@ import { callModelTier, type TierProfile } from "../model/call.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, publicAnalysisEngine, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
 import { reviewArtifactFromParsed, type ArtifactFinding } from "../enforcement/artifact.js";
-import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxCiOnlyVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
+import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
+import { applyBlockerVerification } from "../enforcement/blocker-verification.js";
+import { createHeadSourceReader } from "../enforcement/source-verifier.js";
 import { capCiEvidenceFindings } from "../enforcement/ci-evidence.js";
 import { markerReviewResult } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
@@ -997,8 +999,15 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   const reviewRecord = (artifact ?? {}) as Record<string, unknown>;
   const ciChecksContent = ciChecksBytes(env);
   const ciChecksMarkdown = ciChecksContent === null ? null : Buffer.from(ciChecksContent).toString("utf8");
+  let blockerVerification: Awaited<ReturnType<typeof applyBlockerVerification>> | null = null;
   if (Array.isArray(reviewRecord.findings)) {
     capCiEvidenceFindings(reviewRecord.findings as ArtifactFinding[], ciChecksMarkdown);
+    const expectedRevision = context.headSha || String(pr.headRefOid ?? "") || null;
+    const readSource = createHeadSourceReader({ workspace, revision: expectedRevision });
+    blockerVerification = await applyBlockerVerification(reviewRecord.findings as ArtifactFinding[], {
+      readSource,
+      expectedRevision,
+    });
   }
   const verdictPolicy = env.VERDICT_POLICY ?? "strict";
   // Captured before any layer mutates it: the strict mapping (#811) takes the
@@ -1066,10 +1075,21 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
     relaxVerificationOnlyVerdict(reviewRecord as never, { forced });
     relaxCiOnlyVerdict(reviewRecord as never, { forced });
+    relaxUnverifiedBlockerVerdict(reviewRecord as never, { forced });
     // #977: the relaxation can flip the model's request_changes to approve
     // after the enforcement banner was written; reconcile the markdown with
     // the final verdict.
     reconcileEnforcedReviewMarkdown(reviewRecord as never);
+  }
+  if (blockerVerification !== null && blockerVerification.demoted > 0) {
+    ws.write("blocker-verification.json", Buffer.from(`${pyJsonDumps({
+      version: 1,
+      expected_revision: context.headSha || String(pr.headRefOid ?? "") || "",
+      demoted: blockerVerification.demoted,
+      findings: blockerVerification.findings,
+    })}\n`, "utf8"));
+    reviewRecord.review_markdown = String(reviewRecord.review_markdown ?? "")
+      + `\n\n_${blockerVerification.demoted} finding(s) asserting committed source text could not be confirmed against exact-head source and are listed above as non-blocking. Deterministic enforcement gates are unaffected._`;
   }
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(reviewRecord)}\n`, "utf8"));
 
