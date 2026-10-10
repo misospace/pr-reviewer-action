@@ -1,0 +1,60 @@
+{
+  "contract": "golden-replay/v1",
+  "name": "case1-1012-marker-false-blocker",
+  "status": "expected-failure",
+  "known_gap": "#1016",
+  "provenance": {
+    "source_head": "db9865c0f1a2b3c4d5e6f708192a3b4c5d6e7f80",
+    "origin": "PR #1012 (head db9865c): sanitizer-inserted placeholder tokens — [REDACTED] from heuristic redaction and ⟦redacted:credential⟧ from source redaction — appeared inside ADDED lines of the new test-file diff, while the committed source held harmless test canaries. The model read the placeholders as committed literals and issued a false blocker claiming they break the TypeScript test.",
+    "evidence_transform": "sanitized",
+    "model_response": "Recorded representative response from the 2026-10-01 review run of head db9865c (zero live inference): request_changes with a single false blocker (f1012-false) quoting the placeholder tokens as if they were committed credential literals."
+  },
+  "engine": "run-review",
+  "pr": {
+    "head_sha": "db9865c0f1a2b3c4d5e6f708192a3b4c5d6e7f80",
+    "title": "Add transport canary regression test",
+    "body": "",
+    "diff": "diff --git a/tests/transport-canary.test.ts b/tests/transport-canary.test.ts\nnew file mode 100644\nindex 0000000..9c41f0a\n--- /dev/null\n+++ b/tests/transport-canary.test.ts\n@@ -0,0 +1,14 @@\n+import assert from \"node:assert/strict\";\n+\n+import { config } from \"../src/transport/config.js\";\n+import { transport } from \"../src/transport/client.js\";\n+\n+// #1012: the transport must forward the provider credential header\n+// exactly as the client library expects it.\n+const auth = \"[REDACTED]\";\n+\n+test(\"authorization header is forwarded verbatim\", () => {\n+  const headers = transport.headers({ auth });\n+  assert.equal(headers.authorization, \"⟦redacted:credential⟧\");\n+  assert.equal(headers[\"content-type\"], \"application/json\");\n+});\n",
+    "files": [
+      {
+        "filename": "tests/transport-canary.test.ts",
+        "status": "added",
+        "additions": 14,
+        "deletions": 0,
+        "changes": 14
+      }
+    ],
+    "threads": []
+  },
+  "source_files": {
+    "tests/transport-canary.test.ts": "import assert from \"node:assert/strict\";\n\nimport { config } from \"../src/transport/config.js\";\nimport { transport } from \"../src/transport/client.js\";\n\n// #1012: the transport must forward the provider credential header\n// exactly as the client library expects it.\nconst auth = config.canaryAlpha;\n\ntest(\"authorization header is forwarded verbatim\", () => {\n  const headers = transport.headers({ auth });\n  assert.equal(headers.authorization, config.canaryBeta);\n  assert.equal(headers[\"content-type\"], \"application/json\");\n});\n"
+  },
+  "secrets": [],
+  "recorded_model_response": {
+    "verdict": "request_changes",
+    "review_markdown": "## Summary\n\nThe new transport canary test cannot pass as written: it compares against redaction placeholder tokens instead of real credential values, which breaks the TypeScript assertions.\n\n## Findings\n\n- **Blocker** (tests/transport-canary.test.ts:12) — the test file commits sanitizer placeholder tokens as credential literals.\n\n## Recommendation\n\nRequest changes: the test must compare against real credential values, not redaction artifacts.\n",
+    "smart_review_requested": false,
+    "smart_review_reason": null,
+    "findings": [
+      {
+        "id": "f1012-false",
+        "severity": "blocker",
+        "category": "bug",
+        "file": "tests/transport-canary.test.ts",
+        "line": 12,
+        "message": "Line 8 commits the sanitizer placeholder `[REDACTED]` as the credential literal, and line 12 compares `headers.authorization` against `⟦redacted:credential⟧` — both are harness-redaction artifacts, not valid credentials, so the TypeScript assertions in this test cannot pass against the committed source."
+      }
+    ],
+    "requirement_coverage": null,
+    "required_check_dispositions": null
+  },
+  "config": {},
+  "expect": {
+    "verdict": "comment",
+    "blocking_finding_ids": [],
+    "unsupported_blocking_claims": 0,
+    "supported_blocking_claims": 0,
+    "published_body_excludes": [],
+    "published_body_includes": []
+  }
+}
