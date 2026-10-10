@@ -1046,7 +1046,7 @@ test("liveness: a stuck publish does not block tick() or dispatch of other prKey
       });
     },
   };
-  const { clock, executor, controller } = setup({
+  const { executor, controller } = setup({
     publisher: hungPublisher,
     maxConcurrent: 1,
   });
