@@ -10,6 +10,7 @@ import {
 } from "../src/tools/executors.js";
 import { McpToolset, isReadOnlyTool, parseServerSpecs, splitNamespaced } from "../src/tools/mcp.js";
 import { USER_AGENT } from "../src/platform/user-agent.js";
+import { REDACTED_SOURCE } from "../src/context/redact.js";
 
 function fixture(fn: (root: string, outside: string) => Promise<void> | void): Promise<void> {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "tools-test-")), root = path.join(base, "x"), outside = path.join(base, "xy");
@@ -307,4 +308,64 @@ test("workspace tools expose only the committed tree when a tracked index is pre
   const unfiltered = ctx(root);
   assert.deepEqual(findFiles("*.json", unfiltered).files, ["pr.json"]);
   assert.equal((await readFile("pr.json", unfiltered)).content, "{}\n");
+}));
+
+test("source-derived tools attach evidence provenance (#1015)", async () => fixture(async (root) => {
+  const revision = "a".repeat(40);
+
+  // A real credential in committed source is sanitized; provenance says so.
+  fs.writeFileSync(path.join(root, "creds.ts"), 'const k = "ghp_' + "A".repeat(36) + '";\n');
+  const sanitized = await executeToolRequest("read_file", { path: "creds.ts" }, ctx(root, { sourceRevision: revision }));
+  assert.equal(sanitized.status, "ok");
+  assert.doesNotMatch(sanitized.result.content, /ghp_/);
+  assert.ok(sanitized.result.content.includes(REDACTED_SOURCE));
+  assert.equal(sanitized.provenance.representation, "sanitized_source");
+  assert.equal(sanitized.provenance.synthesized, true);
+  assert.ok(sanitized.provenance.redactionCount >= 1);
+  assert.equal(sanitized.provenance.file, "creds.ts");
+  assert.equal(sanitized.provenance.revision, revision);
+
+  // A secret-named key assigned a code expression is NOT a credential (#876):
+  // committed source, zero redactions.
+  fs.writeFileSync(path.join(root, "config.ts"), "apiKey: config.apiKey\n");
+  const committed = await executeToolRequest("read_file", { path: "config.ts" }, ctx(root, { sourceRevision: revision }));
+  assert.equal(committed.result.content, "apiKey: config.apiKey\n");
+  assert.equal(committed.provenance.representation, "committed_source");
+  assert.equal(committed.provenance.redactionCount, 0);
+  assert.equal(committed.provenance.synthesized, false);
+
+  // A literal `[REDACTED]` in committed source is distinguishable from a
+  // sanitizer-inserted marker: it stays committed source with count 0.
+  fs.writeFileSync(path.join(root, "literal.ts"), 'const m = "[REDACTED]";\n');
+  const literal = await executeToolRequest("read_file", { path: "literal.ts" }, ctx(root, { sourceRevision: revision }));
+  assert.equal(literal.result.content, 'const m = "[REDACTED]";\n');
+  assert.equal(literal.provenance.representation, "committed_source");
+  assert.equal(literal.provenance.redactionCount, 0);
+}));
+
+test("gh_api Contents provenance records the blob sha as the revision (#1015)", async () => {
+  const sha = "b".repeat(40);
+  const secretText = "token: ghp_" + "A".repeat(36) + "\n";
+  const payload = {
+    type: "file", encoding: "base64", path: "cfg.yml", sha, size: Buffer.byteLength(secretText),
+    content: Buffer.from(secretText, "utf8").toString("base64"),
+  };
+  const res = await executeToolRequest("gh_api", { endpoint: "repos/o/r/contents/cfg.yml" },
+    ctx("/tmp", {
+      allowedGhRepos: ["o/r"],
+      sourceRevision: "c".repeat(40),
+      deps: { ...deps(), env: { GH_TOKEN: "test-token" }, ghGet: async () => ({ status: 200, body: JSON.stringify(payload) }) },
+    }));
+  assert.equal(res.status, "ok");
+  assert.match(res.result.content, /redacted:credential/);
+  assert.equal(res.provenance.representation, "sanitized_source");
+  assert.equal(res.provenance.file, "cfg.yml");
+  assert.equal(res.provenance.revision, sha);
+});
+
+test("non-source tools carry no provenance (#1015)", async () => fixture(async (root) => {
+  fs.writeFileSync(path.join(root, "a.txt"), "x");
+  const res = await executeToolRequest("find_files", { pattern: "*" }, ctx(root, { sourceRevision: "a".repeat(40) }));
+  assert.equal(res.status, "ok");
+  assert.equal(res.provenance, undefined);
 }));

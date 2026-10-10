@@ -10,6 +10,7 @@ import {
   dedupeVerdictCorpus,
   truncateText,
 } from "../src/model/conversation.js";
+import { sanitizedSourceProvenance } from "../src/context/evidence-provenance.js";
 
 test("tool results are wrapped in an untrusted envelope with defanged delimiters", () => {
   const c = new Conversation();
@@ -25,6 +26,26 @@ test("tool results are wrapped in an untrusted envelope with defanged delimiters
   assert.equal((msg.content.match(/<\/untrusted_tool_result>/g) ?? []).length, 1);
   assert.equal((msg.content.match(/<_untrusted_tool_result/g) ?? []).length, 2);
   assert.ok(msg.content.trimEnd().endsWith("</untrusted_tool_result>"));
+});
+
+test("tool results carry bounded provenance attributes when evidence is provided", () => {
+  const c = new Conversation();
+  c.addToolResult("c1", { content: "x" }, { provenance: sanitizedSourceProvenance(1, "src/x.ts", "abc123") });
+  const msg = (c.renderOpenAiMessages() as Array<{ role: string; content: string }>).find((m) => m.role === "tool")!;
+  assert.match(
+    msg.content,
+    /^<untrusted_tool_result provenance="tool_result" call_id="c1" status="ok" representation="sanitized_source" synthesized="true" redaction_count="1" source_file="src\/x\.ts" source_revision="abc123">\n/,
+  );
+  assert.ok(msg.content.includes('representation="sanitized_source"'));
+  assert.ok(msg.content.includes('synthesized="true"'));
+  assert.ok(msg.content.includes('redaction_count="1"'));
+  assert.ok(msg.content.includes('source_file="src/x.ts"'));
+  assert.ok(msg.content.includes('source_revision="abc123"'));
+  // The no-provenance case is byte-identical to the historical envelope.
+  const plain = new Conversation();
+  plain.addToolResult("c2", { content: "x" });
+  const plainMsg = (plain.renderOpenAiMessages() as Array<{ role: string; content: string }>).find((m) => m.role === "tool")!;
+  assert.ok(plainMsg.content.startsWith('<untrusted_tool_result provenance="tool_result" call_id="c2" status="ok">\n'));
 });
 
 test("error results carry status=error and the Anthropic is_error flag", () => {

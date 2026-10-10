@@ -23,7 +23,8 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { maskAndTruncate, maskAndTruncateSource, redactSourceText } from "../context/redact.js";
+import { maskAndTruncate, maskAndTruncateSource, maskAndTruncateSourceDetailed, redactSourceText } from "../context/redact.js";
+import { committedSourceProvenance, sanitizedSourceProvenance, type EvidenceProvenance } from "../context/evidence-provenance.js";
 import { USER_AGENT } from "../platform/user-agent.js";
 import { runProcess, type ProcessResult } from "../runtime/subprocess.js";
 import { pyDumpsCompact } from "../model/conversation.js";
@@ -121,10 +122,25 @@ export type ToolContext = {
   requestTimeout?: number;
   searchUrl?: string;
   maxSearchResults?: number;
+  /** Exact commit revision the source-derived tools read from, when known
+   * (the PR head SHA). `null` means "not an exact revision" — a branch or
+   * default-branch read — and is carried through provenance unchanged. */
+  sourceRevision?: string | null;
   deps: ToolDeps;
 };
 
 type Obj = Record<string, any>;
+
+/** #1015: source-derived tool results carry provenance describing whether the
+ * returned text is committed source or was sanitized by the redactor. A count
+ * of 0 means nothing was replaced, so the bytes are committed source. */
+function provenanceFor(count: number, file: string | null, revision: string | null): EvidenceProvenance {
+  return count > 0 ? sanitizedSourceProvenance(count, file, revision) : committedSourceProvenance(file, revision);
+}
+
+/** A ref is an exact revision only when it is a full commit/blob SHA. A branch
+ * name (or absent ref) is NOT an exact revision — fail closed to null. */
+const REVISION_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 const defaultFetch: NonNullable<ToolDeps["fetch"]> = async (url, init) => {
   const controller = new AbortController();
@@ -1008,16 +1024,21 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
   const boundedSource = (s: string, n = cap, filePath?: string | null) => maskAndTruncateSource(s, n, filePath).text;
   try {
     let result: Obj;
+    let provenance: EvidenceProvenance | undefined;
     switch (tool) {
       case "read_file": {
         const p = args.path ?? "";
         if (!p) throw new Error("Missing 'path' argument");
         const res = await readFile(p, ctx, optInt(args.offset), optInt(args.limit));
         if (res.error) throw new Error(res.error);
-        const text = boundedSource(maskAndTruncateSource(res.content, Number.MAX_SAFE_INTEGER, p).text, cap, p);
+        // Mask over the FULL pre-truncation text (#926), then truncate the
+        // masked text; provenance counts the redactions the masker made.
+        const full = maskAndTruncateSourceDetailed(res.content, Number.MAX_SAFE_INTEGER, p);
+        const text = boundedSource(full.text, cap, p);
         const payload: Obj = { content: text };
         if (res.range) payload.range = res.range;
         result = payload;
+        provenance = provenanceFor(full.redactionCount, p, ctx.sourceRevision ?? null);
         break;
       }
       case "find_files": {
@@ -1067,7 +1088,9 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         if (!p) throw new Error("Missing 'path' argument");
         const res = await gitBlame(p, ctx, optInt(args.start), optInt(args.end));
         if (res.error) throw new Error(res.error);
-        result = { blame: boundedSource(res.blame, cap, p) };
+        const det = maskAndTruncateSourceDetailed(res.blame, cap, p);
+        result = { blame: det.text };
+        provenance = provenanceFor(det.redactionCount, p, ctx.sourceRevision ?? null);
         break;
       }
       case "git_grep": {
@@ -1076,9 +1099,10 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         const maxResults = clampGrepMaxResults(args.max_results);
         const res = await gitGrep(pattern, ctx, args.path, maxResults);
         if (res.error) throw new Error(res.error);
-        const joined = maskAndTruncateSource(res.matches.join("\n"), cap);
-        result = { matches: joined.text.split(/\r?\n/), truncated: joined.truncated };
+        const det = maskAndTruncateSourceDetailed(res.matches.join("\n"), cap);
+        result = { matches: det.text.split(/\r?\n/), truncated: det.truncated };
         if (res.note) result.note = res.note;
+        provenance = provenanceFor(det.redactionCount, null, ctx.sourceRevision ?? null);
         break;
       }
       case "repo_contents": {
@@ -1091,8 +1115,12 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         if (res.error) throw new Error(res.error);
         if (res.type === "file" && "content" in res) {
           // Masking sees the full decoded text; this owns mask-then-truncate (#927).
-          const clipped = maskAndTruncateSource(res.content, Math.min(cap, REPO_CONTENTS_MAX_BYTES), contentsPath);
-          result = { ...res, content: clipped.text, truncated: (res.truncated ?? false) || clipped.truncated };
+          const det = maskAndTruncateSourceDetailed(res.content, Math.min(cap, REPO_CONTENTS_MAX_BYTES), contentsPath);
+          result = { ...res, content: det.text, truncated: (res.truncated ?? false) || det.truncated };
+          // Only an explicit SHA-shaped ref is an exact revision; a branch
+          // name or default-branch read fails closed to null.
+          const revision = typeof args.ref === "string" && REVISION_SHA_RE.test(args.ref) ? args.ref : null;
+          provenance = provenanceFor(det.redactionCount, contentsPath, revision);
         } else if (res.type === "directory" && cap > 0) {
           const entries: Obj[] = res.entries;
           const kept: Obj[] = [];
@@ -1123,8 +1151,10 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
             // runs over the FULL decoded text and maskAndTruncateSource owns
             // the mask-then-truncate order (#926): a credential straddling
             // the cap boundary is masked whole, never cut in half.
-            const clipped = maskAndTruncateSource(contentsFile.content, cap, contentsFile.path);
-            result = { ...contentsFile, content: clipped.text, truncated: clipped.truncated };
+            const det = maskAndTruncateSourceDetailed(contentsFile.content, cap, contentsFile.path);
+            result = { ...contentsFile, content: det.text, truncated: det.truncated };
+            const revision = typeof contentsFile.sha === "string" && contentsFile.sha ? contentsFile.sha : null;
+            provenance = provenanceFor(det.redactionCount, contentsFile.path, revision);
           } else {
             result = contentsFile;
           }
@@ -1172,6 +1202,7 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
     }
     toolResult.status = "ok";
     toolResult.result = result;
+    if (provenance !== undefined) toolResult.provenance = provenance;
   } catch (e) {
     toolResult.result = { error: e instanceof Error ? e.message : String(e) };
   }

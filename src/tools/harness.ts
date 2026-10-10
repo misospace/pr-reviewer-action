@@ -1388,6 +1388,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     requestTimeout: input.requestTimeout,
     searchUrl,
     maxSearchResults,
+    sourceRevision: ((env.PR_HEAD_SHA ?? "").trim() || null),
     deps: { env: env as NodeJS.ProcessEnv },
   };
 
