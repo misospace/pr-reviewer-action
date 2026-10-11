@@ -1,5 +1,23 @@
 # Changelog
 
+## [3.5.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.4.1...source-v3.5.0) (2026-10-11)
+
+
+### Features
+
+* **eval:** reproducible heterogeneous model/profile lanes for [#967](https://github.com/misospace/pr-reviewer-action/issues/967) ([#1022](https://github.com/misospace/pr-reviewer-action/issues/1022)) ([492c743](https://github.com/misospace/pr-reviewer-action/commit/492c743f89afa2eddf233c08b80a5682b2388297))
+* **ingress:** self-hosted Forgejo webhook/auth/reconciliation adapter ([#730](https://github.com/misospace/pr-reviewer-action/issues/730)) ([#1019](https://github.com/misospace/pr-reviewer-action/issues/1019)) ([c16c85b](https://github.com/misospace/pr-reviewer-action/commit/c16c85b0e708ac8f71e6e72cd343b540c8f21e35))
+* **tangled:** fetch latest pull round and normalize patch-blob diff/files ([#586](https://github.com/misospace/pr-reviewer-action/issues/586)) ([#1012](https://github.com/misospace/pr-reviewer-action/issues/1012)) ([e7db913](https://github.com/misospace/pr-reviewer-action/commit/e7db913365d4e89a792dee30164cf712bcd221a4))
+* **tangled:** normalize pull metadata into the platform read seam ([#585](https://github.com/misospace/pr-reviewer-action/issues/585)) ([#1013](https://github.com/misospace/pr-reviewer-action/issues/1013)) ([aa12fff](https://github.com/misospace/pr-reviewer-action/commit/aa12fffaf9d31abd0775fda8fbbaeba91194be29))
+
+
+### Bug Fixes
+
+* **deps:** update dependency @types/node (24.19.1 → 24.19.2) ([#1023](https://github.com/misospace/pr-reviewer-action/issues/1023)) ([e44a237](https://github.com/misospace/pr-reviewer-action/commit/e44a23736f38de52e175cef8e75886072ed07028))
+* **partition:** fail-closed no-diff coverage and bind outcomes to plan round ([#1026](https://github.com/misospace/pr-reviewer-action/issues/1026)) ([#1031](https://github.com/misospace/pr-reviewer-action/issues/1031)) ([55ecf00](https://github.com/misospace/pr-reviewer-action/commit/55ecf0050f260ea56180a146844c444afc873354))
+* **reviewer:** carry source-evidence provenance through model-visible tool output ([#1015](https://github.com/misospace/pr-reviewer-action/issues/1015)) ([#1029](https://github.com/misospace/pr-reviewer-action/issues/1029)) ([afe282f](https://github.com/misospace/pr-reviewer-action/commit/afe282f5fa3e5b343946f9d927c165db20286cf5))
+* **tools:** make smart-tier loop round and wall-clock limits settable ([#1020](https://github.com/misospace/pr-reviewer-action/issues/1020)) ([#1032](https://github.com/misospace/pr-reviewer-action/issues/1032)) ([f5b3e11](https://github.com/misospace/pr-reviewer-action/commit/f5b3e115d1c3f805eda479040025552c00b1f623))
+
 ## [3.4.1](https://github.com/misospace/pr-reviewer-action/compare/source-v3.4.0...source-v3.4.1) (2026-10-07)
 
 
