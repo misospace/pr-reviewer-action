@@ -137,7 +137,21 @@ function isConfigLikePath(filePath: string | null | undefined): boolean {
  * an unquoted secret-named scalar as a literal; code files (and unknown
  * paths) never do, because there an unquoted value is a code expression. A
  * QUOTED literal is masked either way — quoting is a value-shape signal a
- * code expression never has. */
+ * code expression never has.
+ *
+ * Marker contract (#1016): the rules below write credentials INTO the
+ * `REDACTED_SOURCE` marker, never OUT of it. A `⟦redacted:credential⟧`
+ * substring that is already present in the source (legitimately committed
+ * text, or any byte sequence that happens to match the marker) is preserved
+ * verbatim — the masker only uses the marker as a replacement target, never
+ * as an input pattern. The blocker-verification boundary at
+ * `src/enforcement/blocker-verification.ts` relies on this: a finding that
+ * cites the literal marker must observe the same marker in the exact-head
+ * read for the positive (`marker-present`) path to fire, and a future
+ * masker change that redacted the marker out of committed source would
+ * silently flip that path to `refuted`. `tests-v3/source-verifier.test.ts`
+ * pins the positive path; do not change this contract without updating
+ * both the test and the boundary. */
 export interface RedactSourceResult { text: string; redactionCount: number; }
 
 function replaceAndCount(
