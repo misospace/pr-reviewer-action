@@ -11,6 +11,7 @@ import { truncateClean } from "../corpus/truncate.js";
 import { readFileSync, appendFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { canonicalChangedFile, normalizeLinkedIssues } from "../context/types.js";
+import { redactText } from "../context/redact.js";
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { buildHarnessObligations } from "../requirements/obligations.js";
 import { externalChecksConclusion } from "../precheck/decide.js";
@@ -1179,7 +1180,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     cacheHitRatio,
     analysisEngine,
   };
-  ws.write("review-body.md", outputs.reviewMarkdown);
+  ws.write("review-body.md", redactText(outputs.reviewMarkdown));
   ws.write("verdict.txt", `${outputs.verdict}\n`);
   ws.write("analysis_engine.txt", `${analysisEngine}\n`);
   persistOutputs(context.outputFilePath, formatReviewStepOutputs(outputs));
