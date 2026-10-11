@@ -1,8 +1,7 @@
 {
   "contract": "golden-replay/v1",
   "name": "case8-source-claim-unverified-keeps-non-approving",
-  "status": "expected-failure",
-  "known_gap": "#1016",
+  "status": "active",
   "provenance": {
     "source_head": "5d8a3b1c9e2f4a7b6c0d8e1f3a5b7c9d2e4f6a8b",
     "origin": "Companion to case1: a marker-based source claim citing a path that the deterministic safeFile seam rejects (starts with a leading `-`, the git argv option shape), so the production source-verifier returns unavailable. The deterministic enforcement layer (required_check_validation_mode=fail, classifier-driven path_handling must_check) keeps the verdict at request_changes — a fail-closed gate cannot relax on an unverified grounding, only on a refuted one. Pinned to #1016: pre-#1016 no grounding_status is recorded, the verdict is model-pass-through, and the relaxed verdict would currently hide the bug the unverified case is meant to catch.",
@@ -63,11 +62,6 @@
     "validate-required-checks": "true",
     "required-check-validation-mode": "fail"
   },
-  "expected_mismatch_keys": [
-    "blocking_finding_ids",
-    "grounding_status",
-    "unsupported_blocking_claims"
-  ],
   "expect": {
     "verdict": "request_changes",
     "blocking_finding_ids": [],

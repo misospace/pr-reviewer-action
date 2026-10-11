@@ -8,7 +8,10 @@ const revision = "a".repeat(40);
 const source = (text: string): SourceReadResult => ({ status: "ok", text, provenance: committedSourceProvenance("src/a.ts", revision) });
 const markerFinding = (overrides: Partial<ArtifactFinding> = {}): ArtifactFinding => ({
   severity: "blocker", category: "bug", file: "src/a.ts", line: 1,
-  message: "broken literal ⟦redacted:credential⟧", ...overrides,
+  // The stock message cites the marker inside a quoted span whose sentence
+  // carries no mention/expectation cue, so it classifies as a
+  // committed_literal claim.
+  message: "line 8 commits the sanitizer placeholder `⟦redacted:credential⟧`", ...overrides,
 });
 const requirementFinding = (overrides: Partial<ArtifactFinding> = {}): ArtifactFinding => ({
   severity: "major", category: "security", file: "src/a.ts", line: null,
@@ -64,9 +67,9 @@ test("missing marker location is unverified and missing requirement location uns
 test("requirement location needs cited code evidence to ground against authoritative source", async () => {
   // requirementFinding's stock message has no backtick spans — under the
   // post-#1016 boundary it cannot ground on line existence alone. The
-  // cited-span check replaces the old location-only rule: line 4 out of
-  // range and file missing are still refuted, but a valid line with no
-  // cited evidence becomes unsupported (no specific violation cited).
+  // cited-span check runs before line validity: a claim without cited
+  // evidence is unsupported regardless of its line (in-range or not),
+  // while a missing file is still refuted before any span is examined.
   const unsupportedNoSpans = requirementFinding({ file: "src/unsupported.ts", line: 1 });
   const outOfRange = requirementFinding({ file: "src/out-of-range.ts", line: 4 });
   const missing = requirementFinding({ file: "src/missing.ts" });
@@ -110,15 +113,119 @@ test("ordinary, non-blocking, and verification findings are untouched", async ()
   assert.ok(findings.every((finding) => finding.grounding_status === undefined));
 });
 
-test("a marker substring is classified as a source claim and refuted when absent", async () => {
-  // Pins the substring semantics: a finding that merely mentions the marker is
-  // treated as a committed-text claim, so a future change cannot silently widen
-  // (or narrow) the match.
-  const finding = markerFinding({ message: "the log line should show [REDACTED] for secrets", file: "src/a.ts" });
+test("marker mentions that are not cited as committed content are left untouched", async () => {
+  // A marker in prose — expected output of a masker that never runs — is a
+  // description of the review's own expectation, not an assertion about
+  // committed bytes, so the boundary must not verify (or refute) it.
+  const prose = markerFinding({
+    message: "Sensitive request headers are logged verbatim; they should be replaced with [REDACTED], but the logging path never calls the masker.",
+  });
+  // Even quoted, a mention carrying an expectation cue in its sentence is
+  // not a committed-content assertion.
+  const quotedWithCue = markerFinding({ message: "the masker should emit `[REDACTED]` for credentials" });
+  const result = await verify([prose, quotedWithCue], async () => source("const value = 'actual';"));
+  assert.deepEqual(result.findings, []);
+  assert.equal(result.demoted, 0);
+  assert.equal(prose.severity, "blocker");
+  assert.equal(prose.grounding_status, undefined);
+  assert.equal(quotedWithCue.severity, "blocker");
+  assert.equal(quotedWithCue.grounding_status, undefined);
+});
+
+test("a quoted marker cited without a mention cue is a source claim and refuted when absent", async () => {
+  // The #1012 path: the message asserts the committed source contains the
+  // marker — quoted, and its sentence carries no expectation cue — so the
+  // boundary verifies it against exact-head source and refutes it when the
+  // marker is not there.
+  const finding = markerFinding({ message: "line 8 commits the literal `[REDACTED]` into the file" });
   const result = await verify([finding], async () => source("const value = 'actual';"));
   assert.equal(result.findings[0]?.kind, "committed_literal");
   assert.equal(result.findings[0]?.status, "refuted");
+  assert.equal(result.findings[0]?.reason, "marker-absent");
+  assert.equal(result.demoted, 1);
+  assert.equal(finding.severity, "minor");
+  assert.equal(finding.capped_from, "blocker");
   assert.equal(finding.grounding_status, "refuted");
+});
+
+test("the #1012 false-blocker message shape stays a source claim and is refuted", async () => {
+  // The pinned golden-replay case1 message cites both markers in backticks;
+  // its sentence carries "not valid" / "cannot pass", which are not
+  // mention/expectation cues, so it must still classify and be refuted
+  // against committed source that lacks the markers.
+  const finding = markerFinding({
+    file: "tests/transport-canary.test.ts",
+    line: 12,
+    message: "Line 8 commits the sanitizer placeholder `[REDACTED]` as the credential literal, and line 12 compares `headers.authorization` against `⟦redacted:credential⟧` — both are harness-redaction artifacts, not valid credentials, so the TypeScript assertions in this test cannot pass against the committed source.",
+  });
+  const result = await verify([finding], async () => source("const auth = config.canaryAlpha;"));
+  assert.equal(result.findings[0]?.kind, "committed_literal");
+  assert.equal(result.findings[0]?.status, "refuted");
+  assert.equal(result.findings[0]?.reason, "marker-absent");
+  assert.equal(result.demoted, 1);
+  assert.equal(finding.grounding_status, "refuted");
+});
+
+test("a cited span found only away from the cited line is unknown evidence", async () => {
+  // The snippet exists in the file, but not at the cited location: the
+  // claim is neither confirmed nor disproved by the cited line, so it is
+  // demoted as unverified rather than grounded or refuted.
+  const finding = requirementFinding({
+    file: "src/distant.ts",
+    line: 3,
+    message: "requirement not enforced: `console.log(x)` violates standard Y",
+  });
+  const filler = Array.from({ length: 99 }, (_, i) => `// filler line ${i + 1}`).join("\n");
+  const result = await verify([finding], async () => source(`${filler}\nconsole.log(x);`));
+  assert.equal(result.findings[0]?.status, "unverified");
+  assert.equal(result.findings[0]?.reason, "evidence-location-mismatch");
+  assert.equal(result.demoted, 1);
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("the evidence window is ±EVIDENCE_LINE_WINDOW lines around the cited line", async () => {
+  // Cited line 3: a snippet on line 5 sits at the window edge (distance 2)
+  // and grounds; one on line 6 falls outside it and does not.
+  const inside = requirementFinding({ file: "src/inside.ts", line: 3, message: "requirement not enforced: `boundary` violates standard X" });
+  const outside = requirementFinding({ file: "src/outside.ts", line: 3, message: "requirement not enforced: `boundary` violates standard X" });
+  const result = await verify([inside, outside], async (file) => {
+    return file === "src/inside.ts"
+      ? source("one\ntwo\nthree\nfour\nboundary")
+      : source("one\ntwo\nthree\nfour\nfive\nboundary");
+  });
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["grounded", "evidence-verified"], ["unverified", "evidence-location-mismatch"],
+  ]);
+  assert.equal(result.demoted, 1);
+});
+
+test("a cited line beyond the end of the file refutes the claim", async () => {
+  const finding = requirementFinding({
+    file: "src/short.ts",
+    line: 4,
+    message: "requirement not enforced: `one` violates standard X",
+  });
+  const result = await verify([finding], async () => source("one\ntwo"));
+  assert.equal(result.findings[0]?.status, "refuted");
+  assert.equal(result.findings[0]?.reason, "location-missing");
+  assert.equal(result.demoted, 1);
+  assert.equal(finding.grounding_status, "refuted");
+});
+
+test("cited spans without a concrete line are unsupported, never grounded elsewhere", async () => {
+  // A null/0/negative/NaN line can never ground a claim even when its span
+  // matches the source: without a concrete location there is no evidence
+  // to verify.
+  const nullLine = requirementFinding({ file: "src/null.ts", line: null, message: "requirement not enforced: `one` violates standard X" });
+  const zeroLine = requirementFinding({ file: "src/zero.ts", line: 0, message: "requirement not enforced: `one` violates standard X" });
+  const negativeLine = requirementFinding({ file: "src/negative.ts", line: -3, message: "requirement not enforced: `one` violates standard X" });
+  const nanLine = requirementFinding({ file: "src/nan.ts", line: Number.NaN, message: "requirement not enforced: `one` violates standard X" });
+  const result = await verify([nullLine, zeroLine, negativeLine, nanLine], async () => source("one\ntwo"));
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["unsupported", "no-concrete-location"], ["unsupported", "no-concrete-location"],
+    ["unsupported", "no-concrete-location"], ["unsupported", "no-concrete-location"],
+  ]);
+  assert.equal(result.demoted, 4);
 });
 
 test("read budget is bounded and remaining candidates are unverified", async () => {

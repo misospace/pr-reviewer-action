@@ -1,8 +1,7 @@
 {
   "contract": "golden-replay/v1",
   "name": "case1-1012-marker-false-blocker",
-  "status": "expected-failure",
-  "known_gap": "#1016",
+  "status": "active",
   "provenance": {
     "source_head": "db9865c0f1a2b3c4d5e6f708192a3b4c5d6e7f80",
     "origin": "PR #1012 (head db9865c): sanitizer-inserted placeholder tokens — [REDACTED] from heuristic redaction and ⟦redacted:credential⟧ from source redaction — appeared inside ADDED lines of the new test-file diff, while the committed source held harmless test canaries. The model read the placeholders as committed literals and issued a false blocker claiming they break the TypeScript test.",
@@ -49,12 +48,6 @@
     "required_check_dispositions": null
   },
   "config": {},
-  "expected_mismatch_keys": [
-    "blocking_finding_ids",
-    "grounding_status",
-    "unsupported_blocking_claims",
-    "verdict"
-  ],
   "expect": {
     "verdict": "comment",
     "blocking_finding_ids": [],

@@ -8,6 +8,13 @@ export type GroundingKind = "committed_literal" | "requirement_claim";
 export const SANITIZER_MARKERS: readonly string[] = ["⟦redacted:credential⟧", "⟦•⟧", "[REDACTED]"];
 export const REQUIREMENT_NOT_ENFORCED_RE = /^\s*requirement\s+not\s+enforced\b/i;
 export const MAX_VERIFICATION_READS = 20;
+/**
+ * #1016 (review pass): a `requirement_claim` is grounded only when the cited
+ * span is present within ±EVIDENCE_LINE_WINDOW lines of the cited line. A
+ * span found only elsewhere in the file is unknown evidence, not
+ * confirmation.
+ */
+export const EVIDENCE_LINE_WINDOW = 2;
 
 export interface SourceReadOk { status: "ok"; text: string; provenance: EvidenceProvenance; }
 export interface SourceReadUnavailable { status: "unavailable"; reason: string; }
@@ -42,8 +49,88 @@ export function safeFile(file: unknown): file is string {
     && !file.includes("\0");
 }
 
+/**
+ * Mention/expectation cues: sentence-level wording that marks a marker as
+ * *expected output* of a sanitizer (or an absent mechanism / comparison)
+ * rather than as bytes the reviewer claims the committed source contains.
+ */
+const COMMITTED_MARKER_CUE_RE = /\bshould\b|\bmust be\b|\bexpected\b|instead of|\breplac\w*\b|\bnever\b|\bwithout\b|\bmissing\b|\bfails? to\b/i;
+
+const SENTENCE_DELIMITERS = new Set([".", "!", "?", ";", "\n"]);
+
+/**
+ * Character ranges `[start, end)` of quoted spans in `message`: the interior
+ * of single-backtick spans (`...`) and triple-backtick fences
+ * (```...```), i.e. text a reviewer explicitly cites rather than prose.
+ */
+function quotedSpans(message: string): Array<{ start: number; end: number }> {
+  const spans: Array<{ start: number; end: number }> = [];
+  for (const match of message.matchAll(/```(?:[^\n]*\n)?[\s\S]*?```/g)) {
+    const chunk = match[0] ?? "";
+    const index = match.index ?? 0;
+    const contentStart = chunk.includes("\n") ? chunk.indexOf("\n") + 1 : 3;
+    const contentEnd = chunk.length - 3;
+    if (contentStart < contentEnd) spans.push({ start: index + contentStart, end: index + contentEnd });
+  }
+  for (const match of message.matchAll(/`([^`]+)`/g)) {
+    const index = match.index ?? 0;
+    spans.push({ start: index + 1, end: index + 1 + (match[1] ?? "").length });
+  }
+  return spans;
+}
+
+/**
+ * The sentence containing a character range: the maximal substring around
+ * it delimited by `.`, `!`, `?`, `;`, or a newline.
+ */
+function sentenceContaining(message: string, from: number, to: number): string {
+  let start = from;
+  while (start > 0 && !SENTENCE_DELIMITERS.has(message[start - 1] ?? "")) start -= 1;
+  let end = to;
+  while (end < message.length && !SENTENCE_DELIMITERS.has(message[end] ?? "")) end += 1;
+  return message.slice(start, end);
+}
+
+/**
+ * True when `message` asserts that committed source contains a sanitizer
+ * marker: at least one marker occurrence must sit inside a quoted span, and
+ * the sentence carrying that cited occurrence must carry no
+ * mention/expectation cue.
+ */
+function assertsCommittedMarker(message: string): boolean {
+  const spans = quotedSpans(message);
+  if (spans.length === 0) return false;
+  for (const marker of SANITIZER_MARKERS) {
+    let from = 0;
+    for (;;) {
+      const index = message.indexOf(marker, from);
+      if (index === -1) break;
+      const end = index + marker.length;
+      for (const span of spans) {
+        if (span.start <= index && end <= span.end
+          && !COMMITTED_MARKER_CUE_RE.test(sentenceContaining(message, index, end))) {
+          return true;
+        }
+      }
+      from = index + 1;
+    }
+  }
+  return false;
+}
+
+/**
+ * Classify a finding message into the claim kinds the boundary can verify.
+ *
+ * Invariant (#1016 review pass): `committed_literal` fires only on markers
+ * *cited as committed content* — a marker inside a quoted span
+ * (single backticks or a triple-backtick fence) whose carrying sentence has
+ * no mention/expectation cue. Prose mentions of expected output, absent
+ * masking, or comparisons never classify as committed source claims; an
+ * ambiguous message falls through to the requirement regex, then to null,
+ * and the finding is left untouched.
+ */
 function classify(message: string): GroundingKind | null {
-  if (SANITIZER_MARKERS.some((marker) => message.includes(marker))) return "committed_literal";
+  if (assertsCommittedMarker(message)) return "committed_literal";
   if (REQUIREMENT_NOT_ENFORCED_RE.test(message)) return "requirement_claim";
   return null;
 }
@@ -117,20 +204,46 @@ export async function applyBlockerVerification(
         // `const x = 1; const y = 2; const z = 3;` does not establish that
         // a violated standard lives there. Independent, machine-checkable
         // evidence of a specific violation is required: a backticked code
-        // span whose bytes match the exact-head source. A claim without
-        // such a span is unsupported (no cited evidence). A claim with
-        // spans that none of the source files contain is refuted (source
-        // positively disproves the cited pattern).
+        // span whose bytes match the exact-head source. The evidence must
+        // sit at the cited location (#1016 review pass): the span is
+        // grounded only when it occurs within ±EVIDENCE_LINE_WINDOW lines
+        // of the cited line. A span found only elsewhere in the file is
+        // unknown evidence, not confirmation (unverified); a claim with no
+        // cited evidence is unsupported, and one whose spans the source
+        // contains nowhere is refuted (source positively disproves the
+        // cited pattern). A span without a concrete cited line can never
+        // ground, even when it matches elsewhere.
         const spans = extractCodeSpans(finding.message);
         if (spans.length === 0) {
           status = "unsupported";
           reason = "no-cited-evidence";
-        } else if (spans.some((span) => read.text.includes(span))) {
-          status = "grounded";
-          reason = "evidence-verified";
         } else {
-          status = "refuted";
-          reason = "evidence-mismatch";
+          const line = finding.line;
+          const citedLine = typeof line === "number" && Number.isInteger(line) && line >= 1 ? line : null;
+          if (citedLine === null) {
+            status = "unsupported";
+            reason = "no-concrete-location";
+          } else {
+            const lines = read.text.split(/\r?\n/);
+            if (citedLine > lines.length) {
+              status = "refuted";
+              reason = "location-missing";
+            } else {
+              const windowText = lines
+                .slice(Math.max(0, citedLine - 1 - EVIDENCE_LINE_WINDOW), citedLine + EVIDENCE_LINE_WINDOW)
+                .join("\n");
+              if (spans.some((span) => verifySourceSpan(windowText, span).present)) {
+                status = "grounded";
+                reason = "evidence-verified";
+              } else if (spans.some((span) => verifySourceSpan(read.text, span).present)) {
+                status = "unverified";
+                reason = "evidence-location-mismatch";
+              } else {
+                status = "refuted";
+                reason = "evidence-mismatch";
+              }
+            }
+          }
         }
       }
     }
