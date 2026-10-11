@@ -61,18 +61,41 @@ test("missing marker location is unverified and missing requirement location uns
   assert.equal(result.demoted, 2);
 });
 
-test("requirement location is grounded or refuted against authoritative source", async () => {
-  const grounded = requirementFinding({ file: "src/grounded.ts", line: null });
+test("requirement location needs cited code evidence to ground against authoritative source", async () => {
+  // requirementFinding's stock message has no backtick spans — under the
+  // post-#1016 boundary it cannot ground on line existence alone. The
+  // cited-span check replaces the old location-only rule: line 4 out of
+  // range and file missing are still refuted, but a valid line with no
+  // cited evidence becomes unsupported (no specific violation cited).
+  const unsupportedNoSpans = requirementFinding({ file: "src/unsupported.ts", line: 1 });
   const outOfRange = requirementFinding({ file: "src/out-of-range.ts", line: 4 });
   const missing = requirementFinding({ file: "src/missing.ts" });
-  const result = await verify([grounded, outOfRange, missing], async (file) => {
-    if (file === "src/grounded.ts" || file === "src/out-of-range.ts") return source("one\ntwo");
+  const result = await verify([unsupportedNoSpans, outOfRange, missing], async (file) => {
+    if (file === "src/unsupported.ts" || file === "src/out-of-range.ts") return source("one\ntwo");
     return { status: "unavailable", reason: "not-found" };
   });
   assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
-    ["grounded", "location-verified"], ["refuted", "line-out-of-range"], ["refuted", "location-missing"],
+    ["unsupported", "no-cited-evidence"], ["unsupported", "no-cited-evidence"], ["refuted", "location-missing"],
   ]);
-  assert.equal(result.demoted, 2);
+  assert.equal(result.demoted, 3);
+});
+
+test("requirement claim with cited code evidence is grounded or refuted", async () => {
+  const grounded = requirementFinding({
+    file: "src/grounded.ts",
+    line: 1,
+    message: "requirement not enforced: `one` violates standard X",
+  });
+  const refuted = requirementFinding({
+    file: "src/refuted.ts",
+    line: 1,
+    message: "requirement not enforced: `unrelated_thing` violates standard X",
+  });
+  const result = await verify([grounded, refuted], async (file) => source("one\ntwo"));
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["grounded", "evidence-verified"], ["refuted", "evidence-mismatch"],
+  ]);
+  assert.equal(result.demoted, 1);
 });
 
 test("ordinary, non-blocking, and verification findings are untouched", async () => {

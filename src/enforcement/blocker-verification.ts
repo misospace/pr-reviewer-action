@@ -48,6 +48,25 @@ function classify(message: string): GroundingKind | null {
   return null;
 }
 
+/**
+ * Extract backtick-delimited code spans from a finding message. Used by the
+ * `requirement_claim` branch: a generic "requirement not enforced" assertion
+ * carries no machine-checkable evidence of a specific violation unless it
+ * cites specific code. Bare line numbers and bare file references cannot
+ * establish that the cited code matches what the source actually contains;
+ * only quoted code does.
+ */
+function extractCodeSpans(message: string): string[] {
+  const out: string[] = [];
+  for (const match of message.matchAll(/`([^`]+)`/g)) {
+    const span = (match[1] ?? "").trim();
+    // Single characters and pure punctuation do not constitute a citable
+    // claim — pin a minimum length so a stray backtick pair cannot ground.
+    if (span.length >= 2) out.push(span);
+  }
+  return out;
+}
+
 export async function applyBlockerVerification(
   findings: ArtifactFinding[],
   options: BlockerVerificationOptions,
@@ -92,12 +111,27 @@ export async function applyBlockerVerification(
         const present = SANITIZER_MARKERS.some((marker) => verifySourceSpan(read.text, marker).present);
         status = present ? "grounded" : "refuted";
         reason = present ? "marker-present" : "marker-absent";
-      } else if (finding.line !== null && finding.line > read.text.split("\n").length) {
-        status = "refuted";
-        reason = "line-out-of-range";
       } else {
-        status = "grounded";
-        reason = "location-verified";
+        // requirement_claim: a generic standard assertion cannot promote
+        // CHANGES_REQUESTED on file/line existence alone — line 3 of
+        // `const x = 1; const y = 2; const z = 3;` does not establish that
+        // a violated standard lives there. Independent, machine-checkable
+        // evidence of a specific violation is required: a backticked code
+        // span whose bytes match the exact-head source. A claim without
+        // such a span is unsupported (no cited evidence). A claim with
+        // spans that none of the source files contain is refuted (source
+        // positively disproves the cited pattern).
+        const spans = extractCodeSpans(finding.message);
+        if (spans.length === 0) {
+          status = "unsupported";
+          reason = "no-cited-evidence";
+        } else if (spans.some((span) => read.text.includes(span))) {
+          status = "grounded";
+          reason = "evidence-verified";
+        } else {
+          status = "refuted";
+          reason = "evidence-mismatch";
+        }
       }
     }
 

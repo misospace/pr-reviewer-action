@@ -1054,6 +1054,11 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
+    // #1016: the strict mapping computes the unknown-evidence forcing
+    // signal from the artifact's own `grounding_status` field — any
+    // demoted finding with `grounding_status === "unverified"` forces
+    // `request_changes` with a #1016 attribution note so an approve cannot
+    // silently certify a claim the verifier never checked.
     applyStrictVerdictPolicy(reviewRecord as never, { modelVerdict, forced });
     // The strict mapping can derive an approve after the enforcement banner
     // was written; reconcile the markdown with the final verdict.
@@ -1075,6 +1080,10 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
     relaxVerificationOnlyVerdict(reviewRecord as never, { forced });
     relaxCiOnlyVerdict(reviewRecord as never, { forced });
+    // #1016: relaxUnverifiedBlockerVerdict itself refuses to relax when any
+    // demoted finding has `grounding_status === "unverified"` (unknown
+    // evidence, not a refutation) — the verifier did not disprove the
+    // claim, so a clean review cannot be certified.
     relaxUnverifiedBlockerVerdict(reviewRecord as never, { forced });
     // #977: the relaxation can flip the model's request_changes to approve
     // after the enforcement banner was written; reconcile the markdown with
