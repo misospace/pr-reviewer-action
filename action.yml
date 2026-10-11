@@ -401,6 +401,10 @@ inputs:
     description: Wall-clock ceiling in seconds for the whole tool_mode=native_loop exchange (all model round-trips plus tool execution). Ignored for other modes.
     required: false
     default: "600"
+  smart-tool-loop-wall-clock-sec:
+    description: Wall-clock ceiling in seconds for the smart tier's tool-mode=native_loop exchange (the post-review escalation rerun) only. Empty (the default) inherits tool-loop-wall-clock-sec. An explicit value outranks tool-loop-wall-clock-sec on the smart tier and leaves the primary tier untouched. Ignored for other modes.
+    required: false
+    default: ""
   tool-loop-summarize:
     description: When "true", tool_mode=native_loop folds the oldest tool results into a model-generated evidence digest once the conversation outgrows its context budget, instead of blunt-truncating them — preserving salient facts (versions, paths, URLs, findings) in fewer tokens at the cost of one extra model call per compaction. Off by default (truncation). Ignored for other modes.
     required: false
@@ -423,6 +427,10 @@ inputs:
     default: ""
   tool-max-rounds:
     description: "Round budget for tool_mode=native_loop, where a round is a single model turn. Empty (the default) resolves to 4, and the effective round cap also scales with the resolved tool-max-requests budget (#895) — one round per tool call, so a model that reads one file per turn can spend the whole size-scaled or tiered call budget; it is bounded at 32 rounds, and the wall clock is the real bound. Set this explicitly to opt back out of that scaling: the loop then allows up to twice the configured value (capped at 12), exactly as before #895, to leave room for one-call-per-turn chains and repair turns. Ignored when tool_mode=off."
+    required: false
+    default: ""
+  smart-tool-max-rounds:
+    description: "Round budget for the smart tier's tool-mode=native_loop run (the post-review escalation rerun) only. Empty (the default) inherits tool-max-rounds, so with both empty the smart round cap scales with its resolved tool budget, bounded at 32 rounds (#895). An explicit value outranks tool-max-rounds on the smart tier and opts that tier alone out of the scaling: its loop then allows up to twice this value (capped at 12). Leaves the primary tier untouched. Ignored when tool-mode=off."
     required: false
     default: ""
   tool-turn-timeout-sec:

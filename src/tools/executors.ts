@@ -23,7 +23,8 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { maskAndTruncate, maskAndTruncateSource, redactSourceText } from "../context/redact.js";
+import { maskAndTruncate, maskAndTruncateSource, maskAndTruncateSourceDetailed, redactSourceText } from "../context/redact.js";
+import { committedSourceProvenance, sanitizedSourceProvenance, untrustedTextProvenance, type EvidenceProvenance } from "../context/evidence-provenance.js";
 import { USER_AGENT } from "../platform/user-agent.js";
 import { runProcess, type ProcessResult } from "../runtime/subprocess.js";
 import { pyDumpsCompact } from "../model/conversation.js";
@@ -121,10 +122,67 @@ export type ToolContext = {
   requestTimeout?: number;
   searchUrl?: string;
   maxSearchResults?: number;
+  /** Exact commit revision the source-derived tools read from, when known
+   * (the PR head SHA). `null` means "not an exact revision" — a branch or
+   * default-branch read — and is carried through provenance unchanged. */
+  sourceRevision?: string | null;
   deps: ToolDeps;
 };
 
 type Obj = Record<string, any>;
+
+/** #1015: source-derived tool results carry provenance describing whether the
+ * returned text is committed source or was sanitized by the redactor. A count
+ * of 0 means nothing was replaced, so the bytes are committed source. */
+function provenanceFor(count: number, file: string | null, revision: string | null): EvidenceProvenance {
+  return count > 0 ? sanitizedSourceProvenance(count, file, revision) : committedSourceProvenance(file, revision);
+}
+
+/** #1015: a SHA is only treated as an exact revision when it parses as a
+ * full commit/blob SHA. A branch name, ref, or unparseable string fails
+ * closed to null — the byte-identity guarantee cannot be claimed without an
+ * exact revision to bind to. */
+const SOURCE_REVISION_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/** #1015: read the version of `filePath` committed at `sourceRevision` via
+ * `git show <rev>:<path>`. Returns `{ok:true, text}` when the file is in the
+ * committed tree, `{ok:false, error}` otherwise (file not in tree, revision
+ * unparseable, `git` transport failure). The text is the literal bytes from
+ * the tree — byte-identity with the blob the revision names — so a downstream
+ * `authorizesLiteralClaim(provenance, sourceRevision)` cannot return true for
+ * a claim that does not exist at that revision. */
+async function readCommittedFileBytes(
+  filePath: string,
+  sourceRevision: string | null | undefined,
+  ctx: ToolContext,
+): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  if (typeof sourceRevision !== "string" || !SOURCE_REVISION_SHA_RE.test(sourceRevision)) {
+    return { ok: false, error: "no exact revision bound to the source tool call" };
+  }
+  const argv = ["git", "show", `${sourceRevision}:${filePath}`];
+  const timeout = ctx.requestTimeout ?? 15;
+  const r = await processOutput(ctx, argv, timeout);
+  if (r.status === "timeout") return { ok: false, error: `git show timed out after ${timeout}s` };
+  if (r.status === "spawn_error") return { ok: false, error: r.launchError ?? "git show failed to start" };
+  if (r.exitCode !== 0) {
+    const stderr = toText(r.stderr).trim();
+    return { ok: false, error: stderr || `git show exited with code ${r.exitCode}` };
+  }
+  return { ok: true, text: toText(r.stdout) };
+}
+
+/** #1015: the helper `readCommittedFileBytes` calls into, distinguished so a
+ * failing case can fall back to the working tree without losing the source
+ * bytes the model needs to see. The provenance the caller stamps is degraded
+ * to `untrusted_text` so a downstream literal-claim check cannot authorize on
+ * unverified bytes. */
+function provenanceForWorkingTreeFallback(file: string | null): EvidenceProvenance {
+  return untrustedTextProvenance(file);
+}
+
+/** A ref is an exact revision only when it is a full commit/blob SHA. A branch
+ * name (or absent ref) is NOT an exact revision — fail closed to null. */
+const REVISION_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 const defaultFetch: NonNullable<ToolDeps["fetch"]> = async (url, init) => {
   const controller = new AbortController();
@@ -522,17 +580,35 @@ function decodeGhApiContentsFile(data: unknown): Obj | null {
 export async function readFile(input: string, ctx: ToolContext, offset?: number | null, limit?: number | null): Promise<Obj> {
   const guarded = resolveWorkspacePath(input, ctx.workspaceRoot);
   if (guarded.error) return { error: guarded.error };
-  if (ctx.trackedIndex && !ctx.trackedIndex.files.has(workspaceRel(guarded.path!, ctx.workspaceRoot))) {
+  const relative = workspaceRel(guarded.path!, ctx.workspaceRoot);
+  if (ctx.trackedIndex && !ctx.trackedIndex.files.has(relative)) {
     return { error: UNTRACKED_PATH_ERROR };
   }
+  // #1015: bind source-derived reads to the committed tree at the bound
+  // revision. A checkout at HEAD may have files modified on disk during
+  // build/test/preparation; reading from the working tree and stamping
+  // `committed_source` would let `authorizesLiteralClaim(provenance, HEAD)`
+  // succeed for a literal that does not exist at HEAD. `git show <rev>:<p>`
+  // returns the literal bytes from the committed tree — byte-identity with
+  // the blob at that revision — so a literal claim against that provenance
+  // cannot authorize a phantom claim. Fall through to the working tree when
+  // the read cannot be bound (no SHA, file missing from tree, git refused);
+  // the caller stamps `untrusted_text` so a downstream verifier cannot
+  // authorize.
+  const committed = await readCommittedFileBytes(relative, ctx.sourceRevision, ctx);
+  const bound = committed.ok;
   let content: string;
-  try {
-    content = fs.readFileSync(guarded.path!, "utf8");
-  } catch (e) {
-    return { error: String(e) };
+  if (bound) {
+    content = committed.text;
+  } else {
+    try {
+      content = fs.readFileSync(guarded.path!, "utf8");
+    } catch (e) {
+      return { error: String(e) };
+    }
   }
   if (offset == null && limit == null) {
-    return { content: codepointSlice(content, 12000) };
+    return { content: codepointSlice(content, 12000), committed: bound };
   }
   const lines = splitKeepEnds(content);
   const start = Math.max((offset || 1) - 1, 0);
@@ -541,6 +617,7 @@ export async function readFile(input: string, ctx: ToolContext, offset?: number 
   return {
     content: codepointSlice(window, 12000),
     range: { offset: start + 1, lines: end - start, total_lines: lines.length },
+    committed: bound,
   };
 }
 
@@ -723,7 +800,11 @@ function grepPathspec(resolved: string, workspaceRoot: string): string {
 /** Consume a raw `git grep -z` stream into match records (port of
  * `_parse_grep_z_records`). A text record is `path\0lineno\0content\n`; a
  * binary match carries no NUL; malformed trailing output is kept as a
- * binary-style record so the redaction pass fails closed. */
+ * binary-style record so the redaction pass fails closed. When `git grep`
+ * was invoked against a specific tree (`git grep <rev> -- <pattern>`), the
+ * path field is prefixed by `<rev>:` — strip that prefix so the redaction
+ * policy and the model-visible match line see the real workspace-relative
+ * path, not a colon-prefixed tree identifier. */
 export function parseGrepZRecords(stdout: string): Array<{ kind: "text"; path: string; lineno: string; content: string } | { kind: "binary"; line: string }> {
   const records: Array<{ kind: "text"; path: string; lineno: string; content: string } | { kind: "binary"; line: string }> = [];
   const n = stdout.length;
@@ -748,15 +829,27 @@ export function parseGrepZRecords(stdout: string): Array<{ kind: "text"; path: s
     }
     let newline = stdout.indexOf("\n", nul2 + 1);
     if (newline === -1) newline = n;
+    const rawPath = stdout.slice(i, nul1);
     records.push({
       kind: "text",
-      path: stdout.slice(i, nul1),
+      path: stripRevisionPrefix(rawPath),
       lineno: stdout.slice(nul1 + 1, nul2),
       content: stdout.slice(nul2 + 1, newline),
     });
     i = newline + 1;
   }
   return records;
+}
+
+/** Strip a `<sha>:` prefix `git grep <rev>` prepends to every match path.
+ * Only strips a full 40/64-char hex SHA; leaves an un-prefixed path (or any
+ * other leading bytes) untouched. */
+function stripRevisionPrefix(rawPath: string): string {
+  const colon = rawPath.indexOf(":");
+  if (colon <= 0) return rawPath;
+  const prefix = rawPath.slice(0, colon);
+  if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(prefix)) return rawPath.slice(colon + 1);
+  return rawPath;
 }
 
 /** Re-check every match's own path against the same sensitive-path policy:
@@ -785,6 +878,16 @@ export async function gitGrep(pattern: string, ctx: ToolContext, scope?: unknown
   // not a valid ERE (`foo(`) is retried once as a fixed string, noted in the
   // result (port of `git_grep`).
   const argv = ["git", "grep", "-n", "-z", "-E", "--", pattern];
+  // #1015: when the harness bound an exact revision, search THAT commit's
+  // tree (`git grep <pattern> <rev>`), not the working tree. The default
+  // (working-tree grep) reads bytes that may have been modified on disk and
+  // never committed, and stamping `committed_source` over those bytes would
+  // authorize literal claims that do not exist at the claimed revision. With
+  // a SHA, the `<rev>` position argument is a literal revision token; without
+  // one, the historical whole-worktree form is preserved byte-for-byte so the
+  // existing byte-exact tests stay green.
+  const bound = typeof ctx.sourceRevision === "string" && SOURCE_REVISION_SHA_RE.test(ctx.sourceRevision);
+  if (bound) argv.push(ctx.sourceRevision as string);
   if (scope === null || scope === undefined) {
     // No explicit path: preserve the historical whole-worktree invocation
     // byte-for-byte (single `--` before the pattern, `.` pathspec).
@@ -855,6 +958,14 @@ export async function gitBlame(input: string, ctx: ToolContext, start?: number |
     }
     argv.push("-L", `${Number(start)},${Number(end)}`);
   }
+  // #1015: when the harness bound an exact revision, attribute lines against
+  // THAT commit (`git blame <rev> -- <path>`), not the working tree. By
+  // default `git blame` prints the working-tree content of the file, even
+  // when `-w` is set; with a SHA, blame against the bound revision is the
+  // only way the displayed bytes are guaranteed to equal the blob at that
+  // revision. Without a SHA, blame runs against the working tree as before.
+  const bound = typeof ctx.sourceRevision === "string" && SOURCE_REVISION_SHA_RE.test(ctx.sourceRevision);
+  if (bound) argv.push(ctx.sourceRevision as string);
   argv.push("--", guarded.path!);
   const t = ctx.requestTimeout ?? 15;
   const r = await processOutput(ctx, argv, t);
@@ -1008,16 +1119,30 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
   const boundedSource = (s: string, n = cap, filePath?: string | null) => maskAndTruncateSource(s, n, filePath).text;
   try {
     let result: Obj;
+    let provenance: EvidenceProvenance | undefined;
     switch (tool) {
       case "read_file": {
         const p = args.path ?? "";
         if (!p) throw new Error("Missing 'path' argument");
         const res = await readFile(p, ctx, optInt(args.offset), optInt(args.limit));
         if (res.error) throw new Error(res.error);
-        const text = boundedSource(maskAndTruncateSource(res.content, Number.MAX_SAFE_INTEGER, p).text, cap, p);
+        // Mask over the FULL pre-truncation text (#926), then truncate the
+        // masked text; provenance counts the redactions the masker made.
+        const full = maskAndTruncateSourceDetailed(res.content, Number.MAX_SAFE_INTEGER, p);
+        const text = boundedSource(full.text, cap, p);
         const payload: Obj = { content: text };
         if (res.range) payload.range = res.range;
         result = payload;
+        // #1015: `readFile` reads from the committed tree at `sourceRevision`
+        // when possible, so a literal claim against this provenance can be
+        // byte-verified against the same revision. When the read fell back to
+        // the working tree (no SHA, file not in tree, git transport failure),
+        // the bytes are no longer revision-bound — degrade to untrusted_text
+        // so `authorizesLiteralClaim` cannot succeed for a claim whose
+        // authoritative bytes are not in evidence.
+        provenance = res.committed
+          ? provenanceFor(full.redactionCount, p, ctx.sourceRevision ?? null)
+          : provenanceForWorkingTreeFallback(p);
         break;
       }
       case "find_files": {
@@ -1067,7 +1192,15 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         if (!p) throw new Error("Missing 'path' argument");
         const res = await gitBlame(p, ctx, optInt(args.start), optInt(args.end));
         if (res.error) throw new Error(res.error);
-        result = { blame: boundedSource(res.blame, cap, p) };
+        const det = maskAndTruncateSourceDetailed(res.blame, cap, p);
+        result = { blame: det.text };
+        // #1015: blame bound to the committed tree at `sourceRevision` is
+        // byte-true to that revision; without a SHA, blame ran against the
+        // working tree and cannot claim literal authority.
+        const blameBound = typeof ctx.sourceRevision === "string" && SOURCE_REVISION_SHA_RE.test(ctx.sourceRevision);
+        provenance = blameBound
+          ? provenanceFor(det.redactionCount, p, ctx.sourceRevision ?? null)
+          : provenanceForWorkingTreeFallback(p);
         break;
       }
       case "git_grep": {
@@ -1076,9 +1209,17 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         const maxResults = clampGrepMaxResults(args.max_results);
         const res = await gitGrep(pattern, ctx, args.path, maxResults);
         if (res.error) throw new Error(res.error);
-        const joined = maskAndTruncateSource(res.matches.join("\n"), cap);
-        result = { matches: joined.text.split(/\r?\n/), truncated: joined.truncated };
+        const det = maskAndTruncateSourceDetailed(res.matches.join("\n"), cap);
+        result = { matches: det.text.split(/\r?\n/), truncated: det.truncated };
         if (res.note) result.note = res.note;
+        // #1015: grep bound to the committed tree at `sourceRevision` returns
+        // matches that exist at that revision; without a SHA, the matches came
+        // from the working tree and literal claims against them cannot be
+        // authorized.
+        const grepBound = typeof ctx.sourceRevision === "string" && SOURCE_REVISION_SHA_RE.test(ctx.sourceRevision);
+        provenance = grepBound
+          ? provenanceFor(det.redactionCount, null, ctx.sourceRevision ?? null)
+          : provenanceForWorkingTreeFallback(null);
         break;
       }
       case "repo_contents": {
@@ -1091,8 +1232,12 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         if (res.error) throw new Error(res.error);
         if (res.type === "file" && "content" in res) {
           // Masking sees the full decoded text; this owns mask-then-truncate (#927).
-          const clipped = maskAndTruncateSource(res.content, Math.min(cap, REPO_CONTENTS_MAX_BYTES), contentsPath);
-          result = { ...res, content: clipped.text, truncated: (res.truncated ?? false) || clipped.truncated };
+          const det = maskAndTruncateSourceDetailed(res.content, Math.min(cap, REPO_CONTENTS_MAX_BYTES), contentsPath);
+          result = { ...res, content: det.text, truncated: (res.truncated ?? false) || det.truncated };
+          // Only an explicit SHA-shaped ref is an exact revision; a branch
+          // name or default-branch read fails closed to null.
+          const revision = typeof args.ref === "string" && REVISION_SHA_RE.test(args.ref) ? args.ref : null;
+          provenance = provenanceFor(det.redactionCount, contentsPath, revision);
         } else if (res.type === "directory" && cap > 0) {
           const entries: Obj[] = res.entries;
           const kept: Obj[] = [];
@@ -1123,8 +1268,10 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
             // runs over the FULL decoded text and maskAndTruncateSource owns
             // the mask-then-truncate order (#926): a credential straddling
             // the cap boundary is masked whole, never cut in half.
-            const clipped = maskAndTruncateSource(contentsFile.content, cap, contentsFile.path);
-            result = { ...contentsFile, content: clipped.text, truncated: clipped.truncated };
+            const det = maskAndTruncateSourceDetailed(contentsFile.content, cap, contentsFile.path);
+            result = { ...contentsFile, content: det.text, truncated: det.truncated };
+            const revision = typeof contentsFile.sha === "string" && contentsFile.sha ? contentsFile.sha : null;
+            provenance = provenanceFor(det.redactionCount, contentsFile.path, revision);
           } else {
             result = contentsFile;
           }
@@ -1172,6 +1319,7 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
     }
     toolResult.status = "ok";
     toolResult.result = result;
+    if (provenance !== undefined) toolResult.provenance = provenance;
   } catch (e) {
     toolResult.result = { error: e instanceof Error ? e.message : String(e) };
   }

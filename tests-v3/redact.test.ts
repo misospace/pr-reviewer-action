@@ -7,6 +7,7 @@ import {
   maskDiagnostic,
   maskKnownSecrets,
   redactSourceText,
+  redactSourceTextDetailed,
   redactText,
 } from "../src/context/redact.js";
 import { describeTransportFailure, TransportFailure } from "../src/transport/http.js";
@@ -17,6 +18,21 @@ import { describeTransportFailure, TransportFailure } from "../src/transport/htt
 // syntax. The heuristic `redactText` policy (untrusted prose/log/web
 // payloads) is unchanged and still over-redacts these code shapes, which is
 // exactly the #862/#876 false-positive this module fixes for source evidence.
+
+test("#1015: detailed source redaction counts actual replacements only", () => {
+  assert.equal(redactSourceTextDetailed('const label = "[REDACTED]";').redactionCount, 0);
+  assert.equal(redactSourceTextDetailed(`const label = "${REDACTED_SOURCE}";`).redactionCount, 0);
+  // The real PR #1012 canary is masked only in its secret-key form; a bare
+  // non-secret-named identifier assignment (`const CANARY = "..."`) survives
+  // by design (#1018), so it must not inflate the count.
+  assert.equal(redactSourceTextDetailed('const CANARY = "s3cr3t-credential";').redactionCount, 0);
+  const one = redactSourceTextDetailed('const config = { token: "Bearer s3cr3t-credential" };');
+  assert.ok(one.redactionCount >= 1);
+  const two = redactSourceTextDetailed('ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456 sk-abcdefghijklmnopqrstuvwxyz012345');
+  assert.equal(two.redactionCount, 2);
+  assert.equal(redactSourceText('apiKey: config.apiKey'), "apiKey: config.apiKey");
+  assert.equal(redactSourceText('const token = "hunter2hunter2";'), `const token = "${REDACTED_SOURCE}";`);
+});
 
 test("#876: code-expression secret-named assignments survive redactSourceText byte-for-byte", () => {
   const lines = [

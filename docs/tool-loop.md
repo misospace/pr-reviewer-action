@@ -120,10 +120,19 @@ then allows up to `2 × tool-max-rounds`, capped at 12 — the pre-#895
 behavior, which leaves room for one-call-per-turn chains and repair turns
 without tracking the call budget.
 
+The smart tier (the post-review escalation rerun) reads `smart-tool-max-rounds`
+first. Left empty (the default) it inherits `tool-max-rounds`, including its
+scaling or its opt-out. An explicit value gives the smart tier its own round
+count and opts only that tier out of the scaling, under the same rule: up to
+`2 × smart-tool-max-rounds`, capped at 12. The primary tier is unchanged.
+
 ### Wall clock and per-turn timeouts
 
 - `tool-loop-wall-clock-sec` (default 600) bounds the whole exchange — every
   model round-trip plus tool execution.
+- `smart-tool-loop-wall-clock-sec` (default empty, inheriting
+  `tool-loop-wall-clock-sec`) bounds the smart tier's exchange, and therefore
+  the deadline its per-turn timeouts are clamped to.
 - `tool-turn-timeout-sec` (default 180) bounds each individual model turn. On
   the smart/escalated tier this is also clamped to whatever remains of the
   wall-clock deadline, so a slow turn can't single-handedly blow past it.

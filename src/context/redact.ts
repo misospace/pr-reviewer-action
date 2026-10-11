@@ -7,6 +7,8 @@
  * before anything reaches the corpus. This is a normalization seam, not a
  * security-policy one: no network, no process, no policy decisions. */
 
+import { committedSourceProvenance, sanitizedSourceProvenance } from "./evidence-provenance.js";
+
 const REDACTED = "[REDACTED]";
 
 // In application order. Each pattern replaces every occurrence; later
@@ -136,21 +138,48 @@ function isConfigLikePath(filePath: string | null | undefined): boolean {
  * paths) never do, because there an unquoted value is a code expression. A
  * QUOTED literal is masked either way — quoting is a value-shape signal a
  * code expression never has. */
+export interface RedactSourceResult { text: string; redactionCount: number; }
+
+function replaceAndCount(
+  text: string,
+  pattern: RegExp,
+  replacement: string | ((...args: any[]) => string),
+): RedactSourceResult {
+  let redactionCount = 0;
+  const result = text.replace(pattern, (...args: any[]) => {
+    const match = args[0] as string;
+    const replaced = typeof replacement === "string" ? replacement : replacement(...args);
+    if (replaced !== match) redactionCount += 1;
+    return replaced;
+  });
+  return { text: result, redactionCount };
+}
+
 export function redactSourceText(text: string | null | undefined, filePath?: string | null): string {
-  if (!text) return "";
+  return redactSourceTextDetailed(text, filePath).text;
+}
+
+export function redactSourceTextDetailed(text: string | null | undefined, filePath?: string | null): RedactSourceResult {
+  if (!text) return { text: "", redactionCount: 0 };
   let redacted = text;
+  let redactionCount = 0;
+  const replace = (pattern: RegExp, replacement: string | ((...args: any[]) => string)) => {
+    const result = replaceAndCount(redacted, pattern, replacement);
+    redacted = result.text;
+    redactionCount += result.redactionCount;
+  };
 
   // Bare token-shape secrets: the whole match IS the literal, nothing else
   // to preserve.
-  redacted = redacted.replace(/ghp_[A-Za-z0-9]{30,}/g, REDACTED_SOURCE);
-  redacted = redacted.replace(/github_pat_[A-Za-z0-9_]{20,}/g, REDACTED_SOURCE);
-  redacted = redacted.replace(/AKIA[0-9A-Z]{16}/g, REDACTED_SOURCE);
+  replace(/ghp_[A-Za-z0-9]{30,}/g, REDACTED_SOURCE);
+  replace(/github_pat_[A-Za-z0-9_]{20,}/g, REDACTED_SOURCE);
+  replace(/AKIA[0-9A-Z]{16}/g, REDACTED_SOURCE);
   // OpenAI-style `sk-` legacy bare shape (`sk-<20+ alnum>`), retained exactly
   // as it was. Its one ambiguity — a kebab token whose leading word is 20+
   // characters (`sk-internationalization-notes`) is masked — is pre-existing
   // and irreducible without weakening the pin, and over-redaction is the
   // module's stated preference over a leaked credential.
-  redacted = redacted.replace(/sk-[A-Za-z0-9]{20,}/g, REDACTED_SOURCE);
+  replace(/sk-[A-Za-z0-9]{20,}/g, REDACTED_SOURCE);
 
   // The dash-separated families (#996), ENUMERATED, with the body's first
   // segment required to be an alphanumeric run of at least 20 characters that
@@ -201,7 +230,7 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
   //    of scope; #996's acceptance is amended to accept it instead.
   // Pre-#997 left all three classes alone; the amended #996 acceptance trades
   // them for covering the three families.
-  redacted = redacted.replace(
+  replace(
     /(?<![A-Za-z0-9])sk-(?:proj|ant-api03|or-v1)-(?=[A-Za-z0-9]*[0-9A-Z])[A-Za-z0-9]{20,}[A-Za-z0-9_-]*/g,
     REDACTED_SOURCE,
   );
@@ -260,27 +289,27 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
    * api03/admin01 shape is exact on both edges: a token continuing past `AA`
    * with further base64url characters is not that shape and survives whole,
    * since matching it partially would leak the tail. */
-  redacted = redacted.replace(
+  replace(
     /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{0,256}T3BlbkFJ[A-Za-z0-9_-]*/g,
     REDACTED_SOURCE,
   );
-  redacted = redacted.replace(
+  replace(
     /(?<![A-Za-z0-9])sk-ant-(?:api03|admin01)-[A-Za-z0-9_-]{93}AA(?![A-Za-z0-9_-])/g,
     REDACTED_SOURCE,
   );
-  redacted = redacted.replace(
+  replace(
     /(?<![A-Za-z0-9])sk-ant-oat01-[A-Za-z0-9_-]{40,}/g,
     REDACTED_SOURCE,
   );
 
   // Bearer / Basic auth headers: keep the scheme word, mask only the token.
-  redacted = redacted.replace(
+  replace(
     /\b(Bearer|Basic)(\s+)([A-Za-z0-9._+/=-]{20,})/gi,
     (_m, scheme: string, ws: string) => `${scheme}${ws}${REDACTED_SOURCE}`,
   );
 
   // PEM private key blocks: keep the BEGIN/END lines, mask only the body.
-  redacted = redacted.replace(
+  replace(
     /(-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)([\s\S]*?)(-----END [A-Z0-9 ]*PRIVATE KEY-----)/g,
     (_m, begin: string, _body: string, end: string) => `${begin}\n${REDACTED_SOURCE}\n${end}`,
   );
@@ -290,7 +319,7 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
   // `!GetAtt ...`) is captured whole, to end of line, so it is judged (and,
   // being a reference, left alone) as ONE value rather than truncated at its
   // first space — `!Ref ClientKeyData` must never become `⟦…⟧ ClientKeyData`.
-  redacted = redacted.replace(
+  replace(
     /(client-certificate-data|client-key-data|certificate-authority-data)(\s*:\s*)(![^\n]*|\S+)/gi,
     (m, key: string, sep: string, value: string) =>
       isReferenceValue(value.trim(), false) ? m : `${key}${sep}${REDACTED_SOURCE}`,
@@ -302,7 +331,7 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
   // matching value quotes and no quote inside the value, so a code
   // expression (unquoted) never matches. A quoted reference (e.g.
   // `apiKey: "${API_KEY}"`) is left alone.
-  redacted = redacted.replace(
+  replace(
     new RegExp(`(["'\`]?)(${SECRET_KEY_ALTERNATION})\\1(\\s*[:=]\\s*)(["'\`])([^"'\`]{8,})\\4`, "gi"),
     (m, keyQuote: string, key: string, sep: string, quote: string, value: string) =>
       isReferenceValue(value, true) ? m : `${keyQuote}${key}${keyQuote}${sep}${quote}${REDACTED_SOURCE}${quote}`,
@@ -316,14 +345,14 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
   // `"token": hunter2hunter2`), and the same whole-value-to-end-of-line
   // capture for a tagged reference form.
   if (isConfigLikePath(filePath)) {
-    redacted = redacted.replace(
+    replace(
       new RegExp(`(["'\`]?)(${SECRET_KEY_ALTERNATION})\\1(\\s*[:=]\\s*)(![^\\n#]*|[^\\s#'"]{8,})`, "gi"),
       (m, keyQuote: string, key: string, sep: string, value: string) =>
         isReferenceValue(value.trim(), false) ? m : `${keyQuote}${key}${keyQuote}${sep}${REDACTED_SOURCE}`,
     );
   }
 
-  return redacted;
+  return { text: redacted, redactionCount };
 }
 
 /** Marker used for known-secret masking (`maskKnownSecrets`/`maskDiagnostic`/
@@ -450,16 +479,40 @@ export function maskAndTruncate(
  * contract, but masks with `redactSourceText` so repository source content
  * (tool file reads, grep matches, blame) survives byte-for-byte apart from
  * actual credential values. */
+export interface MaskSourceResult { text: string; truncated: boolean; redactionCount: number; }
+
 export function maskAndTruncateSource(
   text: string | null | undefined,
   maxBytes: number,
   filePath?: string | null,
 ): { text: string; truncated: boolean } {
-  const masked = redactSourceText(text, filePath);
-  const raw = Buffer.from(masked, "utf8");
+  const { text: masked, truncated } = maskAndTruncateSourceDetailed(text, maxBytes, filePath);
+  return { text: masked, truncated };
+}
+
+export function maskAndTruncateSourceDetailed(
+  text: string | null | undefined,
+  maxBytes: number,
+  filePath?: string | null,
+): MaskSourceResult {
+  const result = redactSourceTextDetailed(text, filePath);
+  const raw = Buffer.from(result.text, "utf8");
   if (raw.length <= maxBytes) {
-    return { text: masked, truncated: false };
+    return { ...result, truncated: false };
   }
   const clipped = raw.subarray(0, maxBytes).toString("utf8");
-  return { text: clipped + "\n[truncated]", truncated: true };
+  return { ...result, text: clipped + "\n[truncated]", truncated: true };
+}
+
+export function sourceEvidence(
+  text: string | null | undefined,
+  filePath: string | null | undefined,
+  file: string | null,
+  revision: string | null,
+): { text: string; provenance: import("./evidence-provenance.js").EvidenceProvenance } {
+  const result = redactSourceTextDetailed(text, filePath);
+  const provenance = result.redactionCount > 0
+    ? sanitizedSourceProvenance(result.redactionCount, file, revision)
+    : committedSourceProvenance(file, revision);
+  return { text: result.text, provenance };
 }

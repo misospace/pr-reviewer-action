@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Conversation } from "../src/model/conversation.js";
+import { sanitizedSourceProvenance } from "../src/context/evidence-provenance.js";
 import {
   STOP_BUDGET,
   STOP_MAX_ROUNDS,
@@ -70,6 +71,36 @@ test("model stops voluntarily after gathering evidence", async () => {
   assert.equal(outcome.finalText, "done");
   assert.equal(outcome.executed.length, 1);
   assert.equal(outcome.requestsRemaining, 3);
+});
+
+test("executor provenance rides through the loop into the rendered tool result", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const { postFn, executeFn, timeFn } = scriptedLoop(
+    [openAiCall("c1", "read_file", '{"path":"src/x.ts"}'), openAiText("done")],
+    [
+      {
+        tool: "read_file",
+        status: "ok",
+        result: { content: "x" },
+        provenance: sanitizedSourceProvenance(1, "src/x.ts", "abc123"),
+      },
+    ],
+  );
+  await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(2, 4, 120),
+    timeFn,
+  });
+  const event = conversation.events.find((e) => e.kind === "tool_result") as { evidence?: unknown };
+  assert.ok(event.evidence);
+  const msg = (conversation.renderOpenAiMessages() as Array<{ role: string; content: string }>).find((m) => m.role === "tool")!;
+  assert.ok(msg.content.includes('representation="sanitized_source"'));
+  assert.ok(msg.content.includes('synthesized="true"'));
+  assert.ok(msg.content.includes('redaction_count="1"'));
+  assert.ok(msg.content.includes('source_file="src/x.ts"'));
+  assert.ok(msg.content.includes('source_revision="abc123"'));
 });
 
 test("round budget exhausts with the doubled cap", async () => {
