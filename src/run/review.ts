@@ -1002,7 +1002,17 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   let blockerVerification: Awaited<ReturnType<typeof applyBlockerVerification>> | null = null;
   if (Array.isArray(reviewRecord.findings)) {
     capCiEvidenceFindings(reviewRecord.findings as ArtifactFinding[], ciChecksMarkdown);
-    const expectedRevision = context.headSha || String(pr.headRefOid ?? "") || null;
+    // Defense in depth alongside the reader's hex-SHA check
+    // (source-verifier.ts): pass `null` here whenever the candidate
+    // revision is not a syntactically valid 40/64-char hex SHA. The reader
+    // validates before reading, but the boundary caller should not hand
+    // a non-SHA revision to `authorizesLiteralClaim` and rely on the
+    // downstream reject to do the right thing — pass `null` explicitly
+    // so every `unverified` demotion gets a clear `no-exact-revision`
+    // reason instead of a stringly-typed free-form input.
+    const HEX_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+    const candidateRevision = context.headSha || String(pr.headRefOid ?? "") || "";
+    const expectedRevision = HEX_SHA_RE.test(candidateRevision) ? candidateRevision : null;
     const readSource = createHeadSourceReader({ workspace, revision: expectedRevision });
     blockerVerification = await applyBlockerVerification(reviewRecord.findings as ArtifactFinding[], {
       readSource,

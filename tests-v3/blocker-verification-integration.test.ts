@@ -401,3 +401,84 @@ test("#1016 native review stays REQUEST_CHANGES once marker claims are unverifie
   assert.equal(api.submitted.length, 1);
   assert.equal(api.submitted[0]?.event, "REQUEST_CHANGES");
 });
+
+test("#1016 attribution note discloses unverified co-existence with a blocker", async () => {
+  // #1016 (review pass, attribution defect): when an unverified demotion
+  // co-exists with a blocking finding, the override note previously named
+  // only the blocker count and silently hid the #1016 unknown-evidence
+  // contribution. Now the note composes both signals with `;`, so a
+  // reader sees that BOTH the blocker count AND the unknown-evidence
+  // boundary contributed to the request_changes — the safety defense
+  // is disclosed, not just the count.
+  const groundedButBlocking = finding({
+    severity: "blocker",
+    category: "bug",
+    file: "src/open.ts",
+    line: 4,
+    message: "real committed bug",
+  });
+  const a = artifact({
+    findings: [
+      groundedButBlocking,
+      finding({ message: "value is [REDACTED]", file: "src/unknown.ts" }),
+    ],
+  });
+  await applyBlockerVerification(a.findings, { readSource: unavailableReader, expectedRevision: null });
+  // The first finding stayed blocker (un-demoted, classification-skip),
+  // the second was demoted to minor with grounding_status="unverified".
+  // The strict mapping's blocker count (>0) drives the verdict; the
+  // unverified co-existence drives the attribution disclosure.
+  assert.equal(a.findings[0]!.grounding_status, undefined);
+  assert.equal(a.findings[0]!.severity, "blocker");
+  assert.equal(a.findings[1]!.grounding_status, "unverified");
+  assert.equal(a.findings[1]!.severity, "minor");
+
+  const outcome = applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+  assert.equal(a.verdict, "request_changes");
+  assert.equal(outcome.overridden, true);
+  assert.equal(outcome.source, "findings");
+  assert.ok(
+    a.review_markdown.includes("1 blocker/major finding(s) out of 2 open"),
+    `expected blocker-count disclosure in note, got: ${a.review_markdown}`,
+  );
+  assert.ok(
+    a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"),
+    `expected #1016 attribution disclosure in note, got: ${a.review_markdown}`,
+  );
+  assert.ok(
+    a.review_markdown.includes("#1016"),
+    `expected #1016 reference in note, got: ${a.review_markdown}`,
+  );
+});
+
+test("#1016 attribution note discloses enforcement-forced co-existence with a blocker", async () => {
+  // #1016 (review pass, attribution defect, dual signal): when both an
+  // unverified demotion and a forced enforcement layer fire alongside a
+  // blocker count, the note names all three. The dominant decision is
+  // still the blocker count (verdict_source = "findings"), but the
+  // #1016 unknown-evidence contribution and the enforcement-forced
+  // contribution are both disclosed so the review markdown does not
+  // mislead about which signals fired.
+  const groundedButBlocking = finding({
+    severity: "blocker",
+    category: "bug",
+    file: "src/open.ts",
+    line: 4,
+    message: "real committed bug",
+  });
+  const a = artifact({
+    findings: [
+      groundedButBlocking,
+      finding({ message: "value is [REDACTED]", file: "src/unknown.ts" }),
+    ],
+  });
+  await applyBlockerVerification(a.findings, { readSource: unavailableReader, expectedRevision: null });
+
+  const outcome = applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: true });
+  assert.equal(a.verdict, "request_changes");
+  assert.equal(outcome.overridden, true);
+  assert.equal(outcome.source, "findings");
+  assert.ok(a.review_markdown.includes("1 blocker/major finding(s) out of 2 open"));
+  assert.ok(a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"));
+  assert.ok(a.review_markdown.includes("a fail-closed enforcement layer forced request_changes"));
+});

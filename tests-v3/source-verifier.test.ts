@@ -5,6 +5,19 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHeadSourceReader } from "../src/enforcement/source-verifier.js";
+import { applyBlockerVerification } from "../src/enforcement/blocker-verification.js";
+import type { ArtifactFinding } from "../src/enforcement/artifact.js";
+
+function finding(overrides: Partial<ArtifactFinding> = {}): ArtifactFinding {
+  return {
+    severity: "blocker",
+    category: "bug",
+    file: "src/literal.ts",
+    line: 1,
+    message: "finding",
+    ...overrides,
+  };
+}
 
 const revision = "a".repeat(40);
 
@@ -59,6 +72,36 @@ test("source reader returns exact committed git content and provenance", async (
     assert.deepEqual(await createHeadSourceReader({ workspace, revision: "bogus" })("src/literal.ts"), {
       status: "unavailable", reason: "no-exact-revision",
     });
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+// #1016 (review pass, hypothesis the reviewer raised): if the source safe-
+// redactor (`redactSourceTextDetailed`) ever redacted a real committed
+// `⟦redacted:credential⟧` literal, the marker would no longer match and
+// the boundary would spuriously `refuted` a real finding. The current
+// masker does not redact this literal (it only REDACTs credentials INTO
+// this marker), so the committed-marker path stays `grounded`. This
+// real-git round-trip pins the positive path so a future masker change
+// cannot silently regress it.
+test("source-verifier + boundary: committed marker stays grounded through the real git reader", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "source-verifier-"));
+  try {
+    git(workspace, ["init"]);
+    const file = path.join(workspace, "src", "literal.ts");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const text = 'const marker = "⟦redacted:credential⟧";\n';
+    fs.writeFileSync(file, text);
+    git(workspace, ["add", "src/literal.ts"]);
+    git(workspace, ["-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "fixture"]);
+    const sha = git(workspace, ["rev-parse", "HEAD"]);
+
+    const readSource = createHeadSourceReader({ workspace, revision: sha });
+    const findings = [finding({ message: "value is [REDACTED]", file: "src/literal.ts" })];
+    const result = await applyBlockerVerification(findings, { readSource, expectedRevision: sha });
+    assert.equal(result.demoted, 0, "committed marker must stay grounded after redaction");
+    assert.equal(findings[0]!.grounding_status, undefined);
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
