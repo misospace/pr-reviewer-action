@@ -1086,3 +1086,136 @@ test("liveness: a stuck publish does not block tick() or dispatch of other prKey
   for (const resolve of deferreds) resolve(true);
   await flush();
 });
+
+test("liveness: a hung publish does not consume a per-scope slot, so a same-scoped B on a different prKey can still dispatch", async () => {
+  // Regression for joryirving review against fa40cdc. `scopeFull()`
+  // previously counted a `publishing` record (any isActiveState) as
+  // occupying a scope slot, even though `countActive()` excludes it.
+  // With `maxConcurrent: 2`, `scopeKeyOf: () => "local-model"`, and
+  // `scopeLimitOf: () => 1`, let A finish execution and hang in
+  // `publishing` (no worker slot in use). B for an unrelated repo on
+  // the same scope must still be able to dispatch.
+  const deferred: { current: ((b: boolean) => void) | null } = { current: null };
+  const hungPublisher: JobPublisher = {
+    async publish(_record: JobRecord): Promise<boolean> {
+      return new Promise<boolean>((resolve) => {
+        deferred.current = resolve;
+      });
+    },
+  };
+  const { executor, controller } = setup({
+    publisher: hungPublisher,
+    maxConcurrent: 2,
+    scopeKeyOf: () => "local-model",
+    scopeLimitOf: (scopeKey) => (scopeKey === "local-model" ? 1 : 0),
+  });
+
+  controller.enqueue(makeJob("job-a", { prNumber: 1 }));
+  await controller.tick();
+  executor.last().settle(DONE);
+  await flush();
+  assert.equal(controller.recordFor("job-a")!.state, "publishing");
+  assert.ok(deferred.current !== null, "A's publish is in flight (and hung)");
+
+  controller.enqueue(makeJob("job-b", { prNumber: 2 }));
+  await controller.tick();
+  assert.equal(
+    executor.invocations.length,
+    2,
+    "B dispatches even though A is hung in publishing — publishing is not a scope slot",
+  );
+  assert.equal(executor.invocations[1]!.record.job.jobId, "job-b");
+  assert.equal(
+    controller.recordFor("job-a")!.state,
+    "publishing",
+    "A's durable result is preserved while the publish is hung",
+  );
+
+  // Cleanup: resolve the hung publisher so the background promise can run.
+  deferred.current!(true);
+  await flush();
+});
+
+test("liveness: a hung publish on the prior generation does not strand a newer generation of the same prKey", async () => {
+  // Regression for joryirving review against fa40cdc. When A is
+  // stuck in `publishing` and B is enqueued for the same prKey, the
+  // controller must (a) dispatch B (a `publishing`-with-result record
+  // is not an active slot for the prKey), and (b) when A's late
+  // publisher finally resolves, retire A as `superseded` instead of
+  // overwriting B's verdict or durable state.
+  const deferreds = new Map<string, (b: boolean) => void>();
+  const hungPublisher: JobPublisher = {
+    async publish(record: JobRecord): Promise<boolean> {
+      return new Promise<boolean>((resolve) => {
+        deferreds.set(record.job.jobId, resolve);
+      });
+    },
+  };
+  const { executor, controller } = setup({ publisher: hungPublisher });
+
+  // A: enqueue, dispatch, settle, hung publish.
+  controller.enqueue(makeJob("job-a", { prNumber: 1 }));
+  await controller.tick();
+  executor.last().settle(DONE);
+  await flush();
+  assert.equal(controller.recordFor("job-a")!.state, "publishing");
+  assert.ok(deferreds.has("job-a"), "A's publish is in flight (and hung)");
+
+  // B: enqueue for the same prKey. The enqueue flags A
+  // `cancelRequested`; the next tick dispatches B.
+  controller.enqueue(makeJob("job-b", { prNumber: 1 }));
+  assert.equal(
+    controller.recordFor("job-a")!.cancelRequested,
+    true,
+    "A is marked cancelRequested by B's enqueue",
+  );
+  await controller.tick();
+  assert.equal(
+    executor.invocations.length,
+    2,
+    "B dispatches even though A is hung in publishing on the same prKey",
+  );
+  assert.equal(executor.invocations[1]!.record.job.jobId, "job-b");
+
+  // B's executor runs to completion and enters publishing while A
+  // is still hung.
+  const aBefore = controller.recordFor("job-a")!;
+  const bBefore = controller.recordFor("job-b")!;
+  assert.equal(aBefore.state, "publishing");
+  assert.equal(bBefore.state, "running");
+  executor.invocations[1]!.settle(DONE);
+  await flush();
+  assert.equal(
+    controller.recordFor("job-b")!.state,
+    "publishing",
+    "B reaches publishing with its own result while A is still hung",
+  );
+  assert.equal(
+    controller.recordFor("job-b")!.resultHeadSha,
+    HEAD_SHA,
+    "B's durable result is its own, independent of A's",
+  );
+  assert.ok(deferreds.has("job-b"), "B's publish is in flight (will resolve immediately)");
+
+  // B's publish resolves first; B must complete normally.
+  deferreds.get("job-b")!(true);
+  await flush();
+  assert.equal(
+    controller.recordFor("job-b")!.state,
+    "completed",
+    "B completes normally when its publish resolves",
+  );
+
+  // A's late publisher resolution: A must retire as `superseded`,
+  // not overwrite B as `completed` (B was its own non-terminal
+  // sibling when A's publish finally resolved).
+  deferreds.get("job-a")!(true);
+  await flush();
+  const aAfter = controller.recordFor("job-a")!;
+  assert.equal(aAfter.state, "superseded", "A retires as superseded after the late publish");
+  assert.equal(aAfter.failureReason, "superseded-by-newer-head");
+  assert.equal(aAfter.supersededByJobId, "job-b");
+  const bAfter = controller.recordFor("job-b")!;
+  assert.equal(bAfter.state, "completed", "B's state is unchanged by A's late publish");
+  assert.equal(bAfter.resultHeadSha, HEAD_SHA);
+});

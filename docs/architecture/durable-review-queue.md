@@ -148,7 +148,25 @@ The `publishInFlight` set guarantees no two publish calls for the
 same record are in flight at once. The post-publish state update is
 gated on `state === "publishing"` (and on a lease-token match for the
 in-process path) so a late resolution from an abandoned generation
-never mutates a re-dispatched record.
+never mutates a re-dispatched record. The post-publish handler also
+re-runs `mayPublish` (the same supersession gate as before every
+publish attempt) so a generation that was superseded *while* its
+publish was in flight is retired as `superseded` instead of being
+allowed to overwrite the trailing generation's verdict or durable
+state. The `#731` latest-head-wins and trailing-generation progress
+requirements are satisfied even under a hung publish on the prior
+generation.
+
+The same `publishing`-with-result exclusion applies to `hasActiveFor`
+and `scopeFull` (per-scope caps): a `publishing` record does **not**
+hold a scope slot, so a hung publisher on A does not starve B on a
+different PR (global bound), a different scope (per-scope cap), or the
+same `prKey` (latest-head-wins). For the same-`prKey` case, a newer
+generation enqueued while A is stuck in `publishing` sets
+`A.cancelRequested`; the next tick dispatches B because `hasActiveFor`
+treats A as a forge wait, not a worker slot, and the post-publish
+supersetion re-check in `runPublish` retires A as `superseded` when its
+publisher eventually resolves.
 
 ## Safety invariants
 

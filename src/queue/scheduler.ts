@@ -12,18 +12,22 @@
  * never mutated in place; every dispatch takes a UNIQUE lease-owner
  * token, and a late executor resolution whose token no longer matches is
  * revoked (no-op), never resurrecting a requeued generation; the
- * supersession gate is checked before EVERY publish attempt. All
- * uncertain state fails closed.
+ * supersession gate is checked before EVERY publish attempt AND again
+ * after a publish resolves (a late publish resolution from a generation
+ * that was superseded mid-flight is retired, not allowed to overwrite
+ * the trailing generation's verdict or durable state). All uncertain
+ * state fails closed.
  *
- * Liveness: `countActive()` excludes `publishing` records (a publishing
- * record holds its durable result and is just waiting for a forge
- * side-effect — it is NOT a worker slot), and the publish path is
+ * Liveness: `countActive()`, `hasActiveFor()`, and `scopeFull()` all
+ * exclude `publishing`-with-result records (a publishing record holds
+ * its durable result and is just waiting for a forge side-effect — it
+ * is NOT a worker or scope slot), and the publish path is
  * fire-and-forget (`tick()` never awaits `publisher.publish`). A hung
  * publisher therefore cannot block `tick()`, dispatch of unrelated
- * prKeys, or `shutdown(drainMs)`'s drain loop — a poison publisher
- * cannot starve the rest of the queue. The in-flight slot is tracked
- * in `publishInFlight` so a record is never published twice
- * concurrently.
+ * prKeys, dispatch of a newer generation of the same prKey, or
+ * `shutdown(drainMs)`'s drain loop — a poison publisher cannot starve
+ * the rest of the queue. The in-flight slot is tracked in
+ * `publishInFlight` so a record is never published twice concurrently.
  */
 
 import type { ReviewJob } from "../jobs/types.js";
@@ -248,9 +252,19 @@ export class ReviewQueueController {
         );
         supersededQueued = true;
       } else if (isActiveState(existing.state)) {
+        // Stamp the superseder jobId on the existing record so the
+        // eventual `superseded` transition (from `runPublish` after a
+        // hung publish resolves, from `expireLeases` if the lease
+        // dies first, or from the executor's cancellation settle) can
+        // attribute the supersession even after the superseder itself
+        // has reached a terminal state.
         this.records.set(
           existingId,
-          Object.freeze({ ...existing, cancelRequested: true }),
+          Object.freeze({
+            ...existing,
+            cancelRequested: true,
+            supersededByJobId: jobId,
+          }),
         );
         const entry = this.controllers.get(existingId);
         if (entry !== undefined) entry.controller.abort();
@@ -408,7 +422,17 @@ export class ReviewQueueController {
 
   private hasActiveFor(prKey: string): boolean {
     for (const record of this.records.values()) {
-      if (record.prKey === prKey && isActiveState(record.state)) return true;
+      if (record.prKey !== prKey) continue;
+      if (!isActiveState(record.state)) continue;
+      // A `publishing` record holding its durable result is just
+      // waiting for a forge side-effect — it is NOT a worker slot.
+      // Allow a newer generation for the same prKey to dispatch while
+      // the previous one is stuck in a hung publish; the late
+      // resolution is gated on the supersession re-check in
+      // `runPublish`, so a stale publish can never overwrite the
+      // trailing generation's verdict or durable state.
+      if (record.state === "publishing" && record.resultHeadSha !== "") continue;
+      return true;
     }
     return false;
   }
@@ -425,6 +449,11 @@ export class ReviewQueueController {
     let activeInScope = 0;
     for (const other of this.records.values()) {
       if (!isActiveState(other.state)) continue;
+      // Mirror `countActive()`: a `publishing` record does NOT
+      // consume a scope slot. Counting it would let a hung publisher
+      // starve unrelated prKeys under per-scope caps even though no
+      // model/worker slot is being used.
+      if (other.state === "publishing" && other.resultHeadSha !== "") continue;
       if (this.scopeKeyOf(other) === scopeKey) activeInScope += 1;
     }
     return activeInScope >= limit;
@@ -786,6 +815,38 @@ export class ReviewQueueController {
     const current = this.records.get(jobId);
     if (current === undefined || current.state !== "publishing") return;
     if (requireLeaseMatch && current.leaseOwner !== token) return;
+    // Re-check the supersession gate after the publish completes: a
+    // newer non-terminal sibling may have been enqueued while the
+    // publish was in flight (the publish path is fire-and-forget so
+    // a hung publisher cannot block dispatch). The result must NOT
+    // overwrite the trailing generation's verdict or durable state
+    // — retire the record as `superseded` instead. A late publish
+    // resolution from an abandoned generation still goes through this
+    // check, so a stale publish can never resurrect a re-dispatched
+    // prKey.
+    if (!this.mayPublish(current)) {
+      // Prefer the superseder stamped at enqueue time (the enqueue
+      // for the trailing generation sets `supersededByJobId` on the
+      // prior active record so the supersession attribution
+      // survives even after the superseder itself reaches a
+      // terminal state). Fall back to the live non-terminal sibling
+      // lookup if the stamp is absent.
+      const superseder = current.supersededByJobId !== ""
+        ? current.supersededByJobId
+        : this.findSupersedingSibling(current) ?? "";
+      this.records.set(
+        jobId,
+        Object.freeze({
+          ...withState(current, "superseded", now),
+          failureReason: "superseded-by-newer-head",
+          supersededByJobId: superseder,
+          leaseOwner: "",
+          leaseExpiresAtMs: 0,
+        }),
+      );
+      this.save();
+      return;
+    }
     if (published) {
       this.records.set(
         jobId,
