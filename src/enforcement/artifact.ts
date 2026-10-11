@@ -37,6 +37,13 @@ export interface ArtifactFinding {
    * every hunk's new-side range. Content-level only — never changes
    * verdict, requirement coverage, or any other policy input. */
   outside_diff?: boolean;
+  /** #1016: set by the deterministic blocker-verification boundary when a
+   * model-authored source/requirement claim could not be confirmed against
+   * exact-head source and was demoted to non-blocking. One of "refuted"
+   * (exact-head committed source contradicts the claim), "unverified"
+   * (source could not be authoritatively checked), or "unsupported" (no
+   * concrete location). Never set on a grounded finding. */
+  grounding_status?: "refuted" | "unverified" | "unsupported";
 }
 
 export interface ArtifactThreadDisposition {

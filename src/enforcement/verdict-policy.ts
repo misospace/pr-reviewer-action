@@ -229,6 +229,64 @@ export function relaxCiOnlyVerdict(
   return true;
 }
 
+/**
+ * #1016: a finding whose grounding_status is "refuted" or "unsupported"
+ * carries positive evidence the claim is wrong (source contradicted it, or
+ * there was no specific violation to verify). A "grounded" finding keeps
+ * its severity; an "unverified" finding could not be checked at all.
+ *
+ * The relaxation below only accepts refuted/unsupported demotions — never
+ * unverified ones. Unknown evidence cannot certify a clean review: the
+ * verifier did not disprove the claim, it just could not read the source.
+ * The review and the publish guard keep `request_changes` for those
+ * (strict mapping sees the unverified list via the `forced` signal at its
+ * call site; this relaxer refuses to flip a verdict whose only blockers
+ * could not be checked).
+ */
+function isRefutedOrUnsupportedGrounding(finding: ArtifactFinding): boolean {
+  const status = (finding as { grounding_status?: unknown }).grounding_status;
+  return status === "refuted" || status === "unsupported";
+}
+
+function isUnverifiedGrounding(finding: ArtifactFinding): boolean {
+  return (finding as { grounding_status?: unknown }).grounding_status === "unverified";
+}
+
+/**
+ * #1016: relax a model-authored request_changes whose every still-open finding
+ * is non-blocking because the deterministic blocker-verification boundary
+ * positively refuted it (grounding_status refuted/unsupported) — alongside
+ * #977 verification and #976 CI-only findings. Same forced/unresolved-check
+ * safeguards as #977; never fires for zero findings, a mixed finding set, any
+ * independent deterministic gate, or when any demoted grounding is
+ * "unverified" (unknown evidence, not a refutation).
+ */
+export function relaxUnverifiedBlockerVerdict(
+  artifact: ReviewArtifact,
+  options: { forced: boolean },
+): boolean {
+  if (artifact.verdict !== "request_changes") return false;
+  if (!canRelaxForCiOnly(artifact, options.forced)) return false;
+  const findings = artifact.findings;
+  if (!Array.isArray(findings) || findings.length === 0) return false;
+  // Unknown evidence must never certify a clean review: refuse the relaxer
+  // outright when any open finding has grounding_status="unverified". The
+  // strict verdict mapping applies the same fail-closed rule via the
+  // `forced` flag at its call site.
+  if (findings.some(isUnverifiedGrounding)) return false;
+  const allRelaxable = findings.every((finding) =>
+    isAlwaysNonBlockingCategory(finding.category)
+    || isRefutedOrUnsupportedGrounding(finding)
+    || (finding.ci_capped === true && finding.severity === "info"));
+  if (!allRelaxable) return false;
+  if (!findings.some(isRefutedOrUnsupportedGrounding)) return false;
+  artifact.review_markdown = (artifact.review_markdown || "")
+    + "\n\n_Verdict relaxed from structured findings (#1016): every open finding was either a verification request or a source claim the deterministic blocker-verification boundary positively refuted against exact-head source; the findings remain listed above and deterministic gates are unaffected._";
+  artifact.verdict = "approve";
+  artifact.verdict_source = "findings";
+  return true;
+}
+
 export interface VerdictPolicyResult {
   /** "model" | "findings" | "enforcement" — the applied verdict source:
    * "findings" when the strict mapping overrode the model verdict from the
@@ -356,6 +414,40 @@ function appendStrictNote(artifact: ReviewArtifact, detail: string, modelVerdict
 }
 
 /**
+ * Build the strict-mapping attribution note for an override to
+ * `request_changes`. Names every contributing safety signal so the reader
+ * can see exactly why the verdict is what it is: a blocker count when
+ * open blockers exist, an "unknown evidence" note when an unverified
+ * demotion co-exists, and an enforcement-forced note when a fail-closed
+ * layer fired. Multiple signals compose with `;` so the override line
+ * stays one attribution note rather than three.
+ */
+function strictRequestChangesDetail(input: {
+  counts: { blocking: number; total: number };
+  unverifiedGrounding: boolean;
+  forced: boolean;
+}): string {
+  const parts: string[] = [];
+  if (input.counts.blocking > 0) {
+    parts.push(`${input.counts.blocking} blocker/major finding(s) out of ${input.counts.total} open`);
+  }
+  if (input.unverifiedGrounding) {
+    parts.push("blocker-verification boundary could not confirm a demoted source claim (unknown evidence, not refuted; #1016)");
+  }
+  if (input.forced) {
+    parts.push("a fail-closed enforcement layer forced request_changes");
+  }
+  if (parts.length === 0) {
+    // No findings, no unverified, no forced — the reviewer would be a
+    // request_changes with nothing to attribute to. This branch is
+    // unreachable in practice: the caller already established that at
+    // least one signal fires when this helper runs.
+    return "request_changes";
+  }
+  return parts.join("; ");
+}
+
+/**
  * Apply the strict verdict mapping (#811) to the artifact in place. Runs
  * LAST in the enforcement pipeline — after the completeness pass (which
  * records `required_checks`) and after the enforcement overlays — so it
@@ -367,9 +459,26 @@ function appendStrictNote(artifact: ReviewArtifact, detail: string, modelVerdict
  * Mapping: request_changes only when at least one open finding is blocker
  * or major; otherwise approve. `forced` is the caller's fail-closed signal
  * — a forcing layer (evidence blocker, tool-harness failure, min-successful,
- * `required_check_validation_mode=fail`) fired for these inputs — and a
- * request_changes it forced is never relaxed here, even when the model
- * itself also asked for changes (the layer's own section discloses it).
+ * `required_check_validation_mode=fail`) fired for these inputs. The
+ * mapping also computes a #1016 unknown-evidence signal from the artifact's
+ * own `grounding_status`: any demoted finding with `grounding_status ===
+ * "unverified"` (the verifier could not check the claim — it did not disprove
+ * the claim) forces `request_changes` with a `#1016` attribution note, so
+ * an approve cannot silently certify a clean review the verifier never
+ * confirmed. Refuted/unsupported demotions alone do not force — they flow
+ * through the normal strict mapping.
+ *
+ * When an override flips the model verdict, the attribution note names
+ * EVERY contributing safety signal — blocker counts, unverified-grounding
+ * (#1016), and forced enforcement — so the review markdown discloses the
+ * full authority model. A blocker count alone produces the unchanged
+ * "N blocker/major finding(s) out of M open" prose; an unverified
+ * co-existence adds the #1016 attribution; a forced layer adds the
+ * enforcement-forced disclosure. Provenance (`verdict_source`) reflects
+ * the dominant authority per branch ("findings" for blocker count,
+ * "enforcement" for forced/unverified-only), so a mixed-blocker-plus-
+ * unverified verdict still disclaims the model layer while disclosing
+ * both contributions inline.
  * When the mapping overrides the model verdict the review says so in one
  * line, as findings_severity_gated does.
  */
@@ -380,6 +489,7 @@ export function applyStrictVerdictPolicy(
   const findings = Array.isArray(artifact.findings) ? artifact.findings : [];
   const modelVerdict = options.modelVerdict;
   const counts = severityCounts(findings);
+  const unverifiedGrounding = findings.some(isUnverifiedGrounding);
 
   let verdict: VerdictValue;
   let overridden: boolean;
@@ -391,22 +501,33 @@ export function applyStrictVerdictPolicy(
     if (overridden) {
       appendStrictNote(
         artifact,
-        `${counts.blocking} blocker/major finding(s) out of ${counts.total} open`,
+        strictRequestChangesDetail({ counts, unverifiedGrounding, forced: options.forced }),
         modelVerdict,
       );
     }
-  } else if (options.forced) {
+  } else if (options.forced || unverifiedGrounding) {
     // A fail-closed enforcement layer decided this verdict. When the model
     // did not produce it, attributing the verdict to "model" would lie
     // about provenance — the deciding authority is the enforcement layer
     // ("enforcement"); the layer's own section discloses the forcing.
+    // #1016: when the only blocker-level demotions are "unverified"
+    // (unknown evidence, not refutation), the boundary did not disprove the
+    // claim — it could not check it — so an approve would silently
+    // certify a clean review the verifier never confirmed. Treat as a
+    // fail-closed forcing condition with a #1016 attribution note.
+    //
+    // Reached only when `counts.blocking === 0` (the first branch
+    // captures the blocker-count path), so the helper emits a
+    // single-signal attribution line — the unverified #1016 note
+    // when present, the fail-closed enforcement note when present,
+    // or both joined with `;` when both fire.
     verdict = "request_changes";
     overridden = modelVerdict !== "request_changes";
     source = overridden ? "enforcement" : "model";
     if (overridden) {
       appendStrictNote(
         artifact,
-        "a fail-closed enforcement layer forced request_changes",
+        strictRequestChangesDetail({ counts, unverifiedGrounding, forced: options.forced }),
         modelVerdict,
       );
     }
