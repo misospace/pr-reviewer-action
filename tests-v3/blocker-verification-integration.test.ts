@@ -14,6 +14,9 @@ import {
   sanitizedSourceProvenance,
 } from "../src/context/evidence-provenance.js";
 import type { ReviewArtifact, ArtifactFinding } from "../src/enforcement/artifact.js";
+import { applyReviewThreadEnforcement } from "../src/enforcement/threads.js";
+import { publishReview } from "../src/publish/publish.js";
+import type { NativeReviewRequest, PublishPlatformApi } from "../src/platform/publish-api.js";
 
 const REVISION = "a".repeat(40);
 
@@ -166,4 +169,62 @@ test("#1016 sanitized (non-authoritative) provenance cannot ground a marker clai
   const result = await applyBlockerVerification(a.findings, { readSource, expectedRevision: REVISION });
   assert.equal(result.demoted, 1);
   assert.equal(a.findings[0]!.grounding_status, "unverified");
+});
+
+test("#1016 synthesized thread re-emissions added after the boundary are not demoted", async () => {
+  const a = artifact({ findings: [finding({ message: "value is [REDACTED]", file: "src/a.ts" })] });
+  await applyBlockerVerification(a.findings, { readSource: unavailableReader, expectedRevision: null });
+  assert.equal(a.findings[0]!.grounding_status, "unverified");
+  applyReviewThreadEnforcement(a, [{
+    thread_id: "t", path: "src/b.ts", line: 4, severity: "blocker",
+    message: "unresolved thread mentioning [REDACTED]", category: "bug", own_finding: false, replies: 1,
+  }], "strict");
+  const reemitted = a.findings.find((item) => item.thread_id === "t");
+  assert.ok(reemitted, "expected the thread to re-emit as a finding");
+  assert.equal(reemitted!.grounding_status, undefined);
+});
+
+test("#1016 native review is not REQUEST_CHANGES once marker claims are refuted", async () => {
+  class RecordingApi {
+    readonly head = "head-123";
+    readonly submitted: NativeReviewRequest[] = [];
+    async getHeadSha(): Promise<string | null> { return this.head; }
+    async createReview(request: NativeReviewRequest): Promise<{ ok: boolean }> {
+      this.submitted.push(request);
+      return { ok: true };
+    }
+  }
+  const publishInput = (overrides: Record<string, unknown>): Parameters<typeof publishReview>[0] => ({
+    mode: "review_verdict", reviewMarkdown: "review", verdict: "approve", analysisEngine: "test-engine",
+    baseSha: "base-1", headSha: "head-123", prNumber: "42", commentMarker: "<!-- ai-pr-review -->",
+    requiredChecks: "complete", verdictPolicy: "strict", reviewRoute: "primary", escalationReason: "",
+    cacheHitRatio: "-", inlineFindings: false, inlineFindingsMax: 10, findings: [],
+    cleanupPreviousNativeReviews: "false", allowApprove: true, approveForks: false, isForkPr: false,
+    upstreamLinkMode: "inert", forgejoPositions: false,
+    conditionalPresence: { linkedIssue: true, evidenceProvider: true, standards: true, toolHarnessFindings: true, toolHarnessResults: true },
+    ...overrides,
+  }) as Parameters<typeof publishReview>[0];
+
+  const a = artifact({ findings: [finding({ message: "value is [REDACTED]", file: "tests-v3/http-transport.test.ts" })] });
+  const readSource = readerFor('const CANARY = "s3cr3t-credential";\n');
+  await applyBlockerVerification(a.findings, { readSource, expectedRevision: REVISION });
+  applyStrictVerdictPolicy(a, { modelVerdict: "request_changes", forced: false });
+  assert.equal(a.verdict, "approve");
+
+  const control = new RecordingApi();
+  await publishReview(
+    publishInput({ verdict: "request_changes", findings: [finding({ message: "value is [REDACTED]" })] }),
+    control as unknown as PublishPlatformApi,
+    { diffText: "" },
+  );
+  assert.equal(control.submitted[0]?.event, "REQUEST_CHANGES");
+
+  const api = new RecordingApi();
+  await publishReview(
+    publishInput({ verdict: a.verdict, reviewMarkdown: a.review_markdown, findings: a.findings }),
+    api as unknown as PublishPlatformApi,
+    { diffText: "" },
+  );
+  assert.equal(api.submitted.length, 1);
+  assert.notEqual(api.submitted[0]?.event, "REQUEST_CHANGES");
 });

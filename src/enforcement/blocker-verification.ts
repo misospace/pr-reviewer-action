@@ -35,6 +35,9 @@ export function safeFile(file: unknown): file is string {
   return typeof file === "string"
     && file.length > 0
     && !file.startsWith("/")
+    // A leading `-` is never a valid repo-relative path a reviewer should
+    // verify and keeps a git argv option shape out of the reader entirely.
+    && !file.startsWith("-")
     && !file.split(/[\\/]/).includes("..")
     && !file.includes("\0");
 }
@@ -79,6 +82,10 @@ export async function applyBlockerVerification(
           reason = read.reason;
         }
       } else if (!authorizesLiteralClaim(read.provenance, options.expectedRevision)) {
+        // Defense-in-depth: the reader binds provenance to the same exact
+        // revision, so this is normally just "committed_source and
+        // unsynthesized". A reader that reads a different revision (or a
+        // stale one) still fails closed here rather than grounding the claim.
         status = "unverified";
         reason = "non-authoritative-source";
       } else if (kind === "committed_literal") {

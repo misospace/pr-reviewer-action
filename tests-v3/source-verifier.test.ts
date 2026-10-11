@@ -18,7 +18,9 @@ test("source reader rejects missing revision and unsafe paths", async () => {
   const invalidRevision = createHeadSourceReader({ workspace: "/tmp", revision: null, execFile: () => { throw new Error("must not execute"); } });
   assert.deepEqual(await invalidRevision("src/a.ts"), { status: "unavailable", reason: "no-exact-revision" });
   const invalidPath = createHeadSourceReader({ workspace: "/tmp", revision, execFile: () => { throw new Error("must not execute"); } });
-  assert.deepEqual(await invalidPath("../etc/passwd"), { status: "unavailable", reason: "path-invalid" });
+  for (const hostile of ["../etc/passwd", "/etc/passwd", "-foo", "--help", "a/../../b", "a\0b", ""]) {
+    assert.deepEqual(await invalidPath(hostile), { status: "unavailable", reason: "path-invalid" }, `expected ${JSON.stringify(hostile)} to be rejected`);
+  }
 });
 
 test("source reader maps execution failures to bounded reasons", async () => {

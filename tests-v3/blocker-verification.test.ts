@@ -87,6 +87,17 @@ test("ordinary, non-blocking, and verification findings are untouched", async ()
   assert.ok(findings.every((finding) => finding.grounding_status === undefined));
 });
 
+test("a marker substring is classified as a source claim and refuted when absent", async () => {
+  // Pins the substring semantics: a finding that merely mentions the marker is
+  // treated as a committed-text claim, so a future change cannot silently widen
+  // (or narrow) the match.
+  const finding = markerFinding({ message: "the log line should show [REDACTED] for secrets", file: "src/a.ts" });
+  const result = await verify([finding], async () => source("const value = 'actual';"));
+  assert.equal(result.findings[0]?.kind, "committed_literal");
+  assert.equal(result.findings[0]?.status, "refuted");
+  assert.equal(finding.grounding_status, "refuted");
+});
+
 test("read budget is bounded and remaining candidates are unverified", async () => {
   const findings = Array.from({ length: 25 }, () => markerFinding());
   let calls = 0;
