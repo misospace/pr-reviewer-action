@@ -225,32 +225,41 @@ test("the evidence window is ±EVIDENCE_LINE_WINDOW lines around the cited line"
   assert.equal(result.demoted, 1);
 });
 
-test("a multi-line cited span matches the raw CRLF bytes at the cited location", async () => {
-  // The verification window keeps the source's exact line terminators, so
-  // a cited multi-line span in a CRLF file grounds instead of mislabeling
-  // as a location mismatch.
-  const finding = requirementFinding({
+test("line-ending representation never flips a multi-line cited span's grounding", async () => {
+  // Comparison is modulo carriage returns in BOTH directions: a CRLF-cited
+  // or LF-cited multi-line span against a CRLF file must ground the same
+  // way, so line endings alone can never refute a real claim.
+  const crlfCited = requirementFinding({
     file: "src/crlf.ts",
     line: 1,
     message: "requirement not enforced: `const a = 1;\r\nconst b = 2;` violates standard X",
   });
-  const result = await verify([finding], async () => source("const a = 1;\r\nconst b = 2;\r\nconst c = 3;\r\n"));
-  assert.equal(result.findings[0]?.status, "grounded");
-  assert.equal(result.findings[0]?.reason, "evidence-verified");
+  const lfCited = requirementFinding({
+    file: "src/crlf.ts",
+    line: 1,
+    message: "requirement not enforced: `const a = 1;\nconst b = 2;` violates standard X",
+  });
+  const result = await verify([crlfCited, lfCited], async () => source("const a = 1;\r\nconst b = 2;\r\nconst c = 3;\r\n"));
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["grounded", "evidence-verified"], ["grounded", "evidence-verified"],
+  ]);
   assert.equal(result.demoted, 0);
 });
 
-test("a cited line beyond the end of the file refutes the claim", async () => {
+test("a cited line beyond the end of the file is unverified, never refuted", async () => {
+  // Past-EOF is an unverifiable location (line counting differences at a
+  // trailing newline are representation artifacts), not positive disproof:
+  // it demotes as unverified so it cannot relax into an approval.
   const finding = requirementFinding({
     file: "src/short.ts",
     line: 4,
     message: "requirement not enforced: `one` violates standard X",
   });
   const result = await verify([finding], async () => source("one\ntwo"));
-  assert.equal(result.findings[0]?.status, "refuted");
-  assert.equal(result.findings[0]?.reason, "location-missing");
+  assert.equal(result.findings[0]?.status, "unverified");
+  assert.equal(result.findings[0]?.reason, "line-beyond-end");
   assert.equal(result.demoted, 1);
-  assert.equal(finding.grounding_status, "refuted");
+  assert.equal(finding.grounding_status, "unverified");
 });
 
 test("cited spans without a concrete line are unsupported, never grounded elsewhere", async () => {

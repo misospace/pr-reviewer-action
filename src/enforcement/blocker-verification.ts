@@ -255,21 +255,27 @@ export async function applyBlockerVerification(
             status = "unsupported";
             reason = "no-concrete-location";
           } else {
-            // Split on newline boundaries while keeping the terminators, so the
-            // window carries the exact bytes of the source (a multi-line
-            // cited span in a CRLF file must match against CRLF bytes).
-            const lines = read.text.split(/(?<=\n)/);
+            const lines = read.text.split(/\r?\n/);
             if (citedLine > lines.length) {
-              status = "refuted";
-              reason = "location-missing";
+              // A cited line past the end of the file is an unverifiable
+              // location, not positive disproof (the model may count a
+              // trailing-newline-terminated file one line longer), so it
+              // must not refute into the relaxable path.
+              status = "unverified";
+              reason = "line-beyond-end";
             } else {
-              const windowText = lines
+              // Compare cited spans to the window modulo carriage returns:
+              // model citations carry LF line endings even when the commit
+              // uses CRLF, and the line-ending representation must never
+              // by itself flip grounded into refuted.
+              const strip = (s: string): string => s.replace(/\r/g, "");
+              const windowText = strip(lines
                 .slice(Math.max(0, citedLine - 1 - EVIDENCE_LINE_WINDOW), citedLine + EVIDENCE_LINE_WINDOW)
-                .join("");
-              if (spans.some((span) => verifySourceSpan(windowText, span).present)) {
+                .join("\n"));
+              if (spans.some((span) => verifySourceSpan(windowText, strip(span)).present)) {
                 status = "grounded";
                 reason = "evidence-verified";
-              } else if (spans.some((span) => verifySourceSpan(read.text, span).present)) {
+              } else if (spans.some((span) => verifySourceSpan(strip(read.text), strip(span)).present)) {
                 status = "unverified";
                 reason = "evidence-location-mismatch";
               } else {
