@@ -20,7 +20,7 @@ test("current canonical contract validates and maps every input once", () => {
     assert.ok(Object.hasOwn(config, toCamelCase(input.id)), input.id);
     assert.equal(toCamelCase(input.id).includes("_"), false);
   }
-  assert.equal(contract.inputs.length, 138);
+  assert.equal(contract.inputs.length, 140);
   assert.equal(Object.hasOwn(config, "ai_base_url"), false);
 });
 
@@ -163,6 +163,13 @@ test("defaults are contract sourced and parsing is explicit", () => {
   // #701: the tool request budget is bounded to the same 1..50 ceiling on both sides.
   assert.throws(() => loadConfig(contract, { ...raw, "tool-max-requests": "51" }), /between 1 and 50/);
   assert.throws(() => loadConfig(contract, { ...raw, "tool-max-requests": "0" }), /between 1 and 50/);
+  // #1020: the smart-tier loop limits default empty (inherit the primary
+  // pair at runtime) and parse like the primary pair: positive integers.
+  for (const id of ["smart-tool-max-rounds", "smart-tool-loop-wall-clock-sec"] as const) {
+    assert.equal((config as Record<string, unknown>)[toCamelCase(id)], "", id);
+    assert.throws(() => loadConfig(contract, { ...raw, [id]: "0" }), /must be at least 1/, id);
+    assert.throws(() => loadConfig(contract, { ...raw, [id]: "abc" }), /must be an integer/, id);
+  }
   assert.throws(() => loadConfig(contract, { ...raw, "ai-api-format": "provider" }), /must be one of/);
   assert.throws(() => loadConfig(contract, { ...raw, "ai-stream": "yes" }), /must be 'true' or 'false'/);
   // github-token defaults to the runner's `${{ github.token }}`; the loader

@@ -15,6 +15,8 @@ import { adaptiveLoopBudgets } from "../src/tools/loop.js";
 import { stageEnvFromConfig, buildStageEnv, validateStageEnv, type RunContext } from "../src/run/env.js";
 import { buildHumanReviewsSection } from "../src/run/stages.js";
 import { RunWorkspace } from "../src/run/workspace.js";
+import { rawInputsFromEnv } from "../src/run/review.js";
+import { collectConfigLines, computeConfigHash } from "../src/precheck/fingerprint.js";
 
 /**
  * The kebab→SCREAMING_SNAKE projection the orchestrator feeds the ported
@@ -166,6 +168,89 @@ test("#895: an omitted tool-max-rounds scales the round cap through the real con
   };
   assert.ok(rounds(required) >= 16, "the contract default must leave the round cap free to scale with a 32-call budget");
   assert.equal(rounds({ ...required, "tool-max-rounds": "4" }), 8);
+});
+
+test("#1020: smart-tier round and wall-clock inputs reach resolveLoopLimits from the runner's INPUT_ channel", async (t) => {
+  const base: RunContext = {
+    workspace: "/ws", runDir: "/run", repo: "o/r", prNumber: "9", headSha: "",
+    isForkPr: "false", platform: "auto", forgejoApiUrl: "", ciChecksFile: "",
+    outputFilePath: "/dev/null", stepSummaryPath: "", baseRef: "",
+  };
+  // The runner exports composite inputs as INPUT_<ID> with kebab IDs kept.
+  const runnerEnv = (inputs: Record<string, string>, ambient: Record<string, string> = {}): NodeJS.ProcessEnv => {
+    const env: NodeJS.ProcessEnv = { ...ambient };
+    for (const input of contract.inputs.filter((entry) => entry.required)) {
+      env[`INPUT_${input.id.toUpperCase()}`] = `required-${input.id}`;
+    }
+    for (const [id, value] of Object.entries(inputs)) env[`INPUT_${id.toUpperCase()}`] = value;
+    return env;
+  };
+  const stageFor = (env: NodeJS.ProcessEnv): Record<string, string> =>
+    buildStageEnv(loadConfig(contract, rawInputsFromEnv(contract, env)), base, env);
+  const caps = (stage: Record<string, string>, tier: "smart" | "primary", budget: number): number => {
+    const [maxRounds, wallClock, explicit] = resolveLoopLimits(stage, tier);
+    return adaptiveLoopBudgets(maxRounds, budget, wallClock, explicit).maxRounds;
+  };
+  const cases: {
+    name: string;
+    inputs: Record<string, string>;
+    ambient?: Record<string, string>;
+    smart: [number, number, boolean];
+    smartCap: number;
+    primary: [number, number, boolean];
+    primaryCap: number;
+  }[] = [
+    {
+      name: "runner default: smart inputs exported empty",
+      inputs: { "smart-tool-max-rounds": "", "smart-tool-loop-wall-clock-sec": "" },
+      smart: [4, 600, false], smartCap: 32, primary: [4, 600, false], primaryCap: 24,
+    },
+    {
+      name: "smart inherits an explicit primary pair",
+      inputs: { "tool-max-rounds": "3", "tool-loop-wall-clock-sec": "300" },
+      smart: [3, 300, true], smartCap: 6, primary: [3, 300, true], primaryCap: 6,
+    },
+    {
+      name: "smart override with the primary pair unset",
+      inputs: { "smart-tool-max-rounds": "5", "smart-tool-loop-wall-clock-sec": "120" },
+      smart: [5, 120, true], smartCap: 10, primary: [4, 600, false], primaryCap: 24,
+    },
+    {
+      name: "smart override beats an explicit primary pair",
+      inputs: {
+        "tool-max-rounds": "2", "smart-tool-max-rounds": "6",
+        "tool-loop-wall-clock-sec": "300", "smart-tool-loop-wall-clock-sec": "900",
+      },
+      smart: [6, 900, true], smartCap: 12, primary: [2, 300, true], primaryCap: 4,
+    },
+    {
+      name: "ambient SCREAMING_SNAKE env is not a route",
+      inputs: {},
+      ambient: { SMART_TOOL_MAX_ROUNDS: "6", SMART_TOOL_LOOP_WALL_CLOCK_SEC: "120" },
+      smart: [4, 600, false], smartCap: 32, primary: [4, 600, false], primaryCap: 24,
+    },
+  ];
+  for (const entry of cases) {
+    await t.test(entry.name, () => {
+      const stage = stageFor(runnerEnv(entry.inputs, entry.ambient));
+      assert.deepEqual(resolveLoopLimits(stage, "smart"), entry.smart, "smart limits");
+      assert.equal(caps(stage, "smart", 32), entry.smartCap, "smart rounds cap");
+      assert.deepEqual(resolveLoopLimits(stage, "primary"), entry.primary, "primary limits");
+      assert.equal(caps(stage, "primary", 24), entry.primaryCap, "primary rounds cap");
+    });
+  }
+  await t.test("the smart round cap is part of the config fingerprint", () => {
+    const stage = stageFor(runnerEnv({ "smart-tool-max-rounds": "5", "smart-tool-loop-wall-clock-sec": "120" }));
+    assert.ok(collectConfigLines(stage).includes("SMART_TOOL_MAX_ROUNDS=5"));
+  });
+  // A longer loop can finish more rounds, so a wall-clock change on an
+  // unchanged diff has to re-review rather than skip as already reviewed.
+  for (const id of ["tool-loop-wall-clock-sec", "smart-tool-loop-wall-clock-sec"]) {
+    await t.test(`changing ${id} changes the config hash`, () => {
+      const hashOf = (value: string) => computeConfigHash(collectConfigLines(stageFor(runnerEnv({ [id]: value }))));
+      assert.notEqual(hashOf("120"), hashOf("900"));
+    });
+  }
 });
 
 test("#928: env-only stage knobs survive buildStageEnv, so blind replays really skip human reviews", async () => {
