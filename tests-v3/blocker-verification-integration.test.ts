@@ -156,6 +156,7 @@ test("#1016 requirement claim with cited code absent from exact-head source is r
   assert.equal(a.findings[0]!.grounding_status, "refuted");
   const outcome = applyStrictVerdictPolicy(a, { modelVerdict: "request_changes", forced: false });
   assert.equal(a.verdict, "approve");
+  assert.equal(outcome.verdict, "approve");
 });
 
 test("#1016 requirement claim with null/zero/invalid line is unsupported", async () => {
