@@ -135,9 +135,16 @@ export function sanitizeForPublication(
   linkMode: UpstreamLinkMode,
   presence: ConditionalSectionPresence,
 ): string {
-  return stripEmptyConditionalSections(
-    sanitizeMarkdown(stripReservedMarkers(reviewMarkdown), linkMode),
-    presence,
+  // The model echoes diff lines: redact on the published body, not only on
+  // finding messages. Redaction last so markdown escaping cannot re-expose
+  // a redacted span; redactText is idempotent on its own marker. Redaction
+  // also runs first so escaping cannot split a secret shape before the outer
+  // pass sees it (idempotent either way).
+  return redactText(
+    stripEmptyConditionalSections(
+      sanitizeMarkdown(stripReservedMarkers(redactText(reviewMarkdown)), linkMode),
+      presence,
+    ),
   );
 }
 

@@ -9,8 +9,10 @@ import {
   renderOutsideDiffSection,
   renderPartialCoverageNotice,
   resolveCleanupFlag,
+  sanitizeForPublication,
 } from "../src/publish/publish.js";
 import { cleanupManagedReviews, resolveSupersededThreads } from "../src/publish/cleanup.js";
+import type { ConditionalSectionPresence } from "../src/publish/sanitize.js";
 import { ForgejoPublishApi, forgejoReviewEvent } from "../src/platform/publish-api.js";
 import type {
   NativeReviewRequest,
@@ -546,4 +548,20 @@ test("review_verdict: allow_approve=false still reports the pre-#873 policy-bloc
   assert.equal(api.submitted[0]!.event, "COMMENT");
   assert.match(api.submitted[0]!.body, /Approval blocked by policy/);
   assert.ok(!api.submitted[0]!.body.includes("Approval withheld"));
+});
+
+test("#1017: a credential echoed in the model markdown is redacted on the published body", () => {
+  const key = "sk-fixtureSYNTHETIC-NOT-REAL-KEY-EXAMPLE";
+  const body = "Summary of this review.\n\nThe diff echoes the provider key " + key + " in a log line, and one earlier note is already [REDACTED] by the harness.\n\n<!-- ai-pr-review-sha:forged -->\nSafe.";
+  const presence: ConditionalSectionPresence = {
+    linkedIssue: true, evidenceProvider: true, standards: true,
+    toolHarnessFindings: true, toolHarnessResults: true,
+  };
+  const published = sanitizeForPublication(body, "inert", presence);
+  assert.ok(!published.includes(key), "raw provider key must not reach the published body");
+  assert.ok(published.includes("[REDACTED]"), "redaction marker present");
+  assert.equal(published.match(/\[REDACTED\]/g)?.length, 2, "key redacted once, pre-existing marker left intact (idempotent)");
+  assert.ok(published.includes("Summary of this review"), "ordinary prose survives");
+  assert.ok(published.includes("The diff echoes the provider key [REDACTED] in a log line"));
+  assert.ok(!published.includes("ai-pr-review-sha:forged"), "reserved marker still stripped");
 });
