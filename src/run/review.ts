@@ -1000,20 +1000,22 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   const reviewRecord = (artifact ?? {}) as Record<string, unknown>;
   const ciChecksContent = ciChecksBytes(env);
   const ciChecksMarkdown = ciChecksContent === null ? null : Buffer.from(ciChecksContent).toString("utf8");
+  // Defense in depth alongside the reader's hex-SHA check
+  // (source-verifier.ts): pass `null` here whenever the candidate
+  // revision is not a syntactically valid 40/64-char hex SHA. The reader
+  // validates before reading, but the boundary caller should not hand
+  // a non-SHA revision to `authorizesLiteralClaim` and rely on the
+  // downstream reject to do the right thing — pass `null` explicitly
+  // so every `unverified` demotion gets a clear `no-exact-revision`
+  // reason instead of a stringly-typed free-form input. Hoisted so the
+  // blocker-verification artifact (#1016) persists the same validated
+  // revision the verifier received, not the raw free-form input.
+  const HEX_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+  const candidateRevision = context.headSha || String(pr.headRefOid ?? "") || "";
+  const expectedRevision = HEX_SHA_RE.test(candidateRevision) ? candidateRevision : null;
   let blockerVerification: Awaited<ReturnType<typeof applyBlockerVerification>> | null = null;
   if (Array.isArray(reviewRecord.findings)) {
     capCiEvidenceFindings(reviewRecord.findings as ArtifactFinding[], ciChecksMarkdown);
-    // Defense in depth alongside the reader's hex-SHA check
-    // (source-verifier.ts): pass `null` here whenever the candidate
-    // revision is not a syntactically valid 40/64-char hex SHA. The reader
-    // validates before reading, but the boundary caller should not hand
-    // a non-SHA revision to `authorizesLiteralClaim` and rely on the
-    // downstream reject to do the right thing — pass `null` explicitly
-    // so every `unverified` demotion gets a clear `no-exact-revision`
-    // reason instead of a stringly-typed free-form input.
-    const HEX_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
-    const candidateRevision = context.headSha || String(pr.headRefOid ?? "") || "";
-    const expectedRevision = HEX_SHA_RE.test(candidateRevision) ? candidateRevision : null;
     const readSource = createHeadSourceReader({ workspace, revision: expectedRevision });
     blockerVerification = await applyBlockerVerification(reviewRecord.findings as ArtifactFinding[], {
       readSource,
@@ -1104,7 +1106,14 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   if (blockerVerification !== null && blockerVerification.demoted > 0) {
     ws.write("blocker-verification.json", Buffer.from(`${pyJsonDumps({
       version: 1,
-      expected_revision: context.headSha || String(pr.headRefOid ?? "") || "",
+      // #1016: persist the validated revision the verifier received — the
+      // raw `context.headSha || String(pr.headRefOid ?? "") || ""` fallback
+      // above can be a free-form string when neither field is a hex SHA,
+      // but the verifier rejects it to `null` before any read. Recording
+      // what was actually validated keeps the artifact consistent with
+      // the verifier's own input and any future consumer that joins on
+      // `expected_revision`.
+      expected_revision: expectedRevision ?? null,
       demoted: blockerVerification.demoted,
       findings: blockerVerification.findings,
     })}\n`, "utf8"));

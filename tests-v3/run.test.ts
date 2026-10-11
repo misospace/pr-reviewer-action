@@ -3974,6 +3974,66 @@ test("#899: a native loop whose harness artifact is unreadable records partial c
   assert.deepEqual(resolvePartialCoverage({ partial_coverage: recorded }, true, true), recorded);
 });
 
+test("#1016: blocker-verification artifact persists the validated head SHA the verifier received, not the raw input", async () => {
+  // The verifier rejects any non-hex-SHA revision to `null` before reading,
+  // but the artifact used to record the raw free-form input (e.g.
+  // `context.headSha || String(pr.headRefOid ?? "") || ""`). A future
+  // consumer that joins on `expected_revision` against the verifier input
+  // would see a recorded value the verifier actually rejected, so the
+  // artifact now persists what the verifier received: the validated SHA,
+  // or `null` when no field is a 40/64-char hex.
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("application/json", JSON.stringify({}));
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      verdict: "request_changes",
+      findings: [{
+        // Asserts the marker is committed source (cite: exists, not a
+        // mention/expectation cue). The empty workspace means the source
+        // reader returns unavailable, demoting this finding to
+        // grounding_status="unverified" — the demotion path that writes
+        // the artifact.
+        severity: "blocker",
+        category: "bug",
+        file: "src/missing.ts",
+        line: 1,
+        message: "the file commits the literal `[REDACTED]`",
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+    const artifactPath = join(runDir, "blocker-verification.json");
+    assert.ok(existsSync(artifactPath), "blocker-verification.json must be written when a finding is demoted");
+    const artifact = JSON.parse(readFileSync(artifactPath, "utf8")) as { expected_revision: string | null; demoted: number };
+    // mockPlatform's head SHA is "a".repeat(40) — a valid 40-char hex SHA.
+    // The verifier received this same value, so the artifact must record it
+    // (not the raw `context.headSha` literal, which happens to match here).
+    assert.equal(artifact.expected_revision, "a".repeat(40));
+    assert.equal(artifact.demoted, 1);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
 for (const direction of ["added", "removed"] as const) {
   test(`#935: a same-head refresh that ${direction === "added" ? "adds" : "removes"} a linked-issue requirement re-scopes the trace prompt`, async () => {
     const requests: string[] = [];
