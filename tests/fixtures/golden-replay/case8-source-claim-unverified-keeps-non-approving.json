@@ -1,0 +1,82 @@
+{
+  "contract": "golden-replay/v1",
+  "name": "case8-source-claim-unverified-keeps-non-approving",
+  "status": "expected-failure",
+  "known_gap": "#1016",
+  "provenance": {
+    "source_head": "5d8a3b1c9e2f4a7b6c0d8e1f3a5b7c9d2e4f6a8b",
+    "origin": "Companion to case1: a marker-based source claim citing a path that the deterministic safeFile seam rejects (starts with a leading `-`, the git argv option shape), so the production source-verifier returns unavailable. The deterministic enforcement layer (required_check_validation_mode=fail, classifier-driven path_handling must_check) keeps the verdict at request_changes — a fail-closed gate cannot relax on an unverified grounding, only on a refuted one. Pinned to #1016: pre-#1016 no grounding_status is recorded, the verdict is model-pass-through, and the relaxed verdict would currently hide the bug the unverified case is meant to catch.",
+    "evidence_transform": "sanitized",
+    "model_response": "Recorded representative response (zero live inference): request_changes with a single source-claim blocker (f8-unverifiable) whose `[REDACTED]` quote and leading-`-` file path make safeFile reject the read; required_check_dispositions leaves the classifier's path_handling must_check unresolved."
+  },
+  "engine": "run-review",
+  "pr": {
+    "head_sha": "5d8a3b1c9e2f4a7b6c0d8e1f3a5b7c9d2e4f6a8b",
+    "title": "Add path sanitizer for untrusted filenames",
+    "body": "",
+    "diff": "diff --git a/src/sanitize_path.ts b/src/sanitize_path.ts\nnew file mode 100644\nindex 0000000..a3b8d7e\n--- /dev/null\n+++ b/src/sanitize_path.ts\n@@ -0,0 +1,12 @@\n+import path from \"node:path\";\n+\n+export function sanitizePath(input: string): string {\n+  const cleaned = path.normalize(input);\n+  if (cleaned.includes(\"..\")) {\n+    throw new Error(\"traversal blocked\");\n+  }\n+  return cleaned;\n+}\n+\n+export const safe_join = (base: string, target: string): string => path.join(base, target);\n",
+    "files": [
+      {
+        "filename": "src/sanitize_path.ts",
+        "status": "added",
+        "additions": 12,
+        "deletions": 0,
+        "changes": 12
+      }
+    ],
+    "threads": []
+  },
+  "source_files": {
+    "src/sanitize_path.ts": "import path from \"node:path\";\n\nexport function sanitizePath(input: string): string {\n  const cleaned = path.normalize(input);\n  if (cleaned.includes(\"..\")) {\n    throw new Error(\"traversal blocked\");\n  }\n  return cleaned;\n}\n\nexport const safe_join = (base: string, target: string): string => path.join(base, target);\n"
+  },
+  "secrets": [],
+  "recorded_model_response": {
+    "verdict": "request_changes",
+    "review_markdown": "## Summary\n\nThe new path sanitizer must not bypass the leading-`-` redaction boundary; the committed source already does the right thing, but the model's own quote carries a `[REDACTED]` marker that has to be verified against exact-head source before this can land.\n\n## Findings\n\n- **Blocker** (`-untrusted/secrets.txt`) — the diff ships a marker that, if not refuted, would commit a sanitizer-placeholder token to a path the deterministic `safeFile` boundary rejects on read.\n\n## Recommendation\n\nRequest changes until the marker can be confirmed absent from the exact-head source, and the deterministic required-check is satisfied.\n",
+    "smart_review_requested": false,
+    "smart_review_reason": null,
+    "findings": [
+      {
+        "id": "f8-unverifiable",
+        "severity": "blocker",
+        "category": "bug",
+        "file": "-untrusted/secrets.txt",
+        "line": 1,
+        "message": "Line 1 cites a `[REDACTED]` marker inside `-untrusted/secrets.txt`; the leading `-` makes `safeFile` reject the read, so the source-verifier seam cannot confirm the marker absent from exact-head source and the claim is left `unverified` rather than `refuted`."
+      }
+    ],
+    "requirement_coverage": null,
+    "required_check_dispositions": [
+      {
+        "check": "review for path traversal vulnerabilities",
+        "status": "unresolved",
+        "rationale": "Without an authoritative read of the cited path (the verifier returns unavailable), the path-handling risk cannot be confirmed resolved in this run."
+      },
+      {
+        "check": "test with edge-case paths (null bytes, symlinks)",
+        "status": "satisfied",
+        "rationale": "The diff's normalize + `..` guard covers the traversal edge the review intends to verify."
+      }
+    ]
+  },
+  "config": {
+    "validate-required-checks": "true",
+    "required-check-validation-mode": "fail"
+  },
+  "expected_mismatch_keys": [
+    "blocking_finding_ids",
+    "grounding_status",
+    "unsupported_blocking_claims"
+  ],
+  "expect": {
+    "verdict": "request_changes",
+    "blocking_finding_ids": [],
+    "unsupported_blocking_claims": 0,
+    "supported_blocking_claims": 0,
+    "published_body_excludes": [],
+    "published_body_includes": [],
+    "grounding_status": {
+      "f8-unverifiable": "unverified"
+    }
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "contract": "golden-replay/v1",
+  "name": "case2-genuine-blocker-retained",
+  "status": "active",
+  "provenance": {
+    "source_head": "3a7c1e9f5b0d4a8c2f6e1d9b0a3c7f5e8d2b6a4c",
+    "origin": "synthetic genuine-blocker retention control for #1017",
+    "evidence_transform": "raw",
+    "model_response": "Recorded representative response (zero live inference): request_changes with a single genuine blocker (f1) quoting the broken comparison in `allow`, so the limiter never trips."
+  },
+  "engine": "run-review",
+  "pr": {
+    "head_sha": "3a7c1e9f5b0d4a8c2f6e1d9b0a3c7f5e8d2b6a4c",
+    "title": "Add per-key rate limiter",
+    "body": "Introduces `src/rate-limit.ts`, a per-key in-memory rate limiter.",
+    "diff": "diff --git a/src/rate-limit.ts b/src/rate-limit.ts\nnew file mode 100644\nindex 0000000..e7c31f9\n--- /dev/null\n+++ b/src/rate-limit.ts\n@@ -0,0 +1,16 @@\n+export interface RateLimiterOptions {\n+  limit: number;\n+  windowMs: number;\n+}\n+\n+export class RateLimiter {\n+  private counts = new Map<string, number>();\n+\n+  constructor(private options: RateLimiterOptions) {}\n+\n+  allow(key: string): boolean {\n+    const current = this.counts.get(key) ?? 0;\n+    this.counts.set(key, current + 1);\n+    return current < this.options.windowMs;\n+  }\n+}\n",
+    "files": [
+      {
+        "filename": "src/rate-limit.ts",
+        "status": "added",
+        "additions": 16,
+        "deletions": 0,
+        "changes": 16
+      }
+    ],
+    "threads": []
+  },
+  "source_files": {
+    "src/rate-limit.ts": "export interface RateLimiterOptions {\n  limit: number;\n  windowMs: number;\n}\n\nexport class RateLimiter {\n  private counts = new Map<string, number>();\n\n  constructor(private options: RateLimiterOptions) {}\n\n  allow(key: string): boolean {\n    const current = this.counts.get(key) ?? 0;\n    this.counts.set(key, current + 1);\n    return current < this.options.windowMs;\n  }\n}\n"
+  },
+  "secrets": [],
+  "recorded_model_response": {
+    "verdict": "request_changes",
+    "review_markdown": "## Summary\n\nThe new `src/rate-limit.ts` limiter is broken: the guard in `allow` compares `current < this.options.windowMs` — a duration in ms — instead of `limit`, so it never trips.\n\n## Findings\n\n- **Blocker** (src/rate-limit.ts:14) — the `allow` guard compares `current < this.options.windowMs` (a duration in milliseconds) instead of `limit`, so the limiter never trips and requests are never throttled.\n\n## Recommendation\n\nRequest changes: compare the count against `limit`, not `windowMs`.\n",
+    "smart_review_requested": false,
+    "smart_review_reason": null,
+    "findings": [
+      {
+        "id": "f1",
+        "severity": "blocker",
+        "category": "bug",
+        "file": "src/rate-limit.ts",
+        "line": 14,
+        "message": "The `allow` guard compares `current < this.options.windowMs` — a duration in milliseconds — against the running count instead of `limit`, so the limiter never trips and no request is ever throttled."
+      }
+    ],
+    "requirement_coverage": null,
+    "required_check_dispositions": null
+  },
+  "config": {},
+  "expect": {
+    "verdict": "request_changes",
+    "blocking_finding_ids": [
+      "f1"
+    ],
+    "unsupported_blocking_claims": 0,
+    "supported_blocking_claims": 1,
+    "published_body_excludes": [],
+    "published_body_includes": [
+      "so the limiter never trips and requests are never throttled"
+    ]
+  }
+}

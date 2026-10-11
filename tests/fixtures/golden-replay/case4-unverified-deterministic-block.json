@@ -1,0 +1,66 @@
+{
+  "contract": "golden-replay/v1",
+  "name": "case4-unverified-deterministic-block",
+  "status": "active",
+  "provenance": {
+    "source_head": "8c2e5f0a7b3d6c9e1f4a0b7d2e5c8f1a9b3e6d0c",
+    "origin": "The deterministic must_check 'unit-tests' could not be verified in the run (no test-run evidence; the model dispositioned it unresolved), yet the model produced no findings. With verdict_policy=strict and required_check_validation_mode=fail, deterministic completeness must keep the block — unknown verification must never be relaxed to approve.",
+    "evidence_transform": "raw",
+    "model_response": "Recorded representative response (zero live inference): request_changes on verification grounds only, zero findings, unit-tests dispositioned unresolved."
+  },
+  "engine": "enforcement-fixture",
+  "pr": {
+    "head_sha": "8c2e5f0a7b3d6c9e1f4a0b7d2e5c8f1a9b3e6d0c",
+    "title": "Cap retry backoff in withRetry",
+    "body": "",
+    "diff": "diff --git a/src/api/retry.ts b/src/api/retry.ts\nindex 3d5b7a9..8c0e2f4 100644\n--- a/src/api/retry.ts\n+++ b/src/api/retry.ts\n@@ -7,4 +7,5 @@\n export function withRetry(request: Request, options: RetryOptions = {}): Promise<unknown> {\n   const maxAttempts = options.attempts ?? 3;\n-  return attemptRequest(request, maxAttempts, 0);\n+  const maxBackoffMs = 30000;\n+  return attemptRequest(request, maxAttempts, 0, maxBackoffMs);\n }\n",
+    "files": [
+      {
+        "filename": "src/api/retry.ts",
+        "status": "modified",
+        "additions": 2,
+        "deletions": 1,
+        "changes": 3
+      }
+    ],
+    "threads": []
+  },
+  "source_files": {
+    "src/api/retry.ts": "import type { Request } from \"./request\";\n\nexport interface RetryOptions {\n  attempts?: number;\n}\n\nexport function withRetry(request: Request, options: RetryOptions = {}): Promise<unknown> {\n  const maxAttempts = options.attempts ?? 3;\n  const maxBackoffMs = 30000;\n  return attemptRequest(request, maxAttempts, 0, maxBackoffMs);\n}\n"
+  },
+  "secrets": [],
+  "enforcement": {
+    "contract": "enforcement-pipeline/v1",
+    "artifact": {
+      "verdict": "request_changes",
+      "review_markdown": "The backoff change is correct on inspection, but the required 'unit-tests' check could not be verified in this run: no test-run evidence is available, so the mandatory check remains unresolved.\n",
+      "findings": [],
+      "required_checks": "incomplete",
+      "required_check_dispositions": [
+        {
+          "check": "unit-tests",
+          "status": "unresolved",
+          "rationale": "No CI test-run evidence is available in this run; the unit-tests check cannot be marked satisfied or not_applicable."
+        }
+      ],
+      "source": "model"
+    },
+    "must_check": [
+      "unit-tests"
+    ],
+    "config": {
+      "verdict_policy": "strict",
+      "validate_required_checks": "true",
+      "required_check_validation_mode": "fail"
+    }
+  },
+  "config": {},
+  "expect": {
+    "verdict": "request_changes",
+    "blocking_finding_ids": [],
+    "unsupported_blocking_claims": 0,
+    "supported_blocking_claims": 0,
+    "published_body_excludes": [],
+    "published_body_includes": []
+  }
+}

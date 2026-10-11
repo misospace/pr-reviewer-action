@@ -1,0 +1,51 @@
+{
+  "contract": "golden-replay/v1",
+  "name": "case6-stale-source-head",
+  "status": "active",
+  "provenance": {
+    "source_head": "1111222233334444555566667777888899990000",
+    "origin": "harness head-guard regression for #1017",
+    "evidence_transform": "raw",
+    "model_response": "Recorded representative response (zero live inference): approve, no findings."
+  },
+  "engine": "run-review",
+  "pr": {
+    "head_sha": "aa11bb22cc33dd44ee55ff660718293a4b5c6d7e",
+    "title": "Clarify project overview in README",
+    "body": "",
+    "diff": "diff --git a/README.md b/README.md\nindex 4f1a2b3..9c8d7e6 100644\n--- a/README.md\n+++ b/README.md\n@@ -3,2 +3,2 @@\n-This project provides a small library.\n+This project provides a small, well-tested library.\n More information below.\n",
+    "files": [
+      {
+        "filename": "README.md",
+        "status": "modified",
+        "additions": 1,
+        "deletions": 1,
+        "changes": 2
+      }
+    ],
+    "threads": []
+  },
+  "source_files": {
+    "README.md": "# pr-reviewer-action\n\nThis project provides a small, well-tested library.\nMore information below.\n"
+  },
+  "secrets": [],
+  "recorded_model_response": {
+    "verdict": "approve",
+    "review_markdown": "The README change is a harmless wording clarification; no issues found.\n",
+    "smart_review_requested": false,
+    "smart_review_reason": null,
+    "findings": [],
+    "requirement_coverage": null,
+    "required_check_dispositions": null
+  },
+  "config": {},
+  "expect": {
+    "verdict": "approve",
+    "blocking_finding_ids": [],
+    "unsupported_blocking_claims": 0,
+    "supported_blocking_claims": 0,
+    "published_body_excludes": [],
+    "published_body_includes": []
+  },
+  "expect_refusal": "stale-source-head"
+}
