@@ -1,6 +1,7 @@
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { startMockServer } from "./helpers.js";
@@ -58,6 +59,13 @@ interface GoldenExpect {
   published_body_excludes?: string[];
   published_body_includes?: string[];
   thread_dispositions?: ThreadDispositionExpect[];
+  /** #1016: per-finding grounding status asserted when the production
+   * source-verifier seam is wired in. Keys are finding ids (or message
+   * prefixes for fabricated re-emissions). Forward-compatible: the
+   * assertion is silent until #1016 lands — pre-#1016, no finding
+   * carries `grounding_status`, so the assertion fails the case until
+   * then, exactly like other #1016-pinned checks. */
+  grounding_status?: Record<string, string>;
 }
 
 interface GoldenCase {
@@ -255,7 +263,7 @@ function scoreCase(
   actualVerdict: string,
   findings: ArtifactFinding[],
   recorded: RecordedFinding[],
-  published?: { reviewBody: string; submitted: string[]; comments: string[] },
+  published?: { reviewBody: string; submitted: string[]; comments: string[]; stepOutput: string },
   threadDispositions?: Array<Record<string, unknown>>,
 ): CaseScore {
   const mismatches: string[] = [];
@@ -303,16 +311,44 @@ function scoreCase(
   // Published-body checks apply to the run-review engine only; enforcement
   // fixtures pass empty arrays and never publish. Fixture `secrets` are
   // excluded on every published surface in addition to explicit excludes.
+  // The persisted step-output file (`runDir/o.txt`, where `GITHUB_OUTPUT` is
+  // pointed by the harness) is the actual sink `formatReviewStepOutputs`
+  // writes `review-markdown`/`findings` into (#1017 follow-up — the prior
+  // review pass inspected `review-body.md` / native bodies / sticky
+  // comments but never the file the runtime actually persists).
   if (c.engine === "run-review" && published) {
     const excludes = [...new Set([...(c.expect.published_body_excludes ?? []), ...(c.secrets ?? [])])];
     for (const v of excludes) {
       const where = [...(published.reviewBody.includes(v) ? ["review-body.md"] : [])]
         .concat(published.submitted.filter((b) => b.includes(v)).map(() => "submitted-review"))
-        .concat(published.comments.filter((b) => b.includes(v)).map(() => "sticky-comment"));
+        .concat(published.comments.filter((b) => b.includes(v)).map(() => "sticky-comment"))
+        .concat(typeof published.stepOutput === "string" && published.stepOutput.includes(v) ? ["step_output"] : []);
       if (where.length) mismatches.push(`published_body_excludes: ${JSON.stringify(v)} found in ${where.join(", ")}`);
     }
     for (const v of c.expect.published_body_includes ?? []) {
       if (!published.reviewBody.includes(v)) mismatches.push(`published_body_includes: ${JSON.stringify(v)} missing from review-body.md`);
+    }
+  }
+  // #1016: forward-compatible grounding assertion. The recorded source tree
+  // is committed in `replayRunReview` so when the production source-verifier
+  // seam lands, the verified files match real bytes. Pre-#1016 the artifact
+  // findings carry no `grounding_status` (the field is added by
+  // `applyBlockerVerification`), so any expected mapping reads as a
+  // mismatch — the golden's `status: expected-failure` is what keeps the
+  // suite green until the companion fix merges.
+  if (c.expect.grounding_status !== undefined) {
+    for (const [id, expectedStatus] of Object.entries(c.expect.grounding_status)) {
+      const recordedMatch = recorded.find((r) => typeof r.id === "string" && r.id === id);
+      const findByRecordedId = (file: ArtifactFinding): boolean => {
+        if (!recordedMatch || typeof recordedMatch.message !== "string") return false;
+        return file.message === recordedMatch.message;
+      };
+      const target = findings.find((f) => findByRecordedId(f))
+        ?? findings.find((f) => typeof f.message === "string" && f.message.startsWith(id));
+      const actualStatus = target ? (target as { grounding_status?: string }).grounding_status ?? "undefined" : "absent";
+      if (actualStatus !== expectedStatus) {
+        mismatches.push(`grounding_status: ${id} expected ${expectedStatus}, got ${actualStatus}`);
+      }
     }
   }
   return { verdict: actualVerdict, unsupported, supported, priorStatus, mismatches };
@@ -325,7 +361,31 @@ async function replayRunReview(c: GoldenCase): Promise<CaseScore> {
     res.end(verdictBody(c.recordedModelResponse ?? {}));
   });
   const runDir = mkdtempSync(join(tmpdir(), "golden-replay-"));
+  // #1016 forward-compatibility: record `c.sourceFiles` into a real,
+  // reproducible Git tree at the workspace the production source-verifier
+  // reads from. `git show <sha>:<file>` against this tree returns the
+  // fixture's committed bytes — without it, the verifier would demote
+  // every marker-based blocker as `unverified` (no tree → not-found),
+  // and an expected-failure pinned to refutation could flip green for
+  // the wrong reason. The mock PR's `head_sha` is then mutated to the
+  // actual revision so `validateCase`'s source-head guard at module load
+  // (matched on the JSON placeholder) cannot block — both values were
+  // 40-char hex placeholders at load time.
+  const sourceDir = mkdtempSync(join(tmpdir(), "golden-source-"));
   try {
+    execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: sourceDir });
+    execFileSync("git", ["config", "user.email", "golden@example.com"], { cwd: sourceDir });
+    execFileSync("git", ["config", "user.name", "golden-replay"], { cwd: sourceDir });
+    for (const [file, content] of Object.entries(c.sourceFiles)) {
+      const fullPath = join(sourceDir, file);
+      const parent = resolve(fullPath, "..");
+      execFileSync("mkdir", ["-p", parent], { cwd: sourceDir });
+      writeFileSync(fullPath, content, "utf8");
+    }
+    execFileSync("git", ["add", "-A"], { cwd: sourceDir });
+    execFileSync("git", ["commit", "-q", "-m", "golden-replay-fixture"], { cwd: sourceDir });
+    const actualHeadSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir }).toString("utf8").trim();
+    pr.head_sha = actualHeadSha;
     const result = await runReview({
       env: { GITHUB_OUTPUT: join(runDir, "o.txt"), GITHUB_STEP_SUMMARY: join(runDir, "s.md") },
       inputs: {
@@ -336,14 +396,15 @@ async function replayRunReview(c: GoldenCase): Promise<CaseScore> {
         "ai-model": "m",
         "ai-stream": "false",
         "ai-api-key": "k",
-        // The replay workspace is not a git checkout, so repository-map
-        // generation can only fail; the config input that controls it keeps
-        // the run quiet instead of logging the guaranteed failure.
+        // The replay workspace is a real git checkout, but repository-map
+        // generation is unrelated to the verifier seam and would only
+        // churn noise; the config input that controls it keeps the run
+        // quiet instead of logging a guaranteed failure on tiny fixtures.
         "repo-map-context": "false",
         ...c.config,
       },
       runDir,
-      workspace: runDir,
+      workspace: sourceDir,
       platformAdapter: mockPlatform(pr),
       persistArtifacts: true,
       quiet: true,
@@ -383,15 +444,21 @@ async function replayRunReview(c: GoldenCase): Promise<CaseScore> {
       api,
       { diffText: String(pr.diff ?? "") },
     );
+    const stepOutputPath = join(runDir, "o.txt");
     const published = {
       reviewBody: readFileSync(join(runDir, "review-body.md"), "utf8"),
       submitted: api.submitted.map((r) => r.body),
       comments: api.comments,
+      // #1017 follow-up: the actual sink `formatReviewStepOutputs` writes
+      // `review-markdown`/`findings` into. Missing when the harness has
+      // not yet persisted the assignments; the test tolerates absence.
+      stepOutput: existsSync(stepOutputPath) ? readFileSync(stepOutputPath, "utf8") : "",
     };
     return scoreCase(c, result.outputs.verdict, findings, recordedFindings(c), published, artifact.thread_dispositions);
   } finally {
     await server.close();
     rmSync(runDir, { recursive: true, force: true });
+    rmSync(sourceDir, { recursive: true, force: true });
   }
 }
 

@@ -51,6 +51,7 @@
   "config": {},
   "expected_mismatch_keys": [
     "blocking_finding_ids",
+    "grounding_status",
     "unsupported_blocking_claims",
     "verdict"
   ],
@@ -60,6 +61,9 @@
     "unsupported_blocking_claims": 0,
     "supported_blocking_claims": 0,
     "published_body_excludes": [],
-    "published_body_includes": []
+    "published_body_includes": [],
+    "grounding_status": {
+      "f1012-false": "refuted"
+    }
   }
 }
