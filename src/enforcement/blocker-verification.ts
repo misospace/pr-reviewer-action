@@ -56,6 +56,26 @@ export function safeFile(file: unknown): file is string {
  */
 const COMMITTED_MARKER_CUE_RE = /\bshould\b|\bmust be\b|\bexpected\b|instead of|\breplac\w*\b|\bnever\b|\bwithout\b|\bmissing\b|\bfails? to\b/i;
 
+/**
+ * Existence-assertion cues: sentence-level wording that positively locates
+ * the cited token in the committed source (committed/contained/hardcoded
+ * as written). Without one, a quoted marker is ambiguous — e.g. "the
+ * masking helper returns `[REDACTED]` but is not wired into this writer"
+ * describes the token as another function's return value, not as committed
+ * bytes — and ambiguity falls through to untouched (the fail-safe
+ * direction: an over-narrow boundary leaves a real finding blocking, it
+ * never refutes one it does not understand).
+ */
+const COMMITTED_MARKER_ASSERTION_RE = /\bcontain\w*\b|\bcommit\w*\b|\bhardcod\w*\b|\bliteral\w*\b|\bas written\b|\binside\b|\bpresent\b|\bequals\b|\bis set to\b/i;
+
+/**
+ * Upper bound on the message text the quoted-citation scan inspects. The
+ * scan is superlinear on pathological all-backtick input, and an oversized
+ * message is by definition not a pinpoint citation: it falls through as
+ * ambiguous (untouched), which also caps the boundary's worst-case work.
+ */
+export const MAX_CLAIM_SCAN_LENGTH = 16_384;
+
 const SENTENCE_DELIMITERS = new Set([".", "!", "?", ";", "\n"]);
 
 /**
@@ -94,10 +114,13 @@ function sentenceContaining(message: string, from: number, to: number): string {
 /**
  * True when `message` asserts that committed source contains a sanitizer
  * marker: at least one marker occurrence must sit inside a quoted span, and
- * the sentence carrying that cited occurrence must carry no
- * mention/expectation cue.
+ * the sentence carrying that cited occurrence must assert existence
+ * (COMMITTED_MARKER_ASSERTION_RE) while carrying no mention/expectation cue.
+ * Anything else — including oversized messages and phrasings the scan does
+ * not recognize — is ambiguous and returns false (untouched).
  */
 function assertsCommittedMarker(message: string): boolean {
+  if (message.length > MAX_CLAIM_SCAN_LENGTH) return false;
   const spans = quotedSpans(message);
   if (spans.length === 0) return false;
   for (const marker of SANITIZER_MARKERS) {
@@ -107,9 +130,11 @@ function assertsCommittedMarker(message: string): boolean {
       if (index === -1) break;
       const end = index + marker.length;
       for (const span of spans) {
-        if (span.start <= index && end <= span.end
-          && !COMMITTED_MARKER_CUE_RE.test(sentenceContaining(message, index, end))) {
-          return true;
+        if (span.start <= index && end <= span.end) {
+          const sentence = sentenceContaining(message, index, end);
+          if (!COMMITTED_MARKER_CUE_RE.test(sentence) && COMMITTED_MARKER_ASSERTION_RE.test(sentence)) {
+            return true;
+          }
         }
       }
       from = index + 1;
@@ -123,11 +148,15 @@ function assertsCommittedMarker(message: string): boolean {
  *
  * Invariant (#1016 review pass): `committed_literal` fires only on markers
  * *cited as committed content* — a marker inside a quoted span
- * (single backticks or a triple-backtick fence) whose carrying sentence has
- * no mention/expectation cue. Prose mentions of expected output, absent
- * masking, or comparisons never classify as committed source claims; an
- * ambiguous message falls through to the requirement regex, then to null,
- * and the finding is left untouched.
+ * (single backticks or a triple-backtick fence) whose carrying sentence
+ * positively asserts existence in the source and carries no
+ * mention/expectation cue. Prose mentions of expected output, absent
+ * masking, comparisons, and any ambiguous phrasing (including oversized
+ * messages) never classify as committed source claims; they fall through
+ * to the requirement regex, then to null, and the finding is left
+ * untouched. Accepted recall trade-off: an existence assertion that cites
+ * the marker in bare prose (no quotes) also escapes verification — it
+ * stays blocking, which is the fail-safe side of this boundary.
  */
 function classify(message: string): GroundingKind | null {
   if (assertsCommittedMarker(message)) return "committed_literal";
@@ -148,8 +177,10 @@ function extractCodeSpans(message: string): string[] {
   for (const match of message.matchAll(/`([^`]+)`/g)) {
     const span = (match[1] ?? "").trim();
     // Single characters and pure punctuation do not constitute a citable
-    // claim — pin a minimum length so a stray backtick pair cannot ground.
-    if (span.length >= 2) out.push(span);
+    // claim — a minimum length alone would let a ubiquitous token like
+    // `=>` "ground" any claim, so require at least one identifier
+    // character.
+    if (span.length >= 2 && /[A-Za-z0-9_$]/.test(span)) out.push(span);
   }
   return out;
 }
@@ -224,14 +255,17 @@ export async function applyBlockerVerification(
             status = "unsupported";
             reason = "no-concrete-location";
           } else {
-            const lines = read.text.split(/\r?\n/);
+            // Split on newline boundaries while keeping the terminators, so the
+            // window carries the exact bytes of the source (a multi-line
+            // cited span in a CRLF file must match against CRLF bytes).
+            const lines = read.text.split(/(?<=\n)/);
             if (citedLine > lines.length) {
               status = "refuted";
               reason = "location-missing";
             } else {
               const windowText = lines
                 .slice(Math.max(0, citedLine - 1 - EVIDENCE_LINE_WINDOW), citedLine + EVIDENCE_LINE_WINDOW)
-                .join("\n");
+                .join("");
               if (spans.some((span) => verifySourceSpan(windowText, span).present)) {
                 status = "grounded";
                 reason = "evidence-verified";

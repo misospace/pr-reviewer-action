@@ -62,7 +62,7 @@ test("#1016 #1012 regression: [REDACTED] marker claims are refuted against exact
   const a = artifact({
     findings: [
       finding({ message: "credential is hardcoded as `[REDACTED]`", file: "tests-v3/http-transport.test.ts" }),
-      finding({ message: "token appears as `[REDACTED]`", file: "tests-v3/tangled-diff.test.ts" }),
+      finding({ message: "token is hardcoded as `[REDACTED]`", file: "tests-v3/tangled-diff.test.ts" }),
     ],
   });
   const readSource = readerFor('const CANARY = "s3cr3t-credential";\n');
@@ -176,7 +176,7 @@ test("#1016 requirement claim with null/zero/invalid line is unsupported", async
 });
 
 test("#1016 unavailable exact-head source leaves the claim unverified and keeps request_changes", async () => {
-  const a = artifact({ findings: [finding({ message: "value is `[REDACTED]`", file: "src/a.ts" })] });
+  const a = artifact({ findings: [finding({ message: "the file commits the literal `[REDACTED]`", file: "src/a.ts" })] });
   const result = await applyBlockerVerification(a.findings, { readSource: unavailableReader, expectedRevision: null });
   assert.equal(result.demoted, 1);
   assert.equal(a.findings[0]!.grounding_status, "unverified");
@@ -197,7 +197,7 @@ test("#1016 stale-revision unverified finding keeps request_changes", async () =
     text: "marker text",
     provenance: committedSourceProvenance("src/a.ts", "f".repeat(40)),
   });
-  const a = artifact({ findings: [finding({ message: "value is `[REDACTED]`", file: "src/a.ts" })] });
+  const a = artifact({ findings: [finding({ message: "the file commits the literal `[REDACTED]`", file: "src/a.ts" })] });
   const result = await applyBlockerVerification(a.findings, { readSource: staleReader, expectedRevision: REVISION });
   assert.equal(result.demoted, 1);
   assert.equal(a.findings[0]!.grounding_status, "unverified");
@@ -210,7 +210,7 @@ test("#1016 read-budget-exhausted unverified finding keeps request_changes", asy
   // Past MAX_VERIFICATION_READS the boundary stops reading and demotes the
   // remaining candidates as unverified. The strict mapping must keep
   // request_changes for any unverified demotion.
-  const markerArray = Array.from({ length: 21 }, () => finding({ message: "value is `[REDACTED]`", file: "src/a.ts" }));
+  const markerArray = Array.from({ length: 21 }, () => finding({ message: "the file commits the literal `[REDACTED]`", file: "src/a.ts" }));
   const a = artifact({ findings: markerArray });
   const readSource: SourceReader = async (): Promise<SourceReadResult> => ({
     status: "ok", text: "no marker here", provenance: committedSourceProvenance("src/a.ts", REVISION),
@@ -234,14 +234,14 @@ test("#1016 model-policy relaxation fires only for a refuted-only request_change
     text: "const CANARY = 'plain';",
     provenance: committedSourceProvenance("src/a.ts", REVISION),
   });
-  const a = artifact({ findings: [finding({ message: "value is `[REDACTED]`", file: "src/a.ts" })] });
+  const a = artifact({ findings: [finding({ message: "the file commits the literal `[REDACTED]`", file: "src/a.ts" })] });
   await applyBlockerVerification(a.findings, { readSource: refutedReader, expectedRevision: REVISION });
   assert.equal(relaxUnverifiedBlockerVerdict(a, { forced: false }), true);
   assert.equal(a.verdict, "approve");
 
   const mixed = artifact({
     findings: [
-      finding({ message: "value is `[REDACTED]`", file: "src/a.ts" }),
+      finding({ message: "the file commits the literal `[REDACTED]`", file: "src/a.ts" }),
       finding({ severity: "major", message: "off by one", file: "src/b.ts" }),
     ],
   });
@@ -252,7 +252,7 @@ test("#1016 model-policy relaxation fires only for a refuted-only request_change
 });
 
 test("#1016 model-policy relaxation refuses to relax when any demotion is unverified", async () => {
-  const a = artifact({ findings: [finding({ message: "value is `[REDACTED]`", file: "src/a.ts" })] });
+  const a = artifact({ findings: [finding({ message: "the file commits the literal `[REDACTED]`", file: "src/a.ts" })] });
   await applyBlockerVerification(a.findings, { readSource: unavailableReader, expectedRevision: null });
   // Unknown evidence: relaxer refuses; verdict stays request_changes.
   assert.equal(relaxUnverifiedBlockerVerdict(a, { forced: false }), false);
@@ -270,8 +270,8 @@ test("#1016 mixed refuted + unverified finding refuses relaxation on unverified"
   };
   const a = artifact({
     findings: [
-      finding({ message: "value is `[REDACTED]`", file: "src/refuted.ts" }),
-      finding({ message: "value is `[REDACTED]`", file: "src/unknown.ts" }),
+      finding({ message: "the file commits the literal `[REDACTED]`", file: "src/refuted.ts" }),
+      finding({ message: "the file commits the literal `[REDACTED]`", file: "src/unknown.ts" }),
     ],
   });
   await applyBlockerVerification(a.findings, { readSource: refutedReader, expectedRevision: REVISION });
@@ -282,7 +282,7 @@ test("#1016 mixed refuted + unverified finding refuses relaxation on unverified"
 test("#1016 relaxation is refused while a deterministic gate (incomplete checks) is in play", async () => {
   const a = artifact({
     required_checks: "incomplete",
-    findings: [finding({ message: "value is `[REDACTED]`", file: "src/a.ts" })],
+    findings: [finding({ message: "the file commits the literal `[REDACTED]`", file: "src/a.ts" })],
   });
   await applyBlockerVerification(a.findings, { readSource: unavailableReader, expectedRevision: null });
   assert.equal(relaxUnverifiedBlockerVerdict(a, { forced: false }), false);
@@ -292,7 +292,7 @@ test("#1016 relaxation is refused while a deterministic gate (incomplete checks)
 // `sanitizedSourceProvenance` documents the other non-authoritative representation
 // the boundary rejects: a sanitized read never authorizes a literal claim.
 test("#1016 sanitized (non-authoritative) provenance cannot ground a marker claim", async () => {
-  const a = artifact({ findings: [finding({ message: "value is `[REDACTED]`", file: "src/a.ts" })] });
+  const a = artifact({ findings: [finding({ message: "the file commits the literal `[REDACTED]`", file: "src/a.ts" })] });
   const readSource: SourceReader = async (): Promise<SourceReadResult> => ({
     status: "ok",
     text: "value is [REDACTED]",
@@ -304,7 +304,7 @@ test("#1016 sanitized (non-authoritative) provenance cannot ground a marker clai
 });
 
 test("#1016 synthesized thread re-emissions added after the boundary are not demoted", async () => {
-  const a = artifact({ findings: [finding({ message: "value is `[REDACTED]`", file: "src/a.ts" })] });
+  const a = artifact({ findings: [finding({ message: "the file commits the literal `[REDACTED]`", file: "src/a.ts" })] });
   await applyBlockerVerification(a.findings, { readSource: unavailableReader, expectedRevision: null });
   assert.equal(a.findings[0]!.grounding_status, "unverified");
   applyReviewThreadEnforcement(a, [{
@@ -337,7 +337,7 @@ test("#1016 native review is not REQUEST_CHANGES once marker claims are refuted"
     ...overrides,
   }) as Parameters<typeof publishReview>[0];
 
-  const a = artifact({ findings: [finding({ message: "value is `[REDACTED]`", file: "tests-v3/http-transport.test.ts" })] });
+  const a = artifact({ findings: [finding({ message: "the file commits the literal `[REDACTED]`", file: "tests-v3/http-transport.test.ts" })] });
   const readSource = readerFor('const CANARY = "s3cr3t-credential";\n');
   await applyBlockerVerification(a.findings, { readSource, expectedRevision: REVISION });
   applyStrictVerdictPolicy(a, { modelVerdict: "request_changes", forced: false });
@@ -345,7 +345,7 @@ test("#1016 native review is not REQUEST_CHANGES once marker claims are refuted"
 
   const control = new RecordingApi();
   await publishReview(
-    publishInput({ verdict: "request_changes", findings: [finding({ message: "value is `[REDACTED]`" })] }),
+    publishInput({ verdict: "request_changes", findings: [finding({ message: "the file commits the literal `[REDACTED]`" })] }),
     control as unknown as PublishPlatformApi,
     { diffText: "" },
   );
@@ -387,7 +387,7 @@ test("#1016 native review stays REQUEST_CHANGES once marker claims are unverifie
     ...overrides,
   }) as Parameters<typeof publishReview>[0];
 
-  const a = artifact({ findings: [finding({ message: "value is `[REDACTED]`", file: "src/a.ts" })] });
+  const a = artifact({ findings: [finding({ message: "the file commits the literal `[REDACTED]`", file: "src/a.ts" })] });
   await applyBlockerVerification(a.findings, { readSource: unavailableReader, expectedRevision: null });
   applyStrictVerdictPolicy(a, { modelVerdict: "request_changes", forced: false });
   assert.equal(a.verdict, "request_changes");
@@ -420,7 +420,7 @@ test("#1016 attribution note discloses unverified co-existence with a blocker", 
   const a = artifact({
     findings: [
       groundedButBlocking,
-      finding({ message: "value is `[REDACTED]`", file: "src/unknown.ts" }),
+      finding({ message: "the file commits the literal `[REDACTED]`", file: "src/unknown.ts" }),
     ],
   });
   await applyBlockerVerification(a.findings, { readSource: unavailableReader, expectedRevision: null });
@@ -469,7 +469,7 @@ test("#1016 attribution note discloses enforcement-forced co-existence with a bl
   const a = artifact({
     findings: [
       groundedButBlocking,
-      finding({ message: "value is `[REDACTED]`", file: "src/unknown.ts" }),
+      finding({ message: "the file commits the literal `[REDACTED]`", file: "src/unknown.ts" }),
     ],
   });
   await applyBlockerVerification(a.findings, { readSource: unavailableReader, expectedRevision: null });
@@ -504,7 +504,7 @@ test("#1016 prose mention of the redaction token as expected output is never ref
   const outcome = applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
   assert.equal(a.verdict, "request_changes");
   assert.equal(outcome.source, "findings");
-  assert.ok(!a.review_markdown.includes("#1016"), `unexpected #1016 attribution: ${a.review_markdown}`);
+  assert.ok(!a.review_markdown.includes("unknown evidence, not refuted"), `unexpected unknown-evidence attribution: ${a.review_markdown}`);
 
   // Model policy: relaxation applies only to grounding-demoted findings; an
   // untouched blocker keeps request_changes.

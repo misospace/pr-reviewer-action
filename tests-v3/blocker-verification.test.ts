@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { committedSourceProvenance, sanitizedSourceProvenance } from "../src/context/evidence-provenance.js";
-import { applyBlockerVerification, MAX_VERIFICATION_READS, type SourceReadResult } from "../src/enforcement/blocker-verification.js";
+import { applyBlockerVerification, MAX_CLAIM_SCAN_LENGTH, MAX_VERIFICATION_READS, type SourceReadResult } from "../src/enforcement/blocker-verification.js";
 import type { ArtifactFinding } from "../src/enforcement/artifact.js";
 
 const revision = "a".repeat(40);
@@ -9,8 +9,8 @@ const source = (text: string): SourceReadResult => ({ status: "ok", text, proven
 const markerFinding = (overrides: Partial<ArtifactFinding> = {}): ArtifactFinding => ({
   severity: "blocker", category: "bug", file: "src/a.ts", line: 1,
   // The stock message cites the marker inside a quoted span whose sentence
-  // carries no mention/expectation cue, so it classifies as a
-  // committed_literal claim.
+  // asserts existence ("commits") and carries no mention/expectation cue,
+  // so it classifies as a committed_literal claim.
   message: "line 8 commits the sanitizer placeholder `⟦redacted:credential⟧`", ...overrides,
 });
 const requirementFinding = (overrides: Partial<ArtifactFinding> = {}): ArtifactFinding => ({
@@ -132,6 +132,32 @@ test("marker mentions that are not cited as committed content are left untouched
   assert.equal(quotedWithCue.grounding_status, undefined);
 });
 
+test("a quoted marker whose sentence asserts no existence in the source stays untouched", async () => {
+  // The quote is necessary but not sufficient: a sentence describing the
+  // token as some helper's return value, without asserting the cited file
+  // contains it, is ambiguous and must never be refuted (review pass:
+  // refuting a different assertion must never refute the defect).
+  const helperReturnMention = markerFinding({
+    message: "Raw credentials are written to the audit log; the masking helper returns `[REDACTED]` but is not wired into this writer.",
+  });
+  const result = await verify([helperReturnMention], async () => source("logger.info(credential);"));
+  assert.deepEqual(result.findings, []);
+  assert.equal(result.demoted, 0);
+  assert.equal(helperReturnMention.severity, "blocker");
+  assert.equal(helperReturnMention.grounding_status, undefined);
+});
+
+test("an oversized claim message is ambiguous and left untouched", async () => {
+  // The citation scan is bounded by MAX_CLAIM_SCAN_LENGTH; past it the
+  // boundary does not attempt to refute anything (fail-safe: the finding
+  // stays blocking, and hostile-length input cannot stall the pipeline).
+  const padding = "x".repeat(MAX_CLAIM_SCAN_LENGTH);
+  const finding = markerFinding({ message: `the file commits the literal \`[REDACTED]\` ${padding}` });
+  const result = await verify([finding], async () => source("const value = 'actual';"));
+  assert.deepEqual(result.findings, []);
+  assert.equal(finding.grounding_status, undefined);
+});
+
 test("a quoted marker cited without a mention cue is a source claim and refuted when absent", async () => {
   // The #1012 path: the message asserts the committed source contains the
   // marker — quoted, and its sentence carries no expectation cue — so the
@@ -197,6 +223,21 @@ test("the evidence window is ±EVIDENCE_LINE_WINDOW lines around the cited line"
     ["grounded", "evidence-verified"], ["unverified", "evidence-location-mismatch"],
   ]);
   assert.equal(result.demoted, 1);
+});
+
+test("a multi-line cited span matches the raw CRLF bytes at the cited location", async () => {
+  // The verification window keeps the source's exact line terminators, so
+  // a cited multi-line span in a CRLF file grounds instead of mislabeling
+  // as a location mismatch.
+  const finding = requirementFinding({
+    file: "src/crlf.ts",
+    line: 1,
+    message: "requirement not enforced: `const a = 1;\r\nconst b = 2;` violates standard X",
+  });
+  const result = await verify([finding], async () => source("const a = 1;\r\nconst b = 2;\r\nconst c = 3;\r\n"));
+  assert.equal(result.findings[0]?.status, "grounded");
+  assert.equal(result.findings[0]?.reason, "evidence-verified");
+  assert.equal(result.demoted, 0);
 });
 
 test("a cited line beyond the end of the file refutes the claim", async () => {
