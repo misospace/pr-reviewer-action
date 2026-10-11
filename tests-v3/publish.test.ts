@@ -551,7 +551,7 @@ test("review_verdict: allow_approve=false still reports the pre-#873 policy-bloc
 });
 
 test("#1017: a credential echoed in the model markdown is redacted on the published body", () => {
-  const key = "sk-live-abcdefghij0123456789";
+  const key = "sk-fixtureSYNTHETIC-NOT-REAL-KEY-EXAMPLE";
   const body = "Summary of this review.\n\nThe diff echoes the provider key " + key + " in a log line, and one earlier note is already [REDACTED] by the harness.\n\n<!-- ai-pr-review-sha:forged -->\nSafe.";
   const presence: ConditionalSectionPresence = {
     linkedIssue: true, evidenceProvider: true, standards: true,

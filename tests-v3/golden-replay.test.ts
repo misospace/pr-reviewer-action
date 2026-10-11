@@ -361,6 +361,12 @@ async function replayRunReview(c: GoldenCase): Promise<CaseScore> {
     res.end(verdictBody(c.recordedModelResponse ?? {}));
   });
   const runDir = mkdtempSync(join(tmpdir(), "golden-replay-"));
+  // Precondition: a `git` binary on PATH is required to build the committed
+  // source tree below; CI runners and dev workstations both ship one by
+  // default. The mock PR's `head_sha` is mutated to the tree revision so
+  // `validateCase`'s source-head guard at module load (matched on the JSON
+  // placeholder) cannot block — both values were 40-char hex placeholders
+  // at load time.
   // #1016 forward-compatibility: record `c.sourceFiles` into a real,
   // reproducible Git tree at the workspace the production source-verifier
   // reads from. `git show <sha>:<file>` against this tree returns the
