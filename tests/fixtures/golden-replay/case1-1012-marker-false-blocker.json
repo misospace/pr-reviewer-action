@@ -49,6 +49,11 @@
     "required_check_dispositions": null
   },
   "config": {},
+  "expected_mismatch_keys": [
+    "blocking_finding_ids",
+    "unsupported_blocking_claims",
+    "verdict"
+  ],
   "expect": {
     "verdict": "comment",
     "blocking_finding_ids": [],

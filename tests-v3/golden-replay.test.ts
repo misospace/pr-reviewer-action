@@ -7,6 +7,8 @@ import { startMockServer } from "./helpers.js";
 import { runReview } from "../src/run/review.js";
 import { runEnforcementFixture } from "../src/enforcement/fixture.js";
 import { publishReview } from "../src/publish/publish.js";
+import { isAlwaysNonBlockingCategory } from "../src/enforcement/verdict-policy.js";
+import { KNOWN_SECRET_REDACTED, REDACTED_SOURCE } from "../src/context/redact.js";
 import type {
   NativeReviewRequest,
   PublishPlatformApi,
@@ -17,8 +19,11 @@ const ROOT = resolve(__dirname, "..", "..");
 const FIXTURES = join(ROOT, "tests", "fixtures", "golden-replay");
 
 // Redaction marker tokens: a blocking claim that cites a token the PR's own
-// source does not contain is a claim the evidence cannot support.
-const MARKERS = ["[REDACTED]", "⟦redacted:credential⟧", "⟦•⟧"];
+// source does not contain is a claim the evidence cannot support. The plain
+// `[REDACTED]` placeholder is module-private (src/context/redact.ts:10), so it
+// stays literal here; the other two markers are imported from the module that
+// owns them.
+const MARKERS = ["[REDACTED]", REDACTED_SOURCE, KNOWN_SECRET_REDACTED];
 
 // Findings in the post-pipeline artifact carry no id. The set present IS the
 // open set: thread enforcement re-emits unresolved prior threads and drops
@@ -38,6 +43,12 @@ interface ArtifactFinding {
 
 interface RecordedFinding { id?: string; message?: string; [k: string]: unknown; }
 
+interface ThreadDispositionExpect {
+  thread_id: string;
+  disposition: string;
+  evidence?: string | null;
+}
+
 interface GoldenExpect {
   verdict?: string;
   blocking_finding_ids?: string[];
@@ -46,6 +57,7 @@ interface GoldenExpect {
   supported_blocking_claims?: number;
   published_body_excludes?: string[];
   published_body_includes?: string[];
+  thread_dispositions?: ThreadDispositionExpect[];
 }
 
 interface GoldenCase {
@@ -60,6 +72,8 @@ interface GoldenCase {
   enforcement?: Record<string, unknown> | undefined;
   config: Record<string, string>;
   priorBlockerId?: string | undefined;
+  secrets?: string[];
+  expectedMismatchKeys?: string[] | undefined;
   expect: GoldenExpect;
 }
 
@@ -97,6 +111,10 @@ function validateCase(raw: unknown): GoldenCase | { refusal: string } {
     enforcement: fx.enforcement as Record<string, unknown> | undefined,
     config: (fx.config ?? {}) as Record<string, string>,
     priorBlockerId: typeof fx.prior_blocker_id === "string" ? fx.prior_blocker_id : undefined,
+    secrets: Array.isArray(fx.secrets) ? (fx.secrets as unknown[]).filter((s): s is string => typeof s === "string") : [],
+    expectedMismatchKeys: Array.isArray(fx.expected_mismatch_keys)
+      ? ((fx.expected_mismatch_keys as unknown[]).filter((s): s is string => typeof s === "string"))
+      : undefined,
     expect: (fx.expect ?? {}) as GoldenExpect,
   };
 }
@@ -180,14 +198,21 @@ function backtickSpans(message: string): string[] {
 }
 
 function scoreClaims(findings: ArtifactFinding[], sourceFiles: Record<string, string>) {
-  const blocking = findings.filter((f) => f.severity === "blocker" || f.severity === "major");
+  // Mirror the production policy: a category that can never block does not
+  // count as blocking, whatever severity it carries.
+  const blocking = findings.filter(
+    (f) => (f.severity === "blocker" || f.severity === "major") && !isAlwaysNonBlockingCategory(f.category),
+  );
   let unsupported = 0;
   let supported = 0;
   for (const f of blocking) {
     const content = f.file ? sourceFiles[f.file] : undefined;
     const tokens = MARKERS.filter((t) => f.message.includes(t));
     if (tokens.some((t) => content === undefined || !content.includes(t))) unsupported++;
-    const spans = backtickSpans(f.message).filter((s) => s.length >= 4);
+    // A cited span only supports a claim when it looks like code rather than
+    // prose: it must contain a space or an operator/punctuation character.
+    // Bare identifiers and marker tokens do not.
+    const spans = backtickSpans(f.message).filter((s) => s.length >= 4 && /[ <>=&|;()]/.test(s));
     if (content !== undefined && spans.some((s) => content.includes(s))) supported++;
   }
   return { blocking, unsupported, supported };
@@ -231,6 +256,7 @@ function scoreCase(
   findings: ArtifactFinding[],
   recorded: RecordedFinding[],
   published?: { reviewBody: string; submitted: string[]; comments: string[] },
+  threadDispositions?: Array<Record<string, unknown>>,
 ): CaseScore {
   const mismatches: string[] = [];
   const { blocking, unsupported, supported } = scoreClaims(findings, c.sourceFiles);
@@ -246,9 +272,12 @@ function scoreCase(
     }
   }
   // prior_blocker_status is only meaningful when the fixture names a prior
-  // blocker: the recovered open set containing it means the thread is still
-  // unresolved; otherwise the pipeline settled it as fixed.
-  const priorStatus = c.priorBlockerId ? (recovered.includes(c.priorBlockerId) ? "open" : "resolved") : null;
+  // blocker. A re-emitted open finding carries the thread_id but a message
+  // suffix, so message-equality id recovery misses it — the carried
+  // thread_id is the reliable signal that the thread is still unresolved.
+  const priorStatus = c.priorBlockerId
+    ? (recovered.includes(c.priorBlockerId) || blocking.some((f) => f.thread_id === c.priorBlockerId) ? "open" : "resolved")
+    : null;
   if (c.expect.prior_blocker_status !== undefined && c.expect.prior_blocker_status !== priorStatus) {
     mismatches.push(`prior_blocker_status: expected ${c.expect.prior_blocker_status}, got ${priorStatus ?? "n/a"}`);
   }
@@ -258,10 +287,25 @@ function scoreCase(
   if (c.expect.supported_blocking_claims !== undefined && c.expect.supported_blocking_claims !== supported) {
     mismatches.push(`supported_blocking_claims: expected ${c.expect.supported_blocking_claims}, got ${supported}`);
   }
+  // The settled disposition records the pipeline wrote to the final artifact,
+  // compared as a sorted (thread_id, disposition, evidence) set.
+  if (c.expect.thread_dispositions !== undefined) {
+    const canonical = (d: Record<string, unknown>) =>
+      `${String(d.thread_id ?? "")}:${String(d.disposition ?? "")}:${typeof d.evidence === "string" ? d.evidence : ""}`;
+    const actual = (threadDispositions ?? []).map(canonical).sort();
+    const expected = c.expect.thread_dispositions
+      .map((d) => `${d.thread_id}:${d.disposition}:${d.evidence ?? ""}`)
+      .sort();
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      mismatches.push(`thread_dispositions: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+    }
+  }
   // Published-body checks apply to the run-review engine only; enforcement
-  // fixtures pass empty arrays and never publish.
+  // fixtures pass empty arrays and never publish. Fixture `secrets` are
+  // excluded on every published surface in addition to explicit excludes.
   if (c.engine === "run-review" && published) {
-    for (const v of c.expect.published_body_excludes ?? []) {
+    const excludes = [...new Set([...(c.expect.published_body_excludes ?? []), ...(c.secrets ?? [])])];
+    for (const v of excludes) {
       const where = [...(published.reviewBody.includes(v) ? ["review-body.md"] : [])]
         .concat(published.submitted.filter((b) => b.includes(v)).map(() => "submitted-review"))
         .concat(published.comments.filter((b) => b.includes(v)).map(() => "sticky-comment"));
@@ -292,6 +336,10 @@ async function replayRunReview(c: GoldenCase): Promise<CaseScore> {
         "ai-model": "m",
         "ai-stream": "false",
         "ai-api-key": "k",
+        // The replay workspace is not a git checkout, so repository-map
+        // generation can only fail; the config input that controls it keeps
+        // the run quiet instead of logging the guaranteed failure.
+        "repo-map-context": "false",
         ...c.config,
       },
       runDir,
@@ -300,7 +348,10 @@ async function replayRunReview(c: GoldenCase): Promise<CaseScore> {
       persistArtifacts: true,
       quiet: true,
     });
-    const artifact = result.reviewArtifact as unknown as { findings?: ArtifactFinding[] };
+    const artifact = result.reviewArtifact as unknown as {
+      findings?: ArtifactFinding[];
+      thread_dispositions?: Array<Record<string, unknown>>;
+    };
     const findings = artifact.findings ?? [];
     const api = new MinimalPublishApi(String(pr.head_sha));
     await publishReview(
@@ -337,7 +388,7 @@ async function replayRunReview(c: GoldenCase): Promise<CaseScore> {
       submitted: api.submitted.map((r) => r.body),
       comments: api.comments,
     };
-    return scoreCase(c, result.outputs.verdict, findings, recordedFindings(c), published);
+    return scoreCase(c, result.outputs.verdict, findings, recordedFindings(c), published, artifact.thread_dispositions);
   } finally {
     await server.close();
     rmSync(runDir, { recursive: true, force: true });
@@ -356,8 +407,12 @@ function replayEnforcement(c: GoldenCase): CaseScore {
     if (result.values === undefined) {
       return { verdict: "(no values)", unsupported: 0, supported: 0, priorStatus: null, mismatches: ["enforcement_run: expected values, got none"] };
     }
-    const art = JSON.parse(String(result.values.artifact ?? "{}")) as { verdict?: string; findings?: ArtifactFinding[] };
-    return scoreCase(c, String(art.verdict ?? ""), art.findings ?? [], recordedFindings(c));
+    const art = JSON.parse(String(result.values.artifact ?? "{}")) as {
+      verdict?: string;
+      findings?: ArtifactFinding[];
+      thread_dispositions?: Array<Record<string, unknown>>;
+    };
+    return scoreCase(c, String(art.verdict ?? ""), art.findings ?? [], recordedFindings(c), undefined, art.thread_dispositions);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -413,7 +468,22 @@ for (const entry of ordered) {
         // expected-failure is a pinned regression: the documented gap must
         // still fail, and a zero-mismatch run means the companion fix landed.
         if (score.mismatches.length === 0) throw new Error(`golden ${c.name}: companion fix landed — promote golden to active`);
-        console.log(`golden ${c.name} still fails as documented (${c.knownGap}): ${score.mismatches[0]}`);
+        if (c.expectedMismatchKeys !== undefined) {
+          // The recorded key set (the field before each mismatch's ":") pins
+          // the failure shape: a different set means the gap changed shape,
+          // which a key-count-only pin would have missed.
+          const keys = [...new Set(
+            score.mismatches.map((m) => {
+              const i = m.indexOf(":");
+              return (i >= 0 ? m.slice(0, i) : m).trim();
+            }),
+          )].sort();
+          const expected = [...c.expectedMismatchKeys].sort();
+          if (JSON.stringify(keys) !== JSON.stringify(expected)) {
+            throw new Error(`golden ${c.name}: failure shape changed — recorded keys ${JSON.stringify(expected)}, actual ${JSON.stringify(keys)}`);
+          }
+        }
+        console.log(`golden ${c.name} still fails as documented (${c.knownGap}): ${score.mismatches.join(" | ")}`);
       }
     });
   } else {

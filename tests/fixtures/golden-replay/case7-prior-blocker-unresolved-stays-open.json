@@ -1,12 +1,12 @@
 {
   "contract": "golden-replay/v1",
-  "name": "case3-prior-blocker-fixed-resolves",
+  "name": "case7-prior-blocker-unresolved-stays-open",
   "status": "active",
   "provenance": {
     "source_head": "3f8a1c6d9b0e4f7a2c5d8b1e6f9a0c3d4e7b2f5a",
-    "origin": "A prior AI review left an unresolved blocker thread (PRRT_917) on src/client.ts — missing timeout on the fetch call in fetchWithTimeout. The new head adds an AbortSignal timeout and the recorded response settles the thread as fixed with code-citing evidence.",
+    "origin": "Companion to case3 on the same head: the prior AI review left an unresolved blocker thread (PRRT_917) on src/client.ts, and the recorded response never dispositions it (a plain approve with an empty thread_dispositions). The unresolved prior blocker re-emits and stays open; no fabricated new blocker — the only blocking finding is the re-emission carrying the thread's original message and severity, and the strict mapping derives the blocking verdict from it.",
     "evidence_transform": "raw",
-    "model_response": "Recorded representative response (zero live inference): approve, no findings, and a thread_dispositions entry marking the prior blocker thread fixed, citing the new timeout line."
+    "model_response": "Recorded representative response (zero live inference): a plain approve that notes the prior blocker in prose but omits the disposition — thread_dispositions is present and empty, so the deterministic settlement downgrades the un-dispositioned thread to open and re-emits the original finding."
   },
   "engine": "run-review",
   "pr": {
@@ -51,35 +51,33 @@
   "secrets": [],
   "recorded_model_response": {
     "verdict": "approve",
-    "review_markdown": "The prior blocker is resolved in this head: `fetchWithTimeout` derives an `AbortSignal.timeout` before the fetch call (src/client.ts:9), so an unresponsive endpoint can no longer hang the client. No new findings in this diff.\n",
+    "review_markdown": "The diff adds an `AbortSignal` timeout to the fetch in `fetchWithTimeout` (src/client.ts:9), addressing the prior review's blocker: missing timeout on the fetch call in `fetchWithTimeout` — an unresponsive endpoint hangs the client indefinitely. No new findings in this diff.\n",
     "smart_review_requested": false,
     "smart_review_reason": null,
     "findings": [],
     "requirement_coverage": null,
     "required_check_dispositions": null,
-    "thread_dispositions": [
-      {
-        "thread_id": "PRRT_917",
-        "disposition": "fixed",
-        "evidence": "The fetch call now passes an AbortSignal.timeout derived at src/client.ts:9, so the request aborts instead of hanging indefinitely"
-      }
-    ]
+    "thread_dispositions": []
   },
   "config": {},
   "prior_blocker_id": "PRRT_917",
   "expect": {
-    "verdict": "approve",
-    "blocking_finding_ids": [],
-    "prior_blocker_status": "resolved",
+    "verdict": "request_changes",
+    "blocking_finding_ids": ["missing timeout on the fetch call in `fetchWithTimeout` — an"],
+    "prior_blocker_status": "open",
     "unsupported_blocking_claims": 0,
     "supported_blocking_claims": 0,
     "published_body_excludes": [],
-    "published_body_includes": [],
+    "published_body_includes": [
+      "missing timeout on the fetch call in `fetchWithTimeout` — an unresponsive endpoint hangs the client indefinitely",
+      "- `PRRT_917`: open — no disposition given",
+      "_Verdict set from open findings (verdict_policy=strict): 1 blocker/major finding(s) out of 1 open; model verdict was 'approve'._"
+    ],
     "thread_dispositions": [
       {
         "thread_id": "PRRT_917",
-        "disposition": "fixed",
-        "evidence": "The fetch call now passes an AbortSignal.timeout derived at src/client.ts:9, so the request aborts instead of hanging indefinitely"
+        "disposition": "open",
+        "evidence": null
       }
     ]
   }

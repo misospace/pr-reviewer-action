@@ -226,8 +226,9 @@ export function formatReviewStepOutputs(
     ["incomplete-reason", outputs.incompleteReason],
     ["review-route", outputs.reviewRoute],
     ["escalation-reason", outputs.escalationReason],
-    ["review-markdown", outputs.reviewMarkdown],
-    ["findings", outputs.findings],
+    // Models echo diff lines; the public step output must not carry raw credentials; redactText is idempotent with the publish boundary.
+    ["review-markdown", redactText(outputs.reviewMarkdown)],
+    ["findings", redactText(outputs.findings)],
     ["tool-calls", outputs.toolCalls],
     ["cache-hit-ratio", outputs.cacheHitRatio],
     ["analysis-engine", outputs.analysisEngine],

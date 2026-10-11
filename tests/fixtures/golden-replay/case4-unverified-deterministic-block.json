@@ -29,21 +29,6 @@
     "src/api/retry.ts": "import type { Request } from \"./request\";\n\nexport interface RetryOptions {\n  attempts?: number;\n}\n\nexport function withRetry(request: Request, options: RetryOptions = {}): Promise<unknown> {\n  const maxAttempts = options.attempts ?? 3;\n  const maxBackoffMs = 30000;\n  return attemptRequest(request, maxAttempts, 0, maxBackoffMs);\n}\n"
   },
   "secrets": [],
-  "recorded_model_response": {
-    "verdict": "request_changes",
-    "review_markdown": "The backoff change is correct on inspection, but the required 'unit-tests' check could not be verified in this run: no test-run evidence is available, so the mandatory check remains unresolved.\n",
-    "smart_review_requested": false,
-    "smart_review_reason": null,
-    "findings": [],
-    "requirement_coverage": null,
-    "required_check_dispositions": [
-      {
-        "check": "unit-tests",
-        "status": "unresolved",
-        "rationale": "No CI test-run evidence is available in this run; the unit-tests check cannot be marked satisfied or not_applicable."
-      }
-    ]
-  },
   "enforcement": {
     "contract": "enforcement-pipeline/v1",
     "artifact": {
