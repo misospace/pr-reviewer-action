@@ -3983,7 +3983,6 @@ test("#1016: blocker-verification artifact persists the validated head SHA the v
   // artifact now persists what the verifier received: the validated SHA,
   // or `null` when no field is a 40/64-char hex.
   const server = await startMockServer((_req, _body, res) => {
-    res.setHeader("application/json", JSON.stringify({}));
     res.setHeader("Content-Type", "application/json");
     res.end(verdictBody(baseVerdict({
       verdict: "request_changes",
