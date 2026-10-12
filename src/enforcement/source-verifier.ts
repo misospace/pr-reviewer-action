@@ -24,14 +24,27 @@ export function createHeadSourceReader(options: HeadSourceReaderOptions): Source
     }
     if (!safeFile(file)) return { status: "unavailable", reason: "path-invalid" };
 
-    let stdout: Buffer;
+    const revision = options.revision;
+    const execOptions = {
+      cwd: options.workspace,
+      timeout: timeoutSec * 1000,
+      stdio: ["ignore", "pipe", "pipe"] as const,
+      windowsHide: true,
+    };
+
+    // Pre-flight: verify the SHA names an object in this workspace's object
+    // DB. A well-formed hex SHA does not by itself prove that exact commit is
+    // local — without this check, a non-repository workspace, a corrupt
+    // object DB, or a SHA that simply does not exist in this checkout all
+    // surface as `git show` exit-nonzero, and the boundary would treat
+    // them as `not-found` (i.e. refute the blocker and risk a false
+    // APPROVE). `git cat-file -e` succeeds exactly when the SHA resolves
+    // to a commit object reachable from this workspace; any failure
+    // here is unknown evidence, not proven path absence.
     try {
-      stdout = exec("git", ["show", `${options.revision}:${file}`], {
-        cwd: options.workspace,
-        timeout: timeoutSec * 1000,
-        maxBuffer: maxBytes,
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true,
+      exec("git", ["cat-file", "-e", `${revision}^{commit}`], {
+        ...execOptions,
+        maxBuffer: 1_000_000,
       });
     } catch (error) {
       const failure = error as { code?: unknown; killed?: unknown; signal?: unknown; message?: unknown };
@@ -41,14 +54,33 @@ export function createHeadSourceReader(options: HeadSourceReaderOptions): Source
       if (failure.code === "ENOBUFS" || /buffer|large/i.test(String(failure.message ?? ""))) {
         return { status: "unavailable", reason: "too-large" };
       }
+      return { status: "unavailable", reason: "revision-unreachable" };
+    }
+
+    let stdout: Buffer;
+    try {
+      stdout = exec("git", ["show", `${revision}:${file}`], {
+        ...execOptions,
+        maxBuffer: maxBytes,
+      });
+    } catch (error) {
+      const failure = error as { code?: unknown; killed?: unknown; signal?: unknown; message?: unknown };
+      if (failure.code === "ENOENT" || failure.killed || failure.signal) {
+        return { status: "unavailable", reason: "read-failed" };
+      }
+      if (failure.code === "ENOBUFS" || /buffer|large/i.test(String(failure.message ?? ""))) {
+        return { status: "unavailable", reason: "too-large" };
+      }
+      // The SHA is reachable in this workspace's object DB; any remaining
+      // exit nonzero is the file path's proven absence in a verified tree.
       return { status: "unavailable", reason: "not-found" };
     }
 
     const raw = stdout.toString("utf8");
     const { text, redactionCount } = redactSourceTextDetailed(raw, file);
     const provenance = redactionCount > 0
-      ? sanitizedSourceProvenance(redactionCount, file, options.revision)
-      : committedSourceProvenance(file, options.revision);
+      ? sanitizedSourceProvenance(redactionCount, file, revision)
+      : committedSourceProvenance(file, revision);
     return { status: "ok", text, provenance };
   };
 }
