@@ -89,6 +89,12 @@ function resolveInherited(config: MutableConfig): void {
   inherit(config, "aiFallbackRequestTimeoutSec", "aiRequestTimeoutSec");
   inherit(config, "aiFallbackConnectTimeoutSec", "aiConnectTimeoutSec");
   inherit(config, "aiFallbackStream", "aiStream");
+  // #1009: per-lane response_format inheritance — explicit empty defaults
+  // back to the base setting so the existing `ai-response-format` stays the
+  // behavioral baseline for workflows that only set one input.
+  inherit(config, "aiPrimaryResponseFormat", "aiResponseFormat");
+  inherit(config, "aiSmartResponseFormat", "aiResponseFormat");
+  inherit(config, "aiFallbackResponseFormat", "aiResponseFormat");
   inherit(config, "aiPrimaryModel", "aiModel");
   inherit(config, "aiPrimaryBaseUrl", "aiBaseUrl");
   inherit(config, "aiPrimaryApiFormat", "aiApiFormat");

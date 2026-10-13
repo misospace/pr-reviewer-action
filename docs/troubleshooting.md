@@ -56,6 +56,19 @@ If the endpoint rejects the request after enabling this (HTTP 400 mentioning `re
 
 Fireworks/LiteLLM note: grammar-constrained decoding under `json_schema` can cause some models (e.g. `glm-4p5`, `qwen3-coder`) to under-emit `\n` inside the `review_markdown` string, producing a single-line wall of bolded headings. The action detects a payload with multiple `## ` heading markers but no newlines and fails it into the retry path — but the reliable fix is `ai-response-format: json_object` for those endpoints.
 
+### Per-lane `ai-{primary,smart,fallback}-response-format` overrides (#1009)
+
+A single global `ai-response-format` cannot fit heterogeneous deployments: a primary model behind a proxy that rejects `response_format` would force the value off for every lane, even though the smart or fallback lane supports `json_schema`. The base setting stays request-byte compatible with existing workflows, and each lane can be pinned independently:
+
+```yaml
+ai-response-format: json_object          # base / default
+ai-primary-response-format: ""            # inherits json_object (default)
+ai-smart-response-format: json_schema     # smart re-review uses structured output
+ai-fallback-response-format: ""           # inherits json_object (default)
+```
+
+Override only the lanes that need it; an empty/unset value never coerces `off` and is never silently translated between modes — the inherited base value is used. Anthropic-format lanes ignore the setting entirely, regardless of value. Changing an effective lane value changes the request byte sequence, so the unchanged-diff skip will not hide it.
+
 ### Timeouts, streaming, and retries
 
 - **Slow prompt eval** (big corpus, CPU offload): raise `ai-request-timeout-sec` (default 300). Each `tool-mode: native_loop` model turn has its own `tool-turn-timeout-sec` — raise it too if loop turns time out.
