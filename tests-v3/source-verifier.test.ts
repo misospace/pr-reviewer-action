@@ -138,6 +138,122 @@ test("source reader proves path absence only against a reachable SHA in a real g
   }
 });
 
+test("source reader proves tree absence with ls-tree before refuting a git show failure", async () => {
+  // #1016 (review pass): after the commit pre-flight succeeds, a failed
+  // `git show` must NOT be mapped straight to `not-found`. The reader has
+  // to prove absence in the validated commit tree with an exact-path
+  // `git ls-tree`; anything but a clean no-entry listing is unknown
+  // evidence (`read-failed`), never positive refutation.
+  const showFailure = Object.assign(new Error("fatal: bad object"), { status: 128 });
+  const calls: string[][] = [];
+  const readerFor = (lsTree: () => Buffer) => createHeadSourceReader({
+    workspace: "/tmp",
+    revision,
+    execFile: (_file, args) => {
+      calls.push([...args]);
+      if (args[0] === "cat-file") return Buffer.alloc(0);
+      if (args[0] === "show") throw showFailure;
+      return lsTree();
+    },
+  });
+
+  // Tree lists the exact path but the blob read failed ⇒ unknown evidence.
+  assert.deepEqual(
+    await readerFor(() => Buffer.from("100644 blob 1111111111111111111111111111111111111111\tsrc/a.ts\0"))("src/a.ts"),
+    { status: "unavailable", reason: "read-failed" },
+  );
+  // The lookup must be an exact, raw-path (-z) literal-pathspec query, never a glob.
+  const lookup = calls[calls.length - 1]!;
+  assert.deepEqual(lookup.slice(0, 3), ["ls-tree", "-z", revision]);
+  assert.equal(lookup[4], ":(literal)src/a.ts");
+
+  // Tree cleanly has no such entry ⇒ proven absence (refutation allowed).
+  assert.deepEqual(await readerFor(() => Buffer.from(""))("src/a.ts"), { status: "unavailable", reason: "not-found" });
+  // A similar-but-not-equal entry name must not count as the cited path.
+  assert.deepEqual(
+    await readerFor(() => Buffer.from("100644 blob 1111111111111111111111111111111111111111\tsrc/a.ts.bak\0"))("src/a.ts"),
+    { status: "unavailable", reason: "not-found" },
+  );
+  // Tree inspection itself fails ⇒ fail closed, not refutation.
+  assert.deepEqual(
+    await readerFor(() => { throw Object.assign(new Error("fatal: could not read tree"), { status: 128 }); })("src/a.ts"),
+    { status: "unavailable", reason: "read-failed" },
+  );
+});
+
+test("source reader returns read-failed when the tree lists the path but its blob is unreadable", async () => {
+  // Real-git reproduction of the reviewer's corrupt-object-DB shape:
+  // commit `src/literal.ts`, delete its loose blob object, and confirm the
+  // pre-flight still passes (the commit resolves) while the reader refuses
+  // to refute the read failure. A genuinely absent path in the same
+  // workspace must still be proven `not-found`.
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "source-verifier-"));
+  try {
+    git(workspace, ["init"]);
+    git(workspace, ["config", "gc.auto", "0"]);
+    const file = path.join(workspace, "src", "literal.ts");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'const marker = "⟦redacted:credential⟧";\n');
+    git(workspace, ["add", "src/literal.ts"]);
+    git(workspace, ["-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "fixture"]);
+    const sha = git(workspace, ["rev-parse", "HEAD"]);
+    const blob = git(workspace, ["rev-parse", `${sha}:src/literal.ts`]);
+    const looseBlob = path.join(workspace, ".git", "objects", blob.slice(0, 2), blob.slice(2));
+    assert.ok(fs.existsSync(looseBlob), "fixture expects the blob to be a loose object");
+    fs.rmSync(looseBlob);
+
+    const read = createHeadSourceReader({ workspace, revision: sha });
+    assert.deepEqual(await read("src/literal.ts"), { status: "unavailable", reason: "read-failed" });
+    assert.deepEqual(await read("src/missing.ts"), { status: "unavailable", reason: "not-found" });
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("source reader's read-failed keeps request_changes through the boundary", async () => {
+  // Fail-closed guarantee for the same boundary (mirrors the
+  // revision-unreachable test): a commit whose tree contains the cited
+  // path but whose blob cannot be read must surface as `unverified`
+  // (reason `read-failed`) through `applyBlockerVerification` and keep
+  // `request_changes` under the strict mapping — unknown evidence can
+  // never certify a clean review.
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "source-verifier-"));
+  try {
+    git(workspace, ["init"]);
+    git(workspace, ["config", "gc.auto", "0"]);
+    const file = path.join(workspace, "src", "literal.ts");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'const marker = "⟦redacted:credential⟧";\n');
+    git(workspace, ["add", "src/literal.ts"]);
+    git(workspace, ["-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "fixture"]);
+    const sha = git(workspace, ["rev-parse", "HEAD"]);
+    const blob = git(workspace, ["rev-parse", `${sha}:src/literal.ts`]);
+    fs.rmSync(path.join(workspace, ".git", "objects", blob.slice(0, 2), blob.slice(2)));
+
+    const readSource = createHeadSourceReader({ workspace, revision: sha });
+    const a = artifact({
+      findings: [finding({
+        message: "line 1 commits the literal `⟦redacted:credential⟧`",
+        file: "src/literal.ts",
+        line: 1,
+      })],
+    });
+    const result = await applyBlockerVerification(a.findings, { readSource, expectedRevision: sha });
+    assert.equal(result.demoted, 1);
+    assert.equal(a.findings[0]!.grounding_status, "unverified");
+    assert.equal(a.findings[0]!.severity, "minor");
+    assert.equal(result.findings[0]!.reason, "read-failed");
+
+    const outcome = applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+    assert.equal(a.verdict, "request_changes");
+    assert.equal(outcome.verdict, "request_changes");
+    assert.ok(a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"));
+    assert.ok(a.review_markdown.includes("#1016"));
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("source reader's revision-unreachable keeps request_changes through the boundary", async () => {
   // #1016 (review pass, fail-closed guarantee): a real git workspace
   // + a well-formed but non-object SHA — the exact shape of the reviewer's

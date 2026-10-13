@@ -71,9 +71,38 @@ export function createHeadSourceReader(options: HeadSourceReaderOptions): Source
       if (failure.code === "ENOBUFS" || /buffer|large/i.test(String(failure.message ?? ""))) {
         return { status: "unavailable", reason: "too-large" };
       }
-      // The SHA is reachable in this workspace's object DB; any remaining
-      // exit nonzero is the file path's proven absence in a verified tree.
-      return { status: "unavailable", reason: "not-found" };
+      // A reachable commit does not prove that a failed `git show` means
+      // the path is absent: the tree entry can exist while its blob is
+      // missing or unreadable (partial clone/promisor failure, corrupted or
+      // incomplete object DB, permissions). Before allowing the affirmative
+      // `not-found` disproof, independently prove absence in the validated
+      // commit tree with a bounded exact-path `git ls-tree` (argv-only,
+      // literal pathspec so no glob interpretation, byte- and time-capped).
+      // Anything but a clean no-entry listing is unknown evidence.
+      try {
+        // `-z`: NUL-separated entries with RAW paths. Without it git quotes
+        // non-ASCII/special names (core.quotePath), which would break the
+        // exact-name comparison and let a corrupted-blob path refute as
+        // falsely "not listed".
+        const listing = exec("git", ["ls-tree", "-z", revision, "--", `:(literal)${file}`], {
+          ...execOptions,
+          maxBuffer: 1_000_000,
+        }).toString("utf8");
+        // Entry format: `<mode> <type> <object-id>\t<path>\0`. The path
+        // starts after the FIRST tab (mode/type/object-id never contain
+        // one), so a tab inside the path itself still compares exactly.
+        for (const entry of listing.split("\0")) {
+          const tab = entry.indexOf("\t");
+          if (tab !== -1 && entry.slice(tab + 1) === file) {
+            // The path is listed in the tree but its blob could not be
+            // read: unknown evidence, never positive refutation.
+            return { status: "unavailable", reason: "read-failed" };
+          }
+        }
+        return { status: "unavailable", reason: "not-found" };
+      } catch {
+        return { status: "unavailable", reason: "read-failed" };
+      }
     }
 
     const raw = stdout.toString("utf8");
