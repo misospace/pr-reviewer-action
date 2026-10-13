@@ -353,7 +353,7 @@ def test_gate_denial_path_never_emits_untrusted_text(gate, tmp_path, monkeypatch
 
 
 def test_gate_routes_through_configured_forge_capability(gate, monkeypatch) -> None:
-    """Structural check (#837): the real ``gh_api`` wrapper never spawns
+    """Structural check: the real ``gh_api`` wrapper never spawns
     a subprocess to a forge CLI. Every forge read goes through the
     configured forge capability (``pr_reviewer.forge``), the one module
     that knows how to authenticate and how to refuse redirects safely.
@@ -365,7 +365,9 @@ def test_gate_routes_through_configured_forge_capability(gate, monkeypatch) -> N
     ``shell=True``, no token in the command line.
     """
     module = _load_module()
-    assert not hasattr(module, "subprocess"), "gh_api must not shell out to a forge CLI (#837)"
+    assert not hasattr(module, "subprocess"), (
+        "gh_api must route through the configured forge capability, not a CLI"
+    )
     # The seam the test suite stubs is the read boundary (``gh_api``);
     # the transport underneath it is the forge module. A test that
     # patches ``module.gh_api`` is sufficient to inject canned payloads.

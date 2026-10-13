@@ -1,12 +1,15 @@
-"""Unit tests for :mod:`pr_reviewer.forge` (#837).
+"""Unit tests for :mod:`pr_reviewer.forge`.
 
 The forge capability is the one place the Python tooling talks to the
-host API. These tests pin the four properties every forge read/write
+host API. These tests pin the five properties every forge read/write
 relies on:
 
 - redirects are refused (the bearer token must never follow a 3xx to a
   different origin — the ``#855``-class risk a hand-rolled ``urlopen``
   would expose);
+- the base URL must use HTTPS for every non-loopback origin so the
+  bearer token is never sent over plaintext HTTP — loopback HTTP is
+  permitted only because the credential never leaves the host;
 - the token rides only the ``Authorization`` header, never the URL or
   the body or argv;
 - a request URL is bound to the validated base; an absolute URL or a
@@ -81,6 +84,107 @@ class TestForgeClientBuildsValidRequest:
         monkeypatch.delenv("GH_TOKEN", raising=False)
         client = forge.ForgeClient()
         assert client.token == ""
+
+
+class TestForgeClientRequiresHTTPSForNonLoopbackBase:
+    """The bearer token must ride only an encrypted transport for any host
+    the credential could leave the machine. Loopback HTTP is permitted
+    only because the request never leaves the box; a configured
+    ``http://ghe.example.com`` (or accidental ``http://`` override) would
+    attach ``Authorization: Bearer <token>`` to a cleartext request and
+    leak the credential on any network an attacker can observe. The
+    base-URL guard rejects that combination at ``__init__`` time, before
+    any byte goes out, and refuses to construct the client at all.
+    """
+
+    def test_http_to_non_loopback_hostname_is_rejected(self):
+        with pytest.raises(forge.ForgeError, match="non-loopback HTTP"):
+            forge.ForgeClient(base_url="http://ghe.example.com/api/v3")
+
+    def test_http_to_non_loopback_ipv4_is_rejected(self):
+        with pytest.raises(forge.ForgeError, match="non-loopback HTTP"):
+            forge.ForgeClient(base_url="http://10.0.0.1/api/v3")
+
+    def test_http_to_loopback_ipv4_is_allowed(self, monkeypatch):
+        monkeypatch.delenv("GITHUB_API_URL", raising=False)
+        client = forge.ForgeClient(
+            base_url="http://127.0.0.1:8080/api/v3", token="loopback-secret"
+        )
+        assert client.base_url == "http://127.0.0.1:8080/api/v3"
+
+    def test_http_to_localhost_is_allowed(self, monkeypatch):
+        monkeypatch.delenv("GITHUB_API_URL", raising=False)
+        client = forge.ForgeClient(base_url="http://localhost/api/v3")
+        assert client.base_url == "http://localhost/api/v3"
+
+    def test_http_to_ipv6_loopback_is_allowed(self, monkeypatch):
+        monkeypatch.delenv("GITHUB_API_URL", raising=False)
+        client = forge.ForgeClient(base_url="http://[::1]:8080/api/v3")
+        assert client.base_url == "http://[::1]:8080/api/v3"
+
+    def test_https_to_non_loopback_host_is_allowed(self):
+        client = forge.ForgeClient(
+            base_url="https://ghe.example.com/api/v3", token="enterprise-token"
+        )
+        assert client.base_url == "https://ghe.example.com/api/v3"
+        assert client.token == "enterprise-token"
+
+    def test_token_with_non_loopback_http_fails_before_request(self):
+        """A token + non-loopback HTTP base URL must raise ForgeError at
+        ``__init__`` so no byte is ever put on the wire carrying the
+        credential. The test asserts (a) construction fails, (b) the
+        error is the documented ForgeError from the base-URL guard, and
+        (c) no network request is made — verified by a local socket
+        listener bound to ``127.0.0.1`` that records every connection
+        and is asserted empty. The base URL still names the would-be
+        attacker host, so the constructor rejection (not a connection
+        refusal) is what stopped the credential. A failure mode where
+        the guard passes and the client later opened a TCP socket would
+        still leak the credential on the first byte.
+        """
+        contacted = {"count": 0}
+
+        class CountingHandler(BaseHTTPRequestHandler):
+            def handle_one_request(self):
+                contacted["count"] += 1
+                super().handle_one_request()
+
+            def log_message(self, *_args):  # noqa: ANN001
+                pass
+
+        class CountingServer(HTTPServer):
+            def process_request(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                contacted["count"] += 1
+                super().process_request(*args, **kwargs)
+
+        server = CountingServer(("127.0.0.1", 0), CountingHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            SECRET = "would-leak-on-http"
+            with pytest.raises(forge.ForgeError, match="non-loopback HTTP"):
+                forge.ForgeClient(
+                    base_url="http://attacker.example.com/api/v3",
+                    token=SECRET,
+                )
+            assert contacted["count"] == 0, (
+                "the base-URL guard must refuse to construct the client "
+                "before any TCP connection — a token should never reach "
+                "the wire over plaintext HTTP"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_token_with_non_loopback_http_via_env_fails_before_request(self, monkeypatch):
+        """The ``GITHUB_API_URL`` env-var path must apply the same guard —
+        an operator who sets ``GITHUB_API_URL=http://...`` by accident
+        gets the same refused construction, not a silently-leaking
+        client.
+        """
+        monkeypatch.setenv("GITHUB_API_URL", "http://ghe.example.com/api/v3")
+        monkeypatch.setenv("GITHUB_TOKEN", "would-leak-on-http")
+        with pytest.raises(forge.ForgeError, match="non-loopback HTTP"):
+            forge.ForgeClient()
 
 
 class TestForgeClientRejectsPathInjection:

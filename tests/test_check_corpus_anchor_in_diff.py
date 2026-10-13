@@ -202,7 +202,7 @@ class TestCheckEntries:
 
 
 class TestGitHubClientRoutesThroughForgeCapability:
-    """#837: every forge read and write goes through the configured forge
+    """Every forge read and write goes through the configured forge
     capability (``pr_reviewer.forge``), not a forge-specific CLI like
     ``gh``. The script must not import ``shutil`` / ``subprocess`` to
     shell out; the only thing the script knows about the API URL and
@@ -218,7 +218,9 @@ class TestGitHubClientRoutesThroughForgeCapability:
     def test_does_not_shell_out_to_a_forge_cli(self):
         import check_corpus_anchor_in_diff as mod
 
-        assert not hasattr(mod, "subprocess"), "shell-out to a forge CLI is forbidden by #837"
+        assert not hasattr(mod, "subprocess"), (
+            "shell-out to a forge CLI bypasses the configured forge capability"
+        )
         assert not hasattr(mod, "shutil"), "shutil.which('gh') is a forge-CLI affordance, not a seam"
 
     def test_has_no_direct_urllib_import(self):

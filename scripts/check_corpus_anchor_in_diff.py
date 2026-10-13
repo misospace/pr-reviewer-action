@@ -36,7 +36,7 @@ Usage:
     python3 scripts/check_corpus_anchor_in_diff.py evals/corpus-human-findings.json
     python3 scripts/check_corpus_anchor_in_diff.py evals/corpus-real-prs.json --verbose
 
-Forge reads go through ``pr_reviewer.forge`` (#837) — the configured
+Forge reads go through ``pr_reviewer.forge`` — the configured
 forge capability, the one module that talks to the host API. This script
 no longer shells out to the ``gh`` CLI; the forge module's redirect-safe
 transport is what the script relies on for safe auth. The
@@ -75,9 +75,9 @@ class GitHubClient:
     ``gh``'s own token handling, so a hand-rolled ``Authorization: Bearer``
     over ``urllib.request.urlopen`` (which follows redirects by default and
     would forward the token cross-origin on a 3xx) was deliberately
-    avoided. Issue #837 moves the forge boundary into ``pr_reviewer.forge``:
-    the redirect-safe transport lives there once, and this script simply
-    calls it. No subprocess, no CLI, no argv-borne token.
+    avoided. The forge boundary now lives in ``pr_reviewer.forge``: the
+    redirect-safe transport lives there once, and this script simply calls
+    it. No subprocess, no CLI, no argv-borne token.
     """
 
     def __init__(self) -> None:

@@ -30,7 +30,7 @@ Untrusted-data hygiene (issue: fork PR metadata is attacker-controlled):
   invocations are argv lists (``shell=False``); untrusted text has no path
   into a command line.
 
-Forge boundary (#837): every read goes through ``pr_reviewer.forge`` —
+Forge boundary: every read goes through ``pr_reviewer.forge`` —
 the configured forge capability, the one module that knows how to
 authenticate and how to refuse redirects safely. This script used to
 shell out to ``gh api``; the forge module replaces that call so the
@@ -131,8 +131,8 @@ def gh_api(endpoint: str) -> dict | list:
     tests that monkeypatch ``gate.gh_api`` keep working — the seam they
     stub is the read boundary, not the transport. The actual transport is
     now ``pr_reviewer.forge.ForgeClient`` (the configured forge
-    capability, #837), which uses a redirect-safe HTTP opener and never
-    embeds the token in argv.
+    capability), which uses a redirect-safe HTTP opener and never embeds
+    the token in argv.
     """
     path, params = _split_endpoint(endpoint)
     try:

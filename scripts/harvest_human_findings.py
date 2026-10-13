@@ -28,8 +28,8 @@ after the fact — so the approval decision is read from the bot's
 present (``review_result: "clean"``), and only falls back to the raw
 ``state`` when no marker parses.
 
-GitHub reads only — every request goes through ``pr_reviewer.forge``
-(#837), the configured forge capability, the one module that knows how to
+GitHub reads only — every request goes through ``pr_reviewer.forge``,
+the configured forge capability, the one module that knows how to
 authenticate and how to refuse redirects safely. This script never shells
 out to a forge CLI and never hand-rolls an ``urllib`` request; the forge
 module is the only thing in this script that knows the API URL or carries
@@ -84,8 +84,8 @@ class GitHubClient:
 
     The script used to fork between the ``gh`` CLI (when present) and a
     ``urllib`` fallback — two transports, two failure modes, and a token
-    that had to be threaded into both. Issue #837 moves the forge
-    boundary into ``pr_reviewer.forge``: every read goes through
+    that had to be threaded into both. The forge boundary now lives in
+    ``pr_reviewer.forge``: every read goes through
     :class:`pr_reviewer.forge.ForgeClient`, the redirect-safe transport
     lives there once, and the token is configured (never argv) by the
     forge module.

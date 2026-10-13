@@ -13,6 +13,9 @@ script imports a forge-specific CLI like ``gh`` or hand-rolls its own
   embedded in a URL;
 - refuses redirects so the bearer token cannot leak across origins (the
   ``#855``-class risk a hand-rolled ``urlopen`` call would expose);
+- requires HTTPS for every non-loopback origin so the bearer token cannot
+  be sent in cleartext over an unencrypted transport — loopback HTTP is
+  permitted only because the credential never leaves the host;
 - validates the request URL before attaching the token, so a token cannot
   bind to an unvalidated origin;
 - emits a fixed, credential-free error string on failure — never the raw
@@ -23,6 +26,14 @@ copies the request headers, including ``Authorization``, onto a redirected
 request, even across origins. The shared ``OPENER_NO_REDIRECT`` opener in
 :mod:`pr_reviewer.http_safe` is the one mechanism that closes that hole,
 and this module uses it for every request.
+
+HTTPS for non-loopback is the second safe default: redirect refusal
+prevents the bearer from *following* an attacker-controlled 3xx to a
+different host, but a configured ``GITHUB_API_URL=http://ghe.example.com``
+would still attach ``Authorization: Bearer <token>`` to a request over
+plaintext HTTP — the credential would leak in transit on any network the
+attacker can observe. The base-URL guard rejects that combination at
+:func:`_build_base_url` time, before any byte goes out.
 
 The module exposes :class:`ForgeClient` (one configured instance per forge
 host) and a module-level :func:`default_forge` for the common case of
@@ -69,6 +80,36 @@ class ForgeError(RuntimeError):
     """
 
 
+_LOOPBACK_HOSTNAMES = frozenset({"localhost", "ip6-localhost", "ip6-loopback"})
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    """True for hosts whose names imply a local-only connection.
+
+    Covers the loopback DNS names (``localhost`` and its IPv6 aliases) and
+    the IPv4 loopback range ``127.0.0.0/8`` (any address whose first
+    ``127.`` octet qualifies, including ``127.0.0.1`` and ``127.1.2.3``).
+    IPv6 loopback (``::1``) is covered by ``ip6-localhost`` /
+    ``ip6-loopback`` and a literal ``::1``. Used to gate the only ``http``
+    exception to the HTTPS-only base-URL guard.
+    """
+    lowered = (hostname or "").strip().lower()
+    if lowered in _LOOPBACK_HOSTNAMES:
+        return True
+    if lowered == "::1":
+        return True
+    if lowered.startswith("[") and lowered.endswith("]"):
+        lowered = lowered[1:-1]
+    parts = lowered.split(".")
+    if len(parts) == 4 and all(part.isdigit() for part in parts):
+        try:
+            octets = [int(part) for part in parts]
+        except ValueError:
+            return False
+        return octets[0] == 127
+    return False
+
+
 def _build_base_url(explicit: str | None) -> str:
     """Return the configured base URL, with a hard requirement that the
     caller-supplied value is well-formed.
@@ -77,7 +118,11 @@ def _build_base_url(explicit: str | None) -> str:
     taken verbatim from ``GITHUB_API_URL`` (which may point at a self-hosted
     GitHub Enterprise instance). The scheme is restricted to ``http`` or
     ``https`` so the forge capability cannot be redirected to an exotic
-    scheme; ``https`` is the recommended default for production.
+    scheme, and plaintext HTTP is permitted ONLY when the host is a
+    loopback address — a configured ``http://ghe.example.com`` would
+    attach ``Authorization: Bearer <token>`` to a cleartext request and
+    leak the credential on any network an attacker can observe, so the
+    base-URL guard rejects that combination before any byte goes out.
     """
     raw = (explicit if explicit is not None else os.environ.get("GITHUB_API_URL", "")).strip()
     if not raw:
@@ -85,6 +130,8 @@ def _build_base_url(explicit: str | None) -> str:
     parsed = urllib.parse.urlparse(raw)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise ForgeError("invalid GITHUB_API_URL")
+    if parsed.scheme == "http" and not _is_loopback_host(parsed.hostname or ""):
+        raise ForgeError("invalid GITHUB_API_URL: non-loopback HTTP is not permitted")
     # Reassemble without query/fragment; the path is kept so the caller can
     # point at a /api/v3 root on Enterprise.
     return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
@@ -113,7 +160,10 @@ class ForgeClient:
     to requests whose URL is bound to the validated base, and only via the
     ``Authorization`` header — never via argv, URL parameters, or the body.
     Redirects are refused, so a 3xx response never propagates the token to
-    a different host.
+    a different host, and the base URL must use HTTPS unless it points at
+    a loopback address — a plaintext HTTP base URL would let the bearer
+    token travel over an unencrypted transport. Construction raises
+    :class:`ForgeError` for an invalid base URL before any byte is sent.
     """
 
     def __init__(
