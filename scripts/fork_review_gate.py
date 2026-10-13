@@ -30,6 +30,13 @@ Untrusted-data hygiene (issue: fork PR metadata is attacker-controlled):
   invocations are argv lists (``shell=False``); untrusted text has no path
   into a command line.
 
+Forge boundary (#837): every read goes through ``pr_reviewer.forge`` —
+the configured forge capability, the one module that knows how to
+authenticate and how to refuse redirects safely. This script used to
+shell out to ``gh api``; the forge module replaces that call so the
+trust boundary is one well-tested Python module instead of a subprocess
+whose argv can grow.
+
 Exit codes:
 
 - ``gate``: 0 = a decision was reached (inspect the ``proceed`` output;
@@ -50,7 +57,6 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 
 LABEL_DEFAULT = "ai-review-fork"
@@ -79,25 +85,64 @@ class GateError(Exception):
     """Unexpected failure — the caller must fail visibly, never silently skip."""
 
 
+# Build the configured forge capability once at import time. Tests that
+# need to stub reads use ``monkeypatch.setattr(gate, "_get_forge", stub)``
+# to swap the factory, which is the documented injection point. The
+# script-level import keeps the default behavior aligned with the rest of
+# the tooling: the same ``GITHUB_API_URL`` and ``GITHUB_TOKEN``/``GH_TOKEN``
+# configuration the harvest, corpus, and judge tooling uses.
+def _get_forge():
+    """Return the configured forge capability, lazily.
+
+    Module-level import would force a forge instance per process even when
+    a test stubs the read path, so we instantiate on first use. The
+    function is also the single hook tests use to swap the transport.
+    """
+    # Imported here so the rest of the module can be loaded in a
+    # hermetic test environment without a working GITHUB_API_URL.
+    from pr_reviewer.forge import default_forge
+
+    return default_forge()
+
+
+def _split_endpoint(endpoint: str) -> tuple[str, dict[str, str]]:
+    """Split ``repos/.../pulls?state=open`` into ``(path, params)``.
+
+    Tests pass plain paths (no query) and full endpoints with a query;
+    the forge module's ``get`` accepts both shapes via its ``params``
+    argument.
+    """
+    if "?" not in endpoint:
+        return endpoint, {}
+    path, query = endpoint.split("?", 1)
+    params: dict[str, str] = {}
+    for part in query.split("&"):
+        if not part:
+            continue
+        key, _, value = part.partition("=")
+        params[key] = value
+    return path, params
+
+
 def gh_api(endpoint: str) -> dict | list:
-    """Run a read-only ``gh api`` call, argv-only (no shell interpolation)."""
-    gh = os.environ.get("GH_PATH", "gh")
-    proc = subprocess.run(
-        [gh, "api", endpoint],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        shell=False,
-        check=False,
-    )
-    if proc.returncode != 0:
-        raise GateError(
-            f"gh api {endpoint.split('?')[0]} failed with exit {proc.returncode}"
-        )
+    """Run a read-only forge read through the configured forge capability.
+
+    The function is kept under the historical ``gh_api`` name so existing
+    tests that monkeypatch ``gate.gh_api`` keep working — the seam they
+    stub is the read boundary, not the transport. The actual transport is
+    now ``pr_reviewer.forge.ForgeClient`` (the configured forge
+    capability, #837), which uses a redirect-safe HTTP opener and never
+    embeds the token in argv.
+    """
+    path, params = _split_endpoint(endpoint)
     try:
-        return json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
-        raise GateError(f"gh api {endpoint.split('?')[0]} returned non-JSON") from exc
+        result = _get_forge().get(path, params)
+    except Exception as exc:  # noqa: BLE001 - forge raises a fixed error class
+        label = endpoint.split("?", 1)[0]
+        raise GateError(f"forge read {label} failed: {exc}") from None
+    if not isinstance(result, (dict, list)):
+        raise GateError(f"forge read {endpoint.split('?', 1)[0]} returned non-JSON")
+    return result
 
 
 def _repo() -> str:

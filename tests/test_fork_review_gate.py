@@ -352,29 +352,24 @@ def test_gate_denial_path_never_emits_untrusted_text(gate, tmp_path, monkeypatch
     assert "$" not in out["reason"] and "pwn" not in out["reason"]
 
 
-def test_gate_uses_argv_only_subprocess(gate, monkeypatch) -> None:
-    """Structural check: the real gh_api wrapper never spawns a shell."""
+def test_gate_routes_through_configured_forge_capability(gate, monkeypatch) -> None:
+    """Structural check (#837): the real ``gh_api`` wrapper never spawns
+    a subprocess to a forge CLI. Every forge read goes through the
+    configured forge capability (``pr_reviewer.forge``), the one module
+    that knows how to authenticate and how to refuse redirects safely.
+
+    The historical guard (argv-only, ``shell=False``) is now covered by
+    the redirect-safety and token-handling tests on
+    :mod:`pr_reviewer.forge`. This test pins the structural fact that
+    the gate itself has no subprocess affordance — no argv, no
+    ``shell=True``, no token in the command line.
+    """
     module = _load_module()
-    captured: list[dict] = []
-
-    def spy_run(*args: Any, **kwargs: Any) -> Any:
-        captured.append(kwargs)
-
-        class Proc:
-            returncode = 0
-            stdout = "[]"
-            stderr = ""
-
-        return Proc()
-
-    # monkeypatch restores the stdlib module attribute after the test —
-    # a plain assignment here would leak the stub into every later
-    # subprocess-based test in the suite (the full-suite pollution class).
-    monkeypatch.setattr(module.subprocess, "run", spy_run)
-    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
-    module.gh_api("repos/misospace/pr-reviewer-action/pulls/747")
-    assert len(captured) == 1
-    assert captured[0].get("shell") is False
+    assert not hasattr(module, "subprocess"), "gh_api must not shell out to a forge CLI (#837)"
+    # The seam the test suite stubs is the read boundary (``gh_api``);
+    # the transport underneath it is the forge module. A test that
+    # patches ``module.gh_api`` is sufficient to inject canned payloads.
+    assert hasattr(module, "gh_api") and callable(module.gh_api)
 
 
 # ---------------------------------------------------------------------------
