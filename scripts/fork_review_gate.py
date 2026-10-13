@@ -58,6 +58,19 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
+
+# Make the repository root importable when this script is invoked by path
+# (``python3 scripts/fork_review_gate.py`` in ``.github/workflows/fork-ai-review.yaml``)
+# so the configured forge capability in ``pr_reviewer.forge`` is reachable.
+# ``scripts/check_corpus_anchor_in_diff.py`` and
+# ``scripts/harvest_human_findings.py`` carry the same pattern — three review
+# scripts, one direct-entrypoint contract.
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT = SCRIPT_DIR.parent
+for _p in (str(ROOT), str(SCRIPT_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 LABEL_DEFAULT = "ai-review-fork"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -109,12 +122,20 @@ def _split_endpoint(endpoint: str) -> tuple[str, dict[str, str]]:
     """Split ``repos/.../pulls?state=open`` into ``(path, params)``.
 
     Tests pass plain paths (no query) and full endpoints with a query;
-    the forge module's ``get`` accepts both shapes via its ``params``
-    argument.
+    the forge module's :meth:`ForgeClient.get` requires the ``path`` to
+    start with a single ``/`` (it rejects ``//`` and bare relative
+    shapes). The historical ``gh api`` endpoint accepted either shape, so
+    the contract this wrapper used to honor was "leading slash optional";
+    we now normalize to the canonical leading-slash form so the script
+    survives the rewrite onto the configured forge capability without
+    changing every call site.
     """
     if "?" not in endpoint:
-        return endpoint, {}
-    path, query = endpoint.split("?", 1)
+        path, query = endpoint, ""
+    else:
+        path, query = endpoint.split("?", 1)
+    if not path.startswith("/"):
+        path = "/" + path
     params: dict[str, str] = {}
     for part in query.split("&"):
         if not part:
