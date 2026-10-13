@@ -86,6 +86,8 @@ test("source reader returns exact committed git content and provenance", async (
       assert.match(result.text, /⟦redacted:credential⟧/);
     }
     assert.deepEqual(await read("src/unknown.ts"), { status: "unavailable", reason: "not-found" });
+    // Non-normalized citations read the canonical committed entry.
+    assert.deepEqual(await read("./src//literal.ts"), result);
     assert.deepEqual(await createHeadSourceReader({ workspace, revision: "bogus" })("src/literal.ts"), {
       status: "unavailable", reason: "no-exact-revision",
     });
@@ -162,9 +164,11 @@ test("source reader proves tree absence with ls-tree before refuting a git show 
     await readerFor(() => Buffer.from("100644 blob 1111111111111111111111111111111111111111\tsrc/a.ts\0"))("src/a.ts"),
     { status: "unavailable", reason: "read-failed" },
   );
-  // The lookup must be an exact, raw-path (-z) literal-pathspec query, never a glob.
+  // The lookup must be an exact, raw-path (-z) literal-pathspec query,
+  // never a glob, and must use the `--` separator.
   const lookup = calls[calls.length - 1]!;
   assert.deepEqual(lookup.slice(0, 3), ["ls-tree", "-z", revision]);
+  assert.equal(lookup[3], "--");
   assert.equal(lookup[4], ":(literal)src/a.ts");
 
   // Tree cleanly has no such entry ⇒ proven absence (refutation allowed).
@@ -179,6 +183,60 @@ test("source reader proves tree absence with ls-tree before refuting a git show 
     await readerFor(() => { throw Object.assign(new Error("fatal: could not read tree"), { status: 128 }); })("src/a.ts"),
     { status: "unavailable", reason: "read-failed" },
   );
+});
+
+test("source reader canonicalizes non-normalized citations and compares tree names byte-exactly", async () => {
+  // #1016 (review pass, minor): git keys trees by the CANONICAL path — a
+  // citation like `src//a.ts` fails `git show` even when `src/a.ts` exists,
+  // while `git ls-tree` reports the canonical entry name — so a raw
+  // non-normalized citation could still reach `not-found`. The reader
+  // normalizes empty/dot segments before BOTH lookups; the name
+  // comparison is byte-exact on the raw `-z` listing.
+  const calls: string[][] = [];
+  const reader = createHeadSourceReader({
+    workspace: "/tmp",
+    revision,
+    execFile: (_file, args) => {
+      calls.push([...args]);
+      if (args[0] === "cat-file") return Buffer.alloc(0);
+      if (args[0] === "show") {
+        // Mirror git: only the canonical revarg resolves.
+        if (args[1] === `${revision}:src/a.ts`) return Buffer.from("const x = 1;\n");
+        throw Object.assign(new Error("fatal: bad object"), { status: 128 });
+      }
+      // ls-tree: canonical entry present (blob unreadable for the failing
+      // revargs is impossible here — show succeeded); return the entry for
+      // every lookup to prove the comparison uses the canonical name.
+      return Buffer.from("100644 blob 1111111111111111111111111111111111111111\tsrc/a.ts\0");
+    },
+  });
+  for (const citation of ["src//a.ts", "./src/a.ts", "src/./a.ts"]) {
+    const result = await reader(citation);
+    assert.equal(result.status, "ok", `expected ${JSON.stringify(citation)} to read the canonical entry`);
+  }
+  // The revarg the reader actually ran is canonical for every citation form.
+  const showRevargs = calls.filter((args) => args[0] === "show").map((args) => args[1]);
+  assert.deepEqual(showRevargs, [`${revision}:src/a.ts`, `${revision}:src/a.ts`, `${revision}:src/a.ts`]);
+
+  // Byte-exact comparison: an entry whose raw bytes merely LOOK like the
+  // cited path after lossy UTF-8 decoding (invalid UTF-8 → U+FFFD) must
+  // not match, and a clean no-match listing still proves absence.
+  const byteExact = createHeadSourceReader({
+    workspace: "/tmp",
+    revision,
+    execFile: (_file, args) => {
+      if (args[0] === "cat-file") return Buffer.alloc(0);
+      if (args[0] === "show") throw Object.assign(new Error("fatal: bad object"), { status: 128 });
+      // Raw byte `0xff` in the entry name: decodes to U+FFFD, not "café".
+      return Buffer.concat([Buffer.from("100644 blob 1111111111111111111111111111111111111111\tsrc/caf"), Buffer.from([0xff]), Buffer.from(".ts\0")]);
+    },
+  });
+  assert.deepEqual(await byteExact("src/café.ts"), { status: "unavailable", reason: "not-found" });
+
+  // Empty/dot-only citations are path-invalid, never a root-tree lookup.
+  for (const citation of [".", "./", "//"]) {
+    assert.deepEqual(await reader(citation), { status: "unavailable", reason: "path-invalid" }, citation);
+  }
 });
 
 test("source reader returns read-failed when the tree lists the path but its blob is unreadable", async () => {

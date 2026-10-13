@@ -4,6 +4,20 @@ import { committedSourceProvenance, sanitizedSourceProvenance } from "../context
 import { safeFile } from "./blocker-verification.js";
 import type { SourceReadResult, SourceReader } from "./blocker-verification.js";
 
+/**
+ * Canonicalize a cited tree path before it is used as a git revarg or
+ * pathspec. Git's tree lookups key on the canonical path — a raw citation
+ * like `src//a.ts` or `./src/a.ts` fails `git show` even when the canonical
+ * entry exists — so the reader normalizes empty and `.` segments on both
+ * sides of the seam and never lets a normalization mismatch become an
+ * affirmative "path absent". `safeFile` has already rejected absolute
+ * paths, leading `-`, `..` segments, and NUL, so stripping empty/dot
+ * segments cannot introduce traversal.
+ */
+function canonicalTreePath(file: string): string {
+  return file.split("/").filter((segment) => segment !== "" && segment !== ".").join("/");
+}
+
 export interface HeadSourceReaderOptions {
   workspace: string;
   revision: string | null | undefined;
@@ -23,6 +37,8 @@ export function createHeadSourceReader(options: HeadSourceReaderOptions): Source
       return { status: "unavailable", reason: "no-exact-revision" };
     }
     if (!safeFile(file)) return { status: "unavailable", reason: "path-invalid" };
+    const treePath = canonicalTreePath(file);
+    if (treePath === "") return { status: "unavailable", reason: "path-invalid" };
 
     const revision = options.revision;
     const execOptions = {
@@ -59,7 +75,7 @@ export function createHeadSourceReader(options: HeadSourceReaderOptions): Source
 
     let stdout: Buffer;
     try {
-      stdout = exec("git", ["show", `${revision}:${file}`], {
+      stdout = exec("git", ["show", `${revision}:${treePath}`], {
         ...execOptions,
         maxBuffer: maxBytes,
       });
@@ -84,32 +100,45 @@ export function createHeadSourceReader(options: HeadSourceReaderOptions): Source
         // non-ASCII/special names (core.quotePath), which would break the
         // exact-name comparison and let a corrupted-blob path refute as
         // falsely "not listed".
-        const listing = exec("git", ["ls-tree", "-z", revision, "--", `:(literal)${file}`], {
+        const listing = exec("git", ["ls-tree", "-z", revision, "--", `:(literal)${treePath}`], {
           ...execOptions,
           maxBuffer: 1_000_000,
-        }).toString("utf8");
+        });
         // Entry format: `<mode> <type> <object-id>\t<path>\0`. The path
         // starts after the FIRST tab (mode/type/object-id never contain
         // one), so a tab inside the path itself still compares exactly.
-        for (const entry of listing.split("\0")) {
-          const tab = entry.indexOf("\t");
-          if (tab !== -1 && entry.slice(tab + 1) === file) {
+        // The comparison is byte-exact on the raw listing: a tree path
+        // with non-UTF-8 bytes must never match (or falsely miss through
+        // a lossy decode) the cited path.
+        const wanted = Buffer.from(treePath, "utf8");
+        let cursor = 0;
+        while (cursor < listing.length) {
+          const nul = listing.indexOf(0, cursor);
+          const entryEnd = nul === -1 ? listing.length : nul;
+          const tab = listing.indexOf(0x09, cursor);
+          if (tab !== -1 && tab < entryEnd && listing.subarray(tab + 1, entryEnd).equals(wanted)) {
             // The path is listed in the tree but its blob could not be
             // read: unknown evidence, never positive refutation.
             return { status: "unavailable", reason: "read-failed" };
           }
+          if (nul === -1) break;
+          cursor = nul + 1;
         }
         return { status: "unavailable", reason: "not-found" };
-      } catch {
+      } catch (error) {
+        const failure = error as { code?: unknown; message?: unknown };
+        if (failure.code === "ENOBUFS" || /buffer|large/i.test(String(failure.message ?? ""))) {
+          return { status: "unavailable", reason: "too-large" };
+        }
         return { status: "unavailable", reason: "read-failed" };
       }
     }
 
     const raw = stdout.toString("utf8");
-    const { text, redactionCount } = redactSourceTextDetailed(raw, file);
+    const { text, redactionCount } = redactSourceTextDetailed(raw, treePath);
     const provenance = redactionCount > 0
-      ? sanitizedSourceProvenance(redactionCount, file, revision)
-      : committedSourceProvenance(file, revision);
+      ? sanitizedSourceProvenance(redactionCount, treePath, revision)
+      : committedSourceProvenance(treePath, revision);
     return { status: "ok", text, provenance };
   };
 }
