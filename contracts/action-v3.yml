@@ -49,7 +49,19 @@ inputs:
     v2_id: ai_response_format
     required: false
     default: "off"
-    description: "Structured-output mode for OpenAI-compatible endpoints (including LiteLLM): off (default), json_object, or json_schema (enforces a verdict/review_markdown schema). Ignored for the anthropic format. Improves output reliability with smaller local models. Applies to both the primary and fallback review calls."
+    description: "Structured-output mode for OpenAI-compatible endpoints (including LiteLLM): off (default), json_object, or json_schema (enforces a verdict/review_markdown schema). Ignored for the anthropic format. Improves output reliability with smaller local models. Acts as the base/default for ai-primary-response-format, ai-smart-response-format, and ai-fallback-response-format: an unset lane override inherits this value rather than forcing off."
+  - id: ai-primary-response-format
+    required: false
+    default: ""
+    description: "Primary-lane override for the OpenAI response_format mode (off, json_object, or json_schema). Empty (the default) inherits ai-response-format, so existing single-value workflows stay request-byte compatible. Empty/unset is not coerced to off — a primary model known to reject response_format can be pinned to off here while smart/fallback lanes keep their structured-output selection. Ignored for the anthropic format and never silently translated between modes."
+  - id: ai-smart-response-format
+    required: false
+    default: ""
+    description: "Smart-lane override for the OpenAI response_format mode (off, json_object, or json_schema). Empty (the default) inherits ai-response-format. Used by the reviewer-requested smart re-review (#721) so the smart model can use a richer structured-output setting than the primary lane. Ignored for the anthropic format."
+  - id: ai-fallback-response-format
+    required: false
+    default: ""
+    description: "Fallback-lane override for the OpenAI response_format mode (off, json_object, or json_schema). Empty (the default) inherits ai-response-format. The fallback lane is availability recovery, not quality escalation (#965); this input is the per-lane choice, not a promotion. Ignored for the anthropic format."
   - id: ai-tokens-param
     v2_id: ai_tokens_param
     required: false

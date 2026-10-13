@@ -115,6 +115,33 @@ test("anthropic omits temperature when empty and supports trailing_task", () => 
   assert.equal((body.messages as { content: string }[])[0]!.content, "CORPUS\n\nUSER");
 });
 
+test("#1009: request body honors the resolved lane response_format", () => {
+  // Each lane's effective value is chosen by the routing layer; this test
+  // pins that the request body shape matches the chosen value and is
+  // distinct across lanes. The omitted path is the request builder's
+  // response to a lane override of `off`, so the per-lane selection is
+  // an actual request-byte change between lanes, not just telemetry.
+  const off = buildModelRequest(config({ responseFormat: "off" })).body as unknown as Record<string, unknown>;
+  assert.equal("response_format" in off, false);
+  const objectBody = buildModelRequest(config({ responseFormat: "json_object" })).body as unknown as Record<string, unknown>;
+  assert.deepEqual(objectBody.response_format, { type: "json_object" });
+  const schemaBody = buildModelRequest(config({ responseFormat: "json_schema" })).body as unknown as Record<string, unknown>;
+  assert.deepEqual(schemaBody.response_format, OPENAI_VERDICT_JSON_SCHEMA);
+});
+
+test("#1009: anthropic lanes drop response_format regardless of the lane selection (#1009 acceptance)", () => {
+  // Anthropic transport ignores OpenAI response_format semantics. The
+  // routing layer can resolve a per-lane value of `json_schema` for an
+  // Anthropic-format smart lane (the user might pipe it through anyway);
+  // the request builder still drops the key, matching v2's request-shape
+  // contract.
+  for (const responseFormat of ["off", "json_object", "json_schema"] as const) {
+    const payload = buildModelRequest(config({ apiFormat: "anthropic", responseFormat }));
+    const body = payload.body as unknown as Record<string, unknown>;
+    assert.equal("response_format" in body, false, responseFormat);
+  }
+});
+
 test("request construction is provider-neutral: no branching on model names", () => {
   // The same config with different model names produces identical structure.
   const a = buildModelRequest(config({ model: "gpt-9-mini" }));

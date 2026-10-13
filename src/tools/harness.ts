@@ -1633,8 +1633,16 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         }
         const tempRaw = (env.AI_TEMPERATURE ?? "").trim();
         const temperature = tempRaw ? Number(tempRaw) : null;
-        const rf = (env.AI_RESPONSE_FORMAT ?? "off").trim().toLowerCase();
-        const responseFormat = rf === "json_object" || rf === "json_schema" ? rf : null;
+        // #1009: per-lane `response_format` resolution; the tier-aware helper
+        // treats the inheritance rules identically to the rest of the v3
+        // config chain and keeps Anthropic-format lanes unaffected.
+        const tierKey = input.tier === "smart"
+          ? "AI_SMART_RESPONSE_FORMAT"
+          : input.tier === "fallback"
+            ? "AI_FALLBACK_RESPONSE_FORMAT"
+            : "AI_PRIMARY_RESPONSE_FORMAT";
+        const rfRaw = ((env[tierKey] ?? env.AI_RESPONSE_FORMAT ?? "off")).trim().toLowerCase();
+        const responseFormat = rfRaw === "json_object" || rfRaw === "json_schema" ? rfRaw : null;
         const verdictPayload = conversation.toRequestPayload(input.apiFormat, input.model, {
           stream,
           maxTokens: envIntBounded(env, "AI_MAX_TOKENS", 8192, 256, 200000),

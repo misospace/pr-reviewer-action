@@ -703,7 +703,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
                 apiKey: profiles.primary.apiKey,
                 maxTokens: Number(env.CLAIM_FALSIFICATION_MAX_TOKENS ?? "4096") || 4096,
                 temperature,
-                responseFormat: env.AI_RESPONSE_FORMAT ?? "off",
+                responseFormat: profiles.primary.responseFormat,
                 tokensParam: env.AI_TOKENS_PARAM ?? "max_tokens",
                 stream: (env.AI_STREAM ?? "true").toLowerCase() === "true",
                 timeoutSec: claimsTimeoutSec,
@@ -957,7 +957,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
             apiKey: profiles.primary.apiKey,
             maxTokens: Number(env.REQUIREMENT_TRACE_REPAIR_MAX_TOKENS ?? "4096") || 4096,
             temperature,
-            responseFormat: env.AI_RESPONSE_FORMAT ?? "off",
+            responseFormat: profiles.primary.responseFormat,
             tokensParam: env.AI_TOKENS_PARAM ?? "max_tokens",
             stream: (env.AI_STREAM ?? "true").toLowerCase() === "true",
             timeoutSec: repairTimeoutSec,
@@ -1535,7 +1535,7 @@ function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | 
     shape: tierRequestShape(tier === "smart" ? "smart" : tier === "fallback" ? "fallback" : "primary", env),
     maxTokens: aiMaxTokens,
     temperature: temperatureRaw === "" ? "" : Number(temperatureRaw) || 0.1,
-    responseFormat: (env.AI_RESPONSE_FORMAT ?? "off") as TierProfile["responseFormat"],
+    responseFormat: resolved.responseFormat,
     tokensParam: (env.AI_TOKENS_PARAM ?? "max_tokens") as TierProfile["tokensParam"],
   };
 }

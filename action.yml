@@ -42,9 +42,21 @@ inputs:
     required: false
     default: "0.1"
   ai-response-format:
-    description: "Structured-output mode for OpenAI-compatible endpoints (including LiteLLM): off (default), json_object, or json_schema (enforces a verdict/review_markdown schema). Ignored for the anthropic format. Improves output reliability with smaller local models. Applies to both the primary and fallback review calls."
+    description: "Structured-output mode for OpenAI-compatible endpoints (including LiteLLM): off (default), json_object, or json_schema (enforces a verdict/review_markdown schema). Ignored for the anthropic format. Improves output reliability with smaller local models. Acts as the base/default for ai-primary-response-format, ai-smart-response-format, and ai-fallback-response-format: an unset lane override inherits this value rather than forcing off."
     required: false
     default: "off"
+  ai-primary-response-format:
+    description: Primary-lane override for the OpenAI response_format mode (off, json_object, or json_schema). Empty (the default) inherits ai-response-format, so existing single-value workflows stay request-byte compatible. Empty/unset is not coerced to off — a primary model known to reject response_format can be pinned to off here while smart/fallback lanes keep their structured-output selection. Ignored for the anthropic format and never silently translated between modes.
+    required: false
+    default: ""
+  ai-smart-response-format:
+    description: Smart-lane override for the OpenAI response_format mode (off, json_object, or json_schema). Empty (the default) inherits ai-response-format. Used by the reviewer-requested smart re-review (#721) so the smart model can use a richer structured-output setting than the primary lane. Ignored for the anthropic format.
+    required: false
+    default: ""
+  ai-fallback-response-format:
+    description: Fallback-lane override for the OpenAI response_format mode (off, json_object, or json_schema). Empty (the default) inherits ai-response-format. The fallback lane is availability recovery, not quality escalation (#965); this input is the per-lane choice, not a promotion. Ignored for the anthropic format.
+    required: false
+    default: ""
   ai-tokens-param:
     description: "Token-limit field name for OpenAI-compatible requests: max_tokens (default) or max_completion_tokens (required by newer OpenAI reasoning models). Ignored for anthropic."
     required: false

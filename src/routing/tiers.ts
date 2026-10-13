@@ -21,6 +21,10 @@ export interface ResolvedTier extends TierSettings {
   stream: boolean;
   requestTimeoutSec: number;
   connectTimeoutSec: number;
+  /** #1009: per-lane OpenAI response_format (off/json_object/json_schema).
+   * Empty lane overrides inherit `ai-response-format`. The Anthropic transport
+   * ignores this field regardless of value. */
+  responseFormat: "off" | "json_object" | "json_schema";
 }
 export interface TierProfiles {
   primary: ResolvedTier;
@@ -48,6 +52,25 @@ function numberValue(env: EnvLike, key: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 function trueValue(raw: string | undefined): boolean { return (raw ?? "").trim().toLowerCase() === "true"; }
+/** #1009: per-lane `response_format` resolution. Empty/unset lane overrides
+ * inherit `ai-response-format` (the contract base), so existing single-value
+ * workflows stay request-byte compatible. Only OpenAI-compatible lanes use
+ * the value; the Anthropic transport ignores it (see request.ts). */
+export function tierResponseFormat(tier: "primary" | "smart" | "fallback", env: EnvLike): "off" | "json_object" | "json_schema" {
+  const base = (env.AI_RESPONSE_FORMAT ?? "off").trim().toLowerCase();
+  const key = tier === "smart"
+    ? "AI_SMART_RESPONSE_FORMAT"
+    : tier === "fallback"
+      ? "AI_FALLBACK_RESPONSE_FORMAT"
+      : "AI_PRIMARY_RESPONSE_FORMAT";
+  const laneValue = (env[key] ?? "").trim().toLowerCase();
+  const resolved = laneValue === "" ? base : laneValue;
+  if (resolved === "json_object" || resolved === "json_schema" || resolved === "off") return resolved;
+  // The contract validates user-supplied values, but values that reach here
+  // via ambient overrides or test rigs may be other strings; quietly fall
+  // back to off rather than crashing the review.
+  return "off";
+}
 
 /** #965: the primary-first policy. In `auto` mode the initial review always
  * uses the primary profile; the smart model is reached only when the completed
@@ -135,12 +158,21 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
   const connectTimeout = numberValue(env, "AI_CONNECT_TIMEOUT_SEC", 30);
   const fallbackStream = trueValue(env.AI_FALLBACK_STREAM);
   return {
-    primary: { ...primary, resolved: Boolean(primary.model), retries: primaryRetries, retryDelaySec: delay, stream, requestTimeoutSec: timeout, connectTimeoutSec: connectTimeout },
-    smart: { ...smart, resolved: smartResolved, retries: numberValue(env, "AI_SMART_RETRIES", 2), retryDelaySec: delay, stream, requestTimeoutSec: timeout, connectTimeoutSec: connectTimeout },
+    primary: {
+      ...primary, resolved: Boolean(primary.model), retries: primaryRetries, retryDelaySec: delay, stream,
+      requestTimeoutSec: timeout, connectTimeoutSec: connectTimeout,
+      responseFormat: tierResponseFormat("primary", env),
+    },
+    smart: {
+      ...smart, resolved: smartResolved, retries: numberValue(env, "AI_SMART_RETRIES", 2), retryDelaySec: delay, stream,
+      requestTimeoutSec: timeout, connectTimeoutSec: connectTimeout,
+      responseFormat: tierResponseFormat("smart", env),
+    },
     fallback: {
       ...fallback, resolved: Boolean(fallback.baseUrl && fallback.model), retries: numberValue(env, "AI_FALLBACK_RETRIES", 2), retryDelaySec: delay,
       stream: fallbackStream, requestTimeoutSec: numberValue(env, "AI_FALLBACK_REQUEST_TIMEOUT_SEC", timeout),
       connectTimeoutSec: numberValue(env, "AI_FALLBACK_CONNECT_TIMEOUT_SEC", connectTimeout),
+      responseFormat: tierResponseFormat("fallback", env),
     },
   };
 }
