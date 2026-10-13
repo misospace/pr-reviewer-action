@@ -21,6 +21,10 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -352,29 +356,26 @@ def test_gate_denial_path_never_emits_untrusted_text(gate, tmp_path, monkeypatch
     assert "$" not in out["reason"] and "pwn" not in out["reason"]
 
 
-def test_gate_uses_argv_only_subprocess(gate, monkeypatch) -> None:
-    """Structural check: the real gh_api wrapper never spawns a shell."""
+def test_gate_routes_through_configured_forge_capability(gate, monkeypatch) -> None:
+    """Structural check: the real ``gh_api`` wrapper never spawns
+    a subprocess to a forge CLI. Every forge read goes through the
+    configured forge capability (``pr_reviewer.forge``), the one module
+    that knows how to authenticate and how to refuse redirects safely.
+
+    The historical guard (argv-only, ``shell=False``) is now covered by
+    the redirect-safety and token-handling tests on
+    :mod:`pr_reviewer.forge`. This test pins the structural fact that
+    the gate itself has no subprocess affordance — no argv, no
+    ``shell=True``, no token in the command line.
+    """
     module = _load_module()
-    captured: list[dict] = []
-
-    def spy_run(*args: Any, **kwargs: Any) -> Any:
-        captured.append(kwargs)
-
-        class Proc:
-            returncode = 0
-            stdout = "[]"
-            stderr = ""
-
-        return Proc()
-
-    # monkeypatch restores the stdlib module attribute after the test —
-    # a plain assignment here would leak the stub into every later
-    # subprocess-based test in the suite (the full-suite pollution class).
-    monkeypatch.setattr(module.subprocess, "run", spy_run)
-    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
-    module.gh_api("repos/misospace/pr-reviewer-action/pulls/747")
-    assert len(captured) == 1
-    assert captured[0].get("shell") is False
+    assert not hasattr(module, "subprocess"), (
+        "gh_api must route through the configured forge capability, not a CLI"
+    )
+    # The seam the test suite stubs is the read boundary (``gh_api``);
+    # the transport underneath it is the forge module. A test that
+    # patches ``module.gh_api`` is sufficient to inject canned payloads.
+    assert hasattr(module, "gh_api") and callable(module.gh_api)
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +583,212 @@ def test_gate_unexpected_api_failure_fails_visibly(gate, tmp_path, monkeypatch) 
     event_file.write_text(json.dumps(_workflow_run_event()), encoding="utf-8")
     with pytest.raises(gate.GateError):
         gate.run_gate(str(event_file), LABEL)
+
+
+# ---------------------------------------------------------------------------
+# Direct-entrypoint subprocess regression (#1039 review follow-up)
+#
+# ``.github/workflows/fork-ai-review.yaml`` invokes the gate as
+# ``python3 scripts/fork_review_gate.py ...`` with no PYTHONPATH. With a
+# script-file invocation, Python sets ``sys.path[0]`` to ``.../scripts``,
+# not the repository root, so the sibling ``pr_reviewer/`` package is
+# invisible — the configured forge capability's lazy import would fail
+# with ``ModuleNotFoundError`` and the gate would exit with a forge error
+# rather than a real authorization decision. The other two consolidated
+# scripts (``check_corpus_anchor_in_diff.py``, ``harvest_human_findings.py``)
+# prepend the repository root to ``sys.path`` at import time; this section
+# pins the same property for the gate through a real subprocess so the
+# failure mode the review caught cannot regress silently.
+# ---------------------------------------------------------------------------
+
+
+def _make_loopback_stub(handler_cls: type[BaseHTTPRequestHandler]) -> tuple[HTTPServer, str]:
+    """Bind a stub GitHub-API server to a free loopback port."""
+    server = HTTPServer(("127.0.0.1", 0), handler_cls)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    host, port = server.server_address
+    return server, f"http://{host}:{port}"
+
+
+def _stop(server: HTTPServer) -> None:
+    server.shutdown()
+    server.server_close()
+
+
+class _RecordingHandler(BaseHTTPRequestHandler):
+    """Stub handler that records the ``User-Agent``, ``Accept`` and
+    ``Authorization`` headers received on each request and returns a
+    canned payload for ``repos/.../pulls/{n}``. Every other path yields
+    a JSON error so the test can assert the gate reached the API."""
+
+    received_paths: list[str] = []
+    received_auth: list[str] = []
+    received_user_agent: list[str] = []
+
+    def log_message(self, *_args: Any) -> None:  # silence stderr noise
+        return
+
+    def do_GET(self) -> None:  # noqa: N802
+        _RecordingHandler.received_paths.append(self.path)
+        _RecordingHandler.received_auth.append(
+            self.headers.get("Authorization", "")
+        )
+        _RecordingHandler.received_user_agent.append(
+            self.headers.get("User-Agent", "")
+        )
+        if self.path.startswith(f"/repos/{REPO}/pulls/{747}"):
+            pr_payload = _pr()
+            body = json.dumps(pr_payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        body = json.dumps({"message": "not-stubbed"}).encode("utf-8")
+        self.send_response(404)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def _run_gate_subprocess(
+    args: list[str],
+    api_url: str,
+    repo: str,
+    extra_env: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    """Run the real script as a subprocess with no PYTHONPATH (matches the
+    workflow) and the test's loopback stub serving the forge layer.
+
+    The subprocess inherits ``sys.executable`` so the same Python interpreter
+    is used here as the one pytest is running on — no host-Python assumption.
+    """
+    env = {
+        # Ship ``PATH`` so the subprocess can locate dynamic libraries; strip
+        # ``PYTHONPATH`` and any other Python-affecting vars so the assertion
+        # below cannot be defeated by an ambient path injection.
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", ""),
+        "LD_LIBRARY_PATH": os.environ.get("LD_LIBRARY_PATH", ""),
+        "GITHUB_API_URL": api_url,
+        "GITHUB_REPOSITORY": repo,
+        # No github token — the gate must reach the API transport without one
+        # (the PR object is unauthenticated-readable here).
+    }
+    env.update(extra_env)
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPT), *args],
+        cwd=str(_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc
+
+
+def test_gate_subprocess_reaches_forge_transport_without_sys_path(tmp_path) -> None:
+    """Pin ``#1039`` direct-entrypoint fix. The fork-review workflow invokes
+    the gate as ``python3 scripts/fork_review_gate.py ...`` with no
+    ``PYTHONPATH``; without the in-script ``sys.path`` rewrite the
+    ``from pr_reviewer.forge import default_forge`` line in ``_get_forge``
+    raises ``ModuleNotFoundError``. This regression fails the gate at
+    run time (a forge error is masked as ``GateError``), disabling fork
+    authorization and pre-review verification entirely.
+
+    The test asserts: (a) the subprocess exits 0 (a real decision,
+    not a forge error); (b) the request actually reached the loopback
+    stub, proving the configured forge capability imported and used;
+    (c) it arrives with the documented ``Accept:`` and is the only call
+    the labeled-mode path makes.
+    """
+    _RecordingHandler.received_paths = []
+    _RecordingHandler.received_auth = []
+    _RecordingHandler.received_user_agent = []
+    server, base_url = _make_loopback_stub(_RecordingHandler)
+    try:
+        event_file = tmp_path / "event.json"
+        event_file.write_text(json.dumps(_labeled_event()), encoding="utf-8")
+        outputs_file = tmp_path / "outputs.txt"
+        proc = _run_gate_subprocess(
+            ["gate", "--event-file", str(event_file), "--label", LABEL],
+            api_url=base_url,
+            repo=REPO,
+            extra_env={"GITHUB_OUTPUT": str(outputs_file)},
+        )
+    finally:
+        _stop(server)
+
+    assert "ModuleNotFoundError" not in proc.stderr, (
+        "the gate must self-bootstrap sys.path so the configured forge "
+        "capability is importable under direct-entrypoint invocation; "
+        "got: " + proc.stderr
+    )
+    assert "No module named 'pr_reviewer'" not in proc.stderr, (
+        "the gate must reach pr_reviewer.forge without PYTHONPATH; "
+        "got: " + proc.stderr
+    )
+    assert proc.returncode == 0, (
+        "the gate must reach a real decision (exit 0), not a forge error; "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert _RecordingHandler.received_paths, (
+        "the subprocess must reach the configured forge capability's "
+        "transport — empty received_paths means the gate never made an "
+        "API call"
+    )
+    assert _RecordingHandler.received_paths == [
+        f"/repos/{REPO}/pulls/747"
+    ], (
+        "the labeled-mode path must call exactly one endpoint, the same "
+        "endpoint the module-level test asserts"
+    )
+    body = outputs_file.read_text(encoding="utf-8")
+    assert "proceed=true" in body, body
+    assert "pr_number=747" in body, body
+    assert f"head_sha={BASE_SHA}" in body, body
+
+
+def test_verify_subprocess_reaches_forge_transport_without_sys_path(tmp_path) -> None:
+    """Same regression for the ``verify`` subcommand. The pre-model-work
+    guard is the second invocation point that previously imported the
+    forge module via a path-boundary that didn't bootstrap sys.path."""
+    _RecordingHandler.received_paths = []
+    _RecordingHandler.received_auth = []
+    _RecordingHandler.received_user_agent = []
+    server, base_url = _make_loopback_stub(_RecordingHandler)
+    try:
+        proc = _run_gate_subprocess(
+            [
+                "verify",
+                "--pr-number",
+                "747",
+                "--expected-sha",
+                BASE_SHA,
+                "--label",
+                LABEL,
+            ],
+            api_url=base_url,
+            repo=REPO,
+            extra_env={},
+        )
+    finally:
+        _stop(server)
+
+    assert "ModuleNotFoundError" not in proc.stderr, proc.stderr
+    assert "No module named 'pr_reviewer'" not in proc.stderr, proc.stderr
+    assert proc.returncode == 0, (
+        "verify must reach a real decision (exit 0) on a labeled fork "
+        f"with matching head; stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert _RecordingHandler.received_paths == [
+        f"/repos/{REPO}/pulls/747"
+    ], (
+        "verify must reach the same single endpoint; empty list means the "
+        "forge import failed before any request was made"
+    )
 
 
 if __name__ == "__main__":

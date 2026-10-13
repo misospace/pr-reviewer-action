@@ -346,7 +346,11 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
   const { baseUrl, apiFormat, model, apiKey } = profiles.transport;
   const maxTokens = envInt(env, "DEEP_REVIEW_MAX_TOKENS", DEFAULT_SPECIALIST_MAX_TOKENS);
   const temperature = envTemperature(env);
-  const responseFormat = envStr(env, "AI_RESPONSE_FORMAT", "off").trim().toLowerCase();
+  // #1009: the specialist phase inherits the primary lane's effective
+  // response_format — explicit empty `ai-primary-response-format` falls
+  // back to `ai-response-format`, the same way the rest of the v3 config
+  // chain does.
+  const responseFormat = envStr(env, "AI_PRIMARY_RESPONSE_FORMAT", envStr(env, "AI_RESPONSE_FORMAT", "off")).trim().toLowerCase();
   const tokensParam = envStr(env, "AI_TOKENS_PARAM", "max_tokens").trim().toLowerCase();
   const stream = envStr(env, "AI_STREAM", "true").trim().toLowerCase() === "true";
   const roleTimeoutSec = envInt(env, "AI_REQUEST_TIMEOUT_SEC", 300);

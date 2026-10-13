@@ -133,6 +133,52 @@ test("specialist profile and per-role models use one profile transport and repor
   }
 });
 
+test("#1009: specialist phase inherits the primary lane response_format; explicit ai-primary-response-format wins over the base", async () => {
+  // The specialists inherit the primary profile transport (per #966), so
+  // they read the primary lane's effective response_format — explicit empty
+  // ai-primary-response-format falls back to ai-response-format, the same
+  // way every other lane override does.
+  const requests: { body: string }[] = [];
+  const server = await startMockServer((_req, body, res) => {
+    requests.push({ body });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(leadsResponse([])));
+  });
+  try {
+    // Base json_object + explicit primary off: the request body MUST carry
+    // no response_format on the wire.
+    const base = await run({
+      DEEP_REVIEW: "true",
+      AI_BASE_URL: `${server.url}/v1`,
+      AI_SPECIALIST_MODEL: "specialist",
+      AI_SPECIALIST_BASE_URL: `${server.url}/v1`,
+      AI_RESPONSE_FORMAT: "json_object",
+      AI_PRIMARY_RESPONSE_FORMAT: "off",
+    }, { productionTransport: true });
+    assert.equal(base.code, 0);
+    const baseBodies = server.requests.map(({ body }) => JSON.parse(body) as { response_format?: unknown });
+    assert.ok(baseBodies.every((payload) => payload.response_format === undefined), "primary off must drop response_format");
+
+    requests.length = 0;
+    server.requests.length = 0;
+    // Empty primary override inherits the base json_object; every request
+    // body carries the json_object response shape.
+    const inherit = await run({
+      DEEP_REVIEW: "true",
+      AI_BASE_URL: `${server.url}/v1`,
+      AI_SPECIALIST_MODEL: "specialist",
+      AI_SPECIALIST_BASE_URL: `${server.url}/v1`,
+      AI_RESPONSE_FORMAT: "json_object",
+    }, { productionTransport: true });
+    assert.equal(inherit.code, 0);
+    const inheritedBodies = server.requests.map(({ body }) => JSON.parse(body) as { response_format?: { type: string } });
+    assert.ok(inheritedBodies.every((payload) => payload.response_format?.type === "json_object"), "empty primary override must inherit the base json_object");
+    rmSync(inherit.root, { recursive: true, force: true });
+  } finally {
+    await server.close();
+  }
+});
+
 test("invalid specialist format warns and falls back to the primary transport", async () => {
   const seen: { url: string; model: string }[] = [];
   const server = await startMockServer((req, body, res) => {

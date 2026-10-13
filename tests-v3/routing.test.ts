@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { isLowConfidence, reviewerRequestedEscalation, shouldEscalate } from "../src/routing/escalation.js";
-import { resolveReviewRoute, resolveSpecialistProfiles, resolveTierProfiles, tierRequestShape } from "../src/routing/tiers.js";
+import { resolveReviewRoute, resolveSpecialistProfiles, resolveTierProfiles, tierRequestShape, tierResponseFormat } from "../src/routing/tiers.js";
 
 const flags = { onIncomplete: true, onRequestChanges: true, onLowConfidence: true, onBlockers: true, onPlanningFailure: true };
 const longReview = "The change is reviewed carefully and the behavior appears correct. No concerns identified in the touched paths.";
@@ -109,11 +109,13 @@ test("specialist profiles reject invalid formats and report orphan transport fie
 
 test("tier profiles bind model defaults, retry/stream settings, and request shapes", () => {
   const base = resolveTierProfiles({ AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "k" });
-  assert.deepEqual(base.primary, { baseUrl: "https://primary", model: "main", apiFormat: "openai", apiKey: "k", resolved: true, retries: 8, retryDelaySec: 15, stream: true, requestTimeoutSec: 300, connectTimeoutSec: 30 });
+  assert.deepEqual(base.primary, { baseUrl: "https://primary", model: "main", apiFormat: "openai", apiKey: "k", resolved: true, retries: 8, retryDelaySec: 15, stream: true, requestTimeoutSec: 300, connectTimeoutSec: 30, responseFormat: "off" });
   assert.equal(base.smart.resolved, false);
   assert.equal(base.smart.baseUrl, "https://primary");
   assert.equal(base.smart.apiKey, "k");
+  assert.equal(base.smart.responseFormat, "off");
   assert.equal(base.fallback.resolved, false);
+  assert.equal(base.fallback.responseFormat, "off");
   const configured = resolveTierProfiles({ AI_BASE_URL: "p", AI_MODEL: "m", AI_SMART_MODEL: "s", AI_SMART_API_FORMAT: "anthropic", AI_FALLBACK_BASE_URL: "f", AI_FALLBACK_MODEL: "fm", AI_STREAM: "true" });
   assert.equal(configured.smart.resolved, true);
   assert.equal(configured.smart.apiFormat, "anthropic");
@@ -126,4 +128,65 @@ test("tier profiles bind model defaults, retry/stream settings, and request shap
   assert.equal(tierRequestShape("smart", { SMART_REQUEST_SHAPE: "trailing_task" }), "trailing_task");
   assert.equal(tierRequestShape("fallback", { SMART_REQUEST_SHAPE: "trailing_task" }), "default");
   assert.equal(tierRequestShape("smart", { SMART_REQUEST_SHAPE: "unknown" }), "default");
+});
+
+test("#1009: tierResponseFormat inherits the base setting when the lane override is empty", () => {
+  // Empty lane overrides do not coerce off; they inherit the base setting
+  // (`ai-response-format`), so existing single-value workflows stay
+  // request-byte compatible.
+  assert.equal(tierResponseFormat("primary", { AI_RESPONSE_FORMAT: "off" }), "off");
+  assert.equal(tierResponseFormat("smart", { AI_RESPONSE_FORMAT: "off" }), "off");
+  assert.equal(tierResponseFormat("fallback", { AI_RESPONSE_FORMAT: "off" }), "off");
+  assert.equal(tierResponseFormat("primary", { AI_RESPONSE_FORMAT: "json_object" }), "json_object");
+  assert.equal(tierResponseFormat("smart", { AI_RESPONSE_FORMAT: "json_object" }), "json_object");
+  assert.equal(tierResponseFormat("fallback", { AI_RESPONSE_FORMAT: "json_object" }), "json_object");
+  assert.equal(tierResponseFormat("primary", { AI_RESPONSE_FORMAT: "json_schema" }), "json_schema");
+});
+
+test("#1009: tierResponseFormat honors per-lane overrides independently of each other", () => {
+  // Primary lane turned off (a primary model that rejects response_format),
+  // smart lane uses the richer json_schema, fallback lane keeps the global
+  // json_object default. None of these settings affect the Anthropic
+  // transport, which still ignores the value at request time.
+  const env = {
+    AI_RESPONSE_FORMAT: "json_object",
+    AI_PRIMARY_RESPONSE_FORMAT: "off",
+    AI_SMART_RESPONSE_FORMAT: "json_schema",
+    AI_FALLBACK_RESPONSE_FORMAT: "json_object",
+  };
+  assert.equal(tierResponseFormat("primary", env), "off");
+  assert.equal(tierResponseFormat("smart", env), "json_schema");
+  assert.equal(tierResponseFormat("fallback", env), "json_object");
+});
+
+test("#1009: tierResponseFormat treats unset AI_RESPONSE_FORMAT as off and ignores unknown values silently", () => {
+  assert.equal(tierResponseFormat("primary", {}), "off");
+  assert.equal(tierResponseFormat("primary", { AI_RESPONSE_FORMAT: "" }), "off");
+  // The contract's enum validation rejects unknown values for user-supplied
+  // inputs, but values can reach here from ambient overrides or test rigs;
+  // the helper must not crash a live review.
+  assert.equal(tierResponseFormat("primary", { AI_RESPONSE_FORMAT: "unknown", AI_PRIMARY_RESPONSE_FORMAT: "also-unknown" }), "off");
+  assert.equal(tierResponseFormat("primary", { AI_PRIMARY_RESPONSE_FORMAT: "json_object" }), "json_object");
+  assert.equal(tierResponseFormat("smart", { AI_PRIMARY_RESPONSE_FORMAT: "json_object", AI_SMART_RESPONSE_FORMAT: "" }), "off");
+});
+
+test("#1009: resolveTierProfiles threads the effective responseFormat through every tier", () => {
+  // The helper is the single source for the value the request builder reads
+  // for OpenAI-compatible lanes — Anthropic lanes still drop the field at
+  // request build time regardless of value (#1009 acceptance).
+  const profiles = resolveTierProfiles({
+    AI_BASE_URL: "https://primary",
+    AI_MODEL: "main",
+    AI_API_KEY: "k",
+    AI_SMART_MODEL: "s",
+    AI_FALLBACK_BASE_URL: "https://fb",
+    AI_FALLBACK_MODEL: "fb",
+    AI_FALLBACK_API_KEY: "fb-key",
+    AI_PRIMARY_RESPONSE_FORMAT: "off",
+    AI_SMART_RESPONSE_FORMAT: "json_schema",
+    AI_FALLBACK_RESPONSE_FORMAT: "json_object",
+  });
+  assert.equal(profiles.primary.responseFormat, "off");
+  assert.equal(profiles.smart.responseFormat, "json_schema");
+  assert.equal(profiles.fallback.responseFormat, "json_object");
 });

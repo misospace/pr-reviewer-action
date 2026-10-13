@@ -20,8 +20,72 @@ test("current canonical contract validates and maps every input once", () => {
     assert.ok(Object.hasOwn(config, toCamelCase(input.id)), input.id);
     assert.equal(toCamelCase(input.id).includes("_"), false);
   }
-  assert.equal(contract.inputs.length, 140);
+  assert.equal(contract.inputs.length, 143);
   assert.equal(Object.hasOwn(config, "ai_base_url"), false);
+});
+
+test("#1009: per-lane response_format inputs default empty and inherit ai-response-format; explicit values are preserved; enum rejects bad values", () => {
+  // No lane override: effective primary/smart/fallback values all match
+  // the base (`off`). Existing single-value workflows stay request-byte
+  // compatible.
+  const baseline = loadConfig(contract, {
+    "ai-base-url": "https://primary",
+    "ai-model": "main",
+  });
+  assert.equal(baseline.aiResponseFormat, "off");
+  assert.equal(baseline.aiPrimaryResponseFormat, "off");
+  assert.equal(baseline.aiSmartResponseFormat, "off");
+  assert.equal(baseline.aiFallbackResponseFormat, "off");
+
+  // Base value changes: each lane override (empty) inherits the base.
+  const jsonObject = loadConfig(contract, {
+    ...Object.fromEntries(contract.inputs.map((input) => [input.id, ""])),
+    "ai-base-url": "https://primary",
+    "ai-model": "main",
+    "ai-response-format": "json_object",
+  });
+  assert.equal(jsonObject.aiResponseFormat, "json_object");
+  assert.equal(jsonObject.aiPrimaryResponseFormat, "json_object");
+  assert.equal(jsonObject.aiSmartResponseFormat, "json_object");
+  assert.equal(jsonObject.aiFallbackResponseFormat, "json_object");
+
+  // Explicit lane overrides are preserved (and never coalesced back to the
+  // base setting — only empty values inherit).
+  const overrides = loadConfig(contract, {
+    "ai-base-url": "https://primary",
+    "ai-model": "main",
+    "ai-response-format": "json_object",
+    "ai-primary-response-format": "off",
+    "ai-smart-response-format": "json_schema",
+    "ai-fallback-response-format": "json_object",
+  });
+  assert.equal(overrides.aiPrimaryResponseFormat, "off");
+  assert.equal(overrides.aiSmartResponseFormat, "json_schema");
+  assert.equal(overrides.aiFallbackResponseFormat, "json_object");
+
+  // Invalid values: rejected by the existing enum validator.
+  const required = Object.fromEntries(contract.inputs.filter((input) => input.required).map((input) => [input.id, `required-${input.id}`]));
+  for (const id of ["ai-primary-response-format", "ai-smart-response-format", "ai-fallback-response-format"]) {
+    assert.throws(
+      () => loadConfig(contract, { ...required, "ai-response-format": "json_object", [id]: "bogus" }),
+      new RegExp(`must be one of: off, json_object, json_schema`),
+      id,
+    );
+  }
+
+  // Each per-lane override can also be left empty without disturbing the
+  // sibling lanes or the base setting.
+  const onlyPrimary = loadConfig(contract, {
+    "ai-base-url": "https://primary",
+    "ai-model": "main",
+    "ai-response-format": "json_schema",
+    "ai-primary-response-format": "",
+    "ai-smart-response-format": "json_object",
+    "ai-fallback-response-format": "json_schema",
+  });
+  assert.equal(onlyPrimary.aiPrimaryResponseFormat, "json_schema");
+  assert.equal(onlyPrimary.aiSmartResponseFormat, "json_object");
+  assert.equal(onlyPrimary.aiFallbackResponseFormat, "json_schema");
 });
 
 test("#875: equivalent-paths-max-bytes is a positive integer — zero and negative are rejected", () => {
@@ -58,6 +122,12 @@ test("contract defaults and typed parsing agree for every input", () => {
     "ai-fallback-request-timeout-sec": "aiRequestTimeoutSec",
     "ai-fallback-connect-timeout-sec": "aiConnectTimeoutSec",
     "ai-fallback-stream": "aiStream",
+    // #1009: per-lane `response_format` inherits the base setting when
+    // explicitly empty; config inheritance is the single source of truth
+    // for which effective value each lane's request body uses.
+    "ai-primary-response-format": "aiResponseFormat",
+    "ai-smart-response-format": "aiResponseFormat",
+    "ai-fallback-response-format": "aiResponseFormat",
     "ai-primary-model": "aiModel",
     "ai-primary-base-url": "aiBaseUrl",
     "ai-primary-api-format": "aiApiFormat",

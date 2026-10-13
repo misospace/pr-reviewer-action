@@ -126,6 +126,13 @@ const FILE_SERVING_PATTERNS: readonly RegExp[] = [
  *   trusted path bookkeeping (never fires alone)
  *     - repository-root discovery: `Path(__file__).resolve().parent...`,
  *       `os.path.dirname(os.path.abspath(__file__))`, `__dirname` joins;
+ *     - self-location `readlink` (#1034): `os.readlink(__file__)`, shell
+ *       `readlink [-f] "$0"` / `"${BASH_SOURCE[0]}"` as a whole statement or
+ *       inside `dirname`/`cd`, and the Python and shell symlink-resolution
+ *       loops. It holds for ordinary code only: rebinding the anchor, a
+ *       template line that is really string content, a second file and
+ *       obfuscated spellings can evade it, as `getattr(os, "read" + "link")`
+ *       evades the class scan already;
  *     - module resolution specifiers (`from "../x.js"` — kept from #720);
  *     - path-library usage with no untrusted input flow
  *       (`Path("/etc/myapp/config.yaml")`, `path_join(base, "static")`);
@@ -405,6 +412,163 @@ const DIFF_MARKERS: ReadonlySet<string> = new Set(["+", "-", " "]);
 function diffMarker(line: string): string {
   const first = line[0] ?? "";
   return DIFF_MARKERS.has(first) ? first : "\u0000";
+}
+
+/** #1034: a script reading its OWN symlink (`os.readlink(__file__)`, shell
+ * `readlink "$0"`, the portable symlink-resolution loop) is self-location
+ * bookkeeping like `realpath(__file__)`, not a symlink-sensitive surface.
+ * Recognition is closed and line-whole: a handful of complete statements and
+ * two loop templates of consecutive lines, matched by static patterns, so an
+ * untrusted operand, an intervening reassignment or a second operation on
+ * the line keeps firing. It reads each line as ordinary code: a rebound
+ * anchor, a template line that is really string content, or a second file
+ * that changes what the anchor means can evade it. */
+type SelfLocationFamilies = { python: boolean; shell: boolean };
+
+/** Language gate: `.py`/`.pyw` Python, `.sh`/`.bash` shell, an extensionless
+ * file (a `bin/` wrapper) either, anything else (a dotfile included) neither. */
+function selfLocationFamilies(path: string | null): SelfLocationFamilies {
+  const base = path?.split("/").pop() ?? "";
+  if (base === "" || base.startsWith(".")) return { python: false, shell: false };
+  if (!base.includes(".")) return { python: true, shell: true };
+  const kind = fileKindToken(base);
+  return { python: kind === "py" || kind === "pyw", shell: kind === "sh" || kind === "bash" };
+}
+
+/** Identifiers are bounded so a pathological name fails to match rather than
+ * costing time. */
+const SELF_LOCATION_IDENT = String.raw`[A-Za-z_]\w{0,63}`;
+const SH_ANCHOR_WORD = String.raw`(?:\$0|\$\{BASH_SOURCE\[0\]\})`;
+const SH_ANCHOR = String.raw`"${SH_ANCHOR_WORD}"`;
+const SH_READLINK_ANCHOR = String.raw`readlink[ \t]+(?:-f[ \t]+)?${SH_ANCHOR}`;
+/** A literal path after the resolved directory (`")/.."`, `")/lib"`): plain
+ * path characters only, bounded. */
+const SH_PATH_SUFFIX = String.raw`(?:/[\w.-]{0,64}){0,8}`;
+const SH_DIRNAME_ANCHOR = String.raw`\$\(dirname[ \t]+"\$\(${SH_READLINK_ANCHOR}\)"\)${SH_PATH_SUFFIX}`;
+
+/** Whole-statement direct forms. Python: `[NAME =] os.readlink(__file__)`.
+ * Shell: `readlink [-f] A`, `NAME="$(readlink [-f] A)"`,
+ * `NAME="$(dirname "$(readlink [-f] A)")"`, `cd "$(dirname "$(readlink [-f] A)")"`,
+ * with A a quoted `$0` or `${BASH_SOURCE[0]}` and an optional `local`. An
+ * assignment's right-hand side is not word-split, so its outer quotes are
+ * optional, as a matched pair (`("?)...\N`); the shell loop lines take the
+ * same rule. */
+const PY_DIRECT_STATEMENT = new RegExp(
+  String.raw`^[ \t]*(?:${SELF_LOCATION_IDENT}[ \t]*=[ \t]*)?os\.readlink[ \t]*\([ \t]*__file__[ \t]*(?:,[ \t]*)?\)[ \t]*$`,
+);
+const SH_DIRECT_STATEMENT = new RegExp(
+  String.raw`^[ \t]*(?:${SH_READLINK_ANCHOR}|(?:local[ \t]+)?${SELF_LOCATION_IDENT}=("?)\$\(${SH_READLINK_ANCHOR}\)\1|(?:local[ \t]+)?${SELF_LOCATION_IDENT}=("?)${SH_DIRNAME_ANCHOR}\2|cd[ \t]+"${SH_DIRNAME_ANCHOR}")[ \t]*$`,
+);
+
+/** Python loop template lines; indentation is captured and compared as text. */
+const PY_LOOP_ANCHOR = new RegExp(String.raw`^([ \t]*)(${SELF_LOCATION_IDENT})[ \t]*=[ \t]*__file__[ \t]*$`);
+const PY_LOOP_GUARD = new RegExp(
+  String.raw`^([ \t]*)while[ \t]+os\.path\.islink[ \t]*\([ \t]*(${SELF_LOCATION_IDENT})[ \t]*\)[ \t]*:[ \t]*$`,
+);
+const PY_LOOP_UPDATE = new RegExp(
+  String.raw`^([ \t]*)(${SELF_LOCATION_IDENT})[ \t]*=[ \t]*os\.readlink[ \t]*\([ \t]*(${SELF_LOCATION_IDENT})[ \t]*\)[ \t]*$`,
+);
+
+/** Shell loop template lines. */
+const SH_LOOP_ANCHOR = new RegExp(String.raw`^[ \t]*(${SELF_LOCATION_IDENT})=("?)${SH_ANCHOR_WORD}\2[ \t]*$`);
+const SH_LOOP_GUARD = new RegExp(
+  String.raw`^[ \t]*while[ \t]+(?:\[[ \t]+-[Lh][ \t]+"\$(${SELF_LOCATION_IDENT})"[ \t]+\]|\[\[[ \t]+-[Lh][ \t]+"\$(${SELF_LOCATION_IDENT})"[ \t]+\]\])[ \t]*;[ \t]*do[ \t]*$`,
+);
+const SH_LOOP_READ = new RegExp(
+  String.raw`^[ \t]*(${SELF_LOCATION_IDENT})=("?)\$\(readlink[ \t]+"\$(${SELF_LOCATION_IDENT})"\)\2[ \t]*$`,
+);
+const SH_LOOP_COPY = new RegExp(
+  String.raw`^[ \t]*(${SELF_LOCATION_IDENT})=("?)\$(${SELF_LOCATION_IDENT})\2[ \t]*$`,
+);
+const SH_LOOP_DONE = /^[ \t]*done[ \t]*$/;
+
+/** Python template at run position k: `T = __file__`, `while os.path.islink(T):`
+ * at the same indentation, one body line `T = os.readlink(T)` indented under
+ * it, then a dedent to the guard's level (or further) or the end of the run.
+ * Returns the body line's position, or null. */
+function pythonSelfLocationLoop(codes: readonly string[], k: number): number | null {
+  const anchor = PY_LOOP_ANCHOR.exec(codes[k] ?? "");
+  const guard = PY_LOOP_GUARD.exec(codes[k + 1] ?? "");
+  const update = PY_LOOP_UPDATE.exec(codes[k + 2] ?? "");
+  if (!anchor || !guard || !update) return null;
+  const [, indent = "", ident = ""] = anchor;
+  if (guard[1] !== indent || guard[2] !== ident) return null;
+  const bodyIndent = update[1] ?? "";
+  if (bodyIndent.length <= indent.length || !bodyIndent.startsWith(indent)) return null;
+  if (update[2] !== ident || update[3] !== ident) return null;
+  for (let j = k + 3; j < codes.length; j++) {
+    const code = codes[j] ?? "";
+    if (code.trim() === "") continue;
+    const lead = /^[ \t]*/.exec(code)?.[0] ?? "";
+    return indent.startsWith(lead) ? k + 2 : null;
+  }
+  return k + 2;
+}
+
+/** Shell template, five consecutive lines: `T="${BASH_SOURCE[0]}"` (or `"$0"`),
+ * `while [ -L "$T" ]; do`, `L="$(readlink "$T")"`, `T="$L"`, `done`. Returns
+ * the readlink line's position, or null. */
+function shellSelfLocationLoop(codes: readonly string[], k: number): number | null {
+  const anchor = SH_LOOP_ANCHOR.exec(codes[k] ?? "");
+  const guard = SH_LOOP_GUARD.exec(codes[k + 1] ?? "");
+  const read = SH_LOOP_READ.exec(codes[k + 2] ?? "");
+  const copy = SH_LOOP_COPY.exec(codes[k + 3] ?? "");
+  if (!anchor || !guard || !read || !copy || !SH_LOOP_DONE.test(codes[k + 4] ?? "")) return null;
+  const ident = anchor[1] ?? "";
+  const link = read[1] ?? "";
+  if (link === ident || (guard[1] ?? guard[2]) !== ident || read[3] !== ident) return null;
+  return copy[1] === ident && copy[3] === link ? k + 2 : null;
+}
+
+/** Lines whose `readlink` is a recognised self-location read. A direct
+ * statement is line-local. Loops are matched per diff side: the new side reads
+ * added and context lines, the old side removed and context lines, and a
+ * header line ends both runs; a context line counts only when both sides
+ * recognise it. */
+function selfLocationReadlinkLines(lines: readonly string[], path: string | null): Set<number> {
+  const families = selfLocationFamilies(path);
+  const approved = new Set<number>();
+  if (!families.python && !families.shell) return approved;
+  const codes = lines.map((line) => line.slice(1));
+  const inLoop = { "+": new Set<number>(), "-": new Set<number>() };
+  for (const side of ["+", "-"] as const) {
+    let run: number[] = [];
+    const flush = (): void => {
+      const runCodes = run.map((index) => codes[index] ?? "");
+      for (let k = 0; k < run.length; k++) {
+        const hit =
+          (families.python ? pythonSelfLocationLoop(runCodes, k) : null) ??
+          (families.shell ? shellSelfLocationLoop(runCodes, k) : null);
+        if (hit !== null) inLoop[side].add(run[hit] ?? -1);
+      }
+      run = [];
+    };
+    lines.forEach((line, index) => {
+      const marker = diffMarker(line);
+      if (marker === "\u0000") flush();
+      else if (marker === side || marker === " ") run.push(index);
+    });
+    flush();
+  }
+  lines.forEach((line, index) => {
+    const marker = diffMarker(line);
+    if (marker === "\u0000") return;
+    const code = codes[index] ?? "";
+    const direct =
+      (families.python && PY_DIRECT_STATEMENT.test(code)) || (families.shell && SH_DIRECT_STATEMENT.test(code));
+    const onNew = inLoop["+"].has(index);
+    const onOld = inLoop["-"].has(index);
+    const loop = marker === "+" ? onNew : marker === "-" ? onOld : onNew && onOld;
+    if (direct || loop) approved.add(index);
+  });
+  return approved;
+}
+
+/** A recognised line with `readlink` blanked. The line matched a whole
+ * statement, so any other occurrence is inside an identifier
+ * (`readlink_result = os.readlink(__file__)`). */
+function blankSelfLocationReadlink(line: string): string {
+  return line.replaceAll("readlink", '""');
 }
 
 /** Characters that end a statement or expression, after which a comment marker
@@ -728,12 +892,14 @@ function blankCommentSpans(lines: string[], path: string | null): string[] {
   return out;
 }
 
-function neutralizeChunkLines(commentFree: string[]): string[] {
+function neutralizeChunkLines(commentFree: string[], path: string | null): string[] {
   /** Neutralize a diff chunk line by line, feeding each line its adjacent
-   * comment-free neighbors for the one-hop untrusted-flow refusal. */
+   * comment-free neighbors for the one-hop untrusted-flow refusal. A
+   * recognised self-location `readlink` (#1034) is blanked first. */
+  const selfLocation = selfLocationReadlinkLines(commentFree, path);
   return commentFree.map((line, index) =>
     neutralizePathFalsePositives(
-      line,
+      selfLocation.has(index) ? blankSelfLocationReadlink(line) : line,
       index > 0 ? commentFree[index - 1] ?? "" : "",
       index + 1 < commentFree.length ? commentFree[index + 1] ?? "" : "",
     ),
@@ -790,7 +956,8 @@ const PATH_HANDLING_CONTENT_CLASSES: readonly (readonly [string, readonly RegExp
     /\b(?:ZipFile|TarFile)\b/i,
     /\bunzip\s*\(/i,
   ]],
-  // Symlink-sensitive filesystem operations.
+  // Symlink-sensitive filesystem operations. A recognised self-location
+  // `readlink` (#1034) is blanked before this scan runs.
   ["symlink_sensitive", [
     /symlink|readlink|lstat|follow_symlinks|O_NOFOLLOW/i,
   ]],
@@ -1178,11 +1345,9 @@ export function evaluatePathHandlingSignals(
     if (lines.length === 0) continue;
     // A headerless chunk has no language of its own; fall back to the single
     // changed file when there is exactly one, and blank nothing otherwise.
-    const commentFree = blankCommentSpans(
-      lines,
-      chunkFile ?? (filenames.length === 1 ? filenames[0] ?? null : null),
-    );
-    const neutralized = neutralizeChunkLines(commentFree);
+    const chunkPath = chunkFile ?? (filenames.length === 1 ? filenames[0] ?? null : null);
+    const commentFree = blankCommentSpans(lines, chunkPath);
+    const neutralized = neutralizeChunkLines(commentFree, chunkPath);
     const isTest =
       chunkFile !== null ? isTestPath(chunkFile) : allFilesAreTests;
     const buckets = isTest ? discountedBuckets : firedBuckets;

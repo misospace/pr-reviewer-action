@@ -19,6 +19,9 @@
       "ai-max-tokens",
       "ai-temperature",
       "ai-response-format",
+      "ai-primary-response-format",
+      "ai-smart-response-format",
+      "ai-fallback-response-format",
       "ai-tokens-param",
       "anthropic-version"
     ]

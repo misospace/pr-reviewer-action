@@ -1561,6 +1561,148 @@ test("#749: headerless diffs degrade conservatively", () => {
   assert.equal(withProduction.prKind, "path_handling_changes");
 });
 
+// ── #1034: a script reading its own symlink is self-location bookkeeping ──
+
+function selfLocationDiff(file: string, lines: string[]): string {
+  return `diff --git a/${file} b/${file}\n${lines.join("\n")}\n`;
+}
+
+function firesSymlinkSensitive(result: ReturnType<typeof classifyPr>): boolean {
+  return result.pathHandlingProvenance.signals.some(
+    (s) => s.signal === "symlink_sensitive" && s.source === "diff",
+  );
+}
+
+const SH_SELF_LOCATION_LOOP = [
+  '+_src="${BASH_SOURCE[0]}"',
+  '+while [ -L "$_src" ]; do',
+  '+  _link="$(readlink "$_src")"',
+  '+  _src="$_link"',
+  "+done",
+];
+const PY_SELF_LOCATION_LOOP = ["+src = __file__", "+while os.path.islink(src):", "+    src = os.readlink(src)"];
+const asContext = (lines: string[]): string[] => lines.map((line) => ` ${line.slice(1)}`);
+/** The shell loop with its anchor line modified and the rest in context. */
+const modifiedLoopAnchor = (from: string, to: string): string[] => [
+  "@@ -1,5 +1,5 @@",
+  `-_src="${from}"`,
+  `+_src="${to}"`,
+  ...asContext(SH_SELF_LOCATION_LOOP.slice(1)),
+];
+
+test("#1034: self-location readlink no longer fires symlink_sensitive", () => {
+  const cases: [string, string, string[]][] = [
+    // The issue's five rows.
+    ["python direct", "tools/tool.py", ["+HERE = os.readlink(__file__)"]],
+    ["python one-hop loop", "tools/tool.py", [...PY_SELF_LOCATION_LOOP, "+HERE = os.path.dirname(src)"]],
+    ["shell dirname/readlink -f one-liner", "scripts/run.sh", ['+DIR="$(dirname "$(readlink -f "$0")")"']],
+    ["shell BASH_SOURCE direct", "scripts/run.sh", ['+SRC="$(readlink "${BASH_SOURCE[0]}")"']],
+    ["shell wrapper loop", "scripts/run.sh", SH_SELF_LOCATION_LOOP],
+    // The other recognised forms.
+    ["bare readlink $0", "scripts/run.sh", ['+readlink "$0"']],
+    ["readlink -f BASH_SOURCE", "scripts/run.sh", ['+readlink -f "${BASH_SOURCE[0]}"']],
+    ["cd into the resolved dir", "scripts/run.sh", ['+cd "$(dirname "$(readlink -f "$0")")"']],
+    ["local assignment", "scripts/run.sh", ["+resolve() {", '+  local here="$(readlink -f "$0")"', '+  echo "$here"', "+}"]],
+    ["[[ -L ]] guard", "scripts/run.sh", SH_SELF_LOCATION_LOOP.map((l) => l.replace('[ -L "$_src" ]', '[[ -L "$_src" ]]'))],
+    ["-h guard", "scripts/run.sh", SH_SELF_LOCATION_LOOP.map((l) => l.replace("-L", "-h"))],
+    ["uppercase loop variables", "scripts/run.sh", SH_SELF_LOCATION_LOOP.map((l) => l.replace(/_src/g, "SRC").replace(/_link/g, "LINK"))],
+    ["python trailing comma", "tools/tool.py", ["+HERE = os.readlink(__file__,)"]],
+    ["python identifier containing readlink", "tools/tool.py", ["+readlink_result = os.readlink(__file__)"]],
+    ["shell identifier containing readlink", "scripts/run.sh", ['+my_readlink="$(readlink "$0")"']],
+    ["unquoted assignment", "scripts/run.sh", ['+SCRIPT=$(readlink -f "$0")']],
+    ["unquoted dirname assignment", "scripts/run.sh", ['+SCRIPT_DIR=$(dirname "$(readlink -f "$0")")']],
+    [
+      "shell loop with unquoted assignments",
+      "scripts/run.sh",
+      ["+_src=${BASH_SOURCE[0]}", '+while [ -L "$_src" ]; do', '+  _link=$(readlink "$_src")', "+  _src=$_link", "+done"],
+    ],
+    ["dirname with a /lib suffix", "scripts/run.sh", ['+LIB="$(dirname "$(readlink -f "$0")")/lib"']],
+    ["dirname with a /.. suffix", "scripts/run.sh", ['+ROOT="$(dirname "$(readlink -f "$0")")/.."']],
+    // Ordinary neighbours in the same file.
+    ["Path(__file__) beside the python loop", "tools/tool.py", ["+ROOT = Path(__file__).parent", ...PY_SELF_LOCATION_LOOP]],
+    ["strict mode beside the shell loop", "scripts/run.sh", ["+set -euo pipefail", ...SH_SELF_LOCATION_LOOP]],
+    ["readonly beside the shell loop", "scripts/run.sh", ["+readonly VERSION=1", ...SH_SELF_LOCATION_LOOP]],
+    ["heredoc usage beside the shell loop", "scripts/run.sh", ["+usage() {", "+  cat <<EOF", "+usage: run <file>", "+EOF", "+}", ...SH_SELF_LOCATION_LOOP]],
+    ["trailing comment, python", "tools/tool.py", ["+HERE = os.readlink(__file__)  # resolve our own link"]],
+    ["trailing comment, shell", "scripts/run.sh", ['+DIR="$(dirname "$(readlink -f "$0")")"  # our own dir']],
+    // The extensionless bin/ wrapper.
+    ["extensionless wrapper", "bin/tool", SH_SELF_LOCATION_LOOP],
+    // Diff shapes.
+    ["loop in context, unrelated line added", "scripts/run.sh", ["@@ -1,5 +1,6 @@", ...asContext(SH_SELF_LOCATION_LOOP), "+set -e"]],
+    ["anchor changed from $0 to BASH_SOURCE, loop in context", "scripts/run.sh", modifiedLoopAnchor("$0", "${BASH_SOURCE[0]}")],
+  ];
+  for (const [label, file, lines] of cases) {
+    const result = classifyPr({ prFiles: files(file), diffText: selfLocationDiff(file, lines), linkedIssues: [] });
+    assert.equal(result.prKind, "app_code", label);
+    assert.equal(result.pathHandlingProvenance.fired, false, label);
+    assert.ok(!firesSymlinkSensitive(result), `${label}: unexpected symlink_sensitive`);
+  }
+
+  // A `../` suffix still fires traversal_literal, a separate class; only the
+  // readlink stops counting.
+  const sibling = classifyPr({
+    prFiles: files("scripts/run.sh"),
+    diffText: selfLocationDiff("scripts/run.sh", ['+LIB="$(dirname "$(readlink -f "$0")")/../lib"']),
+    linkedIssues: [],
+  });
+  assert.ok(!firesSymlinkSensitive(sibling));
+  assert.ok(sibling.pathHandlingProvenance.signals.some(
+    (s) => s.signal === "traversal_literal" && s.source === "diff",
+  ));
+});
+
+test("#1034: real symlink surfaces and near-miss self-location shapes keep firing", () => {
+  const cases: [string, string, string[]][] = [
+    // Scope counterexamples.
+    ["untrusted python operand", "src/app.py", ["+os.readlink(user_path)"]],
+    ["python reassignment", "src/app.py", ["+src = __file__", '+src = request.args["path"]', "+os.readlink(src)"]],
+    ["os.symlink", "src/app.py", ["+os.symlink(target, dest)"]],
+    ["shell positional operand", "scripts/run.sh", ['+readlink "$1"']],
+    ["shell reassignment", "scripts/run.sh", ['+src="${BASH_SOURCE[0]}"', '+src="$1"', '+readlink "$src"']],
+    // Ordinary near-misses.
+    ["python loop body with a second statement", "tools/tool.py", [...PY_SELF_LOCATION_LOOP, "+    hops += 1"]],
+    ["python loop reads another variable", "tools/tool.py", ["+src = __file__", "+while os.path.islink(src):", "+    src = os.readlink(user_path)"]],
+    ["shell loop reads another variable", "scripts/run.sh", SH_SELF_LOCATION_LOOP.map((l) => l.replace('readlink "$_src"', 'readlink "$target"'))],
+    ["shell loop copies another variable", "scripts/run.sh", SH_SELF_LOCATION_LOOP.map((l) => l.replace('_src="$_link"', '_src="$target"'))],
+    ["statement between anchor and guard", "scripts/run.sh", [SH_SELF_LOCATION_LOOP[0] ?? "", '+_src="$1"', ...SH_SELF_LOCATION_LOOP.slice(1)]],
+    ["second readlink on the line, shell", "scripts/run.sh", ['+readlink "$0"; readlink "$1"']],
+    ["unbalanced outer quote", "scripts/run.sh", ['+SCRIPT="$(readlink -f "$0")']],
+    ["second readlink on the line, python", "tools/tool.py", ["+x = os.readlink(__file__) or os.readlink(p)"]],
+    ["anchor changed from $0 to $1, loop in context", "scripts/run.sh", modifiedLoopAnchor("$0", "$1")],
+    ["anchor changed from $1 to $0, loop in context", "scripts/run.sh", modifiedLoopAnchor("$1", "$0")],
+    ["shell loop in a .js file", "src/run.js", SH_SELF_LOCATION_LOOP],
+    ["shell loop in a .zsh file", "scripts/run.zsh", SH_SELF_LOCATION_LOOP],
+    ["os.lstat", "src/app.py", ["+os.lstat(path)"]],
+    // Declared limits: false positives that exist today and stay.
+    [
+      "relative-link wrapper loop",
+      "scripts/run.sh",
+      [
+        '+_src="${BASH_SOURCE[0]}"',
+        '+while [ -L "$_src" ]; do',
+        '+  _link="$(readlink "$_src")"',
+        '+  case "$_link" in',
+        '+    /*) _src="$_link" ;;',
+        '+    *) _src="$(dirname "$_src")/$_link" ;;',
+        "+  esac",
+        "+done",
+      ],
+    ],
+    ["symlink word in a string literal", "scripts/run.sh", ['+echo "too many symlink levels" >&2']],
+    ["comment in an extensionless file", "bin/tool", ["+# follow readlink until the real file", ...SH_SELF_LOCATION_LOOP]],
+    ["single-line compound", "scripts/run.sh", ['+[ -L "$0" ] && readlink "$0"']],
+    ["braced ${0}", "scripts/run.sh", ['+readlink "${0}"']],
+    ["unquoted $0", "scripts/run.sh", ["+readlink $0"]],
+    ["readlink -e", "scripts/run.sh", ['+readlink -e "$0"']],
+    ["CRLF line", "scripts/run.sh", ['+readlink "$0"\r']],
+    ["suffix with a variable", "scripts/run.sh", ['+cd "$(dirname "$(readlink -f "$0")")/$1"']],
+  ];
+  for (const [label, file, lines] of cases) {
+    const result = classifyPr({ prFiles: files(file), diffText: selfLocationDiff(file, lines), linkedIssues: [] });
+    assert.ok(firesSymlinkSensitive(result), `${label}: expected a symlink_sensitive signal`);
+  }
+});
+
 // ── Specialist role selection (#633 port) ─────────────────────────────────
 
 test("lane tables select roles from kind and flags", () => {

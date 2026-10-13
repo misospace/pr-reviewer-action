@@ -201,20 +201,48 @@ class TestCheckEntries:
         assert seen == [("acme/repo", "b" * 40, "h" * 40)]
 
 
-class TestGitHubClientHasNoHttpFallback:
-    """#855-class safety: this client must never hold a bearer token over a
-    redirect-following urlopen call. The simplest guarantee is having no
-    direct-HTTP path at all."""
+class TestGitHubClientRoutesThroughForgeCapability:
+    """Every forge read and write goes through the configured forge
+    capability (``pr_reviewer.forge``), not a forge-specific CLI like
+    ``gh``. The script must not import ``shutil`` / ``subprocess`` to
+    shell out; the only thing the script knows about the API URL and
+    the token is the forge capability.
 
-    def test_raises_when_gh_cli_is_missing(self, monkeypatch):
+    The historical guard against #855-class redirect token leakage (this
+    script used to require the ``gh`` CLI because a hand-rolled
+    ``urlopen`` followed redirects by default) is now covered by the
+    redirect-safety test on :mod:`pr_reviewer.forge` itself. This module
+    merely asserts the seam is the one place the script does forge I/O.
+    """
+
+    def test_does_not_shell_out_to_a_forge_cli(self):
         import check_corpus_anchor_in_diff as mod
 
-        monkeypatch.setattr(mod.shutil, "which", lambda _name: None)
-        with pytest.raises(GitHubAPIError, match="gh"):
-            mod.GitHubClient()
+        assert not hasattr(mod, "subprocess"), (
+            "shell-out to a forge CLI bypasses the configured forge capability"
+        )
+        assert not hasattr(mod, "shutil"), "shutil.which('gh') is a forge-CLI affordance, not a seam"
 
-    def test_has_no_urllib_import(self):
+    def test_has_no_direct_urllib_import(self):
         import check_corpus_anchor_in_diff as mod
 
+        # The script must not import urllib itself; the redirect-safe
+        # transport lives in ``pr_reviewer.forge``, not here.
         assert not hasattr(mod, "urlopen")
         assert not hasattr(mod, "Request")
+
+    def test_github_client_is_built_around_forge_capability(self):
+        """The script's ``GitHubClient`` delegates to ``pr_reviewer.forge``;
+        the only place a request URL or a token is constructed is the
+        forge module, not this script.
+        """
+        import check_corpus_anchor_in_diff as mod
+        from pr_reviewer import forge
+
+        client = mod.GitHubClient()
+        # The forge capability owns the request URL and the token; the
+        # script must not have either of those concepts in its own
+        # attributes. (The forge module itself is tested for both.)
+        assert not hasattr(client, "base_url")
+        assert not hasattr(client, "token")
+        assert isinstance(client._forge, forge.ForgeClient)

@@ -42,6 +42,12 @@ export const EXACT_CONFIG_KEYS: readonly string[] = [
   "FALLBACK_MODEL_CONTEXT_TOKENS",
   "PRIMARY_REQUEST_SHAPE",
   "SMART_REQUEST_SHAPE",
+  // #1009: per-lane `response_format` selects which `response_format` body
+  // shape the OpenAI-compatible lane emits. The `AI_*` prefix is swept
+  // automatically by `collectConfigLines`; the note here is for reviewers
+  // — changing the effective lane value IS model-affecting config, so an
+  // unchanged diff must NOT skip a review that emitted a different request
+  // byte sequence.
   "REVIEW_ROUTING_MODE",
   "SYSTEM_PROMPT",
   "STANDARDS_FILE_CANDIDATES",
