@@ -173,16 +173,66 @@ test("source reader proves tree absence with ls-tree before refuting a git show 
 
   // Tree cleanly has no such entry ⇒ proven absence (refutation allowed).
   assert.deepEqual(await readerFor(() => Buffer.from(""))("src/a.ts"), { status: "unavailable", reason: "not-found" });
-  // A similar-but-not-equal entry name must not count as the cited path.
+  // A listing that carries entries but none matching is NOT proof of absence
+  // (#1016 review pass): the exact-pathspec query answered with content this
+  // reader cannot reconcile with a missing path, so it stays unknown evidence.
   assert.deepEqual(
     await readerFor(() => Buffer.from("100644 blob 1111111111111111111111111111111111111111\tsrc/a.ts.bak\0"))("src/a.ts"),
-    { status: "unavailable", reason: "not-found" },
+    { status: "unavailable", reason: "read-failed" },
   );
   // Tree inspection itself fails ⇒ fail closed, not refutation.
   assert.deepEqual(
     await readerFor(() => { throw Object.assign(new Error("fatal: could not read tree"), { status: 128 }); })("src/a.ts"),
     { status: "unavailable", reason: "read-failed" },
   );
+});
+
+test("source reader refuses to prove absence from a truncated or malformed ls-tree stream", async () => {
+  // #1016 (review pass, blocker): absence must be proven, not inferred. The
+  // pre-#1016 loop fell through to `not-found` on ANY listing that did not
+  // contain the cited path — including a truncated buffer, a record that does
+  // not parse as `<mode> SP <type> SP <object-id> TAB <path>`, and a buffer
+  // that does not end on a record boundary. Each of those is unknown evidence
+  // (the entry that would refute the claim may be in the part that never
+  // arrived), so it must read-fail and never refute.
+  const showFailure = Object.assign(new Error("fatal: bad object"), { status: 128 });
+  const readerFor = (listing: Buffer) => createHeadSourceReader({
+    workspace: "/tmp",
+    revision,
+    execFile: (_file, args) => {
+      if (args[0] === "cat-file") return Buffer.alloc(0);
+      if (args[0] === "show") throw showFailure;
+      return listing;
+    },
+  });
+  const malformed: Array<[string, Buffer]> = [
+    // Record stream cut mid-record (no trailing NUL).
+    ["truncated buffer", Buffer.from("100644 blob 1111111111111111111111111111111111111111\tsrc/")],
+    // Header truncated: only 20 of the 40 object-id bytes arrived.
+    ["short object id", Buffer.from("100644 blob 11111111111111111111\tsrc/a.ts\0")],
+    // No TAB at all — the record has no path field.
+    ["missing tab", Buffer.from("100644 blob 1111111111111111111111111111111111111111 src/a.ts\0")],
+    // Empty path after the TAB.
+    ["empty path", Buffer.from("100644 blob 1111111111111111111111111111111111111111\t\0")],
+    // Non-object-id junk in the header.
+    ["junk header", Buffer.from("garbage\tsrc/a.ts\0")],
+    // A well-formed entry, then a NUL-terminated empty record.
+    ["empty record", Buffer.concat([
+      Buffer.from("100644 blob 1111111111111111111111111111111111111111\tsrc/b.ts\0"),
+      Buffer.from("\0"),
+    ])],
+  ];
+  for (const [label, listing] of malformed) {
+    assert.deepEqual(
+      await readerFor(listing)("src/a.ts"),
+      { status: "unavailable", reason: "read-failed" },
+      `expected ${label} to be unknown evidence, not proven absence`,
+    );
+  }
+
+  // Control: only a cleanly completed, well-formed, EMPTY listing proves
+  // absence — the shape `git ls-tree` returns for a path the tree lacks.
+  assert.deepEqual(await readerFor(Buffer.from(""))("src/a.ts"), { status: "unavailable", reason: "not-found" });
 });
 
 test("source reader canonicalizes non-normalized citations and compares tree names byte-exactly", async () => {
@@ -219,8 +269,10 @@ test("source reader canonicalizes non-normalized citations and compares tree nam
   assert.deepEqual(showRevargs, [`${revision}:src/a.ts`, `${revision}:src/a.ts`, `${revision}:src/a.ts`]);
 
   // Byte-exact comparison: an entry whose raw bytes merely LOOK like the
-  // cited path after lossy UTF-8 decoding (invalid UTF-8 → U+FFFD) must
-  // not match, and a clean no-match listing still proves absence.
+  // cited path after lossy UTF-8 decoding (invalid UTF-8 → U+FFFD) must not
+  // match. Under the strengthened invariant a well-formed non-matching
+  // listing is unknown evidence rather than proven absence, so this asserts
+  // the safe direction the byte-exact comparison preserves.
   const byteExact = createHeadSourceReader({
     workspace: "/tmp",
     revision,
@@ -231,7 +283,7 @@ test("source reader canonicalizes non-normalized citations and compares tree nam
       return Buffer.concat([Buffer.from("100644 blob 1111111111111111111111111111111111111111\tsrc/caf"), Buffer.from([0xff]), Buffer.from(".ts\0")]);
     },
   });
-  assert.deepEqual(await byteExact("src/café.ts"), { status: "unavailable", reason: "not-found" });
+  assert.deepEqual(await byteExact("src/café.ts"), { status: "unavailable", reason: "read-failed" });
 
   // Empty/dot-only citations are path-invalid, never a root-tree lookup.
   for (const citation of [".", "./", "//"]) {

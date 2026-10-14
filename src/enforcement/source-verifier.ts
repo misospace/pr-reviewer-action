@@ -18,6 +18,63 @@ function canonicalTreePath(file: string): string {
   return file.split("/").filter((segment) => segment !== "" && segment !== ".").join("/");
 }
 
+/**
+ * A `-z` `ls-tree` record header: `<mode> SP <type> SP <object-id>`. git
+ * emits six octal mode digits, one of the three tree entry types, and a full
+ * hex object id (40 for sha1, 64 for sha256) — so a record whose header does
+ * not match this shape is truncated or otherwise not a record git wrote.
+ */
+const LS_TREE_HEADER_RE = /^[0-7]{6} (?:blob|tree|commit) [0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+
+/**
+ * #1016 (review pass, blocker): `not-found` is an affirmative disproof — the
+ * boundary is allowed to relax a blocker on it — so absence must be PROVEN,
+ * not inferred from a listing that merely failed to contain the cited path.
+ * A record stream that is truncated mid-record, does not end on a record
+ * boundary, or holds a record this reader cannot parse is unknown evidence:
+ * the entry that would refute the claim may be in the part that never
+ * arrived.
+ *
+ * Three outcomes:
+ * - "listed": a byte-exact match for the cited path is present (the entry
+ *   exists, only its blob could not be read) — unknown evidence.
+ * - "absent": a successfully completed, structurally complete, EMPTY
+ *   listing. Absence is asserted for this shape only.
+ * - "unknown": everything else, including a cleanly parsed listing that
+ *   carries entries but none matching — a non-empty answer to an
+ *   exact-pathspec query is not a complete record of what the tree holds, so
+ *   it cannot prove absence.
+ */
+function inspectLsTreeListing(listing: Buffer, wanted: Buffer): "listed" | "absent" | "unknown" {
+  if (listing.length === 0) return "absent";
+  // `-z` NUL-terminates every record, so a non-empty listing must end on a
+  // NUL. A buffer that does not was cut short mid-record.
+  if (listing[listing.length - 1] !== 0) return "unknown";
+  let cursor = 0;
+  while (cursor < listing.length) {
+    const nul = listing.indexOf(0, cursor);
+    if (nul === -1) return "unknown";
+    // Entry format: `<mode> <type> <object-id>\t<path>`. The path starts
+    // after the FIRST tab (mode/type/object-id never contain one), so a tab
+    // inside the path itself still compares exactly. That separator is the
+    // invariant the header regex depends on: `tab` is searched from `cursor`,
+    // so it is the record's separator, never a byte borrowed from its path.
+    const tab = listing.indexOf(0x09, cursor);
+    if (tab === -1 || tab >= nul || nul === tab + 1) return "unknown";
+    // The header is ASCII by construction; decode it byte-per-character so
+    // no multi-byte sequence can shift the record boundary.
+    if (!LS_TREE_HEADER_RE.test(listing.toString("latin1", cursor, tab))) return "unknown";
+    // The comparison is byte-exact on the raw listing: a tree path with
+    // non-UTF-8 bytes must never match (or falsely miss through a lossy
+    // decode) the cited path.
+    if (listing.subarray(tab + 1, nul).equals(wanted)) return "listed";
+    cursor = nul + 1;
+  }
+  // Every record parsed cleanly and none matched, yet the listing is
+  // non-empty: unknown evidence, never a disproof.
+  return "unknown";
+}
+
 export interface HeadSourceReaderOptions {
   workspace: string;
   revision: string | null | undefined;
@@ -94,7 +151,7 @@ export function createHeadSourceReader(options: HeadSourceReaderOptions): Source
       // `not-found` disproof, independently prove absence in the validated
       // commit tree with a bounded exact-path `git ls-tree` (argv-only,
       // literal pathspec so no glob interpretation, byte- and time-capped).
-      // Anything but a clean no-entry listing is unknown evidence.
+      // Anything but a clean, complete, empty listing is unknown evidence.
       try {
         // `-z`: NUL-separated entries with RAW paths. Without it git quotes
         // non-ASCII/special names (core.quotePath), which would break the
@@ -104,27 +161,16 @@ export function createHeadSourceReader(options: HeadSourceReaderOptions): Source
           ...execOptions,
           maxBuffer: 1_000_000,
         });
-        // Entry format: `<mode> <type> <object-id>\t<path>\0`. The path
-        // starts after the FIRST tab (mode/type/object-id never contain
-        // one), so a tab inside the path itself still compares exactly.
-        // The comparison is byte-exact on the raw listing: a tree path
-        // with non-UTF-8 bytes must never match (or falsely miss through
-        // a lossy decode) the cited path.
-        const wanted = Buffer.from(treePath, "utf8");
-        let cursor = 0;
-        while (cursor < listing.length) {
-          const nul = listing.indexOf(0, cursor);
-          const entryEnd = nul === -1 ? listing.length : nul;
-          const tab = listing.indexOf(0x09, cursor);
-          if (tab !== -1 && tab < entryEnd && listing.subarray(tab + 1, entryEnd).equals(wanted)) {
-            // The path is listed in the tree but its blob could not be
-            // read: unknown evidence, never positive refutation.
-            return { status: "unavailable", reason: "read-failed" };
-          }
-          if (nul === -1) break;
-          cursor = nul + 1;
+        const outcome = inspectLsTreeListing(listing, Buffer.from(treePath, "utf8"));
+        if (outcome === "listed") {
+          // The path is listed in the tree but its blob could not be
+          // read: unknown evidence, never positive refutation.
+          return { status: "unavailable", reason: "read-failed" };
         }
-        return { status: "unavailable", reason: "not-found" };
+        if (outcome === "absent") {
+          return { status: "unavailable", reason: "not-found" };
+        }
+        return { status: "unavailable", reason: "read-failed" };
       } catch (error) {
         const failure = error as { code?: unknown; message?: unknown };
         if (failure.code === "ENOBUFS" || /buffer|large/i.test(String(failure.message ?? ""))) {

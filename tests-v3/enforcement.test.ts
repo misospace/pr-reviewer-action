@@ -217,6 +217,65 @@ test("findings policy escalates blocker with contractual note", () => {
   assert.ok(a.review_markdown.includes("_Verdict escalated from structured findings (verdict_policy=findings_severity_gated): 1 blocker finding(s) out of 1; model verdict was 'approve'._"));
 });
 
+test("#1016 findings policy keeps an unverified blocker demotion blocking", () => {
+  // The deterministic boundary demotes an originally-blocker finding to minor
+  // when it could not confirm the source claim, which hides it from the
+  // severity gate: with zero live blockers a model `approve` would survive as
+  // a published approve even though the exact-head source was never read.
+  // Unknown evidence is not refutation, so the gated policy must fail closed
+  // the same way the strict mapping does.
+  const demoted = (overrides: Record<string, unknown> = {}) => ({
+    severity: "minor", category: "bug", file: "src/a.ts", line: 4, message: "finding",
+    capped_from: "blocker", grounding_status: "unverified", ...overrides,
+  });
+
+  const a = artifact({ findings: [demoted()] });
+  applyVerdictPolicy(a, "findings_severity_gated", policyOptions);
+  assert.equal(a.verdict, "request_changes");
+  assert.equal(a.verdict_source, "findings");
+  assert.ok(
+    a.review_markdown.includes("1 blocker finding(s) whose source claim could not be verified against exact-head source (unknown evidence, not refuted; #1016)"),
+    `expected the unknown-evidence attribution in the note, got: ${a.review_markdown}`,
+  );
+  assert.ok(a.review_markdown.includes("model verdict was 'approve'._"));
+
+  // A positively REFUTED demotion is proof the claim is wrong: the model
+  // approve stands and the note never implies an unverifiable blocker.
+  const refuted = artifact({ findings: [demoted({ grounding_status: "refuted" })] });
+  applyVerdictPolicy(refuted, "findings_severity_gated", policyOptions);
+  assert.equal(refuted.verdict, "approve");
+  assert.equal(refuted.verdict_source, "model");
+  assert.ok(!refuted.review_markdown.includes("escalated from structured findings"));
+
+  // The gate is blocker-level only: a demoted major never escalated under
+  // this policy before #1016 and must not start now.
+  const major = artifact({ findings: [demoted({ capped_from: "major" })] });
+  applyVerdictPolicy(major, "findings_severity_gated", policyOptions);
+  assert.equal(major.verdict, "approve");
+  assert.equal(major.verdict_source, "model");
+
+  // #977 verification asks can never request changes, capped or not.
+  const verification = artifact({ findings: [demoted({ category: "verification" })] });
+  applyVerdictPolicy(verification, "findings_severity_gated", policyOptions);
+  assert.equal(verification.verdict, "approve");
+  assert.equal(verification.verdict_source, "model");
+});
+
+test("#1016 findings policy attributes a live blocker and an unverified demotion as one note", () => {
+  // Both signals fire: the composed note names each contribution and keeps the
+  // live blocker count intact, mirroring `strictRequestChangesDetail`.
+  const a = artifact({ findings: [finding("blocker"), {
+    severity: "minor", category: "bug", file: "src/b.ts", line: 4, message: "finding",
+    capped_from: "blocker", grounding_status: "unverified",
+  }] });
+  applyVerdictPolicy(a, "findings_severity_gated", policyOptions);
+  assert.equal(a.verdict, "request_changes");
+  assert.ok(
+    a.review_markdown.includes("_Verdict escalated from structured findings (verdict_policy=findings_severity_gated): 1 blocker finding(s) out of 2; 1 blocker finding(s) whose source claim could not be verified against exact-head source (unknown evidence, not refuted; #1016); model verdict was 'approve'._"),
+    `expected one composed attribution note, got: ${a.review_markdown}`,
+  );
+});
+
 test("#775 caps opted-in blocker/major findings and relaxes only without remaining gates", () => {
   const a = artifact({ verdict: "request_changes", findings: [finding("blocker", "tests"), finding("major", "docs")] });
   applyVerdictPolicy(a, "findings_severity_gated", policyOptions);

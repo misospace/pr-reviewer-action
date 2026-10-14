@@ -7,6 +7,7 @@ import {
 } from "../src/enforcement/blocker-verification.js";
 import {
   applyStrictVerdictPolicy,
+  applyVerdictPolicy,
   relaxUnverifiedBlockerVerdict,
 } from "../src/enforcement/verdict-policy.js";
 import {
@@ -52,6 +53,14 @@ function readerFor(text: string): SourceReader {
 const unavailableReader: SourceReader = async (): Promise<SourceReadResult> => ({
   status: "unavailable",
   reason: "no-exact-revision",
+});
+
+/** An exact-head read that got as far as the tree lookup and still could not
+ * return the source — the `read-failed` shape the gated policy must not read
+ * as a refutation. */
+const readFailingReader: SourceReader = async (): Promise<SourceReadResult> => ({
+  status: "unavailable",
+  reason: "read-failed",
 });
 
 // ---------------------------------------------------------------------------
@@ -554,4 +563,76 @@ test("#1016 requirement claim with the cited snippet only away from the cited li
   assert.equal(a.verdict, "request_changes");
   assert.ok(a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"));
   assert.ok(a.review_markdown.includes("#1016"));
+});
+
+test("#1016 findings_severity_gated: a model approve cannot survive an unverified blocker demotion", async () => {
+  // End-to-end shape of the gated policy path (#1016 review pass): the
+  // boundary demotes an originally-blocker finding because the exact-head
+  // read came back `read-failed`, and the model verdict was `approve`. With
+  // the demotion counted only by severity the gate sees zero blockers and the
+  // approve publishes — unknown evidence silently becoming approval. The
+  // gated policy must fail closed on it, exactly as `strict` does, and the
+  // attribution note must name the unknown-evidence signal instead of
+  // implying a live blocker that no longer exists.
+  const gated = { nonBlockingCategories: new Set<string>(), securityFlagged: false };
+  const a = artifact({
+    verdict: "approve",
+    findings: [finding({ file: "src/logger.ts", message: "the file commits the literal `[REDACTED]`" })],
+  });
+  const result = await applyBlockerVerification(a.findings, { readSource: readFailingReader, expectedRevision: REVISION });
+  assert.equal(result.demoted, 1);
+  assert.equal(a.findings[0]!.grounding_status, "unverified");
+  assert.equal(a.findings[0]!.capped_from, "blocker");
+  assert.equal(a.findings[0]!.severity, "minor");
+
+  applyVerdictPolicy(a, "findings_severity_gated", gated);
+  assert.equal(a.verdict, "request_changes");
+  assert.equal(a.verdict_source, "findings");
+  assert.ok(
+    a.review_markdown.includes("1 blocker finding(s) whose source claim could not be verified against exact-head source (unknown evidence, not refuted; #1016)"),
+    `expected the #1016 unknown-evidence attribution, got: ${a.review_markdown}`,
+  );
+  assert.ok(!a.review_markdown.includes("1 blocker finding(s) out of 1"), `note must not claim a live blocker: ${a.review_markdown}`);
+  // The relaxer downstream still refuses: the boundary never certifies a
+  // clean review from evidence it could not read.
+  assert.equal(relaxUnverifiedBlockerVerdict(a, { forced: false }), false);
+  assert.equal(a.verdict, "request_changes");
+});
+
+test("#1016 findings_severity_gated: a positively refuted blocker demotion still ends approve", async () => {
+  // The control for the case above: the reader answered, and the exact-head
+  // source positively disproved the claim. Refutation is proof, so the gated
+  // policy leaves the model's approve alone — the fail-closed rule must not
+  // fire on evidence that was actually checked.
+  const gated = { nonBlockingCategories: new Set<string>(), securityFlagged: false };
+  const refutedReader: SourceReader = async (file: string): Promise<SourceReadResult> => ({
+    status: "ok",
+    text: "const CANARY = 'plain';",
+    provenance: committedSourceProvenance(file, REVISION),
+  });
+  const a = artifact({
+    verdict: "approve",
+    findings: [finding({ file: "src/logger.ts", message: "the file commits the literal `[REDACTED]`" })],
+  });
+  const result = await applyBlockerVerification(a.findings, { readSource: refutedReader, expectedRevision: REVISION });
+  assert.equal(result.demoted, 1);
+  assert.equal(a.findings[0]!.grounding_status, "refuted");
+  assert.equal(a.findings[0]!.capped_from, "blocker");
+  assert.equal(a.findings[0]!.severity, "minor");
+
+  applyVerdictPolicy(a, "findings_severity_gated", gated);
+  assert.equal(a.verdict, "approve");
+  assert.equal(a.verdict_source, "model");
+  assert.ok(!a.review_markdown.includes("escalated from structured findings"), `unexpected escalation: ${a.review_markdown}`);
+
+  // Same artifact shape with the model's own request_changes: the relaxer
+  // accepts the refutation, so a proven-false blocker cannot hold a PR.
+  const blocked = artifact({
+    verdict: "request_changes",
+    findings: [finding({ file: "src/logger.ts", message: "the file commits the literal `[REDACTED]`" })],
+  });
+  await applyBlockerVerification(blocked.findings, { readSource: refutedReader, expectedRevision: REVISION });
+  applyVerdictPolicy(blocked, "findings_severity_gated", gated);
+  assert.equal(relaxUnverifiedBlockerVerdict(blocked, { forced: false }), true);
+  assert.equal(blocked.verdict, "approve");
 });

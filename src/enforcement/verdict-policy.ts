@@ -253,6 +253,21 @@ function isUnverifiedGrounding(finding: ArtifactFinding): boolean {
 }
 
 /**
+ * #1016: a blocker-level finding the deterministic boundary demoted to minor
+ * because its source claim could not be checked. `capped_from` and
+ * `grounding_status` are set together only by `applyBlockerVerification` —
+ * the other capping paths (non-blocking category #775, CI evidence #976) set
+ * `capped_from` alone and never record a grounding status — so this cannot
+ * collide with another capping path's `capped_from: "blocker"`.
+ *
+ * Such a finding is unknown evidence, not a refutation, and must keep
+ * counting as blocking everywhere a verdict is derived from the open findings.
+ */
+function isUnverifiedBlockerDemotion(finding: ArtifactFinding): boolean {
+  return finding.capped_from === "blocker" && isUnverifiedGrounding(finding);
+}
+
+/**
  * #1016: relax a model-authored request_changes whose every still-open finding
  * is non-blocking because the deterministic blocker-verification boundary
  * positively refuted it (grounding_status refuted/unsupported) — alongside
@@ -296,6 +311,26 @@ export interface VerdictPolicyResult {
 }
 
 /**
+ * #1016: the findings_severity_gated escalation note. One part when only
+ * live blocker findings triggered the escalation — byte-identical to the
+ * pre-#1016 note — plus an explicit #1016 unknown-evidence part when
+ * blocker-level demotions whose source claim could not be verified
+ * co-contribute, so the markdown never implies a live blocker that does
+ * not exist. Mirrors `strictRequestChangesDetail` below: `;`-joined parts,
+ * one attribution note rather than two.
+ */
+function gatedEscalationDetail(input: { blockers: number; unverified: number; total: number }): string {
+  const parts: string[] = [];
+  if (input.blockers > 0) {
+    parts.push(`${input.blockers} blocker finding(s) out of ${input.total}`);
+  }
+  if (input.unverified > 0) {
+    parts.push(`${input.unverified} blocker finding(s) whose source claim could not be verified against exact-head source (unknown evidence, not refuted; #1016)`);
+  }
+  return parts.join("; ");
+}
+
+/**
  * Apply the verdict policy to the artifact in place. `policy` is the
  * `verdict_policy` config value ("model" default). `nonBlockingCategories`
  * is the parsed #775 opt-in list; `securityFlagged` the classification
@@ -327,12 +362,26 @@ export function applyVerdictPolicy(
       artifact.verdict = "approve";
       source = "findings";
     }
+    // #1016: the boundary's demotion of an originally-blocker finding hides
+    // it from the severity gate — after the demotion there are zero `blocker`
+    // findings, so a model `approve` would survive as a published approve even
+    // though the exact-head source was never read. Unknown evidence is not
+    // refutation: a demotion with `grounding_status === "unverified"` counts
+    // as blocking here, matching the strict mapping for blocker-level
+    // demotions. This gate is blocker-level by design (the strict mapping
+    // also fires on a demoted `major`), so a demoted major is left alone
+    // rather than escalated by a policy that never escalated one.
     const blockers = findings.filter((finding) => finding.severity === "blocker" && !isAlwaysNonBlockingCategory(finding.category));
-    if (blockers.length > 0 && artifact.verdict !== "request_changes") {
+    const unverifiedBlockers = findings.filter((finding) => isUnverifiedBlockerDemotion(finding) && !isAlwaysNonBlockingCategory(finding.category));
+    if ((blockers.length > 0 || unverifiedBlockers.length > 0) && artifact.verdict !== "request_changes") {
+      const detail = gatedEscalationDetail({
+        blockers: blockers.length,
+        unverified: unverifiedBlockers.length,
+        total: findings.length,
+      });
       artifact.review_markdown += (
         "\n\n_Verdict escalated from structured findings "
-        + `(verdict_policy=findings_severity_gated): ${blockers.length} blocker finding(s) `
-        + `out of ${findings.length}; model verdict was '${artifact.verdict}'._`
+        + `(verdict_policy=findings_severity_gated): ${detail}; model verdict was '${artifact.verdict}'._`
       );
       artifact.verdict = "request_changes";
       source = "findings";
