@@ -1,6 +1,7 @@
 import { appendFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { ciAttemptTimeoutMs } from "../platform/bounded.js";
 import { ForgejoAdapter } from "../platform/forgejo.js";
+import { forgejoTokenFromEnv } from "../platform/forgejo-auth.js";
 import { GitHubAdapter } from "../platform/github.js";
 import { jqCompact } from "../platform/jq.js";
 import { forgejoSelfRunOrigin, type ExternalCheck } from "../platform/normalize.js";
@@ -85,12 +86,12 @@ export function ciAdapterFromEnv(ciEnv: CiEnv, repo: string, prNumber: string, t
   const platform = resolvePlatform(ciEnv.PLATFORM, ciEnv.FORGEJO_API_URL ?? "", ciEnv.GITHUB_SERVER_URL ?? "", ciEnv.TANGLED_REPO_DID ?? "");
   requireImplementedBackend(platform);
   if (platform === "forgejo") {
-    const forgejoToken = ciEnv.FORGEJO_TOKEN || ciEnv.GITHUB_TOKEN || ciEnv.GH_TOKEN || "";
+    const forgejoToken = forgejoTokenFromEnv(ciEnv);
     return new ForgejoAdapter({
       repo,
       prNumber,
       baseUrl: ciEnv.FORGEJO_API_URL ?? "",
-      token: forgejoToken === "" ? undefined : forgejoToken,
+      token: forgejoToken,
       authMethod: (ciEnv.FORGEJO_AUTH_METHOD ?? "").trim().toLowerCase() || undefined,
       authorizedIntegrationAudience: (ciEnv.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE ?? "").trim() || undefined,
     });

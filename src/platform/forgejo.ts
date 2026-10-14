@@ -49,7 +49,7 @@ export interface ForgejoAdapterOptions {
   prNumber: string;
   /** FORGEJO_API_URL — validated before any credential is attached. */
   baseUrl: string;
-  /** Resolved token (FORGEJO_TOKEN → GITHUB_TOKEN → GH_TOKEN chain). */
+  /** Resolved token; the runner token is only a fallback in token mode. */
   token?: string | undefined;
   /** "token" (default) or "authorized_integration" (#254 lineage). */
   authMethod?: string | undefined;
@@ -108,7 +108,7 @@ export class ForgejoAdapter implements PlatformReadAdapter {
     this.repo = options.repo;
     this.prNumber = options.prNumber;
     this.token = options.token;
-    this.authMethod = options.authMethod ?? "token";
+    this.authMethod = options.authMethod ?? "";
     this.audience = options.authorizedIntegrationAudience ?? "";
     this.timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.fetchImpl = options.fetchImpl ?? fetch;
@@ -127,16 +127,36 @@ export class ForgejoAdapter implements PlatformReadAdapter {
   }
 
   private isAuthorizedIntegrationMode(): boolean {
-    return this.audience.trim() !== "";
+    // Audience-only direct callers used OIDC before authMethod was wired
+    // through. An explicit method governs when both settings are supplied.
+    const method = this.authMethod.trim().toLowerCase();
+    return method === "authorized_integration" || (method === "" && this.audience.trim() !== "");
   }
 
-  /** Resolve the Authorization header (port of `_resolve_auth_header`):
-   * authorized-integration mode with no explicit token uses the OIDC JWT;
-   * an explicit token always wins; token="" opts out of authentication. */
+  /** Share the adapter's OIDC exchange with Forgejo write operations. */
+  async authorizationHeaderForRequest(): Promise<string | undefined> {
+    return this.authorizationHeader();
+  }
+
+  /** Surface exchange and Forgejo authorization failures before reads can fold them into empty data. */
+  async preflightAuthentication(): Promise<void> {
+    if (!this.isAuthorizedIntegrationMode()) return;
+    const { status } = await requestText(
+      this.repoUrl("/pulls/", this.prNumber),
+      await this.options("application/json"),
+    );
+    if (status !== 200) {
+      throw new PlatformRequestError(
+        `Forgejo authorized-integration credential check failed with status ${status}`,
+        status,
+        "integration-auth",
+      );
+    }
+  }
+
+  /** The selected method owns authentication even if a caller supplies a token. */
   private async authorizationHeader(): Promise<string | undefined> {
     if (this.isAuthorizedIntegrationMode()) {
-      if (this.token === "") return undefined;
-      if (this.token) return `token ${this.token}`;
       return `Bearer ${await this.getJwt()}`;
     }
     if (!this.token) return undefined;
@@ -158,6 +178,13 @@ export class ForgejoAdapter implements PlatformReadAdapter {
   private async getJwt(): Promise<string> {
     const cached = this.jwtCache;
     if (cached && Date.now() - cached.fetchedAt < JWT_TTL_SECONDS * 1000) return cached.token;
+    if (!this.audience.trim()) {
+      throw new PlatformRequestError(
+        "Authorized-integration mode requires FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE",
+        null,
+        "missing-audience",
+      );
+    }
     const requestUrl = process.env.ACTIONS_ID_TOKEN_REQUEST_URL ?? "";
     const requestToken = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN ?? "";
     if (!requestUrl || !requestToken) {

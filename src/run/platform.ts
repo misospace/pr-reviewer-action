@@ -1,5 +1,6 @@
 import type { FetchLike } from "../platform/http.js";
 import { ForgejoAdapter } from "../platform/forgejo.js";
+import { forgejoTokenFromEnv } from "../platform/forgejo-auth.js";
 import { GitHubAdapter } from "../platform/github.js";
 import { resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend, tangledContextFromEnv } from "../platform/tangled.js";
@@ -47,7 +48,7 @@ export function buildPlatformReadAdapter(env: StageEnv, fetchImpl?: FetchLike): 
       repo,
       prNumber,
       baseUrl: env.FORGEJO_API_URL ?? "",
-      token: env.FORGEJO_TOKEN || env.GITHUB_TOKEN || env.GH_TOKEN || undefined,
+      token: forgejoTokenFromEnv(env),
       ...(env.FORGEJO_AUTH_METHOD !== undefined ? { authMethod: env.FORGEJO_AUTH_METHOD } : {}),
       ...(env.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE !== undefined
         ? { authorizedIntegrationAudience: env.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE }

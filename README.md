@@ -108,6 +108,8 @@ The action works on **GitHub** and **Forgejo** (1.4.x), with **Tangled** resolva
 | Tool harness | ✅ Full | ✅ Full |
 | Reviewer-requested smart escalation | ✅ Full | ✅ Full |
 
+Forgejo Authorized Integrations can reuse managed sticky comments with repository and issue permissions; `read:user` is not required. The action matches the integration owner's ID from its Forgejo-generated audience against comment author IDs. If a prior managed comment has no usable author ID and ownership cannot be established, publication fails closed.
+
 > **Note:** On Forgejo, features requiring GitHub's GraphQL API (review minimization) are skipped with a clear log line. CI auto-discovery requires Forgejo v16.0+ (the first release with the run-jobs API) and excludes a pending status only when that API proves this is a single-job run. If the job has an `html_url`, its path must exactly match the status `target_url` path on the runner's origin. Forgejo v16 jobs omit `html_url`; in that case the job's `run_id` must match the queried run, and the status must target a job page for the runner's repository and run number. `FORGEJO_RUN_NUMBER`/`GITHUB_RUN_NUMBER` identify candidate status URLs; `FORGEJO_RUN_ID` (or `GITHUB_RUN_ID` fallback) is used only to query the jobs API. Multi-job, mismatched, and unavailable cases leave statuses visible; older Forgejo instances warn immediately and fall back to bounded waiting, so set `CI_STATUS_CONTEXT` to avoid self-deadlock; a whitespace-only value is treated as unset and enables auto-discovery. Multi-job reviewer workflows also need `CI_STATUS_CONTEXT`. The core review pipeline and all REST-based features work fully.
 
 ## 📚 Documentation
