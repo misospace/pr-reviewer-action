@@ -103,7 +103,7 @@ async function runTriageReview(options: {
   try {
     const outputFile = join(runDir, "gh-output.txt");
     const stepSummaryFile = join(runDir, "step-summary.md");
-    const result = await runReview({
+    await runReview({
       env: { GITHUB_OUTPUT: outputFile, GITHUB_STEP_SUMMARY: stepSummaryFile, ...options.env },
       inputs: {
         "github-token": "tok",
