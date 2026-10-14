@@ -319,7 +319,7 @@ inputs:
     v2_id: system_prompt_mode
     required: false
     default: "replace"
-    description: "How a supplied system_prompt / system_prompt_file combines with the bundled default. 'replace' (default) uses the supplied prompt verbatim. 'append' keeps the conditionally-assembled bundled default and appends the supplied prompt as a repo-specific addendum — so consumers add conventions without copying (and re-syncing) the whole default."
+    description: "How a supplied system_prompt / system_prompt_file combines with the bundled default. 'replace' (default) uses the supplied prompt verbatim (with one exception: when 'review-triage' is enabled, the triage question is always appended so the tri-state answer stays grounded — see #1003). 'append' keeps the conditionally-assembled bundled default and appends the supplied prompt as a repo-specific addendum — so consumers add conventions without copying (and re-syncing) the whole default."
     repo-configurable: true
     repo-policy: true
   - id: review-verbosity

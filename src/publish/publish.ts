@@ -288,10 +288,13 @@ export function renderReviewTriageBlock(
   const line = reason === ""
     ? `> **Human review triage: ${label}**`
     : `> **Human review triage: ${label}** — ${reason}`;
-  const lines = ["## Human Review Triage", "", line];
-  if (reason !== "") {
-    lines.push(">", "_Advisory only: this triage answer does not change the review's verdict or findings, and it requests no reviewer._");
-  }
+  const lines = [
+    "## Human Review Triage",
+    "",
+    line,
+    ">",
+    "_Advisory only: this triage answer does not change the review's verdict or findings, and it requests no reviewer._",
+  ];
   return lines.join("\n");
 }
 

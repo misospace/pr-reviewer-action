@@ -143,12 +143,31 @@ test("#1003: applyReviewTriageFragment appends the triage question only when ena
   const fragment = BUNDLED_PROMPT_ASSETS.fragments.review_triage!;
   const enabled = applyReviewTriageFragment(base, true);
   assert.equal(enabled.systemPrompt, `BASE\n${fragment.trimEnd()}`);
-  // Disabled (and the default false) leaves the prompt byte-identical.
+  // Disabled (and the default false) leaves the prompt byte-identical,
+  // regardless of default/replace-mode — the only gate is the input.
   assert.equal(applyReviewTriageFragment(base, false).systemPrompt, "BASE");
-  // An operator replace-mode prompt is untouched, like every other fragment.
-  assert.equal(applyReviewTriageFragment({ ...base, isDefault: false }, true).systemPrompt, "BASE");
+  assert.equal(applyReviewTriageFragment({ ...base, isDefault: false }, false).systemPrompt, "BASE");
   // Idempotent: a second application adds nothing.
   assert.equal(applyReviewTriageFragment(enabled, true).systemPrompt, enabled.systemPrompt);
+});
+
+test("#1003: applyReviewTriageFragment composes with operator replace-mode prompts (the only fragment that does)", () => {
+  // #1003 ("Configuration") says triage must compose with custom system
+  // prompts. The operator prompt is preserved verbatim up to the appended
+  // line so the existing prompts are not rewritten; only the triage question
+  // is added. Other fragments stay tied to the default because they assume
+  // the placeholder discipline the bundled default has; triage is opt-in by
+  // config, so omitting the question from a custom prompt would silently
+  // degrade the answer to `unknown` and leave the tri-state ungrounded.
+  const fragment = BUNDLED_PROMPT_ASSETS.fragments.review_triage!;
+  const operator = { systemPrompt: "OPERATOR PROMPT", isDefault: false, addendum: "" };
+  const enabled = applyReviewTriageFragment(operator, true);
+  assert.equal(enabled.systemPrompt, `OPERATOR PROMPT\n${fragment.trimEnd()}`);
+  // The operator's content is preserved verbatim — the triage line is only an
+  // addition, never a rewrite of operator prose.
+  assert.equal(enabled.systemPrompt.startsWith("OPERATOR PROMPT\n"), true);
+  // Disabled never adds, even when the operator opted in.
+  assert.equal(applyReviewTriageFragment(operator, false).systemPrompt, "OPERATOR PROMPT");
 });
 
 test("#1003: the triage fragment states the fail-closed, no-invented-owner and no-extra-access rules", () => {
@@ -329,14 +348,33 @@ test("#1003: the triage section shows the reason for every decision, unknown inc
     const block = renderReviewTriageBlock({ decision, reason: "policy evidence" }, "inert");
     assert.match(block, new RegExp(`> \\*\\*Human review triage: ${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\*\\* — policy evidence`));
   }
-  // No reason: the block still states the decision, with no dangling dash.
+  // No reason: the block still states the decision, with no dangling dash
+  // AND still carries the advisory-only note — the note documents the
+  // section's non-binding nature, not the reason; an empty reason never
+  // hides it.
   assert.equal(
     renderReviewTriageBlock({ decision: "unknown", reason: "" }, "inert"),
-    "## Human Review Triage\n\n> **Human review triage: unknown — the reviewer could not determine this**",
+    "## Human Review Triage\n\n> **Human review triage: unknown — the reviewer could not determine this**\n>\n_Advisory only: this triage answer does not change the review's verdict or findings, and it requests no reviewer._",
   );
   // Fail closed at this boundary too: a value that is not one of the three
   // literals renders as unknown.
   assert.match(renderReviewTriageBlock({ decision: "REQUESTED", reason: "" }, "inert"), /Human review triage: unknown/);
+});
+
+test("#1003: the published triage section always carries the advisory-only note, including on the empty-reason path", () => {
+  // The advisory-only message is a property of the section, not of the
+  // reason; it must render for every decision/reason combination, including
+  // the case where the model gave no reason at all.
+  for (const decision of ["not_required", "required", "unknown"] as const) {
+    for (const reason of ["", "evidence here"]) {
+      const block = renderReviewTriageBlock({ decision, reason }, "inert");
+      assert.match(
+        block,
+        /_Advisory only: this triage answer does not change the review's verdict or findings, and it requests no reviewer\._/,
+        `advisory-only note missing for decision=${JSON.stringify(decision)} reason=${JSON.stringify(reason)}`,
+      );
+    }
+  }
 });
 
 test("#1003: a hostile triage reason cannot break out of the triage block", () => {
