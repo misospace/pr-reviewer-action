@@ -37,7 +37,7 @@ import {
 import { extractRequirementLedger, ledgerToArtifact, renderRequirementLedgerMarkdown } from "../requirements/ledger.js";
 import { requirementLedgerPresence } from "../requirements/presence.js";
 import { classifyPr, classificationToArtifact } from "../classification/classify.js";
-import { resolveReviewRoute, resolveTierProfiles, tierRequestShape, type TierProfiles } from "../routing/tiers.js";
+import { resolveReviewRoute, resolveTierProfiles, tierRequestShape, anthropicEffortSupported, type TierProfiles } from "../routing/tiers.js";
 import { reviewerRequestedEscalation } from "../routing/escalation.js";
 import { buildSpecialistCorpus } from "../specialists/corpus.js";
 import { forkGate, type ForkedGate, type GateName, type GateOutcome } from "../gates/gates.js";
@@ -627,7 +627,17 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   env.REVIEW_ROUTE = route;
   env.ROUTE_REASON = reason;
   if (route === "primary") {
-    Object.assign(env, { AI_BASE_URL: profiles.primary.baseUrl, AI_MODEL: profiles.primary.model, AI_API_FORMAT: profiles.primary.apiFormat, AI_API_KEY: profiles.primary.apiKey });
+    Object.assign(env, {
+      AI_BASE_URL: profiles.primary.baseUrl,
+      AI_MODEL: profiles.primary.model,
+      AI_API_FORMAT: profiles.primary.apiFormat,
+      AI_API_KEY: profiles.primary.apiKey,
+      // #998: the route's effort follows the route, exactly like the
+      // transport keys above — env-driven consumers downstream (the tool
+      // harness, the specialist phase) resolve their effort from the primary
+      // lane's value, not the raw base input.
+      AI_REASONING_EFFORT: profiles.primary.reasoningEffort,
+    });
   }
   env.REVIEW_CONTEXT_PROFILE = "primary";
   log(`Review route: ${route} (${reason}) → ${env.AI_MODEL}`);
@@ -710,6 +720,10 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
                 stream: (env.AI_STREAM ?? "true").toLowerCase() === "true",
                 timeoutSec: claimsTimeoutSec,
                 inputMaxBytes: Number(env.CLAIM_FALSIFICATION_INPUT_MAX_BYTES ?? "48000") || 48000,
+                // #998: the pre-pass runs on the primary route, so it uses the
+                // primary lane's resolved effort.
+                reasoningEffort: profiles.primary.reasoningEffort,
+                anthropicEffortSupported: anthropicEffortSupported(env),
               },
               requestFn: specialistRequestFn({
                 baseUrl: profiles.primary.baseUrl,
@@ -964,6 +978,9 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
             stream: (env.AI_STREAM ?? "true").toLowerCase() === "true",
             timeoutSec: repairTimeoutSec,
             inputMaxBytes: Number(env.REQUIREMENT_TRACE_REPAIR_INPUT_MAX_BYTES ?? "48000") || 48000,
+            // #998: the repair pass runs on the primary route.
+            reasoningEffort: profiles.primary.reasoningEffort,
+            anthropicEffortSupported: anthropicEffortSupported(env),
           },
           requestFn: specialistRequestFn({
             baseUrl: profiles.primary.baseUrl,
@@ -1585,6 +1602,9 @@ function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | 
     temperature: temperatureRaw === "" ? "" : Number(temperatureRaw) || 0.1,
     responseFormat: resolved.responseFormat,
     tokensParam: (env.AI_TOKENS_PARAM ?? "max_tokens") as TierProfile["tokensParam"],
+    // #998: the lane's resolved effort; "" omits the provider field entirely.
+    reasoningEffort: resolved.reasoningEffort,
+    anthropicEffortSupported: anthropicEffortSupported(env),
   };
 }
 
@@ -1611,6 +1631,8 @@ async function callTier(
     temperature: profile.temperature,
     responseFormat: profile.responseFormat,
     tokensParam: profile.tokensParam,
+    reasoningEffort: profile.reasoningEffort,
+    anthropicEffortSupported: profile.anthropicEffortSupported,
   });
   ws.write(requestArtifact, pyJsonDumps(requestPayload.body));
   ws.write(responseArtifact, "");
@@ -1629,7 +1651,11 @@ async function callTier(
     },
   });
   if (outcome.status === "ok") {
-    log(`${profile.label} model attempt ${outcome.attempts}/${profile.retries}: ${profile.model} @ ${profile.baseUrl} (${profile.apiFormat})`);
+    // #998: the effective effort is part of which request produced this
+    // verdict, so the per-call debug line carries it — appended only when one
+    // was actually sent, keeping the line unchanged for every existing setup.
+    const effortNote = profile.reasoningEffort === "" ? "" : `, effort=${profile.reasoningEffort}`;
+    log(`${profile.label} model attempt ${outcome.attempts}/${profile.retries}: ${profile.model} @ ${profile.baseUrl} (${profile.apiFormat}${effortNote})`);
     const parsed = parseVerdictResponse(outcome.rawResponse, [profile.apiKey]);
     const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
     ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
@@ -1824,12 +1850,16 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
       // The tier-smart harness reads its endpoint from the SMART_* env keys
       // (tier-keyed, unlike the AI_* transport the loop uses at tier
       // primary); bind the resolved smart profile for the harness phase.
-      const smartEnvKeys = ["SMART_BASE_URL", "SMART_MODEL", "SMART_API_FORMAT", "SMART_API_KEY"] as const;
+      const smartEnvKeys = ["SMART_BASE_URL", "SMART_MODEL", "SMART_API_FORMAT", "SMART_API_KEY", "SMART_REASONING_EFFORT"] as const;
       const savedSmartEnv = smartEnvKeys.map((key) => [key, env[key]] as const);
       env.SMART_BASE_URL = profiles.smart.baseUrl;
       env.SMART_MODEL = profiles.smart.model;
       env.SMART_API_FORMAT = profiles.smart.apiFormat;
       env.SMART_API_KEY = profiles.smart.apiKey;
+      // #998: bind the smart lane's resolved effort beside its transport keys
+      // so the harness's loop rounds, summarizer turn, and closing verdict
+      // turn all send the smart effort rather than the base one.
+      env.SMART_REASONING_EFFORT = profiles.smart.reasoningEffort;
       env.TOOL_HARNESS_TIER = "smart";
       try {
         await runToolHarnessPhase(ws, env, input.workspace, log);

@@ -144,6 +144,26 @@ function readFileText(path: string): string | null {
   }
 }
 
+/**
+ * #998: the reasoning-effort family and its Anthropic opt-in are
+ * model-affecting config — changing an effective effort changes the request
+ * bytes, so an unchanged diff must NOT skip a review. But they are also
+ * `AI_*` keys the sweep above would pick up UNCONDITIONALLY, and
+ * `stageEnvFromConfig` projects every contract input even when empty, so a
+ * plain sweep would emit `AI_REASONING_EFFORT=` / `..._SUPPORT=false` for
+ * every existing user and invalidate every cached review on upgrade. These
+ * keys are therefore removed from the unconditional sweep and re-emitted
+ * below only when they actually change behavior: an unset configuration
+ * produces a config hash IDENTICAL to a build without the feature.
+ */
+const CONDITIONAL_AI_KEYS: ReadonlySet<string> = new Set([
+  "AI_REASONING_EFFORT",
+  "AI_PRIMARY_REASONING_EFFORT",
+  "AI_SMART_REASONING_EFFORT",
+  "AI_SPECIALIST_REASONING_EFFORT",
+  "AI_ANTHROPIC_EFFORT_SUPPORT",
+]);
+
 /** Collect configuration key=value lines from the environment map and
  * config files (port of `_collect_config_lines`). `AI_*` is swept as this
  * action's own namespace except `*_API_KEY` secrets; every other key is
@@ -152,7 +172,10 @@ function readFileText(path: string): string | null {
 export function collectConfigLines(env: Record<string, string>): string[] {
   const lines: string[] = [];
   const keys = Object.keys(env)
-    .filter((key) => (key.startsWith("AI_") && !key.endsWith("_API_KEY")) || EXACT_CONFIG_KEY_SET.has(key))
+    .filter((key) => (
+      (key.startsWith("AI_") && !key.endsWith("_API_KEY") && !CONDITIONAL_AI_KEYS.has(key))
+      || EXACT_CONFIG_KEY_SET.has(key)
+    ))
     .sort();
   for (const key of keys) lines.push(`${key}=${env[key]}`);
 
@@ -167,6 +190,17 @@ export function collectConfigLines(env: Record<string, string>): string[] {
   // valid.
   if ((env.CLAIM_FALSIFICATION ?? "").trim().toLowerCase() === "true") {
     lines.push("CLAIM_FALSIFICATION=true");
+  }
+  // #998: only a resolved effort contributes. The value is the request's own
+  // field, so a change here is a real behavior change (and the emitted line
+  // is byte-identical to the sweep's, keeping one canonical form per key).
+  for (const key of CONDITIONAL_AI_KEYS) {
+    if (key === "AI_ANTHROPIC_EFFORT_SUPPORT") {
+      if ((env[key] ?? "").trim().toLowerCase() === "true") lines.push(`${key}=true`);
+      continue;
+    }
+    const effort = (env[key] ?? "").trim();
+    if (effort !== "") lines.push(`${key}=${effort}`);
   }
 
   const filePaths = CONFIG_FILE_VARS

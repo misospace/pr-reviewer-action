@@ -185,6 +185,9 @@ TIER_RESOLVED_V3_ONLY_NOT_REPO_CONFIGURABLE = {
     "ai-specialist-model",
     "ai-specialist-base-url",
     "ai-specialist-api-format",
+    # #998: the specialist reasoning effort is an operator-only input, exactly
+    # like the rest of the ai-specialist-* family.
+    "ai-specialist-reasoning-effort",
 }
 SPECIALIST_SECRET_NOT_REPO_CONFIGURABLE = {"ai-specialist-api-key"}
 

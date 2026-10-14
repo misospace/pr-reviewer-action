@@ -137,6 +137,10 @@ export interface SpecialistRunConfig {
   roleTimeoutSec: number;
   phaseTimeoutSec: number;
   execution: ExecutionMode;
+  /** #998: resolved specialist reasoning effort ("" = omit the field). */
+  reasoningEffort?: string;
+  /** #998: the Anthropic endpoint opt-in for `output_config.effort`. */
+  anthropicEffortSupported?: boolean;
 }
 
 export interface SpecialistRunInput {
@@ -377,6 +381,10 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
     responseFormat: config.responseFormat,
     tokensParam: config.tokensParam,
     stream: config.stream,
+    // #998: the specialist lane's resolved effort (inherited from the primary
+    // lane unless ai-specialist-reasoning-effort overrides it).
+    ...(config.reasoningEffort !== undefined ? { reasoningEffort: config.reasoningEffort } : {}),
+    ...(config.anthropicEffortSupported !== undefined ? { anthropicEffortSupported: config.anthropicEffortSupported } : {}),
   });
   requestBytes = payloadBytes(payload);
   options.onRequest?.(payload);
@@ -587,6 +595,9 @@ async function runSpecialistScout(
     responseFormat: config.responseFormat,
     tokensParam: config.tokensParam,
     stream: config.stream,
+    // #998: same effort wiring as the three-call path.
+    ...(config.reasoningEffort !== undefined ? { reasoningEffort: config.reasoningEffort } : {}),
+    ...(config.anthropicEffortSupported !== undefined ? { anthropicEffortSupported: config.anthropicEffortSupported } : {}),
   });
   builtPayload = payload;
 

@@ -263,6 +263,10 @@ export interface DriveToolLoopOptions {
   stream?: boolean;
   tokensParam?: string;
   cachePrefix?: boolean;
+  /** #998: the tier's resolved reasoning effort ("" = omit the field). */
+  reasoningEffort?: string;
+  /** #998: the Anthropic endpoint opt-in for `output_config.effort`. */
+  anthropicEffortSupported?: boolean;
   /** Best-effort summarizer for context compaction; may be async. */
   summarizeFn?: ((block: string) => string | Promise<string>) | null;
   /** Injectable clock (seconds) for deterministic tests. */
@@ -378,6 +382,10 @@ export async function driveToolLoop(
       temperature,
       tokensParam,
       cachePrefix,
+      // #998: the tier's effort rides every loop round (and the summarizer
+      // turn the harness builds from the same options), verbatim.
+      reasoningEffort: options.reasoningEffort ?? "",
+      anthropicEffortSupported: options.anthropicEffortSupported ?? false,
     });
     let response: unknown;
     try {

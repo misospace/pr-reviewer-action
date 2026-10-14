@@ -20,8 +20,44 @@ export type RawInputs = Readonly<Record<string, string | undefined>>;
 // absent one: it disables what the input configures (ai-temperature: no
 // sampling-temperature override; rereview-command: comment-triggered
 // re-reviews), so the loader must keep it and not substitute the contract
-// default.
-const EMPTY_DISABLING_INPUTS: ReadonlySet<string> = new Set(["ai-temperature", "rereview-command"]);
+// default. #998: the reasoning-effort family is the same case — empty means
+// "omit the provider's effort field entirely", which is what keeps an unset
+// configuration request-byte identical, so it must stay "".
+const EMPTY_DISABLING_INPUTS: ReadonlySet<string> = new Set([
+  "ai-temperature",
+  "rereview-command",
+  "ai-reasoning-effort",
+  "ai-primary-reasoning-effort",
+  "ai-smart-reasoning-effort",
+  "ai-specialist-reasoning-effort",
+]);
+
+// #998: the reasoning-effort values are free-form but bounded, so they get
+// their own shape check (below) rather than an ENUM_INPUTS vocabulary.
+const REASONING_EFFORT_INPUTS: ReadonlySet<string> = new Set([
+  "ai-reasoning-effort", "ai-primary-reasoning-effort", "ai-smart-reasoning-effort", "ai-specialist-reasoning-effort",
+]);
+
+/** #998: the bounded, free-form shape every reasoning-effort value must have
+ * after trim+lowercase. Deliberately NOT an enum: providers and proxies
+ * define their own effort vocabularies, so the action validates the *shape*
+ * of the value (a bounded token that is safe to put in a JSON string) and
+ * passes the vocabulary through verbatim. Shared with the resolution-time
+ * validator in `src/routing/tiers.ts`. */
+export const REASONING_EFFORT_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
+
+/** Loud, non-fatal notice for a dropped value. Config validation of every
+ * other input throws, but a malformed effort must not abort a review the
+ * operator asked for (#998): it is dropped as unset and reported. The notice
+ * names the input and never echoes the rejected value — the value is
+ * operator-supplied free text and the warning is a log line. */
+function warnRejectedEffort(id: string): void {
+  process.emitWarning(
+    `Input '${id}' was dropped: the reasoning effort must match ${REASONING_EFFORT_PATTERN.source} `
+    + "(lowercase letters, digits, '-', and '_'; up to 32 characters). The review runs without it.",
+    "PrReviewerInputWarning",
+  );
+}
 
 export function toCamelCase(id: string): string {
   return id.replace(/-([a-z0-9])/g, (_match, char: string) => char.toUpperCase());
@@ -71,6 +107,17 @@ export function loadConfig(contract: ActionContract, raw: RawInputs): RuntimeCon
       const number = Number(text);
       if (!Number.isFinite(number)) throw new Error(`Input '${input.id}' must be a finite number`);
       value = number;
+    } else if (REASONING_EFFORT_INPUTS.has(input.id) && text !== "") {
+      // #998: free-form but bounded. Normalize (trim, lowercase) and drop —
+      // never crash, never clamp, never invent a vocabulary — when the shape
+      // is wrong; the drop is announced by key and the value then behaves as
+      // unset (inheriting its base, if any).
+      const normalized = text.trim().toLowerCase();
+      if (REASONING_EFFORT_PATTERN.test(normalized)) value = normalized;
+      else {
+        warnRejectedEffort(input.id);
+        value = "";
+      }
     }
     const allowed = ENUM_INPUTS[input.id];
     if (allowed && text !== "" && !allowed.includes(text)) throw new Error(`Input '${input.id}' must be one of: ${allowed.join(", ")}`);
@@ -95,6 +142,14 @@ function resolveInherited(config: MutableConfig): void {
   inherit(config, "aiPrimaryResponseFormat", "aiResponseFormat");
   inherit(config, "aiSmartResponseFormat", "aiResponseFormat");
   inherit(config, "aiFallbackResponseFormat", "aiResponseFormat");
+  // #998: per-lane reasoning-effort inheritance. Empty lane overrides fall
+  // back to the base `ai-reasoning-effort`, and the specialist input inherits
+  // the primary lane's already-resolved value, exactly like the
+  // response_format family above. A rejected value was dropped to "" above,
+  // so it inherits here rather than crashing the load.
+  inherit(config, "aiPrimaryReasoningEffort", "aiReasoningEffort");
+  inherit(config, "aiSmartReasoningEffort", "aiReasoningEffort");
+  inherit(config, "aiSpecialistReasoningEffort", "aiPrimaryReasoningEffort");
   inherit(config, "aiPrimaryModel", "aiModel");
   inherit(config, "aiPrimaryBaseUrl", "aiBaseUrl");
   inherit(config, "aiPrimaryApiFormat", "aiApiFormat");

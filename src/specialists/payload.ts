@@ -6,6 +6,7 @@
  * `json_object` here and nothing else is carried over. */
 
 import { pyFloatRepr } from "../platform/py.js";
+import { buildAnthropicOutputConfig } from "../model/request.js";
 
 export interface SpecialistPayloadInput {
   apiFormat: string;
@@ -17,12 +18,23 @@ export interface SpecialistPayloadInput {
   responseFormat: string;
   tokensParam: string;
   stream: boolean;
+  /** #998: resolved reasoning effort, "" to omit. Optional so every existing
+   * caller stays byte-compatible; the resolved value is passed through
+   * verbatim (no clamping, no invented vocabulary). */
+  reasoningEffort?: string;
+  /** #998: Anthropic `output_config.effort` opt-in for this endpoint. */
+  anthropicEffortSupported?: boolean;
 }
 
 export type SpecialistPayload = Record<string, unknown>;
 
 export function buildSpecialistPayload(input: SpecialistPayloadInput): SpecialistPayload {
   const { apiFormat, model, system, user, maxTokens, temperature, responseFormat, tokensParam, stream } = input;
+  // #998: specialists build their body directly (no `buildModelRequest`), so
+  // they honor the same wire rules here: OpenAI gets `reasoning_effort`,
+  // Anthropic gets `output_config.effort` only under the operator's opt-in,
+  // and an unset effort emits nothing at all.
+  const reasoningEffort = input.reasoningEffort ?? "";
 
   if (apiFormat === "anthropic") {
     const payload: SpecialistPayload = {
@@ -33,6 +45,10 @@ export function buildSpecialistPayload(input: SpecialistPayloadInput): Specialis
       messages: [{ role: "user", content: user }],
     };
     if (temperature !== null) payload.temperature = temperature;
+    if (input.anthropicEffortSupported === true) {
+      const outputConfig = buildAnthropicOutputConfig(reasoningEffort);
+      if (outputConfig !== null) payload.output_config = outputConfig;
+    }
     return payload;
   }
 
@@ -53,6 +69,7 @@ export function buildSpecialistPayload(input: SpecialistPayloadInput): Specialis
   if (stream) {
     payload.stream_options = { include_usage: true };
   }
+  if (reasoningEffort !== "") payload.reasoning_effort = reasoningEffort;
   return payload;
 }
 

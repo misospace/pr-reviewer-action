@@ -22,6 +22,7 @@
       "ai-primary-response-format",
       "ai-smart-response-format",
       "ai-fallback-response-format",
+      "ai-reasoning-effort",
       "ai-tokens-param",
       "anthropic-version"
     ]
@@ -72,7 +73,11 @@
       "ai-specialist-api-key",
       "ai-specialist-correctness-model",
       "ai-specialist-security-model",
-      "ai-specialist-tests-model"
+      "ai-specialist-tests-model",
+      "ai-primary-reasoning-effort",
+      "ai-smart-reasoning-effort",
+      "ai-specialist-reasoning-effort",
+      "ai-anthropic-effort-support"
     ]
   },
   {

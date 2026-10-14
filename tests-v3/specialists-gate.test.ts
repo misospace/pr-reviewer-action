@@ -179,6 +179,101 @@ test("#1009: specialist phase inherits the primary lane response_format; explici
   }
 });
 
+test("#998: specialist calls carry the resolved effort on the wire, and the Anthropic shape stays put without the opt-in", async () => {
+  // The specialist phase builds its request body directly, so the effort has
+  // to be proven end-to-end on the wire, not just in the payload helper.
+  const server = await startMockServer((_req, body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(leadsResponse([])));
+  });
+  try {
+    // 1. Unset: no effort field anywhere.
+    const unset = await run({
+      DEEP_REVIEW: "true",
+      AI_BASE_URL: `${server.url}/v1`,
+      AI_SPECIALIST_MODEL: "specialist",
+    }, { productionTransport: true });
+    assert.equal(unset.code, 0);
+    assert.equal(unset.read("specialist-correctness.request.json").includes("reasoning_effort"), false);
+    rmSync(unset.root, { recursive: true, force: true });
+    server.requests.length = 0;
+
+    // 2. The specialist lane inherits the primary lane's resolved value, and
+    // the OpenAI body carries it verbatim.
+    const inherited = await run({
+      DEEP_REVIEW: "true",
+      AI_BASE_URL: `${server.url}/v1`,
+      AI_SPECIALIST_MODEL: "specialist",
+      AI_REASONING_EFFORT: "high",
+      AI_PRIMARY_REASONING_EFFORT: "xhigh-ultra",
+    }, { productionTransport: true });
+    assert.equal(inherited.code, 0);
+    const inheritedBodies = server.requests.map(({ body }) => JSON.parse(body) as Record<string, unknown>);
+    assert.equal(inheritedBodies.length, 3);
+    assert.ok(inheritedBodies.every((payload) => payload.reasoning_effort === "xhigh-ultra"));
+    rmSync(inherited.root, { recursive: true, force: true });
+    server.requests.length = 0;
+
+    // 3. An explicit specialist override wins over the inherited primary.
+    const overridden = await run({
+      DEEP_REVIEW: "true",
+      AI_BASE_URL: `${server.url}/v1`,
+      AI_SPECIALIST_MODEL: "specialist",
+      AI_REASONING_EFFORT: "high",
+      AI_SPECIALIST_REASONING_EFFORT: "minimal",
+    }, { productionTransport: true });
+    assert.equal(overridden.code, 0);
+    assert.ok(server.requests.every(({ body }) => (JSON.parse(body) as { reasoning_effort?: string }).reasoning_effort === "minimal"));
+    rmSync(overridden.root, { recursive: true, force: true });
+    server.requests.length = 0;
+
+    // 4. Anthropic without the endpoint opt-in: byte-compatible, no
+    // output_config, and never OpenAI's reasoning_effort.
+    const anthropicUnopted = await run({
+      DEEP_REVIEW: "true",
+      AI_BASE_URL: `${server.url}/v1`,
+      AI_API_FORMAT: "anthropic",
+      AI_SPECIALIST_MODEL: "specialist",
+      AI_REASONING_EFFORT: "high",
+    }, { productionTransport: true });
+    assert.equal(anthropicUnopted.code, 0);
+    const anthropicBodies = server.requests.map(({ body }) => JSON.parse(body) as Record<string, unknown>);
+    assert.ok(anthropicBodies.every((payload) => payload.output_config === undefined && !("reasoning_effort" in payload)));
+    rmSync(anthropicUnopted.root, { recursive: true, force: true });
+    server.requests.length = 0;
+
+    // 5. Anthropic with the opt-in: output_config.effort only.
+    const anthropicOptedIn = await run({
+      DEEP_REVIEW: "true",
+      AI_BASE_URL: `${server.url}/v1`,
+      AI_API_FORMAT: "anthropic",
+      AI_SPECIALIST_MODEL: "specialist",
+      AI_REASONING_EFFORT: "high",
+      AI_ANTHROPIC_EFFORT_SUPPORT: "true",
+    }, { productionTransport: true });
+    assert.equal(anthropicOptedIn.code, 0);
+    const optedInBodies = server.requests.map(({ body }) => JSON.parse(body) as Record<string, unknown>);
+    assert.ok(optedInBodies.every((payload) => JSON.stringify(payload.output_config) === '{"effort":"high"}'));
+    assert.ok(optedInBodies.every((payload) => !("reasoning_effort" in payload) && !("thinking" in payload)));
+    rmSync(anthropicOptedIn.root, { recursive: true, force: true });
+
+    // 6. #252: a hostile value is dropped with a warning and never reaches the
+    // wire (the profiles' warnings channel is printed by the gate).
+    const hostile = await run({
+      DEEP_REVIEW: "true",
+      AI_BASE_URL: `${server.url}/v1`,
+      AI_SPECIALIST_MODEL: "specialist",
+      AI_SPECIALIST_REASONING_EFFORT: "minimal\"}\n{\"format\": {}",
+    }, { productionTransport: true });
+    assert.equal(hostile.code, 0);
+    assert.ok(hostile.out.some((line) => line.startsWith("WARNING: AI_SPECIALIST_REASONING_EFFORT ignored")), hostile.out.join(" | "));
+    assert.ok(server.requests.every(({ body }) => !JSON.parse(body).reasoning_effort));
+    rmSync(hostile.root, { recursive: true, force: true });
+  } finally {
+    await server.close();
+  }
+});
+
 test("invalid specialist format warns and falls back to the primary transport", async () => {
   const seen: { url: string; model: string }[] = [];
   const server = await startMockServer((req, body, res) => {

@@ -351,6 +351,12 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
   // back to `ai-response-format`, the same way the rest of the v3 config
   // chain does.
   const responseFormat = envStr(env, "AI_PRIMARY_RESPONSE_FORMAT", envStr(env, "AI_RESPONSE_FORMAT", "off")).trim().toLowerCase();
+  // #998: the specialist lane's reasoning effort — ai-specialist-reasoning-
+  // effort when set, else the primary lane's resolved value. The Anthropic
+  // `output_config.effort` opt-in is the operator's per-endpoint assertion and
+  // applies to whichever format the specialist transport resolved.
+  const reasoningEffort = profiles.transport.reasoningEffort;
+  const anthropicEffort = profiles.transport.anthropicEffortSupported;
   const tokensParam = envStr(env, "AI_TOKENS_PARAM", "max_tokens").trim().toLowerCase();
   const stream = envStr(env, "AI_STREAM", "true").trim().toLowerCase() === "true";
   const roleTimeoutSec = envInt(env, "AI_REQUEST_TIMEOUT_SEC", 300);
@@ -421,6 +427,8 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
       roleTimeoutSec,
       phaseTimeoutSec,
       execution: execution as ExecutionMode,
+      reasoningEffort,
+      anthropicEffortSupported: anthropicEffort,
     },
     corpus: corpus.text,
     corpusError: corpus.error,

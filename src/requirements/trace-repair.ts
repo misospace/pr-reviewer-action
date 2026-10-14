@@ -55,6 +55,10 @@ export interface TraceRepairModelConfig {
   stream: boolean;
   timeoutSec: number;
   inputMaxBytes: number;
+  /** #998: the primary lane's resolved reasoning effort ("" = omit). */
+  reasoningEffort?: string;
+  /** #998: the Anthropic endpoint opt-in for `output_config.effort`. */
+  anthropicEffortSupported?: boolean;
 }
 
 export const TRACE_REPAIR_SYSTEM_PROMPT =
@@ -294,6 +298,9 @@ export async function runRequirementTraceRepairPass(input: TraceRepairPassInput)
     responseFormat: input.config.responseFormat,
     tokensParam: input.config.tokensParam,
     stream: input.config.stream,
+    // #998: the primary lane's effort, same as the review call.
+    ...(input.config.reasoningEffort !== undefined ? { reasoningEffort: input.config.reasoningEffort } : {}),
+    ...(input.config.anthropicEffortSupported !== undefined ? { anthropicEffortSupported: input.config.anthropicEffortSupported } : {}),
   });
 
   let outcome;

@@ -25,6 +25,9 @@ export interface ResolvedTier extends TierSettings {
    * Empty lane overrides inherit `ai-response-format`. The Anthropic transport
    * ignores this field regardless of value. */
   responseFormat: "off" | "json_object" | "json_schema";
+  /** #998: the lane's resolved reasoning effort, or "" when none is
+   * configured (the field is then omitted from the request entirely). */
+  reasoningEffort: string;
 }
 export interface TierProfiles {
   primary: ResolvedTier;
@@ -39,7 +42,17 @@ export interface SpecialistRoleModel {
 }
 export interface SpecialistProfiles {
   profileActive: boolean;
-  transport: { baseUrl: string; model: string; apiFormat: string; apiKey: string };
+  transport: {
+    baseUrl: string;
+    model: string;
+    apiFormat: string;
+    apiKey: string;
+    /** #998: resolved specialist reasoning effort ("" = omit the field). */
+    reasoningEffort: string;
+    /** #998: the operator's opt-in that this Anthropic endpoint accepts
+     * `output_config.effort`. False (the default) never emits it. */
+    anthropicEffortSupported: boolean;
+  };
   roleModels: Record<"correctness" | "security" | "tests", SpecialistRoleModel>;
   overridesActive: boolean;
   warnings: string[];
@@ -70,6 +83,89 @@ export function tierResponseFormat(tier: "primary" | "smart" | "fallback", env: 
   // via ambient overrides or test rigs may be other strings; quietly fall
   // back to off rather than crashing the review.
   return "off";
+}
+
+// ── #998: reasoning effort ───────────────────────────────────────────────
+// Free-form by design: providers and proxies define their own effort
+// vocabularies, so the action imposes no enum and clamps nothing. What it does
+// impose is a SHAPE — a short, lowercase, JSON-safe token — because the value
+// travels into a provider request body.
+
+/** Same shape contract as `REASONING_EFFORT_PATTERN` in `src/config/load-config.ts`. */
+export const REASONING_EFFORT_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
+
+/** The normalized effort for a raw value, or null when it is unset or fails
+ * the shape check. Pure: the caller decides how loudly to report a drop. */
+export function normalizeReasoningEffort(raw: string | undefined): string | null {
+  const normalized = (raw ?? "").trim().toLowerCase();
+  if (normalized === "") return null;
+  return REASONING_EFFORT_PATTERN.test(normalized) ? normalized : null;
+}
+
+/** The bounded, key-naming notice a dropped effort produces. Never echoes the
+ * rejected value: the warning is a log line and the value is free text. */
+export function reasoningEffortWarning(key: string): string {
+  return `${key} ignored: the reasoning effort must match ${REASONING_EFFORT_PATTERN.source} (lowercase letters, digits, '-', and '_'; up to 32 characters)`;
+}
+
+/** The env key a lane's own effort override lives under. `fallback` has no
+ * lane key at all: fallback is availability recovery and inherits the base. */
+function tierReasoningEffortKey(tier: "primary" | "smart" | "fallback"): string | null {
+  if (tier === "smart") return "AI_SMART_REASONING_EFFORT";
+  if (tier === "fallback") return null;
+  return "AI_PRIMARY_REASONING_EFFORT";
+}
+
+interface EffortResolution {
+  value: string;
+  warning: string | null;
+}
+
+/** Resolve one env value: normalize-and-accept, or drop it with a warning. */
+function effortFrom(env: EnvLike, key: string): EffortResolution {
+  const raw = env[key] ?? "";
+  if (raw.trim() === "") return { value: "", warning: null };
+  const normalized = normalizeReasoningEffort(raw);
+  if (normalized === null) return { value: "", warning: reasoningEffortWarning(key) };
+  return { value: normalized, warning: null };
+}
+
+/**
+ * #998: a lane's effective reasoning effort, mirroring `tierResponseFormat`'s
+ * inheritance — an empty lane override inherits `ai-reasoning-effort` (the
+ * contract base) and the fallback lane always uses the base. A value that
+ * fails validation is dropped as unset (announced loudly) so the inheritance
+ * below still applies; "" means "omit the field from the request".
+ *
+ * Validation is repeated here on purpose: `loadConfig` guards
+ * contract-supplied values, but these inputs can also arrive from ambient env
+ * overrides or eval-harness rigs, which never pass through the loader.
+ */
+export function tierReasoningEffort(
+  tier: "primary" | "smart" | "fallback",
+  env: EnvLike,
+  onWarning?: (warning: string) => void,
+): string {
+  const emit = (warning: string | null): void => {
+    if (warning === null) return;
+    if (onWarning !== undefined) onWarning(warning);
+    else process.emitWarning(`WARNING: ${warning}`, "PrReviewerConfigWarning");
+  };
+  const key = tierReasoningEffortKey(tier);
+  const lane = key === null ? { value: "", warning: null } : effortFrom(env, key);
+  emit(lane.warning);
+  if (lane.value !== "") return lane.value;
+  const base = effortFrom(env, "AI_REASONING_EFFORT");
+  emit(base.warning);
+  return base.value;
+}
+
+/** #998: the operator's explicit opt-in that the configured
+ * Anthropic-compatible endpoint accepts `output_config.effort`. True only on
+ * the exact word "true"; anything else (including a malformed value) is off,
+ * so an Anthropic request never carries an effort field by accident. */
+export function anthropicEffortSupported(env: EnvLike): boolean {
+  return (env.AI_ANTHROPIC_EFFORT_SUPPORT ?? "").trim().toLowerCase() === "true";
 }
 
 /** #965: the primary-first policy. In `auto` mode the initial review always
@@ -128,7 +224,28 @@ export function resolveSpecialistProfiles(env: EnvLike): SpecialistProfiles {
   })) as SpecialistProfiles["roleModels"];
   const overridesActive = profileActive || Object.values(roleModels).some((role) => role.source === "role-override");
 
-  return { profileActive, transport, roleModels, overridesActive, warnings };
+  // #998: the specialist lane's effort — its own override, else the primary
+  // lane's resolved value, exactly like the transport fields above. A rejected
+  // value is dropped as unset and reported through `warnings` (the specialist
+  // phase prints them as WARNING lines), so a typo can never silently change
+  // the request body.
+  const specialistEffort = effortFrom(env, "AI_SPECIALIST_REASONING_EFFORT");
+  if (specialistEffort.warning !== null) warnings.push(specialistEffort.warning);
+  const primaryEffort = tierReasoningEffort("primary", env, (warning) => warnings.push(warning));
+  const reasoningEffort = specialistEffort.value !== "" ? specialistEffort.value : primaryEffort;
+  const anthropicSupport = anthropicEffortSupported(env);
+
+  return {
+    profileActive,
+    transport: {
+      ...transport,
+      reasoningEffort,
+      anthropicEffortSupported: anthropicSupport,
+    },
+    roleModels,
+    overridesActive,
+    warnings,
+  };
 }
 
 export function resolveTierProfiles(env: EnvLike): TierProfiles {
@@ -162,17 +279,22 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
       ...primary, resolved: Boolean(primary.model), retries: primaryRetries, retryDelaySec: delay, stream,
       requestTimeoutSec: timeout, connectTimeoutSec: connectTimeout,
       responseFormat: tierResponseFormat("primary", env),
+      reasoningEffort: tierReasoningEffort("primary", env),
     },
     smart: {
       ...smart, resolved: smartResolved, retries: numberValue(env, "AI_SMART_RETRIES", 2), retryDelaySec: delay, stream,
       requestTimeoutSec: timeout, connectTimeoutSec: connectTimeout,
       responseFormat: tierResponseFormat("smart", env),
+      reasoningEffort: tierReasoningEffort("smart", env),
     },
     fallback: {
       ...fallback, resolved: Boolean(fallback.baseUrl && fallback.model), retries: numberValue(env, "AI_FALLBACK_RETRIES", 2), retryDelaySec: delay,
       stream: fallbackStream, requestTimeoutSec: numberValue(env, "AI_FALLBACK_REQUEST_TIMEOUT_SEC", timeout),
       connectTimeoutSec: numberValue(env, "AI_FALLBACK_CONNECT_TIMEOUT_SEC", connectTimeout),
       responseFormat: tierResponseFormat("fallback", env),
+      // #998: availability recovery, never quality escalation — the fallback
+      // lane inherits the base effort and has no override input of its own.
+      reasoningEffort: tierReasoningEffort("fallback", env),
     },
   };
 }

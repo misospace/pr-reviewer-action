@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { isLowConfidence, reviewerRequestedEscalation, shouldEscalate } from "../src/routing/escalation.js";
-import { resolveReviewRoute, resolveSpecialistProfiles, resolveTierProfiles, tierRequestShape, tierResponseFormat } from "../src/routing/tiers.js";
+import { anthropicEffortSupported, normalizeReasoningEffort, resolveReviewRoute, resolveSpecialistProfiles, resolveTierProfiles, tierReasoningEffort, tierRequestShape, tierResponseFormat } from "../src/routing/tiers.js";
 
 const flags = { onIncomplete: true, onRequestChanges: true, onLowConfidence: true, onBlockers: true, onPlanningFailure: true };
 const longReview = "The change is reviewed carefully and the behavior appears correct. No concerns identified in the touched paths.";
@@ -67,7 +67,15 @@ test("specialist profiles resolve role, profile, and primary model precedence", 
     AI_SPECIALIST_CORRECTNESS_MODEL: " correctness-model ", AI_SPECIALIST_TESTS_MODEL: "  ",
   });
   assert.equal(resolved.profileActive, true);
-  assert.deepEqual(resolved.transport, { baseUrl: "https://specialist", model: "specialist-model", apiFormat: "anthropic", apiKey: "specialist-key" });
+  assert.deepEqual(resolved.transport, {
+    baseUrl: "https://specialist",
+    model: "specialist-model",
+    apiFormat: "anthropic",
+    apiKey: "specialist-key",
+    // #998: unset in this fixture, so nothing is emitted.
+    reasoningEffort: "",
+    anthropicEffortSupported: false,
+  });
   assert.deepEqual(resolved.roleModels, {
     correctness: { model: "correctness-model", source: "role-override" },
     security: { model: "specialist-model", source: "specialist-profile" },
@@ -78,7 +86,14 @@ test("specialist profiles resolve role, profile, and primary model precedence", 
 
   const primary = resolveSpecialistProfiles({ AI_BASE_URL: " primary-url ", AI_MODEL: " primary-model ", AI_API_FORMAT: " OpenAI ", AI_API_KEY: " key ", AI_SPECIALIST_SECURITY_MODEL: " security-model " });
   assert.equal(primary.profileActive, false);
-  assert.deepEqual(primary.transport, { baseUrl: "primary-url", model: "primary-model", apiFormat: "openai", apiKey: "key" });
+  assert.deepEqual(primary.transport, {
+    baseUrl: "primary-url",
+    model: "primary-model",
+    apiFormat: "openai",
+    apiKey: "key",
+    reasoningEffort: "",
+    anthropicEffortSupported: false,
+  });
   assert.deepEqual(primary.roleModels, {
     correctness: { model: "primary-model", source: "primary" },
     security: { model: "security-model", source: "role-override" },
@@ -93,7 +108,14 @@ test("specialist profiles reject invalid formats and report orphan transport fie
     AI_SPECIALIST_CORRECTNESS_MODEL: " role-model ",
   });
   assert.equal(invalid.profileActive, false);
-  assert.deepEqual(invalid.transport, { baseUrl: "", model: "primary", apiFormat: "openai", apiKey: "" });
+  assert.deepEqual(invalid.transport, {
+    baseUrl: "",
+    model: "primary",
+    apiFormat: "openai",
+    apiKey: "",
+    reasoningEffort: "",
+    anthropicEffortSupported: false,
+  });
   assert.equal(invalid.roleModels.correctness.model, "role-model");
   assert.equal(invalid.roleModels.correctness.source, "role-override");
   assert.deepEqual(invalid.warnings, ["specialist profile ignored: AI_SPECIALIST_API_FORMAT must be openai or anthropic"]);
@@ -109,7 +131,7 @@ test("specialist profiles reject invalid formats and report orphan transport fie
 
 test("tier profiles bind model defaults, retry/stream settings, and request shapes", () => {
   const base = resolveTierProfiles({ AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "k" });
-  assert.deepEqual(base.primary, { baseUrl: "https://primary", model: "main", apiFormat: "openai", apiKey: "k", resolved: true, retries: 8, retryDelaySec: 15, stream: true, requestTimeoutSec: 300, connectTimeoutSec: 30, responseFormat: "off" });
+  assert.deepEqual(base.primary, { baseUrl: "https://primary", model: "main", apiFormat: "openai", apiKey: "k", resolved: true, retries: 8, retryDelaySec: 15, stream: true, requestTimeoutSec: 300, connectTimeoutSec: 30, responseFormat: "off", reasoningEffort: "" });
   assert.equal(base.smart.resolved, false);
   assert.equal(base.smart.baseUrl, "https://primary");
   assert.equal(base.smart.apiKey, "k");
@@ -189,4 +211,117 @@ test("#1009: resolveTierProfiles threads the effective responseFormat through ev
   assert.equal(profiles.primary.responseFormat, "off");
   assert.equal(profiles.smart.responseFormat, "json_schema");
   assert.equal(profiles.fallback.responseFormat, "json_object");
+});
+
+// ── #998: profile-aware reasoning effort ────────────────────────────────
+
+test("#998: tierReasoningEffort inherits the base when the lane override is empty", () => {
+  // Same inheritance contract as the response_format family: an unset lane
+  // override follows `ai-reasoning-effort`, so a single-value workflow stays
+  // request-byte compatible.
+  assert.equal(tierReasoningEffort("primary", { AI_REASONING_EFFORT: "high" }), "high");
+  assert.equal(tierReasoningEffort("smart", { AI_REASONING_EFFORT: "high" }), "high");
+  assert.equal(tierReasoningEffort("fallback", { AI_REASONING_EFFORT: "high" }), "high");
+  // Unset everywhere resolves to "" (omit the field), never a default value.
+  assert.equal(tierReasoningEffort("primary", {}), "");
+  assert.equal(tierReasoningEffort("smart", { AI_REASONING_EFFORT: "" }), "");
+  assert.equal(tierReasoningEffort("primary", { AI_REASONING_EFFORT: "   " }), "");
+  // Values are passed through verbatim after trim+lowercase; no vocabulary is
+  // imposed or clamped, so a provider-specific token survives intact.
+  assert.equal(tierReasoningEffort("primary", { AI_REASONING_EFFORT: "  HIGH  " }), "high");
+  assert.equal(tierReasoningEffort("primary", { AI_REASONING_EFFORT: "xhigh-ultra" }), "xhigh-ultra");
+  assert.equal(tierReasoningEffort("primary", { AI_REASONING_EFFORT: "effort_2" }), "effort_2");
+  assert.equal(normalizeReasoningEffort("xhigh-ultra"), "xhigh-ultra");
+  assert.equal(normalizeReasoningEffort(undefined), null);
+});
+
+test("#998: tierReasoningEffort honors per-lane overrides independently, and the fallback lane has none", () => {
+  const env = {
+    AI_REASONING_EFFORT: "low",
+    AI_PRIMARY_REASONING_EFFORT: "high",
+    AI_SMART_REASONING_EFFORT: "xhigh",
+  };
+  assert.equal(tierReasoningEffort("primary", env), "high");
+  assert.equal(tierReasoningEffort("smart", env), "xhigh");
+  // Fallback is availability recovery, never quality escalation (#965): it
+  // always inherits the base and no input can move it (there is no
+  // `AI_FALLBACK_REASONING_EFFORT` env key at all).
+  assert.equal(tierReasoningEffort("fallback", env), "low");
+  assert.equal(tierReasoningEffort("fallback", { ...env, AI_FALLBACK_REASONING_EFFORT: "medium" }), "low");
+});
+
+test("#998: a malformed effort is dropped as unset and announced, never clamped and never fatal", () => {
+  // Values reach this layer from ambient env overrides and eval-harness rigs
+  // that never passed through `loadConfig`, so the shape check repeats here.
+  const warnings: string[] = [];
+  const capture = (warning: string): void => { warnings.push(warning); };
+  // #252: feed the boundary its own adversarial values (quote, newline,
+  // leading dash, over-long, leading digit, inner space).
+  for (const bad of ['high"', "high\nreasoning_effort: \"low\"", "-high", "a".repeat(33), "9lives", "high high", "high;drop"]) {
+    assert.equal(tierReasoningEffort("primary", { AI_REASONING_EFFORT: bad }, capture), "", JSON.stringify(bad));
+    assert.equal(tierReasoningEffort("smart", { AI_REASONING_EFFORT: "high", AI_SMART_REASONING_EFFORT: bad }, capture), "high", JSON.stringify(bad));
+  }
+  assert.equal(warnings.length > 0, true, "a dropped value is never silent");
+  for (const warning of warnings) {
+    assert.match(warning, /AI_(REASONING_EFFORT|PRIMARY_REASONING_EFFORT|SMART_REASONING_EFFORT) ignored/);
+  }
+  // Without a collector the drop is still loud: it goes out as a process
+  // warning rather than crashing the review.
+  assert.doesNotThrow(() => tierReasoningEffort("primary", { AI_REASONING_EFFORT: "-bad" }));
+});
+
+test("#998: resolveTierProfiles threads the effective reasoningEffort through every tier", () => {
+  const profiles = resolveTierProfiles({
+    AI_BASE_URL: "https://primary",
+    AI_MODEL: "main",
+    AI_SMART_MODEL: "s",
+    AI_FALLBACK_BASE_URL: "https://fb",
+    AI_FALLBACK_MODEL: "fb",
+    AI_REASONING_EFFORT: "low",
+    AI_PRIMARY_REASONING_EFFORT: "high",
+    AI_SMART_REASONING_EFFORT: "xhigh",
+  });
+  assert.equal(profiles.primary.reasoningEffort, "high");
+  assert.equal(profiles.smart.reasoningEffort, "xhigh");
+  assert.equal(profiles.fallback.reasoningEffort, "low");
+  assert.equal(resolveTierProfiles({ AI_BASE_URL: "p", AI_MODEL: "m" }).primary.reasoningEffort, "");
+});
+
+test("#998: the specialist lane inherits the primary resolved effort and reports a malformed one as a warning", () => {
+  const base = { AI_MODEL: "primary", AI_SPECIALIST_MODEL: "specialist" };
+  assert.equal(resolveSpecialistProfiles(base).transport.reasoningEffort, "");
+  assert.equal(resolveSpecialistProfiles({ ...base, AI_REASONING_EFFORT: "high" }).transport.reasoningEffort, "high");
+  assert.equal(
+    resolveSpecialistProfiles({ ...base, AI_REASONING_EFFORT: "low", AI_PRIMARY_REASONING_EFFORT: "high" }).transport.reasoningEffort,
+    "high",
+  );
+  assert.equal(
+    resolveSpecialistProfiles({ ...base, AI_REASONING_EFFORT: "high", AI_SPECIALIST_REASONING_EFFORT: "minimal" }).transport.reasoningEffort,
+    "minimal",
+  );
+  // #252: a hostile value is reported through the profiles' warnings channel
+  // (the specialist phase prints them) and never reaches the transport.
+  const rejected = resolveSpecialistProfiles({ ...base, AI_SPECIALIST_REASONING_EFFORT: "minimal\"}\n{\"format\": {}" });
+  assert.equal(rejected.transport.reasoningEffort, "");
+  assert.ok(rejected.warnings.some((warning) => warning.includes("AI_SPECIALIST_REASONING_EFFORT")), rejected.warnings.join(" | "));
+  assert.equal(rejected.warnings.some((warning) => warning.includes("format")), false, "the rejected value is never echoed");
+  // A malformed primary value is reported on the same channel and the
+  // specialist lane then falls back to nothing (no inherited base either).
+  const badPrimary = resolveSpecialistProfiles({ ...base, AI_REASONING_EFFORT: "high", AI_PRIMARY_REASONING_EFFORT: "-nope" });
+  assert.equal(badPrimary.transport.reasoningEffort, "high", "a dropped lane value behaves as unset and inherits the base");
+  assert.ok(badPrimary.warnings.some((warning) => warning.includes("AI_PRIMARY_REASONING_EFFORT")));
+});
+
+test("#998: the Anthropic output_config.effort opt-in accepts only the literal true", () => {
+  assert.equal(anthropicEffortSupported({}), false);
+  assert.equal(anthropicEffortSupported({ AI_ANTHROPIC_EFFORT_SUPPORT: "" }), false);
+  assert.equal(anthropicEffortSupported({ AI_ANTHROPIC_EFFORT_SUPPORT: "false" }), false);
+  assert.equal(anthropicEffortSupported({ AI_ANTHROPIC_EFFORT_SUPPORT: "yes" }), false);
+  assert.equal(anthropicEffortSupported({ AI_ANTHROPIC_EFFORT_SUPPORT: "1" }), false);
+  for (const value of ["true", "TRUE", " true "]) {
+    assert.equal(anthropicEffortSupported({ AI_ANTHROPIC_EFFORT_SUPPORT: value }), true, value);
+  }
+  // The flag is surfaced on the specialist transport next to its effort.
+  assert.equal(resolveSpecialistProfiles({ AI_MODEL: "m", AI_ANTHROPIC_EFFORT_SUPPORT: "true" }).transport.anthropicEffortSupported, true);
+  assert.equal(resolveSpecialistProfiles({ AI_MODEL: "m" }).transport.anthropicEffortSupported, false);
 });
