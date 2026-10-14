@@ -162,6 +162,11 @@ const CONDITIONAL_AI_KEYS: ReadonlySet<string> = new Set([
   "AI_SMART_REASONING_EFFORT",
   "AI_SPECIALIST_REASONING_EFFORT",
   "AI_ANTHROPIC_EFFORT_SUPPORT",
+  // #998 (#1049 review): the per-lane Anthropic effort opt-ins. Same rule:
+  // the unconditional sweep would emit `..._SUPPORT=false` for every existing
+  // user and invalidate every cached review, so only a `true` contributes.
+  "AI_SMART_ANTHROPIC_EFFORT_SUPPORT",
+  "AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT",
 ]);
 
 /** Collect configuration key=value lines from the environment map and
@@ -195,7 +200,7 @@ export function collectConfigLines(env: Record<string, string>): string[] {
   // field, so a change here is a real behavior change (and the emitted line
   // is byte-identical to the sweep's, keeping one canonical form per key).
   for (const key of CONDITIONAL_AI_KEYS) {
-    if (key === "AI_ANTHROPIC_EFFORT_SUPPORT") {
+    if (key.endsWith("_EFFORT_SUPPORT")) {
       if ((env[key] ?? "").trim().toLowerCase() === "true") lines.push(`${key}=true`);
       continue;
     }

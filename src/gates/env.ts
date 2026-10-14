@@ -126,6 +126,11 @@ export const SPECIALIST_GATE_ENV_KEYS: EnvAllowlist = [
   "AI_SMART_REASONING_EFFORT",
   "AI_SPECIALIST_REASONING_EFFORT",
   "AI_ANTHROPIC_EFFORT_SUPPORT",
+  // #998 (#1049 review): the effort opt-in is now per-lane, so the specialist
+  // child resolves its OWN assertion (`ai-specialist-anthropic-effort-support`)
+  // exactly like the in-process path; the smart key stays out of this
+  // allowlist — the specialist phase never routes to the smart lane.
+  "AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT",
   "AI_TOKENS_PARAM",
   "AI_STREAM",
   // Deep-review phase controls.

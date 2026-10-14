@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { isLowConfidence, reviewerRequestedEscalation, shouldEscalate } from "../src/routing/escalation.js";
-import { anthropicEffortSupported, normalizeReasoningEffort, resolveReviewRoute, resolveSpecialistProfiles, resolveTierProfiles, tierReasoningEffort, tierRequestShape, tierResponseFormat } from "../src/routing/tiers.js";
+import { anthropicEffortInactiveWarning, anthropicEffortSupported, anthropicEffortSupportInput, effectiveWireEffort, laneAnthropicEffortSupported, normalizeReasoningEffort, resolveReviewRoute, resolveSpecialistProfiles, resolveTierProfiles, tierReasoningEffort, tierRequestShape, tierResponseFormat } from "../src/routing/tiers.js";
 
 const flags = { onIncomplete: true, onRequestChanges: true, onLowConfidence: true, onBlockers: true, onPlanningFailure: true };
 const longReview = "The change is reviewed carefully and the behavior appears correct. No concerns identified in the touched paths.";
@@ -131,7 +131,7 @@ test("specialist profiles reject invalid formats and report orphan transport fie
 
 test("tier profiles bind model defaults, retry/stream settings, and request shapes", () => {
   const base = resolveTierProfiles({ AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "k" });
-  assert.deepEqual(base.primary, { baseUrl: "https://primary", model: "main", apiFormat: "openai", apiKey: "k", resolved: true, retries: 8, retryDelaySec: 15, stream: true, requestTimeoutSec: 300, connectTimeoutSec: 30, responseFormat: "off", reasoningEffort: "" });
+  assert.deepEqual(base.primary, { baseUrl: "https://primary", model: "main", apiFormat: "openai", apiKey: "k", resolved: true, retries: 8, retryDelaySec: 15, stream: true, requestTimeoutSec: 300, connectTimeoutSec: 30, responseFormat: "off", reasoningEffort: "", anthropicEffortSupported: false });
   assert.equal(base.smart.resolved, false);
   assert.equal(base.smart.baseUrl, "https://primary");
   assert.equal(base.smart.apiKey, "k");
@@ -321,7 +321,97 @@ test("#998: the Anthropic output_config.effort opt-in accepts only the literal t
   for (const value of ["true", "TRUE", " true "]) {
     assert.equal(anthropicEffortSupported({ AI_ANTHROPIC_EFFORT_SUPPORT: value }), true, value);
   }
-  // The flag is surfaced on the specialist transport next to its effort.
-  assert.equal(resolveSpecialistProfiles({ AI_MODEL: "m", AI_ANTHROPIC_EFFORT_SUPPORT: "true" }).transport.anthropicEffortSupported, true);
+  // #1049 review: the assertion is per-lane. The base flag scopes the
+  // base/primary/fallback lanes; the specialist lane asserts its own endpoint
+  // and never inherits it.
+  assert.equal(resolveSpecialistProfiles({ AI_MODEL: "m", AI_ANTHROPIC_EFFORT_SUPPORT: "true" }).transport.anthropicEffortSupported, false);
+  assert.equal(resolveSpecialistProfiles({ AI_MODEL: "m", AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT: "true" }).transport.anthropicEffortSupported, true);
   assert.equal(resolveSpecialistProfiles({ AI_MODEL: "m" }).transport.anthropicEffortSupported, false);
+});
+
+test("#998 (#1049 review): the Anthropic effort opt-in never crosses lanes", () => {
+  // A heterogeneous configuration: MiniMax Anthropic on the primary route, a
+  // different Anthropic-compatible backend on the smart route. Asserting the
+  // primary endpoint must not enable `output_config.effort` on the smart one.
+  const baseEnv = {
+    AI_API_FORMAT: "anthropic",
+    AI_MODEL: "minimax",
+    AI_SMART_MODEL: "other-anthropic",
+    AI_SMART_API_FORMAT: "anthropic",
+    AI_SMART_BASE_URL: "https://other.example",
+    AI_REASONING_EFFORT: "medium",
+  };
+  assert.equal(laneAnthropicEffortSupported("primary", {}), false);
+  assert.equal(laneAnthropicEffortSupported("smart", { AI_ANTHROPIC_EFFORT_SUPPORT: "true" }), false);
+  assert.equal(laneAnthropicEffortSupported("smart", { AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "true" }), true);
+  // Only the literal "true" counts, same as the base flag.
+  for (const value of ["", "false", "yes", "1", "True-ish"]) {
+    assert.equal(laneAnthropicEffortSupported("smart", { AI_SMART_ANTHROPIC_EFFORT_SUPPORT: value }), false, value);
+  }
+  const profiles = resolveTierProfiles({ ...baseEnv, AI_ANTHROPIC_EFFORT_SUPPORT: "true" });
+  assert.equal(profiles.primary.anthropicEffortSupported, true);
+  // The fallback lane is availability recovery on the base endpoint: it shares
+  // the base assertion exactly like it inherits the base effort.
+  assert.equal(profiles.fallback.anthropicEffortSupported, true);
+  assert.equal(profiles.smart.anthropicEffortSupported, false);
+  const smartAsserted = resolveTierProfiles({ ...baseEnv, AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "true" });
+  assert.equal(smartAsserted.smart.anthropicEffortSupported, true);
+  assert.equal(smartAsserted.primary.anthropicEffortSupported, false);
+});
+
+test("#998 (#1049 review): the wire effort a log may report is what was actually sent", () => {
+  // Anthropic without the opt-in sends nothing, so a log must never claim the
+  // configured value was applied.
+  assert.equal(effectiveWireEffort("anthropic", "medium", false), "");
+  assert.equal(effectiveWireEffort("anthropic", "medium", true), "medium");
+  // OpenAI is unaffected by the Anthropic assertion.
+  assert.equal(effectiveWireEffort("openai", "medium", false), "medium");
+  assert.equal(effectiveWireEffort("openai", "", true), "");
+});
+
+test("#998 (#1049 review): a configured-but-inactive Anthropic effort is named, never silent", () => {
+  const specialist = resolveSpecialistProfiles({
+    AI_MODEL: "primary",
+    AI_SPECIALIST_MODEL: "specialist",
+    AI_SPECIALIST_API_FORMAT: "anthropic",
+    AI_SPECIALIST_REASONING_EFFORT: "medium",
+  });
+  assert.equal(specialist.transport.anthropicEffortSupported, false);
+  assert.ok(
+    specialist.warnings.some((warning) =>
+      warning.includes("specialist") && warning.includes("medium") && warning.includes("ai-specialist-anthropic-effort-support")),
+    specialist.warnings.join(" | "),
+  );
+  // Asserting the endpoint silences it; the field is then actually sent.
+  const asserted = resolveSpecialistProfiles({
+    AI_MODEL: "primary",
+    AI_SPECIALIST_MODEL: "specialist",
+    AI_SPECIALIST_API_FORMAT: "anthropic",
+    AI_SPECIALIST_REASONING_EFFORT: "medium",
+    AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT: "true",
+  });
+  assert.equal(asserted.transport.anthropicEffortSupported, true);
+  assert.equal(asserted.warnings.length, 0, asserted.warnings.join(" | "));
+  // An OpenAI specialist with an effort is the normal case: never a warning.
+  const openai = resolveSpecialistProfiles({
+    AI_MODEL: "primary",
+    AI_SPECIALIST_MODEL: "specialist",
+    AI_SPECIALIST_REASONING_EFFORT: "medium",
+  });
+  assert.equal(openai.warnings.length, 0, openai.warnings.join(" | "));
+  // No effort configured at all stays completely quiet.
+  const quiet = resolveSpecialistProfiles({
+    AI_MODEL: "primary",
+    AI_SPECIALIST_MODEL: "specialist",
+    AI_SPECIALIST_API_FORMAT: "anthropic",
+  });
+  assert.equal(quiet.warnings.length, 0, quiet.warnings.join(" | "));
+  // The warning names the lane's own input, never a secret and never another
+  // lane's flag.
+  const warning = anthropicEffortInactiveWarning("smart", "medium");
+  assert.match(warning, /ai-smart-anthropic-effort-support/);
+  assert.equal(warning.includes("medium"), true);
+  assert.equal(anthropicEffortSupportInput("primary"), "ai-anthropic-effort-support");
+  assert.equal(anthropicEffortSupportInput("fallback"), "ai-anthropic-effort-support");
+  assert.equal(anthropicEffortSupportInput("specialist"), "ai-specialist-anthropic-effort-support");
 });

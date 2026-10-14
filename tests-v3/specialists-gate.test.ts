@@ -239,11 +239,19 @@ test("#998: specialist calls carry the resolved effort on the wire, and the Anth
     assert.equal(anthropicUnopted.code, 0);
     const anthropicBodies = server.requests.map(({ body }) => JSON.parse(body) as Record<string, unknown>);
     assert.ok(anthropicBodies.every((payload) => payload.output_config === undefined && !("reasoning_effort" in payload)));
+    // #1049 review: the omission is announced, naming the lane's own opt-in —
+    // a silently-ignored parameter is the exact confusion #998 removes.
+    assert.ok(
+      anthropicUnopted.out.some((line) => line.startsWith("WARNING:") && line.includes("ai-specialist-anthropic-effort-support") && line.includes("NOT sent")),
+      anthropicUnopted.out.join(" | "),
+    );
     rmSync(anthropicUnopted.root, { recursive: true, force: true });
     server.requests.length = 0;
 
-    // 5. Anthropic with the opt-in: output_config.effort only.
-    const anthropicOptedIn = await run({
+    // 5a. The BASE opt-in never scopes the specialist lane: a heterogeneous
+    // operator who asserted the primary endpoint must not have
+    // output_config.effort pushed at an unasserted specialist backend.
+    const anthropicBaseOnly = await run({
       DEEP_REVIEW: "true",
       AI_BASE_URL: `${server.url}/v1`,
       AI_API_FORMAT: "anthropic",
@@ -251,7 +259,23 @@ test("#998: specialist calls carry the resolved effort on the wire, and the Anth
       AI_REASONING_EFFORT: "high",
       AI_ANTHROPIC_EFFORT_SUPPORT: "true",
     }, { productionTransport: true });
+    assert.equal(anthropicBaseOnly.code, 0);
+    assert.ok(server.requests.every(({ body }) => JSON.parse(body).output_config === undefined));
+    rmSync(anthropicBaseOnly.root, { recursive: true, force: true });
+    server.requests.length = 0;
+
+    // 5b. Anthropic with the specialist lane's OWN opt-in: output_config.effort
+    // is actually transmitted, and the inactive-effort warning is gone.
+    const anthropicOptedIn = await run({
+      DEEP_REVIEW: "true",
+      AI_BASE_URL: `${server.url}/v1`,
+      AI_API_FORMAT: "anthropic",
+      AI_SPECIALIST_MODEL: "specialist",
+      AI_REASONING_EFFORT: "high",
+      AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT: "true",
+    }, { productionTransport: true });
     assert.equal(anthropicOptedIn.code, 0);
+    assert.equal(anthropicOptedIn.out.some((line) => line.includes("NOT sent")), false, anthropicOptedIn.out.join(" | "));
     const optedInBodies = server.requests.map(({ body }) => JSON.parse(body) as Record<string, unknown>);
     assert.ok(optedInBodies.every((payload) => JSON.stringify(payload.output_config) === '{"effort":"high"}'));
     assert.ok(optedInBodies.every((payload) => !("reasoning_effort" in payload) && !("thinking" in payload)));

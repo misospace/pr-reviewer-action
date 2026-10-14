@@ -77,7 +77,9 @@
       "ai-primary-reasoning-effort",
       "ai-smart-reasoning-effort",
       "ai-specialist-reasoning-effort",
-      "ai-anthropic-effort-support"
+      "ai-anthropic-effort-support",
+      "ai-smart-anthropic-effort-support",
+      "ai-specialist-anthropic-effort-support"
     ]
   },
   {

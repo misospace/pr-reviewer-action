@@ -38,7 +38,7 @@ import { KNOWN_SECRET_REDACTED, maskAndTruncate, maskDiagnostic } from "../conte
 import { reframeForCorpus, renderRepoMapMarkdown, repoMapFromArtifact, trustFramingOverhead } from "../context/repo-map.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { VerdictParseFailure } from "../model/types.js";
-import { anthropicEffortSupported, normalizeReasoningEffort, tierReasoningEffort } from "../routing/tiers.js";
+import { anthropicEffortInactiveWarning, laneAnthropicEffortSupported, normalizeReasoningEffort, tierReasoningEffort } from "../routing/tiers.js";
 import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
 import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
 import {
@@ -1327,7 +1327,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   const boundEffort = input.tier === "smart" ? (env.SMART_REASONING_EFFORT ?? "").trim() : "";
   const tierEffort = () => tierReasoningEffort(input.tier === "smart" ? "smart" : "primary", env);
   const reasoningEffort = boundEffort === "" ? tierEffort() : normalizeReasoningEffort(boundEffort) ?? tierEffort();
-  const anthropicEffort = anthropicEffortSupported(env);
+  // #998 (#1049 review): the opt-in is per-lane, because a smart route may
+  // target a different Anthropic-compatible backend than the primary one.
+  // An effort held back by the missing assertion is announced once here, not
+  // silently dropped on every loop round.
+  const anthropicEffort = laneAnthropicEffortSupported(input.tier === "smart" ? "smart" : "primary", env);
+  if (input.apiFormat === "anthropic" && reasoningEffort !== "" && !anthropicEffort) {
+    log(`WARNING: ${anthropicEffortInactiveWarning(input.tier === "smart" ? "smart" : "primary", reasoningEffort)}`);
+  }
 
   // Token/cost telemetry across the whole loop.
   const usageAcc: UsageAccumulator = {

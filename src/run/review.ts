@@ -37,7 +37,7 @@ import {
 import { extractRequirementLedger, ledgerToArtifact, renderRequirementLedgerMarkdown } from "../requirements/ledger.js";
 import { requirementLedgerPresence } from "../requirements/presence.js";
 import { classifyPr, classificationToArtifact } from "../classification/classify.js";
-import { resolveReviewRoute, resolveTierProfiles, tierRequestShape, anthropicEffortSupported, type TierProfiles } from "../routing/tiers.js";
+import { resolveReviewRoute, resolveTierProfiles, tierRequestShape, anthropicEffortInactiveWarning, effectiveWireEffort, type TierProfiles } from "../routing/tiers.js";
 import { reviewerRequestedEscalation } from "../routing/escalation.js";
 import { buildSpecialistCorpus } from "../specialists/corpus.js";
 import { forkGate, type ForkedGate, type GateName, type GateOutcome } from "../gates/gates.js";
@@ -724,7 +724,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
                 // #998: the pre-pass runs on the primary route, so it uses the
                 // primary lane's resolved effort.
                 reasoningEffort: profiles.primary.reasoningEffort,
-                anthropicEffortSupported: anthropicEffortSupported(env),
+                anthropicEffortSupported: profiles.primary.anthropicEffortSupported,
               },
               requestFn: specialistRequestFn({
                 baseUrl: profiles.primary.baseUrl,
@@ -981,7 +981,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
             inputMaxBytes: Number(env.REQUIREMENT_TRACE_REPAIR_INPUT_MAX_BYTES ?? "48000") || 48000,
             // #998: the repair pass runs on the primary route.
             reasoningEffort: profiles.primary.reasoningEffort,
-            anthropicEffortSupported: anthropicEffortSupported(env),
+            anthropicEffortSupported: profiles.primary.anthropicEffortSupported,
           },
           requestFn: specialistRequestFn({
             baseUrl: profiles.primary.baseUrl,
@@ -1604,8 +1604,10 @@ function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | 
     responseFormat: resolved.responseFormat,
     tokensParam: (env.AI_TOKENS_PARAM ?? "max_tokens") as TierProfile["tokensParam"],
     // #998: the lane's resolved effort; "" omits the provider field entirely.
+    // #1049 review: the Anthropic opt-in is the lane's own assertion —
+    // the smart lane never inherits the base flag.
     reasoningEffort: resolved.reasoningEffort,
-    anthropicEffortSupported: anthropicEffortSupported(env),
+    anthropicEffortSupported: resolved.anthropicEffortSupported,
   };
 }
 
@@ -1619,6 +1621,13 @@ async function callTier(
 ): Promise<{ ok: boolean; artifact: Record<string, unknown> | null; rawResponse: unknown }> {
   const { env, ws, log, errorLog, annotate } = input;
   const corpusText = ws.readText(corpusName) ?? "";
+  // #998 (#1049 review): an Anthropic effort the operator configured but the
+  // lane's endpoint opt-in refuses is NOT sent. Say so once, per call, at the
+  // runtime boundary — a silently dropped parameter is exactly the confusion
+  // this feature exists to remove.
+  if (profile.apiFormat === "anthropic" && profile.reasoningEffort !== "" && !profile.anthropicEffortSupported) {
+    errorLog(`WARNING: ${anthropicEffortInactiveWarning(tier, profile.reasoningEffort)}`);
+  }
   // Persist the request artifact before the first attempt (v2 writes it once).
   const requestPayload = buildModelRequest({
     apiFormat: profile.apiFormat,
@@ -1655,7 +1664,8 @@ async function callTier(
     // #998: the effective effort is part of which request produced this
     // verdict, so the per-call debug line carries it — appended only when one
     // was actually sent, keeping the line unchanged for every existing setup.
-    const effortNote = profile.reasoningEffort === "" ? "" : `, effort=${profile.reasoningEffort}`;
+    const wireEffort = effectiveWireEffort(profile.apiFormat, profile.reasoningEffort, profile.anthropicEffortSupported);
+    const effortNote = wireEffort === "" ? "" : `, effort=${wireEffort}`;
     log(`${profile.label} model attempt ${outcome.attempts}/${profile.retries}: ${profile.model} @ ${profile.baseUrl} (${profile.apiFormat}${effortNote})`);
     const parsed = parseVerdictResponse(outcome.rawResponse, [profile.apiKey]);
     const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;

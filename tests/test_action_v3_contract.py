@@ -188,6 +188,9 @@ TIER_RESOLVED_V3_ONLY_NOT_REPO_CONFIGURABLE = {
     # #998: the specialist reasoning effort is an operator-only input, exactly
     # like the rest of the ai-specialist-* family.
     "ai-specialist-reasoning-effort",
+    # #998 (#1049 review): the specialist Anthropic effort opt-in is part of the
+    # same operator-only specialist transport family.
+    "ai-specialist-anthropic-effort-support",
 }
 SPECIALIST_SECRET_NOT_REPO_CONFIGURABLE = {"ai-specialist-api-key"}
 

@@ -4083,3 +4083,71 @@ for (const direction of ["added", "removed"] as const) {
     }
   });
 }
+
+// ── #998 (#1049 review): the Anthropic effort opt-in at the runtime/logging boundary
+
+test("#998 (#1049 review): the run reports the Anthropic effort the wire actually carried", async () => {
+  // The exact P1 configuration from the review: an Anthropic-format endpoint
+  // with a configured effort. Without the lane's opt-in the field is NOT sent,
+  // so the run must say so loudly and must never log the held-back value as
+  // applied; with the opt-in the field is transmitted and the log agrees.
+  const anthropicVerdict = (text: string): string => JSON.stringify({
+    id: "msg_1",
+    model: "m",
+    role: "assistant",
+    content: [{ type: "text", text }],
+    stop_reason: "end_turn",
+  });
+  for (const support of ["", "true"] as const) {
+    const expectSent = support === "true";
+    const bodies: Record<string, unknown>[] = [];
+    const server = await startMockServer((_req, body, res) => {
+      bodies.push(JSON.parse(body) as Record<string, unknown>);
+      res.setHeader("Content-Type", "application/json");
+      res.end(anthropicVerdict(JSON.stringify(baseVerdict())));
+    });
+    const { runDir, cleanup } = withRunDir();
+    const logs: string[] = [];
+    const errors: string[] = [];
+    try {
+      const result = await runReview({
+        env: {},
+        inputs: {
+          "github-token": "tok",
+          repo: "o/r",
+          "pr-number": "7",
+          "ai-base-url": server.url,
+          "ai-model": "m",
+          "ai-api-format": "anthropic",
+          "ai-stream": "false",
+          "ai-api-key": "k",
+          "ai-primary-reasoning-effort": "medium",
+          ...(support === "" ? {} : { "ai-anthropic-effort-support": support }),
+        },
+        runDir,
+        workspace: runDir,
+        platformAdapter: mockPlatform(),
+        log: (line) => logs.push(line),
+        error: (line) => errors.push(line),
+      });
+      assert.equal(result.outputs.verdict, "approve");
+      const reviewBody = bodies[0];
+      assert.ok(reviewBody, "the review call must have reached the mock endpoint");
+      if (expectSent) {
+        assert.deepEqual(reviewBody.output_config, { effort: "medium" });
+        assert.ok(logs.some((line) => line.includes("effort=medium")), logs.join(" | "));
+        assert.equal(errors.some((line) => line.includes("NOT sent")), false, errors.join(" | "));
+      } else {
+        assert.equal("output_config" in reviewBody, false, "no effort field without the opt-in");
+        assert.ok(
+          errors.some((line) => line.includes("NOT sent") && line.includes("ai-anthropic-effort-support")),
+          errors.join(" | "),
+        );
+        assert.equal(logs.some((line) => line.includes("effort=")), false, `a held-back effort is never logged as applied: ${logs.join(" | ")}`);
+      }
+    } finally {
+      await server.close();
+      cleanup();
+    }
+  }
+});

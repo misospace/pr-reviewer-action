@@ -28,6 +28,12 @@ export interface ResolvedTier extends TierSettings {
   /** #998: the lane's resolved reasoning effort, or "" when none is
    * configured (the field is then omitted from the request entirely). */
   reasoningEffort: string;
+  /** #998: the per-lane assertion that this lane's Anthropic endpoint accepts
+   * `output_config.effort`. The base/primary/fallback lanes share the base
+   * `ai-anthropic-effort-support` opt-in; the smart lane requires its own
+   * `ai-smart-anthropic-effort-support`, because a route may target a
+   * different Anthropic-compatible backend that was never asserted. */
+  anthropicEffortSupported: boolean;
 }
 export interface TierProfiles {
   primary: ResolvedTier;
@@ -49,8 +55,9 @@ export interface SpecialistProfiles {
     apiKey: string;
     /** #998: resolved specialist reasoning effort ("" = omit the field). */
     reasoningEffort: string;
-    /** #998: the operator's opt-in that this Anthropic endpoint accepts
-     * `output_config.effort`. False (the default) never emits it. */
+    /** #998: the specialist lane's OWN `output_config.effort` assertion
+     * (`ai-specialist-anthropic-effort-support`); the base flag never scopes
+     * this lane. False (the default) never emits the field. */
     anthropicEffortSupported: boolean;
   };
   roleModels: Record<"correctness" | "security" | "tests", SpecialistRoleModel>;
@@ -163,9 +170,64 @@ export function tierReasoningEffort(
 /** #998: the operator's explicit opt-in that the configured
  * Anthropic-compatible endpoint accepts `output_config.effort`. True only on
  * the exact word "true"; anything else (including a malformed value) is off,
- * so an Anthropic request never carries an effort field by accident. */
+ * so an Anthropic request never carries an effort field by accident. This is
+ * the base assertion: it scopes the base/primary/fallback lanes. The smart
+ * and specialist lanes each require their own assertion (below), because a
+ * heterogeneous configuration routes those lanes to a different Anthropic-
+ * compatible backend that was never asserted to accept the field. */
 export function anthropicEffortSupported(env: EnvLike): boolean {
   return (env.AI_ANTHROPIC_EFFORT_SUPPORT ?? "").trim().toLowerCase() === "true";
+}
+
+/** #998: the per-lane Anthropic `output_config.effort` assertion. The smart
+ * lane never inherits the base flag: an opt-in made for the primary
+ * endpoint must not silently enable the field on an unrelated Anthropic-
+ * compatible smart backend (and vice versa). The fallback lane shares the
+ * base assertion exactly like it inherits the base effort. */
+export function laneAnthropicEffortSupported(
+  tier: "primary" | "smart" | "fallback",
+  env: EnvLike,
+): boolean {
+  if (tier === "smart") {
+    return (env.AI_SMART_ANTHROPIC_EFFORT_SUPPORT ?? "").trim().toLowerCase() === "true";
+  }
+  return anthropicEffortSupported(env);
+}
+
+/** #998: the input name that carries the effort opt-in for one lane. */
+export function anthropicEffortSupportInput(lane: "primary" | "smart" | "fallback" | "specialist"): string {
+  if (lane === "smart") return "ai-smart-anthropic-effort-support";
+  if (lane === "specialist") return "ai-specialist-anthropic-effort-support";
+  // The base assertion scopes the base/primary/fallback lanes.
+  return "ai-anthropic-effort-support";
+}
+
+/** #998: the effective effort a request actually carries on the wire. An
+ * Anthropic request without its opt-in sends no effort at all, so logs and
+ * any other "what did we ask for" surface must report "" here rather than the
+ * configured value — the operator is told what was SENT, never what the
+ * config happened to name. */
+export function effectiveWireEffort(
+  apiFormat: string,
+  effort: string,
+  anthropicEffortSupported: boolean,
+): string {
+  if (effort === "") return "";
+  if (apiFormat === "anthropic" && !anthropicEffortSupported) return "";
+  return effort;
+}
+
+/** #998: the operator-facing notice for a configured Anthropic effort that
+ * will NOT be sent because the lane's endpoint opt-in is off. Names the lane,
+ * the bounded (validated) effort value, and the exact input that turns it on;
+ * it never mentions a secret. Silent omission alone is what made a configured
+ * effort indistinguishable from an ignored one (#1049 review). */
+export function anthropicEffortInactiveWarning(
+  lane: "primary" | "smart" | "fallback" | "specialist",
+  effort: string,
+): string {
+  const supportInput = anthropicEffortSupportInput(lane);
+  return `${lane} lane: the Anthropic endpoint is not asserted to accept output_config.effort, so the configured reasoning effort "${effort}" is NOT sent; set ${supportInput}: true only if the endpoint is known to accept it`;
 }
 
 /** #965: the primary-first policy. In `auto` mode the initial review always
@@ -233,7 +295,17 @@ export function resolveSpecialistProfiles(env: EnvLike): SpecialistProfiles {
   if (specialistEffort.warning !== null) warnings.push(specialistEffort.warning);
   const primaryEffort = tierReasoningEffort("primary", env, (warning) => warnings.push(warning));
   const reasoningEffort = specialistEffort.value !== "" ? specialistEffort.value : primaryEffort;
-  const anthropicSupport = anthropicEffortSupported(env);
+  // #998: the opt-in is per-lane, like the transport fields above. The base
+  // `ai-anthropic-effort-support` assertion covers the base/primary/fallback
+  // endpoint; the specialist lane only sends `output_config.effort` when its
+  // OWN assertion is true, so enabling it for one Anthropic backend never
+  // silently enables it on another. An effort resolved onto an Anthropic
+  // specialist transport without that assertion is reported through
+  // `warnings`, never dropped silently.
+  const anthropicSupport = (env.AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT ?? "").trim().toLowerCase() === "true";
+  if (transport.apiFormat === "anthropic" && reasoningEffort !== "" && !anthropicSupport) {
+    warnings.push(anthropicEffortInactiveWarning("specialist", reasoningEffort));
+  }
 
   return {
     profileActive,
@@ -280,12 +352,16 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
       requestTimeoutSec: timeout, connectTimeoutSec: connectTimeout,
       responseFormat: tierResponseFormat("primary", env),
       reasoningEffort: tierReasoningEffort("primary", env),
+      anthropicEffortSupported: laneAnthropicEffortSupported("primary", env),
     },
     smart: {
       ...smart, resolved: smartResolved, retries: numberValue(env, "AI_SMART_RETRIES", 2), retryDelaySec: delay, stream,
       requestTimeoutSec: timeout, connectTimeoutSec: connectTimeout,
       responseFormat: tierResponseFormat("smart", env),
       reasoningEffort: tierReasoningEffort("smart", env),
+      // #998: the smart lane asserts its own endpoint capability; the base
+      // flag never scopes a route that may point at another backend.
+      anthropicEffortSupported: laneAnthropicEffortSupported("smart", env),
     },
     fallback: {
       ...fallback, resolved: Boolean(fallback.baseUrl && fallback.model), retries: numberValue(env, "AI_FALLBACK_RETRIES", 2), retryDelaySec: delay,
@@ -295,6 +371,9 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
       // #998: availability recovery, never quality escalation — the fallback
       // lane inherits the base effort and has no override input of its own.
       reasoningEffort: tierReasoningEffort("fallback", env),
+      // #998: like its effort, the fallback lane shares the base endpoint
+      // assertion; it has no effort opt-in input of its own.
+      anthropicEffortSupported: laneAnthropicEffortSupported("fallback", env),
     },
   };
 }

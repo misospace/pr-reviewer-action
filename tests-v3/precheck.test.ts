@@ -83,6 +83,8 @@ test("#998: an unset reasoning effort leaves the config hash untouched; a change
     AI_SMART_REASONING_EFFORT: "",
     AI_SPECIALIST_REASONING_EFFORT: "",
     AI_ANTHROPIC_EFFORT_SUPPORT: "false",
+    AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "false",
+    AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT: "false",
   });
   assert.deepEqual(after, before);
   assert.equal(computeConfigHash(after), computeConfigHash(before));
@@ -105,6 +107,20 @@ test("#998: an unset reasoning effort leaves the config hash untouched; a change
   const optedIn = collectConfigLines({ AI_MODEL: "m", AI_ANTHROPIC_EFFORT_SUPPORT: "true" });
   assert.notEqual(computeConfigHash(notOptedIn), computeConfigHash(optedIn));
   assert.ok(optedIn.includes("AI_ANTHROPIC_EFFORT_SUPPORT=true"));
+  // #1049 review: same conditional rule for the per-lane opt-ins — unset or
+  // false stays out of the hash, a true flips it (it changes what is sent).
+  const lanesUnset = collectConfigLines({
+    AI_MODEL: "m",
+    AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "",
+    AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT: "false",
+  });
+  assert.deepEqual(lanesUnset, collectConfigLines({ AI_MODEL: "m" }));
+  const smartOptedIn = collectConfigLines({ AI_MODEL: "m", AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "true" });
+  assert.ok(smartOptedIn.includes("AI_SMART_ANTHROPIC_EFFORT_SUPPORT=true"));
+  assert.notEqual(computeConfigHash(notOptedIn), computeConfigHash(smartOptedIn));
+  const specialistOptedIn = collectConfigLines({ AI_MODEL: "m", AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT: "true" });
+  assert.ok(specialistOptedIn.includes("AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT=true"));
+  assert.notEqual(computeConfigHash(smartOptedIn), computeConfigHash(specialistOptedIn));
   assert.equal(collectConfigLines({ AI_MODEL: "m" })[0] !== undefined, true);
 
   // Secrets still never enter the hash.
