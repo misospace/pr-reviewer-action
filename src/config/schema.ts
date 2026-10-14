@@ -6,6 +6,14 @@ export const BOOLEAN_INPUTS = new Set([
   "evidence-blocker-enforcement", "evidence-enable-for-forks", "tool-loop-summarize", "tool-failure-enforcement",
   "tool-enable-for-forks", "forgejo-skip-permission-preflight", "skip-if-diff-unchanged", "force-review",
   "ci-status-check", "ci-skip-on-timeout", "claim-falsification",
+  // #998: the operator's explicit assertion that the Anthropic-compatible
+  // endpoint accepts `output_config.effort`. Default off; without it no
+  // Anthropic request ever carries an effort field. Per-lane (#1049 review):
+  // every lane asserts its own endpoint and never inherits another.
+  "ai-anthropic-effort-support",
+  "ai-smart-anthropic-effort-support",
+  "ai-fallback-anthropic-effort-support",
+  "ai-specialist-anthropic-effort-support",
 ]);
 
 export const INTEGER_INPUTS = new Set([

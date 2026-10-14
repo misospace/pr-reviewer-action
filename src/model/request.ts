@@ -102,14 +102,42 @@ function userContent(config: ModelRequestConfig): string {
 }
 
 /**
+ * #998: build Anthropic's `output_config` object — the ONE place the wire
+ * family merges its keys. `format` (#1047, not implemented here) and `effort`
+ * are siblings of the same object, so a later key must never clobber an
+ * existing one: `setOutputConfigKey` writes a key only when it is absent (or
+ * already holds that exact value) and drops null/undefined outright. Returns
+ * null when nothing survives, so an unset effort leaves the body untouched
+ * (byte-identical to a build without the feature).
+ */
+export function buildAnthropicOutputConfig(
+  effort: string,
+  format?: unknown,
+): Record<string, unknown> | null {
+  const config: Record<string, unknown> = {};
+  const setOutputConfigKey = (key: string, value: unknown): void => {
+    if (value === undefined || value === null) return;
+    if (key in config && config[key] !== value) return;
+    config[key] = value;
+  };
+  setOutputConfigKey("format", format);
+  const normalizedEffort = effort.trim();
+  setOutputConfigKey("effort", normalizedEffort === "" ? null : normalizedEffort);
+  return Object.keys(config).length > 0 ? config : null;
+}
+
+/**
  * Build the transport wire payload for a review request. Provider-neutral:
  * branches only on the configured api format, never on model names.
  *
  * - Anthropic always sends `max_tokens` and never response_format/token-param
- *   switching/stream_options.
+ *   switching/stream_options. #998: it carries `output_config.effort` only
+ *   under the operator's explicit `anthropicEffortSupported` opt-in, and
+ *   never OpenAI's `reasoning_effort`.
  * - OpenAI-compatible: the token field flips wholesale via `tokensParam`
- *   (never both), temperature is omitted iff empty, and stream_options is
- *   attached only while streaming.
+ *   (never both), temperature is omitted iff empty, stream_options is
+ *   attached only while streaming, and #998 `reasoning_effort` is sent
+ *   verbatim whenever an effort is resolved.
  */
 export function buildModelRequest(config: ModelRequestConfig): TransportWirePayload {
   const content = userContent(config);
@@ -122,6 +150,13 @@ export function buildModelRequest(config: ModelRequestConfig): TransportWirePayl
       messages: [{ role: "user", content }],
     };
     if (config.temperature !== "") body.temperature = config.temperature;
+    // #998: unset, or configured without the endpoint opt-in, means no
+    // `output_config` key at all — never `thinking: {"type":"disabled"}` and
+    // never an invented "none" effort.
+    if (config.anthropicEffortSupported) {
+      const outputConfig = buildAnthropicOutputConfig(config.reasoningEffort);
+      if (outputConfig !== null) body.output_config = outputConfig;
+    }
     return { endpointPath: "/messages", body: body as unknown as TransportWirePayload["body"] };
   }
   const body: Record<string, unknown> = {
@@ -140,5 +175,7 @@ export function buildModelRequest(config: ModelRequestConfig): TransportWirePayl
     body.response_format = OPENAI_VERDICT_JSON_SCHEMA;
   }
   if (config.stream) body.stream_options = { include_usage: true };
+  // #998: the protocol-native effort field, verbatim.
+  if (config.reasoningEffort !== "") body.reasoning_effort = config.reasoningEffort;
   return { endpointPath: "/chat/completions", body: body as unknown as TransportWirePayload["body"] };
 }

@@ -24,6 +24,9 @@ function profile(overrides: Partial<TierProfile> = {}): TierProfile {
     temperature: 0.1,
     responseFormat: "off",
     tokensParam: "max_tokens",
+    // #998: unset by default so the fixture stays request-byte compatible.
+    reasoningEffort: "",
+    anthropicEffortSupported: false,
     ...overrides,
   };
 }

@@ -69,6 +69,69 @@ test("config hashing sorts lines, drops comments, and honors the verbosity dial"
   assert.ok(!collectConfigLines({ AI_MODEL: "m", AI_API_KEY: "sk-secret", AI_SPECIALIST_API_KEY: "specialist-secret" }).some((line) => line.includes("secret")));
 });
 
+test("#998: an unset reasoning effort leaves the config hash untouched; a changed effective effort changes it", () => {
+  // Every contract input is projected into the stage env even when empty, and
+  // `AI_*` is swept wholesale — so an unconditional sweep of the new keys
+  // would invalidate every existing user's cached review on upgrade. The
+  // settled rule is conditional emission: unset ⇒ the same lines as before.
+  const before = collectConfigLines({ AI_MODEL: "m", AI_BASE_URL: "https://primary" });
+  const after = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_REASONING_EFFORT: "",
+    AI_PRIMARY_REASONING_EFFORT: "",
+    AI_SMART_REASONING_EFFORT: "",
+    AI_SPECIALIST_REASONING_EFFORT: "",
+    AI_ANTHROPIC_EFFORT_SUPPORT: "false",
+    AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "false",
+    AI_FALLBACK_ANTHROPIC_EFFORT_SUPPORT: "false",
+    AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT: "false",
+  });
+  assert.deepEqual(after, before);
+  assert.equal(computeConfigHash(after), computeConfigHash(before));
+  assert.equal(after.some((line) => line.startsWith("AI_REASONING_EFFORT")), false);
+  assert.equal(after.some((line) => line.startsWith("AI_ANTHROPIC_EFFORT_SUPPORT")), false);
+
+  // A configured effort is model-affecting config: it enters the hash, and a
+  // different effective value produces a different fingerprint (so the run
+  // reviews instead of skipping as "diff unchanged").
+  const base = collectConfigLines({ AI_MODEL: "m", AI_BASE_URL: "https://primary", AI_REASONING_EFFORT: "high" });
+  assert.ok(base.includes("AI_REASONING_EFFORT=high"));
+  const other = collectConfigLines({ AI_MODEL: "m", AI_BASE_URL: "https://primary", AI_REASONING_EFFORT: "xhigh" });
+  assert.notEqual(computeConfigHash(base), computeConfigHash(other));
+  const laneOverride = collectConfigLines({ AI_MODEL: "m", AI_BASE_URL: "https://primary", AI_PRIMARY_REASONING_EFFORT: "high" });
+  assert.ok(laneOverride.includes("AI_PRIMARY_REASONING_EFFORT=high"));
+  assert.notEqual(computeConfigHash(base), computeConfigHash(laneOverride));
+
+  // The Anthropic opt-in only contributes when it is true.
+  const notOptedIn = collectConfigLines({ AI_MODEL: "m", AI_ANTHROPIC_EFFORT_SUPPORT: "false" });
+  const optedIn = collectConfigLines({ AI_MODEL: "m", AI_ANTHROPIC_EFFORT_SUPPORT: "true" });
+  assert.notEqual(computeConfigHash(notOptedIn), computeConfigHash(optedIn));
+  assert.ok(optedIn.includes("AI_ANTHROPIC_EFFORT_SUPPORT=true"));
+  // #1049 review: same conditional rule for the per-lane opt-ins — unset or
+  // false stays out of the hash, a true flips it (it changes what is sent).
+  const lanesUnset = collectConfigLines({
+    AI_MODEL: "m",
+    AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "",
+    AI_FALLBACK_ANTHROPIC_EFFORT_SUPPORT: "",
+    AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT: "false",
+  });
+  assert.deepEqual(lanesUnset, collectConfigLines({ AI_MODEL: "m" }));
+  const smartOptedIn = collectConfigLines({ AI_MODEL: "m", AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "true" });
+  assert.ok(smartOptedIn.includes("AI_SMART_ANTHROPIC_EFFORT_SUPPORT=true"));
+  assert.notEqual(computeConfigHash(notOptedIn), computeConfigHash(smartOptedIn));
+  const fallbackOptedIn = collectConfigLines({ AI_MODEL: "m", AI_FALLBACK_ANTHROPIC_EFFORT_SUPPORT: "true" });
+  assert.ok(fallbackOptedIn.includes("AI_FALLBACK_ANTHROPIC_EFFORT_SUPPORT=true"));
+  assert.notEqual(computeConfigHash(notOptedIn), computeConfigHash(fallbackOptedIn));
+  const specialistOptedIn = collectConfigLines({ AI_MODEL: "m", AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT: "true" });
+  assert.ok(specialistOptedIn.includes("AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT=true"));
+  assert.notEqual(computeConfigHash(smartOptedIn), computeConfigHash(specialistOptedIn));
+  assert.equal(collectConfigLines({ AI_MODEL: "m" })[0] !== undefined, true);
+
+  // Secrets still never enter the hash.
+  assert.ok(!collectConfigLines({ AI_REASONING_EFFORT: "high", AI_API_KEY: "sk-secret" }).some((line) => line.includes("secret")));
+});
+
 test("marker fingerprints round-trip the empty-diff placeholder and first marker wins", () => {
   const marker = buildMarkerFingerprint("", "abc");
   assert.equal(marker, `${EMPTY_DIFF_FINGERPRINT}|cfg:abc`);
