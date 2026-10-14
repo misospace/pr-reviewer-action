@@ -63,6 +63,7 @@ Verdict policy, inline comments, required-check validation.
 | `inline-findings-max` | `20` | Maximum inline review comments attached per review when inline-findings=true. |
 | `validate-required-checks` | `auto` | Whether to validate the final review against the classifier's must_check items. 'auto' (default) validates whenever must_check is non-empty; 'true' and 'false' force it on or off. Since #750, validation is structured-first: when the verdict carries required_check_dispositions, each deterministic check must be dispositioned satisfied, grounded not_applicable, or unresolved; the legacy keyword match applies only when the model emitted no structured dispositions at all. |
 | `required-check-validation-mode` | `warn` | What to do when required checks are unresolved or undispositioned. 'warn' (default) appends an 'Unaddressed required checks' section to the published review. 'fail' also forces a request_changes verdict. 'metadata_only' records the result (required-checks output and metadata marker) without changing the published review. Incompleteness never triggers smart escalation by itself (#721). |
+| `review-triage` | `false` | Opt-in human-review triage (#1003): the reviewer additionally answers whether this change needs a specialized/owning human review, as 'not_required', 'required', or 'unknown' (fail-closed: any missing, malformed or unrecognized answer is 'unknown'). The escalation policy comes from the repository's trusted instruction files already in context; triage never names a reviewer, never requests one, and never changes the verdict, findings, or any tool, evidence or fork access. Publishes review-triage-decision and review-triage-reason, and adds a short section to the published review and the step summary. Off by default: disabled means the outputs stay empty. |
 
 ### Routing & escalation
 
@@ -251,6 +252,8 @@ Diff skip, forced re-review, waiting for CI.
 | `incomplete-reason` | Why the review's coverage is incomplete, distinguishing review-execution gaps from requirement-traceability gaps: 'execution' (tool-loop or required-check coverage did not finish), 'requirement_trace' (the review completed, but an in-scope requirement lacks verifiable enforcement/test evidence), 'both', or 'none' when complete. #954. Has no v2 equivalent. |
 | `review-route` | Model route used for this review ('legacy', 'primary', 'smart', or 'escalated') |
 | `escalation-reason` | primary_requested when review-route is 'escalated' (the primary reviewer's structured smart_review_requested field triggered the smart re-review); empty otherwise |
+| `review-triage-decision` | Human-review triage answer (#1003) when review-triage ran: 'not_required', 'required', or 'unknown' (fail-closed for a missing or malformed answer). Empty when review-triage is disabled. Advisory only — never affects the verdict, findings, or any tool/access gating. |
+| `review-triage-reason` | Reason behind review-triage-decision (#1003), possibly empty when the model gave none; empty when review-triage is disabled. Model-authored text, redacted before publication. |
 | `findings` | Normalized structured findings as a JSON array (empty array when the model produced none) |
 | `review-markdown` | Human-readable markdown review body |
 | `analysis-engine` | Model and endpoint that produced the final result |

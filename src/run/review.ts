@@ -49,7 +49,7 @@ import { renderClaimsSection } from "../claims/render.js";
 import { buildModelRequest } from "../model/request.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
 import { parseVerdictResponse } from "../model/verdict.js";
-import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, publicAnalysisEngine, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
+import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, publicAnalysisEngine, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, applyReviewTriageFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
 import { reviewArtifactFromParsed, type ArtifactFinding } from "../enforcement/artifact.js";
 import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
 import { applyBlockerVerification } from "../enforcement/blocker-verification.js";
@@ -108,6 +108,12 @@ import type { ReadResult } from "../platform/types.js";
  * artifact bus — persisted to the run directory only where outputs, evals,
  * diagnostics or the shadow comparison read it. No Python, no shell.
  */
+
+/** #1003: the only three triage decisions the outputs/publish boundary will
+ * emit. Mirrors the parser's fail-closed set so a carried-forward or
+ * hand-edited artifact can never smuggle a fourth value onto a public
+ * surface. */
+const REVIEW_TRIAGE_DECISIONS: ReadonlySet<string> = new Set(["not_required", "required", "unknown"]);
 
 export class RunReviewError extends Error {
   readonly exitCode: number;
@@ -845,6 +851,13 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     errorLog(`requirement owners: ${warning}`);
   }
   promptState = applyRequirementTraceFragment(promptState, ws, requirementTraceEnabled, undefined, traceScopeIds, distributedHints);
+  // #1003 human-review triage: an operator-only, review-only opt-in. The
+  // fragment adds ONE question to the reviewer and nothing else — no tool,
+  // evidence, fork or model-routing capability is gated on or granted by it
+  // (hence no `review-triage-enable-for-forks` sibling), and it can never
+  // move the verdict. Disabled, the assembled prompt below is byte-identical
+  // to pre-#1003.
+  promptState = applyReviewTriageFragment(promptState, config.reviewTriage === true);
   env.SYSTEM_PROMPT = promptState.systemPrompt;
 
   // ── Native tool harness (corpus.sh tail) ─────────────────────────────
@@ -1205,6 +1218,22 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ...(incompleteReason !== "none" ? { incomplete_reason: incompleteReason } : {}),
   };
   ws.write("review-coverage.json", Buffer.from(`${pyJsonDumps(reviewCoverage)}\n`, "utf8"));
+  // #1003: the triage outputs. Disabled means "" for BOTH — "did not run",
+  // deliberately distinct from the fail-closed `unknown` answer, so a
+  // consumer can tell "not asked" from "could not tell". Enabled, the
+  // decision is re-validated against the three literals here too (the parser
+  // already fails closed; this is the publish/step-summary boundary's own
+  // fail-closed check for a carried-forward or hand-edited artifact). Triage
+  // is review-only: no value below feeds the verdict, the marker, or any
+  // tool/fork/evidence gate.
+  const reviewTriageEnabled = config.reviewTriage === true;
+  const triageDecisionValue = reviewRecord.review_triage_decision;
+  const triageDecision = reviewTriageEnabled
+    ? (typeof triageDecisionValue === "string" && REVIEW_TRIAGE_DECISIONS.has(triageDecisionValue) ? triageDecisionValue : "unknown")
+    : "";
+  const triageReason = reviewTriageEnabled && typeof reviewRecord.review_triage_reason === "string"
+    ? reviewRecord.review_triage_reason
+    : "";
   const outputs: ReviewStepOutputs = {
     verdict: outputVerdict,
     degradedGateBypass,
@@ -1223,6 +1252,8 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     }),
     reviewRoute: env.REVIEW_ROUTE ?? "legacy",
     escalationReason: escalationReasons,
+    reviewTriageDecision: triageDecision,
+    reviewTriageReason: triageReason,
     reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     findings: pyJsonDumps(Array.isArray(reviewRecord.findings) ? reviewRecord.findings : []),
     toolCalls,
@@ -1935,6 +1966,11 @@ function writeStepSummary(stepSummaryPath: string, input: SummaryInput): void {
     findings,
     upstreamLinkMode: upstreamLinkModeFromEnv(env),
     requiredChecksStatus: input.outputs.requiredChecks,
+    // #1003: present only when triage ran (the decision output is "" when the
+    // input is off), so a disabled run's summary gains no row.
+    ...(input.outputs.reviewTriageDecision !== ""
+      ? { reviewTriage: { decision: input.outputs.reviewTriageDecision, reason: input.outputs.reviewTriageReason } }
+      : {}),
     ...(total > 0 ? { requirementCoverage: { total, unknown } } : {}),
     primaryTools: {
       executedRequestCount: typeof primaryHarness?.executed_request_count === "number" ? primaryHarness.executed_request_count : 0,

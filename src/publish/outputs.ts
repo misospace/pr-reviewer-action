@@ -18,6 +18,28 @@ import { redactText } from "../context/redact.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
 import { SEVERITY_LABELS } from "./inline-findings.js";
 
+//
+// ---------------------------------------------------------------------------
+// #1003 human-review triage: the one place the publish layer decides what a
+// triage answer is allowed to look like. Both public surfaces (the published
+// review body and the step summary) validate against this set, so a
+// carried-forward artifact or a hand-edited output fails closed to `unknown`
+// rather than rendering a decision nobody validated.
+// ---------------------------------------------------------------------------
+
+/** The only three triage decisions; anything else fails closed to `unknown`. */
+export const REVIEW_TRIAGE_DECISIONS: ReadonlySet<string> = new Set([
+  "not_required",
+  "required",
+  "unknown",
+]);
+
+/** Cap on the model-authored reason rendered on a public surface. The cap is
+ * applied to the text BEFORE pipe-escaping (escaping expands `\` and `|`
+ * two-fold, and cutting an escape pair in half would itself be a rendering
+ * bug), so the published bytes are bounded at roughly twice this. */
+export const MAX_REVIEW_TRIAGE_REASON_CHARS = 300;
+
 // ---------------------------------------------------------------------------
 // Findings summary (moved from publish.ts, #975): the per-finding table a
 // reader sees in place of bare counts, shared by the strict publish body and
@@ -145,6 +167,8 @@ export const REVIEW_STEP_OUTPUT_IDS = [
   "incomplete-reason",
   "review-route",
   "escalation-reason",
+  "review-triage-decision",
+  "review-triage-reason",
   "findings",
   "review-markdown",
   "analysis-engine",
@@ -177,6 +201,14 @@ export interface ReviewStepOutputs {
   incompleteReason: string;
   reviewRoute: string;
   escalationReason: string;
+  /** #1003: the human-review triage decision — one of "not_required",
+   * "required", "unknown" — or "" when `review-triage` is disabled. "" means
+   * "did not run", which is deliberately distinct from the fail-closed
+   * "unknown" answer. */
+  reviewTriageDecision: string;
+  /** #1003: the triage reason (possibly "" when the model gave none), or ""
+   * when triage is disabled. */
+  reviewTriageReason: string;
   /** Compact JSON array of the normalized findings. */
   findings: string;
   /** Full review markdown (model-controlled text). */
@@ -226,6 +258,11 @@ export function formatReviewStepOutputs(
     ["incomplete-reason", outputs.incompleteReason],
     ["review-route", outputs.reviewRoute],
     ["escalation-reason", outputs.escalationReason],
+    // #1003: triage telemetry. The reason is model-authored text, so it takes
+    // the same redaction as review-markdown/findings — a public step output
+    // must never carry raw credentials.
+    ["review-triage-decision", outputs.reviewTriageDecision],
+    ["review-triage-reason", redactText(outputs.reviewTriageReason)],
     // Models echo diff lines; the public step output must not carry raw credentials; redactText is idempotent with the publish boundary.
     ["review-markdown", redactText(outputs.reviewMarkdown)],
     ["findings", redactText(outputs.findings)],
@@ -333,6 +370,12 @@ export interface StepSummaryTelemetry {
   };
   route: string;
   routeReason?: string;
+  /** #1003: human-review triage telemetry, supplied only when triage
+   * actually ran (`review-triage` enabled) — absent renders no row, so a
+   * disabled run's summary is byte-identical to pre-#1003. `unknown` is a
+   * real answer and renders like any other: the point of failing closed is
+   * that the gap is visible, not silently reported as "not required". */
+  reviewTriage?: { decision: string; reason: string };
   /** #633 deep-review telemetry row (rendered only when deep review ran). */
   deepReview?: { leads: string; errors: boolean; autoSelection?: { selected: number; skipped: number } };
   budget: string;
@@ -379,6 +422,23 @@ export function renderStepSummary(telemetry: StepSummaryTelemetry): string {
     rows.push(row);
   }
   rows.push(`| Route | ${telemetry.route} (${telemetry.routeReason ?? ""}) |`);
+  // #1003: compact one-row triage summary, rendered only when triage ran.
+  if (telemetry.reviewTriage) {
+    // The decision is re-validated here rather than trusted: this summary is
+    // a public surface and a carried-forward or hand-edited value must fail
+    // closed to `unknown`, exactly as the parser and the publish body do.
+    const decision = REVIEW_TRIAGE_DECISIONS.has(telemetry.reviewTriage.decision)
+      ? telemetry.reviewTriage.decision
+      : "unknown";
+    // Model-authored reason: redact, flatten to one cell, and escape pipes so
+    // a hostile string cannot forge a row (same discipline as the findings
+    // table's message cell). Capped at the same 300 characters as the
+    // published-body section so one answer reads identically on both.
+    const reason = escapeTableCell(
+      redactText(telemetry.reviewTriage.reason).replace(/\s+/g, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS),
+    );
+    rows.push(`| Review triage | ${decision}${reason === "" ? "" : `: ${reason}`} (advisory only) |`);
+  }
   const budgetRows: string[] = [];
   for (const harness of [telemetry.primaryTools, telemetry.smartTools]) {
     const budget = harness?.budget;

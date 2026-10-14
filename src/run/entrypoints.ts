@@ -15,7 +15,7 @@ import type { UpstreamLinkMode } from "../publish/sanitize.js";
 import { nonEmpty } from "./run-dir.js";
 import { partialCoverageOf } from "./review.js";
 import type { PartialCoverage } from "../tools/coverage.js";
-import { isIncompleteReason, type IncompleteReason } from "../publish/outputs.js";
+import { isIncompleteReason, REVIEW_TRIAGE_DECISIONS, type IncompleteReason } from "../publish/outputs.js";
 
 /**
  * Production entrypoints for the #706 composite cutover: the precheck and
@@ -417,6 +417,21 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
       toolHarnessResults: isFileNonEmpty(env, "tool-harness.md"),
     },
     ...(env.REREVIEW_LABEL ? { rerunLabel: env.REREVIEW_LABEL } : {}),
+    // #1003: the human-review triage answer, mirrored from the action's own
+    // publish env so a standalone `publish` re-publish carries the same
+    // section the review run would have written. Empty means triage did not
+    // run — distinct from the fail-closed `unknown` answer, which is a real
+    // value here and must still render. A value that is neither empty nor one
+    // of the three literals fails closed here too, at this boundary, rather
+    // than relying on a downstream renderer to reject it.
+    ...(env.REVIEW_TRIAGE_DECISION
+      ? {
+        reviewTriage: {
+          decision: REVIEW_TRIAGE_DECISIONS.has(env.REVIEW_TRIAGE_DECISION) ? env.REVIEW_TRIAGE_DECISION : "unknown",
+          reason: env.REVIEW_TRIAGE_REASON ?? "",
+        },
+      }
+      : {}),
     ...(env.VERDICT_POLICY ? { verdictPolicy: env.VERDICT_POLICY } : {}),
     degradedGateBypass: env.DEGRADED_GATE_BYPASS === "true",
     // #873: the same coverage-gap record `run` computed, read back from its

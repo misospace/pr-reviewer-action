@@ -1318,6 +1318,17 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
         // escalation.
         smart_review_requested: { type: "boolean" },
         smart_review_reason: { type: ["string", "null"] },
+        // #1003: the opt-in human-review triage answer. Always in the strict
+        // schema (strict mode requires every property in `required`); the
+        // prompt only explains the fields when `review-triage` is on. The
+        // parser accepts only the three literal words and fails closed to
+        // `unknown`; triage never touches the verdict, findings, or any
+        // capability.
+        review_triage_decision: {
+          type: "string",
+          enum: ["not_required", "required", "unknown"],
+        },
+        review_triage_reason: { type: ["string", "null"] },
         findings: {
           type: ["array", "null"],
           items: {
@@ -1390,7 +1401,7 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
           },
         },
       },
-      required: ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "findings", "requirement_coverage", "required_check_dispositions"],
+      required: ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "findings", "requirement_coverage", "required_check_dispositions"],
       additionalProperties: false,
     },
   },

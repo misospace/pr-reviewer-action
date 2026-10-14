@@ -12,6 +12,11 @@ import type { ModelRequestConfig, TransportWirePayload } from "./types.js";
  * findings. `smart_review_requested`/`smart_review_reason` (#721) are the
  * reviewer's structured request for a smart-tier second pass; the parser
  * normalizes them so only the JSON boolean `true` requests one.
+ * `review_triage_decision`/`review_triage_reason` (#1003) are the opt-in
+ * human-review triage answer; they are always in the strict schema (so every
+ * provider emits them) while the prompt explains them only when the
+ * `review-triage` input is on, and the parser fails an absent or malformed
+ * decision closed to `unknown`.
  * `required_check_dispositions` (#750) carries one disposition per
  * deterministic must_check item, echoed by exact check text.
  */
@@ -27,6 +32,14 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
         review_markdown: { type: "string" },
         smart_review_requested: { type: "boolean" },
         smart_review_reason: { type: ["string", "null"] },
+        // #1003: the opt-in human-review triage answer. Always present in the
+        // strict schema (strict mode requires every property in `required`);
+        // the prompt only explains the fields when `review-triage` is on. The
+        // parser accepts only the three literal words and fails closed to
+        // `unknown` — like every other triage value here, it never touches
+        // the verdict, findings, or any capability.
+        review_triage_decision: { type: "string", enum: ["not_required", "required", "unknown"] },
+        review_triage_reason: { type: ["string", "null"] },
         findings: {
           type: ["array", "null"],
           items: {
@@ -87,7 +100,7 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
           },
         },
       },
-      required: ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "findings", "requirement_coverage", "required_check_dispositions"],
+      required: ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "findings", "requirement_coverage", "required_check_dispositions"],
       additionalProperties: false,
     },
   },

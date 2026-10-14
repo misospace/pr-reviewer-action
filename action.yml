@@ -365,6 +365,10 @@ inputs:
     description: "Opt-in claim falsification pre-pass (#785): a deterministic scan of the PR body and its diff's added comments/docstrings for the PR's own quantified claims and invariants (every/only/never/identical/parity, authority boundaries, compatibility promises), each anchored to the concrete code it describes; falls back to one bounded model call on the primary route only when that scan finds nothing. The review corpus gets a Claims to Falsify section asking the reviewer to check every listed item and report counterexamples as findings. Fail-soft; never changes the verdict policy."
     required: false
     default: "false"
+  review-triage:
+    description: "Opt-in human-review triage (#1003): the reviewer additionally answers whether this change needs a specialized/owning human review, as 'not_required', 'required', or 'unknown' (fail-closed: any missing, malformed or unrecognized answer is 'unknown'). The escalation policy comes from the repository's trusted instruction files already in context; triage never names a reviewer, never requests one, and never changes the verdict, findings, or any tool, evidence or fork access. Publishes review-triage-decision and review-triage-reason, and adds a short section to the published review and the step summary. Off by default: disabled means the outputs stay empty."
+    required: false
+    default: "false"
   enrichment-budget-sec:
     description: Maximum seconds to spend on enrichment (linked source fetching, release metadata, ghcr.io lookups). Exceeding the budget stops further enrichment. Default 60.
     required: false
@@ -592,6 +596,10 @@ outputs:
     description: Model route used for this review ('legacy', 'primary', 'smart', or 'escalated')
   escalation-reason:
     description: primary_requested when review_route is 'escalated' (the primary reviewer's structured smart_review_requested field triggered the smart re-review); empty otherwise
+  review-triage-decision:
+    description: "Human-review triage answer (#1003) when review-triage ran: 'not_required', 'required', or 'unknown' (fail-closed for a missing or malformed answer). Empty when review-triage is disabled. Advisory only — never affects the verdict, findings, or any tool/access gating."
+  review-triage-reason:
+    description: Reason behind review-triage-decision (#1003), possibly empty when the model gave none; empty when review-triage is disabled. Model-authored text, redacted before publication.
   findings:
     description: Normalized structured findings as a JSON array (empty array when the model produced none)
   review-markdown:

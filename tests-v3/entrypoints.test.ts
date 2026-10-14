@@ -65,6 +65,24 @@ test("publishInputFromEnv reads internal degraded gate-bypass eligibility", () =
   assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", DEGRADED_GATE_BYPASS: "false" } as NodeJS.ProcessEnv, "github").degradedGateBypass, false);
 });
 
+// #1003: a standalone `publish` re-publish must carry the same triage section
+// the review run wrote. An empty decision means triage never ran and renders no
+// section; the fail-closed `unknown` is a real answer and still renders.
+test("#1003: publishInputFromEnv carries the triage answer, and omits it when triage did not run", () => {
+  const ran = publishInputFromEnv({
+    PUBLISH_MODE: "comment",
+    REVIEW_TRIAGE_DECISION: "required",
+    REVIEW_TRIAGE_REASON: "touches the auth subsystem",
+  } as NodeJS.ProcessEnv, "github");
+  assert.deepEqual(ran.reviewTriage, { decision: "required", reason: "touches the auth subsystem" });
+
+  const unknown = publishInputFromEnv({ PUBLISH_MODE: "comment", REVIEW_TRIAGE_DECISION: "unknown" } as NodeJS.ProcessEnv, "github");
+  assert.deepEqual(unknown.reviewTriage, { decision: "unknown", reason: "" });
+
+  const didNotRun = publishInputFromEnv({ PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+  assert.equal(didNotRun.reviewTriage, undefined);
+});
+
 test("publish entrypoint rejects an invalid publish mode fail-closed", async () => {
   await assert.rejects(
     publishMain({

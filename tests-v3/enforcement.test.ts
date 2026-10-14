@@ -30,7 +30,9 @@ function parsed(overrides: Partial<ParsedReviewVerdict> = {}): ParsedReviewVerdi
     requiredCheckDispositions: null, requiredCheckDispositionsEmitted: false,
     threadDispositions: null, threadDispositionsEmitted: false,
     humanReviewDispositions: null, humanReviewDispositionsEmitted: false,
-    smartReviewRequested: false, smartReviewReason: null, extra: {}, ...overrides,
+    smartReviewRequested: false, smartReviewReason: null,
+    reviewTriageDecision: "unknown", reviewTriageReason: "",
+    extra: {}, ...overrides,
   };
 }
 const policyOptions = { nonBlockingCategories: new Set(["tests", "docs"]), securityFlagged: false };
@@ -51,6 +53,25 @@ test("artifact maps verdict, tri-state dispositions, findings, and extra fields"
   assert.equal("human_review_dispositions" in result, false);
   assert.equal(result.custom, 7);
   assert.equal(result.requirement_trace_incomplete, undefined, "model extras cannot forge deterministic trace state");
+  // #1003: the triage answer is persisted verbatim (fail-closed value and all)
+  // so the outputs/publish/step-summary layers share one normalized answer.
+  assert.equal(result.review_triage_decision, "unknown");
+  assert.equal(result.review_triage_reason, "");
+});
+
+test("#1003: the artifact carries the normalized triage decision and reason in snake_case", () => {
+  const result = reviewArtifactFromParsed(parsed({
+    reviewTriageDecision: "required",
+    reviewTriageReason: "touches the payments gateway contract",
+  }));
+  assert.equal(result.review_triage_decision, "required");
+  assert.equal(result.review_triage_reason, "touches the payments gateway contract");
+  // A model-supplied extra with the same name can never overwrite it.
+  const forged = reviewArtifactFromParsed(parsed({
+    reviewTriageDecision: "not_required",
+    extra: { review_triage_decision: "required" },
+  }));
+  assert.equal(forged.review_triage_decision, "not_required");
 });
 
 test("model policy is a no-op and records model source", () => {
