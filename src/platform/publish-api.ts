@@ -13,7 +13,7 @@
  * - Every operation reports failure instead of throwing where the v2 seam
    logged a warning and continued; callers decide what is fatal.
  */
-import { requestJson, type FetchLike } from "./http.js";
+import { requestJson, requestText, type FetchLike } from "./http.js";
 import { ForgejoAdapter } from "./forgejo.js";
 import { parsePlatformBaseUrl, GITHUB_API_BASE } from "./urls.js";
 
@@ -31,6 +31,18 @@ export interface PublishReviewRef {
   node_id?: string;
   state?: string;
   body?: string;
+  user?: { id?: number | string; login?: string } | null;
+}
+
+export interface ManagedInlineCommentRef {
+  id: number | string;
+  reviewId: number | string;
+  body?: string;
+  user?: { id?: number | string; login?: string } | null;
+  in_reply_to_id?: number | string | null;
+  inReplyToId?: number | string | null;
+  hasReplies?: boolean;
+  pull_request_review_id?: number | string;
 }
 
 export interface NativeReviewComment {
@@ -70,13 +82,17 @@ export interface PublishPlatformApi {
   readonly platform: PublishPlatformName;
   /** Current PR head sha, for the publication-boundary re-check (#451). */
   getHeadSha(): Promise<string | null>;
+  authenticatedIdentity?(): Promise<string | null>;
   /** Issue comments (paginated), oldest-first as returned by the API. */
   listIssueComments(): Promise<PublishCommentRef[]>;
   /** Create or update the sticky managed comment (marker semantics shared). */
   upsertStickyComment(marker: string, body: string): Promise<StickyResult>;
   listReviews(): Promise<PublishReviewRef[]>;
+  /** Enumerate and retire individual comments belonging to managed reviews. */
+  listManagedInlineComments(reviewIds: readonly string[]): Promise<{ supported: boolean; complete: boolean; comments: ManagedInlineCommentRef[] }>;
+  retireInlineComment(reviewId: string, commentId: string): Promise<boolean>;
   /** Create a native review from a GitHub-shaped payload. */
-  createReview(request: NativeReviewRequest): Promise<{ ok: boolean; error?: string }>;
+  createReview(request: NativeReviewRequest): Promise<{ ok: boolean; error?: string; reviewId?: number | string }>;
   dismissReview(reviewId: number | string, message: string): Promise<boolean>;
   /** GraphQL-only capabilities: Forgejo implementations degrade (ok:false / empty). */
   minimizedReviewIds(): Promise<string[]>;
@@ -162,6 +178,17 @@ export class GitHubPublishApi implements PublishPlatformApi {
     };
   }
 
+  async authenticatedIdentity(): Promise<string | null> {
+    if (!this.token) return null;
+    const viewer = await graphql(this.url("/graphql"), this.token, "query { viewer { login } }", {}, this.timeoutMs, this.fetchImpl);
+    const login = ((viewer?.data as { viewer?: { login?: unknown } } | undefined)?.viewer)?.login;
+    if (typeof login === "string" && login.trim() !== "") return login;
+    try {
+      const { status, data } = await requestJson(this.url("/user"), this.opts("GET"));
+      return status === 200 && typeof (data as { login?: unknown } | null)?.login === "string" ? (data as { login: string }).login : null;
+    } catch { return null; }
+  }
+
   async getHeadSha(): Promise<string | null> {
     try {
       const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}`), this.opts("GET"));
@@ -226,20 +253,51 @@ export class GitHubPublishApi implements PublishPlatformApi {
           this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews?per_page=100&page=${page}`),
           this.opts("GET"),
         );
-        if (status !== 200 || !Array.isArray(data)) break;
+        if (status !== 200 || !Array.isArray(data)) throw new Error("Incomplete review listing");
         reviews.push(...(data as PublishReviewRef[]));
-        if ((data as unknown[]).length < 100) break;
+        if (data.length < 100) return reviews;
       } catch {
-        break;
+        throw new Error("Incomplete review listing; cleanup must fail closed");
       }
     }
-    return reviews;
+    throw new Error("Review listing exceeded pagination cap");
   }
 
-  async createReview(request: NativeReviewRequest): Promise<{ ok: boolean; error?: string }> {
+  async listManagedInlineComments(reviewIds: readonly string[]): Promise<{ supported: boolean; complete: boolean; comments: ManagedInlineCommentRef[] }> {
+    const comments: ManagedInlineCommentRef[] = [];
+    for (let page = 1; page <= 10; page += 1) {
+      try {
+        const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/comments?per_page=100&page=${page}`), this.opts("GET"));
+        if (status !== 200 || !Array.isArray(data)) return { supported: true, complete: false, comments: [] };
+        const rows = data as ManagedInlineCommentRef[];
+        comments.push(...rows);
+        if (rows.length < 100) {
+          if (comments.some((row) => !/^[1-9]\d*$/.test(String(row.id ?? "")) || !/^[1-9]\d*$/.test(String(row.pull_request_review_id ?? "")))) {
+            return { supported: true, complete: false, comments: [] };
+          }
+          const repliedTo = new Set(comments.filter((row) => row.in_reply_to_id != null).map((row) => String(row.in_reply_to_id)));
+          return { supported: true, complete: true, comments: comments
+            .filter((row) => reviewIds.includes(String(row.pull_request_review_id)))
+            .map((row) => ({ ...row, reviewId: String(row.pull_request_review_id), hasReplies: repliedTo.has(String(row.id)) })) };
+        }
+      } catch { return { supported: true, complete: false, comments: [] }; }
+    }
+    return { supported: true, complete: false, comments: [] };
+  }
+
+  async retireInlineComment(_reviewId: string, commentId: string): Promise<boolean> {
+    if (!/^[1-9]\d*$/.test(commentId)) return false;
     try {
-      const { status } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews`), this.opts("POST", request));
-      return status === 200 || status === 201 ? { ok: true } : { ok: false, error: `status ${status}` };
+      const { status } = await requestText(this.url(`/repos/${this.repo}/pulls/comments/${commentId}`), this.opts("DELETE"));
+      return status === 204 || status === 404;
+    } catch { return false; }
+  }
+
+  async createReview(request: NativeReviewRequest): Promise<{ ok: boolean; error?: string; reviewId?: number | string }> {
+    try {
+      const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews`), this.opts("POST", request));
+      const reviewId = (data as { id?: number | string } | null)?.id;
+      return status === 200 || status === 201 ? { ok: true, ...(reviewId !== undefined ? { reviewId } : {}) } : { ok: false, error: `status ${status}` };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -427,6 +485,8 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     };
   }
 
+  async authenticatedIdentity(): Promise<string | null> { return this.authorization.authenticatedIdentity(); }
+
   async getHeadSha(): Promise<string | null> {
     try {
       const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}`), await this.opts("GET"));
@@ -521,15 +581,44 @@ export class ForgejoPublishApi implements PublishPlatformApi {
   }
 
   async listReviews(): Promise<PublishReviewRef[]> {
-    try {
-      const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews`), await this.opts("GET"));
-      return status === 200 && Array.isArray(data) ? (data as PublishReviewRef[]) : [];
-    } catch {
-      return [];
+    const reviews: PublishReviewRef[] = [];
+    for (let page = 1; page <= 10; page++) {
+      const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews?limit=100&page=${page}`), await this.opts("GET"));
+      if (status !== 200 || !Array.isArray(data)) throw new Error("Incomplete review listing");
+      reviews.push(...data as PublishReviewRef[]);
+      if (data.length < 100) return reviews;
     }
+    throw new Error("Review listing exceeded pagination cap");
   }
 
-  async createReview(request: NativeReviewRequest): Promise<{ ok: boolean; error?: string }> {
+  async listManagedInlineComments(reviewIds: readonly string[]): Promise<{ supported: boolean; complete: boolean; comments: ManagedInlineCommentRef[] }> {
+    const comments: ManagedInlineCommentRef[] = [];
+    if (reviewIds.length > 25 || reviewIds.some((id) => !/^[1-9]\d*$/.test(id))) return { supported: true, complete: false, comments };
+    for (const id of reviewIds) {
+      try {
+        const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews/${id}/comments`), await this.opts("GET"));
+        if (status === 404) return { supported: false, complete: false, comments: [] };
+        if (status !== 200 || !Array.isArray(data)) return { supported: true, complete: false, comments: [] };
+        const rows = data as ManagedInlineCommentRef[];
+        // Forgejo replies are sibling comments: a foreign/unknown author makes the entire review unsafe.
+        if (rows.some((c) => !c.user?.login)) return { supported: true, complete: false, comments: [] };
+        if (rows.some((c) => String(c.pull_request_review_id ?? c.reviewId ?? "") !== id)) return { supported: true, complete: false, comments: [] };
+        if (comments.length + rows.length > 1000) return { supported: true, complete: false, comments: [] };
+        comments.push(...rows.map((c) => ({ ...c, reviewId: id, hasReplies: false })));
+      } catch { return { supported: true, complete: false, comments: [] }; }
+    }
+    return { supported: true, complete: true, comments };
+  }
+
+  async retireInlineComment(reviewId: string, commentId: string): Promise<boolean> {
+    if (!/^[1-9]\d*$/.test(reviewId) || !/^[1-9]\d*$/.test(commentId)) return false;
+    try {
+      const { status } = await requestText(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews/${reviewId}/comments/${commentId}`), await this.opts("DELETE"));
+      return status === 204 || status === 404;
+    } catch { return false; }
+  }
+
+  async createReview(request: NativeReviewRequest): Promise<{ ok: boolean; error?: string; reviewId?: number | string }> {
     const payload: Record<string, unknown> = {
       body: request.body,
       event: forgejoReviewEvent(request.event),
@@ -542,8 +631,9 @@ export class ForgejoPublishApi implements PublishPlatformApi {
       payload.comments = comments;
     }
     try {
-      const { status } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews`), await this.opts("POST", payload));
-      return status === 200 || status === 201 ? { ok: true } : { ok: false, error: `status ${status}` };
+      const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews`), await this.opts("POST", payload));
+      const reviewId = (data as { id?: number | string } | null)?.id;
+      return status === 200 || status === 201 ? { ok: true, ...(reviewId !== undefined ? { reviewId } : {}) } : { ok: false, error: `status ${status}` };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }

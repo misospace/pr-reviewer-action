@@ -22,6 +22,7 @@ function recorder(routes: Array<[string, number, unknown]>): { fetchImpl: FetchL
     calls.push({ method, url, auth: headers.get("authorization"), body: raw === null ? null : JSON.parse(raw) });
     const hit = routes.find(([key]) => `${method} ${url}`.startsWith(key));
     const [, status, data] = hit ?? ["", 404, {}];
+    if (status === 204) return new Response(null, { status });
     return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
   };
   return { fetchImpl, calls };
@@ -35,7 +36,7 @@ test("github createReview posts the native review payload with auth", async () =
   const { fetchImpl, calls } = recorder([[`POST ${BASE}/repos/o/r/pulls/9/reviews`, 200, { id: 1 }]]);
   const request = { body: "<!-- m -->\nreview", event: "COMMENT", comments: [{ path: "a.py", line: 3, body: "x" }] };
   const result = await github(fetchImpl).createReview(request as never);
-  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(result, { ok: true, reviewId: 1 });
   assert.equal(calls.length, 1);
   assert.equal(calls[0]!.method, "POST");
   assert.equal(calls[0]!.url, `${BASE}/repos/o/r/pulls/9/reviews`);
@@ -98,6 +99,85 @@ test("github unresolvedSupersededThreads keeps only unresolved threads opened by
   assert.deepEqual(result.threads.map((t) => t.id), ["T1"]);
   const body = calls[0]!.body as { variables: Record<string, unknown> };
   assert.deepEqual(body.variables, { owner: "o", name: "r", number: 9 });
+});
+
+test("GitHub managed review listing traverses complete PR-wide pages", async () => {
+  const first = Array.from({ length: 100 }, (_, i) => ({ id: i + 1 }));
+  const { fetchImpl, calls } = recorder([
+    [`GET ${BASE}/repos/o/r/pulls/9/reviews?per_page=100&page=1`, 200, first],
+    [`GET ${BASE}/repos/o/r/pulls/9/reviews?per_page=100&page=2`, 200, [{ id: 101 }]],
+  ]);
+  const reviews = await github(fetchImpl).listReviews();
+  assert.equal(reviews.length, 101);
+  assert.equal(calls.length, 2);
+});
+
+test("GitHub review listing fails closed on a later-page error and pagination cap", async () => {
+  const first = Array.from({ length: 100 }, (_, i) => ({ id: i + 1 }));
+  const laterFailure = recorder([
+    [`GET ${BASE}/repos/o/r/pulls/9/reviews?per_page=100&page=1`, 200, first],
+    [`GET ${BASE}/repos/o/r/pulls/9/reviews?per_page=100&page=2`, 503, {}],
+  ]);
+  await assert.rejects(github(laterFailure.fetchImpl).listReviews(), /fail closed/);
+  assert.equal(laterFailure.calls.length, 2);
+
+  const capped = recorder(Array.from({ length: 10 }, (_, i) => [`GET ${BASE}/repos/o/r/pulls/9/reviews?per_page=100&page=${i + 1}`, 200, first] as [string, number, unknown]));
+  await assert.rejects(github(capped.fetchImpl).listReviews(), /pagination cap/);
+  assert.equal(capped.calls.length, 10);
+});
+
+test("GitHub inline listing proves reply graph, ownership metadata and bounded completeness", async () => {
+  const rows = [
+    { id: 1, pull_request_review_id: 7, user: { login: "bot" } },
+    { id: 2, pull_request_review_id: 7, in_reply_to_id: 1, user: { login: "human" } },
+  ];
+  const { fetchImpl } = recorder([[`GET ${BASE}/repos/o/r/pulls/9/comments?per_page=100&page=1`, 200, rows]]);
+  const result = await github(fetchImpl).listManagedInlineComments(["7"]);
+  assert.equal(result.complete, true);
+  assert.deepEqual(result.comments.map((c) => [c.reviewId, c.id, c.hasReplies]), [["7", 1, true], ["7", 2, false]]);
+});
+
+test("GitHub inline listing fails closed for 403, 429, malformed pairs and page cap", async () => {
+  for (const status of [403, 429]) {
+    const { fetchImpl } = recorder([[`GET ${BASE}/repos/o/r/pulls/9/comments?`, status, {}]]);
+    assert.equal((await github(fetchImpl).listManagedInlineComments(["7"])).complete, false);
+  }
+  const mismatch = recorder([[`GET ${BASE}/repos/o/r/pulls/9/comments?`, 200, [{ id: 1 }]]]);
+  assert.equal((await github(mismatch.fetchImpl).listManagedInlineComments(["7"])).complete, false);
+  const capped = recorder(Array.from({ length: 10 }, (_, i) => [`GET ${BASE}/repos/o/r/pulls/9/comments?per_page=100&page=${i + 1}`, 200, Array.from({ length: 100 }, (_, j) => ({ id: i * 100 + j + 1, pull_request_review_id: 7, user: { login: "bot" } }))] as [string, number, unknown]));
+  assert.equal((await github(capped.fetchImpl).listManagedInlineComments(["7"])).complete, false);
+});
+
+test("Forgejo review listing paginates and fails closed on later-page errors and cap", async () => {
+  const base = "https://forge.example/api/v1/repos/o/r/pulls/9/reviews";
+  const first = Array.from({ length: 100 }, (_, i) => ({ id: i + 1 }));
+  const paged = recorder([
+    [`GET ${base}?limit=100&page=1`, 200, first],
+    [`GET ${base}?limit=100&page=2`, 200, [{ id: 101 }]],
+  ]);
+  const api = new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token", baseUrl: "https://forge.example", fetchImpl: paged.fetchImpl });
+  assert.equal((await api.listReviews()).length, 101);
+  assert.equal(paged.calls.length, 2);
+
+  const failed = recorder([[`GET ${base}?limit=100&page=1`, 200, first], [`GET ${base}?limit=100&page=2`, 503, {}]]);
+  await assert.rejects(new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token", baseUrl: "https://forge.example", fetchImpl: failed.fetchImpl }).listReviews());
+  const capped = recorder(Array.from({ length: 10 }, (_, i) => [`GET ${base}?limit=100&page=${i + 1}`, 200, first] as [string, number, unknown]));
+  await assert.rejects(new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token", baseUrl: "https://forge.example", fetchImpl: capped.fetchImpl }).listReviews(), /pagination cap/);
+});
+
+test("Forgejo review comments require matching ownership pair and DELETE is scoped to review", async () => {
+  const { fetchImpl, calls } = recorder([
+    ["GET https://forge.example/api/v1/repos/o/r/pulls/9/reviews/7/comments", 200, [{ id: 3, pull_request_review_id: 7, user: { login: "bot" } }]],
+    ["DELETE https://forge.example/api/v1/repos/o/r/pulls/9/reviews/7/comments/3", 204, null],
+  ]);
+  const api = new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token", baseUrl: "https://forge.example", fetchImpl });
+  const listed = await api.listManagedInlineComments(["7"]);
+  assert.equal(listed.complete, true);
+  assert.deepEqual(listed.comments.map((c) => c.reviewId), ["7"]);
+  assert.equal(await api.retireInlineComment("7", "3"), true);
+  assert.equal(calls.at(-1)?.url, "https://forge.example/api/v1/repos/o/r/pulls/9/reviews/7/comments/3");
+  const mismatch = recorder([["GET https://forge.example/api/v1/repos/o/r/pulls/9/reviews/7/comments", 200, [{ id: 3, pull_request_review_id: 8, user: { login: "bot" } }]]]);
+  assert.equal((await new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token", baseUrl: "https://forge.example", fetchImpl: mismatch.fetchImpl }).listManagedInlineComments(["7"])).complete, false);
 });
 
 test("forgejo graphql-only capabilities degrade without any request", async () => {

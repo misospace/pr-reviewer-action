@@ -135,6 +135,8 @@ class MinimalPublishApi implements PublishPlatformApi {
   async listIssueComments(): Promise<PublishCommentRef[]> { return []; }
   async upsertStickyComment(): Promise<{ ok: boolean; created: boolean }> { return { ok: true, created: true }; }
   async listReviews(): Promise<PublishReviewRef[]> { return []; }
+  async listManagedInlineComments() { return { supported: true, complete: true, comments: [] }; }
+  async retireInlineComment() { return true; }
   async createReview(request: NativeReviewRequest): Promise<{ ok: boolean }> { this.submitted.push(request); return { ok: true }; }
   async dismissReview(): Promise<boolean> { return true; }
   async minimizedReviewIds(): Promise<string[]> { return []; }
