@@ -4139,10 +4139,13 @@ test("#998 (#1049 review): the run reports the Anthropic effort the wire actuall
         assert.equal(errors.some((line) => line.includes("NOT sent")), false, errors.join(" | "));
       } else {
         assert.equal("output_config" in reviewBody, false, "no effort field without the opt-in");
+        // One warning per configured lane: the review call and the specialist
+        // phase each name the lane input they need (both are Anthropic here).
         assert.ok(
-          errors.some((line) => line.includes("NOT sent") && line.includes("ai-anthropic-effort-support")),
-          errors.join(" | "),
+          logs.some((line) => line.includes("NOT sent") && line.includes("(review call)") && line.includes("set ai-anthropic-effort-support: true")),
+          logs.join(" | "),
         );
+        assert.equal(logs.filter((line) => line.includes("(review call)") && line.includes("NOT sent")).length, 1, logs.join(" | "));
         assert.equal(logs.some((line) => line.includes("effort=")), false, `a held-back effort is never logged as applied: ${logs.join(" | ")}`);
       }
     } finally {

@@ -1626,7 +1626,7 @@ async function callTier(
   // runtime boundary — a silently dropped parameter is exactly the confusion
   // this feature exists to remove.
   if (profile.apiFormat === "anthropic" && profile.reasoningEffort !== "" && !profile.anthropicEffortSupported) {
-    errorLog(`WARNING: ${anthropicEffortInactiveWarning(tier, profile.reasoningEffort)}`);
+    log(`WARNING: ${anthropicEffortInactiveWarning(tier, profile.reasoningEffort, " (review call)")}`);
   }
   // Persist the request artifact before the first attempt (v2 writes it once).
   const requestPayload = buildModelRequest({

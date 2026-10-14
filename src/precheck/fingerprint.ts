@@ -166,6 +166,18 @@ const CONDITIONAL_AI_KEYS: ReadonlySet<string> = new Set([
   // the unconditional sweep would emit `..._SUPPORT=false` for every existing
   // user and invalidate every cached review, so only a `true` contributes.
   "AI_SMART_ANTHROPIC_EFFORT_SUPPORT",
+  "AI_FALLBACK_ANTHROPIC_EFFORT_SUPPORT",
+  "AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT",
+]);
+
+/** The subset of `CONDITIONAL_AI_KEYS` that are booleans rather than efforts:
+ * an explicit set, so a future `*_EFFORT_*` key can never be silently
+ * half-emitted by a name-suffix guess. Keep in step with `schema.ts`
+ * BOOLEAN_INPUTS and `routing/tiers.ts`. */
+const ANTHROPIC_EFFORT_SUPPORT_KEYS: ReadonlySet<string> = new Set([
+  "AI_ANTHROPIC_EFFORT_SUPPORT",
+  "AI_SMART_ANTHROPIC_EFFORT_SUPPORT",
+  "AI_FALLBACK_ANTHROPIC_EFFORT_SUPPORT",
   "AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT",
 ]);
 
@@ -200,7 +212,7 @@ export function collectConfigLines(env: Record<string, string>): string[] {
   // field, so a change here is a real behavior change (and the emitted line
   // is byte-identical to the sweep's, keeping one canonical form per key).
   for (const key of CONDITIONAL_AI_KEYS) {
-    if (key.endsWith("_EFFORT_SUPPORT")) {
+    if (ANTHROPIC_EFFORT_SUPPORT_KEYS.has(key)) {
       if ((env[key] ?? "").trim().toLowerCase() === "true") lines.push(`${key}=true`);
       continue;
     }

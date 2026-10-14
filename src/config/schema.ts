@@ -9,10 +9,10 @@ export const BOOLEAN_INPUTS = new Set([
   // #998: the operator's explicit assertion that the Anthropic-compatible
   // endpoint accepts `output_config.effort`. Default off; without it no
   // Anthropic request ever carries an effort field. Per-lane (#1049 review):
-  // the base flag scopes base/primary/fallback; smart and specialist assert
-  // their own endpoints and never inherit it.
+  // every lane asserts its own endpoint and never inherits another.
   "ai-anthropic-effort-support",
   "ai-smart-anthropic-effort-support",
+  "ai-fallback-anthropic-effort-support",
   "ai-specialist-anthropic-effort-support",
 ]);
 

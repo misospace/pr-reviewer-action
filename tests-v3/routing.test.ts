@@ -350,13 +350,19 @@ test("#998 (#1049 review): the Anthropic effort opt-in never crosses lanes", () 
   }
   const profiles = resolveTierProfiles({ ...baseEnv, AI_ANTHROPIC_EFFORT_SUPPORT: "true" });
   assert.equal(profiles.primary.anthropicEffortSupported, true);
-  // The fallback lane is availability recovery on the base endpoint: it shares
-  // the base assertion exactly like it inherits the base effort.
-  assert.equal(profiles.fallback.anthropicEffortSupported, true);
+  // The fallback lane runs on its own ai-fallback-base-url, so it asserts its
+  // own endpoint even though it inherits the base effort.
+  assert.equal(profiles.fallback.anthropicEffortSupported, false);
   assert.equal(profiles.smart.anthropicEffortSupported, false);
   const smartAsserted = resolveTierProfiles({ ...baseEnv, AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "true" });
   assert.equal(smartAsserted.smart.anthropicEffortSupported, true);
   assert.equal(smartAsserted.primary.anthropicEffortSupported, false);
+  const fallbackAsserted = resolveTierProfiles({ ...baseEnv, AI_FALLBACK_ANTHROPIC_EFFORT_SUPPORT: "true" });
+  assert.equal(fallbackAsserted.fallback.anthropicEffortSupported, true);
+  assert.equal(fallbackAsserted.primary.anthropicEffortSupported, false);
+  for (const value of ["", "false", "yes", "1"]) {
+    assert.equal(laneAnthropicEffortSupported("fallback", { AI_FALLBACK_ANTHROPIC_EFFORT_SUPPORT: value, AI_ANTHROPIC_EFFORT_SUPPORT: "true" }), false, value);
+  }
 });
 
 test("#998 (#1049 review): the wire effort a log may report is what was actually sent", () => {
@@ -412,6 +418,6 @@ test("#998 (#1049 review): a configured-but-inactive Anthropic effort is named, 
   assert.match(warning, /ai-smart-anthropic-effort-support/);
   assert.equal(warning.includes("medium"), true);
   assert.equal(anthropicEffortSupportInput("primary"), "ai-anthropic-effort-support");
-  assert.equal(anthropicEffortSupportInput("fallback"), "ai-anthropic-effort-support");
+  assert.equal(anthropicEffortSupportInput("fallback"), "ai-fallback-anthropic-effort-support");
   assert.equal(anthropicEffortSupportInput("specialist"), "ai-specialist-anthropic-effort-support");
 });

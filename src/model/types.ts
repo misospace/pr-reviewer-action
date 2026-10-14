@@ -29,10 +29,10 @@ export interface ModelRequestConfig {
    * layer; passed through verbatim (no clamping, no invented vocabulary). */
   reasoningEffort: string;
   /** #998: the lane's own opt-in that its Anthropic-format endpoint accepts
-   * `output_config.effort` (`ai-anthropic-effort-support` for the base/primary/
-   * fallback lanes, `ai-smart-anthropic-effort-support` for smart,
-   * `ai-specialist-anthropic-effort-support` for specialists — never inherited
-   * across lanes, #1049 review). False means the Anthropic body carries no
+   * `output_config.effort` (`ai-anthropic-effort-support` for the base/primary
+   * route, `ai-smart-anthropic-effort-support`, `ai-fallback-anthropic-effort-support`,
+   * `ai-specialist-anthropic-effort-support` — never inherited across lanes,
+   * #1049 review). False means the Anthropic body carries no
    * effort field even when `reasoningEffort` is set. Ignored by OpenAI. */
   anthropicEffortSupported: boolean;
 }

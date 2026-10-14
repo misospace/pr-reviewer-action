@@ -1333,7 +1333,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // silently dropped on every loop round.
   const anthropicEffort = laneAnthropicEffortSupported(input.tier === "smart" ? "smart" : "primary", env);
   if (input.apiFormat === "anthropic" && reasoningEffort !== "" && !anthropicEffort) {
-    log(`WARNING: ${anthropicEffortInactiveWarning(input.tier === "smart" ? "smart" : "primary", reasoningEffort)}`);
+    log(`WARNING: ${anthropicEffortInactiveWarning(input.tier === "smart" ? "smart" : "primary", reasoningEffort, " (native tool loop)")}`);
   }
 
   // Token/cost telemetry across the whole loop.

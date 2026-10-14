@@ -782,3 +782,50 @@ test("#922: a declared window too small for the per-turn completion is refused",
     LoopContextError,
   );
 });
+
+test("#998 (#1049 review): the smart loop asserts its own Anthropic endpoint and never inherits the base opt-in", async () => {
+  // A heterogeneous configuration: an Anthropic-compatible smart backend that
+  // was never asserted to accept output_config.effort. The loop's own requests
+  // must carry the field ONLY under the smart lane's assertion, and a held-back
+  // effort must be announced once rather than silently dropped every round.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff\n+ change\n");
+  const smartEnv = {
+    TOOL_HARNESS_TIER: "smart",
+    REPO: "o/r",
+    SMART_BASE_URL: "http://smart.test/v1",
+    SMART_MODEL: "s1",
+    SMART_API_FORMAT: "anthropic",
+    SMART_API_KEY: "sk",
+    AI_SMART_REASONING_EFFORT: "medium",
+    SYSTEM_PROMPT: "You are the reviewer.",
+  };
+  const runLoop = async (overrides: Record<string, string>) => {
+    const payloads: Record<string, unknown>[] = [];
+    const logs: string[] = [];
+    await runToolHarness(deps({
+      env: { ...smartEnv, ...overrides },
+      transport: async (_url: string, _format: string, payload: Record<string, unknown>) => {
+        payloads.push(payload);
+        return { content: [{ type: "text", text: "no tool calls" }] };
+      },
+      log: (line: string) => logs.push(line),
+    }));
+    return { payloads, logs };
+  };
+
+  const unasserted = await runLoop({});
+  assert.ok(unasserted.payloads.length > 0, "the loop must have made a request");
+  assert.ok(unasserted.payloads.every((payload) => payload.output_config === undefined && !("reasoning_effort" in payload)));
+  assert.equal(unasserted.logs.filter((line) => line.includes("ai-smart-anthropic-effort-support")).length, 1, unasserted.logs.join(" | "));
+
+  // The base assertion never scopes the smart route.
+  const baseAsserted = await runLoop({ AI_ANTHROPIC_EFFORT_SUPPORT: "true" });
+  assert.ok(baseAsserted.payloads.every((payload) => payload.output_config === undefined));
+
+  const asserted = await runLoop({ AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "true" });
+  assert.ok(asserted.payloads.every((payload) => JSON.stringify(payload.output_config) === '{"effort":"medium"}'));
+  assert.equal(asserted.logs.some((line) => line.includes("NOT sent")), false, asserted.logs.join(" | "));
+
+  fs.rmSync(root, { recursive: true, force: true });
+});

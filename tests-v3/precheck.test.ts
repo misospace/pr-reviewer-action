@@ -84,6 +84,7 @@ test("#998: an unset reasoning effort leaves the config hash untouched; a change
     AI_SPECIALIST_REASONING_EFFORT: "",
     AI_ANTHROPIC_EFFORT_SUPPORT: "false",
     AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "false",
+    AI_FALLBACK_ANTHROPIC_EFFORT_SUPPORT: "false",
     AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT: "false",
   });
   assert.deepEqual(after, before);
@@ -112,12 +113,16 @@ test("#998: an unset reasoning effort leaves the config hash untouched; a change
   const lanesUnset = collectConfigLines({
     AI_MODEL: "m",
     AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "",
+    AI_FALLBACK_ANTHROPIC_EFFORT_SUPPORT: "",
     AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT: "false",
   });
   assert.deepEqual(lanesUnset, collectConfigLines({ AI_MODEL: "m" }));
   const smartOptedIn = collectConfigLines({ AI_MODEL: "m", AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "true" });
   assert.ok(smartOptedIn.includes("AI_SMART_ANTHROPIC_EFFORT_SUPPORT=true"));
   assert.notEqual(computeConfigHash(notOptedIn), computeConfigHash(smartOptedIn));
+  const fallbackOptedIn = collectConfigLines({ AI_MODEL: "m", AI_FALLBACK_ANTHROPIC_EFFORT_SUPPORT: "true" });
+  assert.ok(fallbackOptedIn.includes("AI_FALLBACK_ANTHROPIC_EFFORT_SUPPORT=true"));
+  assert.notEqual(computeConfigHash(notOptedIn), computeConfigHash(fallbackOptedIn));
   const specialistOptedIn = collectConfigLines({ AI_MODEL: "m", AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT: "true" });
   assert.ok(specialistOptedIn.includes("AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT=true"));
   assert.notEqual(computeConfigHash(smartOptedIn), computeConfigHash(specialistOptedIn));
