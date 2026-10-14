@@ -280,6 +280,8 @@ class CapturingPublishApi implements PublishPlatformApi {
   async minimizeReview(): Promise<boolean> { return true; }
   async minimizedReviewIds(): Promise<string[]> { return []; }
   async unresolvedSupersededThreads() { return { ok: true, threads: [], hasNextPage: false }; }
+  async listManagedInlineComments(_ids: readonly string[]): ReturnType<PublishPlatformApi["listManagedInlineComments"]> { return { supported: true, complete: true, comments: [] }; }
+  async retireInlineComment(_review: string, _comment: string) { return true; }
   async resolveThread(): Promise<boolean> { return true; }
   async removeLabel(): Promise<boolean> { return true; }
 }
