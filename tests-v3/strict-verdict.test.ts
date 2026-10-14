@@ -382,6 +382,8 @@ class MockPublishApi implements PublishPlatformApi {
   async listIssueComments() { return this.comments; }
   async upsertStickyComment(marker: string, body: string) { this.sticky.push({ marker, body }); return { ok: true, created: true }; }
   async listReviews() { return this.reviews; }
+  async listManagedInlineComments() { return { supported: true, complete: true, comments: [] }; }
+  async retireInlineComment() { return true; }
   async createReview(request: Parameters<PublishPlatformApi["createReview"]>[0]) { this.submitted.push(request); return { ok: true }; }
   async dismissReview(): Promise<boolean> { return true; }
   async minimizedReviewIds(): Promise<string[]> { return []; }

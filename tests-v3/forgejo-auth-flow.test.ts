@@ -158,7 +158,7 @@ test("Forgejo publisher renews its integration JWT before a delayed write", asyn
   });
   assert.equal(await api.getHeadSha(), "abc");
   now += 2_700_001;
-  assert.deepEqual(await api.createReview({ body: "review", event: "COMMENT", comments: [] }), { ok: true });
+  assert.deepEqual(await api.createReview({ body: "review", event: "COMMENT", comments: [] }), { ok: true, reviewId: 1 });
   assert.equal(exchanges, 2);
   assert.deepEqual(forgeAuth, ["Bearer jwt-1", "Bearer jwt-2"]);
 }));

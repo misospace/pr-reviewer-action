@@ -17,8 +17,8 @@ import { publicAnalysisEngine } from "../prompt/index.js";
 import { ACTION_VERSION } from "../version.js";
 import { buildComments, SEVERITY_LABELS } from "./inline-findings.js";
 import { redactText } from "../context/redact.js";
-import { buildRunMetadataMarker, emitReviewMarkers, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
-import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, type CleanupLog } from "./cleanup.js";
+import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
+import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, retireManagedInlineComments, type CleanupLog } from "./cleanup.js";
 import { strictReviewResult } from "../enforcement/verdict-policy.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
 import { COVERAGE_NOTICE_MAX_ITEMS, type PartialCoverage } from "../tools/coverage.js";
@@ -478,7 +478,7 @@ export async function submitNativeReview(
     commitId: string;
     comments: NativeReviewComment[];
   },
-): Promise<{ ok: boolean; inlineCount: number; fellBack: boolean; error?: string }> {
+): Promise<{ ok: boolean; inlineCount: number; fellBack: boolean; error?: string; reviewId?: number | string }> {
   if (options.event !== "APPROVE" && options.event !== "REQUEST_CHANGES" && options.event !== "COMMENT") {
     return { ok: false, inlineCount: 0, fellBack: false, error: `Unsupported native review event: ${options.event}` };
   }
@@ -495,11 +495,11 @@ export async function submitNativeReview(
   }
   const created = await api.createReview(request);
   if (created.ok) {
-    return { ok: true, inlineCount, fellBack: false };
+    return { ok: true, inlineCount, fellBack: false, ...(created.reviewId !== undefined ? { reviewId: created.reviewId } : {}) };
   }
   const plain = await api.createReview({ body: options.body, event: options.event });
   if (plain.ok) {
-    return { ok: true, inlineCount, fellBack: true };
+    return { ok: true, inlineCount, fellBack: true, ...(plain.reviewId !== undefined ? { reviewId: plain.reviewId } : {}) };
   }
   const error = plain.error ?? created.error;
   return error === undefined
@@ -526,6 +526,7 @@ export async function publishReview(
   options: { diffText: string },
 ): Promise<PublishResult> {
   const messages: string[] = [];
+  let nativeReviewId: number | string | undefined;
 
   if (!input.prNumber) {
     return { status: "failed", messages, error: `publish_${input.mode} requires a pull_request event or explicit pr_number` };
@@ -616,20 +617,17 @@ export async function publishReview(
     });
   }
 
-  // Cleanup of previous managed native reviews runs before anything new is
-  // posted, in both native modes.
-  if (input.mode !== "comment") {
-    const flag = resolveCleanupFlag(input.cleanupPreviousNativeReviews, input.mode);
-    if (flag === "true") {
-      const cleanupLog: CleanupLog = (line) => messages.push(line);
-      const managedIds = await cleanupManagedReviews(api, input.prNumber, input.commentMarker, cleanupLog);
-      if (api.platform === "github") {
-        await resolveSupersededThreads(api, managedIds, cleanupLog);
-      } else {
-        messages.push(`  NOTE: Skipping review-thread resolution (platform=${api.platform}; no GraphQL API)`);
-      }
-    }
+  const cleanupEnabled = input.mode !== "comment"
+    && resolveCleanupFlag(input.cleanupPreviousNativeReviews, input.mode) === "true";
+  const cleanupLog: CleanupLog = (line) => messages.push(line);
+  let previousReviews: Awaited<ReturnType<PublishPlatformApi["listReviews"]>> = [];
+  if (cleanupEnabled) {
+    try { previousReviews = await api.listReviews(); }
+    catch { messages.push("WARN: Could not snapshot previous reviews; cleanup skipped"); }
   }
+  const completeCoverage = !input.partialCoverage && !input.coverageUnknown
+    && reviewResult !== "partial" && incompleteReason === "none" && input.degradedGateBypass !== true;
+  let fallbackSubmission = false;
 
   try {
     if (input.mode === "comment") {
@@ -679,10 +677,11 @@ export async function publishReview(
       }
       // Best-effort inline findings as a separate COMMENT review carrying the
       // managed marker: the summary comment above is already published.
-      if (inlineComments.length > 0) {
+      if (inlineComments.length > 0 || (completeCoverage && cleanupEnabled && previousReviews.some((r) => isManagedBody(r.body ?? "", input.commentMarker)))) {
         const inlineBody = `${input.commentMarker}\n_Inline findings from the automated review (summary in the sticky comment)._`;
-        const submitted = await api.createReview({ body: inlineBody, event: "COMMENT", comments: inlineComments });
+        const submitted = await api.createReview({ body: inlineBody, event: "COMMENT", commit_id: input.headSha, comments: inlineComments });
         if (submitted.ok) {
+          nativeReviewId = submitted.reviewId;
           messages.push(`Attached ${inlineComments.length} inline finding comment(s)`);
         } else {
           messages.push("WARN: inline findings review submission failed; summary comment was still published");
@@ -761,6 +760,7 @@ export async function publishReview(
         commitId: input.headSha,
         comments: inlineComments,
       });
+      fallbackSubmission = submitted.fellBack;
       if (submitted.fellBack) {
         messages.push("WARN: commit-bound review submission failed; falling back to plain review");
       }
@@ -771,6 +771,7 @@ export async function publishReview(
         }
         return { status: "failed", messages, error: `native review submission failed: ${submitted.error ?? "unknown error"}` };
       }
+      nativeReviewId = submitted.reviewId;
       messages.push(`Submitted native review (${event}) with ${submitted.inlineCount} inline comment(s)`);
     }
   } catch (error) {
@@ -779,6 +780,49 @@ export async function publishReview(
       messages,
       error: error instanceof Error ? error.message : String(error),
     };
+  }
+
+  // Retire old inline findings only after a complete replacement at the expected head.
+  if (cleanupEnabled) {
+    const replacementComplete = completeCoverage && !fallbackSubmission && nativeReviewId !== undefined;
+    if (replacementComplete) {
+      try {
+        const verifiedHead = await api.getHeadSha();
+        if (verifiedHead === input.headSha && nativeReviewId !== undefined) {
+            const identity = await api.authenticatedIdentity?.() ?? null;
+            const previous = identity === null ? [] : previousReviews.filter((r) => r.user?.login?.toLowerCase() === identity.toLowerCase());
+            const newestId = BigInt(String(nativeReviewId));
+            const olderManaged = previous.filter((r) => {
+              if (!isManagedBody(typeof r.body === "string" ? r.body : "", input.commentMarker)) return false;
+              try { return BigInt(String(r.id)) < newestId; } catch { return false; }
+            });
+            if (olderManaged.length > 100) {
+              messages.push("WARN: Previous managed review snapshot exceeds cleanup bound; cleanup skipped");
+            } else {
+              const stillCurrent = async () => {
+                if (await api.getHeadSha() !== input.headSha) return false;
+                const latest = await api.listReviews();
+                const replacement = latest.find((r) => String(r.id) === String(nativeReviewId));
+                if (!replacement || !isManagedBody(typeof replacement.body === "string" ? replacement.body : "", input.commentMarker)) return false;
+                const newest = latest
+                  .filter((r) => isManagedBody(typeof r.body === "string" ? r.body : "", input.commentMarker))
+                  .reduce<bigint | null>((max, r) => { try { const id = BigInt(String(r.id)); return max === null || id > max ? id : max; } catch { return max; } }, null);
+                return newest === BigInt(String(nativeReviewId));
+              };
+              if (await stillCurrent()) {
+                await retireManagedInlineComments(api, olderManaged, input.commentMarker, cleanupLog, stillCurrent);
+                if (await stillCurrent()) {
+                  const managedIds = await cleanupManagedReviews(api, input.prNumber, input.commentMarker, cleanupLog, [], olderManaged);
+                  if (api.platform === "github") await resolveSupersededThreads(api, managedIds, cleanupLog);
+                  else messages.push("NOTE: Skipping review-thread resolution (platform=forgejo; no GraphQL API)");
+                }
+              } else messages.push("WARN: A newer review superseded this run; cleanup skipped");
+            }
+        } else {
+          messages.push("  WARN: Missing replacement review id or head changed; leaving previous inline comments unchanged");
+        }
+      } catch { messages.push("WARN: Cleanup failed safely; replacement review remains published"); }
+    }
   }
 
   // Re-review label cleanup: best-effort, never fails the run.

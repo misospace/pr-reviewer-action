@@ -50,7 +50,17 @@ class MockPublishApi implements PublishPlatformApi {
   async listIssueComments(): Promise<PublishCommentRef[]> { return this.comments; }
   async upsertStickyComment(marker: string, body: string) { this.sticky.push({ marker, body }); return this.stickyResult; }
   async listReviews(): Promise<PublishReviewRef[]> { if (this.listReviewsError) throw new Error("list failed"); return this.reviews; }
-  async createReview(request: NativeReviewRequest) { this.submitted.push(request); return this.reviewResults.shift() ?? { ok: true }; }
+  async authenticatedIdentity() { return "bot"; }
+  async listManagedInlineComments(_ids: readonly string[]): ReturnType<PublishPlatformApi["listManagedInlineComments"]> { return { supported: true, complete: true, comments: [] }; }
+  async retireInlineComment(_review: string, _comment: string) { return true; }
+  async createReview(request: NativeReviewRequest) {
+    this.submitted.push(request);
+    const result = this.reviewResults.shift() ?? { ok: true };
+    if (!result.ok) return result;
+    const reviewId = 1000 + this.submitted.length;
+    this.reviews = [...this.reviews, { id: reviewId, body: request.body, user: { login: "bot" } }];
+    return { ...result, reviewId };
+  }
   async dismissReview(id: number | string): Promise<boolean> { this.dismissed.push(String(id)); return this.dismissResult; }
   async minimizedReviewIds(): Promise<string[]> { return this.minimizeIds; }
   async minimizeReview(id: string): Promise<boolean> { this.minimized.push(id); return this.minimizeResult; }
@@ -564,4 +574,86 @@ test("#1017: a credential echoed in the model markdown is redacted on the publis
   assert.ok(published.includes("Summary of this review"), "ordinary prose survives");
   assert.ok(published.includes("The diff echoes the provider key [REDACTED] in a log line"));
   assert.ok(!published.includes("ai-pr-review-sha:forged"), "reserved marker still stripped");
+});
+
+
+for (const platform of ["github", "forgejo"] as const) {
+  for (const mode of ["review_comment", "review_verdict"] as const) {
+    test(`${platform} ${mode}: complete clean replacement retires owned old inline comments after publication`, async () => {
+      const api = new MockPublishApi(platform);
+      api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" } }];
+      api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+      const deleted: string[] = [];
+      api.retireInlineComment = async (_review, comment) => { assert.ok(api.submitted.length > 0); deleted.push(comment); return true; };
+      const result = await publishReview(input({ mode, inlineFindings: true, cleanupPreviousNativeReviews: "auto" }), api, { diffText: DIFF });
+      assert.equal(result.status, "published");
+      assert.deepEqual(deleted, ["11"]);
+      assert.equal(api.submitted[0]?.commit_id, HEAD);
+    });
+  }
+}
+
+for (const [name, overrides] of [
+  ["partial", { requiredChecks: "incomplete" }],
+  ["unknown coverage", { coverageUnknown: true }],
+  ["degraded", { degradedGateBypass: true }],
+  ["disabled", { cleanupPreviousNativeReviews: "false" }],
+  ["comment mode", { mode: "comment" }],
+] as const) {
+  test(`${name}: prior inline findings are never deleted`, async () => {
+    const api = new MockPublishApi();
+    api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" } }];
+    api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+    api.retireInlineComment = async () => { assert.fail("unsafe delete"); };
+    await publishReview(input({ mode: "review_verdict", cleanupPreviousNativeReviews: "true", ...overrides }), api, { diffText: DIFF });
+    assert.deepEqual(api.dismissed, []);
+  });
+}
+
+for (const race of ["head", "newer"] as const) {
+  test(`${race} race after publish preserves previous findings`, async () => {
+    const api = new MockPublishApi();
+    api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" } }];
+    const create = api.createReview.bind(api);
+    api.createReview = async (request) => {
+      const result = await create(request);
+      if (race === "head") api.head = "different";
+      else api.reviews.push({ id: 2000, body: MARKER, user: { login: "bot" } });
+      return result;
+    };
+    api.retireInlineComment = async () => { assert.fail("unsafe race deletion"); };
+    await publishReview(input({ mode: "review_verdict", cleanupPreviousNativeReviews: "true" }), api, { diffText: DIFF });
+    assert.deepEqual(api.dismissed, []);
+  });
+}
+
+test("failed and plain fallback native submissions preserve previous findings", async () => {
+  for (const results of [[{ ok: false }, { ok: false }], [{ ok: false }, { ok: true }]]) {
+    const api = new MockPublishApi();
+    api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" } }];
+    api.reviewResults = results;
+    api.retireInlineComment = async () => { assert.fail("unsafe failure deletion"); };
+    await publishReview(input({ mode: "review_verdict", cleanupPreviousNativeReviews: "true" }), api, { diffText: DIFF });
+    assert.deepEqual(api.dismissed, []);
+  }
+});
+
+
+test("cleanup cap skips cleanup but still removes the rerun label", async () => {
+  const api = new MockPublishApi();
+  api.reviews = Array.from({ length: 101 }, (_, i) => ({ id: i + 1, body: MARKER, user: { login: "bot" } }));
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "true", rerunLabel: "ai-review" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.deepEqual(api.removedLabels, ["ai-review"]);
+  assert.ok(result.messages.some((line) => line.includes("cleanup skipped")));
+  assert.deepEqual(api.dismissed, []);
+});
+
+test("spoofed managed marker in a human review grants no cleanup authority", async () => {
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, state: "CHANGES_REQUESTED", user: { login: "human" } }];
+  api.retireInlineComment = async () => { assert.fail("human review mutation"); };
+  await publishReview(input({ mode: "review_verdict", cleanupPreviousNativeReviews: "true" }), api, { diffText: DIFF });
+  assert.deepEqual(api.dismissed, []);
+  assert.deepEqual(api.resolved, []);
 });
