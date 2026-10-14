@@ -6,16 +6,15 @@
  * - GraphQL-backed operations (minimized state, thread resolution) are
  *   GitHub-only; Forgejo degrades explicitly (the caller logs a note and
  *   continues — a missing GraphQL API is never a publish failure).
- * - Sticky-comment selection is shared semantics: the latest comment
- *   CONTAINING the marker (by updated_at), never "last comment by the
- *   current user" — the v2 `--edit-last` behavior picked a different
- *   comment on multi-bot repos and diverged from Forgejo.
+ * - Sticky-comment selection requires the marker. On Forgejo integration
+ *   identity changes, the newest marker owned by the current account wins.
  * - Forgejo review creation re-validates inline-comment positions against
    the fresh diff and drops anything that no longer anchors.
  * - Every operation reports failure instead of throwing where the v2 seam
    logged a warning and continued; callers decide what is fatal.
  */
 import { requestJson, type FetchLike } from "./http.js";
+import { ForgejoAdapter } from "./forgejo.js";
 import { parsePlatformBaseUrl, GITHUB_API_BASE } from "./urls.js";
 
 export type PublishPlatformName = "github" | "forgejo";
@@ -24,6 +23,7 @@ export interface PublishCommentRef {
   id: number | string;
   updated_at?: string;
   body?: string;
+  user?: { id?: number | string; login?: string } | null;
 }
 
 export interface PublishReviewRef {
@@ -353,13 +353,27 @@ export function forgejoReviewEvent(event: string): string {
   return "COMMENT";
 }
 
+/** Forgejo generates integration audiences as `u:<owner ID>:<UUID>`. */
+function integrationOwnerId(audience: string | undefined): string | null {
+  const match = /^u:([1-9]\d*):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.exec(audience ?? "");
+  return match?.[1] ?? null;
+}
+
+function commentAuthorId(comment: PublishCommentRef): string | null {
+  const id = comment.user?.id;
+  if (typeof id === "number") return Number.isSafeInteger(id) && id > 0 ? String(id) : null;
+  return typeof id === "string" && /^[1-9]\d*$/.test(id) ? id : null;
+}
+
 export class ForgejoPublishApi implements PublishPlatformApi {
   readonly platform = "forgejo" as const;
   private readonly base: string;
   private readonly origin: string;
   private readonly repo: string;
   private readonly prNumber: string;
-  private readonly token: string | undefined;
+  private readonly authorization: ForgejoAdapter;
+  private readonly integrationMode: boolean;
+  private readonly integrationOwnerId: string | null;
   private readonly timeoutMs: number;
   private readonly fetchImpl: FetchLike | undefined;
   /** Fresh diff used to re-validate inline-comment positions. */
@@ -369,6 +383,8 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     repo: string;
     prNumber: string;
     token?: string | undefined;
+    authMethod?: string | undefined;
+    authorizedIntegrationAudience?: string | undefined;
     baseUrl?: string | undefined;
     timeoutMs?: number | undefined;
     fetchImpl?: FetchLike | undefined;
@@ -379,7 +395,18 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     this.origin = parsed.origin;
     this.repo = options.repo;
     this.prNumber = options.prNumber;
-    this.token = options.token;
+    this.integrationMode = (options.authMethod ?? "token").trim().toLowerCase() === "authorized_integration";
+    this.integrationOwnerId = integrationOwnerId(options.authorizedIntegrationAudience);
+    this.authorization = new ForgejoAdapter({
+      repo: options.repo,
+      prNumber: options.prNumber,
+      baseUrl: options.baseUrl ?? "",
+      token: options.token,
+      authMethod: options.authMethod,
+      authorizedIntegrationAudience: options.authorizedIntegrationAudience,
+      timeoutMs: options.timeoutMs,
+      fetchImpl: options.fetchImpl,
+    });
     this.timeoutMs = options.timeoutMs ?? 25_000;
     this.fetchImpl = options.fetchImpl;
     this.diffProvider = options.diffProvider ?? null;
@@ -389,10 +416,10 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     return `${this.base}/api/v1${path}`;
   }
 
-  private opts(method: string, body?: unknown): Parameters<typeof requestJson>[1] {
+  private async opts(method: string, body?: unknown): Promise<Parameters<typeof requestJson>[1]> {
     return {
       method,
-      token: this.token ? `token ${this.token}` : undefined,
+      token: await this.authorization.authorizationHeaderForRequest(),
       timeoutMs: this.timeoutMs,
       fetchImpl: this.fetchImpl,
       allowedOrigin: this.origin,
@@ -402,7 +429,7 @@ export class ForgejoPublishApi implements PublishPlatformApi {
 
   async getHeadSha(): Promise<string | null> {
     try {
-      const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}`), this.opts("GET"));
+      const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}`), await this.opts("GET"));
       if (status !== 200 || data === null || typeof data !== "object") return null;
       const head = (data as { head?: { sha?: unknown } }).head;
       return typeof head?.sha === "string" ? head.sha : null;
@@ -413,31 +440,67 @@ export class ForgejoPublishApi implements PublishPlatformApi {
 
   async listIssueComments(): Promise<PublishCommentRef[]> {
     try {
-      const { status, data } = await requestJson(this.url(`/repos/${this.repo}/issues/${this.prNumber}/comments`), this.opts("GET"));
-      return status === 200 && Array.isArray(data) ? (data as PublishCommentRef[]) : [];
+      return await this.listIssueCommentsStrict();
     } catch {
       return [];
     }
   }
 
+  /** Upsert must distinguish a failed list from an empty one to avoid duplicates. */
+  private async listIssueCommentsStrict(): Promise<PublishCommentRef[]> {
+    const comments: PublishCommentRef[] = [];
+    for (let page = 1; page <= 20; page += 1) {
+      const { status, data } = await requestJson(
+        this.url(`/repos/${this.repo}/issues/${this.prNumber}/comments?limit=50&page=${page}`),
+        await this.opts("GET"),
+      );
+      if (status !== 200 || !Array.isArray(data)) throw new Error(`Forgejo issue comments read failed (status ${status})`);
+      comments.push(...(data as PublishCommentRef[]));
+      if (data.length < 50) return comments;
+    }
+    throw new Error("Forgejo issue comments exceeded the pagination limit");
+  }
+
   async upsertStickyComment(marker: string, body: string): Promise<StickyResult> {
-    const comments = await this.listIssueComments();
-    const matching = comments.filter((c) => typeof c.body === "string" && c.body.includes(marker));
-    matching.sort((a, b) => String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? "")));
-    const target = matching[0];
     try {
+      const comments = await this.listIssueCommentsStrict();
+      const matching = comments.filter((c) => typeof c.body === "string" && c.body.includes(marker));
+      matching.sort((a, b) => {
+        const updated = String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? ""));
+        if (updated !== 0) return updated;
+        const aId = Number(a.id);
+        const bId = Number(b.id);
+        return Number.isSafeInteger(aId) && Number.isSafeInteger(bId) ? bId - aId : 0;
+      });
+      let target = matching[0];
+      if (this.integrationMode && target !== undefined) {
+        let author: (comment: PublishCommentRef) => string | null;
+        let current: string;
+        if (this.integrationOwnerId !== null) {
+          // The audience identifies the account Forgejo authenticates as.
+          // /user needs a separate user scope that repository-scoped JWTs lack.
+          author = commentAuthorId;
+          current = this.integrationOwnerId;
+        } else {
+          const identity = await this.authorization.authenticatedIdentity();
+          if (identity === null) return { ok: false, created: false, error: "Forgejo sticky comment owner could not be verified" };
+          author = (comment) => {
+            const login = comment.user?.login;
+            return typeof login === "string" && login.trim() !== "" ? login.toLowerCase() : null;
+          };
+          current = identity.toLowerCase();
+        }
+        target = matching.find((comment) => author(comment) === current);
+        if (target === undefined && matching.some((comment) => author(comment) === null)) {
+          return { ok: false, created: false, error: "Forgejo sticky comment ownership is unknown" };
+        }
+      }
       if (target === undefined) {
-        const { status, data } = await requestJson(
-          this.url(`/repos/${this.repo}/issues/${this.prNumber}/comments`),
-          this.opts("POST", { body }),
-        );
-        if (status !== 201) return { ok: false, created: false, error: `status ${status}` };
-        const id = (data as { id?: number | string } | null)?.id;
-        return id === undefined ? { ok: true, created: true } : { ok: true, created: true, commentId: id };
+        return await this.createStickyComment(body);
       }
       const { status, data } = await requestJson(
         this.url(`/repos/${this.repo}/issues/comments/${target.id}`),
-        this.opts("PATCH", { body }),
+        await this.opts("PATCH", { body }),
       );
       if (status !== 200) return { ok: false, created: false, error: `status ${status}` };
       const id = (data as { id?: number | string } | null)?.id ?? target.id;
@@ -447,9 +510,19 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     }
   }
 
+  private async createStickyComment(body: string): Promise<StickyResult> {
+    const { status, data } = await requestJson(
+      this.url(`/repos/${this.repo}/issues/${this.prNumber}/comments`),
+      await this.opts("POST", { body }),
+    );
+    if (status !== 201) return { ok: false, created: false, error: `status ${status}` };
+    const id = (data as { id?: number | string } | null)?.id;
+    return id === undefined ? { ok: true, created: true } : { ok: true, created: true, commentId: id };
+  }
+
   async listReviews(): Promise<PublishReviewRef[]> {
     try {
-      const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews`), this.opts("GET"));
+      const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews`), await this.opts("GET"));
       return status === 200 && Array.isArray(data) ? (data as PublishReviewRef[]) : [];
     } catch {
       return [];
@@ -469,7 +542,7 @@ export class ForgejoPublishApi implements PublishPlatformApi {
       payload.comments = comments;
     }
     try {
-      const { status } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews`), this.opts("POST", payload));
+      const { status } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews`), await this.opts("POST", payload));
       return status === 200 || status === 201 ? { ok: true } : { ok: false, error: `status ${status}` };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -517,7 +590,7 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     try {
       const { status } = await requestJson(
         this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews/${reviewId}/dismissals`),
-        this.opts("POST", { message }),
+        await this.opts("POST", { message }),
       );
       return status === 200 || status === 201 || status === 204;
     } catch {
@@ -546,7 +619,7 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     try {
       const { status } = await requestJson(
         this.url(`/repos/${this.repo}/issues/${this.prNumber}/labels/${encodeURIComponent(label)}`),
-        this.opts("DELETE"),
+        await this.opts("DELETE"),
       );
       return status === 204 || status === 200;
     } catch {

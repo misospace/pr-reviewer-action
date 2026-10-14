@@ -383,6 +383,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // sanitizer, the corpus fences, and the never-execute rule.
   const ws = new RunWorkspace(runDir, options.persistArtifacts ?? true);
   const adapter: PlatformReadAdapter = options.platformAdapter ?? buildPlatformReadAdapter(env, options.fetchImpl);
+  await adapter.preflightAuthentication?.();
   const profiles: TierProfiles = resolveTierProfiles(env);
   const streamBool = (env.AI_STREAM ?? "true").toLowerCase() === "true";
 

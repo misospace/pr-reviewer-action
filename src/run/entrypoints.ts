@@ -4,6 +4,7 @@ import { resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
 import { GitHubAdapter } from "../platform/github.js";
 import { ForgejoAdapter } from "../platform/forgejo.js";
+import { forgejoTokenFromEnv } from "../platform/forgejo-auth.js";
 import type { PlatformAdapter } from "../platform/types.js";
 import { GitHubPublishApi } from "../platform/publish-api.js";
 import { ForgejoPublishApi } from "../platform/publish-api.js";
@@ -47,7 +48,7 @@ export function buildAdapter(env: NodeJS.ProcessEnv): PlatformAdapter {
       repo,
       prNumber,
       baseUrl: env.FORGEJO_API_URL ?? "",
-      token: env.FORGEJO_TOKEN || env.GITHUB_TOKEN || env.GH_TOKEN || undefined,
+      token: forgejoTokenFromEnv(env),
       ...(env.FORGEJO_AUTH_METHOD !== undefined ? { authMethod: env.FORGEJO_AUTH_METHOD } : {}),
       ...(env.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE !== undefined
         ? { authorizedIntegrationAudience: env.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE }
@@ -174,9 +175,11 @@ export async function precheckMain(env: NodeJS.ProcessEnv): Promise<number> {
   const stage = prNumber !== undefined && (env.PR_NUMBER ?? "") === ""
     ? { ...env, PR_NUMBER: prNumber }
     : env;
+  const adapter = buildAdapter(stage);
+  await adapter.preflightAuthentication?.();
   const output = await runPrecheck({
     env: stage as Record<string, string>,
-    adapter: buildAdapter(stage),
+    adapter,
     ...(event !== undefined ? { event: event as never } : {}),
     ...(eventHeadSha !== undefined ? { eventHeadSha } : {}),
   });
@@ -354,9 +357,7 @@ export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformA
   const prNumber = env.PR_NUMBER ?? "";
   const platform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "", env.TANGLED_REPO_DID ?? "");
   requireImplementedBackend(platform);
-  const token = platform === "forgejo"
-    ? (env.FORGEJO_TOKEN || env.GITHUB_TOKEN || env.GH_TOKEN || "")
-    : ghToken(env);
+  const token = platform === "forgejo" ? forgejoTokenFromEnv(env) : ghToken(env);
   const apiOptions = {
     repo,
     prNumber,
@@ -365,7 +366,13 @@ export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformA
   };
   const diffProvider = async (): Promise<string> => buildAdapter(env).getPrDiff();
   const api: PublishPlatformApi = platform === "forgejo"
-    ? new ForgejoPublishApi({ ...apiOptions, baseUrl: env.FORGEJO_API_URL ?? "", diffProvider })
+    ? new ForgejoPublishApi({
+      ...apiOptions,
+      baseUrl: env.FORGEJO_API_URL ?? "",
+      authMethod: env.FORGEJO_AUTH_METHOD,
+      authorizedIntegrationAudience: env.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE,
+      diffProvider,
+    })
     : new GitHubPublishApi(apiOptions);
   return { api, platform, diffProvider };
 }

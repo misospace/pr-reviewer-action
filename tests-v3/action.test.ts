@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { actionStageEnv, createRunDir, eventLabelName, writeOutputs } from "../src/run/action.js";
+import { forgejoTokenFromEnv } from "../src/platform/forgejo-auth.js";
 import { existsSync } from "node:fs";
 
 function withDir(): { dir: string; cleanup: () => void } {
@@ -42,6 +43,39 @@ test("action stage env: only endpoint + model given, everything else derived", (
 test("action stage env: a non-GitHub server URL is the Forgejo API base", () => {
   const stage = actionStageEnv({ "INPUT_AI-BASE-URL": "https://x.invalid", "INPUT_AI-MODEL": "m", GITHUB_SERVER_URL: "https://forge.example.invalid" });
   assert.equal(stage.FORGEJO_API_URL, "https://forge.example.invalid");
+});
+
+test("action stage env keeps token fallback while integration mode selects OIDC", () => {
+  const base = {
+    "INPUT_AI-BASE-URL": "https://llm.example.invalid/v1",
+    "INPUT_AI-MODEL": "m",
+    "INPUT_GITHUB-TOKEN": "runner",
+    FORGEJO_TOKEN: "injected-forgejo-token",
+    GITHUB_TOKEN: "injected-github-token",
+    GITHUB_SERVER_URL: "https://forge.example.invalid",
+  };
+  const tokenMode = actionStageEnv(base);
+  assert.equal(tokenMode.FORGEJO_TOKEN, "injected-forgejo-token");
+  assert.equal(forgejoTokenFromEnv(tokenMode), "injected-forgejo-token");
+  assert.equal(actionStageEnv({ ...base, "INPUT_FORGEJO-TOKEN": "explicit-pat" }).FORGEJO_TOKEN, "explicit-pat");
+  assert.equal(actionStageEnv({ ...base, FORGEJO_TOKEN: "" }).FORGEJO_TOKEN, "runner");
+
+  const integrationMode = actionStageEnv({
+    ...base,
+    "INPUT_FORGEJO-AUTH-METHOD": "authorized_integration",
+    "INPUT_FORGEJO-AUTHORIZED-INTEGRATION-AUDIENCE": "aud",
+  });
+  assert.equal(integrationMode.FORGEJO_TOKEN, "");
+  assert.equal(forgejoTokenFromEnv(integrationMode), undefined);
+  assert.throws(
+    () => actionStageEnv({
+      ...base,
+      "INPUT_FORGEJO-AUTH-METHOD": "authorized_integration",
+      "INPUT_FORGEJO-AUTHORIZED-INTEGRATION-AUDIENCE": "aud",
+      "INPUT_FORGEJO-TOKEN": "explicit-pat",
+    }),
+    /forgejo-token.*cannot be set/,
+  );
 });
 
 test("multiline outputs use a delimiter the value cannot forge", () => {

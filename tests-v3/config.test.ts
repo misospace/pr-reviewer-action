@@ -13,6 +13,24 @@ const source = readFileSync("contracts/action-v3.yml", "utf8");
 const rawContract: unknown = parse(source);
 const contract = validateContract(rawContract);
 
+test("Forgejo Authorized Integration requires an audience and refuses an explicit token before review", () => {
+  const base = { "ai-base-url": "https://llm.example", "ai-model": "m", "forgejo-auth-method": "authorized_integration" };
+  assert.throws(
+    () => loadConfig(contract, base),
+    /forgejo-authorized-integration-audience.*required/,
+  );
+  assert.throws(
+    () => loadConfig(contract, { ...base, "forgejo-authorized-integration-audience": "   " }),
+    /forgejo-authorized-integration-audience.*required/,
+  );
+  assert.throws(
+    () => loadConfig(contract, { ...base, "forgejo-authorized-integration-audience": "aud", "forgejo-token": "secret" }),
+    /forgejo-token.*cannot be set.*token' mode/,
+  );
+  assert.equal(loadConfig(contract, { ...base, "forgejo-authorized-integration-audience": "aud" }).forgejoAuthMethod, "authorized_integration");
+  assert.equal(loadConfig(contract, { ...base, "forgejo-auth-method": "token", "forgejo-token": "secret" }).forgejoAuthMethod, "token");
+});
+
 test("current canonical contract validates and maps every input once", () => {
   const raw = Object.fromEntries(contract.inputs.map((input) => [input.id, input.default === undefined ? "test-value" : String(input.default)]));
   const config = loadConfig(contract, raw);

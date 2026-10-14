@@ -526,11 +526,11 @@ inputs:
     required: false
     default: ""
   forgejo-token:
-    description: Optional Forgejo API token. Defaults to github_token when blank. Use this when the token used for GitHub-compatible operations is not also valid for the Forgejo REST API.
+    description: Optional Forgejo API token in token mode. Defaults to github_token when blank in that mode. Use this when the token used for GitHub-compatible operations is not also valid for the Forgejo REST API. Must be empty in authorized_integration mode.
     required: false
     default: ""
   forgejo-auth-method:
-    description: "Forgejo authentication method. 'token' (default) uses a static personal access token via the forgejo_token input. 'authorized_integration' uses Forgejo's authorized integrations flow: the action exchanges the forgejo_authorized_integration_audience for a short-lived JWT via the runner's OIDC token endpoint and authenticates API calls with 'Authorization: Bearer {jwt}'. Requires forgejo_authorized_integration_audience and that the workflow sets 'enable-openid-connect: true'."
+    description: "Forgejo authentication method. 'token' (default) uses a static personal access token via the forgejo_token input. 'authorized_integration' uses Forgejo's authorized integrations flow: the action exchanges the forgejo_authorized_integration_audience for a short-lived JWT via the runner's OIDC token endpoint and authenticates API calls with 'Authorization: Bearer {jwt}'. Requires forgejo_authorized_integration_audience and that the workflow sets 'enable-openid-connect: true'; setting forgejo_token at the same time fails configuration validation."
     required: false
     default: "token"
   forgejo-authorized-integration-audience:

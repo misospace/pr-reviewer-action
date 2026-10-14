@@ -1,6 +1,6 @@
 import type { ActionContract } from "./contract.js";
 import { BOOLEAN_INPUTS, ENUM_INPUTS, FLOAT_INPUTS, INTEGER_INPUTS, POSITIVE_INTEGER_INPUTS, SECRET_INPUTS } from "./schema.js";
-import { isRuntimeConfig, secretValue, type RuntimeConfig } from "./types.js";
+import { isRuntimeConfig, isSecretValue, secretValue, type RuntimeConfig } from "./types.js";
 
 type MutableConfig = Record<string, string | number | boolean | ReturnType<typeof secretValue>>;
 export const INTEGER_BOUNDS: Readonly<Record<string, readonly [number, number]>> = Object.freeze({
@@ -75,6 +75,15 @@ export function loadConfig(contract: ActionContract, raw: RawInputs): RuntimeCon
     const allowed = ENUM_INPUTS[input.id];
     if (allowed && text !== "" && !allowed.includes(text)) throw new Error(`Input '${input.id}' must be one of: ${allowed.join(", ")}`);
     config[toCamelCase(input.id)] = SECRET_INPUTS.has(input.id) ? secretValue(text) : value;
+  }
+  if (config.forgejoAuthMethod === "authorized_integration") {
+    if (typeof config.forgejoAuthorizedIntegrationAudience !== "string"
+      || config.forgejoAuthorizedIntegrationAudience.trim() === "") {
+      throw new Error("Input 'forgejo-authorized-integration-audience' is required when 'forgejo-auth-method' is 'authorized_integration'");
+    }
+    if (isSecretValue(config.forgejoToken) && config.forgejoToken.present) {
+      throw new Error("Input 'forgejo-token' cannot be set when 'forgejo-auth-method' is 'authorized_integration'; use 'token' mode to authenticate with a token");
+    }
   }
   resolveInherited(config);
   const frozen: unknown = Object.freeze(config);
