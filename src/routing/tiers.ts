@@ -194,8 +194,10 @@ export function laneAnthropicEffortSupported(
     ? "AI_SMART_ANTHROPIC_EFFORT_SUPPORT"
     : tier === "fallback"
       ? "AI_FALLBACK_ANTHROPIC_EFFORT_SUPPORT"
-      : "AI_ANTHROPIC_EFFORT_SUPPORT";
-  return (env[key] ?? "").trim().toLowerCase() === "true";
+      : "";
+  // The base/primary lane delegates to the shared coercion, so every lane
+  // agrees on what an asserted endpoint means.
+  return key === "" ? anthropicEffortSupported(env) : (env[key] ?? "").trim().toLowerCase() === "true";
 }
 
 /** #998: the input name that carries the effort opt-in for one lane. */

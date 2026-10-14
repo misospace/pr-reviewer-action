@@ -4154,3 +4154,76 @@ test("#998 (#1049 review): the run reports the Anthropic effort the wire actuall
     }
   }
 });
+
+test("#998 (#1049 review): the fallback lane asserts its own Anthropic endpoint at the wire and in the log", async () => {
+  // The fallback route runs on ai-fallback-base-url, which may be a different
+  // Anthropic-compatible backend than the asserted primary one, so it needs
+  // its own assertion — and, like every lane, it reports only what it sent.
+  const deadServer = await startMockServer((_req, _body, res) => {
+    res.statusCode = 500;
+    res.end('{"error":"down"}');
+  });
+  for (const support of ["", "true"] as const) {
+    const expectSent = support === "true";
+    const bodies: Record<string, unknown>[] = [];
+    const fallbackServer = await startMockServer((_req, body, res) => {
+      bodies.push(JSON.parse(body) as Record<string, unknown>);
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({
+        content: [{ type: "text", text: JSON.stringify(baseVerdict({ review_markdown: "Fallback review.\n" })) }],
+        stop_reason: "end_turn",
+      }));
+    });
+    const { runDir, cleanup } = withRunDir();
+    const logs: string[] = [];
+    try {
+      const result = await runReview({
+        env: {},
+        inputs: {
+          "github-token": "tok",
+          repo: "o/r",
+          "pr-number": "7",
+          "ai-base-url": deadServer.url,
+          "ai-model": "m",
+          "ai-api-format": "anthropic",
+          "ai-stream": "false",
+          "ai-api-key": "k",
+          "ai-primary-retries": "1",
+          "ai-primary-retry-delay-sec": "0",
+          "ai-fallback-model": "fb",
+          "ai-fallback-base-url": fallbackServer.url,
+          "ai-fallback-api-format": "anthropic",
+          "ai-reasoning-effort": "low",
+          // The primary endpoint IS asserted here: that must not carry over.
+          "ai-anthropic-effort-support": "true",
+          ...(support === "" ? {} : { "ai-fallback-anthropic-effort-support": support }),
+        },
+        runDir,
+        workspace: runDir,
+        platformAdapter: mockPlatform(),
+        log: (line) => logs.push(line),
+      });
+      assert.equal(result.outputs.verdict, "approve");
+      const fallbackBody = bodies[0];
+      assert.ok(fallbackBody, "the fallback call must have reached its own endpoint");
+      const fallbackLogs = logs.filter((line) => line.includes("Fallback model attempt"));
+      if (expectSent) {
+        assert.deepEqual(fallbackBody.output_config, { effort: "low" });
+        assert.ok(fallbackLogs.some((line) => line.includes("effort=low")), logs.join(" | "));
+        assert.equal(logs.some((line) => line.includes("fallback lane") && line.includes("NOT sent")), false, logs.join(" | "));
+      } else {
+        assert.equal("output_config" in fallbackBody, false);
+        assert.ok(
+          logs.some((line) =>
+            line.includes("fallback lane") && line.includes("NOT sent") && line.includes("set ai-fallback-anthropic-effort-support: true")),
+          logs.join(" | "),
+        );
+        assert.ok(fallbackLogs.every((line) => !line.includes("effort=")), fallbackLogs.join(" | "));
+      }
+    } finally {
+      await fallbackServer.close();
+      cleanup();
+    }
+  }
+  await deadServer.close();
+});

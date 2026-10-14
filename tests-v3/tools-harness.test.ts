@@ -824,7 +824,7 @@ test("#998 (#1049 review): the smart loop asserts its own Anthropic endpoint and
   assert.ok(baseAsserted.payloads.every((payload) => payload.output_config === undefined));
 
   const asserted = await runLoop({ AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "true" });
-  assert.ok(asserted.payloads.every((payload) => JSON.stringify(payload.output_config) === '{"effort":"medium"}'));
+  assert.ok(asserted.payloads.every((payload) => JSON.stringify(payload.output_config) === '{"effort":"medium"}' && !("reasoning_effort" in payload)));
   assert.equal(asserted.logs.some((line) => line.includes("NOT sent")), false, asserted.logs.join(" | "));
 
   fs.rmSync(root, { recursive: true, force: true });
