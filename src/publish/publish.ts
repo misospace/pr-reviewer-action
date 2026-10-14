@@ -742,26 +742,28 @@ export async function publishReview(
               if (!isManagedBody(typeof r.body === "string" ? r.body : "", input.commentMarker)) return false;
               try { return BigInt(String(r.id)) < newestId; } catch { return false; }
             });
-            if (olderManaged.length > 100) messages.push("WARN: Previous managed review snapshot exceeds cleanup bound; cleanup skipped");
-            if (olderManaged.length > 100) return { status: "published", messages };
-            const stillCurrent = async () => {
-              if (await api.getHeadSha() !== input.headSha) return false;
-              const latest = await api.listReviews();
-              const replacement = latest.find((r) => String(r.id) === String(nativeReviewId));
-              if (!replacement || !isManagedBody(typeof replacement.body === "string" ? replacement.body : "", input.commentMarker)) return false;
-              const newest = latest
-                .filter((r) => isManagedBody(typeof r.body === "string" ? r.body : "", input.commentMarker))
-                .reduce<bigint | null>((max, r) => { try { const id = BigInt(String(r.id)); return max === null || id > max ? id : max; } catch { return max; } }, null);
-              return newest === BigInt(String(nativeReviewId));
-            };
-            if (await stillCurrent()) {
-              await retireManagedInlineComments(api, olderManaged, input.commentMarker, cleanupLog, stillCurrent);
+            if (olderManaged.length > 100) {
+              messages.push("WARN: Previous managed review snapshot exceeds cleanup bound; cleanup skipped");
+            } else {
+              const stillCurrent = async () => {
+                if (await api.getHeadSha() !== input.headSha) return false;
+                const latest = await api.listReviews();
+                const replacement = latest.find((r) => String(r.id) === String(nativeReviewId));
+                if (!replacement || !isManagedBody(typeof replacement.body === "string" ? replacement.body : "", input.commentMarker)) return false;
+                const newest = latest
+                  .filter((r) => isManagedBody(typeof r.body === "string" ? r.body : "", input.commentMarker))
+                  .reduce<bigint | null>((max, r) => { try { const id = BigInt(String(r.id)); return max === null || id > max ? id : max; } catch { return max; } }, null);
+                return newest === BigInt(String(nativeReviewId));
+              };
               if (await stillCurrent()) {
-                const managedIds = await cleanupManagedReviews(api, input.prNumber, input.commentMarker, cleanupLog, [], olderManaged);
-                if (api.platform === "github") await resolveSupersededThreads(api, managedIds, cleanupLog);
-                else messages.push("NOTE: Skipping review-thread resolution (platform=forgejo; no GraphQL API)");
-              }
-            } else messages.push("WARN: A newer review superseded this run; cleanup skipped");
+                await retireManagedInlineComments(api, olderManaged, input.commentMarker, cleanupLog, stillCurrent);
+                if (await stillCurrent()) {
+                  const managedIds = await cleanupManagedReviews(api, input.prNumber, input.commentMarker, cleanupLog, [], olderManaged);
+                  if (api.platform === "github") await resolveSupersededThreads(api, managedIds, cleanupLog);
+                  else messages.push("NOTE: Skipping review-thread resolution (platform=forgejo; no GraphQL API)");
+                }
+              } else messages.push("WARN: A newer review superseded this run; cleanup skipped");
+            }
         } else {
           messages.push("  WARN: Missing replacement review id or head changed; leaving previous inline comments unchanged");
         }

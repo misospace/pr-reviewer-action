@@ -351,7 +351,7 @@ export class GitHubPublishApi implements PublishPlatformApi {
     const data = await graphql(
       this.url("/graphql"),
       this.token,
-      "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { id isResolved comments(first: 1) { nodes { pullRequestReview { databaseId } } } } } } } }",
+      "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { id isResolved comments(first: 2) { totalCount pageInfo { hasNextPage } nodes { pullRequestReview { databaseId } } } } } } } }",
       { owner, name, number: Number(this.prNumber) },
       this.timeoutMs,
       this.fetchImpl,
@@ -366,9 +366,11 @@ export class GitHubPublishApi implements PublishPlatformApi {
     const idSet = new Set(managedIds.map(String));
     const threads: SupersededThread[] = [];
     for (const node of payload.nodes) {
-      const thread = node as { id?: unknown; isResolved?: unknown; comments?: { nodes?: unknown } };
+      const thread = node as { id?: unknown; isResolved?: unknown; comments?: { totalCount?: unknown; pageInfo?: { hasNextPage?: unknown }; nodes?: unknown } };
       if (typeof thread.id !== "string" || thread.isResolved === true) continue;
-      const first = Array.isArray(thread.comments?.nodes) ? thread.comments.nodes[0] : null;
+      const comments = thread.comments;
+      if (!comments || comments.totalCount !== 1 || comments.pageInfo?.hasNextPage !== false || !Array.isArray(comments.nodes) || comments.nodes.length !== 1) continue;
+      const first = comments.nodes[0];
       const reviewId = (first as { pullRequestReview?: { databaseId?: unknown } } | null | undefined)
         ?.pullRequestReview?.databaseId;
       const key = reviewId === undefined || reviewId === null ? "-1" : String(reviewId);

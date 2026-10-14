@@ -86,9 +86,11 @@ test("github resolveThread sends the resolveReviewThread mutation for that threa
 
 test("github unresolvedSupersededThreads keeps only unresolved threads opened by managed reviews", async () => {
   const nodes = [
-    { id: "T1", isResolved: false, comments: { nodes: [{ pullRequestReview: { databaseId: 11 } }] } },
-    { id: "T2", isResolved: true, comments: { nodes: [{ pullRequestReview: { databaseId: 11 } }] } },
-    { id: "T3", isResolved: false, comments: { nodes: [{ pullRequestReview: { databaseId: 33 } }] } },
+    { id: "T1", isResolved: false, comments: { totalCount: 1, pageInfo: { hasNextPage: false }, nodes: [{ pullRequestReview: { databaseId: 11 } }] } },
+    { id: "T2", isResolved: true, comments: { totalCount: 1, pageInfo: { hasNextPage: false }, nodes: [{ pullRequestReview: { databaseId: 11 } }] } },
+    { id: "T3", isResolved: false, comments: { totalCount: 1, pageInfo: { hasNextPage: false }, nodes: [{ pullRequestReview: { databaseId: 33 } }] } },
+    { id: "human-reply", isResolved: false, comments: { totalCount: 2, pageInfo: { hasNextPage: false }, nodes: [{ pullRequestReview: { databaseId: 11 } }, { pullRequestReview: null }] } },
+    { id: "missing-metadata", isResolved: false, comments: { nodes: [{ pullRequestReview: { databaseId: 11 } }] } },
   ];
   const { fetchImpl, calls } = recorder([
     [`POST ${BASE}/graphql`, 200, { data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: true }, nodes } } } } }],
@@ -97,6 +99,7 @@ test("github unresolvedSupersededThreads keeps only unresolved threads opened by
   assert.equal(result.ok, true);
   assert.equal(result.hasNextPage, true);
   assert.deepEqual(result.threads.map((t) => t.id), ["T1"]);
+  assert.match((calls[0]!.body as { query: string }).query, /comments\(first: 2\).*totalCount/s);
   const body = calls[0]!.body as { variables: Record<string, unknown> };
   assert.deepEqual(body.variables, { owner: "o", name: "r", number: 9 });
 });

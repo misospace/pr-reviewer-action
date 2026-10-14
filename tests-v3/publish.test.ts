@@ -639,6 +639,16 @@ test("failed and plain fallback native submissions preserve previous findings", 
 });
 
 
+test("cleanup cap skips cleanup but still removes the rerun label", async () => {
+  const api = new MockPublishApi();
+  api.reviews = Array.from({ length: 101 }, (_, i) => ({ id: i + 1, body: MARKER, user: { login: "bot" } }));
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "true", rerunLabel: "ai-review" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.deepEqual(api.removedLabels, ["ai-review"]);
+  assert.ok(result.messages.some((line) => line.includes("cleanup skipped")));
+  assert.deepEqual(api.dismissed, []);
+});
+
 test("spoofed managed marker in a human review grants no cleanup authority", async () => {
   const api = new MockPublishApi();
   api.reviews = [{ id: 7, body: MARKER, state: "CHANGES_REQUESTED", user: { login: "human" } }];
