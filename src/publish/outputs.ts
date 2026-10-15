@@ -244,6 +244,12 @@ export function formatReviewStepOutputs(
   outputs: Omit<ReviewStepOutputs, "degradedGateBypass">,
   randomBytes?: () => Uint8Array,
 ): string {
+  // #1003: re-resolve rather than trust the caller, so an unsubstantiated
+  // `not_required` (or any non-literal decision) can never be written as a
+  // public step output. "" means triage did not run and stays "".
+  const triageDecision = outputs.reviewTriageDecision === ""
+    ? ""
+    : resolveReviewTriageDecision(outputs.reviewTriageDecision, outputs.reviewTriageReason);
   const assignments: Array<[string, string]> = [
     ["verdict", outputs.verdict],
     ["verdict-source", outputs.verdictSource],
@@ -252,10 +258,11 @@ export function formatReviewStepOutputs(
     ["incomplete-reason", outputs.incompleteReason],
     ["review-route", outputs.reviewRoute],
     ["escalation-reason", outputs.escalationReason],
-    // #1003: triage telemetry. The reason is model-authored text, so it takes
-    // the same redaction as review-markdown/findings — a public step output
-    // must never carry raw credentials.
-    ["review-triage-decision", outputs.reviewTriageDecision],
+    // #1003: triage telemetry. The decision is re-resolved above, and the
+    // reason is model-authored text, so it takes the same redaction as
+    // review-markdown/findings — a public step output must never carry raw
+    // credentials.
+    ["review-triage-decision", triageDecision],
     ["review-triage-reason", redactText(outputs.reviewTriageReason)],
     // Models echo diff lines; the public step output must not carry raw credentials; redactText is idempotent with the publish boundary.
     ["review-markdown", redactText(outputs.reviewMarkdown)],

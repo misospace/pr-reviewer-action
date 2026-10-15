@@ -12,6 +12,7 @@ import { BUNDLED_PROMPT_ASSETS } from "../src/prompt/assets.js";
 import { startMockServer } from "./helpers.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import type { PublishCommentRef, NativeReviewRequest, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
+import { resolveReviewTriageDecision } from "../src/model/triage.js";
 
 /**
  * #1003 human-review triage: the opt-in, review-only, fail-closed
@@ -309,6 +310,30 @@ test("#1003: a substantiated not_required is kept, and required/unknown need no 
     rmSync(required.runDir, { recursive: true, force: true });
     rmSync(unknown.runDir, { recursive: true, force: true });
   }
+});
+
+// #1003 fail-closed, syntactic plausibility: a `not_required` reason must
+// carry at least one visible letter or number. Whitespace, ASCII controls,
+// Unicode formatting characters (zero-width spaces/joiners, bidi controls,
+// BOM) and punctuation-only strings are not usable evidence and fail closed.
+// This pins the resolver directly, feeding each hostile value itself (#252).
+test("#1003: the resolver requires a visible letter or number to keep not_required", () => {
+  for (const reason of [
+    "", "   ", "\n\t ", "\u200B", "\u200B\u200B", " \u200B ", "\u200D",
+    "\u202E\u202C", "\u2066\u2069", "\uFEFF",
+    "...", "_", "---", "…", "?!", ".", "()",
+  ]) {
+    assert.equal(resolveReviewTriageDecision("not_required", reason), "unknown", JSON.stringify(reason));
+  }
+  for (const reason of ["policy evidence", "N/A", "123", "café", "检查", "n/a (no owning team)"]) {
+    assert.equal(resolveReviewTriageDecision("not_required", reason), "not_required", JSON.stringify(reason));
+  }
+  // `required` and `unknown` are not positive claims: no reason needed. Any
+  // non-literal decision still fails closed regardless of the reason.
+  assert.equal(resolveReviewTriageDecision("required", ""), "required");
+  assert.equal(resolveReviewTriageDecision("unknown", ""), "unknown");
+  assert.equal(resolveReviewTriageDecision("maybe", "policy evidence"), "unknown");
+  assert.equal(resolveReviewTriageDecision(null, "policy evidence"), "unknown");
 });
 
 test("#1003: triage never moves the verdict", async () => {

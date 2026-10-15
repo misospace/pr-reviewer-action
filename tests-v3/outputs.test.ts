@@ -72,6 +72,27 @@ test("review output formatting serializes all keys in contract order with kebab-
   assert.ok(!result.includes("review_markdown"));
 });
 
+// #1003: the formatter is itself a public output boundary — it must not write
+// an unsubstantiated `not_required` even if a caller hands it one. "" (triage
+// did not run) stays "".
+test("#1003: formatReviewStepOutputs fails an unsubstantiated not_required closed to unknown", () => {
+  const base = {
+    verdict: "approve", verdictSource: "model", requiredChecks: "complete", reviewResult: "clean", incompleteReason: "none", reviewRoute: "primary",
+    escalationReason: "", findings: "[]", reviewMarkdown: "a", analysisEngine: "engine", toolCalls: "[]", cacheHitRatio: "-",
+  };
+  const bytes = (): Uint8Array => new Uint8Array(16).fill(0xab);
+
+  const unsubstantiated = formatReviewStepOutputs({ ...base, reviewTriageDecision: "not_required", reviewTriageReason: "\u200B" }, bytes);
+  assert.ok(unsubstantiated.includes("review-triage-decision=unknown\n"), unsubstantiated);
+  assert.ok(!unsubstantiated.includes("review-triage-decision=not_required"));
+
+  const substantiated = formatReviewStepOutputs({ ...base, reviewTriageDecision: "not_required", reviewTriageReason: "policy evidence" }, bytes);
+  assert.ok(substantiated.includes("review-triage-decision=not_required\n"), substantiated);
+
+  const didNotRun = formatReviewStepOutputs({ ...base, reviewTriageDecision: "", reviewTriageReason: "" }, bytes);
+  assert.ok(didNotRun.includes("review-triage-decision=\n"), didNotRun);
+});
+
 test("tool calls compact primary and smart harness traces; missing traces are empty", () => {
   assert.equal(buildToolCallsOutput(
     { tool_calls: [{ tool: "git_status_short", status: "ok", args: "omit" }, { tool: "git_diff_stat", status: "error" }, { status: "ignored" }] },
