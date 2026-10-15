@@ -52,7 +52,7 @@ ai-response-format: json_object   # broad support: ollama, vLLM, llama.cpp serve
 ai-response-format: json_schema   # vLLM guided decoding, llama.cpp grammars, newer servers
 ```
 
-If the endpoint rejects the request after enabling this (HTTP 400 mentioning `response_format`), the server doesn't support that mode — drop back to `json_object` or `off`. Ignored entirely for `ai-api-format: anthropic`.
+If the endpoint rejects the request after enabling this (HTTP 400 mentioning `response_format`), the server doesn't support that mode — drop back to `json_object` or `off`. On an Anthropic-format endpoint see [the Anthropic section below](#anthropic-format-lanes-what-ai-response-format-actually-does-1047): `json_object` is prompt-only there and `json_schema` needs an explicit opt-in.
 
 Fireworks/LiteLLM note: grammar-constrained decoding under `json_schema` can cause some models (e.g. `glm-4p5`, `qwen3-coder`) to under-emit `\n` inside the `review_markdown` string, producing a single-line wall of bolded headings. The action detects a payload with multiple `## ` heading markers but no newlines and fails it into the retry path — but the reliable fix is `ai-response-format: json_object` for those endpoints.
 
@@ -67,7 +67,37 @@ ai-smart-response-format: json_schema     # smart re-review uses structured outp
 ai-fallback-response-format: ""           # inherits json_object (default)
 ```
 
-Override only the lanes that need it; an empty/unset value never coerces `off` and is never silently translated between modes — the inherited base value is used. Anthropic-format lanes ignore the setting entirely, regardless of value. Changing an effective lane value changes the request byte sequence, so the unchanged-diff skip will not hide it.
+Override only the lanes that need it; an empty/unset value never coerces `off` and is never silently translated between modes — the inherited base value is used. Changing an effective lane value changes the request byte sequence, so the unchanged-diff skip will not hide it.
+
+### Anthropic-format lanes: what `ai-response-format` actually does (#1047)
+
+The Anthropic Messages API has no `response_format` parameter. Its native structured output is a different field with a different shape (`output_config.format` carrying a bare JSON schema), and not every Anthropic-compatible backend implements it — a wire family is no proof a proxy supports the family's optional features. The action therefore treats the two formats honestly instead of pretending:
+
+- **`json_object` is prompt-only on Anthropic, always.** There is no Anthropic-native equivalent to translate it into, and the action never invents one. The run logs a warning saying the JSON contract is prompted, not enforced.
+- **`json_schema` is enforced only with an explicit opt-in**: `ai-anthropic-structured-output-support` (base/primary lane), `ai-smart-anthropic-structured-output-support`, or `ai-fallback-anthropic-structured-output-support`. Each lane asserts its own endpoint; an opt-in never crosses lanes. When the opt-in is off, the parameter is NOT sent — the request bytes are identical to `off` — and the run logs exactly that rather than implying enforcement.
+- **A wrong assertion degrades safely.** If an opted-in endpoint rejects the parameter (HTTP 400 naming `response_format`/`output_config`/`json_schema`), the same request is retried once without it, and the review continues with prompted JSON instead of failing.
+
+```yaml
+# MiniMax-M3.1 (or another Anthropic-compatible endpoint) confirmed to accept
+# output_config.format — e.g. first-party Anthropic:
+ai-api-format: anthropic
+ai-response-format: json_schema
+ai-anthropic-structured-output-support: "true"
+```
+
+To verify an endpoint accepts it before opting in, send one request with `output_config.format` yourself (a 400 naming the parameter means it does not). When `json_schema` is enforced the run's per-call log line says `format=json_schema`; an unasserted lane never shows that note.
+
+### When a model turn produces an unusable reply: the failure-shape line
+
+When a model call ends without a usable verdict — an empty reply, a reply spent entirely in a thinking channel, a token-cap truncation, a proxy 524, or JSON too malformed to decode — the error log carries a bounded, content-free failure-shape line next to the error, e.g.:
+
+```
+Primary: parse/validate failures exhausted (Expected JSON object but got NoneType) [response_class=reasoning-only profile=Primary api_format=anthropic streamed=false failure_kind=not_object finish_reason=end_turn text_blocks=0 text_chars=0 thinking_blocks=1 tool_blocks=0 completion_tokens=4096 completion_budget_raised_to=4096]
+```
+
+`response_class` is the diagnosis: `zero-output` (nothing came back), `reasoning-only` (the whole budget went to the thinking channel before any text — raise `ai-max-tokens` or the model's reasoning effort), `truncated` (token cap; raise `ai-max-tokens`), `malformed-json` (text arrived but does not decode), `sse-framing-loss` (tokens were billed but the payload frames were lost behind a proxy), `http-error`/`timeout` (transport), or `endpoint-error` (a 200 body carrying an error). The line contains counts, stop reasons, and token figures only — never reply text, reasoning content, or credentials.
+
+When the failure shape shows the token cap destroyed the verdict (a truncation, or a reasoning-only reply), the single retry that follows automatically uses a raised completion budget (4x `ai-max-tokens`, capped at 32768) — no extra model call is spent, and the line reports the raise as `completion_budget_raised_to`. The native tool loop's final verdict turn gets the same bounded treatment, recorded in `tool-harness.json` as `native_loop_verdict_diagnostics` and rendered in the step summary's Native verdict row; tools and evidence already gathered are never re-collected.
 
 ### Timeouts, streaming, and retries
 

@@ -1300,3 +1300,130 @@ test("describeTransportFailure: a secret in a status-less failure's bare message
   const detail = describeTransportFailure(failure, { secrets: [secret] });
   assert.ok(!detail.includes(secret));
 });
+
+// ── #1047: the single structured-output strip on a capability-mismatch 400 ──
+
+test("#1047: a 400 naming response_format is retried once without it (openai)", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  let requests = 0;
+  const server = await startMockServer((_req, body, res) => {
+    requests++;
+    bodies.push(JSON.parse(body) as Record<string, unknown>);
+    if (requests === 1) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: { message: "response_format is not supported by this model" } }));
+      return;
+    }
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, response_format: { type: "json_object" } }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "ok");
+    assert.equal(requests, 2);
+    assert.ok(bodies[0]!.response_format, "the first attempt carried the parameter");
+    assert.equal("response_format" in bodies[1]!, false, "the retry stripped it");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1047: a 400 naming output_config.format strips only the format key, keeping sibling keys (anthropic)", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  let requests = 0;
+  const server = await startMockServer((_req, body, res) => {
+    requests++;
+    bodies.push(JSON.parse(body) as Record<string, unknown>);
+    if (requests === 1) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: { message: "output_config.format is not supported here" } }));
+      return;
+    }
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "anthropic",
+      payload: payload({
+        model: "m", max_tokens: 64, stream: false, system: "s",
+        messages: [{ role: "user", content: "u" }],
+        output_config: { format: { type: "json_schema", schema: { type: "object" } }, effort: "medium" },
+      }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "ok");
+    assert.equal(requests, 2);
+    assert.ok((bodies[0]!.output_config as Record<string, unknown>).format);
+    // The operator's asserted effort survives; only the unsupported format goes.
+    assert.deepEqual(bodies[1]!.output_config, { effort: "medium" });
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1047: the strip is strictly evidence-gated and once-per-request", async () => {
+  // A 400 that does NOT name the parameter never triggers a strip.
+  let requests = 0;
+  const unrelated = await startMockServer((_req, _body, res) => {
+    requests++;
+    res.statusCode = 400;
+    res.end(JSON.stringify({ error: { message: "max_tokens: 64 > 8, which is the maximum allowed number of output tokens" } }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: unrelated.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, max_tokens: 64, response_format: { type: "json_object" } }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "failure");
+    // The token clamp handled it, not the strip — but either way the request
+    // never re-ran with a silently stripped parameter on an unrelated 400.
+    assert.equal(requests, 2);
+    assert.equal(requests === 2 && outcome.status, "failure");
+  } finally {
+    await unrelated.close();
+  }
+
+  // A payload carrying no structured-output parameter never strips anything.
+  let plainRequests = 0;
+  const plain = await startMockServer((_req, _body, res) => {
+    plainRequests++;
+    res.statusCode = 400;
+    res.end(JSON.stringify({ error: { message: "response_format is not supported by this model" } }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: plain.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "failure");
+    assert.equal(plainRequests, 1, "nothing to strip: no retry");
+  } finally {
+    await plain.close();
+  }
+});

@@ -14,6 +14,15 @@ export const BOOLEAN_INPUTS = new Set([
   "ai-smart-anthropic-effort-support",
   "ai-fallback-anthropic-effort-support",
   "ai-specialist-anthropic-effort-support",
+  // #1047: the operator's explicit assertion that the Anthropic-compatible
+  // endpoint accepts Anthropic-native structured output
+  // (`output_config.format` with the verdict JSON schema). Default off;
+  // without it no Anthropic request ever carries a structured-output
+  // parameter. Per-lane like the effort opt-in (no specialist input:
+  // specialist contracts are not the verdict schema).
+  "ai-anthropic-structured-output-support",
+  "ai-smart-anthropic-structured-output-support",
+  "ai-fallback-anthropic-structured-output-support",
 ]);
 
 export const INTEGER_INPUTS = new Set([

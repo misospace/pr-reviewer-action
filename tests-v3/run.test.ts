@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { resolvePartialCoverage, runReview } from "../src/run/review.js";
+import { ANTHROPIC_VERDICT_OUTPUT_FORMAT } from "../src/model/request.js";
 import { failOnRequestChanges } from "../src/run/action.js";
 import { parseMetadata } from "../src/precheck/metadata.js";
 import { authoritativeBodyRevision, harnessTransportAdapter, type PrBodyRevision } from "../src/run/stages.js";
@@ -4226,4 +4227,214 @@ test("#998 (#1049 review): the fallback lane asserts its own Anthropic endpoint 
     }
   }
   await deadServer.close();
+});
+
+// ── #1047: truthful Anthropic structured-output semantics at the wire
+
+test("#1047: the run enforces json_schema on Anthropic only under the lane opt-in, and says which mode ran", async () => {
+  // The #1033 shape: ai-response-format resolved onto an Anthropic-format
+  // endpoint. Without the opt-in NO structured-output parameter may reach the
+  // wire (prompt-only), the log must say so by name, and a held-back mode
+  // must never be reported as enforced. With the opt-in the request carries
+  // output_config.format with the verdict schema.
+  const anthropicVerdict = (text: string): string => JSON.stringify({
+    id: "msg_1",
+    model: "m",
+    role: "assistant",
+    content: [{ type: "text", text }],
+    stop_reason: "end_turn",
+  });
+  for (const support of ["", "true"] as const) {
+    const expectSent = support === "true";
+    const bodies: Record<string, unknown>[] = [];
+    const server = await startMockServer((_req, body, res) => {
+      bodies.push(JSON.parse(body) as Record<string, unknown>);
+      res.setHeader("Content-Type", "application/json");
+      res.end(anthropicVerdict(JSON.stringify(baseVerdict())));
+    });
+    const { runDir, cleanup } = withRunDir();
+    const logs: string[] = [];
+    const errors: string[] = [];
+    try {
+      const result = await runReview({
+        env: {},
+        inputs: {
+          "github-token": "tok",
+          repo: "o/r",
+          "pr-number": "7",
+          "ai-base-url": server.url,
+          "ai-model": "m",
+          "ai-api-format": "anthropic",
+          "ai-stream": "false",
+          "ai-api-key": "k",
+          "ai-response-format": "json_schema",
+          ...(support === "" ? {} : { "ai-anthropic-structured-output-support": support }),
+        },
+        runDir,
+        workspace: runDir,
+        platformAdapter: mockPlatform(),
+        log: (line) => logs.push(line),
+        error: (line) => errors.push(line),
+      });
+      assert.equal(result.outputs.verdict, "approve");
+      const reviewBody = bodies[0];
+      assert.ok(reviewBody, "the review call must have reached the mock endpoint");
+      if (expectSent) {
+        const outputConfig = reviewBody.output_config as Record<string, unknown> | undefined;
+        assert.ok(outputConfig, "output_config must be sent under the opt-in");
+        assert.deepEqual(outputConfig.format, ANTHROPIC_VERDICT_OUTPUT_FORMAT);
+        assert.ok(
+          logs.some((line) => line.includes("Primary model attempt") && line.includes("format=json_schema")),
+          logs.join(" | "),
+        );
+        assert.equal(
+          logs.some((line) => line.includes("prompt-only")),
+          false,
+          `an asserted endpoint is never told the contract is prompt-only: ${logs.join(" | ")}`,
+        );
+      } else {
+        assert.equal("output_config" in reviewBody, false, "no structured-output parameter without the opt-in");
+        assert.equal("response_format" in reviewBody, false, "never an OpenAI response_format on the Anthropic wire");
+        assert.ok(
+          logs.some((line) =>
+            line.includes("prompt-only") && line.includes("(review call)") && line.includes("set ai-anthropic-structured-output-support: true")),
+          logs.join(" | "),
+        );
+        assert.equal(
+          logs.some((line) => line.includes("format=json_schema")),
+          false,
+          `a held-back mode is never logged as enforced: ${logs.join(" | ")}`,
+        );
+      }
+    } finally {
+      await server.close();
+      cleanup();
+    }
+  }
+});
+
+test("#1047: json_object on an Anthropic lane is reported prompt-only and never translated", async () => {
+  // json_object has no Anthropic-native equivalent — no flag exists that
+  // could enforce it — so the wire must stay clean and the run must name the
+  // mode's truth (prompt-only) instead of implying enforcement.
+  const bodies: Record<string, unknown>[] = [];
+  const server = await startMockServer((_req, body, res) => {
+    bodies.push(JSON.parse(body) as Record<string, unknown>);
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      id: "msg_1", model: "m", role: "assistant",
+      content: [{ type: "text", text: JSON.stringify(baseVerdict()) }],
+      stop_reason: "end_turn",
+    }));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const logs: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-api-format": "anthropic",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ai-response-format": "json_object",
+        // Even the opt-in cannot make json_object enforceable; assert it to
+        // prove the flag alone does not fabricate a wire parameter.
+        "ai-anthropic-structured-output-support": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      log: (line) => logs.push(line),
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    const reviewBody = bodies[0]!;
+    assert.equal("output_config" in reviewBody, false, "json_object is never translated into an Anthropic parameter");
+    assert.equal("response_format" in reviewBody, false);
+    assert.ok(
+      logs.some((line) => line.includes("no Anthropic-native equivalent") && line.includes("prompt-only")),
+      logs.join(" | "),
+    );
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#1047: an unusable reasoning-only verdict carries bounded diagnostics and recovers via the standard call", async () => {
+  // The #1033 shape, bounded to one lane: the primary's review call answers
+  // with thinking blocks and no visible text. The run must NOT fail: the
+  // tier loop's raise applies (budget spent invisibly), the final failure
+  // carries a content-free diagnostic record, and the fallback produces the
+  // verdict. No response text may appear in the diagnostics.
+  const reasoningOnly = JSON.stringify({
+    id: "msg_r", model: "m", role: "assistant",
+    content: [{ type: "thinking", thinking: "ALL-THE-SECRET-REASONING", signature: "sig" }],
+    stop_reason: "end_turn",
+    usage: { input_tokens: 100, output_tokens: 4096 },
+  });
+  const fallbackVerdict = JSON.stringify({
+    id: "msg_f", model: "fb", role: "assistant",
+    content: [{ type: "text", text: JSON.stringify(baseVerdict({ review_markdown: "Fallback review.\n" })) }],
+    stop_reason: "end_turn",
+  });
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(reasoningOnly);
+  });
+  const fallbackServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(fallbackVerdict);
+  });
+  const { runDir, cleanup } = withRunDir();
+  const logs: string[] = [];
+  const errors: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": primaryServer.url,
+        "ai-model": "m",
+        "ai-api-format": "anthropic",
+        "ai-stream": "false",
+        "ai-api-key": "test-key-1047-0123456789",
+        "ai-max-tokens": "1024",
+        "ai-primary-retries": "2",
+        "ai-primary-retry-delay-sec": "0",
+        "ai-fallback-model": "fb",
+        "ai-fallback-base-url": fallbackServer.url,
+        "ai-fallback-api-format": "anthropic",
+        "ai-fallback-stream": "false",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      log: (line) => logs.push(line),
+      error: (line) => errors.push(line),
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    // Tier failures ride the error channel, diagnostics line attached.
+    assert.ok(
+      errors.some((line) => line.includes("response_class=reasoning-only") && line.includes("thinking_blocks=1") && line.includes("profile=Primary")),
+      `the diagnostics line must classify the failure: ${errors.join(" | ")}`,
+    );
+    // The raised budget after the token-cap-shaped failure is visible, and
+    // the secret reasoning text never enters any line.
+    assert.ok(errors.some((line) => line.includes("response_class=reasoning-only") && line.includes("completion_budget_raised_to=4096")), errors.join(" | "));
+    assert.equal([...logs, ...errors].some((line) => line.includes("ALL-THE-SECRET-REASONING")), false, "reasoning text must never leak into logs");
+    // The published review came from the fallback, marked as such in the
+    // analysis-engine provenance.
+    assert.match(result.analysisEngine, /fallback/);
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
 });
