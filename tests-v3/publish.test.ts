@@ -19,6 +19,7 @@ import type {
   PublishCommentRef,
   PublishPlatformApi,
   PublishReviewRef,
+  ReviewerRequestResult,
 } from "../src/platform/publish-api.js";
 
 const MARKER = "<!-- ai-pr-review -->";
@@ -44,6 +45,15 @@ class MockPublishApi implements PublishPlatformApi {
   minimizeResult = true;
   resolveResult = true;
   threadQueryError = false;
+  reviewerRequests: { users: string[]; teams: string[] }[] = [];
+  reviewerRequestResult: ReviewerRequestResult = {
+    ok: true,
+    supported: true,
+    requestedUsers: [],
+    requestedTeams: [],
+    alreadyRequestedUsers: [],
+    alreadyRequestedTeams: [],
+  };
 
   constructor(platform: "github" | "forgejo" = "github") { this.platform = platform; }
   async getHeadSha(): Promise<string | null> { return this.head; }
@@ -69,6 +79,10 @@ class MockPublishApi implements PublishPlatformApi {
   }
   async resolveThread(id: string): Promise<boolean> { this.resolved.push(id); return this.resolveResult; }
   async removeLabel(label: string): Promise<boolean> { this.removedLabels.push(label); return true; }
+  async requestReviewers(users: readonly string[], teams: readonly string[]): Promise<ReviewerRequestResult> {
+    this.reviewerRequests.push({ users: [...users], teams: [...teams] });
+    return this.reviewerRequestResult;
+  }
 }
 
 function input(overrides: Partial<Parameters<typeof publishReview>[0]> = {}): Parameters<typeof publishReview>[0] {

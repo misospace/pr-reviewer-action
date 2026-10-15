@@ -391,6 +391,9 @@ class MockPublishApi implements PublishPlatformApi {
   async unresolvedSupersededThreads() { return { ok: true, threads: [], hasNextPage: false }; }
   async resolveThread(): Promise<boolean> { return true; }
   async removeLabel(label: string): Promise<boolean> { this.removedLabels.push(label); return true; }
+  async requestReviewers(): ReturnType<PublishPlatformApi["requestReviewers"]> {
+    return { ok: true, supported: true, requestedUsers: [], requestedTeams: [], alreadyRequestedUsers: [], alreadyRequestedTeams: [] };
+  }
 }
 
 function publishInput(overrides: Record<string, unknown> = {}): Parameters<typeof publishReview>[0] {

@@ -17,6 +17,7 @@ import { partialCoverageOf } from "./review.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { isIncompleteReason, type IncompleteReason } from "../publish/outputs.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
+import { isHumanReviewRoutingStatus, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 
 /**
  * Production entrypoints for the #706 composite cutover: the precheck and
@@ -352,6 +353,27 @@ function partialCoverageFromRunDir(env: NodeJS.ProcessEnv): CoverageResolution {
   return { partialCoverage: partialCoverageOf(harness), unknown: false, requiredChecks, incompleteReason };
 }
 
+/** #1005: read the persisted reviewer-routing plan from the run dir (never
+ * cwd). A missing, unparseable, or structurally unrecognizable plan yields
+ * `undefined` (no routing) so an uncertain plan can never mutate the forge. */
+function reviewRoutingFromRunDir(env: NodeJS.ProcessEnv): HumanReviewRoutingPlan | undefined {
+  const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
+  if (runDir === undefined) return undefined;
+  const record = readJsonObject(join(runDir, "review-routing.json"));
+  if (record === null) return undefined;
+  if (!isHumanReviewRoutingStatus(record.status)) return undefined;
+  if (record.mode !== "off" && record.mode !== "advisory" && record.mode !== "request") return undefined;
+  const strArray = (value: unknown): string[] => Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+  return {
+    mode: record.mode,
+    status: record.status,
+    targetIds: strArray(record.target_ids),
+    users: strArray(record.users),
+    teams: strArray(record.teams),
+    detail: typeof record.detail === "string" ? record.detail : "",
+  };
+}
+
 /** The platform publish seam (GitHub REST/GraphQL or Forgejo /api/v1). */
 export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformApi; platform: string; diffProvider: () => Promise<string> } {
   const repo = env.REPO ?? "";
@@ -387,6 +409,7 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
   // env, which (like `TOOL_MODE`/`REVIEW_ROUTE` before it) can be omitted
   // or stale for the run actually being published.
   const coverage = partialCoverageFromRunDir(env);
+  const reviewRouting = reviewRoutingFromRunDir(env);
   return {
     mode: publishMode(env.PUBLISH_MODE),
     reviewMarkdown: env.REVIEW_MARKDOWN ?? "",
@@ -436,6 +459,9 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
       : {}),
     ...(env.VERDICT_POLICY ? { verdictPolicy: env.VERDICT_POLICY } : {}),
     degradedGateBypass: env.DEGRADED_GATE_BYPASS === "true",
+    // #1005: the deterministic reviewer-routing plan the review step persisted
+    // (read from the run dir, never cwd). Absent when routing did not run.
+    ...(reviewRouting ? { reviewRouting } : {}),
     // #873: the same coverage-gap record `run` computed, read back from its
     // persisted artifact so a partial-coverage run can never publish
     // APPROVE through the standalone `publish` CLI path either. `unknown`
