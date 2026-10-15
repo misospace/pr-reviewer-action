@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { LoopContextError, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
+import { OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
 import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
 import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
@@ -828,4 +829,48 @@ test("#998 (#1049 review): the smart loop asserts its own Anthropic endpoint and
   assert.equal(asserted.logs.some((line) => line.includes("NOT sent")), false, asserted.logs.join(" | "));
 
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("#1047 (review): an explicit-empty lane response-format override inherits the base in the verdict turn", async () => {
+  // The review follow-up on #1065: the verdict turn's per-lane resolution now
+  // runs through tierResponseFormat, so an explicit-empty `ai-primary-response-
+  // format` inherits `ai-response-format` here exactly as loadConfig resolves
+  // it upstream — a direct harness entrypoint can never read the empty
+  // override as "off". The verdict turn is the one request that carries
+  // response_format, so its body is the observable.
+  const runVerdictTurn = async (envOverrides: Record<string, string>) => {
+    const { root, deps } = workspace();
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+    fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+    const scripted = [openAiCall("c1", "read_file", '{"path":"src.ts"}'), openAiText("evidence gathered"), validVerdict()];
+    let transportCalls = 0;
+    const verdictPayloads: Record<string, unknown>[] = [];
+    const { result } = await runToolHarness(deps({
+      ...withPrompt,
+      env: { ...withPrompt.env, ...envOverrides },
+      transport: async (_url: string, _format: string, payload: Record<string, unknown>) => {
+        transportCalls++;
+        if (transportCalls === 3) verdictPayloads.push(payload);
+        return scripted[transportCalls - 1];
+      },
+    }));
+    assert.equal(result.native_loop_verdict_produced, true);
+    assert.equal(verdictPayloads.length, 1);
+    fs.rmSync(root, { recursive: true, force: true });
+    return verdictPayloads[0]!;
+  };
+
+  // Explicit empty on the lane override: inherits the base json_schema —
+  // NOT silently off.
+  const inherited = await runVerdictTurn({ AI_RESPONSE_FORMAT: "json_schema", AI_PRIMARY_RESPONSE_FORMAT: "" });
+  assert.ok(inherited.response_format, "the verdict turn must carry the inherited base response_format");
+  assert.deepEqual(
+    inherited.response_format,
+    JSON.parse(JSON.stringify(OPENAI_VERDICT_JSON_SCHEMA)),
+  );
+  // An explicit off stays off, and a lane override still beats the base.
+  const off = await runVerdictTurn({ AI_RESPONSE_FORMAT: "json_schema", AI_PRIMARY_RESPONSE_FORMAT: "off" });
+  assert.equal("response_format" in off, false);
+  const overridden = await runVerdictTurn({ AI_RESPONSE_FORMAT: "off", AI_PRIMARY_RESPONSE_FORMAT: "json_object" });
+  assert.deepEqual(overridden.response_format, { type: "json_object" });
 });

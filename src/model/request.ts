@@ -115,12 +115,26 @@ function userContent(config: ModelRequestConfig): string {
 }
 
 /**
+ * #1047: the Anthropic-native structured-output envelope for the verdict —
+ * `output_config.format = {type: "json_schema", schema}` per the Messages API
+ * contract, carrying the SAME inner schema the OpenAI `json_schema` mode
+ * enforces (the `json_schema.schema` object, not the OpenAI wrapper around
+ * it). Only ever sent under the lane's explicit structured-output opt-in;
+ * there is no Anthropic-native `json_object` to translate that mode into, so
+ * it is never attempted.
+ */
+export const ANTHROPIC_VERDICT_OUTPUT_FORMAT: Record<string, unknown> = {
+  type: "json_schema",
+  schema: (OPENAI_VERDICT_JSON_SCHEMA.json_schema as { schema: Record<string, unknown> }).schema,
+};
+
+/**
  * #998: build Anthropic's `output_config` object — the ONE place the wire
- * family merges its keys. `format` (#1047, not implemented here) and `effort`
- * are siblings of the same object, so a later key must never clobber an
- * existing one: `setOutputConfigKey` writes a key only when it is absent (or
- * already holds that exact value) and drops null/undefined outright. Returns
- * null when nothing survives, so an unset effort leaves the body untouched
+ * family merges its keys. `format` (#1047) and `effort` are siblings of the
+ * same object, so a later key must never clobber an existing one:
+ * `setOutputConfigKey` writes a key only when it is absent (or already holds
+ * that exact value) and drops null/undefined outright. Returns null when
+ * nothing survives, so an unset effort leaves the body untouched
  * (byte-identical to a build without the feature).
  */
 export function buildAnthropicOutputConfig(
@@ -146,7 +160,12 @@ export function buildAnthropicOutputConfig(
  * - Anthropic always sends `max_tokens` and never response_format/token-param
  *   switching/stream_options. #998: it carries `output_config.effort` only
  *   under the operator's explicit `anthropicEffortSupported` opt-in, and
- *   never OpenAI's `reasoning_effort`.
+ *   never OpenAI's `reasoning_effort`. #1047: it carries
+ *   `output_config.format` (the Anthropic-native verdict schema envelope)
+ *   only when `responseFormat` resolved to `json_schema` AND the lane's
+ *   `anthropicStructuredOutputSupported` opt-in is set; `json_object` has no
+ *   Anthropic-native equivalent and is never sent or translated, so an
+ *   un-opted-in or `json_object` configuration leaves the bytes unchanged.
  * - OpenAI-compatible: the token field flips wholesale via `tokensParam`
  *   (never both), temperature is omitted iff empty, stream_options is
  *   attached only while streaming, and #998 `reasoning_effort` is sent
@@ -163,13 +182,17 @@ export function buildModelRequest(config: ModelRequestConfig): TransportWirePayl
       messages: [{ role: "user", content }],
     };
     if (config.temperature !== "") body.temperature = config.temperature;
-    // #998: unset, or configured without the endpoint opt-in, means no
-    // `output_config` key at all — never `thinking: {"type":"disabled"}` and
+    // Each output_config key is gated by its OWN opt-in: #998's effort never
+    // rides along because #1047's format was asserted (and vice versa), an
+    // unset/unasserted key contributes nothing, and only a surviving key set
+    // emits the object at all — never `thinking: {"type":"disabled"}` and
     // never an invented "none" effort.
-    if (config.anthropicEffortSupported) {
-      const outputConfig = buildAnthropicOutputConfig(config.reasoningEffort);
-      if (outputConfig !== null) body.output_config = outputConfig;
-    }
+    const effort = config.anthropicEffortSupported ? config.reasoningEffort : "";
+    const format = config.anthropicStructuredOutputSupported && config.responseFormat === "json_schema"
+      ? ANTHROPIC_VERDICT_OUTPUT_FORMAT
+      : undefined;
+    const outputConfig = buildAnthropicOutputConfig(effort, format);
+    if (outputConfig !== null) body.output_config = outputConfig;
     return { endpointPath: "/messages", body: body as unknown as TransportWirePayload["body"] };
   }
   const body: Record<string, unknown> = {

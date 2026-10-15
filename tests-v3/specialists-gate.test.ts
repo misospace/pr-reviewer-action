@@ -846,6 +846,46 @@ test("#1061: the unset 16384 default reaches Anthropic specialist payloads", asy
   }
 });
 
+test("#1047 (review): explicit-empty primary response-format override inherits the base for Anthropic specialists, and the prompt-only warning fires", async () => {
+  // The specialist phase resolves through the same tierResponseFormat helper
+  // as the rest of the v3 config chain, so an explicitly empty (or
+  // whitespace-only) ai-primary-response-format inherits ai-response-format —
+  // and on an Anthropic specialist transport the inherited json_object/
+  // json_schema is announced as prompt-only, never read as silently off.
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(leadsResponse([])));
+  });
+  try {
+    for (const override of ["", "  "]) {
+      const result = await run({
+        DEEP_REVIEW: "true",
+        AI_BASE_URL: `${server.url}/v1`,
+        AI_API_FORMAT: "anthropic",
+        AI_SPECIALIST_MODEL: "specialist",
+        AI_RESPONSE_FORMAT: "json_schema",
+        AI_PRIMARY_RESPONSE_FORMAT: override,
+      }, { productionTransport: true });
+      assert.equal(result.code, 0, `override=${JSON.stringify(override)}`);
+      // The inherited json_schema is announced as prompt-only (specialist
+      // contracts are not the verdict schema; no opt-in applies to them).
+      assert.ok(
+        result.out.some((line) =>
+          line.startsWith("WARNING:") && line.includes("specialist") && line.includes("prompted only")),
+        `override=${JSON.stringify(override)}: ${result.out.join(" | ")}`,
+      );
+      // Preserved specialist wire behavior: no structured-output parameter
+      // ever reaches an Anthropic specialist payload.
+      const bodies = server.requests.map(({ body }) => JSON.parse(body) as Record<string, unknown>);
+      assert.ok(bodies.length > 0);
+      assert.ok(bodies.every((payload) => payload.output_config === undefined && !("response_format" in payload)));
+      server.requests.length = 0;
+    }
+  } finally {
+    await server.close();
+  }
+});
+
 test("#1061: a valid-empty overrun is classified and logged, not reported as a clean role", async () => {
   const emptyAtCap = {
     id: "c1",

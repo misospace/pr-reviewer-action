@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildAnthropicOutputConfig, buildModelRequest, OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
+import { ANTHROPIC_VERDICT_OUTPUT_FORMAT, buildAnthropicOutputConfig, buildModelRequest, OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
 import { resolveSpecialistProfiles, resolveTierProfiles } from "../src/routing/tiers.js";
 import type { ModelRequestConfig } from "../src/model/types.js";
 
@@ -28,6 +28,8 @@ function config(overrides: Partial<ModelRequestConfig> = {}): ModelRequestConfig
     // a byte-compatibility pin.
     reasoningEffort: "",
     anthropicEffortSupported: false,
+    // #1047: the structured-output opt-in, default off for byte compatibility.
+    anthropicStructuredOutputSupported: false,
     ...overrides,
   };
 }
@@ -238,8 +240,6 @@ test("#998: Anthropic carries output_config.effort only under the explicit opt-i
 });
 
 test("#998: buildAnthropicOutputConfig merges format and effort without either overwriting the other", () => {
-  // #1047's `format` is not implemented here; the helper must already be
-  // merge-safe for it, because both keys live in the same object.
   assert.deepEqual(buildAnthropicOutputConfig("high", { type: "json_schema" }), {
     format: { type: "json_schema" },
     effort: "high",
@@ -255,6 +255,88 @@ test("#998: buildAnthropicOutputConfig merges format and effort without either o
   const merged = buildAnthropicOutputConfig("high", { type: "json_schema" });
   assert.equal((merged as Record<string, unknown>).effort, "high");
   assert.deepEqual((merged as Record<string, unknown>).format, { type: "json_schema" });
+});
+
+// ── #1047: Anthropic-native structured output ───────────────────────────
+
+test("#1047: json_schema + opt-in sends output_config.format with the verdict schema", () => {
+  const payload = buildModelRequest(config({
+    apiFormat: "anthropic",
+    responseFormat: "json_schema",
+    anthropicStructuredOutputSupported: true,
+  }));
+  assert.equal(payload.endpointPath, "/messages");
+  const body = payload.body as unknown as Record<string, unknown>;
+  const outputConfig = body.output_config as Record<string, unknown> | undefined;
+  assert.ok(outputConfig, "output_config must be present");
+  assert.deepEqual(outputConfig.format, ANTHROPIC_VERDICT_OUTPUT_FORMAT);
+  // The envelope carries the SAME inner schema the OpenAI json_schema mode
+  // enforces — one verdict contract, two wire families.
+  assert.deepEqual(outputConfig.format, {
+    type: "json_schema",
+    schema: (OPENAI_VERDICT_JSON_SCHEMA.json_schema as { schema: unknown }).schema,
+  });
+  // The OpenAI wrapper never leaks onto the Anthropic wire.
+  assert.equal(JSON.stringify(outputConfig).includes("json_schema\":{"), false);
+  assert.equal("response_format" in body, false);
+  // The whole body stays valid JSON with no OpenAI-only keys.
+  assert.equal(JSON.stringify(body).includes("response_format"), false);
+});
+
+test("#1047: json_schema without the opt-in is never silently enforced (byte-compatible)", () => {
+  // The truth-telling core of #1047: a resolved json_schema on an un-asserted
+  // Anthropic endpoint sends NOTHING — byte-identical to off — and no
+  // json_object-style translation is invented.
+  for (const responseFormat of ["off", "json_object", "json_schema"] as const) {
+    const unasserted = buildModelRequest(config({ apiFormat: "anthropic", responseFormat }));
+    assert.deepEqual(unasserted, buildModelRequest(config({ apiFormat: "anthropic", responseFormat: "off" })), responseFormat);
+  }
+  // json_object + opt-in is ALSO nothing: there is no Anthropic-native
+  // json_object to opt into, so the flag cannot make one appear.
+  assert.deepEqual(
+    buildModelRequest(config({ apiFormat: "anthropic", responseFormat: "json_object", anthropicStructuredOutputSupported: true })),
+    buildModelRequest(config({ apiFormat: "anthropic", responseFormat: "off" })),
+  );
+  // And the flag alone (json_schema unset) still sends nothing.
+  assert.deepEqual(
+    buildModelRequest(config({ apiFormat: "anthropic", responseFormat: "off", anthropicStructuredOutputSupported: true })),
+    buildModelRequest(config({ apiFormat: "anthropic", responseFormat: "off" })),
+  );
+});
+
+test("#1047: format and effort merge in one output_config without clobbering", () => {
+  const payload = buildModelRequest(config({
+    apiFormat: "anthropic",
+    responseFormat: "json_schema",
+    reasoningEffort: "medium",
+    anthropicStructuredOutputSupported: true,
+    anthropicEffortSupported: true,
+  }));
+  const body = payload.body as unknown as Record<string, unknown>;
+  assert.deepEqual(body.output_config, {
+    format: ANTHROPIC_VERDICT_OUTPUT_FORMAT,
+    effort: "medium",
+  });
+  // Each key still honors its own opt-in: format asserted, effort not.
+  const effortless = buildModelRequest(config({
+    apiFormat: "anthropic",
+    responseFormat: "json_schema",
+    reasoningEffort: "medium",
+    anthropicStructuredOutputSupported: true,
+    anthropicEffortSupported: false,
+  }));
+  assert.deepEqual((effortless.body as unknown as Record<string, unknown>).output_config, {
+    format: ANTHROPIC_VERDICT_OUTPUT_FORMAT,
+  });
+});
+
+test("#1047: the Anthropic output format envelope carries the exact verdict schema object", () => {
+  const inner = (OPENAI_VERDICT_JSON_SCHEMA.json_schema as { schema: Record<string, unknown> }).schema;
+  assert.deepEqual(ANTHROPIC_VERDICT_OUTPUT_FORMAT, { type: "json_schema", schema: inner });
+  // And it is a plain (non-wrapped) JSON-Schema object: type/properties/
+  // required at the top, exactly the shape the Messages API documents.
+  assert.equal((ANTHROPIC_VERDICT_OUTPUT_FORMAT.schema as Record<string, unknown>).type, "object");
+  assert.ok("properties" in (ANTHROPIC_VERDICT_OUTPUT_FORMAT.schema as Record<string, unknown>));
 });
 
 test("#998: a hostile or malformed effort never reaches a request body", () => {

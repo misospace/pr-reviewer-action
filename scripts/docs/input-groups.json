@@ -81,7 +81,10 @@
       "ai-anthropic-effort-support",
       "ai-smart-anthropic-effort-support",
       "ai-fallback-anthropic-effort-support",
-      "ai-specialist-anthropic-effort-support"
+      "ai-specialist-anthropic-effort-support",
+      "ai-anthropic-structured-output-support",
+      "ai-smart-anthropic-structured-output-support",
+      "ai-fallback-anthropic-structured-output-support"
     ]
   },
   {

@@ -34,7 +34,7 @@
  * `</untrusted_tool_result>` cannot close its own fence.
  */
 import { provenanceAttributes, type EvidenceProvenance } from "../context/evidence-provenance.js";
-import { buildAnthropicOutputConfig } from "./request.js";
+import { ANTHROPIC_VERDICT_OUTPUT_FORMAT, buildAnthropicOutputConfig } from "./request.js";
 
 // ---------------------------------------------------------------------------
 // Tool schemas
@@ -1123,6 +1123,9 @@ export class Conversation {
       reasoningEffort?: string;
       /** #998: Anthropic `output_config.effort` opt-in; ignored by OpenAI. */
       anthropicEffortSupported?: boolean;
+      /** #1047: Anthropic `output_config.format` opt-in for the verdict
+       * schema; ignored by OpenAI and by non-verdict turns. */
+      anthropicStructuredOutputSupported?: boolean;
     } = {},
   ): Record<string, unknown> {
     const stream = options.stream ?? false;
@@ -1135,6 +1138,7 @@ export class Conversation {
     const cachePrefix = options.cachePrefix ?? false;
     const reasoningEffort = options.reasoningEffort ?? "";
     const anthropicEffortSupported = options.anthropicEffortSupported ?? false;
+    const anthropicStructuredOutputSupported = options.anthropicStructuredOutputSupported ?? false;
     if (apiFormat === "anthropic") {
       return this.toAnthropicPayload({
         model,
@@ -1148,6 +1152,7 @@ export class Conversation {
         includeTurnNotes: !verdictTurn,
         reasoningEffort,
         anthropicEffortSupported,
+        anthropicStructuredOutputSupported,
       });
     }
     return this.toOpenAiPayload({
@@ -1243,6 +1248,8 @@ export class Conversation {
     reasoningEffort: string;
     /** #998: the operator's `output_config.effort` opt-in for this endpoint. */
     anthropicEffortSupported: boolean;
+    /** #1047: the operator's `output_config.format` opt-in for this endpoint. */
+    anthropicStructuredOutputSupported: boolean;
   }): Record<string, unknown> {
     let system = this.system;
     let messages = this.renderAnthropicMessages(options.includeTurnNotes);
@@ -1268,19 +1275,24 @@ export class Conversation {
     if (!options.verdictTurn) {
       payload.tools = this.toolSchemas.map(toolToAnthropic);
     }
-    // Anthropic has no response_format; the closing-turn contract relies on
-    // the system prompt to request JSON. response_format is silently ignored
-    // to keep the call sites uniform between the two APIs.
-    void options.responseFormat;
+    // #1047: Anthropic-native structured output exists only as
+    // `output_config.format = {type: "json_schema", schema}` — there is no
+    // Anthropic `response_format` and no `json_object` mode to translate into,
+    // so the resolved mode is enforced on the wire ONLY on the closing verdict
+    // turn, ONLY as `json_schema`, and ONLY under the endpoint's explicit
+    // opt-in. Mirrors the OpenAI arm's `verdictTurn` gate one-to-one.
+    const structuredFormat = options.verdictTurn
+      && options.anthropicStructuredOutputSupported
+      && options.responseFormat === "json_schema"
+      ? ANTHROPIC_VERDICT_OUTPUT_FORMAT
+      : undefined;
     // #998: Anthropic carries the effort in its own `output_config` object,
     // never as OpenAI's `reasoning_effort`, and only under the operator's
-    // explicit endpoint opt-in. Built through the shared helper so a future
-    // `output_config.format` key (#1047) merges into the same object instead
-    // of replacing it.
-    if (options.anthropicEffortSupported) {
-      const outputConfig = buildAnthropicOutputConfig(options.reasoningEffort);
-      if (outputConfig !== null) payload.output_config = outputConfig;
-    }
+    // explicit endpoint opt-in. #1047: `format` merges into the same object
+    // through the shared helper, so neither key replaces the other.
+    const effort = options.anthropicEffortSupported ? options.reasoningEffort : "";
+    const outputConfig = buildAnthropicOutputConfig(effort, structuredFormat);
+    if (outputConfig !== null) payload.output_config = outputConfig;
     // Anthropic prompt caching is opt-in (#263 Part 2): unlike OpenAI's
     // automatic prefix cache, it caches nothing unless cache_control markers
     // are present. Mark the stable prefix — the system block and the tools
