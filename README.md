@@ -163,8 +163,8 @@ Stop reading the removed incremental outputs (`effective_review_scope`, `previou
 ## 🧪 Development
 
 ```bash
-npm ci && npm run typecheck && npm test   # v3 suite, end-to-end against mock platform and model servers
-pytest tests/ -q                           # retained Python gates and tooling
+npm ci && npm run typecheck && npm test   # the shipped v3 runtime, end-to-end against mock platform and model servers
+pytest tests/ -q                           # Python auxiliary tooling and workflow gates — not the shipped action
 ```
 
 Contributor and agent docs (code map, architecture, eval runbooks) start at [`AGENTS.md`](AGENTS.md); evaluation is in [`docs/evals.md`](docs/evals.md).

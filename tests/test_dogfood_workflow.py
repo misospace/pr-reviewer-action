@@ -9,9 +9,10 @@ actually explore repository context (discover the tree, locate a related
 implementation, inspect a caller, inspect a test) before producing a
 verdict.
 
-These tests pin that budget with focused text assertions (no YAML parser —
-the CI test env has none, matching the rest of the suite) so a later
-cleanup cannot silently shrink the dogfood loop back to the old profile.
+These tests pin that budget with focused text assertions (and a parsed YAML
+walk where a structural check is clearer — PyYAML is available in the test
+env via the yamllint pin) so a later cleanup cannot silently shrink the
+dogfood loop back to the old profile.
 They also pin the public ``action.yml`` defaults for the same inputs,
 which #565 deliberately leaves unchanged, and the comment re-review shape
 (#914): the ``issue_comment`` trigger, the API ``pr-gate`` step that must
@@ -23,6 +24,8 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+
+import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "ai-pr-review.yaml"
@@ -159,7 +162,9 @@ def test_dogfood_workflow_exists() -> None:
 
 
 # The dogfood workflow runs the recommended setup (#706): the action defaults,
-# plus only the overrides that are genuinely this repository's choice.
+# plus only the overrides that are genuinely this repository's choice. The
+# reasoning-effort knobs (#998) are operator-only model controls, so they are
+# this repository's choice too.
 DOGFOOD_OVERRIDES = {
     "github-token",
     "tool-allowed-gh-api-repos",
@@ -169,32 +174,60 @@ DOGFOOD_OVERRIDES = {
     "ai-base-url",
     "ai-api-format",
     "ai-model",
-    "primary-model-context-tokens",
     "ai-api-key",
     "ai-response-format",
+    "ai-anthropic-effort-support",
+    "ai-reasoning-effort",
+    "ai-primary-reasoning-effort",
+    "ai-smart-reasoning-effort",
     "ai-fallback-base-url",
     "ai-fallback-api-format",
     "ai-fallback-model",
-    "fallback-model-context-tokens",
     "ai-fallback-api-key",
+    "primary-model-context-tokens",
+    "fallback-model-context-tokens",
+    "smart-model-context-tokens",
     "review-routing-mode",
     "ai-smart-base-url",
     "ai-smart-api-format",
     "ai-smart-model",
-    "smart-model-context-tokens",
     "ai-smart-api-key",
-    "primary-model-context-tokens",
-    "smart-model-context-tokens",
-    "fallback-model-context-tokens",
     "ci-timeout-sec",
     "publish-mode",
     "allow-approve",
 }
 
 
+def _review_step_with(workflow_text: str) -> dict[str, str]:
+    """The ``with:`` mapping of the review step, parsed from the workflow YAML.
+
+    Parsed (not line-scanned) so reordering the ``with:`` block — the exact
+    change that broke the old substring/allowlist checks — cannot matter.
+    """
+    workflow = yaml.safe_load(workflow_text)
+    for job in workflow["jobs"].values():
+        for step in job.get("steps", []):
+            if step.get("name") == REVIEW_STEP:
+                return dict(step.get("with") or {})
+    raise AssertionError(f"step {REVIEW_STEP!r} not found in {WORKFLOW}")
+
+
+def _contract_input_ids() -> set[str]:
+    contract = yaml.safe_load(CONTRACTS.read_text(encoding="utf-8"))
+    return {entry["id"] for entry in contract["inputs"]}
+
+
 def test_dogfood_overrides_only_what_is_ours() -> None:
-    """Endpoint/models/auth, our CI timeout and approving: everything else is default."""
-    values = _extract_with_block(REVIEW_STEP, WORKFLOW.read_text(encoding="utf-8"))
+    """Endpoint/models/auth, our CI timeout and approving: everything else is default.
+
+    Two distinct guarantees, both order-independent: every overridden key must
+    name a declared contract input (a stale or renamed key fails here instead
+    of silently no-op'ing in the workflow), and the override set must stay
+    within this repository's deliberate policy set.
+    """
+    values = _review_step_with(WORKFLOW.read_text(encoding="utf-8"))
+    unknown = sorted(set(values) - _contract_input_ids())
+    assert not unknown, f"dogfood overrides name unknown action inputs: {unknown}"
     assert set(values) <= DOGFOOD_OVERRIDES, sorted(set(values) - DOGFOOD_OVERRIDES)
     assert values.get("publish-mode") == "review_verdict"
     assert values.get("allow-approve") == "true"
