@@ -744,10 +744,77 @@ async function runSpecialistScout(
       );
       break;
     }
-    const artifacts = parseScoutResponse(extractResponseText(outcome.raw), roles);
+    let response = outcome.raw;
+    let responseText = extractResponseText(response);
+    let artifacts = parseScoutResponse(responseText, roles);
+    const overran = completionOverran(response);
+    let overrunRetry = false;
+    let retryMaxTokens: number | null = null;
+    let overrunRetryResult: "recovered" | "failed" | "skipped" | null = null;
+
+    // #1061: the scout shares ONE call across roles, so the overrun trigger is
+    // evaluated over the shared response — the same "completion-limit stop and
+    // a malformed/no-lead role artifact" condition the three-call path uses,
+    // so the applicable combined-scout path gets the same one-shot bounded
+    // recovery and diagnostics.
+    const anyMalformed = (parsed: Record<string, SpecialistArtifact>): boolean =>
+      roles.some((role) => {
+        const artifact = parsed[role]!;
+        return artifact.errors.length > 0 && artifact.leads.length === 0;
+      });
+
+    if (overran && anyMalformed(artifacts)) {
+      const retryPayload = overrunRetryPayload(payload, config.maxTokens);
+      const remainingForRetry = deadline - now();
+      if (retryPayload !== null && remainingForRetry >= MIN_ATTEMPT_TIMEOUT_SEC) {
+        const retryTokens = (retryPayload.max_tokens ?? retryPayload.max_completion_tokens) as number;
+        overrunRetry = true;
+        retryMaxTokens = retryTokens;
+        let retried: SpecialistTransportOutcome | null = null;
+        try {
+          retried = await requestFn(retryPayload, config.apiFormat, Math.min(config.roleTimeoutSec, remainingForRetry));
+        } catch {
+          retried = null;
+        }
+        if (retried !== null && retried.ok && !(typeof retried.raw === "object" && retried.raw !== null && (retried.raw as Record<string, unknown>).error)) {
+          const retriedArtifacts = parseScoutResponse(extractResponseText(retried.raw), roles);
+          if (!anyMalformed(retriedArtifacts)) {
+            response = retried.raw;
+            responseText = extractResponseText(response);
+            artifacts = retriedArtifacts;
+            overrunRetryResult = "recovered";
+          } else {
+            overrunRetryResult = "failed";
+          }
+        } else {
+          overrunRetryResult = "failed";
+        }
+      } else {
+        overrunRetryResult = "skipped";
+      }
+    }
+
     const elapsed = now() - started;
-    const entries = roles.map((role) => roleEntry(role, artifacts[role]!, statusOf(artifacts[role]!), null, elapsed));
-    return { entries, request: payload, response: outcome.raw, artifacts };
+    const stopReason = boundedStopReason(responseStopReason(response), [config.apiKey]);
+    const entries = roles.map((role) => {
+      const artifact = artifacts[role]!;
+      const failed = artifact.errors.length > 0 && artifact.leads.length === 0;
+      const overrunUnrecovered = overran && failed;
+      const parseFailed = !overrunUnrecovered && failed;
+      const diagnostics: {
+        overrunRetry: boolean;
+        retryMaxTokens: number | null;
+        stopReason?: string;
+        outputChars: number;
+        overrunDetected?: boolean;
+        overrunRetryResult?: "recovered" | "failed" | "skipped";
+      } = { overrunRetry, retryMaxTokens, outputChars: responseText.length };
+      if (stopReason !== null) diagnostics.stopReason = stopReason;
+      if (overran) diagnostics.overrunDetected = true;
+      if (overrunRetryResult !== null) diagnostics.overrunRetryResult = overrunRetryResult;
+      return roleEntry(role, artifact, statusOf(artifact), overrunUnrecovered ? "overrun" : parseFailed ? "parser" : null, elapsed, diagnostics);
+    });
+    return { entries, request: payload, response, artifacts };
   }
 
   return failureEntries(lastError ?? "transport: no attempt completed");

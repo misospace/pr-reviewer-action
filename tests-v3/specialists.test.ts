@@ -913,3 +913,113 @@ test("#1061: OpenAI 'length' still triggers the bounded retry (no regression)", 
   assert.equal(entry.overrun_retry_result, "recovered");
 });
 
+
+// ---------------------------------------------------------------------------
+// #1061: the applicable combined-scout path gets the same treatment
+// ---------------------------------------------------------------------------
+
+test("#1061: combined_scout applies the same overrun detection, recovery, and diagnostics", async () => {
+  const scoutComplete = (lead: string): unknown => ({
+    choices: [{
+      message: {
+        content: JSON.stringify({
+          correctness: { leads: [{ severity: "major", message: lead }] },
+          security: { leads: [] },
+          tests: { leads: [] },
+        }),
+      },
+      finish_reason: "stop",
+    }],
+  });
+  const seen: number[] = [];
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, execution: "combined_scout", maxTokens: 16384 },
+    requestFn: async (payload) => {
+      seen.push(payload.max_tokens as number);
+      return seen.length === 1
+        ? { ok: true, raw: { choices: [{ message: { content: '{"correctness":' }, finish_reason: "max_tokens" }] } }
+        : { ok: true, raw: scoutComplete("recovered scout lead") };
+    },
+  }));
+
+  // One shared call, one bounded retry at the ceiling.
+  assert.deepEqual(seen, [16384, 32768]);
+  const correctness = roleEntry(result, "correctness");
+  assert.equal(correctness.status, "ok");
+  assert.equal(correctness.error_kind, null);
+  assert.equal(correctness.overrun_retry, true);
+  assert.equal(correctness.retry_max_tokens, 32768);
+  assert.equal(correctness.overrun_detected, true);
+  assert.equal(correctness.overrun_retry_result, "recovered");
+  assert.equal(correctness.stop_reason, "stop");
+  assert.equal(result.artifacts.perRole.correctness!.leads[0]!.message, "recovered scout lead");
+});
+
+test("#1061: a streamed Anthropic max_tokens scout response recovers once (combined_scout)", async () => {
+  const truncated = anthropicStream('{"correctness":', "max_tokens");
+  const complete = anthropicStream(
+    JSON.stringify({
+      correctness: { leads: [{ severity: "info", message: "recovered scout lead" }] },
+      security: { leads: [] },
+      tests: { leads: [] },
+    }),
+    "end_turn",
+  );
+  const seen: number[] = [];
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://anthropic.test",
+    apiKey: REALISTIC_KEY,
+    anthropicVersion: "2023-06-01",
+    runChat: async (input) => {
+      const body = input.payload.body as { max_tokens: number };
+      seen.push(body.max_tokens);
+      const text = seen.length === 1 ? truncated : complete;
+      return { status: "ok", response: reassembleSse(text, "anthropic"), raw: {} };
+    },
+  });
+
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, apiFormat: "anthropic", stream: true, execution: "combined_scout", maxTokens: 16384, apiKey: REALISTIC_KEY },
+    requestFn,
+  }));
+
+  assert.deepEqual(seen, [16384, 32768]);
+  const correctness = roleEntry(result, "correctness");
+  assert.equal(correctness.status, "ok");
+  assert.equal(correctness.overrun_retry_result, "recovered");
+  assert.equal(correctness.stop_reason, "end_turn");
+  assert.equal(result.artifacts.perRole.correctness!.leads[0]!.message, "recovered scout lead");
+});
+
+test("#1061: combined_scout classifies an unrecovered overrun and a plain parse failure distinctly", async () => {
+  // Unrecovered overrun already at the retry ceiling: no retry is possible.
+  const overrunCaps: number[] = [];
+  const overrun = await runSpecialists(baseInput({
+    config: { ...baseInput().config, execution: "combined_scout", maxTokens: 32768 },
+    requestFn: async (payload) => {
+      overrunCaps.push(payload.max_tokens as number);
+      return { ok: true, raw: { choices: [{ message: { content: '{"correctness":' }, finish_reason: "length" }] } };
+    },
+  }));
+  assert.equal(overrunCaps.length, 1, "already at the ceiling: no retry");
+  const overrunEntry = roleEntry(overrun, "correctness");
+  assert.equal(overrunEntry.error_kind, "overrun");
+  assert.equal(overrunEntry.overrun_detected, true);
+  assert.equal(overrunEntry.overrun_retry, false);
+  assert.equal(overrunEntry.overrun_retry_result, "skipped");
+
+  // Plain parse failure with a normal stop: parser, never retried.
+  let parserCalls = 0;
+  const parser = await runSpecialists(baseInput({
+    config: { ...baseInput().config, execution: "combined_scout" },
+    requestFn: async () => {
+      parserCalls += 1;
+      return { ok: true, raw: { choices: [{ message: { content: "NOT JSON AT ALL" }, finish_reason: "stop" }] } };
+    },
+  }));
+  assert.equal(parserCalls, 1, "an ordinary parse failure is never retried");
+  const parserEntry = roleEntry(parser, "correctness");
+  assert.equal(parserEntry.error_kind, "parser");
+  assert.equal(parserEntry.stop_reason, "stop");
+  assert.equal("overrun_detected" in parserEntry, false);
+});
