@@ -199,6 +199,54 @@ test("#1005: GitHub requestReviewers fails closed on a read failure or an invali
   assert.equal(invalid.calls.length, 0, "invalid identity must never reach the API");
 });
 
+test("#1005: a 200 GET without well-formed users/teams arrays mutates nothing", async () => {
+  // A malformed success body is an uncertain state: the dedup diff cannot be
+  // trusted, so the reviewer request fails closed instead of POSTing against
+  // an assumed-empty reviewer set.
+  for (const body of [{ users: "alice" }, { teams: 7 }, { users: [{ login: "alice" }] }, {}]) {
+    const { fetchImpl, calls } = recorder([[`GET ${BASE}/repos/o/r/pulls/9/requested_reviewers`, 200, body]]);
+    const result = await github(fetchImpl).requestReviewers(["bob"], []);
+    assert.equal(result.ok, false, JSON.stringify(body));
+    assert.match(result.error ?? "", /malformed response/);
+    assert.ok(!calls.some((c) => c.method === "POST"), JSON.stringify(body));
+  }
+});
+
+test("#1005: a 200 GET with malformed reviewer entries mutates nothing", async () => {
+  // Member-level fail closed: an entry without a well-formed login/slug makes
+  // the whole read uncertain, so the diff is never computed and the POST
+  // never fires. Well-formed shapes — including empty arrays — stay valid.
+  const cases: unknown[] = [
+    { users: [{ unexpected: "alice" }], teams: [] },
+    { users: [null], teams: [] },
+    { users: [{ login: 42 }], teams: [] },
+    { users: [{ login: "" }], teams: [] },
+    { users: [], teams: [{ slug: "Not A Slug" }] },
+    { users: [], teams: [{ slug: 7 }] },
+    { users: [], teams: [null] },
+    { users: [], teams: [{ slug: "" }] },
+  ];
+  for (const body of cases) {
+    const { fetchImpl, calls } = recorder([[`GET ${BASE}/repos/o/r/pulls/9/requested_reviewers`, 200, body]]);
+    const result = await github(fetchImpl).requestReviewers(["bob"], ["team"]);
+    assert.equal(result.ok, false, JSON.stringify(body));
+    assert.match(result.error ?? "", /malformed response/);
+    assert.ok(!calls.some((c) => c.method === "POST"), JSON.stringify(body));
+  }
+  const valid = recorder([
+    [`GET ${BASE}/repos/o/r/pulls/9/requested_reviewers`, 200, { users: [{ login: "alice" }], teams: [{ slug: "platform-team" }] }],
+    [`POST ${BASE}/repos/o/r/pulls/9/requested_reviewers`, 201, {}],
+  ]);
+  const ok = await github(valid.fetchImpl).requestReviewers(["bob"], []);
+  assert.equal(ok.ok, true);
+  const empty = recorder([
+    [`GET ${BASE}/repos/o/r/pulls/9/requested_reviewers`, 200, { users: [], teams: [] }],
+    [`POST ${BASE}/repos/o/r/pulls/9/requested_reviewers`, 201, {}],
+  ]);
+  const okEmpty = await github(empty.fetchImpl).requestReviewers(["bob"], []);
+  assert.equal(okEmpty.ok, true);
+});
+
 test("#1005: Forgejo requestReviewers is explicitly unsupported with no network call", async () => {
   const api = new ForgejoPublishApi({ repo: "o/r", prNumber: "9", baseUrl: "https://forgejo.example", token: "t" });
   const result = await api.requestReviewers(["alice"], ["platform-team"]);

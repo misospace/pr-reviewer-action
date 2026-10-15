@@ -450,17 +450,32 @@ export class GitHubPublishApi implements PublishPlatformApi {
         return { ok: false, supported: true, ...none(), error: `could not read requested reviewers (status ${status})` };
       }
       const record = data as { users?: unknown; teams?: unknown };
-      if (Array.isArray(record.users)) {
-        existingUsers = record.users
-          .map((u) => (typeof (u as { login?: unknown } | null)?.login === "string" ? (u as { login: string }).login : ""))
-          .filter((u) => u !== "");
+      // Fail closed (#1005): a 200 that does not carry both reviewer arrays
+      // is an uncertain state — the dedup diff cannot be trusted, so no
+      // mutation happens. Treating a malformed body as an empty reviewer set
+      // would let the POST proceed on an unverified assumption.
+      if (!Array.isArray(record.users) || !Array.isArray(record.teams)) {
+        return { ok: false, supported: true, ...none(), error: "could not read requested reviewers (malformed response: users/teams are not arrays)" };
       }
-      if (Array.isArray(record.teams)) {
-        existingTeams = record.teams
-          .map((t) => (typeof (t as { slug?: unknown } | null)?.slug === "string" ? (t as { slug: string }).slug : ""))
-          .filter((t) => t !== "");
+      // Fail closed at the member level too: every entry must carry a
+      // well-formed identity. Silently dropping malformed members would let
+      // the POST proceed on an unverified picture of the existing requests —
+      // the same uncertain-read-to-mutation hole as a malformed body.
+      const loginOf = (entry: unknown): string | null => {
+        const login = (entry as { login?: unknown } | null)?.login;
+        return typeof login === "string" && REQUESTER_USER.test(login) ? login : null;
+      };
+      const slugOf = (entry: unknown): string | null => {
+        const slug = (entry as { slug?: unknown } | null)?.slug;
+        return typeof slug === "string" && REQUESTER_TEAM.test(slug) ? slug : null;
+      };
+      const users = record.users.map(loginOf);
+      const teams = record.teams.map(slugOf);
+      if (users.includes(null) || teams.includes(null)) {
+        return { ok: false, supported: true, ...none(), error: "could not read requested reviewers (malformed response: a reviewer entry lacks a valid login or team slug)" };
       }
-    } catch (error) {
+      existingUsers = users as string[];
+      existingTeams = teams as string[];    } catch (error) {
       return { ok: false, supported: true, ...none(), error: error instanceof Error ? error.message : String(error) };
     }
     const existingUserSet = new Set(existingUsers.map((u) => u.toLowerCase()));
