@@ -54,7 +54,7 @@
   color: "1d76ed"
   description: >
     Authorize a trusted AI review of a cross-repository (fork) PR by the
-    fork-ai-review workflow. Maintainer-controlled; removing it stops future
+    ai-pr-review-fork workflow. Maintainer-controlled; removing it stops future
     fork reviews.
 - name: umbrella
   color: "5319e7"

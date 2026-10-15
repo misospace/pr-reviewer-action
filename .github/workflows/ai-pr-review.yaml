@@ -40,7 +40,7 @@ permissions:
 jobs:
   review:
     # Same-repository PRs (and manual dispatch) only. Cross-repository
-    # (fork) PRs are handled by the privileged fork-ai-review workflow
+    # (fork) PRs are handled by the privileged ai-pr-review-fork workflow
     # (workflow_run after CI completes + label-gated pull_request_target).
     # This job used to fail noisily at the app-token step for forks — fork
     # pull_request runs never receive secrets — so it now skips them

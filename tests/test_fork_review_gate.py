@@ -1,6 +1,6 @@
 """Tests for the trusted fork-review gate (scripts/fork_review_gate.py).
 
-The fork AI review workflow (``.github/workflows/fork-ai-review.yaml``) runs
+The fork AI review workflow (``.github/workflows/ai-pr-review-fork.yaml``) runs
 privileged code with model credentials. Its gate must decide from trusted
 GitHub API state only, deny by default, and never let attacker-controlled PR
 text cross a trust boundary. These tests pin that behavior end to end against
@@ -588,7 +588,7 @@ def test_gate_unexpected_api_failure_fails_visibly(gate, tmp_path, monkeypatch) 
 # ---------------------------------------------------------------------------
 # Direct-entrypoint subprocess regression (#1039 review follow-up)
 #
-# ``.github/workflows/fork-ai-review.yaml`` invokes the gate as
+# ``.github/workflows/ai-pr-review-fork.yaml`` invokes the gate as
 # ``python3 scripts/fork_review_gate.py ...`` with no PYTHONPATH. With a
 # script-file invocation, Python sets ``sys.path[0]`` to ``.../scripts``,
 # not the repository root, so the sibling ``pr_reviewer/`` package is

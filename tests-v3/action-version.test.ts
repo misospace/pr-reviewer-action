@@ -178,7 +178,7 @@ test("#941 review: dogfood workflows stamp the sha they actually checked out", (
     return job;
   };
 
-  for (const workflow of ["ai-pr-review.yaml", "fork-ai-review.yaml"]) {
+  for (const workflow of ["ai-pr-review.yaml", "ai-pr-review-fork.yaml"]) {
     const job = loadJob(workflow);
     const buildStep = job.steps?.find((step) => step.name === stepName);
     const stampedSha = buildStep?.env?.PR_REVIEWER_BUILD_SHA;

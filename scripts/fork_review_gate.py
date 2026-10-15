@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Trusted authorization and identity gate for the fork AI review workflow.
 
-The fork reviewer (``.github/workflows/fork-ai-review.yaml``) runs privileged
+The fork reviewer (``.github/workflows/ai-pr-review-fork.yaml``) runs privileged
 code with model credentials. This script is the only component allowed to
 decide whether that privilege is spent, and it decides exclusively from
 **trusted GitHub API state** — never from PR-controlled text:
@@ -61,7 +61,7 @@ import sys
 from pathlib import Path
 
 # Make the repository root importable when this script is invoked by path
-# (``python3 scripts/fork_review_gate.py`` in ``.github/workflows/fork-ai-review.yaml``)
+# (``python3 scripts/fork_review_gate.py`` in ``.github/workflows/ai-pr-review-fork.yaml``)
 # so the configured forge capability in ``pr_reviewer.forge`` is reachable.
 # ``scripts/check_corpus_anchor_in_diff.py`` and
 # ``scripts/harvest_human_findings.py`` carry the same pattern — three review

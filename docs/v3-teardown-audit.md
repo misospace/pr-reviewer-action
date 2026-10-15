@@ -89,7 +89,7 @@ Four consumer groups keep v2 code alive after the cutover. Everything in
   docs that described v2 as live updated (AGENTS.md code map, `README.md`,
   `docs/architecture/code-map.md`, `docs/v3-migration.md`, `SECURITY.md`,
   `.github/ai-review-rules.md`, and the `scripts/verify_pr_head.sh` mention
-  in `.github/workflows/fork-ai-review.yaml`). This re-point landed before
+  in `.github/workflows/ai-pr-review-fork.yaml`). This re-point landed before
   the #681 measurement work (#810, #796), which has to measure v3.
   Port-provenance comments inside `src/` are history, not consumers, and stay.
 - **Wave 1 — delete the (a) set** (v2 production runtime, its tests, and the
@@ -288,7 +288,7 @@ the `validate-static` "Verify smoke test helper is executable" step (see
 | `scripts/merge_bot_branch_corpus.py` | `harvest-human-findings.yaml` and `scripts/push_harvest_branch.sh`; `tests/test_merge_bot_branch_corpus.py`. |
 | `scripts/push_harvest_branch.sh` | `harvest-human-findings.yaml`; `tests/test_push_harvest_branch.sh`. |
 | `scripts/resolve_harvest_scope.sh` | `harvest-human-findings.yaml`; `tests/test_resolve_harvest_scope.sh`. |
-| `scripts/fork_review_gate.py` | `.github/workflows/fork-ai-review.yaml` (`gate` and `verify` steps); `tests/test_fork_review_gate.py`, `tests/test_fork_review_workflow.py`. |
+| `scripts/fork_review_gate.py` | `.github/workflows/ai-pr-review-fork.yaml` (`gate` and `verify` steps); `tests/test_fork_review_gate.py`, `tests/test_fork_review_workflow.py`. |
 | `scripts/release/tag-with-dist.sh` | `.github/workflows/manual-release.yml`; `tests/test_release_tag_with_dist.sh`. |
 
 ### pr_reviewer/

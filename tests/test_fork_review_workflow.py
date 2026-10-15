@@ -1,6 +1,6 @@
 """Structural security tests for the fork AI review workflow (issue: fork PRs).
 
-The fork reviewer (``.github/workflows/fork-ai-review.yaml``) is a privileged
+The fork reviewer (``.github/workflows/ai-pr-review-fork.yaml``) is a privileged
 workflow: it holds model credentials and publishes reviews. These tests pin
 its security invariants as text assertions (matching
 ``test_dogfood_workflow.py``; PyYAML is available but the raw text pins
@@ -34,7 +34,7 @@ import pytest
 from test_dogfood_workflow import _extract_with_block, _unquote
 
 ROOT = Path(__file__).resolve().parent.parent
-FORK_WORKFLOW = ROOT / ".github" / "workflows" / "fork-ai-review.yaml"
+FORK_WORKFLOW = ROOT / ".github" / "workflows" / "ai-pr-review-fork.yaml"
 DOGFOOD_WORKFLOW = ROOT / ".github" / "workflows" / "ai-pr-review.yaml"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yaml"
 LABELS = ROOT / ".github" / "labels.yaml"
@@ -95,7 +95,7 @@ def test_fork_workflow_never_triggers_on_unprivileged_pull_request(fork_text) ->
     (maintainer label).
     """
     assert not re.search(r"^  pull_request:\s*$", fork_text, re.M), (
-        "fork-ai-review.yaml must not trigger on the unprivileged pull_request event"
+        "ai-pr-review-fork.yaml must not trigger on the unprivileged pull_request event"
     )
     assert re.search(r"^  workflow_run:", fork_text, re.M)
     assert re.search(r"^  pull_request_target:", fork_text, re.M)
@@ -639,7 +639,7 @@ def test_dogfood_job_if_semantics() -> None:
 
     # Same-repo, ready PR → the dogfood reviewer runs.
     assert _eval_github_expr(expr, ctx("pull_request", repository_id, False)) is True
-    # Fork PR → skipped cleanly (the fork-ai-review workflow owns it).
+    # Fork PR → skipped cleanly (the ai-pr-review-fork workflow owns it).
     assert _eval_github_expr(expr, ctx("pull_request", 222222, False)) is False
     # Same-repo draft → skipped (pre-existing behavior preserved).
     assert _eval_github_expr(expr, ctx("pull_request", repository_id, True)) is False

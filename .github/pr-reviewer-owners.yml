@@ -24,7 +24,7 @@
 requirements:
   fork-privilege-separation:
     owners:
-      - .github/workflows/fork-ai-review.yaml
+      - .github/workflows/ai-pr-review-fork.yaml
       - scripts/fork_review_gate.py
 
   untrusted-content-is-data:

@@ -733,7 +733,7 @@ test("#957: the #956 linked-issue change does not scope unrelated AGENTS standar
 /** The declared owner map a repository config would carry (#958): architectural
  * metadata, not an inferred lexical signal. */
 const OWNERSHIP = [
-  { match: ["fork", "privilege", "separation"], owners: [".github/workflows/fork-ai-review.yaml", "scripts/fork_review_gate.py"] },
+  { match: ["fork", "privilege", "separation"], owners: [".github/workflows/ai-pr-review-fork.yaml", "scripts/fork_review_gate.py"] },
   { match: ["untrusted", "content", "data"], owners: ["src/context/pr-thread.ts", "src/context/review-threads.ts", "src/specialists/render.ts", "src/claims/render.ts", "src/requirements/ledger.ts", "src/publish/publish.ts"] },
   { match: ["model", "api", "credentials"], owners: ["src/transport/http.ts", "src/transport/sse.ts", "src/transport/transport.ts"] },
 ];
@@ -747,11 +747,11 @@ test("#958: a declared owner path scopes its requirement in; unrelated paths do 
   const scope = (paths: string[]): string[] =>
     requirementTraceScope(ledger, changedSubjectText("+  const x = 1;\n", paths), { ownership: OWNERSHIP, paths }).inScope.map((e) => e.id).sort();
 
-  // The fork-privilege standard guards .github/workflows/fork-ai-review.yaml:
+  // The fork-privilege standard guards .github/workflows/ai-pr-review-fork.yaml:
   // ordinary workflow edits there need not repeat "fork privilege" or
   // "trust boundary", but the declared owner path keeps it in scope — and it
   // scopes only that standard.
-  assert.deepEqual(scope([".github/workflows/fork-ai-review.yaml"]), ["req-fork"]);
+  assert.deepEqual(scope([".github/workflows/ai-pr-review-fork.yaml"]), ["req-fork"]);
   assert.deepEqual(scope(["scripts/fork_review_gate.py"]), ["req-fork"]);
   // The untrusted-content boundary's fence renderers own it.
   assert.deepEqual(scope(["src/specialists/render.ts"]), ["req-untrusted"]);
@@ -779,7 +779,7 @@ test("#958: parseRequirementOwners accepts a valid map and drops invalid owner g
     "requirements:",
     "  fork-privilege-separation:",
     "    owners:",
-    "      - .github/workflows/fork-ai-review.yaml",
+    "      - .github/workflows/ai-pr-review-fork.yaml",
     "      - scripts/fork_review_gate.py",
     "  untrusted-content-is-data:",
     "    owners:",
@@ -793,7 +793,7 @@ test("#958: parseRequirementOwners accepts a valid map and drops invalid owner g
   assert.ok(!("malformed" in parsed));
   if ("malformed" in parsed) return;
   assert.deepEqual(parsed.rules, [
-    { match: ["fork", "privilege", "separation"], owners: [".github/workflows/fork-ai-review.yaml", "scripts/fork_review_gate.py"] },
+    { match: ["fork", "privilege", "separation"], owners: [".github/workflows/ai-pr-review-fork.yaml", "scripts/fork_review_gate.py"] },
     { match: ["untrusted", "content", "data"], owners: ["src/specialists/render.ts"] },
   ]);
   assert.ok(parsed.warnings.length >= 4, JSON.stringify(parsed.warnings));
@@ -835,7 +835,7 @@ test("#958: parseRequirementOwners warns on a non-slug key and an over-long owne
       "requirements:",
       "  fork_privilege_separation:",
       "    owners:",
-      "      - .github/workflows/fork-ai-review.yaml",
+      "      - .github/workflows/ai-pr-review-fork.yaml",
       "  untrusted-content-is-data:",
       "    owners:",
       ...Array.from({ length: 40 }, (_unused, i) => `      - src/file-${i}.ts`),
@@ -853,10 +853,10 @@ test("#958: parseRequirementOwners warns on a non-slug key and an over-long owne
 
 test("#958: a malformed ownership context cannot crash the trace scope", () => {
   const ledger = { requirements: [{ id: "r", text: STANDARDS_FORK, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 1 }] }] };
-  const changed = changedSubjectText("+x\n", [".github/workflows/fork-ai-review.yaml"]);
+  const changed = changedSubjectText("+x\n", [".github/workflows/ai-pr-review-fork.yaml"]);
   // A non-string token (which the parser never produces) must be dropped, not throw.
   assert.doesNotThrow(() =>
-    requirementTraceScope(ledger, changed, { ownership: [{ match: [42] as never, owners: [".github/workflows/fork-ai-review.yaml"] }], paths: [".github/workflows/fork-ai-review.yaml"] }),
+    requirementTraceScope(ledger, changed, { ownership: [{ match: [42] as never, owners: [".github/workflows/ai-pr-review-fork.yaml"] }], paths: [".github/workflows/ai-pr-review-fork.yaml"] }),
   );
 });
 
@@ -1357,7 +1357,7 @@ const FORK_GROUPS = [
 
 const FORK_DISTRIBUTED_OWNERSHIP: RequirementOwnership[] = [{
   match: ["fork", "privilege", "separation"],
-  owners: [".github/workflows/fork-ai-review.yaml"],
+  owners: [".github/workflows/ai-pr-review-fork.yaml"],
   groups: FORK_GROUPS,
 }];
 

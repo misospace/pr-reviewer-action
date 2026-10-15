@@ -17,7 +17,7 @@ Stage 1 (unprivileged, fork-controlled code runs here)
 
 Stage 2 (privileged, only trusted base-repository code runs here)
   workflow_run (CI completed) ─┐
-  pull_request_target (label) ─┴→ fork-ai-review workflow
+  pull_request_target (label) ─┴→ ai-pr-review-fork workflow
     · gate: authorization + identity from trusted GitHub API state
     · reviewer: the action checked out from the base repository
     · local models only, bounded compute, exact-head-guarded publication
@@ -231,7 +231,7 @@ Run locally:
 
 ```bash
 python3 -m pytest tests/test_fork_review_gate.py tests/test_fork_review_workflow.py -v
-actionlint .github/workflows/fork-ai-review.yaml
+actionlint .github/workflows/ai-pr-review-fork.yaml
 ```
 
 ## Follow-up (v3)
