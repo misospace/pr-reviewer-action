@@ -17,6 +17,13 @@ import type { ModelRequestConfig, TransportWirePayload } from "./types.js";
  * provider emits them) while the prompt explains them only when the
  * `review-triage` input is on, and the parser fails an absent or malformed
  * decision closed to `unknown`.
+ * `review_triage_targets` (#1005) is the model's bounded selection of LOGICAL
+ * routing target ids when `review_triage_decision === "required"`; it is
+ * always present in the strict schema (so OpenAI strict-mode does not drop it
+ * mid-request) while the prompt only explains it when routing is enabled, and
+ * the parser caps the list and drops non-string/empty/oversized entries. The
+ * model can only ever name a logical id here — the deterministic resolver
+ * validates every id against the trusted base-ref configuration.
  * `required_check_dispositions` (#750) carries one disposition per
  * deterministic must_check item, echoed by exact check text.
  */
@@ -40,6 +47,16 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
         // the verdict, findings, or any capability.
         review_triage_decision: { type: "string", enum: ["not_required", "required", "unknown"] },
         review_triage_reason: { type: ["string", "null"] },
+        // #1005: the model emits only LOGICAL ids here. The deterministic
+        // resolver validates every id against the trusted base-ref config
+        // before any reviewer request; this pass only bounds the list. A
+        // null/empty array is the "not_required" / no-routing-configured
+        // default, so the strict-mode required entry below always permits
+        // null under OpenAI strict semantics.
+        review_triage_targets: {
+          type: ["array", "null"],
+          items: { type: "string" },
+        },
         findings: {
           type: ["array", "null"],
           items: {
@@ -100,7 +117,7 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
           },
         },
       },
-      required: ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "findings", "requirement_coverage", "required_check_dispositions"],
+      required: ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "review_triage_targets", "findings", "requirement_coverage", "required_check_dispositions"],
       additionalProperties: false,
     },
   },

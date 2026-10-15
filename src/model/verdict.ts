@@ -237,6 +237,33 @@ function normalizeReviewTriage(parsed: Record<string, unknown>): {
   return { decision, reason };
 }
 
+/**
+ * #1005: normalize the model's `review_triage_targets` — the logical routing
+ * target IDs it selected. The model can only ever name a LOGICAL id here; the
+ * deterministic resolver validates every id against trusted configuration
+ * before any reviewer request, so this pass only bounds and cleans the list:
+ * non-arrays become `[]`, non-string entries are dropped, each id is
+ * control-char-collapsed and trimmed (lowercased for comparison), empty or
+ * oversized ids are dropped, duplicates collapse, and the list is capped.
+ * It never interprets an id as a concrete GitHub identity.
+ */
+function normalizeReviewTriageTargets(parsed: Record<string, unknown>): string[] {
+  const raw = parsed.review_triage_targets;
+  if (!Array.isArray(raw)) return [];
+  const targets: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    const target = item.replace(SMART_REVIEW_REASON_CONTROL, " ").trim().toLowerCase();
+    if (target === "" || target.length > MAX_REVIEW_TRIAGE_TARGET_CHARS) continue;
+    if (seen.has(target)) continue;
+    seen.add(target);
+    targets.push(target);
+    if (targets.length >= MAX_REVIEW_TRIAGE_TARGETS) break;
+  }
+  return targets;
+}
+
 const TRUNCATION_REASONS = new Set(["length", "max_tokens", "max_output_tokens"]);
 
 // #1003: the parser-side bound on the model-authored reason. The published
@@ -245,6 +272,11 @@ const TRUNCATION_REASONS = new Set(["length", "max_tokens", "max_output_tokens"]
 // fail-closed rule — lives in ./triage.ts, shared with every downstream
 // boundary.
 const MAX_REVIEW_TRIAGE_REASON_CHARS = 400;
+
+// #1005: bounds on the model's logical routing-target selection. One model
+// answer; a configured logical id is a short slug.
+const MAX_REVIEW_TRIAGE_TARGETS = 32;
+const MAX_REVIEW_TRIAGE_TARGET_CHARS = 64;
 
 const TRUNC_SUFFIX = " (model output appears truncated at the token limit; increase ai_max_tokens)";
 
@@ -674,6 +706,7 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
       // #1003: known structured fields, not model extras — a triage answer is
       // read by the parser (fail-closed), never passed through unparsed.
       && key !== "review_triage_decision" && key !== "review_triage_reason"
+      && key !== "review_triage_targets"
       && key !== "required_check_dispositions"
       && key !== "thread_dispositions"
       && key !== "human_review_dispositions"
@@ -710,6 +743,7 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
     smartReviewReason: smartRequest.reason,
     reviewTriageDecision: triage.decision,
     reviewTriageReason: triage.reason,
+    reviewTriageTargets: normalizeReviewTriageTargets(parsed),
     extra,
   };
 }

@@ -532,6 +532,15 @@ inputs:
     required: false
     default: "false"
     description: "Opt-in human-review triage (#1003): the reviewer additionally answers whether this change needs a specialized/owning human review, as 'not_required', 'required', or 'unknown' (fail-closed: any missing, malformed or unrecognized answer is 'unknown', and a 'not_required' with no usable supporting reason is also 'unknown'). The escalation policy comes from the repository's trusted instruction files already in context; triage never names a reviewer, never requests one, and never changes the verdict, findings, or any tool, evidence or fork access. Publishes review-triage-decision and review-triage-reason, and adds a short section to the published review and the step summary. Off by default: disabled means the outputs stay empty."
+  # #1005: operator-only routing layer on top of the #1003 triage answer. The
+  # model selects only LOGICAL target ids; trusted base-ref configuration
+  # (`.github/pr-reviewer-routing.yml`) maps those ids to concrete GitHub
+  # users/teams. No repo-configurable key and no `-enable-for-forks` sibling:
+  # it can never be switched on by a PR and never mutates on a fork.
+  - id: review-triage-routing-mode
+    required: false
+    default: "off"
+    description: "Optional deterministic reviewer-routing layer on top of #1003 human-review triage: 'off' (default), 'advisory', or 'request'. Only meaningful when review-triage is enabled. The model chooses only from the logical routing targets declared in the trusted base-ref file .github/pr-reviewer-routing.yml; deterministic action code maps those ids to concrete GitHub users/teams. 'advisory' computes and publishes the routing plan but never mutates the forge (safe dogfooding); 'request' additively requests the configured reviewers when triage says required. The model can never emit a GitHub user or team, requests are idempotent and never remove existing reviewers, and an unknown/unconfigured target or any uncertain state causes no mutation. Never mutates on fork pull requests. Reviewer requests are GitHub-only; Forgejo degrades to request_failed with no mutation. Publishes review-triage-routing."
   - id: enrichment-budget-sec
     v2_id: enrichment_budget_sec
     required: false
@@ -836,6 +845,9 @@ outputs:
   - id: review-triage-reason
     v2_id: review_triage_reason
     description: "Reason behind review-triage-decision (#1003), possibly empty when the model gave none; empty when review-triage is disabled. Model-authored text, redacted before publication."
+  - id: review-triage-routing
+    v2_id: review_triage_routing
+    description: "Deterministic reviewer-routing status (#1005) when review-triage-routing-mode ran: 'not_required', 'no_targets', 'invalid', 'advisory', 'request', or 'fork_blocked'. Empty when review-triage or review-triage-routing-mode is off. The model selects only configured logical target ids; concrete GitHub users/teams come only from trusted base-ref configuration, and an invalid or uncertain state never mutates the forge. This review-step output reports the routing intent; the published review additionally reports the publish-time outcome ('requested' or 'request_failed')."
   - id: findings
     v2_id: findings
     description: "Normalized structured findings as a JSON array (empty array when the model produced none)"

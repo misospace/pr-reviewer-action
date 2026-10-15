@@ -15,7 +15,7 @@ import type { StepSummaryTelemetry } from "../src/publish/outputs.js";
 test("review step output IDs exactly match the kebab-case contract", () => {
   assert.deepEqual(REVIEW_STEP_OUTPUT_IDS, [
     "verdict", "verdict-source", "required-checks", "review-result", "incomplete-reason", "review-route", "escalation-reason",
-    "review-triage-decision", "review-triage-reason",
+    "review-triage-decision", "review-triage-reason", "review-triage-routing",
     "findings", "review-markdown", "analysis-engine", "tool-calls", "cache-hit-ratio",
   ]);
   for (const id of REVIEW_STEP_OUTPUT_IDS) {
@@ -53,7 +53,7 @@ test("output assignment keeps single lines direct and multiline values collision
 test("review output formatting serializes all keys in contract order with kebab-case names", () => {
   const result = formatReviewStepOutputs({
     verdict: "approve", verdictSource: "model", requiredChecks: "complete", reviewResult: "clean", incompleteReason: "none", reviewRoute: "primary",
-    escalationReason: "", reviewTriageDecision: "", reviewTriageReason: "",
+    escalationReason: "", reviewTriageDecision: "", reviewTriageReason: "", reviewTriageRouting: "",
     findings: "[]", reviewMarkdown: "a\nb", analysisEngine: "engine",
     toolCalls: "[]", cacheHitRatio: "0.5",
   }, () => new Uint8Array(16).fill(0xab));
@@ -61,7 +61,7 @@ test("review output formatting serializes all keys in contract order with kebab-
   const headers = [...result.matchAll(/^([a-z][a-z-]*)(?:=|<<)/gm)].map((match) => match[1]);
   assert.deepEqual(headers, [
     "verdict", "verdict-source", "required-checks", "review-result", "incomplete-reason", "review-route", "escalation-reason",
-    "review-triage-decision", "review-triage-reason",
+    "review-triage-decision", "review-triage-reason", "review-triage-routing",
     "review-markdown", "findings", "tool-calls", "cache-hit-ratio", "analysis-engine",
   ]);
   assert.ok(result.includes("review-result=clean\n"));
@@ -79,6 +79,7 @@ test("#1003: formatReviewStepOutputs fails an unsubstantiated not_required close
   const base = {
     verdict: "approve", verdictSource: "model", requiredChecks: "complete", reviewResult: "clean", incompleteReason: "none", reviewRoute: "primary",
     escalationReason: "", findings: "[]", reviewMarkdown: "a", analysisEngine: "engine", toolCalls: "[]", cacheHitRatio: "-",
+    reviewTriageRouting: "",
   };
   const bytes = (): Uint8Array => new Uint8Array(16).fill(0xab);
 

@@ -18,6 +18,7 @@ import { redactText } from "../context/redact.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
 import { SEVERITY_LABELS } from "./inline-findings.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
+import { isHumanReviewRoutingStatus } from "../routing/human-review-routing.js";
 
 //
 // ---------------------------------------------------------------------------
@@ -163,6 +164,7 @@ export const REVIEW_STEP_OUTPUT_IDS = [
   "escalation-reason",
   "review-triage-decision",
   "review-triage-reason",
+  "review-triage-routing",
   "findings",
   "review-markdown",
   "analysis-engine",
@@ -203,6 +205,10 @@ export interface ReviewStepOutputs {
   /** #1003: the triage reason (possibly "" when the model gave none), or ""
    * when triage is disabled. */
   reviewTriageReason: string;
+  /** #1005: the deterministic reviewer-routing status — one of the
+   * non-`off` statuses — or "" when review-triage or review-triage-routing is
+   * off ("routing did not run"). Never model text. */
+  reviewTriageRouting: string;
   /** Compact JSON array of the normalized findings. */
   findings: string;
   /** Full review markdown (model-controlled text). */
@@ -264,6 +270,10 @@ export function formatReviewStepOutputs(
     // credentials.
     ["review-triage-decision", triageDecision],
     ["review-triage-reason", redactText(outputs.reviewTriageReason)],
+    // #1005: the routing status is a closed action-owned token; re-validate it
+    // here so a carried-forward or hand-edited value can never be written as a
+    // public output. "" means routing did not run and stays "".
+    ["review-triage-routing", isHumanReviewRoutingStatus(outputs.reviewTriageRouting) ? outputs.reviewTriageRouting : ""],
     // Models echo diff lines; the public step output must not carry raw credentials; redactText is idempotent with the publish boundary.
     ["review-markdown", redactText(outputs.reviewMarkdown)],
     ["findings", redactText(outputs.findings)],
@@ -383,6 +393,10 @@ export interface StepSummaryTelemetry {
    * real answer and renders like any other: the point of failing closed is
    * that the gap is visible, not silently reported as "not required". */
   reviewTriage?: { decision: string; reason: string };
+  /** #1005: reviewer-routing telemetry, supplied only when routing ran
+   * (mode != off) — absent renders no row. All action-owned/trusted-config
+   * values, never model text. */
+  reviewRouting?: { status: string; targetIds: string[]; users: string[]; teams: string[] };
   /** #633 deep-review telemetry row (rendered only when deep review ran). */
   deepReview?: { leads: string; errors: boolean; autoSelection?: { selected: number; skipped: number } };
   budget: string;
@@ -451,6 +465,17 @@ export function renderStepSummary(telemetry: StepSummaryTelemetry): string {
       redactText(telemetry.reviewTriage.reason).replace(/\s+/g, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS),
     );
     rows.push(`| Review triage | ${decision}${reason === "" ? "" : `: ${reason}`} (advisory only) |`);
+  }
+  // #1005: compact one-row routing summary, rendered only when routing ran.
+  // Every value is action-owned or trusted-config; model text never appears.
+  if (telemetry.reviewRouting) {
+    const routing = telemetry.reviewRouting;
+    const targets = routing.targetIds.length > 0 ? ` target(s): ${escapeTableCell(routing.targetIds.join(", "))}` : "";
+    const resolved: string[] = [];
+    if (routing.users.length > 0) resolved.push(`users: ${escapeTableCell(routing.users.join(", "))}`);
+    if (routing.teams.length > 0) resolved.push(`teams: ${escapeTableCell(routing.teams.join(", "))}`);
+    const reviewers = resolved.length > 0 ? `; ${resolved.join("; ")}` : "";
+    rows.push(`| Reviewer routing | ${escapeTableCell(routing.status)}${targets}${reviewers} |`);
   }
   const budgetRows: string[] = [];
   for (const harness of [telemetry.primaryTools, telemetry.smartTools]) {

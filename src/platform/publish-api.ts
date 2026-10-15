@@ -78,6 +78,27 @@ export interface ThreadQueryResult {
   error?: string;
 }
 
+/** #1005: outcome of an additive reviewer request. `supported` distinguishes
+ * "this forge cannot request reviewers" from an operational failure. The
+ * `alreadyRequested*` sets are the inputs that were already on the PR and were
+ * therefore not re-requested (idempotency); `requested*` are the sets actually
+ * sent in this call. Nothing is ever removed. */
+export interface ReviewerRequestResult {
+  ok: boolean;
+  supported: boolean;
+  requestedUsers: string[];
+  requestedTeams: string[];
+  alreadyRequestedUsers: string[];
+  alreadyRequestedTeams: string[];
+  error?: string;
+}
+
+/** A GitHub user login, bounded and charset-restricted so a config value can
+ * never be turned into a URL path or injection. */
+const REQUESTER_USER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+/** A GitHub team slug (lowercase hyphenated). */
+const REQUESTER_TEAM = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
 export interface PublishPlatformApi {
   readonly platform: PublishPlatformName;
   /** Current PR head sha, for the publication-boundary re-check (#451). */
@@ -102,6 +123,11 @@ export interface PublishPlatformApi {
   resolveThread(threadId: string): Promise<boolean>;
   /** Best-effort label removal (the re-review label cleanup). */
   removeLabel(label: string): Promise<boolean>;
+  /** #1005: additively request reviewers/teams from trusted configuration.
+   * Idempotent (already-requested identities are not re-requested) and
+   * additive only (never removes). Fails closed on an invalid identity or a
+   * read failure — it never substitutes another reviewer. */
+  requestReviewers(users: readonly string[], teams: readonly string[]): Promise<ReviewerRequestResult>;
 }
 
 function ownerRepo(repo: string): { owner: string; name: string } {
@@ -401,6 +427,62 @@ export class GitHubPublishApi implements PublishPlatformApi {
       return status === 200 || status === 204;
     } catch {
       return false;
+    }
+  }
+
+  async requestReviewers(users: readonly string[], teams: readonly string[]): Promise<ReviewerRequestResult> {
+    const none = (): Pick<ReviewerRequestResult, "requestedUsers" | "requestedTeams" | "alreadyRequestedUsers" | "alreadyRequestedTeams"> =>
+      ({ requestedUsers: [], requestedTeams: [], alreadyRequestedUsers: [], alreadyRequestedTeams: [] });
+    const cleanUsers = [...new Set(users.map((u) => u.trim()))].filter((u) => u !== "");
+    const cleanTeams = [...new Set(teams.map((t) => t.trim()))].filter((t) => t !== "");
+    // Fail closed: a non-login/non-slug identity is never sent to the API.
+    if (cleanUsers.some((u) => !REQUESTER_USER.test(u)) || cleanTeams.some((t) => !REQUESTER_TEAM.test(t))) {
+      return { ok: false, supported: true, ...none(), error: "reviewer request rejected: an identity is not a valid GitHub login or team slug" };
+    }
+    if (cleanUsers.length === 0 && cleanTeams.length === 0) {
+      return { ok: true, supported: true, ...none() };
+    }
+    let existingUsers: string[] = [];
+    let existingTeams: string[] = [];
+    try {
+      const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/requested_reviewers`), this.opts("GET"));
+      if (status !== 200 || data === null || typeof data !== "object") {
+        return { ok: false, supported: true, ...none(), error: `could not read requested reviewers (status ${status})` };
+      }
+      const record = data as { users?: unknown; teams?: unknown };
+      if (Array.isArray(record.users)) {
+        existingUsers = record.users
+          .map((u) => (typeof (u as { login?: unknown } | null)?.login === "string" ? (u as { login: string }).login : ""))
+          .filter((u) => u !== "");
+      }
+      if (Array.isArray(record.teams)) {
+        existingTeams = record.teams
+          .map((t) => (typeof (t as { slug?: unknown } | null)?.slug === "string" ? (t as { slug: string }).slug : ""))
+          .filter((t) => t !== "");
+      }
+    } catch (error) {
+      return { ok: false, supported: true, ...none(), error: error instanceof Error ? error.message : String(error) };
+    }
+    const existingUserSet = new Set(existingUsers.map((u) => u.toLowerCase()));
+    const existingTeamSet = new Set(existingTeams.map((t) => t.toLowerCase()));
+    const newUsers = cleanUsers.filter((u) => !existingUserSet.has(u.toLowerCase()));
+    const newTeams = cleanTeams.filter((t) => !existingTeamSet.has(t.toLowerCase()));
+    const alreadyRequestedUsers = cleanUsers.filter((u) => existingUserSet.has(u.toLowerCase()));
+    const alreadyRequestedTeams = cleanTeams.filter((t) => existingTeamSet.has(t.toLowerCase()));
+    if (newUsers.length === 0 && newTeams.length === 0) {
+      return { ok: true, supported: true, requestedUsers: [], requestedTeams: [], alreadyRequestedUsers, alreadyRequestedTeams };
+    }
+    try {
+      const body: Record<string, unknown> = {};
+      if (newUsers.length > 0) body["reviewers"] = newUsers;
+      if (newTeams.length > 0) body["team_reviewers"] = newTeams;
+      const { status } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/requested_reviewers`), this.opts("POST", body));
+      if (status !== 200 && status !== 201) {
+        return { ok: false, supported: true, ...none(), error: `status ${status}` };
+      }
+      return { ok: true, supported: true, requestedUsers: newUsers, requestedTeams: newTeams, alreadyRequestedUsers, alreadyRequestedTeams };
+    } catch (error) {
+      return { ok: false, supported: true, ...none(), error: error instanceof Error ? error.message : String(error) };
     }
   }
 }
@@ -717,5 +799,20 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     } catch {
       return false;
     }
+  }
+
+  /** #1005: reviewer requests are not supported on Forgejo. Degrade
+   * explicitly (like the GraphQL-only capabilities) — no mutation, and the
+   * caller surfaces the unsupported capability rather than substituting. */
+  async requestReviewers(_users: readonly string[], _teams: readonly string[]): Promise<ReviewerRequestResult> {
+    return {
+      ok: false,
+      supported: false,
+      requestedUsers: [],
+      requestedTeams: [],
+      alreadyRequestedUsers: [],
+      alreadyRequestedTeams: [],
+      error: "reviewer requests are not supported on this platform",
+    };
   }
 }

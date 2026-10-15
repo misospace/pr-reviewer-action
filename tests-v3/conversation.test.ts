@@ -224,7 +224,7 @@ test("the strict verdict schema literal stays contractually identical", () => {
   const schema = (OPENAI_VERDICT_JSON_SCHEMA as { json_schema: { schema: Record<string, unknown> } }).json_schema.schema;
   assert.deepEqual(schema.required, [
     "verdict", "review_markdown", "smart_review_requested", "smart_review_reason",
-    "review_triage_decision", "review_triage_reason",
+    "review_triage_decision", "review_triage_reason", "review_triage_targets",
     "findings", "requirement_coverage", "required_check_dispositions",
   ]);
   const props = schema.properties as Record<string, { enum?: string[]; type?: unknown }>;
@@ -233,6 +233,13 @@ test("the strict verdict schema literal stays contractually identical", () => {
   // present here exactly as in src/model/request.ts.
   assert.deepEqual(props.review_triage_decision!.enum, ["not_required", "required", "unknown"]);
   assert.deepEqual(props.review_triage_reason!.type, ["string", "null"]);
+  // #1005: routing targets are a bounded array of LOGICAL ids, nullable so a
+  // not_required decision / disabled routing can emit null under strict mode.
+  assert.deepEqual(props.review_triage_targets!.type, ["array", "null"]);
+  assert.deepEqual(
+    (props.review_triage_targets as { items: { type: string } }).items.type,
+    "string",
+  );
   const dispositions = props.required_check_dispositions as { items: { properties: { status: { enum: string[] } } } };
   assert.deepEqual(dispositions.items.properties.status.enum, ["satisfied", "not_applicable", "unresolved"]);
   assert.equal(WEB_SEARCH_SCHEMA.name, "web_search");

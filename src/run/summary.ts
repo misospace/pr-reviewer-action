@@ -3,6 +3,7 @@ import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js"
 import { renderStepSummary, type ReviewStepOutputs } from "../publish/outputs.js";
 import { publicAnalysisEngine } from "../prompt/index.js";
 import { resolveTierBudgets } from "../corpus/budgets.js";
+import type { HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 import type { StageEnv } from "./env.js";
 import type { RunWorkspace } from "./workspace.js";
 import { safeJson } from "./stages.js";
@@ -27,6 +28,8 @@ export interface SummaryInput {
   routeReason: string;
   analysisEngine: string;
   fallbackUsed: boolean;
+  /** #1005: the deterministic routing plan, supplied only when routing ran. */
+  reviewRouting?: HumanReviewRoutingPlan;
 }
 
 /** Port of write_step_summary. Appends to `stepSummaryPath`; the summary is
@@ -71,6 +74,18 @@ export function writeStepSummary(stepSummaryPath: string, input: SummaryInput): 
     // input is off), so a disabled run's summary gains no row.
     ...(input.outputs.reviewTriageDecision !== ""
       ? { reviewTriage: { decision: input.outputs.reviewTriageDecision, reason: input.outputs.reviewTriageReason } }
+      : {}),
+    // #1005: present only when routing ran (mode != off), so a run without
+    // routing gains no row. Action-owned; no model text.
+    ...(input.reviewRouting
+      ? {
+        reviewRouting: {
+          status: input.reviewRouting.status,
+          targetIds: input.reviewRouting.targetIds,
+          users: input.reviewRouting.users,
+          teams: input.reviewRouting.teams,
+        },
+      }
       : {}),
     ...(total > 0 ? { requirementCoverage: { total, unknown } } : {}),
     primaryTools: {

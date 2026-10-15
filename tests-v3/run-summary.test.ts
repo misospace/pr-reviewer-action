@@ -25,6 +25,7 @@ function baseOutputs(overrides: Partial<ReviewStepOutputs> = {}): ReviewStepOutp
     escalationReason: "",
     reviewTriageDecision: "",
     reviewTriageReason: "",
+    reviewTriageRouting: "",
     findings: "[]",
     reviewMarkdown: "",
     analysisEngine: "gpt-5",

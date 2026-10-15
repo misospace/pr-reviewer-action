@@ -89,6 +89,10 @@ export interface ReviewArtifact {
    * what the model actually answered. */
   review_triage_decision?: ReviewTriageDecision;
   review_triage_reason?: string;
+  /** #1005: the model's selected LOGICAL routing target IDs (bounded,
+   * lowercased). Persisted so the routing resolver reads the same normalized
+   * value; never a concrete GitHub identity. */
+  review_triage_targets?: string[];
   /** Every additional key the model produced passes through untouched. */
   [key: string]: unknown;
 }
@@ -129,6 +133,7 @@ export function reviewArtifactFromParsed(parsed: ParsedReviewVerdict): ReviewArt
     // at all is the caller's `review-triage` input, not this artifact.
     review_triage_decision: parsed.reviewTriageDecision,
     review_triage_reason: parsed.reviewTriageReason,
+    review_triage_targets: parsed.reviewTriageTargets,
   };
   if (parsed.requiredCheckDispositionsEmitted) {
     artifact.required_check_dispositions = parsed.requiredCheckDispositions === null

@@ -227,13 +227,36 @@ export function applyRequirementTraceFragment(
 export function applyReviewTriageFragment(
   state: SystemPromptState,
   enabled: boolean,
+  allowedTargets: readonly string[] = [],
   assets: PromptAssets = BUNDLED_PROMPT_ASSETS,
 ): SystemPromptState {
   if (!enabled) return state;
   const triage = bashCapture(rawFragment(assets, "review_triage"));
   if (triage === "") return state;
-  if (state.systemPrompt.includes(triage)) return state;
-  return { ...state, systemPrompt: `${state.systemPrompt}\n${triage}` };
+  const routing = renderReviewTriageRoutingFragment(allowedTargets);
+  let prompt = state.systemPrompt;
+  if (!prompt.includes(triage)) {
+    prompt = `${prompt}\n${triage}`;
+  }
+  if (routing !== "" && !prompt.includes(routing)) {
+    prompt = `${prompt}\n${routing}`;
+  }
+  return prompt === state.systemPrompt ? state : { ...state, systemPrompt: prompt };
+}
+
+/**
+ * #1005: the routing addendum appended after the triage question ONLY when
+ * `review-triage-routing` is enabled and at least one logical target is
+ * configured. It names the exact configured logical ids the model may choose
+ * from — the model can never name a concrete GitHub user or team — and it is
+ * constructed here rather than in the bundled `review_triage.txt` fragment so
+ * the v2-parity fragment text (shared with the v2 runtime) is unchanged and a
+ * disabled run's prompt stays byte-identical.
+ */
+export function renderReviewTriageRoutingFragment(allowedTargets: readonly string[]): string {
+  const ids = [...new Set(allowedTargets.map((id) => id.trim().toLowerCase()).filter((id) => id !== ""))].sort();
+  if (ids.length === 0) return "";
+  return `Routing targets are configured for this repository. When \`review_triage_decision\` is \`required\`, also set \`review_triage_targets\` to the configured capability ids that apply, chosen only from this exact list: ${ids.join(", ")}. Use the ids verbatim; never invent, rename, or guess an id, and never put a GitHub username, team name, or @handle in the field. Leave \`review_triage_targets\` empty whenever \`review_triage_decision\` is not \`required\`.`;
 }
 
 /**

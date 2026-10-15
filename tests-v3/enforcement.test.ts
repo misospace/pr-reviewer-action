@@ -32,6 +32,7 @@ function parsed(overrides: Partial<ParsedReviewVerdict> = {}): ParsedReviewVerdi
     humanReviewDispositions: null, humanReviewDispositionsEmitted: false,
     smartReviewRequested: false, smartReviewReason: null,
     reviewTriageDecision: "unknown", reviewTriageReason: "",
+    reviewTriageTargets: [],
     extra: {}, ...overrides,
   };
 }

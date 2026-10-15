@@ -374,6 +374,9 @@ class CapturingPublishApi implements PublishPlatformApi {
   async retireInlineComment(_review: string, _comment: string) { return true; }
   async resolveThread(): Promise<boolean> { return true; }
   async removeLabel(): Promise<boolean> { return true; }
+  async requestReviewers(): ReturnType<PublishPlatformApi["requestReviewers"]> {
+    return { ok: true, supported: true, requestedUsers: [], requestedTeams: [], alreadyRequestedUsers: [], alreadyRequestedTeams: [] };
+  }
 }
 
 function publishInput(overrides: Partial<Parameters<typeof publishReview>[0]> = {}): Parameters<typeof publishReview>[0] {

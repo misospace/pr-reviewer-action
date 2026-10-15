@@ -52,6 +52,9 @@ import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js"
 import { maskKnownSecrets } from "../context/redact.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
+import type { ReviewTriageDecision } from "../model/types.js";
+import { resolveReviewerRouting } from "../config/reviewer-routing.js";
+import { resolveHumanReviewRouting, type HumanReviewRoutingMode, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, applyReviewTriageFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
 import { reviewArtifactFromParsed, type ArtifactFinding } from "../enforcement/artifact.js";
 import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
@@ -868,7 +871,20 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // (hence no `review-triage-enable-for-forks` sibling), and it can never
   // move the verdict. Disabled, the assembled prompt below is byte-identical
   // to pre-#1003.
-  promptState = applyReviewTriageFragment(promptState, config.reviewTriage === true);
+  const triageEnabled = config.reviewTriage === true;
+  // #1005: the trusted reviewer-routing config is read from the SAME trusted
+  // base ref as the other repo-owned config, and only when triage is enabled
+  // and routing is not off. The configured LOGICAL target ids are injected
+  // into the triage question so the model can select only capabilities this
+  // repository declared; it never sees a concrete GitHub user or team.
+  const routingMode: HumanReviewRoutingMode = config.reviewTriageRoutingMode === "advisory" || config.reviewTriageRoutingMode === "request"
+    ? config.reviewTriageRoutingMode
+    : "off";
+  const reviewerRouting = triageEnabled && routingMode !== "off" && baseRef !== ""
+    ? resolveReviewerRouting({ baseRef, workspace })
+    : { targets: new Map() as ReadonlyMap<string, { users: readonly string[]; teams: readonly string[] }>, warnings: [] as readonly string[], sourcePath: null };
+  for (const warning of reviewerRouting.warnings) errorLog(`reviewer routing: ${warning}`);
+  promptState = applyReviewTriageFragment(promptState, triageEnabled, [...reviewerRouting.targets.keys()]);
   env.SYSTEM_PROMPT = promptState.systemPrompt;
 
   // ── Native tool harness (corpus.sh tail) ─────────────────────────────
@@ -1254,6 +1270,34 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   const triageDecision = reviewTriageEnabled
     ? resolveReviewTriageDecision(reviewRecord.review_triage_decision, triageReason)
     : "";
+  // #1005: the deterministic routing plan. Computed only when triage and
+  // routing are both enabled; the resolver validates every model-named logical
+  // target against trusted configuration and fails closed on any uncertain
+  // state, so a model can never cause an unconfigured identity to be
+  // requested. The plan is persisted for the publish step to act on.
+  const triageTargets = Array.isArray(reviewRecord.review_triage_targets)
+    ? reviewRecord.review_triage_targets.filter((target): target is string => typeof target === "string")
+    : [];
+  const routingPlan: HumanReviewRoutingPlan | null = reviewTriageEnabled && routingMode !== "off"
+    ? resolveHumanReviewRouting({
+        mode: routingMode,
+        decision: (triageDecision === "" ? "unknown" : triageDecision) as ReviewTriageDecision,
+        targets: triageTargets,
+        config: reviewerRouting.targets,
+        isForkPr: forkFlag === "true",
+      })
+    : null;
+  if (routingPlan !== null) {
+    ws.write("review-routing.json", `${JSON.stringify({
+      mode: routingPlan.mode,
+      status: routingPlan.status,
+      target_ids: routingPlan.targetIds,
+      users: routingPlan.users,
+      teams: routingPlan.teams,
+      detail: routingPlan.detail,
+    })}\n`);
+  }
+  const routingOutput = routingPlan === null || routingPlan.status === "off" ? "" : routingPlan.status;
   const outputs: ReviewStepOutputs = {
     verdict: outputVerdict,
     degradedGateBypass,
@@ -1274,6 +1318,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     escalationReason: escalationReasons,
     reviewTriageDecision: triageDecision,
     reviewTriageReason: triageReason,
+    reviewTriageRouting: routingOutput,
     reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     findings: pyJsonDumps(Array.isArray(reviewRecord.findings) ? reviewRecord.findings : []),
     toolCalls,
@@ -1297,6 +1342,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     routeReason: env.ROUTE_REASON ?? "",
     analysisEngine,
     fallbackUsed: primary.fromFallback,
+    ...(routingPlan !== null ? { reviewRouting: routingPlan } : {}),
   });
 
   const finished = clock();
