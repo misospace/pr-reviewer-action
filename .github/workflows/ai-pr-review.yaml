@@ -205,14 +205,14 @@ jobs:
           ai-fallback-base-url: ${{ vars.LITELLM_URL }}
           ai-fallback-model: ${{ vars.FALLBACK_MODEL }}
           ai-model: ${{ vars.PRIMARY_MODEL }}
-          ai-primary-reasoning-effort: ${{ vars.AI_PRIMARY_REASONING_EFFORT }}
-          ai-reasoning-effort: ${{ vars.AI_REASONING_EFFORT }}
+          ai-primary-reasoning-effort: ${{ vars.PRIMARY_REASONING_EFFORT }}
+          ai-reasoning-effort: ${{ vars.REASONING_EFFORT }}
           ai-response-format: json_object
           ai-smart-api-format: ${{ vars.SMART_FORMAT }}
           ai-smart-api-key: ${{ secrets.LITELLM_API_KEY }}
           ai-smart-base-url: ${{ vars.LITELLM_URL }}
           ai-smart-model: ${{ vars.SMART_MODEL }}
-          ai-smart-reasoning-effort: ${{ vars.AI_SMART_REASONING_EFFORT }}
+          ai-smart-reasoning-effort: ${{ vars.SMART_REASONING_EFFORT }}
           allow-approve: "true"
           ci-timeout-sec: "600"
           claim-falsification: "true"
