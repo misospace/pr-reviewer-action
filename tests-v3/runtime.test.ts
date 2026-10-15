@@ -256,11 +256,14 @@ test("external cancellation (parent action cancelled) terminates both trees", as
     // spinning on a null pid forever (the pgrep-less hang of #1069).
     await awaitLaunched([first, second], "external-cancellation");
     scope.abort("job-cancelled");
-  } finally {
-    // Idempotent: a no-op when the abort above ran, but it terminates any
-    // started sibling when the readiness wait failed instead, so no 60s
-    // sleeper can outlive the test.
-    scope.abort("test-teardown");
+  } catch (error) {
+    // Failure path: terminate any started sibling and await the settled
+    // results before rethrowing — `scope.abort` only initiates the
+    // asynchronous tree termination, so without this await the test could
+    // report its failure while sleeper cleanup is still in flight.
+    scope.abort("test-failure-cleanup");
+    await Promise.allSettled([first.result, second.result]);
+    throw error;
   }
   const [firstResult, secondResult] = await Promise.all([first.result, second.result]);
 
