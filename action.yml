@@ -42,19 +42,19 @@ inputs:
     required: false
     default: "0.1"
   ai-response-format:
-    description: "Structured-output mode for OpenAI-compatible endpoints (including LiteLLM): off (default), json_object, or json_schema (enforces a verdict/review_markdown schema). Ignored for the anthropic format. Improves output reliability with smaller local models. Acts as the base/default for ai-primary-response-format, ai-smart-response-format, and ai-fallback-response-format: an unset lane override inherits this value rather than forcing off."
+    description: "Structured-output mode: off (default), json_object, or json_schema (enforces a verdict/review_markdown schema). OpenAI-compatible endpoints (including LiteLLM) receive it as response_format. For the anthropic format nothing is sent by default: json_schema is enforced natively (output_config.format) only under the lane's ai-anthropic-structured-output-support opt-in, json_object has no Anthropic-native equivalent and stays prompt-only — either way the run logs what was actually enforced and a capability mismatch 400 is retried once without the parameter. Improves output reliability with smaller local models. Acts as the base/default for ai-primary-response-format, ai-smart-response-format, and ai-fallback-response-format: an unset lane override inherits this value rather than forcing off."
     required: false
     default: "off"
   ai-primary-response-format:
-    description: Primary-lane override for the OpenAI response_format mode (off, json_object, or json_schema). Empty (the default) inherits ai-response-format, so existing single-value workflows stay request-byte compatible. Empty/unset is not coerced to off — a primary model known to reject response_format can be pinned to off here while smart/fallback lanes keep their structured-output selection. Ignored for the anthropic format and never silently translated between modes.
+    description: Primary-lane override for the response_format mode (off, json_object, or json_schema). Empty (the default) inherits ai-response-format, so existing single-value workflows stay request-byte compatible. Empty/unset is not coerced to off — a primary model known to reject response_format can be pinned to off here while smart/fallback lanes keep their structured-output selection. On the anthropic format json_schema is enforced only with ai-anthropic-structured-output-support; json_object stays prompt-only. Never silently translated between modes.
     required: false
     default: ""
   ai-smart-response-format:
-    description: Smart-lane override for the OpenAI response_format mode (off, json_object, or json_schema). Empty (the default) inherits ai-response-format. Used by the reviewer-requested smart re-review (#721) so the smart model can use a richer structured-output setting than the primary lane. Ignored for the anthropic format.
+    description: Smart-lane override for the response_format mode (off, json_object, or json_schema). Empty (the default) inherits ai-response-format. Used by the reviewer-requested smart re-review (#721) so the smart model can use a richer structured-output setting than the primary lane. On the anthropic format json_schema is enforced only with ai-smart-anthropic-structured-output-support; json_object stays prompt-only.
     required: false
     default: ""
   ai-fallback-response-format:
-    description: Fallback-lane override for the OpenAI response_format mode (off, json_object, or json_schema). Empty (the default) inherits ai-response-format. The fallback lane is availability recovery, not quality escalation (#965); this input is the per-lane choice, not a promotion. Ignored for the anthropic format.
+    description: Fallback-lane override for the response_format mode (off, json_object, or json_schema). Empty (the default) inherits ai-response-format. The fallback lane is availability recovery, not quality escalation (#965); this input is the per-lane choice, not a promotion. On the anthropic format json_schema is enforced only with ai-fallback-anthropic-structured-output-support; json_object stays prompt-only.
     required: false
     default: ""
   ai-reasoning-effort:
@@ -85,6 +85,18 @@ inputs:
     description: "Fallback-lane override for the reasoning effort. Empty (the default) inherits ai-reasoning-effort, so existing single-value workflows stay request-byte compatible — the fallback lane is availability recovery, never quality escalation (#965). Values are free-form, bounded (lowercase letters, digits, '-', and '_'; up to 32 characters), passed through verbatim like ai-reasoning-effort; a value that fails shape is dropped as unset and the lane then inherits the base, with the drop announced by key. On Anthropic fallback requests the effort is sent as output_config.effort ONLY when ai-fallback-anthropic-effort-support: true is set — other lanes' true flags do NOT authorize fallback, exactly like the per-lane effort opt-in itself. Operator-only: never repo-configurable, matching the other ai-fallback-* reasoning inputs."
     required: false
     default: ""
+  ai-anthropic-structured-output-support:
+    description: "Operator assertion that the configured Anthropic-compatible endpoint/proxy is known to accept Anthropic-native structured output (output_config.format with the verdict/review_markdown JSON schema). Scopes the base and primary lanes only; the smart and fallback lanes assert their own endpoints (ai-smart-anthropic-structured-output-support, ai-fallback-anthropic-structured-output-support), so enabling it for one endpoint never silently enables it on another. Default false: Anthropic-format requests carry no structured-output parameter, even when ai-response-format resolved to json_schema — the JSON contract is prompt-only, and the run logs that truthfully instead of implying the parameter was sent. json_object has no Anthropic-native equivalent and is never sent or translated on this wire family regardless of this flag. If the assertion turns out wrong (an HTTP 400 naming the parameter), the request is retried once WITHOUT it so the review degrades to prompted JSON rather than failing. Set true only after confirming the endpoint accepts output_config.format. Ignored for the openai format."
+    required: false
+    default: "false"
+  ai-smart-anthropic-structured-output-support:
+    description: "Operator assertion that the smart lane's Anthropic-compatible endpoint/proxy is known to accept output_config.format structured output. Does NOT inherit ai-anthropic-structured-output-support: the smart route may target a different Anthropic-compatible backend that was never asserted, so a capability assertion never crosses lanes. Default false: smart Anthropic requests carry no structured-output parameter even when the lane resolved json_schema, and the run logs a warning naming this input. A wrong assertion degrades safely: one retry without the parameter. Ignored for the openai format."
+    required: false
+    default: "false"
+  ai-fallback-anthropic-structured-output-support:
+    description: "Operator assertion that the fallback lane's Anthropic-compatible endpoint/proxy is known to accept output_config.format structured output. Does NOT inherit ai-anthropic-structured-output-support: the fallback lane runs on its own ai-fallback-base-url, which may be a different Anthropic-compatible backend that was never asserted. Default false: fallback Anthropic requests carry no structured-output parameter even when the lane resolved json_schema, and the run logs a warning naming this input. A wrong assertion degrades safely: one retry without the parameter. Ignored for the openai format."
+    required: false
+    default: "false"
   ai-tokens-param:
     description: "Token-limit field name for OpenAI-compatible requests: max_tokens (default) or max_completion_tokens (required by newer OpenAI reasoning models). Ignored for anthropic."
     required: false
@@ -390,9 +402,9 @@ inputs:
     required: false
     default: "600"
   deep-review-max-tokens:
-    description: Maximum completion tokens for each deep-review specialist role; independent of ai_max_tokens. Default 4096.
+    description: Maximum completion tokens for each deep-review specialist role; independent of ai_max_tokens. Default 16384.
     required: false
-    default: "4096"
+    default: "16384"
   deep-review-corpus-max-bytes:
     description: Hard UTF-8 byte cap on the compact deep-review specialist corpus; independent of the final review corpus. Default 48000.
     required: false

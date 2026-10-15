@@ -9,7 +9,12 @@ import type {
 import { VerdictParseFailure } from "./types.js";
 import { buildModelRequest } from "./request.js";
 import { parseVerdictResponse } from "./verdict.js";
-import { runChatRequest, type ChatRequestOutcome } from "../transport/transport.js";
+import {
+  describeUnusableResponse,
+  shouldRaiseCompletionBudget,
+  type ResponseDiagnostics,
+} from "./response-diagnostics.js";
+import { runChatRequest, type ChatRequestOutcome, type StructuredOutputSurface } from "../transport/transport.js";
 import { describeTransportFailure, TransportFailure } from "../transport/http.js";
 
 /**
@@ -38,6 +43,23 @@ import { describeTransportFailure, TransportFailure } from "../transport/http.js
 export const EMPTY_COMPLETION_EXIT = 3;
 export const PARSE_FAIL_CAP = 2;
 export const MAX_RETRY_DELAY_SEC = 120;
+
+/**
+ * #1047: the bounded completion-budget raise for an evidence-gated verdict
+ * retry. Same multiplier and ceiling as the specialist overrun retry
+ * (`OVERRUN_RETRY_*` in `src/specialists/payload.ts`): at most 4x the
+ * configured cap, never above 32768, applied at most once per tier call and
+ * only when the response's own shape shows the cap destroyed the verdict (a
+ * token-cap stop reason, or the whole budget spent on reasoning before any
+ * text). No additional attempt is spent — the raise upgrades a retry that
+ * was already going to run.
+ */
+export const VERDICT_BUDGET_RAISE_MULTIPLIER = 4;
+export const VERDICT_BUDGET_RAISE_CEILING = 32768;
+
+export function raisedCompletionBudget(maxTokens: number): number {
+  return Math.max(maxTokens, Math.min(maxTokens * VERDICT_BUDGET_RAISE_MULTIPLIER, VERDICT_BUDGET_RAISE_CEILING));
+}
 
 /** #1006: Tier-level permanent HTTP statuses, distinct from the transport's
  * same-request retry allowlist. #987 borrowed that transport set as the tier's
@@ -68,6 +90,9 @@ export interface TierProfile {
   reasoningEffort: string;
   /** #998: the Anthropic endpoint opt-in for `output_config.effort`. */
   anthropicEffortSupported: boolean;
+  /** #1047: the Anthropic endpoint opt-in for `output_config.format`
+   * (verdict JSON schema). */
+  anthropicStructuredOutputSupported: boolean;
 }
 
 export interface ModelCallContext {
@@ -84,12 +109,17 @@ export interface ModelCallDeps {
 }
 
 export type ModelCallOutcome =
-  | { status: "ok"; verdict: ParsedReviewVerdict; rawResponse: unknown; attempts: number }
-  | { status: "empty_completion"; attempts: number; failure: VerdictParseFailure }
-  | { status: "parse_exhausted"; attempts: number; failure: VerdictParseFailure }
-  | { status: "transport_exhausted"; attempts: number; failure: TransportFailure; nonRetryable?: boolean };
+  | { status: "ok"; verdict: ParsedReviewVerdict; rawResponse: unknown; attempts: number; budgetRaisedTo?: number;
+      /** #1047 (review): set only when the successful request came from the
+       * transport's one-shot structured-output strip retry — the verdict was
+       * produced WITHOUT the parameter, so effective-format reporting must
+       * reflect the stripped state, not the configuration. */
+      strippedStructuredOutput?: StructuredOutputSurface | undefined }
+  | { status: "empty_completion"; attempts: number; failure: VerdictParseFailure; diagnostics?: ResponseDiagnostics | undefined }
+  | { status: "parse_exhausted"; attempts: number; failure: VerdictParseFailure; diagnostics?: ResponseDiagnostics | undefined }
+  | { status: "transport_exhausted"; attempts: number; failure: TransportFailure; nonRetryable?: boolean; diagnostics?: ResponseDiagnostics | undefined };
 
-function requestConfig(profile: TierProfile, context: ModelCallContext, stream: boolean): ModelRequestConfig {
+function requestConfig(profile: TierProfile, context: ModelCallContext, stream: boolean, maxTokensOverride?: number): ModelRequestConfig {
   return {
     apiFormat: profile.apiFormat,
     model: profile.model,
@@ -98,14 +128,35 @@ function requestConfig(profile: TierProfile, context: ModelCallContext, stream: 
     corpus: context.corpus,
     stream,
     shape: profile.shape,
-    maxTokens: profile.maxTokens,
+    maxTokens: maxTokensOverride ?? profile.maxTokens,
     temperature: profile.temperature,
     responseFormat: profile.responseFormat,
     tokensParam: profile.tokensParam,
     // #998: forwarded verbatim; "" keeps the request byte-identical.
     reasoningEffort: profile.reasoningEffort,
     anthropicEffortSupported: profile.anthropicEffortSupported,
+    // #1047: forwarded so the Anthropic wire family can enforce the verdict
+    // schema only under the lane's own endpoint assertion.
+    anthropicStructuredOutputSupported: profile.anthropicStructuredOutputSupported,
   };
+}
+
+/** #1047: bounded diagnostics for a tier-level failure. Total — every
+ * failure shape produces a record. */
+function tierDiagnostics(
+  profile: TierProfile,
+  response: unknown,
+  failure: { kind?: string; status?: number } | undefined,
+): ResponseDiagnostics {
+  return describeUnusableResponse({
+    response,
+    apiFormat: profile.apiFormat,
+    profile: profile.label,
+    streamed: profile.stream,
+    secrets: [profile.apiKey],
+    ...(failure?.status !== undefined ? { httpStatus: failure.status } : {}),
+    ...(failure?.kind !== undefined && failure.kind !== "" ? { failureKind: failure.kind } : {}),
+  });
 }
 
 async function defaultSleep(seconds: number): Promise<void> {
@@ -133,6 +184,12 @@ export async function callModelTier(
   let attempt = 1;
   let lastParseFailure: VerdictParseFailure | null = null;
   let lastTransportFailure: TransportFailure | null = null;
+  // #1047: the last body the endpoint returned (for failure diagnostics) and
+  // the latched completion-budget raise. `raisedTokens` is set at most once,
+  // only on token-cap evidence, and only upgrades an attempt that was
+  // already going to run — the attempt count never grows.
+  let lastRaw: unknown = null;
+  let raisedTokens: number | null = null;
 
   // #867: `retries` is a total-attempt budget (attempt <= retries), but a
   // caller-configured 0 (accepted by schema validation: ai-primary-retries
@@ -143,7 +200,7 @@ export async function callModelTier(
   // always runs; `retries` still governs every attempt after the first.
   const totalAttempts = Math.max(1, profile.retries);
   while (attempt <= totalAttempts) {
-    const payload = buildModelRequest(requestConfig(profile, context, profile.stream));
+    const payload = buildModelRequest(requestConfig(profile, context, profile.stream, raisedTokens ?? undefined));
     const outcome = await doCall({
       baseUrl: profile.baseUrl,
       apiFormat: profile.apiFormat,
@@ -156,7 +213,13 @@ export async function callModelTier(
 
     if (outcome.status === "failure") {
       if (!isRetryableTransportFailure(outcome.failure)) {
-        return { status: "transport_exhausted", attempts: attempt, failure: outcome.failure, nonRetryable: true };
+        return {
+          status: "transport_exhausted",
+          attempts: attempt,
+          failure: outcome.failure,
+          nonRetryable: true,
+          diagnostics: tierDiagnostics(profile, null, outcome.failure),
+        };
       }
       // Transport or HTTP error: consume the retry budget with doubling
       // backoff, capped at 120 s. Only sleep/back off when another attempt
@@ -171,9 +234,19 @@ export async function callModelTier(
       continue;
     }
 
+    lastRaw = outcome.raw;
     try {
       const verdict = parseVerdictResponse(outcome.raw, [profile.apiKey]);
-      return { status: "ok", verdict, rawResponse: outcome.raw, attempts: attempt };
+      return {
+        status: "ok",
+        verdict,
+        rawResponse: outcome.raw,
+        attempts: attempt,
+        ...(raisedTokens !== null ? { budgetRaisedTo: raisedTokens } : {}),
+        ...(outcome.strippedStructuredOutput !== undefined
+          ? { strippedStructuredOutput: outcome.strippedStructuredOutput }
+          : {}),
+      };
     } catch (error) {
       if (!(error instanceof VerdictParseFailure)) throw error;
       lastParseFailure = error;
@@ -181,10 +254,32 @@ export async function callModelTier(
       // An empty completion is deterministic for a given input: escalate now
       // rather than spending the parse-failure budget on a repeat.
       if (error.emptyCompletion) {
-        return { status: "empty_completion", attempts: attempt, failure: error };
+        return {
+          status: "empty_completion",
+          attempts: attempt,
+          failure: error,
+          diagnostics: tierDiagnostics(profile, lastRaw, error),
+        };
       }
       if (parseFails >= PARSE_FAIL_CAP) {
-        return { status: "parse_exhausted", attempts: attempt, failure: error };
+        const exhaustedDiagnostics = tierDiagnostics(profile, lastRaw, error);
+        if (exhaustedDiagnostics !== undefined && raisedTokens !== null) {
+          exhaustedDiagnostics.record.completion_budget_raised_to = raisedTokens;
+        }
+        return { status: "parse_exhausted", attempts: attempt, failure: error, diagnostics: exhaustedDiagnostics };
+      }
+      // #1047: the next parse attempt upgrades its completion budget when —
+      // and only when — the failed body's own shape shows the cap destroyed
+      // the verdict (token-cap stop reason, or the whole budget spent on
+      // reasoning before any text). Latched once; every other failure class
+      // retries with the configured budget unchanged.
+      if (raisedTokens === null) {
+        const raised = raisedCompletionBudget(profile.maxTokens);
+        if (raised > profile.maxTokens) {
+          if (shouldRaiseCompletionBudget(tierDiagnostics(profile, lastRaw, error).class)) {
+            raisedTokens = raised;
+          }
+        }
       }
       attempt++;
       // Same rule as the transport branch: only sleep when a further
@@ -192,13 +287,24 @@ export async function callModelTier(
       if (attempt <= totalAttempts) await sleep(delay);
     }
   }
-  return lastTransportFailure
-    ? { status: "transport_exhausted", attempts: attempt - 1, failure: lastTransportFailure }
-    : {
-      status: "parse_exhausted",
+  if (lastTransportFailure) {
+    return {
+      status: "transport_exhausted",
       attempts: attempt - 1,
-      failure: lastParseFailure ?? new VerdictParseFailure("not_object", "Expected JSON object but got NoneType"),
+      failure: lastTransportFailure,
+      diagnostics: tierDiagnostics(profile, null, lastTransportFailure),
     };
+  }
+  const finalParseDiagnostics = tierDiagnostics(profile, lastRaw, lastParseFailure ?? undefined);
+  if (finalParseDiagnostics !== undefined && raisedTokens !== null) {
+    finalParseDiagnostics.record.completion_budget_raised_to = raisedTokens;
+  }
+  return {
+    status: "parse_exhausted",
+    attempts: attempt - 1,
+    failure: lastParseFailure ?? new VerdictParseFailure("not_object", "Expected JSON object but got NoneType"),
+    diagnostics: finalParseDiagnostics,
+  };
 }
 
 export type VerdictOutcome = {
@@ -213,6 +319,12 @@ export type VerdictOutcome = {
   /** Set when a streamed attempt failed and the non-streamed retry ran. */
   streamFailureKind: VerdictOutcome["reason"];
   streamFailureDetail: string;
+  /** #1047: bounded failure-shape diagnostics for the final unusable
+   * response (absent on success). */
+  diagnostics?: ResponseDiagnostics;
+  /** #1047: the raised completion budget the non-streamed retry used, when
+   * the streamed attempt's failure shape justified one (absent otherwise). */
+  budgetRaisedTo?: number;
 };
 
 /**
@@ -267,12 +379,34 @@ export async function produceVerdict(
   let streamFailureKind: VerdictOutcome["reason"] = "";
   let streamFailureDetail = "";
   let current = first;
+  let finalBudgetRaisedTo: number | null = null;
 
   if (!first.ok && attemptedStream) {
     retried = true;
     streamFailureKind = first.reason;
     streamFailureDetail = first.detail;
-    const retryPayload = buildModelRequest(requestConfig(profile, context, false));
+    // #1047: the single non-streamed retry raises its completion budget when
+    // — and only when — the streamed body's own shape shows the token cap
+    // destroyed the verdict (token-cap stop reason, or the whole budget
+    // spent on reasoning before any text). No extra call is spent: the retry
+    // was already going to run; only its cap changes. Transport failures and
+    // true zero-output never raise — more tokens cannot recover those.
+    let budgetRaisedTo: number | undefined;
+    if (first.reason === "parse") {
+      const diagnostics = describeUnusableResponse({
+        response: first.raw,
+        apiFormat: profile.apiFormat,
+        profile: profile.label,
+        streamed: true,
+        secrets: [profile.apiKey],
+        failureKind: "parse",
+      });
+      const raised = raisedCompletionBudget(profile.maxTokens);
+      if (shouldRaiseCompletionBudget(diagnostics.class) && raised > profile.maxTokens) {
+        budgetRaisedTo = raised;
+      }
+    }
+    const retryPayload = buildModelRequest(requestConfig(profile, context, false, budgetRaisedTo));
     current = evaluate(await doCall({
       baseUrl: profile.baseUrl,
       apiFormat: profile.apiFormat,
@@ -283,7 +417,19 @@ export async function produceVerdict(
       connectTimeoutSec: profile.connectTimeoutSec,
     }));
     attempts++;
+    finalBudgetRaisedTo = budgetRaisedTo ?? null;
   }
+
+  const finalDiagnostics = current.ok
+    ? null
+    : describeUnusableResponse({
+        response: current.raw,
+        apiFormat: profile.apiFormat,
+        profile: profile.label,
+        streamed: current === first ? attemptedStream : false,
+        secrets: [profile.apiKey],
+        failureKind: current.reason === "transport" ? "network" : current.reason === "empty" ? "empty_completion" : "not_object",
+      });
 
   return {
     ok: current.ok,
@@ -298,5 +444,7 @@ export async function produceVerdict(
     rawResponse: current.raw,
     streamFailureKind: streamFailureKind,
     streamFailureDetail: streamFailureDetail,
+    ...(finalDiagnostics !== null ? { diagnostics: finalDiagnostics } : {}),
+    ...(finalBudgetRaisedTo !== null ? { budgetRaisedTo: finalBudgetRaisedTo } : {}),
   };
 }

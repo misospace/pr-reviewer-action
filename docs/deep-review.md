@@ -59,10 +59,18 @@ Every run records the mode and the per-role reasoning in `specialists.json`: `de
 | Input | Default | What it bounds |
 | --- | --- | --- |
 | `deep-review-timeout-sec` | `600` | Wall-clock budget for the whole specialist phase (selected roles run concurrently). A straggler past the deadline is recorded as an error on its own artifact; it never blocks or fails the review. |
-| `deep-review-max-tokens` | `4096` | Completion tokens per specialist role — independent of `ai-max-tokens`, since a specialist returns a short structured lead list, not a full review. |
+| `deep-review-max-tokens` | `16384` | Completion tokens per specialist role — independent of `ai-max-tokens`. Raised from 4096 by #1061: reasoning-heavy models spend the same budget on thinking and on the short structured lead list, and the 4096 default truncated them at exactly 4095 tokens with zero leads. Lower it for small-output-cap models. |
 | `deep-review-corpus-max-bytes` | `48000` | Hard byte cap on the shared specialist corpus (PR metadata, classification, changed files, diff, capped standards, requirement ledger, related-code, evidence/CI), built once and reused by every selected role. |
 
 When `deep-review` is enabled, the specialist passes run **concurrently with the CI wait**, not after it — both branches fork after the unchanged-review precheck and join before the final reviewer starts, so wall clock is closer to `max(CI, specialists)` than their sum. A CI timeout/failure never blocks the review, and specialists stay advisory and fail-soft either way.
+
+### Completion caps, overrun recovery, and reasoning effort
+
+Reasoning-heavy models spend the same completion budget on thinking and on the answer, so a cap that is fine for a plain chat model truncates them. The per-role default is `16384` (#1061). When a role's response stops at the cap and yields no leads — whether it failed to parse or parsed cleanly as an empty list — the phase raises the budget **once**, to a bounded `32768` ceiling, and re-parses; the same rule applies to `combined_scout`'s single shared call. A response that already carries leads is never retried. That recovery only fires when the stop reason is recognized — OpenAI's `length` and Anthropic's `max_tokens` are both handled, streamed or not; before #1061 a streamed Anthropic `max_tokens` turn was invisible to the check, so the retry never ran. Lower `deep-review-max-tokens` for small-output-cap models.
+
+Each role's outcome records the bounded, non-sensitive diagnostic needed to tell the failure modes apart: `stop_reason`, `output_chars`, `overrun_detected`, `overrun_retry_result` (`recovered`/`failed`/`skipped`), and `error_kind` — `overrun` for an unrecovered completion-limit truncation, `parser` for a malformed/no-lead response with a normal stop, and `transport`/`timeout`/`input`/`guard` for non-response failures (null on success). The role's log line carries the same fields. None of it contains prompts, chain-of-thought, credentials, or provider bodies.
+
+Reasoning effort is a **separate** control. On an Anthropic endpoint the specialist lane sends `output_config.effort` only when `ai-specialist-anthropic-effort-support: true` is asserted for that endpoint; otherwise the configured effort is not sent and the run prints a warning naming the input. Raising the token cap is deliberately independent of that opt-in — it does not require, enable, or imply provider effort support, and asserting support still needs its own provider-capability testing.
 
 ## `true` / `false` overrides
 

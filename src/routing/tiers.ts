@@ -1,4 +1,5 @@
 import type { EnvLike } from "../tools/budget.js";
+import { REASONING_EFFORT_PATTERN } from "../config/load-config.js";
 
 /**
  * Review routing and tier bindings, ported from scripts/sections/classification.sh
@@ -35,6 +36,14 @@ export interface ResolvedTier extends TierSettings {
    * no lane inherits another, because a route may target a different
    * Anthropic-compatible backend that was never asserted. */
   anthropicEffortSupported: boolean;
+  /** #1047: the per-lane assertion that this lane's Anthropic endpoint
+   * accepts Anthropic-native structured output (`output_config.format` with
+   * the verdict JSON schema). Only `json_schema` is sendable and only under
+   * this assertion (`ai-anthropic-structured-output-support` for the
+   * base/primary route, `ai-smart-…`, `ai-fallback-…`); no lane inherits
+   * another, for the same endpoint-heterogeneity reason as the effort
+   * opt-in. */
+  anthropicStructuredOutputSupported: boolean;
 }
 export interface TierProfiles {
   primary: ResolvedTier;
@@ -97,10 +106,10 @@ export function tierResponseFormat(tier: "primary" | "smart" | "fallback", env: 
 // Free-form by design: providers and proxies define their own effort
 // vocabularies, so the action imposes no enum and clamps nothing. What it does
 // impose is a SHAPE — a short, lowercase, JSON-safe token — because the value
-// travels into a provider request body.
-
-/** Same shape contract as `REASONING_EFFORT_PATTERN` in `src/config/load-config.ts`. */
-export const REASONING_EFFORT_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
+// travels into a provider request body. The shape lives in exactly one place
+// (`src/config/load-config.ts`, the loader's boundary check); this module
+// consumes it rather than keeping a second copy in step.
+export { REASONING_EFFORT_PATTERN };
 
 /** The normalized effort for a raw value, or null when it is unset or fails
  * the shape check. Pure: the caller decides how loudly to report a drop. */
@@ -243,6 +252,98 @@ export function anthropicEffortInactiveWarning(
   return `${lane} lane${boundary}: the Anthropic endpoint is not asserted to accept output_config.effort, so the configured reasoning effort "${effort}" is NOT sent; set ${supportInput}: true only if the endpoint is known to accept it`;
 }
 
+// ── #1047: Anthropic-native structured output ───────────────────────────
+// The Messages API's structured-output contract is
+// `output_config.format = {type: "json_schema", schema}` — a sibling of
+// `effort` in the same object. A wire family is not proof a backend supports
+// its optional features, so the parameter is opt-in per lane, exactly like
+// the effort opt-in: asserted endpoints only, never inherited across lanes,
+// never translated from `json_object` (that mode has no Anthropic-native
+// equivalent at all).
+
+/** #1047: the input name that carries the structured-output opt-in for one
+ * lane. The specialist lane has none by design: specialist payloads do not
+ * use the verdict schema, so there is no Anthropic-native schema to assert
+ * for them (their JSON stays prompted, and the truthful warning below says
+ * so). */
+export function anthropicStructuredOutputSupportInput(lane: "primary" | "smart" | "fallback"): string {
+  if (lane === "smart") return "ai-smart-anthropic-structured-output-support";
+  if (lane === "fallback") return "ai-fallback-anthropic-structured-output-support";
+  return "ai-anthropic-structured-output-support";
+}
+
+/** #1047: the per-lane Anthropic structured-output assertion. True only on
+ * the exact word "true"; anything else (including a malformed value) is off,
+ * so an Anthropic request never carries `output_config.format` by accident.
+ * Like the effort opt-in, no lane inherits another. */
+export function laneAnthropicStructuredOutputSupported(
+  tier: "primary" | "smart" | "fallback",
+  env: EnvLike,
+): boolean {
+  const key = tier === "smart"
+    ? "AI_SMART_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT"
+    : tier === "fallback"
+      ? "AI_FALLBACK_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT"
+      : "";
+  return key === ""
+    ? (env.AI_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT ?? "").trim().toLowerCase() === "true"
+    : (env[key] ?? "").trim().toLowerCase() === "true";
+}
+
+/** #1047: the effective structured-output mode a request actually enforces
+ * on the wire. An Anthropic lane enforces `json_schema` only under its
+ * opt-in; everything else on that wire family is prompt-only and reports as
+ * "off" — logs and diagnostics state what was SENT, never what the config
+ * happened to name. */
+export function effectiveWireResponseFormat(
+  apiFormat: string,
+  responseFormat: string,
+  anthropicStructuredOutputSupported: boolean,
+): "off" | "json_object" | "json_schema" {
+  if (responseFormat !== "json_object" && responseFormat !== "json_schema") return "off";
+  if (apiFormat === "anthropic") {
+    return responseFormat === "json_schema" && anthropicStructuredOutputSupported ? "json_schema" : "off";
+  }
+  return responseFormat;
+}
+
+/** #1047: the operator-facing notice for a resolved `json_schema` that will
+ * NOT be enforced because the lane's Anthropic endpoint opt-in is off. Names
+ * the lane, the effective prompt-only mode, and the exact input that turns
+ * enforcement on; never mentions a secret. This is the truth-telling the
+ * issue exists for: a silently omitted parameter is indistinguishable from
+ * an enforced one. */
+export function anthropicStructuredOutputInactiveWarning(
+  lane: "primary" | "smart" | "fallback",
+  boundary = "",
+): string {
+  const supportInput = anthropicStructuredOutputSupportInput(lane);
+  return `${lane} lane${boundary}: ai-response-format resolved to json_schema, but the Anthropic endpoint is not asserted to accept output_config.format, so NO structured-output parameter is sent and the JSON contract is prompt-only; set ${supportInput}: true only if the endpoint is known to accept it`;
+}
+
+/** #1047: the operator-facing notice for `json_object` resolved onto an
+ * Anthropic-format lane. There is no Anthropic-native `json_object` — no
+ * opt-in exists that could enable it, and the action never translates the
+ * mode into some other wire parameter — so the request asks for JSON in the
+ * prompt only. The actionable alternative is named: `json_schema` plus the
+ * lane's structured-output opt-in. The specialist lane has no opt-in at all
+ * (specialist payloads do not use the verdict schema), so its notice says
+ * that instead of naming an input that would do nothing. */
+export function anthropicJsonObjectsPromptOnlyWarning(
+  lane: "primary" | "smart" | "fallback" | "specialist",
+  responseFormat: "json_object" | "json_schema" = "json_object",
+  boundary = "",
+): string {
+  if (lane === "specialist") {
+    return `${lane} lane${boundary}: ai-response-format is ignored for Anthropic-format specialist calls — specialist JSON contracts are prompted only and are never sent as output_config.format`;
+  }
+  const supportInput = anthropicStructuredOutputSupportInput(lane);
+  if (responseFormat === "json_schema") {
+    return anthropicStructuredOutputInactiveWarning(lane, boundary);
+  }
+  return `${lane} lane${boundary}: ai-response-format resolved to json_object, which has no Anthropic-native equivalent — the request is prompt-only for JSON and nothing is schema-enforced; use json_schema with ${supportInput}: true on an endpoint known to accept it`;
+}
+
 /** #965: the primary-first policy. In `auto` mode the initial review always
  * uses the primary profile; the smart model is reached only when the completed
  * primary verdict explicitly sets `smart_review_requested: true` (#721), and
@@ -366,6 +467,9 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
       responseFormat: tierResponseFormat("primary", env),
       reasoningEffort: tierReasoningEffort("primary", env),
       anthropicEffortSupported: laneAnthropicEffortSupported("primary", env),
+      // #1047: the base assertion scopes the base/primary route, exactly like
+      // the effort opt-in.
+      anthropicStructuredOutputSupported: laneAnthropicStructuredOutputSupported("primary", env),
     },
     smart: {
       ...smart, resolved: smartResolved, retries: numberValue(env, "AI_SMART_RETRIES", 2), retryDelaySec: delay, stream,
@@ -375,6 +479,9 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
       // #998: the smart lane asserts its own endpoint capability; the base
       // flag never scopes a route that may point at another backend.
       anthropicEffortSupported: laneAnthropicEffortSupported("smart", env),
+      // #1047: same per-lane rule — the smart route may target a different
+      // Anthropic-compatible backend that was never asserted.
+      anthropicStructuredOutputSupported: laneAnthropicStructuredOutputSupported("smart", env),
     },
     fallback: {
       ...fallback, resolved: Boolean(fallback.baseUrl && fallback.model), retries: numberValue(env, "AI_FALLBACK_RETRIES", 2), retryDelaySec: delay,
@@ -390,6 +497,9 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
       // #998: like its effort, the fallback lane shares the base endpoint
       // assertion; it has no effort opt-in input of its own.
       anthropicEffortSupported: laneAnthropicEffortSupported("fallback", env),
+      // #1047: the fallback endpoint asserts its own support (it runs on its
+      // own ai-fallback-base-url, which may be a different backend).
+      anthropicStructuredOutputSupported: laneAnthropicStructuredOutputSupported("fallback", env),
     },
   };
 }

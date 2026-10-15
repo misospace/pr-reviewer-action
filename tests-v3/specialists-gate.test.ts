@@ -718,3 +718,200 @@ test("#846 security review: a one-character or three-character configured API ke
     }
   }
 });
+
+// ---------------------------------------------------------------------------
+// #1061: default cap + bounded overrun diagnostic in the role log line
+// ---------------------------------------------------------------------------
+
+test("#1061: the shipped default cap is 16384 and an overrun role logs a bounded diagnostic", async () => {
+  const truncated = {
+    id: "c1",
+    object: "chat.completion",
+    model: "m",
+    choices: [{ index: 0, message: { role: "assistant", content: '{"leads":[' }, finish_reason: "max_tokens" }],
+    usage: { prompt_tokens: 10, completion_tokens: 4096, total_tokens: 4106 },
+  };
+  const seen: number[] = [];
+  const requestFn: SpecialistRequestFn = async (payload) => {
+    seen.push(payload.max_tokens as number);
+    return { ok: true, raw: truncated };
+  };
+  const result = await run({ DEEP_REVIEW: "true" }, { requestFn });
+  try {
+    assert.equal(result.code, 0);
+    // No DEEP_REVIEW_MAX_TOKENS override: the shipped 16384 default applies,
+    // and the one-shot retry raises it to the bounded 32768 ceiling.
+    assert.ok(seen.length > 0);
+    assert.ok(seen.every((cap) => cap === 16384 || cap === 32768), `caps: ${JSON.stringify(seen)}`);
+    assert.ok(seen.includes(16384), "the initial call used the shipped default");
+    assert.ok(seen.includes(32768), "the overrun retry used the ceiling");
+    assert.equal((JSON.parse(result.read("specialists.json")) as { specialist_max_tokens: number }).specialist_max_tokens, 16384);
+
+    const line = result.out.find((entry) => entry.startsWith("specialist correctness:"));
+    assert.ok(line, `expected a correctness log line, got ${JSON.stringify(result.out)}`);
+    assert.match(line!, /degraded \(overrun\)/);
+    assert.match(line!, /stop_reason=max_tokens/);
+    assert.match(line!, /output_chars=10/);
+    assert.match(line!, /overrun=failed/);
+    // The diagnostic never carries the response body.
+    assert.ok(!line!.includes('{"leads":['), "the log line must not carry the response body");
+  } finally {
+    rmSync(result.root, { recursive: true, force: true });
+  }
+});
+
+test("#1061: an explicit deep-review-max-tokens override is preserved", async () => {
+  const seen: number[] = [];
+  const requestFn: SpecialistRequestFn = async (payload) => {
+    seen.push(payload.max_tokens as number);
+    return { ok: true, raw: leadsResponse([]) };
+  };
+  const result = await run({ DEEP_REVIEW: "true", DEEP_REVIEW_MAX_TOKENS: "2048" }, { requestFn });
+  try {
+    assert.equal(result.code, 0);
+    assert.ok(seen.every((cap) => cap === 2048), `caps: ${JSON.stringify(seen)}`);
+    assert.equal((JSON.parse(result.read("specialists.json")) as { specialist_max_tokens: number }).specialist_max_tokens, 2048);
+  } finally {
+    rmSync(result.root, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #1061: parser failures are classified, and exposed without raw model output
+// ---------------------------------------------------------------------------
+
+test("#1061: a malformed response with a normal stop is classified 'parser' in the aggregate and the role log", async () => {
+  const rawBody = "RAW-MODEL-OUTPUT-NOT-JSON";
+  const malformed = {
+    id: "c1",
+    object: "chat.completion",
+    model: "m",
+    choices: [{ index: 0, message: { role: "assistant", content: rawBody }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+  };
+  let calls = 0;
+  const requestFn: SpecialistRequestFn = async () => {
+    calls += 1;
+    return { ok: true, raw: malformed };
+  };
+  const result = await run({ DEEP_REVIEW: "true" }, { requestFn });
+  try {
+    assert.equal(result.code, 0);
+    // No retry: a plain parse failure is not a completion-limit overrun.
+    assert.equal(calls, 3, "each role makes exactly one attempt");
+
+    const aggregate = JSON.parse(result.read("specialists.json")) as {
+      roles: { role: string; status: string; error_kind: string | null }[];
+    };
+    for (const entry of aggregate.roles) {
+      assert.equal(entry.status, "degraded");
+      assert.equal(entry.error_kind, "parser", `${entry.role} must be classified a parser failure`);
+    }
+
+    const line = result.out.find((entry) => entry.startsWith("specialist correctness:"));
+    assert.ok(line, `expected a correctness log line, got ${JSON.stringify(result.out)}`);
+    assert.match(line!, /degraded \(parser\)/);
+    assert.ok(!line!.includes(rawBody), "the role log must never carry raw model output");
+
+    // The persisted per-role artifact records the parse failure, not the body.
+    const artifact = JSON.parse(result.read("specialist-correctness.json")) as { errors: string[] };
+    assert.ok(artifact.errors.some((error) => /malformed JSON/.test(error)));
+    assert.ok(!JSON.stringify(artifact).includes(rawBody), "the role artifact must not carry raw model output");
+  } finally {
+    rmSync(result.root, { recursive: true, force: true });
+  }
+});
+
+test("#1061: the unset 16384 default reaches Anthropic specialist payloads", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(leadsResponse([])));
+  });
+  try {
+    const result = await run({
+      DEEP_REVIEW: "true",
+      AI_BASE_URL: `${server.url}/v1`,
+      AI_API_FORMAT: "anthropic",
+      AI_SPECIALIST_MODEL: "specialist",
+      // DEEP_REVIEW_MAX_TOKENS deliberately unset: the shipped default must
+      // reach the wire without the operator setting anything.
+    }, { productionTransport: true });
+    assert.equal(result.code, 0);
+    assert.equal(server.requests.length, 3, "one call per selected role");
+    for (const { body } of server.requests) {
+      assert.equal((JSON.parse(body) as { max_tokens: number }).max_tokens, 16384, `unset default must reach the wire: ${body}`);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1047 (review): explicit-empty primary response-format override inherits the base for Anthropic specialists, and the prompt-only warning fires", async () => {
+  // The specialist phase resolves through the same tierResponseFormat helper
+  // as the rest of the v3 config chain, so an explicitly empty (or
+  // whitespace-only) ai-primary-response-format inherits ai-response-format —
+  // and on an Anthropic specialist transport the inherited json_object/
+  // json_schema is announced as prompt-only, never read as silently off.
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(leadsResponse([])));
+  });
+  try {
+    for (const override of ["", "  "]) {
+      const result = await run({
+        DEEP_REVIEW: "true",
+        AI_BASE_URL: `${server.url}/v1`,
+        AI_API_FORMAT: "anthropic",
+        AI_SPECIALIST_MODEL: "specialist",
+        AI_RESPONSE_FORMAT: "json_schema",
+        AI_PRIMARY_RESPONSE_FORMAT: override,
+      }, { productionTransport: true });
+      assert.equal(result.code, 0, `override=${JSON.stringify(override)}`);
+      // The inherited json_schema is announced as prompt-only (specialist
+      // contracts are not the verdict schema; no opt-in applies to them).
+      assert.ok(
+        result.out.some((line) =>
+          line.startsWith("WARNING:") && line.includes("specialist") && line.includes("prompted only")),
+        `override=${JSON.stringify(override)}: ${result.out.join(" | ")}`,
+      );
+      // Preserved specialist wire behavior: no structured-output parameter
+      // ever reaches an Anthropic specialist payload.
+      const bodies = server.requests.map(({ body }) => JSON.parse(body) as Record<string, unknown>);
+      assert.ok(bodies.length > 0);
+      assert.ok(bodies.every((payload) => payload.output_config === undefined && !("response_format" in payload)));
+      server.requests.length = 0;
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1061: a valid-empty overrun is classified and logged, not reported as a clean role", async () => {
+  const emptyAtCap = {
+    id: "c1",
+    object: "chat.completion",
+    model: "m",
+    choices: [{ index: 0, message: { role: "assistant", content: '{"leads":[]}' }, finish_reason: "max_tokens" }],
+    usage: { prompt_tokens: 10, completion_tokens: 16384, total_tokens: 16394 },
+  };
+  const requestFn: SpecialistRequestFn = async () => ({ ok: true, raw: emptyAtCap });
+  const result = await run({ DEEP_REVIEW: "true" }, { requestFn });
+  try {
+    assert.equal(result.code, 0);
+    const aggregate = JSON.parse(result.read("specialists.json")) as {
+      any_errors: boolean;
+      roles: { role: string; status: string; error_kind: string | null }[];
+    };
+    for (const entry of aggregate.roles) {
+      assert.equal(entry.status, "degraded", `${entry.role} must not read as a clean success`);
+      assert.equal(entry.error_kind, "overrun", `${entry.role} must be classified an overrun`);
+    }
+    assert.equal(aggregate.any_errors, true, "an unrecovered zero-lead overrun must not be silently clean");
+
+    const line = result.out.find((entry) => entry.startsWith("specialist correctness:"));
+    assert.ok(line, `expected a correctness log line, got ${JSON.stringify(result.out)}`);
+    assert.match(line!, /degraded \(overrun\)/);
+  } finally {
+    rmSync(result.root, { recursive: true, force: true });
+  }
+});

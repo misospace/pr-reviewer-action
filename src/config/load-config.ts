@@ -20,22 +20,24 @@ export type RawInputs = Readonly<Record<string, string | undefined>>;
 // absent one: it disables what the input configures (ai-temperature: no
 // sampling-temperature override; rereview-command: comment-triggered
 // re-reviews), so the loader must keep it and not substitute the contract
-// default. #998: the reasoning-effort family is the same case — empty means
-// "omit the provider's effort field entirely", which is what keeps an unset
-// configuration request-byte identical, so it must stay "".
-const EMPTY_DISABLING_INPUTS: ReadonlySet<string> = new Set([
+// default. Every member MUST have a non-empty contract default: an input whose
+// default is already "" preserves an explicit "" by construction (the
+// empty-default rule in `loadConfig`), so listing it here would be a no-op —
+// the drift guard in tests-v3/config.test.ts enforces that. #998: the
+// reasoning-effort family is exactly that case — its "" default means empty
+// keeps "omit the provider's effort field entirely", which is what keeps an
+// unset configuration request-byte identical, so a new lane override (#1053)
+// needs no entry here.
+export const EMPTY_DISABLING_INPUTS: ReadonlySet<string> = new Set([
   "ai-temperature",
   "rereview-command",
-  "ai-reasoning-effort",
-  "ai-primary-reasoning-effort",
-  "ai-smart-reasoning-effort",
-  "ai-fallback-reasoning-effort",
-  "ai-specialist-reasoning-effort",
 ]);
 
 // #998: the reasoning-effort values are free-form but bounded, so they get
-// their own shape check (below) rather than an ENUM_INPUTS vocabulary.
-const REASONING_EFFORT_INPUTS: ReadonlySet<string> = new Set([
+// their own shape check (below) rather than an ENUM_INPUTS vocabulary. A new
+// lane override must be registered here or its value would skip the boundary
+// check; the drift guard in tests-v3/config.test.ts catches that omission.
+export const REASONING_EFFORT_INPUTS: ReadonlySet<string> = new Set([
   "ai-reasoning-effort", "ai-primary-reasoning-effort", "ai-smart-reasoning-effort", "ai-fallback-reasoning-effort", "ai-specialist-reasoning-effort",
 ]);
 
@@ -74,9 +76,16 @@ export function loadConfig(contract: ActionContract, raw: RawInputs): RuntimeCon
     const fallback = typeof input.default === "string" && /^\$\{\{.*\}\}$/s.test(input.default.trim())
       ? ""
       : input.default;
+    // An explicit empty string is preserved — never replaced by the contract
+    // default — when the default is itself empty, so the reasoning-effort
+    // family's "empty means omit the field" behavior falls out of the contract
+    // default rather than a per-input registration. The declared carve-outs
+    // cover the remaining inputs (non-empty defaults) for which "" is a
+    // functional disable rather than "use the default".
+    const emptyIsFunctional = fallback === "" || EMPTY_DISABLING_INPUTS.has(input.id);
     const source = external === undefined
       ? fallback
-      : external === "" && fallback !== undefined && !EMPTY_DISABLING_INPUTS.has(input.id)
+      : external === "" && fallback !== undefined && !emptyIsFunctional
         ? String(fallback)
         : external;
     if (source === undefined) {
