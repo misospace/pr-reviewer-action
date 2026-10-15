@@ -11,10 +11,10 @@ This file is the durable standards context injected into every agent and reviewe
 - **Forge agnostic** — GitHub and Forgejo behind the platform seam (`src/platform/`). No forge-specific logic outside the adapters.
 - **Repository agnostic** — product behavior never special-cases this repository's identity, paths, or metadata.
 - **Provider/model agnostic** — OpenAI `POST /chat/completions` and Anthropic `POST /messages` wire formats; cloud and local/self-hosted endpoints are both first-class.
-- **Deployment/runtime agnostic** — GitHub Actions and Forgejo Actions (composite wrapper + committed Node bundle).
+- **Deployment/runtime compatible** — GitHub Actions and qualified Forgejo Actions runners use the native JavaScript Action (`runs.using: node24`). `dist/` is built by CI and packaged on release-tag commits, not committed to `main`.
 - **Independent of the maintainer's infrastructure** — no dependency on the homelab, LiteLLM topology, Kubernetes, Flux, Courier, Dispatch, or home-ops.
 
-Do not freeze temporary v2 implementation details into permanent product rules. The v2→v3 state is migration, not policy — see `docs/v3-migration.md`.
+Do not freeze temporary v2 implementation details into permanent product rules. The completed v2→v3 migration is historical context, not policy — see `docs/v3-migration.md`.
 
 ## Authority model (normative)
 
@@ -43,7 +43,7 @@ Do not freeze temporary v2 implementation details into permanent product rules. 
 | `src/` | The TypeScript runtime — the shipped production path (`node dist/index.js`, entry `src/run/action.ts`): `platform/`, `precheck/`, `prompt/`, `context/`, `classification/`, `requirements/`, `corpus/`, `model/`, `transport/`, `runtime/`, `gates/`, `evidence/` |
 | `scripts/` | Repository tooling (eval, harvest, fork gate, judge, release, v3 build assets); not part of the action |
 | `pr_reviewer/` | Python modules for the semantic-eval and judge tooling; not part of the action |
-| `tests/`, `tests-v3/` | pytest + shell tests (retained tooling and gates); node:test for v3; shared JSON fixtures under `tests/fixtures/` |
+| `tests/`, `tests-v3/` | node:test for the shipped v3 runtime; pytest + shell for retained Python auxiliary tooling (eval, harvest, judge, fork gate) and repo/workflow structural gates; shared JSON fixtures under `tests/fixtures/` |
 | `evals/` | graded eval corpora driven by `scripts/eval_harness.py` through the v3 runtime (runbook: `docs/evals.md`) |
 | `.github/workflows/fork-ai-review.yaml` | privilege-separated fork-PR reviewer (`docs/fork-review.md`) |
 
@@ -60,7 +60,7 @@ pytest tests/ -v --tb=short                 # Python tests: eval tooling, retain
 ## Development conventions (normative)
 
 - **`dist/` is release-only**: never commit it. CI builds it; releases commit it onto the tagged release commit (off `main`) via `scripts/release/tag-with-dist.sh`.
-- **Naming**: v2 public contract snake_case (`action.yml`); v3 public contract kebab-case (`contracts/action-v3.yml`). TypeScript internals camelCase; snake_case survives only at persisted/parity serialization boundaries via explicit converters.
+- **Naming**: current public Action input/output IDs are kebab-case in `contracts/action-v3.yml` and the generated `action.yml`. TypeScript internals use camelCase; snake_case survives only in explicit persisted/compatibility serialization and historical v2 migration mappings.
 - **Model API credentials travel only through the HTTP auth headers** the provider defines (e.g. `Authorization: Bearer` / `x-api-key`) over the typed Node transport (`src/transport/`); they must never appear in process argv, request URLs or bodies, or locally generated diagnostics and error messages. Do not reintroduce a shell/curl transport.
 - **Versioning**: `vX.Y.Z` semver tags with floating major tags (`v1`, `v2`, …). Follow the README's "Versioning policy" for patch/minor/major criteria; release via **Actions → Manual Release** after CI is green on `main`.
 - **Documentation**: keep runbooks and implementation detail in `docs/`; `AGENTS.md` carries durable rules and pointers only.

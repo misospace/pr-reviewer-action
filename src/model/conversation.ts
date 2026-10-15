@@ -34,6 +34,7 @@
  * `</untrusted_tool_result>` cannot close its own fence.
  */
 import { provenanceAttributes, type EvidenceProvenance } from "../context/evidence-provenance.js";
+import { buildAnthropicOutputConfig } from "./request.js";
 
 // ---------------------------------------------------------------------------
 // Tool schemas
@@ -1118,6 +1119,10 @@ export class Conversation {
       responseFormat?: string | null;
       tokensParam?: string;
       cachePrefix?: boolean;
+      /** #998: the tier's resolved reasoning effort ("" = omit). */
+      reasoningEffort?: string;
+      /** #998: Anthropic `output_config.effort` opt-in; ignored by OpenAI. */
+      anthropicEffortSupported?: boolean;
     } = {},
   ): Record<string, unknown> {
     const stream = options.stream ?? false;
@@ -1128,6 +1133,8 @@ export class Conversation {
     const responseFormat = options.responseFormat ?? null;
     const tokensParam = options.tokensParam ?? "max_tokens";
     const cachePrefix = options.cachePrefix ?? false;
+    const reasoningEffort = options.reasoningEffort ?? "";
+    const anthropicEffortSupported = options.anthropicEffortSupported ?? false;
     if (apiFormat === "anthropic") {
       return this.toAnthropicPayload({
         model,
@@ -1139,6 +1146,8 @@ export class Conversation {
         responseFormat,
         cachePrefix,
         includeTurnNotes: !verdictTurn,
+        reasoningEffort,
+        anthropicEffortSupported,
       });
     }
     return this.toOpenAiPayload({
@@ -1151,6 +1160,7 @@ export class Conversation {
       responseFormat,
       tokensParam,
       includeTurnNotes: !verdictTurn,
+      reasoningEffort,
     });
   }
 
@@ -1164,6 +1174,8 @@ export class Conversation {
     responseFormat: string | null;
     tokensParam: string;
     includeTurnNotes: boolean;
+    /** #998: the tier's resolved reasoning effort ("" = omit). */
+    reasoningEffort: string;
   }): Record<string, unknown> {
     let system = this.system;
     let messages = this.renderOpenAiMessages(options.includeTurnNotes);
@@ -1209,6 +1221,11 @@ export class Conversation {
     } else {
       payload.tools = this.toolSchemas.map(toolToOpenAi);
     }
+    // #998: OpenAI's protocol-native effort field, verbatim and only when a
+    // tier actually resolved one (the unset case stays byte-identical).
+    if (options.reasoningEffort !== "") {
+      payload.reasoning_effort = options.reasoningEffort;
+    }
     return payload;
   }
 
@@ -1222,6 +1239,10 @@ export class Conversation {
     responseFormat: string | null;
     cachePrefix: boolean;
     includeTurnNotes: boolean;
+    /** #998: the tier's resolved reasoning effort ("" = omit). */
+    reasoningEffort: string;
+    /** #998: the operator's `output_config.effort` opt-in for this endpoint. */
+    anthropicEffortSupported: boolean;
   }): Record<string, unknown> {
     let system = this.system;
     let messages = this.renderAnthropicMessages(options.includeTurnNotes);
@@ -1251,6 +1272,15 @@ export class Conversation {
     // the system prompt to request JSON. response_format is silently ignored
     // to keep the call sites uniform between the two APIs.
     void options.responseFormat;
+    // #998: Anthropic carries the effort in its own `output_config` object,
+    // never as OpenAI's `reasoning_effort`, and only under the operator's
+    // explicit endpoint opt-in. Built through the shared helper so a future
+    // `output_config.format` key (#1047) merges into the same object instead
+    // of replacing it.
+    if (options.anthropicEffortSupported) {
+      const outputConfig = buildAnthropicOutputConfig(options.reasoningEffort);
+      if (outputConfig !== null) payload.output_config = outputConfig;
+    }
     // Anthropic prompt caching is opt-in (#263 Part 2): unlike OpenAI's
     // automatic prefix cache, it caches nothing unless cache_control markers
     // are present. Mark the stable prefix — the system block and the tools

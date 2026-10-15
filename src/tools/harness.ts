@@ -38,6 +38,7 @@ import { KNOWN_SECRET_REDACTED, maskAndTruncate, maskDiagnostic } from "../conte
 import { reframeForCorpus, renderRepoMapMarkdown, repoMapFromArtifact, trustFramingOverhead } from "../context/repo-map.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { VerdictParseFailure } from "../model/types.js";
+import { anthropicEffortInactiveWarning, laneAnthropicEffortSupported, normalizeReasoningEffort, tierReasoningEffort } from "../routing/tiers.js";
 import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
 import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
 import {
@@ -1317,6 +1318,24 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       ? "max_completion_tokens"
       : "max_tokens";
 
+  // #998: this loop's reasoning effort. The smart native loop binds
+  // SMART_REASONING_EFFORT alongside its SMART_* endpoint keys, so prefer
+  // that (re-validated here, so no bound value can skip the shape check);
+  // otherwise resolve the tier's own lane input (ai-primary-/
+  // ai-smart-reasoning-effort) with the base as fallback. "" keeps every
+  // request byte-identical to a build without the feature.
+  const boundEffort = input.tier === "smart" ? (env.SMART_REASONING_EFFORT ?? "").trim() : "";
+  const tierEffort = () => tierReasoningEffort(input.tier === "smart" ? "smart" : "primary", env);
+  const reasoningEffort = boundEffort === "" ? tierEffort() : normalizeReasoningEffort(boundEffort) ?? tierEffort();
+  // #998 (#1049 review): the opt-in is per-lane, because a smart route may
+  // target a different Anthropic-compatible backend than the primary one.
+  // An effort held back by the missing assertion is announced once here, not
+  // silently dropped on every loop round.
+  const anthropicEffort = laneAnthropicEffortSupported(input.tier === "smart" ? "smart" : "primary", env);
+  if (input.apiFormat === "anthropic" && reasoningEffort !== "" && !anthropicEffort) {
+    log(`WARNING: ${anthropicEffortInactiveWarning(input.tier === "smart" ? "smart" : "primary", reasoningEffort, " (native tool loop)")}`);
+  }
+
   // Token/cost telemetry across the whole loop.
   const usageAcc: UsageAccumulator = {
     requests: 0,
@@ -1478,6 +1497,10 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         maxTokens: summarizeMaxTokens,
         temperature: planningTemp,
         tokensParam,
+        // #998: the digest call is part of this tier's spend, so it carries
+        // the same effort the loop rounds do.
+        reasoningEffort,
+        anthropicEffortSupported: anthropicEffort,
       });
       // The digest call rides the loop's postFn so its spend is counted in
       // usage_acc and it gets the same streamed-turn fallback.
@@ -1501,6 +1524,8 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       stream,
       tokensParam,
       cachePrefix: true,
+      reasoningEffort,
+      anthropicEffortSupported: anthropicEffort,
       summarizeFn,
       timeFn,
     },
@@ -1652,6 +1677,10 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           responseFormat,
           tokensParam,
           cachePrefix: true,
+          // #998: the closing verdict turn is part of this tier's spend too,
+          // so it honors the same effort (and the same Anthropic opt-in).
+          reasoningEffort,
+          anthropicEffortSupported: anthropicEffort,
         }) as Record<string, unknown>;
         let verdictTimeout = input.turnTimeout;
         if (deadline !== null) {

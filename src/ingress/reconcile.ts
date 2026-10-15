@@ -8,11 +8,21 @@
  * suppress the duplicate: a missed webhook discovers exactly one job, and a
  * discovered-but-already-known head discovers none.
  *
+ * Poll-scope binding (#1025): the adapter only schedules jobs for the
+ * repository it polled. An entry whose normalized target repository
+ * disagrees with `options.repos` (either via the envelope
+ * `repository.full_name` or via `base.repo.full_name` when the envelope is
+ * absent) is reported in `skipped` and never reserves a generation id —
+ * the normalizer's resolved `repoFullName` IS the target identity, so a
+ * cross-repo response cannot piggy-back on the configured repo's ledger
+ * reservation. Forks (head.repo differs from base.repo) are preserved
+ * because the normalizer already keys the target on `base.repo.full_name`.
+ *
  * Raw PR payloads from the lister are passed UNTOUCHED to
  * `reconciliationPollEvent`; nothing in this module interprets them.
  */
 
-import { reconciliationPollEvent } from "../events/normalize.js";
+import { reconciliationPollEvent, normalizeRepoFullName } from "../events/normalize.js";
 import { buildReviewJob } from "../jobs/generation.js";
 import type { BuildJobOptions, ReviewJob } from "../jobs/types.js";
 import type { ReadResult } from "./api-client.js";
@@ -47,11 +57,20 @@ export async function reconcileForgejoRepositories(
   const failed: string[] = [];
   let discovered = 0;
   let skipped = 0;
-  for (const repo of options.repos) {
+  for (const rawRepo of options.repos) {
+    // The polled target identity in the normalizer's own canonical form,
+    // so the per-entry scope check below uses the SAME definition the
+    // normalizer derived `event.repoFullName` with (#1025) — case and
+    // whitespace differences never bypass the boundary.
+    const targetRepo = normalizeRepoFullName(rawRepo);
+    if (targetRepo === "") {
+      failed.push(rawRepo);
+      continue;
+    }
     try {
-      const listed = await options.listOpenPullRequests(repo);
+      const listed = await options.listOpenPullRequests(rawRepo);
       if (!listed.ok) {
-        failed.push(repo);
+        failed.push(rawRepo);
         continue;
       }
       for (const entry of listed.data) {
@@ -62,6 +81,17 @@ export async function reconcileForgejoRepositories(
           options.installationId === undefined ? {} : { installationId: options.installationId },
         );
         if (event === null) {
+          skipped += 1;
+          continue;
+        }
+        // Scope binding (#1025): an entry whose normalized target
+        // repository disagrees with the polled `targetRepo` is not in
+        // scope and MUST NOT mint a job or reserve a generation id. The
+        // normalizer already prefers `repository.full_name` over
+        // `base.repo.full_name`, so either conflict surfaces here.
+        // Legitimate forks resolve to `base.repo.full_name` and so
+        // still match — the head repo is intentionally NOT compared.
+        if (event.repoFullName !== targetRepo) {
           skipped += 1;
           continue;
         }
@@ -77,7 +107,7 @@ export async function reconcileForgejoRepositories(
         jobs.push(job);
       }
     } catch {
-      failed.push(repo);
+      failed.push(rawRepo);
     }
   }
   return Object.freeze({

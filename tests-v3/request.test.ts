@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildModelRequest, OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
+import { buildAnthropicOutputConfig, buildModelRequest, OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
+import { resolveSpecialistProfiles, resolveTierProfiles } from "../src/routing/tiers.js";
 import type { ModelRequestConfig } from "../src/model/types.js";
 
 // Frozen copy of the v2 `rf_json` bash literal (scripts/model_call.sh's
@@ -23,6 +24,10 @@ function config(overrides: Partial<ModelRequestConfig> = {}): ModelRequestConfig
     temperature: 0.1,
     responseFormat: "off",
     tokensParam: "max_tokens",
+    // #998: unset by default so every pre-existing shape assertion below stays
+    // a byte-compatibility pin.
+    reasoningEffort: "",
+    anthropicEffortSupported: false,
     ...overrides,
   };
 }
@@ -142,8 +147,138 @@ test("#1009: anthropic lanes drop response_format regardless of the lane selecti
   }
 });
 
+// ── #998: profile-aware reasoning effort ────────────────────────────────
+
+test("#998: an unset effort keeps the request body byte-compatible on both wire families", () => {
+  // The unset case must be indistinguishable from a build without the
+  // feature: no `reasoning_effort`, no `output_config`, nothing else moved.
+  const openai = buildModelRequest(config()).body as unknown as Record<string, unknown>;
+  assert.equal("reasoning_effort" in openai, false);
+  assert.equal("output_config" in openai, false);
+  const anthropic = buildModelRequest(config({ apiFormat: "anthropic" })).body as unknown as Record<string, unknown>;
+  assert.equal("output_config" in anthropic, false);
+  assert.equal("reasoning_effort" in anthropic, false);
+  assert.deepEqual(
+    buildModelRequest(config()),
+    buildModelRequest(config({ reasoningEffort: "", anthropicEffortSupported: false })),
+  );
+  // An Anthropic call with the opt-in ON but no effort configured is still
+  // byte-identical: the opt-in only permits the field, it does not invent one.
+  assert.deepEqual(
+    buildModelRequest(config({ apiFormat: "anthropic", anthropicEffortSupported: true })),
+    buildModelRequest(config({ apiFormat: "anthropic" })),
+  );
+});
+
+test("#998: the base effort reaches the primary OpenAI body as reasoning_effort", () => {
+  const profiles = resolveTierProfiles({ AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_REASONING_EFFORT: "high" });
+  assert.equal(profiles.primary.reasoningEffort, "high");
+  const body = buildModelRequest(config({ reasoningEffort: profiles.primary.reasoningEffort })).body as unknown as Record<string, unknown>;
+  assert.equal(body.reasoning_effort, "high");
+  // Verbatim, never translated: no clamping, no invented vocabulary.
+  const verbatim = resolveTierProfiles({ AI_REASONING_EFFORT: "xhigh-ultra" }).primary.reasoningEffort;
+  assert.equal(verbatim, "xhigh-ultra");
+  assert.equal(
+    (buildModelRequest(config({ reasoningEffort: verbatim })).body as unknown as Record<string, unknown>).reasoning_effort,
+    "xhigh-ultra",
+  );
+});
+
+test("#998: a primary override beats the base, and the smart override applies only to the smart route", () => {
+  const profiles = resolveTierProfiles({
+    AI_BASE_URL: "https://primary",
+    AI_MODEL: "main",
+    AI_SMART_MODEL: "smart",
+    AI_REASONING_EFFORT: "low",
+    AI_PRIMARY_REASONING_EFFORT: "high",
+    AI_SMART_REASONING_EFFORT: "xhigh",
+  });
+  assert.equal(profiles.primary.reasoningEffort, "high");
+  assert.equal(profiles.smart.reasoningEffort, "xhigh");
+  // Fallback is availability recovery, never escalation: it keeps the base.
+  assert.equal(profiles.fallback.reasoningEffort, "low");
+  const primaryBody = buildModelRequest(config({ reasoningEffort: profiles.primary.reasoningEffort })).body as unknown as Record<string, unknown>;
+  const smartBody = buildModelRequest(config({ reasoningEffort: profiles.smart.reasoningEffort })).body as unknown as Record<string, unknown>;
+  assert.equal(primaryBody.reasoning_effort, "high");
+  assert.equal(smartBody.reasoning_effort, "xhigh");
+  assert.notEqual(primaryBody.reasoning_effort, smartBody.reasoning_effort);
+});
+
+test("#998: the specialist override applies to specialist calls and inherits the primary value when empty", () => {
+  const base = { AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_SPECIALIST_MODEL: "specialist" };
+  const inherited = resolveSpecialistProfiles({ ...base, AI_REASONING_EFFORT: "high" });
+  assert.equal(inherited.transport.reasoningEffort, "high");
+  // An explicit primary lane value is what the specialist lane inherits.
+  const primaryLane = resolveSpecialistProfiles({ ...base, AI_REASONING_EFFORT: "low", AI_PRIMARY_REASONING_EFFORT: "high" });
+  assert.equal(primaryLane.transport.reasoningEffort, "high");
+  const overridden = resolveSpecialistProfiles({ ...base, AI_REASONING_EFFORT: "high", AI_SPECIALIST_REASONING_EFFORT: "minimal" });
+  assert.equal(overridden.transport.reasoningEffort, "minimal");
+  // Unset everywhere: nothing is emitted.
+  assert.equal(resolveSpecialistProfiles(base).transport.reasoningEffort, "");
+});
+
+test("#998: Anthropic carries output_config.effort only under the explicit opt-in, never reasoning_effort", () => {
+  const optedIn = buildModelRequest(config({ apiFormat: "anthropic", reasoningEffort: "high", anthropicEffortSupported: true }));
+  assert.equal(optedIn.endpointPath, "/messages");
+  assert.deepEqual((optedIn.body as unknown as Record<string, unknown>).output_config, { effort: "high" });
+  // OpenAI's field never appears anywhere on the Anthropic wire family.
+  assert.equal("reasoning_effort" in (optedIn.body as object), false);
+  assert.equal(JSON.stringify(optedIn.body).includes("reasoning_effort"), false);
+  // No `thinking` disable trick and no invented "none" effort.
+  assert.equal("thinking" in (optedIn.body as object), false);
+  assert.equal(JSON.stringify(optedIn.body).includes('"none"'), false);
+
+  // Configured but NOT opted in: byte-compatible, no output_config at all.
+  const notOptedIn = buildModelRequest(config({ apiFormat: "anthropic", reasoningEffort: "high", anthropicEffortSupported: false }));
+  assert.deepEqual(notOptedIn, buildModelRequest(config({ apiFormat: "anthropic" })));
+  // A malformed flag is not an opt-in (the helper only accepts "true").
+  const env = { AI_BASE_URL: "https://p", AI_MODEL: "m", AI_API_FORMAT: "anthropic", AI_REASONING_EFFORT: "high", AI_ANTHROPIC_EFFORT_SUPPORT: "yes" };
+  assert.equal(resolveTierProfiles(env).primary.reasoningEffort, "high");
+  assert.equal(JSON.stringify(buildModelRequest(config({ apiFormat: "anthropic", reasoningEffort: "high", anthropicEffortSupported: false }))).includes("output_config"), false);
+});
+
+test("#998: buildAnthropicOutputConfig merges format and effort without either overwriting the other", () => {
+  // #1047's `format` is not implemented here; the helper must already be
+  // merge-safe for it, because both keys live in the same object.
+  assert.deepEqual(buildAnthropicOutputConfig("high", { type: "json_schema" }), {
+    format: { type: "json_schema" },
+    effort: "high",
+  });
+  assert.deepEqual(buildAnthropicOutputConfig("high", undefined), { effort: "high" });
+  assert.deepEqual(buildAnthropicOutputConfig("", { type: "json_object" }), { format: { type: "json_object" } });
+  // Nothing to merge ⇒ no key at all (so the body stays byte-compatible).
+  assert.equal(buildAnthropicOutputConfig(""), null);
+  assert.equal(buildAnthropicOutputConfig("", undefined), null);
+  assert.equal(buildAnthropicOutputConfig("", null), null);
+  // Neither key clobbers the other, and a null/undefined format is dropped
+  // rather than sent as a null.
+  const merged = buildAnthropicOutputConfig("high", { type: "json_schema" });
+  assert.equal((merged as Record<string, unknown>).effort, "high");
+  assert.deepEqual((merged as Record<string, unknown>).format, { type: "json_schema" });
+});
+
+test("#998: a hostile or malformed effort never reaches a request body", () => {
+  // #252: feed the boundary its own adversarial values. Each is dropped as
+  // unset (with a warning) at resolution time, so no provider request can
+  // carry a quote, a newline, a dash-led token, or an over-long one.
+  const hostile = ['high"', "high\nreasoning_effort: \"low\"", "-high", "high high", "a".repeat(33), "9lives", ""];
+  for (const value of hostile) {
+    const profiles = resolveTierProfiles({ AI_BASE_URL: "https://p", AI_MODEL: "m", AI_REASONING_EFFORT: value });
+    const body = buildModelRequest(config({ reasoningEffort: profiles.primary.reasoningEffort })).body as unknown as Record<string, unknown>;
+    assert.equal("reasoning_effort" in body, false, JSON.stringify(value));
+    const anthropic = buildModelRequest(config({
+      apiFormat: "anthropic",
+      reasoningEffort: profiles.primary.reasoningEffort,
+      anthropicEffortSupported: true,
+    })).body as unknown as Record<string, unknown>;
+    assert.equal("output_config" in anthropic, false, JSON.stringify(value));
+  }
+  // The whole body is still valid JSON — a dropped value can never corrupt
+  // the request bytes.
+  assert.doesNotThrow(() => JSON.stringify(buildModelRequest(config()).body));
+});
+
 test("request construction is provider-neutral: no branching on model names", () => {
-  // The same config with different model names produces identical structure.
   const a = buildModelRequest(config({ model: "gpt-9-mini" }));
   const b = buildModelRequest(config({ model: "qwen3-local@proxy" }));
   assert.deepEqual(

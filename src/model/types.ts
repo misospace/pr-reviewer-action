@@ -24,6 +24,17 @@ export interface ModelRequestConfig {
   responseFormat: ResponseFormatMode;
   /** OpenAI-compatible token-limit field name. */
   tokensParam: TokensParam;
+  /** #998: the resolved reasoning effort for this call, or "" to omit the
+   * provider's effort field entirely. Free-form and bounded by the config
+   * layer; passed through verbatim (no clamping, no invented vocabulary). */
+  reasoningEffort: string;
+  /** #998: the lane's own opt-in that its Anthropic-format endpoint accepts
+   * `output_config.effort` (`ai-anthropic-effort-support` for the base/primary
+   * route, `ai-smart-anthropic-effort-support`, `ai-fallback-anthropic-effort-support`,
+   * `ai-specialist-anthropic-effort-support` — never inherited across lanes,
+   * #1049 review). False means the Anthropic body carries no
+   * effort field even when `reasoningEffort` is set. Ignored by OpenAI. */
+  anthropicEffortSupported: boolean;
 }
 
 /**
@@ -50,6 +61,8 @@ export interface OpenAiWireBody {
   temperature?: number;
   response_format?: Record<string, unknown>;
   stream_options?: { include_usage: boolean };
+  /** #998: the OpenAI-protocol effort field, verbatim. */
+  reasoning_effort?: string;
 }
 
 export interface AnthropicWireBody {
@@ -59,6 +72,10 @@ export interface AnthropicWireBody {
   system: string;
   messages: [{ role: "user"; content: string }];
   temperature?: number;
+  /** #998: Anthropic's own container for output controls; `effort` is only
+   * present under the operator's explicit `ai-anthropic-effort-support`
+   * opt-in. Never carries OpenAI's `reasoning_effort`. */
+  output_config?: Record<string, unknown>;
 }
 
 export interface NormalizedToolCall {

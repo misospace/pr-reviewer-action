@@ -64,6 +64,10 @@ export interface TierProfile {
   temperature: number | "";
   responseFormat: ResponseFormatMode;
   tokensParam: TokensParam;
+  /** #998: the lane's resolved reasoning effort ("" = omit the field). */
+  reasoningEffort: string;
+  /** #998: the Anthropic endpoint opt-in for `output_config.effort`. */
+  anthropicEffortSupported: boolean;
 }
 
 export interface ModelCallContext {
@@ -98,6 +102,9 @@ function requestConfig(profile: TierProfile, context: ModelCallContext, stream: 
     temperature: profile.temperature,
     responseFormat: profile.responseFormat,
     tokensParam: profile.tokensParam,
+    // #998: forwarded verbatim; "" keeps the request byte-identical.
+    reasoningEffort: profile.reasoningEffort,
+    anthropicEffortSupported: profile.anthropicEffortSupported,
   };
 }
 

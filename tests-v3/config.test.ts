@@ -38,7 +38,7 @@ test("current canonical contract validates and maps every input once", () => {
     assert.ok(Object.hasOwn(config, toCamelCase(input.id)), input.id);
     assert.equal(toCamelCase(input.id).includes("_"), false);
   }
-  assert.equal(contract.inputs.length, 144);
+  assert.equal(contract.inputs.length, 152);
   assert.equal(Object.hasOwn(config, "ai_base_url"), false);
 });
 
@@ -106,6 +106,97 @@ test("#1009: per-lane response_format inputs default empty and inherit ai-respon
   assert.equal(onlyPrimary.aiFallbackResponseFormat, "json_schema");
 });
 
+test("#998: reasoning-effort inputs default empty, inherit per lane, pass values through, and reject malformed values loudly", async () => {
+  // Declared, optional, and empty by default: an unset configuration must
+  // resolve to no effort anywhere, which is what keeps request bytes
+  // identical to a build without the feature.
+  const baseline = loadConfig(contract, { "ai-base-url": "https://primary", "ai-model": "main" });
+  assert.equal(baseline.aiReasoningEffort, "");
+  assert.equal(baseline.aiPrimaryReasoningEffort, "");
+  assert.equal(baseline.aiSmartReasoningEffort, "");
+  assert.equal(baseline.aiSpecialistReasoningEffort, "");
+  // The Anthropic opt-in is a boolean input defaulting to false — the
+  // endpoint assertion is never implied by configuring an effort.
+  assert.equal(baseline.aiAnthropicEffortSupport, false);
+  for (const id of ["ai-reasoning-effort", "ai-primary-reasoning-effort", "ai-smart-reasoning-effort", "ai-specialist-reasoning-effort"]) {
+    const input = contract.inputs.find((entry) => entry.id === id);
+    assert.ok(input, id);
+    assert.equal(input.required, false, id);
+    assert.equal(input.default, "", id);
+    assert.equal(input["repo-configurable"], undefined, `${id} is operator-only`);
+  }
+  assert.equal(ENUM_INPUTS["ai-reasoning-effort"], undefined, "free-form, not an enum");
+
+  // Base value: each lane override (empty) inherits it, and the specialist
+  // input inherits the primary lane's resolved value.
+  const inherited = loadConfig(contract, {
+    "ai-base-url": "https://primary",
+    "ai-model": "main",
+    "ai-reasoning-effort": "high",
+  });
+  assert.equal(inherited.aiReasoningEffort, "high");
+  assert.equal(inherited.aiPrimaryReasoningEffort, "high");
+  assert.equal(inherited.aiSmartReasoningEffort, "high");
+  assert.equal(inherited.aiSpecialistReasoningEffort, "high");
+
+  // Explicit lane overrides win, and normalization is trim + lowercase (no
+  // vocabulary is imposed: `xhigh-ultra` is as valid as `high`).
+  const overrides = loadConfig(contract, {
+    "ai-base-url": "https://primary",
+    "ai-model": "main",
+    "ai-reasoning-effort": "low",
+    "ai-primary-reasoning-effort": "HIGH",
+    "ai-smart-reasoning-effort": "  xhigh-ultra  ",
+    "ai-specialist-reasoning-effort": "minimal_1",
+    "ai-anthropic-effort-support": "true",
+  });
+  assert.equal(overrides.aiReasoningEffort, "low");
+  assert.equal(overrides.aiPrimaryReasoningEffort, "high");
+  assert.equal(overrides.aiSmartReasoningEffort, "xhigh-ultra");
+  assert.equal(overrides.aiSpecialistReasoningEffort, "minimal_1");
+  assert.equal(overrides.aiAnthropicEffortSupport, true);
+
+  // The opt-in is a strict boolean like every other boolean input.
+  assert.throws(
+    () => loadConfig(contract, { "ai-base-url": "https://primary", "ai-model": "main", "ai-anthropic-effort-support": "yes" }),
+    /must be 'true' or 'false'/,
+  );
+
+  // #252: malformed values are rejected AT THE BOUNDARY ITSELF — dropped as
+  // unset with a loud warning naming the key, never a crash and never a
+  // silent clamp. The rejected text must not survive into the config.
+  const required = Object.fromEntries(contract.inputs.filter((input) => input.required).map((input) => [input.id, `required-${input.id}`]));
+  const warnings: string[] = [];
+  const onWarning = (warning: Error): void => { warnings.push(warning.message); };
+  process.on("warning", onWarning);
+  try {
+    const dropped = loadConfig(contract, { ...required, "ai-reasoning-effort": "high", "ai-primary-reasoning-effort": "-bad" });
+    // A dropped lane value then behaves as unset: it inherits the base rather
+    // than failing the run.
+    assert.equal(dropped.aiPrimaryReasoningEffort, "high");
+    const badValues = [
+      ["ai-reasoning-effort", 'high"'],
+      ["ai-primary-reasoning-effort", "high\nreasoning_effort"],
+      ["ai-smart-reasoning-effort", "-high"],
+      ["ai-specialist-reasoning-effort", "a".repeat(33)],
+    ] as const;
+    const droppedConfigs = badValues.map(([id, bad]) => [
+      id,
+      bad,
+      loadConfig(contract, { ...required, [id]: bad }),
+    ] as const);
+    // process.emitWarning delivers on the next tick.
+    await new Promise((resolve) => setImmediate(resolve));
+    for (const [id, bad, config] of droppedConfigs) {
+      assert.equal((config as Record<string, unknown>)[toCamelCase(id)], "", id);
+      assert.ok(warnings.some((message) => message.includes(id)), `${id} is announced by key: ${warnings.join(" | ")}`);
+      assert.equal(warnings.some((message) => message.includes(bad)), false, "the rejected value is never echoed into the notice");
+    }
+  } finally {
+    process.off("warning", onWarning);
+  }
+});
+
 test("#875: equivalent-paths-max-bytes is a positive integer — zero and negative are rejected", () => {
   // Matches related-code-max-bytes: 0 must not silently fall back to the
   // 6000 default, and a negative value must not reach the clipping helper
@@ -146,6 +237,11 @@ test("contract defaults and typed parsing agree for every input", () => {
     "ai-primary-response-format": "aiResponseFormat",
     "ai-smart-response-format": "aiResponseFormat",
     "ai-fallback-response-format": "aiResponseFormat",
+    // #998: per-lane reasoning effort inherits the base when empty, and the
+    // specialist input inherits the primary lane's already-resolved value.
+    "ai-primary-reasoning-effort": "aiReasoningEffort",
+    "ai-smart-reasoning-effort": "aiReasoningEffort",
+    "ai-specialist-reasoning-effort": "aiPrimaryReasoningEffort",
     "ai-primary-model": "aiModel",
     "ai-primary-base-url": "aiBaseUrl",
     "ai-primary-api-format": "aiApiFormat",

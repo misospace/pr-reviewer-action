@@ -117,6 +117,20 @@ export const SPECIALIST_GATE_ENV_KEYS: EnvAllowlist = [
   "AI_PRIMARY_RESPONSE_FORMAT",
   "AI_SMART_RESPONSE_FORMAT",
   "AI_FALLBACK_RESPONSE_FORMAT",
+  // #998: the reasoning-effort family and the Anthropic `output_config.effort`
+  // opt-in — same category as the response_format keys above (model-call
+  // settings), so the child specialist phase resolves the same effort the
+  // in-process path does.
+  "AI_REASONING_EFFORT",
+  "AI_PRIMARY_REASONING_EFFORT",
+  "AI_SMART_REASONING_EFFORT",
+  "AI_SPECIALIST_REASONING_EFFORT",
+  "AI_ANTHROPIC_EFFORT_SUPPORT",
+  // #998 (#1049 review): the effort opt-in is now per-lane, so the specialist
+  // child resolves its OWN assertion (`ai-specialist-anthropic-effort-support`)
+  // exactly like the in-process path; the smart key stays out of this
+  // allowlist — the specialist phase never routes to the smart lane.
+  "AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT",
   "AI_TOKENS_PARAM",
   "AI_STREAM",
   // Deep-review phase controls.

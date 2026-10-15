@@ -233,6 +233,10 @@ export interface ClaimModelPassConfig {
   stream: boolean;
   timeoutSec: number;
   inputMaxBytes: number;
+  /** #998: the primary lane's resolved reasoning effort ("" = omit). */
+  reasoningEffort?: string;
+  /** #998: the Anthropic endpoint opt-in for `output_config.effort`. */
+  anthropicEffortSupported?: boolean;
 }
 
 export interface ClaimModelPassInput {
@@ -273,6 +277,10 @@ export async function runClaimFalsificationModelPass(input: ClaimModelPassInput)
     responseFormat: input.config.responseFormat,
     tokensParam: input.config.tokensParam,
     stream: input.config.stream,
+    // #998: the primary lane's effort, so the pre-pass sends the same
+    // request bytes shape as the review call.
+    ...(input.config.reasoningEffort !== undefined ? { reasoningEffort: input.config.reasoningEffort } : {}),
+    ...(input.config.anthropicEffortSupported !== undefined ? { anthropicEffortSupported: input.config.anthropicEffortSupported } : {}),
   });
   const requestBytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
 
