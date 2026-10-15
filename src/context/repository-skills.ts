@@ -19,6 +19,15 @@ export const SKILL_LIMITS = Object.freeze({
   loadedSkills: 4,
 });
 
+/** Conversation-append budget for a `read_skill` tool result (#1043 review).
+ * The executor verifies the *serialized* result (the same `pyDumpsSorted`
+ * text `Conversation.addToolResult` re-serializes) fits this bound before
+ * admitting the read, so `content_complete: true` can never be followed by a
+ * silent append-time truncation: JSON escaping can expand raw bytes up to
+ * 6× (`\u00XX` control chars), so a pathologically escape-dense body fails
+ * the read explicitly instead of arriving as a cut-off fragment. */
+export const SKILL_RESULT_MAX_BYTES = SKILL_LIMITS.bytesPerSkill * 2;
+
 export interface RepositorySkill {
   name: string;
   description: string;

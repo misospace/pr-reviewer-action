@@ -25,10 +25,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { maskAndTruncate, maskAndTruncateSource, maskAndTruncateSourceDetailed, redactSourceText } from "../context/redact.js";
 import { committedSourceProvenance, sanitizedSourceProvenance, untrustedTextProvenance, type EvidenceProvenance } from "../context/evidence-provenance.js";
-import { isRepositorySkillPath, readRepositorySkill, SKILL_LIMITS } from "../context/repository-skills.js";
+import { isRepositorySkillPath, readRepositorySkill, SKILL_LIMITS, SKILL_RESULT_MAX_BYTES } from "../context/repository-skills.js";
 import { USER_AGENT } from "../platform/user-agent.js";
 import { runProcess, type ProcessResult } from "../runtime/subprocess.js";
-import { pyDumpsCompact } from "../model/conversation.js";
+import { pyDumpsCompact, pyDumpsSorted } from "../model/conversation.js";
 
 export const GH_DENY_SUBSTRINGS = [
   "/actions/secrets",
@@ -1152,6 +1152,15 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         // the complete body (see driveToolLoop).
         const fullBody = maskAndTruncateSource(content, Number.MAX_SAFE_INTEGER, path).text;
         result = { path, content: fullBody, source: "trusted-base", content_complete: true };
+        // #1043 (review, second pass): the append budget binds the SERIALIZED
+        // result, and JSON escaping can expand raw bytes up to 6×. Measure
+        // the exact `pyDumpsSorted` text `Conversation.addToolResult` will
+        // re-serialize and fail the read explicitly when it cannot fit — a
+        // successful `content_complete: true` response is never a truncated
+        // fragment.
+        if (Buffer.byteLength(pyDumpsSorted(result), "utf8") > SKILL_RESULT_MAX_BYTES) {
+          throw new Error(`Serialized repository skill exceeds the ${SKILL_RESULT_MAX_BYTES}-byte tool-result budget; refusing to truncate`);
+        }
         provenance = untrustedTextProvenance(path);
         break;
       }

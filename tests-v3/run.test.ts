@@ -4881,6 +4881,12 @@ test("#1043 review: a reused run dir never ingests a stale repository-skill adde
     assert.ok(existsSync(join(runDir, "repository-skill-addendum.md")), "run 1 writes the addendum");
     const corpus1 = readFileSync(join(runDir, "review-corpus.truncated.md"), "utf8");
     assert.match(corpus1, /EXPAND-CONTRACT-ROLLOUT-MARKER/);
+    // The runtime stage path must match the actually loaded addendum
+    // (#1043 review: deriving the path from a not-yet-computed addendum
+    // cleared it for every active selection).
+    const skillContext = JSON.parse(readFileSync(join(runDir, "repository-skill-context.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(skillContext.path, skillPath);
+    assert.equal(skillContext.added_to_corpus, true);
     // Run 2: same run dir, skills disabled — the stale addendum must not
     // survive into the second corpus. IS_FORK_PR stays "false"; the point
     // is the stale-artifact cleanup, not the fork gate.

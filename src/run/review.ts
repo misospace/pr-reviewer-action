@@ -462,14 +462,17 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   env.REPOSITORY_SKILLS_PATHS = JSON.stringify(skillsEnabled ? skillCatalog.skills.map(skill => skill.path) : []);
   env.REPOSITORY_SKILLS_CATALOG = renderSkillCatalog(skillsEnabled ? skillCatalog.skills : []);
   env.REPOSITORY_SKILLS_FINGERPRINT = (skillsEnabled || explicitSkill !== null) ? skillCatalog.contentFingerprint : "";
-  // #1043 (review): the env var mirrors the addendum actually in effect —
-  // an addendum present in the corpus but absent from the config env would
-  // dodge the fingerprint, so both are keyed off the same condition.
-  env.REPOSITORY_SKILL_PATH = env.REPOSITORY_SKILL_ADDENDUM !== "" ? explicitSkillPath : "";
+  // #1043 (review, second pass): compute the addendum FIRST, then derive the
+  // runtime path from it — deriving from the not-yet-assigned (initialized "")
+  // addendum cleared the path for every actively selected skill.
   env.REPOSITORY_SKILL_ADDENDUM = explicitSkill !== null
     && (!skillsEnabled || (env.TOOL_MODE ?? "off").toLowerCase() !== "native_loop")
     ? renderExplicitSkill(explicitSkillPath, explicitSkill)
     : "";
+  // #1043 (review): the env var mirrors the addendum actually in effect —
+  // an addendum present in the corpus but absent from the config env would
+  // dodge the fingerprint, so both are keyed off the same condition.
+  env.REPOSITORY_SKILL_PATH = env.REPOSITORY_SKILL_ADDENDUM !== "" ? explicitSkillPath : "";
   if (env.REPOSITORY_SKILL_ADDENDUM !== "") {
     ws.write("repository-skill-addendum.md", env.REPOSITORY_SKILL_ADDENDUM);
     ws.write("repository-skill-context.json", JSON.stringify({ source: "operator-selected", path: explicitSkillPath, added_to_corpus: true }));

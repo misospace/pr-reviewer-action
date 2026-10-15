@@ -213,6 +213,26 @@ test("#1043 review: an accepted skill body is served complete, never silently tr
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("#1043 review: an escape-dense skill fails the read explicitly instead of truncating", async () => {
+  const root = fixture();
+  try {
+    // 23,900 raw control-char bytes are within the 24KB per-skill cap but
+    // JSON-escape to ~143KB — far past the 48KB serialized-result budget.
+    const body = "\u0001".repeat(23_900);
+    const dense = addSkill(root, "dense", metadata("Dense") + body);
+    const moderate = addSkill(root, "moderate", metadata("Moderate") + "text line\n".repeat(500));
+    assert.ok(Buffer.byteLength(body) <= SKILL_LIMITS.bytesPerSkill);
+    const ref = commit(root);
+    const response = await executeToolRequest("read_skill", { path: dense }, context(root, ref, [dense]));
+    assert.equal(response.status, "error");
+    assert.match(String((response.result as Record<string, unknown>).error), /refusing to truncate/);
+    // An ordinary body whose serialized form fits still completes.
+    const ok = await executeToolRequest("read_skill", { path: moderate }, context(root, ref, [moderate]));
+    assert.equal(ok.status, "ok");
+    assert.equal((ok.result as Record<string, unknown>).content_complete, true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("#1043 review: multiline YAML frontmatter parses; non-string and oversized fields do not", () => {
   const root = fixture();
   try {
