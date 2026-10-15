@@ -91,7 +91,7 @@ the action entry's publish stage (`src/publish/`).
 ### Tests and fixtures
 
 - **`tests/forgejo_e2e_smoke.sh`** — Opt-in (`FORGEJO_E2E=true`, needs Docker) disposable Forgejo E2E: REST backend smoke (#254) plus the #683 runner-compat phase, which registers an ephemeral act_runner and executes the #682 v3 composite fixture as a real Forgejo Actions workflow job. Notes: the token needs the `write:user` scope on Forgejo 9 (repo creation), runner registration uses the server CLI (no REST endpoint), and `FORGEJO_E2E_HOST_ALIAS` must match `[A-Za-z0-9._-]+`
-- **`tests/test_*.py`** — pytest suite over the retained tooling (eval harness, harvest, fork gate, judge, release) — run in CI via `pytest tests/`
+- **`tests/test_*.py`** — pytest suite over the retained Python auxiliary tooling (eval harness, harvest, fork gate, judge, release scripts) and the repo/workflow structural gates (dogfood/fork/release/harvest workflows, AGENTS.md budget); the shipped action's contract/input checks live in `tests-v3/`. Run in CI via `pytest tests/`.
 - **`tests/test_*.sh`** — shell suites for the retained tooling (harvest, release) plus the Forgejo E2E smoke guard
 - **`tests-v3/`** — focused node:test regression suites for the TypeScript runtime, including retained CI gate and platform-read behavior.
 

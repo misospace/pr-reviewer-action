@@ -2,9 +2,10 @@
 
 The fork reviewer (``.github/workflows/fork-ai-review.yaml``) is a privileged
 workflow: it holds model credentials and publishes reviews. These tests pin
-its security invariants as text assertions (no YAML parser in the CI test env
-— same approach as ``test_dogfood_workflow.py``), so a later "cleanup" cannot
-silently weaken the boundary:
+its security invariants as text assertions (matching
+``test_dogfood_workflow.py``; PyYAML is available but the raw text pins
+ordering and shell bodies the parsed document would hide), so a later
+"cleanup" cannot silently weaken the boundary:
 
 1.  same-repo PRs stay on the dogfood reviewer; the fork path denies them;
 2.  fork PRs without ``ai-review-fork`` invoke no model (default-deny gate);
