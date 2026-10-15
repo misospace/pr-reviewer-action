@@ -43,7 +43,7 @@ Do not freeze temporary v2 implementation details into permanent product rules. 
 | `src/` | The TypeScript runtime — the shipped production path (`node dist/index.js`, entry `src/run/action.ts`): `platform/`, `precheck/`, `prompt/`, `context/`, `classification/`, `requirements/`, `corpus/`, `model/`, `transport/`, `runtime/`, `gates/`, `evidence/` |
 | `scripts/` | Repository tooling (eval, harvest, fork gate, judge, release, v3 build assets); not part of the action |
 | `pr_reviewer/` | Python modules for the semantic-eval and judge tooling; not part of the action |
-| `tests/`, `tests-v3/` | pytest + shell tests (retained tooling and gates); node:test for v3; shared JSON fixtures under `tests/fixtures/` |
+| `tests/`, `tests-v3/` | node:test for the shipped v3 runtime; pytest + shell for retained Python auxiliary tooling (eval, harvest, judge, fork gate) and repo/workflow structural gates; shared JSON fixtures under `tests/fixtures/` |
 | `evals/` | graded eval corpora driven by `scripts/eval_harness.py` through the v3 runtime (runbook: `docs/evals.md`) |
 | `.github/workflows/fork-ai-review.yaml` | privilege-separated fork-PR reviewer (`docs/fork-review.md`) |
 
