@@ -87,7 +87,10 @@ async function awaitLaunched(
         ),
       timeoutMs,
     );
-    deadlineTimer.unref();
+    // Referenced on purpose: an unref'd timer is the only pending handle in
+    // the never-settles case, so the event loop can drain and cancel the
+    // test (ERR_TEST_FAILURE) before the bounded rejection fires. The
+    // `finally` below clears it on every settled path.
   });
   try {
     await Promise.race([Promise.all(handles.map((handle) => handle.launched)), deadline]);
