@@ -54,13 +54,16 @@
  * `unverifiable`). `nonCodeProofDomain` classifies such rows deterministically
  * from ledger text (NEVER a model field) into an `external_state` or
  * `documentation` proof kind, dispositioned `pending` (a non-blocking advisory)
- * or, for a documentation obligation whose literal is positively present in the
- * trusted PR body, `met`. This is a proof-domain split, not a waiver: a genuine
+ * or, for a documentation obligation whose literal is positively present in
+ * that obligation's OWN target source, `met`: the trusted PR body for a
+ * PR-description/body obligation, the exact-head checkout's README/CHANGELOG/
+ * docs for a checkout-document obligation (never cross-confirmed). This is a
+ * proof-domain split, not a waiver: a genuine
  * code obligation, a mandatory test, or any row with a code-action/enforcement
  * verb is vetoed out of the domain and stays on the strict `unverifiable`-blocks
  * path, and the model can never claim `pending` to escape a code proof.
  */
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import type { ArtifactFinding, ReviewArtifact } from "./artifact.js";
 import { workspaceRegularFile, workspaceFsPath, workspacePathExists, workspacePathHasSymlinkComponent } from "../context/workspace-path.js";
 import { detectLanguage, isTestPath } from "../context/change-anchors.js";
@@ -875,7 +878,15 @@ const EXTERNAL_OUTCOME_RE = /\b(green|passing|passed|passes|status|merge[sd]?|me
  * asked to be recorded (PR description / body, README, CHANGELOG, docstring,
  * docs). Naming this artifact is what distinguishes "record X in the PR
  * description" (a metadata obligation) from "the audit logger must record the
- * actor" (a runtime logging obligation) — the bare verb alone is never enough. */
+ * actor" (a runtime logging obligation) — the bare verb alone is never enough.
+ *
+ * #1062 review follow-up: the target ALSO selects the proof SOURCE. A literal
+ * recorded in the PR body proves only a PR-metadata obligation; "README must
+ * document X" is satisfied by the README in the exact-head checkout, not by
+ * the description mentioning X. The two target groups are therefore matched
+ * separately and never cross-confirmed. */
+const PR_BODY_TARGET_RE = /\b(PR description|pull[\s-]request description|PR body|pull[\s-]request body)\b/i;
+const CHECKOUT_DOC_TARGET_RE = /\b(README|CHANGELOG|docstring|documentation|docs)\b/i;
 const DOC_TARGET_RE = /\b(PR description|pull[\s-]request description|PR body|pull[\s-]request body|README|CHANGELOG|docstring|documentation|docs)\b/i;
 
 /** A recording verb, required alongside {@link DOC_TARGET_RE}. */
@@ -928,6 +939,82 @@ function literalRecordedIn(text: string, literal: string): boolean {
   return false;
 }
 
+/** Which trusted source a documentation obligation's target names. `pr_body`
+ * (PR description/body — the author's own recording surface), `checkout_doc`
+ * (a repository artifact read from the exact-head checkout: README, CHANGELOG,
+ * docs), or `mixed` when the text names both — an obligation spanning two
+ * sources is never confirmable from one, so it stays advisory. */
+export type DocumentationProofSource = "pr_body" | "checkout_doc" | "mixed";
+
+export function documentationProofSource(text: string): DocumentationProofSource {
+  const prBody = PR_BODY_TARGET_RE.test(text);
+  const checkout = CHECKOUT_DOC_TARGET_RE.test(text);
+  if (prBody && checkout) return "mixed";
+  return prBody ? "pr_body" : "checkout_doc";
+}
+
+/* Bounds for the checkout-documentation scan: the search is bounded work over
+ * a repository checkout, not a full-tree walk. A requirement whose doc lives
+ * beyond these bounds simply stays `pending` (advisory) — the scan can only
+ * ever CONFIRM a `met`, never manufacture a block. */
+const DOC_SCAN_MAX_ENTRIES = 500;
+const DOC_SCAN_MAX_FILES = 64;
+const DOC_SCAN_MAX_DEPTH = 4;
+const DOC_TEXT_EXT_RE = /\.(?:md|markdown|rst|txt|adoc)$/i;
+
+/** Deterministic, bounded candidate list of checkout documentation files a
+ * requirement's target words name: root-level `README*` / `CHANGELOG*` for
+ * those targets, plus root-level docs and the `docs/` tree for a generic
+ * documentation/docs target. A docstring-only target has no bounded trusted
+ * source (the string lives inside unnamed source), so it yields no candidates
+ * and the row stays advisory. Symlinked entries are skipped — the scan never
+ * reads through a link, matching the citation reader's own guards. */
+function checkoutDocumentationFiles(workspace: string, text: string): string[] {
+  const wantsReadme = /\bREADME\b/i.test(text);
+  const wantsChangelog = /\bCHANGELOG\b/i.test(text);
+  const wantsDocs = /\b(?:documentation|docs)\b/i.test(text);
+  if (!wantsReadme && !wantsChangelog && !wantsDocs) return [];
+  const out: string[] = [];
+  let scanned = 0;
+  let root: import("node:fs").Dirent<string>[];
+  try {
+    root = readdirSync(workspace, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  for (const entry of root) {
+    if (scanned >= DOC_SCAN_MAX_ENTRIES || out.length >= DOC_SCAN_MAX_FILES) break;
+    scanned += 1;
+    if (!entry.isFile()) continue;
+    if (wantsReadme && /^readme(\.\w+)?$/i.test(entry.name)) out.push(entry.name);
+    else if (wantsChangelog && /^changelog(\.\w+)?$/i.test(entry.name)) out.push(entry.name);
+    else if (wantsDocs && DOC_TEXT_EXT_RE.test(entry.name)) out.push(entry.name);
+  }
+  if (wantsDocs && scanned < DOC_SCAN_MAX_ENTRIES && out.length < DOC_SCAN_MAX_FILES) {
+    const walk = (dir: string, prefix: string, depth: number): void => {
+      if (scanned >= DOC_SCAN_MAX_ENTRIES || out.length >= DOC_SCAN_MAX_FILES || depth > DOC_SCAN_MAX_DEPTH) return;
+      let entries: import("node:fs").Dirent<string>[];
+      try {
+        entries = readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (scanned >= DOC_SCAN_MAX_ENTRIES || out.length >= DOC_SCAN_MAX_FILES) return;
+        scanned += 1;
+        if (entry.isSymbolicLink()) continue;
+        if (entry.isDirectory()) {
+          walk(`${dir}/${entry.name}`, `${prefix}${entry.name}/`, depth + 1);
+          continue;
+        }
+        if (entry.isFile() && DOC_TEXT_EXT_RE.test(entry.name)) out.push(`${prefix}${entry.name}`);
+      }
+    };
+    walk(`${workspace}/docs`, "docs/", 1);
+  }
+  return out;
+}
+
 /**
  * #1062: resolve the disposition for a requirement in a non-code proof domain.
  *
@@ -937,10 +1024,17 @@ function literalRecordedIn(text: string, literal: string): boolean {
  * - A well-formed `unmet` (a non-empty reason) is the reviewer reporting a real
  *   failing external/documentation condition, so it is honored as a blocking
  *   `unmet` — the domain never launders a reported gap into an advisory.
- * - `documentation` whose single quoted literal is positively present in the
- *   trusted PR description is `met` (the obligation is literally "record X", so
- *   recording X in the body IS its fulfillment). It is NOT verified from source
- *   code — that is the point of the domain.
+ * - `documentation` targeting the PR description/body whose single quoted
+ *   literal is positively present in the trusted PR body is `met` (the
+ *   obligation is literally "record X in the description", so recording X in
+ *   the body IS its fulfillment). #1062 review follow-up: a documentation
+ *   obligation targeting a checkout artifact (`README must document X`) is
+ *   confirmed ONLY from that artifact in the exact-head checkout — the PR body
+ *   describing X is not the README containing X, and confirming across sources
+ *   would grant positive proof from the wrong source. A target naming both
+ *   sources, a docstring target (no bounded trusted source), a missing
+ *   literal, and any failed confirmation all stay `pending`, never a
+ *   cross-source or fabricated `met`.
  * - Everything else — prose-only documentation with no confirmable literal, and
  *   every external/future outcome — is `pending`: a distinct advisory condition
  *   surfaced to the author that does not fold into `required_checks=incomplete`
@@ -956,6 +1050,8 @@ function nonCodeDisposition(
   modelDisposition: string | null,
   modelReason: string,
   prBody: string | null,
+  cache: FileTextCache,
+  workspace: string,
   notes: string[],
 ): string {
   // A reported failure is a real gap on ANY domain. Mirror the strict path's
@@ -971,16 +1067,45 @@ function nonCodeDisposition(
     return "unmet";
   }
   if (domain === "documentation") {
-    // The PR body is the author's OWN recording surface for this obligation
-    // ("record X in the description"), so its presence is genuine proof — but
-    // ONLY for a documentation obligation; a code obligation cannot reach this
-    // domain (`nonCodeProofDomain` requires a named doc/metadata target and vetoes
-    // every code verb). With no trusted body, or no confirmable literal, it stays
-    // a non-blocking `pending`, never a fabricated code `met`.
+    const source = documentationProofSource(text);
+    if (source === "mixed") {
+      // Names both a PR-metadata and a checkout-document target: one source
+      // cannot prove the other's half, so the row stays advisory instead of
+      // borrowing confirmation from either.
+      notes.push("documentation-pending-mixed-target");
+      return PENDING_DISPOSITION;
+    }
     const literal = documentationLiteral(text);
-    if (literal !== null && prBody !== null && literalRecordedIn(prBody, literal)) {
-      notes.push("documentation-verified-in-pr-body");
-      return "met";
+    if (source === "pr_body") {
+      // The PR body is the author's OWN recording surface for this obligation
+      // ("record X in the description"), so its presence is genuine proof — but
+      // ONLY for a documentation obligation; a code obligation cannot reach this
+      // domain (`nonCodeProofDomain` requires a named doc/metadata target and vetoes
+      // every code verb). With no trusted body, or no confirmable literal, it stays
+      // a non-blocking `pending`, never a fabricated code `met`.
+      if (literal !== null && prBody !== null && literalRecordedIn(prBody, literal)) {
+        notes.push("documentation-verified-in-pr-body");
+        return "met";
+      }
+      notes.push("documentation-pending-unconfirmed");
+      return PENDING_DISPOSITION;
+    }
+    // checkout_doc: confirm the literal ONLY from the named artifact class in
+    // the exact-head checkout. The PR body is never consulted here — a
+    // description claiming "the README documents X" is exactly the wrong-source
+    // self-certification this fix exists to refuse. No candidates, unreadable
+    // candidates, or a missing literal all stay advisory.
+    if (literal !== null) {
+      for (const file of checkoutDocumentationFiles(workspace, text)) {
+        const lines = cache.lines(file);
+        if (lines === null) continue;
+        if (literalRecordedIn(lines.join("\n"), literal)) {
+          notes.push("documentation-verified-in-checkout");
+          return "met";
+        }
+      }
+      notes.push("documentation-pending-checkout-unconfirmed");
+      return PENDING_DISPOSITION;
     }
     notes.push("documentation-pending-unconfirmed");
     return PENDING_DISPOSITION;
@@ -1485,11 +1610,26 @@ export function validateRequirementTrace(
      * available, so a documentation row is never `met` from a body it cannot see
      * and falls to `pending`. */
     prBody?: string | null | undefined;
+    /** #1062 review follow-up: the exact-head CI conclusion this run observed
+     * through the CI gate, if any (e.g. `success`/`failure`/`none`). It is
+     * diagnostic-only: an `external_state` advisory row reports it (or its
+     * unavailability) so the author sees what the review could and could not
+     * observe; it never changes a disposition. */
+    ciState?: string | null | undefined;
   } = {},
 ): RequirementTraceArtifact {
   const { inScope, outOfScope } = requirementTraceScope(ledger, changed, context);
   if (inScope.length === 0 && outOfScope.length === 0) {
     return { version: ARTIFACT_VERSION, rows: [], incomplete: false, errors: [] };
+  }
+
+  // #1062 review follow-up: provenance lookup so a pending advisory can state
+  // WHERE its requirement came from (linked issues / PR body / standards / …).
+  // The scope decision itself stays owned by `requirementTraceScope`; this map
+  // only labels rows that are already dispositioned.
+  const sourcesById = new Map<string, string>();
+  for (const { entry, sources } of ledgerTraceCandidates(ledger)) {
+    if (sources !== null && sources.length > 0) sourcesById.set(entry.id, [...new Set(sources)].join("/").slice(0, 96));
   }
 
   const cache = new FileTextCache(workspace);
@@ -1564,8 +1704,18 @@ export function validateRequirementTrace(
       enforcement = claim !== undefined ? parseLocations(claim.enforcement) : [];
       test = claim !== undefined ? parseLocations(claim.test) : [];
       reason = modelReason;
-      disposition = nonCodeDisposition(nonCode, entry.text, modelDisposition, modelReason, context.prBody ?? null, notes);
+      disposition = nonCodeDisposition(nonCode, entry.text, modelDisposition, modelReason, context.prBody ?? null, cache, workspace, notes);
       if (claim === undefined) notes.push("non-code-not-traced");
+      // #1062 review follow-up: the advisory must be explainable from the
+      // artifact alone — where the requirement came from, and (for an
+      // external-state row) what the review could actually observe about CI
+      // at head. Diagnostic labels only; neither note can change a disposition.
+      const provenance = sourcesById.get(entry.id);
+      notes.push(`provenance:${provenance ?? "unknown"}`);
+      if (nonCode === "external_state") {
+        const ci = typeof context.ciState === "string" ? context.ciState.replace(/[^A-Za-z0-9._-]/g, "").slice(0, 32) : "";
+        notes.push(ci === "" ? "external-state-ci-unavailable" : `external-state-ci:${ci}`);
+      }
     } else if (claim === undefined) {
       disposition = "unverifiable";
       enforcement = [];
@@ -1876,14 +2026,37 @@ export function renderRequirementTraceMarkdown(trace: RequirementTraceArtifact):
   const pendingSection = pending.length === 0
     ? ""
     : (() => {
-        const pendingDomain = (row: RequirementTraceRow): string =>
-          row.proof === "external_state" ? "external/future outcome" : "documentation / PR metadata";
+        const cleanSource = (value: string): string => value.replace(/[\x00-\x1f\x7f`*[\]()]/g, "").slice(0, 96);
+        const pendingDomain = (row: RequirementTraceRow): string => {
+          if (row.proof === "external_state") return "external/future outcome";
+          if (row.notes.includes("documentation-pending-checkout-unconfirmed")) return "checkout documentation";
+          if (row.notes.includes("documentation-pending-mixed-target")) return "documentation (PR metadata + checkout docs)";
+          return "documentation / PR metadata";
+        };
         const pendingLine = (row: RequirementTraceRow): string => {
-          const detail = row.notes.includes("documentation-pending-unconfirmed")
-            ? "not confirmable from the PR description"
-            : "no code/test predicate can observe it at head";
+          const parts: string[] = [];
+          if (row.notes.includes("documentation-pending-unconfirmed")) {
+            parts.push("not confirmable from the PR description");
+          } else if (row.notes.includes("documentation-pending-checkout-unconfirmed")) {
+            parts.push("the literal was not found in the checkout documentation at head");
+          } else if (row.notes.includes("documentation-pending-mixed-target")) {
+            parts.push("names both PR metadata and a checkout document; neither source alone confirms it");
+          } else {
+            parts.push("no code/test predicate can observe it at head");
+            if (row.notes.includes("external-state-ci-unavailable")) {
+              parts.push("exact-head CI state was not observed during this review");
+            } else {
+              const ci = row.notes.find((note) => note.startsWith("external-state-ci:"));
+              if (ci !== undefined) parts.push(`known exact-head CI state: \`${cleanSource(ci.slice("external-state-ci:".length))}\``);
+            }
+          }
+          const provenance = row.notes.find((note) => note.startsWith("provenance:"));
+          if (provenance !== undefined) {
+            const source = cleanSource(provenance.slice("provenance:".length));
+            parts.push(source === "linked_issues" ? "from the linked issue, unconditionally in scope" : `from ${source}`);
+          }
           const why = row.reason !== "" ? `: ${row.reason}` : "";
-          return `- \`${cleanRequirementId(row.requirement_id)}\` — ${pendingDomain(row)} (${detail})${why}`;
+          return `- \`${cleanRequirementId(row.requirement_id)}\` — ${pendingDomain(row)} (${parts.join("; ")})${why}`;
         };
         const items = pending.slice(0, MAX_RENDERED_ROWS).map(pendingLine);
         if (pending.length > MAX_RENDERED_ROWS) items.push(`- …and ${pending.length - MAX_RENDERED_ROWS} more`);
@@ -1927,6 +2100,9 @@ export function applyRequirementTraceEnforcement(
     /** #1062 trusted PR description (title + body) at head — the only source a
      * `documentation`-domain row may be positively confirmed against. */
     prBody?: string | null | undefined;
+    /** #1062 review follow-up: the CI gate's exact-head conclusion, if this run
+     * observed one — diagnostic-only text surfaced in the non-code advisory. */
+    ciState?: string | null | undefined;
   },
 ): RequirementTraceEnforcementResult {
   if (!options.enabled) {
@@ -1936,6 +2112,7 @@ export function applyRequirementTraceEnforcement(
     ownership: options.ownership,
     paths: options.paths,
     prBody: options.prBody,
+    ciState: options.ciState,
   });
   if (trace.rows.length === 0) {
     return { applied: false, trace, findingsAdded: 0 };

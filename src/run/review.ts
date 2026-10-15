@@ -856,6 +856,16 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // authoritative platform PR snapshot, never model output, and is never used to
   // confirm a code obligation — the validator's classifier gates that out.
   const tracePrBody = `${String(pr.title ?? "")}\n${String(pr.body ?? "")}`;
+  // #1062 review follow-up: when the CI gate finalized during this run, hand its
+  // exact-head conclusion to the requirement-trace advisory diagnostics (an
+  // `external_state` row reports the known state, or explicitly that none was
+  // observed). Diagnostic-only: it never changes a disposition, and the gate's
+  // read was already paid for by the gate itself — no new forge call here.
+  let traceCiState: string | null = null;
+  if (ciFork !== null) {
+    const gateFinal = /^ci-status-final=([A-Za-z0-9._-]+)$/m.exec(ciGateOutputs(join(runDir, CI_GATE_OUTPUT_FILE)));
+    if (gateFinal?.[1] !== undefined) traceCiState = gateFinal[1];
+  }
   const ledgerValue = safeJson(ws.read("requirement-ledger.json"));
   // #959: the in-scope ids are computed once here and reused by the repair
   // pass below, so the prompt, the repair and the validator all see the same
@@ -1104,7 +1114,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     // place before the strict mapping counts open findings.
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
@@ -1124,7 +1134,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     });
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     // #977: the model's own request_changes is relaxed only when every
     // still-open finding is a verification ask and no independent
