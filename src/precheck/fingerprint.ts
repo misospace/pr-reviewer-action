@@ -168,6 +168,11 @@ const CONDITIONAL_AI_KEYS: ReadonlySet<string> = new Set([
   "AI_SMART_ANTHROPIC_EFFORT_SUPPORT",
   "AI_FALLBACK_ANTHROPIC_EFFORT_SUPPORT",
   "AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT",
+  // #1047: the per-lane Anthropic structured-output opt-ins — identical rule
+  // (only a `true` changes request bytes and thus the fingerprint).
+  "AI_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT",
+  "AI_SMART_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT",
+  "AI_FALLBACK_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT",
 ]);
 
 /** The subset of `CONDITIONAL_AI_KEYS` that are booleans rather than efforts:
@@ -179,6 +184,10 @@ const ANTHROPIC_EFFORT_SUPPORT_KEYS: ReadonlySet<string> = new Set([
   "AI_SMART_ANTHROPIC_EFFORT_SUPPORT",
   "AI_FALLBACK_ANTHROPIC_EFFORT_SUPPORT",
   "AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT",
+  // #1047: same boolean treatment for the structured-output opt-ins.
+  "AI_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT",
+  "AI_SMART_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT",
+  "AI_FALLBACK_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT",
 ]);
 
 /** Collect configuration key=value lines from the environment map and

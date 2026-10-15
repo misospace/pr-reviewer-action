@@ -27,6 +27,8 @@ function profile(overrides: Partial<TierProfile> = {}): TierProfile {
     // #998: unset by default so the fixture stays request-byte compatible.
     reasoningEffort: "",
     anthropicEffortSupported: false,
+    // #1047: the structured-output opt-in, default off for byte compatibility.
+    anthropicStructuredOutputSupported: false,
     ...overrides,
   };
 }
@@ -439,4 +441,196 @@ test("#868 maintainer follow-up: the primary call masks a configured key echoed 
     assert.equal(verdictOutcome.reason, "parse");
     assert.ok(!verdictOutcome.detail.includes(apiKey), `[key=${apiKey}] leaked in produceVerdict's detail: ${verdictOutcome.detail}`);
   }
+});
+
+// ── #1047: bounded failure diagnostics + the evidence-gated budget raise ──
+
+test("#1047: a parse-exhausted truncation raises the retry's completion budget and reports it", async () => {
+  const maxTokensSeen: number[] = [];
+  let calls = 0;
+  const outcome = await callModelTier(profile({ maxTokens: 1000, retries: 4 }), CONTEXT, {
+    sleep: async () => {},
+    call: async (input) => {
+      calls++;
+      maxTokensSeen.push(input.payload.body.max_tokens!);
+      // Always truncated: finish_reason=length with a partial JSON body.
+      return {
+        status: "ok",
+        raw: {
+          choices: [{ message: { content: '{"verdict": "appr' }, finish_reason: "length" }],
+          usage: { completion_tokens: 1000 },
+        },
+        response: { id: "", object: "chat.completion", model: "m", content: "", toolCalls: [], finishReason: "length", usage: null, error: undefined },
+      };
+    },
+  });
+  assert.equal(outcome.status, "parse_exhausted");
+  // Still exactly the parse-fail cap — the raise never buys extra attempts.
+  assert.equal(calls, PARSE_FAIL_CAP);
+  // First attempt at the configured cap; the (single) raise latched after it.
+  assert.deepEqual(maxTokensSeen, [1000, 4000]);
+  if (outcome.status === "parse_exhausted") {
+    assert.equal(outcome.diagnostics?.class, "truncated");
+    assert.equal(outcome.diagnostics?.record.completion_budget_raised_to, 4000);
+  }
+});
+
+test("#1047: a reasoning-only failure raises the retry budget; zero-output and malformed JSON never do", async () => {
+  const runWith = async (raw: unknown): Promise<{ status: string; tokens: number[] }> => {
+    const tokens: number[] = [];
+    const outcome = await callModelTier(profile({ maxTokens: 1000, retries: 3 }), CONTEXT, {
+      sleep: async () => {},
+      call: async (input) => {
+        tokens.push(input.payload.body.max_tokens!);
+        return { status: "ok", raw, response: { id: "", object: "chat.completion", model: "m", content: "", toolCalls: [], finishReason: "stop", usage: null, error: undefined } };
+      },
+    });
+    return { status: outcome.status, tokens };
+  };
+
+  // Reasoning-only: the entire budget went to reasoning_content before any
+  // text — the cap destroyed the verdict, so the retry gets a bigger one.
+  const reasoningOnly = await runWith({
+    choices: [{ message: { content: "", reasoning_content: "thinking" }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 10, completion_tokens: 900 },
+  });
+  assert.equal(reasoningOnly.status, "parse_exhausted");
+  assert.deepEqual(reasoningOnly.tokens, [1000, 4000]);
+
+  // True zero output: v2 exit-3 semantics — deterministic, stops the tier
+  // immediately on the one attempt, never retries (a raise or not).
+  const zero = await runWith({
+    choices: [{ message: { content: "" }, finish_reason: "stop" }],
+    usage: { completion_tokens: 0 },
+  });
+  assert.equal(zero.status, "empty_completion");
+  assert.deepEqual(zero.tokens, [1000]);
+
+  // Present-but-malformed JSON: the budget was not the failure, no raise.
+  const malformed = await runWith({
+    choices: [{ message: { content: "not json at all" }, finish_reason: "stop" }],
+    usage: { completion_tokens: 12 },
+  });
+  assert.equal(malformed.status, "parse_exhausted");
+  assert.deepEqual(malformed.tokens, [1000, 1000]);
+});
+
+test("#1047: the raise is latched once and caps at the 32768 ceiling", async () => {
+  const maxTokensSeen: number[] = [];
+  await callModelTier(profile({ maxTokens: 20000, retries: 6 }), CONTEXT, {
+    sleep: async () => {},
+    call: async (input) => {
+      maxTokensSeen.push(input.payload.body.max_tokens!);
+      return {
+        status: "ok",
+        raw: {
+          choices: [{ message: { content: '{"verdict": "appr' }, finish_reason: "length" }],
+          usage: { completion_tokens: 20000 },
+        },
+        response: { id: "", object: "chat.completion", model: "m", content: "", toolCalls: [], finishReason: "length", usage: null, error: undefined },
+      };
+    },
+  });
+  // 20000 * 4 = 80000 clamps to 32768. The parse-fail cap still ends the
+  // tier at two attempts — the raise never buys a third.
+  assert.deepEqual(maxTokensSeen, [20000, 32768]);
+});
+
+test("#1047: an empty completion exits with diagnostics and without any raise (deterministic)", async () => {
+  const outcome = await callModelTier(profile({ maxTokens: 1000, retries: 4 }), CONTEXT, {
+    sleep: async () => {},
+    call: async () => ({
+      status: "ok",
+      raw: { choices: [{ message: { content: "" }, finish_reason: "stop" }], usage: { completion_tokens: 0 } },
+      response: { id: "", object: "chat.completion", model: "m", content: "", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+    }),
+  });
+  assert.equal(outcome.status, "empty_completion");
+  if (outcome.status === "empty_completion") {
+    assert.equal(outcome.diagnostics?.class, "zero-output");
+  }
+});
+
+test("#1047: transport-exhausted carries http/timeout diagnostics", async () => {
+  const outcome = await callModelTier(profile({ retries: 2 }), CONTEXT, {
+    sleep: async () => {},
+    call: async () => ({ status: "failure", failure: new TransportFailure("http_status", "model endpoint returned HTTP 524", { status: 524 }) }),
+  });
+  assert.equal(outcome.status, "transport_exhausted");
+  if (outcome.status === "transport_exhausted") {
+    assert.equal(outcome.diagnostics?.class, "http-error");
+    assert.equal(outcome.diagnostics?.record.http_status, 524);
+    assert.equal(outcome.diagnostics?.record.profile, "primary");
+  }
+});
+
+test("#1047: produceVerdict's single non-streamed retry raises on truncation evidence, never otherwise", async () => {
+  const truncatedOnce = ((): (() => ChatRequestOutcome) => {
+    let first = true;
+    return () => {
+      if (first) {
+        first = false;
+        return {
+          status: "ok",
+          raw: {
+            choices: [{ message: { content: '{"verdict": "appr' }, finish_reason: "length" }],
+            usage: { completion_tokens: 8192 },
+          },
+          response: { id: "", object: "chat.completion", model: "m", content: "", toolCalls: [], finishReason: "length", usage: null, error: undefined },
+        };
+      }
+      return {
+        status: "ok",
+        raw: {
+          choices: [{ message: { content: JSON.stringify({ verdict: "approve", review_markdown: "## ok" }) }, finish_reason: "stop" }],
+          usage: { completion_tokens: 100 },
+        },
+        response: { id: "", object: "chat.completion", model: "m", content: "", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+      };
+    };
+  })();
+  const bodies: { stream: boolean; tokens: number }[] = [];
+  const outcome = await produceVerdict(profile({ stream: true, maxTokens: 8192 }), CONTEXT, {
+    call: async (input) => {
+      bodies.push({ stream: input.payload.body.stream, tokens: input.payload.body.max_tokens! });
+      return truncatedOnce();
+    },
+  });
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.retried, true);
+  assert.equal(outcome.budgetRaisedTo, 32768);
+  assert.deepEqual(bodies, [{ stream: true, tokens: 8192 }, { stream: false, tokens: 32768 }]);
+  // And a non-raising failure (true zero output) retries at the same cap.
+  const zeroBodies: { stream: boolean; tokens: number }[] = [];
+  await produceVerdict(profile({ stream: true, maxTokens: 8192 }), CONTEXT, {
+    call: async (input) => {
+      zeroBodies.push({ stream: input.payload.body.stream, tokens: input.payload.body.max_tokens! });
+      return {
+        status: "ok",
+        raw: { choices: [{ message: { content: "" }, finish_reason: "stop" }], usage: { completion_tokens: 0 } },
+        response: { id: "", object: "chat.completion", model: "m", content: "", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+      };
+    },
+  });
+  assert.deepEqual(zeroBodies, [{ stream: true, tokens: 8192 }, { stream: false, tokens: 8192 }]);
+});
+
+test("#1047 (review): callModelTier threads the transport's strip surface to the caller", async () => {
+  const outcome = await callModelTier(profile(), CONTEXT, {
+    call: async () => ({
+      status: "ok",
+      raw: {
+        choices: [{ message: { content: JSON.stringify({ verdict: "approve", review_markdown: "## ok" }) }, finish_reason: "stop" }],
+        usage: { completion_tokens: 5 },
+      },
+      response: { id: "", object: "chat.completion", model: "m", content: "", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+      // As the transport tags it after the one-shot 400 strip retry.
+      strippedStructuredOutput: "output_config.format",
+    }),
+  });
+  assert.equal(outcome.status, "ok");
+  assert.equal(outcome.status === "ok" && outcome.strippedStructuredOutput, "output_config.format");
+  // And a plain success carries no strip metadata.
+  const plain = await callModelTier(profile(), CONTEXT, { call: async () => okResponse() });
+  assert.equal(plain.status === "ok" && plain.strippedStructuredOutput, undefined);
 });

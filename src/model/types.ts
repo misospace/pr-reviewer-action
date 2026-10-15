@@ -20,7 +20,11 @@ export interface ModelRequestConfig {
   maxTokens: number;
   /** Empty string means "omit the temperature field entirely" (v2 semantics). */
   temperature: number | "";
-  /** OpenAI-compatible only; Anthropic never sends a response_format. */
+  /** Structured-output mode. OpenAI-compatible wires carry it as
+   * `response_format`; the Anthropic wire family carries it as
+   * `output_config.format` and only for `json_schema` under the lane's
+   * explicit opt-in (#1047) — `json_object` has no Anthropic-native
+   * equivalent and is never translated. */
   responseFormat: ResponseFormatMode;
   /** OpenAI-compatible token-limit field name. */
   tokensParam: TokensParam;
@@ -35,6 +39,16 @@ export interface ModelRequestConfig {
    * #1049 review). False means the Anthropic body carries no
    * effort field even when `reasoningEffort` is set. Ignored by OpenAI. */
   anthropicEffortSupported: boolean;
+  /** #1047: the lane's own opt-in that its Anthropic-format endpoint accepts
+   * Anthropic-native structured output (`output_config.format` with the
+   * verdict JSON schema) — `ai-anthropic-structured-output-support` for the
+   * base/primary route, `ai-smart-anthropic-structured-output-support`,
+   * `ai-fallback-anthropic-structured-output-support`; never inherited across
+   * lanes. False (the default) keeps the request bytes unchanged: a resolved
+   * `json_schema` is NOT sent and the configuration is reported as
+   * prompt-only. `json_object` is never sent on this wire family regardless
+   * (no Anthropic-native equivalent exists to opt into). Ignored by OpenAI. */
+  anthropicStructuredOutputSupported: boolean;
 }
 
 /**
@@ -72,9 +86,11 @@ export interface AnthropicWireBody {
   system: string;
   messages: [{ role: "user"; content: string }];
   temperature?: number;
-  /** #998: Anthropic's own container for output controls; `effort` is only
-   * present under the operator's explicit `ai-anthropic-effort-support`
-   * opt-in. Never carries OpenAI's `reasoning_effort`. */
+  /** #998/#1047: Anthropic's own container for output controls; `effort` is
+   * only present under the operator's explicit `ai-anthropic-effort-support`
+   * opt-in, and `format` (#1047) only under the lane's
+   * `ai-*-anthropic-structured-output-support` opt-in with a resolved
+   * `json_schema`. Never carries OpenAI's `reasoning_effort`. */
   output_config?: Record<string, unknown>;
 }
 
@@ -109,6 +125,14 @@ export interface NormalizedModelResponse {
   finishReason: string;
   usage: NormalizedUsage | null;
   error: unknown;
+  /** #1047: block-shape counters the streamed reassemblers fill in so an
+   * unusable response can be diagnosed (reasoning-only vs zero output vs
+   * framing loss) without ever retaining content. Counts only — never text.
+   * `thinking` counts Anthropic thinking blocks and OpenAI-compatible
+   * `reasoning_content`/`reasoning` deltas alike; `text` counts text
+   * segments; `toolUse` counts tool-use blocks. Absent when a stream carried
+   * none of a block kind. */
+  blockCounts?: { text: number; thinking: number; toolUse: number };
 }
 
 export interface NormalizedFinding {
