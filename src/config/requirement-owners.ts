@@ -3,7 +3,7 @@
  * enforcement files that own it. Requirement-trace scope treats a change to a
  * declared owner path as in-scope even when the diff repeats none of the
  * requirement's prose (#958: the fork-privilege standard guards
- * `.github/workflows/fork-ai-review.yaml`, but ordinary workflow edits repeat
+ * `.github/workflows/ai-pr-review-fork.yaml`, but ordinary workflow edits repeat
  * neither `fork privilege` nor `trust boundary`).
  *
  * Ownership is architectural metadata, not a language problem: the lexical
@@ -21,7 +21,7 @@
  * requirements:
  *   fork-privilege-separation:
  *     owners:
- *       - .github/workflows/fork-ai-review.yaml
+ *       - .github/workflows/ai-pr-review-fork.yaml
  *       - scripts/fork_review_gate.py
  * ```
  *

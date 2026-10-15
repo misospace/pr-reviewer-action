@@ -45,7 +45,7 @@ Do not freeze temporary v2 implementation details into permanent product rules. 
 | `pr_reviewer/` | Python modules for the semantic-eval and judge tooling; not part of the action |
 | `tests/`, `tests-v3/` | node:test for the shipped v3 runtime; pytest + shell for retained Python auxiliary tooling (eval, harvest, judge, fork gate) and repo/workflow structural gates; shared JSON fixtures under `tests/fixtures/` |
 | `evals/` | graded eval corpora driven by `scripts/eval_harness.py` through the v3 runtime (runbook: `docs/evals.md`) |
-| `.github/workflows/fork-ai-review.yaml` | privilege-separated fork-PR reviewer (`docs/fork-review.md`) |
+| `.github/workflows/ai-pr-review-fork.yaml` | privilege-separated fork-PR reviewer (`docs/fork-review.md`) |
 
 Full per-module detail, the pipeline architecture, corpus section order, and descriptive behavioral contracts: [`docs/architecture/code-map.md`](docs/architecture/code-map.md).
 

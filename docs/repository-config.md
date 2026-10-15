@@ -67,7 +67,7 @@ file even when the diff repeats none of the standard's prose (#958):
 requirements:
   fork-privilege-separation:
     owners:
-      - .github/workflows/fork-ai-review.yaml
+      - .github/workflows/ai-pr-review-fork.yaml
       - scripts/fork_review_gate.py
 ```
 
@@ -95,12 +95,12 @@ matched by the same anchored, lowercased full-path glob rules as `owners`.
 requirements:
   fork-privilege-separation:
     owners:                       # unchanged: scopes the requirement in (#958)
-      - .github/workflows/fork-ai-review.yaml
+      - .github/workflows/ai-pr-review-fork.yaml
       - scripts/fork_review_gate.py
     groups:                       # new: the proof topology (#962)
       - name: privileged-checkout
         owners:
-          - .github/workflows/fork-ai-review.yaml
+          - .github/workflows/ai-pr-review-fork.yaml
       - name: feature-defaults
         owners:
           - src/config/repository-config.ts

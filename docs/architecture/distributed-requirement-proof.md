@@ -67,13 +67,13 @@ requirements:
   fork-privilege-separation:
     # unchanged: narrow owner globs that scope the requirement in (#958)
     owners:
-      - .github/workflows/fork-ai-review.yaml
+      - .github/workflows/ai-pr-review-fork.yaml
       - scripts/fork_review_gate.py
     # new: the distributed proof topology (presence ⇒ this requirement is distributed)
     groups:
       - name: privileged-checkout
         owners:
-          - .github/workflows/fork-ai-review.yaml
+          - .github/workflows/ai-pr-review-fork.yaml
         tests:
           - tests/fork_review_gate.test.py
       - name: feature-defaults

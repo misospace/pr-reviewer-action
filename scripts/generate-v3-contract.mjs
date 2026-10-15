@@ -39,7 +39,7 @@ writeFileSync('.v3-generated/prompt-assets.generated.ts', promptAssets);
 // manual-release.yml) stamps vX.Y.Z from .release-please-manifest.json — the
 // release version's single source of truth; GITHUB_ACTION_REF cannot serve
 // (it is a SHA for SHA-pinned consumers). `dev` (dogfood builds of PR source:
-// ai-pr-review.yaml, fork-ai-review.yaml) stamps vX.Y.Z-dev+<short sha> of
+// ai-pr-review.yaml, ai-pr-review-fork.yaml) stamps vX.Y.Z-dev+<short sha> of
 // the bundle's source commit — PR_REVIEWER_BUILD_SHA when the workflow names
 // it, GITHUB_SHA otherwise. Any other invocation bakes "" so parity/test/local
 // builds publish output that is byte-identical to pre-#915.
