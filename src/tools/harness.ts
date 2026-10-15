@@ -34,11 +34,27 @@ import {
 } from "../model/conversation.js";
 import { redactText } from "../context/redact.js";
 import { fenceSafeLength } from "../context/related-context.js";
-import { KNOWN_SECRET_REDACTED, maskAndTruncate, maskDiagnostic } from "../context/redact.js";
+import { KNOWN_SECRET_REDACTED, maskAndTruncate, maskDiagnostic, maskKnownSecrets } from "../context/redact.js";
 import { reframeForCorpus, renderRepoMapMarkdown, repoMapFromArtifact, trustFramingOverhead } from "../context/repo-map.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { VerdictParseFailure } from "../model/types.js";
-import { anthropicEffortInactiveWarning, laneAnthropicEffortSupported, normalizeReasoningEffort, tierReasoningEffort } from "../routing/tiers.js";
+import { raisedCompletionBudget } from "../model/call.js";
+import {
+  describeUnusableResponse,
+  formatResponseDiagnosticsLine,
+  shouldRaiseCompletionBudget,
+  type ResponseDiagnostics,
+} from "../model/response-diagnostics.js";
+import {
+  anthropicEffortInactiveWarning,
+  anthropicJsonObjectsPromptOnlyWarning,
+  anthropicStructuredOutputInactiveWarning,
+  laneAnthropicEffortSupported,
+  laneAnthropicStructuredOutputSupported,
+  normalizeReasoningEffort,
+  tierReasoningEffort,
+  tierResponseFormat,
+} from "../routing/tiers.js";
 import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
 import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
 import {
@@ -412,6 +428,12 @@ export interface NativeVerdictOutcome {
   detail: string;
   streamFailureKind: NativeVerdictOutcome["reason"];
   streamFailureDetail: string;
+  /** #1047: bounded failure-shape diagnostics for the final unusable
+   * response (absent on success). Content-free by construction. */
+  diagnostics?: ResponseDiagnostics;
+  /** #1047: the raised completion budget the non-streamed retry used, when
+   * the streamed attempt's failure shape justified one (absent otherwise). */
+  budgetRaisedTo?: number;
 }
 
 export interface ProduceVerdictInput {
@@ -424,6 +446,9 @@ export interface ProduceVerdictInput {
   deadline: number | null;
   transport: HarnessTransport;
   timeFn: () => number;
+  /** #1047: the lane name for failure diagnostics ("primary" | "smart").
+   * Optional so existing callers keep compiling; defaults to "primary". */
+  tier?: string;
 }
 
 /**
@@ -431,8 +456,12 @@ export interface ProduceVerdictInput {
  * Fast path unchanged: a streamed payload whose body satisfies the verdict
  * contract is accepted on the first attempt. When that streamed attempt is
  * unusable — transport/reassembly failure OR a body the verdict parser
- * rejects — retry once non-streamed. Never throws: transport errors are
- * classified, not propagated. Every returned body is folded into usageAcc.
+ * rejects — retry once non-streamed. #1047: that single retry raises its
+ * completion budget when the streamed body's own shape shows the token cap
+ * destroyed the verdict (token-cap stop reason, or the whole budget spent on
+ * reasoning before any text); no additional call is ever spent. Never
+ * throws: transport errors are classified, not propagated. Every returned
+ * body is folded into usageAcc.
  */
 export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<NativeVerdictOutcome> {
   const { transport, timeFn } = input;
@@ -462,6 +491,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
   let ok = false;
   let reason: NativeVerdictOutcome["reason"];
   let detail = "";
+  let finalBudgetRaisedTo: number | null = null;
 
   const firstAttempt = await request(first);
   attempts += 1;
@@ -482,11 +512,41 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
     retried = true;
     streamFailureKind = reason;
     streamFailureDetail = detail;
+    // #1047: evidence-gated completion-budget raise for the single
+    // non-streamed retry — only when the streamed body's own shape shows the
+    // cap destroyed the verdict. Bumps whichever token field the payload
+    // carries; a payload without one (neither max_tokens nor
+    // max_completion_tokens) is retried unchanged.
+    let budgetRaisedTo: number | undefined;
+    if (reason === "parse" && response !== null) {
+      const currentTokens = typeof first.max_tokens === "number" ? first.max_tokens
+        : typeof first.max_completion_tokens === "number" ? first.max_completion_tokens
+          : 0;
+      if (currentTokens > 0) {
+        const diagnostics = describeUnusableResponse({
+          response,
+          apiFormat: input.apiFormat,
+          profile: input.tier ?? "primary",
+          streamed: true,
+          secrets: [input.apiKey],
+          failureKind: "parse",
+        });
+        const raised = raisedCompletionBudget(currentTokens);
+        if (shouldRaiseCompletionBudget(diagnostics.class) && raised > currentTokens) {
+          budgetRaisedTo = raised;
+        }
+      }
+    }
     const retryPayload: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(first)) {
       if (k !== "stream_options") retryPayload[k] = v;
     }
     retryPayload.stream = false;
+    if (budgetRaisedTo !== undefined) {
+      if (typeof retryPayload.max_tokens === "number") retryPayload.max_tokens = budgetRaisedTo;
+      else if (typeof retryPayload.max_completion_tokens === "number") retryPayload.max_completion_tokens = budgetRaisedTo;
+    }
+    finalBudgetRaisedTo = budgetRaisedTo ?? null;
     const retry = await request(retryPayload);
     attempts += 1;
     response = retry.response;
@@ -503,6 +563,17 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
     }
   }
 
+  const finalDiagnostics = ok
+    ? null
+    : describeUnusableResponse({
+        response,
+        apiFormat: input.apiFormat,
+        profile: input.tier ?? "primary",
+        streamed: !retried && attemptedStream,
+        secrets: [input.apiKey],
+        failureKind: reason === "transport" ? "network" : reason === "empty" ? "empty_completion" : "not_object",
+      });
+
   return {
     response,
     ok,
@@ -513,6 +584,8 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
     detail: ok ? "" : detail,
     streamFailureKind,
     streamFailureDetail,
+    ...(finalDiagnostics !== null ? { diagnostics: finalDiagnostics } : {}),
+    ...(finalBudgetRaisedTo !== null ? { budgetRaisedTo: finalBudgetRaisedTo } : {}),
   };
 }
 
@@ -1658,16 +1731,33 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         }
         const tempRaw = (env.AI_TEMPERATURE ?? "").trim();
         const temperature = tempRaw ? Number(tempRaw) : null;
-        // #1009: per-lane `response_format` resolution; the tier-aware helper
-        // treats the inheritance rules identically to the rest of the v3
-        // config chain and keeps Anthropic-format lanes unaffected.
-        const tierKey = input.tier === "smart"
-          ? "AI_SMART_RESPONSE_FORMAT"
-          : input.tier === "fallback"
-            ? "AI_FALLBACK_RESPONSE_FORMAT"
-            : "AI_PRIMARY_RESPONSE_FORMAT";
-        const rfRaw = ((env[tierKey] ?? env.AI_RESPONSE_FORMAT ?? "off")).trim().toLowerCase();
-        const responseFormat = rfRaw === "json_object" || rfRaw === "json_schema" ? rfRaw : null;
+        // #1009: per-lane `response_format` resolution through the SAME
+        // tier-aware helper the rest of the v3 config chain uses — an
+        // explicit-empty lane override inherits the base here exactly as
+        // `loadConfig` resolves it upstream, so a direct harness entrypoint
+        // can never read an unnormalized empty override as "off" (the review
+        // follow-up on #1065: the supported path was already normalized, this
+        // removes the hand-rolled `??` chain that could have diverged).
+        // #1047: on an Anthropic-format lane the resolved mode is enforced on
+        // the wire ONLY as `json_schema` under the lane's own structured-
+        // output opt-in — every other combination stays prompt-only and is
+        // announced here, never silently held back.
+        const resolvedFormat = tierResponseFormat(
+          input.tier === "smart" ? "smart" : input.tier === "fallback" ? "fallback" : "primary",
+          env,
+        );
+        const responseFormat = resolvedFormat === "off" ? null : resolvedFormat;
+        const anthropicStructuredOutput = laneAnthropicStructuredOutputSupported(
+          input.tier === "smart" ? "smart" : input.tier === "fallback" ? "fallback" : "primary",
+          env,
+        );
+        if (input.apiFormat === "anthropic" && responseFormat !== null) {
+          if (responseFormat === "json_schema" && !anthropicStructuredOutput) {
+            log(`WARNING: ${anthropicStructuredOutputInactiveWarning(input.tier === "smart" ? "smart" : "primary", " (native tool loop)")}`);
+          } else if (responseFormat === "json_object") {
+            log(`WARNING: ${anthropicJsonObjectsPromptOnlyWarning(input.tier === "smart" ? "smart" : "primary", "json_object", " (native tool loop)")}`);
+          }
+        }
         const verdictPayload = conversation.toRequestPayload(input.apiFormat, input.model, {
           stream,
           maxTokens: envIntBounded(env, "AI_MAX_TOKENS", 8192, 256, 200000),
@@ -1681,6 +1771,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           // so it honors the same effort (and the same Anthropic opt-in).
           reasoningEffort,
           anthropicEffortSupported: anthropicEffort,
+          // #1047: the verdict schema rides output_config.format only under
+          // the lane's own endpoint assertion.
+          anthropicStructuredOutputSupported: anthropicStructuredOutput,
         }) as Record<string, unknown>;
         let verdictTimeout = input.turnTimeout;
         if (deadline !== null) {
@@ -1698,11 +1791,22 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           deadline,
           transport: deps.transport,
           timeFn,
+          tier: input.tier,
         });
         input.result.native_loop_verdict_attempts = verdict.attempts;
         input.result.native_loop_verdict_retried = verdict.retried;
         if (verdict.retried) {
           input.result.native_loop_verdict_stream_failure = verdict.streamFailureKind;
+        }
+        // #1047: the bounded failure-shape record (and the budget raise, when
+        // the single non-streamed retry used one) — content-free counts and
+        // reasons only, so the harness artifact can say WHY the verdict turn
+        // failed without ever carrying response text.
+        if (!verdict.ok && verdict.diagnostics !== undefined) {
+          input.result.native_loop_verdict_diagnostics = verdict.diagnostics.record;
+        }
+        if (verdict.budgetRaisedTo !== undefined) {
+          input.result.native_loop_verdict_budget_raised_to = verdict.budgetRaisedTo;
         }
         // Keep the raw response as a diagnostic artifact even when it is
         // unusable, but never claim success without a reusable body (#637).
@@ -1729,8 +1833,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           input.result.native_loop_verdict_reason =
             deadline !== null && timeFn() >= deadline ? "deadline" : verdict.reason;
           input.result.native_loop_verdict_error = verdict.detail;
+          // #1047: masked whole against the loop's key — the record carries
+          // no response content, but the static field names can collide with
+          // a very short configured key (see callTier's matching mask).
+          const diagnosticsLine = verdict.diagnostics !== undefined
+            ? maskKnownSecrets(` [${formatResponseDiagnosticsLine(verdict.diagnostics.record)}]`, [input.apiKey])
+            : "";
           log(
-            `  native_loop: no reusable in-conversation verdict [${verdict.reason}] ${verdict.detail} — the standard review call will synthesize the verdict`,
+            `  native_loop: no reusable in-conversation verdict [${verdict.reason}] ${verdict.detail}${diagnosticsLine} — the standard review call will synthesize the verdict`,
           );
         }
       }

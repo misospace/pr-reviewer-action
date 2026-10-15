@@ -189,3 +189,53 @@ test("plain JSON success body without SSE framing is not misread", () => {
   assert.equal(response.content, "");
   assert.equal(response.error, undefined);
 });
+
+// ── #1047: block-shape counters for failure diagnostics ──────────────────
+
+test("#1047: an Anthropic stream with thinking blocks records their count — never their text", () => {
+  const text = [
+    data({ type: "message_start", message: { id: "m1", model: "mm", usage: { input_tokens: 10 } } }),
+    data({ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } }),
+    data({ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "SECRET-REASONING" } }),
+    data({ type: "content_block_stop", index: 0 }),
+    data({ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } }),
+    data({ type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "hi" } }),
+    data({ type: "content_block_stop", index: 1 }),
+    data({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 9 } }),
+    data({ type: "message_stop" }),
+  ].join("\n");
+  const response = reassembleSse(text, "anthropic");
+  assert.deepEqual(response.blockCounts, { text: 1, thinking: 1, toolUse: 0 });
+  assert.equal(JSON.stringify(response.blockCounts).includes("SECRET"), false);
+});
+
+test("#1047: redacted thinking blocks are counted as thinking", () => {
+  const text = [
+    data({ type: "content_block_start", index: 0, content_block: { type: "redacted_thinking", data: "opaque" } }),
+    data({ type: "content_block_stop", index: 0 }),
+  ].join("\n");
+  const response = reassembleSse(text, "anthropic");
+  assert.equal(response.blockCounts?.thinking, 1);
+});
+
+test("#1047: an OpenAI-compatible stream counts reasoning_content segments as thinking", () => {
+  const text = [
+    data({ id: "c1", choices: [{ delta: { reasoning_content: "chain" } }] }),
+    data({ id: "c1", choices: [{ delta: { content: "vis" } }] }),
+    data({ id: "c1", choices: [{ delta: {}, finish_reason: "stop" }] }),
+  ].join("\n");
+  const response = reassembleSse(text, "openai");
+  assert.deepEqual(response.blockCounts, { text: 1, thinking: 1, toolUse: 0 });
+});
+
+test("#1047: thinking-free responses keep the exact v2 shape (no blockCounts key)", () => {
+  const text = [
+    data({ type: "message_start", message: { id: "m1", model: "mm", usage: { input_tokens: 10 } } }),
+    data({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }),
+    data({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "plain" } }),
+    data({ type: "content_block_stop", index: 0 }),
+    data({ type: "message_delta", delta: { stop_reason: "end_turn" } }),
+  ].join("\n");
+  const response = reassembleSse(text, "anthropic");
+  assert.equal("blockCounts" in response, false);
+});

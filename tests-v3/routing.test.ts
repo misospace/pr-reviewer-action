@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { isLowConfidence, reviewerRequestedEscalation, shouldEscalate } from "../src/routing/escalation.js";
-import { anthropicEffortInactiveWarning, anthropicEffortSupported, anthropicEffortSupportInput, effectiveWireEffort, laneAnthropicEffortSupported, normalizeReasoningEffort, resolveReviewRoute, resolveSpecialistProfiles, resolveTierProfiles, tierReasoningEffort, tierRequestShape, tierResponseFormat } from "../src/routing/tiers.js";
+import { anthropicEffortInactiveWarning, anthropicEffortSupported, anthropicEffortSupportInput, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, anthropicStructuredOutputSupportInput, effectiveWireEffort, effectiveWireResponseFormat, laneAnthropicEffortSupported, laneAnthropicStructuredOutputSupported, normalizeReasoningEffort, resolveReviewRoute, resolveSpecialistProfiles, resolveTierProfiles, tierReasoningEffort, tierRequestShape, tierResponseFormat } from "../src/routing/tiers.js";
 
 const flags = { onIncomplete: true, onRequestChanges: true, onLowConfidence: true, onBlockers: true, onPlanningFailure: true };
 const longReview = "The change is reviewed carefully and the behavior appears correct. No concerns identified in the touched paths.";
@@ -131,7 +131,7 @@ test("specialist profiles reject invalid formats and report orphan transport fie
 
 test("tier profiles bind model defaults, retry/stream settings, and request shapes", () => {
   const base = resolveTierProfiles({ AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "k" });
-  assert.deepEqual(base.primary, { baseUrl: "https://primary", model: "main", apiFormat: "openai", apiKey: "k", resolved: true, retries: 8, retryDelaySec: 15, stream: true, requestTimeoutSec: 300, connectTimeoutSec: 30, responseFormat: "off", reasoningEffort: "", anthropicEffortSupported: false });
+  assert.deepEqual(base.primary, { baseUrl: "https://primary", model: "main", apiFormat: "openai", apiKey: "k", resolved: true, retries: 8, retryDelaySec: 15, stream: true, requestTimeoutSec: 300, connectTimeoutSec: 30, responseFormat: "off", reasoningEffort: "", anthropicEffortSupported: false, anthropicStructuredOutputSupported: false });
   assert.equal(base.smart.resolved, false);
   assert.equal(base.smart.baseUrl, "https://primary");
   assert.equal(base.smart.apiKey, "k");
@@ -420,4 +420,73 @@ test("#998 (#1049 review): a configured-but-inactive Anthropic effort is named, 
   assert.equal(anthropicEffortSupportInput("primary"), "ai-anthropic-effort-support");
   assert.equal(anthropicEffortSupportInput("fallback"), "ai-fallback-anthropic-effort-support");
   assert.equal(anthropicEffortSupportInput("specialist"), "ai-specialist-anthropic-effort-support");
+});
+
+// ── #1047: Anthropic-native structured output resolution ────────────────
+
+test("#1047: the Anthropic structured-output opt-in accepts only the literal true, per lane", () => {
+  assert.equal(laneAnthropicStructuredOutputSupported("primary", {}), false);
+  assert.equal(laneAnthropicStructuredOutputSupported("primary", { AI_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT: "false" }), false);
+  for (const value of ["true", "TRUE", " true "]) {
+    assert.equal(laneAnthropicStructuredOutputSupported("primary", { AI_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT: value }), true, value);
+  }
+  // No cross-lane inheritance: each lane asserts its own endpoint.
+  assert.equal(laneAnthropicStructuredOutputSupported("smart", { AI_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT: "true" }), false);
+  assert.equal(laneAnthropicStructuredOutputSupported("smart", { AI_SMART_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT: "true" }), true);
+  assert.equal(laneAnthropicStructuredOutputSupported("fallback", { AI_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT: "true" }), false);
+  assert.equal(laneAnthropicStructuredOutputSupported("fallback", { AI_FALLBACK_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT: "true" }), true);
+  for (const value of ["", "false", "yes", "1", "True-ish"]) {
+    assert.equal(laneAnthropicStructuredOutputSupported("smart", { AI_SMART_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT: value }), false, value);
+    assert.equal(laneAnthropicStructuredOutputSupported("fallback", { AI_FALLBACK_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT: value, AI_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT: "true" }), false, value);
+  }
+  const baseEnv = {
+    AI_API_FORMAT: "anthropic",
+    AI_MODEL: "minimax",
+    AI_SMART_MODEL: "other-anthropic",
+    AI_SMART_API_FORMAT: "anthropic",
+    AI_SMART_BASE_URL: "https://other.example",
+    AI_RESPONSE_FORMAT: "json_schema",
+  };
+  const profiles = resolveTierProfiles({ ...baseEnv, AI_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT: "true" });
+  assert.equal(profiles.primary.anthropicStructuredOutputSupported, true);
+  assert.equal(profiles.smart.anthropicStructuredOutputSupported, false);
+  assert.equal(profiles.fallback.anthropicStructuredOutputSupported, false);
+  const smartAsserted = resolveTierProfiles({ ...baseEnv, AI_SMART_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT: "true" });
+  assert.equal(smartAsserted.smart.anthropicStructuredOutputSupported, true);
+  assert.equal(smartAsserted.primary.anthropicStructuredOutputSupported, false);
+});
+
+test("#1047: the wire response_format a log may report is what was actually enforced", () => {
+  // Anthropic without the opt-in enforces nothing — json_object can never be
+  // enforced there at all.
+  assert.equal(effectiveWireResponseFormat("anthropic", "json_schema", false), "off");
+  assert.equal(effectiveWireResponseFormat("anthropic", "json_object", true), "off");
+  assert.equal(effectiveWireResponseFormat("anthropic", "json_schema", true), "json_schema");
+  assert.equal(effectiveWireResponseFormat("anthropic", "off", true), "off");
+  // OpenAI is unaffected by the Anthropic assertion.
+  assert.equal(effectiveWireResponseFormat("openai", "json_schema", false), "json_schema");
+  assert.equal(effectiveWireResponseFormat("openai", "json_object", false), "json_object");
+  assert.equal(effectiveWireResponseFormat("openai", "off", true), "off");
+});
+
+test("#1047: the warnings name the lane and the exact input that turns enforcement on", () => {
+  const schemaWarning = anthropicStructuredOutputInactiveWarning("primary", " (review call)");
+  assert.match(schemaWarning, /primary lane \(review call\)/);
+  assert.match(schemaWarning, /json_schema/);
+  assert.match(schemaWarning, /ai-anthropic-structured-output-support/);
+  assert.match(anthropicStructuredOutputInactiveWarning("fallback"), /ai-fallback-anthropic-structured-output-support/);
+  assert.match(anthropicStructuredOutputInactiveWarning("smart"), /ai-smart-anthropic-structured-output-support/);
+  const objectWarning = anthropicJsonObjectsPromptOnlyWarning("primary", "json_object");
+  assert.match(objectWarning, /json_object/);
+  assert.match(objectWarning, /no Anthropic-native equivalent/);
+  assert.match(objectWarning, /ai-anthropic-structured-output-support/);
+  // The specialist lane has no opt-in input (its contracts are not the
+  // verdict schema), so its warning must not name an input that would do
+  // nothing.
+  const specialistWarning = anthropicJsonObjectsPromptOnlyWarning("specialist", "json_schema");
+  assert.match(specialistWarning, /specialist/);
+  assert.equal(specialistWarning.includes("-support"), false, specialistWarning);
+  assert.equal(anthropicStructuredOutputSupportInput("primary"), "ai-anthropic-structured-output-support");
+  assert.equal(anthropicStructuredOutputSupportInput("smart"), "ai-smart-anthropic-structured-output-support");
+  assert.equal(anthropicStructuredOutputSupportInput("fallback"), "ai-fallback-anthropic-structured-output-support");
 });
