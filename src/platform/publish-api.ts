@@ -450,16 +450,19 @@ export class GitHubPublishApi implements PublishPlatformApi {
         return { ok: false, supported: true, ...none(), error: `could not read requested reviewers (status ${status})` };
       }
       const record = data as { users?: unknown; teams?: unknown };
-      if (Array.isArray(record.users)) {
-        existingUsers = record.users
-          .map((u) => (typeof (u as { login?: unknown } | null)?.login === "string" ? (u as { login: string }).login : ""))
-          .filter((u) => u !== "");
+      // Fail closed (#1005): a 200 that does not carry both reviewer arrays
+      // is an uncertain state — the dedup diff cannot be trusted, so no
+      // mutation happens. Treating a malformed body as an empty reviewer set
+      // would let the POST proceed on an unverified assumption.
+      if (!Array.isArray(record.users) || !Array.isArray(record.teams)) {
+        return { ok: false, supported: true, ...none(), error: "could not read requested reviewers (malformed response: users/teams are not arrays)" };
       }
-      if (Array.isArray(record.teams)) {
-        existingTeams = record.teams
-          .map((t) => (typeof (t as { slug?: unknown } | null)?.slug === "string" ? (t as { slug: string }).slug : ""))
-          .filter((t) => t !== "");
-      }
+      existingUsers = record.users
+        .map((u) => (typeof (u as { login?: unknown } | null)?.login === "string" ? (u as { login: string }).login : ""))
+        .filter((u) => u !== "");
+      existingTeams = record.teams
+        .map((t) => (typeof (t as { slug?: unknown } | null)?.slug === "string" ? (t as { slug: string }).slug : ""))
+        .filter((t) => t !== "");
     } catch (error) {
       return { ok: false, supported: true, ...none(), error: error instanceof Error ? error.message : String(error) };
     }
