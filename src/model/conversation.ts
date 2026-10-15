@@ -1371,6 +1371,16 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
           enum: ["not_required", "required", "unknown"],
         },
         review_triage_reason: { type: ["string", "null"] },
+        // #1005: the model emits only LOGICAL ids here. The deterministic
+        // resolver validates every id against the trusted base-ref config
+        // before any reviewer request; this pass only bounds the list. A
+        // null/empty array is the "not_required" / no-routing-configured
+        // default, so the strict-mode required entry below always permits
+        // null under OpenAI strict semantics.
+        review_triage_targets: {
+          type: ["array", "null"],
+          items: { type: "string" },
+        },
         findings: {
           type: ["array", "null"],
           items: {
@@ -1443,7 +1453,7 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
           },
         },
       },
-      required: ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "findings", "requirement_coverage", "required_check_dispositions"],
+      required: ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "review_triage_targets", "findings", "requirement_coverage", "required_check_dispositions"],
       additionalProperties: false,
     },
   },
