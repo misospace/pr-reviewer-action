@@ -89,8 +89,8 @@ export interface SpecialistRoleEntry {
   status: "ok" | "degraded" | "error" | "skipped";
   /** #1061: the role's failure classification, or null when the role
    * succeeded (or is skipped). Closed set:
-   *   - `overrun`  — response stopped at the completion-token cap and the
-   *                  one-shot recovery did not produce a clean parse;
+   *   - `overrun`  — the final response still stopped at the completion-token
+   *                  cap with no leads (the retry failed or was not possible);
    *   - `parser`   — a malformed/no-lead response with a normal stop;
    *   - `transport`, `timeout`, `input`, `guard` — non-response failures.
    * Reasoning-effort capability is a separate lane-level warning, never an
@@ -116,13 +116,16 @@ export interface SpecialistRoleEntry {
    * attempt (bounded telemetry, never the text itself). Absent when no
    * response-bearing attempt completed. */
   output_chars?: number | null;
-  /** #1061: present (true) only when the final response stopped at the
-   * completion-token cap. */
+  /** #1061: present (true) when the role's INITIAL response stopped at the
+   * completion-token cap. It stays true even when the one-shot retry then
+   * succeeds, so the diagnostic records that the first response hit the cap
+   * (`overrun_retry_result` says what happened next). */
   overrun_detected?: boolean;
   /** #1061: outcome of the one-shot overrun recovery — `recovered` (the retry
-   * produced a clean parse), `failed` (the retry ran but did not), `skipped`
-   * (no retry was possible: already at the ceiling, or no time budget left).
-   * Absent when no overrun was detected. */
+   * cleared the completion limit), `failed` (the retry ran but the response
+   * still stopped at the cap), `skipped` (no retry was possible: already at
+   * the ceiling, or no time budget left). Absent when no overrun was
+   * detected. */
   overrun_retry_result?: "recovered" | "failed" | "skipped" | null;
   /** #846: present only for an error entry whose failure was an actual HTTP
    * error response from the model endpoint (never for input/timeout/guard
@@ -529,10 +532,16 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
     let response = outcome.raw;
     let responseText = extractResponseText(response);
     let artifact = parseSpecialistResponse(responseText, role);
-    const overran = completionOverran(response);
-    overrunDetected = overran;
+    // #1061: `overrunDetected` records the INITIAL completion-limit event. It
+    // stays true even when the retry below recovers, so the diagnostic shows
+    // that the first response hit the cap.
+    overrunDetected = completionOverran(response);
 
-    if (overran && artifact.errors.length > 0 && artifact.leads.length === 0) {
+    // A completion-limit stop with zero leads is eligible for one bounded
+    // retry regardless of parser errors: a cleanly parsed `{"leads":[]}` that
+    // exhausted its budget is as untrustworthy as a truncated one. A response
+    // that carries leads is never retried, so valid partial leads are kept.
+    if (overrunDetected && artifact.leads.length === 0) {
       const retryPayload = overrunRetryPayload(payload, config.maxTokens);
       const remainingForRetry = deadline - now();
       if (retryPayload !== null && !cancelled.value && remainingForRetry >= MIN_ATTEMPT_TIMEOUT_SEC) {
@@ -546,15 +555,17 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
           retried = null;
         }
         if (retried !== null && retried.ok && !(typeof retried.raw === "object" && retried.raw !== null && (retried.raw as Record<string, unknown>).error)) {
-          const retriedArtifact = parseSpecialistResponse(extractResponseText(retried.raw), role);
+          const retriedText = extractResponseText(retried.raw);
+          const retriedArtifact = parseSpecialistResponse(retriedText, role);
+          // Adopt a clean re-parse so any leads it carries are kept.
           if (retriedArtifact.errors.length === 0) {
             response = retried.raw;
-            responseText = extractResponseText(response);
+            responseText = retriedText;
             artifact = retriedArtifact;
-            overrunRetryResult = "recovered";
-          } else {
-            overrunRetryResult = "failed";
           }
+          // "recovered" only when the retry itself cleared the completion
+          // limit — a still-truncated retry is not a genuine recovery.
+          overrunRetryResult = completionOverran(retried.raw) ? "failed" : "recovered";
         } else {
           overrunRetryResult = "failed";
         }
@@ -565,20 +576,23 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
       }
     }
 
-    // #1061: classify the response-level failure so the aggregate and the
-    // role log line distinguish it, never a bare `degraded`/null:
-    //   - an overrun that recovered is a clean `ok` (no classification);
-    //   - an unrecovered completion-limit truncation is `overrun`;
+    // #1061: classify the FINAL response so the aggregate and the role log
+    // line distinguish it, never a bare `degraded`/null:
+    //   - an overrun that recovered is a clean `ok`;
+    //   - an unrecovered completion-limit truncation with no leads is
+    //     `overrun` — degraded even when it parsed cleanly as `{"leads":[]}`,
+    //     because the model never finished;
     //   - any other malformed/no-lead response with a normal stop is a
     //     `parser` failure.
-    // Transport, timeout, input and guard failures are classified at their own
-    // return sites, and the Anthropic effort-capability warning stays a
-    // separate lane-level concern (see resolveSpecialistProfiles).
-    const overrunUnrecovered = overrunDetected && artifact.errors.length > 0 && artifact.leads.length === 0;
+    // A normal-stop empty result stays a clean `ok`. Transport, timeout, input
+    // and guard failures are classified at their own return sites, and the
+    // Anthropic effort-capability warning stays a separate lane-level concern
+    // (see resolveSpecialistProfiles).
+    const overrunUnrecovered = completionOverran(response) && artifact.leads.length === 0;
     const parseFailed = !overrunUnrecovered && artifact.errors.length > 0 && artifact.leads.length === 0;
     return finish(
       artifact,
-      statusOf(artifact),
+      overrunUnrecovered ? "degraded" : statusOf(artifact),
       overrunUnrecovered ? "overrun" : parseFailed ? "parser" : null,
       extractResponseUsage(response),
       payload,
@@ -747,23 +761,27 @@ async function runSpecialistScout(
     let response = outcome.raw;
     let responseText = extractResponseText(response);
     let artifacts = parseScoutResponse(responseText, roles);
-    const overran = completionOverran(response);
+    // #1061: the INITIAL completion-limit event, kept for the diagnostic even
+    // when the retry below recovers.
+    const initialOverran = completionOverran(response);
     let overrunRetry = false;
     let retryMaxTokens: number | null = null;
     let overrunRetryResult: "recovered" | "failed" | "skipped" | null = null;
 
     // #1061: the scout shares ONE call across roles, so the overrun trigger is
-    // evaluated over the shared response — the same "completion-limit stop and
-    // a malformed/no-lead role artifact" condition the three-call path uses,
-    // so the applicable combined-scout path gets the same one-shot bounded
-    // recovery and diagnostics.
-    const anyMalformed = (parsed: Record<string, SpecialistArtifact>): boolean =>
+    // evaluated over the shared response. It fires whenever the shared call
+    // hit the completion limit AND any role came back with zero leads — a
+    // cleanly parsed empty role is as untrustworthy as a truncated one. A
+    // shared response where every role already carries leads is never retried.
+    const anyZeroLead = (parsed: Record<string, SpecialistArtifact>): boolean =>
+      roles.some((role) => parsed[role]!.leads.length === 0);
+    const anyUnusable = (parsed: Record<string, SpecialistArtifact>): boolean =>
       roles.some((role) => {
         const artifact = parsed[role]!;
         return artifact.errors.length > 0 && artifact.leads.length === 0;
       });
 
-    if (overran && anyMalformed(artifacts)) {
+    if (initialOverran && anyZeroLead(artifacts)) {
       const retryPayload = overrunRetryPayload(payload, config.maxTokens);
       const remainingForRetry = deadline - now();
       if (retryPayload !== null && remainingForRetry >= MIN_ATTEMPT_TIMEOUT_SEC) {
@@ -777,15 +795,17 @@ async function runSpecialistScout(
           retried = null;
         }
         if (retried !== null && retried.ok && !(typeof retried.raw === "object" && retried.raw !== null && (retried.raw as Record<string, unknown>).error)) {
-          const retriedArtifacts = parseScoutResponse(extractResponseText(retried.raw), roles);
-          if (!anyMalformed(retriedArtifacts)) {
+          const retriedText = extractResponseText(retried.raw);
+          const retriedArtifacts = parseScoutResponse(retriedText, roles);
+          // Adopt a usable re-parse so any leads it carries are kept.
+          if (!anyUnusable(retriedArtifacts)) {
             response = retried.raw;
-            responseText = extractResponseText(response);
+            responseText = retriedText;
             artifacts = retriedArtifacts;
-            overrunRetryResult = "recovered";
-          } else {
-            overrunRetryResult = "failed";
           }
+          // "recovered" only when the retry itself cleared the completion
+          // limit — a still-truncated retry is not a genuine recovery.
+          overrunRetryResult = completionOverran(retried.raw) ? "failed" : "recovered";
         } else {
           overrunRetryResult = "failed";
         }
@@ -794,13 +814,16 @@ async function runSpecialistScout(
       }
     }
 
+    const finalOverran = completionOverran(response);
     const elapsed = now() - started;
     const stopReason = boundedStopReason(responseStopReason(response), [config.apiKey]);
     const entries = roles.map((role) => {
       const artifact = artifacts[role]!;
-      const failed = artifact.errors.length > 0 && artifact.leads.length === 0;
-      const overrunUnrecovered = overran && failed;
-      const parseFailed = !overrunUnrecovered && failed;
+      // An unrecovered completion-limit truncation with no leads is `overrun`
+      // (degraded), even when it parsed cleanly; a normal-stop empty result is
+      // a clean `ok`; a malformed/no-lead normal-stop response is `parser`.
+      const overrunUnrecovered = finalOverran && artifact.leads.length === 0;
+      const parseFailed = !overrunUnrecovered && artifact.errors.length > 0 && artifact.leads.length === 0;
       const diagnostics: {
         overrunRetry: boolean;
         retryMaxTokens: number | null;
@@ -810,9 +833,9 @@ async function runSpecialistScout(
         overrunRetryResult?: "recovered" | "failed" | "skipped";
       } = { overrunRetry, retryMaxTokens, outputChars: responseText.length };
       if (stopReason !== null) diagnostics.stopReason = stopReason;
-      if (overran) diagnostics.overrunDetected = true;
+      if (initialOverran) diagnostics.overrunDetected = true;
       if (overrunRetryResult !== null) diagnostics.overrunRetryResult = overrunRetryResult;
-      return roleEntry(role, artifact, statusOf(artifact), overrunUnrecovered ? "overrun" : parseFailed ? "parser" : null, elapsed, diagnostics);
+      return roleEntry(role, artifact, overrunUnrecovered ? "degraded" : statusOf(artifact), overrunUnrecovered ? "overrun" : parseFailed ? "parser" : null, elapsed, diagnostics);
     });
     return { entries, request: payload, response, artifacts };
   }

@@ -821,3 +821,57 @@ test("#1061: a malformed response with a normal stop is classified 'parser' in t
     rmSync(result.root, { recursive: true, force: true });
   }
 });
+
+test("#1061: the unset 16384 default reaches Anthropic specialist payloads", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(leadsResponse([])));
+  });
+  try {
+    const result = await run({
+      DEEP_REVIEW: "true",
+      AI_BASE_URL: `${server.url}/v1`,
+      AI_API_FORMAT: "anthropic",
+      AI_SPECIALIST_MODEL: "specialist",
+      // DEEP_REVIEW_MAX_TOKENS deliberately unset: the shipped default must
+      // reach the wire without the operator setting anything.
+    }, { productionTransport: true });
+    assert.equal(result.code, 0);
+    assert.equal(server.requests.length, 3, "one call per selected role");
+    for (const { body } of server.requests) {
+      assert.equal((JSON.parse(body) as { max_tokens: number }).max_tokens, 16384, `unset default must reach the wire: ${body}`);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1061: a valid-empty overrun is classified and logged, not reported as a clean role", async () => {
+  const emptyAtCap = {
+    id: "c1",
+    object: "chat.completion",
+    model: "m",
+    choices: [{ index: 0, message: { role: "assistant", content: '{"leads":[]}' }, finish_reason: "max_tokens" }],
+    usage: { prompt_tokens: 10, completion_tokens: 16384, total_tokens: 16394 },
+  };
+  const requestFn: SpecialistRequestFn = async () => ({ ok: true, raw: emptyAtCap });
+  const result = await run({ DEEP_REVIEW: "true" }, { requestFn });
+  try {
+    assert.equal(result.code, 0);
+    const aggregate = JSON.parse(result.read("specialists.json")) as {
+      any_errors: boolean;
+      roles: { role: string; status: string; error_kind: string | null }[];
+    };
+    for (const entry of aggregate.roles) {
+      assert.equal(entry.status, "degraded", `${entry.role} must not read as a clean success`);
+      assert.equal(entry.error_kind, "overrun", `${entry.role} must be classified an overrun`);
+    }
+    assert.equal(aggregate.any_errors, true, "an unrecovered zero-lead overrun must not be silently clean");
+
+    const line = result.out.find((entry) => entry.startsWith("specialist correctness:"));
+    assert.ok(line, `expected a correctness log line, got ${JSON.stringify(result.out)}`);
+    assert.match(line!, /degraded \(overrun\)/);
+  } finally {
+    rmSync(result.root, { recursive: true, force: true });
+  }
+});

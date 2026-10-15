@@ -1023,3 +1023,154 @@ test("#1061: combined_scout classifies an unrecovered overrun and a plain parse 
   assert.equal(parserEntry.stop_reason, "stop");
   assert.equal("overrun_detected" in parserEntry, false);
 });
+
+// ---------------------------------------------------------------------------
+// #1061: a cleanly parsed but empty response that exhausted the budget is not
+// a clean success — it is eligible for the same one bounded retry.
+// ---------------------------------------------------------------------------
+
+test("#1061: three-call — valid-empty at the cap retries, recovers, skips at the ceiling, and keeps normal-stop empty clean", async () => {
+  const capEmpty = { choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "max_tokens" }] };
+  const stopEmpty = { choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "stop" }] };
+
+  // (a) valid-empty at the cap, retry still truncated → unrecovered overrun.
+  const failedCaps: number[] = [];
+  const failed = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async (payload) => {
+      failedCaps.push(payload.max_tokens as number);
+      return { ok: true, raw: capEmpty };
+    },
+  }));
+  assert.deepEqual(failedCaps, [4096, 16384], "a cleanly parsed empty response at the cap is still retried once");
+  const failedEntry = roleEntry(failed, "correctness");
+  assert.equal(failedEntry.status, "degraded", "an unrecovered zero-lead overrun is not a clean success");
+  assert.equal(failedEntry.error_kind, "overrun");
+  assert.equal(failedEntry.overrun_detected, true);
+  assert.equal(failedEntry.overrun_retry_result, "failed");
+
+  // (b) valid-empty at the cap, retry completes normally → the empty answer is
+  // now trustworthy, so it is a clean ok.
+  let recoveredCalls = 0;
+  const recovered = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async () => {
+      recoveredCalls += 1;
+      return { ok: true, raw: recoveredCalls === 1 ? capEmpty : stopEmpty };
+    },
+  }));
+  assert.equal(recoveredCalls, 2);
+  const recoveredEntry = roleEntry(recovered, "correctness");
+  assert.equal(recoveredEntry.status, "ok");
+  assert.equal(recoveredEntry.error_kind, null);
+  assert.equal(recoveredEntry.overrun_detected, true, "overrun_detected describes the INITIAL completion-limit event");
+  assert.equal(recoveredEntry.overrun_retry_result, "recovered");
+
+  // (c) valid-empty at the cap, already at the ceiling → no retry, still overrun.
+  const ceilingCaps: number[] = [];
+  const ceiling = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, maxTokens: 32768 },
+    requestFn: async (payload) => {
+      ceilingCaps.push(payload.max_tokens as number);
+      return { ok: true, raw: capEmpty };
+    },
+  }));
+  assert.equal(ceilingCaps.length, 1, "no retry is possible above the ceiling");
+  const ceilingEntry = roleEntry(ceiling, "correctness");
+  assert.equal(ceilingEntry.error_kind, "overrun");
+  assert.equal(ceilingEntry.overrun_retry, false);
+  assert.equal(ceilingEntry.overrun_retry_result, "skipped");
+
+  // (d) normal-stop empty → clean ok, never retried.
+  let stopCalls = 0;
+  const clean = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async () => {
+      stopCalls += 1;
+      return { ok: true, raw: stopEmpty };
+    },
+  }));
+  assert.equal(stopCalls, 1, "a normal-stop empty result is a clean success, not a retry trigger");
+  const cleanEntry = roleEntry(clean, "correctness");
+  assert.equal(cleanEntry.status, "ok");
+  assert.equal(cleanEntry.error_kind, null);
+  assert.equal("overrun_detected" in cleanEntry, false);
+});
+
+test("#1061: combined_scout — valid-empty at the cap retries, recovers, skips at the ceiling, and keeps normal-stop empty clean", async () => {
+  const scout = (stopReason: string): unknown => ({
+    choices: [{
+      message: {
+        content: JSON.stringify({ correctness: { leads: [] }, security: { leads: [] }, tests: { leads: [] } }),
+      },
+      finish_reason: stopReason,
+    }],
+  });
+  const scoutConfig = { ...baseInput().config, execution: "combined_scout" as const };
+
+  // (a) all-empty scout at the cap, retry still truncated → unrecovered overrun.
+  const failedCaps: number[] = [];
+  const failed = await runSpecialists(baseInput({
+    config: { ...scoutConfig, maxTokens: 16384 },
+    requestFn: async (payload) => {
+      failedCaps.push(payload.max_tokens as number);
+      return { ok: true, raw: scout("length") };
+    },
+  }));
+  assert.deepEqual(failedCaps, [16384, 32768], "a cleanly parsed all-empty scout at the cap is retried once");
+  const failedEntry = roleEntry(failed, "correctness");
+  assert.equal(failedEntry.status, "degraded");
+  assert.equal(failedEntry.error_kind, "overrun");
+  assert.equal(failedEntry.overrun_detected, true);
+  assert.equal(failedEntry.overrun_retry_result, "failed");
+
+  // (b) all-empty scout at the cap, retry completes normally → clean ok.
+  let recoveredCalls = 0;
+  const recovered = await runSpecialists(baseInput({
+    config: { ...scoutConfig, maxTokens: 16384 },
+    requestFn: async () => {
+      recoveredCalls += 1;
+      return { ok: true, raw: recoveredCalls === 1 ? scout("length") : scout("stop") };
+    },
+  }));
+  assert.equal(recoveredCalls, 2);
+  for (const role of ["correctness", "security", "tests"]) {
+    const entry = roleEntry(recovered, role);
+    assert.equal(entry.status, "ok");
+    assert.equal(entry.error_kind, null);
+    assert.equal(entry.overrun_detected, true, "overrun_detected describes the INITIAL event");
+    assert.equal(entry.overrun_retry_result, "recovered");
+  }
+
+  // (c) all-empty scout at the cap, already at the ceiling → skipped.
+  const ceilingCaps: number[] = [];
+  const ceiling = await runSpecialists(baseInput({
+    config: { ...scoutConfig, maxTokens: 32768 },
+    requestFn: async (payload) => {
+      ceilingCaps.push(payload.max_tokens as number);
+      return { ok: true, raw: scout("length") };
+    },
+  }));
+  assert.equal(ceilingCaps.length, 1, "no retry is possible above the ceiling");
+  const ceilingEntry = roleEntry(ceiling, "correctness");
+  assert.equal(ceilingEntry.error_kind, "overrun");
+  assert.equal(ceilingEntry.overrun_retry_result, "skipped");
+
+  // (d) normal-stop all-empty scout → clean ok, never retried.
+  let stopCalls = 0;
+  const clean = await runSpecialists(baseInput({
+    config: scoutConfig,
+    requestFn: async () => {
+      stopCalls += 1;
+      return { ok: true, raw: scout("stop") };
+    },
+  }));
+  assert.equal(stopCalls, 1, "a normal-stop empty scout is a clean success, not a retry trigger");
+  for (const role of ["correctness", "security", "tests"]) {
+    const entry = roleEntry(clean, role);
+    assert.equal(entry.status, "ok");
+    assert.equal(entry.error_kind, null);
+    assert.equal("overrun_detected" in entry, false);
+  }
+});
