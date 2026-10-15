@@ -23,8 +23,18 @@ export interface ChatRequestInput {
   sleep?: (ms: number) => Promise<void>;
 }
 
+/** #1047: the structured-output surface a strip retry removed from the wire:
+ * the OpenAI `response_format` object, or the Anthropic
+ * `output_config.format` key (siblings preserved). */
+export type StructuredOutputSurface = "response_format" | "output_config.format";
+
 export type ChatRequestOutcome =
-  | { status: "ok"; response: NormalizedModelResponse; raw: unknown }
+  | { status: "ok"; response: NormalizedModelResponse; raw: unknown;
+      /** #1047 (review): set only when THIS successful response came from the
+       * one-shot strip retry — the request that produced it did NOT carry the
+       * named parameter, so "what was enforced" reporting must reflect the
+       * stripped state, not the configuration. */
+      strippedStructuredOutput?: StructuredOutputSurface | undefined }
   | { status: "failure"; failure: TransportFailure };
 
 /**
@@ -81,7 +91,14 @@ async function runChatRequestLoop(input: ChatRequestInput, clampRemaining: boole
         : null;
       if (strip !== null) {
         process.stderr.write(`removed ${strip.surface} for one retry (HTTP 400 body named it)\n`);
-        return runChatRequestLoop(strip.input, clampRemaining, false);
+        const retryOutcome = await runChatRequestLoop(strip.input, clampRemaining, false);
+        // #1047 (review): a successful strip retry is tagged with the surface
+        // it dropped, so callers can report the EFFECTIVE request rather than
+        // the configuration; a failed one returns unchanged.
+        if (retryOutcome.status === "ok") {
+          return { ...retryOutcome, strippedStructuredOutput: strip.surface };
+        }
+        return retryOutcome;
       }
       if (
         outcome.failure.kind === "http_status"
@@ -221,7 +238,7 @@ function tokenClampRetry(input: ChatRequestInput, failure: TransportFailure): To
 
 interface StructuredOutputStripRetry {
   input: ChatRequestInput;
-  surface: "response_format" | "output_config.format";
+  surface: StructuredOutputSurface;
 }
 
 function structuredOutputStripRetry(input: ChatRequestInput, failure: TransportFailure): StructuredOutputStripRetry | null {

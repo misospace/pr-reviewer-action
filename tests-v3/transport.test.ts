@@ -1334,6 +1334,9 @@ test("#1047: a 400 naming response_format is retried once without it (openai)", 
     assert.equal(requests, 2);
     assert.ok(bodies[0]!.response_format, "the first attempt carried the parameter");
     assert.equal("response_format" in bodies[1]!, false, "the retry stripped it");
+    // #1047 (review): the successful outcome is TAGGED with the surface the
+    // effective request dropped, so callers report the stripped state.
+    assert.equal(outcome.status === "ok" && outcome.strippedStructuredOutput, "response_format");
   } finally {
     await server.close();
   }
@@ -1372,6 +1375,29 @@ test("#1047: a 400 naming output_config.format strips only the format key, keepi
     assert.ok((bodies[0]!.output_config as Record<string, unknown>).format);
     // The operator's asserted effort survives; only the unsupported format goes.
     assert.deepEqual(bodies[1]!.output_config, { effort: "medium" });
+    assert.equal(outcome.status === "ok" && outcome.strippedStructuredOutput, "output_config.format");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1047: a plain success carries no strip metadata", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: {} }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, response_format: { type: "json_object" } }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "ok");
+    assert.equal(outcome.status === "ok" && outcome.strippedStructuredOutput, undefined);
   } finally {
     await server.close();
   }

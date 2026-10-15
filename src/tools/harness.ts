@@ -53,6 +53,7 @@ import {
   laneAnthropicStructuredOutputSupported,
   normalizeReasoningEffort,
   tierReasoningEffort,
+  tierResponseFormat,
 } from "../routing/tiers.js";
 import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
 import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
@@ -531,7 +532,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
           failureKind: "parse",
         });
         const raised = raisedCompletionBudget(currentTokens);
-        if (diagnostics !== null && shouldRaiseCompletionBudget(diagnostics.class) && raised > currentTokens) {
+        if (shouldRaiseCompletionBudget(diagnostics.class) && raised > currentTokens) {
           budgetRaisedTo = raised;
         }
       }
@@ -1730,19 +1731,22 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         }
         const tempRaw = (env.AI_TEMPERATURE ?? "").trim();
         const temperature = tempRaw ? Number(tempRaw) : null;
-        // #1009: per-lane `response_format` resolution; the tier-aware helper
-        // treats the inheritance rules identically to the rest of the v3
-        // config chain. #1047: on an Anthropic-format lane the resolved mode
-        // is enforced on the wire ONLY as `json_schema` under the lane's own
-        // structured-output opt-in — every other combination stays prompt-only
-        // and is announced here, never silently held back.
-        const tierKey = input.tier === "smart"
-          ? "AI_SMART_RESPONSE_FORMAT"
-          : input.tier === "fallback"
-            ? "AI_FALLBACK_RESPONSE_FORMAT"
-            : "AI_PRIMARY_RESPONSE_FORMAT";
-        const rfRaw = ((env[tierKey] ?? env.AI_RESPONSE_FORMAT ?? "off")).trim().toLowerCase();
-        const responseFormat = rfRaw === "json_object" || rfRaw === "json_schema" ? rfRaw : null;
+        // #1009: per-lane `response_format` resolution through the SAME
+        // tier-aware helper the rest of the v3 config chain uses — an
+        // explicit-empty lane override inherits the base here exactly as
+        // `loadConfig` resolves it upstream, so a direct harness entrypoint
+        // can never read an unnormalized empty override as "off" (the review
+        // follow-up on #1065: the supported path was already normalized, this
+        // removes the hand-rolled `??` chain that could have diverged).
+        // #1047: on an Anthropic-format lane the resolved mode is enforced on
+        // the wire ONLY as `json_schema` under the lane's own structured-
+        // output opt-in — every other combination stays prompt-only and is
+        // announced here, never silently held back.
+        const resolvedFormat = tierResponseFormat(
+          input.tier === "smart" ? "smart" : input.tier === "fallback" ? "fallback" : "primary",
+          env,
+        );
+        const responseFormat = resolvedFormat === "off" ? null : resolvedFormat;
         const anthropicStructuredOutput = laneAnthropicStructuredOutputSupported(
           input.tier === "smart" ? "smart" : input.tier === "fallback" ? "fallback" : "primary",
           env,

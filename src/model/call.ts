@@ -11,11 +11,10 @@ import { buildModelRequest } from "./request.js";
 import { parseVerdictResponse } from "./verdict.js";
 import {
   describeUnusableResponse,
-  formatResponseDiagnosticsLine,
   shouldRaiseCompletionBudget,
   type ResponseDiagnostics,
 } from "./response-diagnostics.js";
-import { runChatRequest, type ChatRequestOutcome } from "../transport/transport.js";
+import { runChatRequest, type ChatRequestOutcome, type StructuredOutputSurface } from "../transport/transport.js";
 import { describeTransportFailure, TransportFailure } from "../transport/http.js";
 
 /**
@@ -110,7 +109,12 @@ export interface ModelCallDeps {
 }
 
 export type ModelCallOutcome =
-  | { status: "ok"; verdict: ParsedReviewVerdict; rawResponse: unknown; attempts: number; budgetRaisedTo?: number }
+  | { status: "ok"; verdict: ParsedReviewVerdict; rawResponse: unknown; attempts: number; budgetRaisedTo?: number;
+      /** #1047 (review): set only when the successful request came from the
+       * transport's one-shot structured-output strip retry — the verdict was
+       * produced WITHOUT the parameter, so effective-format reporting must
+       * reflect the stripped state, not the configuration. */
+      strippedStructuredOutput?: StructuredOutputSurface | undefined }
   | { status: "empty_completion"; attempts: number; failure: VerdictParseFailure; diagnostics?: ResponseDiagnostics | undefined }
   | { status: "parse_exhausted"; attempts: number; failure: VerdictParseFailure; diagnostics?: ResponseDiagnostics | undefined }
   | { status: "transport_exhausted"; attempts: number; failure: TransportFailure; nonRetryable?: boolean; diagnostics?: ResponseDiagnostics | undefined };
@@ -137,14 +141,13 @@ function requestConfig(profile: TierProfile, context: ModelCallContext, stream: 
   };
 }
 
-/** #1047: bounded diagnostics for a tier-level failure, or null when there
- * is nothing to describe (never reached in practice — every failure variant
- * carries a failure kind). */
+/** #1047: bounded diagnostics for a tier-level failure. Total — every
+ * failure shape produces a record. */
 function tierDiagnostics(
   profile: TierProfile,
   response: unknown,
   failure: { kind?: string; status?: number } | undefined,
-): ResponseDiagnostics | null {
+): ResponseDiagnostics {
   return describeUnusableResponse({
     response,
     apiFormat: profile.apiFormat,
@@ -215,7 +218,7 @@ export async function callModelTier(
           attempts: attempt,
           failure: outcome.failure,
           nonRetryable: true,
-          diagnostics: tierDiagnostics(profile, null, outcome.failure) ?? undefined,
+          diagnostics: tierDiagnostics(profile, null, outcome.failure),
         };
       }
       // Transport or HTTP error: consume the retry budget with doubling
@@ -240,6 +243,9 @@ export async function callModelTier(
         rawResponse: outcome.raw,
         attempts: attempt,
         ...(raisedTokens !== null ? { budgetRaisedTo: raisedTokens } : {}),
+        ...(outcome.strippedStructuredOutput !== undefined
+          ? { strippedStructuredOutput: outcome.strippedStructuredOutput }
+          : {}),
       };
     } catch (error) {
       if (!(error instanceof VerdictParseFailure)) throw error;
@@ -252,11 +258,11 @@ export async function callModelTier(
           status: "empty_completion",
           attempts: attempt,
           failure: error,
-          diagnostics: tierDiagnostics(profile, lastRaw, error) ?? undefined,
+          diagnostics: tierDiagnostics(profile, lastRaw, error),
         };
       }
       if (parseFails >= PARSE_FAIL_CAP) {
-        const exhaustedDiagnostics = tierDiagnostics(profile, lastRaw, error) ?? undefined;
+        const exhaustedDiagnostics = tierDiagnostics(profile, lastRaw, error);
         if (exhaustedDiagnostics !== undefined && raisedTokens !== null) {
           exhaustedDiagnostics.record.completion_budget_raised_to = raisedTokens;
         }
@@ -270,8 +276,7 @@ export async function callModelTier(
       if (raisedTokens === null) {
         const raised = raisedCompletionBudget(profile.maxTokens);
         if (raised > profile.maxTokens) {
-          const diagnostics = tierDiagnostics(profile, lastRaw, error);
-          if (diagnostics === null || shouldRaiseCompletionBudget(diagnostics.class)) {
+          if (shouldRaiseCompletionBudget(tierDiagnostics(profile, lastRaw, error).class)) {
             raisedTokens = raised;
           }
         }
@@ -287,10 +292,10 @@ export async function callModelTier(
       status: "transport_exhausted",
       attempts: attempt - 1,
       failure: lastTransportFailure,
-      diagnostics: tierDiagnostics(profile, null, lastTransportFailure) ?? undefined,
+      diagnostics: tierDiagnostics(profile, null, lastTransportFailure),
     };
   }
-  const finalParseDiagnostics = tierDiagnostics(profile, lastRaw, lastParseFailure ?? undefined) ?? undefined;
+  const finalParseDiagnostics = tierDiagnostics(profile, lastRaw, lastParseFailure ?? undefined);
   if (finalParseDiagnostics !== undefined && raisedTokens !== null) {
     finalParseDiagnostics.record.completion_budget_raised_to = raisedTokens;
   }
@@ -397,7 +402,7 @@ export async function produceVerdict(
         failureKind: "parse",
       });
       const raised = raisedCompletionBudget(profile.maxTokens);
-      if (diagnostics !== null && shouldRaiseCompletionBudget(diagnostics.class) && raised > profile.maxTokens) {
+      if (shouldRaiseCompletionBudget(diagnostics.class) && raised > profile.maxTokens) {
         budgetRaisedTo = raised;
       }
     }

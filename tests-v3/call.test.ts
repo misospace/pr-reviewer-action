@@ -614,3 +614,23 @@ test("#1047: produceVerdict's single non-streamed retry raises on truncation evi
   });
   assert.deepEqual(zeroBodies, [{ stream: true, tokens: 8192 }, { stream: false, tokens: 8192 }]);
 });
+
+test("#1047 (review): callModelTier threads the transport's strip surface to the caller", async () => {
+  const outcome = await callModelTier(profile(), CONTEXT, {
+    call: async () => ({
+      status: "ok",
+      raw: {
+        choices: [{ message: { content: JSON.stringify({ verdict: "approve", review_markdown: "## ok" }) }, finish_reason: "stop" }],
+        usage: { completion_tokens: 5 },
+      },
+      response: { id: "", object: "chat.completion", model: "m", content: "", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+      // As the transport tags it after the one-shot 400 strip retry.
+      strippedStructuredOutput: "output_config.format",
+    }),
+  });
+  assert.equal(outcome.status, "ok");
+  assert.equal(outcome.status === "ok" && outcome.strippedStructuredOutput, "output_config.format");
+  // And a plain success carries no strip metadata.
+  const plain = await callModelTier(profile(), CONTEXT, { call: async () => okResponse() });
+  assert.equal(plain.status === "ok" && plain.strippedStructuredOutput, undefined);
+});

@@ -1725,11 +1725,27 @@ async function callTier(
     // was actually sent, keeping the line unchanged for every existing setup.
     const wireEffort = effectiveWireEffort(profile.apiFormat, profile.reasoningEffort, profile.anthropicEffortSupported);
     const effortNote = wireEffort === "" ? "" : `, effort=${wireEffort}`;
-    // #1047: same rule for the structured-output mode — the line states what
-    // was enforced on the wire, never what the config named. An Anthropic
-    // json_schema under its opt-in is the one combination that adds a note.
+    // #1047 (review): report the format the SUCCESSFUL request actually
+    // carried, never the configuration. The transport's one-shot strip retry
+    // can recover a capability-mismatch 400 without the parameter — the
+    // verdict then came from a prompt-only request, so `format=json_schema`
+    // would be a lie. The strip is announced once, by surface and outcome,
+    // and persisted as bounded attempt evidence beside the initial request
+    // artifact (which keeps its original bytes: it records what was FIRST
+    // sent). No secrets and no response content — the note carries only the
+    // parameter name and the attempt count.
+    const stripped = outcome.strippedStructuredOutput;
+    if (stripped !== undefined) {
+      log(`WARNING: ${profile.label}: the endpoint rejected the structured-output parameter (${stripped}) with HTTP 400; the request was retried once without it and recovered prompt-only`);
+      const effectiveArtifact = requestArtifact.replace(/\.json$/, ".effective.json");
+      ws.write(effectiveArtifact, Buffer.from(`${pyJsonDumps({
+        removed: stripped,
+        note: "structured output removed after HTTP 400; request recovered prompt-only",
+        attempts: outcome.attempts,
+      })}\n`, "utf8"));
+    }
     const wireFormat = effectiveWireResponseFormat(profile.apiFormat, profile.responseFormat, profile.anthropicStructuredOutputSupported);
-    const formatNote = wireFormat === "json_schema" && profile.apiFormat === "anthropic" ? ", format=json_schema" : "";
+    const formatNote = wireFormat === "json_schema" && profile.apiFormat === "anthropic" && stripped === undefined ? ", format=json_schema" : "";
     const raisedNote = outcome.budgetRaisedTo !== undefined ? ` (completion budget raised to ${outcome.budgetRaisedTo} after a token-cap failure)` : "";
     log(`${profile.label} model attempt ${outcome.attempts}/${profile.retries}: ${profile.model} @ ${profile.baseUrl} (${profile.apiFormat}${effortNote}${formatNote})${raisedNote}`);
     const parsed = parseVerdictResponse(outcome.rawResponse, [profile.apiKey]);

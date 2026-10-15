@@ -187,10 +187,11 @@ function blockShapeOf(response: Record<string, unknown>): BlockShape {
 
 /**
  * Classify one unusable response and build its bounded diagnostic record.
- * Returns null only for a caller error (no response AND no transport
- * context) — every real failure shape produces a record.
+ * Total: every failure shape — including a missing body — produces a record,
+ * so callers need no null handling (CodeQL js/comparison-between-incompatible
+ * types flagged the old nullable signature's dead null checks).
  */
-export function describeUnusableResponse(input: ResponseDiagnosticsInput): ResponseDiagnostics | null {
+export function describeUnusableResponse(input: ResponseDiagnosticsInput): ResponseDiagnostics {
   const record: Record<string, unknown> = {
     response_class: "",
     profile: input.profile.replace(/[\u0000-\u0020\u007f]+/g, " ").trim().slice(0, MAX_PROFILE_CHARS),

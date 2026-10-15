@@ -4438,3 +4438,88 @@ test("#1047: an unusable reasoning-only verdict carries bounded diagnostics and 
     cleanup();
   }
 });
+
+test("#1047 (review): a 400 strip recovery reports prompt-only truthfully and persists attempt evidence", async () => {
+  // The blocking review shape: the endpoint is asserted to accept
+  // output_config.format but rejects it. The transport strips it for exactly
+  // one retry and the verdict succeeds — the run must then report
+  // prompt-only (never format=json_schema), warn once by surface, keep the
+  // INITIAL request artifact bytes as first-sent evidence, and persist a
+  // bounded effective-request record. No secrets or response content may
+  // appear in any of it.
+  const bodies: Record<string, unknown>[] = [];
+  let requests = 0;
+  const server = await startMockServer((_req, body, res) => {
+    requests++;
+    bodies.push(JSON.parse(body) as Record<string, unknown>);
+    if (requests === 1) {
+      res.statusCode = 400;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: { message: "output_config.format is not supported by this backend" } }));
+      return;
+    }
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      id: "msg_ok", model: "m", role: "assistant",
+      content: [{ type: "text", text: JSON.stringify(baseVerdict()) }],
+      stop_reason: "end_turn",
+    }));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const logs: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-api-format": "anthropic",
+        "ai-stream": "false",
+        "ai-api-key": "test-key-1047-0123456789",
+        "ai-response-format": "json_schema",
+        "ai-anthropic-structured-output-support": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      log: (line) => logs.push(line),
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(requests, 2, "exactly one strip retry");
+    // Wire evidence: first attempt carried the format, the successful retry did not.
+    assert.ok((bodies[0]!.output_config as Record<string, unknown>).format, "first attempt carried output_config.format");
+    assert.equal("output_config" in bodies[1]!, false, "the effective (successful) request carried no format");
+    // Truthful log: the strip is announced by surface with the prompt-only
+    // outcome, and the success line NEVER claims enforcement.
+    assert.ok(
+      logs.some((line) =>
+        line.includes("rejected the structured-output parameter (output_config.format)")
+        && line.includes("recovered prompt-only")
+        && line.includes("Primary"),
+      ),
+      logs.join(" | "),
+    );
+    assert.equal(
+      logs.some((line) => line.includes("format=json_schema")),
+      false,
+      `a stripped request must never be reported as enforced: ${logs.join(" | ")}`,
+    );
+    // Persisted evidence: the INITIAL request artifact keeps its original
+    // bytes (what was first sent), and the effective-request record is
+    // bounded, secret-free, and content-free.
+    const initial = JSON.parse(readFileSync(join(runDir, "ai-request.primary.json"), "utf8")) as Record<string, unknown>;
+    assert.ok((initial.output_config as Record<string, unknown>).format, "initial artifact preserves the first-sent bytes");
+    const effective = JSON.parse(readFileSync(join(runDir, "ai-request.primary.effective.json"), "utf8")) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(effective).sort(), ["attempts", "note", "removed"]);
+    assert.equal(effective.removed, "output_config.format");
+    assert.equal(effective.attempts, 1);
+    assert.equal(JSON.stringify(effective).includes("test-key-1047"), false, "no secret in the effective-request record");
+    assert.equal(JSON.stringify(effective).includes("verdict"), false, "no response content in the effective-request record");
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
