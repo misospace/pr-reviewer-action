@@ -278,6 +278,38 @@ test("#928: env-only stage knobs survive buildStageEnv, so blind replays really 
   assert.match(seeing.readText("human-reviews.md") ?? "", /ctx\.sourceSha/);
 });
 
+test("#1053: an unset fallback override stays out of the config fingerprint through the production projection", () => {
+  // loadConfig → stageEnvFromConfig → collectConfigLines is exactly the
+  // shipped precheck path. An installation that sets only
+  // `ai-reasoning-effort` must NOT gain an `AI_FALLBACK_REASONING_EFFORT`
+  // line from the new input's inheritance, or every cached review of that
+  // configuration invalidates on upgrade; a configured override must add
+  // the line and flip the hash.
+  const unset = loadConfig(contract, {
+    "repo": "o/r", "pr-number": "7",
+    "ai-base-url": "http://m/v1", "ai-model": "m",
+    "ai-reasoning-effort": "low",
+  });
+  const unsetLines = collectConfigLines(stageEnvFromConfig(unset));
+  assert.equal(unsetLines.some((line) => line.startsWith("AI_FALLBACK_REASONING_EFFORT")), false);
+  // A projection from a build without the input at all hashes identically:
+  // the empty new key is invisible to the fingerprint.
+  const withoutFeature = { ...stageEnvFromConfig(unset) };
+  delete withoutFeature.AI_FALLBACK_REASONING_EFFORT;
+  assert.deepEqual(unsetLines, collectConfigLines(withoutFeature));
+  assert.equal(computeConfigHash(unsetLines), computeConfigHash(collectConfigLines(withoutFeature)));
+
+  const overridden = loadConfig(contract, {
+    "repo": "o/r", "pr-number": "7",
+    "ai-base-url": "http://m/v1", "ai-model": "m",
+    "ai-reasoning-effort": "low",
+    "ai-fallback-reasoning-effort": "high",
+  });
+  const overriddenLines = collectConfigLines(stageEnvFromConfig(overridden));
+  assert.ok(overriddenLines.includes("AI_FALLBACK_REASONING_EFFORT=high"));
+  assert.notEqual(computeConfigHash(overriddenLines), computeConfigHash(unsetLines));
+});
+
 test("#914: the pr-gate's pinned head sha is projected from the ambient env into the stage env", () => {
   const base: RunContext = {
     workspace: "/ws", runDir: "/run", repo: "o/r", prNumber: "7", headSha: "",
