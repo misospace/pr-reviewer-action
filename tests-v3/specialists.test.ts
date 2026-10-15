@@ -765,23 +765,82 @@ test("#1061: a non-streamed Anthropic max_tokens body is also an overrun (negati
   assert.equal(entry.overrun_retry_result, "failed");
 });
 
-test("#1061: a normal stop is never an overrun and carries no recovery fields", async () => {
+test("#1061: valid JSON with a normal stop is a clean ok and carries no recovery fields", async () => {
   let calls = 0;
   const result = await runSpecialists(baseInput({
     rolesToRun: ["correctness"],
     requestFn: async () => {
       calls += 1;
-      return { ok: true, raw: { choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "stop" }] } };
+      return { ok: true, raw: { choices: [{ message: { content: '{"leads":[{"severity":"info","message":"a real lead"}]}' }, finish_reason: "stop" }] } };
     },
   }));
 
   assert.equal(calls, 1);
   const entry = roleEntry(result, "correctness");
   assert.equal(entry.status, "ok");
-  assert.equal(entry.error_kind, null);
+  assert.equal(entry.error_kind, null, "a clean parse is never classified as a failure");
+  assert.equal(entry.lead_count, 1);
+  assert.equal(entry.errors_count, 0);
   assert.equal(entry.stop_reason, "stop");
   assert.equal("overrun_detected" in entry, false);
   assert.equal("overrun_retry_result" in entry, false);
+});
+
+test("#1061: a malformed response with a normal stop is classified 'parser', and never retried", async () => {
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async () => {
+      calls += 1;
+      return { ok: true, raw: { choices: [{ message: { content: "RAW-BODY-NOT-JSON" }, finish_reason: "stop" }] } };
+    },
+  }));
+
+  // An ordinary parse failure is not a completion-limit overrun: exactly one
+  // attempt, no recovery retry.
+  assert.equal(calls, 1, "an ordinary parse failure must never be retried");
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.status, "degraded");
+  assert.equal(entry.error_kind, "parser", "a malformed/no-lead response with a normal stop is a parser failure");
+  assert.equal(entry.stop_reason, "stop");
+  assert.equal(entry.errors_count, 1);
+  assert.equal("overrun_detected" in entry, false);
+  assert.equal("overrun_retry_result" in entry, false);
+  // The persisted role artifact records the parse failure, never the raw body.
+  const artifact = result.artifacts.perRole.correctness!;
+  assert.match(artifact.errors[0]!, /malformed JSON/);
+  assert.ok(!JSON.stringify(artifact).includes("RAW-BODY-NOT-JSON"));
+});
+
+test("#1061: the failure classifications stay mutually distinct (parser vs overrun vs transport vs timeout)", async () => {
+  // parser: malformed, normal stop.
+  const parser = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async () => ({ ok: true, raw: { choices: [{ message: { content: "nope" }, finish_reason: "stop" }] } }),
+  }));
+  assert.equal(roleEntry(parser, "correctness").error_kind, "parser");
+
+  // overrun: completion-limit stop, unrecovered.
+  const overrun = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, maxTokens: 32768 },
+    requestFn: async () => ({ ok: true, raw: { choices: [{ message: { content: "" }, finish_reason: "length" }] } }),
+  }));
+  assert.equal(roleEntry(overrun, "correctness").error_kind, "overrun");
+
+  // transport: a hard failure, no response.
+  const transport = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async () => ({ ok: false, errorMessage: "boom" }),
+  }));
+  assert.equal(roleEntry(transport, "correctness").error_kind, "transport");
+
+  // timeout: a transport outcome flagged as timed out.
+  const timeout = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async () => ({ ok: false, errorMessage: "planner model request timed out", timeout: true }),
+  }));
+  assert.equal(roleEntry(timeout, "correctness").error_kind, "timeout");
 });
 
 test("#1061: the stop-reason diagnostic is redacted and bounded (never a leak vector)", async () => {

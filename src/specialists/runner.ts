@@ -87,6 +87,14 @@ export type SpecialistRequestFn = (
 export interface SpecialistRoleEntry {
   role: string;
   status: "ok" | "degraded" | "error" | "skipped";
+  /** #1061: the role's failure classification, or null when the role
+   * succeeded (or is skipped). Closed set:
+   *   - `overrun`  — response stopped at the completion-token cap and the
+   *                  one-shot recovery did not produce a clean parse;
+   *   - `parser`   — a malformed/no-lead response with a normal stop;
+   *   - `transport`, `timeout`, `input`, `guard` — non-response failures.
+   * Reasoning-effort capability is a separate lane-level warning, never an
+   * `error_kind`. */
   error_kind: string | null;
   elapsed_sec: number;
   lead_count: number;
@@ -557,17 +565,31 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
       }
     }
 
-    // #1061: an overrun that recovered is a clean `ok`; an overrun that did
-    // not is classified `overrun` (never a bare `degraded`/null), so a
-    // full-budget no-lead failure is distinguishable from a plain parser
-    // failure in the aggregate and the role log line.
+    // #1061: classify the response-level failure so the aggregate and the
+    // role log line distinguish it, never a bare `degraded`/null:
+    //   - an overrun that recovered is a clean `ok` (no classification);
+    //   - an unrecovered completion-limit truncation is `overrun`;
+    //   - any other malformed/no-lead response with a normal stop is a
+    //     `parser` failure.
+    // Transport, timeout, input and guard failures are classified at their own
+    // return sites, and the Anthropic effort-capability warning stays a
+    // separate lane-level concern (see resolveSpecialistProfiles).
     const overrunUnrecovered = overrunDetected && artifact.errors.length > 0 && artifact.leads.length === 0;
-    return finish(artifact, statusOf(artifact), overrunUnrecovered ? "overrun" : null, extractResponseUsage(response), payload, response, {
-      stopReason: boundedStopReason(responseStopReason(response), [config.apiKey]),
-      outputChars: responseText.length,
-      overrunDetected,
-      overrunRetryResult,
-    });
+    const parseFailed = !overrunUnrecovered && artifact.errors.length > 0 && artifact.leads.length === 0;
+    return finish(
+      artifact,
+      statusOf(artifact),
+      overrunUnrecovered ? "overrun" : parseFailed ? "parser" : null,
+      extractResponseUsage(response),
+      payload,
+      response,
+      {
+        stopReason: boundedStopReason(responseStopReason(response), [config.apiKey]),
+        outputChars: responseText.length,
+        overrunDetected,
+        overrunRetryResult,
+      },
+    );
   }
 
   const failureArtifact = emptyArtifact(role);

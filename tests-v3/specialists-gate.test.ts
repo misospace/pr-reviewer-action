@@ -775,3 +775,49 @@ test("#1061: an explicit deep-review-max-tokens override is preserved", async ()
     rmSync(result.root, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// #1061: parser failures are classified, and exposed without raw model output
+// ---------------------------------------------------------------------------
+
+test("#1061: a malformed response with a normal stop is classified 'parser' in the aggregate and the role log", async () => {
+  const rawBody = "RAW-MODEL-OUTPUT-NOT-JSON";
+  const malformed = {
+    id: "c1",
+    object: "chat.completion",
+    model: "m",
+    choices: [{ index: 0, message: { role: "assistant", content: rawBody }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+  };
+  let calls = 0;
+  const requestFn: SpecialistRequestFn = async () => {
+    calls += 1;
+    return { ok: true, raw: malformed };
+  };
+  const result = await run({ DEEP_REVIEW: "true" }, { requestFn });
+  try {
+    assert.equal(result.code, 0);
+    // No retry: a plain parse failure is not a completion-limit overrun.
+    assert.equal(calls, 3, "each role makes exactly one attempt");
+
+    const aggregate = JSON.parse(result.read("specialists.json")) as {
+      roles: { role: string; status: string; error_kind: string | null }[];
+    };
+    for (const entry of aggregate.roles) {
+      assert.equal(entry.status, "degraded");
+      assert.equal(entry.error_kind, "parser", `${entry.role} must be classified a parser failure`);
+    }
+
+    const line = result.out.find((entry) => entry.startsWith("specialist correctness:"));
+    assert.ok(line, `expected a correctness log line, got ${JSON.stringify(result.out)}`);
+    assert.match(line!, /degraded \(parser\)/);
+    assert.ok(!line!.includes(rawBody), "the role log must never carry raw model output");
+
+    // The persisted per-role artifact records the parse failure, not the body.
+    const artifact = JSON.parse(result.read("specialist-correctness.json")) as { errors: string[] };
+    assert.ok(artifact.errors.some((error) => /malformed JSON/.test(error)));
+    assert.ok(!JSON.stringify(artifact).includes(rawBody), "the role artifact must not carry raw model output");
+  } finally {
+    rmSync(result.root, { recursive: true, force: true });
+  }
+});
