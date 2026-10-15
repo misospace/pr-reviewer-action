@@ -26,4 +26,5 @@ Start with the [quick start](../README.md#-quick-start); the defaults are the re
 |---|---|
 | [Architecture](architecture/) | Code map, pipeline and review-corpus internals |
 | [Evals](evals.md) | Eval harness, corpora and the semantic gate |
+| [CI critical path](ci-performance.md) | Measured CI wall clock, the critical-path leaves, and how to reproduce them |
 | [v3 teardown audit](v3-teardown-audit.md) | History of the v2 runtime removal |

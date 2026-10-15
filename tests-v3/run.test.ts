@@ -499,6 +499,7 @@ test("primary failure with a configured fallback publishes the fallback review",
       runDir,
       workspace: runDir,
       platformAdapter: mockPlatform(),
+      sleep: async () => {},
       quiet: true,
     });
     assert.equal(result.outputs.verdict, "approve");
@@ -538,6 +539,7 @@ for (const withFallback of [false, true]) {
         runDir,
         workspace: runDir,
         platformAdapter: mockPlatform(),
+        sleep: async () => {},
         quiet: true,
       });
       assert.equal(result.outputs.verdict, "request_changes");
@@ -551,6 +553,47 @@ for (const withFallback of [false, true]) {
     }
   });
 }
+
+test("#1058: the injected clock also covers the transport's own 429/5xx backoff", async () => {
+  // The transport retries a retryable status three times with a real 1s/2s
+  // wait unless the caller's deterministic clock reaches it; without that
+  // seam every retryable-status test pays ~3s of wall time (#1058).
+  const deadServer = await startMockServer((_req, _body, res) => {
+    res.statusCode = 500;
+    res.end('{"error":"down"}');
+  });
+  const { runDir, cleanup } = withRunDir();
+  const sleeps: number[] = [];
+  try {
+    await assert.rejects(() => runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": deadServer.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        // One model-tier attempt, so the only sleeps observed are the
+        // transport's own backoff for the retryable 500.
+        "ai-primary-retries": "1",
+        "ai-primary-retry-delay-sec": "0",
+        "on-model-failure": "fail",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async (seconds) => { sleeps.push(seconds); },
+      quiet: true,
+    }));
+    assert.equal(deadServer.requests.length, 3, "the transport must still make all three HTTP attempts");
+    assert.deepEqual(sleeps, [1, 2], "the caller's clock must cover the transport backoff, in seconds");
+  } finally {
+    await deadServer.close();
+    cleanup();
+  }
+});
 
 test("#867: a non-2xx primary reply (ai-primary-retries: 0) is a transport failure, never a parse failure", async () => {
   let calls = 0;
@@ -4202,6 +4245,7 @@ test("#998 (#1049 review): the fallback lane asserts its own Anthropic endpoint 
         runDir,
         workspace: runDir,
         platformAdapter: mockPlatform(),
+        sleep: async () => {},
         log: (line) => logs.push(line),
       });
       assert.equal(result.outputs.verdict, "approve");
@@ -4269,6 +4313,7 @@ test("#1053: the fallback lane picks its own reasoning effort on the OpenAI wire
       runDir,
       workspace: runDir,
       platformAdapter: mockPlatform(),
+      sleep: async () => {},
       log: (line) => logs.push(line),
     });
     assert.equal(result.outputs.verdict, "approve");
@@ -4330,6 +4375,7 @@ test("#1053: the fallback Anthropic wire picks the fallback override when its op
       runDir,
       workspace: runDir,
       platformAdapter: mockPlatform(),
+      sleep: async () => {},
       log: (line) => logs.push(line),
     });
     assert.equal(result.outputs.verdict, "approve");
@@ -4389,6 +4435,7 @@ test("#1053: an unset ai-fallback-reasoning-effort still inherits the base effor
       runDir,
       workspace: runDir,
       platformAdapter: mockPlatform(),
+      sleep: async () => {},
       log: (line) => logs.push(line),
     });
     assert.equal(result.outputs.verdict, "approve");
