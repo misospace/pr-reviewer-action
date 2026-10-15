@@ -847,6 +847,12 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   const traceOwnership = !requirementTraceEnabled || baseRef === "" ? { rules: [], warnings: [] } : resolveRequirementOwners({ baseRef, workspace });
   for (const warning of traceOwnership.warnings) errorLog(`requirement owners: ${warning}`);
   const tracePaths = requirementTraceEnabled ? traceChangedFilePaths(ws) : undefined;
+  // #1062: the trusted PR title + body at head, passed to the trace validator as
+  // the ONLY positive-confirmation source for a `documentation`-domain obligation
+  // (e.g. "the PR description records the removed-file inventory"). It is the
+  // authoritative platform PR snapshot, never model output, and is never used to
+  // confirm a code obligation — the validator's classifier gates that out.
+  const tracePrBody = `${String(pr.title ?? "")}\n${String(pr.body ?? "")}`;
   const ledgerValue = safeJson(ws.read("requirement-ledger.json"));
   // #959: the in-scope ids are computed once here and reused by the repair
   // pass below, so the prompt, the repair and the validator all see the same
@@ -1081,7 +1087,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     // place before the strict mapping counts open findings.
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
@@ -1101,7 +1107,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     });
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     // #977: the model's own request_changes is relaxed only when every
     // still-open finding is a verification ask and no independent
