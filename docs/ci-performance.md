@@ -97,15 +97,33 @@ in 2). Static and Bash have ~40s of headroom and never bound the path.
 2. **Pip wheel cache** on the two jobs that install the hashed set
    (`validate-python`, `validate-bash`), keyed on `requirements.txt`.
 
-Net effect on the aggregate critical path is bounded by `validate-python`,
-which stays co-critical: the TypeScript leaf drops from ~87s to roughly the
-Python leaf's level, so the path improves only in the runs where TypeScript was
-the straggler (a few seconds on average) while ~60s of TypeScript runner time is
-reclaimed per run. The remaining lever is the `pytest` step itself — see below.
+### Observed after (PR #1077, run 38782804443)
+
+Seconds; attempt 1 is the cold-cache first run, attempt 2 the warm-cache rerun.
+
+| | ts | py | static | bash | aggregate | wall | critpath |
+|---|---|---|---|---|---|---|---|
+| baseline mean | 87 | 91 | 52 | 18 | 3 | 114 | 94 |
+| after, attempt 1 | 42 | 87 | 53 | 37 | 4 | 97 | 87 |
+| after, attempt 2 | 34 | 95 | 51 | 13 | 3 | 103 | 95 |
+
+`validate-typescript`'s own step is 33s and 27s (was 76–95s for the job).
+`pip install` in `validate-python` is 3s and 8s (was 4–14s). `validate-bash`'s
+37s is the cold-cache first run — `Set up Python` 9s plus an 11s install; the
+warm rerun is 13s, back in the baseline band.
+
+Net effect on the aggregate critical path is bounded by `validate-python`, which
+stays co-critical: the TypeScript leaf drops to roughly the Python leaf's level,
+so the path improves only in the runs where TypeScript was the straggler (5 of
+the 12 baseline runs, a few seconds on average) while ~55–60s of TypeScript
+runner time is reclaimed per run. The aggregate wall clock is now Python-bound;
+the remaining lever is the `pytest` step itself — see below.
 
 ## Follow-up
 
-`validate-python`'s `pytest` step (59–67s of a 74–113s job) is now the dominant
-single cost on the path. Its slowest tests are the semantic-eval cases that
-spawn a Node subprocess each; trimming that is a separate change with its own
-risk profile and is not part of this one.
+`validate-python`'s `pytest` step (67–70s of a 87–95s job) is now the dominant
+single cost on the path, and `validate-typescript` is no longer the straggler.
+Its slowest tests are the ~14 cases that spawn the semantic-eval runner as a
+subprocess, each re-running the corpus and rebuilding `.test-build`; the corpus
+evaluation is repeated per invocation. Trimming that is a separate change with
+its own isolation/risk trade-off and is not part of this one.
