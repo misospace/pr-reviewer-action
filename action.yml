@@ -465,6 +465,10 @@ inputs:
     description: Opt in to discovering bounded .agents/skills/*/SKILL.md guidance from the trusted PR base. In native_loop, the model may read relevant skills on demand; this never enables tools or changes deterministic review policy. Disabled for fork PRs.
     required: false
     default: "false"
+  repository-skill-path:
+    description: Optional exact trusted-base .agents/skills/<name>/SKILL.md path to include as a bounded corpus addendum when native-loop tools are off. Must exist in the trusted base; never reads PR-head content.
+    required: false
+    default: ""
   tool-mode:
     description: "Optional tool harness mode: \"off\" (no evidence tools) or \"native_loop\". With native_loop the model uses its native tool-calling API — it holds the tool schemas and decides each next read-only call from the previous result, enabling multi-hop evidence chains. A model that never emits a tool call degrades to a corpus-only review (the verdict is still produced). Loop turns stream by default (controlled by ai_stream) so long turns don't time out behind a short-idle proxy; a stream that can't be reassembled is retried non-streamed for that turn. Budgets: tool_max_requests, tool_max_rounds, and tool_loop_wall_clock_sec. (The legacy plan_execute_once / plan_execute_loop planner modes were removed in 2.0; a stale value is treated as \"off\".)"
     required: false

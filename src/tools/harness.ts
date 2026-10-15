@@ -76,6 +76,7 @@ import {
 import { McpToolset, parseServerSpecs, splitNamespaced, resolveMcpToolName } from "./mcp.js";
 import { CORPUS_DIFF_SECTION_ARTIFACT, CORPUS_DIFF_SECTION_SMART_ARTIFACT } from "../corpus/assemble.js";
 import { buildTrackedIndex, executeToolRequest, type ToolContext, type TrackedIndex } from "./executors.js";
+
 import { runProcess } from "../runtime/subprocess.js";
 import { decodeUtf8Ignore } from "../corpus/truncate.js";
 
@@ -1312,7 +1313,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // web_search is advertised only when a search endpoint is configured.
   const searchUrl = (env.SEARCH_URL ?? "").trim();
   const maxSearchResults = envIntBounded(env, "TOOL_MAX_SEARCH_RESULTS", 5, 1, 15);
-  const toolSchemas = [...TOOL_SCHEMAS].filter(schema => schema.name !== "read_skill" || (env.REPOSITORY_SKILLS_PATHS ?? "[]") !== "[]");
+  const toolSchemas = [...TOOL_SCHEMAS].filter(schema => schema.name !== "read_skill" || ((env.REPOSITORY_SKILLS_PATHS ?? "[]") !== "[]" && (env.REPOSITORY_SKILLS ?? "false") === "true"));
   if (searchUrl) toolSchemas.push(WEB_SEARCH_SCHEMA);
 
   const limitsProfile = loopLimitsProfile(env, input.tier);
@@ -1492,7 +1493,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     sourceRevision = null;
   }
 
-  const allowedSkills = (() => { try { const value: unknown = JSON.parse(env.REPOSITORY_SKILLS_PATHS ?? "[]"); return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; } catch { return []; } })();
+  const allowedSkills = (() => {
+    try {
+      const value: unknown = JSON.parse(env.REPOSITORY_SKILLS_PATHS ?? "[]");
+      return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").slice(0, 24) : [];
+    } catch {
+      return [];
+    }
+  })();
   const toolCtx: ToolContext = {
     workspaceRoot: input.workspaceRoot,
     ...(env.REPOSITORY_SKILLS_REF ? { skillRef: env.REPOSITORY_SKILLS_REF } : {}),
@@ -1678,6 +1686,19 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     input.result.native_loop_error = outcome.error || "smart tool-loop deadline exceeded";
     return false;
   }
+  const appliedSkills = outcome.executed
+    .filter(call => call.tool === "read_skill" && call.result.status === "ok")
+    .map(call => {
+      const path = typeof call.args.path === "string" ? call.args.path : "";
+      const metadata = allowedSkills.includes(path)
+        ? path.split("/").at(-2) ?? ""
+        : "";
+      return metadata === "" ? null : { path, name: metadata };
+    })
+    .filter((skill): skill is { path: string; name: string } => skill !== null)
+    .slice(0, 4);
+  input.result.repository_skills_applied = appliedSkills;
+  if (appliedSkills.length > 0) input.deps.writeArtifact("repository-skills-applied.json", JSON.stringify(appliedSkills));
   if (outcome.degraded) {
     log(
       "  native_loop degraded: the model issued no tool calls" +
@@ -1906,6 +1927,10 @@ export function summarizeLoopOutcome(result: HarnessResult, outcome: LoopOutcome
   mdLines.push(`**Planned requests:** ${outcome.toolCallsIssued}`);
   mdLines.push(`**Loop rounds:** ${outcome.rounds}`);
   mdLines.push(`**Stop reason:** ${outcome.stopReason}`);
+  const appliedSkills = Array.isArray(result.repository_skills_applied) ? result.repository_skills_applied as Array<{ name: string; path: string }> : [];
+  if (appliedSkills.length > 0) {
+    mdLines.push("**Repository skills read:** " + appliedSkills.map(skill => `${skill.name} (${skill.path})`).join(", "));
+  }
   if (outcome.stopReason === STOP_BUDGET) {
     // #701: never let budget exhaustion read as "the investigation is
     // complete" — the visible corpus line keeps the limitation honest.

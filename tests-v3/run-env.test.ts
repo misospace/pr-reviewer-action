@@ -65,6 +65,7 @@ test("projection values: defaults, numbers, booleans, and revealed secrets", () 
   assert.equal(env.FAIL_ON_DEGRADED_REVIEW, "false");
   assert.equal(env.GITHUB_TOKEN, "tok", "secrets are revealed on the stage ABI, never redacted");
   assert.equal(env.AI_TEMPERATURE, "0.1", "contract default applies when the input is unset");
+  assert.equal(env.REPOSITORY_SKILLS, "false", "typed repository skill opt-in flows through config projection");
 });
 
 test("GH_TOKEN follows config.sh's binding: GH_TOKEN || GITHUB_TOKEN, then the token input", () => {
@@ -93,6 +94,8 @@ test("validateStageEnv fails closed with the v2 messages on missing bindings", (
     /Missing GitHub token/,
   );
   assert.equal(validateStageEnv({ ...empty, REPO: "o/r", PR_NUMBER: "1", AI_BASE_URL: "u", AI_MODEL: "m", GH_TOKEN: "t" } as never), null);
+  assert.match(validateStageEnv({ ...empty, REPO: "o/r", PR_NUMBER: "1", AI_BASE_URL: "u", AI_MODEL: "m", GH_TOKEN: "t", REPOSITORY_SKILLS_PATHS: "not-json" } as never) ?? "", /REPOSITORY_SKILLS_PATHS/);
+  assert.equal(validateStageEnv({ ...empty, REPO: "o/r", PR_NUMBER: "1", AI_BASE_URL: "u", AI_MODEL: "m", GH_TOKEN: "t", REPOSITORY_SKILLS_PATHS: "[]" } as never), null);
 });
 
 test("eval fixture keys survive the stage-env projection and yield the offline adapter", async () => {

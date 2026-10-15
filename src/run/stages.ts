@@ -476,6 +476,7 @@ export function assembleCorpus(
       ciChecksContent,
       versionHintsTruncatedTxt: ws.read("version-hints.truncated.txt"),
       toolHarnessMd: ws.read("tool-harness.md"),
+      repositorySkillAddendumMd: ws.read("repository-skill-addendum.md"),
       toolHarnessSmartMd: ws.read("tool-harness.smart.md"),
       evidenceProvidersMd: ws.read("evidence-providers.md"),
       imageDigestContextMd: ws.read("image-digest-context.md"),

@@ -14,6 +14,7 @@ import {
 import { parseMetadata } from "./metadata.js";
 import { isIncompleteReason } from "../publish/outputs.js";
 import { buildSelectionSignature } from "./selection.js";
+import { discoverRepositorySkills } from "../context/repository-skills.js";
 
 /** The action's precheck decision path (#674) — TS port of the decision
  * layers of `scripts/check_review_needed.sh` + `pr_reviewer/precheck.py`.
@@ -609,6 +610,23 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
   }
 
   // ── The should-review decision ────────────────────────────────────────
+  if ((configEnv.REPOSITORY_SKILLS ?? "").toLowerCase() === "true" || (configEnv.REPOSITORY_SKILL_PATH ?? "") !== "") {
+    const precheckPr = commentPrObject ?? await spec.adapter.getPr();
+    const rawBase = precheckPr !== null && typeof precheckPr === "object"
+      ? (precheckPr as { base?: unknown }).base
+      : null;
+    const baseRef = rawBase !== null && typeof rawBase === "object"
+      && typeof (rawBase as { sha?: unknown }).sha === "string"
+      ? String((rawBase as { sha: string }).sha)
+      : "";
+    const skills = baseRef !== ""
+      ? discoverRepositorySkills(baseRef, env.GITHUB_WORKSPACE ?? process.cwd())
+      : { contentFingerprint: "", warnings: ["trusted base revision unavailable; repository skills disabled"] };
+    configEnv.REPOSITORY_SKILLS_FINGERPRINT = skills.contentFingerprint || "unavailable";
+    if (skills.warnings.length > 0) {
+      process.stderr.write(`[precheck] WARNING: ${skills.warnings.join("; ")}\n`);
+    }
+  }
   const configLines = collectConfigLines(configEnv);
   const configHash = computeConfigHash(configLines);
   const skipIfDiffUnchanged = envFlag(env, "SKIP_IF_DIFF_UNCHANGED", true);

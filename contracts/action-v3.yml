@@ -603,6 +603,10 @@ inputs:
     required: false
     default: "false"
     description: "Opt in to discovering bounded .agents/skills/*/SKILL.md guidance from the trusted PR base. In native_loop, the model may read relevant skills on demand; this never enables tools or changes deterministic review policy. Disabled for fork PRs."
+  - id: repository-skill-path
+    required: false
+    default: ""
+    description: "Optional exact trusted-base .agents/skills/<name>/SKILL.md path to include as a bounded corpus addendum when native-loop tools are off. Must exist in the trusted base; never reads PR-head content."
   - id: tool-mode
     v2_id: tool_mode
     required: false

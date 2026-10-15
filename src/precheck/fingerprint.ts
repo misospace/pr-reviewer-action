@@ -62,6 +62,9 @@ export const EXACT_CONFIG_KEYS: readonly string[] = [
   "EVIDENCE_BLOCKER_ENFORCEMENT",
   "EVIDENCE_ENABLE_FOR_FORKS",
   "TOOL_MODE",
+  "REPOSITORY_SKILLS",
+  "REPOSITORY_SKILL_PATH",
+  "REPOSITORY_SKILLS_FINGERPRINT",
   "TOOL_MAX_REQUESTS",
   "PRIMARY_TOOL_MAX_REQUESTS",
   "SMART_TOOL_MAX_REQUESTS",
@@ -204,10 +207,21 @@ export function collectConfigLines(env: Record<string, string>): string[] {
   const keys = Object.keys(env)
     .filter((key) => (
       (key.startsWith("AI_") && !key.endsWith("_API_KEY") && !CONDITIONAL_AI_KEYS.has(key))
-      || EXACT_CONFIG_KEY_SET.has(key)
+      || (EXACT_CONFIG_KEY_SET.has(key) && !["REPOSITORY_SKILLS", "REPOSITORY_SKILL_PATH", "REPOSITORY_SKILLS_FINGERPRINT"].includes(key))
     ))
     .sort();
   for (const key of keys) lines.push(`${key}=${env[key]}`);
+
+  // Repository skill opt-in and trusted-base content affect review context.
+  // Disabled/default state emits no lines, preserving baseline fingerprints.
+  const skillsEnabled = (env.REPOSITORY_SKILLS ?? "").trim().toLowerCase() === "true";
+  if (skillsEnabled) lines.push("REPOSITORY_SKILLS=true");
+  const explicitSkillPath = (env.REPOSITORY_SKILL_PATH ?? "").trim();
+  if (explicitSkillPath !== "") lines.push(`REPOSITORY_SKILL_PATH=${explicitSkillPath}`);
+  if (skillsEnabled || explicitSkillPath !== "") {
+    const contentFingerprint = (env.REPOSITORY_SKILLS_FINGERPRINT ?? "").trim();
+    lines.push(`REPOSITORY_SKILLS_FINGERPRINT=${contentFingerprint || "unavailable"}`);
+  }
 
   // REVIEW_VERBOSITY hashes the value the review step assembles a prompt
   // from: only a genuine switch to concise changes the prompt, so only it

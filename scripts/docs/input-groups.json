@@ -112,7 +112,9 @@
       "system-prompt-mode",
       "review-verbosity",
       "standards-file",
-      "standards-file-candidates"
+      "standards-file-candidates",
+      "repository-skills",
+      "repository-skill-path"
     ]
   },
   {
@@ -177,7 +179,6 @@
     "summary": "read-only model-planned evidence gathering",
     "inputs": [
       "tool-mode",
-    "repository-skills",
       "tool-max-requests",
       "primary-tool-max-requests",
       "smart-tool-max-requests",

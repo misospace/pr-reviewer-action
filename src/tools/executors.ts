@@ -25,7 +25,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { maskAndTruncate, maskAndTruncateSource, maskAndTruncateSourceDetailed, redactSourceText } from "../context/redact.js";
 import { committedSourceProvenance, sanitizedSourceProvenance, untrustedTextProvenance, type EvidenceProvenance } from "../context/evidence-provenance.js";
-import { readRepositorySkill } from "../context/repository-skills.js";
+import { isRepositorySkillPath, readRepositorySkill } from "../context/repository-skills.js";
 import { USER_AGENT } from "../platform/user-agent.js";
 import { runProcess, type ProcessResult } from "../runtime/subprocess.js";
 import { pyDumpsCompact } from "../model/conversation.js";
@@ -1126,7 +1126,7 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
     switch (tool) {
       case "read_skill": {
         const path = typeof args.path === "string" ? args.path : "";
-        if (!ctx.skillRef || !ctx.allowedSkills?.includes(path)) throw new Error("Skill path is not in the trusted-base catalog");
+        if (!isRepositorySkillPath(path) || !ctx.skillRef || !ctx.allowedSkills?.includes(path)) throw new Error("Skill path is not in the trusted-base catalog");
         const content = readRepositorySkill(ctx.skillRef, ctx.workspaceRoot, path);
         if (content === null) throw new Error("Trusted-base skill could not be read");
         result = { path, content: boundedSource(content, Math.min(cap, 24_000), path), source: "trusted-base" };
