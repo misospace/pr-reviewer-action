@@ -1501,10 +1501,15 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       return [];
     }
   })();
+  // #1043 (review): one shared read-budget set per loop — the executors
+  // enforce the distinct-skill cap against it, and the diagnostics below
+  // report exactly the distinct skills that were successfully read.
+  const skillsRead = new Set<string>();
   const toolCtx: ToolContext = {
     workspaceRoot: input.workspaceRoot,
     ...(env.REPOSITORY_SKILLS_REF ? { skillRef: env.REPOSITORY_SKILLS_REF } : {}),
     allowedSkills,
+    skillsRead,
     trackedIndex,
     allowedGhRepos: [...input.allowedGhApiRepos],
     currentRepo: input.repo,
@@ -1686,17 +1691,19 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     input.result.native_loop_error = outcome.error || "smart tool-loop deadline exceeded";
     return false;
   }
-  const appliedSkills = outcome.executed
-    .filter(call => call.tool === "read_skill" && call.result.status === "ok")
-    .map(call => {
-      const path = typeof call.args.path === "string" ? call.args.path : "";
-      const metadata = allowedSkills.includes(path)
-        ? path.split("/").at(-2) ?? ""
-        : "";
-      return metadata === "" ? null : { path, name: metadata };
-    })
-    .filter((skill): skill is { path: string; name: string } => skill !== null)
-    .slice(0, 4);
+  // #1043 (review): the loaded-skills cap is enforced at execution (the
+  // shared skillsRead set); this list reports every successful distinct
+  // read truthfully — deduplicated, first-read order, with the execution
+  // cap as the only slice.
+  const appliedSkills: Array<{ path: string; name: string }> = [];
+  const seenApplied = new Set<string>();
+  for (const call of outcome.executed) {
+    if (call.tool !== "read_skill" || call.result.status !== "ok") continue;
+    const path = typeof call.args.path === "string" ? call.args.path : "";
+    if (!allowedSkills.includes(path) || seenApplied.has(path)) continue;
+    seenApplied.add(path);
+    appliedSkills.push({ path, name: path.split("/").at(-2) ?? "" });
+  }
   input.result.repository_skills_applied = appliedSkills;
   if (appliedSkills.length > 0) input.deps.writeArtifact("repository-skills-applied.json", JSON.stringify(appliedSkills));
   if (outcome.degraded) {

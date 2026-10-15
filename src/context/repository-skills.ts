@@ -9,6 +9,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { parse as parseYaml } from "yaml";
 
 /** Hard catalog and content limits; overflow candidates are skipped whole. */
 export const SKILL_LIMITS = Object.freeze({
@@ -66,19 +67,33 @@ function regularBlobAtRef(ref: string, path: string, workspace: string): boolean
   return /^100(?:644|755) blob [0-9a-f]+\t/u.test(row) && row.slice(row.indexOf("\t") + 1) === path;
 }
 
+/** #1043 (review): frontmatter is parsed with the repo's YAML parser (the
+ * same dependency the config modules trust) so standard block scalars —
+ * `description: >-` folded and `|` literal — work, not just single-line
+ * values. Only the two bounded string fields the catalog presents are
+ * accepted; every other key is non-authoritative and ignored. The parser's
+ * default alias budget blocks expansion attacks, and the block is
+ * size-capped before parsing. */
+const FRONTMATTER_MAX_CHARS = 4096;
+
 function parseFrontmatter(text: string): Pick<RepositorySkill, "name" | "description"> | null {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(text);
+  const match = new RegExp(`^---\\r?\\n([\\s\\S]{0,${FRONTMATTER_MAX_CHARS}}?)\\r?\\n---(?:\\r?\\n|$)`, "u").exec(text);
   if (!match) return null;
-  const fields: Record<string, string> = {};
-  for (const line of match[1]!.split(/\r?\n/u)) {
-    const field = /^(name|description):\s*(.*?)\s*$/u.exec(line);
-    if (field) {
-      const value = field[2]!.replace(/^(?:"([\s\S]*)"|'([\s\S]*)')$/u, (_whole, double: string | undefined, single: string | undefined) => double ?? single ?? "");
-      fields[field[1]!] = value;
-    }
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(match[1]!);
+  } catch {
+    return null;
   }
-  if (!fields.name || !fields.description || fields.name.length > 100 || fields.description.length > 500) return null;
-  return { name: fields.name, description: fields.description };
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const fields = parsed as Record<string, unknown>;
+  const name = fields.name;
+  const description = fields.description;
+  if (typeof name !== "string" || typeof description !== "string") return null;
+  const cleanName = name.trim();
+  const cleanDescription = description.trim();
+  if (cleanName === "" || cleanDescription === "" || cleanName.length > 100 || cleanDescription.length > 500) return null;
+  return { name: cleanName, description: cleanDescription };
 }
 
 function treePaths(output: Buffer): Array<{ path: string; mode: string }> {
@@ -148,7 +163,10 @@ export function readRepositorySkill(ref: string, workspace: string, path: string
 }
 
 function safeCatalogText(value: string): string {
-  return value.replace(CATALOG_TAG_RE, "&lt;repository_skill_catalog_untrusted");
+  // Multiline (block-scalar) values collapse to single-line rows: a newline
+  // inside name/description must not be able to forge additional catalog
+  // rows or break the fence structure.
+  return value.replace(/\r\n?|[\n\u0085\u2028\u2029]/gu, " ").replace(CATALOG_TAG_RE, "&lt;repository_skill_catalog_untrusted");
 }
 
 /** Catalog is metadata only, fenced as untrusted data using the tool envelope convention. */

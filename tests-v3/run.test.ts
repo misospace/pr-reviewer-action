@@ -4828,3 +4828,70 @@ test("#1047 (review): a >64-char configured key echoed in a stop reason never su
     cleanup();
   }
 });
+
+test("#1043 review: a reused run dir never ingests a stale repository-skill addendum", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  // A trusted base with one skill; the run workspace IS the fixture repo so
+  // base-ref reads resolve against it.
+  const repo = mkdtempSync(join(tmpdir(), "v3-skill-repo-"));
+  const git = (...args: string[]): string =>
+    execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
+  git("init", "-q");
+  git("config", "user.email", "test@example.invalid");
+  git("config", "user.name", "test");
+  mkdirSync(join(repo, ".agents/skills/dependency-upgrades"), { recursive: true });
+  const skillPath = ".agents/skills/dependency-upgrades/SKILL.md";
+  writeFileSync(
+    join(repo, skillPath),
+    "---\nname: Dependency upgrades\ndescription: How to review dependency bumps.\n---\nEXPAND-CONTRACT-ROLLOUT-MARKER\n",
+  );
+  git("add", ".");
+  git("commit", "-qm", "skill");
+  const baseSha = git("rev-parse", "HEAD");
+  const { runDir, cleanup } = withRunDir();
+  const baseInputs = {
+    "github-token": "tok",
+    repo: "o/r",
+    "pr-number": "7",
+    "ai-base-url": server.url,
+    "ai-model": "m",
+    "ai-stream": "false",
+    "ai-api-key": "k",
+  };
+  const runOnce = async (env: Record<string, string>, inputs: Record<string, string>): Promise<void> => {
+    await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), GITHUB_STEP_SUMMARY: join(runDir, "step-summary.md"), ...env },
+      inputs,
+      runDir,
+      workspace: repo,
+      platformAdapter: mockPlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+  };
+  try {
+    // Run 1: the operator-selected skill is applied to the corpus. The
+    // precheck stage resolves IS_FORK_PR before the review stage; the mock
+    // PR object carries no repo identity, so the test supplies the resolved
+    // flag the way the pipeline does.
+    await runOnce({ PR_REVIEWER_BASE_REF: baseSha, IS_FORK_PR: "false" }, { ...baseInputs, "repository-skill-path": skillPath });
+    assert.ok(existsSync(join(runDir, "repository-skill-addendum.md")), "run 1 writes the addendum");
+    const corpus1 = readFileSync(join(runDir, "review-corpus.truncated.md"), "utf8");
+    assert.match(corpus1, /EXPAND-CONTRACT-ROLLOUT-MARKER/);
+    // Run 2: same run dir, skills disabled — the stale addendum must not
+    // survive into the second corpus. IS_FORK_PR stays "false"; the point
+    // is the stale-artifact cleanup, not the fork gate.
+    await runOnce({ IS_FORK_PR: "false" }, { ...baseInputs });
+    assert.equal(existsSync(join(runDir, "repository-skill-addendum.md")), false, "run 2 removes the stale addendum");
+    assert.equal(existsSync(join(runDir, "repository-skill-context.json")), false, "run 2 removes the stale context record");
+    const corpus2 = readFileSync(join(runDir, "review-corpus.truncated.md"), "utf8");
+    assert.doesNotMatch(corpus2, /EXPAND-CONTRACT-ROLLOUT-MARKER/);
+  } finally {
+    await server.close();
+    cleanup();
+    rmSync(repo, { recursive: true, force: true });
+  }
+});

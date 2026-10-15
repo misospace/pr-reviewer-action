@@ -310,7 +310,10 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     effectiveRaw = resolution.raw;
   }
   const config = loadConfig(contract, effectiveRaw);
-  let skillCatalog: ReturnType<typeof discoverRepositorySkills> = { skills: [], warnings: [], contentFingerprint: "" };
+  // Assigned unconditionally below, once the resolved fork flag is known —
+  // skill discovery must wait for the fail-closed fork gate (#1043 review:
+  // CodeQL flagged the dead initializer).
+  let skillCatalog: ReturnType<typeof discoverRepositorySkills>;
 
   // #838: an explicit run dir (the caller's own, or PR_REVIEWER_RUN_DIR) is
   // reused as given; with neither, the default is a fresh private temp dir —
@@ -459,10 +462,10 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   env.REPOSITORY_SKILLS_PATHS = JSON.stringify(skillsEnabled ? skillCatalog.skills.map(skill => skill.path) : []);
   env.REPOSITORY_SKILLS_CATALOG = renderSkillCatalog(skillsEnabled ? skillCatalog.skills : []);
   env.REPOSITORY_SKILLS_FINGERPRINT = (skillsEnabled || explicitSkill !== null) ? skillCatalog.contentFingerprint : "";
-  env.REPOSITORY_SKILL_PATH = explicitSkill !== null
-    && (env.TOOL_MODE ?? "off").toLowerCase() !== "native_loop"
-    ? explicitSkillPath
-    : "";
+  // #1043 (review): the env var mirrors the addendum actually in effect —
+  // an addendum present in the corpus but absent from the config env would
+  // dodge the fingerprint, so both are keyed off the same condition.
+  env.REPOSITORY_SKILL_PATH = env.REPOSITORY_SKILL_ADDENDUM !== "" ? explicitSkillPath : "";
   env.REPOSITORY_SKILL_ADDENDUM = explicitSkill !== null
     && (!skillsEnabled || (env.TOOL_MODE ?? "off").toLowerCase() !== "native_loop")
     ? renderExplicitSkill(explicitSkillPath, explicitSkill)
@@ -471,6 +474,11 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ws.write("repository-skill-addendum.md", env.REPOSITORY_SKILL_ADDENDUM);
     ws.write("repository-skill-context.json", JSON.stringify({ source: "operator-selected", path: explicitSkillPath, added_to_corpus: true }));
   } else {
+    // #1043 (review): run dirs can be shared across runs (explicit runDir /
+    // PR_REVIEWER_RUN_DIR), so both skill artifacts must be cleared when no
+    // skill is selected — a stale addendum on disk would be ingested by the
+    // next corpus build while diagnostics claim no skill was applied.
+    ws.remove("repository-skill-addendum.md");
     ws.remove("repository-skill-context.json");
   }
   if (skillsEnabled && skillCatalog.skills.length > 0) {

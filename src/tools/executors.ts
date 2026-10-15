@@ -25,7 +25,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { maskAndTruncate, maskAndTruncateSource, maskAndTruncateSourceDetailed, redactSourceText } from "../context/redact.js";
 import { committedSourceProvenance, sanitizedSourceProvenance, untrustedTextProvenance, type EvidenceProvenance } from "../context/evidence-provenance.js";
-import { isRepositorySkillPath, readRepositorySkill } from "../context/repository-skills.js";
+import { isRepositorySkillPath, readRepositorySkill, SKILL_LIMITS } from "../context/repository-skills.js";
 import { USER_AGENT } from "../platform/user-agent.js";
 import { runProcess, type ProcessResult } from "../runtime/subprocess.js";
 import { pyDumpsCompact } from "../model/conversation.js";
@@ -117,6 +117,10 @@ export type ToolContext = {
   workspaceRoot: string;
   skillRef?: string;
   allowedSkills?: readonly string[];
+  /** Distinct skill paths successfully read this loop (#1043 review). One
+   * Set per native loop, shared across every executor call so the
+   * loaded-skills budget is enforced here instead of in diagnostics. */
+  skillsRead?: Set<string>;
   trackedIndex?: TrackedIndex | null;
   allowedGhRepos?: readonly string[];
   currentRepo?: string;
@@ -1127,9 +1131,27 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
       case "read_skill": {
         const path = typeof args.path === "string" ? args.path : "";
         if (!isRepositorySkillPath(path) || !ctx.skillRef || !ctx.allowedSkills?.includes(path)) throw new Error("Skill path is not in the trusted-base catalog");
+        // #1043 (review): the distinct-skill budget is enforced here, at
+        // execution, synchronously before the read — parallel same-round
+        // requests (executeToolRequests is Promise.all) cannot race past it
+        // because the check-and-reserve block contains no await. Only a
+        // successful read consumes the budget; repeat reads of an
+        // already-counted skill stay allowed.
+        const readSkills = ctx.skillsRead;
+        if (readSkills !== undefined && !readSkills.has(path) && readSkills.size >= SKILL_LIMITS.loadedSkills) {
+          throw new Error(`Repository skill read limit reached (${SKILL_LIMITS.loadedSkills} distinct skills per review)`);
+        }
         const content = readRepositorySkill(ctx.skillRef, ctx.workspaceRoot, path);
         if (content === null) throw new Error("Trusted-base skill could not be read");
-        result = { path, content: boundedSource(content, Math.min(cap, 24_000), path), source: "trusted-base" };
+        readSkills?.add(path);
+        // #1043 (review): an accepted skill body is never silently truncated —
+        // a partial skill would hand the model misleading half-instructions,
+        // which the ticket forbids. Masking still runs over the full text;
+        // the deterministic `bytesPerSkill` catalog cap is the bound. The
+        // loop raises its conversation-append budget for this tool to hold
+        // the complete body (see driveToolLoop).
+        const fullBody = maskAndTruncateSource(content, Number.MAX_SAFE_INTEGER, path).text;
+        result = { path, content: fullBody, source: "trusted-base", content_complete: true };
         provenance = untrustedTextProvenance(path);
         break;
       }

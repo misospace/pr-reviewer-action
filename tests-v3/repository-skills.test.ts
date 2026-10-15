@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { discoverRepositorySkills, readRepositorySkill, renderExplicitSkill, renderSkillCatalog, repositorySkillsAllowed, SKILL_LIMITS } from "../src/context/repository-skills.js";
 import { executeToolRequest, type ToolContext } from "../src/tools/executors.js";
-import { TOOL_SCHEMAS } from "../src/model/conversation.js";
+import { TOOL_SCHEMAS, Conversation } from "../src/model/conversation.js";
 import { collectConfigLines, computeConfigHash } from "../src/precheck/fingerprint.js";
 
 function git(cwd: string, ...args: string[]): string {
@@ -136,5 +136,98 @@ test("catalog and body fences neutralize hostile delimiters, and explicit tool-o
     const enabled = computeConfigHash(collectConfigLines({ REPOSITORY_SKILLS: "true", REPOSITORY_SKILLS_FINGERPRINT: catalog.contentFingerprint }));
     const changed = computeConfigHash(collectConfigLines({ REPOSITORY_SKILLS: "true", REPOSITORY_SKILLS_FINGERPRINT: "different" }));
     assert.notEqual(enabled, changed);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("#1043 review: the distinct-skill read cap is enforced at execution", async () => {
+  const root = fixture();
+  try {
+    const paths: string[] = [];
+    for (let index = 0; index < SKILL_LIMITS.loadedSkills + 1; index++) {
+      paths.push(addSkill(root, `cap-${index}`, metadata(`Cap ${index}`) + `Advice ${index}\n`));
+    }
+    const ref = commit(root);
+    const seen = new Set<string>();
+    const toolContext = { ...context(root, ref, paths), skillsRead: seen };
+    for (const path of paths.slice(0, SKILL_LIMITS.loadedSkills)) {
+      assert.equal((await executeToolRequest("read_skill", { path }, toolContext)).status, "ok");
+    }
+    const fifth = paths[SKILL_LIMITS.loadedSkills]!;
+    const rejected = await executeToolRequest("read_skill", { path: fifth }, toolContext);
+    assert.equal(rejected.status, "error");
+    assert.match(String((rejected.result as Record<string, unknown>).error), /read limit reached/);
+    // Repeat reads of an already-counted skill stay allowed.
+    assert.equal((await executeToolRequest("read_skill", { path: paths[0] }, toolContext)).status, "ok");
+    // A failed read consumes no budget.
+    assert.equal((await executeToolRequest("read_skill", { path: ".agents/skills/missing/SKILL.md" }, toolContext)).status, "error");
+    assert.equal((await executeToolRequest("read_skill", { path: paths[1] }, toolContext)).status, "ok");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("#1043 review: parallel same-round reads cannot race past the distinct cap", async () => {
+  const root = fixture();
+  try {
+    const paths: string[] = [];
+    for (let index = 0; index < SKILL_LIMITS.loadedSkills + 1; index++) {
+      paths.push(addSkill(root, `race-${index}`, metadata(`Race ${index}`) + "Advice\n"));
+    }
+    const ref = commit(root);
+    const seen = new Set<string>();
+    const toolContext = { ...context(root, ref, paths), skillsRead: seen };
+    const results = await Promise.all(paths.map(path => executeToolRequest("read_skill", { path }, toolContext)));
+    const ok = results.filter(result => result.status === "ok");
+    const rejected = results.filter(result => result.status === "error");
+    assert.equal(ok.length, SKILL_LIMITS.loadedSkills);
+    assert.equal(rejected.length, 1);
+    assert.match(String((rejected[0]!.result as Record<string, unknown>).error), /read limit reached/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("#1043 review: an accepted skill body is served complete, never silently truncated", async () => {
+  const root = fixture();
+  try {
+    // 20KB body: over the default 12KB tool-response cap AND the 8KB
+    // conversation-append budget, inside the 24KB per-skill catalog cap.
+    const secret = "api_token = \"sk-live-abcdef0123456789\"";
+    const body = `${"line\n".repeat(3000)}${secret}\nTAIL-MARKER-end-of-skill\n`;
+    assert.ok(Buffer.byteLength(body) > 12_000 && Buffer.byteLength(body) <= SKILL_LIMITS.bytesPerSkill);
+    const path = addSkill(root, "large", metadata("Large skill") + body);
+    const ref = commit(root);
+    const toolContext = { ...context(root, ref, [path]), maxResponseBytes: 12000 };
+    const response = await executeToolRequest("read_skill", { path }, toolContext);
+    assert.equal(response.status, "ok");
+    const payload = response.result as Record<string, unknown>;
+    assert.equal(payload.content_complete, true);
+    const content = String(payload.content);
+    assert.ok(content.includes("TAIL-MARKER-end-of-skill"), "the complete body arrives");
+    assert.doesNotMatch(content, /sk-live-abcdef0123456789/, "masking still applies to the full body");
+    // The default append budget must not re-truncate a read_skill result.
+    const conversation = new Conversation();
+    conversation.addToolResult("c1", payload, { maxBytes: SKILL_LIMITS.bytesPerSkill * 2 });
+    const rendered = (conversation.renderOpenAiMessages() as Array<{ role: string; content: string }>).find(message => message.role === "tool")!;
+    assert.ok(rendered.content.includes("TAIL-MARKER-end-of-skill"), "the append budget holds the complete body");
+    const defaultConversation = new Conversation();
+    defaultConversation.addToolResult("c1", payload);
+    const defaultRendered = (defaultConversation.renderOpenAiMessages() as Array<{ role: string; content: string }>).find(message => message.role === "tool")!;
+    assert.doesNotMatch(defaultRendered.content, /TAIL-MARKER-end-of-skill/, "sanity: the default budget would have truncated");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("#1043 review: multiline YAML frontmatter parses; non-string and oversized fields do not", () => {
+  const root = fixture();
+  try {
+    const folded = addSkill(root, "folded", "---\nname: Dependency upgrades\ndescription: >-\n  How to review Renovate-style\n  dependency bumps safely.\n---\nBody.\n");
+    const literal = addSkill(root, "literal", "---\nname: Migrations\ndescription: |\n  Step one.\n  Step two.\n---\nBody.\n");
+    const nonString = addSkill(root, "nonstring", "---\nname: 42\ndescription:\n  - not a string\n---\nBody.\n");
+    const oversized = addSkill(root, "oversized-field", `---\nname: Big\ndescription: ${"x".repeat(501)}\n---\nBody.\n`);
+    const catalog = discoverRepositorySkills(commit(root), root);
+    const byPath = new Map(catalog.skills.map(skill => [skill.path, skill]));
+    assert.equal(byPath.get(folded)?.description, "How to review Renovate-style dependency bumps safely.");
+    assert.equal(byPath.get(literal)?.description, "Step one.\nStep two.");
+    assert.equal(byPath.has(nonString), false);
+    assert.equal(byPath.has(oversized), false);
+    // A multiline description cannot forge extra catalog rows.
+    const rendered = renderSkillCatalog(catalog.skills);
+    assert.equal(rendered.split("\n").filter(line => line.startsWith("- ")).length, catalog.skills.length);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

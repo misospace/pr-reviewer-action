@@ -32,6 +32,7 @@ import {
   type ToolCallRecord,
 } from "../model/conversation.js";
 import type { EvidenceProvenance } from "../context/evidence-provenance.js";
+import { SKILL_LIMITS } from "../context/repository-skills.js";
 
 // Stop reasons (LoopOutcome.stopReason)
 export const STOP_MODEL_DONE = "model-stopped";
@@ -503,6 +504,12 @@ export async function driveToolLoop(
       conversation.addToolResult(disposition.callId, result.result ?? {}, {
         isError: result.status !== "ok",
         provenance: (result as { provenance?: EvidenceProvenance }).provenance,
+        // #1043 (review): read_skill results carry the complete trusted-base
+        // skill body — the executor never truncates one, and the default
+        // tool-result budget here must not silently re-truncate it at
+        // conversation append. The deterministic bytesPerSkill catalog cap is
+        // the bound; the 2× slack absorbs JSON escaping of the body.
+        ...(exec.name === "read_skill" ? { maxBytes: SKILL_LIMITS.bytesPerSkill * 2 } : {}),
       });
     }
 
