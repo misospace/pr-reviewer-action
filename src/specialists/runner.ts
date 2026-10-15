@@ -558,14 +558,17 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
           const retriedText = extractResponseText(retried.raw);
           const retriedArtifact = parseSpecialistResponse(retriedText, role);
           // Adopt a clean re-parse so any leads it carries are kept.
-          if (retriedArtifact.errors.length === 0) {
+          const adopted = retriedArtifact.errors.length === 0;
+          if (adopted) {
             response = retried.raw;
             responseText = retriedText;
             artifact = retriedArtifact;
           }
-          // "recovered" only when the retry itself cleared the completion
-          // limit — a still-truncated retry is not a genuine recovery.
-          overrunRetryResult = completionOverran(retried.raw) ? "failed" : "recovered";
+          // "recovered" requires all three: the retry parsed acceptably, it was
+          // adopted, and it cleared the completion limit. A retry that fails to
+          // parse (a normal stop included) leaves the original truncated
+          // response in place, so it is a failure, never a recovery.
+          overrunRetryResult = adopted && !completionOverran(retried.raw) ? "recovered" : "failed";
         } else {
           overrunRetryResult = "failed";
         }
@@ -798,14 +801,17 @@ async function runSpecialistScout(
           const retriedText = extractResponseText(retried.raw);
           const retriedArtifacts = parseScoutResponse(retriedText, roles);
           // Adopt a usable re-parse so any leads it carries are kept.
-          if (!anyUnusable(retriedArtifacts)) {
+          const adopted = !anyUnusable(retriedArtifacts);
+          if (adopted) {
             response = retried.raw;
             responseText = retriedText;
             artifacts = retriedArtifacts;
           }
-          // "recovered" only when the retry itself cleared the completion
-          // limit — a still-truncated retry is not a genuine recovery.
-          overrunRetryResult = completionOverran(retried.raw) ? "failed" : "recovered";
+          // "recovered" requires all three: the retry parsed acceptably, it was
+          // adopted, and it cleared the completion limit. A retry that fails to
+          // parse (a normal stop included) leaves the original truncated
+          // response in place, so it is a failure, never a recovery.
+          overrunRetryResult = adopted && !completionOverran(retried.raw) ? "recovered" : "failed";
         } else {
           overrunRetryResult = "failed";
         }

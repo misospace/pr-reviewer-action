@@ -1174,3 +1174,53 @@ test("#1061: combined_scout — valid-empty at the cap retries, recovers, skips 
     assert.equal("overrun_detected" in entry, false);
   }
 });
+
+// #1061: a retry is only a recovery when its parse is actually adopted.
+test("#1061: three-call — a retry that fails to parse is 'failed', never 'recovered'", async () => {
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, apiKey: REALISTIC_KEY },
+    requestFn: async () => {
+      calls += 1;
+      return calls === 1
+        // Empty at the cap: eligible for the one bounded retry.
+        ? { ok: true, raw: { choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "max_tokens" }] } }
+        // Normal stop, but malformed — the retry is discarded, not adopted.
+        : { ok: true, raw: { choices: [{ message: { content: "NOT JSON AT ALL" }, finish_reason: "stop" }] } };
+    },
+  }));
+
+  assert.equal(calls, 2, "the empty-at-cap response is retried once");
+  const entry = roleEntry(result, "correctness");
+  // The malformed retry is not adopted, so the original truncated response stands.
+  assert.equal(entry.status, "degraded");
+  assert.equal(entry.error_kind, "overrun");
+  assert.equal(entry.overrun_detected, true);
+  assert.equal(entry.overrun_retry_result, "failed", "a discarded retry is not a recovery");
+  assert.equal(entry.stop_reason, "max_tokens", "the retained response is the initial one");
+});
+
+test("#1061: combined_scout — a retry that fails to parse is 'failed', never 'recovered'", async () => {
+  const empty = { correctness: { leads: [] }, security: { leads: [] }, tests: { leads: [] } };
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, execution: "combined_scout", maxTokens: 16384, apiKey: REALISTIC_KEY },
+    requestFn: async () => {
+      calls += 1;
+      return calls === 1
+        ? { ok: true, raw: { choices: [{ message: { content: JSON.stringify(empty) }, finish_reason: "max_tokens" }] } }
+        : { ok: true, raw: { choices: [{ message: { content: "NOT JSON AT ALL" }, finish_reason: "stop" }] } };
+    },
+  }));
+
+  assert.equal(calls, 2, "the empty-at-cap scout is retried once");
+  for (const role of ["correctness", "security", "tests"]) {
+    const entry = roleEntry(result, role);
+    assert.equal(entry.status, "degraded", role);
+    assert.equal(entry.error_kind, "overrun", role);
+    assert.equal(entry.overrun_detected, true, role);
+    assert.equal(entry.overrun_retry_result, "failed", `${role}: a discarded retry is not a recovery`);
+  }
+  assert.equal(roleEntry(result, "correctness").stop_reason, "max_tokens", "the retained response is the initial one");
+});
