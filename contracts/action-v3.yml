@@ -599,6 +599,10 @@ inputs:
     required: false
     default: "false"
     description: "If true, allow evidence providers to run on cross-repository pull requests"
+  - id: repository-skills
+    required: false
+    default: "false"
+    description: "Opt in to discovering bounded .agents/skills/*/SKILL.md guidance from the trusted PR base. In native_loop, the model may read relevant skills on demand; this never enables tools or changes deterministic review policy. Disabled for fork PRs."
   - id: tool-mode
     v2_id: tool_mode
     required: false

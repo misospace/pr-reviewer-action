@@ -16,6 +16,7 @@ import { pythonJsonStringify } from "../precheck/metadata.js";
 import { buildHarnessObligations } from "../requirements/obligations.js";
 import { externalChecksConclusion } from "../precheck/decide.js";
 import { readStandardsFileAtRef, StandardsFileRefError } from "../context/standards-file-ref.js";
+import { discoverRepositorySkills, renderSkillCatalog } from "../context/repository-skills.js";
 import { loopContextLimits } from "../tools/harness.js";
 import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
@@ -309,6 +310,17 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     effectiveRaw = resolution.raw;
   }
   const config = loadConfig(contract, effectiveRaw);
+  const skillsEnabled = String(effectiveRaw["repository-skills"] ?? "false").toLowerCase() === "true"
+    && String(options.env.IS_FORK_PR ?? options.env.FORK_PR ?? "false").toLowerCase() !== "true";
+  const skillCatalog = skillsEnabled && baseRef !== ""
+    ? discoverRepositorySkills(baseRef, options.workspace ?? options.env.GITHUB_WORKSPACE ?? process.cwd())
+    : { skills: [], warnings: [] as string[] };
+  for (const warning of skillCatalog.warnings) log(`WARNING: ${warning}`);
+  if (skillCatalog.skills.length > 0) {
+    options.env.REPOSITORY_SKILLS_REF = baseRef;
+    options.env.REPOSITORY_SKILLS_PATHS = JSON.stringify(skillCatalog.skills.map(skill => skill.path));
+    log(`Trusted-base repository skill catalog: ${skillCatalog.skills.length} skill(s); content loads only if read_skill is used.`);
+  }
 
   // #838: an explicit run dir (the caller's own, or PR_REVIEWER_RUN_DIR) is
   // reused as given; with neither, the default is a fresh private temp dir —
@@ -355,6 +367,10 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     baseRef,
   };
   const env = buildStageEnv(config, context, options.env) as StageEnv;
+  if (skillCatalog.skills.length > 0) {
+    env.REPOSITORY_SKILLS_REF = baseRef;
+    env.REPOSITORY_SKILLS_PATHS = JSON.stringify(skillCatalog.skills.map(skill => skill.path));
+  }
   const missing = validateStageEnv(env);
   if (missing !== null) throw new RunReviewError(missing);
 
@@ -654,7 +670,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ...(env.PR_THREAD_CONTEXT !== undefined ? { prThreadContext: env.PR_THREAD_CONTEXT } : {}),
     ...(env.REVIEW_VERBOSITY !== undefined ? { reviewVerbosity: env.REVIEW_VERBOSITY } : {}),
   }, ws);
-  env.SYSTEM_PROMPT = promptState.systemPrompt;
+  env.SYSTEM_PROMPT = `${promptState.systemPrompt}${renderSkillCatalog(skillCatalog.skills)}`;
 
   // ── Corpus stage part 1 (corpus.sh): fork CI, harvest advisory ───────
   const scope = createCancellationScope();

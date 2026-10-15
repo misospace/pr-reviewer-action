@@ -1312,7 +1312,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // web_search is advertised only when a search endpoint is configured.
   const searchUrl = (env.SEARCH_URL ?? "").trim();
   const maxSearchResults = envIntBounded(env, "TOOL_MAX_SEARCH_RESULTS", 5, 1, 15);
-  const toolSchemas = [...TOOL_SCHEMAS];
+  const toolSchemas = [...TOOL_SCHEMAS].filter(schema => schema.name !== "read_skill" || (env.REPOSITORY_SKILLS_PATHS ?? "[]") !== "[]");
   if (searchUrl) toolSchemas.push(WEB_SEARCH_SCHEMA);
 
   const limitsProfile = loopLimitsProfile(env, input.tier);
@@ -1492,8 +1492,11 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     sourceRevision = null;
   }
 
+  const allowedSkills = (() => { try { const value: unknown = JSON.parse(env.REPOSITORY_SKILLS_PATHS ?? "[]"); return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; } catch { return []; } })();
   const toolCtx: ToolContext = {
     workspaceRoot: input.workspaceRoot,
+    ...(env.REPOSITORY_SKILLS_REF ? { skillRef: env.REPOSITORY_SKILLS_REF } : {}),
+    allowedSkills,
     trackedIndex,
     allowedGhRepos: [...input.allowedGhApiRepos],
     currentRepo: input.repo,

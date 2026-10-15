@@ -177,6 +177,7 @@
     "summary": "read-only model-planned evidence gathering",
     "inputs": [
       "tool-mode",
+    "repository-skills",
       "tool-max-requests",
       "primary-tool-max-requests",
       "smart-tool-max-requests",

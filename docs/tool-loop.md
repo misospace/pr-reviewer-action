@@ -6,6 +6,10 @@ reviewing model uses its provider's native tool-calling API (OpenAI
 contents, git history, GitHub metadata, allowlisted web pages — before the
 verdict turn.
 
+## Repository skills
+
+When `repository-skills: true`, the catalog of eligible trusted-base skills is included as lower-priority repository advice. The model may call `read_skill` for an exact catalog path; only those bytes are read and they remain untrusted guidance. This does not add a model call or grant shell/tool permissions. If the model does not read a skill, diagnostics do not claim it was applied. Fork reviews disable the feature.
+
 ## How the loop works
 
 1. The action sends the planning corpus plus the tool schemas in the first
