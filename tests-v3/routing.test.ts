@@ -235,7 +235,7 @@ test("#998: tierReasoningEffort inherits the base when the lane override is empt
   assert.equal(normalizeReasoningEffort(undefined), null);
 });
 
-test("#998: tierReasoningEffort honors per-lane overrides independently, and the fallback lane has none", () => {
+test("#998/#1053: tierReasoningEffort honors per-lane overrides independently; the fallback lane now has its own", () => {
   const env = {
     AI_REASONING_EFFORT: "low",
     AI_PRIMARY_REASONING_EFFORT: "high",
@@ -243,11 +243,31 @@ test("#998: tierReasoningEffort honors per-lane overrides independently, and the
   };
   assert.equal(tierReasoningEffort("primary", env), "high");
   assert.equal(tierReasoningEffort("smart", env), "xhigh");
-  // Fallback is availability recovery, never quality escalation (#965): it
-  // always inherits the base and no input can move it (there is no
-  // `AI_FALLBACK_REASONING_EFFORT` env key at all).
+  // Fallback is availability recovery, never quality escalation (#965) — but
+  // it now has its own override key (#1053). An empty fallback override still
+  // inherits the base, so a build without the feature stays request-byte
+  // compatible.
   assert.equal(tierReasoningEffort("fallback", env), "low");
-  assert.equal(tierReasoningEffort("fallback", { ...env, AI_FALLBACK_REASONING_EFFORT: "medium" }), "low");
+  assert.equal(tierReasoningEffort("fallback", { ...env, AI_FALLBACK_REASONING_EFFORT: "" }), "low");
+  // A configured fallback override wins over the base effort, mirroring the
+  // primary/smart lane behaviour.
+  assert.equal(tierReasoningEffort("fallback", { ...env, AI_FALLBACK_REASONING_EFFORT: "medium" }), "medium");
+  // The fallback lane does NOT inherit any other lane's override (its own
+  // override is empty here, so it sees the base "low", not primary's "high").
+  assert.equal(tierReasoningEffort("fallback", { ...env, AI_FALLBACK_REASONING_EFFORT: "" }), "low");
+  // A malformed fallback value is announced by key and behaves as empty
+  // (inheriting the base, never crashing and never clamped).
+  const warnings: string[] = [];
+  const capture = (warning: string): void => { warnings.push(warning); };
+  assert.equal(
+    tierReasoningEffort("fallback", { ...env, AI_FALLBACK_REASONING_EFFORT: "-bad" }, capture),
+    "low",
+    "dropped fallback value inherits the base",
+  );
+  assert.ok(
+    warnings.some((warning) => warning.includes("AI_FALLBACK_REASONING_EFFORT")),
+    `AI_FALLBACK_REASONING_EFFORT is announced by key: ${warnings.join(" | ")}`,
+  );
 });
 
 test("#998: a malformed effort is dropped as unset and announced, never clamped and never fatal", () => {
@@ -270,7 +290,7 @@ test("#998: a malformed effort is dropped as unset and announced, never clamped 
   assert.doesNotThrow(() => tierReasoningEffort("primary", { AI_REASONING_EFFORT: "-bad" }));
 });
 
-test("#998: resolveTierProfiles threads the effective reasoningEffort through every tier", () => {
+test("#998/#1053: resolveTierProfiles threads the effective reasoningEffort through every tier", () => {
   const profiles = resolveTierProfiles({
     AI_BASE_URL: "https://primary",
     AI_MODEL: "main",
@@ -280,11 +300,31 @@ test("#998: resolveTierProfiles threads the effective reasoningEffort through ev
     AI_REASONING_EFFORT: "low",
     AI_PRIMARY_REASONING_EFFORT: "high",
     AI_SMART_REASONING_EFFORT: "xhigh",
+    AI_FALLBACK_REASONING_EFFORT: "medium",
   });
   assert.equal(profiles.primary.reasoningEffort, "high");
   assert.equal(profiles.smart.reasoningEffort, "xhigh");
-  assert.equal(profiles.fallback.reasoningEffort, "low");
+  assert.equal(profiles.fallback.reasoningEffort, "medium");
   assert.equal(resolveTierProfiles({ AI_BASE_URL: "p", AI_MODEL: "m" }).primary.reasoningEffort, "");
+  // #1053: an explicit fallback override takes effect through the thread;
+  // an empty/unset fallback override preserves #998 byte compatibility.
+  const fallbackOwn = resolveTierProfiles({
+    AI_BASE_URL: "https://primary",
+    AI_MODEL: "main",
+    AI_FALLBACK_BASE_URL: "https://fb",
+    AI_FALLBACK_MODEL: "fb",
+    AI_REASONING_EFFORT: "low",
+    AI_FALLBACK_REASONING_EFFORT: "high",
+  });
+  assert.equal(fallbackOwn.fallback.reasoningEffort, "high");
+  const fallbackEmpty = resolveTierProfiles({
+    AI_BASE_URL: "https://primary",
+    AI_MODEL: "main",
+    AI_FALLBACK_BASE_URL: "https://fb",
+    AI_FALLBACK_MODEL: "fb",
+    AI_REASONING_EFFORT: "low",
+  });
+  assert.equal(fallbackEmpty.fallback.reasoningEffort, "low");
 });
 
 test("#998: the specialist lane inherits the primary resolved effort and reports a malformed one as a warning", () => {

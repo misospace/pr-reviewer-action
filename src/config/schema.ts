@@ -54,6 +54,7 @@ export const ENUM_INPUTS: Readonly<Record<string, readonly string[]>> = Object.f
   "validate-required-checks": ["auto", "true", "false"],
   "required-check-validation-mode": ["warn", "fail", "metadata_only"],
   "review-routing-mode": ["off", "auto"],
+  "review-triage-routing-mode": ["off", "advisory", "request"],
   "system-prompt-mode": ["replace", "append"],
   "review-verbosity": ["normal", "concise"],
   "publish-mode": ["comment", "review_comment", "review_verdict"],

@@ -12,3 +12,10 @@ export {
   tierRequestShape,
 } from "./tiers.js";
 export type { ReviewRoute, ResolvedTier, TierProfiles, TierSettings } from "./tiers.js";
+export {
+  HUMAN_REVIEW_ROUTING_STATUSES,
+  NON_MUTATING_ROUTING_STATUSES,
+  isHumanReviewRoutingStatus,
+  resolveHumanReviewRouting,
+} from "./human-review-routing.js";
+export type { HumanReviewRoutingMode, HumanReviewRoutingPlan, HumanReviewRoutingStatus } from "./human-review-routing.js";

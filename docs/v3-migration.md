@@ -433,6 +433,7 @@ Inputs with no v2 implementation.
 | `fallback-model-context-tokens` | empty |
 | `rereview-command` | `/ai-review` |
 | `review-triage` | `false` |
+| `review-triage-routing-mode` | `off` |
 
 ## New outputs
 
@@ -444,6 +445,7 @@ Outputs with no v2 implementation.
 | `incomplete-reason` | Why coverage is incomplete: `execution` / `requirement_trace` / `both` / `none` (#954). Distinguishes a finished review with an unverified requirement from a review that stopped early; `review-result` stays `partial` for both. |
 | `review-triage-decision` | Opt-in human-review triage answer (#1003): `not_required` / `required` / `unknown`, or empty when `review-triage` is disabled. Fail-closed: a missing or malformed answer, or a `not_required` with no usable supporting reason, is `unknown` — never a confident negative. Advisory only — it never changes the verdict, the findings, or any tool/evidence/fork access. |
 | `review-triage-reason` | The evidence behind `review-triage-decision` (#1003), possibly empty, or empty when `review-triage` is disabled. Redacted before publication. |
+| `review-triage-routing` | Deterministic reviewer-routing status (#1005) when `review-triage-routing-mode` ran: `not_required` / `no_targets` / `invalid` / `advisory` / `request` / `fork_blocked`. Empty when triage or routing is off. The review-step output reports the intent; the published review additionally reports the publish-time outcome (`requested` / `request_failed`). |
 
 `review-triage` (#1003) is operator-only (repository config can never switch a
 review behaviour on) and review-only: it asks the reviewer one extra question
@@ -451,6 +453,17 @@ and grants nothing, so it has no `*-enable-for-forks` sibling. Disabled, both
 outputs stay empty ("did not run"), the assembled prompt is byte-identical to
 pre-#1003, and the published review gains no section — a disabled run is
 distinguishable from one that ran and answered `unknown`.
+
+`review-triage-routing-mode` (#1005) is an operator-only layer on top of
+`review-triage`: `off` (default), `advisory`, or `request`. The model may select
+only the LOGICAL routing targets declared in the trusted base-ref file
+`.github/pr-reviewer-routing.yml` (`.pr-reviewer-routing.yml` as a root-dotfile
+fallback); deterministic action code maps those ids to concrete GitHub
+users/teams. The model can never name a GitHub identity, and an unknown or
+unconfigured target, or any uncertain state, causes no mutation. Requests are
+idempotent and additive only (existing reviewers are never removed), `advisory`
+dogfoods the plan without mutating, and fork pull requests never mutate. It has
+no `*-enable-for-forks` sibling and no `repo-configurable` key.
 
 `requirement-trace` depends on a bundled prompt fragment that asks the model to
 emit the trace fields. With `system-prompt-mode=replace` that fragment is

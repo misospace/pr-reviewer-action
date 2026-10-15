@@ -181,6 +181,9 @@ class MinimalPublishApi implements PublishPlatformApi {
   }
   async resolveThread(): Promise<boolean> { return true; }
   async removeLabel(): Promise<boolean> { return true; }
+  async requestReviewers(): ReturnType<PublishPlatformApi["requestReviewers"]> {
+    return { ok: true, supported: true, requestedUsers: [], requestedTeams: [], alreadyRequestedUsers: [], alreadyRequestedTeams: [] };
+  }
 }
 
 function withRunDir<T>(fn: (dir: string) => T): T {

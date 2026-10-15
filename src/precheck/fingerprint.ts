@@ -160,6 +160,10 @@ const CONDITIONAL_AI_KEYS: ReadonlySet<string> = new Set([
   "AI_REASONING_EFFORT",
   "AI_PRIMARY_REASONING_EFFORT",
   "AI_SMART_REASONING_EFFORT",
+  // #1053: the fallback override stays "" in the resolved config when the
+  // operator left it unset (load-config does not copy the base into it), so
+  // only a configured value ever contributes a line here.
+  "AI_FALLBACK_REASONING_EFFORT",
   "AI_SPECIALIST_REASONING_EFFORT",
   "AI_ANTHROPIC_EFFORT_SUPPORT",
   // #998 (#1049 review): the per-lane Anthropic effort opt-ins. Same rule:
@@ -216,6 +220,20 @@ export function collectConfigLines(env: Record<string, string>): string[] {
   // valid.
   if ((env.CLAIM_FALSIFICATION ?? "").trim().toLowerCase() === "true") {
     lines.push("CLAIM_FALSIFICATION=true");
+  }
+  // #1003/#1005: human-review triage and its routing layer only run when
+  // opted in, so only the enabled state contributes and the defaults leave
+  // existing fingerprints valid (same rule as CLAIM_FALSIFICATION above).
+  // The routing line carries the *effective* routing mode: with triage
+  // disabled the mode is inert, so only triage-enabled non-`off` modes
+  // contribute — `off`/unset never invalidates a cached review on upgrade.
+  const triageEnabled = (env.REVIEW_TRIAGE ?? "").trim().toLowerCase() === "true";
+  if (triageEnabled) {
+    lines.push("REVIEW_TRIAGE=true");
+  }
+  const routingMode = (env.REVIEW_TRIAGE_ROUTING_MODE ?? "").trim().toLowerCase();
+  if (triageEnabled && (routingMode === "advisory" || routingMode === "request")) {
+    lines.push(`REVIEW_TRIAGE_ROUTING_MODE=${routingMode}`);
   }
   // #998: only a resolved effort contributes. The value is the request's own
   // field, so a change here is a real behavior change (and the emitted line

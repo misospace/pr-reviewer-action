@@ -199,6 +199,9 @@ class MinimalPublishApi implements PublishPlatformApi {
   async unresolvedSupersededThreads() { return { ok: true, threads: [], hasNextPage: false }; }
   async resolveThread() { return true; }
   async removeLabel() { return true; }
+  async requestReviewers(): ReturnType<PublishPlatformApi["requestReviewers"]> {
+    return { ok: true, supported: true, requestedUsers: [], requestedTeams: [], alreadyRequestedUsers: [], alreadyRequestedTeams: [] };
+  }
 }
 
 function backtickSpans(message: string): string[] {

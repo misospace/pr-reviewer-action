@@ -24,6 +24,7 @@ import { escapeTableCell } from "../gates/ci-wait.js";
 import { COVERAGE_NOTICE_MAX_ITEMS, type PartialCoverage } from "../tools/coverage.js";
 import { isIncompleteReason, renderFindingsSummary, severityCountsLabel, MAX_REVIEW_TRIAGE_REASON_CHARS, type IncompleteReason } from "./outputs.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
+import type { HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 import type { NativeReviewComment, NativeReviewRequest, PublishPlatformApi } from "../platform/publish-api.js";
 
 export type PublishMode = "comment" | "review_comment" | "review_verdict";
@@ -110,6 +111,11 @@ export interface PublishInput {
    * (`review-triage` enabled) and the review produced one. Absent means
    * "did not run" and renders no section — never a silent "not required". */
   reviewTriage?: { decision: string; reason: string };
+  /** #1005: the deterministic reviewer-routing plan, present ONLY when
+   * routing ran. Its `status` is action-owned; `users`/`teams` come only from
+   * trusted base-ref configuration. The publish step performs the reviewer
+   * request only for `status: "request"`. */
+  reviewRouting?: HumanReviewRoutingPlan;
 }
 
 export interface PublishResult {
@@ -232,6 +238,9 @@ export function buildPublishedBody(options: {
   stateBlock?: string | undefined;
   /** #1003: rendered human-review triage section (only when triage ran). */
   triageBlock?: string | undefined;
+  /** #1005: rendered reviewer-routing section (only when routing ran and the
+   * status carries a decision). */
+  routingBlock?: string | undefined;
   /** #915: defaults to the build-time stamp; explicit "" forces unstamped. */
   actionVersion?: string;
 }): string {
@@ -253,6 +262,9 @@ export function buildPublishedBody(options: {
   }
   if (options.triageBlock) {
     lines.push(options.triageBlock, "");
+  }
+  if (options.routingBlock) {
+    lines.push(options.routingBlock, "");
   }
   lines.push(options.sanitizedMarkdown);
   return `${lines.join("\n")}\n`;
@@ -296,6 +308,49 @@ export function renderReviewTriageBlock(
     ">",
     "_Advisory only: this triage answer does not change the review's verdict or findings, and it requests no reviewer._",
   ];
+  return lines.join("\n");
+}
+
+/** #1005: labels for the reviewer-routing statuses that render a section.
+ * `off`/`not_required`/`no_targets` render nothing (there is nothing to
+ * report), so a common triage-enabled run's published body stays compact. */
+const REVIEW_ROUTING_LABELS: Record<string, string> = {
+  invalid: "invalid selection — no reviewer requested",
+  advisory: "advisory — no reviewer requested",
+  requested: "configured reviewers requested",
+  request_failed: "reviewer request failed",
+  fork_blocked: "blocked on a fork pull request — no reviewer requested",
+};
+
+/** A single-line code span for a trusted-config value; no `@` so an advisory
+ * block never pings a reviewer that was not actually requested. */
+function routingCodeSpan(value: string, maxChars: number): string {
+  return escapeCodeSpan(value, maxChars);
+}
+
+/**
+ * #1005: the compact reviewer-routing section. Every value is action-owned
+ * (the status label) or trusted base-ref configuration (the logical target ids
+ * and the concrete reviewers) — model text never appears here, and the model
+ * cannot name a concrete identity. Rendered only for statuses that carry a
+ * decision (invalid/advisory/requested/request_failed/fork_blocked).
+ */
+export function renderReviewRoutingBlock(routing: HumanReviewRoutingPlan): string {
+  const label = REVIEW_ROUTING_LABELS[routing.status];
+  if (label === undefined) return "";
+  const targets = routing.targetIds.map((id) => routingCodeSpan(id, 120)).join(", ");
+  const reviewers: string[] = [
+    ...routing.users.map((user) => routingCodeSpan(user, 60)),
+    ...routing.teams.map((team) => routingCodeSpan(`team:${team}`, 120)),
+  ];
+  const lines = ["## Reviewer Routing", "", `> **Reviewer routing: ${label}**`];
+  if (targets !== "") {
+    lines.push(">", `> Configured target(s): ${targets}`);
+  }
+  if (reviewers.length > 0) {
+    lines.push(">", `> Reviewer(s): ${reviewers.join(", ")}`);
+  }
+  lines.push(">", "_Advisory: reviewer routing never changes the review's verdict or findings, and concrete reviewers come only from trusted repository configuration._");
   return lines.join("\n");
 }
 
@@ -550,6 +605,45 @@ export async function publishReview(
     return { status: "superseded", messages };
   }
 
+  // #1005: perform the additive reviewer request for a "request" plan. Runs
+  // only after the head-sha guard, so a stale review never requests a
+  // reviewer. The boundary re-checks the plan's own invariants rather than
+  // trusting a carried-forward artifact: the mode must itself be `request`,
+  // and a fork PR (or an unknown fork state, `null`) never mutates. A failure
+  // is surfaced clearly and never substitutes another reviewer; it does not
+  // fail the review publication (the request is auxiliary, and the published
+  // section reports the outcome).
+  let reviewRouting = input.reviewRouting;
+  if (reviewRouting && reviewRouting.status === "request") {
+    if (reviewRouting.mode === "request" && input.isForkPr === false) {
+      const request = await api.requestReviewers(reviewRouting.users, reviewRouting.teams);
+      if (request.ok) {
+        const sent = [
+          ...request.requestedUsers,
+          ...request.requestedTeams.map((team) => `team:${team}`),
+        ];
+        const already = [
+          ...request.alreadyRequestedUsers,
+          ...request.alreadyRequestedTeams.map((team) => `team:${team}`),
+        ];
+        messages.push(
+          `Reviewer routing: requested ${sent.length > 0 ? sent.join(", ") : "(none new)"}`
+          + (already.length > 0 ? `; already requested: ${already.join(", ")}` : ""),
+        );
+        reviewRouting = { ...reviewRouting, status: "requested" };
+      } else {
+        messages.push(`WARN: reviewer routing failed (${request.supported ? "request" : "unsupported platform"}): ${request.error ?? "unknown error"}`);
+        reviewRouting = { ...reviewRouting, status: "request_failed" };
+      }
+    } else {
+      // A carried-forward/tampered artifact claims a request while its mode is
+      // not `request` or the PR is a fork/unknown: refuse to mutate and report
+      // the inconsistency rather than a phantom request.
+      messages.push("WARN: reviewer routing plan is inconsistent at the publish boundary; no reviewer was requested");
+      reviewRouting = { ...reviewRouting, status: "invalid" };
+    }
+  }
+
   // Sanitize model output first — the same pipeline for every mode. Any
   // outside-diff findings are appended as their own section: unlike inline
   // comments (which can only anchor in-diff findings), every publish mode
@@ -570,6 +664,8 @@ export async function publishReview(
   // #1003: rendered only when triage ran; the three modes share the one
   // block so a triage answer can never differ by publish mode.
   const triageBlock = input.reviewTriage ? renderReviewTriageBlock(input.reviewTriage, input.upstreamLinkMode) : "";
+  // #1005: rendered only when routing ran and the status carries a decision.
+  const routingBlock = reviewRouting ? renderReviewRoutingBlock(reviewRouting) : "";
   const markerContext: RunMarkerContext = {
     headSha: input.headSha,
     baseSha: input.baseSha,
@@ -658,6 +754,7 @@ export async function publishReview(
           ? renderStrictStateBlock({ incompleteReason, findings: input.findings, linkMode: input.upstreamLinkMode })
           : undefined,
         triageBlock: triageBlock || undefined,
+        routingBlock: routingBlock || undefined,
       });
       const result = await api.upsertStickyComment(input.commentMarker, body);
       if (!result.ok) {
@@ -674,6 +771,7 @@ export async function publishReview(
           ? renderStrictStateBlock({ incompleteReason, findings: input.findings, linkMode: input.upstreamLinkMode })
           : undefined,
         triageBlock: triageBlock || undefined,
+        routingBlock: routingBlock || undefined,
       });
       const result = await api.upsertStickyComment(input.commentMarker, body);
       if (!result.ok) {
@@ -717,6 +815,7 @@ export async function publishReview(
           ? renderStrictStateBlock({ incompleteReason, findings: input.findings, linkMode: input.upstreamLinkMode })
           : undefined,
         triageBlock: triageBlock || undefined,
+        routingBlock: routingBlock || undefined,
       });
       if (input.verdict === "approve" && !canApprove) {
         if (!guardrails.canApprove) {

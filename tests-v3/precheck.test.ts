@@ -37,6 +37,9 @@ import {
 } from "../src/precheck/decide.js";
 import { FixtureAdapter, fixtureLinearCollector, type PrecheckFixture } from "../src/precheck/fixture.js";
 import type { ManagedComment, ManagedReview } from "../src/platform/types.js";
+import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
+import { loadConfig } from "../src/config/load-config.js";
+import { stageEnvFromConfig } from "../src/run/env.js";
 import { failOnRequestChanges } from "../src/run/action.js";
 
 const DIFF = "diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n";
@@ -81,6 +84,7 @@ test("#998: an unset reasoning effort leaves the config hash untouched; a change
     AI_REASONING_EFFORT: "",
     AI_PRIMARY_REASONING_EFFORT: "",
     AI_SMART_REASONING_EFFORT: "",
+    AI_FALLBACK_REASONING_EFFORT: "",
     AI_SPECIALIST_REASONING_EFFORT: "",
     AI_ANTHROPIC_EFFORT_SUPPORT: "false",
     AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "false",
@@ -90,6 +94,7 @@ test("#998: an unset reasoning effort leaves the config hash untouched; a change
   assert.deepEqual(after, before);
   assert.equal(computeConfigHash(after), computeConfigHash(before));
   assert.equal(after.some((line) => line.startsWith("AI_REASONING_EFFORT")), false);
+  assert.equal(after.some((line) => line.startsWith("AI_FALLBACK_REASONING_EFFORT")), false);
   assert.equal(after.some((line) => line.startsWith("AI_ANTHROPIC_EFFORT_SUPPORT")), false);
 
   // A configured effort is model-affecting config: it enters the hash, and a
@@ -112,6 +117,7 @@ test("#998: an unset reasoning effort leaves the config hash untouched; a change
   // false stays out of the hash, a true flips it (it changes what is sent).
   const lanesUnset = collectConfigLines({
     AI_MODEL: "m",
+    AI_FALLBACK_REASONING_EFFORT: "",
     AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "",
     AI_FALLBACK_ANTHROPIC_EFFORT_SUPPORT: "",
     AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT: "false",
@@ -128,8 +134,101 @@ test("#998: an unset reasoning effort leaves the config hash untouched; a change
   assert.notEqual(computeConfigHash(smartOptedIn), computeConfigHash(specialistOptedIn));
   assert.equal(collectConfigLines({ AI_MODEL: "m" })[0] !== undefined, true);
 
+  // #1053: an effective fallback override IS model-affecting config: it
+  // enters the hash and a different value produces a different fingerprint.
+  const fallbackBase = collectConfigLines({ AI_MODEL: "m", AI_BASE_URL: "https://primary", AI_REASONING_EFFORT: "low" });
+  const fallbackOverride = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_REASONING_EFFORT: "low",
+    AI_FALLBACK_REASONING_EFFORT: "high",
+  });
+  assert.ok(fallbackOverride.includes("AI_FALLBACK_REASONING_EFFORT=high"));
+  assert.notEqual(computeConfigHash(fallbackBase), computeConfigHash(fallbackOverride));
+  // A different effective fallback value also flips the hash.
+  const fallbackOther = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_REASONING_EFFORT: "low",
+    AI_FALLBACK_REASONING_EFFORT: "medium",
+  });
+  assert.notEqual(computeConfigHash(fallbackOverride), computeConfigHash(fallbackOther));
+  // An empty (whitespace-only) fallback value follows the existing
+  // emit-only-if-trim-non-empty rule: it is NOT emitted, so an unset value
+  // leaves the hash identical to the build without the feature.
+  const fallbackBlank = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_REASONING_EFFORT: "low",
+    AI_FALLBACK_REASONING_EFFORT: "   ",
+  });
+  assert.equal(fallbackBlank.some((line) => line.startsWith("AI_FALLBACK_REASONING_EFFORT")), false);
+  assert.equal(computeConfigHash(fallbackBlank), computeConfigHash(fallbackBase));
+
   // Secrets still never enter the hash.
   assert.ok(!collectConfigLines({ AI_REASONING_EFFORT: "high", AI_API_KEY: "sk-secret" }).some((line) => line.includes("secret")));
+});
+
+test("#1005/#1003: triage and its routing mode enter the config fingerprint only when effective", () => {
+  const base = collectConfigLines({ AI_MODEL: "m" });
+
+  // Upgrade safety: `off` (the contract default) and unset leave the hash
+  // byte-identical to a build without the feature — an operator upgrading
+  // does not invalidate every existing cached review.
+  for (const mode of [undefined, "", "off", "OFF"]) {
+    const env: Record<string, string> = { AI_MODEL: "m" };
+    if (mode !== undefined) env.REVIEW_TRIAGE_ROUTING_MODE = mode;
+    assert.deepEqual(collectConfigLines(env), base, `mode=${String(mode)}`);
+    assert.equal(computeConfigHash(collectConfigLines(env)), computeConfigHash(base));
+  }
+  // Triage itself follows the same rule: unset/false contribute nothing.
+  assert.deepEqual(collectConfigLines({ AI_MODEL: "m", REVIEW_TRIAGE: "false" }), base);
+  assert.deepEqual(collectConfigLines({ AI_MODEL: "m", REVIEW_TRIAGE: "" }), base);
+
+  // An effective non-`off` mode is review-shaping config: it must change the
+  // hash so an unchanged PR re-reviews instead of skipping, and each mode
+  // hashes differently.
+  const advisory = collectConfigLines({ AI_MODEL: "m", REVIEW_TRIAGE: "true", REVIEW_TRIAGE_ROUTING_MODE: "advisory" });
+  const request = collectConfigLines({ AI_MODEL: "m", REVIEW_TRIAGE: "true", REVIEW_TRIAGE_ROUTING_MODE: "request" });
+  assert.ok(advisory.includes("REVIEW_TRIAGE=true"));
+  assert.ok(advisory.includes("REVIEW_TRIAGE_ROUTING_MODE=advisory"));
+  assert.ok(request.includes("REVIEW_TRIAGE_ROUTING_MODE=request"));
+  assert.notEqual(computeConfigHash(base), computeConfigHash(advisory));
+  assert.notEqual(computeConfigHash(base), computeConfigHash(request));
+  assert.notEqual(computeConfigHash(advisory), computeConfigHash(request));
+
+  // The mode is inert while triage is disabled (the resolver never runs), so
+  // a set mode with triage off contributes nothing on its own — the triage
+  // line is what flips the hash.
+  assert.deepEqual(collectConfigLines({ AI_MODEL: "m", REVIEW_TRIAGE_ROUTING_MODE: "request" }), base);
+
+  // An unrecognized value normalizes to `off` downstream (review.ts maps it
+  // to the default), so it must not enter the hash either.
+  assert.deepEqual(collectConfigLines({ AI_MODEL: "m", REVIEW_TRIAGE: "true", REVIEW_TRIAGE_ROUTING_MODE: "bogus" }),
+    collectConfigLines({ AI_MODEL: "m", REVIEW_TRIAGE: "true" }));
+});
+
+test("#1005/#1003: a routing-mode or triage flip on an unchanged PR re-reviews instead of skipping", () => {
+  // Full dataflow: contract load -> stage-env projection -> config hash ->
+  // precheck decision. The stored marker was produced with the defaults
+  // (triage off, routing off); the next run enables `request` on the same
+  // diff. The config hash must differ, so the skip must not fire.
+  const raw = Object.fromEntries(V3_CONTRACT.inputs.map((input) => [input.id, "default" in input && input.default !== undefined ? String(input.default) : ""]));
+  raw["ai-base-url"] = "https://primary";
+  raw["ai-model"] = "m";
+  const enabled = loadConfig(V3_CONTRACT, { ...raw, "review-triage": "true", "review-triage-routing-mode": "request" });
+  const defaults = loadConfig(V3_CONTRACT, raw);
+
+  const defaultsHash = computeConfigHash(collectConfigLines(stageEnvFromConfig(defaults)));
+  const enabledHash = computeConfigHash(collectConfigLines(stageEnvFromConfig(enabled)));
+  assert.notEqual(defaultsHash, enabledHash);
+
+  const diff = "diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n";
+  const marker = buildMarkerFingerprint(computeDiffFingerprint(diff), defaultsHash);
+  const skipped = evaluatePrecheck(diff, [marker], { configHash: defaultsHash });
+  assert.equal(skipped.decision, "skip_already_reviewed");
+  const reReviewed = evaluatePrecheck(diff, [marker], { configHash: enabledHash });
+  assert.equal(reReviewed.decision, "review_needed");
 });
 
 test("marker fingerprints round-trip the empty-diff placeholder and first marker wins", () => {

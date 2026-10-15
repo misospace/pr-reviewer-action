@@ -242,6 +242,15 @@ export interface ParsedReviewVerdict {
    */
   reviewTriageDecision: ReviewTriageDecision;
   reviewTriageReason: string;
+  /**
+   * #1005: the model-selected LOGICAL routing target IDs for the human-review
+   * triage answer. Bounded, control-char-free, lowercased strings, deduped;
+   * empty when the model emitted none. These are logical IDs only — the model
+   * can never name a concrete GitHub user or team here, and the deterministic
+   * resolver validates every ID against trusted configuration before any
+   * reviewer request is made.
+   */
+  reviewTriageTargets: string[];
   extra: Record<string, unknown>;
 }
 
