@@ -213,6 +213,36 @@ test("#1043 review: an accepted skill body is served complete, never silently tr
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("#1043 review: a failed oversized read consumes no skill slot, the four-success cap still holds", async () => {
+  const root = fixture();
+  try {
+    // One escape-dense skill (~143KB serialized) plus exactly four ordinary
+    // ones: if the dense failure consumed a slot, the fourth ordinary read
+    // would be rejected too.
+    const dense = addSkill(root, "dense", metadata("Dense") + "\u0001".repeat(23_900));
+    const ordinary: string[] = [];
+    // Five ordinary skills: exactly four must succeed after the dense
+    // failure — if the failed read consumed a slot, only three would.
+    for (let index = 0; index < SKILL_LIMITS.loadedSkills + 1; index++) {
+      ordinary.push(addSkill(root, `ok-${index}`, metadata(`Ok ${index}`) + "Advice\n"));
+    }
+    const ref = commit(root);
+    const seen = new Set<string>();
+    const toolContext = { ...context(root, ref, [dense, ...ordinary]), skillsRead: seen };
+    const failed = await executeToolRequest("read_skill", { path: dense }, toolContext);
+    assert.equal(failed.status, "error");
+    assert.match(String((failed.result as Record<string, unknown>).error), /refusing to truncate/);
+    assert.equal(seen.size, 0, "the failed read consumed no slot");
+    for (const path of ordinary.slice(0, SKILL_LIMITS.loadedSkills)) {
+      assert.equal((await executeToolRequest("read_skill", { path }, toolContext)).status, "ok");
+    }
+    assert.equal(seen.size, SKILL_LIMITS.loadedSkills, "four successful reads held the cap");
+    const fifth = await executeToolRequest("read_skill", { path: ordinary[SKILL_LIMITS.loadedSkills]! }, toolContext);
+    assert.equal(fifth.status, "error");
+    assert.match(String((fifth.result as Record<string, unknown>).error), /read limit reached/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("#1043 review: an escape-dense skill fails the read explicitly instead of truncating", async () => {
   const root = fixture();
   try {

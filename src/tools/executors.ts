@@ -1143,13 +1143,14 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         }
         const content = readRepositorySkill(ctx.skillRef, ctx.workspaceRoot, path);
         if (content === null) throw new Error("Trusted-base skill could not be read");
-        readSkills?.add(path);
-        // #1043 (review): an accepted skill body is never silently truncated —
-        // a partial skill would hand the model misleading half-instructions,
-        // which the ticket forbids. Masking still runs over the full text;
-        // the deterministic `bytesPerSkill` catalog cap is the bound. The
-        // loop raises its conversation-append budget for this tool to hold
-        // the complete body (see driveToolLoop).
+        // #1043 (review, third pass): the slot is claimed only after EVERY
+        // validation succeeds — a read that fails the serialized-size check
+        // below must not consume one of the loadedSkills slots, or a
+        // rejected read would silently shrink the model's usable budget.
+        // Masking still runs over the full text; the deterministic
+        // `bytesPerSkill` catalog cap is the bound. The loop raises its
+        // conversation-append budget for this tool to hold the complete
+        // body (see driveToolLoop).
         const fullBody = maskAndTruncateSource(content, Number.MAX_SAFE_INTEGER, path).text;
         result = { path, content: fullBody, source: "trusted-base", content_complete: true };
         // #1043 (review, second pass): the append budget binds the SERIALIZED
@@ -1161,6 +1162,7 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         if (Buffer.byteLength(pyDumpsSorted(result), "utf8") > SKILL_RESULT_MAX_BYTES) {
           throw new Error(`Serialized repository skill exceeds the ${SKILL_RESULT_MAX_BYTES}-byte tool-result budget; refusing to truncate`);
         }
+        readSkills?.add(path);
         provenance = untrustedTextProvenance(path);
         break;
       }
