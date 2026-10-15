@@ -147,4 +147,9 @@ test("the dogfood workflow wires the action through kebab-case contract ids", ()
     assert.ok(contractIds.has(key), `dogfood review step passes non-contract input ${key}`);
   }
   assert.ok(withKeys.includes("github-token"), "dogfood review step must pass github-token");
+  assert.equal(
+    step!.with?.["github-token"],
+    "${{ steps.app-token.outputs.token }}",
+    "the dogfood reviewer must post as the app bot, not the default runner token",
+  );
 });

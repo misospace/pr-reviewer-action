@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { parse } from "yaml";
 import { failOnRequestChanges } from "../src/run/action.js";
 import { resolveDegradedGateBypass } from "../src/run/review.js";
 
@@ -62,4 +64,24 @@ test("#978: fail-on-request-changes respects the full gate-bypass truth table", 
   } finally {
     process.stdout.write = originalWrite;
   }
+});
+
+test("#518: the fail-on-request-changes gate is opt-in and runs after publishing", () => {
+  // Both gate inputs default off: failing the step is a deliberate choice
+  // (docs/verdicts-and-publishing.md).
+  const action = parse(readFileSync("action.yml", "utf8")) as { inputs: Record<string, { default?: string }> };
+  assert.equal(action.inputs["fail-on-request-changes"]?.default, "false");
+  assert.equal(action.inputs["fail-on-degraded-review"]?.default, "false");
+
+  // "Runs after publishing — the review comment and inline findings still land
+  // on the PR either way." actionMain has no injectable publish/gate seam, so
+  // guard the orchestration order at the source (the same pattern as
+  // qualification-dataflow.test.ts): a future reorder that gated before
+  // publishing would fail a review that never posted.
+  const source = readFileSync("src/run/action.ts", "utf8");
+  const publishAt = source.indexOf("await publishWith(");
+  const gateAt = source.indexOf("const gate = failOnRequestChanges(");
+  assert.ok(publishAt !== -1, "actionMain must call publishWith");
+  assert.ok(gateAt !== -1, "actionMain must call failOnRequestChanges");
+  assert.ok(publishAt < gateAt, "publication must precede the fail-on-request-changes gate");
 });
