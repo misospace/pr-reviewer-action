@@ -1,6 +1,7 @@
 import type {
   NormalizedFinding,
   ParsedReviewVerdict,
+  ReviewTriageDecision,
   VerdictValue,
 } from "../model/types.js";
 
@@ -81,6 +82,13 @@ export interface ReviewArtifact {
   /** #721: structured reviewer-requested smart escalation. */
   smart_review_requested?: boolean;
   smart_review_reason?: string | null;
+  /** #1003: the human-review triage answer as the parser normalized it
+   * (fail-closed to `unknown`), plus its bounded reason ("" when the model
+   * gave none). Persisted in the artifact so the outputs, publish and step
+   * summary all read the same normalized value, and so an operator can see
+   * what the model actually answered. */
+  review_triage_decision?: ReviewTriageDecision;
+  review_triage_reason?: string;
   /** Every additional key the model produced passes through untouched. */
   [key: string]: unknown;
 }
@@ -115,6 +123,12 @@ export function reviewArtifactFromParsed(parsed: ParsedReviewVerdict): ReviewArt
     requirement_coverage: parsed.requirementCoverage,
     smart_review_requested: parsed.smartReviewRequested,
     smart_review_reason: parsed.smartReviewReason,
+    // #1003: v3-only triage keys. Written unconditionally (like the #721
+    // escalation fields) so the persisted artifact always records what the
+    // model answered, including the fail-closed `unknown`; whether triage ran
+    // at all is the caller's `review-triage` input, not this artifact.
+    review_triage_decision: parsed.reviewTriageDecision,
+    review_triage_reason: parsed.reviewTriageReason,
   };
   if (parsed.requiredCheckDispositionsEmitted) {
     artifact.required_check_dispositions = parsed.requiredCheckDispositions === null

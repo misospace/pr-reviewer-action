@@ -247,6 +247,10 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       REQUIRED_CHECKS: review.outputs.requiredChecks,
       REVIEW_ROUTE: review.outputs.reviewRoute,
       ESCALATION_REASON: review.outputs.escalationReason,
+      // #1003: both empty when review-triage is disabled ("did not run"),
+      // distinct from the fail-closed "unknown" answer.
+      REVIEW_TRIAGE_DECISION: review.outputs.reviewTriageDecision,
+      REVIEW_TRIAGE_REASON: review.outputs.reviewTriageReason,
       REVIEW_MARKDOWN: review.outputs.reviewMarkdown,
       FINDINGS: review.outputs.findings,
       ANALYSIS_ENGINE: review.outputs.analysisEngine,
@@ -274,6 +278,19 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       ...(review.toolMaxRounds !== undefined ? { maxRounds: review.toolMaxRounds } : {}),
       ...(review.contextBudget !== undefined ? { contextBudget: review.contextBudget } : {}),
       ...(review.contextPeak !== undefined ? { contextPeak: review.contextPeak } : {}),
+      // #1003: the human-review triage answer reaches the published body
+      // only when triage ran (the decision output is "" when the input is
+      // off), so a disabled run's published review is byte-identical to
+      // pre-#1003. Triage grants no capability: this thread changes the
+      // comment text only, never fork/tool/evidence gating or the verdict.
+      ...(review.outputs.reviewTriageDecision !== ""
+        ? {
+          reviewTriage: {
+            decision: review.outputs.reviewTriageDecision,
+            reason: review.outputs.reviewTriageReason,
+          },
+        }
+        : {}),
     };
     publishFailed = (await publishWith(input, seam)) !== 0;
   }

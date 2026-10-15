@@ -203,6 +203,40 @@ export function applyRequirementTraceFragment(
 }
 
 /**
+ * #1003: the human-review triage instructions, appended only when the
+ * `review-triage` input is enabled. Deliberately ungated by any presence
+ * file (unlike the #874 trace fragment): the question is answerable from the
+ * corpus plus the repository's trusted instruction files, and a missing
+ * ledger is not a reason to stay silent — the fragment itself tells the
+ * reviewer to answer `unknown` when the escalation policy is not in context.
+ *
+ * Opt-in and review-only: with the input off the assembled prompt is
+ * byte-identical to pre-#1003 (no mention of triage anywhere), and with it on
+ * nothing about tool, evidence, fork or model routing changes — triage grants
+ * no capability. Same idempotent appended-fragment discipline as the others.
+ *
+ * Deliberate exception to the `isDefault`-only rule every other fragment
+ * follows: #1003's acceptance requires triage to compose with custom system
+ * prompts, so an operator replace-mode prompt is preserved verbatim and the
+ * triage instructions are appended as one extra line. The other fragments
+ * stay tied to the default because they assume the placeholder discipline
+ * the bundled default ships with; triage is opt-in by config — the operator
+ * has explicitly switched it on — so omitting it would silently degrade the
+ * answer to `unknown` for any operator using a custom prompt.
+ */
+export function applyReviewTriageFragment(
+  state: SystemPromptState,
+  enabled: boolean,
+  assets: PromptAssets = BUNDLED_PROMPT_ASSETS,
+): SystemPromptState {
+  if (!enabled) return state;
+  const triage = bashCapture(rawFragment(assets, "review_triage"));
+  if (triage === "") return state;
+  if (state.systemPrompt.includes(triage)) return state;
+  return { ...state, systemPrompt: `${state.systemPrompt}\n${triage}` };
+}
+
+/**
  * #812: the superseded-discussion rule, appended v3-only after the corpus's
  * discussion sections exist (never by the v2-parity fragment assembly). The
  * current PR description and linked issues are authoritative context, and a
