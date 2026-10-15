@@ -29,13 +29,14 @@ const EMPTY_DISABLING_INPUTS: ReadonlySet<string> = new Set([
   "ai-reasoning-effort",
   "ai-primary-reasoning-effort",
   "ai-smart-reasoning-effort",
+  "ai-fallback-reasoning-effort",
   "ai-specialist-reasoning-effort",
 ]);
 
 // #998: the reasoning-effort values are free-form but bounded, so they get
 // their own shape check (below) rather than an ENUM_INPUTS vocabulary.
 const REASONING_EFFORT_INPUTS: ReadonlySet<string> = new Set([
-  "ai-reasoning-effort", "ai-primary-reasoning-effort", "ai-smart-reasoning-effort", "ai-specialist-reasoning-effort",
+  "ai-reasoning-effort", "ai-primary-reasoning-effort", "ai-smart-reasoning-effort", "ai-fallback-reasoning-effort", "ai-specialist-reasoning-effort",
 ]);
 
 /** #998: the bounded, free-form shape every reasoning-effort value must have
@@ -158,6 +159,7 @@ function resolveInherited(config: MutableConfig): void {
   // so it inherits here rather than crashing the load.
   inherit(config, "aiPrimaryReasoningEffort", "aiReasoningEffort");
   inherit(config, "aiSmartReasoningEffort", "aiReasoningEffort");
+  inherit(config, "aiFallbackReasoningEffort", "aiReasoningEffort");
   inherit(config, "aiSpecialistReasoningEffort", "aiPrimaryReasoningEffort");
   inherit(config, "aiPrimaryModel", "aiModel");
   inherit(config, "aiPrimaryBaseUrl", "aiBaseUrl");

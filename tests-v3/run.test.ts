@@ -4227,3 +4227,178 @@ test("#998 (#1049 review): the fallback lane asserts its own Anthropic endpoint 
   }
   await deadServer.close();
 });
+
+test("#1053: the fallback lane picks its own reasoning effort on the OpenAI wire when overridden", async () => {
+  // ai-reasoning-effort=low + ai-fallback-reasoning-effort=high ⇒ the primary
+  // request carries "low" (or is retried on the dead primary here), and the
+  // fallback request carries "high". The per-lane override is independent of
+  // the base, exactly like the primary and smart lane overrides.
+  const deadServer = await startMockServer((_req, _body, res) => {
+    res.statusCode = 500;
+    res.end('{"error":"down"}');
+  });
+  const bodies: Record<string, unknown>[] = [];
+  const fallbackServer = await startMockServer((_req, body, res) => {
+    bodies.push(JSON.parse(body) as Record<string, unknown>);
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ review_markdown: "Fallback review.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const logs: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": deadServer.url,
+        "ai-model": "m",
+        "ai-api-format": "openai",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ai-primary-retries": "1",
+        "ai-primary-retry-delay-sec": "0",
+        "ai-fallback-model": "fb",
+        "ai-fallback-base-url": fallbackServer.url,
+        "ai-fallback-api-format": "openai",
+        "ai-reasoning-effort": "low",
+        "ai-fallback-reasoning-effort": "high",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      log: (line) => logs.push(line),
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    const fallbackBody = bodies[0];
+    assert.ok(fallbackBody, "the fallback call must have reached its own endpoint");
+    assert.equal(fallbackBody.reasoning_effort, "high", "fallback request carries the per-lane override, not the base");
+    const fallbackLogs = logs.filter((line) => line.includes("Fallback model attempt"));
+    assert.ok(fallbackLogs.some((line) => line.includes("effort=high")), logs.join(" | "));
+  } finally {
+    await fallbackServer.close();
+    await deadServer.close();
+    cleanup();
+  }
+});
+
+test("#1053: the fallback Anthropic wire picks the fallback override when its opt-in is true", async () => {
+  // ai-fallback-anthropic-effort-support=true + ai-fallback-reasoning-effort=high
+  // ⇒ the fallback Anthropic body carries output_config.effort: "high", even
+  // though the base ai-reasoning-effort is "low" and the primary opt-in
+  // (ai-anthropic-effort-support) is also asserted — only the lane's own
+  // opt-in authorizes its wire.
+  const deadServer = await startMockServer((_req, _body, res) => {
+    res.statusCode = 500;
+    res.end('{"error":"down"}');
+  });
+  const bodies: Record<string, unknown>[] = [];
+  const fallbackServer = await startMockServer((_req, body, res) => {
+    bodies.push(JSON.parse(body) as Record<string, unknown>);
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      content: [{ type: "text", text: JSON.stringify(baseVerdict({ review_markdown: "Fallback review.\n" })) }],
+      stop_reason: "end_turn",
+    }));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const logs: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": deadServer.url,
+        "ai-model": "m",
+        "ai-api-format": "anthropic",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ai-primary-retries": "1",
+        "ai-primary-retry-delay-sec": "0",
+        "ai-fallback-model": "fb",
+        "ai-fallback-base-url": fallbackServer.url,
+        "ai-fallback-api-format": "anthropic",
+        "ai-reasoning-effort": "low",
+        "ai-fallback-reasoning-effort": "high",
+        "ai-anthropic-effort-support": "true",
+        "ai-fallback-anthropic-effort-support": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      log: (line) => logs.push(line),
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    const fallbackBody = bodies[0];
+    assert.ok(fallbackBody, "the fallback call must have reached its own endpoint");
+    assert.deepEqual(fallbackBody.output_config, { effort: "high" });
+    const fallbackLogs = logs.filter((line) => line.includes("Fallback model attempt"));
+    assert.ok(fallbackLogs.some((line) => line.includes("effort=high")), logs.join(" | "));
+  } finally {
+    await fallbackServer.close();
+    await deadServer.close();
+    cleanup();
+  }
+});
+
+test("#1053: an unset ai-fallback-reasoning-effort still inherits the base effort on Anthropic fallback when its opt-in is true", async () => {
+  // With the new input empty, the Anthropic fallback body uses the base
+  // ai-reasoning-effort value — exactly the #998 byte-compat behavior. The
+  // ai-fallback-anthropic-effort-support opt-in authorizes the wire for the
+  // fallback lane alone.
+  const deadServer = await startMockServer((_req, _body, res) => {
+    res.statusCode = 500;
+    res.end('{"error":"down"}');
+  });
+  const bodies: Record<string, unknown>[] = [];
+  const fallbackServer = await startMockServer((_req, body, res) => {
+    bodies.push(JSON.parse(body) as Record<string, unknown>);
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      content: [{ type: "text", text: JSON.stringify(baseVerdict({ review_markdown: "Fallback review.\n" })) }],
+      stop_reason: "end_turn",
+    }));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const logs: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": deadServer.url,
+        "ai-model": "m",
+        "ai-api-format": "anthropic",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ai-primary-retries": "1",
+        "ai-primary-retry-delay-sec": "0",
+        "ai-fallback-model": "fb",
+        "ai-fallback-base-url": fallbackServer.url,
+        "ai-fallback-api-format": "anthropic",
+        "ai-reasoning-effort": "low",
+        // ai-fallback-reasoning-effort is intentionally omitted.
+        "ai-fallback-anthropic-effort-support": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      log: (line) => logs.push(line),
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    const fallbackBody = bodies[0];
+    assert.ok(fallbackBody, "the fallback call must have reached its own endpoint");
+    assert.deepEqual(fallbackBody.output_config, { effort: "low" });
+    const fallbackLogs = logs.filter((line) => line.includes("Fallback model attempt"));
+    assert.ok(fallbackLogs.some((line) => line.includes("effort=low")), logs.join(" | "));
+  } finally {
+    await fallbackServer.close();
+    await deadServer.close();
+    cleanup();
+  }
+});

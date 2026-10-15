@@ -116,11 +116,14 @@ export function reasoningEffortWarning(key: string): string {
   return `${key} ignored: the reasoning effort must match ${REASONING_EFFORT_PATTERN.source} (lowercase letters, digits, '-', and '_'; up to 32 characters)`;
 }
 
-/** The env key a lane's own effort override lives under. `fallback` has no
- * lane key at all: fallback is availability recovery and inherits the base. */
+/** The env key a lane's own effort override lives under. Every per-lane
+ * override has its own key — fallback included (#1053): availability
+ * recovery still wants a per-lane effort so an operator can tune the
+ * fallback lane separately, and the empty-or-rejected value then falls
+ * back to the base `AI_REASONING_EFFORT`. */
 function tierReasoningEffortKey(tier: "primary" | "smart" | "fallback"): string | null {
   if (tier === "smart") return "AI_SMART_REASONING_EFFORT";
-  if (tier === "fallback") return null;
+  if (tier === "fallback") return "AI_FALLBACK_REASONING_EFFORT";
   return "AI_PRIMARY_REASONING_EFFORT";
 }
 
@@ -141,9 +144,11 @@ function effortFrom(env: EnvLike, key: string): EffortResolution {
 /**
  * #998: a lane's effective reasoning effort, mirroring `tierResponseFormat`'s
  * inheritance — an empty lane override inherits `ai-reasoning-effort` (the
- * contract base) and the fallback lane always uses the base. A value that
- * fails validation is dropped as unset (announced loudly) so the inheritance
- * below still applies; "" means "omit the field from the request".
+ * contract base). The fallback lane (#1053) now has its own override too;
+ * it stays availability recovery (never an escalation target) but inherits
+ * the base only when its override is empty or malformed. A value that fails
+ * validation is dropped as unset (announced loudly) so the inheritance below
+ * still applies; "" means "omit the field from the request".
  *
  * Validation is repeated here on purpose: `loadConfig` guards
  * contract-supplied values, but these inputs can also arrive from ambient env
@@ -376,8 +381,11 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
       stream: fallbackStream, requestTimeoutSec: numberValue(env, "AI_FALLBACK_REQUEST_TIMEOUT_SEC", timeout),
       connectTimeoutSec: numberValue(env, "AI_FALLBACK_CONNECT_TIMEOUT_SEC", connectTimeout),
       responseFormat: tierResponseFormat("fallback", env),
-      // #998: availability recovery, never quality escalation — the fallback
-      // lane inherits the base effort and has no override input of its own.
+      // #998 / #1053: availability recovery, never quality escalation — the
+      // fallback lane now has its own override input
+      // (ai-fallback-reasoning-effort) but stays byte-compatible when it is
+      // empty or malformed: the base effort is then inherited, exactly like
+      // the primary and smart lanes.
       reasoningEffort: tierReasoningEffort("fallback", env),
       // #998: like its effort, the fallback lane shares the base endpoint
       // assertion; it has no effort opt-in input of its own.

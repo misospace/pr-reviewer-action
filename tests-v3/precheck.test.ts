@@ -81,6 +81,7 @@ test("#998: an unset reasoning effort leaves the config hash untouched; a change
     AI_REASONING_EFFORT: "",
     AI_PRIMARY_REASONING_EFFORT: "",
     AI_SMART_REASONING_EFFORT: "",
+    AI_FALLBACK_REASONING_EFFORT: "",
     AI_SPECIALIST_REASONING_EFFORT: "",
     AI_ANTHROPIC_EFFORT_SUPPORT: "false",
     AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "false",
@@ -90,6 +91,7 @@ test("#998: an unset reasoning effort leaves the config hash untouched; a change
   assert.deepEqual(after, before);
   assert.equal(computeConfigHash(after), computeConfigHash(before));
   assert.equal(after.some((line) => line.startsWith("AI_REASONING_EFFORT")), false);
+  assert.equal(after.some((line) => line.startsWith("AI_FALLBACK_REASONING_EFFORT")), false);
   assert.equal(after.some((line) => line.startsWith("AI_ANTHROPIC_EFFORT_SUPPORT")), false);
 
   // A configured effort is model-affecting config: it enters the hash, and a
@@ -112,6 +114,7 @@ test("#998: an unset reasoning effort leaves the config hash untouched; a change
   // false stays out of the hash, a true flips it (it changes what is sent).
   const lanesUnset = collectConfigLines({
     AI_MODEL: "m",
+    AI_FALLBACK_REASONING_EFFORT: "",
     AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "",
     AI_FALLBACK_ANTHROPIC_EFFORT_SUPPORT: "",
     AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT: "false",
@@ -127,6 +130,37 @@ test("#998: an unset reasoning effort leaves the config hash untouched; a change
   assert.ok(specialistOptedIn.includes("AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT=true"));
   assert.notEqual(computeConfigHash(smartOptedIn), computeConfigHash(specialistOptedIn));
   assert.equal(collectConfigLines({ AI_MODEL: "m" })[0] !== undefined, true);
+
+  // #1053: an effective fallback override IS model-affecting config: it
+  // enters the hash and a different value produces a different fingerprint.
+  const fallbackBase = collectConfigLines({ AI_MODEL: "m", AI_BASE_URL: "https://primary", AI_REASONING_EFFORT: "low" });
+  const fallbackOverride = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_REASONING_EFFORT: "low",
+    AI_FALLBACK_REASONING_EFFORT: "high",
+  });
+  assert.ok(fallbackOverride.includes("AI_FALLBACK_REASONING_EFFORT=high"));
+  assert.notEqual(computeConfigHash(fallbackBase), computeConfigHash(fallbackOverride));
+  // A different effective fallback value also flips the hash.
+  const fallbackOther = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_REASONING_EFFORT: "low",
+    AI_FALLBACK_REASONING_EFFORT: "medium",
+  });
+  assert.notEqual(computeConfigHash(fallbackOverride), computeConfigHash(fallbackOther));
+  // An empty (whitespace-only) fallback value follows the existing
+  // emit-only-if-trim-non-empty rule: it is NOT emitted, so an unset value
+  // leaves the hash identical to the build without the feature.
+  const fallbackBlank = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_REASONING_EFFORT: "low",
+    AI_FALLBACK_REASONING_EFFORT: "   ",
+  });
+  assert.equal(fallbackBlank.some((line) => line.startsWith("AI_FALLBACK_REASONING_EFFORT")), false);
+  assert.equal(computeConfigHash(fallbackBlank), computeConfigHash(fallbackBase));
 
   // Secrets still never enter the hash.
   assert.ok(!collectConfigLines({ AI_REASONING_EFFORT: "high", AI_API_KEY: "sk-secret" }).some((line) => line.includes("secret")));
