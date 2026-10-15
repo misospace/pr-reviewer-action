@@ -1,4 +1,5 @@
 import type { EnvLike } from "../tools/budget.js";
+import { REASONING_EFFORT_PATTERN } from "../config/load-config.js";
 
 /**
  * Review routing and tier bindings, ported from scripts/sections/classification.sh
@@ -105,10 +106,10 @@ export function tierResponseFormat(tier: "primary" | "smart" | "fallback", env: 
 // Free-form by design: providers and proxies define their own effort
 // vocabularies, so the action imposes no enum and clamps nothing. What it does
 // impose is a SHAPE — a short, lowercase, JSON-safe token — because the value
-// travels into a provider request body.
-
-/** Same shape contract as `REASONING_EFFORT_PATTERN` in `src/config/load-config.ts`. */
-export const REASONING_EFFORT_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
+// travels into a provider request body. The shape lives in exactly one place
+// (`src/config/load-config.ts`, the loader's boundary check); this module
+// consumes it rather than keeping a second copy in step.
+export { REASONING_EFFORT_PATTERN };
 
 /** The normalized effort for a raw value, or null when it is unset or fails
  * the shape check. Pure: the caller decides how loudly to report a drop. */
