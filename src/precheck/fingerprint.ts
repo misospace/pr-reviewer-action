@@ -160,6 +160,10 @@ const CONDITIONAL_AI_KEYS: ReadonlySet<string> = new Set([
   "AI_REASONING_EFFORT",
   "AI_PRIMARY_REASONING_EFFORT",
   "AI_SMART_REASONING_EFFORT",
+  // #1053: the fallback override stays "" in the resolved config when the
+  // operator left it unset (load-config does not copy the base into it), so
+  // only a configured value ever contributes a line here.
+  "AI_FALLBACK_REASONING_EFFORT",
   "AI_SPECIALIST_REASONING_EFFORT",
   "AI_ANTHROPIC_EFFORT_SUPPORT",
   // #998 (#1049 review): the per-lane Anthropic effort opt-ins. Same rule:

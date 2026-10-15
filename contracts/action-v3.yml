@@ -86,6 +86,10 @@ inputs:
     required: false
     default: "false"
     description: "Operator assertion that the fallback lane's Anthropic-compatible endpoint/proxy is known to accept output_config.effort. Does NOT inherit ai-anthropic-effort-support: the fallback lane runs on its own ai-fallback-base-url, which may be a different Anthropic-compatible backend that was never asserted, so a capability assertion never crosses lanes (#1049 review). The fallback lane still inherits the base reasoning effort; this flag only decides whether that effort is actually sent to the fallback endpoint. Default false: fallback Anthropic requests carry no effort field even when one is configured, and the run logs a warning naming this input. Ignored for the openai format."
+  - id: ai-fallback-reasoning-effort
+    required: false
+    default: ""
+    description: "Fallback-lane override for the reasoning effort. Empty (the default) inherits ai-reasoning-effort, so existing single-value workflows stay request-byte compatible — the fallback lane is availability recovery, never quality escalation (#965). Values are free-form, bounded (lowercase letters, digits, '-', and '_'; up to 32 characters), passed through verbatim like ai-reasoning-effort; a value that fails shape is dropped as unset and the lane then inherits the base, with the drop announced by key. On Anthropic fallback requests the effort is sent as output_config.effort ONLY when ai-fallback-anthropic-effort-support: true is set — other lanes' true flags do NOT authorize fallback, exactly like the per-lane effort opt-in itself. Operator-only: never repo-configurable, matching the other ai-fallback-* reasoning inputs."
   - id: ai-anthropic-structured-output-support
     required: false
     default: "false"

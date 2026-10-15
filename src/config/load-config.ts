@@ -38,7 +38,7 @@ export const EMPTY_DISABLING_INPUTS: ReadonlySet<string> = new Set([
 // lane override must be registered here or its value would skip the boundary
 // check; the drift guard in tests-v3/config.test.ts catches that omission.
 export const REASONING_EFFORT_INPUTS: ReadonlySet<string> = new Set([
-  "ai-reasoning-effort", "ai-primary-reasoning-effort", "ai-smart-reasoning-effort", "ai-specialist-reasoning-effort",
+  "ai-reasoning-effort", "ai-primary-reasoning-effort", "ai-smart-reasoning-effort", "ai-fallback-reasoning-effort", "ai-specialist-reasoning-effort",
 ]);
 
 /** #998: the bounded, free-form shape every reasoning-effort value must have
@@ -168,6 +168,16 @@ function resolveInherited(config: MutableConfig): void {
   // so it inherits here rather than crashing the load.
   inherit(config, "aiPrimaryReasoningEffort", "aiReasoningEffort");
   inherit(config, "aiSmartReasoningEffort", "aiReasoningEffort");
+  // #1053: the fallback effort deliberately does NOT inherit here. The
+  // resolved config is projected verbatim into the stage env
+  // (`stageEnvFromConfig`), and `AI_FALLBACK_REASONING_EFFORT` is a
+  // conditional fingerprint key — copying the base into an unset override
+  // would add a new fingerprint line for every existing
+  // `ai-reasoning-effort` installation and invalidate its cached reviews on
+  // upgrade. The unset override must stay distinguishable from a configured
+  // one, so the fallback lane resolves the base itself in
+  // `tierReasoningEffort` (which already inherits when its key is empty);
+  // request bytes are identical either way.
   inherit(config, "aiSpecialistReasoningEffort", "aiPrimaryReasoningEffort");
   inherit(config, "aiPrimaryModel", "aiModel");
   inherit(config, "aiPrimaryBaseUrl", "aiBaseUrl");
