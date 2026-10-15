@@ -304,7 +304,6 @@ the `validate-static` "Verify smoke test helper is executable" step (see
 
 | File | Consumer(s) / subject |
 | --- | --- |
-| `test_action_inputs.py`, `test_action_v3_contract.py` | Pin the shipped `action.yml` / `contracts/action-v3.yml` (v3 CI). |
 | `test_agents_md_budget.py` | AGENTS.md budget regression guard (repo hygiene, not v2). |
 | `test_dogfood_workflow.py` | Pins `.github/workflows/ai-pr-review.yaml` + `action.yml` defaults. |
 | `test_html_entities_table.py` | Pins `src/context/html-entities.ts` (v3) to CPython's `html.entities` tables. |
@@ -318,8 +317,8 @@ the `validate-static` "Verify smoke test helper is executable" step (see
 | `tests/_lib/assert.sh` | Bash helper sourced by every retained suite. |
 
 Preserved data (not Python/bash, listed for completeness): `tests/fixtures/`
-(`parity/`, `forgejo/`, `requirement-ledger/`, `v3-runtime/`, `failure_paths/`,
-`eval_weekly_summary/`) and the `evals/` corpora — the deterministic parity,
+(`parity/`, `forgejo/`, `golden-replay/`, `v3-runtime/`, `eval_weekly_summary/`,
+`strip-source-text/`) and the `evals/` corpora — the deterministic parity,
 #662, and Forgejo qualification fixtures #706 says to preserve.
 
 ## (c) keep temporarily — parity oracles, with deletion conditions
