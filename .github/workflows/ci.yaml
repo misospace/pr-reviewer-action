@@ -77,6 +77,11 @@ jobs:
           # between local and CI is how the duplicate-key regression test first
           # shipped broken (passed on local 3.9, ModuleNotFoundError on CI 3.x).
           python-version: '3.14'
+          # #1058: this is the critical-path job and the hashed install was its
+          # largest non-test step (4-14s measured); the wheel cache makes it
+          # the cheap step. Keyed on the pinned set, so a changed pin refetches.
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install test dependencies
         run: pip install --require-hashes -r requirements.txt
@@ -203,6 +208,9 @@ jobs:
           # Same pinned interpreter as validate-python so bash suites that shell
           # out to python3 see the same version (see the skew note above).
           python-version: '3.14'
+          # #1058: same hashed install as validate-python; cache it here too.
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install test dependencies
         # Some suites import PyYAML in inline python (it arrives transitively

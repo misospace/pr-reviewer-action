@@ -1743,7 +1743,13 @@ async function callTier(
   }, {
     ...(input.sleep !== undefined ? { sleep: input.sleep } : {}),
     call: async (chatInput) => {
-      const result = await runChatRequest(chatInput);
+      // #1058: the injected clock must reach the transport's own 429/5xx
+      // backoff too (that loop counts in ms, the model-tier one in seconds),
+      // or a test that opts into a deterministic clock still pays the real
+      // 1s/2s waits. Production passes no `sleep`, so nothing changes there.
+      const result = await runChatRequest(
+        input.sleep === undefined ? chatInput : { ...chatInput, sleep: (ms: number) => input.sleep!(ms / 1000) },
+      );
       if (result.status === "failure") return result;
       ws.write(responseArtifact, pyJsonDumps(result.raw));
       return result;
