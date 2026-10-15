@@ -243,3 +243,57 @@ test("#1047: a hostile profile label is flattened and bounded like every other f
   assert.equal(profile.includes("\n"), false);
   assert.equal(profile.length <= 64, true);
 });
+
+test("#1047 (review): a >64-char configured secret echoed in the stop reason leaves no prefix — masked BEFORE the bound", () => {
+  // Opaque configured key, longer than the 64-character reason bound. If the
+  // bound were imposed before configured-secret masking, a prefix of the key
+  // would survive the later mask and land in the record and every log line.
+  const key = `opensecret-${"k".repeat(80)}`; // 90 chars
+  const result = describeUnusableResponse({
+    response: anthropicBody({
+      stop_reason: `end_turn cred=${key}`,
+      content: [{ type: "thinking", thinking: "t" }],
+      usage: { input_tokens: 10, output_tokens: 900 },
+    }),
+    apiFormat: "anthropic",
+    profile: "Primary",
+    streamed: false,
+    failureKind: "not_object",
+    secrets: [key],
+  });
+  assert.ok(result);
+  // No 8-character window of the key may survive anywhere in the record or
+  // the rendered line — a prefix surviving truncation would fail this.
+  const windows: string[] = [];
+  for (let i = 0; i + 8 <= key.length; i++) windows.push(key.slice(i, i + 8));
+  const recordJson = JSON.stringify(result.record);
+  const line = formatResponseDiagnosticsLine(result.record);
+  for (const window of windows) {
+    assert.equal(recordJson.includes(window), false, `record leaked window: ${window}`);
+    assert.equal(line.includes(window), false, `line leaked window: ${window}`);
+  }
+  // Classification is untouched: still reasoning-only, reason still present
+  // in its redacted form.
+  assert.equal(result.class, "reasoning-only");
+  assert.ok(result.record.finish_reason, "finish_reason is present, redacted");
+  assert.equal(String(result.record.finish_reason).includes("end_turn cred="), true);
+  assert.equal(String(result.record.finish_reason).includes("\u27e6\u2022\u27e7"), true);
+});
+
+test("#1047 (review): an OpenAI finish_reason gets the same mask-before-bound treatment", () => {
+  const key = "proj-" + "z".repeat(70);
+  const result = describeUnusableResponse({
+    response: openaiBody({
+      choices: [{ message: { content: "" }, finish_reason: `stop leak=${key}` }],
+      usage: { prompt_tokens: 5, completion_tokens: 0 },
+    }),
+    apiFormat: "openai",
+    profile: "Fallback",
+    streamed: false,
+    failureKind: "not_object",
+    secrets: [key],
+  });
+  assert.ok(result);
+  assert.equal(JSON.stringify(result.record).includes(key.slice(0, 16)), false);
+  assert.equal(JSON.stringify(result.record).includes(key), false);
+});

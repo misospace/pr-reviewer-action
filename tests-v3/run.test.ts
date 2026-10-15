@@ -4523,3 +4523,83 @@ test("#1047 (review): a 400 strip recovery reports prompt-only truthfully and pe
     cleanup();
   }
 });
+
+test("#1047 (review): a >64-char configured key echoed in a stop reason never survives diagnostics or logs", async () => {
+  // Adversarial companion to the reasoning-only e2e: the broken endpoint
+  // echoes the operator's over-64-char API key inside the stop reason. The
+  // diagnostics must mask the COMPLETE key before any truncation, so no
+  // prefix survives in the error log line or the persisted response artifact.
+  const apiKey = `sk-live-${"e".repeat(80)}`; // 88 chars
+  const reasoningOnly = JSON.stringify({
+    id: "msg_r", model: "m", role: "assistant",
+    content: [{ type: "thinking", thinking: "hidden reasoning", signature: "sig" }],
+    stop_reason: `end_turn cred=${apiKey}`,
+    usage: { input_tokens: 100, output_tokens: 4096 },
+  });
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(reasoningOnly);
+  });
+  const fallbackServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      id: "msg_f", model: "fb", role: "assistant",
+      content: [{ type: "text", text: JSON.stringify(baseVerdict({ review_markdown: "Fallback review.\n" })) }],
+      stop_reason: "end_turn",
+    }));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const errors: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": primaryServer.url,
+        "ai-model": "m",
+        "ai-api-format": "anthropic",
+        "ai-stream": "false",
+        "ai-api-key": apiKey,
+        "ai-max-tokens": "1024",
+        "ai-primary-retries": "2",
+        "ai-primary-retry-delay-sec": "0",
+        "ai-fallback-model": "fb",
+        "ai-fallback-base-url": fallbackServer.url,
+        "ai-fallback-api-format": "anthropic",
+        "ai-fallback-stream": "false",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      log: () => {},
+      error: (line) => errors.push(line),
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    const diagnosticsLines = errors.filter((line) => line.includes("response_class="));
+    assert.ok(diagnosticsLines.length > 0, `expected a diagnostics line: ${errors.join(" | ")}`);
+    // No 8-char window of the key may survive in ANY error line.
+    const windows: string[] = [];
+    for (let i = 0; i + 8 <= apiKey.length; i++) windows.push(apiKey.slice(i, i + 8));
+    for (const line of errors) {
+      for (const window of windows) {
+        assert.equal(line.includes(window), false, `log line leaked key window ${window}: ${line}`);
+      }
+    }
+    // The persisted diagnostics record is clean too.
+    const artifact = JSON.parse(readFileSync(join(runDir, "ai-response.primary.json"), "utf8")) as {
+      diagnostics?: Record<string, unknown>;
+    };
+    assert.ok(artifact.diagnostics, "the failure artifact carries the diagnostics record");
+    const artifactJson = JSON.stringify(artifact);
+    for (const window of windows) {
+      assert.equal(artifactJson.includes(window), false, `artifact leaked key window ${window}`);
+    }
+    assert.equal(artifact.diagnostics.finish_reason, "end_turn cred=\u27e6\u2022\u27e7");
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});

@@ -65,9 +65,10 @@ export interface ResponseDiagnosticsInput {
    * side, or a `VerdictParseFailure` kind when the body was rejected. */
   failureKind?: string;
   /** The operator-configured model API key(s) for this call, masked out of
-   * the one provider-controlled free-text field (`finish_reason`) before it
-   * can reach a log line — a broken endpoint echoing the key into a stop
-   * reason must not survive the record. */
+   * the one provider-controlled free-text field (`finish_reason`) BEFORE the
+   * 64-character bound is imposed — a broken endpoint echoing even a
+   * longer-than-bound key into a stop reason must not leave a partial
+   * secret in the record or any log line built from it. */
   secrets?: readonly (string | null | undefined)[];
 }
 
@@ -79,10 +80,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * credential-redacted token — the value lands in logs and summaries, so
  * hostile bytes must not be able to forge lines there, and a key-shaped
  * token a broken endpoint echoes into a stop reason must not survive it
- * (same `redactText` pass every other provider-controlled string gets). */
-function safeReasonToken(value: unknown): string | undefined {
+ * (same `redactText` pass every other provider-controlled string gets).
+ * ORDER IS LOAD-BEARING (#1065 review): the COMPLETE configured secret is
+ * masked on the complete value BEFORE the character bound — truncating first
+ * would leave an unmaskable prefix of a longer-than-bound key in the record
+ * and every log line built from it. */
+function safeReasonToken(value: unknown, secrets: readonly (string | null | undefined)[]): string | undefined {
   if (typeof value !== "string") return undefined;
-  const cleaned = redactText(value.replace(/[\u0000-\u0020\u007f]+/g, " ").trim()).slice(0, MAX_FINISHED_REASON_CHARS);
+  const flattened = value.replace(/[\u0000-\u0020\u007f]+/g, " ").trim();
+  const masked = redactText(maskKnownSecrets(flattened, secrets));
+  const cleaned = masked.slice(0, MAX_FINISHED_REASON_CHARS);
   return cleaned === "" ? undefined : cleaned;
 }
 
@@ -106,13 +113,13 @@ function intOrUndefined(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) ? value : undefined;
 }
 
-function blockShapeOf(response: Record<string, unknown>): BlockShape {
+function blockShapeOf(response: Record<string, unknown>, secrets: readonly (string | null | undefined)[]): BlockShape {
   if (isNormalizedResponse(response)) {
     const blocks = isRecord(response.blockCounts) ? response.blockCounts : null;
     const usage = isRecord(response.usage) ? response.usage : null;
     const content = typeof response.content === "string" ? response.content : "";
     return {
-      finishReason: safeReasonToken(response.finishReason),
+      finishReason: safeReasonToken(response.finishReason, secrets),
       textBlocks: intOrUndefined(blocks?.text) ?? (content === "" ? 0 : 1),
       textChars: content.length,
       thinkingBlocks: intOrUndefined(blocks?.thinking) ?? 0,
@@ -134,7 +141,7 @@ function blockShapeOf(response: Record<string, unknown>): BlockShape {
       || (typeof message.reasoning === "string" && message.reasoning !== "");
     const usage = isRecord(response.usage) ? response.usage : null;
     return {
-      finishReason: safeReasonToken(first.finish_reason),
+      finishReason: safeReasonToken(first.finish_reason, secrets),
       textBlocks: content === "" ? 0 : 1,
       textChars: content.length,
       thinkingBlocks: hasReasoning ? 1 : 0,
@@ -164,7 +171,7 @@ function blockShapeOf(response: Record<string, unknown>): BlockShape {
     }
     const usage = isRecord(response.usage) ? response.usage : null;
     return {
-      finishReason: safeReasonToken(response.stop_reason),
+      finishReason: safeReasonToken(response.stop_reason, secrets),
       textBlocks,
       textChars,
       thinkingBlocks,
@@ -219,7 +226,7 @@ export function describeUnusableResponse(input: ResponseDiagnosticsInput): Respo
       responseClass = "transport-error";
     }
   } else {
-    const shape = blockShapeOf(response);
+    const shape = blockShapeOf(response, secrets);
     if (shape.finishReason !== undefined && TRUNCATION_REASONS.has(shape.finishReason)) {
       responseClass = "truncated";
     } else if (shape.textChars > 0) {
@@ -235,7 +242,7 @@ export function describeUnusableResponse(input: ResponseDiagnosticsInput): Respo
     } else {
       responseClass = "zero-output";
     }
-    if (shape.finishReason !== undefined) record.finish_reason = maskKnownSecrets(shape.finishReason, secrets);
+    if (shape.finishReason !== undefined) record.finish_reason = shape.finishReason;
     record.text_blocks = shape.textBlocks;
     record.text_chars = shape.textChars;
     record.thinking_blocks = shape.thinkingBlocks;

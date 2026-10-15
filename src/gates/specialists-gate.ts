@@ -19,7 +19,7 @@ import {
 import { DEFAULT_SPECIALIST_MAX_TOKENS, MAX_INPUT_BYTES, SPECIALIST_ROLES_ORDER, type SpecialistArtifact } from "../specialists/types.js";
 import { guardedWrite, resolveArtifactPath, resolveRoot } from "./guarded-write.js";
 import { specialistRequestFn } from "./specialist-transport.js";
-import { resolveSpecialistProfiles, anthropicJsonObjectsPromptOnlyWarning } from "../routing/tiers.js";
+import { resolveSpecialistProfiles, anthropicJsonObjectsPromptOnlyWarning, tierResponseFormat } from "../routing/tiers.js";
 
 /**
  * Specialists gate workload (#706 PR 6): the glue around `runSpecialists`
@@ -347,10 +347,11 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
   const maxTokens = envInt(env, "DEEP_REVIEW_MAX_TOKENS", DEFAULT_SPECIALIST_MAX_TOKENS);
   const temperature = envTemperature(env);
   // #1009: the specialist phase inherits the primary lane's effective
-  // response_format — explicit empty `ai-primary-response-format` falls
-  // back to `ai-response-format`, the same way the rest of the v3 config
-  // chain does.
-  const responseFormat = envStr(env, "AI_PRIMARY_RESPONSE_FORMAT", envStr(env, "AI_RESPONSE_FORMAT", "off")).trim().toLowerCase();
+  // response_format through the SAME tier-aware helper the rest of the v3
+  // config chain uses (#1065 review): an explicitly empty (or whitespace-
+  // only) `ai-primary-response-format` inherits `ai-response-format`, and an
+  // unresolvable value falls back to off — never the raw ambient bytes.
+  const responseFormat = tierResponseFormat("primary", env);
   // #998: the specialist lane's reasoning effort — ai-specialist-reasoning-
   // effort when set, else the primary lane's resolved value. The Anthropic
   // `output_config.effort` opt-in is the operator's per-endpoint assertion and
