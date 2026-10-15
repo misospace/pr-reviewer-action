@@ -1,0 +1,63 @@
+---
+import Base from "../layouts/Base.astro";
+---
+<Base>
+  <section class="hero">
+    <span class="kicker">pr-reviewer-action</span>
+    <h1>Every PR gets<br/>a real review.</h1>
+    <p class="sub">
+      AI pull request reviews with any OpenAI- or Anthropic-compatible model —
+      cloud or self-hosted. Point it at your llama.cpp box or your Anthropic
+      key. Either way, the review is real: evidence first, verdict second,
+      and a verdict it can't back up is never an approval.
+    </p>
+    <div class="cta-row">
+      <a class="btn primary" href="https://github.com/misospace/pr-reviewer-action">View on GitHub ↗</a>
+      <a class="btn" href="#quick-start">Quick start</a>
+    </div>
+  </section>
+
+  <section class="section" id="highlights">
+    <h2>How it works</h2>
+    <p class="lede">
+      The action collects the diff, linked issues, CI results, repository
+      standards, and prior evidence; lets the model read the checkout through
+      a bounded, read-only tool loop; then publishes structured findings and a
+      verdict — as a native review or a sticky comment.
+    </p>
+    <div class="cards two">
+      <div class="card"><h3>Local-model first</h3><p>ollama, llama.cpp, vLLM, LiteLLM, or any OpenAI/Anthropic-compatible endpoint — with an optional fallback model.</p></div>
+      <div class="card"><h3>Gathers its own evidence</h3><p>A native tool loop reads files, greps, follows git history, and calls GitHub APIs or MCP servers before any verdict. The evidence budget scales with the PR.</p></div>
+      <div class="card"><h3>Deterministic classification</h3><p>Rule-based risk flags and required checks keep smaller models focused; specialist passes run only when the change warrants them.</p></div>
+      <div class="card"><h3>Verdicts you can audit</h3><p>Request-changes only on open blocker or major findings — and if the review couldn't read everything, it says so and never approves.</p></div>
+      <div class="card"><h3>Token-saving</h3><p>An unchanged diff skips the model entirely and carries the prior verdict forward.</p></div>
+      <div class="card"><h3>Safe default</h3><p>Standards and prompts read from the base branch, read-only tools, secret redaction, approvals off, and fork PRs isolated.</p></div>
+    </div>
+  </section>
+
+  <section class="section" id="quick-start">
+    <h2>Quick start</h2>
+    <p class="lede">One workflow file. The review runs on every PR event you point it at.</p>
+    <div class="terminal">
+      <div class="term-head"><span class="dotset"><i></i><i></i><i></i></span>.github/workflows/ai-pr-review.yml</div>
+      <pre>name: AI PR Review
+
+on: <span class="c-hi">[pull_request]</span>
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: <span class="c-hi">0</span>
+      - uses: <span class="c-hi">misospace/pr-reviewer-action@v3</span>
+        with:
+          api-base: <span class="c-link">https://your-llama-box.local/v1</span>
+          model: <span class="c-hi">qwen3-coder-30b</span></pre>
+    </div>
+  </section>
+</Base>
