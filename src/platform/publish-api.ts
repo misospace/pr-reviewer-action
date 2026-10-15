@@ -457,13 +457,25 @@ export class GitHubPublishApi implements PublishPlatformApi {
       if (!Array.isArray(record.users) || !Array.isArray(record.teams)) {
         return { ok: false, supported: true, ...none(), error: "could not read requested reviewers (malformed response: users/teams are not arrays)" };
       }
-      existingUsers = record.users
-        .map((u) => (typeof (u as { login?: unknown } | null)?.login === "string" ? (u as { login: string }).login : ""))
-        .filter((u) => u !== "");
-      existingTeams = record.teams
-        .map((t) => (typeof (t as { slug?: unknown } | null)?.slug === "string" ? (t as { slug: string }).slug : ""))
-        .filter((t) => t !== "");
-    } catch (error) {
+      // Fail closed at the member level too: every entry must carry a
+      // well-formed identity. Silently dropping malformed members would let
+      // the POST proceed on an unverified picture of the existing requests —
+      // the same uncertain-read-to-mutation hole as a malformed body.
+      const loginOf = (entry: unknown): string | null => {
+        const login = (entry as { login?: unknown } | null)?.login;
+        return typeof login === "string" && REQUESTER_USER.test(login) ? login : null;
+      };
+      const slugOf = (entry: unknown): string | null => {
+        const slug = (entry as { slug?: unknown } | null)?.slug;
+        return typeof slug === "string" && REQUESTER_TEAM.test(slug) ? slug : null;
+      };
+      const users = record.users.map(loginOf);
+      const teams = record.teams.map(slugOf);
+      if (users.includes(null) || teams.includes(null)) {
+        return { ok: false, supported: true, ...none(), error: "could not read requested reviewers (malformed response: a reviewer entry lacks a valid login or team slug)" };
+      }
+      existingUsers = users as string[];
+      existingTeams = teams as string[];    } catch (error) {
       return { ok: false, supported: true, ...none(), error: error instanceof Error ? error.message : String(error) };
     }
     const existingUserSet = new Set(existingUsers.map((u) => u.toLowerCase()));
