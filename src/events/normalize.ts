@@ -133,8 +133,13 @@ function asId(value: unknown): number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
 }
 
-/** Trim, lowercase, and require exactly one "/" with both halves non-empty. */
-function normalizeRepoFullName(fullName: string): string {
+/** Trim, lowercase, and require exactly one "/" with both halves non-empty.
+ * Exported because the reconciliation poll adapter (`src/ingress/reconcile.ts`)
+ * must reject entries whose normalized target repository disagrees with
+ * the configured repository it polled using the SAME definition the
+ * normalizer applies — raw or ad-hoc string comparisons would let
+ * malformed envelopes slip past the boundary (#1025). */
+export function normalizeRepoFullName(fullName: string): string {
   const trimmed = fullName.trim().toLowerCase();
   if (trimmed === "") return "";
   const slash = trimmed.indexOf("/");
