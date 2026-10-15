@@ -432,6 +432,7 @@ Inputs with no v2 implementation.
 | `equivalent-paths-max-bytes` | `6000` |
 | `fallback-model-context-tokens` | empty |
 | `rereview-command` | `/ai-review` |
+| `review-triage` | `false` |
 
 ## New outputs
 
@@ -441,6 +442,15 @@ Outputs with no v2 implementation.
 | --- | --- |
 | `review-result` | The metadata marker's `review_result` state (`clean`/`findings`/`partial`/`issues`), additive alongside `verdict` (#873). `verdict: approve` with `review-result: partial` is not an approval; gate merges on both, never on `verdict` alone. |
 | `incomplete-reason` | Why coverage is incomplete: `execution` / `requirement_trace` / `both` / `none` (#954). Distinguishes a finished review with an unverified requirement from a review that stopped early; `review-result` stays `partial` for both. |
+| `review-triage-decision` | Opt-in human-review triage answer (#1003): `not_required` / `required` / `unknown`, or empty when `review-triage` is disabled. Fail-closed: a missing or malformed answer, or a `not_required` with no usable supporting reason, is `unknown` — never a confident negative. Advisory only — it never changes the verdict, the findings, or any tool/evidence/fork access. |
+| `review-triage-reason` | The evidence behind `review-triage-decision` (#1003), possibly empty, or empty when `review-triage` is disabled. Redacted before publication. |
+
+`review-triage` (#1003) is operator-only (repository config can never switch a
+review behaviour on) and review-only: it asks the reviewer one extra question
+and grants nothing, so it has no `*-enable-for-forks` sibling. Disabled, both
+outputs stay empty ("did not run"), the assembled prompt is byte-identical to
+pre-#1003, and the published review gains no section — a disabled run is
+distinguishable from one that ran and answered `unknown`.
 
 `requirement-trace` depends on a bundled prompt fragment that asks the model to
 emit the trace fields. With `system-prompt-mode=replace` that fragment is

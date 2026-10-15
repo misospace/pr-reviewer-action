@@ -22,7 +22,8 @@ import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, re
 import { strictReviewResult } from "../enforcement/verdict-policy.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
 import { COVERAGE_NOTICE_MAX_ITEMS, type PartialCoverage } from "../tools/coverage.js";
-import { isIncompleteReason, renderFindingsSummary, severityCountsLabel, type IncompleteReason } from "./outputs.js";
+import { isIncompleteReason, renderFindingsSummary, severityCountsLabel, MAX_REVIEW_TRIAGE_REASON_CHARS, type IncompleteReason } from "./outputs.js";
+import { resolveReviewTriageDecision } from "../model/triage.js";
 import type { NativeReviewComment, NativeReviewRequest, PublishPlatformApi } from "../platform/publish-api.js";
 
 export type PublishMode = "comment" | "review_comment" | "review_verdict";
@@ -105,6 +106,10 @@ export interface PublishInput {
   /** #922: the loop's conversation budget and peak (approx tokens). */
   contextBudget?: number;
   contextPeak?: number;
+  /** #1003: the human-review triage answer, present ONLY when triage ran
+   * (`review-triage` enabled) and the review produced one. Absent means
+   * "did not run" and renders no section — never a silent "not required". */
+  reviewTriage?: { decision: string; reason: string };
 }
 
 export interface PublishResult {
@@ -211,9 +216,10 @@ export function resolveIncompleteReason(input: {
 
 /** Build the published body: marker preamble + engine line + the optional
  * action-owned #810 coverage notice + the strict state block (#811, when
- * present) + sanitized review. Both blocks are inserted AFTER sanitization
- * (action-owned, never model text) so no stripping pass can drop them, and
- * sit near the top so a partial-coverage run cannot read as complete. */
+ * present) + the optional #1003 human-review triage section + sanitized
+ * review. Every block is action-owned and inserted AFTER sanitization (never
+ * model text) so no stripping pass can drop them, and they sit near the top
+ * so a partial-coverage run cannot read as complete. */
 export function buildPublishedBody(options: {
   markers: string;
   header?: string;
@@ -224,6 +230,8 @@ export function buildPublishedBody(options: {
   coverageNotice?: string;
   /** Rendered coverage-gap notice + findings summary for verdict_policy=strict. */
   stateBlock?: string | undefined;
+  /** #1003: rendered human-review triage section (only when triage ran). */
+  triageBlock?: string | undefined;
   /** #915: defaults to the build-time stamp; explicit "" forces unstamped. */
   actionVersion?: string;
 }): string {
@@ -243,8 +251,52 @@ export function buildPublishedBody(options: {
   if (options.stateBlock) {
     lines.push(options.stateBlock, "");
   }
+  if (options.triageBlock) {
+    lines.push(options.triageBlock, "");
+  }
   lines.push(options.sanitizedMarkdown);
   return `${lines.join("\n")}\n`;
+}
+
+/** #1003: the three literal triage decisions live with the other publish-layer
+ * triage constants in outputs.js, so the published body and the step summary
+ * validate against one set. */
+
+const REVIEW_TRIAGE_LABELS: Record<string, string> = {
+  not_required: "no specialized human review required",
+  required: "specialized human review required",
+  unknown: "unknown — the reviewer could not determine this",
+};
+
+/**
+ * #1003: the compact human-review triage section. Action-owned prose (never
+ * model text), rendered only when triage ran, and it carries the reason for
+ * ALL three decisions — `unknown` in particular must be visible rather than
+ * read as "nothing to do". The reason is model-authored, so it takes the same
+ * discipline as every other untrusted string on this surface: redaction,
+ * link sanitization, whitespace flattening, a length cap and pipe escaping,
+ * none of which can break out of the blockquote line.
+ */
+export function renderReviewTriageBlock(
+  triage: { decision: string; reason: string },
+  linkMode: UpstreamLinkMode,
+): string {
+  const decision = resolveReviewTriageDecision(triage.decision, triage.reason);
+  const reason = escapeTableCell(
+    sanitizeMarkdown(redactText(String(triage.reason ?? "")), linkMode).replace(/\s+/g, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS),
+  );
+  const label = REVIEW_TRIAGE_LABELS[decision]!;
+  const line = reason === ""
+    ? `> **Human review triage: ${label}**`
+    : `> **Human review triage: ${label}** — ${reason}`;
+  const lines = [
+    "## Human Review Triage",
+    "",
+    line,
+    ">",
+    "_Advisory only: this triage answer does not change the review's verdict or findings, and it requests no reviewer._",
+  ];
+  return lines.join("\n");
 }
 
 /**
@@ -515,6 +567,9 @@ export async function publishReview(
   const incompleteReason = resolveIncompleteReason(input);
   const reviewResult = markerReviewResult(input);
   const coverageNotice = input.partialCoverage ? renderPartialCoverageNotice(input.partialCoverage) : "";
+  // #1003: rendered only when triage ran; the three modes share the one
+  // block so a triage answer can never differ by publish mode.
+  const triageBlock = input.reviewTriage ? renderReviewTriageBlock(input.reviewTriage, input.upstreamLinkMode) : "";
   const markerContext: RunMarkerContext = {
     headSha: input.headSha,
     baseSha: input.baseSha,
@@ -602,6 +657,7 @@ export async function publishReview(
         stateBlock: strict
           ? renderStrictStateBlock({ incompleteReason, findings: input.findings, linkMode: input.upstreamLinkMode })
           : undefined,
+        triageBlock: triageBlock || undefined,
       });
       const result = await api.upsertStickyComment(input.commentMarker, body);
       if (!result.ok) {
@@ -617,6 +673,7 @@ export async function publishReview(
         stateBlock: strict
           ? renderStrictStateBlock({ incompleteReason, findings: input.findings, linkMode: input.upstreamLinkMode })
           : undefined,
+        triageBlock: triageBlock || undefined,
       });
       const result = await api.upsertStickyComment(input.commentMarker, body);
       if (!result.ok) {
@@ -659,6 +716,7 @@ export async function publishReview(
         stateBlock: strict
           ? renderStrictStateBlock({ incompleteReason, findings: input.findings, linkMode: input.upstreamLinkMode })
           : undefined,
+        triageBlock: triageBlock || undefined,
       });
       if (input.verdict === "approve" && !canApprove) {
         if (!guardrails.canApprove) {

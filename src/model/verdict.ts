@@ -1,4 +1,5 @@
-import type { NormalizedFinding, NormalizedHumanReviewDisposition, NormalizedRequiredCheckDisposition, NormalizedThreadDisposition, ParsedReviewVerdict, RequiredCheckStatus, VerdictValue } from "./types.js";
+import type { NormalizedFinding, NormalizedHumanReviewDisposition, NormalizedRequiredCheckDisposition, NormalizedThreadDisposition, ParsedReviewVerdict, RequiredCheckStatus, ReviewTriageDecision, VerdictValue } from "./types.js";
+import { resolveReviewTriageDecision } from "./triage.js";
 import { VerdictParseFailure } from "./types.js";
 import { maskDiagnostic } from "../context/redact.js";
 
@@ -215,7 +216,35 @@ function normalizeSmartReviewRequest(parsed: Record<string, unknown>): {
   return { requested, reason };
 }
 
+/**
+ * #1003: normalize the opt-in human-review triage answer. Exact-literal match
+ * only; every other shape (absent, null, non-string, a near-miss like
+ * "required " or "Required", an unknown word) is uncertainty and becomes
+ * `unknown` — triage must never read a malformed answer as "not required",
+ * which would turn a parser failure into a silent pass. An unsubstantiated
+ * `not_required` (no usable reason) fails closed to `unknown` too, so the
+ * positive claim can never rest on a parser gap. The reason is kept as a
+ * bounded, control-char-free single line ("" when absent or blank).
+ */
+function normalizeReviewTriage(parsed: Record<string, unknown>): {
+  decision: ReviewTriageDecision;
+  reason: string;
+} {
+  const reason = typeof parsed.review_triage_reason === "string"
+    ? parsed.review_triage_reason.replace(SMART_REVIEW_REASON_CONTROL, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS)
+    : "";
+  const decision = resolveReviewTriageDecision(parsed.review_triage_decision, reason);
+  return { decision, reason };
+}
+
 const TRUNCATION_REASONS = new Set(["length", "max_tokens", "max_output_tokens"]);
+
+// #1003: the parser-side bound on the model-authored reason. The published
+// surfaces render a shorter, 300-char cap (see src/publish/outputs.ts).
+// Decision resolution — including the unsubstantiated-`not_required`
+// fail-closed rule — lives in ./triage.ts, shared with every downstream
+// boundary.
+const MAX_REVIEW_TRIAGE_REASON_CHARS = 400;
 
 const TRUNC_SUFFIX = " (model output appears truncated at the token limit; increase ai_max_tokens)";
 
@@ -642,6 +671,9 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
       key !== "verdict" && key !== "review_markdown" && key !== "findings"
       && key !== "requirement_coverage"
       && key !== "smart_review_requested" && key !== "smart_review_reason"
+      // #1003: known structured fields, not model extras — a triage answer is
+      // read by the parser (fail-closed), never passed through unparsed.
+      && key !== "review_triage_decision" && key !== "review_triage_reason"
       && key !== "required_check_dispositions"
       && key !== "thread_dispositions"
       && key !== "human_review_dispositions"
@@ -650,6 +682,7 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
     }
   }
   const smartRequest = normalizeSmartReviewRequest(parsed);
+  const triage = normalizeReviewTriage(parsed);
   const dispositions = normalizeRequiredCheckDispositions(
     parsed.required_check_dispositions,
     "required_check_dispositions" in parsed,
@@ -675,6 +708,8 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
     humanReviewDispositionsEmitted: humanReviewDispositions.present,
     smartReviewRequested: smartRequest.requested,
     smartReviewReason: smartRequest.reason,
+    reviewTriageDecision: triage.decision,
+    reviewTriageReason: triage.reason,
     extra,
   };
 }

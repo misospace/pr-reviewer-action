@@ -129,6 +129,16 @@ export interface NormalizedFinding {
  */
 export type RequiredCheckStatus = "satisfied" | "not_applicable" | "unresolved";
 
+/**
+ * #1003: the opt-in human-review triage answer — "does this change need a
+ * specialized/owning human review?". Tri-state, and fail-closed: the parser
+ * accepts only an exact match of one of the three literals, so a missing,
+ * null, wrongly typed, or unrecognized answer becomes `unknown` (visible
+ * "we could not decide"), never a silent `not_required`. Advisory only — it
+ * never influences verdict, findings, or any capability.
+ */
+export type ReviewTriageDecision = "not_required" | "required" | "unknown";
+
 export interface NormalizedRequiredCheckDisposition {
   /** The check text as the model echoed it (sanitized, bounded). */
   check: string;
@@ -200,6 +210,14 @@ export interface ParsedReviewVerdict {
   smartReviewRequested: boolean;
   /** Bounded single-line reason; null when no request (or no usable reason). */
   smartReviewReason: string | null;
+  /**
+   * #1003: the tri-state human-review triage answer, fail-closed to
+   * `unknown`, and its bounded single-line reason ("" when the model gave
+   * none). Parsed from the verdict object — never from review markdown, so
+   * PR-controlled prose cannot forge it — and it influences no other field.
+   */
+  reviewTriageDecision: ReviewTriageDecision;
+  reviewTriageReason: string;
   extra: Record<string, unknown>;
 }
 
