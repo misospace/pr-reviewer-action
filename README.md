@@ -152,6 +152,8 @@ Release tags point at a build commit that contains `dist/`; `main` does not carr
 - **`source-vX.Y.Z` tags** mark each release's source commit on `main` for release tooling. They have no `dist/`, so never pin to them.
 - **Pre-releases** (`vX.Y.Z-rc.N`) never move the floating major tag.
 
+Published release notes get rewritten from the raw changelog — see [`docs/release-notes.md`](docs/release-notes.md) for the house style and the procedure.
+
 Subscribe to [GitHub Releases](https://github.com/misospace/pr-reviewer-action/releases) to follow changes.
 
 ### 🚚 v3 breaking changes
