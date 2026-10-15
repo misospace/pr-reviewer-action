@@ -27,6 +27,10 @@ import {
   requirementTraceScope,
   structuralStateClaim,
   explicitlyRequiresTest,
+nonCodeProofDomain,
+documentationProofSource,
+DOC_SCAN_MAX_FILE_BYTES,
+PENDING_DISPOSITION,
   validateRequirementTrace,
   type RequirementOwnership,
   type RequirementTraceArtifact,
@@ -3186,5 +3190,594 @@ test("#985: an intermediate symlinked directory cannot prove absence either", ()
   } finally {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+// ── #1062: non-code proof domains (external/future + PR metadata) ─────────
+
+const FUTURE_MERGE_REQUIREMENT = "Whether the unrelated pull request #1052 will merge successfully after this change";
+const CI_GREEN_REQUIREMENT = "The external CI checks must remain green for the whole suite";
+const INVENTORY_REQUIREMENT = "The pull request description must record the removed-file inventory";
+const CODE_COMPARE_REQUIREMENT = "Context resolution MUST compare the source SHA against the resolved pull";
+
+test("#1062: classifier tags external/future and documentation criteria, vetoes code", () => {
+  assert.equal(nonCodeProofDomain(FUTURE_MERGE_REQUIREMENT), "external_state");
+  assert.equal(nonCodeProofDomain(CI_GREEN_REQUIREMENT), "external_state");
+  assert.equal(nonCodeProofDomain(INVENTORY_REQUIREMENT), "documentation");
+  // A genuine implementation obligation — a compare, a mandatory test, or a
+  // security/crypto verb — is never a non-code domain, even when it also names
+  // a merge or the CI.
+  assert.equal(nonCodeProofDomain(CODE_COMPARE_REQUIREMENT), null);
+  assert.equal(nonCodeProofDomain("The credential redaction path must be covered by a regression test"), null);
+  assert.equal(nonCodeProofDomain("The fix will merge the source SHA comparison before release"), null);
+  // A plain behavioural requirement with no external/process signal stays strict.
+  assert.equal(nonCodeProofDomain("The loader must reject an oversized payload"), null);
+});
+
+test("#1062: recording/reporting/publishing verbs are code obligations, never non-code", () => {
+  // #252 hostile-boundary: a bare "record"/"document" with no doc/metadata target
+  // is a runtime obligation (audit logging, event recording), NOT documentation.
+  assert.equal(nonCodeProofDomain("The audit logger must record the actor and action for every admin override"), null);
+  assert.equal(nonCodeProofDomain("The new endpoint must record the `admin.override` event in the response log"), null);
+  assert.equal(nonCodeProofDomain("The command must document its usage in the help output"), null);
+  // Publishing a status / shipping a release is THIS product's own behaviour.
+  assert.equal(nonCodeProofDomain("The publish step must report a green status check on pull request #1000"), null);
+  assert.equal(nonCodeProofDomain("The workflow must ship the release artifact only after CI is green"), null);
+  // External/future still needs an explicit external/unrelated frame; a bare CI
+  // or PR mention does not carve a real obligation out of strict proof.
+  assert.equal(nonCodeProofDomain("CI must stay green on this pull request"), null);
+});
+
+test("#1062: a documentation obligation cannot be self-certified into a blocking gap on absence", () => {
+  const workspace = makeWorkspace();
+  try {
+    const text = "The PR description must document the new `--no-cache` flag";
+    const ledger = ledgerWith([{ id: "req-doc", text, kind: "acceptance" }]);
+    const claims = [{ requirement_id: "req-doc", disposition: "met", reason: "documented" }];
+    // The literal is absent from the body: never blocking, and never a code `met`
+    // — it is a non-blocking pending advisory.
+    const absent = validateRequirementTrace(claims, ledger, workspace, undefined, { prBody: "no mention here" });
+    assert.equal(absent.rows[0]?.disposition, PENDING_DISPOSITION);
+    assert.equal(absent.incomplete, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1062: a bare unmet (no reason) on a non-code row still blocks", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([{ id: "req-merge", text: FUTURE_MERGE_REQUIREMENT, kind: "acceptance" }]);
+    const trace = validateRequirementTrace([{ requirement_id: "req-merge", disposition: "unmet" }], ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.equal(trace.incomplete, true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1062: an external/future criterion with no claim is a non-blocking pending advisory", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([{ id: "req-merge", text: FUTURE_MERGE_REQUIREMENT, kind: "acceptance" }]);
+    const trace = validateRequirementTrace([], ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, PENDING_DISPOSITION);
+    assert.equal(trace.rows[0]?.proof, "external_state");
+    assert.ok(trace.rows[0]?.notes.includes("external-state-pending"));
+    assert.ok(trace.rows[0]?.notes.includes("non-code-not-traced"));
+    assert.equal(trace.incomplete, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1062: a model cannot launder an external/future outcome into a met code proof", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([{ id: "req-merge", text: FUTURE_MERGE_REQUIREMENT, kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-merge",
+      disposition: "met",
+      enforcement: [{ file: "src/real.ts", line: 1 }],
+      test: [VALID_TEST_LOCATION],
+      reason: "I confirmed the unrelated PR merged",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    // Never met: an outcome not observable at head cannot be certified, but it
+    // also does not fold into incomplete (it is advisory, not a code gap).
+    assert.equal(trace.rows[0]?.disposition, PENDING_DISPOSITION);
+    assert.equal(trace.rows[0]?.proof, "external_state");
+    assert.equal(trace.incomplete, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1062: a documented inventory recorded in the trusted PR body is met without code proof", () => {
+  const workspace = makeWorkspace();
+  try {
+    const text = "The PR description must document the new `--no-cache` flag";
+    const ledger = ledgerWith([{ id: "req-doc", text, kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-doc",
+      disposition: "met",
+      enforcement: [],
+      test: [],
+      reason: "the PR description documents the flag",
+    }];
+    const met = validateRequirementTrace(claims, ledger, workspace, undefined, { prBody: "Add a new `--no-cache` flag to the CLI." });
+    assert.equal(met.rows[0]?.disposition, "met");
+    assert.equal(met.rows[0]?.proof, "documentation");
+    assert.ok(met.rows[0]?.notes.includes("documentation-verified-in-pr-body"));
+    assert.equal(met.incomplete, false);
+    // Without a trusted PR body it can never be `met` — it falls to pending, not
+    // a blocking unverifiable, and never invents a source predicate.
+    const noBody = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(noBody.rows[0]?.disposition, PENDING_DISPOSITION);
+    assert.ok(noBody.rows[0]?.notes.includes("documentation-pending-unconfirmed"));
+    assert.equal(noBody.incomplete, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1062: #1060-shape ledger no longer blocks on non-code criteria alone", () => {
+  const workspace = makeWorkspace();
+  try {
+    const nonCodeOnly = [
+      { id: "req-inventory", text: INVENTORY_REQUIREMENT, kind: "acceptance" },
+      { id: "req-ci", text: CI_GREEN_REQUIREMENT, kind: "acceptance" },
+      { id: "req-merge", text: FUTURE_MERGE_REQUIREMENT, kind: "acceptance" },
+    ];
+    const noneTraced = validateRequirementTrace([], ledgerWith(nonCodeOnly), workspace);
+    assert.ok(noneTraced.rows.every((row) => row.disposition === PENDING_DISPOSITION), JSON.stringify(noneTraced.rows));
+    assert.equal(noneTraced.incomplete, false);
+    const enforced = applyRequirementTraceEnforcement(artifact({}), { enabled: true, ledger: ledgerWith(nonCodeOnly), workspace, prBody: "docs" });
+    assert.equal(enforced.applied, true);
+    assert.notEqual(enforced.trace.rows.length, 0);
+    assert.notEqual(enforced.trace.incomplete, true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1062: a genuine unverified code requirement still blocks in a mixed ledger", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([
+      { id: "req-inventory", text: INVENTORY_REQUIREMENT, kind: "acceptance" },
+      { id: "req-merge", text: FUTURE_MERGE_REQUIREMENT, kind: "acceptance" },
+      { id: "req-code", text: CODE_COMPARE_REQUIREMENT, kind: "normative" },
+    ]);
+    const trace = validateRequirementTrace([], ledger, workspace);
+    assert.equal(trace.rows.find((r) => r.requirement_id === "req-code")?.disposition, "unverifiable");
+    assert.equal(trace.rows.find((r) => r.requirement_id === "req-code")?.proof, "runtime_behavior");
+    assert.equal(trace.rows.find((r) => r.requirement_id === "req-merge")?.disposition, PENDING_DISPOSITION);
+    assert.equal(trace.incomplete, true, "the unverified code requirement keeps the review blocking");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1062: a properly-traced code requirement alongside pending criteria does not block", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/context-resolution.ts", ["if (sourceSha === resolved.pull.sourceSha) { return true; }"]);
+    const ledger = ledgerWith([
+      { id: "req-inventory", text: INVENTORY_REQUIREMENT, kind: "acceptance" },
+      { id: "req-code", text: CODE_COMPARE_REQUIREMENT, kind: "normative" },
+    ]);
+    const claims = [{
+      requirement_id: "req-code",
+      disposition: "met",
+      enforcement: [{ file: "src/context-resolution.ts", line: 1 }],
+      test: [VALID_TEST_LOCATION],
+      reason: "compares sourceSha against the resolved pull",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows.find((r) => r.requirement_id === "req-code")?.disposition, "met");
+    assert.equal(trace.rows.find((r) => r.requirement_id === "req-inventory")?.disposition, PENDING_DISPOSITION);
+    assert.equal(trace.incomplete, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1062: a well-formed unmet on a non-code row stays a blocking gap", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([{ id: "req-ci", text: CI_GREEN_REQUIREMENT, kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-ci",
+      disposition: "unmet",
+      enforcement: [],
+      test: [],
+      reason: "the CI suite is currently red on the changed files",
+    }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, "unmet");
+    assert.ok(trace.rows[0]?.notes.includes("non-code-reported-unmet"));
+    assert.equal(trace.incomplete, true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1062: the model cannot self-declare a code row pending", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([{ id: "req-code", text: CODE_COMPARE_REQUIREMENT, kind: "normative" }]);
+    const claims = [{ requirement_id: "req-code", disposition: "pending", reason: "trust me" }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    // "pending" is not a model vocabulary; it is rejected and the code row falls
+    // to unverifiable (blocking), so the domain cannot be used to self-waive.
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.equal(trace.rows[0]?.proof, "runtime_behavior");
+    assert.equal(trace.incomplete, true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1062: pending rows render as advisory and never as a blocking trace failure", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([
+      { id: "req-merge", text: FUTURE_MERGE_REQUIREMENT, kind: "acceptance" },
+      { id: "req-code", text: CODE_COMPARE_REQUIREMENT, kind: "normative" },
+    ]);
+    const trace = validateRequirementTrace([], ledger, workspace);
+    const rendered = renderRequirementTraceMarkdown(trace);
+    assert.ok(rendered.includes("Non-code criteria (advisory"), rendered);
+    assert.ok(rendered.includes("external/future outcome"), rendered);
+    assert.ok(rendered.includes("`req-merge`"), rendered);
+    // The blocking section still names the code gap; the pending row appears only
+    // in the advisory list, never in the blocker count.
+    assert.ok(rendered.includes("not fully traced to enforcement and a test"), rendered);
+    assert.ok(rendered.includes("`req-code`"), rendered);
+    const blockerSection = rendered.split("Non-code criteria")[0] ?? "";
+    assert.ok(!blockerSection.includes("`req-merge`"), "pending row must not appear in the blocker count");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1062: a pending-only ledger still renders the advisory section", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([{ id: "req-ci", text: CI_GREEN_REQUIREMENT, kind: "acceptance" }]);
+    const trace = validateRequirementTrace([], ledger, workspace);
+    assert.equal(trace.incomplete, false);
+    const rendered = renderRequirementTraceMarkdown(trace);
+    assert.ok(rendered.includes("Non-code criteria (advisory"), rendered);
+    assert.ok(!rendered.includes("not fully traced to enforcement and a test"), rendered);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+// ── #1062 review follow-up: proof-SOURCE split, advisory diagnostics, and the
+// full #1060 eleven-class regression (joryirving + its-saffron reviews on
+// #1067: a `README must document X` obligation must never be `met` because the
+// PR body merely mentions X — confirmation comes from the exact-head checkout;
+// advisories must state provenance/scope and the known exact-head CI state;
+// and the motivating #1060 ledger needs an 11-row fixture, not an
+// approximation).
+
+test("#1062 review: documentation proof source follows the named target", () => {
+  assert.equal(documentationProofSource("The PR description records the `x` inventory"), "pr_body");
+  assert.equal(documentationProofSource("The pull request body must document the `x` flag"), "pr_body");
+  assert.equal(documentationProofSource("The README must document the `x` flag"), "checkout_doc");
+  assert.equal(documentationProofSource("The CHANGELOG records the `x` entry"), "checkout_doc");
+  assert.equal(documentationProofSource("The docs must capture the `x` matrix"), "checkout_doc");
+  assert.equal(documentationProofSource("The PR description and README must record the `x` inventory"), "mixed");
+});
+
+test("#1062 review: a README obligation is never certified from the PR body alone", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "README.md", ["# Project", "", "Nothing about that flag here."]);
+    const ledger = ledgerWith([{ id: "req-readme", text: "The README must document the `preview-mode` flag", kind: "acceptance" }]);
+    // The hostile shape: the PR body CLAIMS the flag is documented and quotes
+    // the literal. That is self-certification from the wrong source — the
+    // README at head is the obligation's target, and it does not carry it.
+    const hostile = validateRequirementTrace([], ledger, workspace, undefined, {
+      prBody: "This PR documents preview-mode thoroughly in the description.",
+    });
+    assert.equal(hostile.rows[0]?.disposition, PENDING_DISPOSITION);
+    assert.ok(hostile.rows[0]?.notes.includes("documentation-pending-checkout-unconfirmed"));
+    assert.ok(!hostile.rows[0]?.notes.includes("documentation-verified-in-pr-body"));
+    assert.equal(hostile.incomplete, false);
+    // Once the checkout itself carries the literal, the obligation is met —
+    // from its own target, with the checkout note recorded.
+    writeFile(workspace, "README.md", ["# Project", "", "Run with `preview-mode` to dry-run publication."]);
+    const met = validateRequirementTrace([], ledger, workspace);
+    assert.equal(met.rows[0]?.disposition, "met");
+    assert.ok(met.rows[0]?.notes.includes("documentation-verified-in-checkout"));
+    assert.equal(met.incomplete, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1062 review: CHANGELOG and docs/ checkout targets confirm only from the checkout", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([
+      { id: "req-changelog", text: "The CHANGELOG records the `changelog-cleanup-note` entry", kind: "acceptance" },
+      { id: "req-docs-tree", text: "The docs must capture the `effort-inputs` matrix", kind: "acceptance" },
+    ]);
+    const prBody = "The description mentions changelog-cleanup-note and the effort-inputs matrix.";
+    const absent = validateRequirementTrace([], ledger, workspace, undefined, { prBody });
+    assert.equal(absent.rows[0]?.disposition, PENDING_DISPOSITION);
+    assert.equal(absent.rows[1]?.disposition, PENDING_DISPOSITION);
+    assert.ok(absent.rows[0]?.notes.includes("documentation-pending-checkout-unconfirmed"));
+    assert.ok(absent.rows[1]?.notes.includes("documentation-pending-checkout-unconfirmed"));
+    assert.equal(absent.incomplete, false);
+    writeFile(workspace, "CHANGELOG.md", ["# Changelog", "", "- changelog-cleanup-note added for the cleanup"]);
+    writeFile(workspace, "docs/guide.md", ["See the effort-inputs matrix section for the four inputs."]);
+    const met = validateRequirementTrace([], ledger, workspace);
+    assert.equal(met.rows[0]?.disposition, "met");
+    assert.equal(met.rows[1]?.disposition, "met");
+    assert.ok(met.rows[0]?.notes.includes("documentation-verified-in-checkout"));
+    assert.ok(met.rows[1]?.notes.includes("documentation-verified-in-checkout"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1062 review: a symlinked docs/ root is never enumerated outside the workspace", () => {
+  const workspace = makeWorkspace();
+  const outside = mkdtempSync(join(tmpdir(), "req-trace-outside-"));
+  try {
+    writeFile(outside, "escape.md", ["the outside-effort matrix lives outside the checkout"]);
+    symlinkSync(outside, join(workspace, "docs"));
+    const ledger = ledgerWith([{ id: "req-docs", text: "The docs must capture the `outside-effort` matrix", kind: "acceptance" }]);
+    // The literal sits in the linked tree; the scan must refuse the symlinked
+    // root entirely — advisory, never a cross-boundary `met`.
+    const trace = validateRequirementTrace([], ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, PENDING_DISPOSITION);
+    assert.ok(trace.rows[0]?.notes.includes("documentation-pending-checkout-unconfirmed"));
+    assert.equal(trace.incomplete, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("#1062 review: an oversized README is never auto-read for confirmation", () => {
+  const workspace = makeWorkspace();
+  try {
+    const literal = "oversized-review-note";
+    // A hostile checkout puts the literal just past the per-file read cap.
+    const filler = "x".repeat(DOC_SCAN_MAX_FILE_BYTES + 16);
+    writeFileSync(join(workspace, "README.md"), `${literal}\n${filler}`);
+    const ledger = ledgerWith([{ id: "req-readme", text: "The README must document the `oversized-review-note` entry", kind: "acceptance" }]);
+    const trace = validateRequirementTrace([], ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, PENDING_DISPOSITION);
+    assert.ok(trace.rows[0]?.notes.includes("documentation-pending-checkout-unconfirmed"));
+    assert.equal(trace.incomplete, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1062 review: a target naming both PR metadata and a checkout doc stays advisory", () => {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "README.md", ["retired-tooling inventory: two suites removed"]);
+    const ledger = ledgerWith([{ id: "req-mixed", text: "The PR description and README must record the retired-tooling inventory", kind: "acceptance" }]);
+    // Even with the prose present in BOTH sources, the single-source
+    // confirmation rules cannot certify half-proved obligations: it stays a
+    // non-blocking advisory naming both sources.
+    const trace = validateRequirementTrace([], ledger, workspace, undefined, { prBody: "retired-tooling inventory recorded here" });
+    assert.equal(trace.rows[0]?.disposition, PENDING_DISPOSITION);
+    assert.ok(trace.rows[0]?.notes.includes("documentation-pending-mixed-target"));
+    assert.equal(trace.incomplete, false);
+    const rendered = renderRequirementTraceMarkdown(trace);
+    assert.ok(rendered.includes("names both PR metadata and a checkout document"), rendered);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1062 review: advisories report provenance, scope, and the known exact-head CI state", () => {
+  const workspace = makeWorkspace();
+  try {
+    const provenance = [{ source: "linked_issues" }];
+    const ledger = {
+      requirements: [
+        { id: "req-ci", text: CI_GREEN_REQUIREMENT, kind: "acceptance", provenance },
+        { id: "req-merge", text: FUTURE_MERGE_REQUIREMENT, kind: "acceptance", provenance },
+      ],
+    };
+    const known = validateRequirementTrace([], ledger, workspace, undefined, { ciState: "success" });
+    assert.ok(known.rows[0]?.notes.includes("external-state-ci:success"));
+    assert.ok(known.rows[0]?.notes.includes("provenance:linked_issues"));
+    assert.ok(known.rows[1]?.notes.includes("external-state-ci:success"));
+    const knownRendered = renderRequirementTraceMarkdown(known);
+    assert.ok(knownRendered.includes("known exact-head CI state: `success`"), knownRendered);
+    assert.ok(knownRendered.includes("from the linked issue, unconditionally in scope"), knownRendered);
+    // No CI observation this run: the advisory says so explicitly instead of
+    // silently omitting the state the author asked about.
+    const unobserved = validateRequirementTrace([], ledger, workspace);
+    assert.ok(unobserved.rows[0]?.notes.includes("external-state-ci-unavailable"));
+    const unobservedRendered = renderRequirementTraceMarkdown(unobserved);
+    assert.ok(unobservedRendered.includes("exact-head CI state was not observed during this review"), unobservedRendered);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+/** The PR #1060 published review (head e8c532a) reported 9 of 11 in-scope
+ * linked-issue criteria `unverifiable`. This fixture reproduces all eleven
+ * classes from that ledger — two traced code obligations, a genuine untraced
+ * one, PR-description inventory, prose-only documentation, a README target, a
+ * checkout-missing README target, a both-sources target, external CI state, an
+ * unrelated PR's future merge, a docs/ tree target, and a CHANGELOG target —
+ * and pins the corrected outcomes row by row. */
+function pr1060FixtureWorkspace(): string {
+  const workspace = makeWorkspace();
+  writeFile(workspace, "src/compare-resolution.ts", ["if (sourceSha === resolved.pull.sourceSha) { return true; }"]);
+  writeFile(workspace, "tests/cleanup.test.ts", ["test cleanup"]);
+  writeFile(workspace, "README.md", ["# pr-reviewer-action", "", "Pass `--no-cache` to skip the review cache."]);
+  writeFile(workspace, "CHANGELOG.md", ["# Changelog", "", "- changelog-cleanup-note for the retired Python suites"]);
+  writeFile(workspace, "docs/guide.md", ["See the effort-inputs matrix in this guide."]);
+  return workspace;
+}
+
+function pr1060Ledger(): unknown {
+  const provenance = [{ source: "linked_issues" }];
+  const entry = (id: string, text: string, kind = "acceptance"): unknown => ({ id, text, kind, provenance });
+  return {
+    requirements: [
+      entry("req-compare", "Context resolution MUST compare the source SHA against the resolved pull request head"),
+      entry("req-gate-order", "The publish-before-fail-gate comparison MUST be pinned by a regression test"),
+      entry("req-inventory", "The PR description records the `dogfood-cleanup` inventory"),
+      entry("req-suite-split", "The pull request description must record the inventory of removed and retained suites"),
+      entry("req-readme-flag", "The README must document the `--no-cache` flag"),
+      entry("req-readme-absent", "The README must document the `preview-mode` flag"),
+      entry("req-both-sources", "The PR description and README must record the retired-tooling inventory"),
+      entry("req-ci-green", "The external CI checks must remain green across the whole suite"),
+      entry("req-future-merge", "Whether unrelated pull request #1052 merges successfully after this change"),
+      entry("req-docs-matrix", "The docs must capture the `effort-inputs` matrix"),
+      entry("req-changelog", "The CHANGELOG records the `changelog-cleanup-note` entry"),
+    ],
+  };
+}
+
+const PR1060_PR_BODY = "This PR records the dogfood-cleanup inventory in its description "
+  + "and explains that preview-mode is fully documented (in this description).";
+
+test("#1062 regression: the #1060 eleven-class ledger no longer yields a blanket unverifiable wall", () => {
+  const workspace = pr1060FixtureWorkspace();
+  try {
+    const claims = [{
+      requirement_id: "req-compare",
+      disposition: "met",
+      enforcement: [{ file: "src/compare-resolution.ts", line: 1 }],
+      test: [{ file: "tests/cleanup.test.ts", line: 1 }],
+      reason: "compares sourceSha against the resolved pull head",
+    }];
+    // `changed` names nothing the linked-issue criteria mention: their scope
+    // must come from provenance alone (they are never silently dropped).
+    const trace = validateRequirementTrace(claims, pr1060Ledger(), workspace, "src/unrelated-pipeline.ts", {
+      prBody: PR1060_PR_BODY,
+      ciState: "success",
+    });
+    assert.equal(trace.rows.length, 11);
+    const byId = new Map(trace.rows.map((row) => [row.requirement_id, row]));
+    // Proof kinds are derived deterministically per class.
+    assert.equal(byId.get("req-compare")?.proof, "runtime_behavior");
+    assert.equal(byId.get("req-gate-order")?.proof, "test_required");
+    for (const id of ["req-inventory", "req-suite-split", "req-readme-flag", "req-readme-absent", "req-both-sources", "req-docs-matrix", "req-changelog"]) {
+      assert.equal(byId.get(id)?.proof, "documentation", id);
+    }
+    for (const id of ["req-ci-green", "req-future-merge"]) assert.equal(byId.get(id)?.proof, "external_state", id);
+    // The two traced/met-by-source rows are met from their OWN sources.
+    assert.equal(byId.get("req-compare")?.disposition, "met");
+    assert.equal(byId.get("req-inventory")?.disposition, "met");
+    assert.ok(byId.get("req-inventory")?.notes.includes("documentation-verified-in-pr-body"));
+    assert.equal(byId.get("req-readme-flag")?.disposition, "met");
+    assert.ok(byId.get("req-readme-flag")?.notes.includes("documentation-verified-in-checkout"));
+    assert.equal(byId.get("req-docs-matrix")?.disposition, "met");
+    assert.equal(byId.get("req-changelog")?.disposition, "met");
+    // The wrong-source row stays advisory despite the PR body quoting it.
+    assert.equal(byId.get("req-readme-absent")?.disposition, PENDING_DISPOSITION);
+    assert.ok(byId.get("req-readme-absent")?.notes.includes("documentation-pending-checkout-unconfirmed"));
+    // Unconfirmable process/external rows are advisory, never `unverifiable`.
+    assert.equal(byId.get("req-suite-split")?.disposition, PENDING_DISPOSITION);
+    assert.equal(byId.get("req-both-sources")?.disposition, PENDING_DISPOSITION);
+    assert.ok(byId.get("req-both-sources")?.notes.includes("documentation-pending-mixed-target"));
+    assert.equal(byId.get("req-ci-green")?.disposition, PENDING_DISPOSITION);
+    assert.ok(byId.get("req-ci-green")?.notes.includes("external-state-ci:success"));
+    assert.equal(byId.get("req-future-merge")?.disposition, PENDING_DISPOSITION);
+    // Every non-code row carries its provenance so the scope decision is explainable.
+    for (const row of trace.rows) {
+      if (row.proof === "documentation" || row.proof === "external_state") {
+        assert.ok(row.notes.includes("provenance:linked_issues"), row.requirement_id);
+      }
+    }
+    // The ONLY blocker left is the genuine untraced code obligation — not a
+    // 9/11 wall of unobservable criteria.
+    const blockers = trace.rows.filter((row) => row.disposition === "unverifiable" || row.disposition === "unmet");
+    assert.deepEqual(blockers.map((row) => row.requirement_id), ["req-gate-order"]);
+    assert.equal(trace.incomplete, true);
+    const rendered = renderRequirementTraceMarkdown(trace);
+    // The blocker denominator counts only code/test-verifiable rows (11 total
+    // minus the 5 pending advisories), so the wall reads 1-of-6, not 9-of-11.
+    assert.ok(rendered.includes("1 of 6 requirement(s) not fully traced"), rendered);
+    const blockerSection = rendered.split("Non-code criteria")[0] ?? "";
+    for (const pendingId of ["req-suite-split", "req-readme-absent", "req-both-sources", "req-ci-green", "req-future-merge"]) {
+      assert.ok(!blockerSection.includes(pendingId), `${pendingId} must not appear as a blocker`);
+    }
+    const advisorySection = rendered.split("Non-code criteria")[1] ?? "";
+    for (const pendingId of ["req-suite-split", "req-readme-absent", "req-both-sources", "req-ci-green", "req-future-merge"]) {
+      assert.ok(advisorySection.includes(pendingId), `${pendingId} must appear in the advisory section`);
+    }
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1062 regression: with the code gap traced, the eleven-class ledger completes without withholding", () => {
+  const workspace = pr1060FixtureWorkspace();
+  try {
+    writeFile(workspace, "src/gate-comparison.ts", [
+      "const gateOrder = compare(publishTime, gateTime);",
+      "if (gateOrder < 0 && comparison === \"publish-before-gate\") { return true; }",
+    ]);
+    const claims = [
+      {
+        requirement_id: "req-compare",
+        disposition: "met",
+        enforcement: [{ file: "src/compare-resolution.ts", line: 1 }],
+        test: [{ file: "tests/cleanup.test.ts", line: 1 }],
+        reason: "compares sourceSha against the resolved pull head",
+      },
+      {
+        requirement_id: "req-gate-order",
+        disposition: "met",
+        enforcement: [{ file: "src/gate-comparison.ts", line: 2 }],
+        test: [{ file: "tests/cleanup.test.ts", line: 1 }],
+        reason: "comparison pins publish-before-gate ordering",
+      },
+    ];
+    const trace = validateRequirementTrace(claims, pr1060Ledger(), workspace, undefined, { prBody: PR1060_PR_BODY });
+    assert.equal(trace.incomplete, false);
+    assert.ok(trace.rows.every((row) => row.disposition === "met" || row.disposition === PENDING_DISPOSITION));
+    const rendered = renderRequirementTraceMarkdown(trace);
+    assert.ok(!rendered.includes("not fully traced to enforcement and a test"), rendered);
+    assert.ok(rendered.includes("Non-code criteria (advisory"), rendered);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1062 regression: a hostile all-met payload cannot launder advisory rows or the code gap", () => {
+  const workspace = pr1060FixtureWorkspace();
+  try {
+    const claims = (["req-compare", "req-gate-order", "req-inventory", "req-suite-split", "req-readme-flag",
+      "req-readme-absent", "req-both-sources", "req-ci-green", "req-future-merge", "req-docs-matrix", "req-changelog"])
+      .map((id) => ({ requirement_id: id, disposition: "met", enforcement: [], test: [], reason: "trust me, all done" }));
+    const trace = validateRequirementTrace(claims, pr1060Ledger(), workspace, undefined, { prBody: PR1060_PR_BODY });
+    const byId = new Map(trace.rows.map((row) => [row.requirement_id, row]));
+    // Code rows without valid locations fall to unverifiable (blocking) no
+    // matter what the model claims; the non-code domains ignore the claim
+    // entirely (fail-soft to their own deterministic dispositions).
+    assert.equal(byId.get("req-compare")?.disposition, "unverifiable");
+    assert.equal(byId.get("req-gate-order")?.disposition, "unverifiable");
+    assert.equal(byId.get("req-suite-split")?.disposition, PENDING_DISPOSITION);
+    assert.equal(byId.get("req-readme-absent")?.disposition, PENDING_DISPOSITION);
+    assert.equal(byId.get("req-both-sources")?.disposition, PENDING_DISPOSITION);
+    assert.equal(byId.get("req-ci-green")?.disposition, PENDING_DISPOSITION);
+    assert.equal(byId.get("req-future-merge")?.disposition, PENDING_DISPOSITION);
+    // Source-confirmed rows stay met because the CHECKOUT/BODY proves them,
+    // not the claim.
+    assert.equal(byId.get("req-readme-flag")?.disposition, "met");
+    assert.equal(byId.get("req-inventory")?.disposition, "met");
+    assert.equal(trace.incomplete, true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
   }
 });
