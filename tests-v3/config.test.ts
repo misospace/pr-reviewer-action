@@ -7,6 +7,7 @@ import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 import { loadConfig, toCamelCase } from "../src/config/load-config.js";
 import { isSecretValue, redactConfig, toJSON } from "../src/config/types.js";
 import { BOOLEAN_INPUTS, ENUM_INPUTS, FLOAT_INPUTS, INTEGER_INPUTS, SECRET_INPUTS } from "../src/config/schema.js";
+import { tierReasoningEffort } from "../src/routing/tiers.js";
 import { assertSupportedNode } from "../src/runtime/node-version.js";
 
 const source = readFileSync("contracts/action-v3.yml", "utf8");
@@ -138,7 +139,12 @@ test("#998: reasoning-effort inputs default empty, inherit per lane, pass values
   assert.equal(inherited.aiReasoningEffort, "high");
   assert.equal(inherited.aiPrimaryReasoningEffort, "high");
   assert.equal(inherited.aiSmartReasoningEffort, "high");
-  assert.equal(inherited.aiFallbackReasoningEffort, "high");
+  // #1053: the fallback override stays "" in the RESOLVED config when unset
+  // — the lane inherits the base at request time in `tierReasoningEffort`
+  // instead, so an installation that never configured the new input keeps
+  // the unset value distinguishable from a configured one at the
+  // fingerprint boundary.
+  assert.equal(inherited.aiFallbackReasoningEffort, "");
   assert.equal(inherited.aiSpecialistReasoningEffort, "high");
 
   // Explicit lane overrides win, and normalization is trim + lowercase (no
@@ -187,7 +193,15 @@ test("#998: reasoning-effort inputs default empty, inherit per lane, pass values
     // process.emitWarning delivers on the next tick, so the assertion needs
     // the listener still attached when the event fires.
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(droppedFallback.aiFallbackReasoningEffort, "low", "dropped fallback value inherits the base");
+    assert.equal(droppedFallback.aiFallbackReasoningEffort, "", "a dropped value stays unset in the resolved config (#1053)");
+    // The lane still falls back to the base at request time: the resolved
+    // stage env carries the empty override and `tierReasoningEffort`
+    // inherits the base from it.
+    assert.equal(
+      tierReasoningEffort("fallback", { AI_REASONING_EFFORT: "low", AI_FALLBACK_REASONING_EFFORT: "" }),
+      "low",
+      "the dropped fallback value behaves as unset and inherits the base",
+    );
     assert.ok(
       fallbackWarnings.some((message) => message.includes("ai-fallback-reasoning-effort")),
       `ai-fallback-reasoning-effort is announced by key: ${fallbackWarnings.join(" | ")}`,
@@ -283,10 +297,12 @@ test("contract defaults and typed parsing agree for every input", () => {
     // specialist input inherits the primary lane's already-resolved value.
     "ai-primary-reasoning-effort": "aiReasoningEffort",
     "ai-smart-reasoning-effort": "aiReasoningEffort",
-    // #1053: the fallback lane now has its own override, but its default
-    // empty still inherits the base, keeping the unset configuration
-    // request-byte compatible with #998.
-    "ai-fallback-reasoning-effort": "aiReasoningEffort",
+    // #1053: NOT inherited at load on purpose. The resolved value is
+    // projected verbatim into the stage env and `AI_FALLBACK_REASONING_EFFORT`
+    // feeds the config fingerprint, so copying the base into an unset
+    // override would change existing fingerprints on upgrade. The fallback
+    // lane inherits the base in `tierReasoningEffort` instead, keeping the
+    // unset configuration request-byte compatible with #998.
     "ai-specialist-reasoning-effort": "aiPrimaryReasoningEffort",
     "ai-primary-model": "aiModel",
     "ai-primary-base-url": "aiBaseUrl",
