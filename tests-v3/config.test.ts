@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { validateContract } from "../src/config/contract.js";
 import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
-import { loadConfig, toCamelCase } from "../src/config/load-config.js";
+import { EMPTY_DISABLING_INPUTS, loadConfig, REASONING_EFFORT_INPUTS, toCamelCase } from "../src/config/load-config.js";
 import { isSecretValue, redactConfig, toJSON } from "../src/config/types.js";
 import { BOOLEAN_INPUTS, ENUM_INPUTS, FLOAT_INPUTS, INTEGER_INPUTS, SECRET_INPUTS } from "../src/config/schema.js";
 import { assertSupportedNode } from "../src/runtime/node-version.js";
@@ -194,6 +194,28 @@ test("#998: reasoning-effort inputs default empty, inherit per lane, pass values
     }
   } finally {
     process.off("warning", onWarning);
+  }
+});
+
+test("#1057: empty-disabling carve-outs are never no-ops and every effort input is registered", () => {
+  const byId = new Map(contract.inputs.map((input) => [input.id, input]));
+  // An input whose contract default is already "" preserves an explicit ""
+  // by construction, so listing it in EMPTY_DISABLING_INPUTS would be
+  // redundant registration. Every member must actually need the carve-out.
+  for (const id of EMPTY_DISABLING_INPUTS) {
+    const input = byId.get(id);
+    assert.ok(input, `EMPTY_DISABLING_INPUTS entry '${id}' is a contract input`);
+    assert.notEqual(input!.default, "", `EMPTY_DISABLING_INPUTS entry '${id}' must have a non-empty default`);
+  }
+  // The free-form effort family is validated by shape, not by an ENUM_INPUTS
+  // vocabulary: a new lane override (e.g. #1053) that is not registered here
+  // would skip the boundary check. Pin the whole family both ways.
+  const family = contract.inputs.map((input) => input.id).filter((id) => id.endsWith("-reasoning-effort"));
+  for (const id of family) {
+    assert.ok(REASONING_EFFORT_INPUTS.has(id), `reasoning-effort input '${id}' is registered for shape validation`);
+  }
+  for (const id of REASONING_EFFORT_INPUTS) {
+    assert.ok(byId.has(id), `REASONING_EFFORT_INPUTS entry '${id}' is a contract input`);
   }
 });
 
