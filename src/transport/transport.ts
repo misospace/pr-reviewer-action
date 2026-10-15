@@ -23,8 +23,18 @@ export interface ChatRequestInput {
   sleep?: (ms: number) => Promise<void>;
 }
 
+/** #1047: the structured-output surface a strip retry removed from the wire:
+ * the OpenAI `response_format` object, or the Anthropic
+ * `output_config.format` key (siblings preserved). */
+export type StructuredOutputSurface = "response_format" | "output_config.format";
+
 export type ChatRequestOutcome =
-  | { status: "ok"; response: NormalizedModelResponse; raw: unknown }
+  | { status: "ok"; response: NormalizedModelResponse; raw: unknown;
+      /** #1047 (review): set only when THIS successful response came from the
+       * one-shot strip retry — the request that produced it did NOT carry the
+       * named parameter, so "what was enforced" reporting must reflect the
+       * stripped state, not the configuration. */
+      strippedStructuredOutput?: StructuredOutputSurface | undefined }
   | { status: "failure"; failure: TransportFailure };
 
 /**
@@ -54,8 +64,17 @@ export async function runChatRequest(input: ChatRequestInput): Promise<ChatReque
  * RETRYABLE_HTTP_STATUSES, and the clamped request re-enters this loop with
  * the ordinary retry behavior. `clampRemaining` makes the retry strictly
  * once-per-request — a clamped request that fails again returns its failure
- * unchanged, never a third attempt. */
-async function runChatRequestLoop(input: ChatRequestInput, clampRemaining: boolean): Promise<ChatRequestOutcome> {
+ * unchanged, never a third attempt.
+ *
+ * #1047 adds the same-shaped structured-output strip on the other 400 a
+ * capability mismatch produces: an endpoint that rejects the structured-
+ * output parameter (an operator's opt-in assertion that turned out wrong,
+ * or an OpenAI `response_format` a proxy does not implement) fails the whole
+ * review otherwise. When the 400 body names the parameter AND this payload
+ * carries it, the same request is retried once with the parameter removed —
+ * the review degrades to prompted-JSON instead of dying. `stripRemaining`
+ * makes it strictly once-per-request, exactly like the clamp. */
+async function runChatRequestLoop(input: ChatRequestInput, clampRemaining: boolean, stripRemaining = true): Promise<ChatRequestOutcome> {
   const sleep = input.sleep ?? defaultSleep;
   for (let attempt = 1; ; attempt++) {
     const outcome = await runChatRequestOnce(input);
@@ -65,7 +84,21 @@ async function runChatRequestLoop(input: ChatRequestInput, clampRemaining: boole
         : null;
       if (clamp !== null) {
         process.stderr.write(`clamped ${clamp.field} ${clamp.from} -> ${clamp.to} (${clamp.reason})\n`);
-        return runChatRequestLoop(clamp.input, false);
+        return runChatRequestLoop(clamp.input, false, stripRemaining);
+      }
+      const strip = stripRemaining
+        ? structuredOutputStripRetry(input, outcome.failure)
+        : null;
+      if (strip !== null) {
+        process.stderr.write(`removed ${strip.surface} for one retry (HTTP 400 body named it)\n`);
+        const retryOutcome = await runChatRequestLoop(strip.input, clampRemaining, false);
+        // #1047 (review): a successful strip retry is tagged with the surface
+        // it dropped, so callers can report the EFFECTIVE request rather than
+        // the configuration; a failed one returns unchanged.
+        if (retryOutcome.status === "ok") {
+          return { ...retryOutcome, strippedStructuredOutput: strip.surface };
+        }
+        return retryOutcome;
       }
       if (
         outcome.failure.kind === "http_status"
@@ -193,6 +226,52 @@ function tokenClampRetry(input: ChatRequestInput, failure: TransportFailure): To
     to: stated.cap,
     reason: stated.reason,
   };
+}
+
+// ── structured-output parameter removal on HTTP 400 (#1047) ──────────────
+// A 400 whose body names the structured-output surface (`response_format`,
+// `output_config`, or `json_schema`) while this payload carries it is a
+// capability mismatch, not a transient error: retrying identical bytes can
+// never succeed. The strip is evidence-gated on BOTH sides — the body must
+// name the parameter AND the request must actually carry it — and strictly
+// once per request.
+
+interface StructuredOutputStripRetry {
+  input: ChatRequestInput;
+  surface: StructuredOutputSurface;
+}
+
+function structuredOutputStripRetry(input: ChatRequestInput, failure: TransportFailure): StructuredOutputStripRetry | null {
+  if (failure.kind !== "http_status" || failure.status !== 400) return null;
+  if (failure.body === undefined) return null;
+  const body = input.payload.body as unknown as Record<string, unknown>;
+  const message = errorMessageText(failure.body).toLowerCase();
+  const namesSurface = message.includes("response_format") || message.includes("output_config") || message.includes("json_schema");
+  if (!namesSurface) return null;
+
+  if (body.response_format !== undefined) {
+    const retryBody = { ...body };
+    delete retryBody.response_format;
+    return {
+      input: { ...input, payload: { ...input.payload, body: retryBody as unknown as TransportWirePayload["body"] } },
+      surface: "response_format",
+    };
+  }
+  const outputConfig = body.output_config;
+  if (typeof outputConfig === "object" && outputConfig !== null && !Array.isArray(outputConfig)) {
+    const config = outputConfig as Record<string, unknown>;
+    if (config.format === undefined) return null;
+    const retryConfig = { ...config };
+    delete retryConfig.format;
+    const retryBody = { ...body };
+    if (Object.keys(retryConfig).length > 0) retryBody.output_config = retryConfig;
+    else delete retryBody.output_config;
+    return {
+      input: { ...input, payload: { ...input.payload, body: retryBody as unknown as TransportWirePayload["body"] } },
+      surface: "output_config.format",
+    };
+  }
+  return null;
 }
 
 async function runChatRequestOnce(input: ChatRequestInput): Promise<ChatRequestOutcome> {

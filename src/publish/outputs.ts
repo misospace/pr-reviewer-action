@@ -368,6 +368,12 @@ export interface StepSummaryTelemetry {
     attempts: number;
     retried: boolean;
     reason?: string;
+    /** #1047: bounded failure-shape line (content-free) for a verdict turn
+     * that produced no usable body — `class=… profile=… …`. */
+    diagnostics?: string;
+    /** #1047: the raised completion budget the single retry used, when the
+     * failure shape justified one. */
+    budgetRaisedTo?: number;
   };
   route: string;
   routeReason?: string;
@@ -419,7 +425,14 @@ export function renderStepSummary(telemetry: StepSummaryTelemetry): string {
     if (telemetry.nativeVerdict.reason) {
       row += `, reason: ${telemetry.nativeVerdict.reason}`;
     }
-    row += ") |";
+    if (telemetry.nativeVerdict.budgetRaisedTo !== undefined) {
+      row += `, budget raised to ${telemetry.nativeVerdict.budgetRaisedTo}`;
+    }
+    row += ")";
+    if (telemetry.nativeVerdict.diagnostics) {
+      row += ` — ${telemetry.nativeVerdict.diagnostics}`;
+    }
+    row += " |";
     rows.push(row);
   }
   rows.push(`| Route | ${telemetry.route} (${telemetry.routeReason ?? ""}) |`);

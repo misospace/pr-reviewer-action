@@ -14,6 +14,29 @@ interface ToolState {
   argsParts: string[];
 }
 
+/** #1047: block counters are capped so a hostile or runaway stream cannot
+ * grow them unboundedly — they are diagnostics, not accounting. Only counts,
+ * never content. */
+const MAX_BLOCK_COUNT = 9999;
+
+function bumpCount(count: number): number {
+  return count < MAX_BLOCK_COUNT ? count + 1 : count;
+}
+
+/** #1047: attach block counts to a reassembled response only when a thinking
+ * block arrived — the one signal the joined `content` string cannot show and
+ * the classifier needs (a reasoning-only stream otherwise looks identical to
+ * a zero-output one). Thinking-free responses keep their exact v2 shape. */
+function withBlockCounts(
+  response: NormalizedModelResponse,
+  thinkingBlocks: number,
+  textBlocks: number,
+  toolBlocks: number,
+): NormalizedModelResponse {
+  if (thinkingBlocks <= 0) return response;
+  return { ...response, blockCounts: { text: textBlocks, thinking: thinkingBlocks, toolUse: toolBlocks } };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -69,6 +92,11 @@ function reassembleOpenai(text: string): NormalizedModelResponse {
   let cacheReadTokens = 0;
   let completionTokens = 0;
   let error: unknown;
+  // #1047: counts only — reasoning segments (DeepSeek-style
+  // reasoning_content / reasoning deltas, which proxy-translated thinking
+  // also arrives as), text deltas, and flushed tool calls.
+  let textDeltas = 0;
+  let reasoningSegments = 0;
 
   const flushAll = (): void => {
     for (const index of [...tools.keys()].sort((a, b) => a - b)) {
@@ -101,7 +129,13 @@ function reassembleOpenai(text: string): NormalizedModelResponse {
       if (!isRecord(choice)) continue;
       const delta = isRecord(choice.delta) ? choice.delta : {};
       const content = asString(delta.content);
-      if (content !== null) contentParts.push(content);
+      if (content !== null) {
+        contentParts.push(content);
+        textDeltas = bumpCount(textDeltas);
+      }
+      if (asString(delta.reasoning_content) !== null || asString(delta.reasoning) !== null) {
+        reasoningSegments = bumpCount(reasoningSegments);
+      }
       const rawToolCalls = delta.tool_calls;
       const toolCallItems: unknown[] = Array.isArray(rawToolCalls)
         ? rawToolCalls
@@ -140,7 +174,12 @@ function reassembleOpenai(text: string): NormalizedModelResponse {
   // carried none) — the parser's empty-completion detection reads
   // usage.completion_tokens == 0, so an absent usage must not read as null.
   const usage = withCache({ promptTokens, completionTokens, totalTokens: promptTokens + completionTokens }, cacheReadTokens, 0);
-  return baseResponse(id, model, contentParts.join(""), toolCalls, finishReason || "stop", usage, error);
+  return withBlockCounts(
+    baseResponse(id, model, contentParts.join(""), toolCalls, finishReason || "stop", usage, error),
+    reasoningSegments,
+    textDeltas,
+    toolCalls.length,
+  );
 }
 
 interface AnthropicToolBlock {
@@ -162,6 +201,11 @@ function reassembleAnthropic(text: string): NormalizedModelResponse {
   let stopReason = "";
   let error: unknown;
   let openBlock: AnthropicToolBlock | null = null;
+  // #1047: counts only — thinking blocks (including redacted thinking), text
+  // deltas, and tool-use blocks; never their content.
+  let textDeltas = 0;
+  let thinkingBlocks = 0;
+  let toolBlocks = 0;
 
   const flushOpen = (): void => {
     const call = flushTool(openBlock);
@@ -208,6 +252,9 @@ function reassembleAnthropic(text: string): NormalizedModelResponse {
           argsParts: [],
           index: typeof event.index === "number" ? event.index : null,
         };
+        toolBlocks = bumpCount(toolBlocks);
+      } else if (block.type === "thinking" || block.type === "redacted_thinking") {
+        thinkingBlocks = bumpCount(thinkingBlocks);
       }
       continue;
     }
@@ -215,7 +262,10 @@ function reassembleAnthropic(text: string): NormalizedModelResponse {
       const delta = isRecord(event.delta) ? event.delta : {};
       if (delta.type === "text_delta" || delta.type === "text") {
         const piece = asString(delta.text);
-        if (piece !== null) contentParts.push(piece);
+        if (piece !== null) {
+          contentParts.push(piece);
+          textDeltas = bumpCount(textDeltas);
+        }
       } else if (delta.type === "input_json_delta" || delta.type === "input_json") {
         const raw = delta.partial_json ?? delta.input ?? "";
         if (typeof raw === "string") openBlock?.argsParts.push(raw);
@@ -244,7 +294,12 @@ function reassembleAnthropic(text: string): NormalizedModelResponse {
   let finishReason = stopReason || "stop";
   if (toolCalls.length > 0 && finishReason === "tool_use") finishReason = "tool_calls";
   const usage = withCache({ promptTokens, completionTokens, totalTokens: promptTokens + completionTokens }, cacheReadTokens, cacheWriteTokens);
-  return baseResponse(id, model, contentParts.join(""), toolCalls, finishReason, usage, error);
+  return withBlockCounts(
+    baseResponse(id, model, contentParts.join(""), toolCalls, finishReason, usage, error),
+    thinkingBlocks,
+    textDeltas,
+    toolBlocks,
+  );
 }
 
 /**

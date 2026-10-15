@@ -37,7 +37,7 @@ import {
 import { extractRequirementLedger, ledgerToArtifact, renderRequirementLedgerMarkdown } from "../requirements/ledger.js";
 import { requirementLedgerPresence } from "../requirements/presence.js";
 import { classifyPr, classificationToArtifact } from "../classification/classify.js";
-import { resolveReviewRoute, resolveTierProfiles, tierRequestShape, anthropicEffortInactiveWarning, effectiveWireEffort, type TierProfiles } from "../routing/tiers.js";
+import { resolveReviewRoute, resolveTierProfiles, tierRequestShape, anthropicEffortInactiveWarning, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, effectiveWireEffort, effectiveWireResponseFormat, type TierProfiles } from "../routing/tiers.js";
 import { reviewerRequestedEscalation } from "../routing/escalation.js";
 import { buildSpecialistCorpus } from "../specialists/corpus.js";
 import { forkGate, type ForkedGate, type GateName, type GateOutcome } from "../gates/gates.js";
@@ -48,6 +48,8 @@ import { runClaimFalsificationPass } from "../claims/pass.js";
 import { renderClaimsSection } from "../claims/render.js";
 import { buildModelRequest } from "../model/request.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
+import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js";
+import { maskKnownSecrets } from "../context/redact.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, publicAnalysisEngine, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, applyReviewTriageFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
@@ -969,6 +971,13 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
         Number(env.AI_REQUEST_TIMEOUT_SEC ?? "180") || 180,
       );
       log(`requirement trace: ${repairRequirements.length} in-scope requirement(s) carried no claim; attempting one bounded repair pass`);
+      // #1047: the repair pass rides the primary route and asks for its own
+      // (non-verdict) JSON contract in the prompt only — an Anthropic-format
+      // repair call never carries a native structured-output parameter, so a
+      // configured response_format must not read as enforced here either.
+      if (profiles.primary.apiFormat === "anthropic" && profiles.primary.responseFormat !== "off") {
+        log(`WARNING: primary lane (trace repair pass): ai-response-format resolved to ${profiles.primary.responseFormat}, which is not sent on the Anthropic wire for the repair contract — the repair JSON is prompt-only`);
+      }
       // Fail-soft at the boundary too, mirroring the claim-falsification
       // pre-pass: a throw here must never abort the review.
       let repaired: Awaited<ReturnType<typeof runRequirementTraceRepairPass>> | null = null;
@@ -1639,6 +1648,8 @@ function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | 
     // the smart lane never inherits the base flag.
     reasoningEffort: resolved.reasoningEffort,
     anthropicEffortSupported: resolved.anthropicEffortSupported,
+    // #1047: the lane's own structured-output assertion, same per-lane rule.
+    anthropicStructuredOutputSupported: resolved.anthropicStructuredOutputSupported,
   };
 }
 
@@ -1659,6 +1670,16 @@ async function callTier(
   if (profile.apiFormat === "anthropic" && profile.reasoningEffort !== "" && !profile.anthropicEffortSupported) {
     log(`WARNING: ${anthropicEffortInactiveWarning(tier, profile.reasoningEffort, " (review call)")}`);
   }
+  // #1047: same truth-telling for structured output. A resolved json_schema
+  // the endpoint opt-in refuses is NOT enforced, and json_object has no
+  // Anthropic-native wire form at all — either way the JSON contract is
+  // prompt-only, and the operator is told so by name instead of believing a
+  // parameter was sent.
+  if (profile.apiFormat === "anthropic" && profile.responseFormat === "json_schema" && !profile.anthropicStructuredOutputSupported) {
+    log(`WARNING: ${anthropicStructuredOutputInactiveWarning(tier, " (review call)")}`);
+  } else if (profile.apiFormat === "anthropic" && profile.responseFormat === "json_object") {
+    log(`WARNING: ${anthropicJsonObjectsPromptOnlyWarning(tier, "json_object", " (review call)")}`);
+  }
   // Persist the request artifact before the first attempt (v2 writes it once).
   const requestPayload = buildModelRequest({
     apiFormat: profile.apiFormat,
@@ -1674,6 +1695,7 @@ async function callTier(
     tokensParam: profile.tokensParam,
     reasoningEffort: profile.reasoningEffort,
     anthropicEffortSupported: profile.anthropicEffortSupported,
+    anthropicStructuredOutputSupported: profile.anthropicStructuredOutputSupported,
   });
   ws.write(requestArtifact, pyJsonDumps(requestPayload.body));
   ws.write(responseArtifact, "");
@@ -1691,39 +1713,80 @@ async function callTier(
       return result;
     },
   });
+  // #1047: the bounded, content-free failure-shape record — logged as one
+  // line and persisted beside the error so a degraded run explains itself.
+  // #1047: bounded failure-shape diagnostics. The record carries no response
+  // content by construction, and its one provider-controlled free-text field
+  // (finish_reason) was already masked in-record — but the LINE is still
+  // masked whole against the tier's key before it is logged, because the
+  // static field names ("failure_kind" contains a "k") can collide with a
+  // very short configured key. Over-redacting a few incidental letters is the
+  // accepted cost (the same second-pass rationale as describeTransportFailure).
+  const diagnosticsLine = outcome.status !== "ok" && outcome.diagnostics !== undefined
+    ? maskKnownSecrets(` [${formatResponseDiagnosticsLine(outcome.diagnostics.record)}]`, [profile.apiKey])
+    : "";
   if (outcome.status === "ok") {
     // #998: the effective effort is part of which request produced this
     // verdict, so the per-call debug line carries it — appended only when one
     // was actually sent, keeping the line unchanged for every existing setup.
     const wireEffort = effectiveWireEffort(profile.apiFormat, profile.reasoningEffort, profile.anthropicEffortSupported);
     const effortNote = wireEffort === "" ? "" : `, effort=${wireEffort}`;
-    log(`${profile.label} model attempt ${outcome.attempts}/${profile.retries}: ${profile.model} @ ${profile.baseUrl} (${profile.apiFormat}${effortNote})`);
+    // #1047 (review): report the format the SUCCESSFUL request actually
+    // carried, never the configuration. The transport's one-shot strip retry
+    // can recover a capability-mismatch 400 without the parameter — the
+    // verdict then came from a prompt-only request, so `format=json_schema`
+    // would be a lie. The strip is announced once, by surface and outcome,
+    // and persisted as bounded attempt evidence beside the initial request
+    // artifact (which keeps its original bytes: it records what was FIRST
+    // sent). No secrets and no response content — the note carries only the
+    // parameter name and the attempt count.
+    const stripped = outcome.strippedStructuredOutput;
+    if (stripped !== undefined) {
+      log(`WARNING: ${profile.label}: the endpoint rejected the structured-output parameter (${stripped}) with HTTP 400; the request was retried once without it and recovered prompt-only`);
+      const effectiveArtifact = requestArtifact.replace(/\.json$/, ".effective.json");
+      ws.write(effectiveArtifact, Buffer.from(`${pyJsonDumps({
+        removed: stripped,
+        note: "structured output removed after HTTP 400; request recovered prompt-only",
+        attempts: outcome.attempts,
+      })}\n`, "utf8"));
+    }
+    const wireFormat = effectiveWireResponseFormat(profile.apiFormat, profile.responseFormat, profile.anthropicStructuredOutputSupported);
+    const formatNote = wireFormat === "json_schema" && profile.apiFormat === "anthropic" && stripped === undefined ? ", format=json_schema" : "";
+    const raisedNote = outcome.budgetRaisedTo !== undefined ? ` (completion budget raised to ${outcome.budgetRaisedTo} after a token-cap failure)` : "";
+    log(`${profile.label} model attempt ${outcome.attempts}/${profile.retries}: ${profile.model} @ ${profile.baseUrl} (${profile.apiFormat}${effortNote}${formatNote})${raisedNote}`);
     const parsed = parseVerdictResponse(outcome.rawResponse, [profile.apiKey]);
     const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
     ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
     return { ok: true, artifact, rawResponse: outcome.rawResponse };
   }
   if (outcome.status === "empty_completion") {
-    errorLog(`${profile.label}: model returned an empty completion; not retrying ${tier}`);
+    errorLog(`${profile.label}: model returned an empty completion; not retrying ${tier}${diagnosticsLine}`);
+    if (outcome.diagnostics !== undefined) {
+      ws.write(responseArtifact, pyJsonDumps({ error: outcome.failure.message, diagnostics: outcome.diagnostics.record }));
+    }
   } else if (outcome.status === "parse_exhausted") {
     // #868: the raw response artifact was written before parsing could tell
     // whether the body carried an in-body error (already-masked message
     // below, via `parseVerdictResponse`'s `secrets` — see
     // `surfaceStreamError`); replace it so an unmasked provider body never
     // survives on disk, mirroring the transport-exhausted branch below.
-    errorLog(`${profile.label}: parse/validate failures exhausted (${outcome.failure.message})`);
-    ws.write(responseArtifact, pyJsonDumps({ error: outcome.failure.message }));
+    errorLog(`${profile.label}: parse/validate failures exhausted (${outcome.failure.message})${diagnosticsLine}`);
+    ws.write(responseArtifact, pyJsonDumps(outcome.diagnostics !== undefined
+      ? { error: outcome.failure.message, diagnostics: outcome.diagnostics.record }
+      : { error: outcome.failure.message }));
   } else {
     // #846: carry the HTTP status and a redacted, length-capped body excerpt
     // (plus the ai-api-format hint on a 404) instead of the bare "model
     // endpoint returned HTTP <status>" message. `secrets` masks this tier's
     // configured key unconditionally, on top of `redactText`'s heuristics.
     const detail = describeTransportFailure(outcome.failure, { secrets: [profile.apiKey] });
-    errorLog(`${profile.label}: transport failures exhausted (${detail})`);
+    errorLog(`${profile.label}: transport failures exhausted (${detail})${diagnosticsLine}`);
     if (outcome.nonRetryable === true) {
       annotate(`::error::${profile.label}: model endpoint returned a non-retryable HTTP status; failing over without retrying (${annotationSafe(detail)})`);
     }
-    ws.write(responseArtifact, pyJsonDumps({ error: detail }));
+    ws.write(responseArtifact, pyJsonDumps(outcome.diagnostics !== undefined
+      ? { error: detail, diagnostics: outcome.diagnostics.record }
+      : { error: detail }));
   }
   return { ok: false, artifact: null, rawResponse: null };
 }
@@ -2040,6 +2103,15 @@ function writeStepSummary(stepSummaryPath: string, input: SummaryInput): void {
           retried: primaryHarness?.native_loop_verdict_retried === true,
           ...(primaryHarness?.native_loop_verdict_reason !== undefined && primaryHarness.native_loop_verdict_reason !== null
             ? { reason: String(primaryHarness.native_loop_verdict_reason) }
+            : {}),
+          // #1047: content-free failure shape + budget raise, when the
+          // verdict turn recorded them.
+          ...(primaryHarness?.native_loop_verdict_diagnostics !== undefined && primaryHarness.native_loop_verdict_diagnostics !== null
+            && typeof primaryHarness.native_loop_verdict_diagnostics === "object"
+            ? { diagnostics: formatResponseDiagnosticsLine(primaryHarness.native_loop_verdict_diagnostics as Record<string, unknown>) }
+            : {}),
+          ...(typeof primaryHarness?.native_loop_verdict_budget_raised_to === "number"
+            ? { budgetRaisedTo: primaryHarness.native_loop_verdict_budget_raised_to }
             : {}),
         },
       }
