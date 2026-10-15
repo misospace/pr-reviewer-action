@@ -51,7 +51,8 @@
       "inline-findings",
       "inline-findings-max",
       "validate-required-checks",
-      "required-check-validation-mode"
+      "required-check-validation-mode",
+      "review-triage"
     ]
   },
   {

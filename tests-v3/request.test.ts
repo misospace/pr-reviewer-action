@@ -287,19 +287,35 @@ test("request construction is provider-neutral: no branching on model names", ()
   );
 });
 
-test("the strict verdict schema matches the frozen v2 bash literal byte for byte", () => {
-  assert.deepEqual(OPENAI_VERDICT_JSON_SCHEMA, JSON.parse(V2_RF_JSON_SCHEMA_LITERAL));
+test("the strict verdict schema matches the frozen v2 bash literal plus only the v3 triage fields (#1003)", () => {
+  // #1003 adds exactly two properties (the human-review triage answer) and
+  // two `required` entries on top of the frozen v2 literal. Strip them and
+  // the pin is byte-for-byte the v2 snapshot again, so a future drift in
+  // anything else still fails here.
+  const live = structuredClone(OPENAI_VERDICT_JSON_SCHEMA) as {
+    json_schema: { schema: { properties: Record<string, unknown>; required: string[] } };
+  };
+  const schema = live.json_schema.schema;
+  delete schema.properties.review_triage_decision;
+  delete schema.properties.review_triage_reason;
+  schema.required = schema.required.filter((name) => !name.startsWith("review_triage_"));
+  assert.deepEqual(live, JSON.parse(V2_RF_JSON_SCHEMA_LITERAL));
 });
 
 test("the strict verdict schema requires every property (OpenAI strict mode)", () => {
   const schema = (OPENAI_VERDICT_JSON_SCHEMA.json_schema as unknown as Record<string, unknown>).schema as unknown as Record<string, unknown>;
   assert.deepEqual(
     schema.required,
-    ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "findings", "requirement_coverage", "required_check_dispositions"],
+    ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "findings", "requirement_coverage", "required_check_dispositions"],
   );
-  const properties = schema.properties as unknown as Record<string, { type: unknown }>;
+  const properties = schema.properties as unknown as Record<string, { type: unknown; enum?: string[] }>;
   assert.deepEqual(properties.smart_review_requested!.type, "boolean");
   assert.deepEqual(properties.smart_review_reason!.type, ["string", "null"]);
+  // #1003: the triage decision is exactly the three literal words; there is
+  // no fourth value for a malformed answer to normalize into.
+  assert.deepEqual(properties.review_triage_decision!.enum, ["not_required", "required", "unknown"]);
+  assert.deepEqual(properties.review_triage_decision!.type, "string");
+  assert.deepEqual(properties.review_triage_reason!.type, ["string", "null"]);
   const findings = properties.findings! as unknown as { type: string[] };
   assert.deepEqual(findings.type, ["array", "null"]);
   // #750: one disposition per deterministic must_check item; identity is

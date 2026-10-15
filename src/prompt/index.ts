@@ -11,6 +11,7 @@ export {
   applySpecialistLeadsFragment,
   applySupersededDiscussionFragment,
   applyRequirementTraceFragment,
+  applyReviewTriageFragment,
   SUPERSEDED_DISCUSSION_GUIDANCE,
   applySystemPromptFragments,
   resolveSystemPrompt,
