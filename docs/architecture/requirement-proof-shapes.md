@@ -12,6 +12,8 @@ A single evidence rule is too strict for repository-state requirements and too w
 - **`structural_state`** — The requirement makes one unambiguous, non-behavioral containment or existence assertion about a named, checkout-relative, non-source file. Content assertions need exactly one quoted/backticked literal. Config, manifest, ignore, and dotfiles may qualify; executable source, extensionless scripts, `Dockerfile`, and `Makefile` do not.
 - **`test_required`** — The requirement explicitly demands test coverage. It uses the strict runtime proof and makes test evidence mandatory.
 - **`distributed`** — Trusted topology declares at least two seams for the requirement (#962), requiring evidence across each seam.
+- **`external_state`** (#1062) — The requirement names an explicitly external or unrelated system's CI/workflow state, or a future/other-pull-request merge outcome, that no checkout predicate can observe. Not a proof target: the row is dispositioned `pending`, a non-blocking advisory that is never `met` (the run's exact-head CI state is surfaced when observed, not certified).
+- **`documentation`** (#1062) — A recording obligation aimed at a named documentation/metadata artifact (PR description/body, README, CHANGELOG, docs, docstring). Confirmed only from the artifact's own trusted source; never by inventing a source-code predicate.
 
 ## What is required per shape
 
@@ -21,6 +23,8 @@ A single evidence rule is too strict for repository-state requirements and too w
 | `structural_state` | A citation naming the checkout-relative target file and the validator's re-derived, whole assertion holding in the checkout. Only a single containment/existence assertion is structural; content claims need exactly one literal and, for a non-empty file, an in-range citation line (empty files are exempt). | No, unless the requirement also explicitly demands tests. |
 | `test_required` | Same enforcement location and predicate as `runtime_behavior`, plus a valid test location. | Yes |
 | `distributed` | Distinct valid enforcement and test citations covering every declared seam, plus a predicate over the matched enforcement evidence. | Yes, in every seam. |
+| `external_state` | None — the row is `pending`, a non-blocking advisory in its own "Non-code criteria" section, excluded from the not-fully-traced denominator. It reports its provenance/scope basis and the run's known exact-head CI state (from the CI gate's finalized output) or that none was observed. | No; `pending` never demands or fakes test evidence. |
+| `documentation` | Exactly one quoted literal, positively present as a bounded token in the source the named target selects: a PR-description/PR-body target confirms only from the trusted PR body (`pr.title + pr.body`); a README/CHANGELOG/docs target confirms only from the matching files of the exact-head checkout (bounded, size-capped, symlink-refusing scan). A target naming both sources, or a docstring with no bounded file source, confirms from neither and stays `pending`. | No; advisory-only. |
 
 For all shapes, test citations must point to real test/fixture files. `structural_state` and an explicit test demand are independent: a structural requirement that also demands tests needs both the checked state and test evidence. Any non-`met` disposition requires a reason; every `unmet` requires a matching finding. Use `not_applicable` only when the requirement genuinely does not apply.
 
@@ -38,6 +42,10 @@ For all shapes, test citations must point to real test/fixture files. `structura
 - Missing test evidence alone does not make a proven structural requirement `unverifiable`; it does when that requirement explicitly demands tests. Missing valid deterministic proof always does.
 - The #854 control is preserved: a runtime-semantics requirement whose cited line merely copies a field (for example, `sourceSha: ctx.sourceSha`) is `unverifiable`, test or no test.
 - `unverifiable` and `unmet` make `requirement_trace_incomplete`, forcing `required_checks=incomplete` and a non-clean verdict.
+- #1062: `pending` is deliberately **not** in `TRACE_DISPOSITIONS`. A model that emits `disposition: "pending"` on a code row falls to `disposition-invalid` → `unverifiable` (blocking), so it cannot self-authorize out of a mandatory code proof; only the validator's ledger-text classification may set `pending`.
+- #1062: a genuine code/test-verifiable obligation is never `pending`. Any code-action/enforcement/publish/report/ship/release verb, any named source or test path, or an explicit test demand vetoes the row back to the strict path; structural and distributed seams take precedence over the non-code domain. `external_state` additionally requires the subject to be framed as **explicitly external/unrelated** — a bare `CI` or `PR #N` mention is not enough — and `documentation` requires both a recording verb and a named documentation/metadata target.
+- #1062: a `pending` row never sets `requirement_trace_incomplete`, never synthesizes a finding, and is excluded from the blocker denominator; a well-formed `unmet` still blocks, and a bare `unmet` with no reason degrades to blocking `unverifiable` — checked **before** any non-code routing, so the domain cannot launder a real gap.
+- #1062: documentation proof sources never cross. The PR body is never consulted for a checkout-document target, and the automatic checkout scan is read-only, bounded (entry/file/depth/size caps), and symlink-refusing (including a symlinked `docs/` root); it can only ever grant `met` or fall to `pending`, never manufacture a block.
 
 ## Trust boundary
 
