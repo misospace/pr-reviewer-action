@@ -81,6 +81,23 @@ test("#1003: publishInputFromEnv carries the triage answer, and omits it when tr
 
   const didNotRun = publishInputFromEnv({ PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
   assert.equal(didNotRun.reviewTriage, undefined);
+
+  // #1003 fail-closed: `not_required` is a positive claim and needs a usable
+  // supporting statement. A carried-forward or hand-edited env with no usable
+  // reason must not cross this boundary as a confident negative.
+  const unsubstantiated = publishInputFromEnv({
+    PUBLISH_MODE: "comment",
+    REVIEW_TRIAGE_DECISION: "not_required",
+    REVIEW_TRIAGE_REASON: "   ",
+  } as NodeJS.ProcessEnv, "github");
+  assert.equal(unsubstantiated.reviewTriage?.decision, "unknown");
+
+  const substantiated = publishInputFromEnv({
+    PUBLISH_MODE: "comment",
+    REVIEW_TRIAGE_DECISION: "not_required",
+    REVIEW_TRIAGE_REASON: "no owning team in the escalation policy",
+  } as NodeJS.ProcessEnv, "github");
+  assert.deepEqual(substantiated.reviewTriage, { decision: "not_required", reason: "no owning team in the escalation policy" });
 });
 
 test("publish entrypoint rejects an invalid publish mode fail-closed", async () => {

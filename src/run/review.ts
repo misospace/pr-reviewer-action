@@ -49,6 +49,7 @@ import { renderClaimsSection } from "../claims/render.js";
 import { buildModelRequest } from "../model/request.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
 import { parseVerdictResponse } from "../model/verdict.js";
+import { resolveReviewTriageDecision } from "../model/triage.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, publicAnalysisEngine, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, applyReviewTriageFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
 import { reviewArtifactFromParsed, type ArtifactFinding } from "../enforcement/artifact.js";
 import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
@@ -108,12 +109,6 @@ import type { ReadResult } from "../platform/types.js";
  * artifact bus — persisted to the run directory only where outputs, evals,
  * diagnostics or the shadow comparison read it. No Python, no shell.
  */
-
-/** #1003: the only three triage decisions the outputs/publish boundary will
- * emit. Mirrors the parser's fail-closed set so a carried-forward or
- * hand-edited artifact can never smuggle a fourth value onto a public
- * surface. */
-const REVIEW_TRIAGE_DECISIONS: ReadonlySet<string> = new Set(["not_required", "required", "unknown"]);
 
 export class RunReviewError extends Error {
   readonly exitCode: number;
@@ -1244,12 +1239,11 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // is review-only: no value below feeds the verdict, the marker, or any
   // tool/fork/evidence gate.
   const reviewTriageEnabled = config.reviewTriage === true;
-  const triageDecisionValue = reviewRecord.review_triage_decision;
-  const triageDecision = reviewTriageEnabled
-    ? (typeof triageDecisionValue === "string" && REVIEW_TRIAGE_DECISIONS.has(triageDecisionValue) ? triageDecisionValue : "unknown")
-    : "";
   const triageReason = reviewTriageEnabled && typeof reviewRecord.review_triage_reason === "string"
     ? reviewRecord.review_triage_reason
+    : "";
+  const triageDecision = reviewTriageEnabled
+    ? resolveReviewTriageDecision(reviewRecord.review_triage_decision, triageReason)
     : "";
   const outputs: ReviewStepOutputs = {
     verdict: outputVerdict,

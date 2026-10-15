@@ -1,4 +1,5 @@
 import type { NormalizedFinding, NormalizedHumanReviewDisposition, NormalizedRequiredCheckDisposition, NormalizedThreadDisposition, ParsedReviewVerdict, RequiredCheckStatus, ReviewTriageDecision, VerdictValue } from "./types.js";
+import { resolveReviewTriageDecision } from "./triage.js";
 import { VerdictParseFailure } from "./types.js";
 import { maskDiagnostic } from "../context/redact.js";
 
@@ -220,32 +221,29 @@ function normalizeSmartReviewRequest(parsed: Record<string, unknown>): {
  * only; every other shape (absent, null, non-string, a near-miss like
  * "required " or "Required", an unknown word) is uncertainty and becomes
  * `unknown` — triage must never read a malformed answer as "not required",
- * which would turn a parser failure into a silent pass. The reason is kept as
- * a bounded, control-char-free single line ("" when absent or blank).
+ * which would turn a parser failure into a silent pass. An unsubstantiated
+ * `not_required` (no usable reason) fails closed to `unknown` too, so the
+ * positive claim can never rest on a parser gap. The reason is kept as a
+ * bounded, control-char-free single line ("" when absent or blank).
  */
 function normalizeReviewTriage(parsed: Record<string, unknown>): {
   decision: ReviewTriageDecision;
   reason: string;
 } {
-  const raw = parsed.review_triage_decision;
-  const decision = typeof raw === "string" && REVIEW_TRIAGE_DECISIONS.has(raw)
-    ? raw as ReviewTriageDecision
-    : "unknown";
   const reason = typeof parsed.review_triage_reason === "string"
     ? parsed.review_triage_reason.replace(SMART_REVIEW_REASON_CONTROL, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS)
     : "";
+  const decision = resolveReviewTriageDecision(parsed.review_triage_decision, reason);
   return { decision, reason };
 }
 
 const TRUNCATION_REASONS = new Set(["length", "max_tokens", "max_output_tokens"]);
 
-// #1003: human-review triage. The decision is accepted only on an EXACT
-// string match of one of the three literals — no case folding, trimming, or
-// alias table — so a missing, null, wrong-type, or unrecognized answer is
-// indistinguishable from uncertainty and fails closed to `unknown`. The reason
-// is bounded and control-char-collapsed like every other model-authored reason
-// (it reaches step outputs and the published review body).
-const REVIEW_TRIAGE_DECISIONS = new Set<string>(["not_required", "required", "unknown"]);
+// #1003: the parser-side bound on the model-authored reason. The published
+// surfaces render a shorter, 300-char cap (see src/publish/outputs.ts).
+// Decision resolution — including the unsubstantiated-`not_required`
+// fail-closed rule — lives in ./triage.ts, shared with every downstream
+// boundary.
 const MAX_REVIEW_TRIAGE_REASON_CHARS = 400;
 
 const TRUNC_SUFFIX = " (model output appears truncated at the token limit; increase ai_max_tokens)";

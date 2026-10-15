@@ -22,7 +22,8 @@ import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, re
 import { strictReviewResult } from "../enforcement/verdict-policy.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
 import { COVERAGE_NOTICE_MAX_ITEMS, type PartialCoverage } from "../tools/coverage.js";
-import { isIncompleteReason, renderFindingsSummary, severityCountsLabel, MAX_REVIEW_TRIAGE_REASON_CHARS, REVIEW_TRIAGE_DECISIONS, type IncompleteReason } from "./outputs.js";
+import { isIncompleteReason, renderFindingsSummary, severityCountsLabel, MAX_REVIEW_TRIAGE_REASON_CHARS, type IncompleteReason } from "./outputs.js";
+import { resolveReviewTriageDecision } from "../model/triage.js";
 import type { NativeReviewComment, NativeReviewRequest, PublishPlatformApi } from "../platform/publish-api.js";
 
 export type PublishMode = "comment" | "review_comment" | "review_verdict";
@@ -280,7 +281,7 @@ export function renderReviewTriageBlock(
   triage: { decision: string; reason: string },
   linkMode: UpstreamLinkMode,
 ): string {
-  const decision = REVIEW_TRIAGE_DECISIONS.has(triage.decision) ? triage.decision : "unknown";
+  const decision = resolveReviewTriageDecision(triage.decision, triage.reason);
   const reason = escapeTableCell(
     sanitizeMarkdown(redactText(String(triage.reason ?? "")), linkMode).replace(/\s+/g, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS),
   );

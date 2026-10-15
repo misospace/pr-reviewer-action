@@ -442,7 +442,7 @@ Outputs with no v2 implementation.
 | --- | --- |
 | `review-result` | The metadata marker's `review_result` state (`clean`/`findings`/`partial`/`issues`), additive alongside `verdict` (#873). `verdict: approve` with `review-result: partial` is not an approval; gate merges on both, never on `verdict` alone. |
 | `incomplete-reason` | Why coverage is incomplete: `execution` / `requirement_trace` / `both` / `none` (#954). Distinguishes a finished review with an unverified requirement from a review that stopped early; `review-result` stays `partial` for both. |
-| `review-triage-decision` | Opt-in human-review triage answer (#1003): `not_required` / `required` / `unknown`, or empty when `review-triage` is disabled. Fail-closed: a missing or malformed answer is `unknown`, never `not_required`. Advisory only — it never changes the verdict, the findings, or any tool/evidence/fork access. |
+| `review-triage-decision` | Opt-in human-review triage answer (#1003): `not_required` / `required` / `unknown`, or empty when `review-triage` is disabled. Fail-closed: a missing or malformed answer, or a `not_required` with no usable supporting reason, is `unknown` — never a confident negative. Advisory only — it never changes the verdict, the findings, or any tool/evidence/fork access. |
 | `review-triage-reason` | The evidence behind `review-triage-decision` (#1003), possibly empty, or empty when `review-triage` is disabled. Redacted before publication. |
 
 `review-triage` (#1003) is operator-only (repository config can never switch a

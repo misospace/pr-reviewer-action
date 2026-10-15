@@ -15,7 +15,8 @@ import type { UpstreamLinkMode } from "../publish/sanitize.js";
 import { nonEmpty } from "./run-dir.js";
 import { partialCoverageOf } from "./review.js";
 import type { PartialCoverage } from "../tools/coverage.js";
-import { isIncompleteReason, REVIEW_TRIAGE_DECISIONS, type IncompleteReason } from "../publish/outputs.js";
+import { isIncompleteReason, type IncompleteReason } from "../publish/outputs.js";
+import { resolveReviewTriageDecision } from "../model/triage.js";
 
 /**
  * Production entrypoints for the #706 composite cutover: the precheck and
@@ -422,12 +423,13 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
     // section the review run would have written. Empty means triage did not
     // run — distinct from the fail-closed `unknown` answer, which is a real
     // value here and must still render. A value that is neither empty nor one
-    // of the three literals fails closed here too, at this boundary, rather
-    // than relying on a downstream renderer to reject it.
+    // of the three literals — and an unsubstantiated `not_required` — fails
+    // closed here too, at this boundary, rather than relying on a downstream
+    // renderer to reject it.
     ...(env.REVIEW_TRIAGE_DECISION
       ? {
         reviewTriage: {
-          decision: REVIEW_TRIAGE_DECISIONS.has(env.REVIEW_TRIAGE_DECISION) ? env.REVIEW_TRIAGE_DECISION : "unknown",
+          decision: resolveReviewTriageDecision(env.REVIEW_TRIAGE_DECISION, env.REVIEW_TRIAGE_REASON ?? ""),
           reason: env.REVIEW_TRIAGE_REASON ?? "",
         },
       }

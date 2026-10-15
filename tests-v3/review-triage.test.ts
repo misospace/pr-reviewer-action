@@ -265,6 +265,52 @@ test("#1003: a malformed or missing model answer reaches the outputs as unknown"
   }
 });
 
+// #1003 fail-closed: `not_required` is a positive claim ("no specialized
+// human review is needed"), so it requires a usable supporting statement. An
+// unsubstantiated one — empty, blank, missing, non-string — must read as
+// `unknown`, never as a confident negative from a parser gap.
+test("#1003: an unsubstantiated not_required fails closed to unknown", async () => {
+  for (const triage of [
+    { review_triage_decision: "not_required", review_triage_reason: "" },
+    { review_triage_decision: "not_required", review_triage_reason: "   " },
+    { review_triage_decision: "not_required", review_triage_reason: "\n\t " },
+    { review_triage_decision: "not_required" },
+    { review_triage_decision: "not_required", review_triage_reason: null },
+    { review_triage_decision: "not_required", review_triage_reason: 42 },
+  ]) {
+    const run = await runTriageReview({ triage, inputs: { "review-triage": "true" } });
+    try {
+      const label = JSON.stringify(triage);
+      assert.match(run.outputs, /^review-triage-decision=unknown\n/m, label);
+      assert.equal(run.artifact.review_triage_decision, "unknown", label);
+      assert.match(run.stepSummary, /^\| Review triage \| unknown \(advisory only\) \|$/m, label);
+    } finally {
+      rmSync(run.runDir, { recursive: true, force: true });
+    }
+  }
+});
+
+// The converse: a substantiated `not_required` is kept, and `required` /
+// `unknown` stay valid without any reason (neither is a positive claim).
+test("#1003: a substantiated not_required is kept, and required/unknown need no reason", async () => {
+  const substantiated = await runTriageReview({
+    triage: { review_triage_decision: "not_required", review_triage_reason: "no owning team in the escalation policy" },
+    inputs: { "review-triage": "true" },
+  });
+  const required = await runTriageReview({ triage: { review_triage_decision: "required" }, inputs: { "review-triage": "true" } });
+  const unknown = await runTriageReview({ triage: { review_triage_decision: "unknown" }, inputs: { "review-triage": "true" } });
+  try {
+    assert.equal(substantiated.artifact.review_triage_decision, "not_required");
+    assert.match(substantiated.outputs, /^review-triage-decision=not_required\n/m);
+    assert.equal(required.artifact.review_triage_decision, "required");
+    assert.equal(unknown.artifact.review_triage_decision, "unknown");
+  } finally {
+    rmSync(substantiated.runDir, { recursive: true, force: true });
+    rmSync(required.runDir, { recursive: true, force: true });
+    rmSync(unknown.runDir, { recursive: true, force: true });
+  }
+});
+
 test("#1003: triage never moves the verdict", async () => {
   const off = await runTriageReview({ triage: { review_triage_decision: "required", review_triage_reason: "x" } });
   const on = await runTriageReview({
@@ -406,6 +452,19 @@ test("#1003: the published triage section fails closed on an unvalidated decisio
   }
 });
 
+// #1003 fail-closed: the same evidence rule at the published body — an
+// unsubstantiated `not_required` renders as `unknown`, never as "no
+// specialized human review required" without a supporting statement.
+test("#1003: the published triage section fails closed on an unsubstantiated not_required", () => {
+  for (const reason of ["", "   ", "\n\t"]) {
+    const block = renderReviewTriageBlock({ decision: "not_required", reason }, "inert");
+    assert.match(block, /Human review triage: unknown — the reviewer could not determine this/, JSON.stringify(reason));
+    assert.equal(block.includes("no specialized human review required"), false, JSON.stringify(reason));
+  }
+  const kept = renderReviewTriageBlock({ decision: "not_required", reason: "no owning team in the escalation policy" }, "inert");
+  assert.match(kept, /Human review triage: no specialized human review required\*\* — no owning team in the escalation policy/);
+});
+
 test("#1003: buildPublishedBody is byte-identical when no triage block is supplied", () => {
   const options = { markers: MARKER, analysisEngine: "m (openai)", sanitizedMarkdown: "REVIEW", actionVersion: "" };
   assert.equal(buildPublishedBody(options), `${MARKER}\n_Analysis engine: m (openai)_\n\nREVIEW\n`);
@@ -448,6 +507,19 @@ test("#1003: the step summary triage row fails closed on an unvalidated decision
       assert.equal(triageRow.includes(decision.trim()), false, `decision ${JSON.stringify(decision)} must not render verbatim`);
     }
   }
+});
+
+// #1003 fail-closed: the summary applies the same evidence rule, so an
+// unsubstantiated `not_required` shows `unknown` here too.
+test("#1003: the step summary triage row fails closed on an unsubstantiated not_required", () => {
+  for (const reason of ["", "   ", "\n\t"]) {
+    const row = renderStepSummary(telemetry({ reviewTriage: { decision: "not_required", reason } }));
+    assert.match(row, /\| Review triage \| unknown \(advisory only\) \|/, JSON.stringify(reason));
+    const triageRow = row.split("\n").find((line) => line.startsWith("| Review triage |")) ?? "";
+    assert.equal(triageRow.includes("not_required"), false, JSON.stringify(reason));
+  }
+  const kept = renderStepSummary(telemetry({ reviewTriage: { decision: "not_required", reason: "policy evidence" } }));
+  assert.match(kept, /\| Review triage \| not_required: policy evidence \(advisory only\) \|/);
 });
 
 // ── (d) no capability change ──────────────────────────────────────────────

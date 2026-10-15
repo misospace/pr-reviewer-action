@@ -398,7 +398,7 @@ inputs:
     required: false
     default: "false"
   review-triage:
-    description: "Opt-in human-review triage (#1003): the reviewer additionally answers whether this change needs a specialized/owning human review, as 'not_required', 'required', or 'unknown' (fail-closed: any missing, malformed or unrecognized answer is 'unknown'). The escalation policy comes from the repository's trusted instruction files already in context; triage never names a reviewer, never requests one, and never changes the verdict, findings, or any tool, evidence or fork access. Publishes review-triage-decision and review-triage-reason, and adds a short section to the published review and the step summary. Off by default: disabled means the outputs stay empty."
+    description: "Opt-in human-review triage (#1003): the reviewer additionally answers whether this change needs a specialized/owning human review, as 'not_required', 'required', or 'unknown' (fail-closed: any missing, malformed or unrecognized answer is 'unknown', and a 'not_required' with no usable supporting reason is also 'unknown'). The escalation policy comes from the repository's trusted instruction files already in context; triage never names a reviewer, never requests one, and never changes the verdict, findings, or any tool, evidence or fork access. Publishes review-triage-decision and review-triage-reason, and adds a short section to the published review and the step summary. Off by default: disabled means the outputs stay empty."
     required: false
     default: "false"
   enrichment-budget-sec:

@@ -17,22 +17,16 @@ import { sanitizeMarkdown, type UpstreamLinkMode } from "./sanitize.js";
 import { redactText } from "../context/redact.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
 import { SEVERITY_LABELS } from "./inline-findings.js";
+import { resolveReviewTriageDecision } from "../model/triage.js";
 
 //
 // ---------------------------------------------------------------------------
-// #1003 human-review triage: the one place the publish layer decides what a
-// triage answer is allowed to look like. Both public surfaces (the published
-// review body and the step summary) validate against this set, so a
-// carried-forward artifact or a hand-edited output fails closed to `unknown`
-// rather than rendering a decision nobody validated.
+// #1003 human-review triage: the decision is resolved fail-closed — exact
+// literal, and `not_required` only with a usable supporting reason — by
+// src/model/triage.ts, shared with the parser and every other boundary. This
+// module only bounds and escapes the model-authored reason for the two public
+// surfaces (the published review body and the step summary).
 // ---------------------------------------------------------------------------
-
-/** The only three triage decisions; anything else fails closed to `unknown`. */
-export const REVIEW_TRIAGE_DECISIONS: ReadonlySet<string> = new Set([
-  "not_required",
-  "required",
-  "unknown",
-]);
 
 /** Cap on the model-authored reason rendered on a public surface. The cap is
  * applied to the text BEFORE pipe-escaping (escaping expands `\` and `|`
@@ -424,12 +418,11 @@ export function renderStepSummary(telemetry: StepSummaryTelemetry): string {
   rows.push(`| Route | ${telemetry.route} (${telemetry.routeReason ?? ""}) |`);
   // #1003: compact one-row triage summary, rendered only when triage ran.
   if (telemetry.reviewTriage) {
-    // The decision is re-validated here rather than trusted: this summary is
-    // a public surface and a carried-forward or hand-edited value must fail
-    // closed to `unknown`, exactly as the parser and the publish body do.
-    const decision = REVIEW_TRIAGE_DECISIONS.has(telemetry.reviewTriage.decision)
-      ? telemetry.reviewTriage.decision
-      : "unknown";
+    // The decision is re-resolved here rather than trusted: this summary is
+    // a public surface, so a carried-forward or hand-edited value — including
+    // an unsubstantiated `not_required` — must fail closed to `unknown`,
+    // exactly as the parser and the publish body do.
+    const decision = resolveReviewTriageDecision(telemetry.reviewTriage.decision, telemetry.reviewTriage.reason);
     // Model-authored reason: redact, flatten to one cell, and escape pipes so
     // a hostile string cannot forge a row (same discipline as the findings
     // table's message cell). Capped at the same 300 characters as the
