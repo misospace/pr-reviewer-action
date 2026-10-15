@@ -505,8 +505,8 @@ inputs:
   - id: deep-review-max-tokens
     v2_id: deep_review_max_tokens
     required: false
-    default: "4096"
-    description: "Maximum completion tokens for each deep-review specialist role; independent of ai_max_tokens. Default 4096."
+    default: "16384"
+    description: "Maximum completion tokens for each deep-review specialist role; independent of ai_max_tokens. Default 16384."
     repo-configurable: true
   - id: deep-review-corpus-max-bytes
     v2_id: deep_review_corpus_max_bytes

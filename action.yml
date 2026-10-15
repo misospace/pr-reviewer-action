@@ -398,9 +398,9 @@ inputs:
     required: false
     default: "600"
   deep-review-max-tokens:
-    description: Maximum completion tokens for each deep-review specialist role; independent of ai_max_tokens. Default 4096.
+    description: Maximum completion tokens for each deep-review specialist role; independent of ai_max_tokens. Default 16384.
     required: false
-    default: "4096"
+    default: "16384"
   deep-review-corpus-max-bytes:
     description: Hard UTF-8 byte cap on the compact deep-review specialist corpus; independent of the final review corpus. Default 48000.
     required: false

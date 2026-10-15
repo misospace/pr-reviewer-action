@@ -217,6 +217,12 @@ function roleLine(entry: SpecialistRoleEntry): string {
   // "error (transport)" line with no clue the endpoint answered 404.
   const httpDetail = entry.error_status !== undefined && entry.error_detail ? ` — ${entry.error_detail}` : "";
   if (entry.overrun_retry === true) usageNote += ` overrun-retry(max_tokens=${pyStr(entry.retry_max_tokens ?? null)})`;
+  // #1061: the bounded role diagnostic — a full-budget no-lead failure must be
+  // explainable from the log line alone (stop reason, output length, overrun
+  // recovery outcome), never a bare "degraded — 0 lead(s), 1 error(s)".
+  if (entry.stop_reason !== undefined && entry.stop_reason !== null) usageNote += ` stop_reason=${entry.stop_reason}`;
+  if (entry.output_chars !== undefined && entry.output_chars !== null) usageNote += ` output_chars=${pyStr(entry.output_chars)}`;
+  if (entry.overrun_retry_result !== undefined && entry.overrun_retry_result !== null) usageNote += ` overrun=${entry.overrun_retry_result}`;
   return `specialist ${entry.role}: ${entry.status}${suffix}${reason}${httpDetail} — ${entry.lead_count} lead(s), ${entry.errors_count} error(s), ${pyFloatRepr(entry.elapsed_sec)}s${usageNote}`;
 }
 
