@@ -1,5 +1,83 @@
 # Changelog
 
+## [3.5.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.4.1...source-v3.5.0) (2026-10-15)
+
+
+### Features
+
+* **eval:** reproducible heterogeneous model/profile lanes for [#967](https://github.com/misospace/pr-reviewer-action/issues/967) ([#1022](https://github.com/misospace/pr-reviewer-action/issues/1022)) ([492c743](https://github.com/misospace/pr-reviewer-action/commit/492c743f89afa2eddf233c08b80a5682b2388297))
+* **forge:** route Python tooling through a configured forge capability ([#1041](https://github.com/misospace/pr-reviewer-action/issues/1041)) ([#1039](https://github.com/misospace/pr-reviewer-action/issues/1039)) ([c235b7d](https://github.com/misospace/pr-reviewer-action/commit/c235b7d5f1c2f91e5260b73fa25f2a9ffede59b5))
+* **ingress:** self-hosted Forgejo webhook/auth/reconciliation adapter ([#730](https://github.com/misospace/pr-reviewer-action/issues/730)) ([#1019](https://github.com/misospace/pr-reviewer-action/issues/1019)) ([c16c85b](https://github.com/misospace/pr-reviewer-action/commit/c16c85b0e708ac8f71e6e72cd343b540c8f21e35))
+* **model:** allow response-format overrides per model lane ([#1009](https://github.com/misospace/pr-reviewer-action/issues/1009)) ([#1040](https://github.com/misospace/pr-reviewer-action/issues/1040)) ([20cab2d](https://github.com/misospace/pr-reviewer-action/commit/20cab2d572ae5967cdc745d7da42cd46f8dfc16c))
+* **model:** independent ai-fallback-reasoning-effort override ([#1053](https://github.com/misospace/pr-reviewer-action/issues/1053)) ([cd20d43](https://github.com/misospace/pr-reviewer-action/commit/cd20d435205fc20efed9886a6dfdc7784e45f7f9))
+* **model:** independent ai-fallback-reasoning-effort override ([#1053](https://github.com/misospace/pr-reviewer-action/issues/1053)) ([51cad39](https://github.com/misospace/pr-reviewer-action/commit/51cad39880d2b745874499ed32ba5b394e7d7b56))
+* **model:** per-profile reasoning effort for OpenAI and Anthropic ([#998](https://github.com/misospace/pr-reviewer-action/issues/998)) ([#1049](https://github.com/misospace/pr-reviewer-action/issues/1049)) ([01dda91](https://github.com/misospace/pr-reviewer-action/commit/01dda91efa706a0cb62a59fb30cbd852215d0ed0))
+* **queue:** durable review-queue scheduling semantics ([#731](https://github.com/misospace/pr-reviewer-action/issues/731)) ([#1021](https://github.com/misospace/pr-reviewer-action/issues/1021)) ([e9582f5](https://github.com/misospace/pr-reviewer-action/commit/e9582f532b22ef0db56c20ae03563bf9616a19d4))
+* **tangled:** fetch latest pull round and normalize patch-blob diff/files ([#586](https://github.com/misospace/pr-reviewer-action/issues/586)) ([#1012](https://github.com/misospace/pr-reviewer-action/issues/1012)) ([e7db913](https://github.com/misospace/pr-reviewer-action/commit/e7db913365d4e89a792dee30164cf712bcd221a4))
+* **tangled:** normalize pull metadata into the platform read seam ([#585](https://github.com/misospace/pr-reviewer-action/issues/585)) ([#1013](https://github.com/misospace/pr-reviewer-action/issues/1013)) ([aa12fff](https://github.com/misospace/pr-reviewer-action/commit/aa12fffaf9d31abd0775fda8fbbaeba91194be29))
+* **triage:** add first-class human-review triage output ([#1003](https://github.com/misospace/pr-reviewer-action/issues/1003)) ([#1051](https://github.com/misospace/pr-reviewer-action/issues/1051)) ([9cf25c8](https://github.com/misospace/pr-reviewer-action/commit/9cf25c8412beefc1fbc71a9d13965bfe8af5a5ee))
+* **triage:** route required human review to trusted reviewer targets ([#1005](https://github.com/misospace/pr-reviewer-action/issues/1005)) ([bcdda85](https://github.com/misospace/pr-reviewer-action/commit/bcdda85118bef65e3c8a40d5c698d4efab73fa46))
+* **triage:** route required human review to trusted reviewer targets ([#1005](https://github.com/misospace/pr-reviewer-action/issues/1005)) ([3d4ec70](https://github.com/misospace/pr-reviewer-action/commit/3d4ec70085a09d5a77f02ee0e43ee98c89dc2622))
+
+
+### Bug Fixes
+
+* **ci:** repair dogfood regressions and retire obsolete Python test debt ([#1060](https://github.com/misospace/pr-reviewer-action/issues/1060)) ([afd5013](https://github.com/misospace/pr-reviewer-action/commit/afd50132f1bb87b1a174b5a4515fb7c4d978891c))
+* **classification:** treat self-location readlink as trusted path bookkeeping ([#1034](https://github.com/misospace/pr-reviewer-action/issues/1034)) ([#1042](https://github.com/misospace/pr-reviewer-action/issues/1042)) ([92424f9](https://github.com/misospace/pr-reviewer-action/commit/92424f95006e478ce5152fba9377d67551696df1))
+* **config:** preserve unset fallback effort in hash ([c6630d7](https://github.com/misospace/pr-reviewer-action/commit/c6630d7051fba50815c0764396d8f2cac272b223))
+* **deps:** update dependency @types/node (24.19.1 → 24.19.2) ([#1023](https://github.com/misospace/pr-reviewer-action/issues/1023)) ([e44a237](https://github.com/misospace/pr-reviewer-action/commit/e44a23736f38de52e175cef8e75886072ed07028))
+* **enforcement:** confirm documentation trace rows only from their named target source ([86229e0](https://github.com/misospace/pr-reviewer-action/commit/86229e0ba078d900908302549552eb0a1e2be334))
+* **enforcement:** harden documentation scan per independent review ([259de11](https://github.com/misospace/pr-reviewer-action/commit/259de11f78e39a5d35647d668f09394e4c3169d4))
+* **forgejo:** Fix CI timeout on V16 API ([#1046](https://github.com/misospace/pr-reviewer-action/issues/1046)) ([8350071](https://github.com/misospace/pr-reviewer-action/commit/83500713ca546772eb31a7bb1f4e7adfbdc51c1a))
+* **forgejo:** Fix Forgejo authorized_integration mode ([#1045](https://github.com/misospace/pr-reviewer-action/issues/1045)) ([6b38cbe](https://github.com/misospace/pr-reviewer-action/commit/6b38cbe0e32de71ea7bc0510816cc53412b80b1b))
+* **ingress:** bind reconciliation jobs to the configured repository ([#1025](https://github.com/misospace/pr-reviewer-action/issues/1025)) ([#1052](https://github.com/misospace/pr-reviewer-action/issues/1052)) ([d1cff53](https://github.com/misospace/pr-reviewer-action/commit/d1cff53a6b33ec7b59a428e6ea9ec83b830bc4c2))
+* **model:** declare review_triage_targets in strict OpenAI verdict schemas ([aec5111](https://github.com/misospace/pr-reviewer-action/commit/aec51114db9bf60b98f419065a98f7f3d120f0e4))
+* **model:** make Anthropic structured-output semantics truthful and recover usable verdicts ([7a7e130](https://github.com/misospace/pr-reviewer-action/commit/7a7e1308f88e068ae21997e567b8e5cdbbae0c41))
+* **model:** make Anthropic structured-output semantics truthful and recover usable verdicts ([816927b](https://github.com/misospace/pr-reviewer-action/commit/816927bd27feffb63820333386bbe5ac0491c10f))
+* **model:** mask configured secrets before diagnostic truncation; specialist response-format via tierResponseFormat ([f533d65](https://github.com/misospace/pr-reviewer-action/commit/f533d656999e35e8a1ba097f98f703b890cbcb66))
+* **model:** report the effective wire format after a 400 strip recovery; CodeQL cleanup ([f183288](https://github.com/misospace/pr-reviewer-action/commit/f183288d98fb6b6ab15ba92f80e2590eebc442dd))
+* **partition:** fail-closed no-diff coverage and bind outcomes to plan round ([#1026](https://github.com/misospace/pr-reviewer-action/issues/1026)) ([#1031](https://github.com/misospace/pr-reviewer-action/issues/1031)) ([55ecf00](https://github.com/misospace/pr-reviewer-action/commit/55ecf0050f260ea56180a146844c444afc873354))
+* **precheck:** fingerprint the effective triage routing mode ([20ff2e2](https://github.com/misospace/pr-reviewer-action/commit/20ff2e2122b3b75154ba063af5da63249447e089))
+* **publish:** fail closed on a malformed requested-reviewers GET ([#1079](https://github.com/misospace/pr-reviewer-action/issues/1079)) ([5738670](https://github.com/misospace/pr-reviewer-action/commit/5738670be1ca48a9ec403eeabf646fbf8c558180))
+* **publish:** safely retire superseded managed inline comments ([#1050](https://github.com/misospace/pr-reviewer-action/issues/1050)) ([cc1fa07](https://github.com/misospace/pr-reviewer-action/commit/cc1fa074cc486da697616e49f2c485058feebb75))
+* **requirement-trace:** stop non-code acceptance criteria falsely blocking approval ([#1062](https://github.com/misospace/pr-reviewer-action/issues/1062)) ([50bf601](https://github.com/misospace/pr-reviewer-action/commit/50bf6015ffb47db859a8e17635fbe1dc80be0a74))
+* **requirement-trace:** stop non-code acceptance criteria falsely blocking approval ([#1062](https://github.com/misospace/pr-reviewer-action/issues/1062)) ([8f93a01](https://github.com/misospace/pr-reviewer-action/commit/8f93a010c5376cb33ab8aecff943407e9bc4df95))
+* **reviewer:** carry source-evidence provenance through model-visible tool output ([#1015](https://github.com/misospace/pr-reviewer-action/issues/1015)) ([#1029](https://github.com/misospace/pr-reviewer-action/issues/1029)) ([afe282f](https://github.com/misospace/pr-reviewer-action/commit/afe282f5fa3e5b343946f9d927c165db20286cf5))
+* **specialists:** apply overrun recovery to the combined-scout path ([6fcb154](https://github.com/misospace/pr-reviewer-action/commit/6fcb154bddcfba352349e7e20f2176b0e0598c56))
+* **specialists:** classify malformed/no-lead responses as parser ([2bfa3ca](https://github.com/misospace/pr-reviewer-action/commit/2bfa3ca3ef6042571737595f72e0a20d739b98d9))
+* **specialists:** detect Anthropic overruns, raise cap ([4abbfb1](https://github.com/misospace/pr-reviewer-action/commit/4abbfb18e0ed510712bbd93f0bb58957a390fded))
+* **specialists:** detect streamed Anthropic overruns and raise the default cap to 16K ([d60da4a](https://github.com/misospace/pr-reviewer-action/commit/d60da4abe3e0e024a084b7bd2f898c21b1738565))
+* **specialists:** only report overrun recovery when the retry is adopted ([d54ab2b](https://github.com/misospace/pr-reviewer-action/commit/d54ab2bcd12590064a80d823d316a3b7c0a57b62))
+* **specialists:** retry completion-limit responses with zero leads ([5d23b68](https://github.com/misospace/pr-reviewer-action/commit/5d23b689cd6abe8ffe6cbafe30a97f614de778a9))
+* **tools:** make smart-tier loop round and wall-clock limits settable ([#1020](https://github.com/misospace/pr-reviewer-action/issues/1020)) ([#1032](https://github.com/misospace/pr-reviewer-action/issues/1032)) ([f5b3e11](https://github.com/misospace/pr-reviewer-action/commit/f5b3e115d1c3f805eda479040025552c00b1f623))
+
+
+### Performance Improvements
+
+* **ci:** stop tests paying the real transport backoff ([8b8f0d1](https://github.com/misospace/pr-reviewer-action/commit/8b8f0d16b5348c07f5f62a210e8b9f093f683ce3))
+* **ci:** stop tests paying the real transport backoff ([4fd2a05](https://github.com/misospace/pr-reviewer-action/commit/4fd2a052055736312c341ad40a819f5593f64768))
+
+
+### Chores
+
+* **test:** drop unreferenced dogfood-623 and test-evidence artifacts ([496e2d0](https://github.com/misospace/pr-reviewer-action/commit/496e2d052ab9d8e0640e89ce7b75c402fc2a9a77))
+* **test:** drop unreferenced dogfood-623 and test-evidence artifacts ([e1d1ff8](https://github.com/misospace/pr-reviewer-action/commit/e1d1ff826457d45f4def6fea5563f00503022048)), closes [#1063](https://github.com/misospace/pr-reviewer-action/issues/1063)
+
+
+### Documentation
+
+* **agents:** align normative guidance with shipped v3 action ([#1055](https://github.com/misospace/pr-reviewer-action/issues/1055)) ([34d68f1](https://github.com/misospace/pr-reviewer-action/commit/34d68f17e57751e7279fc2391a3277e67c461ef0))
+* **ci:** record the observed after-CI numbers ([67d2f16](https://github.com/misospace/pr-reviewer-action/commit/67d2f16bd4bb61224ade6d81787ebf194a7c2fda))
+* **requirement-trace:** pin non-code proof shapes in contract doc ([bf6a2b2](https://github.com/misospace/pr-reviewer-action/commit/bf6a2b2de45451e3792c1bd77ba297b9e8fb50b2))
+
+
+### Refactors
+
+* **config:** drop no-op Action-input carve-outs ([68b7f61](https://github.com/misospace/pr-reviewer-action/commit/68b7f61a46a02d45ee3fba56e950ec05d07b044a))
+* **config:** drop no-op Action-input carve-outs ([027e94c](https://github.com/misospace/pr-reviewer-action/commit/027e94c4171889ec5e41bbb09876d2bc46847a6d))
+* **run:** extract the step-summary seam from runReview ([afdef1c](https://github.com/misospace/pr-reviewer-action/commit/afdef1cb63f8f99e831b16f78abd3e2cc6fc9805))
+* **run:** extract the step-summary seam from runReview ([7a82877](https://github.com/misospace/pr-reviewer-action/commit/7a828779f1f35b8b85f56cf967544a23c6b80c39))
+
 ## [3.4.1](https://github.com/misospace/pr-reviewer-action/compare/source-v3.4.0...source-v3.4.1) (2026-10-07)
 
 
