@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { parse } from "yaml";
 import {
   normalizeSpecialistOutput,
   parseSpecialistResponse,
@@ -13,6 +15,7 @@ import {
   completionOverran,
   responseStopReason,
   DEFAULT_SPECIALIST_MAX_TOKENS,
+  OVERRUN_RETRY_CEILING,
   type SpecialistCorpusWorkspace,
   type SpecialistRunInput,
   type SpecialistTransportOutcome,
@@ -604,6 +607,28 @@ test("renderSpecialistMarkdown: hostile backtick runs and headings stay inside t
 
 test("#1061: the shipped specialist default completion cap is 16384", () => {
   assert.equal(DEFAULT_SPECIALIST_MAX_TOKENS, 16384);
+});
+
+// #1061: one completion cap across every surface. The runtime default, the
+// canonical contract, the generated action.yml, and the generated docs must
+// agree — drift here is a shipped mismatch, not a cosmetic diff.
+test("#1061: the specialist completion cap agrees across runtime, contract, and generated artifacts", () => {
+  const contract = parse(readFileSync("contracts/action-v3.yml", "utf8")) as {
+    inputs: { id: string; default?: unknown }[];
+  };
+  const declared = contract.inputs.find((input) => input.id === "deep-review-max-tokens");
+  assert.ok(declared, "deep-review-max-tokens must be declared in the contract");
+  assert.equal(declared.default, "16384");
+  assert.equal(Number(declared.default), DEFAULT_SPECIALIST_MAX_TOKENS, "runtime default must match the contract default");
+
+  const action = parse(readFileSync("action.yml", "utf8")) as { inputs: Record<string, { default?: string }> };
+  assert.equal(action.inputs["deep-review-max-tokens"]?.default, String(DEFAULT_SPECIALIST_MAX_TOKENS), "generated action.yml must match the runtime default");
+
+  assert.match(readFileSync("docs/inputs.md", "utf8"), /\| `deep-review-max-tokens` \| `16384` \|/, "generated docs must show the shipped default");
+
+  // The bounded retry ceiling stays above the default and unchanged.
+  assert.equal(OVERRUN_RETRY_CEILING, 32768);
+  assert.ok(OVERRUN_RETRY_CEILING > DEFAULT_SPECIALIST_MAX_TOKENS);
 });
 
 test("#1061: completionOverran recognizes Anthropic max_tokens in every shape", () => {
