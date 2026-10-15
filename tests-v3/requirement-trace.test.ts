@@ -29,6 +29,7 @@ import {
   explicitlyRequiresTest,
 nonCodeProofDomain,
 documentationProofSource,
+DOC_SCAN_MAX_FILE_BYTES,
 PENDING_DISPOSITION,
   validateRequirementTrace,
   type RequirementOwnership,
@@ -3520,6 +3521,42 @@ test("#1062 review: CHANGELOG and docs/ checkout targets confirm only from the c
     assert.equal(met.rows[1]?.disposition, "met");
     assert.ok(met.rows[0]?.notes.includes("documentation-verified-in-checkout"));
     assert.ok(met.rows[1]?.notes.includes("documentation-verified-in-checkout"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1062 review: a symlinked docs/ root is never enumerated outside the workspace", () => {
+  const workspace = makeWorkspace();
+  const outside = mkdtempSync(join(tmpdir(), "req-trace-outside-"));
+  try {
+    writeFile(outside, "escape.md", ["the outside-effort matrix lives outside the checkout"]);
+    symlinkSync(outside, join(workspace, "docs"));
+    const ledger = ledgerWith([{ id: "req-docs", text: "The docs must capture the `outside-effort` matrix", kind: "acceptance" }]);
+    // The literal sits in the linked tree; the scan must refuse the symlinked
+    // root entirely — advisory, never a cross-boundary `met`.
+    const trace = validateRequirementTrace([], ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, PENDING_DISPOSITION);
+    assert.ok(trace.rows[0]?.notes.includes("documentation-pending-checkout-unconfirmed"));
+    assert.equal(trace.incomplete, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("#1062 review: an oversized README is never auto-read for confirmation", () => {
+  const workspace = makeWorkspace();
+  try {
+    const literal = "oversized-review-note";
+    // A hostile checkout puts the literal just past the per-file read cap.
+    const filler = "x".repeat(DOC_SCAN_MAX_FILE_BYTES + 16);
+    writeFileSync(join(workspace, "README.md"), `${literal}\n${filler}`);
+    const ledger = ledgerWith([{ id: "req-readme", text: "The README must document the `oversized-review-note` entry", kind: "acceptance" }]);
+    const trace = validateRequirementTrace([], ledger, workspace);
+    assert.equal(trace.rows[0]?.disposition, PENDING_DISPOSITION);
+    assert.ok(trace.rows[0]?.notes.includes("documentation-pending-checkout-unconfirmed"));
+    assert.equal(trace.incomplete, false);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

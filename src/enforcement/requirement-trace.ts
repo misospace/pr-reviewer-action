@@ -63,7 +63,7 @@
  * verb is vetoed out of the domain and stays on the strict `unverifiable`-blocks
  * path, and the model can never claim `pending` to escape a code proof.
  */
-import { readdirSync, readFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import type { ArtifactFinding, ReviewArtifact } from "./artifact.js";
 import { workspaceRegularFile, workspaceFsPath, workspacePathExists, workspacePathHasSymlinkComponent } from "../context/workspace-path.js";
 import { detectLanguage, isTestPath } from "../context/change-anchors.js";
@@ -960,7 +960,24 @@ export function documentationProofSource(text: string): DocumentationProofSource
 const DOC_SCAN_MAX_ENTRIES = 500;
 const DOC_SCAN_MAX_FILES = 64;
 const DOC_SCAN_MAX_DEPTH = 4;
+/** Unlike model-triggered citations, these reads happen automatically for
+ * every documentation row, so each candidate is size-capped: a hostile
+ * multi-GB README must not inflate every validation. An oversized (or
+ * symlinked) candidate simply drops out and the row stays advisory. */
+export const DOC_SCAN_MAX_FILE_BYTES = 512 * 1024;
 const DOC_TEXT_EXT_RE = /\.(?:md|markdown|rst|txt|adoc)$/i;
+
+/** `lstat` gate for a scan candidate: regular file (never followed through a
+ * link) within the read cap. Containment itself is still enforced per-read by
+ * the citation reader's own `workspaceRegularFile` guard. */
+function docCandidateReadable(workspace: string, file: string): boolean {
+  try {
+    const stat = lstatSync(workspaceFsPath(workspace, file));
+    return stat.isFile() && stat.size <= DOC_SCAN_MAX_FILE_BYTES;
+  } catch {
+    return false;
+  }
+}
 
 /** Deterministic, bounded candidate list of checkout documentation files a
  * requirement's target words name: root-level `README*` / `CHANGELOG*` for
@@ -986,11 +1003,16 @@ function checkoutDocumentationFiles(workspace: string, text: string): string[] {
     if (scanned >= DOC_SCAN_MAX_ENTRIES || out.length >= DOC_SCAN_MAX_FILES) break;
     scanned += 1;
     if (!entry.isFile()) continue;
-    if (wantsReadme && /^readme(\.\w+)?$/i.test(entry.name)) out.push(entry.name);
-    else if (wantsChangelog && /^changelog(\.\w+)?$/i.test(entry.name)) out.push(entry.name);
-    else if (wantsDocs && DOC_TEXT_EXT_RE.test(entry.name)) out.push(entry.name);
+    if (wantsReadme && /^readme(\.\w+)?$/i.test(entry.name)) {
+      if (docCandidateReadable(workspace, entry.name)) out.push(entry.name);
+    } else if (wantsChangelog && /^changelog(\.\w+)?$/i.test(entry.name)) {
+      if (docCandidateReadable(workspace, entry.name)) out.push(entry.name);
+    } else if (wantsDocs && DOC_TEXT_EXT_RE.test(entry.name)) {
+      if (docCandidateReadable(workspace, entry.name)) out.push(entry.name);
+    }
   }
-  if (wantsDocs && scanned < DOC_SCAN_MAX_ENTRIES && out.length < DOC_SCAN_MAX_FILES) {
+  if (wantsDocs && scanned < DOC_SCAN_MAX_ENTRIES && out.length < DOC_SCAN_MAX_FILES
+    && !workspacePathHasSymlinkComponent(workspace, "docs")) {
     const walk = (dir: string, prefix: string, depth: number): void => {
       if (scanned >= DOC_SCAN_MAX_ENTRIES || out.length >= DOC_SCAN_MAX_FILES || depth > DOC_SCAN_MAX_DEPTH) return;
       let entries: import("node:fs").Dirent<string>[];
@@ -1007,7 +1029,9 @@ function checkoutDocumentationFiles(workspace: string, text: string): string[] {
           walk(`${dir}/${entry.name}`, `${prefix}${entry.name}/`, depth + 1);
           continue;
         }
-        if (entry.isFile() && DOC_TEXT_EXT_RE.test(entry.name)) out.push(`${prefix}${entry.name}`);
+        if (entry.isFile() && DOC_TEXT_EXT_RE.test(entry.name) && docCandidateReadable(workspace, `${prefix}${entry.name}`)) {
+          out.push(`${prefix}${entry.name}`);
+        }
       }
     };
     walk(`${workspace}/docs`, "docs/", 1);
