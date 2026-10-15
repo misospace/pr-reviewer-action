@@ -718,3 +718,60 @@ test("#846 security review: a one-character or three-character configured API ke
     }
   }
 });
+
+// ---------------------------------------------------------------------------
+// #1061: default cap + bounded overrun diagnostic in the role log line
+// ---------------------------------------------------------------------------
+
+test("#1061: the shipped default cap is 16384 and an overrun role logs a bounded diagnostic", async () => {
+  const truncated = {
+    id: "c1",
+    object: "chat.completion",
+    model: "m",
+    choices: [{ index: 0, message: { role: "assistant", content: '{"leads":[' }, finish_reason: "max_tokens" }],
+    usage: { prompt_tokens: 10, completion_tokens: 4096, total_tokens: 4106 },
+  };
+  const seen: number[] = [];
+  const requestFn: SpecialistRequestFn = async (payload) => {
+    seen.push(payload.max_tokens as number);
+    return { ok: true, raw: truncated };
+  };
+  const result = await run({ DEEP_REVIEW: "true" }, { requestFn });
+  try {
+    assert.equal(result.code, 0);
+    // No DEEP_REVIEW_MAX_TOKENS override: the shipped 16384 default applies,
+    // and the one-shot retry raises it to the bounded 32768 ceiling.
+    assert.ok(seen.length > 0);
+    assert.ok(seen.every((cap) => cap === 16384 || cap === 32768), `caps: ${JSON.stringify(seen)}`);
+    assert.ok(seen.includes(16384), "the initial call used the shipped default");
+    assert.ok(seen.includes(32768), "the overrun retry used the ceiling");
+    assert.equal((JSON.parse(result.read("specialists.json")) as { specialist_max_tokens: number }).specialist_max_tokens, 16384);
+
+    const line = result.out.find((entry) => entry.startsWith("specialist correctness:"));
+    assert.ok(line, `expected a correctness log line, got ${JSON.stringify(result.out)}`);
+    assert.match(line!, /degraded \(overrun\)/);
+    assert.match(line!, /stop_reason=max_tokens/);
+    assert.match(line!, /output_chars=10/);
+    assert.match(line!, /overrun=failed/);
+    // The diagnostic never carries the response body.
+    assert.ok(!line!.includes('{"leads":['), "the log line must not carry the response body");
+  } finally {
+    rmSync(result.root, { recursive: true, force: true });
+  }
+});
+
+test("#1061: an explicit deep-review-max-tokens override is preserved", async () => {
+  const seen: number[] = [];
+  const requestFn: SpecialistRequestFn = async (payload) => {
+    seen.push(payload.max_tokens as number);
+    return { ok: true, raw: leadsResponse([]) };
+  };
+  const result = await run({ DEEP_REVIEW: "true", DEEP_REVIEW_MAX_TOKENS: "2048" }, { requestFn });
+  try {
+    assert.equal(result.code, 0);
+    assert.ok(seen.every((cap) => cap === 2048), `caps: ${JSON.stringify(seen)}`);
+    assert.equal((JSON.parse(result.read("specialists.json")) as { specialist_max_tokens: number }).specialist_max_tokens, 2048);
+  } finally {
+    rmSync(result.root, { recursive: true, force: true });
+  }
+});

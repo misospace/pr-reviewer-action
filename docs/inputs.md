@@ -153,7 +153,7 @@ Context window sizing, enrichment time limits.
 | `review-threads-max-bytes` | `8000` | Maximum UTF-8 bytes of review-thread context in the review corpus (whole threads are dropped to fit; values above 200000 are rejected) |
 | `deep-review` | `auto` | Specialist leads (correctness/security/tests) over the review corpus: auto (default) = deterministic classifier-driven selection, possibly zero; true = all three roles; false = off. Advisory only. |
 | `deep-review-timeout-sec` | `600` | Maximum wall-clock seconds for the whole deep-review specialist phase; stragglers past the deadline are recorded as role errors (advisory only). Default 600. |
-| `deep-review-max-tokens` | `4096` | Maximum completion tokens for each deep-review specialist role; independent of ai-max-tokens. Default 4096. |
+| `deep-review-max-tokens` | `16384` | Maximum completion tokens for each deep-review specialist role; independent of ai-max-tokens. Default 16384. |
 | `deep-review-corpus-max-bytes` | `48000` | Hard UTF-8 byte cap on the compact deep-review specialist corpus; independent of the final review corpus. Default 48000. |
 | `claim-falsification` | `false` | Opt-in claim falsification pre-pass (#785): a deterministic scan of the PR body and its diff's added comments/docstrings for the PR's own quantified claims and invariants (every/only/never/identical/parity, authority boundaries, compatibility promises), each anchored to the concrete code it describes; falls back to one bounded model call on the primary route only when that scan finds nothing. The review corpus gets a Claims to Falsify section asking the reviewer to check every listed item and report counterexamples as findings. Fail-soft; never changes the verdict policy. |
 

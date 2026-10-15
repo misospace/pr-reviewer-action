@@ -104,18 +104,47 @@ export function extractResponseUsage(response: unknown): SpecialistUsage | null 
   };
 }
 
-/** True when the provider cut the completion at the token budget: OpenAI
- * `choices[0].finish_reason == "length"` (also what the v2 SSE reassembler
- * emits), the v3 `NormalizedModelResponse.finishReason === "length"`, or
- * Anthropic `stop_reason == "max_tokens"`. Wire-level only. */
+/** The completion-limit stop reasons a provider may report. OpenAI says
+ * `length`; Anthropic says `max_tokens`. Both must be recognized whichever
+ * shape they arrive in — the #1061 bug was that a streamed Anthropic
+ * `message_delta.stop_reason=max_tokens` reaches the specialist as
+ * `choices[0].finish_reason === "max_tokens"` (via `toV2Completion`) and was
+ * invisible to this check, so the one-shot overrun recovery never fired. */
+const COMPLETION_LIMIT_REASONS: ReadonlySet<string> = new Set(["length", "max_tokens"]);
+
+/** #632/#1061: true when the provider cut the completion at the token budget.
+ * Recognizes the limit reason in every shape a specialist may see: the v2
+ * completion's `choices[0].finish_reason`, the flattened
+ * `NormalizedModelResponse.finishReason`, and a raw top-level `stop_reason`.
+ * Wire-level only. */
 export function completionOverran(response: unknown): boolean {
   if (!isRecord(response)) return false;
   const choices = response.choices;
   if (Array.isArray(choices) && choices.length > 0 && isRecord(choices[0])) {
-    if (choices[0].finish_reason === "length") return true;
+    const reason = choices[0].finish_reason;
+    if (typeof reason === "string" && COMPLETION_LIMIT_REASONS.has(reason)) return true;
   }
-  if (response.finishReason === "length") return true;
+  const finishReason = response.finishReason;
+  if (typeof finishReason === "string" && COMPLETION_LIMIT_REASONS.has(finishReason)) return true;
   return response.stop_reason === "max_tokens";
+}
+
+/** #1061: the model's stop reason for the role diagnostic — a short,
+ * provider-controlled label (never the response body). Read from the flattened
+ * `finishReason`, else the v2 completion's `choices[0].finish_reason`, else a
+ * raw top-level `stop_reason`; `null` when the response carries none. */
+export function responseStopReason(response: unknown): string | null {
+  if (!isRecord(response)) return null;
+  const finishReason = response.finishReason;
+  if (typeof finishReason === "string" && finishReason !== "") return finishReason;
+  const choices = response.choices;
+  if (Array.isArray(choices) && choices.length > 0 && isRecord(choices[0])) {
+    const reason = choices[0].finish_reason;
+    if (typeof reason === "string" && reason !== "") return reason;
+  }
+  const stopReason = response.stop_reason;
+  if (typeof stopReason === "string" && stopReason !== "") return stopReason;
+  return null;
 }
 
 /** Merge one response's usage into a running total (thread-safe by

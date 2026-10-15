@@ -21,7 +21,7 @@ import {
 } from "./types.js";
 import { emptyArtifact, extractSpecialistJson, normalizeSpecialistOutput, parseSpecialistResponse } from "./normalize.js";
 import { buildSpecialistPayload, overrunRetryPayload, payloadBytes, type SpecialistPayload } from "./payload.js";
-import { completionOverran, extractResponseText, extractResponseUsage, mergeUsage, type SpecialistUsage } from "./wire.js";
+import { completionOverran, extractResponseText, extractResponseUsage, mergeUsage, responseStopReason, type SpecialistUsage } from "./wire.js";
 import { renderSpecialistLeadsSection } from "./render.js";
 import { maskDiagnostic, maskKnownSecrets, redactText } from "../context/redact.js";
 import { pyStr } from "../platform/py.js";
@@ -97,6 +97,25 @@ export interface SpecialistRoleEntry {
   overrun_retry?: boolean;
   retry_max_tokens?: number | null;
   reason?: string;
+  /** #1061: the model's stop reason for this role's final response (e.g.
+   * `max_tokens`, `length`, `stop`, `end_turn`), bounded and
+   * control-character-free — never the response body. Absent when the role
+   * made no response-bearing attempt (timeout/transport/input/guard failure).
+   * This is what makes a full-budget no-lead failure diagnosable instead of a
+   * bare "degraded — 0 lead(s), 1 error(s)". */
+  stop_reason?: string | null;
+  /** #1061: character count of the extracted response text for the final
+   * attempt (bounded telemetry, never the text itself). Absent when no
+   * response-bearing attempt completed. */
+  output_chars?: number | null;
+  /** #1061: present (true) only when the final response stopped at the
+   * completion-token cap. */
+  overrun_detected?: boolean;
+  /** #1061: outcome of the one-shot overrun recovery — `recovered` (the retry
+   * produced a clean parse), `failed` (the retry ran but did not), `skipped`
+   * (no retry was possible: already at the ceiling, or no time budget left).
+   * Absent when no overrun was detected. */
+  overrun_retry_result?: "recovered" | "failed" | "skipped" | null;
   /** #846: present only for an error entry whose failure was an actual HTTP
    * error response from the model endpoint (never for input/timeout/guard
    * failures, or a 200 carrying an error body). */
@@ -233,6 +252,10 @@ function roleEntry(
     errorStatus?: number | undefined;
     errorDetail?: string | undefined;
     roleModel?: SpecialistRoleModel;
+    stopReason?: string | null;
+    outputChars?: number | null;
+    overrunDetected?: boolean;
+    overrunRetryResult?: "recovered" | "failed" | "skipped" | null;
   } = {},
 ): SpecialistRoleEntry {
   return {
@@ -250,7 +273,27 @@ function roleEntry(
     ...(options.errorStatus !== undefined ? { error_status: options.errorStatus } : {}),
     ...(options.errorDetail !== undefined ? { error_detail: options.errorDetail } : {}),
     ...(options.roleModel !== undefined ? { model: options.roleModel.model, model_source: options.roleModel.source } : {}),
+    ...(options.stopReason !== undefined ? { stop_reason: options.stopReason } : {}),
+    ...(options.outputChars !== undefined ? { output_chars: options.outputChars } : {}),
+    ...(options.overrunDetected !== undefined ? { overrun_detected: options.overrunDetected } : {}),
+    ...(options.overrunRetryResult !== undefined ? { overrun_retry_result: options.overrunRetryResult } : {}),
   };
+}
+
+/** #1061: bound a provider-controlled stop reason for the role diagnostic —
+ * single line, control-character-free, configured-secret-masked, length-capped.
+ * Never a body.
+ *
+ * Only `maskKnownSecrets` is applied, deliberately not `redactText`: this
+ * field is a short provider enum, and `redactText`'s pattern maskers corrupt
+ * the legitimate value itself (`max_tokens` contains "tokens" and would be
+ * mangled), which would defeat the diagnostic. The realistic leak here — the
+ * provider echoing the configured API key — is exactly what
+ * `maskKnownSecrets` removes. */
+function boundedStopReason(value: string | null, secrets: readonly string[] = []): string | null {
+  if (value === null) return null;
+  const cleaned = maskKnownSecrets(value, secrets).replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 64);
+  return cleaned === "" ? null : cleaned;
 }
 
 /** v2 `_skipped_entry`: exactly these keys, in this order (no usage or
@@ -335,6 +378,11 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
   let requestBytes: number | null = null;
   let overrunRetry = false;
   let retryMaxTokens: number | null = null;
+  // #1061: bounded, non-sensitive role diagnostics — the stop reason, output
+  // length, and overrun recovery outcome that make a full-budget no-lead
+  // failure explainable from the log/aggregate alone.
+  let overrunDetected = false;
+  let overrunRetryResult: "recovered" | "failed" | "skipped" | null = null;
   // #846: set only when the terminal failure was an actual HTTP error
   // response (never for input/timeout/guard failures or a 200 carrying an
   // error body).
@@ -348,6 +396,12 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
     usage: SpecialistUsage | null,
     request: SpecialistPayload | null,
     response: unknown,
+    diagnostics: {
+      stopReason?: string | null;
+      outputChars?: number | null;
+      overrunDetected?: boolean;
+      overrunRetryResult?: "recovered" | "failed" | "skipped" | null;
+    } = {},
   ): RoleRunOutcome => ({
     entry: roleEntry(role, artifact, status, errorKind, now() - started, {
       usage,
@@ -358,6 +412,10 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
       errorStatus,
       errorDetail,
       ...(options.roleModel !== undefined ? { roleModel: options.roleModel } : {}),
+      ...(diagnostics.stopReason !== undefined && diagnostics.stopReason !== null ? { stopReason: diagnostics.stopReason } : {}),
+      ...(diagnostics.outputChars !== undefined && diagnostics.outputChars !== null ? { outputChars: diagnostics.outputChars } : {}),
+      ...(diagnostics.overrunDetected === true ? { overrunDetected: true } : {}),
+      ...(diagnostics.overrunRetryResult !== undefined && diagnostics.overrunRetryResult !== null ? { overrunRetryResult: diagnostics.overrunRetryResult } : {}),
     }),
     request,
     response,
@@ -461,9 +519,12 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
     }
 
     let response = outcome.raw;
-    let artifact = parseSpecialistResponse(extractResponseText(response), role);
+    let responseText = extractResponseText(response);
+    let artifact = parseSpecialistResponse(responseText, role);
+    const overran = completionOverran(response);
+    overrunDetected = overran;
 
-    if (completionOverran(response) && artifact.errors.length > 0 && artifact.leads.length === 0) {
+    if (overran && artifact.errors.length > 0 && artifact.leads.length === 0) {
       const retryPayload = overrunRetryPayload(payload, config.maxTokens);
       const remainingForRetry = deadline - now();
       if (retryPayload !== null && !cancelled.value && remainingForRetry >= MIN_ATTEMPT_TIMEOUT_SEC) {
@@ -480,13 +541,33 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
           const retriedArtifact = parseSpecialistResponse(extractResponseText(retried.raw), role);
           if (retriedArtifact.errors.length === 0) {
             response = retried.raw;
+            responseText = extractResponseText(response);
             artifact = retriedArtifact;
+            overrunRetryResult = "recovered";
+          } else {
+            overrunRetryResult = "failed";
           }
+        } else {
+          overrunRetryResult = "failed";
         }
+      } else {
+        // Already at the ceiling, cancelled, or no time budget left: no retry
+        // was possible, so the role stays an unrecovered overrun.
+        overrunRetryResult = "skipped";
       }
     }
 
-    return finish(artifact, statusOf(artifact), null, extractResponseUsage(response), payload, response);
+    // #1061: an overrun that recovered is a clean `ok`; an overrun that did
+    // not is classified `overrun` (never a bare `degraded`/null), so a
+    // full-budget no-lead failure is distinguishable from a plain parser
+    // failure in the aggregate and the role log line.
+    const overrunUnrecovered = overrunDetected && artifact.errors.length > 0 && artifact.leads.length === 0;
+    return finish(artifact, statusOf(artifact), overrunUnrecovered ? "overrun" : null, extractResponseUsage(response), payload, response, {
+      stopReason: boundedStopReason(responseStopReason(response), [config.apiKey]),
+      outputChars: responseText.length,
+      overrunDetected,
+      overrunRetryResult,
+    });
   }
 
   const failureArtifact = emptyArtifact(role);

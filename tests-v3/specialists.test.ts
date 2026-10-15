@@ -10,11 +10,16 @@ import {
   overrunRetryPayload,
   buildSpecialistCorpus,
   runSpecialists,
+  completionOverran,
+  responseStopReason,
+  DEFAULT_SPECIALIST_MAX_TOKENS,
   type SpecialistCorpusWorkspace,
   type SpecialistRunInput,
   type SpecialistTransportOutcome,
 } from "../src/specialists/index.js";
 import { fitToBytes } from "../src/specialists/render.js";
+import { reassembleSse } from "../src/transport/sse.js";
+import { specialistRequestFn } from "../src/gates/specialist-transport.js";
 
 // ---------------------------------------------------------------------------
 // normalize.ts
@@ -592,3 +597,235 @@ test("renderSpecialistMarkdown: hostile backtick runs and headings stay inside t
   assert.ok(!inner.some((line) => line.startsWith(fence)));
   assert.equal(lines.filter((line) => line.startsWith("## ")).length, 1);
 });
+
+// ---------------------------------------------------------------------------
+// #1061: streamed Anthropic completion-limit detection + overrun recovery
+// ---------------------------------------------------------------------------
+
+test("#1061: the shipped specialist default completion cap is 16384", () => {
+  assert.equal(DEFAULT_SPECIALIST_MAX_TOKENS, 16384);
+});
+
+test("#1061: completionOverran recognizes Anthropic max_tokens in every shape", () => {
+  // The v2 completion shape a streamed Anthropic turn becomes (via toV2Completion).
+  assert.equal(completionOverran({ choices: [{ message: { content: "" }, finish_reason: "max_tokens" }] }), true);
+  // The flattened NormalizedModelResponse shape.
+  assert.equal(completionOverran({ finishReason: "max_tokens" }), true);
+  // A raw Anthropic body.
+  assert.equal(completionOverran({ stop_reason: "max_tokens" }), true);
+  // OpenAI's own limit reason keeps working.
+  assert.equal(completionOverran({ choices: [{ message: { content: "" }, finish_reason: "length" }] }), true);
+  assert.equal(completionOverran({ finishReason: "length" }), true);
+  // Negative controls: normal stops, tool calls, and non-records never fire.
+  assert.equal(completionOverran({ choices: [{ message: { content: "{}" }, finish_reason: "stop" }] }), false);
+  assert.equal(completionOverran({ finishReason: "end_turn" }), false);
+  assert.equal(completionOverran({ finish_reason: "tool_calls" }), false);
+  assert.equal(completionOverran({ stop_reason: "end_turn" }), false);
+  assert.equal(completionOverran(null), false);
+  assert.equal(completionOverran("nope"), false);
+});
+
+test("#1061: responseStopReason reads every shape and never the body", () => {
+  assert.equal(responseStopReason({ choices: [{ message: { content: "x" }, finish_reason: "max_tokens" }] }), "max_tokens");
+  assert.equal(responseStopReason({ finishReason: "length" }), "length");
+  assert.equal(responseStopReason({ stop_reason: "end_turn" }), "end_turn");
+  assert.equal(responseStopReason({ choices: [] }), null);
+  assert.equal(responseStopReason(null), null);
+});
+
+const sseData = (obj: unknown): string => `data: ${JSON.stringify(obj)}`;
+
+/** A realistic (long) key so `maskKnownSecrets` cannot coincidentally eat an
+ * ordinary letter out of an enum like `max_tokens` — the same hazard the
+ * specialists-gate tests note for one-character configured keys. */
+const REALISTIC_KEY = "sk-test-0123456789abcdef";
+
+/** A streamed Anthropic turn with the given text and terminal stop_reason. */
+function anthropicStream(text: string, stopReason: string): string {
+  return [
+    sseData({ type: "message_start", message: { id: "msg_1", model: "claude-x", usage: { input_tokens: 10, output_tokens: 1 } } }),
+    sseData({ type: "content_block_delta", delta: { type: "text_delta", text } }),
+    sseData({ type: "message_delta", delta: { stop_reason: stopReason }, usage: { output_tokens: 4096 } }),
+    sseData({ type: "message_stop" }),
+  ].join("\n");
+}
+
+function roleEntry(result: Awaited<ReturnType<typeof runSpecialists>>, role: string): Record<string, unknown> {
+  return (result.aggregate.roles as Array<Record<string, unknown>>).find((entry) => entry.role === role)!;
+}
+
+test("#1061: a streamed Anthropic max_tokens turn is recognized as an overrun and recovered once at the ceiling", async () => {
+  // The real path: reassembleSse → specialistRequestFn → toV2Completion → runner.
+  const truncated = anthropicStream('{"leads":[{"severity":"major","message":"trunc', "max_tokens");
+  const complete = anthropicStream('{"leads":[{"severity":"major","message":"recovered lead"}]}', "end_turn");
+  const seen: { maxTokens: number; stream: boolean }[] = [];
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://anthropic.test",
+    apiKey: "k",
+    anthropicVersion: "2023-06-01",
+    runChat: async (input) => {
+      const body = input.payload.body as { max_tokens: number; stream: boolean };
+      seen.push({ maxTokens: body.max_tokens, stream: body.stream });
+      const text = seen.length === 1 ? truncated : complete;
+      return { status: "ok", response: reassembleSse(text, "anthropic"), raw: {} };
+    },
+  });
+
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, apiFormat: "anthropic", stream: true, maxTokens: 16384 },
+    rolesToRun: ["correctness"],
+    requestFn,
+  }));
+
+  // The initial call ran at 16384 and streamed; exactly one retry ran, at the 32768 ceiling.
+  assert.deepEqual(seen, [{ maxTokens: 16384, stream: true }, { maxTokens: 32768, stream: true }]);
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.status, "ok");
+  assert.equal(entry.error_kind, null);
+  assert.equal(entry.lead_count, 1);
+  assert.equal(entry.overrun_retry, true);
+  assert.equal(entry.retry_max_tokens, 32768);
+  assert.equal(entry.overrun_detected, true);
+  assert.equal(entry.overrun_retry_result, "recovered");
+  assert.equal(entry.stop_reason, "end_turn", "the diagnostic reports the final, recovered response");
+  assert.equal(result.artifacts.perRole.correctness!.leads[0]!.message, "recovered lead");
+});
+
+test("#1061: an unrecovered overrun is classified 'overrun', with a bounded diagnostic", async () => {
+  const truncated = anthropicStream('{"leads":[', "max_tokens");
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://anthropic.test",
+    apiKey: "k",
+    anthropicVersion: "2023-06-01",
+    runChat: async () => ({ status: "ok", response: reassembleSse(truncated, "anthropic"), raw: {} }),
+  });
+
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, apiFormat: "anthropic", stream: true, maxTokens: 16384, apiKey: REALISTIC_KEY },
+    rolesToRun: ["correctness"],
+    requestFn,
+  }));
+
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.status, "degraded");
+  assert.equal(entry.error_kind, "overrun", "an overrun is never a bare degraded/parser failure");
+  assert.equal(entry.overrun_detected, true);
+  assert.equal(entry.overrun_retry, true);
+  assert.equal(entry.retry_max_tokens, 32768);
+  assert.equal(entry.overrun_retry_result, "failed");
+  assert.equal(entry.stop_reason, "max_tokens");
+  assert.equal(entry.output_chars, 10);
+  // The diagnostic is bounded and never the response body.
+  assert.ok(!JSON.stringify(result.aggregate).includes('{"leads":['));
+});
+
+test("#1061: an overrun already at the retry ceiling is skipped, not retried", async () => {
+  const truncated = anthropicStream('{"leads":[', "max_tokens");
+  let calls = 0;
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://anthropic.test",
+    apiKey: "k",
+    anthropicVersion: "2023-06-01",
+    runChat: async () => { calls += 1; return { status: "ok", response: reassembleSse(truncated, "anthropic"), raw: {} }; },
+  });
+
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, apiFormat: "anthropic", stream: true, maxTokens: 32768 },
+    rolesToRun: ["correctness"],
+    requestFn,
+  }));
+
+  assert.equal(calls, 1, "no retry when the cap is already at the ceiling");
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.overrun_retry, false);
+  assert.equal(entry.overrun_retry_result, "skipped");
+  assert.equal(entry.error_kind, "overrun");
+});
+
+test("#1061: a non-streamed Anthropic max_tokens body is also an overrun (negative-control sibling)", async () => {
+  const raw = { content: [{ type: "text", text: '{"leads":[' }], stop_reason: "max_tokens" };
+  let calls = 0;
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://anthropic.test",
+    apiKey: "k",
+    anthropicVersion: "2023-06-01",
+    runChat: async () => { calls += 1; return { status: "ok", response: reassembleSse("", "anthropic"), raw }; },
+  });
+
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, apiFormat: "anthropic", stream: false, maxTokens: 16384, apiKey: REALISTIC_KEY },
+    rolesToRun: ["correctness"],
+    requestFn,
+  }));
+
+  assert.equal(calls, 2, "the one-shot overrun retry fired for the non-streamed path too");
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.overrun_detected, true);
+  assert.equal(entry.stop_reason, "max_tokens");
+  assert.equal(entry.overrun_retry_result, "failed");
+});
+
+test("#1061: a normal stop is never an overrun and carries no recovery fields", async () => {
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async () => {
+      calls += 1;
+      return { ok: true, raw: { choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "stop" }] } };
+    },
+  }));
+
+  assert.equal(calls, 1);
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.status, "ok");
+  assert.equal(entry.error_kind, null);
+  assert.equal(entry.stop_reason, "stop");
+  assert.equal("overrun_detected" in entry, false);
+  assert.equal("overrun_retry_result" in entry, false);
+});
+
+test("#1061: the stop-reason diagnostic is redacted and bounded (never a leak vector)", async () => {
+  const key = "sk-live-SECRETKEY";
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://anthropic.test",
+    apiKey: key,
+    anthropicVersion: "2023-06-01",
+    runChat: async () => ({
+      status: "ok",
+      response: reassembleSse(anthropicStream('{"leads":[', `${key}${"x".repeat(200)}`), "anthropic"),
+      raw: {},
+    }),
+  });
+
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, apiFormat: "anthropic", stream: true, maxTokens: 32768, apiKey: key },
+    rolesToRun: ["correctness"],
+    requestFn,
+  }));
+
+  const entry = roleEntry(result, "correctness");
+  assert.equal(typeof entry.stop_reason, "string");
+  assert.ok(!(entry.stop_reason as string).includes(key), "the configured key must be masked out of the diagnostic");
+  assert.ok((entry.stop_reason as string).length <= 64, "the diagnostic is bounded");
+});
+
+test("#1061: OpenAI 'length' still triggers the bounded retry (no regression)", async () => {
+  const seen: number[] = [];
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async (payload) => {
+      calls += 1;
+      seen.push(payload.max_tokens as number);
+      return calls === 1
+        ? { ok: true, raw: { choices: [{ message: { content: "" }, finish_reason: "length" }] } }
+        : { ok: true, raw: { choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "stop" }] } };
+    },
+  }));
+
+  assert.deepEqual(seen, [4096, 16384]);
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.status, "ok");
+  assert.equal(entry.overrun_retry_result, "recovered");
+});
+
