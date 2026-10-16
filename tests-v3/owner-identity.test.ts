@@ -146,6 +146,42 @@ test("#1093: ForgejoAdapter.resolveTrustedOwner emits only bounded reason codes"
   assert.equal((await failingAdapter.resolveTrustedOwner()).reason, "user-transport-and-reaction-transport");
 });
 
+test("#1093: a non-JSON /user error page keeps its HTTP status in the diagnostics reason", async () => {
+  // Forgejo — or a proxy in front of it — answers an unauthenticated or
+  // scope-less `/user` read with an HTML error page, so the JSON read throws
+  // on the unparseable body. That response still carries its real status:
+  // reporting it keeps 401 / 403 / other distinguishable from a transport
+  // that never answered at all, and the composed reason names both stages.
+  const htmlError = (status: number): FetchLike => async (input) => {
+    if (String(input).endsWith("/reactions")) return Response.json({}, { status: 403 });
+    return new Response("<html><body>error</body></html>", { status, headers: { "content-type": "text/html" } });
+  };
+  for (const status of [401, 403, 418, 502]) {
+    const adapter = new ForgejoAdapter({
+      repo: "o/r", prNumber: "9", baseUrl: "https://forgejo.test", token: TOKEN, fetchImpl: htmlError(status),
+    });
+    const resolution = await adapter.resolveTrustedOwner();
+    assert.deepEqual(resolution, {
+      identity: null,
+      reason: `user-http-${status}-and-reaction-http-403`,
+    }, `an HTML ${status} page reports its status, not a transport failure`);
+    assert.match(resolution.reason, REASON_RE);
+    assert.ok(!resolution.reason.includes(TOKEN), "reason must never carry the token");
+    // #970's login contract is unchanged: a non-JSON /user body proves nothing.
+    assert.equal(await adapter.authenticatedIdentity(), null);
+  }
+  // A 200 whose body is unparseable is a payload problem, not a status
+  // rejection and not an unreachable transport.
+  const unparseable: ForgejoAdapter = new ForgejoAdapter({
+    repo: "o/r", prNumber: "9", baseUrl: "https://forgejo.test", token: TOKEN,
+    fetchImpl: async (input) => (String(input).endsWith("/reactions")
+      ? Response.json({}, { status: 403 })
+      : new Response("not json", { status: 200 })),
+  });
+  assert.equal((await unparseable.resolveTrustedOwner()).reason, "user-payload-and-reaction-http-403");
+  assert.equal(await unparseable.authenticatedIdentity(), null);
+});
+
 test("#1093: ForgejoAdapter falls back to the audience owner id whenever /user cannot prove a login", async () => withOidcEnv(async () => {
   const audience = AUDIENCE;
   const exchanges: string[] = [];

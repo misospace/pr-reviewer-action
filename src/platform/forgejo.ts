@@ -351,12 +351,19 @@ export class ForgejoAdapter implements PlatformReadAdapter {
   /** One `GET /api/v1/user` read shared by `authenticatedIdentity()` and
    * `resolveTrustedOwner()` (#1093): `{status, data, transportFailed}` —
    * a transport/auth failure never throws (the callers fold it into their
-   * own fail-closed contracts). */
+   * own fail-closed contracts). A failed response that still carries an HTTP
+   * status (an HTML 401/403/other error page behind a proxy, or a 200 whose
+   * body is unparseable) keeps that status and reports no payload, so the
+   * diagnostics can tell a status-rejected `/user` from a 200 with an
+   * unusable payload and from a transport that never answered. */
   private async fetchAuthenticatedUser(): Promise<{ status: number; data: unknown; transportFailed: boolean }> {
     try {
       const { status, data } = await requestJson(this.apiPath("/user"), await this.options("application/json"));
       return { status, data, transportFailed: false };
-    } catch {
+    } catch (error) {
+      if (error instanceof PlatformRequestError && error.status !== null) {
+        return { status: error.status, data: null, transportFailed: false };
+      }
       return { status: 0, data: null, transportFailed: true };
     }
   }

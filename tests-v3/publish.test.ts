@@ -958,6 +958,13 @@ test("#1093: Forgejo authorized integration — an inline comment whose author i
   });
   assert.equal(result.status, "published");
   assert.equal(requests.filter((r) => r.method === "DELETE").length, 0);
+  // #1093: an empty eligible set is a bounded, reported outcome — distinct
+  // from the incomplete-enumeration refusal asserted in the next test and
+  // from a run that never reached cleanup.
+  assert.ok(
+    result.messages.some((line) => line.includes("No managed native reviews owned by the trusted identity")),
+    "no eligible prior managed reviews is reported, not silent",
+  );
   assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
 }));
 

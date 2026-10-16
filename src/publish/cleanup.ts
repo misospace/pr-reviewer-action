@@ -55,7 +55,14 @@ export async function retireManagedInlineComments(
   const managed = reviews.filter((r) => isManagedBody(typeof r.body === "string" ? r.body : "", marker)
     && ownerMatchesIdentity(r.user, owner));
   const ids = managed.map((r) => String(r.id)).filter((id) => /^[1-9]\d*$/.test(id));
-  if (ids.length === 0) return;
+  // #1093: an empty eligible set is a real, bounded outcome (nothing prior to
+  // retire) and must be distinguishable from the unusable-snapshot refusals
+  // below (unsupported forge, incomplete enumeration) and from a run that
+  // never reached cleanup at all. No ids, bodies, or comment text are logged.
+  if (ids.length === 0) {
+    log("  NOTE: No managed native reviews owned by the trusted identity; nothing to retire");
+    return;
+  }
   const listed = await api.listManagedInlineComments(ids);
   if (!listed.supported) { log("  NOTE: Inline-comment retirement unsupported by this forge"); return; }
   if (!listed.complete) { log("  WARN: Inline-comment enumeration incomplete; no comments retired"); return; }
