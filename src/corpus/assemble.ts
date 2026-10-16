@@ -57,6 +57,7 @@ export interface CorpusWorkspace {
   ciChecksContent: Uint8Array | null;
   versionHintsTruncatedTxt: Uint8Array | null;
   toolHarnessMd: Uint8Array | null;
+  repositorySkillAddendumMd?: Uint8Array | null;
   toolHarnessSmartMd: Uint8Array | null;
   evidenceProvidersMd: Uint8Array | null;
   imageDigestContextMd: Uint8Array | null;
@@ -340,6 +341,9 @@ export function buildReviewCorpus(
   };
 
   pushSection("# Changed Manifest Context", bytes(ws.manifestContextMd));
+  if (nonEmpty(ws.repositorySkillAddendumMd)) {
+    pushSection(undefined, bytes(ws.repositorySkillAddendumMd));
+  }
   pushSection("# PR Metadata", prMetadataLine(ws.prJson), "json");
   pushSection(
     "# PR Classification",

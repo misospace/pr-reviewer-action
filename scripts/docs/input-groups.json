@@ -112,7 +112,9 @@
       "system-prompt-mode",
       "review-verbosity",
       "standards-file",
-      "standards-file-candidates"
+      "standards-file-candidates",
+      "repository-skills",
+      "repository-skill-path"
     ]
   },
   {

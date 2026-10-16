@@ -130,6 +130,10 @@ refused, and only regular-blob entries are accepted (a tracked symlink is
 skipped). An absolute path is treated as operator-owned and read directly
 from disk, since it's never part of the reviewed repository's git history.
 
+## Repository skills
+
+Opt-in `repository-skills: true` discovers up to 24 tracked regular `.agents/skills/<name>/SKILL.md` blobs from the trusted PR base. Only bounded `name` and `description` frontmatter is placed in the prompt catalog; the native tool loop can load an exact catalog path with `read_skill`. Skill text is repository advice, not policy or tool authorization. Skill files are capped at 24 KB each and 48 KB total; oversized and malformed entries are skipped with warnings. Fork PRs disable discovery. With tools unavailable, no skill body is loaded unless the operator sets `repository-skill-path` to one exact skill path; that trusted-base body is added to the corpus without a model call. Diagnostics distinguish that operator-selected addendum from skills actually read through `read_skill`.
+
 ## Repo-local prompt files
 
 `system-prompt-file` points at a file in the reviewed repository to use as

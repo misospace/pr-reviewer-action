@@ -128,6 +128,8 @@ System prompt overrides and repo-local rules.
 | `review-verbosity` | `normal` | Output-length dial for the bundled default prompt. 'normal' (default) leaves the prompt unchanged. 'concise' adds a brevity fragment: a ~300-word target, prose limited to blocker/major issues with minor/info left to the findings array, no diff restatement, and Standards Compliance omitted unless a convention is violated. must_check coverage and the Unknowns section are explicitly exempt, so brevity cannot hide a gap. Applies only to the bundled default — a replace-mode system-prompt override is used verbatim. |
 | `standards-file` | empty | Repository standards file path for conventions and policy context |
 | `standards-file-candidates` | `AGENTS.md,agents.md,CLAUDE.md,claude.md,.github/ai-review-rules.md,.github/ai-review-rules.txt` | Candidate files to auto-discover when standards-file is not set. First found is used. |
+| `repository-skills` | `false` | Opt in to discovering bounded .agents/skills/*/SKILL.md guidance from the trusted PR base. In native_loop, the model may read relevant skills on demand; this never enables tools or changes deterministic review policy. Disabled for fork PRs. |
+| `repository-skill-path` | empty | Optional exact trusted-base .agents/skills/<name>/SKILL.md path to include as a bounded corpus addendum when native-loop tools are off. Must exist in the trusted base; never reads PR-head content. |
 
 ### Context & enrichment budgets
 

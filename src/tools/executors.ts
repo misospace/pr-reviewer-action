@@ -25,9 +25,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { maskAndTruncate, maskAndTruncateSource, maskAndTruncateSourceDetailed, redactSourceText } from "../context/redact.js";
 import { committedSourceProvenance, sanitizedSourceProvenance, untrustedTextProvenance, type EvidenceProvenance } from "../context/evidence-provenance.js";
+import { isRepositorySkillPath, readRepositorySkill, SKILL_LIMITS, SKILL_RESULT_MAX_BYTES } from "../context/repository-skills.js";
 import { USER_AGENT } from "../platform/user-agent.js";
 import { runProcess, type ProcessResult } from "../runtime/subprocess.js";
-import { pyDumpsCompact } from "../model/conversation.js";
+import { pyDumpsCompact, pyDumpsSorted } from "../model/conversation.js";
 
 export const GH_DENY_SUBSTRINGS = [
   "/actions/secrets",
@@ -114,6 +115,12 @@ export function buildTrackedIndex(lsFilesStdout: string): TrackedIndex {
 
 export type ToolContext = {
   workspaceRoot: string;
+  skillRef?: string;
+  allowedSkills?: readonly string[];
+  /** Distinct skill paths successfully read this loop (#1043 review). One
+   * Set per native loop, shared across every executor call so the
+   * loaded-skills budget is enforced here instead of in diagnostics. */
+  skillsRead?: Set<string>;
   trackedIndex?: TrackedIndex | null;
   allowedGhRepos?: readonly string[];
   currentRepo?: string;
@@ -1121,6 +1128,44 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
     let result: Obj;
     let provenance: EvidenceProvenance | undefined;
     switch (tool) {
+      case "read_skill": {
+        const path = typeof args.path === "string" ? args.path : "";
+        if (!isRepositorySkillPath(path) || !ctx.skillRef || !ctx.allowedSkills?.includes(path)) throw new Error("Skill path is not in the trusted-base catalog");
+        // #1043 (review): the distinct-skill budget is enforced here, at
+        // execution, synchronously before the read — parallel same-round
+        // requests (executeToolRequests is Promise.all) cannot race past it
+        // because the check-and-reserve block contains no await. Only a
+        // successful read consumes the budget; repeat reads of an
+        // already-counted skill stay allowed.
+        const readSkills = ctx.skillsRead;
+        if (readSkills !== undefined && !readSkills.has(path) && readSkills.size >= SKILL_LIMITS.loadedSkills) {
+          throw new Error(`Repository skill read limit reached (${SKILL_LIMITS.loadedSkills} distinct skills per review)`);
+        }
+        const content = readRepositorySkill(ctx.skillRef, ctx.workspaceRoot, path);
+        if (content === null) throw new Error("Trusted-base skill could not be read");
+        // #1043 (review, third pass): the slot is claimed only after EVERY
+        // validation succeeds — a read that fails the serialized-size check
+        // below must not consume one of the loadedSkills slots, or a
+        // rejected read would silently shrink the model's usable budget.
+        // Masking still runs over the full text; the deterministic
+        // `bytesPerSkill` catalog cap is the bound. The loop raises its
+        // conversation-append budget for this tool to hold the complete
+        // body (see driveToolLoop).
+        const fullBody = maskAndTruncateSource(content, Number.MAX_SAFE_INTEGER, path).text;
+        result = { path, content: fullBody, source: "trusted-base", content_complete: true };
+        // #1043 (review, second pass): the append budget binds the SERIALIZED
+        // result, and JSON escaping can expand raw bytes up to 6×. Measure
+        // the exact `pyDumpsSorted` text `Conversation.addToolResult` will
+        // re-serialize and fail the read explicitly when it cannot fit — a
+        // successful `content_complete: true` response is never a truncated
+        // fragment.
+        if (Buffer.byteLength(pyDumpsSorted(result), "utf8") > SKILL_RESULT_MAX_BYTES) {
+          throw new Error(`Serialized repository skill exceeds the ${SKILL_RESULT_MAX_BYTES}-byte tool-result budget; refusing to truncate`);
+        }
+        readSkills?.add(path);
+        provenance = untrustedTextProvenance(path);
+        break;
+      }
       case "read_file": {
         const p = args.path ?? "";
         if (!p) throw new Error("Missing 'path' argument");

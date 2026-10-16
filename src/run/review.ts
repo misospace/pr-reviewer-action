@@ -16,6 +16,7 @@ import { pythonJsonStringify } from "../precheck/metadata.js";
 import { buildHarnessObligations } from "../requirements/obligations.js";
 import { externalChecksConclusion } from "../precheck/decide.js";
 import { readStandardsFileAtRef, StandardsFileRefError } from "../context/standards-file-ref.js";
+import { discoverRepositorySkills, readRepositorySkill, renderExplicitSkill, renderSkillCatalog, repositorySkillsAllowed } from "../context/repository-skills.js";
 import { loopContextLimits } from "../tools/harness.js";
 import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
@@ -309,6 +310,10 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     effectiveRaw = resolution.raw;
   }
   const config = loadConfig(contract, effectiveRaw);
+  // Assigned unconditionally below, once the resolved fork flag is known —
+  // skill discovery must wait for the fail-closed fork gate (#1043 review:
+  // CodeQL flagged the dead initializer).
+  let skillCatalog: ReturnType<typeof discoverRepositorySkills>;
 
   // #838: an explicit run dir (the caller's own, or PR_REVIEWER_RUN_DIR) is
   // reused as given; with neither, the default is a fresh private temp dir —
@@ -353,6 +358,13 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     outputFilePath: options.env.GITHUB_OUTPUT ?? "/dev/null",
     stepSummaryPath: options.env.GITHUB_STEP_SUMMARY ?? "",
     baseRef,
+    repositorySkillsEnabled: String(config.repositorySkills === true),
+    repositorySkillPath: typeof config.repositorySkillPath === "string" ? config.repositorySkillPath : "",
+    repositorySkillsRef: "",
+    repositorySkillsPaths: "[]",
+    repositorySkillsCatalog: "",
+    repositorySkillsFingerprint: "",
+    repositorySkillAddendum: "",
   };
   const env = buildStageEnv(config, context, options.env) as StageEnv;
   const missing = validateStageEnv(env);
@@ -430,13 +442,71 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     env.IS_FORK_PR = deriveFork(prObject);
     context.isForkPr = env.IS_FORK_PR;
   }
-  const forkFlag = env.IS_FORK_PR ?? "false";
+  const forkFlag = env.IS_FORK_PR ?? "";
   if (forkFlag === "true") log("Detected cross-repository pull request");
+  const skillsEnabled = repositorySkillsAllowed(config.repositorySkills === true, forkFlag);
+  const explicitSkillPath = typeof config.repositorySkillPath === "string" ? config.repositorySkillPath : "";
+  const canUseExplicitSkill = explicitSkillPath !== "" && forkFlag === "false";
+  skillCatalog = canUseExplicitSkill && baseRef !== ""
+    ? discoverRepositorySkills(baseRef, workspace)
+    : skillsEnabled && forkFlag === "false" && baseRef !== ""
+      ? discoverRepositorySkills(baseRef, workspace)
+      : { skills: [], warnings: [], contentFingerprint: "" };
+  for (const warning of skillCatalog.warnings) log(`WARNING: ${warning}`);
+  const explicitSkill = canUseExplicitSkill && skillCatalog.skills.some(skill => skill.path === explicitSkillPath)
+    ? readRepositorySkill(baseRef, workspace, explicitSkillPath)
+    : null;
+  if (canUseExplicitSkill && explicitSkill === null) log("WARNING: operator-selected repository skill unavailable at trusted base; no fallback to PR-head content");
+  env.REPOSITORY_SKILLS = skillsEnabled ? "true" : "false";
+  env.REPOSITORY_SKILLS_REF = skillsEnabled ? baseRef : "";
+  env.REPOSITORY_SKILLS_PATHS = JSON.stringify(skillsEnabled ? skillCatalog.skills.map(skill => skill.path) : []);
+  env.REPOSITORY_SKILLS_CATALOG = renderSkillCatalog(skillsEnabled ? skillCatalog.skills : []);
+  env.REPOSITORY_SKILLS_FINGERPRINT = (skillsEnabled || explicitSkill !== null) ? skillCatalog.contentFingerprint : "";
+  // #1043 (review, second pass): compute the addendum FIRST, then derive the
+  // runtime path from it — deriving from the not-yet-assigned (initialized "")
+  // addendum cleared the path for every actively selected skill.
+  env.REPOSITORY_SKILL_ADDENDUM = explicitSkill !== null
+    && (!skillsEnabled || (env.TOOL_MODE ?? "off").toLowerCase() !== "native_loop")
+    ? renderExplicitSkill(explicitSkillPath, explicitSkill)
+    : "";
+  // #1043 (review): the env var mirrors the addendum actually in effect —
+  // an addendum present in the corpus but absent from the config env would
+  // dodge the fingerprint, so both are keyed off the same condition.
+  env.REPOSITORY_SKILL_PATH = env.REPOSITORY_SKILL_ADDENDUM !== "" ? explicitSkillPath : "";
+  if (env.REPOSITORY_SKILL_ADDENDUM !== "") {
+    ws.write("repository-skill-addendum.md", env.REPOSITORY_SKILL_ADDENDUM);
+    ws.write("repository-skill-context.json", JSON.stringify({ source: "operator-selected", path: explicitSkillPath, added_to_corpus: true }));
+  } else {
+    // #1043 (review): run dirs can be shared across runs (explicit runDir /
+    // PR_REVIEWER_RUN_DIR), so both skill artifacts must be cleared when no
+    // skill is selected — a stale addendum on disk would be ingested by the
+    // next corpus build while diagnostics claim no skill was applied.
+    ws.remove("repository-skill-addendum.md");
+    ws.remove("repository-skill-context.json");
+  }
+  if (skillsEnabled && skillCatalog.skills.length > 0) {
+    log(`Trusted-base repository skill catalog available: ${skillCatalog.skills.length} skill(s); none are considered applied unless read_skill succeeds.`);
+  }
+  if (explicitSkill !== null && env.REPOSITORY_SKILL_ADDENDUM !== "") {
+    log(`Operator-selected trusted-base skill included in corpus: ${explicitSkillPath}`);
+  } else if (canUseExplicitSkill && explicitSkill === null) {
+    log("Repository skills not applied: selected trusted-base skill unavailable.");
+  }
+  context.repositorySkillsRef = env.REPOSITORY_SKILLS_REF;
+  context.repositorySkillsPaths = env.REPOSITORY_SKILLS_PATHS;
+  context.repositorySkillsCatalog = env.REPOSITORY_SKILLS_CATALOG;
+  context.repositorySkillsFingerprint = env.REPOSITORY_SKILLS_FINGERPRINT;
+  context.repositorySkillAddendum = env.REPOSITORY_SKILL_ADDENDUM;
 
   // Specialist lead artifacts reset (#609): unconditional, before anything
   // can consume a stale value.
   ws.write("specialists.md", "");
   ws.write("specialist-leads-present.txt", "");
+  // #1043 (review): the applied-skills artifact is reset unconditionally —
+  // the loop writes it back only on real read_skill success, so a reused
+  // run dir (zero reads, or tools disabled entirely) never reports the
+  // previous run's skills.
+  ws.remove("repository-skills-applied.json");
 
   let diffText: string;
   const cachedDiff = ws.readText("pr.diff");
@@ -654,7 +724,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ...(env.PR_THREAD_CONTEXT !== undefined ? { prThreadContext: env.PR_THREAD_CONTEXT } : {}),
     ...(env.REVIEW_VERBOSITY !== undefined ? { reviewVerbosity: env.REVIEW_VERBOSITY } : {}),
   }, ws);
-  env.SYSTEM_PROMPT = promptState.systemPrompt;
+  env.SYSTEM_PROMPT = `${promptState.systemPrompt}${env.REPOSITORY_SKILLS_CATALOG ?? ""}`;
 
   // ── Corpus stage part 1 (corpus.sh): fork CI, harvest advisory ───────
   const scope = createCancellationScope();
@@ -684,7 +754,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // #812: the superseded-discussion rule, appended only now that the
   // discussion sections exist (the fragments phase runs before this stage).
   promptState = applySupersededDiscussionFragment(promptState, ws);
-  env.SYSTEM_PROMPT = promptState.systemPrompt;
+  env.SYSTEM_PROMPT = `${promptState.systemPrompt}${env.REPOSITORY_SKILLS_CATALOG ?? ""}`;
 
   // Corpus build #1 (initial review owns the primary artifact slot).
   // #965: the first pass is always the primary profile — the smart tier is
@@ -832,7 +902,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       // carry discussion the system prompt has no superseded-discussion
       // rule for.
       promptState = applySupersededDiscussionFragment(promptState, ws);
-      env.SYSTEM_PROMPT = promptState.systemPrompt;
+      env.SYSTEM_PROMPT = `${promptState.systemPrompt}${env.REPOSITORY_SKILLS_CATALOG ?? ""}`;
     }
   }
 
@@ -901,7 +971,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     : { targets: new Map() as ReadonlyMap<string, { users: readonly string[]; teams: readonly string[] }>, warnings: [] as readonly string[], sourcePath: null };
   for (const warning of reviewerRouting.warnings) errorLog(`reviewer routing: ${warning}`);
   promptState = applyReviewTriageFragment(promptState, triageEnabled, [...reviewerRouting.targets.keys()]);
-  env.SYSTEM_PROMPT = promptState.systemPrompt;
+  env.SYSTEM_PROMPT = `${promptState.systemPrompt}${env.REPOSITORY_SKILLS_CATALOG ?? ""}`;
 
   // ── Native tool harness (corpus.sh tail) ─────────────────────────────
   const toolMode = (env.TOOL_MODE ?? "off").toLowerCase();

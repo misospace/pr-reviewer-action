@@ -32,6 +32,7 @@ import {
   type ToolCallRecord,
 } from "../model/conversation.js";
 import type { EvidenceProvenance } from "../context/evidence-provenance.js";
+import { SKILL_RESULT_MAX_BYTES } from "../context/repository-skills.js";
 
 // Stop reasons (LoopOutcome.stopReason)
 export const STOP_MODEL_DONE = "model-stopped";
@@ -502,7 +503,15 @@ export async function driveToolLoop(
       }
       conversation.addToolResult(disposition.callId, result.result ?? {}, {
         isError: result.status !== "ok",
+        tool: exec.name,
         provenance: (result as { provenance?: EvidenceProvenance }).provenance,
+        // #1043 (review): read_skill results carry the complete trusted-base
+        // skill body — the executor never truncates one, and the default
+        // tool-result budget here must not silently re-truncate it at
+        // conversation append. The executor has verified the serialized
+        // result fits exactly this budget, so `content_complete: true` holds
+        // end to end.
+        ...(exec.name === "read_skill" ? { maxBytes: SKILL_RESULT_MAX_BYTES } : {}),
       });
     }
 
