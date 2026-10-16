@@ -15,14 +15,12 @@ import {
   MAX_DECLARED_GROUPS_PER_RULE,
   MAX_DISTRIBUTED_HINTS,
   distributedRequirementHints,
-  ensureUnmetRequirementFindings,
   extractRequirementTerms,
   ledgerRequirementsById,
   mergeTraceClaims,
   missingTraceRequirementIds,
   renderRequirementTraceMarkdown,
   changedSubjectText,
-  requirementNotEnforcedMessage,
   requirementSubjectSignals,
   requirementTraceScope,
   structuralStateClaim,
@@ -434,33 +432,41 @@ test("a well-formed unmet requirement is a coverage stop (incomplete), not just 
   }
 });
 
-test("ensureUnmetRequirementFindings: synthesizes a finding for an unmet requirement with none", () => {
+test("#1095: an unmet requirement the model did not substantiate with a finding is never synthesized into one", () => {
   const workspace = makeWorkspace();
   try {
     const ledger = ledgerWith([{ id: "req-1", text: "must validate X", kind: "acceptance" }]);
-    const claims = [{ requirement_id: "req-1", disposition: "unmet", reason: "no such check exists" }];
-    const trace = validateRequirementTrace(claims, ledger, workspace);
-    const art = artifact();
-    const added = ensureUnmetRequirementFindings(art, trace, ledger);
-    assert.equal(added, 1);
-    assert.equal(art.findings.length, 1);
-    assert.equal(art.findings[0]?.message, requirementNotEnforcedMessage("must validate X"));
-    assert.equal(art.findings[0]?.severity, "major");
+    const art = artifact({
+      verdict: "approve",
+      requirement_coverage: [{ requirement_id: "req-1", disposition: "unmet", reason: "no such check exists" }],
+    });
+    const result = applyRequirementTraceEnforcement(art, { enabled: true, ledger, workspace });
+    assert.equal(result.applied, true);
+    // The unmet row stays on the record and keeps coverage incomplete — but
+    // the enforcement pass fabricates no blocking finding from the ledger
+    // text alone (miso-gallery#543: three majors, zero code defects).
+    assert.equal(result.trace.rows[0]?.disposition, "unmet");
+    assert.equal(result.trace.incomplete, true);
+    assert.equal(art.required_checks, "incomplete");
+    assert.deepEqual(art.findings, []);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
 });
 
-test("ensureUnmetRequirementFindings: does not duplicate a finding the model already gave", () => {
+test("#1095: a model-substantiated unmet (matching finding) is untouched and still blocks", () => {
   const workspace = makeWorkspace();
   try {
     const ledger = ledgerWith([{ id: "req-1", text: "must validate X", kind: "acceptance" }]);
     const claims = [{ requirement_id: "req-1", disposition: "unmet", reason: "no such check exists" }];
     const trace = validateRequirementTrace(claims, ledger, workspace);
-    const art = artifact({ findings: [{ severity: "major", category: "bug", file: "a.ts", line: 1, message: "must validate X is missing" }] });
-    const added = ensureUnmetRequirementFindings(art, trace, ledger);
-    assert.equal(added, 0);
+    const modelFinding = { severity: "major", category: "bug", file: "a.ts", line: 1, message: "must validate X is missing" };
+    const art = artifact({ findings: [modelFinding] });
+    const result = applyRequirementTraceEnforcement(art, { enabled: true, ledger, workspace });
+    assert.equal(result.applied, true);
     assert.equal(art.findings.length, 1);
+    assert.equal(art.findings[0]?.message, "must validate X is missing");
+    assert.equal(art.required_checks, "incomplete");
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -492,7 +498,7 @@ test("disabled: applyRequirementTraceEnforcement is a no-op", () => {
   }
 });
 
-test("#874 end-to-end: an unmet requirement with no finding gets one and forces request_changes under strict", () => {
+test("#874/#1095 end-to-end: an unsubstantiated unmet keeps coverage incomplete and the model's approve stands", () => {
   const workspace = makeWorkspace();
   try {
     const ledger = ledgerWith([{ id: "req-1", text: "the list path must enforce target.repo === ctx.repoDid", kind: "acceptance" }]);
@@ -500,13 +506,15 @@ test("#874 end-to-end: an unmet requirement with no finding gets one and forces 
       verdict: "approve",
       requirement_coverage: [{ requirement_id: "req-1", disposition: "unmet", reason: "list path has no such check" }],
     });
-    applyRequirementTraceEnforcement(art, { enabled: true, ledger, workspace });
-    assert.equal(art.findings.length, 1);
-    assert.equal(art.findings[0]?.severity, "major");
+    const result = applyRequirementTraceEnforcement(art, { enabled: true, ledger, workspace });
+    // #1095: no fabricated blocking finding — the trace gap is disclosed via
+    // the incomplete marker instead.
+    assert.equal(art.findings.length, 0);
+    assert.equal(result.trace.rows[0]?.disposition, "unmet");
 
     const outcome = applyStrictVerdictPolicy(art, { modelVerdict: "approve", forced: false });
-    assert.equal(outcome.verdict, "request_changes");
-    assert.equal(outcome.reviewResult, "issues");
+    assert.equal(outcome.verdict, "approve");
+    assert.equal(outcome.reviewResult, "partial");
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -3777,6 +3785,72 @@ test("#1062 regression: a hostile all-met payload cannot launder advisory rows o
     assert.equal(byId.get("req-readme-flag")?.disposition, "met");
     assert.equal(byId.get("req-inventory")?.disposition, "met");
     assert.equal(trace.incomplete, true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+// ── #1095: miso-gallery#543 false CHANGES_REQUESTED regression ────────────
+const ISSUE_543_TESTS_PASS = "tests/test_bounded_scans.py, tests/test_gallery_scan_cache.py, tests/test_find_duplicate_media.py and tests/test_recent_smoke.py pass with only import-path updates (automated_test).";
+
+test("#1095: a tests-pass acceptance criterion is an external_state advisory, never unverifiable", () => {
+  const workspace = makeWorkspace();
+  try {
+    assert.equal(nonCodeProofDomain(ISSUE_543_TESTS_PASS), "external_state");
+    const trace = validateRequirementTrace([], ledgerWith([{ id: "req-tests", text: ISSUE_543_TESTS_PASS, kind: "acceptance" }]), workspace);
+    assert.equal(trace.rows[0]?.disposition, PENDING_DISPOSITION);
+    assert.equal(trace.rows[0]?.proof, "external_state");
+    assert.equal(trace.incomplete, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1095: test-execution signal stays narrow — code demands never pend", () => {
+  // A code demand naming test paths as proof targets stays strict...
+  assert.equal(nonCodeProofDomain("tests/test_bounds.py must exercise the new scan limit"), null);
+  // ...phrasal "pass through" is not an outcome...
+  assert.equal(nonCodeProofDomain("tests must pass through the proxy layer"), null);
+  // ...a test demand is caught upstream...
+  assert.equal(nonCodeProofDomain("the new module must have test coverage"), null);
+  // ...parser vocabulary stays an implementation obligation.
+  assert.equal(nonCodeProofDomain("the parser must pass malformed input without crashing"), null);
+  // #1095 review: a compound requirement naming a SOURCE path plus a
+  // tests-pass clause cannot ride the tests-pass half out of strict proof —
+  // only all-test-path subjects may pend.
+  assert.equal(nonCodeProofDomain("`app.py` must define `GALLERY_SCAN_LIMIT` from the environment and the existing tests pass unchanged."), null);
+  // Credential vocabulary (plural included) is never an advisory.
+  assert.equal(nonCodeProofDomain("a test harness step must pass credentials to the sandbox"), null);
+});
+
+test("#1095: the #543 ledger shape yields no synthesized majors and cannot force request_changes", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([
+      { id: "req-merge", text: "Sibling extractions touching app.py must be merged sequentially to avoid merge conflicts.", kind: "normative" },
+      { id: "req-inspect", text: "gallery_scan.py exists and contains the moved helpers and constants (code_inspection).", kind: "acceptance" },
+      { id: "req-tests", text: ISSUE_543_TESTS_PASS, kind: "acceptance" },
+    ]);
+    const art = artifact({
+      verdict: "approve",
+      requirement_coverage: [
+        { requirement_id: "req-merge", disposition: "unmet", enforcement: [], test: [], reason: "merge-process constraint; no production predicate enforces it." },
+        { requirement_id: "req-inspect", disposition: "unmet", enforcement: [{ file: "src/real.ts", line: 1 }], test: [], reason: "no regression test asserts the helpers are present; the cited line is not an enforcing predicate." },
+        { requirement_id: "req-tests", disposition: "unverifiable", enforcement: [], test: [], reason: "no test execution results are provided." },
+      ],
+    });
+    const result = applyRequirementTraceEnforcement(art, { enabled: true, ledger, workspace });
+    assert.equal(result.applied, true);
+    assert.deepEqual(art.findings ?? [], [], JSON.stringify(art.findings));
+    // Coverage stays incomplete (the unsubstantiated unmet is disclosed, not
+    // laundered), so the run can never publish clean — but with zero blocking
+    // findings the strict mapping keeps the model's approve.
+    assert.equal(result.trace.incomplete, true);
+    assert.equal(art.required_checks, "incomplete");
+    const outcome = applyStrictVerdictPolicy(art as unknown as Parameters<typeof applyStrictVerdictPolicy>[0], { modelVerdict: "approve", forced: false });
+    assert.equal(outcome.verdict, "approve");
+    assert.equal(outcome.reviewResult, "partial");
+    assert.equal(outcome.overridden, false);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

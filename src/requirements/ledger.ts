@@ -116,6 +116,44 @@ const ACCEPTANCE_HEADINGS: ReadonlySet<string> = new Set([
   "required checks",
 ]);
 
+/** #1095: headings whose sections are advisory or process commentary, not
+ * requirement sources — a merge-order note under "## Dependencies" or a
+ * maintenance caveat under "## Notes / Risk" reads like a MUST but demands
+ * no checkout predicate, and promoting it into the ledger held a clean
+ * refactor at CHANGES_REQUESTED (miso-gallery#543 via review 5549785027:
+ * three "requirement not enforced" majors synthesized from a Dependencies
+ * bullet and a PR-body risk note). Exact match on the normalized heading,
+ * mirroring ACCEPTANCE_HEADINGS: narrow by construction, and anything not
+ * listed keeps extracting exactly as before. While the scanner is inside
+ * such a section, list items carry no normative weight — the one exception
+ * is the uppercase MUST/SHALL form ({@link UPPER_NORMATIVE_RE}), the
+ * strongest signal the extractor has, which is never silently discarded. A
+ * genuine requirement belongs under an acceptance/requirements heading,
+ * which this set never shadows. */
+const ADVISORY_HEADINGS: ReadonlySet<string> = new Set([
+  "dependencies",
+  "dependency",
+  "notes",
+  "note",
+  "risks",
+  "risk",
+  "notes risk",
+  "risk notes",
+  "caveats",
+  "caveat",
+  "limitations",
+  "limitation",
+  "rollout",
+]);
+
+/** Normalize a heading for the advisory check: lowercase, punctuation
+ * collapsed to spaces, whitespace squeezed — so "## Notes / Risk" and
+ * "## Risk Notes:" both normalize into the exact-match set. */
+function isAdvisoryHeading(heading: string): boolean {
+  const normalized = heading.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return ADVISORY_HEADINGS.has(normalized);
+}
+
 // Uppercase normative tokens apply to any line; word boundaries keep
 // "MUSTARD" / "SHELL" from matching.
 const UPPER_NORMATIVE_RE = /\b(MUST NOT|MUST|SHALL NOT|SHALL)\b/;
@@ -212,13 +250,15 @@ interface ScannedLine {
 }
 
 /** Extract entries from one document. Lines inside ``` / ~~~ fences are
- * skipped (requirements are never extracted from code fences). Line numbers
- * are 1-based. */
+ * skipped (requirements are never extracted from code fences), and so are
+ * advisory/process sections (#1095: see {@link ADVISORY_HEADINGS}).
+ * Line numbers are 1-based. */
 function scanDocument(text: string): ScannedLine[] {
   const found: ScannedLine[] = [];
   let inFence = false;
   let fenceChar = "";
   let heading = "";
+  let inAdvisorySection = false;
   let lineno = 0;
   for (const raw of pySplitLines(text)) {
     lineno += 1;
@@ -235,8 +275,16 @@ function scanDocument(text: string): ScannedLine[] {
     const headingMatch = HEADING_RE.exec(raw);
     if (headingMatch !== null) {
       heading = (headingMatch[1] ?? "").trim();
+      inAdvisorySection = isAdvisoryHeading(heading);
       continue;
     }
+    // #1095: advisory/process sections contribute no requirements — EXCEPT an
+    // uppercase MUST/SHALL, the extractor's strongest normative signal (#624),
+    // which keeps its teeth everywhere. A lowercase "must" on a list item is
+    // the #543 promotion shape (a Dependencies merge note, a PR-body risk
+    // caveat); an uppercase MUST is a deliberate normative statement and is
+    // never silently discarded.
+    if (inAdvisorySection && !UPPER_NORMATIVE_RE.test(raw)) continue;
     const isListItem = LIST_ITEM_RE.test(raw);
     let kind: ScannedLine["kind"] | null = null;
     if (isListItem && ACCEPTANCE_HEADINGS.has(heading.toLowerCase())) {

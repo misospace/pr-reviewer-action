@@ -202,3 +202,57 @@ test("tolerant loading recomputes the sha and repairs forged ids and kinds", () 
   assert.equal(forged.truncation.omittedRequirements, 3);
   assert.equal(forged.truncation.omittedSources, 0);
 });
+
+// ── #1095: advisory/process sections are not requirement sources ──────────
+test("#1095: Dependencies and Notes/Risk sections never become ledger entries", () => {
+  const doc = [
+    "## Dependencies",
+    "- Sibling extractions touching app.py must be merged sequentially to avoid merge conflicts.",
+    "- Deployment should be rolled out region by region.",
+    "## Acceptance criteria",
+    "- [ ] gallery_scan.py exists and contains the moved helpers (code_inspection).",
+    "## Notes / Risk",
+    "- any *future* bootstrap that re-imports `app` must pop `gallery_scan` with it.",
+    "## Requirements",
+    "- The CLI must reject unknown flags.",
+  ].join("\n");
+  const ledger = extractRequirementLedger({ linkedIssuesMarkdown: "## o/r#1\n```json\n" + JSON.stringify({ number: 1, title: "t", state: "OPEN", html_url: "u", labels: [], body: doc }, null, 2) + "\n```\n" });
+  const texts = ledger.requirements.map((entry) => entry.text);
+  assert.ok(texts.every((text) => !text.includes("merged sequentially")), JSON.stringify(texts));
+  assert.ok(texts.every((text) => !text.includes("region by region")), JSON.stringify(texts));
+  assert.ok(texts.every((text) => !text.includes("bootstrap")), JSON.stringify(texts));
+  // Genuine requirement sections are untouched.
+  assert.ok(texts.some((text) => text.includes("gallery_scan.py exists")));
+  assert.ok(texts.some((text) => text.includes("reject unknown flags")));
+});
+
+test("#1095: lowercase must is skipped in advisory sections; uppercase MUST keeps its teeth", () => {
+  const doc = [
+    "## Notes",
+    "- Passwords MUST be hashed with bcrypt, never MD5.",
+    "## Limitations",
+    "- The API MUST NOT exceed 1000 records per page.",
+    "## Risk",
+    "- Rollout should pause between waves.",
+  ].join("\n");
+  const ledger = extractRequirementLedger({ linkedIssuesMarkdown: "## o/r#1\n```json\n" + JSON.stringify({ number: 1, title: "t", state: "OPEN", html_url: "u", labels: [], body: doc }, null, 2) + "\n```\n" });
+  const texts = ledger.requirements.map((entry) => entry.text);
+  assert.ok(texts.some((text) => text.includes("bcrypt, never MD5")), JSON.stringify(texts));
+  assert.ok(texts.some((text) => text.includes("1000 records per page")), JSON.stringify(texts));
+  assert.ok(texts.every((text) => !text.includes("between waves")), JSON.stringify(texts));
+});
+
+test("#1095: the advisory-heading skip ends at the next non-advisory heading; uppercase MUST survives", () => {
+  const doc = [
+    "## Risk",
+    "- Rollout should pause between waves.",
+    "Rollout MUST pause between waves.",
+    "## Specification",
+    "The endpoint MUST return 404 for missing items.",
+  ].join("\n");
+  const ledger = extractRequirementLedger({ linkedIssuesMarkdown: "## o/r#1\n```json\n" + JSON.stringify({ number: 1, title: "t", state: "OPEN", html_url: "u", labels: [], body: doc }, null, 2) + "\n```\n" });
+  const texts = ledger.requirements.map((entry) => entry.text);
+  assert.ok(texts.some((text) => text.includes("MUST pause between waves")), JSON.stringify(texts));
+  assert.ok(texts.every((text) => !text.includes("should pause")), JSON.stringify(texts));
+  assert.ok(texts.some((text) => text.includes("return 404")));
+});
