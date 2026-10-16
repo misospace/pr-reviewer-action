@@ -35,6 +35,7 @@ import {
 import { redactText } from "../context/redact.js";
 import { fenceSafeLength } from "../context/related-context.js";
 import { KNOWN_SECRET_REDACTED, maskAndTruncate, maskDiagnostic, maskKnownSecrets } from "../context/redact.js";
+import { callKnownSecrets, extraHeadersForEnv } from "../transport/headers.js";
 import { reframeForCorpus, renderRepoMapMarkdown, repoMapFromArtifact, trustFramingOverhead } from "../context/repo-map.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { VerdictParseFailure } from "../model/types.js";
@@ -455,6 +456,9 @@ export interface ProduceVerdictInput {
   baseUrl: string;
   apiFormat: string;
   apiKey: string;
+  /** #1037: the extra headers this lane sends; their VALUES are response-side
+   * known secrets (the transport parses its own copy per request). */
+  extraHeaders?: Readonly<Record<string, string>>;
   turnTimeout: number;
   usageAcc: UsageAccumulator;
   deadline: number | null;
@@ -479,6 +483,10 @@ export interface ProduceVerdictInput {
  */
 export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<NativeVerdictOutcome> {
   const { transport, timeFn } = input;
+  // #1037: one known-secret list for every response surface of this verdict
+  // turn (in-body error message, unusable-response record, and the persisted
+  // `ai-response.<tier>.json` body below).
+  const knownSecrets = callKnownSecrets(input.apiKey, input.extraHeaders);
 
   const request = async (payload: Record<string, unknown>): Promise<{ response: unknown; transportError: string | null }> => {
     try {
@@ -512,7 +520,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
   response = firstAttempt.response;
   if (response !== null) {
     accumulateUsage(input.usageAcc, response, input.apiFormat);
-    const evaluation = evaluateNativeVerdict(response, [input.apiKey]);
+    const evaluation = evaluateNativeVerdict(response, knownSecrets);
     ok = evaluation.ok;
     reason = evaluation.reason;
     detail = evaluation.detail;
@@ -542,7 +550,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
           apiFormat: input.apiFormat,
           profile: input.tier ?? "primary",
           streamed: true,
-          secrets: [input.apiKey],
+          secrets: knownSecrets,
           failureKind: "parse",
         });
         const raised = raisedCompletionBudget(currentTokens);
@@ -566,7 +574,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
     response = retry.response;
     if (response !== null) {
       accumulateUsage(input.usageAcc, response, input.apiFormat);
-      const evaluation = evaluateNativeVerdict(response, [input.apiKey]);
+      const evaluation = evaluateNativeVerdict(response, knownSecrets);
       ok = evaluation.ok;
       reason = evaluation.reason;
       detail = evaluation.detail;
@@ -584,7 +592,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
         apiFormat: input.apiFormat,
         profile: input.tier ?? "primary",
         streamed: !retried && attemptedStream,
-        secrets: [input.apiKey],
+        secrets: knownSecrets,
         failureKind: reason === "transport" ? "network" : reason === "empty" ? "empty_completion" : "not_object",
       });
 
@@ -1297,6 +1305,9 @@ export interface RunNativeLoopInput {
   apiFormat: string;
   model: string;
   apiKey: string;
+  /** #1037: the extra headers this lane sends (masked as known secrets on
+   * every response surface); unset adds nothing to the mask list. */
+  extraHeaders?: Readonly<Record<string, string>>;
   corpusText: string;
   allowedGhApiRepos: Set<string>;
   allowedHosts: string[];
@@ -1834,6 +1845,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           baseUrl: input.baseUrl,
           apiFormat: input.apiFormat,
           apiKey: input.apiKey,
+          ...(input.extraHeaders !== undefined ? { extraHeaders: input.extraHeaders } : {}),
           turnTimeout: verdictTimeout,
           usageAcc,
           deadline,
@@ -1862,6 +1874,12 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         // instead of the raw body — an in-body error (or an SSE stream
         // error) can otherwise echo the configured key straight to disk.
         if (verdict.ok && verdict.response !== null && typeof verdict.response === "object") {
+          // Deliberately the raw bytes: this artifact is a CONTRACT — the
+          // native_loop reuse in `runReview` re-parses it as the verdict, so
+          // masking it here would rewrite the serialized verdict's own keys
+          // for any short configured key (`review_mar⟦•⟧down` → unparseable,
+          // and the whole reuse fast path is lost). The reuse parse masks the
+          // configured values in its own thrown messages instead.
           deps.writeArtifact(`ai-response.${input.tier}.json`, JSON.stringify(verdict.response));
         } else if (!verdict.ok && verdict.response !== null && typeof verdict.response === "object") {
           deps.writeArtifact(`ai-response.${input.tier}.json`, JSON.stringify({ error: verdict.detail }));
@@ -1885,7 +1903,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           // no response content, but the static field names can collide with
           // a very short configured key (see callTier's matching mask).
           const diagnosticsLine = verdict.diagnostics !== undefined
-            ? maskKnownSecrets(` [${formatResponseDiagnosticsLine(verdict.diagnostics.record)}]`, [input.apiKey])
+            ? maskKnownSecrets(` [${formatResponseDiagnosticsLine(verdict.diagnostics.record)}]`, callKnownSecrets(input.apiKey, input.extraHeaders))
             : "";
           log(
             `  native_loop: no reusable in-conversation verdict [${verdict.reason}] ${verdict.detail}${diagnosticsLine} — the standard review call will synthesize the verdict`,
@@ -2114,12 +2132,24 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
     if (normalized) allowedGhApiRepos.add(normalized);
   }
 
+  // #1037: parse the operator's header set once for the RESPONSE-side mask
+  // list (the transport parses its own copy per request). Fail-soft exactly
+  // like that per-request parse: a malformed set adds nothing here, and the
+  // adapter rejects every request it would have carried.
+  let extraHeaders: Record<string, string> | undefined;
+  try {
+    extraHeaders = extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "");
+  } catch {
+    extraHeaders = undefined;
+  }
+
   const handled = await runNativeLoop({
     repo,
     baseUrl,
     apiFormat,
     model,
     apiKey,
+    ...(extraHeaders !== undefined ? { extraHeaders } : {}),
     corpusText: planning.text,
     allowedGhApiRepos,
     allowedHosts,

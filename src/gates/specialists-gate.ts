@@ -449,6 +449,9 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
       execution: execution as ExecutionMode,
       reasoningEffort,
       anthropicEffortSupported: anthropicEffort,
+      // #1037: the same configured headers the transport sends — the runner
+      // masks their VALUES out of every response-body surface it persists.
+      ...(extra !== undefined ? { extraHeaders: extra } : {}),
     },
     corpus: corpus.text,
     corpusError: corpus.error,

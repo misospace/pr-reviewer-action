@@ -434,6 +434,43 @@ export function maskKnownSecrets(text: string, secrets: readonly (string | null 
   return masked;
 }
 
+/** Structural counterpart to `maskKnownSecrets`, for a JSON-shaped provider
+ * body on its way into a persisted artifact (#1037). Same masking, applied
+ * per string LEAF instead of to one flat string: object keys, array order,
+ * numbers, and every structural token survive byte-for-byte, so a masked
+ * artifact is still valid JSON with the same shape (the marker contains no
+ * character JSON requires escaping). Masking the serialized text instead
+ * would be wrong twice over — a configured header value carrying `"` or `\`
+ * is JSON-escaped in the artifact, so an exact-substring pass over the
+ * serialized bytes would miss it entirely, and a match on a structural
+ * token (`": "`) would corrupt the document.
+ *
+ * `depth` is an internal recursion bound: at the cap the subtree is masked in
+ * one pass over its own serialized form instead (still no raw value survives),
+ * so a pathologically nested body degrades in shape rather than leaking or
+ * blowing the stack. */
+const MAX_MASK_DEPTH = 32;
+
+export function maskKnownSecretsDeep(value: unknown, secrets: readonly (string | null | undefined)[] = [], depth = 0): unknown {
+  if (typeof value === "string") return maskKnownSecrets(value, secrets);
+  if (depth >= MAX_MASK_DEPTH) {
+    try {
+      return maskKnownSecrets(JSON.stringify(value) ?? "", secrets);
+    } catch {
+      // Cyclic (impossible for a JSON-parsed body): nothing serialized, so
+      // nothing the masker could reach.
+      return value;
+    }
+  }
+  if (Array.isArray(value)) return value.map((item) => maskKnownSecretsDeep(item, secrets, depth + 1));
+  if (typeof value === "object" && value !== null) {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) out[key] = maskKnownSecretsDeep(item, secrets, depth + 1);
+    return out;
+  }
+  return value;
+}
+
 /** Default length cap for `maskDiagnostic`, matching #862's
  * `describeTransportFailure` (300 chars). */
 export const DIAGNOSTIC_MAX_CHARS = 300;

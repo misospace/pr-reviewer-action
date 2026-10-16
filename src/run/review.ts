@@ -21,7 +21,7 @@ import { loopContextLimits } from "../tools/harness.js";
 import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
-import { extraHeadersForEnv } from "../transport/headers.js";
+import { callKnownSecrets, extraHeadersForEnv } from "../transport/headers.js";
 import type { FetchLike } from "../platform/http.js";
 import { normalizePrIdentity } from "../platform/pr.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
@@ -51,7 +51,7 @@ import { renderClaimsSection } from "../claims/render.js";
 import { buildModelRequest } from "../model/request.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
 import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js";
-import { maskKnownSecrets } from "../context/redact.js";
+import { maskKnownSecrets, maskKnownSecretsDeep } from "../context/redact.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
 import type { ReviewTriageDecision } from "../model/types.js";
@@ -1845,6 +1845,13 @@ async function callTier(
   });
   ws.write(requestArtifact, pyJsonDumps(requestPayload.body));
   ws.write(responseArtifact, "");
+  // #1037: ONE known-secret list for every response surface of this call —
+  // the persisted `ai-response.<tier>.json` body, the verdict parse, the
+  // diagnostics line, and the transport-failure detail. A configured
+  // extra-header VALUE is an outbound secret the provider can quote straight
+  // back into its own response body, so it is masked here, where the body
+  // enters artifact/diagnostic state, not only at each consumer.
+  const knownSecrets = callKnownSecrets(profile.apiKey, profile.extraHeaders);
 
   const outcome = await callModelTier(profile, {
     system: env.SYSTEM_PROMPT ?? "",
@@ -1861,7 +1868,13 @@ async function callTier(
         input.sleep === undefined ? chatInput : { ...chatInput, sleep: (ms: number) => input.sleep!(ms / 1000) },
       );
       if (result.status === "failure") return result;
-      ws.write(responseArtifact, pyJsonDumps(result.raw));
+      // #1037: mask the raw provider body on its way into the artifact — the
+      // response can echo a configured header value, and this artifact is read
+      // by later phases (the step summary reads `usage`) and by a human
+      // debugging a degraded run. Nothing re-parses this copy AS a verdict
+      // (the native-loop reuse reads the harness-written artifact, before this
+      // call runs), so a masked leaf cannot break a downstream parse.
+      ws.write(responseArtifact, pyJsonDumps(maskKnownSecretsDeep(result.raw, knownSecrets)));
       return result;
     },
   });
@@ -1875,7 +1888,7 @@ async function callTier(
   // very short configured key. Over-redacting a few incidental letters is the
   // accepted cost (the same second-pass rationale as describeTransportFailure).
   const diagnosticsLine = outcome.status !== "ok" && outcome.diagnostics !== undefined
-    ? maskKnownSecrets(` [${formatResponseDiagnosticsLine(outcome.diagnostics.record)}]`, [profile.apiKey])
+    ? maskKnownSecrets(` [${formatResponseDiagnosticsLine(outcome.diagnostics.record)}]`, knownSecrets)
     : "";
   if (outcome.status === "ok") {
     // #998: the effective effort is part of which request produced this
@@ -1906,7 +1919,13 @@ async function callTier(
     const formatNote = wireFormat === "json_schema" && profile.apiFormat === "anthropic" && stripped === undefined ? ", format=json_schema" : "";
     const raisedNote = outcome.budgetRaisedTo !== undefined ? ` (completion budget raised to ${outcome.budgetRaisedTo} after a token-cap failure)` : "";
     log(`${profile.label} model attempt ${outcome.attempts}/${profile.retries}: ${profile.model} @ ${profile.baseUrl} (${profile.apiFormat}${effortNote}${formatNote})${raisedNote}`);
-    const parsed = parseVerdictResponse(outcome.rawResponse, [profile.apiKey]);
+    const parsed = parseVerdictResponse(outcome.rawResponse, knownSecrets);
+    // Deliberately NOT masked here: the parsed verdict is the review's own
+    // content, and its structural fields (severity/category/file/line) drive
+    // the findings table and the enforcement stages. Masking it would corrupt
+    // published output whenever the configured key is short (legal — `k` masks
+    // every `k` in `blockers: 1`). The provider REFLECTION surface is the raw
+    // body above, which is masked; the model never sees a header value.
     const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
     ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
     return { ok: true, artifact, rawResponse: outcome.rawResponse };
@@ -1933,7 +1952,7 @@ async function callTier(
     // configured key unconditionally, on top of `redactText`'s heuristics.
     // #1037: this lane's configured extra-header VALUES join that list (a
     // provider error body can quote them back, and they carry proxy tokens).
-    const detail = describeTransportFailure(outcome.failure, { secrets: [profile.apiKey, ...Object.values(profile.extraHeaders ?? {})] });
+    const detail = describeTransportFailure(outcome.failure, { secrets: knownSecrets });
     errorLog(`${profile.label}: transport failures exhausted (${detail})${diagnosticsLine}`);
     if (outcome.nonRetryable === true) {
       annotate(`::error::${profile.label}: model endpoint returned a non-retryable HTTP status; failing over without retrying (${annotationSafe(detail)})`);
@@ -1952,6 +1971,14 @@ function configuredApiKeys(routeKey: string | undefined, profiles: TierProfiles)
   const keys = [routeKey, profiles.primary.apiKey, profiles.smart.apiKey, profiles.fallback.apiKey]
     .filter((key): key is string => typeof key === "string" && key !== "");
   return [...new Set(keys)].sort((a, b) => b.length - a.length);
+}
+
+/** #1037: every configured extra-header VALUE this run could have sent.
+ * Response-body surfaces outside a single tier (the native-loop verdict reuse
+ * re-parses a persisted `ai-response.<tier>.json`) mask these too, so a value
+ * the writing lane masked is never unmasked by a later re-parse. */
+function configuredExtraHeaderValues(env: StageEnv): string[] {
+  return Object.values(extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "") ?? {});
 }
 
 /** review.sh: the primary call (native-verdict fast path, then the standard
@@ -2138,7 +2165,10 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
       const responseBytes = ws.read("ai-response.smart.json");
       if (status !== "request-error" && status !== "wall-clock-exceeded" && produced && responseBytes !== null && responseBytes.length > 0) {
         try {
-          const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")), configuredApiKeys(env.AI_API_KEY, profiles));
+          // #1037: the same masking as the writing lane, so a value the
+          // writing lane masked in this artifact cannot reappear in the
+          // messages thrown from this re-parse.
+          const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")), [...configuredApiKeys(env.AI_API_KEY, profiles), ...configuredExtraHeaderValues(env)]);
           const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
           ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
           log("Smart tool harness produced a verdict");
