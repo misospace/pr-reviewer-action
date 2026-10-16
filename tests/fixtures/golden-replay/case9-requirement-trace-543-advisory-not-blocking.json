@@ -1,0 +1,85 @@
+{
+  "contract": "golden-replay/v1",
+  "name": "case9-requirement-trace-543-advisory-not-blocking",
+  "status": "active",
+  "provenance": {
+    "source_head": "6ee8ef451327e5b0f1fe4f34284f07c3cda387f0",
+    "origin": "miso-gallery#543 (review 5549785027) false-CHANGES_REQUESTED control for #1095",
+    "evidence_transform": "raw",
+    "model_response": "Recorded representative response (zero live inference): approve with no findings; the coverage payload marks the merge-process dependency, the checkout-inspection criterion, and the future-bootstrap risk note unmet (reasons only, no matching findings), and leaves the tests-pass criterion unverifiable. Post-#1095 this must publish approve: the process/risk notes never enter the ledger, the tests-pass outcome is an external_state advisory, and an unsubstantiated unmet is disclosed in the trace instead of being synthesized into a blocking major."
+  },
+  "engine": "run-review",
+  "pr": {
+    "head_sha": "6ee8ef451327e5b0f1fe4f34284f07c3cda387f0",
+    "title": "refactor(gallery): extract gallery scanning and media helpers into gallery_scan.py",
+    "body": "Closes #521\n\n## Summary\n\nMoves the gallery-scan/media helpers out of `app.py` into a new sibling module `gallery_scan.py`, following the established `thumbnails.py` / `llm_api.py` extraction pattern. Pure refactor: no scan behavior, endpoint names, URLs, env vars, or template context changes.\n\n## Notes / Risk\n\n- Risk: low. The one semantic subtlety is module generation in tests: `gallery_scan._app()` resolves `sys.modules[\"app\"]` live, so any *future* bootstrap that re-imports `app` must pop `gallery_scan` with it (commented at every existing site, and in `gallery_scan.py`'s module docstring).\n",
+    "diff": "diff --git a/gallery_scan.py b/gallery_scan.py\nnew file mode 100644\n--- /dev/null\n+++ b/gallery_scan.py\n@@ -0,0 +1,12 @@\n+\"\"\"Gallery scanning and media helpers extracted from app.py.\"\"\"\n+\n+import os\n+\n+GALLERY_SCAN_LIMIT = int(os.environ.get(\"GALLERY_SCAN_LIMIT\", \"200\"))\n+\n+def _app():\n+    import app\n+    return app\n+\n+def iter_gallery_items():\n+    return _app().DATA_FOLDER.iterdir()\n",
+    "files": [
+      { "filename": "gallery_scan.py", "status": "added", "additions": 12, "deletions": 0 },
+      { "filename": "app.py", "status": "modified", "additions": 2, "deletions": 1 }
+    ],
+    "linkedIssues": [
+      {
+        "number": 521,
+        "title": "Extract gallery scanning and media helpers from app.py into gallery_scan.py",
+        "state": "OPEN",
+        "html_url": "https://github.com/misospace/miso-gallery/issues/521",
+        "labels": [{ "name": "status/backlog" }],
+        "body": "## Settled design decision\nMove the gallery-scan helpers into new sibling module gallery_scan.py; app.py imports them. Route endpoint names ('view'/'thumb') must stay identical because media_metadata uses url_for.\n\n## Dependencies\n- Sibling extractions touching app.py must be merged sequentially to avoid merge conflicts.\n\n## Acceptance criteria\n- [ ] gallery_scan.py exists and contains the moved helpers and constants (code_inspection).\n- [ ] tests/test_bounded_scans.py, tests/test_gallery_scan_cache.py, tests/test_find_duplicate_media.py and tests/test_recent_smoke.py pass with only import-path updates (automated_test).\n"
+      }
+    ]
+  },
+  "source_files": {
+    "app.py": "from flask import Flask\napp = Flask(__name__)\nfrom gallery_scan import iter_gallery_items, GALLERY_SCAN_LIMIT\n\n__all__ = [\"app\", \"iter_gallery_items\", \"GALLERY_SCAN_LIMIT\"]\n",
+    "gallery_scan.py": "\"\"\"Gallery scanning and media helpers extracted from app.py.\"\"\"\n\nimport os\n\nGALLERY_SCAN_LIMIT = int(os.environ.get(\"GALLERY_SCAN_LIMIT\", \"200\"))\n\ndef _app():\n    import app\n    return app\n\ndef iter_gallery_items():\n    return _app().DATA_FOLDER.iterdir()\n"
+  },
+  "recorded_model_response": {
+    "verdict": "approve",
+    "review_markdown": "## Recommendation: Approve\n\nNo blocking findings. The extraction is internally consistent and preserves the existing route and filesystem-security boundaries.\n",
+    "smart_review_requested": false,
+    "smart_review_reason": null,
+    "findings": [],
+    "requirement_coverage": [
+      {
+        "requirement_id": "req-03c8c00c4e78",
+        "disposition": "unmet",
+        "enforcement": [],
+        "test": [],
+        "reason": "this is a merge-process constraint, but the pull request contains no production predicate, repository guard, or regression test that enforces sequential merging of sibling app.py extractions."
+      },
+      {
+        "requirement_id": "req-470b9a0a2389",
+        "disposition": "unmet",
+        "enforcement": [{ "file": "gallery_scan.py", "line": 10 }],
+        "test": [],
+        "reason": "gallery_scan.py is added and contains the extracted module implementation, but no regression test asserts that the required helpers and constants are present in gallery_scan.py and re-exported through app.py. The cited line only performs a live app import and not an enforcing predicate."
+      },
+      {
+        "requirement_id": "req-79a95db059cc",
+        "disposition": "unverifiable",
+        "enforcement": [],
+        "test": [],
+        "reason": "the diff shows import-path updates, but it does not provide test execution results proving the four listed test files pass."
+      },
+      {
+        "requirement_id": "req-eecac42e59d1",
+        "disposition": "unmet",
+        "enforcement": [{ "file": "gallery_scan.py", "line": 8 }],
+        "test": [],
+        "reason": "no test executes a future bootstrap that re-imports app, so the obligation that it also pop gallery_scan cannot be evidenced."
+      }
+    ]
+  },
+  "config": {
+    "requirement-trace": "true",
+    "repo-map-context": "false"
+  },
+  "secrets": [],
+  "expect": {
+    "verdict": "approve",
+    "blocking_finding_ids": [],
+    "native_event": "COMMENT",
+    "published_body_excludes": ["requirement not enforced"],
+    "published_body_includes": ["unmet", "no regression test asserts"]
+  }
+}

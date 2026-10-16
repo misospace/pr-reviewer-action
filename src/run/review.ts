@@ -1531,9 +1531,10 @@ function cachedProjectNumber(bytes: Uint8Array): number | null {
  * requirement-trace coverage, or any verdict policy/enforcement escalation
  * (`verdict_source !== "model"`) outranks the degraded gate exemption — an
  * operator who enabled one of those meant it. `requirement_trace_incomplete`
- * is authoritative for both `unmet` and `unverifiable` rows, and strictly
- * subsumes findingsAdded because findings are synthesized only for `unmet`.
- * A model-originated `request_changes` keeps `verdict_source === "model"` and stays eligible. */
+ * is authoritative for both `unmet` and `unverifiable` rows (#1095: the trace
+ * no longer synthesizes findings, so incompleteness is the pass's own
+ * signal). A model-originated `request_changes` keeps
+ * `verdict_source === "model"` and stays eligible. */
 export function computeDeterministicBlock(input: {
   enforcementInputs: EnforcementInputs;
   completeness: { status: string; mode: string } | null;

@@ -36,7 +36,11 @@
  * `unmet` is itself a known coverage stop; both fold into
  * `required_checks=incomplete` via `applyRequirementTraceEnforcement`, so a
  * known-unmet requirement can never publish a clean approval under any
- * verdict policy.
+ * verdict policy. #1095: the enforcement pass never synthesizes a finding
+ * from an unmet row — the model's prompt contract obliges it to file the
+ * matching finding itself, and a blocking review must rest on a substantiated
+ * implementation violation, not on ledger text promoted out of a
+ * process/risk note (miso-gallery#543).
  *
  * Scope: ledger entries of kind `acceptance` or `normative` only — the
  * explicit MUST/acceptance-criteria items. `invariant`-kind entries
@@ -64,7 +68,7 @@
  * path, and the model can never claim `pending` to escape a code proof.
  */
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
-import type { ArtifactFinding, ReviewArtifact } from "./artifact.js";
+import type { ReviewArtifact } from "./artifact.js";
 import { workspaceRegularFile, workspaceFsPath, workspacePathExists, workspacePathHasSymlinkComponent } from "../context/workspace-path.js";
 import { detectLanguage, isTestPath } from "../context/change-anchors.js";
 
@@ -858,7 +862,25 @@ export type NonCodeProofDomain = "external_state" | "documentation";
  * The veto is safe in only the fail-closed direction: it can keep a genuinely
  * external criterion strict (it stays blocking, the conservative outcome), never
  * the reverse. */
-const NON_CODE_VETO_RE = /\b(implement[sd]?|compar\w+|hash(?:es|ing)?|encod\w+|decod\w+|authenticat\w+|authori[sz]\w+|redact\w*|saniti[sz]\w*|escap\w+|signature|fingerprint|token|credential|secret|validat\w*|verif\w+|enforce\w+|assert\w*|throw\w*|reject\w*|guard\w*|allow\w*|deny\w*|permit\w*|forbid\w*|prevent[s]?|report[s]?|publish(?:es|ed|ing)?|pos(?:t|ts|ted|ting)|deploy(?:s|ed|ing)?|print(?:s|ed|ing)?|emit(?:s|ted|ting)?|upload(?:s|ed|ing)?|ship(?:s|ped|ping)?|releas\w+)\b/i;
+const NON_CODE_VETO_RE = /\b(implement[sd]?|compar\w+|hash(?:es|ing)?|encod\w+|decod\w+|authenticat\w+|authori[sz]\w+|redact\w*|saniti[sz]\w*|escap\w+|signature|fingerprint|tokens?|secrets?|credentials?|validat\w*|verif\w+|enforce\w+|assert\w*|throw\w*|reject\w*|guard\w*|allow\w*|deny\w*|permit\w*|forbid\w*|prevent[s]?|report[s]?|publish(?:es|ed|ing)?|pos(?:t|ts|ted|ting)|deploy(?:s|ed|ing)?|print(?:s|ed|ing)?|emit(?:s|ted|ting)?|upload(?:s|ed|ing)?|ship(?:s|ped|ping)?|releas\w+|pars(?:e|es|ed|ing))\b/i;
+
+/** #1095: a TEST-EXECUTION OUTCOME demand — the requirement asks whether tests
+ * pass (or the suite is green), not that code enforce something. This is the
+ * miso-gallery#543 shape: an acceptance criterion reading "tests/... and
+ * tests/... pass with only import-path updates" names four test paths as the
+ * SUBJECT of a passing outcome; the named-path veto below would otherwise read
+ * those subjects as implementation obligations and hold a green run at
+ * `unverifiable`. Whether the tests pass is observable only by executing them
+ * (the CI gate's exact-head conclusion, surfaced in the advisory's diagnostic
+ * notes), never from checkout inspection — so the row is `external_state` and
+ * pends as a non-blocking advisory, exactly like the #1062 external-CI rows.
+ * Deliberately narrow: the pass/green verb must FOLLOW a tests/suite subject
+ * within one clause span, so "tests must exercise the new boundary" (a code
+ * demand) and "feature tests must be added" (a test demand, caught upstream)
+ * stay strict; phrasal passes ("pass through the proxy") are excluded; and the
+ * code-verb veto above still runs first, so any enforcement vocabulary in the
+ * row keeps it on the strict path. */
+const TEST_EXECUTION_OUTCOME_RE = /\b(?:tests?[\w./-]*|(?:test\s+|full\s+)?suite)\b[^.;]{0,200}?\bpass(?:es|ed|ing)?\b(?!\s*(?:through|along|over|under|across|between)\b)/i;
 
 /** An external system whose state this review cannot own — CI, an external
  * workflow, or an unrelated pull request — but ONLY when the requirement frames
@@ -895,21 +917,39 @@ const DOC_VERB_RE = /\b(document(?:ed|ation|s)?|record(?:ed|s|ing)?|inventor(?:y
 /**
  * Classify a requirement into a non-code proof domain, or `null` when it is a
  * code/test-verifiable implementation obligation (the strict path). Fail-closed:
- * the only way OUT of strict proof is an affirmative, *explicitly external* or
- * *documenting-into-a-named-artifact* signal, in the presence of NO code verb,
- * NO named source/test path, and NO explicit test demand. The model contributes
- * nothing here.
+ * the only way OUT of strict proof is an affirmative, *explicitly external*,
+ * *test-execution-outcome*, or *documenting-into-a-named-artifact* signal — in
+ * the presence of NO code verb and NO explicit test demand. The model
+ * contributes nothing here.
  */
 export function nonCodeProofDomain(text: string): NonCodeProofDomain | null {
   // A mandatory test/regression/security obligation is never non-code.
   if (explicitlyRequiresTest(text)) return null;
   // Any implementation/enforcement/publish verb (incl. security/crypto terms) is strict.
   if (NON_CODE_VETO_RE.test(text)) return null;
-  // Naming real source or a test path is an implementation obligation.
   const { quoted, bare } = verbatimTokens(text);
-  const namesCode = [...new Set([...quoted, ...bare])].some((token) =>
-    looksLikePath(token) && (isTestPath(token) || detectLanguage(token) !== "non_source"));
-  if (namesCode) return null;
+  const namedTokens = [...new Set([...quoted, ...bare])];
+  // Naming real source or a non-test path is an implementation obligation.
+  // #1095 review: checked BEFORE the test-execution signal so a compound
+  // requirement ("`app.py` must define `X`; the existing tests pass
+  // unchanged") cannot ride its tests-pass clause out of strict proof — only
+  // requirements whose named paths are ALL test subjects may pend. The path
+  // predicate is broader than `looksLikePath` here (any dotted source-style
+  // token counts), so a quoted `app.py` is caught even though `.py` is not a
+  // config extension; over-counting a prose token as a path only ever fails
+  // CLOSED (the row stays strict), never pends.
+  const pathish = (token: string): boolean =>
+    looksLikePath(token) || (token.includes(".") && detectLanguage(token) !== "non_source");
+  const namesSourcePath = namedTokens.some((token) =>
+    pathish(token) && !isTestPath(token) && detectLanguage(token) !== "non_source");
+  if (namesSourcePath) return null;
+  // #1095: a test-execution outcome ("tests/... pass with only import-path
+  // updates") is external state — observable only by running the tests — and
+  // the four #543 criteria name test paths as the subject of the outcome. See
+  // TEST_EXECUTION_OUTCOME_RE for the narrow shape and its exclusions.
+  if (TEST_EXECUTION_OUTCOME_RE.test(text)) return "external_state";
+  // Naming a test path with no test-execution outcome is a test demand.
+  if (namedTokens.some((token) => looksLikePath(token) && isTestPath(token))) return null;
   // External/future state: an explicitly-external system subject AND a state/outcome word.
   if (EXTERNAL_SUBJECT_RE.test(text) && EXTERNAL_OUTCOME_RE.test(text)) return "external_state";
   // Documentation: a recording verb INTO a named documentation/metadata artifact.
@@ -1910,56 +1950,6 @@ export function mergeTraceClaims(coveragePayload: unknown, repaired: readonly un
   return merged;
 }
 
-/**
- * Deterministic finding text for an unmet (violated) requirement with no
- * finding already covering it — mirrors the violated-obligation and
- * unresolved-thread re-emission rules elsewhere in enforcement/.
- */
-export function requirementNotEnforcedMessage(requirementText: string): string {
-  return `requirement not enforced: ${requirementText}`;
-}
-
-/**
- * Ensure every `unmet` in-scope requirement has a corresponding finding.
- * Mutates `artifact.findings` in place (creating the array if absent) and
- * returns the count of findings synthesized. A finding already present for
- * the requirement (matched by message substring, the same "did the model
- * already surface this" heuristic other enforcement passes use) is left
- * alone — this only fills a gap, never duplicates.
- */
-export function ensureUnmetRequirementFindings(
-  artifact: ReviewArtifact,
-  trace: RequirementTraceArtifact,
-  ledger: unknown,
-): number {
-  const unmet = trace.rows.filter((row) => row.disposition === "unmet");
-  if (unmet.length === 0) return 0;
-
-  const textById = new Map<string, string>();
-  for (const entry of ledgerEntriesInScope(ledger)) textById.set(entry.id, entry.text);
-
-  const findings: ArtifactFinding[] = Array.isArray(artifact.findings) ? artifact.findings : [];
-  let added = 0;
-  for (const row of unmet) {
-    const text = textById.get(row.requirement_id);
-    if (text === undefined) continue;
-    const message = requirementNotEnforcedMessage(text);
-    const alreadyCovered = findings.some((f) => f.message.includes(text) || f.message === message);
-    if (alreadyCovered) continue;
-    const location = row.enforcement[0] ?? row.test[0] ?? null;
-    findings.push({
-      severity: "major",
-      category: "other",
-      file: location ? location.file : null,
-      line: location ? location.line : null,
-      message,
-    });
-    added += 1;
-  }
-  if (added > 0) artifact.findings = findings;
-  return added;
-}
-
 const MAX_RENDERED_ROWS = 20;
 /** Collapse the rendered section behind `<details>` once the ledger has
  * more than this many in-scope requirements — the issue's "do not dump an
@@ -2095,21 +2085,29 @@ export function renderRequirementTraceMarkdown(trace: RequirementTraceArtifact):
 export interface RequirementTraceEnforcementResult {
   applied: boolean;
   trace: RequirementTraceArtifact;
-  findingsAdded: number;
 }
 
 /**
  * Apply requirement-trace enforcement to the artifact in place: validate the
- * trace, synthesize findings for unmet requirements the model did not
- * already flag, and — when any in-scope requirement is unverifiable or
- * untraced — record that traceability gap separately and escalate
- * `required_checks` to `incomplete` (never relaxing an already-incomplete
- * status from the must_check pass). Run this AFTER
- * `applyRequiredCheckValidation` (whose unconditional write would otherwise
- * clobber the escalation) and BEFORE the verdict mapping (strict or
- * findings_severity_gated) that reads `required_checks`/`findings`. No-op
- * when disabled or the ledger has no in-scope requirements.
- */
+ * trace and — when any in-scope requirement is unverifiable or untraced —
+ * record that traceability gap separately and escalate `required_checks` to
+ * `incomplete` (never relaxing an already-incomplete status from the
+ * must_check pass). Run this AFTER `applyRequiredCheckValidation` (whose
+ * unconditional write would otherwise clobber the escalation) and BEFORE the
+ * verdict mapping (strict or findings_severity_gated) that reads
+ * `required_checks`/`findings`. No-op when disabled or the ledger has no
+ * in-scope requirements.
+ *
+ * #1095: this pass never SYNTHESIZES findings. A `unmet` row is the model's
+ * own violation claim; the model's prompt contract obliges it to file the
+ * matching finding itself. Fabricating a blocking major from the ledger text
+ * alone promoted process/risk rows the reviewer had declined to flag into
+ * CHANGES_REQUESTED on a defect-free PR (miso-gallery#543, review
+ * 5549785027): three "requirement not enforced" majors, zero code defects.
+ * An unmet the model substantiated with its own finding still blocks through
+ * that finding; an unsubstantiated unmet keeps `required_checks=incomplete`
+ * (no clean approval — #874) and is disclosed in the rendered trace section
+ * instead. */
 export function applyRequirementTraceEnforcement(
   artifact: ReviewArtifact,
   options: {
@@ -2130,7 +2128,7 @@ export function applyRequirementTraceEnforcement(
   },
 ): RequirementTraceEnforcementResult {
   if (!options.enabled) {
-    return { applied: false, trace: { version: ARTIFACT_VERSION, rows: [], incomplete: false, errors: [] }, findingsAdded: 0 };
+    return { applied: false, trace: { version: ARTIFACT_VERSION, rows: [], incomplete: false, errors: [] } };
   }
   const trace = validateRequirementTrace(artifact.requirement_coverage, options.ledger, options.workspace, options.changed, {
     ownership: options.ownership,
@@ -2139,9 +2137,8 @@ export function applyRequirementTraceEnforcement(
     ciState: options.ciState,
   });
   if (trace.rows.length === 0) {
-    return { applied: false, trace, findingsAdded: 0 };
+    return { applied: false, trace };
   }
-  const findingsAdded = ensureUnmetRequirementFindings(artifact, trace, options.ledger);
   if (trace.incomplete) artifact.requirement_trace_incomplete = true;
   if (trace.incomplete && artifact.required_checks !== "incomplete") {
     artifact.required_checks = "incomplete";
@@ -2150,5 +2147,5 @@ export function applyRequirementTraceEnforcement(
   if (rendered !== "") {
     artifact.review_markdown = `${String(artifact.review_markdown ?? "")}${rendered}`;
   }
-  return { applied: true, trace, findingsAdded };
+  return { applied: true, trace };
 }
