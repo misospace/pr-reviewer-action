@@ -58,6 +58,10 @@ interface GoldenExpect {
   supported_blocking_claims?: number;
   published_body_excludes?: string[];
   published_body_includes?: string[];
+  /** #1095: the native review event the publish step submitted (APPROVE /
+   * REQUEST_CHANGES / COMMENT) — the publication-path assertion for
+   * requirement-trace replays. */
+  native_event?: string;
   thread_dispositions?: ThreadDispositionExpect[];
   /** #1016: per-finding grounding status asserted when the production
    * source-verifier seam is wired in. Keys are finding ids (or message
@@ -156,17 +160,24 @@ function mockPlatform(pr: Record<string, unknown>): PlatformReadAdapter {
   const diff = String(pr.diff ?? "");
   const files = (pr.files as unknown[] | undefined) ?? [];
   const threads = (pr.threads as unknown[] | undefined) ?? [];
+  // Optional linked-issue serving (#1095): fixture `pr.linkedIssues` entries
+  // are raw GitHub issue objects, served by number so the requirement-ledger
+  // extraction sees a real linked_issues source.
+  const linkedIssues = Array.isArray(pr.linkedIssues) ? pr.linkedIssues as Array<Record<string, unknown>> : [];
   return {
     platform: "github",
     getPr: () => Promise.resolve({
-      number: 1, title: String(pr.title ?? "t"), body: "",
+      number: 1, title: String(pr.title ?? "t"), body: String(pr.body ?? ""),
       head: { sha: headSha, ref: "feature" }, base: { ref: "main" },
       user: { login: "someone" }, changed_files: files.length || 1,
       additions: 0, deletions: 0, html_url: "https://github.com/o/r/pull/1",
     }),
     getPrDiff: () => Promise.resolve(diff),
     listPrFiles: () => Promise.resolve({ ok: true, data: files }),
-    getIssue: () => Promise.resolve({ ok: false, error: "not served" }),
+    getIssue: (_repo: string, issueNumber: string) => {
+      const match = linkedIssues.find((issue) => String(issue.number) === String(issueNumber));
+      return Promise.resolve(match !== undefined ? { ok: true, data: match } : { ok: false, error: "not served" });
+    },
     listPrConversationComments: () => Promise.resolve({ ok: true, data: [] }),
     listReviewThreads: () => Promise.resolve({ ok: true, data: threads }),
     listPrReviewsPaginated: () => Promise.resolve({ ok: true, data: [] }),
@@ -268,7 +279,7 @@ function scoreCase(
   actualVerdict: string,
   findings: ArtifactFinding[],
   recorded: RecordedFinding[],
-  published?: { reviewBody: string; submitted: string[]; comments: string[]; stepOutput: string },
+  published?: { reviewBody: string; submitted: string[]; submittedEvents: string[]; comments: string[]; stepOutput: string },
   threadDispositions?: Array<Record<string, unknown>>,
 ): CaseScore {
   const mismatches: string[] = [];
@@ -333,6 +344,11 @@ function scoreCase(
     for (const v of c.expect.published_body_includes ?? []) {
       if (!published.reviewBody.includes(v)) mismatches.push(`published_body_includes: ${JSON.stringify(v)} missing from review-body.md`);
     }
+  }
+  if (c.expect.native_event !== undefined && published) {
+    const events = (published as { submittedEvents?: string[] }).submittedEvents ?? [];
+    const event = events.length > 0 ? events[events.length - 1] : "(none)";
+    if (event !== c.expect.native_event) mismatches.push(`native_event: expected ${c.expect.native_event}, got ${event}`);
   }
   // #1016: forward-compatible grounding assertion. The recorded source tree
   // is committed in `replayRunReview` so when the production source-verifier
@@ -426,7 +442,7 @@ async function replayRunReview(c: GoldenCase): Promise<CaseScore> {
     };
     const findings = artifact.findings ?? [];
     const api = new MinimalPublishApi(String(pr.head_sha));
-    await publishReview(
+    const pub = await publishReview(
       {
         mode: "review_verdict",
         reviewMarkdown: result.outputs.reviewMarkdown,
@@ -459,6 +475,7 @@ async function replayRunReview(c: GoldenCase): Promise<CaseScore> {
     const published = {
       reviewBody: readFileSync(join(runDir, "review-body.md"), "utf8"),
       submitted: api.submitted.map((r) => r.body),
+      submittedEvents: api.submitted.map((r) => r.event),
       comments: api.comments,
       // #1017 follow-up: the actual sink `formatReviewStepOutputs` writes
       // `review-markdown`/`findings` into. Missing when the harness has
