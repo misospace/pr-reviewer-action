@@ -13,7 +13,9 @@ import {
   extraHeadersForEnv,
   parseExtraHeaders,
 } from "../src/transport/headers.js";
-import { runReview } from "../src/run/review.js";
+import { configuredKnownSecrets, runReview } from "../src/run/review.js";
+import { parseVerdictResponse } from "../src/model/verdict.js";
+import { KNOWN_SECRET_REDACTED } from "../src/context/redact.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { startMockServer } from "./helpers.js";
 
@@ -74,6 +76,17 @@ function verdictBody(extra: Record<string, unknown> = {}): string {
   });
 }
 
+/** Every artifact a full review run persisted, keyed by its run-dir-relative
+ * name, so a test can assert on one specific artifact (`tool-harness.json`)
+ * without re-globbing a directory the helper has already cleaned up. */
+function readArtifactMap(dir: string): Record<string, string> {
+  const files: Record<string, string> = {};
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isFile()) files[entry.name] = readFileSync(join(dir, entry.name), "utf8");
+  }
+  return files;
+}
+
 /** Every artifact a full review run persisted, as one string, so a test
  * asserts the canary is absent from ALL of them at once (not from a
  * hand-picked few). */
@@ -90,7 +103,8 @@ function readAllArtifacts(dir: string): string {
 async function runAndCollect(
   handler: (res: import("node:http").ServerResponse) => void,
   inputs: Record<string, string>,
-): Promise<{ artifacts: string; errorLog: string[]; summary: string; response: string; output: Record<string, unknown> }> {
+  env: Record<string, string> = {},
+): Promise<{ artifacts: string; files: Record<string, string>; errorLog: string[]; summary: string; response: string; output: Record<string, unknown> }> {
   const server = await startMockServer((_req, _body, res) => handler(res));
   const runDir = mkdtempSync(join(tmpdir(), "v3-extra-headers-"));
   const errorLog: string[] = [];
@@ -99,6 +113,7 @@ async function runAndCollect(
       env: {
         GITHUB_OUTPUT: join(runDir, "gh-output.txt"),
         GITHUB_STEP_SUMMARY: join(runDir, "step-summary.md"),
+        ...env,
       },
       inputs: {
         "github-token": "tok",
@@ -122,6 +137,7 @@ async function runAndCollect(
     });
     return {
       artifacts: readAllArtifacts(runDir),
+      files: readArtifactMap(runDir),
       errorLog,
       summary: readFileSync(join(runDir, "step-summary.md"), "utf8"),
       response: readFileSync(join(runDir, "ai-response.primary.json"), "utf8"),
@@ -602,4 +618,150 @@ test("#252 boundary: a HOSTILE reflected value (fence-breaking residue around th
   assert.equal(persisted.model, "m");
   assert.equal(JSON.parse(persisted.choices[0]!.message.content).verdict, "approve");
   assert.equal(run.output.verdict, "approve");
+});
+
+test("#1094 REPRO: the NATIVE-LOOP success path persists a PROJECTION — a gateway echo reaches no artifact at all", async () => {
+  // #252 boundary: the hostile body itself, on the one path that used to write
+  // it verbatim. A gateway answers the native loop's verdict turn with a VALID
+  // verdict envelope that quotes the configured header VALUE back in the
+  // metadata the verdict parser never reads. Nothing may reach disk — the echo
+  // is DROPPED, not masked — and the reuse fast path must still produce the
+  // review's verdict from the projected artifact.
+  // One echo carries the characters JSON escapes, so the escaped-form assertion
+  // below is load-bearing (the shared `CANARY` has no `"` or `\`, so its
+  // escaped form IS the canary).
+  const ESCAPED_CANARY = 'gw-abc"def\\ghi';
+  const scripted = [
+    // 1: the loop turn, one read-only tool call (no subprocess, no network).
+    { choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "list_tree", arguments: "{}" } }] } }] },
+    // 2: the loop turn that issues no tool calls and closes the round.
+    { choices: [{ message: { content: "inspected the tree" } }] },
+    // 3: the in-conversation verdict turn — valid verdict, echoed canaries.
+    {
+      id: `chatcmpl-${CANARY}`,
+      object: "chat.completion",
+      model: `gpt-echo-${CANARY}`,
+      system_fingerprint: `fp_${CANARY} ${ESCAPED_CANARY}`,
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: JSON.stringify({ verdict: "approve", review_markdown: "## Review\nLooks fine.", findings: [] }) },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      x_gateway_audit: { credential: CANARY },
+    },
+  ];
+  let requests = 0;
+  const run = await runAndCollect((res) => {
+    const body = scripted[requests++] ?? scripted[scripted.length - 1];
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(body));
+  }, {
+    "ai-extra-headers": `X-Gateway-Credential: ${CANARY}`,
+    "tool-mode": "native_loop",
+    // The PR fixture carries no `head.repo`, so fork derivation fails closed
+    // to "fork" and the native loop is gated off unless the test says so.
+  }, { IS_FORK_PR: "false" });
+
+  // The echo is gone from EVERY persisted artifact, in the raw AND the
+  // JSON-escaped form (the artifact is JSON, so an escaped copy is still the
+  // secret — JSON-decoding the file recovers it).
+  const canaries = [CANARY, ESCAPED_CANARY];
+  for (const [label, surface] of [["artifacts", run.artifacts], ["summary", run.summary], ["errorLog", run.errorLog.join("\n")], ["response", run.response]] as const) {
+    for (const canary of canaries) {
+      assert.equal(surface.includes(canary), false, `${label} leaked ${canary}`);
+      assert.equal(surface.includes(JSON.stringify(canary).slice(1, -1)), false, `${label} leaked the escaped form of ${canary}`);
+    }
+  }
+
+  // The run still reviewed, through the reuse fast path: the harness verdict
+  // was accepted and the separate review call was skipped (3 model requests).
+  const harness = JSON.parse(run.files["tool-harness.json"] ?? "{}") as { native_loop_verdict_produced?: boolean; native_loop_verdict_status?: string };
+  assert.equal(harness.native_loop_verdict_produced, true);
+  assert.equal(harness.native_loop_verdict_status, "accepted");
+  assert.equal(requests, 3, "the separate review call must be skipped by the reuse path");
+  assert.equal(run.output.verdict, "approve");
+  // The persisted artifact is the projection: the gateway metadata is GONE.
+  const persisted = JSON.parse(run.response) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(persisted).sort(), ["choices", "usage"]);
+  assert.equal(JSON.stringify(persisted).includes("system_fingerprint"), false);
+  assert.equal(JSON.stringify(persisted).includes("x_gateway_audit"), false);
+  assert.equal(JSON.parse(String((persisted.choices as { 0: { message: { content: string } } })[0].message.content)).verdict, "approve");
+});
+
+test("#1094: a canary embedded in a native-loop VERDICT BODY reaches no artifact, log, or summary (reachable failure direction)", async () => {
+  // #252 boundary, the failure direction — and honestly scoped: this pins the
+  // HARNESS-side mask, not the projection (it still passes with the raw-body
+  // write restored). The canary is not in gateway metadata here, it is inside
+  // the verdict CONTENT the model was scripted to return — here as an invalid
+  // verdict value, so the body fails the verdict contract and the run falls
+  // back to the standard review call. Worth pinning because it also proves the
+  // reuse parse is never reached with such a body: the harness rejects it
+  // first, so nothing the projection carries matters on this path.
+  // The parse message embeds the model-controlled value (`got '<value>'`), so
+  // this is where a configured header VALUE could reappear in `errorLog`, in
+  // the persisted response artifact, and from there in the step summary.
+  const scripted = [
+    { choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "list_tree", arguments: "{}" } }] } }] },
+    { choices: [{ message: { content: "inspected the tree" } }] },
+    { choices: [{ message: { content: JSON.stringify({ verdict: CANARY, review_markdown: "## Review\nLooks fine." }) } }], finish_reason: "stop" },
+    verdictBody(),
+  ];
+  let requests = 0;
+  const run = await runAndCollect((res) => {
+    const body = scripted[requests++] ?? scripted[scripted.length - 1];
+    res.setHeader("Content-Type", "application/json");
+    res.end(typeof body === "string" ? body : JSON.stringify(body));
+  }, {
+    "ai-extra-headers": `X-Gateway-Credential: ${CANARY}`,
+    "tool-mode": "native_loop",
+  }, { IS_FORK_PR: "false" });
+
+  const escapedCanary = JSON.stringify(CANARY).slice(1, -1);
+  for (const [label, surface] of [["artifacts", run.artifacts], ["summary", run.summary], ["errorLog", run.errorLog.join("\n")]] as const) {
+    assert.equal(surface.includes(CANARY), false, `${label} leaked the canary`);
+    assert.equal(surface.includes(escapedCanary), false, `${label} leaked the escaped canary`);
+  }
+  // The failure is still diagnosable (masked, not stripped) and the review
+  // still completed through the standard call.
+  const harness = JSON.parse(run.files["tool-harness.json"] ?? "{}") as {
+    native_loop_verdict_status?: string;
+    native_loop_verdict_reason?: string;
+    native_loop_verdict_error?: string;
+  };
+  assert.equal(harness.native_loop_verdict_status, "fallback");
+  assert.equal(harness.native_loop_verdict_reason, "parse");
+  assert.match(String(harness.native_loop_verdict_error), /Expected verdict to be 'approve' or 'request_changes'/);
+  assert.ok(String(harness.native_loop_verdict_error).includes(KNOWN_SECRET_REDACTED), String(harness.native_loop_verdict_error));
+  assert.equal(run.output.verdict, "approve");
+});
+
+test("#1094: configuredKnownSecrets merges API keys + every configured header VALUE (deduped, longest-first), and masks a hostile parse message", () => {
+  // What this pins, precisely: the LIST the native-loop reuse parse
+  // (`src/run/review.ts`, both the primary and smart sites) masks against, and
+  // that a parse failure over hostile body text is clean with it. It does NOT
+  // pin that both call sites pass this list — that wiring is unreachable by
+  // construction from a black-box run: the harness writes the artifact only
+  // when the verdict was ACCEPTED, and an accepted verdict re-parses, so the
+  // reuse parse's failure branch fires only on a tampered/corrupted artifact.
+  // Driving it end-to-end would need an injectable parse seam, which this
+  // change did not add. Primary path masked API keys only before; both sites
+  // now go through this one helper.
+  const env = { AI_API_KEY: "sk-not-a-real-key-0000", AI_EXTRA_HEADERS: `X-Gateway-Credential: ${CANARY}\nX-Team-Id: platform` };
+  const knownSecrets = configuredKnownSecrets(env as never, { primary: {}, smart: {}, fallback: {} } as never);
+  assert.ok(knownSecrets.includes(CANARY), "the reuse parse must mask configured header values");
+  assert.ok(knownSecrets.includes("platform"), "every configured header value is a known secret");
+  assert.ok(knownSecrets.includes("sk-not-a-real-key-0000"), "the route-bound key is still masked");
+  assert.deepEqual(knownSecrets, [...new Set(knownSecrets)], "the merged list is deduped");
+  assert.equal(knownSecrets[0]!.length >= knownSecrets[knownSecrets.length - 1]!.length, true, "sorted longest-first");
+  const hostile = { choices: [{ message: { content: JSON.stringify({ verdict: CANARY, review_markdown: "## Review\nLooks fine." }) } }] };
+  let thrown = "";
+  try {
+    parseVerdictResponse(hostile, knownSecrets);
+  } catch (error) {
+    thrown = error instanceof Error ? error.message : String(error);
+  }
+  assert.match(thrown, /Expected verdict to be 'approve' or 'request_changes'/);
+  assert.equal(thrown.includes(CANARY), false, thrown);
+  assert.ok(thrown.includes(KNOWN_SECRET_REDACTED), thrown);
 });

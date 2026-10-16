@@ -445,23 +445,24 @@ export function maskKnownSecrets(text: string, secrets: readonly (string | null 
  * serialized bytes would miss it entirely, and a match on a structural
  * token (`": "`) would corrupt the document.
  *
- * `depth` is an internal recursion bound: at the cap the subtree is masked in
- * one pass over its own serialized form instead (still no raw value survives),
- * so a pathologically nested body degrades in shape rather than leaking or
- * blowing the stack. */
+ * `depth` is an internal recursion bound that keeps a pathologically nested
+ * body from blowing the stack. At the cap the subtree FAILS CLOSED: it is
+ * replaced by `KNOWN_SECRET_REDACTED` rather than serialized. Serializing it
+ * and masking the result — the earlier form — was wrong for the same reason
+ * above: `JSON.stringify` escapes `"` and `\`, so a configured value carrying
+ * either (`gw-abc"def`) came out as `gw-abc\"def`, the literal substring never
+ * matched, and JSON-decoding the artifact recovered the secret. It also had
+ * the flat-text pass's second hazard — a short configured key can match a
+ * structural token of the serialization and corrupt the document — and its
+ * cyclic `catch` returned the subtree RAW, unmasked, which is precisely the
+ * fail-open this module must never take. Losing a >32-level subtree's contents
+ * from one diagnostic artifact is an acceptable cost next to any of those.
+ */
 const MAX_MASK_DEPTH = 32;
 
 export function maskKnownSecretsDeep(value: unknown, secrets: readonly (string | null | undefined)[] = [], depth = 0): unknown {
   if (typeof value === "string") return maskKnownSecrets(value, secrets);
-  if (depth >= MAX_MASK_DEPTH) {
-    try {
-      return maskKnownSecrets(JSON.stringify(value) ?? "", secrets);
-    } catch {
-      // Cyclic (impossible for a JSON-parsed body): nothing serialized, so
-      // nothing the masker could reach.
-      return value;
-    }
-  }
+  if (depth >= MAX_MASK_DEPTH) return KNOWN_SECRET_REDACTED;
   if (Array.isArray(value)) return value.map((item) => maskKnownSecretsDeep(item, secrets, depth + 1));
   if (typeof value === "object" && value !== null) {
     // `Object.fromEntries` (CreateDataPropertyOrThrow), NOT `out[key] = ...`:

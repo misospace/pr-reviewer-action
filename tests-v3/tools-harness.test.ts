@@ -3,11 +3,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { LoopContextError, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
+import { LoopContextError, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, reusableVerdictEnvelope, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
 import { OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
 import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
 import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
+import { parseVerdictResponse } from "../src/model/verdict.js";
 import { reassembleSse } from "../src/transport/sse.js";
 import { normalizedToOpenAiChat } from "../src/run/stages.js";
 import { prioritizeDiff } from "../src/corpus/diff-priority.js";
@@ -130,6 +131,76 @@ test("the loop gathers evidence and the in-conversation verdict is produced and 
   // The verdict turn carries the corpus, not the planning context: the harness
   // findings section was substituted and the duplicate section deduped.
   assert.ok(fs.existsSync(path.join(root, "tool-harness.md")));
+});
+
+test("#1094: the accepted-verdict artifact is a PROJECTION — a gateway echo of a configured header VALUE never reaches disk", async () => {
+  // #252: the hostile shape itself, not a benign stand-in. A gateway answers
+  // HTTP 200 with a VALID verdict envelope and quotes the configured
+  // `ai-extra-headers` VALUE back in the metadata fields the verdict parser
+  // never reads — the exact reproduction for the artifact write.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  const CANARY = "gw-8f2a1c9d3b7e4a10";
+  // A second echo carrying the characters JSON escapes, so the "escaped form"
+  // assertions below are load-bearing rather than a tautology (`CANARY` has no
+  // `"` or `\`, so its JSON-escaped form IS the canary).
+  const ESCAPED_CANARY = 'gw-abc"def\\ghi';
+  const verdictBody = {
+    id: `chatcmpl-${CANARY}`,
+    object: "chat.completion",
+    model: `gpt-echo-${CANARY}`,
+    system_fingerprint: `fp_${CANARY} ${ESCAPED_CANARY}`,
+    choices: [{
+      index: 0,
+      message: { role: "assistant", content: JSON.stringify({ verdict: "approve", review_markdown: "## Review\nLooks fine.", findings: [] }) },
+      finish_reason: "stop",
+      logprobs: { token_echo: CANARY },
+    }],
+    usage: { prompt_tokens: 11, completion_tokens: 5, total_tokens: 16, prompt_tokens_details: { cached_tokens: 0, echoed: CANARY } },
+    x_gateway_audit: { credential: CANARY },
+  };
+  const scripted = [openAiCall("c1", "read_file", '{"path":"src.ts"}'), openAiText("evidence gathered"), verdictBody];
+  let transportCalls = 0;
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_EXTRA_HEADERS: `X-Gateway-Credential: ${CANARY}` },
+    transport: async () => scripted[transportCalls++],
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+
+  // Asserted on the artifact BYTES, in both the raw and the JSON-escaped form
+  // of each canary, so no future escaping/masking change can pass this.
+  const bytes = fs.readFileSync(path.join(root, "ai-response.primary.json"), "utf8");
+  for (const canary of [CANARY, ESCAPED_CANARY]) {
+    assert.equal(bytes.includes(canary), false, bytes);
+    assert.equal(bytes.includes(JSON.stringify(canary).slice(1, -1)), false, `escaped form survived: ${bytes}`);
+  }
+
+  // The CONTRACT survives byte-for-byte in behavior: the reuse parse in
+  // `runReview` reads this artifact back as the verdict.
+  const persisted = JSON.parse(bytes) as Record<string, unknown>;
+  const reuse = parseVerdictResponse(persisted);
+  const direct = parseVerdictResponse(JSON.parse(JSON.stringify(verdictBody)));
+  assert.equal(reuse.verdict, direct.verdict);
+  assert.equal(reuse.reviewMarkdown, direct.reviewMarkdown);
+  assert.deepEqual(reuse.findings, direct.findings);
+  assert.equal(reuse.smartReviewRequested, direct.smartReviewRequested);
+  // The projected fields are the parser's, not the gateway's.
+  assert.deepEqual(Object.keys(persisted).sort(), ["choices", "usage"]);
+  const choice = (persisted.choices as Record<string, unknown>[])[0]!;
+  assert.deepEqual(Object.keys(choice).sort(), ["finish_reason", "message"]);
+  assert.equal((choice.message as Record<string, unknown>).role, undefined);
+  assert.equal(JSON.parse(String((choice.message as Record<string, unknown>).content)).verdict, "approve");
+  // NUMERIC counters survive (the step summary reports prompt/completion
+  // tokens from this artifact); the non-numeric `usage` members are dropped,
+  // so the echoed credential inside `usage.prompt_tokens_details` cannot ride
+  // in on the "keep the counters" rule.
+  assert.deepEqual(persisted.usage, { prompt_tokens: 11, completion_tokens: 5, total_tokens: 16 });
+  assert.equal(JSON.stringify(persisted).includes("prompt_tokens_details"), false);
+  // The dropped metadata is GONE, not masked.
+  for (const dropped of ["id", "object", "model", "system_fingerprint", "logprobs", "x_gateway_audit", "cached_tokens"]) {
+    assert.equal(JSON.stringify(persisted).includes(dropped), false, `${dropped} survived the projection`);
+  }
 });
 
 test("an unusable verdict body leaves the produced flag unset so the standard review synthesizes it", async () => {
@@ -324,7 +395,40 @@ test("harness-findings section substitution and tool-request normalization helpe
     tool: "git_grep",
     args: { pattern: "x", max_results: 5 },
   });
-  assert.deepEqual(normalizeToolRequest("junk"), { tool: "", args: {} });
+  assert.deepEqual(normalizeToolRequest("junk"), { tool: "", args: {}
+});
+
+test("#1094: reusableVerdictEnvelope keeps the finish reason where the parser reads it, and drops a numeric secret's echo", () => {
+  // `finishReasonOf` reads `choices[0].finish_reason` FIRST and falls back to
+  // the TOP-LEVEL `stop_reason`. A projection that parked the fallback inside
+  // `choices[0]` would hand the next parser caller a `null` — silently dropping
+  // the truncation suffix — while claiming to carry the reason. Fed the exact
+  // shape that takes the fallback branch (`finish_reason: null`, top-level
+  // `stop_reason`), on both provider shapes.
+  const openAi = { choices: [{ index: 0, message: { content: "x" }, finish_reason: null }], stop_reason: "length" };
+  const openAiProjected = reusableVerdictEnvelope(openAi);
+  assert.equal(openAiProjected.stop_reason, "length");
+  assert.equal(Object.keys(openAiProjected).sort().join(","), "choices,stop_reason");
+  const choice = (openAiProjected.choices as Record<string, unknown>[])[0]!;
+  assert.equal("stop_reason" in choice, false, "the fallback must not be parked inside choices[0]");
+  assert.equal(choice.finish_reason, undefined);
+  // Same for the Anthropic shape, where `stop_reason` is already the root.
+  const anthropic = { content: [{ type: "text", text: "x" }], stop_reason: "length" };
+  const anthropicProjected = reusableVerdictEnvelope(anthropic);
+  assert.equal(anthropicProjected.stop_reason, "length");
+  assert.deepEqual(Object.keys(anthropicProjected).sort(), ["content", "stop_reason"]);
+  // …and `choices[0].finish_reason` still wins when the provider sent it.
+  const withFinish = reusableVerdictEnvelope({ choices: [{ message: { content: "x" }, finish_reason: "stop" }], stop_reason: "length" });
+  assert.deepEqual(Object.keys(withFinish).sort(), ["choices"]);
+  assert.equal((withFinish.choices as Record<string, unknown>[])[0]!.finish_reason, "stop");
+
+  // A PURELY NUMERIC configured value is a secret like any other (the masker
+  // masks one character too), so a counter the masker would touch is DROPPED
+  // rather than carried verbatim.
+  const numericSecret = reusableVerdictEnvelope({ usage: { prompt_tokens: 7, completion_tokens: 12 }, choices: [{ message: { content: "x" } }] }, ["7"]);
+  assert.equal(JSON.stringify(numericSecret).includes("7"), false, JSON.stringify(numericSecret));
+  assert.deepEqual(numericSecret.usage, { completion_tokens: 12 });
+});
 });
 
 test("planner leads with PR metadata and linked issues and lists what it already holds", () => {

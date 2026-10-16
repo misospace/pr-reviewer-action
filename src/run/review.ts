@@ -1982,6 +1982,21 @@ function configuredExtraHeaderValues(env: StageEnv): string[] {
   return Object.values(extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "") ?? {});
 }
 
+/** #1094 review finding 2: the ONE known-secret list every persisted
+ * `ai-response.<tier>.json` re-parse masks against — the API keys
+ * (`configuredApiKeys`) plus the configured extra-header VALUES
+ * (`configuredExtraHeaderValues`), deduped and sorted LONGEST FIRST so a value
+ * contained in a longer one is masked whole rather than leaving its tail
+ * behind. The primary native-loop reuse parse used to mask API keys only: a
+ * gateway that echoed a configured header value into the persisted envelope
+ * got it back verbatim in that parse's thrown messages (`errorLog`, and from
+ * there the summary). Both reuse parses now go through this one helper, so a
+ * value the writing lane masked is never unmasked by a later re-parse. */
+export function configuredKnownSecrets(env: StageEnv, profiles: TierProfiles): string[] {
+  return [...new Set([...configuredApiKeys(env.AI_API_KEY, profiles), ...configuredExtraHeaderValues(env)])]
+    .sort((a, b) => b.length - a.length);
+}
+
 /** review.sh: the primary call (native-verdict fast path, then the standard
  * corpus review) and the fallback on total primary failure. */
 async function producePrimaryReview(input: ReviewCallInput & {
@@ -2009,8 +2024,11 @@ async function producePrimaryReview(input: ReviewCallInput & {
       log("native_loop produced an in-conversation verdict; using it and skipping the separate review call");
       try {
         // The native loop calls the route-bound AI_* environment, which can
-        // differ from an explicit primary profile override, so mask every key.
-        const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")), configuredApiKeys(env.AI_API_KEY, profiles));
+        // differ from an explicit primary profile override, so mask every key
+        // AND every configured extra-header value (#1094: the same list the
+        // writing lane masked the persisted envelope against — a gateway can
+        // quote either straight back into this re-parse's thrown messages).
+        const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")), configuredKnownSecrets(env, profiles));
         const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
         ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
         return {
@@ -2169,7 +2187,7 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
           // #1037: the same masking as the writing lane, so a value the
           // writing lane masked in this artifact cannot reappear in the
           // messages thrown from this re-parse.
-          const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")), [...configuredApiKeys(env.AI_API_KEY, profiles), ...configuredExtraHeaderValues(env)]);
+          const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")), configuredKnownSecrets(env, profiles));
           const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
           ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
           log("Smart tool harness produced a verdict");

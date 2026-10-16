@@ -661,6 +661,32 @@ test("#1037: maskKnownSecretsDeep preserves JSON structure — keys, array order
   assert.equal(JSON.stringify(masked), JSON.stringify(body));
 });
 
+test("#1094: maskKnownSecretsDeep FAILS CLOSED at the depth cap — an escaped secret is not serialized back", () => {
+  // #252 boundary: the hostile shape itself. A configured value carrying `"`
+  // or `\` is JSON-ESCAPED inside the serialized subtree, so the earlier
+  // serialize-then-mask fallback never matched the literal substring and
+  // JSON-decoding the artifact recovered the secret. Both characters are fed
+  // here; a benign stand-in would pass with that fallback in place.
+  const QUOTED = 'gw-abc"def';
+  const BACKSLASHED = "gw-abc\\def";
+  let deep: Record<string, unknown> = { quote: QUOTED, slash: BACKSLASHED };
+  // MAX_MASK_DEPTH is 32: nest well past it from the top-level body.
+  for (let i = 0; i < 40; i++) deep = { nested: deep };
+  const masked = maskKnownSecretsDeep(deep, [QUOTED, BACKSLASHED]) as unknown;
+  const serialized = JSON.stringify(masked);
+  for (const secret of [QUOTED, BACKSLASHED]) {
+    assert.equal(serialized.includes(secret), false, `raw secret survived: ${serialized}`);
+    assert.equal(serialized.includes(JSON.stringify(secret).slice(1, -1)), false, `escaped secret survived: ${serialized}`);
+  }
+  // Fail closed: the over-deep subtree is replaced by the marker, not walked.
+  assert.ok(serialized.includes(KNOWN_SECRET_REDACTED), `expected the fail-closed marker: ${serialized}`);
+  // Nothing below the cap changed behavior: a shallow body still masks per leaf
+  // and preserves structure.
+  const shallow = { a: [`x ${QUOTED}`, { b: QUOTED }], n: 1 };
+  const shallowMasked = maskKnownSecretsDeep(shallow, [QUOTED, BACKSLASHED]) as Record<string, unknown>;
+  assert.deepEqual(shallowMasked, { a: [`x ${KNOWN_SECRET_REDACTED}`, { b: KNOWN_SECRET_REDACTED }], n: 1 });
+});
+
 test("#252 boundary: maskKnownSecretsDeep fed a body with an OWN __proto__ key keeps it an own property and never touches Object.prototype", () => {
   // The hostile key ITSELF, not a benign stand-in: JSON.parse produces an own
   // `__proto__` data property, and a naive `out[key] = ...` rebuild invokes the
