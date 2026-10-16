@@ -1,15 +1,35 @@
-name: Deploy site to GitHub Pages
+name: Site — validate and deploy to GitHub Pages
+
 on:
   push:
     branches: [main]
-    paths: ["site/**"]
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yaml"
+  pull_request:
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yaml"
   workflow_dispatch:
+
 permissions:
   contents: read
-  pages: write
-  id-token: ***
+
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: Install and production-build site/
+        run: npm ci --no-audit --no-fund && npm run build
+        working-directory: site
   build:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,11 +37,15 @@ jobs:
         with:
           path: site
   deploy:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4

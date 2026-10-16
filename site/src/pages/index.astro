@@ -46,6 +46,7 @@ on: <span class="c-hi">[pull_request]</span>
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
   review:
@@ -56,8 +57,8 @@ jobs:
           fetch-depth: <span class="c-hi">0</span>
       - uses: <span class="c-hi">misospace/pr-reviewer-action@v3</span>
         with:
-          api-base: <span class="c-link">https://your-llama-box.local/v1</span>
-          model: <span class="c-hi">qwen3-coder-30b</span></pre>
+          ai-base-url: <span class="c-link">https://your-llama-box.local/v1</span>
+          ai-model: <span class="c-hi">qwen3-coder-30b</span></pre>
     </div>
   </section>
 </Base>
