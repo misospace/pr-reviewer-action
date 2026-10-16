@@ -1,5 +1,6 @@
 import type { ActionContract } from "./contract.js";
 import { BOOLEAN_INPUTS, ENUM_INPUTS, FLOAT_INPUTS, INTEGER_INPUTS, POSITIVE_INTEGER_INPUTS, SECRET_INPUTS } from "./schema.js";
+import { parseExtraHeaders } from "../transport/headers.js";
 import { isRuntimeConfig, isSecretValue, secretValue, type RuntimeConfig } from "./types.js";
 
 type MutableConfig = Record<string, string | number | boolean | ReturnType<typeof secretValue>>;
@@ -128,6 +129,16 @@ export function loadConfig(contract: ActionContract, raw: RawInputs): RuntimeCon
         warnRejectedEffort(input.id);
         value = "";
       }
+    } else if (input.id === "ai-extra-headers" && text !== "") {
+      // #1037: extra provider headers are parsed and validated HERE so a
+      // malformed or transport-colliding set fails at startup with a clear
+      // error, never midway through a review (and never silently overrides
+      // auth/framing headers). Unlike the reasoning-effort drop rule, this
+      // input guards a transport invariant, so a bad value throws like every
+      // other typed input rather than degrading to unset. The raw text stays
+      // the config value; the wire consumers re-parse it with the same
+      // shared parser (`src/transport/headers.ts`).
+      parseExtraHeaders(text);
     }
     const allowed = ENUM_INPUTS[input.id];
     if (allowed && text !== "" && !allowed.includes(text)) throw new Error(`Input '${input.id}' must be one of: ${allowed.join(", ")}`);

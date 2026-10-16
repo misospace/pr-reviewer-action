@@ -39,7 +39,7 @@ test("current canonical contract validates and maps every input once", () => {
     assert.ok(Object.hasOwn(config, toCamelCase(input.id)), input.id);
     assert.equal(toCamelCase(input.id).includes("_"), false);
   }
-  assert.equal(contract.inputs.length, 159);
+  assert.equal(contract.inputs.length, 160);
   assert.equal(Object.hasOwn(config, "ai_base_url"), false);
 });
 
@@ -487,4 +487,37 @@ test("a runner-expression default is never used as a value outside the runner", 
   const contract = validateContract(V3_CONTRACT);
   const config = loadConfig(contract, { "ai-base-url": "https://example.invalid", "ai-model": "m" });
   assert.ok(isSecretValue(config.githubToken) && !config.githubToken.present);
+});
+
+// ── #1037: ai-extra-headers startup validation ────────────────────────────
+
+test("#1037: ai-extra-headers defaults empty and a valid set is preserved verbatim", () => {
+  const base = { "ai-base-url": "https://llm.example", "ai-model": "m" };
+  const unset = loadConfig(contract, base);
+  assert.equal(unset.aiExtraHeaders, "");
+  const multi = "x-litellm-session-id: run-42\nX-Team-Id: platform";
+  const config = loadConfig(contract, { ...base, "ai-extra-headers": multi });
+  assert.equal(config.aiExtraHeaders, multi);
+});
+
+test("#1037: malformed or transport-colliding ai-extra-headers fails at config load, not mid-review", () => {
+  const base = { "ai-base-url": "https://llm.example", "ai-model": "m" };
+  for (const bad of [
+    "x-api-key: sk-evil",
+    "Authorization: Bearer evil",
+    "ANTHROPIC-VERSION: 2099-01-01",
+    "Content-Type: text/plain",
+    "Host: attacker.example",
+    "Content-Length: 0",
+    "no colon on this line",
+    "Bad Name: v",
+  ]) {
+    assert.throws(
+      () => loadConfig(contract, { ...base, "ai-extra-headers": bad }),
+      (error: unknown) => error instanceof Error
+        && /ai-extra-headers/.test(error.message)
+        && !error.message.includes("sk-evil"),
+      bad,
+    );
+  }
 });

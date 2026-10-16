@@ -21,6 +21,9 @@ export interface ChatRequestInput {
   maxResponseBytes?: number;
   /** Backoff sleep, injectable for tests; defaults to a setTimeout wait. */
   sleep?: (ms: number) => Promise<void>;
+  /** #1037 (`ai-extra-headers`): carried verbatim to every attempt of this
+   * request, including clamp/strip retries (they spread this input). */
+  extraHeaders?: Readonly<Record<string, string>>;
 }
 
 /** #1047: the structured-output surface a strip retry removed from the wire:
@@ -287,6 +290,7 @@ async function runChatRequestOnce(input: ChatRequestInput): Promise<ChatRequestO
       connectTimeoutSec: input.connectTimeoutSec,
       stream: streaming,
       ...(input.maxResponseBytes !== undefined ? { maxResponseBytes: input.maxResponseBytes } : {}),
+      ...(input.extraHeaders !== undefined ? { extraHeaders: input.extraHeaders } : {}),
     });
     if (!streaming) {
       let parsed: unknown;

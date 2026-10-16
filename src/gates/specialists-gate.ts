@@ -19,6 +19,7 @@ import {
 import { DEFAULT_SPECIALIST_MAX_TOKENS, MAX_INPUT_BYTES, SPECIALIST_ROLES_ORDER, type SpecialistArtifact } from "../specialists/types.js";
 import { guardedWrite, resolveArtifactPath, resolveRoot } from "./guarded-write.js";
 import { specialistRequestFn } from "./specialist-transport.js";
+import { parseExtraHeaders } from "../transport/headers.js";
 import { resolveSpecialistProfiles, anthropicJsonObjectsPromptOnlyWarning, tierResponseFormat } from "../routing/tiers.js";
 
 /**
@@ -424,6 +425,8 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
     baseUrl,
     apiKey,
     anthropicVersion: envStr(env, "ANTHROPIC_VERSION", "2023-06-01"),
+    // #1037: correlation headers ride specialist calls too.
+    extraHeaders: parseExtraHeaders(envStr(env, "AI_EXTRA_HEADERS")),
   });
 
   const timers = cancellableSleep();

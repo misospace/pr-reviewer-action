@@ -4,6 +4,9 @@ import type { IncomingMessage } from "node:http";
 
 export interface CapturedRequest {
   headers: http.IncomingHttpHeaders;
+  /** Raw on-the-wire header name/value pairs (#1037): `headers` lowercases
+   * names, so case-preservation assertions must read this instead. */
+  rawHeaders: string[];
   body: string;
 }
 
@@ -23,7 +26,7 @@ export function startMockServer(handler: (req: IncomingMessage, body: string, re
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", async () => {
       const body = Buffer.concat(chunks).toString("utf8");
-      requests.push({ headers: req.headers, body });
+      requests.push({ headers: req.headers, rawHeaders: req.rawHeaders, body });
       try {
         await handler(req, body, res);
       } catch (error) {

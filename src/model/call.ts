@@ -93,6 +93,9 @@ export interface TierProfile {
   /** #1047: the Anthropic endpoint opt-in for `output_config.format`
    * (verdict JSON schema). */
   anthropicStructuredOutputSupported: boolean;
+  /** #1037 (`ai-extra-headers`): operator headers merged into every request
+   * this tier makes (wire-validated at startup; absent/empty = unchanged). */
+  extraHeaders?: Readonly<Record<string, string>>;
 }
 
 export interface ModelCallContext {
@@ -209,6 +212,8 @@ export async function callModelTier(
       anthropicVersion: profile.anthropicVersion,
       requestTimeoutSec: profile.requestTimeoutSec,
       connectTimeoutSec: profile.connectTimeoutSec,
+      // #1037: the tier's operator headers ride every attempt of the tier.
+      ...(profile.extraHeaders !== undefined ? { extraHeaders: profile.extraHeaders } : {}),
     });
 
     if (outcome.status === "failure") {
@@ -373,6 +378,8 @@ export async function produceVerdict(
     anthropicVersion: profile.anthropicVersion,
     requestTimeoutSec: profile.requestTimeoutSec,
     connectTimeoutSec: profile.connectTimeoutSec,
+    // #1037: the tier's operator headers ride every attempt of the tier.
+    ...(profile.extraHeaders !== undefined ? { extraHeaders: profile.extraHeaders } : {}),
   }));
   let attempts = 1;
   let retried = false;
@@ -415,6 +422,8 @@ export async function produceVerdict(
       anthropicVersion: profile.anthropicVersion,
       requestTimeoutSec: profile.requestTimeoutSec,
       connectTimeoutSec: profile.connectTimeoutSec,
+      // #1037: the tier's operator headers ride every attempt of the tier.
+      ...(profile.extraHeaders !== undefined ? { extraHeaders: profile.extraHeaders } : {}),
     }));
     attempts++;
     finalBudgetRaisedTo = budgetRaisedTo ?? null;

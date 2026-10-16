@@ -112,6 +112,10 @@ inputs:
     required: false
     default: "2023-06-01"
     description: "Anthropic API version header used when ai_api_format or ai_fallback_api_format is anthropic"
+  - id: ai-extra-headers
+    required: false
+    default: ""
+    description: "Multi-line 'Name: value' pairs merged into every outbound AI provider request (primary, smart, fallback, and specialist lanes; both anthropic and openai formats), e.g. 'x-litellm-session-id: ${{ github.run_id }}' to group one run's calls in a proxy cost log. Header names are sent case-preserved; empty (the default) sends exactly the headers the action always sent. Malformed lines, control characters, duplicate names, and names colliding with the action's own transport headers (x-api-key, Authorization, anthropic-version, Content-Type, Host, Content-Length) are rejected at startup."
   - id: ai-fallback-base-url
     v2_id: ai_fallback_base_url
     required: false

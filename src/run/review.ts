@@ -21,6 +21,7 @@ import { loopContextLimits } from "../tools/harness.js";
 import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
+import { parseExtraHeaders } from "../transport/headers.js";
 import type { FetchLike } from "../platform/http.js";
 import { normalizePrIdentity } from "../platform/pr.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
@@ -806,6 +807,8 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
                 baseUrl: profiles.primary.baseUrl,
                 apiKey: profiles.primary.apiKey,
                 anthropicVersion: env.ANTHROPIC_VERSION ?? "2023-06-01",
+                // #1037: correlation headers ride specialist/pre-pass calls too.
+                extraHeaders: parseExtraHeaders(env.AI_EXTRA_HEADERS ?? ""),
               }),
             }
           : undefined,
@@ -1106,6 +1109,8 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
             baseUrl: profiles.primary.baseUrl,
             apiKey: profiles.primary.apiKey,
             anthropicVersion: env.ANTHROPIC_VERSION ?? "2023-06-01",
+            // #1037: correlation headers ride specialist/pre-pass calls too.
+            extraHeaders: parseExtraHeaders(env.AI_EXTRA_HEADERS ?? ""),
           }),
         });
       } catch (cause) {
@@ -1748,6 +1753,10 @@ function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | 
   const resolved = tier === "fallback" ? profiles.fallback : tier === "smart" ? profiles.smart : profiles.primary;
   const aiMaxTokens = Number(env.AI_MAX_TOKENS ?? "8192") || 8192;
   const temperatureRaw = env.AI_TEMPERATURE ?? "0.1";
+  // #1037: same operator headers on every lane; unset config parses to {}
+  // and the profile omits the field, keeping requests byte-identical.
+  const extraHeaders = parseExtraHeaders(env.AI_EXTRA_HEADERS ?? "");
+  const hasExtraHeaders = Object.keys(extraHeaders).length > 0;
   return {
     label: tier === "fallback" ? "Fallback" : tier === "smart" ? "Smart" : "Primary",
     baseUrl: resolved.baseUrl,
@@ -1772,6 +1781,7 @@ function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | 
     anthropicEffortSupported: resolved.anthropicEffortSupported,
     // #1047: the lane's own structured-output assertion, same per-lane rule.
     anthropicStructuredOutputSupported: resolved.anthropicStructuredOutputSupported,
+    ...(hasExtraHeaders ? { extraHeaders } : {}),
   };
 }
 

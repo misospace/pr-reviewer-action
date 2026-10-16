@@ -26,7 +26,10 @@ export interface SpecialistTransportConfig {
   baseUrl: string;
   apiKey: string;
   anthropicVersion: string;
-  /** Test seam: replaces the HTTP transport. */
+  /** #1037 (`ai-extra-headers`): operator correlation headers merged into
+   * every specialist request; empty/absent merges nothing. */
+  extraHeaders?: Readonly<Record<string, string>>;
+  /** Test seam: replaces HTTP transport. */
   runChat?: (input: ChatRequestInput) => Promise<ChatRequestOutcome>;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -92,8 +95,9 @@ export function specialistRequestFn(config: SpecialistTransportConfig): Speciali
         apiKey: config.apiKey,
         anthropicVersion: config.anthropicVersion,
         requestTimeoutSec: timeoutSec,
-        // curl --max-time bounds the whole attempt in v2, connect included.
+        // curl --max-time bounds whole attempt in v2, connect included.
         connectTimeoutSec: timeoutSec,
+        ...(config.extraHeaders !== undefined ? { extraHeaders: config.extraHeaders } : {}),
         ...(config.sleep !== undefined ? { sleep: config.sleep } : {}),
       });
     } catch (error) {

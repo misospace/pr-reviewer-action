@@ -24,7 +24,8 @@
       "ai-fallback-response-format",
       "ai-reasoning-effort",
       "ai-tokens-param",
-      "anthropic-version"
+      "anthropic-version",
+      "ai-extra-headers"
     ]
   },
   {

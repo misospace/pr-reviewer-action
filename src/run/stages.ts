@@ -45,6 +45,7 @@ import { runEvidenceProvidersPhase } from "../evidence/index.js";
 import { runToolHarness, type HarnessTransport } from "../tools/harness.js";
 import { runChatRequest } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
+import { parseExtraHeaders } from "../transport/headers.js";
 import type { NormalizedModelResponse, TransportWirePayload } from "../model/types.js";
 import type { TierBudgets } from "../corpus/budgets.js";
 import type { StageEnv } from "./env.js";
@@ -555,6 +556,9 @@ export function harnessTransportAdapter(env: StageEnv): HarnessTransport {
       anthropicVersion: env.ANTHROPIC_VERSION ?? "2023-06-01",
       requestTimeoutSec: Math.max(1, Math.trunc(timeoutSec)),
       connectTimeoutSec: Number(env.AI_CONNECT_TIMEOUT_SEC ?? "30") || 30,
+      // #1037: the tool-harness transport is a provider call like any other;
+      // unset config parses to {} and merges nothing (byte-identical).
+      extraHeaders: parseExtraHeaders(env.AI_EXTRA_HEADERS ?? ""),
     });
     // #846: carry the HTTP status and a redacted body excerpt (plus the
     // ai-api-format hint on a 404) instead of the bare "model endpoint

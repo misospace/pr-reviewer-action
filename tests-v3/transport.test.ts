@@ -1453,3 +1453,150 @@ test("#1047: the strip is strictly evidence-gated and once-per-request", async (
     await plain.close();
   }
 });
+
+// ── #1037: ai-extra-headers on the wire ───────────────────────────────────
+
+test("#1037: extra headers ride every request format with case-preserved names", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.end(JSON.stringify({ id: "1", choices: [{ message: { content: "hi" }, finish_reason: "stop" }] }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, messages: [] }),
+      apiKey: "sk-test",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+      extraHeaders: { "X-LiteLLM-Session-Id": "run-42", "x-team-id": "platform" },
+    });
+    assert.equal(outcome.status, "ok");
+    assert.equal(server.requests.length, 1);
+    assert.equal(server.requests[0]!.headers["x-litellm-session-id"], "run-42");
+    assert.equal(server.requests[0]!.headers["x-team-id"], "platform");
+    // Case preservation is asserted on the RAW wire names, not the
+    // Node-lowercased `headers` view.
+    const rawNames = server.requests[0]!.rawHeaders.filter((_v, i) => i % 2 === 0);
+    assert.ok(rawNames.includes("X-LiteLLM-Session-Id"), `raw names: ${rawNames.join(",")}`);
+    assert.ok(rawNames.includes("x-team-id"), `raw names: ${rawNames.join(",")}`);
+    // The action's own headers are untouched alongside the extras.
+    assert.equal(server.requests[0]!.headers.authorization, "Bearer sk-test");
+    assert.equal(server.requests[0]!.headers["content-type"], "application/json");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1037: anthropic format carries the extras next to x-api-key and the streamed Accept header", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.end(JSON.stringify({ id: "m1", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "anthropic",
+      payload: payload({ model: "m", stream: false, messages: [] }),
+      apiKey: "sk-ant",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+      extraHeaders: { "anthropic-beta": "pdfs-2024-05-04" },
+    });
+    assert.equal(outcome.status, "ok");
+    assert.equal(server.requests[0]!.headers["anthropic-beta"], "pdfs-2024-05-04");
+    assert.equal(server.requests[0]!.headers["x-api-key"], "sk-ant");
+    assert.equal(server.requests[0]!.headers["anthropic-version"], "2023-06-01");
+    assert.equal(server.requests[0]!.headers.authorization, undefined);
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1037: unset extraHeaders leaves the outbound header set without any extras", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.end(JSON.stringify({ id: "1", choices: [{ message: { content: "hi" }, finish_reason: "stop" }] }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, messages: [] }),
+      apiKey: "sk-test",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "ok");
+    const names = Object.keys(server.requests[0]!.headers);
+    assert.ok(!names.some((name) => name.includes("session") || name.includes("team") || name.includes("beta")),
+      `unexpected extra headers: ${names.join(",")}`);
+    assert.equal(server.requests[0]!.headers.authorization, "Bearer sk-test");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1037: extras survive the max_tokens clamp retry and the 429 retry on the same request", async () => {
+  let served = 0;
+  const server = await startMockServer((_req, body, res) => {
+    served++;
+    if (served === 1) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: { message: "max_tokens: 8000 > 4096, which is the maximum allowed number of output tokens" } }));
+      return;
+    }
+    assert.equal(JSON.parse(body).max_tokens, 4096);
+    res.statusCode = 200;
+    res.end(JSON.stringify({ id: "1", choices: [{ message: { content: "hi" }, finish_reason: "stop" }] }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, max_tokens: 8000, messages: [] }),
+      apiKey: "sk-test",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+      extraHeaders: { "x-litellm-trace-id": "trace-1" },
+    });
+    assert.equal(outcome.status, "ok");
+    assert.equal(server.requests.length, 2);
+    assert.equal(server.requests[0]!.headers["x-litellm-trace-id"], "trace-1");
+    assert.equal(server.requests[1]!.headers["x-litellm-trace-id"], "trace-1");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1037: a hand-built reserved header fails closed at the wire boundary before any request", async () => {
+  let served = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    served++;
+    res.statusCode = 200;
+    res.end("{}");
+  });
+  try {
+    await assert.rejects(
+      () => runHttpRequest({
+        baseUrl: server.url,
+        apiFormat: "anthropic",
+        bodyText: "{}",
+        apiKey: "sk-real",
+        anthropicVersion: "2023-06-01",
+        requestTimeoutSec: 5,
+        connectTimeoutSec: 5,
+        stream: false,
+        extraHeaders: { "X-API-Key": "attacker" },
+      }),
+      /collides with a transport header/,
+    );
+    assert.equal(served, 0, "no request may reach the endpoint with a colliding header");
+  } finally {
+    await server.close();
+  }
+});
