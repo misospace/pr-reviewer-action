@@ -120,8 +120,10 @@ test("#1093: hasUsableOwner distinguishes well-formed rows from unattributable o
 test("#1093: ForgejoAdapter.resolveTrustedOwner emits only bounded reason codes", async () => {
   const cases: Array<{ name: string; status: number | "fail"; payload: unknown; expected: string }> = [
     { name: "a 200 payload proves the login", status: 200, payload: { login: "octobot" }, expected: "user-login" },
-    { name: "an HTTP failure reports the status digits", status: 403, payload: {}, expected: "user-http-403" },
-    { name: "an unusable payload reports the payload reason", status: 200, payload: {}, expected: "user-payload" },
+    // #1093: a 403 on /user falls through to the reaction self-write probe,
+    // which reports its own bounded reason (the fake serves 403 to it too).
+    { name: "an HTTP failure falls through to the reaction probe", status: 403, payload: {}, expected: "reaction-http-403" },
+    { name: "an unusable /user payload falls through to the reaction probe", status: 200, payload: {}, expected: "reaction-payload" },
   ];
   for (const c of cases) {
     const fetchImpl: FetchLike = async () => {
@@ -140,7 +142,7 @@ test("#1093: ForgejoAdapter.resolveTrustedOwner emits only bounded reason codes"
   const failingAdapter = new ForgejoAdapter({
     repo: "o/r", prNumber: "9", baseUrl: "https://forgejo.test", token: TOKEN, fetchImpl: failing,
   });
-  assert.equal((await failingAdapter.resolveTrustedOwner()).reason, "user-transport");
+  assert.equal((await failingAdapter.resolveTrustedOwner()).reason, "reaction-transport");
 });
 
 test("#1093: ForgejoAdapter falls back to the audience owner id whenever /user cannot prove a login", async () => withOidcEnv(async () => {
@@ -167,26 +169,31 @@ test("#1093: ForgejoAdapter falls back to the audience owner id whenever /user c
   );
   assert.deepEqual(exchanges, [OIDC_REQUEST_URL], "the JWT exchange pins the configured audience verbatim");
 
-  // An unparseable audience never masks the /user failure reason.
+  // An unparseable audience falls through to the reaction self-write probe;
+  // this fake only answers the OIDC exchange and /user, so the probe's
+  // transport attempt reports the bounded transport reason.
   const unparseable = new ForgejoAdapter({
     repo: "o/r", prNumber: "9", baseUrl: "https://forgejo.test", authMethod: "authorized_integration",
     authorizedIntegrationAudience: "aud", fetchImpl,
   });
-  assert.deepEqual(await unparseable.resolveTrustedOwner(), { identity: null, reason: "user-http-403" });
+  assert.deepEqual(await unparseable.resolveTrustedOwner(), { identity: null, reason: "reaction-transport" });
 
-  // A transport failure with an unparseable audience stays user-transport.
+  // A transport failure with an unparseable audience stays reaction-transport.
   const failing: FetchLike = async () => { throw new Error("network down"); };
   const unreachable = new ForgejoAdapter({
     repo: "o/r", prNumber: "9", baseUrl: "https://forgejo.test", authMethod: "authorized_integration",
     authorizedIntegrationAudience: "aud", fetchImpl: failing,
   });
-  assert.deepEqual(await unreachable.resolveTrustedOwner(), { identity: null, reason: "user-transport" });
+  assert.deepEqual(await unreachable.resolveTrustedOwner(), { identity: null, reason: "reaction-transport" });
 
-  // Token mode never falls back to an audience (there is none): 403 stays 403.
+  // #1093: token mode never falls back to an audience (there is none). The
+  // 403 on /user now reaches the reaction probe; this fake only answers the
+  // OIDC exchange and /user and throws otherwise, so the probe's transport
+  // attempt reports the bounded transport reason and stays unproven.
   const tokenMode = new ForgejoAdapter({
     repo: "o/r", prNumber: "9", baseUrl: "https://forgejo.test", token: TOKEN, fetchImpl,
   });
-  assert.deepEqual(await tokenMode.resolveTrustedOwner(), { identity: null, reason: "user-http-403" });
+  assert.deepEqual(await tokenMode.resolveTrustedOwner(), { identity: null, reason: "reaction-transport" });
 }));
 
 test("#1093: FixtureAdapter.resolveTrustedOwner proves login or user-id kinds with bounded reasons", async () => {
@@ -206,3 +213,187 @@ test("#1093: FixtureAdapter.resolveTrustedOwner proves login or user-id kinds wi
   assert.equal(noneResolution.reason, "unavailable");
   assert.match(noneResolution.reason, REASON_RE);
 });
+
+// ---------------------------------------------------------------------------
+// #1093: the reaction self-write probe — a repo-scoped PAT (write:repository
+// + write:issue, no read:user) gets 403 on `GET /user`, so the final
+// fallback proves the authenticated DOER by creating (and best-effort
+// deleting) a reaction on the PR issue itself. The POST response's
+// `user.id` is the proof; the DELETE's fate never is.
+// ---------------------------------------------------------------------------
+
+interface ProbeCall { method: string; url: string; auth: string | null; body: string | null }
+
+function probeFetch(handlers: {
+  post?: { status: number; payload?: unknown } | "throw" | undefined;
+  del?: { status: number } | "throw" | undefined;
+}): { fetchImpl: FetchLike; calls: ProbeCall[] } {
+  const calls: ProbeCall[] = [];
+  const reactionsUrl = "https://forgejo.test/api/v1/repos/o/r/issues/9/reactions";
+  const fetchImpl: FetchLike = async (input, init) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    calls.push({
+      method,
+      url,
+      auth: new Headers(init?.headers).get("authorization"),
+      body: typeof init?.body === "string" ? init.body : null,
+    });
+    if (url.endsWith("/user")) return Response.json({}, { status: 403 });
+    if (url === reactionsUrl && method === "POST") {
+      if (handlers.post === "throw") throw new Error("network down");
+      return Response.json(handlers.post?.payload ?? { user: { id: 7 } }, { status: handlers.post?.status ?? 201 });
+    }
+    if (url === reactionsUrl && method === "DELETE") {
+      // A recurrence of the empty-body DELETE regression must fail here:
+      // the cleanup mirrors the POST's body so the forge deletes the doer's
+      // `eyes` reaction instead of binding an empty reaction type.
+      assert.equal(typeof init?.body === "string" ? init.body : null, '{"content":"eyes"}', "DELETE body mirrors the POST");
+      assert.equal(new Headers(init?.headers).get("content-type"), "application/json", "DELETE carries an explicit JSON content type");
+      if (handlers.del === "throw") throw new Error("network down");
+      return new Response(null, { status: handlers.del?.status ?? 204 });
+    }
+    throw new Error(`unexpected ${method} ${url}`);
+  };
+  return { fetchImpl, calls };
+}
+
+function captureStderr(): { lines: string[]; restore: () => void } {
+  const original = process.stderr.write;
+  const lines: string[] = [];
+  process.stderr.write = ((chunk: unknown): boolean => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  return { lines, restore: (): void => { process.stderr.write = original; } };
+}
+
+test("#1093: the reaction self-write probe proves a repo-scoped PAT identity (created 201 and duplicate 200)", async () => {
+  for (const postStatus of [201, 200]) {
+    const { fetchImpl, calls } = probeFetch({ post: { status: postStatus } });
+    const adapter = new ForgejoAdapter({
+      repo: "o/r", prNumber: "9", baseUrl: "https://forgejo.test", token: TOKEN, fetchImpl,
+    });
+    const resolution = await adapter.resolveTrustedOwner();
+    assert.deepEqual(
+      resolution,
+      { identity: { kind: "userId", userId: "7" }, reason: "reaction-self-attested" },
+      `POST ${postStatus} attests the doer identically`,
+    );
+    assert.deepEqual(
+      calls.map(({ method, url }) => [method, url]),
+      [
+        ["GET", "https://forgejo.test/api/v1/user"],
+        ["POST", "https://forgejo.test/api/v1/repos/o/r/issues/9/reactions"],
+        ["DELETE", "https://forgejo.test/api/v1/repos/o/r/issues/9/reactions"],
+      ],
+      "the probe is repo-scoped on the PR's own issue",
+    );
+    assert.equal(calls[1]!.body, '{"content":"eyes"}', "the probe posts a transient eyes reaction");
+    // The token travels only in the Authorization header — never in a URL,
+    // a body, or a reason code.
+    assert.ok(calls.every(({ auth }) => auth === `token ${TOKEN}`));
+    assert.ok(calls.every(({ url, body }) => !url.includes(TOKEN) && !(body ?? "").includes(TOKEN)));
+    assert.match(resolution.reason, REASON_RE);
+    assert.ok(!resolution.reason.includes(TOKEN));
+  }
+});
+
+test("#1093: a failed reaction DELETE never invalidates the proven identity (warn only)", async () => {
+  for (const del of [{ status: 500 }, "throw"] as const) {
+    const { fetchImpl, calls } = probeFetch({ post: { status: 201 }, del });
+    const adapter = new ForgejoAdapter({
+      repo: "o/r", prNumber: "9", baseUrl: "https://forgejo.test", token: TOKEN, fetchImpl,
+    });
+    const stderr = captureStderr();
+    let resolution: Awaited<ReturnType<ForgejoAdapter["resolveTrustedOwner"]>>;
+    try {
+      resolution = await adapter.resolveTrustedOwner();
+    } finally {
+      stderr.restore();
+    }
+    assert.deepEqual(
+      resolution,
+      { identity: { kind: "userId", userId: "7" }, reason: "reaction-self-attested" },
+      "the proof is the POST response, not the reaction's persistence",
+    );
+    assert.equal(stderr.lines.length, 1, "exactly one bounded cleanup warning");
+    assert.ok(stderr.lines[0]!.startsWith("[forgejo] WARNING: reaction self-write cleanup failed"), "bounded warning prefix");
+    assert.ok(stderr.lines[0]!.endsWith("the identity proof stands\n"), "bounded warning suffix");
+    assert.ok(!stderr.lines.some((line) => line.includes(TOKEN)), "the warning never carries the token");
+    assert.equal(calls.filter(({ method }) => method === "DELETE").length, 1, "exactly one DELETE attempt");
+  }
+});
+
+test("#1093: a refused reaction probe fails closed with bounded reasons and no DELETE", async () => {
+  const cases: Array<{ name: string; post: { status: number; payload?: unknown } | "throw" | undefined; expected: string }> = [
+    { name: "a 403 (locked issue, trimmed whitelist, old instance) reports the status digits", post: { status: 403, payload: {} }, expected: "reaction-http-403" },
+    { name: "a transport failure reports the transport reason", post: "throw", expected: "reaction-transport" },
+    { name: "a 2xx without a canonical user id reports the payload reason", post: { status: 201, payload: { user: {} } }, expected: "reaction-payload" },
+    { name: "a zero id is unproven", post: { status: 200, payload: { user: { id: 0 } } }, expected: "reaction-payload" },
+    { name: "a zero-padded id is not canonical", post: { status: 200, payload: { user: { id: "07" } } }, expected: "reaction-payload" },
+  ];
+  for (const c of cases) {
+    const { fetchImpl, calls } = probeFetch({ post: c.post });
+    const adapter = new ForgejoAdapter({
+      repo: "o/r", prNumber: "9", baseUrl: "https://forgejo.test", token: TOKEN, fetchImpl,
+    });
+    const resolution = await adapter.resolveTrustedOwner();
+    assert.deepEqual(resolution, { identity: null, reason: c.expected }, c.name);
+    assert.match(resolution.reason, REASON_RE, c.name);
+    assert.ok(!resolution.reason.includes(TOKEN), c.name);
+    if (c.expected === "reaction-payload") {
+      // An unprovable 2xx reaction is still cleaned up (it must not linger).
+      assert.equal(calls.filter(({ method }) => method === "DELETE").length, 1, c.name);
+    } else {
+      assert.equal(calls.some(({ method }) => method === "DELETE"), false, `${c.name}: nothing is cleaned up without a proof`);
+    }
+  }
+});
+
+test("#1093: a non-JSON error response reports its real HTTP status, not a transport failure", async () => {
+  // A 502 whose body is an HTML proxy page: requestJson throws on the
+  // unparseable body, but the real status must survive the reason code.
+  const htmlFetch: FetchLike = async (input, init) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (url.endsWith("/user")) return Response.json({}, { status: 403 });
+    if (url === "https://forgejo.test/api/v1/repos/o/r/issues/9/reactions" && method === "POST") {
+      return new Response("<html>bad gateway</html>", { status: 502, headers: { "content-type": "text/html" } });
+    }
+    throw new Error(`unexpected ${method} ${url}`);
+  };
+  const adapter = new ForgejoAdapter({
+    repo: "o/r", prNumber: "9", baseUrl: "https://forgejo.test", token: TOKEN, fetchImpl: htmlFetch,
+  });
+  const resolution = await adapter.resolveTrustedOwner();
+  assert.deepEqual(
+    resolution,
+    { identity: null, reason: "reaction-http-502" },
+    "the proxy's 502 status is preserved in the bounded reason",
+  );
+});
+
+test("#1093: an integration identity proven by the audience never triggers the reaction probe", async () => withOidcEnv(async () => {
+  const seen: string[] = [];
+  const fetchImpl: FetchLike = async (input) => {
+    const url = String(input);
+    seen.push(url);
+    if (url.startsWith(OIDC_URL)) return Response.json({ value: JWT });
+    if (url.endsWith("/user")) return Response.json({}, { status: 403 });
+    return Response.json({ user: { id: 999 } }, { status: 201 });
+  };
+  const adapter = new ForgejoAdapter({
+    repo: "o/r", prNumber: "9", baseUrl: "https://forgejo.test", authMethod: "authorized_integration",
+    authorizedIntegrationAudience: AUDIENCE, fetchImpl,
+  });
+  assert.deepEqual(
+    await adapter.resolveTrustedOwner(),
+    { identity: { kind: "userId", userId: "7" }, reason: "integration-user-id" },
+  );
+  assert.ok(
+    seen.every((url) => !url.includes("/reactions")),
+    "the audience proof short-circuits before any reaction request",
+  );
+  assert.deepEqual(seen, [OIDC_REQUEST_URL, "https://forgejo.test/api/v1/user"]);
+}));

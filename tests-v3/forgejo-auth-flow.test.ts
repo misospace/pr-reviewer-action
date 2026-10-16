@@ -4,9 +4,17 @@ import { actionMain, actionStageEnv } from "../src/run/action.js";
 import { ciAdapterFromEnv } from "../src/gates/ci-wait.js";
 import { forgejoAncillaryWrite, forgejoApiBase } from "../src/platform/forgejo-ancillary.js";
 import { ForgejoPublishApi } from "../src/platform/publish-api.js";
+import { ForgejoAdapter } from "../src/platform/forgejo.js";
 import type { FetchLike } from "../src/platform/http.js";
 import { buildAdapter, buildPublishApi, precheckMain } from "../src/run/entrypoints.js";
 import { buildPlatformReadAdapter } from "../src/run/platform.js";
+import { runPrecheck } from "../src/precheck/decide.js";
+import {
+  buildMarkerFingerprint,
+  collectConfigLines,
+  computeConfigHash,
+  computeDiffFingerprint,
+} from "../src/precheck/fingerprint.js";
 
 const OIDC_URL = "https://oidc.example/token?job=1";
 const OIDC_REQUEST_URL = `${OIDC_URL}&audience=aud`;
@@ -421,3 +429,110 @@ test("Forgejo ancillary write blocks a redirect before its JWT can leave the for
   ]);
   assert.ok(seen.every(({ redirect }) => redirect === "manual"));
 }));
+
+// ---------------------------------------------------------------------------
+// #1093: a repo-restricted Forgejo PAT (write:repository + write:issue, no
+// read:user) cannot read `GET /user`, so the reaction self-write probe
+// restores the precheck skip/carry-forward path over the offline REST seam.
+// ---------------------------------------------------------------------------
+
+const PAT_DIFF = "diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n";
+
+function patPrecheckEnv(): Record<string, string> {
+  return {
+    REPO: "o/r",
+    PR_NUMBER: "9",
+    PLATFORM: "forgejo",
+    FORGEJO_API_URL: FORGE_URL,
+    PUBLISH_MODE: "comment",
+    AI_MODEL: "test-model",
+    // A repo-scoped PAT without read:user cannot resolve a login, so the
+    // #453/#539 Forgejo permission preflight cannot classify it; the
+    // documented operator opt-in is used to let the run proceed to the
+    // should-review decision.
+    FORGEJO_SKIP_PERMISSION_PREFLIGHT: "true",
+  };
+}
+
+function patManagedBody(): string {
+  const fingerprint = buildMarkerFingerprint(
+    computeDiffFingerprint(PAT_DIFF),
+    computeConfigHash(collectConfigLines(patPrecheckEnv())),
+  );
+  return [
+    "<!-- ai-pr-reviewer -->",
+    `<!-- ai-pr-review-fingerprint:${fingerprint} -->`,
+    "## Review",
+    "Body.",
+    '<!-- ai-pr-reviewer:{"version":1,"head_sha":"head-old","base_sha":"base-old","review_result":"clean","ci_state":"success"} -->',
+    "",
+  ].join("\n");
+}
+
+function patPrecheckFetch(handlers: { reactionPostStatus: number; userStatus?: number }): { fetchImpl: FetchLike; seen: string[] } {
+  const seen: string[] = [];
+  const fetchImpl: FetchLike = async (input, init) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    seen.push(`${method} ${url}`);
+    if (url === `${FORGE_URL}/api/v1/user`) {
+      // 403 models a repo-scoped PAT without the read:user scope; 200 with
+      // an unusable payload also proves no login while letting the #453
+      // permission preflight resolve to "unknown" under the operator opt-in.
+      return Response.json({}, { status: handlers.userStatus ?? 403 });
+    }
+    if (method === "GET" && url === `${FORGE_URL}/api/v1/repos/o/r/pulls/9`) {
+      return Response.json({ number: 9, state: "open", draft: false, head: { sha: "abc" }, base: {}, user: { login: "o" } });
+    }
+    if (method === "GET" && url === `${FORGE_URL}/api/v1/repos/o/r/pulls/9.diff`) {
+      return new Response(PAT_DIFF, { status: 200 });
+    }
+    if (method === "GET" && url === `${FORGE_URL}/api/v1/repos/o/r/issues/9/comments?page=1&limit=50`) {
+      return Response.json([{ id: 3, body: patManagedBody(), created_at: "2025-01-01T00:00:00Z", updated_at: "2025-01-01T00:00:00Z", user: { id: 7 } }]);
+    }
+    if (method === "GET" && url === `${FORGE_URL}/api/v1/repos/o/r/pulls/9/reviews`) {
+      return Response.json([]);
+    }
+    if (method === "POST" && url === `${FORGE_URL}/api/v1/repos/o/r/issues/9/reactions`) {
+      return Response.json({ user: { id: 7 } }, { status: handlers.reactionPostStatus });
+    }
+    if (method === "DELETE" && url === `${FORGE_URL}/api/v1/repos/o/r/issues/9/reactions`) {
+      // The cleanup must mirror the POST's body so the forge deletes the
+      // doer's `eyes` reaction instead of binding an empty reaction type.
+      assert.equal(typeof init?.body === "string" ? init.body : null, '{"content":"eyes"}', "DELETE body mirrors the POST");
+      assert.equal(new Headers(init?.headers).get("content-type"), "application/json", "DELETE carries an explicit JSON content type");
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`unexpected ${method} ${url}`);
+  };
+  return { fetchImpl, seen };
+}
+
+test("#1093: a repo-restricted PAT restores the precheck skip with a carried verdict via the reaction self-write probe", async () => {
+  const { fetchImpl, seen } = patPrecheckFetch({ reactionPostStatus: 201 });
+  const adapter = new ForgejoAdapter({
+    repo: "o/r", prNumber: "9", baseUrl: FORGE_URL, token: "repo-scoped-pat", fetchImpl,
+  });
+  const output = await runPrecheck({ env: patPrecheckEnv(), adapter });
+  assert.equal(output.should_review, "false", "the probe-proven identity authorises the diff-unchanged skip");
+  assert.equal(output.skip_reason, "diff-unchanged");
+  assert.equal(output.verdict, "approve", "the previous clean verdict is carried forward");
+  assert.equal(output.verdict_source, "carry_forward");
+  // The probe is repo-scoped on the PR's own issue and runs only after the
+  // /user read failed.
+  assert.ok(seen.includes(`GET ${FORGE_URL}/api/v1/user`));
+  assert.ok(seen.includes(`POST ${FORGE_URL}/api/v1/repos/o/r/issues/9/reactions`));
+  assert.ok(seen.includes(`DELETE ${FORGE_URL}/api/v1/repos/o/r/issues/9/reactions`));
+});
+
+test("#1093: a repo-restricted PAT whose reaction probe is refused cannot skip and forces a fresh review", async () => {
+  const { fetchImpl, seen } = patPrecheckFetch({ reactionPostStatus: 403, userStatus: 200 });
+  const adapter = new ForgejoAdapter({
+    repo: "o/r", prNumber: "9", baseUrl: FORGE_URL, token: "repo-scoped-pat", fetchImpl,
+  });
+  const output = await runPrecheck({ env: patPrecheckEnv(), adapter });
+  assert.equal(output.should_review, "true", "an unproven identity fails closed: no skip, fresh review");
+  assert.equal(output.verdict, undefined, "no verdict is carried from an unauthenticated managed body");
+  assert.ok(seen.includes(`POST ${FORGE_URL}/api/v1/repos/o/r/issues/9/reactions`));
+  assert.equal(seen.some((call) => call.startsWith("DELETE")), false, "no reaction cleanup without a proof");
+});

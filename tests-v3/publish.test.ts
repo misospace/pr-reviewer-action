@@ -59,7 +59,17 @@ class MockPublishApi implements PublishPlatformApi {
   constructor(platform: "github" | "forgejo" = "github") { this.platform = platform; }
   async getHeadSha(): Promise<string | null> { return this.head; }
   async listIssueComments(): Promise<PublishCommentRef[]> { return this.comments; }
-  async upsertStickyComment(marker: string, body: string) { this.sticky.push({ marker, body }); return this.stickyResult; }
+  async upsertStickyComment(marker: string, body: string) {
+    this.sticky.push({ marker, body });
+    // #1093: mirror the real forge — a successful upsert stores the exact
+    // published body on the sticky comment, so the checkpoint's body
+    // equality read observes the same bytes the run published.
+    if (this.stickyResult.ok && this.stickyResult.commentId !== undefined) {
+      const id = String(this.stickyResult.commentId);
+      this.comments = this.comments.map((c) => String(c.id) === id ? { ...c, body } : c);
+    }
+    return this.stickyResult;
+  }
   async listReviews(): Promise<PublishReviewRef[]> { if (this.listReviewsError) throw new Error("list failed"); return this.reviews; }
   async authenticatedIdentity() { return this.identity; }
   /** #1093: the trusted-owner seam; `identity === null` models an unprovable
@@ -859,9 +869,11 @@ async function runIntegrationCleanupScenario(scenario: ForgejoCleanupScenario): 
   requests: Array<{ method: string; url: string; auth: string | null; body: string }>;
 }> {
   const requests: Array<{ method: string; url: string; auth: string | null; body: string }> = [];
-  // The PATCH really does refresh the sticky comment's timestamp; later reads
-  // must observe it or the checkpoint anchor could never be satisfied.
+  // The PATCH really does refresh the sticky comment's timestamp AND stores
+  // the exact published body; later reads must observe both or the checkpoint
+  // anchor could never be satisfied.
   let stickyUpdatedAt = "2025-01-01T00:00:00Z";
+  let stickyBody = MARKER;
   const fetchImpl = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = String(input);
     const method = (init?.method ?? "GET").toUpperCase();
@@ -873,10 +885,11 @@ async function runIntegrationCleanupScenario(scenario: ForgejoCleanupScenario): 
       return Response.json({ number: 42, head: { sha: HEAD } });
     }
     if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/issues/42/comments?limit=50&page=1`) {
-      return Response.json([{ id: 3, body: MARKER, user: { id: 7 }, updated_at: stickyUpdatedAt }]);
+      return Response.json([{ id: 3, body: stickyBody, user: { id: 7 }, updated_at: stickyUpdatedAt }]);
     }
     if (method === "PATCH" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/issues/comments/3`) {
       stickyUpdatedAt = "2026-01-01T00:00:00Z";
+      try { stickyBody = (JSON.parse(body) as { body?: string }).body ?? stickyBody; } catch { /* keep previous */ }
       return Response.json({ id: 3, updated_at: stickyUpdatedAt });
     }
     if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42/reviews?limit=100&page=1`) {
@@ -957,3 +970,210 @@ test("#1093: Forgejo authorized integration — an inline comment with no attrib
   assert.equal(requests.filter((r) => r.method === "DELETE").length, 0);
   assert.ok(result.messages.some((line) => line.includes("Inline-comment enumeration incomplete; no comments retired")));
 }));
+
+// ---------------------------------------------------------------------------
+// #1093: repo-scoped Forgejo PAT cleanup over the offline REST seam — the
+// token lacks the /user scope (403), so ownership is proven by the reaction
+// self-write probe on the PR issue; the POST response's user.id attests the
+// doer and the DELETE is best-effort.
+// ---------------------------------------------------------------------------
+
+const REPO_PAT = "repo-scoped-pat";
+const REACTIONS_URL = `${FORGEJO_BASE}/api/v1/repos/o/r/issues/42/reactions`;
+
+interface ForgejoTokenCleanupScenario {
+  reviews: unknown[];
+  review5Comments: unknown[];
+  review6Comments?: unknown[];
+  reactionPost?: { status: number; payload?: unknown };
+  reactionDeleteStatus?: number;
+  /** What the comments listing serves after the upsert; defaults to the exact body this run published. */
+  stickyBodyOverride?: string;
+}
+
+async function runTokenCleanupScenario(scenario: ForgejoTokenCleanupScenario): Promise<{
+  result: Awaited<ReturnType<typeof publishReview>>;
+  requests: Array<{ method: string; url: string; auth: string | null; body: string }>;
+}> {
+  const requests: Array<{ method: string; url: string; auth: string | null; body: string }> = [];
+  let stickyUpdatedAt = "2025-01-01T00:00:00Z";
+  let stickyBody = MARKER;
+  const fetchImpl = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    const body = typeof init?.body === "string" ? init.body : "";
+    const auth = new Headers(init?.headers).get("authorization");
+    requests.push({ method, url, auth, body });
+    if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42`) {
+      return Response.json({ number: 42, head: { sha: HEAD } });
+    }
+    if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/issues/42/comments?limit=50&page=1`) {
+      return Response.json([{ id: 3, body: stickyBody, user: { id: 7 }, updated_at: stickyUpdatedAt }]);
+    }
+    if (method === "PATCH" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/issues/comments/3`) {
+      stickyUpdatedAt = "2026-01-01T00:00:00Z";
+      try { stickyBody = (JSON.parse(body) as { body?: string }).body ?? stickyBody; } catch { /* keep previous */ }
+      if (scenario.stickyBodyOverride !== undefined) stickyBody = scenario.stickyBodyOverride;
+      return Response.json({ id: 3, updated_at: stickyUpdatedAt });
+    }
+    if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42/reviews?limit=100&page=1`) {
+      return Response.json(scenario.reviews);
+    }
+    if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42/reviews/5/comments`) {
+      return Response.json(scenario.review5Comments);
+    }
+    if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42/reviews/6/comments`) {
+      return Response.json(scenario.review6Comments ?? []);
+    }
+    if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/user`) {
+      return Response.json({}, { status: 403 });
+    }
+    if (method === "POST" && url === REACTIONS_URL) {
+      return Response.json(scenario.reactionPost?.payload ?? { user: { id: 7 } }, { status: scenario.reactionPost?.status ?? 201 });
+    }
+    if (method === "DELETE" && url === REACTIONS_URL) {
+      // The cleanup must mirror the POST's body so the forge deletes the
+      // doer's `eyes` reaction instead of binding an empty reaction type.
+      assert.equal(body, '{"content":"eyes"}', "DELETE body mirrors the POST");
+      assert.equal(new Headers(init?.headers).get("content-type"), "application/json", "DELETE carries an explicit JSON content type");
+      return new Response(null, { status: scenario.reactionDeleteStatus ?? 204 });
+    }
+    if (method === "DELETE" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42/reviews/5/comments/11`) {
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`unexpected ${method} ${url}`);
+  };
+  const api = new ForgejoPublishApi({
+    repo: "o/r", prNumber: "42", baseUrl: FORGEJO_BASE, token: REPO_PAT, fetchImpl,
+  });
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  return { result, requests };
+}
+
+test("#1093: Forgejo repo-scoped PAT — cleanup retires only self-authored managed inline comments via the reaction-proven identity", async () => {
+  const { result, requests } = await runTokenCleanupScenario({
+    reviews: [
+      { id: 5, body: MARKER, user: { id: 7 }, state: "COMMENTED", submitted_at: "2025-01-01T00:00:00Z" },
+      { id: 6, body: MARKER, user: { id: 9, login: "foreign-bot" }, state: "COMMENTED", submitted_at: "2025-06-01T00:00:00Z" },
+    ],
+    review5Comments: [{ id: 11, pull_request_review_id: 5, user: { id: 7 } }],
+    review6Comments: [{ id: 12, pull_request_review_id: 6, user: { id: 9, login: "foreign-bot" } }],
+  });
+  assert.equal(result.status, "published");
+  // The cleanup flow resolves the trusted owner twice (in publishReview and
+  // again inside retireManagedInlineComments), so the probe runs per
+  // resolution; each POST is the bounded repo-scoped eyes reaction.
+  assert.deepEqual(
+    requests.filter((r) => r.method === "POST" && r.url === REACTIONS_URL).map((r) => r.body),
+    ['{"content":"eyes"}', '{"content":"eyes"}'],
+    "the probe posts repo-scoped eyes reactions",
+  );
+  assert.deepEqual(
+    requests.filter((r) => r.method === "DELETE").map((r) => r.url),
+    [REACTIONS_URL, REACTIONS_URL, `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42/reviews/5/comments/11`],
+    "each reaction is cleaned up once and only the self-authored inline comment is retired",
+  );
+  assert.ok(!requests.some((r) => r.url.includes("/reviews/6/")), "the foreign-bot review and its comments are never touched");
+  assert.ok(result.messages.some((line) => line.includes("Inline comments: eligible=1 retired=1")));
+  // Secret travel: the PAT appears only in Authorization headers.
+  for (const request of requests) {
+    assert.equal(request.auth, `token ${REPO_PAT}`);
+    assert.ok(!request.url.includes(REPO_PAT) && !request.body.includes(REPO_PAT));
+  }
+});
+
+test("#1093: Forgejo repo-scoped PAT — a refused reaction probe fails closed and nothing is retired", async () => {
+  const { result, requests } = await runTokenCleanupScenario({
+    reviews: [{ id: 5, body: MARKER, user: { id: 7 }, state: "COMMENTED", submitted_at: "2025-01-01T00:00:00Z" }],
+    review5Comments: [{ id: 11, pull_request_review_id: 5, user: { id: 7 } }],
+    reactionPost: { status: 403, payload: {} },
+  });
+  assert.equal(result.status, "published");
+  assert.ok(
+    result.messages.some((line) => line.includes("Could not verify authenticated owner") && line.includes("identity reason: reaction-http-403") && line.includes("no inline comments retired")),
+  );
+  assert.equal(
+    requests.filter((r) => r.method === "DELETE" && r.url !== REACTIONS_URL).length,
+    0,
+    "no inline comments are retired when the probe is refused",
+  );
+});
+
+test("#1093: Forgejo REST seam — a same-second sticky re-publication with a different body fails the still-current guard", async () => {
+  // The REST-seam variant of the MockPublishApi scenario: the sticky
+  // comment's stored body differs from the body this run published (an
+  // overlapping run re-published it in the same second), so the checkpoint's
+  // body anchor fails the still-current guard even though the refreshed
+  // timestamp equals the checkpoint.
+  const { result, requests } = await runTokenCleanupScenario({
+    reviews: [{ id: 5, body: MARKER, user: { id: 7 }, state: "COMMENTED", submitted_at: "2025-01-01T00:00:00Z" }],
+    review5Comments: [{ id: 11, pull_request_review_id: 5, user: { id: 7 } }],
+    stickyBodyOverride: `${MARKER}\nbody of the overlapping run`,
+  });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
+  assert.equal(
+    requests.filter((r) => r.method === "DELETE" && r.url !== REACTIONS_URL).length,
+    0,
+    "a same-second re-publication with a different body retires nothing",
+  );
+});
+
+test("#1093: a managed review submitted in the same second as the sticky checkpoint supersedes the run; cleanup is skipped", async () => {
+  // The tie case: a competing managed review carries a timestamp EQUAL to the
+  // sticky checkpoint, so it cannot be proven older than the checkpoint —
+  // fail closed.
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2026-01-01T00:00:00Z" }];
+  api.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  api.retireInlineComment = async () => { assert.fail("a same-second managed review must fail the cleanup closed"); };
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
+  assert.deepEqual(api.dismissed, []);
+});
+
+test("#1093: a same-second sticky re-publication with a different body fails the still-current guard; cleanup is skipped", async () => {
+  // An overlapping run re-publishes the sticky in the SAME second (refreshed
+  // timestamp equals the checkpoint) but with a DIFFERENT body; the
+  // refreshedMs equality guard alone cannot detect this, so the checkpoint
+  // also pins the exact published body.
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  api.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  const sticky = api.upsertStickyComment.bind(api);
+  api.upsertStickyComment = async (marker, body) => {
+    const result = await sticky(marker, body);
+    api.comments = api.comments.map((c) => String(c.id) === "9" ? { ...c, body: `${MARKER}\nbody of the overlapping run` } : c);
+    return result;
+  };
+  api.retireInlineComment = async () => { assert.fail("a same-second re-publication with a different body must fail cleanup closed"); };
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
+  assert.deepEqual(api.dismissed, []);
+});
+
+test("#1093: a sticky with the identical published body but a strictly later timestamp fails the refreshed-sticky guard; cleanup is skipped", async () => {
+  // The body matches byte-for-byte, but the refreshed timestamp is strictly
+  // later than the checkpoint: the existing refreshedMs guard alone fails
+  // the still-current check closed.
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-06-01T00:00:00Z" }];
+  api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  api.retireInlineComment = async () => { assert.fail("a re-published sticky invalidates this run's checkpoint"); };
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
+  assert.deepEqual(api.dismissed, []);
+});

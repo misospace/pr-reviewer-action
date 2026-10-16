@@ -6,9 +6,13 @@
  *   by an identity read (GitHub GraphQL viewer / REST `/user`, Forgejo
  *   `/user`). Compared trimmed and case-insensitively (both forges enforce
  *   case-insensitive username uniqueness, #970).
- * - `userId` — the Forgejo Authorized Integration audience's owner id
- *   (`u:<id>:<uuid>`, the same proof `ForgejoPublishApi` already trusts for
- *   sticky-comment ownership). The id is the ONLY authoritative signal: a
+ * - `userId` — two proofs attest the same canonical Forgejo user id:
+ *   the Authorized Integration audience's owner id (`u:<id>:<uuid>`, the
+ *   same proof `ForgejoPublishApi` already trusts for sticky-comment
+ *   ownership), and a reaction self-write probe's `user.id` (a repo-scoped
+ *   token without the `/user` scope proves the authenticated doer by
+ *   creating — and best-effort deleting — a reaction on the PR issue).
+ *   The id is the ONLY authoritative signal: a
  *   candidate's login is never compared against a user-id identity, because
  *   a repo-scoped integration JWT may not resolve to any login at all.
  *

@@ -593,6 +593,11 @@ export async function publishReview(
   // cleanup). The PATCH/POST response timestamp anchors it.
   let stickyCommentId: number | string | undefined;
   let stickyUpdatedAt: string | undefined;
+  // #1093: the exact sticky body this run published — the checkpoint's
+  // body anchor, so a same-second re-publication by an overlapping run
+  // (refreshed timestamp equal to the checkpoint) with a DIFFERENT body
+  // cannot pass for this run's own sticky state.
+  let stickyBody: string | undefined;
   // #1093: the sticky is a complete replacement only when the run had no
   // inline findings to post or that findings review was actually created;
   // a failed findings submission leaves the previous set un-replaced.
@@ -790,6 +795,7 @@ export async function publishReview(
       }
       stickyCommentId = result.commentId;
       stickyUpdatedAt = result.updatedAt;
+      stickyBody = body;
       // #1093: inline findings reviews are created ONLY when there are inline
       // findings — a clean re-review must not publish an empty native review
       // just so cleanup has a checkpoint. The sticky comment (with its
@@ -914,12 +920,12 @@ export async function publishReview(
     // native review at all). Missing both: no cleanup (fail closed).
     type ReplacementCheckpoint =
       | { kind: "review"; reviewId: number | string }
-      | { kind: "sticky"; commentId: number | string; updatedAt: string };
+      | { kind: "sticky"; commentId: number | string; updatedAt: string; body: string };
     const replacementCheckpoint: ReplacementCheckpoint | undefined =
       nativeReviewId !== undefined
         ? { kind: "review", reviewId: nativeReviewId }
-        : stickyCheckpointUsable && stickyCommentId !== undefined && stickyUpdatedAt !== undefined
-          ? { kind: "sticky", commentId: stickyCommentId, updatedAt: stickyUpdatedAt }
+        : stickyCheckpointUsable && stickyCommentId !== undefined && stickyUpdatedAt !== undefined && stickyBody !== undefined
+          ? { kind: "sticky", commentId: stickyCommentId, updatedAt: stickyUpdatedAt, body: stickyBody }
           : undefined;
     const replacementComplete = completeCoverage && !fallbackSubmission && replacementCheckpoint !== undefined;
     if (replacementComplete && replacementCheckpoint !== undefined) {
@@ -985,6 +991,11 @@ export async function publishReview(
                 const stickyLatest = (await api.listIssueComments()).find((c) => String(c.id) === String(replacementCheckpoint.commentId));
                 if (!stickyLatest || !isManagedBody(typeof stickyLatest.body === "string" ? stickyLatest.body : "", input.commentMarker)) return false;
                 if (!ownerMatchesIdentity(stickyLatest.user, owner)) return false;
+                // The sticky body must be byte-identical to what THIS run
+                // published: an overlapping run re-publishing in the same
+                // second (refreshed timestamp equal to the checkpoint) with a
+                // different body would otherwise pass for this run's state.
+                if (stickyLatest.body !== replacementCheckpoint.body) return false;
                 const refreshedMs = Date.parse(stickyLatest.updated_at ?? "");
                 // A newer instant means the sticky was re-published after
                 // this checkpoint (an overlapping run owns the replacement);
@@ -994,7 +1005,10 @@ export async function publishReview(
                   if (!isManagedBody(typeof r.body === "string" ? r.body : "", input.commentMarker)) return false;
                   const instant = reviewInstant(r);
                   const stamp = instant === "" ? Number.NaN : Date.parse(instant);
-                  return Number.isNaN(stamp) || stamp > checkpointMs;
+                  // Fail closed on ties too: a competing managed review
+                  // submitted in the SAME second as the checkpoint cannot be
+                  // proven older than it.
+                  return Number.isNaN(stamp) || stamp >= checkpointMs;
                 });
               };
               if (await stillCurrent()) {

@@ -327,6 +327,11 @@ test("#1093: audience-only config verifies sticky ownership by the audience user
   });
   assert.ok(!calls.some((c) => c.method === "PATCH"), "a foreign-owned marker comment is never patched");
   assert.deepEqual(calls.map(({ auth }) => auth), ["bearer runner-oidc", "Bearer jwt", "Bearer jwt"]);
+  assert.equal(
+    calls[0]?.url,
+    AUDIENCE_OIDC_URL,
+    "the JWT exchange pins the configured audience verbatim",
+  );
 }));
 
 test("#1093: audience-only config patches the sticky comment owned by the audience user id", async () => withAudienceOnlyOidcEnv(async () => {
