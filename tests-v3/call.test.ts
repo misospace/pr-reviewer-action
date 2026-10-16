@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { callModelTier, produceVerdict, PARSE_FAIL_CAP, MAX_RETRY_DELAY_SEC } from "../src/model/call.js";
 import type { TierProfile } from "../src/model/call.js";
-import { RETRYABLE_HTTP_STATUSES, type ChatRequestOutcome } from "../src/transport/transport.js";
+import { RETRYABLE_HTTP_STATUSES, type ChatRequestInput, type ChatRequestOutcome } from "../src/transport/transport.js";
 import { TransportFailure } from "../src/transport/http.js";
 import { VerdictParseFailure } from "../src/model/types.js";
 
@@ -633,4 +633,47 @@ test("#1047 (review): callModelTier threads the transport's strip surface to the
   // And a plain success carries no strip metadata.
   const plain = await callModelTier(profile(), CONTEXT, { call: async () => okResponse() });
   assert.equal(plain.status === "ok" && plain.strippedStructuredOutput, undefined);
+});
+
+test("#1037: the tier profile's extraHeaders ride every model-tier call and both produceVerdict attempts", async () => {
+  const extraHeaders: Record<string, string> = { "x-litellm-session-id": "run-9" };
+  const tierSeen: Array<Record<string, string> | undefined> = [];
+  const capture = (input: ChatRequestInput): Promise<ChatRequestOutcome> => {
+    tierSeen.push(input.extraHeaders === undefined ? undefined : { ...input.extraHeaders });
+    return Promise.resolve(okResponse());
+  };
+  const tier = await callModelTier(profile({ extraHeaders }), CONTEXT, { sleep: async () => {}, call: capture });
+  assert.equal(tier.status, "ok");
+  assert.deepEqual(tierSeen, [extraHeaders]);
+
+  // Streamed attempt fails → the non-streamed retry must carry them too.
+  const verdictSeen: Array<Record<string, string> | undefined> = [];
+  const streamedProfile = profile({ stream: true, extraHeaders });
+  let first = true;
+  const verdict = await produceVerdict(streamedProfile, CONTEXT, {
+    call: async (input: ChatRequestInput): Promise<ChatRequestOutcome> => {
+      verdictSeen.push(input.extraHeaders === undefined ? undefined : { ...input.extraHeaders });
+      if (first) {
+        first = false;
+        return transportFailure();
+      }
+      return okResponse();
+    },
+  });
+  assert.ok(verdict.ok);
+  assert.equal(verdictSeen.length, 2);
+  assert.deepEqual(verdictSeen[0], extraHeaders);
+  assert.deepEqual(verdictSeen[1], extraHeaders);
+});
+
+test("#1037: a profile without extraHeaders sends no extraHeaders key (unchanged-request path)", async () => {
+  let hadKey: boolean | null = null;
+  await callModelTier(profile(), CONTEXT, {
+    sleep: async () => {},
+    call: async (input: ChatRequestInput): Promise<ChatRequestOutcome> => {
+      hadKey = Object.hasOwn(input, "extraHeaders");
+      return okResponse();
+    },
+  });
+  assert.equal(hadKey, false);
 });

@@ -1437,3 +1437,77 @@ test("#970: lastManagedBody selects only the authenticated identity's body", () 
   assert.equal(lastManagedBody(comments, [], "comment", "<!-- ai-pr-reviewer -->", "someone-else"), "");
   assert.equal(lastManagedBody(comments, [], "comment", "<!-- ai-pr-reviewer -->", null), "");
 });
+
+test("#1037: ai-extra-headers hashes ephemeral correlation headers by NAME and everything else by name + value digest", () => {
+  // Unset (or "" projected by stageEnvFromConfig) must leave the config hash
+  // byte-identical to a build without the feature.
+  const before = collectConfigLines({ AI_MODEL: "m", AI_BASE_URL: "https://primary" });
+  const after = collectConfigLines({ AI_MODEL: "m", AI_BASE_URL: "https://primary", AI_EXTRA_HEADERS: "" });
+  assert.deepEqual(after, before);
+  assert.equal(computeConfigHash(after), computeConfigHash(before));
+
+  // A configured surface emits ONE canonical line: the correlation header by
+  // name, the non-ephemeral one as name + a 12-hex value digest.
+  const set = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_EXTRA_HEADERS: "X-LiteLLM-Session-Id: run-42\nanthropic-beta: pdfs-2024-05-04",
+  });
+  const line = set.find((entry) => entry.startsWith("AI_EXTRA_HEADERS="));
+  assert.ok(line, set.join("\n"));
+  assert.match(line, /^AI_EXTRA_HEADERS=anthropic-beta=[0-9a-f]{12},x-litellm-session-id$/);
+
+  // The canonical per-run-id use case: the ephemeral value changes every run,
+  // the fingerprint must NOT — the unchanged-diff skip keeps working.
+  const nextRun = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_EXTRA_HEADERS: "X-LiteLLM-Session-Id: run-43\nanthropic-beta: pdfs-2024-05-04",
+  });
+  assert.equal(computeConfigHash(nextRun), computeConfigHash(set));
+
+  // A NON-ephemeral value change is a real request-byte change: it must
+  // invalidate (swapping one anthropic-beta token for another).
+  const swappedBeta = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_EXTRA_HEADERS: "X-LiteLLM-Session-Id: run-42\nanthropic-beta: pdfs-2024-09-01",
+  });
+  assert.notDeepEqual(swappedBeta, set);
+  assert.notEqual(computeConfigHash(swappedBeta), computeConfigHash(set));
+  // Only the ephemeral value moved alongside it, so the fingerprint is
+  // unchanged — the digest, not the correlation id, is what changed above.
+  const swappedBoth = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_EXTRA_HEADERS: "X-LiteLLM-Session-Id: run-43\nanthropic-beta: pdfs-2024-09-01",
+  });
+  assert.equal(computeConfigHash(swappedBoth), computeConfigHash(swappedBeta));
+
+  // Adding/removing a header (e.g. an anthropic-beta that CAN change model
+  // behavior) does invalidate.
+  const added = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_EXTRA_HEADERS: "X-LiteLLM-Session-Id: run-42",
+  });
+  assert.notEqual(computeConfigHash(added), computeConfigHash(set));
+
+  // The emitted line carries digests, never the configured value itself.
+  const canary = "X-Proxy-Token: sensitive-probe-1037";
+  const withCanary = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_EXTRA_HEADERS: canary,
+  });
+  assert.equal(withCanary.some((entry) => entry.includes("sensitive-probe-1037")), false);
+  assert.match(withCanary.find((entry) => entry.startsWith("AI_EXTRA_HEADERS="))!, /^AI_EXTRA_HEADERS=x-proxy-token=[0-9a-f]{12}$/);
+
+  // A value that cannot be parsed (startup validation bypassed) fails closed
+  // toward a fresh review rather than a silent skip, and a whitespace-only
+  // value behaves as unset.
+  const malformed = collectConfigLines({ AI_MODEL: "m", AI_EXTRA_HEADERS: "no colon line" });
+  assert.ok(malformed.includes("AI_EXTRA_HEADERS=malformed"));
+  const blank = collectConfigLines({ AI_MODEL: "m", AI_EXTRA_HEADERS: "  \n " });
+  assert.ok(!blank.some((line) => line.startsWith("AI_EXTRA_HEADERS")));
+});

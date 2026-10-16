@@ -112,6 +112,10 @@ inputs:
     required: false
     default: "2023-06-01"
     description: "Anthropic API version header used when ai_api_format or ai_fallback_api_format is anthropic"
+  - id: ai-extra-headers
+    required: false
+    default: ""
+    description: "Multi-line 'Name: value' pairs merged into every outbound AI provider request (primary, smart, fallback, and specialist lanes; both anthropic and openai formats), e.g. set 'x-litellm-session-id' to the workflow's github.run_id value (interpolate it in the calling workflow, never as a literal GitHub expression here: GitHub evaluates expressions inside action.yml at load time and fails the run) to group one run's calls in a proxy cost log. Header names are sent case-preserved; empty (the default) sends exactly the headers the action always sent. Malformed lines, control characters, non-latin1 values, duplicate names, and names colliding with the action's own transport or connection-framing headers (x-api-key, Authorization, anthropic-version, Content-Type, Accept, Host, Content-Length, Connection, Keep-Alive, TE, Trailer, Transfer-Encoding, Upgrade, __proto__) are rejected at startup. The whole input is treated as sensitive: header values are redacted from configuration dumps, including the debug config command, and are masked out of provider error text. The review fingerprint treats ephemeral correlation/session/trace headers (a name ending in -session-id, -request-id, -correlation-id, -trace-id, -span-id or -run-id, or one of traceparent, tracestate, x-b3-traceid, x-b3-spanid, x-b3-parentspanid) as name-only, so a per-run correlation value never invalidates a cached review; every other header participates by name plus a one-way digest of its value, so changing a value (e.g. swapping one anthropic-beta token for another) does force a fresh review. No raw header value ever enters the fingerprint as text."
   - id: ai-fallback-base-url
     v2_id: ai_fallback_base_url
     required: false

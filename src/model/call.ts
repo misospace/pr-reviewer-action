@@ -93,6 +93,9 @@ export interface TierProfile {
   /** #1047: the Anthropic endpoint opt-in for `output_config.format`
    * (verdict JSON schema). */
   anthropicStructuredOutputSupported: boolean;
+  /** #1037 (`ai-extra-headers`): operator headers merged into every request
+   * this tier makes (wire-validated at startup; absent/empty = unchanged). */
+  extraHeaders?: Readonly<Record<string, string>>;
 }
 
 export interface ModelCallContext {
@@ -209,6 +212,8 @@ export async function callModelTier(
       anthropicVersion: profile.anthropicVersion,
       requestTimeoutSec: profile.requestTimeoutSec,
       connectTimeoutSec: profile.connectTimeoutSec,
+      // #1037: the tier's operator headers ride every attempt of the tier.
+      ...(profile.extraHeaders !== undefined ? { extraHeaders: profile.extraHeaders } : {}),
     });
 
     if (outcome.status === "failure") {
@@ -347,7 +352,10 @@ export async function produceVerdict(
       // returned HTTP <status>" message. `secrets` masks the configured key
       // unconditionally — a provider echoing it in bare prose would
       // otherwise pass `redactText`'s pattern heuristics untouched.
-      return { ok: false, verdict: null, raw: null, reason: "transport", detail: describeTransportFailure(outcome.failure, { secrets: [profile.apiKey] }) };
+      // #1037: the lane's configured extra-header VALUES join the known-secret
+      // list for the same reason — they routinely carry proxy tokens, and a
+      // provider error body can quote the request headers back.
+      return { ok: false, verdict: null, raw: null, reason: "transport", detail: describeTransportFailure(outcome.failure, { secrets: [profile.apiKey, ...Object.values(profile.extraHeaders ?? {})] }) };
     }
     try {
       return { ok: true, verdict: parseVerdictResponse(outcome.raw, [profile.apiKey]), raw: outcome.raw, reason: "accepted", detail: "" };
@@ -373,6 +381,8 @@ export async function produceVerdict(
     anthropicVersion: profile.anthropicVersion,
     requestTimeoutSec: profile.requestTimeoutSec,
     connectTimeoutSec: profile.connectTimeoutSec,
+    // #1037: the tier's operator headers ride every attempt of the tier.
+    ...(profile.extraHeaders !== undefined ? { extraHeaders: profile.extraHeaders } : {}),
   }));
   let attempts = 1;
   let retried = false;
@@ -415,6 +425,8 @@ export async function produceVerdict(
       anthropicVersion: profile.anthropicVersion,
       requestTimeoutSec: profile.requestTimeoutSec,
       connectTimeoutSec: profile.connectTimeoutSec,
+      // #1037: the tier's operator headers ride every attempt of the tier.
+      ...(profile.extraHeaders !== undefined ? { extraHeaders: profile.extraHeaders } : {}),
     }));
     attempts++;
     finalBudgetRaisedTo = budgetRaisedTo ?? null;

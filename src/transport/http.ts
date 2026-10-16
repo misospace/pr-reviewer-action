@@ -3,6 +3,7 @@ import https from "node:https";
 import { URL } from "node:url";
 import type { ApiFormat } from "../model/types.js";
 import { maskKnownSecrets, redactText } from "../context/redact.js";
+import { applyExtraHeaders } from "./headers.js";
 
 /**
  * Typed HTTP transport for model calls (#677). Replaces the v2 curl/jq wire
@@ -212,6 +213,15 @@ export interface HttpCallInput {
   stream: boolean;
   /** Response-byte ceiling; defaults to DEFAULT_MAX_RESPONSE_BYTES (#745). */
   maxResponseBytes?: number;
+  /** #1037 (`ai-extra-headers`): operator headers merged into every request
+   * with case-preserved names. Validated at startup and revalidated at the
+   * wire boundary (`applyExtraHeaders`) on the same rules — non-string value,
+   * non-token name, control characters, non-latin-1 value, reserved-name
+   * collision, case-insensitive duplicate, count bound — so a caller that
+   * bypassed startup validation cannot outrank auth/framing headers nor reach
+   * Node's request-time header check; absent/empty keeps the outbound headers
+   * byte-for-byte unchanged. */
+  extraHeaders?: Readonly<Record<string, string>>;
 }
 
 export interface HttpCallResult {
@@ -244,6 +254,13 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
   } else if (input.apiKey !== "") {
     headers["Authorization"] = `Bearer ${input.apiKey}`;
   }
+  // #1037: merged after the action's own headers. `applyExtraHeaders` throws on
+  // the whole set before writing anything — reserved-name collision, malformed
+  // or non-token name, control characters or non-latin-1 characters in a value,
+  // a case-insensitive duplicate, or more than MAX_EXTRA_HEADERS entries — so a
+  // caller that bypassed the startup validator still cannot outrank
+  // auth/framing headers, and a rejected set merges nothing at all.
+  if (input.extraHeaders !== undefined) applyExtraHeaders(headers, input.extraHeaders);
 
   return new Promise<HttpCallResult>((resolve, reject) => {
     let settled = false;

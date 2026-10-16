@@ -21,6 +21,7 @@ import { loopContextLimits } from "../tools/harness.js";
 import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
+import { extraHeadersForEnv } from "../transport/headers.js";
 import type { FetchLike } from "../platform/http.js";
 import { normalizePrIdentity } from "../platform/pr.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
@@ -777,6 +778,14 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       Number(env.CLAIM_FALSIFICATION_TIMEOUT_SEC ?? "180") || 180,
       Number(env.AI_REQUEST_TIMEOUT_SEC ?? "180") || 180,
     );
+    // #1037: correlation headers ride the pre-pass calls too. Resolved where
+    // the pre-fix code parsed them — inside the branch that actually builds
+    // the claim model, and before the promise exists — so this block's
+    // async-only `.catch` fail-soft surface is unchanged; unset config omits
+    // the key rather than merging an empty map.
+    const claimExtra = profiles.primary.baseUrl && profiles.primary.model
+      ? extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "")
+      : undefined;
     claimsPromise = runClaimFalsificationPass({
       title: String(pr.title ?? ""),
       body: String(pr.body ?? ""),
@@ -806,6 +815,9 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
                 baseUrl: profiles.primary.baseUrl,
                 apiKey: profiles.primary.apiKey,
                 anthropicVersion: env.ANTHROPIC_VERSION ?? "2023-06-01",
+                // #1037: correlation headers ride specialist/pre-pass calls too;
+                // unset config omits the key.
+                ...(claimExtra !== undefined ? { extraHeaders: claimExtra } : {}),
               }),
             }
           : undefined,
@@ -1078,6 +1090,10 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       // pre-pass: a throw here must never abort the review.
       let repaired: Awaited<ReturnType<typeof runRequirementTraceRepairPass>> | null = null;
       try {
+        // #1037: correlation headers ride the repair pass too; unset config
+        // omits the key. Parsed INSIDE the guarded region (as pre-fix) so a
+        // malformed set can never escape this fail-soft boundary.
+        const repairExtra = extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "");
         repaired = await runRequirementTraceRepairPass({
           requirements: repairRequirements.map((entry) => {
             const groups = distributedHints.find((hint) => hint.requirementId === entry.id)?.groups;
@@ -1106,6 +1122,9 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
             baseUrl: profiles.primary.baseUrl,
             apiKey: profiles.primary.apiKey,
             anthropicVersion: env.ANTHROPIC_VERSION ?? "2023-06-01",
+            // #1037: correlation headers ride specialist/pre-pass calls too;
+            // unset config omits the key.
+            ...(repairExtra !== undefined ? { extraHeaders: repairExtra } : {}),
           }),
         });
       } catch (cause) {
@@ -1748,6 +1767,10 @@ function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | 
   const resolved = tier === "fallback" ? profiles.fallback : tier === "smart" ? profiles.smart : profiles.primary;
   const aiMaxTokens = Number(env.AI_MAX_TOKENS ?? "8192") || 8192;
   const temperatureRaw = env.AI_TEMPERATURE ?? "0.1";
+  // #1037: same operator headers on every lane; unset config yields
+  // `undefined` and the profile omits the field, keeping requests
+  // byte-identical.
+  const extraHeaders = extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "");
   return {
     label: tier === "fallback" ? "Fallback" : tier === "smart" ? "Smart" : "Primary",
     baseUrl: resolved.baseUrl,
@@ -1772,6 +1795,7 @@ function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | 
     anthropicEffortSupported: resolved.anthropicEffortSupported,
     // #1047: the lane's own structured-output assertion, same per-lane rule.
     anthropicStructuredOutputSupported: resolved.anthropicStructuredOutputSupported,
+    ...(extraHeaders !== undefined ? { extraHeaders } : {}),
   };
 }
 
@@ -1907,7 +1931,9 @@ async function callTier(
     // (plus the ai-api-format hint on a 404) instead of the bare "model
     // endpoint returned HTTP <status>" message. `secrets` masks this tier's
     // configured key unconditionally, on top of `redactText`'s heuristics.
-    const detail = describeTransportFailure(outcome.failure, { secrets: [profile.apiKey] });
+    // #1037: this lane's configured extra-header VALUES join that list (a
+    // provider error body can quote them back, and they carry proxy tokens).
+    const detail = describeTransportFailure(outcome.failure, { secrets: [profile.apiKey, ...Object.values(profile.extraHeaders ?? {})] });
     errorLog(`${profile.label}: transport failures exhausted (${detail})${diagnosticsLine}`);
     if (outcome.nonRetryable === true) {
       annotate(`::error::${profile.label}: model endpoint returned a non-retryable HTTP status; failing over without retrying (${annotationSafe(detail)})`);

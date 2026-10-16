@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync } from "node:fs";
+import { extraHeaderFingerprint } from "../transport/headers.js";
 
 /** Precheck fingerprinting (#674) — the faithful TS port of
  * `pr_reviewer/precheck.py`. The marker form `<diff_fp>|cfg:<config_hash>`
@@ -180,6 +181,31 @@ const CONDITIONAL_AI_KEYS: ReadonlySet<string> = new Set([
   "AI_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT",
   "AI_SMART_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT",
   "AI_FALLBACK_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT",
+  // #1037: excluded from the unconditional sweep and re-emitted through the
+  // canonical extra-header fingerprint below (see CANONICALIZED_AI_KEYS).
+  "AI_EXTRA_HEADERS",
+]);
+
+/** #1037: the `ai-extra-headers` surface is hashed by its canonical
+ * fingerprint, not by its raw text. The rule, in full: ephemeral
+ * correlation/session/trace headers (`*-session-id`, `*-request-id`,
+ * `*-correlation-id`, `*-trace-id`, `*-span-id`, `*-run-id`, `traceparent`,
+ * `tracestate`, `x-b3-traceid`, `x-b3-spanid`, `x-b3-parentspanid`) participate
+ * BY NAME only,
+ * because their values legitimately change every run (`x-litellm-session-id:
+ * <run id>`) and hashing them would break the unchanged-diff skip for exactly
+ * the canonical user of this input; EVERY OTHER header participates by name
+ * plus a truncated digest of its VALUE, so changing a non-ephemeral value —
+ * swapping one `anthropic-beta` token for another, which really does change
+ * the request bytes — invalidates the cached review and forces a fresh one.
+ * Adding or removing a header invalidates too. The digest is one-way and the
+ * raw value never enters the fingerprint. A value that cannot be parsed (only
+ * possible if startup validation was bypassed) hashes to an explicit
+ * `malformed` line — fail closed toward a fresh review, never toward a silent
+ * skip — and blank/whitespace-only input emits nothing, so an unset
+ * configuration keeps a byte-identical fingerprint. */
+const CANONICALIZED_AI_KEYS: ReadonlySet<string> = new Set([
+  "AI_EXTRA_HEADERS",
 ]);
 
 /** The subset of `CONDITIONAL_AI_KEYS` that are booleans rather than efforts:
@@ -253,6 +279,21 @@ export function collectConfigLines(env: Record<string, string>): string[] {
   // field, so a change here is a real behavior change (and the emitted line
   // is byte-identical to the sweep's, keeping one canonical form per key).
   for (const key of CONDITIONAL_AI_KEYS) {
+    if (CANONICALIZED_AI_KEYS.has(key)) {
+      const raw = (env[key] ?? "").trim();
+      if (raw !== "") {
+        let fingerprint: string;
+        try {
+          fingerprint = extraHeaderFingerprint(raw);
+        } catch {
+          fingerprint = "malformed";
+        }
+        // Newline-only input parses to no headers — behaves as unset and
+        // emits nothing, keeping the baseline fingerprint stable.
+        if (fingerprint !== "") lines.push(`${key}=${fingerprint}`);
+      }
+      continue;
+    }
     if (ANTHROPIC_EFFORT_SUPPORT_KEYS.has(key)) {
       if ((env[key] ?? "").trim().toLowerCase() === "true") lines.push(`${key}=true`);
       continue;

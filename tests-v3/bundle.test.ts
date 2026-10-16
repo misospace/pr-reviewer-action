@@ -8,6 +8,7 @@ import { parse } from "yaml";
 
 test("built bundle embeds the canonical contract and runs without source files", () => {
   const secret = "bundle-secret-probe";
+  const headerCanary = "X-Proxy-Token: header-secret-probe";
   const bundle = resolve("dist/index.js");
   const source = parse(readFileSync("contracts/action-v3.yml", "utf8")) as {
     schema_version: number;
@@ -23,11 +24,15 @@ test("built bundle embeds the canonical contract and runs without source files",
         INPUT_GITHUB_TOKEN: secret,
         INPUT_AI_BASE_URL: "https://example.invalid",
         INPUT_AI_MODEL: "test-model",
+        "INPUT_AI-EXTRA-HEADERS": headerCanary,
         PR_REVIEWER_V3_DEBUG: "true",
       },
     });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.includes(secret), false);
+    // #1037: the whole ai-extra-headers input is secret — the proxy token in
+    // the header value must not survive the debug config dump either.
+    assert.equal(result.stdout.includes("header-secret-probe"), false);
     const debug = JSON.parse(result.stdout) as {
       schemaVersion: number;
       inputs: number;
@@ -40,6 +45,7 @@ test("built bundle embeds the canonical contract and runs without source files",
       source.inputs.map(({ id }) => id.replace(/-([a-z0-9])/g, (_match, char: string) => char.toUpperCase())).sort(),
     );
     assert.equal(debug.config.githubToken, "[REDACTED]");
+    assert.equal(debug.config.aiExtraHeaders, "[REDACTED]");
     assert.equal(debug.config.aiPrimaryModel, "test-model");
     assert.equal(debug.config.aiFallbackBaseUrl, "https://example.invalid");
 

@@ -3427,6 +3427,29 @@ test("#846 security review: harnessTransportAdapter masks the configured API key
   }
 });
 
+test("#1037: configured extra headers ride every harness-transport request", async () => {
+  // Key ABSENCE on the unset path is deliberately not asserted here:
+  // `harnessTransportAdapter` calls `runChatRequest` directly and the suite
+  // has no transport-injection seam (no `mock.module` harness exists), so "no
+  // header on the wire" cannot distinguish an omitted key from `{}`. The
+  // absence itself is pinned at the `specialistRequestFn` seam and on
+  // `extraHeadersForEnv("") === undefined` in tests-v3/extra-headers.test.ts.
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ id: "1", choices: [{ message: { content: "hi" }, finish_reason: "stop" }] }));
+  });
+  try {
+    const configured = harnessTransportAdapter({ AI_EXTRA_HEADERS: "X-LiteLLM-Session-Id: run-9\nx-team-id: platform" } as StageEnv);
+    await configured(server.url, "openai", { model: "m", stream: false, messages: [] }, "sk-test", 5);
+    assert.equal(server.requests.length, 1);
+    assert.equal(server.requests[0]!.headers["x-litellm-session-id"], "run-9");
+    assert.equal(server.requests[0]!.headers["x-team-id"], "platform");
+  } finally {
+    await server.close();
+  }
+});
+
 test("#846 security review: a one-character or three-character configured API key is masked in the primary error log and artifact", async () => {
   for (const apiKey of ["k", "abc"]) {
     const server = await startMockServer((_req, _body, res) => {

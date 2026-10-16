@@ -19,6 +19,7 @@ import {
 import { DEFAULT_SPECIALIST_MAX_TOKENS, MAX_INPUT_BYTES, SPECIALIST_ROLES_ORDER, type SpecialistArtifact } from "../specialists/types.js";
 import { guardedWrite, resolveArtifactPath, resolveRoot } from "./guarded-write.js";
 import { specialistRequestFn } from "./specialist-transport.js";
+import { extraHeadersForEnv } from "../transport/headers.js";
 import { resolveSpecialistProfiles, anthropicJsonObjectsPromptOnlyWarning, tierResponseFormat } from "../routing/tiers.js";
 
 /**
@@ -420,10 +421,15 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
     if (prompt !== undefined) rolePrompts[role] = prompt;
   }
 
+  // #1037: correlation headers ride specialist calls too; unset config
+  // omits the key rather than merging an empty map.
+  const extra = extraHeadersForEnv(envStr(env, "AI_EXTRA_HEADERS"));
+
   const requestFn = deps.requestFn ?? specialistRequestFn({
     baseUrl,
     apiKey,
     anthropicVersion: envStr(env, "ANTHROPIC_VERSION", "2023-06-01"),
+    ...(extra !== undefined ? { extraHeaders: extra } : {}),
   });
 
   const timers = cancellableSleep();
