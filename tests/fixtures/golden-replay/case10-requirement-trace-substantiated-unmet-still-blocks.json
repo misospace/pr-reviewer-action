@@ -1,0 +1,73 @@
+{
+  "contract": "golden-replay/v1",
+  "name": "case10-requirement-trace-substantiated-unmet-still-blocks",
+  "status": "active",
+  "provenance": {
+    "source_head": "6ee8ef451327e5b0f1fe4f34284f07c3cda387f0",
+    "origin": "#1095 genuine-defect control: a model-substantiated unmet requirement still forces request_changes",
+    "evidence_transform": "raw",
+    "model_response": "Recorded representative response (zero live inference): request_changes whose finding restates the violated ledger requirement (the traversal guard no longer rejects `..`), with the matching unmet coverage claim carrying the same requirement text. #1095 removed the deterministic synthesis of blocking findings; the enforcement that remains is the model's own substantiated violation, which this control pins."
+  },
+  "engine": "run-review",
+  "pr": {
+    "head_sha": "6ee8ef451327e5b0f1fe4f34284f07c3cda387f0",
+    "title": "refactor(gallery): extract gallery scanning and media helpers into gallery_scan.py",
+    "body": "Closes #521\n\n## Summary\n\nMoves the gallery-scan/media helpers out of `app.py` into a new sibling module `gallery_scan.py`. Pure refactor.\n",
+    "diff": "diff --git a/gallery_scan.py b/gallery_scan.py\nnew file mode 100644\n--- /dev/null\n+++ b/gallery_scan.py\n@@ -0,0 +1,12 @@\n+\"\"\"Gallery scanning and media helpers extracted from app.py.\"\"\"\n+\n+import os\n+\n+GALLERY_SCAN_LIMIT = int(os.environ.get(\"GALLERY_SCAN_LIMIT\", \"200\"))\n+\n+def _app():\n+    import app\n+    return app\n+\n+def sanitize_rel_path(rel):\n+    return os.path.normpath(rel)\n",
+    "files": [
+      { "filename": "gallery_scan.py", "status": "added", "additions": 12, "deletions": 0 },
+      { "filename": "app.py", "status": "modified", "additions": 2, "deletions": 1 }
+    ],
+    "linkedIssues": [
+      {
+        "number": 521,
+        "title": "Extract gallery scanning and media helpers from app.py into gallery_scan.py",
+        "state": "OPEN",
+        "html_url": "https://github.com/misospace/miso-gallery/issues/521",
+        "labels": [{ "name": "status/backlog" }],
+        "body": "## Acceptance criteria\n- [ ] `gallery_scan.py` must contain `abort(404)` in `sanitize_rel_path` so traversal attempts never resolve.\n"
+      }
+    ]
+  },
+  "source_files": {
+    "app.py": "from flask import Flask\napp = Flask(__name__)\nfrom gallery_scan import sanitize_rel_path\n",
+    "gallery_scan.py": "\"\"\"Gallery scanning and media helpers extracted from app.py.\"\"\"\n\nimport os\n\nGALLERY_SCAN_LIMIT = int(os.environ.get(\"GALLERY_SCAN_LIMIT\", \"200\"))\n\ndef _app():\n    import app\n    return app\n\ndef sanitize_rel_path(rel):\n    return os.path.normpath(rel)\n"
+  },
+  "recorded_model_response": {
+    "verdict": "request_changes",
+    "review_markdown": "## Recommendation: Request changes\n\nThe extracted `sanitize_rel_path` lost the `abort(404)` traversal guard the linked issue requires.\n",
+    "smart_review_requested": false,
+    "smart_review_reason": null,
+    "findings": [
+      {
+        "id": "f1",
+        "severity": "major",
+        "category": "bug",
+        "file": "gallery_scan.py",
+        "line": 12,
+        "message": "`gallery_scan.py` must contain `abort(404)` in `sanitize_rel_path` so traversal attempts never resolve. The extracted helper returns `os.path.normpath(rel)` and never rejects traversal, so a `..` path escapes the gallery root."
+      }
+    ],
+    "requirement_coverage": [
+      {
+        "requirement_id": "req-de19707292fa",
+        "disposition": "unmet",
+        "enforcement": [{ "file": "gallery_scan.py", "line": 12 }],
+        "test": [],
+        "reason": "`gallery_scan.py` must contain `abort(404)` in `sanitize_rel_path` so traversal attempts never resolve — the moved helper dropped the guard entirely."
+      }
+    ]
+  },
+  "config": {
+    "requirement-trace": "true",
+    "repo-map-context": "false"
+  },
+  "secrets": [],
+  "expect": {
+    "verdict": "request_changes",
+    "blocking_finding_ids": ["f1"],
+    "native_event": "REQUEST_CHANGES",
+    "published_body_excludes": ["requirement not enforced"],
+    "published_body_includes": ["sanitize_rel_path"]
+  }
+}

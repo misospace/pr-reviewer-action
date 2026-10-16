@@ -1252,8 +1252,10 @@ test("#978: fallback no-evidence does not bypass when requirement-trace enforcem
     assert.match(result.outputs.analysisEngine, /fallback-m@.*fallback \(primary failed\)/);
     assert.equal(result.outputs.verdict, "request_changes");
     const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
-    assert.ok(findings.some((finding) => finding.severity === "major" && finding.message.startsWith("requirement not enforced: ")));
-    assert.equal(result.outputs.degradedGateBypass, false, "the synthesized requirement finding is a deterministic block");
+    // #1095: the trace fabricates no finding — but the unmet row still marks
+    // requirement_trace_incomplete, which is itself a deterministic block.
+    assert.ok(!findings.some((finding) => finding.message.startsWith("requirement not enforced: ")));
+    assert.equal(result.outputs.degradedGateBypass, false, "the incomplete trace is a deterministic block");
     assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 1);
     assert.equal(parseMetadata(result.marker)?.degraded_gate_bypass, undefined, "ineligible bypass state must not be persisted");
   } finally {
@@ -3724,7 +3726,7 @@ test("#874 #854-reproduction: a 'met' claim citing a real line that only copies 
   }
 });
 
-test("#874: an 'unmet' requirement with no finding gets a synthesized one and forces request_changes", async () => {
+test("#874/#1095: an 'unmet' requirement with no model finding is disclosed, never synthesized, and cannot force request_changes", async () => {
   const server = await startMockServer((_req, body, res) => {
     const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
     res.setHeader("Content-Type", "application/json");
@@ -3760,14 +3762,17 @@ test("#874: an 'unmet' requirement with no finding gets a synthesized one and fo
       quiet: true,
     });
 
+    // #1095: the enforcement pass fabricates no finding from the ledger text
+    // alone — the model's unsubstantiated unmet stays disclosed in the trace
+    // and keeps coverage incomplete, but a blocking review must rest on a
+    // substantiated violation (the model's own finding), which this payload
+    // does not carry.
     const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
-    assert.equal(findings.length, 1);
-    assert.equal(findings[0]!.severity, "major");
-    assert.match(findings[0]!.message, /^requirement not enforced: /);
-    assert.match(findings[0]!.message, /source SHA/);
+    assert.equal(findings.length, 0);
 
-    assert.equal(result.outputs.verdict, "request_changes");
-    assert.match(result.marker, /"review_result":"issues"/);
+    assert.equal(result.outputs.verdict, "approve");
+    assert.match(result.marker, /"review_result":"partial"/);
+    assert.match(result.marker, /"incomplete_reason":"requirement_trace"/);
   } finally {
     await server.close();
     cleanup();
@@ -3811,19 +3816,12 @@ test("#874: verdict-policy=model — an unmet trace stops coverage and the marke
     });
 
     const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
-    assert.equal(findings.length, 1);
-    assert.equal(findings[0]!.severity, "major");
-    assert.match(findings[0]!.message, /^requirement not enforced: /);
-    assert.match(findings[0]!.message, /source SHA/);
+    assert.equal(findings.length, 0);
 
-    // The synthesized major finding is present, but the non-strict verdict
-    // mapping runs before trace enforcement and leaves the model's approve
-    // in place — which is exactly why the trace is ALSO a coverage stop:
-    // required_checks=incomplete is what withholds approval (#878 guard)
-    // and keeps the marker from reading clean under this policy.
-    assert.equal(findings.length, 1);
-    assert.equal(findings[0]!.severity, "major");
-    assert.match(findings[0]!.message, /^requirement not enforced: /);
+    // #1095: no synthesized finding under any verdict policy. The trace is
+    // still a coverage stop: required_checks=incomplete is what withholds
+    // approval (#878 guard) and keeps the marker from reading clean under
+    // this policy.
     assert.equal(result.outputs.verdict, "approve");
     assert.equal(result.outputs.requiredChecks, "incomplete");
     assert.match(result.marker, /"required_checks":"incomplete"/);
@@ -3872,19 +3870,12 @@ test("#874: verdict-policy=findings_severity_gated — an unmet trace stops cove
     });
 
     const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
-    assert.equal(findings.length, 1);
-    assert.equal(findings[0]!.severity, "major");
-    assert.match(findings[0]!.message, /^requirement not enforced: /);
-    assert.match(findings[0]!.message, /source SHA/);
+    assert.equal(findings.length, 0);
 
-    // The synthesized major finding is present, but the non-strict verdict
-    // mapping runs before trace enforcement and leaves the model's approve
-    // in place — which is exactly why the trace is ALSO a coverage stop:
-    // required_checks=incomplete is what withholds approval (#878 guard)
-    // and keeps the marker from reading clean under this policy.
-    assert.equal(findings.length, 1);
-    assert.equal(findings[0]!.severity, "major");
-    assert.match(findings[0]!.message, /^requirement not enforced: /);
+    // #1095: no synthesized finding under any verdict policy. The trace is
+    // still a coverage stop: required_checks=incomplete is what withholds
+    // approval (#878 guard) and keeps the marker from reading clean under
+    // this policy.
     assert.equal(result.outputs.verdict, "approve");
     assert.equal(result.outputs.requiredChecks, "incomplete");
     assert.match(result.marker, /"required_checks":"incomplete"/);
