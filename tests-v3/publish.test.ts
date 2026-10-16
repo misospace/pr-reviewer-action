@@ -1090,7 +1090,7 @@ test("#1093: Forgejo repo-scoped PAT — a refused reaction probe fails closed a
   });
   assert.equal(result.status, "published");
   assert.ok(
-    result.messages.some((line) => line.includes("Could not verify authenticated owner") && line.includes("identity reason: reaction-http-403") && line.includes("no inline comments retired")),
+    result.messages.some((line) => line.includes("Could not verify authenticated owner") && line.includes("identity reason: user-http-403-and-reaction-http-403") && line.includes("no inline comments retired")),
   );
   assert.equal(
     requests.filter((r) => r.method === "DELETE" && r.url !== REACTIONS_URL).length,

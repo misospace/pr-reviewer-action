@@ -379,21 +379,31 @@ export class ForgejoAdapter implements PlatformReadAdapter {
     return status === 200 ? ForgejoAdapter.loginFromUserPayload(data) : null;
   }
 
-  /** #1093: the trusted owner identity for skip/carry-forward and cleanup
-   * ownership, with a bounded diagnostics reason. `GET /user` proves a
-   * login when it can; in Authorized Integration mode a repo-scoped JWT
-   * typically lacks the `/user` scope (401/403) or cannot reach it at all,
-   * so whenever `/user` cannot prove a login the audience's owner id — the
-   * same proof sticky-comment ownership already trusts — is the fallback
-   * proof. The audience check runs only as that fallback: with an
-   * unparseable audience the run falls through to the reaction self-write
-   * probe below. Every failure mode leaves the identity null (fail
-   * closed). */
+   /** #1093: the trusted owner identity for skip/carry-forward and cleanup
+    * ownership, with a bounded diagnostics reason. `GET /user` proves a
+    * login when it can; in Authorized Integration mode a repo-scoped JWT
+    * typically lacks the `/user` scope (401/403) or cannot reach it at all,
+    * so whenever `/user` cannot prove a login the audience's owner id — the
+    * same proof sticky-comment ownership already trusts — is the fallback
+    * proof. The audience check runs only as that fallback: with an
+    * unparseable audience the run falls through to the reaction self-write
+    * probe below. Every failure mode leaves the identity null (fail
+    * closed). When a fallback cannot prove an identity either, the `/user`
+    * stage's bounded reason is retained alongside the fallback's (composed
+    * with `-and-`), so an operator can tell whether `/user` was
+    * transport-unreachable, status-rejected, or returned an unusable
+    * payload instead of only seeing the final stage's failure. */
   async resolveTrustedOwner(): Promise<IdentityResolution> {
     const user = await this.fetchAuthenticatedUser();
-    if (!user.transportFailed && user.status === 200) {
+    let userStageReason: string;
+    if (user.transportFailed) {
+      userStageReason = "user-transport";
+    } else if (user.status === 200) {
       const login = ForgejoAdapter.loginFromUserPayload(user.data);
       if (login !== null) return { identity: { kind: "login", login }, reason: "user-login" };
+      userStageReason = "user-payload";
+    } else {
+      userStageReason = `user-http-${user.status}`;
     }
     if (this.isAuthorizedIntegrationMode()) {
       const userId = integrationOwnerIdFromAudience(this.audience);
@@ -404,26 +414,35 @@ export class ForgejoAdapter implements PlatformReadAdapter {
     // proven by a reaction self-write on this PR's issue instead. An
     // identity already proven above (a login from `/user`, or the
     // integration audience) never reaches the probe.
-    return this.reactionSelfAttestation();
+    const probe = await this.reactionSelfAttestation();
+    if (probe.identity !== null) return probe;
+    return { identity: null, reason: `${userStageReason}-and-${probe.reason}` };
   }
 
   /** #1093: final identity proof — a transient reaction self-write on this
    * PR's issue. The POST response's `user.id` attests the authenticated
    * DOER (only an account with issue-write on this repository can create
    * the reaction), so a repo-scoped PAT can prove its identity without the
-   * `read:user` scope; 200 (duplicate) and 201 (created) both attest.
+   * `read:user` scope. Both 201 (this run created the reaction) and 200
+   * (a `content:"eyes"` reaction already existed — the forge reports the
+   * doer of the duplicate POST) attest the server-authenticated doer.
    *
    * PATCH/edit-style responses are deliberately NOT acceptable identity
    * sources: they attest the comment's ORIGINAL poster, not the
    * authenticated doer — a repo-write token PATCHing a spoofed-marker
    * comment must never adopt the spoofer's identity.
    *
-   * The DELETE afterwards is best-effort cleanup (exactly one attempt); its
-   * body mirrors the POST's so the forge deletes the doer's `eyes` reaction
-   * (an empty-body DELETE binds an empty reaction type and silently removes
-   * nothing). The proof is the POST response, so a failed cleanup never
-   * invalidates the proven identity — it only emits a single bounded stderr
-   * WARN. Diagnostics never carry body, user, network, or token content. */
+   * The DELETE afterwards is best-effort cleanup (exactly one attempt) and
+   * runs ONLY for a 201: this run created that reaction, so it must not
+   * linger. A 200 means the reaction already existed and belongs to
+   * another moment/author — the proof still stands, but this run deletes
+   * nothing rather than destroying pre-existing user data. The cleanup's
+   * body mirrors the POST's so the forge deletes the doer's `eyes`
+   * reaction (an empty-body DELETE binds an empty reaction type and
+   * silently removes nothing). The proof is the POST response, so a failed
+   * cleanup never invalidates the proven identity — it only emits a single
+   * bounded stderr WARN. Diagnostics never carry body, user, network, or
+   * token content. */
   private async reactionSelfAttestation(): Promise<IdentityResolution> {
     let url: string;
     try {
@@ -452,15 +471,18 @@ export class ForgejoAdapter implements PlatformReadAdapter {
       return { identity: null, reason: "reaction-transport" };
     }
     if (status !== 200 && status !== 201) return { identity: null, reason: `reaction-http-${status}` };
+    const createdHere = status === 201;
     const user = isObject(data) && isObject(data.user) ? data.user : null;
     const userId = user === null ? null : canonicalUserId((user as { id?: unknown }).id);
     if (userId === null) {
-      // A 2xx payload that cannot prove the doer gets the same best-effort
-      // DELETE: an unprovable reaction must not linger on the issue either.
-      await this.deleteProbeReaction(url);
+      // A 201 payload that cannot prove the doer still gets the best-effort
+      // DELETE: this run created that reaction, and an unprovable reaction
+      // must not linger on the issue. A 200 payload cannot prove the doer
+      // either, but nothing was created — nothing is deleted.
+      if (createdHere) await this.deleteProbeReaction(url);
       return { identity: null, reason: "reaction-payload" };
     }
-    await this.deleteProbeReaction(url);
+    if (createdHere) await this.deleteProbeReaction(url);
     return { identity: { kind: "userId", userId }, reason: "reaction-self-attested" };
   }
 
