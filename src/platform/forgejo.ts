@@ -1,5 +1,6 @@
 import { ciAttemptTimeoutMs, isTransientCiRead } from "./bounded.js";
 import { ForgejoEnrichClient } from "./enrich.js";
+import { canonicalUserId, integrationOwnerIdFromAudience, type IdentityResolution } from "./owner-identity.js";
 import { PlatformRequestError, requestJson, requestText, type FetchLike } from "./http.js";
 import {
   forgejoReviewCommentId,
@@ -70,6 +71,14 @@ function forgejoAuthor(user: unknown): string | undefined {
   if (!isObject(user)) return undefined;
   const login = user.login;
   return typeof login === "string" && login !== "" ? login : undefined;
+}
+
+/** #1093: the forge-reported author user id of a Forgejo comment/review
+ * `user` object, in its canonical positive-integer string form. Never reads
+ * body content; unusable ids are `undefined` (unproven ownership). */
+function forgejoAuthorId(user: unknown): string | undefined {
+  if (!isObject(user)) return undefined;
+  return canonicalUserId(user.id) ?? undefined;
 }
 
 function parseRepo(repo: string): { owner: string; repo: string } {
@@ -306,6 +315,7 @@ export class ForgejoAdapter implements PlatformReadAdapter {
           created_at: typeof comment.created_at === "string" ? comment.created_at : typeof comment.created_on === "string" ? comment.created_on : undefined,
           updated_at: typeof comment.updated_at === "string" ? comment.updated_at : typeof comment.updated_on === "string" ? comment.updated_on : undefined,
           author: forgejoAuthor(comment.user),
+          authorId: forgejoAuthorId(comment.user),
         });
       }
       if (comments.length < 50) break;
@@ -334,7 +344,28 @@ export class ForgejoAdapter implements PlatformReadAdapter {
         submitted_at:
           typeof review.submitted_at === "string" ? review.submitted_at : typeof review.updated_at === "string" ? review.updated_at : undefined,
         author: forgejoAuthor(review.user),
+        authorId: forgejoAuthorId(review.user),
       }));
+  }
+
+  /** One `GET /api/v1/user` read shared by `authenticatedIdentity()` and
+   * `resolveTrustedOwner()` (#1093): `{status, data, transportFailed}` —
+   * a transport/auth failure never throws (the callers fold it into their
+   * own fail-closed contracts). */
+  private async fetchAuthenticatedUser(): Promise<{ status: number; data: unknown; transportFailed: boolean }> {
+    try {
+      const { status, data } = await requestJson(this.apiPath("/user"), await this.options("application/json"));
+      return { status, data, transportFailed: false };
+    } catch {
+      return { status: 0, data: null, transportFailed: true };
+    }
+  }
+
+  /** The usable login of a `/user` payload, or null (payload not usable). */
+  private static loginFromUserPayload(data: unknown): string | null {
+    if (!isObject(data)) return null;
+    const login = data.login;
+    return typeof login === "string" && login.trim() !== "" ? login : null;
   }
 
   /** #970: resolve the login this token posts as (`GET /user`). The
@@ -342,14 +373,38 @@ export class ForgejoAdapter implements PlatformReadAdapter {
    * any failure is `null` and the precheck fails closed rather than trusting
    * an unauthenticated marker. */
   async authenticatedIdentity(): Promise<string | null> {
-    try {
-      const { status, data } = await requestJson(this.apiPath("/user"), await this.options("application/json"));
-      if (status !== 200 || !isObject(data)) return null;
-      const login = data.login;
-      return typeof login === "string" && login.trim() !== "" ? login : null;
-    } catch {
-      return null;
+    const { status, data } = await this.fetchAuthenticatedUser();
+    // A non-200 body is an error payload, never an identity (the pre-#1093
+    // contract): only a 200 payload may prove a login.
+    return status === 200 ? ForgejoAdapter.loginFromUserPayload(data) : null;
+  }
+
+  /** #1093: the trusted owner identity for skip/carry-forward and cleanup
+   * ownership, with a bounded diagnostics reason. `GET /user` proves a
+   * login when it can; in Authorized Integration mode a repo-scoped JWT
+   * typically lacks the `/user` scope (401/403) or cannot reach it at all,
+   * so whenever `/user` cannot prove a login the audience's owner id — the
+   * same proof sticky-comment ownership already trusts — is the fallback
+   * proof. The audience check runs only as that fallback: with an
+   * unparseable audience the `/user` failure reason is reported (never a
+   * masked audience code). Every failure mode leaves the identity null
+   * (fail closed). */
+  async resolveTrustedOwner(): Promise<IdentityResolution> {
+    const user = await this.fetchAuthenticatedUser();
+    if (!user.transportFailed && user.status === 200) {
+      const login = ForgejoAdapter.loginFromUserPayload(user.data);
+      if (login !== null) return { identity: { kind: "login", login }, reason: "user-login" };
     }
+    if (this.isAuthorizedIntegrationMode()) {
+      const userId = integrationOwnerIdFromAudience(this.audience);
+      if (userId !== null) return { identity: { kind: "userId", userId }, reason: "integration-user-id" };
+    }
+    // No audience proof available: report why /user could not prove a login.
+    if (!user.transportFailed) {
+      if (user.status !== 200) return { identity: null, reason: `user-http-${user.status}` };
+      return { identity: null, reason: "user-payload" };
+    }
+    return { identity: null, reason: "user-transport" };
   }
 
   /** `_curl` semantics for a read: `{status, text}`, with a transport

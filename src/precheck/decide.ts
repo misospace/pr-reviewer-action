@@ -1,5 +1,6 @@
 import type { PlatformReadAdapter } from "../platform/types.js";
 import type { ExternalCheck } from "../platform/normalize.js";
+import { ownerMatchesIdentity, type IdentityResolution, type TrustedOwnerIdentity } from "../platform/owner-identity.js";
 import { deriveDraftState, deriveIsFork, normalizePrIdentity } from "../platform/pr.js";
 import { resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
@@ -234,15 +235,28 @@ export function extractStoredFingerprint(body: string): string {
  * An empty/missing author, or an unproven (null/blank) identity, never
  * matches — uncertain ownership fails closed. */
 export function authorMatchesTrustedIdentity(author: string | undefined, trustedIdentity: string | null): boolean {
-  const authorLogin = typeof author === "string" ? author.trim().toLowerCase() : "";
-  const identityLogin = typeof trustedIdentity === "string" ? trustedIdentity.trim().toLowerCase() : "";
-  return authorLogin !== "" && identityLogin !== "" && authorLogin === identityLogin;
+  return authorMatchesTrustedOwner(author, undefined, trustedIdentity === null ? null : { kind: "login", login: trustedIdentity });
+}
+
+/** #1093: is a forge-reported author (login and/or user id) the run's own
+ * trusted owner identity? The shared `ownerMatchesIdentity` policy decides:
+ * login-kind identities match the trimmed, case-insensitive login; user-id
+ * identities (Forgejo Authorized Integration) match ONLY the canonical
+ * positive-integer id — the id is authoritative and the login is never
+ * compared across kinds. An unproven identity or an unusable author never
+ * matches (fail closed). */
+export function authorMatchesTrustedOwner(
+  author: string | undefined,
+  authorId: number | string | undefined,
+  trusted: TrustedOwnerIdentity | null,
+): boolean {
+  return ownerMatchesIdentity({ login: author, id: authorId }, trusted);
 }
 
 /** Latest managed comment/review body selection by publish mode: the
  * review_verdict mode reads PR reviews, everything else reads issue comments.
  * Selection is latest-by-timestamp among bodies that BOTH carry the marker
- * AND were authored by the run's forge-authenticated identity (#970): a
+ * AND were authored by the run's trusted owner identity (#970/#1093): a
  * contributor can forge the marker, fingerprint, and metadata — all body
  * content — but cannot forge the author the forge reports. */
 export function lastManagedBody(
@@ -250,16 +264,16 @@ export function lastManagedBody(
   reviews: readonly ManagedReview[],
   publishMode: string,
   commentMarker: string,
-  trustedIdentity: string | null,
+  trusted: TrustedOwnerIdentity | null,
 ): string {
   const marker = commentMarker || "<!-- ai-pr-reviewer -->";
   const mode = (publishMode ?? "").toLowerCase();
   if (mode === "review_verdict") {
-    const matching = reviews.filter((review) => (review.body ?? "").includes(marker) && authorMatchesTrustedIdentity(review.author, trustedIdentity));
+    const matching = reviews.filter((review) => (review.body ?? "").includes(marker) && authorMatchesTrustedOwner(review.author, review.authorId, trusted));
     matching.sort((a, b) => (a.submitted_at ?? "") < (b.submitted_at ?? "") ? -1 : (a.submitted_at ?? "") > (b.submitted_at ?? "") ? 1 : 0);
     return matching.length ? matching[matching.length - 1]!.body : "";
   }
-  const matching = comments.filter((comment) => (comment.body ?? "").includes(marker) && authorMatchesTrustedIdentity(comment.author, trustedIdentity));
+  const matching = comments.filter((comment) => (comment.body ?? "").includes(marker) && authorMatchesTrustedOwner(comment.author, comment.authorId, trusted));
   matching.sort((a, b) => {
     const aKey = a.updated_at ?? a.created_at ?? "";
     const bKey = b.updated_at ?? b.created_at ?? "";
@@ -268,14 +282,15 @@ export function lastManagedBody(
   return matching.length ? matching[matching.length - 1]!.body : "";
 }
 
-/** #970: select the last managed body whose author is the run's own
- * forge-authenticated identity. Only such a body may supply the stored skip
- * fingerprint or a carried verdict. When a marker-bearing body exists but the
- * identity cannot be proven (a failed identity read, a token that posts as
- * nobody, or an unusable payload), or when no body was authored by it, the
- * result is empty — the run then re-reviews rather than trusting an
- * unauthenticated marker. The identity is only resolved when a candidate
- * exists, so a fresh PR costs no extra API call. */
+/** #970/#1093: select the last managed body whose author is the run's own
+ * trusted owner identity. Only such a body may supply the stored skip
+ * fingerprint or a carried verdict. When a marker-bearing body exists but
+ * the identity cannot be proven (a failed identity read, a token that posts
+ * as nobody, an unusable payload, or — in Forgejo Authorized Integration
+ * mode — an audience without a parseable owner id), or when no body was
+ * authored by it, the result is empty — the run then re-reviews rather than
+ * trusting an unauthenticated marker. The identity is only resolved when a
+ * candidate exists, so a fresh PR costs no extra API call. */
 async function selectAuthenticatedManagedBody(
   adapter: PlatformAdapter,
   comments: readonly ManagedComment[],
@@ -287,19 +302,31 @@ async function selectAuthenticatedManagedBody(
   const mode = (publishMode ?? "").toLowerCase();
   const candidates: readonly { body?: string | undefined }[] = mode === "review_verdict" ? reviews : comments;
   if (!candidates.some((entry) => (entry.body ?? "").includes(marker))) return "";
-  let identity: string | null = null;
-  try {
-    identity = await adapter.authenticatedIdentity();
-  } catch {
-    identity = null;
+  let resolution: IdentityResolution;
+  if (typeof adapter.resolveTrustedOwner === "function") {
+    try {
+      resolution = await adapter.resolveTrustedOwner();
+    } catch {
+      resolution = { identity: null, reason: "unavailable" };
+    }
+  } else {
+    let identity: string | null = null;
+    try {
+      identity = await adapter.authenticatedIdentity();
+    } catch {
+      identity = null;
+    }
+    resolution = identity === null || identity.trim() === ""
+      ? { identity: null, reason: "unavailable" }
+      : { identity: { kind: "login", login: identity }, reason: "user-login" };
   }
-  if (identity === null || identity.trim() === "") {
+  if (resolution.identity === null || (resolution.identity.kind === "login" && resolution.identity.login.trim() === "")) {
     process.stderr.write(
-      `warning: could not authenticate the action's own forge identity on ${adapter.platform}; refusing to skip or carry a verdict from an unauthenticated managed body (fail closed)\n`,
+      `warning: could not authenticate the action's own forge identity on ${adapter.platform} (reason: ${resolution.reason}); refusing to skip or carry a verdict from an unauthenticated managed body (fail closed)\n`,
     );
     return "";
   }
-  return lastManagedBody(comments, reviews, publishMode, commentMarker, identity);
+  return lastManagedBody(comments, reviews, publishMode, commentMarker, resolution.identity);
 }
 
 /** Carry the previous review's verdict forward on a diff-unchanged skip so

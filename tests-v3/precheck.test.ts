@@ -637,8 +637,8 @@ test("last managed body reads reviews in review_verdict mode, comments otherwise
     { body: "new <!-- ai-pr-reviewer -->", created_at: "2024-01-03T00:00:00Z", updated_at: "2024-01-03T00:00:00Z", author: "pr-reviewer[bot]" },
   ];
   const reviews = [{ body: "review <!-- ai-pr-reviewer -->", submitted_at: "2024-01-02T00:00:00Z", author: "pr-reviewer[bot]" }];
-  assert.match(lastManagedBody(comments, reviews, "comment", "<!-- ai-pr-reviewer -->", "pr-reviewer[bot]"), /^new /);
-  assert.match(lastManagedBody(comments, reviews, "review_verdict", "<!-- ai-pr-reviewer -->", "pr-reviewer[bot]"), /^review /);
+  assert.match(lastManagedBody(comments, reviews, "comment", "<!-- ai-pr-reviewer -->", { kind: "login", login: "pr-reviewer[bot]" }), /^new /);
+  assert.match(lastManagedBody(comments, reviews, "review_verdict", "<!-- ai-pr-reviewer -->", { kind: "login", login: "pr-reviewer[bot]" }), /^review /);
 });
 
 // ── Orchestration through the fixture adapter ────────────────────────────
@@ -1068,6 +1068,7 @@ function provenanceBody(fingerprint: string, reviewResult: string): string {
 
 function provenancePlatform(opts: {
   identity?: string;
+  identity_user_id?: string;
   comments?: ManagedComment[];
   reviews?: ManagedReview[];
   permission?: string;
@@ -1075,6 +1076,7 @@ function provenancePlatform(opts: {
   return {
     diff: DIFF,
     ...(opts.identity === undefined ? {} : { identity: opts.identity }),
+    ...(opts.identity_user_id === undefined ? {} : { identity_user_id: opts.identity_user_id }),
     comments: opts.comments ?? [],
     reviews: opts.reviews ?? [],
     ...(opts.permission === undefined ? {} : { permission: opts.permission }),
@@ -1361,6 +1363,52 @@ test("#970: an unprovable identity fails closed — a matching marker never auth
   assert.match(warned, /could not authenticate the action's own forge identity/);
 });
 
+// #1093: Forgejo Authorized Integration — the audience-derived owner id is
+// the trusted identity; marker-bearing bodies may be owned by user id alone.
+
+test("#1093: a user-id identity carries the clean verdict forward from a marker-bearing comment owned by that id", async () => {
+  const env = provenanceEnv("comment");
+  const fp = provenanceFingerprint(env);
+  const comments: ManagedComment[] = [
+    { id: 1, body: provenanceBody(fp, "clean"), created_at: "2024-01-01T00:00:00Z", updated_at: "2024-01-01T00:00:00Z", author: "integration-bot", authorId: 7 },
+  ];
+  const output = await runPrecheck({ env, adapter: new FixtureAdapter("forgejo", provenancePlatform({ identity_user_id: "7", comments })) });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "diff-unchanged");
+  assert.equal(output.verdict, "approve", "the newest body's clean verdict is carried forward");
+});
+
+test("#1093: a user-id identity carries the verdict forward from a marker-bearing review owned by that id", async () => {
+  const env = provenanceEnv("review_verdict");
+  const fp = provenanceFingerprint(env);
+  const reviews: ManagedReview[] = [
+    { body: provenanceBody(fp, "clean"), submitted_at: "2024-01-01T00:00:00Z", author: "integration-bot", authorId: 7 },
+  ];
+  const output = await runPrecheck({ env, adapter: new FixtureAdapter("forgejo", provenancePlatform({ identity_user_id: "7", reviews })) });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "diff-unchanged");
+  assert.equal(output.verdict, "approve");
+});
+
+test("#1093: a user-id identity never matches by login alone, and a mismatched id forces a fresh review", async () => {
+  const env = provenanceEnv("comment");
+  const fp = provenanceFingerprint(env);
+  const base = { body: provenanceBody(fp, "clean"), created_at: "2024-01-01T00:00:00Z", updated_at: "2024-01-01T00:00:00Z" };
+  // The login matches the action's usual bot name but no id proves it: a
+  // repo-scoped integration JWT may not resolve to any login at all, so the
+  // login is never compared against a user-id identity.
+  const loginOnly = await runPrecheck({ env, adapter: new FixtureAdapter("forgejo", provenancePlatform({ identity_user_id: "7", comments: [{ ...base, id: 1, author: "pr-reviewer[bot]" }] })) });
+  assert.equal(loginOnly.should_review, "true");
+  assert.equal(loginOnly.verdict, undefined);
+  // A different owner id is simply not this run's managed body.
+  const mismatched = await runPrecheck({ env, adapter: new FixtureAdapter("forgejo", provenancePlatform({ identity_user_id: "7", comments: [{ ...base, id: 2, author: "integration-bot", authorId: 8 }] })) });
+  assert.equal(mismatched.should_review, "true");
+  assert.equal(mismatched.verdict, undefined);
+  // A comment the forge did not attribute at all can never match.
+  const unattributed = await runPrecheck({ env, adapter: new FixtureAdapter("forgejo", provenancePlatform({ identity_user_id: "7", comments: [{ ...base, id: 3 }] })) });
+  assert.equal(unattributed.should_review, "true");
+  assert.equal(unattributed.verdict, undefined);
+});
 test("#970: a body with no forge-reported author cannot match, even when the identity resolves", async () => {
   const env = provenanceEnv("comment");
   const fp = provenanceFingerprint(env);
@@ -1433,8 +1481,8 @@ test("#970: lastManagedBody selects only the authenticated identity's body", () 
     { body: "genuine <!-- ai-pr-reviewer -->", created_at: "2024-01-01T00:00:00Z", updated_at: "2024-01-01T00:00:00Z", author: "pr-reviewer[bot]" },
     { body: "forged <!-- ai-pr-reviewer -->", created_at: "2024-01-09T00:00:00Z", updated_at: "2024-01-09T00:00:00Z", author: "attacker" },
   ];
-  assert.match(lastManagedBody(comments, [], "comment", "<!-- ai-pr-reviewer -->", "pr-reviewer[bot]"), /^genuine /);
-  assert.equal(lastManagedBody(comments, [], "comment", "<!-- ai-pr-reviewer -->", "someone-else"), "");
+  assert.match(lastManagedBody(comments, [], "comment", "<!-- ai-pr-reviewer -->", { kind: "login", login: "pr-reviewer[bot]" }), /^genuine /);
+  assert.equal(lastManagedBody(comments, [], "comment", "<!-- ai-pr-reviewer -->", { kind: "login", login: "someone-else" }), "");
   assert.equal(lastManagedBody(comments, [], "comment", "<!-- ai-pr-reviewer -->", null), "");
 });
 

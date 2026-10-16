@@ -8,6 +8,8 @@
  * GitHub-REST pull shape, and everything beyond metadata reads fails closed.
  */
 
+import type { IdentityResolution } from "./owner-identity.js";
+
 export interface ManagedComment {
   id?: number | string | undefined;
   body: string;
@@ -16,6 +18,10 @@ export interface ManagedComment {
   /** #970: the forge-reported author login (never body content). Undefined
    * when the forge did not report one — treated as unproven ownership. */
   author?: string | undefined;
+  /** #1093: forge-reported author user id (never body content). Undefined
+   * when the forge did not report one — treated as unproven ownership for
+   * user-id identities. */
+  authorId?: number | string | undefined;
 }
 
 export interface ManagedReview {
@@ -24,6 +30,10 @@ export interface ManagedReview {
   /** #970: the forge-reported author login (never body content). Undefined
    * when the forge did not report one — treated as unproven ownership. */
   author?: string | undefined;
+  /** #1093: forge-reported author user id (never body content). Undefined
+   * when the forge did not report one — treated as unproven ownership for
+   * user-id identities. */
+  authorId?: number | string | undefined;
 }
 
 export interface GhApiResult {
@@ -49,10 +59,17 @@ export interface PlatformAdapter {
    * the app's bot account (`<slug>[bot]`), `github-actions[bot]` for
    * `GITHUB_TOKEN`, and the user login for a PAT/OAuth token, so it survives
    * supported token/identity changes and is never inferred from a comment
-   * body. `null` when ownership cannot be proven (no token, transport/auth
-   * failure, or an unusable payload) — callers must fail closed rather than
-   * treat an unproven identity as trusted. */
+ * body. `null` when ownership cannot be proven (no token, transport/auth
+ * failure, or an unusable payload) — callers must fail closed rather than
+ * treat an unproven identity as trusted. */
   authenticatedIdentity(): Promise<string | null>;
+  /** #1093: the forge-authenticated owner identity with a bounded
+   * diagnostics reason. A `userId` proof is authoritative only in Forgejo
+   * Authorized Integration mode (the audience's owner id — the same trust
+   * sticky-comment ownership already extends); a `login` proof behaves like
+   * `authenticatedIdentity()`. Absent → callers fall back to
+   * `authenticatedIdentity()` (login-kind). */
+  resolveTrustedOwner?(): Promise<IdentityResolution>;
   /** "read" | "write" | "admin" | "unknown" | null (transport failure).
    * GitHub returns "unknown": coarse repo permission cannot infer the
    * unit-scoped GitHub App token permissions. */
