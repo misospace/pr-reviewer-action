@@ -464,9 +464,16 @@ export function maskKnownSecretsDeep(value: unknown, secrets: readonly (string |
   }
   if (Array.isArray(value)) return value.map((item) => maskKnownSecretsDeep(item, secrets, depth + 1));
   if (typeof value === "object" && value !== null) {
-    const out: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value)) out[key] = maskKnownSecretsDeep(item, secrets, depth + 1);
-    return out;
+    // `Object.fromEntries` (CreateDataPropertyOrThrow), NOT `out[key] = ...`:
+    // a hostile provider body can carry an OWN `__proto__` key (JSON.parse
+    // produces exactly that), and a plain assignment onto a fresh object
+    // invokes the prototype setter instead of defining the key — the key
+    // would silently vanish from the artifact and `out`'s prototype would
+    // become provider-controlled data. fromEntries defines it as an own data
+    // property, so the documented byte-for-byte key preservation holds.
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, maskKnownSecretsDeep(item, secrets, depth + 1)]),
+    );
   }
   return value;
 }

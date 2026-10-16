@@ -6,6 +6,7 @@ import {
   maskAndTruncateSource,
   maskDiagnostic,
   maskKnownSecrets,
+  maskKnownSecretsDeep,
   redactSourceText,
   redactSourceTextDetailed,
   redactText,
@@ -652,4 +653,29 @@ test("#882: describeTransportFailure fully removes configured keys 'E', 'R', 'A'
     assert.ok(!detail.includes(key), `key ${JSON.stringify(key)} survived: ${detail}`);
     assert.ok(detail.includes(KNOWN_SECRET_REDACTED), `expected the known-secret marker in: ${detail}`);
   }
+});
+
+test("#1037: maskKnownSecretsDeep preserves JSON structure — keys, array order, numbers, nesting", () => {
+  const body = JSON.parse('{"a":[1,"two",{"b":"three"}],"n":null,"f":1.5,"t":true}') as Record<string, unknown>;
+  const masked = maskKnownSecretsDeep(body, []) as Record<string, unknown>;
+  assert.equal(JSON.stringify(masked), JSON.stringify(body));
+});
+
+test("#252 boundary: maskKnownSecretsDeep fed a body with an OWN __proto__ key keeps it an own property and never touches Object.prototype", () => {
+  // The hostile key ITSELF, not a benign stand-in: JSON.parse produces an own
+  // `__proto__` data property, and a naive `out[key] = ...` rebuild invokes the
+  // prototype setter instead — the key vanishes from the artifact and `out`'s
+  // prototype becomes provider-controlled data.
+  const CANARY = "gw-8f2a1c9d3b7e4a10";
+  const body = JSON.parse(`{"__proto__":{"leak":"credential ${CANARY} rejected","keep":1},"safe":"value"}`);
+  const masked = maskKnownSecretsDeep(body, [CANARY]) as Record<string, unknown>;
+  assert.equal(Object.prototype.hasOwnProperty.call(masked, "__proto__"), true, "the own key must survive the rebuild");
+  assert.equal(Object.getPrototypeOf(masked), Object.prototype, "the prototype must stay the plain-object one");
+  assert.equal((masked["__proto__"] as Record<string, unknown>).leak, `credential ${KNOWN_SECRET_REDACTED} rejected`);
+  assert.equal((masked["__proto__"] as Record<string, unknown>).keep, 1);
+  assert.equal(masked.safe, "value");
+  // The serialized artifact keeps the key (still valid JSON, same shape).
+  assert.match(JSON.stringify(masked), /"__proto__":\{"leak"/);
+  assert.equal(JSON.stringify(masked).includes(CANARY), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(Object.prototype, "leak"), false, "no pollution escaped");
 });
