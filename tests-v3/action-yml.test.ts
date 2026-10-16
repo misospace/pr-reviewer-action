@@ -39,6 +39,20 @@ test("action.yml is generated from the contract and is a node24 JavaScript actio
   assert.equal(action.inputs["github-token"]!.default, "${{ github.token }}");
 });
 
+// GitHub evaluates `${{ }}` expressions while loading a reusable action.yml, in a
+// context where `github` is not available outside job-level input defaults: a
+// literal expression in a description fails the whole run with
+// "Unrecognized named-value: 'github'" (the #1037 dogfood breakage — the
+// ai-extra-headers description quoted `${{ github.run_id }}` as an example).
+// The only expression allowed in the generated file is the github-token default.
+test("generated action.yml contains no GitHub expressions except the github-token default", () => {
+  const expressionLines = readFileSync("action.yml", "utf8")
+    .split("\n")
+    .filter((line) => line.includes("${{"))
+    .map((line) => line.trim());
+  assert.deepEqual(expressionLines, ['default: "${{ github.token }}"']);
+});
+
 // #706 cutover: the live action.yml IS the v3 contract — kebab-case public ids,
 // and no removed input is ever aliased back in. action.yml is generated from
 // the contract (checked above), so the id sets are identical by construction;
