@@ -1,5 +1,6 @@
 import type { FetchLike } from "../platform/http.js";
 import type { GhApiResult, ManagedComment, ManagedReview, PlatformAdapter } from "../platform/types.js";
+import { canonicalUserId, type IdentityResolution } from "../platform/owner-identity.js";
 import { type LinkedIssue } from "../context/types.js";
 import { type PrecheckEventComment, type PrecheckEventLabel } from "./decide.js";
 import { extractIssueIdentifiers, LINEAR_PRIORITY_LABELS, type CollectResult } from "./linear.js";
@@ -38,6 +39,12 @@ export interface PrecheckFixture {
      * `authenticatedIdentity()` returns). Omitted → unproven ownership, so a
      * marker-bearing body can never authorize a skip. */
     identity?: string;
+    /** #1093: the forge-reported user id of the fixture's integration
+     * identity. Used only when `identity` is absent/unusable: then
+     * `resolveTrustedOwner()` proves the `userId` kind (Forgejo Authorized
+     * Integration semantics) and marker-bearing bodies may be owned by user
+     * id alone. */
+    identity_user_id?: string;
     permission?: string | null;
     permission_error?: boolean;
     /** Responses for the validated `ghApi` seam, keyed by endpoint. */
@@ -78,6 +85,23 @@ export class FixtureAdapter implements PlatformAdapter {
 
   async authenticatedIdentity(): Promise<string | null> {
     return this.spec.identity ?? null;
+  }
+
+  /** #1093: the trusted owner identity, explicit so fixtures can drive both
+   * proof kinds. `identity` set → login-kind (`user-login`); only a usable
+   * `identity_user_id` (with `identity` absent/unusable) → `userId`-kind
+   * (`integration-user-id`); neither → null (`unavailable`), and callers
+   * fall back to `authenticatedIdentity()`. */
+  async resolveTrustedOwner(): Promise<IdentityResolution> {
+    const identity = this.spec.identity;
+    if (typeof identity === "string" && identity.trim() !== "") {
+      return { identity: { kind: "login", login: identity }, reason: "user-login" };
+    }
+    const userId = typeof this.spec.identity_user_id === "string" ? this.spec.identity_user_id : "";
+    if (canonicalUserId(userId) !== null) {
+      return { identity: { kind: "userId", userId }, reason: "integration-user-id" };
+    }
+    return { identity: null, reason: "unavailable" };
   }
 
   async repoPermission(): Promise<string | null> {

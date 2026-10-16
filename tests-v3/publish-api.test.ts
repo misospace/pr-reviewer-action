@@ -291,3 +291,63 @@ test("Forgejo sticky comment reuse chooses the newest comment when timestamps ti
     ["PATCH", "https://forge.example/api/v1/repos/o/r/issues/comments/12"],
   ]);
 });
+
+// #1093: the legacy audience-only configuration (authMethod unset but an
+// integration audience present) is Authorized Integration mode for the
+// adapter — the publisher must apply the same ownership verification, so a
+// marker comment owned by a DIFFERENT account is never patched blindly.
+const AUDIENCE_ONLY = "u:7:12345678-1234-1234-1234-123456789abc";
+const AUDIENCE_OIDC_URL = `https://oidc.example/token?job=1&audience=${encodeURIComponent(AUDIENCE_ONLY)}`;
+
+function withAudienceOnlyOidcEnv(fn: () => Promise<void>): Promise<void> {
+  const previous = { url: process.env.ACTIONS_ID_TOKEN_REQUEST_URL, token: process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN };
+  process.env.ACTIONS_ID_TOKEN_REQUEST_URL = "https://oidc.example/token?job=1";
+  process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN = "runner-oidc";
+  return fn().finally(() => {
+    if (previous.url === undefined) delete process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+    else process.env.ACTIONS_ID_TOKEN_REQUEST_URL = previous.url;
+    if (previous.token === undefined) delete process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+    else process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN = previous.token;
+  });
+}
+
+test("#1093: audience-only config verifies sticky ownership by the audience user id", async () => withAudienceOnlyOidcEnv(async () => {
+  const { fetchImpl, calls } = recorder([
+    ["GET https://oidc.example/token?job=1", 200, { value: "jwt" }],
+    ["GET https://forge.example/api/v1/repos/o/r/issues/9/comments", 200,
+      [{ id: 7, body: "<!-- m -->\nold", user: { id: 8, login: "someone-else" } }]],
+    ["POST https://forge.example/api/v1/repos/o/r/issues/9/comments", 201, { id: 12 }],
+  ]);
+  const api = new ForgejoPublishApi({
+    repo: "o/r", prNumber: "9", baseUrl: "https://forge.example",
+    authorizedIntegrationAudience: AUDIENCE_ONLY, fetchImpl,
+  });
+  assert.deepEqual(await api.upsertStickyComment("<!-- m -->", "<!-- m -->\nnew"), {
+    ok: true, created: true, commentId: 12,
+  });
+  assert.ok(!calls.some((c) => c.method === "PATCH"), "a foreign-owned marker comment is never patched");
+  assert.deepEqual(calls.map(({ auth }) => auth), ["bearer runner-oidc", "Bearer jwt", "Bearer jwt"]);
+  assert.equal(
+    calls[0]?.url,
+    AUDIENCE_OIDC_URL,
+    "the JWT exchange pins the configured audience verbatim",
+  );
+}));
+
+test("#1093: audience-only config patches the sticky comment owned by the audience user id", async () => withAudienceOnlyOidcEnv(async () => {
+  const { fetchImpl, calls } = recorder([
+    ["GET https://oidc.example/token?job=1", 200, { value: "jwt" }],
+    ["GET https://forge.example/api/v1/repos/o/r/issues/9/comments", 200,
+      [{ id: 7, body: "<!-- m -->\nold", user: { id: 7 } }]],
+    ["PATCH https://forge.example/api/v1/repos/o/r/issues/comments/7", 200, { id: 7, updated_at: "2026-10-14T09:00:00Z" }],
+  ]);
+  const api = new ForgejoPublishApi({
+    repo: "o/r", prNumber: "9", baseUrl: "https://forge.example",
+    authorizedIntegrationAudience: AUDIENCE_ONLY, fetchImpl,
+  });
+  assert.deepEqual(await api.upsertStickyComment("<!-- m -->", "<!-- m -->\nnew"), {
+    ok: true, created: false, commentId: 7, updatedAt: "2026-10-14T09:00:00Z",
+  });
+  assert.equal(calls[2]!.method, "PATCH");
+  assert.equal(calls[2]!.url, "https://forge.example/api/v1/repos/o/r/issues/comments/7");
+}));
