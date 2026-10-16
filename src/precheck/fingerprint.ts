@@ -192,7 +192,10 @@ const CONDITIONAL_AI_KEYS: ReadonlySet<string> = new Set([
  * hashing values would break the unchanged-diff skip for exactly the users
  * of this input; adding or removing a header (e.g. `anthropic-beta`) is the
  * configuration change that can alter model behavior, and that still
- * invalidates. A value that cannot be parsed (only possible if startup
+ * invalidates. The accepted trade-off, stated to operators in the input
+ * description: changing a configured header's VALUE (swapping one
+ * `anthropic-beta` token for another) does NOT invalidate by itself.
+ * A value that cannot be parsed (only possible if startup
  * validation was bypassed) hashes to an explicit `malformed` line — fail
  * closed toward a fresh review, never toward a silent skip. */
 const NAME_ONLY_AI_KEYS: ReadonlySet<string> = new Set([

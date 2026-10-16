@@ -21,14 +21,29 @@
  *   values routinely carry proxy tokens, and load errors reach run logs.
  */
 
-/** Transport-critical headers the action owns; case-insensitive match. */
+/** Transport-critical headers the action owns; case-insensitive match.
+ * Beyond the issue's named six, this covers every header whose override
+ * would silently corrupt the request rather than merely restyle it:
+ * `accept` (the action owns `Accept: text/event-stream` on streamed
+ * Anthropic calls), and the RFC 7230 connection framing set Node manages
+ * itself. `__proto__` is also refused case-insensitively: it is a valid
+ * RFC 7230 token but assignment onto a plain object is a silent no-op, so
+ * an operator must be told, not quietly ignored. */
 export const RESERVED_EXTRA_HEADER_NAMES: ReadonlySet<string> = new Set([
   "x-api-key",
   "authorization",
   "anthropic-version",
   "content-type",
+  "accept",
   "host",
   "content-length",
+  "connection",
+  "keep-alive",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "__proto__",
 ]);
 
 /** Bound on the configured header set — generous next to any legitimate
@@ -45,6 +60,13 @@ const HEADER_NAME_TOKEN = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
  * injection/smuggling surface. Leading/trailing whitespace is trimmed first,
  * so trailing tab/VT variants never reach this check either. */
 const HEADER_VALUE_CONTROL_CHARS = /[\u0000-\u0008\u000A-\u001F\u007F]/;
+
+/** Node's own header-value authority (`checkInvalidHeaderChar` in
+ * `_http_common`): tab, printable ASCII, and latin-1. Anything above
+ * U+00FF (emoji, U+2028) makes `setHeader` throw `ERR_INVALID_CHAR` at
+ * REQUEST time — that would surface mid-review, so the startup parser
+ * rejects exactly what the wire would reject, with a clearer message. */
+const HEADER_VALUE_OUT_OF_LATIN1 = /[^\t\u0020-\u007E\u0080-\u00FF]/;
 
 export class ExtraHeadersError extends Error {
   constructor(message: string) {
@@ -89,6 +111,12 @@ export function parseExtraHeaders(raw: string): Record<string, string> {
     if (HEADER_VALUE_CONTROL_CHARS.test(value)) {
       throw new ExtraHeadersError(
         `Invalid ai-extra-headers value for '${name}': control characters (including CR and LF) are not allowed.`,
+      );
+    }
+    if (HEADER_VALUE_OUT_OF_LATIN1.test(value)) {
+      throw new ExtraHeadersError(
+        `Invalid ai-extra-headers value for '${name}': header values are latin-1 text on the wire; ` +
+        "characters above U+00FF (e.g. emoji) are rejected.",
       );
     }
     const previous = seen.get(lower);

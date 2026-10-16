@@ -62,6 +62,15 @@ test("#1037: every reserved transport header is rejected case-insensitively", ()
     ["content-type", "Content-Type"],
     ["host", "Host"],
     ["content-length", "CONTENT-LENGTH"],
+    // Beyond the issue's six: the action owns Accept on streamed Anthropic
+    // calls, and Node owns connection framing (review finding #3).
+    ["accept", "Accept"],
+    ["connection", "Connection"],
+    ["transfer-encoding", "Transfer-Encoding"],
+    ["upgrade", "Upgrade"],
+    // `__proto__` is a valid RFC 7230 token but assignment onto a plain
+    // object is a silent no-op (review finding #1) — reject, never swallow.
+    ["__proto__", "__Proto__"],
   ];
   for (const [lower, spelling] of spellings) {
     assert.ok(RESERVED_EXTRA_HEADER_NAMES.has(lower));
@@ -103,6 +112,21 @@ test("#252 boundary: CR/LF injection attempts in the value itself are rejected",
   assert.deepEqual(parseExtraHeaders("X-Tab: a\tb"), { "X-Tab": "a\tb" });
 });
 
+test("#252 boundary: values outside Node's latin-1 header alphabet fail at startup, not mid-request", () => {
+  // Node's `checkInvalidHeaderChar` rejects anything above U+00FF with
+  // ERR_INVALID_CHAR at setHeader time; the parser refuses the same set up
+  // front so the operator hears about it before the review starts.
+  for (const value of ["run-\u{1F600}-42", "line\u2028sep", "emoji:\u{1F389}"]) {
+    assert.throws(
+      () => parseExtraHeaders(`X-Trace: ${value}`),
+      (error: unknown) => error instanceof ExtraHeadersError && /latin-1/.test(error.message),
+      value,
+    );
+  }
+  // Latin-1 extensions and ordinary UTF-8 within range stay legal (Node sends them).
+  assert.deepEqual(parseExtraHeaders("X-Trace: café-255-ÿ"), { "X-Trace": "café-255-ÿ" });
+});
+
 test("#1037: case-insensitive duplicates are rejected; different names are fine", () => {
   assert.throws(
     () => parseExtraHeaders("X-Team-Id: a\nx-team-id: b"),
@@ -121,4 +145,42 @@ test("#1037: extraHeaderNames is the sorted lowercase name surface for fingerpri
   assert.deepEqual(extraHeaderNames("X-LiteLLM-Session-Id: run-1\nanthropic-beta: x"), ["anthropic-beta", "x-litellm-session-id"]);
   assert.deepEqual(extraHeaderNames(""), []);
   assert.throws(() => extraHeaderNames("no colon here"), ExtraHeadersError);
+});
+
+test("#1037: the specialist transport forwards configured headers and omits the key when unset", async () => {
+  const { specialistRequestFn } = await import("../src/gates/specialist-transport.js");
+  const seen: unknown[] = [];
+  const okChat = async (input: { extraHeaders?: Readonly<Record<string, string>> }) => {
+    seen.push(input.extraHeaders);
+    return {
+      status: "ok" as const,
+      response: { id: "", object: "chat.completion", model: "m", content: "x", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+      raw: { content: "x" },
+    };
+  };
+  const withHeaders = specialistRequestFn({
+    baseUrl: "http://mock",
+    apiKey: "k",
+    anthropicVersion: "2023-06-01",
+    extraHeaders: { "x-litellm-session-id": "run-1" },
+    runChat: okChat as never,
+  });
+  await withHeaders({ model: "m", stream: false }, "anthropic", 5);
+  assert.deepEqual(seen[0], { "x-litellm-session-id": "run-1" });
+
+  const withoutHeaders = specialistRequestFn({
+    baseUrl: "http://mock",
+    apiKey: "k",
+    anthropicVersion: "2023-06-01",
+    runChat: (input: { extraHeaders?: unknown }) => {
+      seen.push(Object.hasOwn(input, "extraHeaders"));
+      return Promise.resolve({
+        status: "ok" as const,
+        response: { id: "", object: "chat.completion", model: "m", content: "x", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+        raw: { content: "x" },
+      });
+    },
+  });
+  await withoutHeaders({ model: "m", stream: false }, "openai", 5);
+  assert.equal(seen[1], false);
 });
