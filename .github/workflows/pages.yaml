@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: withastro/action@56781b97402ce0487b7e61ce2cb960c0e2cc5289 # v3
+      - uses: withastro/action@3eafd002e65cc31b4f0eae0bb05450d521562247 # v6
         with:
           path: site
   deploy:
