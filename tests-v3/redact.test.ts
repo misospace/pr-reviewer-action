@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   KNOWN_SECRET_REDACTED,
   REDACTED_SOURCE,
+  containsKnownSecret,
   maskAndTruncateSource,
   maskDiagnostic,
   maskKnownSecrets,
@@ -704,4 +705,46 @@ test("#252 boundary: maskKnownSecretsDeep fed a body with an OWN __proto__ key k
   assert.match(JSON.stringify(masked), /"__proto__":\{"leak"/);
   assert.equal(JSON.stringify(masked).includes(CANARY), false);
   assert.equal(Object.prototype.hasOwnProperty.call(Object.prototype, "leak"), false, "no pollution escaped");
+});
+
+test("#1094: containsKnownSecret detects raw, URL-encoded, and base64 variants — the same set maskKnownSecrets replaces", () => {
+  const secret = "gw-8f2a1c9d3b7e4a10";
+  const secrets = [secret];
+  assert.equal(containsKnownSecret(`gateway audit ${secret} ok`, secrets), true, "raw");
+  assert.equal(containsKnownSecret(`gateway audit ${encodeURIComponent(secret)} ok`, secrets), true, "url-encoded");
+  assert.equal(containsKnownSecret(`gateway audit ${Buffer.from(secret, "utf8").toString("base64")} ok`, secrets), true, "base64");
+  assert.equal(containsKnownSecret(secret.repeat(2), secrets), true, "repeated");
+  assert.equal(containsKnownSecret("no credential anywhere in here", secrets), false, "no false positive");
+  // Empty/absent secrets and empty text never match.
+  assert.equal(containsKnownSecret(secret, []), false);
+  assert.equal(containsKnownSecret(secret, ["", null, undefined]), false);
+  assert.equal(containsKnownSecret("", secrets), false);
+  // Consistency contract above the floor: anything the masker would replace
+  // is detected, and the masker only replaces what is detected.
+  const text = `echo ${secret} and ${encodeURIComponent(secret)}`;
+  assert.equal(maskKnownSecrets(text, secrets) !== text, true);
+  assert.equal(containsKnownSecret(maskKnownSecrets(text, secrets), secrets), false, "masked output is clean");
+});
+
+test("#252 boundary: containsKnownSecret's content floor and variant set, fed the marker character itself", () => {
+  // The documented floor: a sub-8-character configured value is
+  // prose-indistinguishable ("k" masks every k in "Looks fine.") and is
+  // handled by the masking surfaces instead — the CONTENT gate refuses only
+  // credential-shaped values, exactly where redactText's generic heuristic
+  // draws its own `{8,}` line. The sub-floor RAW form is excluded, but its
+  // ENCODED forms stay in: a short value with URL-significant characters is
+  // distinctive once encoded, and an encoded echo is a real reflection.
+  assert.equal(containsKnownSecret("value 7 and more", ["7"]), false, "raw below the floor");
+  assert.equal(containsKnownSecret("Lo k fine", ["k"]), false, "raw below the floor");
+  assert.equal(containsKnownSecret("a b&c prose", ["a b&c"]), false, "raw below the floor");
+  assert.equal(containsKnownSecret("echo a%20b%26c here", ["a b&c"]), true, "url-encoded sub-floor variant");
+  assert.equal(containsKnownSecret(`echo ${Buffer.from("a b&c", "utf8").toString("base64")} here`, ["a b&c"]), true, "base64 sub-floor variant");
+  assert.equal(containsKnownSecret("value 12345678 embedded", ["12345678"]), true, "at the floor");
+  assert.equal(containsKnownSecret("value 1234567 embedded", ["1234567"]), false, "raw one under the floor");
+  assert.equal(containsKnownSecret("value 1234567%20x embedded", ["1234567 "]), true, "encoded one under the floor");
+  // Long secrets match in every variant, including the marker's own characters.
+  const long = "gw-8f2a1c9d3b7e4a10";
+  assert.equal(containsKnownSecret("⟦•⟧ residue", ["⟦"]), false, "below the floor");
+  assert.equal(containsKnownSecret(`x ${long} y`, [long]), true);
+  assert.equal(containsKnownSecret("clean text", ["⟦•⟧"]), false);
 });

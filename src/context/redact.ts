@@ -434,6 +434,75 @@ export function maskKnownSecrets(text: string, secrets: readonly (string | null 
   return masked;
 }
 
+/**
+ * #1094 review round 3 (blocker): the fail-closed counterpart of
+ * `maskKnownSecrets`. Answers exactly one question — does `text` contain any
+ * of the configured secrets the CONTENT gate covers? — and shares the
+ * masker's variant set (raw, URL-encoded, base64), but NOT its any-length
+ * rule: the deliberate floor below is exactly where the two mechanisms
+ * disagree, and the masking surfaces (not this gate) carry the any-length
+ * guarantee.
+ *
+ * Why detection instead of masking: `maskKnownSecrets` splices its marker into
+ * provider-controlled free text, which is correct for a diagnostic string but
+ * WRONG for the completion content that becomes the published verdict —
+ * masking there corrupts verdict fields for any short-but-legal configured key
+ * (`review_mar⟦•⟧down` → unparseable). The content surfaces therefore refuse
+ * the response instead: a caller that detects a configured credential in
+ * content it is about to accept, persist, or publish FAILS CLOSED (drops the
+ * response, surfaces a masked error) rather than publishing the secret or
+ * masking it into a corrupted artifact.
+ *
+ * Deliberate floor (#1094 review round 3): only secrets whose RAW configured
+ * value is at least `MIN_KNOWN_SECRET_CONTENT_LEN` characters participate in
+ * the CONTENT gate. Below that floor a configured value is indistinguishable
+ * from ordinary prose — a one-character key masks every `k` in `Looks fine.`
+ * — and refusing every review that mentions it would make the action
+ * unusable, so refusal cannot be the policy there. Such short values keep
+ * their full coverage on every NON-content surface (per-leaf
+ * `maskKnownSecrets`/`maskKnownSecretsDeep` masking of response bodies,
+ * diagnostics, and the envelope projection), which is where their reflection
+ * realistically lands; the same 8-character floor is the one `redactText`'s
+ * generic `key=value` heuristic already uses. A value at or above the floor
+ * is checked in ALL its variants (raw, URL-encoded, base64), with no
+ * false-positive leniency — the masker's any-length rule still governs every
+ * masking surface, so the two mechanisms disagree only where they must.
+ * A sub-floor secret's NON-raw variants are still checked: a short value
+ * containing URL-significant characters (`a b&c` → `a%20b%26c`) is
+ * distinctive rather than prose-indistinguishable in encoded form, so an
+ * encoded echo is refused while the raw false-positive class is not
+ * reintroduced. */
+export const MIN_KNOWN_SECRET_CONTENT_LEN = 8;
+
+export function containsKnownSecret(text: string, secrets: readonly (string | null | undefined)[] = []): boolean {
+  for (const secret of secrets) {
+    if (!secret) continue;
+    const belowFloor = secret.length < MIN_KNOWN_SECRET_CONTENT_LEN;
+    // Below the floor the RAW form is excluded (prose-indistinguishable);
+    // the encoded forms stay in — see the doc above. An encoded variant that
+    // EQUALS the raw form (every URL-safe sub-floor value encodes to itself:
+    // "k" → "k", "7" → "7") is the raw form and is excluded with it, or the
+    // floor would be silently void for exactly the values it exists for.
+    const variants: string[] = belowFloor ? [] : [secret];
+    try {
+      const encoded = encodeURIComponent(secret);
+      if (!belowFloor || encoded !== secret) variants.push(encoded);
+    } catch {
+      // Malformed surrogate pairs etc.: the raw variant is still checked.
+    }
+    try {
+      const b64 = Buffer.from(secret, "utf8").toString("base64");
+      if (!belowFloor || b64 !== secret) variants.push(b64);
+    } catch {
+      // Unreachable in practice (Buffer.from/toString don't throw here).
+    }
+    for (const variant of variants) {
+      if (variant !== "" && text.includes(variant)) return true;
+    }
+  }
+  return false;
+}
+
 /** Structural counterpart to `maskKnownSecrets`, for a JSON-shaped provider
  * body on its way into a persisted artifact (#1037). Same masking, applied
  * per string LEAF instead of to one flat string: object keys, array order,

@@ -34,7 +34,7 @@ import {
 } from "../model/conversation.js";
 import { redactText } from "../context/redact.js";
 import { fenceSafeLength } from "../context/related-context.js";
-import { KNOWN_SECRET_REDACTED, maskAndTruncate, maskDiagnostic, maskKnownSecrets, maskKnownSecretsDeep } from "../context/redact.js";
+import { KNOWN_SECRET_REDACTED, maskAndTruncate, maskDiagnostic, maskKnownSecrets, maskKnownSecretsDeep, MIN_KNOWN_SECRET_CONTENT_LEN } from "../context/redact.js";
 import { callKnownSecrets, extraHeadersForEnv } from "../transport/headers.js";
 import { reframeForCorpus, renderRepoMapMarkdown, repoMapFromArtifact, trustFramingOverhead } from "../context/repo-map.js";
 import { parseVerdictResponse } from "../model/verdict.js";
@@ -469,12 +469,14 @@ function isEnvelopeRecord(value: unknown): value is Record<string, unknown> {
  * - The completion CONTENT is carried VERBATIM. It becomes the published
  *   verdict, so masking it would corrupt verdict fields for a short-but-legal
  *   configured key (`review_mar⟦•⟧down` → unparseable) — the same reason
- *   `ai-output.json` and `specialist-*.json` stay unmasked. It is also not a
- *   credential surface: the model never sees a header value. Read the
- *   guarantee accordingly — "no gateway echo reaches the artifact" is a claim
- *   about ENVELOPE METADATA; a gateway that rewrites the completion `content`
- *   itself to embed a header value still reaches both this artifact and the
- *   published `ai-output.json`, by design.
+ *   `ai-output.json` and `specialist-*.json` stay unmasked. It is NOT a
+ *   free pass, though: this function only runs on the ACCEPTED path, and
+ *   acceptance goes through `parseVerdictResponse` (via `evaluateNativeVerdict`),
+ *   whose #1094 fail-closed gate REFUSES a completion content that embeds a
+ *   configured credential — so a content that reaches this projection is
+ *   already known to be secret-free, and the reuse re-parse enforces the same
+ *   gate again. What remains verbatim is therefore ordinary verdict content,
+ *   the same surface `ai-output.json` publishes.
  * - Every OTHER carried value goes through `maskKnownSecretsDeep`. The finish
  *   reason is masked because this artifact is only written on the accepted
  *   path, where the truncation suffix is never consulted.
@@ -1471,6 +1473,17 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     maxConversationTokens: loopContextLimits(env, limitsProfile).maxConversationTokens,
   };
   const deadline = input.tier === "smart" ? timeFn() + wallClock : null;
+  // #1094 review round 3: the loop's NON-verdict response surfaces (tool-call
+  // arguments, the closing text, loop errors, tool results) are
+  // provider-influenced too, but they are STRUCTURAL — they feed the verdict
+  // corpus and keyed consumers (`tool_results[].status === "ok"`, tool paths
+  // in ordinary file content). Their masking therefore applies the same
+  // documented floor as the content gate: a sub-floor configured value is
+  // prose-indistinguishable here as well ("k" in "checkout"), and mangling
+  // the corpus over it would degrade the review it exists to protect. Pure
+  // diagnostic surfaces (response bodies, errorLog, transport detail) keep
+  // the masker's any-length rule. See `harnessMaskSecrets`.
+  const harnessSecrets = harnessMaskSecrets(callKnownSecrets(input.apiKey, input.extraHeaders));
 
   // Read-only MCP tools (#245), allowlisted via TOOL_MCP_SERVERS. Fork-gating
   // happens upstream, so reaching here means MCP is permitted. A server that
@@ -1847,17 +1860,19 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     input.result.stop_reason =
       deadline !== null && timeFn() >= deadline ? "wall-clock-exceeded" : outcome.stopReason;
     input.result.planned_request_count = outcome.toolCallsIssued;
-    input.result.tool_calls = outcome.executed.map((call) => ({
-      tool: call.tool,
-      args: call.args,
-      status: (call.result.status as string) ?? "error",
-    }));
-    input.result.tool_results = outcome.executed.map((call) => call.result);
-    input.result.executed_request_count = outcome.executed.filter((c) => c.result.status === "ok").length;
-    input.result.native_loop_usage = usageWithCacheRatio(usageAcc);
-    input.result.native_loop_error = outcome.error || "smart tool-loop deadline exceeded";
-    return false;
-  }
+  input.result.tool_calls = outcome.executed.map((call) => ({
+    tool: call.tool,
+    args: maskKnownSecretsDeep(call.args, harnessSecrets),
+    status: (call.result.status as string) ?? "error",
+  }));
+  input.result.tool_results = outcome.executed.map((call) => maskKnownSecretsDeep(call.result, harnessSecrets));
+  input.result.executed_request_count = outcome.executed.filter((c) => c.result.status === "ok").length;
+  input.result.native_loop_usage = usageWithCacheRatio(usageAcc);
+  input.result.native_loop_error = outcome.error
+    ? maskKnownSecrets(outcome.error, harnessSecrets)
+    : "smart tool-loop deadline exceeded";
+  return false;
+}
   if (outcome.degraded) {
     log(
       "  native_loop degraded: the model issued no tool calls" +
@@ -1867,14 +1882,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     input.result.native_loop_degraded = outcome.stopReason;
     input.result.rounds = outcome.rounds;
     input.result.stop_reason = outcome.stopReason;
-    if (outcome.error) input.result.native_loop_error = outcome.error;
+    if (outcome.error) input.result.native_loop_error = maskKnownSecrets(outcome.error, harnessSecrets);
     input.result.native_loop_usage = usageWithCacheRatio(usageAcc);
     return false;
   }
 
   // Fold the outcome into `result` and build tool-harness.md now, before the
   // verdict turn — the verdict re-sends a corpus built before this harness ran.
-  const harnessMarkdown = summarizeLoopOutcome(input.result, outcome);
+  const harnessMarkdown = summarizeLoopOutcome(input.result, outcome, harnessSecrets);
   if (input.tier === "smart" && outcome.executed.some((c) => c.result.status !== "ok")) {
     input.result.native_loop_verdict_status = "fallback";
     input.result.native_loop_verdict_reason = "tool-error";
@@ -2010,7 +2025,11 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           // those bytes no longer reach disk at all. `reusableVerdictEnvelope`
           // carries exactly what `parseVerdictResponse` consumes, in the same
           // provider shape, so the reuse parse behaves identically; the reuse
-          // parse masks the configured values in its own thrown messages.
+          // parse masks the configured values in its own thrown messages. A
+          // content that embeds a configured credential never gets here at
+          // all: acceptance went through `parseVerdictResponse`'s fail-closed
+          // content gate (#1094 review round 3), and the reuse re-parse
+          // enforces the same gate.
           deps.writeArtifact(`ai-response.${input.tier}.json`, JSON.stringify(reusableVerdictEnvelope(verdict.response, verdict.knownSecrets)));
         } else if (!verdict.ok && verdict.response !== null && typeof verdict.response === "object") {
           deps.writeArtifact(`ai-response.${input.tier}.json`, JSON.stringify({ error: verdict.detail }));
@@ -2077,7 +2096,21 @@ function countOccurrences(text: string, needle: string): number {
  * of `_summarize_loop_outcome`). Runs BEFORE the verdict turn so the verdict
  * corpus can be corrected with real findings.
  */
-export function summarizeLoopOutcome(result: HarnessResult, outcome: LoopOutcome): string {
+/** The harness surfaces' masking list: the configured known secrets at or
+ * above `MIN_KNOWN_SECRET_CONTENT_LEN`, the same floor the #1094 content gate
+ * documents — these surfaces are structural (corpus sections, keyed status
+ * fields, file content), not pure diagnostics, so a sub-floor value's
+ * any-length masking would mangle ordinary prose and repo content over a
+ * reflection that cannot be reliably distinguished from either. */
+function harnessMaskSecrets(knownSecrets: readonly (string | null | undefined)[]): readonly (string | null | undefined)[] {
+  return knownSecrets.filter((secret): secret is string => typeof secret === "string" && secret.length >= MIN_KNOWN_SECRET_CONTENT_LEN);
+}
+
+export function summarizeLoopOutcome(
+  result: HarnessResult,
+  outcome: LoopOutcome,
+  knownSecrets: readonly (string | null | undefined)[] = [],
+): string {
   result.mode = "native_loop";
   result.rounds = outcome.rounds;
   result.stop_reason = outcome.stopReason;
@@ -2088,12 +2121,34 @@ export function summarizeLoopOutcome(result: HarnessResult, outcome: LoopOutcome
     // stop"; the investigation hit the ceiling.
     result.budget_exhausted = true;
   }
-  if (outcome.error) result.loop_error = outcome.error;
+  // #1094 review round 3 (major): every NON-verdict turn of the loop is also
+  // provider-controlled, and this trace lands raw in `tool-harness.json` /
+  // `tool-harness.md` (and from the markdown into the persisted verdict
+  // corpus) with only `redactedJson`'s pattern heuristics for company — a
+  // gateway echoing a configured header VALUE into a tool-call ARGUMENT or
+  // the loop's closing TEXT would otherwise land it on disk unmasked. These
+  // are telemetry surfaces, not a re-parsed contract, so per-leaf masking is
+  // safe here: `maskKnownSecretsDeep` keeps the args' JSON shape, and the
+  // final-text mask runs BEFORE truncation so a split secret cannot survive.
+  // (`buildToolCallsOutput` already excludes model-controlled args from the
+  // PUBLISHED output; this closes the on-disk copy.)
+  const loopError = outcome.error ? maskKnownSecrets(outcome.error, knownSecrets) : outcome.error;
+  if (outcome.error) result.loop_error = loopError;
+  const maskedArgs = outcome.executed.map((executed) => maskKnownSecretsDeep(executed.args, knownSecrets));
+  // The tool RESULTS are repo-tool output, not model output — but a tool
+  // error (or any tool output) can echo a model-controlled ARG back (a
+  // read/list error naming the requested path), so the same per-leaf masking
+  // covers them. The result's own `status` field is the executor's
+  // structural vocabulary ("ok"/"error"), not provider-controlled free text,
+  // so it is restored verbatim — a sub-floor configured key must not mangle
+  // the one field consumers branch on (`tool_results[].status === "ok"`).
+  // Telemetry surfaces; nothing re-parses these.
+  const maskedResults = outcome.executed.map((executed) => maskKnownSecretsDeep(executed.result, knownSecrets));
 
   // Additive structured trace of executed calls (tool + args + status).
-  result.tool_calls = outcome.executed.map((executed) => ({
+  result.tool_calls = outcome.executed.map((executed, i) => ({
     tool: executed.tool,
-    args: executed.args,
+    args: maskedArgs[i],
     status: (executed.result.status as string) ?? "error",
   }));
 
@@ -2121,8 +2176,8 @@ export function summarizeLoopOutcome(result: HarnessResult, outcome: LoopOutcome
   for (let i = 0; i < outcome.executed.length; i++) {
     const executed = outcome.executed[i]!;
     if (executed.result.status === "ok") executedCount++;
-    toolResults.push(executed.result);
-    mdLines.push(...toolResultMdLines(i + 1, executed.tool, executed.args, executed.result));
+    toolResults.push(maskedResults[i]);
+    mdLines.push(...toolResultMdLines(i + 1, executed.tool, maskedArgs[i]!, maskedResults[i]! as Record<string, unknown>));
   }
   result.executed_request_count = executedCount;
   result.tool_results = toolResults;
@@ -2130,7 +2185,7 @@ export function summarizeLoopOutcome(result: HarnessResult, outcome: LoopOutcome
   if (outcome.finalText) {
     mdLines.push("## Evidence summary (from the tool loop, untrusted)");
     mdLines.push("");
-    mdLines.push(maskAndTruncate(outcome.finalText, 4000).text);
+    mdLines.push(maskAndTruncate(maskKnownSecrets(outcome.finalText, knownSecrets), 4000).text);
     mdLines.push("");
   }
 

@@ -765,3 +765,108 @@ test("#1094: configuredKnownSecrets merges API keys + every configured header VA
   assert.equal(thrown.includes(CANARY), false, thrown);
   assert.ok(thrown.includes(KNOWN_SECRET_REDACTED), thrown);
 });
+
+test("#1094: a canary embedded in the native-loop verdict CONTENT fails closed — no artifact, log, or summary ever carries it", async () => {
+  // #252 boundary, blocker direction of review round 3: the completion
+  // CONTENT is the one provider-controlled field the accepted-path projection
+  // carries verbatim (masking it would corrupt the serialized verdict). A
+  // gateway with access to the configured header can echo its VALUE into that
+  // content of an otherwise-valid verdict — so the acceptance boundary
+  // (parseVerdictResponse's content gate, shared by evaluateNativeVerdict)
+  // must REFUSE the response: the native loop falls back to the standard
+  // review call, the failed verdict turn's artifact carries only the masked
+  // refusal, and nothing on disk, in the log, or in the summary ever holds the
+  // value. The intermediate turns echo it too — a tool-call ARGUMENT and the
+  // loop's closing TEXT — and the harness trace must mask those the same way
+  // (the reviewer's major on the non-verdict turns).
+  const scripted: unknown[] = [
+    // 1: the loop turn, one read-only tool call whose ARGUMENT echoes the
+    // configured credential (the reviewer's major: intermediate turns are
+    // provider-controlled too).
+    { choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "list_tree", arguments: `{"path":"src/${CANARY}.ts"}` } }] } }] },
+    // 2: the loop turn that issues no tool calls and closes the round — its
+    // closing TEXT echoes the credential as well.
+    { choices: [{ message: { content: `inspected the tree; gateway audit ${CANARY}` } }] },
+    // 3: the in-conversation verdict turn — a VALID verdict whose content
+    // embeds the configured credential.
+    {
+      id: "chatcmpl-verdict",
+      object: "chat.completion",
+      model: "m",
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: JSON.stringify({ verdict: "approve", review_markdown: `## Review\nLooks fine. gateway audit ${CANARY}`, findings: [] }) },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    },
+    // 4: the standard review call the loop fell back to — clean.
+    verdictBody(),
+  ];
+  let requests = 0;
+  const run = await runAndCollect((res) => {
+    const body = scripted[requests++] ?? scripted[scripted.length - 1];
+    res.setHeader("Content-Type", "application/json");
+    res.end(typeof body === "string" ? body : JSON.stringify(body));
+  }, {
+    "ai-extra-headers": `X-Gateway-Credential: ${CANARY}`,
+    "tool-mode": "native_loop",
+  }, { IS_FORK_PR: "false" });
+
+  const escapedCanary = JSON.stringify(CANARY).slice(1, -1);
+  for (const [label, surface] of [["artifacts", run.artifacts], ["summary", run.summary], ["errorLog", run.errorLog.join("\n")]] as const) {
+    assert.equal(surface.includes(CANARY), false, `${label} leaked the canary`);
+    assert.equal(surface.includes(escapedCanary), false, `${label} leaked the escaped canary`);
+  }
+  // The verdict turn was refused as a PARSE failure (not transport, not
+  // empty), with a static refusal message that names neither secret nor
+  // header, and the run still completed through the standard review call.
+  const harness = JSON.parse(run.files["tool-harness.json"] ?? "{}") as {
+    native_loop_verdict_produced?: boolean;
+    native_loop_verdict_status?: string;
+    native_loop_verdict_reason?: string;
+    native_loop_verdict_error?: string;
+  };
+  assert.equal(harness.native_loop_verdict_status, "fallback");
+  assert.equal(harness.native_loop_verdict_reason, "parse");
+  assert.match(String(harness.native_loop_verdict_error), /configured credential/);
+  assert.equal(requests, 4, "the loop's fallback must be the standard review call");
+  assert.equal(run.output.verdict, "approve");
+});
+
+test("#1094: a canary embedded in the STANDARD tier's verdict content fails closed; the run refuses to publish it", async () => {
+  // The primary tier's success parse (`model/call.ts`) consumes the same
+  // gate: retries exhaust on the refusal, the response artifact is replaced
+  // with the masked error, and with no fallback configured the run ends in
+  // the `on-model-failure: notice` lane — never with the credential in
+  // `ai-output.json` or any published artifact.
+  const run = await runAndCollect((res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      id: "c1",
+      object: "chat.completion",
+      model: "m",
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: JSON.stringify({ verdict: "approve", review_markdown: `## Review\nLooks fine. gateway audit ${CANARY}`, findings: [] }) },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    }));
+  }, { "ai-extra-headers": `X-Gateway-Credential: ${CANARY}` }, { ON_MODEL_FAILURE: "notice" });
+
+  const escapedCanary = JSON.stringify(CANARY).slice(1, -1);
+  for (const [label, surface] of [["artifacts", run.artifacts], ["summary", run.summary], ["errorLog", run.errorLog.join("\n")]] as const) {
+    assert.equal(surface.includes(CANARY), false, `${label} leaked the canary`);
+    assert.equal(surface.includes(escapedCanary), false, `${label} leaked the escaped canary`);
+  }
+  // The refusal is diagnosable (masked static prose) and the run still
+  // completed through the notice lane instead of publishing the credential.
+  assert.match(run.errorLog.join("\n"), /configured credential/);
+  assert.ok(typeof run.output.verdict === "string");
+  // The response artifact was replaced with the masked error, not the
+  // secret-bearing body.
+  const persisted = JSON.parse(run.response) as { error?: string };
+  assert.match(String(persisted.error), /configured credential/);
+  assert.equal(JSON.stringify(persisted).includes(CANARY), false);
+});

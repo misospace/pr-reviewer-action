@@ -1,7 +1,7 @@
 import type { NormalizedFinding, NormalizedHumanReviewDisposition, NormalizedRequiredCheckDisposition, NormalizedThreadDisposition, ParsedReviewVerdict, RequiredCheckStatus, ReviewTriageDecision, VerdictValue } from "./types.js";
 import { resolveReviewTriageDecision } from "./triage.js";
 import { VerdictParseFailure } from "./types.js";
-import { maskDiagnostic } from "../context/redact.js";
+import { containsKnownSecret, maskDiagnostic } from "../context/redact.js";
 
 /**
  * Port of pr_reviewer/response_parser.py: tolerant model-output parsing and
@@ -316,6 +316,19 @@ export function normalizeVerdict(value: unknown): VerdictValue | null {
   if (APPROVE_VERDICTS.has(collapsed)) return "approve";
   if (REQUEST_CHANGES_VERDICTS.has(collapsed)) return "request_changes";
   return null;
+}
+
+/** The content-extraction mirror of `parseVerdictResponseUnmasked`: the same
+ * `extractContent` branch order, joined the same way, so the fail-closed gate
+ * evaluates exactly the text the parse accepted (a string or content-part
+ * array the parser would join). Metadata (`system_fingerprint`, `id`, `model`,
+ * ...) is deliberately out of scope here — those surfaces are handled by the
+ * response-side masking and the native-loop envelope projection. */
+function contentHasKnownSecret(response: unknown, secrets: readonly (string | null | undefined)[]): boolean {
+  if (secrets.length === 0 || !isRecord(response)) return false;
+  const raw = extractContent(response);
+  const text = Array.isArray(raw) ? raw.join("") : typeof raw === "string" ? raw : "";
+  return containsKnownSecret(text, secrets);
 }
 
 function extractContent(response: Record<string, unknown>): string | string[] | null {
@@ -764,7 +777,32 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
  */
 export function parseVerdictResponse(response: unknown, secrets: readonly (string | null | undefined)[] = []): ParsedReviewVerdict {
   try {
-    return parseVerdictResponseUnmasked(response);
+    const parsed = parseVerdictResponseUnmasked(response);
+    // #1094 review round 3 (blocker): the completion CONTENT is the one
+    // provider-controlled field that reaches the published artifacts verbatim
+    // (`ai-output.json`'s review_markdown/findings, the native-loop
+    // `ai-response.<tier>.json` envelope content, specialist lead prose). A
+    // gateway that has access to the configured header can echo its VALUE into
+    // that content instead of metadata — no envelope projection or masking
+    // boundary downstream can remove it without corrupting the verdict. So the
+    // acceptance boundary itself FAILS CLOSED: a content that embeds a
+    // configured secret is refused as a parse failure (retry budget applies;
+    // on exhaustion the response artifact is replaced with the masked error
+    // and nothing is published), never masked into a corrupted verdict and
+    // never published. Same variant set as `maskKnownSecrets`, with the
+    // documented content-gate length floor (`MIN_KNOWN_SECRET_CONTENT_LEN`)
+    // — masking surfaces keep the any-length rule, so a short configured key
+    // is still scrubbed from every non-content surface, while content is
+    // never refused over prose-indistinguishable values. The thrown message is
+    // static prose — it names no secret and no header — and `maskDiagnostic`
+    // in the catch below masks it again anyway.
+    if (contentHasKnownSecret(response, secrets)) {
+      throw new VerdictParseFailure(
+        "known_secret_in_content",
+        "Model completion content embeds a configured credential; the response is refused rather than published.",
+      );
+    }
+    return parsed;
   } catch (error) {
     if (error instanceof VerdictParseFailure) {
       throw new VerdictParseFailure(error.kind, maskDiagnostic(error.message, secrets), { truncated: error.truncated });

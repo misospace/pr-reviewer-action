@@ -2112,7 +2112,13 @@ async function producePrimaryReview(input: ReviewCallInput & {
 
 /** `on-model-failure: notice`: the notice verdict is already final JSON, so
  * it is parsed as the content of a provider reply (the same validation and
- * artifact normalization a model answer gets), never as the reply itself. */
+ * artifact normalization a model answer gets), never as the reply itself.
+ * Preconditions pinned: `aiOutputJson` is built entirely from static local
+ * literals (src/prompt/failure.ts) — never provider-influenced text — which
+ * is why this call passes no known-secret list and the #1094 content gate is
+ * correctly inert here. If the notice content ever interpolates
+ * provider-influenced text, this call must gain the configured known-secret
+ * list so the gate covers it. */
 function noticeResult(
   ws: RunWorkspace,
   outcome: { aiOutputJson: string; analysisEngine: string },
