@@ -59,9 +59,9 @@ export interface PlatformAdapter {
    * the app's bot account (`<slug>[bot]`), `github-actions[bot]` for
    * `GITHUB_TOKEN`, and the user login for a PAT/OAuth token, so it survives
    * supported token/identity changes and is never inferred from a comment
- * body. `null` when ownership cannot be proven (no token, transport/auth
- * failure, or an unusable payload) — callers must fail closed rather than
- * treat an unproven identity as trusted. */
+   * body. `null` when ownership cannot be proven (no token, transport/auth
+   * failure, or an unusable payload) — callers must fail closed rather than
+   * treat an unproven identity as trusted. */
   authenticatedIdentity(): Promise<string | null>;
   /** #1093: the forge-authenticated owner identity with a bounded
    * diagnostics reason. A `userId` proof is authoritative only in Forgejo

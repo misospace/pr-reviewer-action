@@ -1144,6 +1144,72 @@ test("#1093: a managed review submitted in the same second as the sticky checkpo
   assert.deepEqual(api.dismissed, []);
 });
 
+test("#1093: a managed review with no usable timestamp fails the still-current guard closed; cleanup is skipped", async () => {
+  // The absent-timestamp arm, distinct from the same-second tie above: a
+  // managed review of ANY author (here a foreign identity, proving the check
+  // is not ownership-scoped) with neither submitted_at nor updated_at cannot
+  // be proven older than the checkpoint, so it fails the gate closed.
+  const api = new MockPublishApi();
+  api.reviews = [
+    { id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" },
+    { id: 2000, body: MARKER, user: { login: "human" } },
+  ];
+  api.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  api.retireInlineComment = async () => { assert.fail("an unplaceable managed review must never delete"); };
+  api.dismissReview = async () => { assert.fail("an unplaceable managed review must never dismiss"); };
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
+  assert.deepEqual(api.dismissed, []);
+});
+
+test("#1093: a sticky checkpoint comment owned by a foreign identity fails the still-current guard; cleanup is skipped", async () => {
+  // Pins the sticky-ownership guard: the checkpoint comment must still be
+  // authored by the identity this run proved. A foreign author's comment at
+  // the checkpoint id attests nothing, so the gate fails closed.
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  api.comments = [{ id: 9, body: MARKER, user: { login: "human" }, updated_at: "2026-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  api.retireInlineComment = async () => { assert.fail("a foreign-authored sticky must never delete"); };
+  api.dismissReview = async () => { assert.fail("a foreign-authored sticky must never dismiss"); };
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
+  assert.deepEqual(api.dismissed, []);
+});
+
+test("#1093: a sticky checkpoint comment that is not the managed body fails the still-current guard; cleanup is skipped", async () => {
+  // Pins the managed-body guard on the refreshed sticky: an unannotated (or
+  // near-miss) body at the checkpoint id is not this action's publication, so
+  // it can never authorize retiring the previous owned inline comments.
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  api.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  // The stored comment loses the managed marker (near-miss prefix) after the
+  // upsert, as a human edit or a spoofed id would.
+  const sticky = api.upsertStickyComment.bind(api);
+  api.upsertStickyComment = async (marker, body) => {
+    const result = await sticky(marker, body);
+    api.comments = api.comments.map((c) => String(c.id) === "9" ? { ...c, body: `${MARKER}x not this action's body` } : c);
+    return result;
+  };
+  api.retireInlineComment = async () => { assert.fail("an unmanaged sticky must never delete"); };
+  api.dismissReview = async () => { assert.fail("an unmanaged sticky must never dismiss"); };
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
+  assert.deepEqual(api.dismissed, []);
+});
+
 test("#1093: a same-second sticky re-publication with a different body fails the still-current guard; cleanup is skipped", async () => {
   // An overlapping run re-publishes the sticky in the SAME second (refreshed
   // timestamp equals the checkpoint) but with a DIFFERENT body; the

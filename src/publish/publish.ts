@@ -1029,6 +1029,11 @@ export async function publishReview(
       // (e.g. a failed inline-findings submission, or a forge response
       // without a usable sticky timestamp).
       messages.push("WARN: No replacement checkpoint (no native review id and no sticky publication timestamp); previous inline comments left in place");
+    } else if (cleanupEnabled) {
+      // #1093: a checkpoint DOES exist here, so the honest cause is an
+      // incomplete replacement — partial inline coverage or a fallback
+      // submission — not a missing checkpoint.
+      messages.push("WARN: Replacement checkpoint is not a complete replacement (incomplete coverage or fallback submission); previous inline comments left in place");
     }
   }
 
