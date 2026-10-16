@@ -625,7 +625,32 @@ interface ToolResultEvent {
   is_error: boolean;
   provenance: string;
   summarized?: boolean;
+  /** Executing tool name, when known (#1043 review). Compaction uses it to
+   * keep contract-bound result shapes (read_skill) from being silently
+   * cut into fragments. */
+  tool?: string;
   evidence?: EvidenceProvenance;
+}
+
+/** Trusted driver-authored replacement for a compacted `read_skill` result
+ * (#1043 review). The executor guarantees a complete body and reports
+ * `content_complete`; compaction must never leave a partial skill advertised
+ * as complete. Replacing the result whole with this marker frees the bytes
+ * AND tells the model the content is gone — never partially present. The
+ * path is recovered from the serialized result when it parses, so the model
+ * can re-read the skill from the trusted base if it still needs it. */
+function repositorySkillDiscardMarker(serialized: string): string {
+  let path = "";
+  try {
+    const parsed: unknown = JSON.parse(serialized);
+    if (parsed !== null && typeof parsed === "object" && typeof (parsed as { path?: unknown }).path === "string") {
+      path = String((parsed as { path: string }).path);
+    }
+  } catch {
+    // the envelope shape is not guaranteed after earlier compactions
+  }
+  const suffix = path !== "" ? ` (${path})` : "";
+  return `[repository skill${suffix} discarded during context compaction — its complete body was delivered when first read; re-read it with read_skill if needed]`;
 }
 
 /** Wrap model-visible tool output in an untrusted-data boundary. */
@@ -768,7 +793,7 @@ export class Conversation {
   addToolResult(
     callId: unknown,
     result: unknown,
-    options: { isError?: boolean; maxBytes?: number; provenance?: EvidenceProvenance | undefined } = {},
+    options: { isError?: boolean; maxBytes?: number; provenance?: EvidenceProvenance | undefined; tool?: string } = {},
   ): void {
     const isError = options.isError ?? false;
     const maxBytes = options.maxBytes ?? TOOL_RESULT_MAX_BYTES;
@@ -781,6 +806,7 @@ export class Conversation {
       content: body,
       is_error: isError,
       provenance: "tool_result",
+      ...(options.tool ? { tool: options.tool } : {}),
     };
     if (options.provenance) event.evidence = options.provenance;
     this.events.push(event);
@@ -874,6 +900,19 @@ export class Conversation {
       if (e.kind !== "tool_result") continue;
       const body = e.content;
       if (Buffer.byteLength(body, "utf8") <= maxBytesPerResult) continue;
+      // #1043 (review): a read_skill result's shape is contract-bound — the
+      // executor guarantees the complete body and reports content_complete.
+      // Blunt truncation would leave a partial skill advertised as complete,
+      // so it is replaced WHOLE with a trusted, explicit discarded marker
+      // instead (freeing the bytes truthfully; the model may re-read).
+      if (e.tool === "read_skill") {
+        const marker = repositorySkillDiscardMarker(body);
+        if (marker !== body) {
+          e.content = marker;
+          shrunk++;
+        }
+        continue;
+      }
       const { text: newBody } = truncateText(body, maxBytesPerResult);
       if (newBody !== body) {
         e.content = newBody;
@@ -907,11 +946,29 @@ export class Conversation {
     const keep = Math.max(keepNewest, 0);
     if (indices.length <= keep) return 0;
     const old = keep > 0 ? indices.slice(0, indices.length - keep) : indices;
+    // #1043 (review): read_skill results are never folded into the digest —
+    // a model paraphrase of repository guidance could distort it. Old skill
+    // results are instead replaced whole with an explicit discarded marker
+    // (trusted driver text), freeing their bytes truthfully.
+    const oldSkills = old.filter((i) => {
+      const e = this.events[i] as ToolResultEvent;
+      return e.tool === "read_skill" && !e.summarized;
+    });
     const foldable = old.filter((i) => {
       const e = this.events[i] as ToolResultEvent;
-      return !e.summarized;
+      return !e.summarized && e.tool !== "read_skill";
     });
-    if (foldable.length === 0) return 0;
+    if (foldable.length === 0 && oldSkills.length === 0) return 0;
+    if (foldable.length === 0) {
+      // Only skill results to compact: no digest call is needed (and no
+      // digest can hold them truthfully) — mark and report the freed slots.
+      for (const i of oldSkills) {
+        const e = this.events[i] as ToolResultEvent;
+        e.content = repositorySkillDiscardMarker(e.content);
+        e.summarized = true;
+      }
+      return oldSkills.length;
+    }
     const block = foldable
       .map((i, n) => {
         const e = this.events[i] as ToolResultEvent;
@@ -920,8 +977,7 @@ export class Conversation {
       .join("\n\n");
     const digest = ((await summarizeFn(block)) || "").trim();
     if (!digest) return 0;
-    const head = foldable[0];
-    if (head === undefined) return 0;
+    const head = foldable[0]!;
     const headEvent = this.events[head] as ToolResultEvent;
     headEvent.content = "Condensed digest of earlier tool results:\n" + digest;
     headEvent.summarized = true;
@@ -930,7 +986,12 @@ export class Conversation {
       e.content = "[folded into the condensed digest above]";
       e.summarized = true;
     }
-    return foldable.length;
+    for (const i of oldSkills) {
+      const e = this.events[i] as ToolResultEvent;
+      e.content = repositorySkillDiscardMarker(e.content);
+      e.summarized = true;
+    }
+    return foldable.length + oldSkills.length;
   }
 
   // ---- wire emission -----------------------------------------------------
@@ -1229,7 +1290,11 @@ export class Conversation {
       } else if (options.responseFormat === "json_schema") {
         payload.response_format = OPENAI_VERDICT_JSON_SCHEMA;
       }
-    } else {
+    } else if (this.toolSchemas.length > 0) {
+      // #1043 (review): omitted entirely when the conversation advertises no
+      // tools — a model-only request (the loop's summarizer) must not carry
+      // a tools field it cannot act on, and an empty array is still a tools
+      // field some providers reject.
       payload.tools = this.toolSchemas.map(toolToOpenAi);
     }
     // #998: OpenAI's protocol-native effort field, verbatim and only when a
@@ -1278,7 +1343,7 @@ export class Conversation {
     if (options.temperature !== null) {
       payload.temperature = options.temperature;
     }
-    if (!options.verdictTurn) {
+    if (!options.verdictTurn && this.toolSchemas.length > 0) {
       payload.tools = this.toolSchemas.map(toolToAnthropic);
     }
     // #1047: Anthropic-native structured output exists only as
