@@ -1680,6 +1680,27 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     });
     if (coverage !== null) input.result.partial_coverage = coverage;
   }
+  // #1043 (review): applied-skill diagnostics are aggregated BEFORE any
+  // early return — a smart-loop request-error or wall-clock exit still read
+  // skills, and the truthful record (and its artifact) must exist on those
+  // exits too.
+  const appliedSkills: Array<{ path: string; name: string }> = [];
+  const seenApplied = new Set<string>();
+  for (const call of outcome.executed) {
+    if (call.tool !== "read_skill" || call.result.status !== "ok") continue;
+    const path = typeof call.args.path === "string" ? call.args.path : "";
+    if (!allowedSkills.includes(path) || seenApplied.has(path)) continue;
+    seenApplied.add(path);
+    appliedSkills.push({ path, name: path.split("/").at(-2) ?? "" });
+  }
+  if (appliedSkills.length > 0) {
+    input.deps.writeArtifact("repository-skills-applied.json", JSON.stringify(appliedSkills));
+  } else {
+    // Zero reads (or tools disabled for this loop): a reused run dir must
+    // not keep the previous run's artifact.
+    input.deps.deleteArtifact?.("repository-skills-applied.json");
+  }
+  input.result.repository_skills_applied = appliedSkills;
   if (
     input.tier === "smart" &&
     (outcome.stopReason === "request-error" ||
@@ -1702,21 +1723,6 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     input.result.native_loop_error = outcome.error || "smart tool-loop deadline exceeded";
     return false;
   }
-  // #1043 (review): the loaded-skills cap is enforced at execution (the
-  // shared skillsRead set); this list reports every successful distinct
-  // read truthfully — deduplicated, first-read order, with the execution
-  // cap as the only slice.
-  const appliedSkills: Array<{ path: string; name: string }> = [];
-  const seenApplied = new Set<string>();
-  for (const call of outcome.executed) {
-    if (call.tool !== "read_skill" || call.result.status !== "ok") continue;
-    const path = typeof call.args.path === "string" ? call.args.path : "";
-    if (!allowedSkills.includes(path) || seenApplied.has(path)) continue;
-    seenApplied.add(path);
-    appliedSkills.push({ path, name: path.split("/").at(-2) ?? "" });
-  }
-  input.result.repository_skills_applied = appliedSkills;
-  if (appliedSkills.length > 0) input.deps.writeArtifact("repository-skills-applied.json", JSON.stringify(appliedSkills));
   if (outcome.degraded) {
     log(
       "  native_loop degraded: the model issued no tool calls" +

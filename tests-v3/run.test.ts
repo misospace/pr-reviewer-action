@@ -4901,3 +4901,94 @@ test("#1043 review: a reused run dir never ingests a stale repository-skill adde
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("#1043 review: repository-skills-applied.json resets on reused run dirs", async () => {
+  let skillPathApplied = "";
+  // Request 1 gets a model turn that reads one skill; everything after gets
+  // a plain verdict (so later runs degrade with zero read_skill calls).
+  let modelRequests = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    modelRequests++;
+    res.setHeader("Content-Type", "application/json");
+    if (modelRequests === 1) {
+      res.end(JSON.stringify({
+        id: "c1",
+        object: "chat.completion",
+        model: "m",
+        choices: [{
+          index: 0,
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [{
+              id: "t1",
+              type: "function",
+              function: { name: "read_skill", arguments: JSON.stringify({ path: skillPathApplied }) },
+            }],
+          },
+          finish_reason: "tool_calls",
+        }],
+        usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 },
+      }));
+      return;
+    }
+    res.end(verdictBody(baseVerdict()));
+  });
+  const repo = mkdtempSync(join(tmpdir(), "v3-applied-repo-"));
+  const git = (...args: string[]): string =>
+    execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
+  git("init", "-q");
+  git("config", "user.email", "test@example.invalid");
+  git("config", "user.name", "test");
+  mkdirSync(join(repo, ".agents/skills/dependency-upgrades"), { recursive: true });
+  skillPathApplied = ".agents/skills/dependency-upgrades/SKILL.md";
+  writeFileSync(
+    join(repo, skillPathApplied),
+    "---\nname: Dependency upgrades\ndescription: How to review dependency bumps.\n---\nROLLOUT-ADVICE-MARKER\n",
+  );
+  git("add", ".");
+  git("commit", "-qm", "skill");
+  const baseSha = git("rev-parse", "HEAD");
+  const { runDir, cleanup } = withRunDir();
+  const baseInputs = {
+    "github-token": "tok",
+    repo: "o/r",
+    "pr-number": "7",
+    "ai-base-url": server.url,
+    "ai-model": "m",
+    "ai-stream": "false",
+    "ai-api-key": "k",
+  };
+  const runOnce = async (env: Record<string, string>, inputs: Record<string, string>): Promise<void> => {
+    await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), GITHUB_STEP_SUMMARY: join(runDir, "step-summary.md"), ...env },
+      inputs,
+      runDir,
+      workspace: repo,
+      platformAdapter: mockPlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+  };
+  try {
+    // Run 1: the loop reads the skill through read_skill — the artifact and
+    // the result diagnostics both record exactly that one distinct read.
+    await runOnce({ PR_REVIEWER_BASE_REF: baseSha, IS_FORK_PR: "false" }, { ...baseInputs, "repository-skills": "true" });
+    assert.ok(existsSync(join(runDir, "repository-skills-applied.json")), "run 1 writes the applied artifact");
+    const applied = JSON.parse(readFileSync(join(runDir, "repository-skills-applied.json"), "utf8")) as Array<{ path: string }>;
+    assert.deepEqual(applied.map((skill) => skill.path), [skillPathApplied]);
+    // The harness summary markdown records the read truthfully too.
+    const harnessMd = readFileSync(join(runDir, "tool-harness.md"), "utf8");
+    assert.match(harnessMd, /\*\*Repository skills read:\*\* dependency-upgrades/);
+    // Run 2: same run dir, tools disabled — the stale artifact must be gone.
+    await runOnce({ IS_FORK_PR: "false" }, { ...baseInputs, "tool-mode": "off" });
+    assert.equal(existsSync(join(runDir, "repository-skills-applied.json")), false, "run 2 (tools off) clears the stale artifact");
+    // Run 3: same run dir, tools on, zero read_skill calls — still absent.
+    await runOnce({ PR_REVIEWER_BASE_REF: baseSha, IS_FORK_PR: "false" }, { ...baseInputs, "repository-skills": "true" });
+    assert.equal(existsSync(join(runDir, "repository-skills-applied.json")), false, "run 3 (zero reads) leaves no artifact");
+  } finally {
+    await server.close();
+    cleanup();
+    rmSync(repo, { recursive: true, force: true });
+  }
+});

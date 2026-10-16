@@ -502,6 +502,11 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // can consume a stale value.
   ws.write("specialists.md", "");
   ws.write("specialist-leads-present.txt", "");
+  // #1043 (review): the applied-skills artifact is reset unconditionally —
+  // the loop writes it back only on real read_skill success, so a reused
+  // run dir (zero reads, or tools disabled entirely) never reports the
+  // previous run's skills.
+  ws.remove("repository-skills-applied.json");
 
   let diffText: string;
   const cachedDiff = ws.readText("pr.diff");
