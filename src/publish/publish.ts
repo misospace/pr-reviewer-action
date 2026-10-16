@@ -593,6 +593,10 @@ export async function publishReview(
   // cleanup). The PATCH/POST response timestamp anchors it.
   let stickyCommentId: number | string | undefined;
   let stickyUpdatedAt: string | undefined;
+  // #1093: the sticky is a complete replacement only when the run had no
+  // inline findings to post or that findings review was actually created;
+  // a failed findings submission leaves the previous set un-replaced.
+  let stickyCheckpointUsable = true;
 
   if (!input.prNumber) {
     return { status: "failed", messages, error: `publish_${input.mode} requires a pull_request event or explicit pr_number` };
@@ -797,6 +801,11 @@ export async function publishReview(
           nativeReviewId = submitted.reviewId;
           messages.push(`Attached ${inlineComments.length} inline finding comment(s)`);
         } else {
+          // The findings review is this run's replacement for the previous
+          // inline set; without it the sticky summary is NOT a complete
+          // replacement, so the sticky checkpoint must not authorize
+          // retiring the old owned comments.
+          stickyCheckpointUsable = false;
           messages.push("WARN: inline findings review submission failed; summary comment was still published");
         }
       }
@@ -909,7 +918,7 @@ export async function publishReview(
     const replacementCheckpoint: ReplacementCheckpoint | undefined =
       nativeReviewId !== undefined
         ? { kind: "review", reviewId: nativeReviewId }
-        : stickyCommentId !== undefined && stickyUpdatedAt !== undefined
+        : stickyCheckpointUsable && stickyCommentId !== undefined && stickyUpdatedAt !== undefined
           ? { kind: "sticky", commentId: stickyCommentId, updatedAt: stickyUpdatedAt }
           : undefined;
     const replacementComplete = completeCoverage && !fallbackSubmission && replacementCheckpoint !== undefined;
@@ -977,7 +986,10 @@ export async function publishReview(
                 if (!stickyLatest || !isManagedBody(typeof stickyLatest.body === "string" ? stickyLatest.body : "", input.commentMarker)) return false;
                 if (!ownerMatchesIdentity(stickyLatest.user, owner)) return false;
                 const refreshedMs = Date.parse(stickyLatest.updated_at ?? "");
-                if (Number.isNaN(refreshedMs) || refreshedMs < checkpointMs) return false;
+                // A newer instant means the sticky was re-published after
+                // this checkpoint (an overlapping run owns the replacement);
+                // a missing/older one is unproven. Either way: fail closed.
+                if (Number.isNaN(refreshedMs) || refreshedMs !== checkpointMs) return false;
                 return !latest.some((r) => {
                   if (!isManagedBody(typeof r.body === "string" ? r.body : "", input.commentMarker)) return false;
                   const instant = reviewInstant(r);
@@ -997,6 +1009,12 @@ export async function publishReview(
           }
         }
       } catch { messages.push("WARN: Cleanup failed safely; replacement review remains published"); }
+    } else if (cleanupEnabled && replacementCheckpoint === undefined) {
+      // #1093: distinguish "cleanup never had a checkpoint" from the other
+      // skip reasons so operators can tell retirement did not run at all
+      // (e.g. a failed inline-findings submission, or a forge response
+      // without a usable sticky timestamp).
+      messages.push("WARN: No replacement checkpoint (no native review id and no sticky publication timestamp); previous inline comments left in place");
     }
   }
 

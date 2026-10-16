@@ -566,7 +566,14 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     this.origin = parsed.origin;
     this.repo = options.repo;
     this.prNumber = options.prNumber;
-    this.integrationMode = (options.authMethod ?? "token").trim().toLowerCase() === "authorized_integration";
+    // #1093: same rule as ForgejoAdapter.isAuthorizedIntegrationMode():
+    // an explicit method governs; the legacy audience-only configuration
+    // (authMethod unset) is integration mode too, so the sticky upsert
+    // target gets the same ownership verification the precheck and the
+    // cleanup gate apply to the audience's user id.
+    const method = (options.authMethod ?? "").trim().toLowerCase();
+    this.integrationMode = method === "authorized_integration"
+      || (method === "" && (options.authorizedIntegrationAudience ?? "").trim() !== "");
     this.integrationOwnerId = integrationOwnerIdFromAudience(options.authorizedIntegrationAudience);
     this.authorization = new ForgejoAdapter({
       repo: options.repo,

@@ -748,7 +748,7 @@ test("#1093: a managed review published after the sticky checkpoint supersedes t
 
 test("#1093: a sticky publication without a usable timestamp provides no cleanup checkpoint", async () => {
   // Missing updatedAt entirely: no checkpoint exists, so cleanup is skipped
-  // silently (fail closed) — nothing is retired or dismissed.
+  // with a bounded WARN (fail closed) — nothing is retired or dismissed.
   const missing = new MockPublishApi();
   missing.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
   missing.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-01-01T00:00:00Z" }];
@@ -757,6 +757,7 @@ test("#1093: a sticky publication without a usable timestamp provides no cleanup
   missing.retireInlineComment = async () => { assert.fail("no checkpoint must never delete"); };
   const missingResult = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), missing, { diffText: "" });
   assert.equal(missingResult.status, "published");
+  assert.ok(missingResult.messages.some((line) => line.includes("No replacement checkpoint")));
   assert.ok(!missingResult.messages.some((line) => line.includes("Inline comments:")));
   assert.deepEqual(missing.dismissed, []);
 
@@ -773,6 +774,48 @@ test("#1093: a sticky publication without a usable timestamp provides no cleanup
   assert.ok(unparseableResult.messages.some((line) => line.includes("cleanup skipped")));
   assert.ok(!unparseableResult.messages.some((line) => line.includes("Inline comments:")));
   assert.deepEqual(unparseable.dismissed, []);
+});
+
+test("#1093: a failed inline-findings submission leaves the sticky unable to authorize retiring the previous set", async () => {
+  // The native findings review IS the replacement for the old inline set.
+  // If its submission fails, the sticky summary alone is not a complete
+  // replacement, so cleanup must not retire the previous owned comments
+  // (the invariant: retire only after a complete replacement at the head).
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  api.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.reviewResults = [{ ok: false, error: "422 unanchored finding" }];
+  api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  api.retireInlineComment = async () => { assert.fail("an unreplaced findings set must never be retired"); };
+  const result = await publishReview(input({
+    mode: "review_comment", inlineFindings: true, findings: FINDINGS,
+    cleanupPreviousNativeReviews: "auto",
+  }), api, { diffText: DIFF });
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted.length, 1, "the findings review submission was attempted");
+  assert.ok(result.messages.some((line) => line.includes("inline findings review submission failed")));
+  assert.ok(result.messages.some((line) => line.includes("No replacement checkpoint")));
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")), "no retirement ran");
+  assert.deepEqual(api.dismissed, []);
+});
+
+test("#1093: a sticky re-published after the checkpoint fails the still-current guard; cleanup is skipped", async () => {
+  // Two overlapping same-head runs: run B PATCHes the sticky after run A
+  // captured its checkpoint timestamp. Run A's refreshed-sticky read now
+  // shows a NEWER instant, which proves re-publication, not still-current
+  // state — run A must retire nothing.
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-06-01T00:00:00Z" }];
+  api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  api.retireInlineComment = async () => { assert.fail("a re-published sticky invalidates this run's checkpoint"); };
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
+  assert.deepEqual(api.dismissed, []);
 });
 
 // ---------------------------------------------------------------------------
