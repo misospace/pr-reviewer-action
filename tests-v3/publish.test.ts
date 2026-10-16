@@ -886,7 +886,7 @@ test("#1093: Forgejo authorized integration — a clean re-review retires the ow
   // Secret travel: the JWT and the runner OIDC token appear only in
   // Authorization headers — never in any Forgejo URL or request body.
   for (const request of requests) {
-    if (!request.url.startsWith(FORGEJO_BASE)) continue;
+    if (request.url !== FORGEJO_BASE && !request.url.startsWith(`${FORGEJO_BASE}/`)) continue;
     assert.equal(request.auth, `Bearer ${JWT_VALUE}`);
     assert.ok(!request.url.includes("token=") && !request.url.includes(JWT_VALUE) && !request.url.includes(OIDC_TOKEN_VALUE));
     assert.ok(!request.body.includes(JWT_VALUE) && !request.body.includes(OIDC_TOKEN_VALUE));

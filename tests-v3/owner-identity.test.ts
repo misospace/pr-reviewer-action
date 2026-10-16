@@ -145,9 +145,13 @@ test("#1093: ForgejoAdapter.resolveTrustedOwner emits only bounded reason codes"
 
 test("#1093: ForgejoAdapter falls back to the audience owner id whenever /user cannot prove a login", async () => withOidcEnv(async () => {
   const audience = AUDIENCE;
+  const exchanges: string[] = [];
   const fetchImpl: FetchLike = async (input) => {
     const url = String(input);
-    if (url.startsWith(OIDC_URL)) return Response.json({ value: JWT });
+    if (url.startsWith(OIDC_URL)) {
+      exchanges.push(url);
+      return Response.json({ value: JWT });
+    }
     if (url.endsWith("/user")) return Response.json({}, { status: 403 });
     throw new Error(`unexpected request ${url}`);
   };
@@ -161,6 +165,7 @@ test("#1093: ForgejoAdapter falls back to the audience owner id whenever /user c
     await adapter.resolveTrustedOwner(),
     { identity: { kind: "userId", userId: "7" }, reason: "integration-user-id" },
   );
+  assert.deepEqual(exchanges, [OIDC_REQUEST_URL], "the JWT exchange pins the configured audience verbatim");
 
   // An unparseable audience never masks the /user failure reason.
   const unparseable = new ForgejoAdapter({
