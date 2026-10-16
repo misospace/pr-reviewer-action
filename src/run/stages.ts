@@ -45,7 +45,7 @@ import { runEvidenceProvidersPhase } from "../evidence/index.js";
 import { runToolHarness, type HarnessTransport } from "../tools/harness.js";
 import { runChatRequest } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
-import { parseExtraHeaders } from "../transport/headers.js";
+import { extraHeadersForEnv } from "../transport/headers.js";
 import type { NormalizedModelResponse, TransportWirePayload } from "../model/types.js";
 import type { TierBudgets } from "../corpus/budgets.js";
 import type { StageEnv } from "./env.js";
@@ -545,6 +545,11 @@ function ciChecksBytes(env: StageEnv): Uint8Array | null {
 
 export function harnessTransportAdapter(env: StageEnv): HarnessTransport {
   return async (baseUrl, apiFormat, payload, apiKey, timeoutSec) => {
+    // #1037: the tool-harness transport is a provider call like any other.
+    // Parsed per request INSIDE the closure (as pre-fix) so a malformed set
+    // stays fail-soft per request; unset config yields `undefined` and the
+    // key is omitted entirely (byte-identical request, nothing to merge).
+    const extra = extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "");
     const outcome = await runChatRequest({
       baseUrl,
       apiFormat: apiFormat === "anthropic" ? "anthropic" : "openai",
@@ -556,15 +561,17 @@ export function harnessTransportAdapter(env: StageEnv): HarnessTransport {
       anthropicVersion: env.ANTHROPIC_VERSION ?? "2023-06-01",
       requestTimeoutSec: Math.max(1, Math.trunc(timeoutSec)),
       connectTimeoutSec: Number(env.AI_CONNECT_TIMEOUT_SEC ?? "30") || 30,
-      // #1037: the tool-harness transport is a provider call like any other;
-      // unset config parses to {} and merges nothing (byte-identical).
-      extraHeaders: parseExtraHeaders(env.AI_EXTRA_HEADERS ?? ""),
+      // #1037: unset config omits the key entirely (byte-identical request,
+      // nothing to merge).
+      ...(extra !== undefined ? { extraHeaders: extra } : {}),
     });
     // #846: carry the HTTP status and a redacted body excerpt (plus the
     // ai-api-format hint on a 404) instead of the bare "model endpoint
     // returned HTTP <status>" message. `secrets` masks the configured key
-    // unconditionally, on top of `redactText`'s heuristics.
-    if (outcome.status === "failure") throw new Error(describeTransportFailure(outcome.failure, { secrets: [apiKey] }));
+    // unconditionally, on top of `redactText`'s heuristics. #1037: the
+    // configured extra-header VALUES join that list — a provider error body
+    // can quote them back, and they routinely carry proxy tokens.
+    if (outcome.status === "failure") throw new Error(describeTransportFailure(outcome.failure, { secrets: [apiKey, ...(extra ? Object.values(extra) : [])] }));
     // A streamed turn's `raw` is the reassembled NormalizedModelResponse, not
     // provider JSON. The loop's tool-call extraction and usage accounting
     // read the OpenAI chat shape (as v2's reassembler produced), so project

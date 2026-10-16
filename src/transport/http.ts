@@ -214,9 +214,13 @@ export interface HttpCallInput {
   /** Response-byte ceiling; defaults to DEFAULT_MAX_RESPONSE_BYTES (#745). */
   maxResponseBytes?: number;
   /** #1037 (`ai-extra-headers`): operator headers merged into every request
-   * with case-preserved names. Validated at startup and re-checked at the
-   * wire boundary (`applyExtraHeaders`); absent/empty keeps the outbound
-   * headers byte-for-byte unchanged. */
+   * with case-preserved names. Validated at startup and revalidated at the
+   * wire boundary (`applyExtraHeaders`) on the same rules — non-string value,
+   * non-token name, control characters, non-latin-1 value, reserved-name
+   * collision, case-insensitive duplicate, count bound — so a caller that
+   * bypassed startup validation cannot outrank auth/framing headers nor reach
+   * Node's request-time header check; absent/empty keeps the outbound headers
+   * byte-for-byte unchanged. */
   extraHeaders?: Readonly<Record<string, string>>;
 }
 
@@ -250,9 +254,12 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
   } else if (input.apiKey !== "") {
     headers["Authorization"] = `Bearer ${input.apiKey}`;
   }
-  // #1037: merged after the action's own headers; `applyExtraHeaders` throws
-  // on any reserved-name collision, so a caller that bypassed the startup
-  // validator still cannot outrank auth/framing headers.
+  // #1037: merged after the action's own headers. `applyExtraHeaders` throws on
+  // the whole set before writing anything — reserved-name collision, malformed
+  // or non-token name, control characters or non-latin-1 characters in a value,
+  // a case-insensitive duplicate, or more than MAX_EXTRA_HEADERS entries — so a
+  // caller that bypassed the startup validator still cannot outrank
+  // auth/framing headers, and a rejected set merges nothing at all.
   if (input.extraHeaders !== undefined) applyExtraHeaders(headers, input.extraHeaders);
 
   return new Promise<HttpCallResult>((resolve, reject) => {

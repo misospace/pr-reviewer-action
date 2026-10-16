@@ -298,6 +298,34 @@ test("#998: specialist calls carry the resolved effort on the wire, and the Anth
   }
 });
 
+test("#1037: configured extra headers ride every specialist request", async () => {
+  // Key ABSENCE on the unset path is deliberately not asserted here: the
+  // gate's only transport seam is `deps.requestFn`, which REPLACES the
+  // constructed request fn and never receives a `ChatRequestInput`, so "no
+  // header on the wire" cannot distinguish an omitted key from `{}`. The
+  // absence itself is pinned at the `specialistRequestFn` seam in
+  // tests-v3/extra-headers.test.ts, and `extraHeadersForEnv("") === undefined`
+  // in the same file.
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(leadsResponse([])));
+  });
+  try {
+    const configured = await run({
+      DEEP_REVIEW: "true",
+      AI_BASE_URL: `${server.url}/v1`,
+      AI_SPECIALIST_MODEL: "specialist",
+      AI_EXTRA_HEADERS: "X-LiteLLM-Session-Id: run-9",
+    }, { productionTransport: true });
+    assert.equal(configured.code, 0);
+    assert.equal(server.requests.length, 3);
+    assert.ok(server.requests.every(({ headers }) => headers["x-litellm-session-id"] === "run-9"));
+    rmSync(configured.root, { recursive: true, force: true });
+  } finally {
+    await server.close();
+  }
+});
+
 test("invalid specialist format warns and falls back to the primary transport", async () => {
   const seen: { url: string; model: string }[] = [];
   const server = await startMockServer((req, body, res) => {

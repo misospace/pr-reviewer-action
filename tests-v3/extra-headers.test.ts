@@ -5,7 +5,8 @@ import {
   MAX_EXTRA_HEADERS,
   RESERVED_EXTRA_HEADER_NAMES,
   applyExtraHeaders,
-  extraHeaderNames,
+  extraHeaderFingerprint,
+  extraHeadersForEnv,
   parseExtraHeaders,
 } from "../src/transport/headers.js";
 
@@ -141,10 +142,76 @@ test("#1037: the header count is bounded", () => {
   assert.equal(Object.keys(parseExtraHeaders(ok)).length, MAX_EXTRA_HEADERS);
 });
 
-test("#1037: extraHeaderNames is the sorted lowercase name surface for fingerprinting", () => {
-  assert.deepEqual(extraHeaderNames("X-LiteLLM-Session-Id: run-1\nanthropic-beta: x"), ["anthropic-beta", "x-litellm-session-id"]);
-  assert.deepEqual(extraHeaderNames(""), []);
-  assert.throws(() => extraHeaderNames("no colon here"), ExtraHeadersError);
+test("#1037: extraHeadersForEnv omits the field entirely when nothing is configured", () => {
+  assert.equal(extraHeadersForEnv(""), undefined);
+  assert.equal(extraHeadersForEnv("  \n\t\n "), undefined);
+  assert.deepEqual(extraHeadersForEnv("X-LiteLLM-Session-Id: run-1"), { "X-LiteLLM-Session-Id": "run-1" });
+  assert.throws(() => extraHeadersForEnv("no colon here"), ExtraHeadersError);
+});
+
+test("#1037: extraHeaderFingerprint names ephemeral correlation headers and digests everything else", () => {
+  // Ephemeral correlation/session/trace headers participate by NAME only — a
+  // per-run value is the canonical use of this input and must not churn the
+  // review fingerprint.
+  const before = extraHeaderFingerprint("X-LiteLLM-Session-Id: run-1\nX-Request-Id: req-7\ntraceparent: 00-a\nX-B3-TraceId: t\nx-b3-parentspanid: p\nx-litellm-run-id: run-1");
+  const after = extraHeaderFingerprint("X-LiteLLM-Session-Id: run-2\nX-Request-Id: req-9\ntraceparent: 00-b\nX-B3-TraceId: u\nx-b3-parentspanid: q\nx-litellm-run-id: run-2");
+  assert.equal(before, after);
+  assert.equal(before, "traceparent,x-b3-parentspanid,x-b3-traceid,x-litellm-run-id,x-litellm-session-id,x-request-id");
+
+  // Every other header participates by name + a value digest, so a value
+  // change invalidates while the value itself never reaches the fingerprint.
+  const beta = extraHeaderFingerprint("anthropic-beta: pdfs-2024-05-04");
+  assert.match(beta, /^anthropic-beta=[0-9a-f]{12}$/);
+  assert.notEqual(beta, extraHeaderFingerprint("anthropic-beta: pdfs-2024-09-01"));
+  assert.equal(beta.includes("pdfs"), false, "the raw value must never be emitted");
+  // Same set, different order/case → same canonical fingerprint.
+  assert.equal(
+    extraHeaderFingerprint("anthropic-beta: pdfs-2024-05-04\nX-Team-Id: platform"),
+    extraHeaderFingerprint("x-team-id: platform\nANTHROPIC-BETA: pdfs-2024-05-04"),
+  );
+
+  // Blank input is the unset baseline; malformed input fails like the parser.
+  assert.equal(extraHeaderFingerprint(""), "");
+  assert.equal(extraHeaderFingerprint("  \n "), "");
+  assert.throws(() => extraHeaderFingerprint("no colon here"), ExtraHeadersError);
+});
+
+test("#252 boundary: the wire fence revalidates the WHOLE shared per-pair rule set", () => {
+  // The attack tokens themselves, fed straight to the wire merge — the startup
+  // parser is bypassed on purpose (#252: a mock that omits the attack encodes
+  // the same blind spot as the code).
+  const cases: [string, Readonly<Record<string, unknown>>][] = [
+    ["empty name", { "": "v" }],
+    ["space in name", { "X Foo": "v" }],
+    ["control char in value", { "X-Injection": "prefix\u0000suffix" }],
+    ["non-latin1 value", { "X-Emoji": "run-\u{1F600}" }],
+    ["reserved name", { "X-Api-Key": "attacker" }],
+    ["reserved proto name", { "__Proto__": "polluted" }],
+    ["duplicate name", { "X-Team-Id": "a", "x-team-id": "b" }],
+    ["over the bound", Object.fromEntries(Array.from({ length: MAX_EXTRA_HEADERS + 1 }, (_u, i) => [`X-H-${i}`, "v"]))],
+    // A JS caller can hand the merge a map whose values are not strings; the
+    // shape checks coerce those and only Node's request time would throw.
+    ["null value", { "X-Null": null }],
+    ["number value", { "X-Number": 42 }],
+    ["object value", { "X-Object": { toString: () => "v" } }],
+  ];
+  for (const [label, hostile] of cases) {
+    const headers: Record<string, string> = { "x-api-key": "real-key" };
+    assert.throws(() => applyExtraHeaders(headers, hostile), ExtraHeadersError, label);
+    // Atomic: a rejected set never leaves a partially merged header block.
+    assert.deepEqual(headers, { "x-api-key": "real-key" }, label);
+  }
+  // A non-string value is named by TYPE only — never echoed.
+  assert.throws(
+    () => applyExtraHeaders({}, { "X-Token": { secret: "do-not-echo-me" } }),
+    (error: unknown) => error instanceof ExtraHeadersError
+      && /values must be strings/.test(error.message)
+      && !error.message.includes("do-not-echo-me"),
+  );
+  // The benign path still merges, case-preserved.
+  const headers: Record<string, string> = {};
+  applyExtraHeaders(headers, { "X-Team-Id": "platform", "x-tab": "a\tb", "x-latin1": "café" });
+  assert.deepEqual(headers, { "X-Team-Id": "platform", "x-tab": "a\tb", "x-latin1": "café" });
 });
 
 test("#1037: the specialist transport forwards configured headers and omits the key when unset", async () => {
@@ -183,4 +250,42 @@ test("#1037: the specialist transport forwards configured headers and omits the 
   });
   await withoutHeaders({ model: "m", stream: false }, "openai", 5);
   assert.equal(seen[1], false);
+});
+
+test("#1037: a provider error body that echoes a configured header value is masked in the diagnostic", async () => {
+  // Header values carry proxy tokens, and a provider/proxy error body can
+  // quote the request headers straight back. The specialist lane's failure
+  // diagnostic must mask them through the existing known-secrets list.
+  // The canary is deliberately NOT framed as `key: value` in the body: a
+  // `token:`-shaped line is already caught by `redactText`'s heuristics, so
+  // that framing would make this test pass even with the masking removed.
+  const { specialistRequestFn } = await import("../src/gates/specialist-transport.js");
+  const proxyToken = "gw-8f2a1c9d3b7e4a10";
+  const request = specialistRequestFn({
+    baseUrl: "http://mock",
+    apiKey: "sk-specialist",
+    anthropicVersion: "2023-06-01",
+    extraHeaders: { "x-gateway-credential": proxyToken, "x-litellm-session-id": "run-1" },
+    runChat: (() => Promise.resolve({
+      status: "failure" as const,
+      failure: {
+        kind: "http_status" as const,
+        message: "model request failed",
+        status: 400,
+        body: JSON.stringify({ error: { message: `upstream rejected the credential ${proxyToken} supplied by the gateway` } }),
+      },
+    })) as never,
+  });
+  const outcome = await request({ model: "m", stream: false }, "openai", 5);
+  assert.equal(outcome.ok, false);
+  const text = [
+    outcome.ok ? "" : outcome.errorMessage,
+    ...(!outcome.ok && outcome.statusDetail !== undefined ? [outcome.statusDetail] : []),
+  ].join("\n");
+  assert.match(text, /HTTP 400/);
+  assert.equal(text.includes(proxyToken), false, text);
+  // The masking is load-bearing, not the heuristic: with no known-secret
+  // entry the raw value would survive `redactText` untouched.
+  const { redactText } = await import("../src/context/redact.js");
+  assert.equal(redactText(`upstream rejected the credential ${proxyToken}`).includes(proxyToken), true);
 });

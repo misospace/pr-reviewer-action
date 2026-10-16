@@ -74,6 +74,11 @@ export const FLOAT_INPUTS = new Set(["ai-temperature"]);
 export const SECRET_INPUTS = new Set([
   "github-token", "ai-api-key", "ai-fallback-api-key", "ai-primary-api-key", "ai-smart-api-key", "ai-specialist-api-key",
   "linear-api-key", "tool-mcp-token", "forgejo-token",
+  // #1037: header VALUES routinely carry proxy/gateway tokens, so the whole
+  // input is secret at the typed config boundary. The runtime stage env
+  // reveals it (`stageEnvFromConfig`) because the transport parser needs the
+  // plain text; redaction, `toJSON`, and the debug CLI then never see it.
+  "ai-extra-headers",
 ]);
 
 export const POSITIVE_INTEGER_INPUTS = new Set([

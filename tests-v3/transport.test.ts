@@ -11,6 +11,7 @@ import {
 } from "../src/transport/http.js";
 import { KNOWN_SECRET_REDACTED, maskKnownSecrets, redactText } from "../src/context/redact.js";
 import { parseStatedTokenCap, runChatRequest } from "../src/transport/transport.js";
+import { ExtraHeadersError } from "../src/transport/headers.js";
 import { startMockServer, sseResponse } from "./helpers.js";
 import type { TransportWirePayload } from "../src/model/types.js";
 
@@ -1596,6 +1597,50 @@ test("#1037: a hand-built reserved header fails closed at the wire boundary befo
       /collides with a transport header/,
     );
     assert.equal(served, 0, "no request may reach the endpoint with a colliding header");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#252 boundary: hostile extra-header pairs fail closed at the wire before ANY request", async () => {
+  // The attack tokens themselves, fed directly into the outbound request —
+  // the startup parser is deliberately bypassed here, so the wire fence has to
+  // revalidate every rule on its own (#252: a mock that omits the attack
+  // encodes the same blind spot as the code).
+  let served = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    served++;
+    res.statusCode = 200;
+    res.end("{}");
+  });
+  const hostile: [string, Record<string, string>][] = [
+    ["empty name", { "": "v" }],
+    ["space in name", { "X Foo": "v" }],
+    ["crlf injection value", { "X-Injection": "prefix\r\nX-Evil: 1" }],
+    ["nul in value", { "X-Injection": "prefix\u0000suffix" }],
+    ["non-latin1 value", { "X-Emoji": "run-\u{1F600}" }],
+    ["duplicate name", { "X-Team-Id": "a", "x-team-id": "b" }],
+    ["over the bound", Object.fromEntries(Array.from({ length: 17 }, (_u, i) => [`X-H-${i}`, "v"]))],
+  ];
+  try {
+    for (const [label, extraHeaders] of hostile) {
+      await assert.rejects(
+        () => runHttpRequest({
+          baseUrl: server.url,
+          apiFormat: "anthropic",
+          bodyText: "{}",
+          apiKey: "sk-real",
+          anthropicVersion: "2023-06-01",
+          requestTimeoutSec: 5,
+          connectTimeoutSec: 5,
+          stream: false,
+          extraHeaders,
+        }),
+        ExtraHeadersError,
+        label,
+      );
+    }
+    assert.equal(served, 0, "no request may reach the endpoint with a hostile header pair");
   } finally {
     await server.close();
   }

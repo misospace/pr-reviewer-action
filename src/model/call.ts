@@ -352,7 +352,10 @@ export async function produceVerdict(
       // returned HTTP <status>" message. `secrets` masks the configured key
       // unconditionally — a provider echoing it in bare prose would
       // otherwise pass `redactText`'s pattern heuristics untouched.
-      return { ok: false, verdict: null, raw: null, reason: "transport", detail: describeTransportFailure(outcome.failure, { secrets: [profile.apiKey] }) };
+      // #1037: the lane's configured extra-header VALUES join the known-secret
+      // list for the same reason — they routinely carry proxy tokens, and a
+      // provider error body can quote the request headers back.
+      return { ok: false, verdict: null, raw: null, reason: "transport", detail: describeTransportFailure(outcome.failure, { secrets: [profile.apiKey, ...Object.values(profile.extraHeaders ?? {})] }) };
     }
     try {
       return { ok: true, verdict: parseVerdictResponse(outcome.raw, [profile.apiKey]), raw: outcome.raw, reason: "accepted", detail: "" };

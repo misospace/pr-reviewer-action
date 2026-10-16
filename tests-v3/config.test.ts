@@ -9,6 +9,7 @@ import { isSecretValue, redactConfig, toJSON } from "../src/config/types.js";
 import { BOOLEAN_INPUTS, ENUM_INPUTS, FLOAT_INPUTS, INTEGER_INPUTS, SECRET_INPUTS } from "../src/config/schema.js";
 import { tierReasoningEffort } from "../src/routing/tiers.js";
 import { assertSupportedNode } from "../src/runtime/node-version.js";
+import { stageEnvFromConfig } from "../src/run/env.js";
 
 const source = readFileSync("contracts/action-v3.yml", "utf8");
 const rawContract: unknown = parse(source);
@@ -450,7 +451,12 @@ test("defaults are contract sourced and parsing is explicit", () => {
 
 test("secret values are redacted and never included in validation errors", () => {
   const raw = Object.fromEntries(contract.inputs.map((input) => [input.id, input.default === undefined ? "present" : String(input.default)]));
-  const secrets = Object.fromEntries([...SECRET_INPUTS].map((id) => [id, `sensitive-${id}-probe`]));
+  // `ai-extra-headers` is secret too (#1037), but its canary must stay a
+  // parseable `Name: value` line or the loader's startup validation throws.
+  const secrets = Object.fromEntries([...SECRET_INPUTS].map((id) => [
+    id,
+    id === "ai-extra-headers" ? "X-Proxy-Token: sensitive-ai-extra-headers-probe" : `sensitive-${id}-probe`,
+  ]));
   Object.assign(raw, secrets);
   for (const [id, invalid] of ([
     ["ai-stream", "not-a-boolean"],
@@ -491,13 +497,34 @@ test("a runner-expression default is never used as a value outside the runner", 
 
 // ── #1037: ai-extra-headers startup validation ────────────────────────────
 
-test("#1037: ai-extra-headers defaults empty and a valid set is preserved verbatim", () => {
+test("#1037: ai-extra-headers is a secret input, defaults empty, and a valid set survives verbatim", () => {
   const base = { "ai-base-url": "https://llm.example", "ai-model": "m" };
   const unset = loadConfig(contract, base);
-  assert.equal(unset.aiExtraHeaders, "");
+  assert.ok(isSecretValue(unset.aiExtraHeaders));
+  assert.equal(unset.aiExtraHeaders.present, false);
+  assert.equal(unset.aiExtraHeaders.reveal(), "");
   const multi = "x-litellm-session-id: run-42\nX-Team-Id: platform";
   const config = loadConfig(contract, { ...base, "ai-extra-headers": multi });
-  assert.equal(config.aiExtraHeaders, multi);
+  assert.ok(isSecretValue(config.aiExtraHeaders));
+  assert.equal(config.aiExtraHeaders.reveal(), multi);
+});
+
+test("#1037: header values (proxy tokens) are redacted at every config serialization boundary", () => {
+  // Header values routinely carry a proxy/gateway token, so `ai-extra-headers`
+  // is secret (#1037): the raw text must not survive redactConfig/toJSON/
+  // JSON.stringify — while the runtime stage env still receives the plain
+  // string the transport parser needs.
+  const canary = "X-Proxy-Token: sensitive-probe-1037";
+  const config = loadConfig(contract, {
+    "ai-base-url": "https://llm.example",
+    "ai-model": "m",
+    "ai-extra-headers": canary,
+  });
+  assert.equal(stageEnvFromConfig(config).AI_EXTRA_HEADERS, canary);
+  for (const snapshot of [JSON.stringify(redactConfig(config)), JSON.stringify(toJSON(config)), JSON.stringify(config)]) {
+    assert.equal(snapshot.includes("sensitive-probe-1037"), false, snapshot);
+    assert.equal(JSON.parse(snapshot).aiExtraHeaders, "[REDACTED]", snapshot);
+  }
 });
 
 test("#1037: malformed or transport-colliding ai-extra-headers fails at config load, not mid-review", () => {
