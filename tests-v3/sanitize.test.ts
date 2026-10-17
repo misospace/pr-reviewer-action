@@ -38,8 +38,11 @@ test("inline code spans remain verbatim while fenced code is sanitized", () => {
 });
 
 test("reserved markers are removed case-insensitively", () => {
-  assert.equal(RESERVED_MARKER_PATTERNS.length, 2);
+  assert.equal(RESERVED_MARKER_PATTERNS.length, 3);
   assert.equal(stripReservedMarkers("x<!-- ai-pr-review-sha:deadbeef -->y<!-- AI-PR-REVIEW-FINGERPRINT: x -->z"), "xyz");
+  // #762: the rejection carry marker is reserved too — model markdown can
+  // never smuggle a suppression claim into a published body.
+  assert.equal(stripReservedMarkers(`y<!-- PR-Reviewer:Rejected-Prescriptions:v1:${"a".repeat(64)} -->z`), "yz");
 });
 
 test("unknown link mode throws", () => {

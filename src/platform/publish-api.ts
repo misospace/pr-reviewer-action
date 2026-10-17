@@ -49,6 +49,16 @@ export interface ManagedInlineCommentRef {
   inReplyToId?: number | string | null;
   hasReplies?: boolean;
   pull_request_review_id?: number | string;
+  /** #762: the anchor the comment was published against, so a later run can
+   * correlate this comment's prescription with its own at the same place.
+   * Normalized to a string / positive integer; a missing or unusable value is
+   * dropped rather than carried through untyped. */
+  path?: string;
+  line?: number;
+  original_line?: number;
+  /** #762: the first line of a multi-line published range (`line` carries its
+   * end), so the range can be reconstructed rather than guessed. */
+  start_line?: number;
 }
 
 export interface NativeReviewComment {
@@ -57,6 +67,10 @@ export interface NativeReviewComment {
   line?: number;
   side?: string;
   new_position?: number;
+  /** #762: multi-line one-click suggestion range (GitHub). The Forgejo adapter
+   * drops these (it cannot express a multi-line suggestion) and re-anchors. */
+  start_line?: number;
+  start_side?: string;
 }
 
 export interface NativeReviewRequest {
@@ -110,6 +124,53 @@ const REQUESTER_USER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 /** A GitHub team slug (lowercase hyphenated). */
 const REQUESTER_TEAM = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
+/** #762: the useful-cap bound on the per-id reaction reads. Defined once here
+ * so the reader and the caller that bounds its candidate set cannot drift. */
+export const MAX_FEEDBACK_COMMENT_IDS = 50;
+
+/** #762: the page cap for a single comment id's reaction listing. 300
+ * reactions on one review comment is far beyond any realistic usefulness
+ * feedback, and hitting the cap degrades to `complete: false` rather than
+ * claiming completeness over a truncated read. */
+const MAX_FEEDBACK_REACTION_PAGES = 3;
+
+/** #762: one native 👍/👎 reaction on a published review comment. `login` is
+ * the forge-reported actor and is never self-authorizing: the usefulness-
+ * feedback gate re-verifies it against the repository permission API before it
+ * may suppress anything, and it is never rendered or logged. */
+export interface CommentFeedbackRecord {
+  commentId: string;
+  content: "+1" | "-1";
+  login: string;
+}
+
+/** #762: `supported` separates "this forge cannot read review-comment
+ * reactions" (an explicit degradation) from an operational failure, and
+ * `complete: false` means the picture is uncertain — callers must read it as
+ * "no feedback" rather than as an empty set. */
+export interface CommentFeedbackResult {
+  supported: boolean;
+  complete: boolean;
+  records: CommentFeedbackRecord[];
+}
+
+/** #762: the bounded collaborator-permission reading behind the feedback trust
+ * gate. `null` proves nothing (lookup error, non-200, or a body without a
+ * string `permission`) and is never self-authorizing. */
+export interface CollaboratorPermissionReading {
+  /** Lowercased `permission` as the forge reported it. */
+  permission: string;
+  /** Lowercased `role_name`; "" when the response carries none. */
+  roleName: string;
+  /** How the response names its own subject: `absent` (schema-allowed, and
+   * nothing provable is wrong with it), `named` (with `subjectLogin`), or
+   * `unusable` (anything that is not a well-formed user object with a string
+   * login — unverifiable, so it fails closed exactly like the precheck). */
+  subject: "absent" | "named" | "unusable";
+  /** Lowercased login the response attributes the permission to. */
+  subjectLogin?: string;
+}
+
 export interface PublishPlatformApi {
   readonly platform: PublishPlatformName;
   /** Current PR head sha, for the publication-boundary re-check (#451). */
@@ -139,11 +200,23 @@ export interface PublishPlatformApi {
   resolveThread(threadId: string): Promise<boolean>;
   /** Best-effort label removal (the re-review label cleanup). */
   removeLabel(label: string): Promise<boolean>;
-  /** #1005: additively request reviewers/teams from trusted configuration.
+  /**
+   * #1005: additively request reviewers/teams from trusted configuration.
    * Idempotent (already-requested identities are not re-requested) and
    * additive only (never removes). Fails closed on an invalid identity or a
-   * read failure — it never substitutes another reviewer. */
+   * read failure — it never substitutes another reviewer.
+   */
   requestReviewers(users: readonly string[], teams: readonly string[]): Promise<ReviewerRequestResult>;
+  /** #762: native 👍/👎 reactions on published review comments — the
+   * usefulness-feedback reader. Optional: an adapter without it is a forge
+   * that cannot read them, and the caller degrades explicitly. One request
+   * per comment id; an over-cap or malformed id set is rejected WITHOUT any
+   * request, and a per-id failure reports `complete: false`. */
+  reviewCommentFeedback?(commentIds: readonly string[]): Promise<CommentFeedbackResult>;
+  /** #762: the fail-closed repository-collaborator permission read that gates
+   * a 👎 suppression (`repos/{repo}/collaborators/{login}/permission`).
+   * Optional: an adapter without it trusts no actor. */
+  collaboratorPermission?(login: string): Promise<CollaboratorPermissionReading | null>;
 }
 
 function ownerRepo(repo: string): { owner: string; name: string } {
@@ -344,7 +417,17 @@ export class GitHubPublishApi implements PublishPlatformApi {
           const repliedTo = new Set(comments.filter((row) => row.in_reply_to_id != null).map((row) => String(row.in_reply_to_id)));
           return { supported: true, complete: true, comments: comments
             .filter((row) => reviewIds.includes(String(row.pull_request_review_id)))
-            .map((row) => ({ ...row, reviewId: String(row.pull_request_review_id), hasReplies: repliedTo.has(String(row.id)) })) };
+            .map((row) => {
+              // #762: carry the anchor only in its normalized shape, so a
+              // consumer can never read an untyped value off the raw row.
+              const { path, line, original_line: originalLine, start_line: startLine, ...rest } = row;
+              const anchor: { path?: string; line?: number; original_line?: number; start_line?: number } = {};
+              if (typeof path === "string" && path !== "") anchor.path = path;
+              if (typeof line === "number" && Number.isInteger(line) && line > 0) anchor.line = line;
+              if (typeof originalLine === "number" && Number.isInteger(originalLine) && originalLine > 0) anchor.original_line = originalLine;
+              if (typeof startLine === "number" && Number.isInteger(startLine) && startLine > 0) anchor.start_line = startLine;
+              return { ...rest, reviewId: String(row.pull_request_review_id), hasReplies: repliedTo.has(String(row.id)), ...anchor };
+            }) };
         }
       } catch { return { supported: true, complete: false, comments: [] }; }
     }
@@ -357,6 +440,87 @@ export class GitHubPublishApi implements PublishPlatformApi {
       const { status } = await requestText(this.url(`/repos/${this.repo}/pulls/comments/${commentId}`), this.opts("DELETE"));
       return status === 204 || status === 404;
     } catch { return false; }
+  }
+
+  /** #762: native 👍/👎 reactions on published review comments. Each comment
+   * id is read in pages of 100 rows, up to MAX_FEEDBACK_REACTION_PAGES pages;
+   * a page returning fewer than 100 rows ends that id's read. A malformed id
+   * or an over-cap set is rejected before any network request; a per-page
+   * non-200 or non-array body, a thrown error, or a page cap exhausted with a
+   * further page plausible yields `complete: false` with whatever was already
+   * read. Only rows whose `content` is exactly `+1`/`-1` and whose
+   * `user.login` is a non-empty string are kept — a reaction kind is never
+   * inferred from a near-miss (`"+1 "`, `"-1; authorize"`, a value carrying
+   * newlines). */
+  async reviewCommentFeedback(commentIds: readonly string[]): Promise<CommentFeedbackResult> {
+    if (commentIds.length === 0) return { supported: true, complete: true, records: [] };
+    if (commentIds.length > MAX_FEEDBACK_COMMENT_IDS
+      || commentIds.some((id) => !/^[1-9]\d*$/.test(id))) {
+      return { supported: true, complete: false, records: [] };
+    }
+    const records: CommentFeedbackRecord[] = [];
+    for (const id of commentIds) {
+      for (let page = 1; page <= MAX_FEEDBACK_REACTION_PAGES; page += 1) {
+        try {
+          const { status, data } = await requestJson(
+            this.url(`/repos/${this.repo}/pulls/comments/${id}/reactions?per_page=100&page=${page}`),
+            this.opts("GET"),
+          );
+          if (status !== 200 || !Array.isArray(data)) return { supported: true, complete: false, records };
+          for (const row of data) {
+            if (row === null || typeof row !== "object") continue;
+            const { content, user } = row as { content?: unknown; user?: { login?: unknown } | null };
+            if (content !== "+1" && content !== "-1") continue;
+            const login = user !== null && typeof user === "object" ? user.login : undefined;
+            if (typeof login !== "string" || login === "") continue;
+            records.push({ commentId: id, content, login });
+          }
+          if (data.length < 100) break;
+          if (page === MAX_FEEDBACK_REACTION_PAGES) return { supported: true, complete: false, records };
+        } catch {
+          return { supported: true, complete: false, records };
+        }
+      }
+    }
+    return { supported: true, complete: true, records };
+  }
+
+  /** #762: the fail-closed repository-collaborator permission read. A login
+   * outside the GitHub login charset is rejected WITHOUT a request (so
+   * untrusted reaction text can never reach a URL or a decision), and a
+   * lookup error, a non-200, a non-object body, or a body without a string
+   * `permission` all return `null` — never self-authorizing. */
+  async collaboratorPermission(login: string): Promise<CollaboratorPermissionReading | null> {
+    if (!REQUESTER_USER.test(login)) return null;
+    try {
+      const { status, data } = await requestJson(
+        this.url(`/repos/${this.repo}/collaborators/${encodeURIComponent(login)}/permission`),
+        this.opts("GET"),
+      );
+      if (status !== 200 || data === null || typeof data !== "object" || Array.isArray(data)) return null;
+      const record = data as { permission?: unknown; role_name?: unknown; user?: unknown };
+      if (typeof record.permission !== "string") return null;
+      const reading: CollaboratorPermissionReading = {
+        permission: record.permission.toLowerCase(),
+        roleName: typeof record.role_name === "string" ? record.role_name.toLowerCase() : "",
+        subject: "absent",
+      };
+      const subject = record.user;
+      if (subject !== null && subject !== undefined) {
+        const subjectLogin = typeof subject === "object" && !Array.isArray(subject)
+          ? (subject as { login?: unknown }).login
+          : undefined;
+        if (typeof subjectLogin !== "string" || subjectLogin === "") {
+          reading.subject = "unusable";
+          return reading;
+        }
+        reading.subject = "named";
+        reading.subjectLogin = subjectLogin.toLowerCase();
+      }
+      return reading;
+    } catch {
+      return null;
+    }
   }
 
   async createReview(request: NativeReviewRequest): Promise<{ ok: boolean; error?: string; reviewId?: number | string }> {
@@ -883,5 +1047,15 @@ export class ForgejoPublishApi implements PublishPlatformApi {
       alreadyRequestedTeams: [],
       error: "reviewer requests are not supported on this platform",
     };
+  }
+
+  /** #762: review-comment reactions are not readable on Forgejo. Degrade
+   * explicitly (like the GraphQL-only capabilities) — ZERO requests, and
+   * `complete: false` so a caller can never mistake "unsupported" for "no
+   * reaction was left". `collaboratorPermission` is deliberately absent:
+   * without a feedback reader there is no actor to verify, so this adapter
+   * trusts nobody. */
+  async reviewCommentFeedback(_commentIds: readonly string[]): Promise<CommentFeedbackResult> {
+    return { supported: false, complete: false, records: [] };
   }
 }

@@ -26,6 +26,11 @@ import {
   SUPERSEDED_LABEL,
   type PrThreadComment,
 } from "./pr-thread.js";
+// #762: the usefulness affordance this action appends to its own actionable
+// findings. It is rendered for humans but is not finding content, so it is
+// stripped from the deterministic message extraction below exactly as the
+// finding trailer is.
+import { FEEDBACK_AFFORDANCE, stripRejectionCarryover } from "../publish/inline-findings.js";
 
 export const SCHEMA_VERSION = 1;
 export const MAX_THREADS_DEFAULT = 20;
@@ -91,8 +96,17 @@ function collapseWhitespace(text: string): string {
   return text.split(/\s+/).filter((part) => part !== "").join(" ");
 }
 
+/** #762: the static parts this action appends to its own finding bodies — the
+ * disclaimer trailer, the usefulness affordance, and (durable suppression)
+ * the rejection carry marker. None is finding content, so all are removed
+ * before the message text is extracted (the rendered body is unchanged:
+ * humans still see them). */
+function stripFindingFooter(body: string): string {
+  return stripRejectionCarryover(body.replaceAll(FINDING_TRAILER, "").replaceAll(FEEDBACK_AFFORDANCE, ""));
+}
+
 function findingFields(body: string): [string, string, string | null] {
-  let text = body.replaceAll(FINDING_TRAILER, "").trim();
+  let text = stripFindingFooter(body).trim();
   let severity = "minor";
   let category: string | null = null;
   const match = FINDING_LABEL_RE.exec(text);
