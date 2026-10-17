@@ -15,6 +15,7 @@
  */
 import { requestJson, requestText, type FetchLike } from "./http.js";
 import { ForgejoAdapter } from "./forgejo.js";
+import { canonicalUserId, hasUsableOwner, integrationOwnerIdFromAudience, ownerMatchesIdentity, type IdentityResolution, type TrustedOwnerIdentity } from "./owner-identity.js";
 import { parsePlatformBaseUrl, GITHUB_API_BASE } from "./urls.js";
 
 export type PublishPlatformName = "github" | "forgejo";
@@ -32,6 +33,11 @@ export interface PublishReviewRef {
   state?: string;
   body?: string;
   user?: { id?: number | string; login?: string } | null;
+  /** #1093: forge-reported review instants (either may be absent). The
+   * sticky-checkpoint cleanup uses them to prove no newer managed review
+   * superseded the run; a review without a usable timestamp fails closed. */
+  submitted_at?: string;
+  updated_at?: string;
 }
 
 export interface ManagedInlineCommentRef {
@@ -64,6 +70,11 @@ export interface StickyResult {
   ok: boolean;
   created: boolean;
   commentId?: number | string;
+  /** #1093: ISO 8601 instant of the published sticky comment, from the
+   * PATCH/POST response body. The publish cleanup gate uses it as the
+   * replacement checkpoint timestamp when no native review was created;
+   * absent → the gate skips cleanup (fail closed). */
+  updatedAt?: string;
   error?: string;
 }
 
@@ -104,6 +115,11 @@ export interface PublishPlatformApi {
   /** Current PR head sha, for the publication-boundary re-check (#451). */
   getHeadSha(): Promise<string | null>;
   authenticatedIdentity?(): Promise<string | null>;
+  /** #1093: the forge-authenticated owner identity with a bounded
+   * diagnostics reason. A `userId` proof is authoritative only in Forgejo
+   * Authorized Integration mode. Absent → callers fall back to
+   * `authenticatedIdentity()` (login-kind). */
+  resolveTrustedOwner?(): Promise<IdentityResolution>;
   /** Issue comments (paginated), oldest-first as returned by the API. */
   listIssueComments(): Promise<PublishCommentRef[]>;
   /** Create or update the sticky managed comment (marker semantics shared). */
@@ -248,7 +264,24 @@ export class GitHubPublishApi implements PublishPlatformApi {
     const comments = await this.listIssueComments();
     const matching = comments.filter((c) => typeof c.body === "string" && c.body.includes(marker));
     matching.sort((a, b) => String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? "")));
-    const target = matching[0];
+    let target = matching[0];
+    // #1098: a marker-bearing comment is visible to every reader, so the
+    // newest match is only a PATCH candidate when the proven trusted owner
+    // authored it (kind-separated matching, same policy as
+    // `owner-identity.ts` — a login identity is compared to logins only).
+    // A foreign-authored or unattributable marker comment is never
+    // overwritten; when the identity itself cannot be proven the upsert
+    // fails closed instead of guessing. With no marker comment at all the
+    // creation path needs no proof — creating never destroys anything.
+    if (target !== undefined) {
+      const login = await this.authenticatedIdentity();
+      if (login === null) return { ok: false, created: false, error: "GitHub sticky comment owner could not be verified" };
+      const identity: TrustedOwnerIdentity = { kind: "login", login };
+      target = matching.find((comment) => ownerMatchesIdentity(comment.user, identity));
+      if (target === undefined && matching.some((comment) => typeof comment.user?.login !== "string" || comment.user.login.trim() === "")) {
+        return { ok: false, created: false, error: "GitHub sticky comment ownership is unknown" };
+      }
+    }
     try {
       if (target === undefined) {
         const { status, data } = await requestJson(
@@ -256,16 +289,23 @@ export class GitHubPublishApi implements PublishPlatformApi {
           this.opts("POST", { body }),
         );
         if (status !== 200 && status !== 201) return { ok: false, created: false, error: `status ${status}` };
-        const id = (data as { id?: number | string } | null)?.id;
-        return id === undefined ? { ok: true, created: true } : { ok: true, created: true, commentId: id };
+        // #1093: the response instant anchors the sticky replacement
+        // checkpoint when review_comment publishes no native review.
+        const created = data as { id?: number | string; updated_at?: unknown } | null;
+        const updatedAt = typeof created?.updated_at === "string" ? created.updated_at : undefined;
+        return created?.id === undefined
+          ? { ok: true, created: true, ...(updatedAt === undefined ? {} : { updatedAt }) }
+          : { ok: true, created: true, commentId: created.id, ...(updatedAt === undefined ? {} : { updatedAt }) };
       }
       const { status, data } = await requestJson(
         this.url(`/repos/${this.repo}/issues/comments/${target.id}`),
         this.opts("PATCH", { body }),
       );
       if (status !== 200) return { ok: false, created: false, error: `status ${status}` };
-      const id = (data as { id?: number | string } | null)?.id ?? target.id;
-      return { ok: true, created: false, commentId: id };
+      const patched = data as { id?: number | string; updated_at?: unknown } | null;
+      const id = patched?.id ?? target.id;
+      const updatedAt = typeof patched?.updated_at === "string" ? patched.updated_at : undefined;
+      return { ok: true, created: false, commentId: id, ...(updatedAt === undefined ? {} : { updatedAt }) };
     } catch (error) {
       return { ok: false, created: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -510,17 +550,8 @@ export function forgejoReviewEvent(event: string): string {
   return "COMMENT";
 }
 
-/** Forgejo generates integration audiences as `u:<owner ID>:<UUID>`. */
-function integrationOwnerId(audience: string | undefined): string | null {
-  const match = /^u:([1-9]\d*):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.exec(audience ?? "");
-  return match?.[1] ?? null;
-}
-
-function commentAuthorId(comment: PublishCommentRef): string | null {
-  const id = comment.user?.id;
-  if (typeof id === "number") return Number.isSafeInteger(id) && id > 0 ? String(id) : null;
-  return typeof id === "string" && /^[1-9]\d*$/.test(id) ? id : null;
-}
+/** Forgejo generates integration audiences as `u:<owner ID>:<UUID>`;
+ * parsing lives in the shared owner-identity policy (#1093). */
 
 export class ForgejoPublishApi implements PublishPlatformApi {
   readonly platform = "forgejo" as const;
@@ -552,8 +583,15 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     this.origin = parsed.origin;
     this.repo = options.repo;
     this.prNumber = options.prNumber;
-    this.integrationMode = (options.authMethod ?? "token").trim().toLowerCase() === "authorized_integration";
-    this.integrationOwnerId = integrationOwnerId(options.authorizedIntegrationAudience);
+    // #1093: same rule as ForgejoAdapter.isAuthorizedIntegrationMode():
+    // an explicit method governs; the legacy audience-only configuration
+    // (authMethod unset) is integration mode too, so the sticky upsert
+    // target gets the same ownership verification the precheck and the
+    // cleanup gate apply to the audience's user id.
+    const method = (options.authMethod ?? "").trim().toLowerCase();
+    this.integrationMode = method === "authorized_integration"
+      || (method === "" && (options.authorizedIntegrationAudience ?? "").trim() !== "");
+    this.integrationOwnerId = integrationOwnerIdFromAudience(options.authorizedIntegrationAudience);
     this.authorization = new ForgejoAdapter({
       repo: options.repo,
       prNumber: options.prNumber,
@@ -585,6 +623,14 @@ export class ForgejoPublishApi implements PublishPlatformApi {
   }
 
   async authenticatedIdentity(): Promise<string | null> { return this.authorization.authenticatedIdentity(); }
+
+  /** #1093: the trusted owner identity for cleanup and sticky ownership,
+   * delegating to the Forgejo adapter (login via `GET /user`, or — in
+   * Authorized Integration mode — the audience's owner id when `/user` is
+   * unreachable). */
+  async resolveTrustedOwner(): Promise<IdentityResolution> {
+    return this.authorization.resolveTrustedOwner();
+  }
 
   async getHeadSha(): Promise<string | null> {
     try {
@@ -633,24 +679,25 @@ export class ForgejoPublishApi implements PublishPlatformApi {
       });
       let target = matching[0];
       if (this.integrationMode && target !== undefined) {
-        let author: (comment: PublishCommentRef) => string | null;
-        let current: string;
+        let identity: TrustedOwnerIdentity | null;
+        // #1093: "unusable" stays branch-specific for byte-identical
+        // behavior — under a user-id identity only an unusable ID counts
+        // (a login is never compared against the audience's owner id);
+        // under a login identity only an unusable login counts.
+        let unusable: (comment: PublishCommentRef) => boolean;
         if (this.integrationOwnerId !== null) {
           // The audience identifies the account Forgejo authenticates as.
           // /user needs a separate user scope that repository-scoped JWTs lack.
-          author = commentAuthorId;
-          current = this.integrationOwnerId;
+          identity = { kind: "userId", userId: this.integrationOwnerId };
+          unusable = (comment) => canonicalUserId(comment.user?.id) === null;
         } else {
-          const identity = await this.authorization.authenticatedIdentity();
-          if (identity === null) return { ok: false, created: false, error: "Forgejo sticky comment owner could not be verified" };
-          author = (comment) => {
-            const login = comment.user?.login;
-            return typeof login === "string" && login.trim() !== "" ? login.toLowerCase() : null;
-          };
-          current = identity.toLowerCase();
+          const login = await this.authorization.authenticatedIdentity();
+          if (login === null) return { ok: false, created: false, error: "Forgejo sticky comment owner could not be verified" };
+          identity = { kind: "login", login };
+          unusable = (comment) => typeof comment.user?.login !== "string" || comment.user.login.trim() === "";
         }
-        target = matching.find((comment) => author(comment) === current);
-        if (target === undefined && matching.some((comment) => author(comment) === null)) {
+        target = matching.find((comment) => ownerMatchesIdentity(comment.user, identity));
+        if (target === undefined && matching.some(unusable)) {
           return { ok: false, created: false, error: "Forgejo sticky comment ownership is unknown" };
         }
       }
@@ -662,8 +709,10 @@ export class ForgejoPublishApi implements PublishPlatformApi {
         await this.opts("PATCH", { body }),
       );
       if (status !== 200) return { ok: false, created: false, error: `status ${status}` };
-      const id = (data as { id?: number | string } | null)?.id ?? target.id;
-      return { ok: true, created: false, commentId: id };
+      const patched = data as { id?: number | string; updated_at?: unknown; updated_on?: unknown } | null;
+      const id = patched?.id ?? target.id;
+      const updatedAt = typeof patched?.updated_at === "string" ? patched.updated_at : typeof patched?.updated_on === "string" ? patched.updated_on : undefined;
+      return { ok: true, created: false, commentId: id, ...(updatedAt === undefined ? {} : { updatedAt }) };
     } catch (error) {
       return { ok: false, created: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -675,8 +724,11 @@ export class ForgejoPublishApi implements PublishPlatformApi {
       await this.opts("POST", { body }),
     );
     if (status !== 201) return { ok: false, created: false, error: `status ${status}` };
-    const id = (data as { id?: number | string } | null)?.id;
-    return id === undefined ? { ok: true, created: true } : { ok: true, created: true, commentId: id };
+    const created = data as { id?: number | string; updated_at?: unknown; updated_on?: unknown } | null;
+    const updatedAt = typeof created?.updated_at === "string" ? created.updated_at : typeof created?.updated_on === "string" ? created.updated_on : undefined;
+    return created?.id === undefined
+      ? { ok: true, created: true, ...(updatedAt === undefined ? {} : { updatedAt }) }
+      : { ok: true, created: true, commentId: created.id, ...(updatedAt === undefined ? {} : { updatedAt }) };
   }
 
   async listReviews(): Promise<PublishReviewRef[]> {
@@ -699,8 +751,10 @@ export class ForgejoPublishApi implements PublishPlatformApi {
         if (status === 404) return { supported: false, complete: false, comments: [] };
         if (status !== 200 || !Array.isArray(data)) return { supported: true, complete: false, comments: [] };
         const rows = data as ManagedInlineCommentRef[];
-        // Forgejo replies are sibling comments: a foreign/unknown author makes the entire review unsafe.
-        if (rows.some((c) => !c.user?.login)) return { supported: true, complete: false, comments: [] };
+        // Forgejo replies are sibling comments: an unattributable author
+        // (neither a usable login nor a usable user id, #1093) makes the
+        // entire review unsafe.
+        if (rows.some((c) => !hasUsableOwner(c.user))) return { supported: true, complete: false, comments: [] };
         if (rows.some((c) => String(c.pull_request_review_id ?? c.reviewId ?? "") !== id)) return { supported: true, complete: false, comments: [] };
         if (comments.length + rows.length > 1000) return { supported: true, complete: false, comments: [] };
         comments.push(...rows.map((c) => ({ ...c, reviewId: id, hasReplies: false })));

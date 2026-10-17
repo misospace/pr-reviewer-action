@@ -54,7 +54,8 @@ test("github dismissReview puts the dismissal message", async () => {
 
 test("github upsertStickyComment patches the marked comment and creates one when absent", async () => {
   const existing = recorder([
-    [`GET ${BASE}/repos/o/r/issues/9/comments`, 200, [{ id: 5, body: "human" }, { id: 7, body: "<!-- m -->\nold" }]],
+    [`GET ${BASE}/repos/o/r/issues/9/comments`, 200, [{ id: 5, body: "human" }, { id: 7, body: "<!-- m -->\nold", user: { login: "ci-bot" } }]],
+    [`POST ${BASE}/graphql`, 200, { data: { viewer: { login: "ci-bot" } } }],
     [`PATCH ${BASE}/repos/o/r/issues/comments/7`, 200, { id: 7 }],
   ]);
   assert.deepEqual(await github(existing.fetchImpl).upsertStickyComment("<!-- m -->", "<!-- m -->\nnew"), {
@@ -62,7 +63,7 @@ test("github upsertStickyComment patches the marked comment and creates one when
   });
   const patch = existing.calls.find((c) => c.method === "PATCH")!;
   assert.deepEqual(patch.body, { body: "<!-- m -->\nnew" });
-  assert.equal(existing.calls.some((c) => c.method === "POST"), false);
+  assert.equal(existing.calls.some((c) => c.method === "POST" && c.url !== `${BASE}/graphql`), false);
 
   const fresh = recorder([
     [`GET ${BASE}/repos/o/r/issues/9/comments`, 200, [{ id: 5, body: "human" }]],
@@ -72,6 +73,91 @@ test("github upsertStickyComment patches the marked comment and creates one when
   assert.equal(created.ok, true);
   assert.equal(created.created, true);
   assert.equal(fresh.calls.some((c) => c.method === "PATCH"), false);
+  // #1098: with no marker-bearing comment there is nothing to own — the
+  // creation path never needs the identity read.
+  assert.equal(fresh.calls.some((c) => c.url === `${BASE}/graphql`), false);
+});
+
+// #1098: every published sticky body carries the marker, so a contributor
+// who quotes it creates a marker-bearing comment they own. The PATCH target
+// is selected only among comments authored by the proven trusted owner —
+// a foreign-authored marker comment is never overwritten, and an identity
+// that cannot be proven fails closed instead of guessing.
+test("#1098: github sticky upsert never patches a foreign-authored marker comment, even when it is newest", async () => {
+  const { fetchImpl, calls } = recorder([
+    [`GET ${BASE}/repos/o/r/issues/9/comments`, 200, [
+      { id: 3, body: "<!-- m -->\ncontributor quote", updated_at: "2026-10-15T10:00:00Z", user: { login: "contributor" } },
+      { id: 7, body: "<!-- m -->\nold", updated_at: "2026-10-14T08:00:00Z", user: { login: "CI-Bot" } },
+    ]],
+    [`POST ${BASE}/graphql`, 200, { data: { viewer: { login: "ci-bot" } } }],
+    [`PATCH ${BASE}/repos/o/r/issues/comments/7`, 200, { id: 7, updated_at: "2026-10-15T11:00:00Z" }],
+  ]);
+  assert.deepEqual(await github(fetchImpl).upsertStickyComment("<!-- m -->", "<!-- m -->\nnew"), {
+    ok: true, created: false, commentId: 7, updatedAt: "2026-10-15T11:00:00Z",
+  });
+  assert.equal(calls.some((c) => c.method === "PATCH" && c.url.endsWith("/comments/3")), false,
+    "the newest marker comment belongs to a foreign author and is never patched");
+  assert.equal(calls.some((c) => c.method === "POST" && c.url !== `${BASE}/graphql`), false);
+  assert.equal(calls.filter((c) => c.method === "PATCH").length, 1);
+});
+
+test("#1098: github sticky upsert fails closed when a marker comment's author is unattributable", async () => {
+  const { fetchImpl, calls } = recorder([
+    [`GET ${BASE}/repos/o/r/issues/9/comments`, 200, [
+      { id: 4, body: "<!-- m -->\nno author", user: { id: 42 } },
+      { id: 5, body: "<!-- m -->\nother", user: { login: "someone-else" } },
+    ]],
+    [`POST ${BASE}/graphql`, 200, { data: { viewer: { login: "ci-bot" } } }],
+  ]);
+  assert.deepEqual(await github(fetchImpl).upsertStickyComment("<!-- m -->", "<!-- m -->\nnew"), {
+    ok: false, created: false, error: "GitHub sticky comment ownership is unknown",
+  });
+  assert.equal(calls.some((c) => c.method === "PATCH"), false, "uncertain ownership performs no mutation");
+  assert.equal(calls.some((c) => c.method === "POST" && c.url !== `${BASE}/graphql`), false);
+});
+
+test("#1098: github sticky upsert creates a fresh comment when only foreign marker comments exist", async () => {
+  const { fetchImpl, calls } = recorder([
+    [`GET ${BASE}/repos/o/r/issues/9/comments`, 200, [
+      { id: 3, body: "<!-- m -->\ncontributor quote", updated_at: "2026-10-15T10:00:00Z", user: { login: "contributor" } },
+    ]],
+    [`POST ${BASE}/graphql`, 200, { data: { viewer: { login: "ci-bot" } } }],
+    [`POST ${BASE}/repos/o/r/issues/9/comments`, 201, { id: 12 }],
+  ]);
+  assert.deepEqual(await github(fetchImpl).upsertStickyComment("<!-- m -->", "<!-- m -->\nnew"), {
+    ok: true, created: true, commentId: 12,
+  });
+  assert.equal(calls.some((c) => c.method === "PATCH"), false,
+    "no owned marker comment exists, so nothing is ever patched");
+});
+
+test("#1098: github sticky upsert patches the owned comment even when an unattributable marker comment exists", async () => {
+  const { fetchImpl, calls } = recorder([
+    [`GET ${BASE}/repos/o/r/issues/9/comments`, 200, [
+      { id: 4, body: "<!-- m -->\nno author", user: { id: 42 } },
+      { id: 7, body: "<!-- m -->\nold", updated_at: "2026-10-14T08:00:00Z", user: { login: "ci-bot" } },
+    ]],
+    [`POST ${BASE}/graphql`, 200, { data: { viewer: { login: "ci-bot" } } }],
+    [`PATCH ${BASE}/repos/o/r/issues/comments/7`, 200, { id: 7 }],
+  ]);
+  assert.deepEqual(await github(fetchImpl).upsertStickyComment("<!-- m -->", "<!-- m -->\nnew"), {
+    ok: true, created: false, commentId: 7,
+  });
+  assert.equal(calls.some((c) => c.method === "PATCH" && c.url.endsWith("/comments/4")), false,
+    "the unattributable marker comment is never patched");
+});
+
+test("#1098: github sticky upsert fails closed when the trusted identity cannot be proven", async () => {
+  const { fetchImpl, calls } = recorder([
+    [`GET ${BASE}/repos/o/r/issues/9/comments`, 200, [{ id: 7, body: "<!-- m -->\nold", user: { login: "ci-bot" } }]],
+    [`POST ${BASE}/graphql`, 404, {}],
+    [`GET ${BASE}/user`, 404, {}],
+  ]);
+  assert.deepEqual(await github(fetchImpl).upsertStickyComment("<!-- m -->", "<!-- m -->\nnew"), {
+    ok: false, created: false, error: "GitHub sticky comment owner could not be verified",
+  });
+  assert.equal(calls.some((c) => c.method === "PATCH"), false, "an unproven identity performs no mutation");
+  assert.equal(calls.some((c) => c.method === "POST" && c.url !== `${BASE}/graphql`), false);
 });
 
 test("github resolveThread sends the resolveReviewThread mutation for that thread", async () => {
@@ -291,3 +377,63 @@ test("Forgejo sticky comment reuse chooses the newest comment when timestamps ti
     ["PATCH", "https://forge.example/api/v1/repos/o/r/issues/comments/12"],
   ]);
 });
+
+// #1093: the legacy audience-only configuration (authMethod unset but an
+// integration audience present) is Authorized Integration mode for the
+// adapter — the publisher must apply the same ownership verification, so a
+// marker comment owned by a DIFFERENT account is never patched blindly.
+const AUDIENCE_ONLY = "u:7:12345678-1234-1234-1234-123456789abc";
+const AUDIENCE_OIDC_URL = `https://oidc.example/token?job=1&audience=${encodeURIComponent(AUDIENCE_ONLY)}`;
+
+function withAudienceOnlyOidcEnv(fn: () => Promise<void>): Promise<void> {
+  const previous = { url: process.env.ACTIONS_ID_TOKEN_REQUEST_URL, token: process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN };
+  process.env.ACTIONS_ID_TOKEN_REQUEST_URL = "https://oidc.example/token?job=1";
+  process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN = "runner-oidc";
+  return fn().finally(() => {
+    if (previous.url === undefined) delete process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+    else process.env.ACTIONS_ID_TOKEN_REQUEST_URL = previous.url;
+    if (previous.token === undefined) delete process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+    else process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN = previous.token;
+  });
+}
+
+test("#1093: audience-only config verifies sticky ownership by the audience user id", async () => withAudienceOnlyOidcEnv(async () => {
+  const { fetchImpl, calls } = recorder([
+    ["GET https://oidc.example/token?job=1", 200, { value: "jwt" }],
+    ["GET https://forge.example/api/v1/repos/o/r/issues/9/comments", 200,
+      [{ id: 7, body: "<!-- m -->\nold", user: { id: 8, login: "someone-else" } }]],
+    ["POST https://forge.example/api/v1/repos/o/r/issues/9/comments", 201, { id: 12 }],
+  ]);
+  const api = new ForgejoPublishApi({
+    repo: "o/r", prNumber: "9", baseUrl: "https://forge.example",
+    authorizedIntegrationAudience: AUDIENCE_ONLY, fetchImpl,
+  });
+  assert.deepEqual(await api.upsertStickyComment("<!-- m -->", "<!-- m -->\nnew"), {
+    ok: true, created: true, commentId: 12,
+  });
+  assert.ok(!calls.some((c) => c.method === "PATCH"), "a foreign-owned marker comment is never patched");
+  assert.deepEqual(calls.map(({ auth }) => auth), ["bearer runner-oidc", "Bearer jwt", "Bearer jwt"]);
+  assert.equal(
+    calls[0]?.url,
+    AUDIENCE_OIDC_URL,
+    "the JWT exchange pins the configured audience verbatim",
+  );
+}));
+
+test("#1093: audience-only config patches the sticky comment owned by the audience user id", async () => withAudienceOnlyOidcEnv(async () => {
+  const { fetchImpl, calls } = recorder([
+    ["GET https://oidc.example/token?job=1", 200, { value: "jwt" }],
+    ["GET https://forge.example/api/v1/repos/o/r/issues/9/comments", 200,
+      [{ id: 7, body: "<!-- m -->\nold", user: { id: 7 } }]],
+    ["PATCH https://forge.example/api/v1/repos/o/r/issues/comments/7", 200, { id: 7, updated_at: "2026-10-14T09:00:00Z" }],
+  ]);
+  const api = new ForgejoPublishApi({
+    repo: "o/r", prNumber: "9", baseUrl: "https://forge.example",
+    authorizedIntegrationAudience: AUDIENCE_ONLY, fetchImpl,
+  });
+  assert.deepEqual(await api.upsertStickyComment("<!-- m -->", "<!-- m -->\nnew"), {
+    ok: true, created: false, commentId: 7, updatedAt: "2026-10-14T09:00:00Z",
+  });
+  assert.equal(calls[2]!.method, "PATCH");
+  assert.equal(calls[2]!.url, "https://forge.example/api/v1/repos/o/r/issues/comments/7");
+}));

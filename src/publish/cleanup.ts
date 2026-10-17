@@ -12,20 +12,57 @@
  */
 import { isManagedBody } from "../metadata/markers.js";
 import type { PublishPlatformApi, PublishReviewRef } from "../platform/publish-api.js";
+import { hasUsableOwner, ownerMatchesIdentity, type IdentityResolution, type TrustedOwnerIdentity } from "../platform/owner-identity.js";
 
 export type CleanupLog = (line: string) => void;
+
+/** #1093: the trusted owner identity the cleanup decisions run under.
+ * Prefers the adapter's `resolveTrustedOwner()` (which carries a bounded
+ * diagnostics reason and the Forgejo Authorized Integration user-id proof);
+ * falls back to `authenticatedIdentity()` (login-kind) when the adapter does
+ * not implement it. `null` when neither can prove an identity — callers
+ * fail closed (no deletions). */
+export async function resolvePublishTrustedOwner(api: PublishPlatformApi): Promise<{ owner: TrustedOwnerIdentity | null; reason: string }> {
+  if (typeof api.resolveTrustedOwner === "function") {
+    try {
+      const resolution: IdentityResolution = await api.resolveTrustedOwner();
+      return { owner: resolution.identity, reason: resolution.reason };
+    } catch {
+      return { owner: null, reason: "unavailable" };
+    }
+  }
+  let identity: string | null = null;
+  try {
+    identity = await api.authenticatedIdentity?.() ?? null;
+  } catch {
+    identity = null;
+  }
+  return identity === null || identity.trim() === ""
+    ? { owner: null, reason: "unavailable" }
+    : { owner: { kind: "login", login: identity }, reason: "user-login" };
+}
 
 /** Best-effort retirement after replacement publication; never trusts comment text alone. */
 export async function retireManagedInlineComments(
   api: PublishPlatformApi, reviews: readonly PublishReviewRef[], marker: string, log: CleanupLog,
   mayDelete: () => Promise<boolean> = async () => true,
 ): Promise<void> {
-  const identity = await api.authenticatedIdentity?.() ?? null;
-  if (identity === null) { log("  WARN: Could not verify authenticated owner; no inline comments retired"); return; }
+  const { owner, reason } = await resolvePublishTrustedOwner(api);
+  if (owner === null) {
+    log(`  WARN: Could not verify authenticated owner (identity reason: ${reason}); no inline comments retired`);
+    return;
+  }
   const managed = reviews.filter((r) => isManagedBody(typeof r.body === "string" ? r.body : "", marker)
-    && r.user?.login?.toLowerCase() === identity.toLowerCase());
+    && ownerMatchesIdentity(r.user, owner));
   const ids = managed.map((r) => String(r.id)).filter((id) => /^[1-9]\d*$/.test(id));
-  if (ids.length === 0) return;
+  // #1093: an empty eligible set is a real, bounded outcome (nothing prior to
+  // retire) and must be distinguishable from the unusable-snapshot refusals
+  // below (unsupported forge, incomplete enumeration) and from a run that
+  // never reached cleanup at all. No ids, bodies, or comment text are logged.
+  if (ids.length === 0) {
+    log("  NOTE: No managed native reviews owned by the trusted identity; nothing to retire");
+    return;
+  }
   const listed = await api.listManagedInlineComments(ids);
   if (!listed.supported) { log("  NOTE: Inline-comment retirement unsupported by this forge"); return; }
   if (!listed.complete) { log("  WARN: Inline-comment enumeration incomplete; no comments retired"); return; }
@@ -33,11 +70,11 @@ export async function retireManagedInlineComments(
   let retired = 0, replies = 0, failed = 0, eligible = 0;
   const seen = new Set<string>();
   if (listed.comments.length === 0) { log("  Inline comments: eligible=0 retired=0 skipped-discussion=0 failed=0"); return; }
-  const authors = new Map(ids.map((id) => [id, identity]));
+  const authors = new Map(ids.map((id) => [id, owner]));
   const foreignReviews = new Set<string>();
   for (const comment of listed.comments) {
-    const owner = authors.get(String(comment.reviewId));
-    if (!owner || !comment.user?.login || comment.user.login.toLowerCase() !== owner.toLowerCase()) foreignReviews.add(String(comment.reviewId));
+    const reviewOwner = authors.get(String(comment.reviewId));
+    if (!reviewOwner || !ownerMatchesIdentity(comment.user, reviewOwner)) foreignReviews.add(String(comment.reviewId));
   }
   for (const comment of listed.comments.slice(0, 100)) {
     const key = `${String(comment.reviewId)}:${String(comment.id)}`;
@@ -47,7 +84,7 @@ export async function retireManagedInlineComments(
     if (foreignReviews.has(String(comment.reviewId))) { replies++; continue; }
     if (!review || !/^[1-9]\d*$/.test(String(comment.id ?? ""))) { failed++; continue; }
     // Adapters derive discussion status from complete listings; unknown status fails closed.
-    if (comment.inReplyToId != null || comment.in_reply_to_id != null || comment.hasReplies !== false || !comment.user?.login) { replies++; continue; }
+    if (comment.inReplyToId != null || comment.in_reply_to_id != null || comment.hasReplies !== false || !hasUsableOwner(comment.user)) { replies++; continue; }
     eligible++;
     try {
       if (!(await mayDelete())) { log("  WARN: Head or latest review changed; stopping inline-comment retirement"); break; }
@@ -55,7 +92,7 @@ export async function retireManagedInlineComments(
       const fresh = await api.listManagedInlineComments([String(review.id)]);
       if (!fresh.supported || !fresh.complete) { log("WARN: Discussion revalidation incomplete; stopping retirement"); break; }
       const current = fresh.comments.find((row) => String(row.id) === String(comment.id));
-      if (fresh.comments.some((row) => row.user?.login?.toLowerCase() !== identity.toLowerCase())
+      if (fresh.comments.some((row) => !ownerMatchesIdentity(row.user, owner))
         || (current && (current.hasReplies !== false || current.in_reply_to_id != null || current.inReplyToId != null))) { replies++; continue; }
       if (!(await mayDelete())) break;
       if (await api.retireInlineComment(String(review.id), String(comment.id))) retired++;

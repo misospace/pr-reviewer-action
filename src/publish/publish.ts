@@ -18,7 +18,8 @@ import { ACTION_VERSION } from "../version.js";
 import { buildComments, SEVERITY_LABELS } from "./inline-findings.js";
 import { redactText } from "../context/redact.js";
 import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
-import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, retireManagedInlineComments, type CleanupLog } from "./cleanup.js";
+import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, retireManagedInlineComments, resolvePublishTrustedOwner, type CleanupLog } from "./cleanup.js";
+import { ownerMatchesIdentity } from "../platform/owner-identity.js";
 import { strictReviewResult } from "../enforcement/verdict-policy.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
 import { COVERAGE_NOTICE_MAX_ITEMS, type PartialCoverage } from "../tools/coverage.js";
@@ -586,6 +587,21 @@ export async function publishReview(
 ): Promise<PublishResult> {
   const messages: string[] = [];
   let nativeReviewId: number | string | undefined;
+  // #1093: the sticky summary comment as the replacement checkpoint when
+  // review_comment mode publishes no inline findings review (a clean re-review
+  // must not emit an empty native "Inline findings" review just to anchor
+  // cleanup). The PATCH/POST response timestamp anchors it.
+  let stickyCommentId: number | string | undefined;
+  let stickyUpdatedAt: string | undefined;
+  // #1093: the exact sticky body this run published — the checkpoint's
+  // body anchor, so a same-second re-publication by an overlapping run
+  // (refreshed timestamp equal to the checkpoint) with a DIFFERENT body
+  // cannot pass for this run's own sticky state.
+  let stickyBody: string | undefined;
+  // #1093: the sticky is a complete replacement only when the run had no
+  // inline findings to post or that findings review was actually created;
+  // a failed findings submission leaves the previous set un-replaced.
+  let stickyCheckpointUsable = true;
 
   if (!input.prNumber) {
     return { status: "failed", messages, error: `publish_${input.mode} requires a pull_request event or explicit pr_number` };
@@ -777,15 +793,25 @@ export async function publishReview(
       if (!result.ok) {
         return { status: "failed", messages, error: `sticky comment publication failed: ${result.error ?? "unknown error"}` };
       }
-      // Best-effort inline findings as a separate COMMENT review carrying the
-      // managed marker: the summary comment above is already published.
-      if (inlineComments.length > 0 || (completeCoverage && cleanupEnabled && previousReviews.some((r) => isManagedBody(r.body ?? "", input.commentMarker)))) {
+      stickyCommentId = result.commentId;
+      stickyUpdatedAt = result.updatedAt;
+      stickyBody = body;
+      // #1093: inline findings reviews are created ONLY when there are inline
+      // findings — a clean re-review must not publish an empty native review
+      // just so cleanup has a checkpoint. The sticky comment (with its
+      // response timestamp) is the replacement checkpoint instead.
+      if (inlineComments.length > 0) {
         const inlineBody = `${input.commentMarker}\n_Inline findings from the automated review (summary in the sticky comment)._`;
         const submitted = await api.createReview({ body: inlineBody, event: "COMMENT", commit_id: input.headSha, comments: inlineComments });
         if (submitted.ok) {
           nativeReviewId = submitted.reviewId;
           messages.push(`Attached ${inlineComments.length} inline finding comment(s)`);
         } else {
+          // The findings review is this run's replacement for the previous
+          // inline set; without it the sticky summary is NOT a complete
+          // replacement, so the sticky checkpoint must not authorize
+          // retiring the old owned comments.
+          stickyCheckpointUsable = false;
           messages.push("WARN: inline findings review submission failed; summary comment was still published");
         }
       }
@@ -887,30 +913,103 @@ export async function publishReview(
 
   // Retire old inline findings only after a complete replacement at the expected head.
   if (cleanupEnabled) {
-    const replacementComplete = completeCoverage && !fallbackSubmission && nativeReviewId !== undefined;
-    if (replacementComplete) {
+    // #1093: what proves this run fully replaced the previous publication.
+    // review-verdict/inline-finding runs use the native review they created;
+    // a review_comment run with no inline findings uses the sticky summary
+    // comment plus its publication timestamp (a clean re-review creates no
+    // native review at all). Missing both: no cleanup (fail closed).
+    type ReplacementCheckpoint =
+      | { kind: "review"; reviewId: number | string }
+      | { kind: "sticky"; commentId: number | string; updatedAt: string; body: string };
+    const replacementCheckpoint: ReplacementCheckpoint | undefined =
+      nativeReviewId !== undefined
+        ? { kind: "review", reviewId: nativeReviewId }
+        : stickyCheckpointUsable && stickyCommentId !== undefined && stickyUpdatedAt !== undefined && stickyBody !== undefined
+          ? { kind: "sticky", commentId: stickyCommentId, updatedAt: stickyUpdatedAt, body: stickyBody }
+          : undefined;
+    const replacementComplete = completeCoverage && !fallbackSubmission && replacementCheckpoint !== undefined;
+    if (replacementComplete && replacementCheckpoint !== undefined) {
       try {
         const verifiedHead = await api.getHeadSha();
-        if (verifiedHead === input.headSha && nativeReviewId !== undefined) {
-            const identity = await api.authenticatedIdentity?.() ?? null;
-            const previous = identity === null ? [] : previousReviews.filter((r) => r.user?.login?.toLowerCase() === identity.toLowerCase());
-            const newestId = BigInt(String(nativeReviewId));
-            const olderManaged = previous.filter((r) => {
-              if (!isManagedBody(typeof r.body === "string" ? r.body : "", input.commentMarker)) return false;
-              try { return BigInt(String(r.id)) < newestId; } catch { return false; }
-            });
+        if (verifiedHead !== input.headSha) {
+          messages.push("  WARN: Missing replacement review id or head changed; leaving previous inline comments unchanged");
+        } else {
+          // #1093: ownership decisions run under the shared forge-agnostic
+          // owner-identity policy (login proof, or - for Forgejo Authorized
+          // Integration - the audience-derived user id). Unproven identity
+          // fails closed: nothing is deleted.
+          const { owner, reason } = await resolvePublishTrustedOwner(api);
+          if (owner === null) {
+            messages.push("WARN: Could not verify authenticated owner (identity reason: " + reason + "); no inline comments retired");
+          } else {
+            const previous = previousReviews.filter((r) => ownerMatchesIdentity(r.user, owner));
+            const reviewInstant = (r: { submitted_at?: string; updated_at?: string }): string => {
+              if (typeof r.submitted_at === "string" && r.submitted_at !== "") return r.submitted_at;
+              return typeof r.updated_at === "string" && r.updated_at !== "" ? r.updated_at : "";
+            };
+            let olderManaged: typeof previous;
+            if (replacementCheckpoint.kind === "review") {
+              const newestId = BigInt(String(replacementCheckpoint.reviewId));
+              olderManaged = previous.filter((r) => {
+                if (!isManagedBody(typeof r.body === "string" ? r.body : "", input.commentMarker)) return false;
+                try { return BigInt(String(r.id)) < newestId; } catch { return false; }
+              });
+            } else {
+              const checkpointMs = Date.parse(replacementCheckpoint.updatedAt);
+              olderManaged = Number.isNaN(checkpointMs)
+                ? []
+                : previous.filter((r) => {
+                  if (!isManagedBody(typeof r.body === "string" ? r.body : "", input.commentMarker)) return false;
+                  const instant = reviewInstant(r);
+                  const stamp = instant === "" ? Number.NaN : Date.parse(instant);
+                  return !Number.isNaN(stamp) && stamp < checkpointMs;
+                });
+            }
             if (olderManaged.length > 100) {
               messages.push("WARN: Previous managed review snapshot exceeds cleanup bound; cleanup skipped");
             } else {
               const stillCurrent = async () => {
                 if (await api.getHeadSha() !== input.headSha) return false;
+                if (replacementCheckpoint.kind === "review") {
+                  const latest = await api.listReviews();
+                  const replacement = latest.find((r) => String(r.id) === String(replacementCheckpoint.reviewId));
+                  if (!replacement || !isManagedBody(typeof replacement.body === "string" ? replacement.body : "", input.commentMarker)) return false;
+                  const newest = latest
+                    .filter((r) => isManagedBody(typeof r.body === "string" ? r.body : "", input.commentMarker))
+                    .reduce<bigint | null>((max, r) => { try { const id = BigInt(String(r.id)); return max === null || id > max ? id : max; } catch { return max; } }, null);
+                  return newest === BigInt(String(replacementCheckpoint.reviewId));
+                }
+                // Sticky checkpoint: the sticky comment must still exist, still
+                // be the managed body owned by this run, and must not have been
+                // re-published after the checkpoint - and no managed review of
+                // ANY author may be newer than the checkpoint (a foreign
+                // model's review supersedes the run too). A review without a
+                // usable timestamp fails closed.
+                const checkpointMs = Date.parse(replacementCheckpoint.updatedAt);
+                if (Number.isNaN(checkpointMs)) return false;
                 const latest = await api.listReviews();
-                const replacement = latest.find((r) => String(r.id) === String(nativeReviewId));
-                if (!replacement || !isManagedBody(typeof replacement.body === "string" ? replacement.body : "", input.commentMarker)) return false;
-                const newest = latest
-                  .filter((r) => isManagedBody(typeof r.body === "string" ? r.body : "", input.commentMarker))
-                  .reduce<bigint | null>((max, r) => { try { const id = BigInt(String(r.id)); return max === null || id > max ? id : max; } catch { return max; } }, null);
-                return newest === BigInt(String(nativeReviewId));
+                const stickyLatest = (await api.listIssueComments()).find((c) => String(c.id) === String(replacementCheckpoint.commentId));
+                if (!stickyLatest || !isManagedBody(typeof stickyLatest.body === "string" ? stickyLatest.body : "", input.commentMarker)) return false;
+                if (!ownerMatchesIdentity(stickyLatest.user, owner)) return false;
+                // The sticky body must be byte-identical to what THIS run
+                // published: an overlapping run re-publishing in the same
+                // second (refreshed timestamp equal to the checkpoint) with a
+                // different body would otherwise pass for this run's state.
+                if (stickyLatest.body !== replacementCheckpoint.body) return false;
+                const refreshedMs = Date.parse(stickyLatest.updated_at ?? "");
+                // A newer instant means the sticky was re-published after
+                // this checkpoint (an overlapping run owns the replacement);
+                // a missing/older one is unproven. Either way: fail closed.
+                if (Number.isNaN(refreshedMs) || refreshedMs !== checkpointMs) return false;
+                return !latest.some((r) => {
+                  if (!isManagedBody(typeof r.body === "string" ? r.body : "", input.commentMarker)) return false;
+                  const instant = reviewInstant(r);
+                  const stamp = instant === "" ? Number.NaN : Date.parse(instant);
+                  // Fail closed on ties too: a competing managed review
+                  // submitted in the SAME second as the checkpoint cannot be
+                  // proven older than it.
+                  return Number.isNaN(stamp) || stamp >= checkpointMs;
+                });
               };
               if (await stillCurrent()) {
                 await retireManagedInlineComments(api, olderManaged, input.commentMarker, cleanupLog, stillCurrent);
@@ -921,10 +1020,20 @@ export async function publishReview(
                 }
               } else messages.push("WARN: A newer review superseded this run; cleanup skipped");
             }
-        } else {
-          messages.push("  WARN: Missing replacement review id or head changed; leaving previous inline comments unchanged");
+          }
         }
       } catch { messages.push("WARN: Cleanup failed safely; replacement review remains published"); }
+    } else if (cleanupEnabled && replacementCheckpoint === undefined) {
+      // #1093: distinguish "cleanup never had a checkpoint" from the other
+      // skip reasons so operators can tell retirement did not run at all
+      // (e.g. a failed inline-findings submission, or a forge response
+      // without a usable sticky timestamp).
+      messages.push("WARN: No replacement checkpoint (no native review id and no sticky publication timestamp); previous inline comments left in place");
+    } else if (cleanupEnabled) {
+      // #1093: a checkpoint DOES exist here, so the honest cause is an
+      // incomplete replacement — partial inline coverage or a fallback
+      // submission — not a missing checkpoint.
+      messages.push("WARN: Replacement checkpoint is not a complete replacement (incomplete coverage or fallback submission); previous inline comments left in place");
     }
   }
 
