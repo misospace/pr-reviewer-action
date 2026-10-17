@@ -689,6 +689,188 @@ test("#1094 REPRO: the NATIVE-LOOP success path persists a PROJECTION — a gate
   assert.equal(JSON.parse(String((persisted.choices as { 0: { message: { content: string } } })[0].message.content)).verdict, "approve");
 });
 
+test("#1094: a canary in IGNORED content-part metadata of an OpenAI-style content ARRAY reaches no artifact (projection drops non-text parts)", async () => {
+  // #252 boundary: the hostile shape itself. The verdict turn's
+  // `choices[0].message.content` is an ARRAY whose second part is a non-text
+  // record carrying the configured header VALUE, and a text part carries it in
+  // an ignored extra field. `extractContent` consumes neither (they are not
+  // bare strings / typed-text `text` values), so the acceptance content gate
+  // passes — but the old verbatim array carry persisted the credential in the
+  // projected artifact anyway. The projection must carry ONLY the consumed
+  // text: the verdict still reuses/parses, and no artifact, log, or summary
+  // ever holds the value.
+  const verdictOpen = '{"verdict": "approve", "review_mark';
+  const verdictClose = 'down": "## Review\\nLooks fine.", "findings": []}';
+  const scripted = [
+    // 1: the loop turn, one read-only tool call (no subprocess, no network).
+    { choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "list_tree", arguments: "{}" } }] } }] },
+    // 2: the loop turn that issues no tool calls and closes the round.
+    { choices: [{ message: { content: "inspected the tree" } }] },
+    // 3: the in-conversation verdict turn — valid verdict split across two
+    // text parts, with the echoed canary in a non-text part and in an ignored
+    // field of the second text part.
+    {
+      id: `chatcmpl-${CANARY}`,
+      object: "chat.completion",
+      model: `gpt-echo-${CANARY}`,
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: [
+          { type: "text", text: verdictOpen },
+          { type: "audit", credential: CANARY },
+          { type: "text", text: verdictClose, trace_id: CANARY },
+        ] },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    },
+  ];
+  let requests = 0;
+  const run = await runAndCollect((res) => {
+    const body = scripted[requests++] ?? scripted[scripted.length - 1];
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(body));
+  }, {
+    "ai-extra-headers": `X-Gateway-Credential: ${CANARY}`,
+    "tool-mode": "native_loop",
+  }, { IS_FORK_PR: "false" });
+
+  // The verdict still reused/parsed: the harness accepted it and the reuse
+  // fast path skipped the separate review call (3 model requests).
+  const harness = JSON.parse(run.files["tool-harness.json"] ?? "{}") as { native_loop_verdict_produced?: boolean; native_loop_verdict_status?: string };
+  assert.equal(harness.native_loop_verdict_produced, true);
+  assert.equal(harness.native_loop_verdict_status, "accepted");
+  assert.equal(requests, 3, "the separate review call must be skipped by the reuse path");
+  assert.equal(run.output.verdict, "approve");
+
+  // The canary appears in NO persisted artifact, the summary, or the logs.
+  for (const [label, surface] of [["artifacts", run.artifacts], ["summary", run.summary], ["errorLog", run.errorLog.join("\n")], ["response", run.response]] as const) {
+    assert.equal(surface.includes(CANARY), false, `${label} leaked the canary`);
+  }
+
+  // The projection carried ONLY the consumed text strings, in order — the
+  // audit part and the ignored text-part field are gone by construction, and
+  // the joined text re-parses to the same verdict.
+  const persisted = JSON.parse(run.response) as { choices: { 0: { message: { content: unknown } } } };
+  const content = persisted.choices[0]!.message.content;
+  assert.ok(Array.isArray(content), "an array content must stay an array in the artifact");
+  assert.deepEqual(content, [verdictOpen, verdictClose]);
+  assert.equal(JSON.stringify(persisted).includes("audit"), false);
+  assert.equal(JSON.stringify(persisted).includes("trace_id"), false);
+  assert.equal(JSON.stringify(persisted).includes("credential"), false);
+  const reuse = parseVerdictResponse(JSON.parse(run.response));
+  assert.equal(reuse.verdict, "approve");
+});
+
+test("#1094: a canary in IGNORED content-part metadata of an Anthropic top-level content ARRAY reaches no artifact (projection drops non-text parts)", async () => {
+  // The Anthropic shape of the same finding: the verdict turn's top-level
+  // `content` array carries the credential in a non-text block. The projection
+  // keeps only what the Anthropic branch of `extractContent` consumes —
+  // normalized `{type:'text', text}` records (bare strings would re-parse to
+  // `null` there) — so the verdict still reuses/parses and nothing persists.
+  const verdictJson = JSON.stringify({ verdict: "approve", review_markdown: "## Review\nLooks fine.", findings: [] });
+  const scripted = [
+    // 1: the loop turn, one read-only tool call.
+    { content: [{ type: "tool_use", id: "t1", name: "list_tree", input: {} }], stop_reason: "tool_use" },
+    // 2: the loop turn that issues no tool calls and closes the round.
+    { content: [{ type: "text", text: "inspected the tree" }], stop_reason: "end_turn" },
+    // 3: the verdict turn — valid text block, echoed canary in a non-text
+    // block and in gateway metadata the parser never reads.
+    {
+      id: `msg_${CANARY}`,
+      model: `claude-echo-${CANARY}`,
+      content: [
+        { type: "text", text: verdictJson },
+        { type: "audit", credential: CANARY },
+      ],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 10, output_tokens: 5 },
+      gateway_audit: { credential: CANARY },
+    },
+  ];
+  let requests = 0;
+  const run = await runAndCollect((res) => {
+    const body = scripted[requests++] ?? scripted[scripted.length - 1];
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(body));
+  }, {
+    "ai-api-format": "anthropic",
+    "ai-extra-headers": `X-Gateway-Credential: ${CANARY}`,
+    "tool-mode": "native_loop",
+  }, { IS_FORK_PR: "false" });
+
+  const harness = JSON.parse(run.files["tool-harness.json"] ?? "{}") as { native_loop_verdict_produced?: boolean; native_loop_verdict_status?: string };
+  assert.equal(harness.native_loop_verdict_produced, true);
+  assert.equal(harness.native_loop_verdict_status, "accepted");
+  assert.equal(requests, 3, "the separate review call must be skipped by the reuse path");
+  assert.equal(run.output.verdict, "approve");
+
+  for (const [label, surface] of [["artifacts", run.artifacts], ["summary", run.summary], ["errorLog", run.errorLog.join("\n")], ["response", run.response]] as const) {
+    assert.equal(surface.includes(CANARY), false, `${label} leaked the canary`);
+  }
+
+  // The projection kept the array shape and each consumed text verbatim as
+  // type/text-only records; the audit block and the gateway metadata are gone.
+  const persisted = JSON.parse(run.response) as { content: unknown; stop_reason?: unknown };
+  assert.ok(Array.isArray(persisted.content));
+  assert.deepEqual(persisted.content, [{ type: "text", text: verdictJson }]);
+  assert.equal(JSON.stringify(persisted).includes("audit"), false);
+  assert.equal(JSON.stringify(persisted).includes("credential"), false);
+  assert.equal(JSON.stringify(persisted).includes("gateway_audit"), false);
+  const reuse = parseVerdictResponse(JSON.parse(run.response));
+  assert.equal(reuse.verdict, "approve");
+});
+
+test("#1094: a canary echoed as a USAGE KEY reaches no artifact (the envelope drops counter entries whose name masks)", async () => {
+  // The value rule had a name-shaped twin: `usage` entries were filtered on
+  // their VALUE only, so a gateway echoing the configured header VALUE as a
+  // provider-controlled counter NAME (`{"usage": {"<canary>": 1}}`) persisted
+  // it verbatim on disk while the value filter stayed green. A counter the
+  // masker would touch — by name or by value — is dropped with its value; the
+  // real counters survive and the verdict still reuses.
+  const scripted = [
+    // 1: the loop turn, one read-only tool call.
+    { choices: [{ message: { content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "list_tree", arguments: "{}" } }] } }] },
+    // 2: the loop turn that issues no tool calls and closes the round.
+    { choices: [{ message: { content: "inspected the tree" } }] },
+    // 3: the verdict turn — valid verdict, canary echoed as a usage key.
+    {
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: JSON.stringify({ verdict: "approve", review_markdown: "## Review\nLooks fine.", findings: [] }) },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 10, [CANARY]: 1, completion_tokens: 5, total_tokens: 15 },
+    },
+  ];
+  let requests = 0;
+  const run = await runAndCollect((res) => {
+    const body = scripted[requests++] ?? scripted[scripted.length - 1];
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(body));
+  }, {
+    "ai-extra-headers": `X-Gateway-Credential: ${CANARY}`,
+    "tool-mode": "native_loop",
+  }, { IS_FORK_PR: "false" });
+
+  const harness = JSON.parse(run.files["tool-harness.json"] ?? "{}") as { native_loop_verdict_produced?: boolean; native_loop_verdict_status?: string };
+  assert.equal(harness.native_loop_verdict_produced, true);
+  assert.equal(harness.native_loop_verdict_status, "accepted");
+  assert.equal(requests, 3, "the separate review call must be skipped by the reuse path");
+  assert.equal(run.output.verdict, "approve");
+
+  for (const [label, surface] of [["artifacts", run.artifacts], ["summary", run.summary], ["errorLog", run.errorLog.join("\n")], ["response", run.response]] as const) {
+    assert.equal(surface.includes(CANARY), false, `${label} leaked the canary`);
+  }
+
+  // The real counters survived (the step summary's token counts stay intact)
+  // and only the hostile entry is gone.
+  const persisted = JSON.parse(run.response) as { usage: Record<string, number> };
+  assert.deepEqual(persisted.usage, { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+  const reuse = parseVerdictResponse(JSON.parse(run.response));
+  assert.equal(reuse.verdict, "approve");
+});
+
 test("#1094: a canary embedded in a native-loop VERDICT BODY reaches no artifact, log, or summary (reachable failure direction)", async () => {
   // #252 boundary, the failure direction — and honestly scoped: this pins the
   // HARNESS-side mask, not the projection (it still passes with the raw-body

@@ -163,7 +163,11 @@ test("#1094: the accepted-verdict artifact is a PROJECTION — a gateway echo of
   const scripted = [openAiCall("c1", "read_file", '{"path":"src.ts"}'), openAiText("evidence gathered"), verdictBody];
   let transportCalls = 0;
   const { result } = await runToolHarness(deps({
-    env: { ...withPrompt.env, AI_EXTRA_HEADERS: `X-Gateway-Credential: ${CANARY}` },
+    // A REALISTIC lane key: the key is a known secret too, and a one-character
+    // one ("k", this file's default) is a substring of "…tokens", so the
+    // envelope's name rule below would drop every usage counter — deliberate
+    // behavior pinned separately in the unit test at the bottom of this file.
+    env: { ...withPrompt.env, AI_API_KEY: "sk-lane-key-not-in-counter-names", AI_EXTRA_HEADERS: `X-Gateway-Credential: ${CANARY}` },
     transport: async () => scripted[transportCalls++],
   }));
   assert.equal(result.native_loop_verdict_produced, true);
@@ -428,6 +432,20 @@ test("#1094: reusableVerdictEnvelope keeps the finish reason where the parser re
   const numericSecret = reusableVerdictEnvelope({ usage: { prompt_tokens: 7, completion_tokens: 12 }, choices: [{ message: { content: "x" } }] }, ["7"]);
   assert.equal(JSON.stringify(numericSecret).includes("7"), false, JSON.stringify(numericSecret));
   assert.deepEqual(numericSecret.usage, { completion_tokens: 12 });
+
+  // The NAME is the same echo surface as the value: a counter whose KEY the
+  // masker would rewrite is dropped with its value (a gateway echoing the
+  // credential as a usage key must not persist it). With a one-character lane
+  // key every "…tokens" name contains it, so ALL counters drop — the same
+  // deliberate short-key cost the any-length masker already charges every
+  // non-content surface.
+  const keyEcho = reusableVerdictEnvelope(
+    { usage: { prompt_tokens: 11, "gw-8f2a1c9d3b7e4a10": 1, completion_tokens: 5 }, choices: [{ message: { content: "x" } }] },
+    ["gw-8f2a1c9d3b7e4a10"],
+  );
+  assert.deepEqual(keyEcho.usage, { prompt_tokens: 11, completion_tokens: 5 });
+  const shortKey = reusableVerdictEnvelope({ usage: { prompt_tokens: 11 }, choices: [{ message: { content: "x" } }] }, ["k"]);
+  assert.equal("usage" in shortKey, false, JSON.stringify(shortKey));
 });
 });
 

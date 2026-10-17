@@ -368,6 +368,41 @@ test("#1037: a specialist response echoing a configured header VALUE is masked i
   }
 });
 
+test("#1094: a canary echoed as an object KEY in a specialist response is masked in the persisted raw artifact, which stays valid JSON", async () => {
+  // The key-echo companion of the value test above: the provider-controlled
+  // property NAME is a reflection surface too, and the raw
+  // `specialist-<role>.response.json` copy must not persist the credential in
+  // a key. The masked document must still parse as JSON with the same shape.
+  const canary = "gw-8f2a1c9d3b7e4a10";
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      ...(leadsResponse([{ severity: "major", category: "correctness", file: "a.py", line: 2, message: "handle leak" }]) as Record<string, unknown>),
+      gateway_audit: { [canary]: "rejected", keep: 1 },
+    }));
+  });
+  try {
+    const result = await run({
+      DEEP_REVIEW: "true",
+      AI_BASE_URL: `${server.url}/v1`,
+      AI_SPECIALIST_MODEL: "specialist",
+      AI_EXTRA_HEADERS: `X-Gateway-Credential: ${canary}`,
+    }, { productionTransport: true });
+    assert.equal(result.code, 0);
+    const artifact = result.read("specialist-correctness.response.json");
+    assert.equal(artifact.includes(canary), false, artifact);
+    // Still valid JSON, same shape, key masked.
+    const parsed = JSON.parse(artifact) as Record<string, unknown>;
+    const audit = parsed.gateway_audit as Record<string, unknown>;
+    assert.equal(audit[KNOWN_SECRET_REDACTED], "rejected");
+    assert.equal(audit.keep, 1);
+    assert.match(artifact, /"⟦•⟧": "rejected"/);
+    rmSync(result.root, { recursive: true, force: true });
+  } finally {
+    await server.close();
+  }
+});
+
 test("#1037: a 200 in-body error carrying a configured header VALUE is masked in the specialist failure surfaces", async () => {
   // The other specialist response-body surface, and one the RUNNER masks
   // itself (not the transport adapter): a 200 whose body carries an error

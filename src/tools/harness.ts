@@ -466,17 +466,47 @@ function isEnvelopeRecord(value: unknown): value is Record<string, unknown> {
  * the `usage` branch below.
  *
  * Two deliberate asymmetries:
- * - The completion CONTENT is carried VERBATIM. It becomes the published
- *   verdict, so masking it would corrupt verdict fields for a short-but-legal
- *   configured key (`review_mar⟦•⟧down` → unparseable) — the same reason
- *   `ai-output.json` and `specialist-*.json` stay unmasked. It is NOT a
- *   free pass, though: this function only runs on the ACCEPTED path, and
- *   acceptance goes through `parseVerdictResponse` (via `evaluateNativeVerdict`),
- *   whose #1094 fail-closed gate REFUSES a completion content that embeds a
- *   configured credential — so a content that reaches this projection is
- *   already known to be secret-free, and the reuse re-parse enforces the same
- *   gate again. What remains verbatim is therefore ordinary verdict content,
- *   the same surface `ai-output.json` publishes.
+ * - The completion CONTENT follows `extractContent`, not a blanket rule.
+ *   STRING content is carried VERBATIM: it becomes the published verdict, so
+ *   masking it would corrupt verdict fields for a short-but-legal configured
+ *   key (`review_mar⟦•⟧down` → unparseable) — the same reason `ai-output.json`
+ *   and `specialist-*.json` stay unmasked. It is NOT a free pass, though:
+ *   this function only runs on the ACCEPTED path, and acceptance goes through
+ *   `parseVerdictResponse` (via `evaluateNativeVerdict`), whose #1094
+ *   fail-closed gate REFUSES a completion content that embeds a configured
+ *   credential — and for a string the extracted text IS the string, so a
+ *   string that reaches this projection is already known to be secret-free.
+ *   ARRAY content (#1094 review round 3) is PROJECTED to only the text
+ *   `extractContent` consumes — verbatim text, non-text parts and ignored
+ *   metadata dropped by construction. Value-only masking cannot work here (a
+ *   part like `{type:'audit', credential: <value>}` is not text, so the gate
+ *   never sees the credential, yet the old verbatim carry persisted it), and
+ *   the projection is built to re-parse EXACTLY like the original through
+ *   `extractContent`'s own branch semantics:
+ *   - OpenAI (`choices[0].message.content`): the consumed texts (bare
+ *     strings, and `text` of parts typed undefined/null/"text") become an
+ *     array of plain STRINGS — re-parse hits `extractContent`'s bare-string
+ *     push path and yields the identical joined text; an empty consumed set
+ *     stays an empty ARRAY, exactly like the `parts` the branch returns
+ *     today (never a string or null).
+ *   - Anthropic (top-level `content`): the consumed texts become normalized
+ *     `{type:'text', text}` records, because that branch's loop consumes ONLY
+ *     typed text records — projecting bare strings there would re-parse to
+ *     `null` and break the reuse parse. The record form carries only `type`
+ *     and `text` (both our own literals), so ignored fields on a text part
+ *     are dropped too; empty stays an empty array, which re-parses to the
+ *     branch's `parts.length > 0 ? parts : null` null — the same outcome the
+ *     original produces today.
+ *   - Content that is neither a string nor an array (exotic — an object,
+ *     number, ...) is out of contract on the accepted path: `extractContent`
+ *     turns it into `""`-equivalent text and `parseVerdictResponse` always
+ *     fails it (not_object, or empty_completion at zero completion tokens),
+ *     so acceptance can never have passed such a body. It is still not
+ *     carried raw: the fail-closed handling is `maskKnownSecretsDeep`, which
+ *     masks keys and string leaves it may carry while leaving the re-parse
+ *     in the same failure class (the text stays `""`), so a defensive-depth
+ *     or future-contract change can never turn this branch into a secret
+ *     persistence path.
  * - Every OTHER carried value goes through `maskKnownSecretsDeep`. The finish
  *   reason is masked because this artifact is only written on the accepted
  *   path, where the truncation suffix is never consulted.
@@ -485,9 +515,65 @@ function isEnvelopeRecord(value: unknown): value is Record<string, unknown> {
  * (CreateDataPropertyOrThrow), never `out[key] = ...`: a hostile provider body
  * can carry an OWN `__proto__` (JSON.parse produces exactly that), where a
  * plain assignment would invoke the prototype setter — the same rule (and the
- * same reason) as `maskKnownSecretsDeep`. A one-character configured key
- * therefore cannot corrupt structure either: it is applied to values only.
+ * same reason) as `maskKnownSecretsDeep`. The content projection's own objects
+ * (the Anthropic `{type:'text', text}` records) are built the same way, from
+ * literals only. The `usage` counters map is built by FILTERING the
+ * provider's own entries: a counter survives only when BOTH its name and its
+ * value are untouched by the masker — a provider-controlled usage KEY is the
+ * same echo surface as any other metadata name, so a key that would mask is
+ * dropped with its value, and no provider-controlled name ever becomes a
+ * property here either.
  */
+/**
+ * #1094 review round 3: the array-projection rule for the completion CONTENT,
+ * shared by both provider shapes of `reusableVerdictEnvelope`. The branch
+ * semantics mirrored here are `extractContent`'s (src/model/verdict.ts) —
+ * OpenAI (`choices[0].message.content`): bare strings, plus the `text` of
+ * parts typed undefined/null/"text"; Anthropic (top-level `content`): only
+ * `{type:'text', text}` records. The returned value re-parses to the SAME
+ * joined text through those branches; see the envelope's doc comment for the
+ * per-shape rationale and the exotic-content fail-closed choice.
+ */
+function projectedVerdictContent(
+  content: unknown,
+  secrets: readonly (string | null | undefined)[],
+  anthropicShape: boolean,
+): unknown {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const consumed: string[] = [];
+    for (const item of content) {
+      if (anthropicShape) {
+        if (isEnvelopeRecord(item) && item.type === "text" && typeof item.text === "string") consumed.push(item.text);
+      } else if (typeof item === "string") {
+        consumed.push(item);
+      } else if (
+        isEnvelopeRecord(item)
+        && (item.type === undefined || item.type === null || item.type === "text")
+        && typeof item.text === "string"
+      ) {
+        consumed.push(item.text);
+      }
+    }
+    if (anthropicShape) {
+      // Bare strings would re-parse to `null` in the Anthropic branch (its
+      // loop consumes typed text records only), so the consumed texts go back
+      // as the exact record shape that branch accepts — `type`/`text` only,
+      // both our own literals, every ignored field dropped.
+      return consumed.map((text) => ({ type: "text", text }));
+    }
+    // OpenAI: an array of plain strings re-parses through the bare-string
+    // push path; an empty consumed set stays an empty array, exactly like the
+    // `parts` the branch returns today.
+    return consumed;
+  }
+  // Exotic content (object/number/...): out of contract on the accepted path
+  // (the parse always fails it), but never carried raw — masked deep so keys
+  // and string leaves cannot persist a credential, with the re-parse left in
+  // today's failure class.
+  return maskKnownSecretsDeep(content, secrets);
+}
+
 export function reusableVerdictEnvelope(
   response: unknown,
   secrets: readonly (string | null | undefined)[] = [],
@@ -500,8 +586,12 @@ export function reusableVerdictEnvelope(
   // Non-numeric `usage` entries are dropped rather than masked: they are free
   // text a gateway can echo a header VALUE into, and no counter the parse or
   // the summary reads is a string — so the numeric rule loses no behavior and
-  // keeps the echo surface out.
-  // A counter is carried only when masking would not have changed it. That is
+  // keeps the echo surface out. The same holds for the entry NAMES: a
+  // usage KEY is provider-controlled metadata exactly like
+  // `system_fingerprint`, so a key the masker would rewrite is dropped with
+  // its value rather than persisting the echoed credential on disk.
+  // A counter is carried only when masking would not have changed either its
+  // name or its value. That is
   // not a formality: `maskKnownSecrets` masks a secret of ANY non-empty length,
   // so a purely NUMERIC configured header value (`X-Team-Id: 7`) is masked in
   // every string leaf while the same value echoed into a numeric counter would
@@ -509,9 +599,10 @@ export function reusableVerdictEnvelope(
   // dropped, exactly like a non-numeric one.
   const usageEntries: Array<[string, unknown]> = [];
   if (isEnvelopeRecord(body.usage)) {
-    const counters = Object.entries(body.usage).filter(([, value]) =>
+    const counters = Object.entries(body.usage).filter(([key, value]) =>
       typeof value === "number"
       && Number.isFinite(value)
+      && maskKnownSecrets(key, secrets) === key
       && maskKnownSecrets(String(value), secrets) === String(value));
     if (counters.length > 0) usageEntries.push(["usage", Object.fromEntries(counters)]);
   }
@@ -524,10 +615,11 @@ export function reusableVerdictEnvelope(
     const first = isEnvelopeRecord(choices[0]) ? choices[0] : {};
     const message = isEnvelopeRecord(first.message) ? first.message : {};
     const choiceEntries: Array<[string, unknown]> = [
-      // `content` keeps its exact form (string, or an array with each item
-      // exactly as the provider wrote it — `extractContent` accepts both, and
-      // a projection that normalized either would change the joined text).
-      ["message", "content" in message ? { content: message.content } : {}],
+      // `content` keeps its exact form when it is a string (the accepted-path
+      // gate already proved it secret-free) and is PROJECTED when it is an
+      // array — only the text `extractContent` consumes survives, so ignored
+      // part metadata cannot ride into the artifact; see the doc comment.
+      ["message", "content" in message ? { content: projectedVerdictContent(message.content, secrets, false) } : {}],
     ];
     // `finishReasonOf` reads `choices[0].finish_reason` first and falls back to
     // the TOP-LEVEL `stop_reason` only when it is absent or non-string. The
@@ -546,7 +638,11 @@ export function reusableVerdictEnvelope(
   }
 
   const entries: Array<[string, unknown]> = [];
-  if ("content" in body) entries.push(["content", body.content]);
+  // Top-level `content` follows the same rule as the OpenAI branch above:
+  // string verbatim (gate-checked), array projected to the consumed text
+  // records (the Anthropic branch of `extractContent`), anything else masked
+  // deep and fail-closed.
+  if ("content" in body) entries.push(["content", projectedVerdictContent(body.content, secrets, true)]);
   if (typeof body.stop_reason === "string") {
     entries.push(["stop_reason", maskKnownSecretsDeep(body.stop_reason, secrets)]);
   }

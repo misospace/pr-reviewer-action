@@ -707,6 +707,55 @@ test("#252 boundary: maskKnownSecretsDeep fed a body with an OWN __proto__ key k
   assert.equal(Object.prototype.hasOwnProperty.call(Object.prototype, "leak"), false, "no pollution escaped");
 });
 
+test("#1094: maskKnownSecretsDeep masks a canary appearing as an object KEY (raw and encoded variants), preserves distinctness, and stays valid JSON", () => {
+  // The provider-controlled property NAME is an echo surface too: value-only
+  // masking left `{ "error": { "<credential>": "rejected" } }` persisting the
+  // credential in the key. Only secret-bearing keys change — benign keys stay
+  // byte-for-byte.
+  const CANARY = "gw-8f2a1c9d3b7e4a10";
+  const raw = JSON.parse(`{"error":{"${CANARY}":"rejected","keep":1},"safe":"value"}`) as Record<string, unknown>;
+  const maskedRaw = maskKnownSecretsDeep(raw, [CANARY]) as Record<string, unknown>;
+  const error = maskedRaw.error as Record<string, unknown>;
+  assert.equal(Object.hasOwn(error, CANARY), false, "the raw secret key must not survive");
+  assert.equal(error[KNOWN_SECRET_REDACTED], "rejected");
+  assert.equal(error.keep, 1, "sibling keys and values are untouched");
+  assert.equal(maskedRaw.safe, "value");
+  // The serialized artifact is still valid JSON and round-trips exactly.
+  const serializedRaw = JSON.stringify(maskedRaw);
+  assert.equal(serializedRaw.includes(CANARY), false, serializedRaw);
+  assert.ok(serializedRaw.includes(KNOWN_SECRET_REDACTED), serializedRaw);
+  assert.deepEqual(JSON.parse(serializedRaw), maskedRaw);
+
+  // Encoded variants are masked in keys too. The shared CANARY has no
+  // URL-significant characters (its encoded form IS itself), so the
+  // URL-encoded case uses a secret that actually encodes differently, and the
+  // base64 case uses the CANARY's own base64 form.
+  const spaced = "tok a&b";
+  const urlEncoded = encodeURIComponent(spaced);
+  const base64 = Buffer.from(CANARY, "utf8").toString("base64");
+  const encodedBody = { error: { [urlEncoded]: "rejected", [base64]: "also rejected", untouched: 1 } };
+  const maskedEncoded = maskKnownSecretsDeep(encodedBody, [spaced, CANARY]) as Record<string, unknown>;
+  const errorEncoded = maskedEncoded.error as Record<string, unknown>;
+  assert.equal(Object.hasOwn(errorEncoded, urlEncoded), false);
+  assert.equal(Object.hasOwn(errorEncoded, base64), false);
+  assert.equal(errorEncoded[KNOWN_SECRET_REDACTED], "also rejected", "distinct masked keys collide deterministically on the marker");
+  assert.equal(errorEncoded.untouched, 1);
+  const serializedEncoded = JSON.stringify(maskedEncoded);
+  assert.equal(serializedEncoded.includes(urlEncoded), false, serializedEncoded);
+  assert.equal(serializedEncoded.includes(base64), false, serializedEncoded);
+  assert.deepEqual(JSON.parse(serializedEncoded), maskedEncoded);
+
+  // Distinctness is preserved deterministically: the marker splices into the
+  // surviving key material, so two different secret-bearing keys stay
+  // distinguishable and a benign key is never merged with a masked one.
+  const distinct = maskKnownSecretsDeep(
+    { [`a${CANARY}`]: 1, [`${CANARY}a`]: 2, plain: 3 },
+    [CANARY],
+  ) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(distinct).sort(), [`a${KNOWN_SECRET_REDACTED}`, KNOWN_SECRET_REDACTED + "a", "plain"].sort());
+  assert.deepEqual(distinct, { [`a${KNOWN_SECRET_REDACTED}`]: 1, [`${KNOWN_SECRET_REDACTED}a`]: 2, plain: 3 });
+});
+
 test("#1094: containsKnownSecret detects raw, URL-encoded, and base64 variants — the same set maskKnownSecrets replaces", () => {
   const secret = "gw-8f2a1c9d3b7e4a10";
   const secrets = [secret];

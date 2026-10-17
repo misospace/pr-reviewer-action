@@ -505,13 +505,26 @@ export function containsKnownSecret(text: string, secrets: readonly (string | nu
 
 /** Structural counterpart to `maskKnownSecrets`, for a JSON-shaped provider
  * body on its way into a persisted artifact (#1037). Same masking, applied
- * per string LEAF instead of to one flat string: object keys, array order,
- * numbers, and every structural token survive byte-for-byte, so a masked
- * artifact is still valid JSON with the same shape (the marker contains no
- * character JSON requires escaping). Masking the serialized text instead
- * would be wrong twice over — a configured header value carrying `"` or `\`
- * is JSON-escaped in the artifact, so an exact-substring pass over the
- * serialized bytes would miss it entirely, and a match on a structural
+ * per string LEAF — and, since the #1094 review round 3 key-echo fix, to
+ * every own object KEY as well: array order, numbers, and every structural
+ * token survive byte-for-byte, so a masked artifact is still valid JSON with
+ * the same shape (the marker contains no character JSON requires escaping).
+ * Key masking exists because provider-controlled property NAMES are an echo
+ * surface too — `{ "error": { "<credential>": "rejected" } }` used to persist
+ * the credential in the key while value-only masking cleaned every leaf —
+ * so each own key goes through `maskKnownSecrets` (raw, URL-encoded, and
+ * base64 variants, any length) before the entry is built. Benign keys pass
+ * through unchanged: masking is a pure substring replacement that touches a
+ * key only when a configured value occurs in it, so distinct benign keys
+ * stay distinct and only secret-bearing keys change. A known collision is
+ * accepted: two distinct secret-bearing keys can collapse onto the same
+ * masked name (`Object.fromEntries` keeps the last), losing one diagnostic
+ * entry — a shape cost, never a leak, and the alternative (indexing or
+ * escaping) would fabricate provider-invisible structure. Masking the
+ * serialized
+ * text instead would be wrong twice over — a configured header value carrying
+ * `"` or `\` is JSON-escaped in the artifact, so an exact-substring pass over
+ * the serialized bytes would miss it entirely, and a match on a structural
  * token (`": "`) would corrupt the document.
  *
  * `depth` is an internal recursion bound that keeps a pathologically nested
@@ -540,9 +553,17 @@ export function maskKnownSecretsDeep(value: unknown, secrets: readonly (string |
     // invokes the prototype setter instead of defining the key — the key
     // would silently vanish from the artifact and `out`'s prototype would
     // become provider-controlled data. fromEntries defines it as an own data
-    // property, so the documented byte-for-byte key preservation holds.
+    // property, so the documented key-preservation rule holds.
+    // Masking the key above does NOT change this property-definition
+    // mechanism: what reaches fromEntries is just a (possibly rewritten)
+    // STRING, and fromEntries defines whatever string it is given as an own
+    // data property. A key that survives masking unchanged (benign, or an
+    // own `__proto__` no secret matches) lands exactly as before; a key the
+    // masker rewrote is a different property NAME that is defined the same
+    // way — it can never turn into a prototype-setter invocation, and a
+    // rewritten `__proto__` is simply an innocently named own property.
     return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, maskKnownSecretsDeep(item, secrets, depth + 1)]),
+      Object.entries(value).map(([key, item]) => [maskKnownSecrets(key, secrets), maskKnownSecretsDeep(item, secrets, depth + 1)]),
     );
   }
   return value;
