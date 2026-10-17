@@ -42,12 +42,20 @@ export async function resolvePublishTrustedOwner(api: PublishPlatformApi): Promi
     : { owner: { kind: "login", login: identity }, reason: "user-login" };
 }
 
-/** Best-effort retirement after replacement publication; never trusts comment text alone. */
+/** Best-effort retirement after replacement publication; never trusts comment text alone.
+ * #1099: the trusted-owner identity is resolved once per publish run and
+ * threaded in here (`resolvePublishTrustedOwner` is the caller's job), so the
+ * Forgejo reaction self-write probe fires once per run instead of twice. The
+ * identity proof is shared, never the per-item verification: the ownership
+ * re-checks below still run independently for every review and comment.
+ * Fail-closed: a `null` identity retires nothing and still emits the bounded
+ * `identity reason: <reason>` WARN. */
 export async function retireManagedInlineComments(
   api: PublishPlatformApi, reviews: readonly PublishReviewRef[], marker: string, log: CleanupLog,
+  trustedOwner: Awaited<ReturnType<typeof resolvePublishTrustedOwner>>,
   mayDelete: () => Promise<boolean> = async () => true,
 ): Promise<void> {
-  const { owner, reason } = await resolvePublishTrustedOwner(api);
+  const { owner, reason } = trustedOwner;
   if (owner === null) {
     log(`  WARN: Could not verify authenticated owner (identity reason: ${reason}); no inline comments retired`);
     return;
