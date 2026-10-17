@@ -16,7 +16,13 @@
 import { spawn } from "node:child_process";
 import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { redactSourceText, redactText } from "./redact.js";
+import { redactSourceText, redactText, sourceEvidence } from "./redact.js";
+import {
+  committedSourceProvenance,
+  provenanceAttributes,
+  sanitizedSourceProvenance,
+  type EvidenceProvenance,
+} from "./evidence-provenance.js";
 import { pyJsonDump } from "./py-json.js";
 
 export const ARTIFACT_VERSION = 1;
@@ -213,27 +219,48 @@ interface GrepRow {
   path: string;
   line: number;
   snippet: string;
+  /** #1030: what the snippet's bytes actually are — committed source, or a
+   * sanitizer-synthesized rendering of it. No revision is recorded: related
+   * code is read from the WORKING TREE, so binding it to a revision would
+   * claim a byte-identity the read never established (see
+   * `docs/architecture/source-evidence-provenance.md`). `revision: null` makes
+   * `authorizesLiteralClaim` fail closed for every corpus snippet. */
+  provenance: EvidenceProvenance;
   changedFile?: boolean;
 }
 
-function snippetOf(value: string, filePath?: string | null): string {
+/** #1030: a count of 0 means the sanitizer replaced nothing, so the text is
+ * committed source; anything above zero is sanitized source. Mirrors
+ * `executors.provenanceFor` so both source surfaces agree on the rule. */
+function provenanceFor(count: number, file: string | null): EvidenceProvenance {
+  return count > 0 ? sanitizedSourceProvenance(count, file, null) : committedSourceProvenance(file, null);
+}
+
+function snippetOf(value: string, filePath?: string | null): { text: string; provenance: EvidenceProvenance } {
   // Source-safe (#876): this is a repository source line (a grep hit), not
   // untrusted prose, so it must survive structurally — only literal
   // credential values are masked, never identifier/property syntax such as
   // `apiKey: config.apiKey,`. filePath (the hit's own file) selects whether
   // an unquoted secret-named scalar is a config literal or a code
   // expression.
-  let text = redactSourceText(value, filePath);
-  text = escapeControls(text);
-  if (charCount(text) > MAX_SNIPPET_CHARS) return charSlice(text, MAX_SNIPPET_CHARS - 3) + "...";
-  return text;
+  //
+  // #1030: the redaction is done through `sourceEvidence`, which is
+  // `redactSourceTextDetailed` plus provenance construction, so the text is
+  // byte-identical to the previous `redactSourceText` call and the count of
+  // replaced spans rides along to the renderers. Truncation stays below, on the
+  // redacted text, so the snippet caps keep measuring content.
+  const { text: redacted, provenance } = sourceEvidence(value, filePath, filePath ?? null, null);
+  let text = escapeControls(redacted);
+  if (charCount(text) > MAX_SNIPPET_CHARS) return { text: charSlice(text, MAX_SNIPPET_CHARS - 3) + "...", provenance };
+  return { text, provenance };
 }
 
 function parseGrepLine(rawLine: string): GrepRow | null {
   const match = GREP_ROW_RE.exec(rawLine);
   if (!match) return null;
   const path = match[1] as string;
-  return { path, line: Number.parseInt(match[2] as string, 10), snippet: snippetOf(match[3] as string, path) };
+  const snippet = snippetOf(match[3] as string, path);
+  return { path, line: Number.parseInt(match[2] as string, 10), snippet: snippet.text, provenance: snippet.provenance };
 }
 
 export interface GrepResult {
@@ -703,10 +730,26 @@ function anchorCounterparts(anchorFiles: Record<string, unknown>[], deletedPaths
   return items;
 }
 
-function fileWindow(lines: string[] | null, start: number, end: number, filePath?: string | null): string[] {
+/** #1030: one rendered window line plus the provenance of its bytes. */
+interface WindowLine {
+  text: string;
+  provenance: EvidenceProvenance;
+}
+
+function fileWindow(lines: string[] | null, start: number, end: number, filePath?: string | null): WindowLine[] {
   if (lines === null) return [];
   const total = lines.length > 0 && lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
-  return lines.slice(Math.max(1, start) - 1, Math.min(end, total)).map((text) => snippetOf(text.replaceAll("\t", "    "), filePath));
+  return lines.slice(Math.max(1, start) - 1, Math.min(end, total)).map((text) => {
+    const line = snippetOf(text.replaceAll("\t", "    "), filePath);
+    return { text: line.text, provenance: line.provenance };
+  });
+}
+
+/** #1030: a window is one reference, so its redaction counts add up. */
+function windowProvenance(window: readonly WindowLine[], filePath: string | null): EvidenceProvenance {
+  let redactionCount = 0;
+  for (const line of window) redactionCount += line.provenance.redactionCount;
+  return provenanceFor(redactionCount, filePath);
 }
 
 function noteCap(result: RelatedContext, reason: string): void {
@@ -893,6 +936,7 @@ async function buildConsumers(
       const reference: ConsumerReference = {
         path: row.path,
         line: row.line,
+        provenance: row.provenance,
         ...(row.changedFile === true ? { changedFile: true } : {}),
         ...(match !== "" ? { match } : {}),
       };
@@ -902,10 +946,11 @@ async function buildConsumers(
         let window = fileWindow(cache.get(row.path) ?? null, start, row.line + CONSUMER_CONTEXT_LINES, row.path);
         if (window.length <= row.line - start) {
           start = row.line;
-          window = [row.snippet];
+          window = [{ text: row.snippet, provenance: row.provenance }];
         }
         reference.start = start;
-        reference.lines = window;
+        reference.lines = window.map((line) => line.text);
+        reference.provenance = windowProvenance(window, row.path);
       } else {
         reference.snippet = row.snippet;
       }
@@ -938,7 +983,8 @@ function buildCounterparts(result: RelatedContext, items: CounterpartItem[], wor
       refName: item.refName,
       refLine: item.refLine,
       ...(item.refChanged ? { refChanged: true } : {}),
-      lines: body,
+      lines: body.map((line) => line.text),
+      provenance: windowProvenance(body, item.refPath),
       ...(body.length < item.refEnd - item.refLine + 1 ? { linesTruncated: true } : {}),
     });
   }
@@ -987,6 +1033,12 @@ export interface ConsumerReference {
   start?: number;
   lines?: string[];
   snippet?: string;
+  /** #1030: what these bytes are. The builder always sets it; optional only so
+   * a hand-built reference (test fixture, external caller) still type-checks,
+   * and a missing value renders NO attributes — never a committed-source
+   * claim. Carries no revision, so a literal claim against a related-code
+   * snippet fails closed. */
+  provenance?: EvidenceProvenance;
 }
 
 export interface ConsumerKey {
@@ -1007,6 +1059,9 @@ export interface Counterpart {
   refChanged?: boolean;
   lines: string[];
   linesTruncated?: boolean;
+  /** #1030: what these bytes are. Always set by the builder; absent renders no
+   * attributes. Carries no revision. */
+  provenance?: EvidenceProvenance;
 }
 
 export interface RelatedContext {
@@ -1265,6 +1320,30 @@ export async function buildRelatedContext(
 // Artifact serialization (#669 camelCase → snake_case boundary)
 // ---------------------------------------------------------------------------
 
+/** #1030: the persisted provenance record. Fixed keys first, optional keys
+ * appended last, matching the surrounding serializer style. `revision` is
+ * emitted only when one was bound; related-code snippets are read from the
+ * working tree and bind none, so the key's absence is the fail-closed signal
+ * for `authorizesLiteralClaim`. */
+function provenanceToArtifact(provenance: EvidenceProvenance | undefined): Record<string, unknown> | undefined {
+  if (provenance === undefined) return undefined;
+  return {
+    representation: provenance.representation,
+    synthesized: provenance.synthesized,
+    redaction_count: provenance.redactionCount,
+    ...(typeof provenance.file === "string" && provenance.file !== "" ? { file: provenance.file } : {}),
+    ...(typeof provenance.revision === "string" && provenance.revision !== "" ? { revision: provenance.revision } : {}),
+  };
+}
+
+/** The `provenance` field to spread into a reference object: present only when
+ * there is provenance to persist, so a hand-built reference without one keeps
+ * the artifact exactly as it was before #1030. */
+function provenanceField(provenance: EvidenceProvenance | undefined): Record<string, unknown> {
+  const record = provenanceToArtifact(provenance);
+  return record === undefined ? {} : { provenance: record };
+}
+
 export function relatedContextToArtifact(related: RelatedContext): Record<string, unknown> {
   return {
     version: related.version,
@@ -1276,6 +1355,7 @@ export function relatedContextToArtifact(related: RelatedContext): Record<string
           path: reference.path,
           line: reference.line,
           snippet: reference.snippet,
+          ...provenanceField(reference.provenance),
           ...(reference.changedFile === true ? { changed_file: true } : {}),
         })),
         ...(symbol.onlyInChangedFiles === true ? { only_in_changed_files: true } : {}),
@@ -1304,6 +1384,7 @@ export function relatedContextToArtifact(related: RelatedContext): Record<string
             references: consumer.references.map((reference) => ({
               path: reference.path,
               line: reference.line,
+              ...provenanceField(reference.provenance),
               ...(reference.changedFile === true ? { changed_file: true } : {}),
               ...(reference.match !== undefined ? { match: reference.match } : {}),
               ...(reference.lines !== undefined ? { start: reference.start, lines: [...reference.lines] } : { snippet: reference.snippet }),
@@ -1320,6 +1401,7 @@ export function relatedContextToArtifact(related: RelatedContext): Record<string
             ref_path: item.refPath,
             ref_name: item.refName,
             ref_line: item.refLine,
+            ...provenanceField(item.provenance),
             ...(item.refChanged === true ? { ref_changed: true } : {}),
             lines: [...item.lines],
             ...(item.linesTruncated === true ? { lines_truncated: true } : {}),
@@ -1469,6 +1551,14 @@ function location(path: unknown, line: unknown): string {
   return number ? `${rendered}:${number}` : rendered;
 }
 
+/** #1030: a fence body is FAITHFUL SOURCE — it renders the bytes exactly as
+ * stored, and never carries harness attributes. Provenance for a fenced
+ * reference is stamped once, on the harness-constructed header line that
+ * precedes the fence (see `provenanceRecordAttributes` callers), so a
+ * repository line that itself contains attribute-shaped text cannot sit on the
+ * same line as an authoritative stamp and forge the annotation channel. This
+ * mirrors `toolResultEnvelope`, where attributes live on the harness-authored
+ * `<untrusted_tool_result …>` open tag, outside the untrusted content. */
 function fenced(start: unknown, lines: unknown, indent: string, filePath?: string | null): string[] {
   const first = positive(start) || 1;
   const body = (Array.isArray(lines) ? lines : []).map((text, offset) => `${first + offset}: ${display(redactSourceText(String(text), filePath), MAX_SNIPPET_CHARS)}`);
@@ -1480,6 +1570,44 @@ function fenced(start: unknown, lines: unknown, indent: string, filePath?: strin
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** #1030: read a persisted provenance record back into the canonical shape and
+ * render its attributes. The artifact may have round-tripped through JSON
+ * (the byte cap shrinks strings and drops list tails), so every field is
+ * re-validated here; anything unrecognized or missing renders NO attributes,
+ * which is the conservative direction — the text is still shown, just never
+ * claimed to be committed source.
+ *
+ * The reader DERIVES `synthesized` from the redaction count rather than
+ * trusting the persisted boolean, and requires the count to be a finite
+ * non-negative integer. It also enforces the producer's representation/count
+ * invariant fail-closed (`sourceEvidence` emits `sanitized_source` only for a
+ * positive count and `committed_source` only for zero): a record claiming
+ * `sanitized_source` with a count of 0 — or `committed_source` with a positive
+ * count — is a contradiction, and the renderer must not be the component that
+ * silently resolves it by coercion. Such a record is unusable and renders
+ * nothing. A present-but-non-string `file`/`revision` is equally unusable; an
+ * absent one simply renders no such attribute. */
+function provenanceRecordAttributes(value: unknown): string {
+  if (!isRecord(value)) return "";
+  const representation = value.representation;
+  if (representation !== "committed_source" && representation !== "sanitized_source") return "";
+  const count = value.redaction_count;
+  if (typeof count !== "number" || !Number.isFinite(count) || !Number.isInteger(count) || count < 0) return "";
+  if (representation === "committed_source" && count > 0) return "";
+  if (representation === "sanitized_source" && count === 0) return "";
+  if (value.file !== undefined && typeof value.file !== "string") return "";
+  if (value.revision !== undefined && typeof value.revision !== "string") return "";
+  const file = typeof value.file === "string" ? value.file : null;
+  const revision = typeof value.revision === "string" ? value.revision : null;
+  return provenanceAttributes({
+    representation,
+    synthesized: count > 0,
+    redactionCount: count,
+    file,
+    revision,
+  });
 }
 
 function renderConsumerLines(artifact: Record<string, unknown>): string[] {
@@ -1503,11 +1631,16 @@ function renderConsumerLines(artifact: Record<string, unknown>): string[] {
       const marker = reference.changed_file === true ? " (changed file)" : "";
       const suffix = typeof match === "string" && match !== "" ? ` as ${codeSpan(display(match))}` : "";
       const loc = `  - ${location(reference.path, reference.line)}${marker}${suffix}`;
+      // #1030: stamped ONCE per reference, on this harness-constructed header
+      // line — never inside the fence, where a repository line could share a
+      // line with (or imitate) the annotation.
+      const attributes = provenanceRecordAttributes(reference.provenance);
+      const header = `${loc}${attributes}`;
       if (Array.isArray(reference.lines)) {
-        lines.push(loc);
+        lines.push(header);
         lines.push(...fenced(reference.start, reference.lines, "    ", toPath(reference.path)));
       } else {
-        lines.push(`${loc} — ${codeSpan(display(redactSourceText(String(reference.snippet ?? ""), toPath(reference.path))))}`);
+        lines.push(`${header} — ${codeSpan(display(redactSourceText(String(reference.snippet ?? ""), toPath(reference.path))))}`);
       }
     }
   }
@@ -1529,7 +1662,9 @@ function renderCounterpartLines(artifact: Record<string, unknown>): string[] {
     const ref = `${location(item.ref_path, item.ref_line)} ${codeSpan(display(String(item.ref_name ?? "")))}`;
     const own = `${codeSpan(display(String(item.name ?? "")))} in ${location(item.path, item.line)}`;
     const notes = item.ref_changed === true ? " (also changed in this PR)" : "";
-    lines.push(`- ${ref} for ${own}${notes}:`);
+    // #1030: one stamp per counterpart, on this harness-authored header line —
+    // never on the fenced body, where repository text could forge it.
+    lines.push(`- ${ref} for ${own}${notes}:${provenanceRecordAttributes(item.provenance)}`);
     lines.push(...fenced(item.ref_line, item.lines, "  ", toPath(item.ref_path)));
     if (item.lines_truncated === true) lines.push(`  _(body cut at ${MAX_COUNTERPART_LINES} lines)_`);
   }
@@ -1573,7 +1708,8 @@ function renderLines(artifact: Record<string, unknown>): string[] {
             if (typeof line !== "number" || !Number.isInteger(line) || line < 0) line = 0;
             const snippet = codeSpan(display(redactSourceText(String(reference.snippet ?? ""), rawRefPath)));
             const marker = reference.changed_file === true ? " (changed file)" : "";
-            lines.push(`  - ${refPath}:${line}${marker} — ${snippet}`);
+            const attributes = provenanceRecordAttributes(reference.provenance);
+            lines.push(`  - ${refPath}:${line}${marker} — ${snippet}${attributes}`);
           }
         }
       }
