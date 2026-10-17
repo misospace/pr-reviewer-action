@@ -1485,6 +1485,42 @@ test("#762: the reacting bot's own login is excluded by its resolved identity, a
   assert.equal(identityCalls, 1);
 });
 
+test("#762: a whitespace-only or non-string identity is unprovable — nobody is authorized", async () => {
+  for (const [label, identity] of [["whitespace-only", "   "], ["non-string", 7]] as Array<[string, unknown]>) {
+    const api = feedbackApi({
+      prior: { id: 501, ...PRIOR },
+      records: [{ commentId: "501", content: "-1", login: "maintainer" }],
+      permissions: { maintainer: { permission: "admin", roleName: "", subject: "absent" } },
+      identity: null,
+    });
+    (api as unknown as { identity: unknown }).identity = identity;
+    const { body } = await publishActionable(api);
+    assert.ok(body.includes("```suggestion") && body.includes("REPL"), `${label}: nothing is suppressed`);
+    assert.deepEqual(api.permissionLookups, [], `${label}: nobody is verified without the exclusion proof`);
+  }
+});
+
+test("#762: the identity read is made at most once across multiple distinct reacting logins", async () => {
+  const api = feedbackApi({
+    prior: { id: 501, ...PRIOR },
+    records: [
+      { commentId: "501", content: "-1", login: "alice" },
+      { commentId: "501", content: "-1", login: "bob" },
+    ],
+    permissions: {
+      alice: { permission: "write", roleName: "", subject: "absent" },
+      bob: { permission: "triage", roleName: "", subject: "absent" },
+    },
+    identity: "ci-bot",
+  });
+  const resolved = api.authenticatedIdentity.bind(api);
+  let identityCalls = 0;
+  api.authenticatedIdentity = async () => { identityCalls += 1; return resolved(); };
+  const { messages } = await publishActionable(api);
+  assert.ok(messages.some((line) => line.includes("2 trusted rejection(s)")), messages.join("\n"));
+  assert.equal(identityCalls, 1);
+});
+
 test("#762: the feedback read is fail-open — an unsupported, incomplete, or throwing read changes nothing", async () => {
   for (const feedback of ["unsupported", "incomplete", "throws"] as const) {
     const api = feedbackApi({

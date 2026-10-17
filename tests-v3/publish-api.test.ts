@@ -641,6 +641,38 @@ test("#762: a later reaction page failing keeps the earlier pages' records and r
   }
 });
 
+test("#762: a failing later comment id keeps the earlier ids' records and reports complete:false", async () => {
+  const { fetchImpl, calls } = recorder([
+    [`GET ${BASE}/repos/o/r/pulls/comments/2/reactions`, 500, { message: "nope" }],
+    [`GET ${BASE}/repos/o/r/pulls/comments/1/reactions`, 200, [{ content: "-1", user: { login: "alice" } }]],
+  ]);
+  const result = await github(fetchImpl).reviewCommentFeedback!(["1", "2"]);
+  assert.deepEqual(result, { supported: true, complete: false, records: [{ commentId: "1", content: "-1", login: "alice" }] });
+  assert.deepEqual(calls.map(({ url }) => url), [
+    `${BASE}/repos/o/r/pulls/comments/1/reactions?per_page=100&page=1`,
+    `${BASE}/repos/o/r/pulls/comments/2/reactions?per_page=100&page=1`,
+  ]);
+});
+
+test("#762: an over-full reaction page is never treated as final", async () => {
+  // A well-behaved forge never returns more rows than `per_page`, but a page
+  // larger than the page size must not read as the last page: only a page
+  // SHORTER than the page size ends an id's read.
+  const overfull = Array.from({ length: 101 }, (_, i) => ({ content: "-1", user: { login: `user-${i}` } }));
+  const { fetchImpl, calls } = recorder([
+    [`GET ${BASE}/repos/o/r/pulls/comments/1/reactions?per_page=100&page=2`, 200, [{ content: "+1", user: { login: "bob" } }]],
+    [`GET ${BASE}/repos/o/r/pulls/comments/1/reactions`, 200, overfull],
+  ]);
+  const result = await github(fetchImpl).reviewCommentFeedback!(["1"]);
+  assert.equal(result.complete, true);
+  assert.equal(result.records.length, 102);
+  assert.deepEqual(result.records.at(-1), { commentId: "1", content: "+1", login: "bob" });
+  assert.deepEqual(calls.map(({ url }) => url), [
+    `${BASE}/repos/o/r/pulls/comments/1/reactions?per_page=100&page=1`,
+    `${BASE}/repos/o/r/pulls/comments/1/reactions?per_page=100&page=2`,
+  ]);
+});
+
 test("#762: forgejo reviewCommentFeedback degrades explicitly with zero requests", async () => {
   const { fetchImpl, calls } = recorder([]);
   const api = new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token t", baseUrl: "https://forge.example", fetchImpl });
