@@ -264,7 +264,24 @@ export class GitHubPublishApi implements PublishPlatformApi {
     const comments = await this.listIssueComments();
     const matching = comments.filter((c) => typeof c.body === "string" && c.body.includes(marker));
     matching.sort((a, b) => String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? "")));
-    const target = matching[0];
+    let target = matching[0];
+    // #1098: a marker-bearing comment is visible to every reader, so the
+    // newest match is only a PATCH candidate when the proven trusted owner
+    // authored it (kind-separated matching, same policy as
+    // `owner-identity.ts` — a login identity is compared to logins only).
+    // A foreign-authored or unattributable marker comment is never
+    // overwritten; when the identity itself cannot be proven the upsert
+    // fails closed instead of guessing. With no marker comment at all the
+    // creation path needs no proof — creating never destroys anything.
+    if (target !== undefined) {
+      const login = await this.authenticatedIdentity();
+      if (login === null) return { ok: false, created: false, error: "GitHub sticky comment owner could not be verified" };
+      const identity: TrustedOwnerIdentity = { kind: "login", login };
+      target = matching.find((comment) => ownerMatchesIdentity(comment.user, identity));
+      if (target === undefined && matching.some((comment) => typeof comment.user?.login !== "string" || comment.user.login.trim() === "")) {
+        return { ok: false, created: false, error: "GitHub sticky comment ownership is unknown" };
+      }
+    }
     try {
       if (target === undefined) {
         const { status, data } = await requestJson(
