@@ -19,7 +19,14 @@
  * or changes the verdict beyond the missing-claim rows it was asked to fill.
  * Mirrors `src/claims/model.ts`. */
 
-import { MAX_GROUPS_PER_RULE, MAX_GROUP_NAME_CHARS } from "../enforcement/requirement-trace.js";
+import {
+  MAX_GROUPS_PER_RULE,
+  MAX_GROUP_NAME_CHARS,
+  MAX_TRACE_REPAIR_SUMMARY_ERROR_CHARS,
+  MAX_TRACE_REPAIR_SUMMARY_ID_CHARS,
+  MAX_TRACE_REPAIR_SUMMARY_IDS,
+  type RequirementTraceRepairOutcome,
+} from "../enforcement/requirement-trace.js";
 import { extractSpecialistJson } from "../specialists/normalize.js";
 import { buildSpecialistPayload, type SpecialistPayload } from "../specialists/payload.js";
 import type { SpecialistRequestFn } from "../specialists/runner.js";
@@ -331,4 +338,70 @@ export async function runRequirementTraceRepairPass(input: TraceRepairPassInput)
     return { claims: [], status: errorKind ? "error" : "empty", errorKind, error: parsed.errors[0] ?? null, diffClipped };
   }
   return { claims: parsed.claims, status: "ok", errorKind: null, error: null, diffClipped };
+}
+
+/** #959 status → #1044 summary outcome: a successful pass means the merged
+ * claims exist, so the missing rows must never say the repair also failed. */
+const STATUS_TO_OUTCOME: Partial<Record<TraceRepairPassResult["status"], RequirementTraceRepairOutcome["outcome"]>> = {
+  ok: "merged",
+  empty: "no_claims",
+  error: "errored",
+  timeout: "timeout",
+};
+
+/** #1044: build the bounded, sanitized `requirement_trace_repair` summary
+ * from the pass result (or the throw its fail-soft boundary caught) plus the
+ * gate facts. Never throws; every string that could carry transport/provider
+ * text is control-stripped and length-capped, and that text is
+ * diagnostics-only — it must never reach the rendered markdown. */
+export function traceRepairOutcomeSummary(input: {
+  attempted: boolean;
+  /** `null` when the caller wants the outcome derived below (attempted runs);
+   * for `attempted: false` the caller passes the gate verdict directly. */
+  outcome: RequirementTraceRepairOutcome["outcome"] | null;
+  missingIds: readonly string[];
+  /** `null` when the call never ran to completion (the boundary caught). */
+  result?: TraceRepairPassResult | null;
+  /** Set when the try/catch in review.ts caught. */
+  thrownError?: unknown;
+}): RequirementTraceRepairOutcome {
+  const sanitizeId = (id: string): string => id.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_TRACE_REPAIR_SUMMARY_ID_CHARS);
+  const cleanError = (text: string): string => text.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, MAX_TRACE_REPAIR_SUMMARY_ERROR_CHARS);
+  const missing_ids: string[] = [];
+  for (const id of input.missingIds) {
+    const clean = sanitizeId(id);
+    if (clean !== "" && !missing_ids.includes(clean)) missing_ids.push(clean);
+    if (missing_ids.length >= MAX_TRACE_REPAIR_SUMMARY_IDS) break;
+  }
+  if (!input.attempted) {
+    return {
+      attempted: false,
+      outcome: input.outcome ?? (missing_ids.length === 0 ? "no_missing_ids" : "skipped_by_gate"),
+      missing_ids,
+      claims: 0,
+    };
+  }
+  if (input.result === null || input.result === undefined) {
+    const cause = input.thrownError;
+    const message = cause instanceof Error ? cause.message : typeof cause === "string" && cause !== "" ? cause : null;
+    return {
+      attempted: true,
+      outcome: "errored",
+      missing_ids,
+      claims: 0,
+      status: "error",
+      error_kind: "thrown",
+      error: message === null ? null : cleanError(message),
+    };
+  }
+  return {
+    attempted: true,
+    outcome: STATUS_TO_OUTCOME[input.result.status] ?? "errored",
+    missing_ids,
+    claims: input.result.claims.length,
+    status: input.result.status,
+    error_kind: input.result.errorKind,
+    error: input.result.error === null ? null : cleanError(input.result.error),
+    diff_clipped: input.result.diffClipped,
+  };
 }

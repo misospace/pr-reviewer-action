@@ -68,8 +68,8 @@ import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
-import { applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope } from "../enforcement/requirement-trace.js";
-import { runRequirementTraceRepairPass } from "../requirements/trace-repair.js";
+import { applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope, type RequirementTraceRepairOutcome } from "../enforcement/requirement-trace.js";
+import { runRequirementTraceRepairPass, traceRepairOutcomeSummary } from "../requirements/trace-repair.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
 import { ACTION_VERSION } from "../version.js";
@@ -1067,11 +1067,21 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // than implying enforcement does not exist. A claim that IS present with
   // unusable locations is never repaired, so this cannot become a way to pass
   // an untraceable change.
-  if (requirementTraceEnabled && promptState.isDefault && analysisEngine !== MODEL_UNAVAILABLE_ENGINE && artifact !== null) {
+  // #1044: bounded, sanitized summary of what the pass did, attached to the
+  // persisted artifact (`requirement_trace_repair`) and handed to the trace
+  // enforcement so the published section can distinguish "the reviewer never
+  // emitted a claim" from "the bounded repair pass ran and failed".
+  let traceRepairOutcome: RequirementTraceRepairOutcome | null = null;
+  if (requirementTraceEnabled && artifact !== null) {
     const repairTarget = (artifact ?? {}) as Record<string, unknown>;
     const missingTraceIds = missingTraceRequirementIds(repairTarget.requirement_coverage, traceScopeIds);
     const repairRequirements = missingTraceIds.length > 0 ? ledgerRequirementsById(ledgerValue, missingTraceIds) : [];
-    if (repairRequirements.length > 0 && profiles.primary.baseUrl && profiles.primary.model) {
+    if (missingTraceIds.length === 0) {
+      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "no_missing_ids", missingIds: missingTraceIds });
+    } else if (!promptState.isDefault || analysisEngine === MODEL_UNAVAILABLE_ENGINE || !profiles.primary.baseUrl || !profiles.primary.model || repairRequirements.length === 0) {
+      // The pass exists but its own gates kept it from running at all.
+      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "skipped_by_gate", missingIds: missingTraceIds });
+    } else {
       const rawTemp = (env.AI_TEMPERATURE ?? "").trim();
       const temperature = rawTemp === "" || Number.isNaN(Number(rawTemp)) ? null : Number(rawTemp);
       const repairTimeoutSec = Math.min(
@@ -1088,6 +1098,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       }
       // Fail-soft at the boundary too, mirroring the claim-falsification
       // pre-pass: a throw here must never abort the review.
+      let repairThrow: unknown = null;
       let repaired: Awaited<ReturnType<typeof runRequirementTraceRepairPass>> | null = null;
       try {
         // #1037: correlation headers ride the repair pass too; unset config
@@ -1128,6 +1139,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
           }),
         });
       } catch (cause) {
+        repairThrow = cause;
         log(`WARNING: requirement trace repair pass failed; continuing without repair: ${cause instanceof Error ? cause.message : String(cause)}`);
       }
       if (repaired !== null) {
@@ -1149,6 +1161,16 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
           log(`requirement trace: repair pass returned no claims (${repaired.status}${repaired.error ? `: ${repaired.error}` : ""})`);
         }
       }
+      traceRepairOutcome = traceRepairOutcomeSummary({
+        attempted: true,
+        outcome: null,
+        missingIds: missingTraceIds,
+        result: repaired,
+        thrownError: repaired === null ? repairThrow : undefined,
+      });
+    }
+    if (traceRepairOutcome !== null) {
+      artifact.requirement_trace_repair = traceRepairOutcome;
     }
   }
 
@@ -1219,7 +1241,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     // place before the strict mapping counts open findings.
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState, traceRepair: traceRepairOutcome ?? undefined });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
@@ -1239,7 +1261,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     });
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState, traceRepair: traceRepairOutcome ?? undefined });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     // #977: the model's own request_changes is relaxed only when every
     // still-open finding is a verification ask and no independent

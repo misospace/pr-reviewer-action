@@ -3965,6 +3965,15 @@ test("#959: a verdict with no trace claim at all gets one bounded repair pass an
     assert.equal(repairRecord.status, "ok");
     assert.equal(repairRecord.claims, 1);
     assert.equal(repairRecord.missing_ids.length, 1);
+
+    // #1044: the persisted artifact carries the bounded repair summary.
+    const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
+      requirement_trace_repair?: { attempted: boolean; outcome: string; claims: number; missing_ids: string[] };
+    };
+    assert.equal(persisted.requirement_trace_repair?.attempted, true);
+    assert.equal(persisted.requirement_trace_repair?.outcome, "merged");
+    assert.equal(persisted.requirement_trace_repair?.claims, 1);
+    assert.equal(persisted.requirement_trace_repair?.missing_ids.length, 1);
   } finally {
     await server.close();
     cleanup();
@@ -4022,6 +4031,76 @@ test("#959: when the repair pass also yields nothing, the section says so instea
     };
     assert.equal(repairRecord.status, "empty");
     assert.equal(repairRecord.claims, 0);
+
+    // #1044: the row is now marked as repair-attempted, the rendered section
+    // says the retry also failed, and the persisted artifact carries the
+    // bounded summary.
+    assert.ok(trace.rows[0]!.notes.includes("trace-repair-ran-no-claims"));
+    assert.match(result.outputs.reviewMarkdown, /the reviewer reported no trace for this requirement, and a bounded repair pass also returned no usable claim/);
+    const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
+      requirement_trace_repair?: { attempted: boolean; outcome: string; claims: number; missing_ids: string[] };
+    };
+    assert.equal(persisted.requirement_trace_repair?.attempted, true);
+    assert.equal(persisted.requirement_trace_repair?.outcome, "no_claims");
+    assert.equal(persisted.requirement_trace_repair?.claims, 0);
+    assert.equal(persisted.requirement_trace_repair?.missing_ids.length, 1);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#1044: a gated-off repair pass records skipped_by_gate and keeps the original wording", async () => {
+  let repairAttempts = 0;
+  const server = await startMockServer((_req, body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    if (String(body).includes("Requirements to trace:")) {
+      repairAttempts += 1;
+      res.end(verdictBody({ requirement_coverage: [] }));
+      return;
+    }
+    // The #947 shape: zero trace claims, and a replace-mode prompt means the
+    // #959 repair (the trace fragment's retry) never runs.
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+        "requirement-trace": "true",
+        "system-prompt": "Operator-supplied review prompt.",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+
+    assert.equal(repairAttempts, 0, "the gated-off pass must never issue a model request");
+    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
+      rows: Array<{ disposition: string; notes: string[] }>;
+    };
+    assert.ok(trace.rows[0]!.notes.includes("not-traced-by-reviewer"));
+    assert.ok(!trace.rows[0]!.notes.includes("trace-repair-ran-no-claims"));
+    assert.match(result.outputs.reviewMarkdown, /the reviewer reported no trace for this requirement/);
+    assert.doesNotMatch(result.outputs.reviewMarkdown, /bounded repair pass/);
+    const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
+      requirement_trace_repair?: { attempted: boolean; outcome: string; claims: number; missing_ids: string[] };
+    };
+    assert.equal(persisted.requirement_trace_repair?.attempted, false);
+    assert.equal(persisted.requirement_trace_repair?.outcome, "skipped_by_gate");
+    assert.equal(persisted.requirement_trace_repair?.claims, 0);
+    assert.equal(persisted.requirement_trace_repair?.missing_ids.length, 1);
   } finally {
     await server.close();
     cleanup();

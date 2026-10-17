@@ -14,6 +14,9 @@ import {
   applyRequirementTraceEnforcement,
   MAX_DECLARED_GROUPS_PER_RULE,
   MAX_DISTRIBUTED_HINTS,
+  MAX_TRACE_REPAIR_SUMMARY_ERROR_CHARS,
+  MAX_TRACE_REPAIR_SUMMARY_ID_CHARS,
+  MAX_TRACE_REPAIR_SUMMARY_IDS,
   distributedRequirementHints,
   extractRequirementTerms,
   ledgerRequirementsById,
@@ -33,7 +36,7 @@ PENDING_DISPOSITION,
   type RequirementOwnership,
   type RequirementTraceArtifact,
 } from "../src/enforcement/requirement-trace.js";
-import { buildTraceRepairUserMessage, normalizeTraceRepairPayload, runRequirementTraceRepairPass } from "../src/requirements/trace-repair.js";
+import { buildTraceRepairUserMessage, normalizeTraceRepairPayload, runRequirementTraceRepairPass, traceRepairOutcomeSummary, type TraceRepairPassResult } from "../src/requirements/trace-repair.js";
 import { workspacePathHasSymlinkComponent } from "../src/context/workspace-path.js";
 
 function artifact(overrides: Record<string, unknown> = {}): ReviewArtifact {
@@ -1343,6 +1346,126 @@ test("#959: runRequirementTraceRepairPass is fail-soft and bounded", async () =>
   });
   assert.equal(ok.status, "ok");
   assert.equal(ok.claims.length, 1);
+});
+
+// ── #1044: bounded requirement_trace_repair summary ──────────────────────
+
+function repairResult(status: TraceRepairPassResult["status"], overrides: Partial<TraceRepairPassResult> = {}): TraceRepairPassResult {
+  return { claims: [], status, errorKind: null, error: null, diffClipped: false, ...overrides };
+}
+
+test("#1044: traceRepairOutcomeSummary maps pass statuses to summary outcomes", () => {
+  const base = { attempted: true, outcome: null as null, missingIds: ["req-1"] };
+  assert.equal(traceRepairOutcomeSummary({ ...base, result: repairResult("ok", { claims: [{ requirement_id: "req-1" }] }) }).outcome, "merged");
+  assert.equal(traceRepairOutcomeSummary({ ...base, result: repairResult("empty") }).outcome, "no_claims");
+  assert.equal(traceRepairOutcomeSummary({ ...base, result: repairResult("timeout", { errorKind: "timeout", error: "timed out" }) }).outcome, "timeout");
+  assert.equal(traceRepairOutcomeSummary({ ...base, result: repairResult("error", { errorKind: "transport", error: "boom" }) }).outcome, "errored");
+  // A null result means the fail-soft boundary caught a throw.
+  const thrown = traceRepairOutcomeSummary({ ...base, result: null, thrownError: new Error("boom") });
+  assert.equal(thrown.outcome, "errored");
+  assert.equal(thrown.error, "boom");
+  assert.equal(thrown.status, "error");
+  assert.equal(thrown.error_kind, "thrown");
+  assert.equal(thrown.claims, 0);
+  // Gate facts: the pass never ran.
+  const noMissing = traceRepairOutcomeSummary({ attempted: false, outcome: "no_missing_ids", missingIds: [] });
+  assert.equal(noMissing.attempted, false);
+  assert.equal(noMissing.outcome, "no_missing_ids");
+  assert.deepEqual(noMissing.missing_ids, []);
+  assert.equal(noMissing.claims, 0);
+  const skipped = traceRepairOutcomeSummary({ attempted: false, outcome: "skipped_by_gate", missingIds: ["req-1"] });
+  assert.equal(skipped.attempted, false);
+  assert.equal(skipped.outcome, "skipped_by_gate");
+  // Status passthrough on a completed run.
+  const errored = traceRepairOutcomeSummary({ ...base, result: repairResult("error", { errorKind: "malformed", error: "bad json", diffClipped: true }) });
+  assert.equal(errored.status, "error");
+  assert.equal(errored.error_kind, "malformed");
+  assert.equal(errored.error, "bad json");
+  assert.equal(errored.diff_clipped, true);
+  const merged = traceRepairOutcomeSummary({ ...base, result: repairResult("ok", { claims: [{ requirement_id: "req-1" }] }) });
+  assert.equal(merged.status, "ok");
+  assert.equal(merged.error_kind, null);
+  assert.equal(merged.error, null);
+});
+
+test("#1044: traceRepairOutcomeSummary sanitizes control characters and caps fields", () => {
+  const hostile = traceRepairOutcomeSummary({
+    attempted: true,
+    outcome: null,
+    missingIds: ["req-a\n## forged", "req-`x`", "req-a"],
+    result: repairResult("error", { errorKind: "transport", error: "line1\nAuthorization: Bearer k\r\n\x00tail" }),
+  });
+  assert.ok(!hostile.missing_ids.some((id) => /[\x00-\x1f\x7f`]/.test(id)), JSON.stringify(hostile.missing_ids));
+  assert.deepEqual(hostile.missing_ids, ["req-a## forged", "req-x", "req-a"]);
+  assert.ok(!/[\x00-\x1f\x7f]/.test(hostile.error ?? ""), JSON.stringify(hostile.error));
+  assert.match(hostile.error ?? "", /line1 Authorization: Bearer k\s+tail/);
+  // Caps: ids deduped and bounded at 48, each at 80 chars; error at 200.
+  const many = Array.from({ length: 60 }, (_v, i) => `req-${i}`);
+  const capped = traceRepairOutcomeSummary({ attempted: false, outcome: "skipped_by_gate", missingIds: many });
+  assert.equal(capped.missing_ids.length, MAX_TRACE_REPAIR_SUMMARY_IDS);
+  assert.deepEqual(capped.missing_ids, many.slice(0, MAX_TRACE_REPAIR_SUMMARY_IDS));
+  const longId = "req-" + "y".repeat(200);
+  assert.equal(traceRepairOutcomeSummary({ attempted: false, outcome: "skipped_by_gate", missingIds: [longId] }).missing_ids[0]?.length, MAX_TRACE_REPAIR_SUMMARY_ID_CHARS);
+  const longError = "e".repeat(500);
+  assert.equal(traceRepairOutcomeSummary({ attempted: true, outcome: null, missingIds: [], result: repairResult("error", { error: longError }) }).error?.length, MAX_TRACE_REPAIR_SUMMARY_ERROR_CHARS);
+});
+
+test("#1044: a repair-pass failure note drives the repair wording on a missing-claim row", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([{ id: "req-1", text: "must validate X", kind: "acceptance" }]);
+    for (const outcome of ["no_claims", "errored", "timeout"] as const) {
+      const trace = validateRequirementTrace([], ledger, workspace, undefined, {
+        traceRepair: { attempted: true, outcome, missing_ids: ["req-1"], claims: 0, status: "empty", error_kind: null, error: null },
+      });
+      assert.ok(trace.rows[0]?.notes.includes("not-traced-by-reviewer"), outcome);
+      assert.ok(trace.rows[0]?.notes.includes("trace-repair-ran-no-claims"), outcome);
+      const md = renderRequirementTraceMarkdown(trace);
+      assert.match(md, /the reviewer reported no trace for this requirement, and a bounded repair pass also returned no usable claim/, outcome);
+    }
+    // A failed id outside the summary's missing_ids does not get the note.
+    const other = validateRequirementTrace([], ledger, workspace, undefined, {
+      traceRepair: { attempted: true, outcome: "no_claims", missing_ids: ["req-other"], claims: 0 },
+    });
+    assert.ok(!other.rows[0]?.notes.includes("trace-repair-ran-no-claims"));
+    assert.doesNotMatch(renderRequirementTraceMarkdown(other), /bounded repair pass/);
+    // "merged" and an absent summary keep the original wording — merged ids
+    // have claims, so the row is not missing anyway; this pins the guard.
+    for (const traceRepair of [
+      { attempted: true, outcome: "merged" as const, missing_ids: ["req-1"], claims: 1 },
+      { attempted: false, outcome: "skipped_by_gate" as const, missing_ids: ["req-1"], claims: 0 },
+      { attempted: false, outcome: "no_missing_ids" as const, missing_ids: [], claims: 0 },
+    ]) {
+      const trace = validateRequirementTrace([], ledger, workspace, undefined, { traceRepair });
+      assert.ok(!trace.rows[0]?.notes.includes("trace-repair-ran-no-claims"), JSON.stringify(traceRepair));
+      const md = renderRequirementTraceMarkdown(trace);
+      assert.match(md, /the reviewer reported no trace for this requirement/);
+      assert.doesNotMatch(md, /bounded repair pass/);
+    }
+    // No summary at all: unchanged behavior.
+    const absent = validateRequirementTrace([], ledger, workspace);
+    assert.doesNotMatch(renderRequirementTraceMarkdown(absent), /bounded repair pass/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1044: applyRequirementTraceEnforcement threads the repair summary to the rows and render", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([{ id: "req-1", text: "must validate X", kind: "acceptance" }]);
+    const art = artifact({});
+    const result = applyRequirementTraceEnforcement(art, {
+      enabled: true,
+      ledger,
+      workspace,
+      traceRepair: { attempted: true, outcome: "no_claims", missing_ids: ["req-1"], claims: 0, status: "empty" },
+    });
+    assert.ok(result.trace.rows[0]?.notes.includes("trace-repair-ran-no-claims"));
+    assert.match(art.review_markdown, /and a bounded repair pass also returned no usable claim/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
 });
 
 // ── #962: trusted distributed-enforcement proof topology ────────────────
