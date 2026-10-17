@@ -34,17 +34,32 @@ and own their own HTTP server, queue, and worker lifecycle.
   (even a request signed with the empty secret), and duplicate-header
   arrays and the GitHub `sha256=` prefixed form are rejected before any
   comparison (`ingress-signature.test.ts`).
-- The `X-Gitea-Event` and `X-Gitea-Event-Type` headers are authoritative:
-  both shape-check against a strict pattern, and the headers decide the
-  projected `name` — only the four whitelisted payload actions
-  (`synchronized`, `reopened`, `label_updated`, `created`) refine it, and
-  payload text never reaches a synthesized field — so a hostile payload
-  `name`/`event` cannot re-route a delivery. The payload is untrusted and no
-  untrusted string is copied into a synthesized field: the only value the
-  projection synthesizes is the trusted re-review-label constant, matched
-  byte-for-byte against `pull_request.labels` and re-emitted as that constant
-  — never as a copy of the payload text — so a hostile label cannot forge the
-  trigger.
+- The `X-Gitea-Event` and `X-Gitea-Event-Type` headers are **unauthenticated
+  hints**, not authenticated facts: the HMAC covers the raw body only, so both
+  are shape-checked against a strict pattern (shape validation, not
+  authentication) and each hint is honored **only when the signed body's own
+  `action` authorizes it** — `synchronized`/`synchronize` for the sync hint,
+  `label_updated` for the label hint, `created` for the comment hint. A hint
+  conflicting with the signed action is never forced: the delivery falls back to
+  the grouped rule for its header (the legacy ungrouped `pull_request_sync`
+  header rejoins the `pull_request` group, so its signed action decides) or to
+  the generic passthrough, so a captured delivery replayed with forged
+  sync/label/comment headers cannot reclassify a terminal
+  `pr_merged`/`pr_closed` into a scheduleable `synchronize`, mint a
+  `rereview_label`, or turn a signed body into a `follow_up` (#1024). The
+  headers still decide the projected `name`, and payload text never reaches a
+  synthesized field, so a hostile payload `name`/`event` cannot re-route a
+  delivery. The payload is untrusted and no untrusted string is copied into a
+  synthesized field: the only value the projection synthesizes is the trusted
+  re-review-label constant, matched byte-for-byte against `pull_request.labels`
+  and re-emitted as that constant — never as a copy of the payload text — so a
+  hostile label cannot forge the trigger.
+- Known residual (pre-existing, outside #1024): the normalizer's
+  action-independent `check_run` / `check_suite` / `status` names still mean
+  `check_update` whatever the signed body says, so a forged group name can move
+  a captured delivery into that family. Forgejo check runs are a capability
+  degradation (`capabilities.ts`: `checkRuns: false`) and the projection is not
+  the seam that owns those kinds; tracked as a follow-up issue.
 - Every response is a fixed status + fixed body; the payload, secret,
   signature, and error text are never reflected. Oversize bodies are
   refused mid-stream (413) and buffering stops immediately; `ping` and
@@ -53,8 +68,9 @@ and own their own HTTP server, queue, and worker lifecycle.
 - Raw payloads stop at the projection (`projectForgejoWebhookPayload`,
   `forgejo-events.ts`), which runs after the HMAC signature check and
   `JSON.parse` and before the #728 `normalizeForgejoEvent`; it reads only
-   the two trusted headers and a small set of field shapes (to remap
-   native vocabulary) and forwards everything else untouched, so the
+   the two shape-guarded headers and a small set of field shapes (to remap
+   native vocabulary and gate each hint on the signed action) and forwards
+   everything else untouched, so the
    frozen provider-neutral normalizer still sees only the
    GitHub-compatible envelope.
 
@@ -74,14 +90,18 @@ Header quirk: `X-Gitea-Event` carries the **grouped** event name;
 `X-Gitea-Event-Type` carries the specific type. Grouping:
 `pull_request_sync`/`pull_request_label` → `pull_request`, and
 `pull_request_comment` → `issue_comment`. An invalid or missing type
-header is ignored — the grouped header alone drives projection.
+header is ignored — the grouped header alone drives projection. Neither
+header is authenticated (the HMAC covers the body only), so a hint only
+refines a projection the signed `action` already authorizes; an
+incompatible hint is never forced — the grouped rule re-dispatches on the
+signed action.
 
 | Native delivery | Projected envelope | Canonical kind |
 |---|---|---|
-| `pull_request` + action `synchronized` (or header/type `pull_request_sync`) | `pull_request` + `synchronize` | `synchronize` |
+| `pull_request` + action `synchronized` (hint: header/type `pull_request_sync` — honored only on a `synchronized`/`synchronize` body) | `pull_request` + `synchronize` | `synchronize` |
 | `pull_request` + action `reopened` | `pull_request` + `reopen` | `pr_reopened` |
-| `pull_request` + type `pull_request_label` (or ungrouped header) + action `label_updated` | `pull_request` + `labeled`, `label` synthesized | `rereview_label` when the trigger label is present, else ignored |
-| `issue_comment` + type `pull_request_comment` (or ungrouped header) + action `created` (top-level `pull_request`) | `issue_comment` with `pull_request` re-nested under `issue` (top-level key removed) | `follow_up` |
+| `pull_request` + action `label_updated` (hint: the ungrouped `pull_request_label` header — honored only on a `label_updated` body; the grouped `pull_request` delivery needs no hint) | `pull_request` + `labeled`, `label` synthesized | `rereview_label` when the trigger label is present, else ignored |
+| `issue_comment` + action `created` (hint: type `pull_request_comment`, or the ungrouped header — honored only on a `created` body), top-level `pull_request` | `issue_comment` with `pull_request` re-nested under `issue` (top-level key removed) | `follow_up` |
 
 Label synthesis caveat: a native `label_updated` carries no top-level
 `label`, so the projection fires `rereview_label` only when the re-review
@@ -89,14 +109,18 @@ label appears in `pull_request.labels`, synthesizing the operator's
 trusted constant (never payload text). An unrelated-label update while
 the trigger label already exists can over-trigger — harmless, because
 same-head re-review generations converge to the ONE #728 job id via the
-generation ledger (see Dedupe and convergence).
+generation ledger (see Dedupe and convergence). A removal
+(`label_deleted`/`label_cleared`) under the legacy ungrouped label header
+now degrades to `unknown` instead of projecting `labeled`: the signed
+action no longer authorizes a re-review trigger (#1024).
 
 Fail-closed: unknown events, labels, and comments project to shapes the
 normalizer maps to `unknown` — those are still acked (202) and forwarded to
 the canonical-event callback, and the kind-gating consumer (dispatch) drops
 them; only a null normalization is acked 200-ignored. Neither path is ever a
-mis-route. Both headers are trusted only because they are covered by the
-preceding signature verification.
+mis-route. Both headers are shape-guarded but unauthenticated: the HMAC covers
+the raw body only, so they may refine a projection compatible with the signed
+action and nothing else (#1024).
 
 ## Endpoint and credential model
 
