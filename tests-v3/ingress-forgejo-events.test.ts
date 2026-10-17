@@ -18,7 +18,7 @@ function project(
 // Rule 1 / 2 — PR sync
 // ---------------------------------------------------------------------------
 
-test("sync: grouped pull_request + type pull_request_sync forces action synchronize", () => {
+test("sync: grouped pull_request + type pull_request_sync on a synchronized body → synchronize", () => {
   const out = project("pull_request", "pull_request_sync", { action: "synchronized" });
   assert.equal(out.name, "pull_request");
   assert.equal(out.action, "synchronize");
@@ -30,8 +30,16 @@ test("sync: grouped pull_request + action synchronized (no type header) → sync
   assert.equal(out.action, "synchronize");
 });
 
-test("sync: older ungrouped pull_request_sync header forces synchronize over any payload action", () => {
-  const out = project("pull_request_sync", "", { action: "opened" });
+test("sync: older ungrouped pull_request_sync header + a synchronized action → synchronize", () => {
+  const out = project("pull_request_sync", "", { action: "synchronized" });
+  assert.equal(out.name, "pull_request");
+  assert.equal(out.action, "synchronize");
+});
+
+test("sync: the GitHub-vocabulary 'synchronize' action also satisfies the sync hint", () => {
+  // Pinned on a non-PR group so the clause is observable: the sync hint alone
+  // decides the name there (without it the delivery would keep `check_run`).
+  const out = project("check_run", "pull_request_sync", { action: "synchronize" });
   assert.equal(out.name, "pull_request");
   assert.equal(out.action, "synchronize");
 });
@@ -67,14 +75,28 @@ test("label: grouped pull_request + type pull_request_label + action label_updat
   assert.deepEqual(out.label, { name: "ai-review" });
 });
 
-test("label: ungrouped/older pull_request_label header projects to labeled regardless of payload action", () => {
+test("label: ungrouped/older pull_request_label header + a label_updated action projects to labeled", () => {
   const out = project("pull_request_label", "", {
-    action: "something-else",
+    action: "label_updated",
     pull_request: { labels: [{ name: "ai-review" }] },
   });
   assert.equal(out.name, "pull_request");
   assert.equal(out.action, "labeled");
   assert.deepEqual(out.label, { name: "ai-review" });
+});
+
+test("label: a pull_request_label TYPE hint alone does not re-group an unrelated delivery", () => {
+  const out = project("push", "pull_request_label", {
+    action: "label_updated",
+    pull_request: { labels: [{ name: "ai-review" }] },
+  });
+  // Only the ungrouped HEADER is a label hint. A type header may refine the
+  // event it groups with (sync/comment), never re-group an unrelated delivery,
+  // so the generic passthrough owns the name and the normalizer maps it to
+  // `unknown`.
+  assert.equal(out.name, "push");
+  assert.equal(out.action, "label_updated");
+  assert.equal("label" in out, false);
 });
 
 test("label: no trigger in pull_request.labels → label '' (normalizer maps to unknown)", () => {
@@ -273,6 +295,146 @@ test("passthrough: an unknown event header passes through unchanged with only na
   const out = project("some_future_event", "", payload);
   assert.equal(out.name, "some_future_event");
   assert.deepEqual(out, { ...payload, name: "some_future_event" });
+});
+
+// ---------------------------------------------------------------------------
+// Signed-replay regressions (#1024) — headers are unauthenticated HINTS
+// ---------------------------------------------------------------------------
+//
+// `signature.ts` verifies the HMAC over the RAW BODY ONLY, so a captured,
+// still-valid delivery can be replayed byte-for-byte with CHANGED event
+// headers. The signed body's own action is therefore authoritative: a hint may
+// refine a projection the signed body already authorizes, and a conflicting
+// hint must degrade fail-closed — never mint a review generation, never
+// rewrite a terminal action into a scheduleable one.
+
+test("replay: a signed terminal body under forged sync headers keeps its own action", () => {
+  // Grouped `pull_request` + `pull_request_sync` type, and the legacy ungrouped
+  // `pull_request_sync` header — the two shapes a captured delivery can be
+  // replayed under.
+  const forged: Array<[string, string]> = [
+    ["pull_request", "pull_request_sync"],
+    ["pull_request_sync", ""],
+  ];
+  for (const [eventHeader, eventTypeHeader] of forged) {
+    for (const extra of [{}, { merged: true }]) {
+      const payload = {
+        action: "closed",
+        pull_request: { number: 7, head: { sha: "a".repeat(40) }, ...extra },
+      };
+      const out = project(eventHeader, eventTypeHeader, payload);
+      // The sync hint is NOT forced: the grouped rule runs on the signed action
+      // and the hinted action never reaches the envelope.
+      assert.equal(out.name, "pull_request", `${eventHeader}/${eventTypeHeader}`);
+      assert.equal(out.action, "closed", `${eventHeader}/${eventTypeHeader}`);
+      assert.deepEqual(out, { ...payload, name: "pull_request" }, `${eventHeader}/${eventTypeHeader}`);
+      assert.equal("label" in out, false);
+    }
+  }
+});
+
+test("replay: a signed non-sync body under a forged sync hint keeps every action", () => {
+  // `synchronized`/`synchronize` are the only actions the sync hint may force;
+  // every other action keeps its own meaning (`reopened` is the grouped rule's
+  // own refinement, exactly as it is without the forged hint).
+  for (const action of ["opened", "reopened", "ready_for_review", "label_deleted"]) {
+    const expected = action === "reopened" ? "reopen" : action;
+    for (const [eventHeader, eventTypeHeader] of [
+      ["pull_request", "pull_request_sync"],
+      ["pull_request_sync", ""],
+    ] as Array<[string, string]>) {
+      const out = project(eventHeader, eventTypeHeader, { action, pull_request: { number: 7 } });
+      assert.equal(out.name, "pull_request", `${eventHeader}/${action}`);
+      assert.equal(out.action, expected, `${eventHeader}/${action}`);
+      assert.notEqual(out.action, "synchronize", `${eventHeader}/${action}`);
+    }
+  }
+});
+
+test("replay: a signed non-label body under a forged label hint never projects to labeled", () => {
+  // A terminal body that already carries the trigger label on its PR: the
+  // forged hint must not turn it into a `labeled` projection (or mine
+  // `pull_request.labels` into a synthesized trigger).
+  const payload = {
+    action: "closed",
+    pull_request: { number: 7, labels: [{ name: "ai-review", color: "00ff00" }] },
+  };
+  for (const [eventHeader, eventTypeHeader] of [
+    ["pull_request", "pull_request_label"],
+    ["pull_request_label", ""],
+  ] as Array<[string, string]>) {
+    const out = project(eventHeader, eventTypeHeader, payload);
+    assert.notEqual(out.action, "labeled", eventHeader);
+    assert.equal(out.action, "closed", eventHeader);
+    assert.equal("label" in out, false, eventHeader);
+  }
+
+  // The grouped header keeps its own signed-action refinement (a sync body
+  // still projects to `synchronize`) but never gains a `label` from the hint.
+  const sync = project("pull_request", "pull_request_label", {
+    action: "synchronized",
+    pull_request: { number: 7, labels: [{ name: "ai-review" }] },
+  });
+  assert.equal(sync.action, "synchronize");
+  assert.equal("label" in sync, false);
+
+  // The ungrouped label group with a rejected hint degrades to the generic
+  // passthrough (whose name the normalizer maps to `unknown`).
+  const terminal = project("pull_request_label", "", payload);
+  assert.equal(terminal.name, "pull_request_label");
+  assert.equal(terminal.action, "closed");
+  assert.equal("label" in terminal, false);
+});
+
+test("label: a label_deleted / label_cleared body is never projected to labeled under a label hint", () => {
+  for (const action of ["label_deleted", "label_cleared"]) {
+    // Grouped PR delivery: the signed action is preserved verbatim.
+    const grouped = project("pull_request", "pull_request_label", {
+      action,
+      pull_request: { number: 7, labels: [{ name: "ai-review" }] },
+    });
+    assert.equal(grouped.name, "pull_request", action);
+    assert.equal(grouped.action, action, action);
+    assert.equal("label" in grouped, false, action);
+    // Legacy ungrouped label group: the hint is rejected, so the delivery
+    // degrades to the generic passthrough (the normalizer maps it to `unknown`)
+    // instead of re-triggering on a label that was just REMOVED (#1024).
+    const ungrouped = project("pull_request_label", "", {
+      action,
+      pull_request: { number: 7, labels: [{ name: "ai-review" }] },
+    });
+    assert.equal(ungrouped.name, "pull_request_label", action);
+    assert.equal(ungrouped.action, action, action);
+    assert.equal("label" in ungrouped, false, action);
+  }
+});
+
+test("replay: a signed non-created body under a forged comment hint is not re-nested", () => {
+  const payload = {
+    action: "closed",
+    comment: { id: 55, user: { login: "dev" } },
+    issue: { number: 7, title: "a PR" },
+    pull_request: { number: 7, head: { sha: "a".repeat(40) } },
+  };
+  for (const [eventHeader, eventTypeHeader] of [
+    ["issue_comment", "pull_request_comment"],
+    ["pull_request_comment", ""],
+  ] as Array<[string, string]>) {
+    const out = project(eventHeader, eventTypeHeader, payload);
+    // The hint is NOT honored: the top-level `pull_request` stays where the
+    // signed body put it and no `issue.pull_request` is synthesized, so the
+    // normalizer cannot reach the follow_up (issue-origin) path.
+    assert.equal(out.name, eventHeader, eventHeader);
+    assert.equal(out.action, "closed", eventHeader);
+    assert.equal(out.pull_request, payload.pull_request, eventHeader);
+    assert.equal(
+      Object.hasOwn((out.issue as Record<string, unknown>)!, "pull_request"),
+      false,
+      eventHeader,
+    );
+    assert.deepEqual(out.issue, { number: 7, title: "a PR" }, eventHeader);
+    assert.deepEqual(out.comment, payload.comment, eventHeader);
+  }
 });
 
 // ---------------------------------------------------------------------------

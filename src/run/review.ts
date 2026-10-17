@@ -21,7 +21,7 @@ import { loopContextLimits } from "../tools/harness.js";
 import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
-import { extraHeadersForEnv } from "../transport/headers.js";
+import { callKnownSecrets, extraHeadersForEnv } from "../transport/headers.js";
 import type { FetchLike } from "../platform/http.js";
 import { normalizePrIdentity } from "../platform/pr.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
@@ -51,7 +51,7 @@ import { renderClaimsSection } from "../claims/render.js";
 import { buildModelRequest } from "../model/request.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
 import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js";
-import { maskKnownSecrets } from "../context/redact.js";
+import { maskKnownSecrets, maskKnownSecretsDeep } from "../context/redact.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
 import type { ReviewTriageDecision } from "../model/types.js";
@@ -68,8 +68,8 @@ import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
-import { applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope } from "../enforcement/requirement-trace.js";
-import { runRequirementTraceRepairPass } from "../requirements/trace-repair.js";
+import { applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope, type RequirementTraceRepairOutcome } from "../enforcement/requirement-trace.js";
+import { runRequirementTraceRepairPass, traceRepairOutcomeSummary } from "../requirements/trace-repair.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
 import { ACTION_VERSION } from "../version.js";
@@ -1067,11 +1067,21 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // than implying enforcement does not exist. A claim that IS present with
   // unusable locations is never repaired, so this cannot become a way to pass
   // an untraceable change.
-  if (requirementTraceEnabled && promptState.isDefault && analysisEngine !== MODEL_UNAVAILABLE_ENGINE && artifact !== null) {
+  // #1044: bounded, sanitized summary of what the pass did, attached to the
+  // persisted artifact (`requirement_trace_repair`) and handed to the trace
+  // enforcement so the published section can distinguish "the reviewer never
+  // emitted a claim" from "the bounded repair pass ran and failed".
+  let traceRepairOutcome: RequirementTraceRepairOutcome | null = null;
+  if (requirementTraceEnabled && artifact !== null) {
     const repairTarget = (artifact ?? {}) as Record<string, unknown>;
     const missingTraceIds = missingTraceRequirementIds(repairTarget.requirement_coverage, traceScopeIds);
     const repairRequirements = missingTraceIds.length > 0 ? ledgerRequirementsById(ledgerValue, missingTraceIds) : [];
-    if (repairRequirements.length > 0 && profiles.primary.baseUrl && profiles.primary.model) {
+    if (missingTraceIds.length === 0) {
+      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "no_missing_ids", missingIds: missingTraceIds, secrets: [profiles.primary.apiKey] });
+    } else if (!promptState.isDefault || analysisEngine === MODEL_UNAVAILABLE_ENGINE || !profiles.primary.baseUrl || !profiles.primary.model || repairRequirements.length === 0) {
+      // The pass exists but its own gates kept it from running at all.
+      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "skipped_by_gate", missingIds: missingTraceIds, secrets: [profiles.primary.apiKey] });
+    } else {
       const rawTemp = (env.AI_TEMPERATURE ?? "").trim();
       const temperature = rawTemp === "" || Number.isNaN(Number(rawTemp)) ? null : Number(rawTemp);
       const repairTimeoutSec = Math.min(
@@ -1088,6 +1098,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       }
       // Fail-soft at the boundary too, mirroring the claim-falsification
       // pre-pass: a throw here must never abort the review.
+      let repairThrow: unknown = null;
       let repaired: Awaited<ReturnType<typeof runRequirementTraceRepairPass>> | null = null;
       try {
         // #1037: correlation headers ride the repair pass too; unset config
@@ -1128,16 +1139,20 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
           }),
         });
       } catch (cause) {
-        log(`WARNING: requirement trace repair pass failed; continuing without repair: ${cause instanceof Error ? cause.message : String(cause)}`);
+        repairThrow = cause;
+        // Credential-shaped transport/provider text must not reach local
+        // diagnostics either (AGENTS.md security boundaries).
+        log(`WARNING: requirement trace repair pass failed; continuing without repair: ${maskKnownSecrets(cause instanceof Error ? cause.message : String(cause), [profiles.primary.apiKey])}`);
       }
       if (repaired !== null) {
         // Per-run record, mirroring claim-falsification.json: the merged
         // claims land in ai-output.json, but the pass's status is otherwise
-        // unobservable.
+        // unobservable. Error text is provider-controlled, so it passes the
+        // secret-redaction boundary before persistence (#1044 review).
         ws.write("requirement-trace-repair.json", Buffer.from(`${pyJsonDumps({
           status: repaired.status,
           error_kind: repaired.errorKind,
-          error: repaired.error,
+          error: redactText(maskKnownSecrets(repaired.error ?? "", [profiles.primary.apiKey])) || null,
           missing_ids: missingTraceIds,
           claims: repaired.claims.length,
           diff_clipped: repaired.diffClipped,
@@ -1146,10 +1161,31 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
           repairTarget.requirement_coverage = mergeTraceClaims(repairTarget.requirement_coverage, repaired.claims);
           log(`requirement trace: repair pass returned ${repaired.claims.length} claim(s)`);
         } else {
-          log(`requirement trace: repair pass returned no claims (${repaired.status}${repaired.error ? `: ${repaired.error}` : ""})`);
+          log(`requirement trace: repair pass returned no claims (${repaired.status}${repaired.error ? `: ${redactText(maskKnownSecrets(repaired.error, [profiles.primary.apiKey]))}` : ""})`);
         }
       }
+      // #1044 review follow-up: derive the summary's `missing_ids` from the
+      // POST-merge coverage — an id still missing after the pass is exactly
+      // the id the retry did not fill, so a partial merge (some ids filled,
+      // some not) labels only the genuinely unfilled rows. For "no_claims"/
+      // thrown nothing merged, so this equals the pre-run set; a full merge
+      // leaves it empty.
+traceRepairOutcome = traceRepairOutcomeSummary({
+attempted: true,
+outcome: null,
+missingIds: missingTraceRequirementIds(repairTarget.requirement_coverage, traceScopeIds),
+result: repaired,
+thrownError: repaired === null ? repairThrow : undefined,
+secrets: [profiles.primary.apiKey],
+});
     }
+    if (traceRepairOutcome !== null) {
+      artifact.requirement_trace_repair = traceRepairOutcome;
+    }
+  } else if (!requirementTraceEnabled && artifact !== null) {
+    // #1044 review follow-up: the feature is off, so any model-forged
+    // summary key must not survive into the persisted artifact.
+    delete artifact.requirement_trace_repair;
   }
 
   // ── Enforcement (review.sh) + requirement coverage ───────────────────
@@ -1219,7 +1255,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     // place before the strict mapping counts open findings.
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState, traceRepair: traceRepairOutcome ?? undefined });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
@@ -1239,7 +1275,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     });
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState });
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState, traceRepair: traceRepairOutcome ?? undefined });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     // #977: the model's own request_changes is relaxed only when every
     // still-open finding is a verification ask and no independent
@@ -1846,6 +1882,13 @@ async function callTier(
   });
   ws.write(requestArtifact, pyJsonDumps(requestPayload.body));
   ws.write(responseArtifact, "");
+  // #1037: ONE known-secret list for every response surface of this call —
+  // the persisted `ai-response.<tier>.json` body, the verdict parse, the
+  // diagnostics line, and the transport-failure detail. A configured
+  // extra-header VALUE is an outbound secret the provider can quote straight
+  // back into its own response body, so it is masked here, where the body
+  // enters artifact/diagnostic state, not only at each consumer.
+  const knownSecrets = callKnownSecrets(profile.apiKey, profile.extraHeaders);
 
   const outcome = await callModelTier(profile, {
     system: env.SYSTEM_PROMPT ?? "",
@@ -1862,7 +1905,13 @@ async function callTier(
         input.sleep === undefined ? chatInput : { ...chatInput, sleep: (ms: number) => input.sleep!(ms / 1000) },
       );
       if (result.status === "failure") return result;
-      ws.write(responseArtifact, pyJsonDumps(result.raw));
+      // #1037: mask the raw provider body on its way into the artifact — the
+      // response can echo a configured header value, and this artifact is read
+      // by later phases (the step summary reads `usage`) and by a human
+      // debugging a degraded run. Nothing re-parses this copy AS a verdict
+      // (the native-loop reuse reads the harness-written artifact, before this
+      // call runs), so a masked leaf cannot break a downstream parse.
+      ws.write(responseArtifact, pyJsonDumps(maskKnownSecretsDeep(result.raw, knownSecrets)));
       return result;
     },
   });
@@ -1876,7 +1925,7 @@ async function callTier(
   // very short configured key. Over-redacting a few incidental letters is the
   // accepted cost (the same second-pass rationale as describeTransportFailure).
   const diagnosticsLine = outcome.status !== "ok" && outcome.diagnostics !== undefined
-    ? maskKnownSecrets(` [${formatResponseDiagnosticsLine(outcome.diagnostics.record)}]`, [profile.apiKey])
+    ? maskKnownSecrets(` [${formatResponseDiagnosticsLine(outcome.diagnostics.record)}]`, knownSecrets)
     : "";
   if (outcome.status === "ok") {
     // #998: the effective effort is part of which request produced this
@@ -1907,7 +1956,13 @@ async function callTier(
     const formatNote = wireFormat === "json_schema" && profile.apiFormat === "anthropic" && stripped === undefined ? ", format=json_schema" : "";
     const raisedNote = outcome.budgetRaisedTo !== undefined ? ` (completion budget raised to ${outcome.budgetRaisedTo} after a token-cap failure)` : "";
     log(`${profile.label} model attempt ${outcome.attempts}/${profile.retries}: ${profile.model} @ ${profile.baseUrl} (${profile.apiFormat}${effortNote}${formatNote})${raisedNote}`);
-    const parsed = parseVerdictResponse(outcome.rawResponse, [profile.apiKey]);
+    const parsed = parseVerdictResponse(outcome.rawResponse, knownSecrets);
+    // Deliberately NOT masked here: the parsed verdict is the review's own
+    // content, and its structural fields (severity/category/file/line) drive
+    // the findings table and the enforcement stages. Masking it would corrupt
+    // published output whenever the configured key is short (legal — `k` masks
+    // every `k` in `blockers: 1`). The provider REFLECTION surface is the raw
+    // body above, which is masked; the model never sees a header value.
     const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
     ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
     return { ok: true, artifact, rawResponse: outcome.rawResponse };
@@ -1934,7 +1989,7 @@ async function callTier(
     // configured key unconditionally, on top of `redactText`'s heuristics.
     // #1037: this lane's configured extra-header VALUES join that list (a
     // provider error body can quote them back, and they carry proxy tokens).
-    const detail = describeTransportFailure(outcome.failure, { secrets: [profile.apiKey, ...Object.values(profile.extraHeaders ?? {})] });
+    const detail = describeTransportFailure(outcome.failure, { secrets: knownSecrets });
     errorLog(`${profile.label}: transport failures exhausted (${detail})${diagnosticsLine}`);
     if (outcome.nonRetryable === true) {
       annotate(`::error::${profile.label}: model endpoint returned a non-retryable HTTP status; failing over without retrying (${annotationSafe(detail)})`);
@@ -1953,6 +2008,29 @@ function configuredApiKeys(routeKey: string | undefined, profiles: TierProfiles)
   const keys = [routeKey, profiles.primary.apiKey, profiles.smart.apiKey, profiles.fallback.apiKey]
     .filter((key): key is string => typeof key === "string" && key !== "");
   return [...new Set(keys)].sort((a, b) => b.length - a.length);
+}
+
+/** #1037: every configured extra-header VALUE this run could have sent.
+ * Response-body surfaces outside a single tier (the native-loop verdict reuse
+ * re-parses a persisted `ai-response.<tier>.json`) mask these too, so a value
+ * the writing lane masked is never unmasked by a later re-parse. */
+function configuredExtraHeaderValues(env: StageEnv): string[] {
+  return Object.values(extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "") ?? {});
+}
+
+/** #1094 review finding 2: the ONE known-secret list every persisted
+ * `ai-response.<tier>.json` re-parse masks against — the API keys
+ * (`configuredApiKeys`) plus the configured extra-header VALUES
+ * (`configuredExtraHeaderValues`), deduped and sorted LONGEST FIRST so a value
+ * contained in a longer one is masked whole rather than leaving its tail
+ * behind. The primary native-loop reuse parse used to mask API keys only: a
+ * gateway that echoed a configured header value into the persisted envelope
+ * got it back verbatim in that parse's thrown messages (`errorLog`, and from
+ * there the summary). Both reuse parses now go through this one helper, so a
+ * value the writing lane masked is never unmasked by a later re-parse. */
+export function configuredKnownSecrets(env: StageEnv, profiles: TierProfiles): string[] {
+  return [...new Set([...configuredApiKeys(env.AI_API_KEY, profiles), ...configuredExtraHeaderValues(env)])]
+    .sort((a, b) => b.length - a.length);
 }
 
 /** review.sh: the primary call (native-verdict fast path, then the standard
@@ -1982,8 +2060,11 @@ async function producePrimaryReview(input: ReviewCallInput & {
       log("native_loop produced an in-conversation verdict; using it and skipping the separate review call");
       try {
         // The native loop calls the route-bound AI_* environment, which can
-        // differ from an explicit primary profile override, so mask every key.
-        const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")), configuredApiKeys(env.AI_API_KEY, profiles));
+        // differ from an explicit primary profile override, so mask every key
+        // AND every configured extra-header value (#1094: the same list the
+        // writing lane masked the persisted envelope against — a gateway can
+        // quote either straight back into this re-parse's thrown messages).
+        const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")), configuredKnownSecrets(env, profiles));
         const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
         ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
         return {
@@ -2067,7 +2148,13 @@ async function producePrimaryReview(input: ReviewCallInput & {
 
 /** `on-model-failure: notice`: the notice verdict is already final JSON, so
  * it is parsed as the content of a provider reply (the same validation and
- * artifact normalization a model answer gets), never as the reply itself. */
+ * artifact normalization a model answer gets), never as the reply itself.
+ * Preconditions pinned: `aiOutputJson` is built entirely from static local
+ * literals (src/prompt/failure.ts) — never provider-influenced text — which
+ * is why this call passes no known-secret list and the #1094 content gate is
+ * correctly inert here. If the notice content ever interpolates
+ * provider-influenced text, this call must gain the configured known-secret
+ * list so the gate covers it. */
 function noticeResult(
   ws: RunWorkspace,
   outcome: { aiOutputJson: string; analysisEngine: string },
@@ -2139,7 +2226,10 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
       const responseBytes = ws.read("ai-response.smart.json");
       if (status !== "request-error" && status !== "wall-clock-exceeded" && produced && responseBytes !== null && responseBytes.length > 0) {
         try {
-          const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")), configuredApiKeys(env.AI_API_KEY, profiles));
+          // #1037: the same masking as the writing lane, so a value the
+          // writing lane masked in this artifact cannot reappear in the
+          // messages thrown from this re-parse.
+          const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")), configuredKnownSecrets(env, profiles));
           const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
           ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
           log("Smart tool harness produced a verdict");

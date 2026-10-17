@@ -434,6 +434,141 @@ export function maskKnownSecrets(text: string, secrets: readonly (string | null 
   return masked;
 }
 
+/**
+ * #1094 review round 3 (blocker): the fail-closed counterpart of
+ * `maskKnownSecrets`. Answers exactly one question — does `text` contain any
+ * of the configured secrets the CONTENT gate covers? — and shares the
+ * masker's variant set (raw, URL-encoded, base64), but NOT its any-length
+ * rule: the deliberate floor below is exactly where the two mechanisms
+ * disagree, and the masking surfaces (not this gate) carry the any-length
+ * guarantee.
+ *
+ * Why detection instead of masking: `maskKnownSecrets` splices its marker into
+ * provider-controlled free text, which is correct for a diagnostic string but
+ * WRONG for the completion content that becomes the published verdict —
+ * masking there corrupts verdict fields for any short-but-legal configured key
+ * (`review_mar⟦•⟧down` → unparseable). The content surfaces therefore refuse
+ * the response instead: a caller that detects a configured credential in
+ * content it is about to accept, persist, or publish FAILS CLOSED (drops the
+ * response, surfaces a masked error) rather than publishing the secret or
+ * masking it into a corrupted artifact.
+ *
+ * Deliberate floor (#1094 review round 3): only secrets whose RAW configured
+ * value is at least `MIN_KNOWN_SECRET_CONTENT_LEN` characters participate in
+ * the CONTENT gate. Below that floor a configured value is indistinguishable
+ * from ordinary prose — a one-character key masks every `k` in `Looks fine.`
+ * — and refusing every review that mentions it would make the action
+ * unusable, so refusal cannot be the policy there. Such short values keep
+ * their full coverage on every NON-content surface (per-leaf
+ * `maskKnownSecrets`/`maskKnownSecretsDeep` masking of response bodies,
+ * diagnostics, and the envelope projection), which is where their reflection
+ * realistically lands; the same 8-character floor is the one `redactText`'s
+ * generic `key=value` heuristic already uses. A value at or above the floor
+ * is checked in ALL its variants (raw, URL-encoded, base64), with no
+ * false-positive leniency — the masker's any-length rule still governs every
+ * masking surface, so the two mechanisms disagree only where they must.
+ * A sub-floor secret's NON-raw variants are still checked: a short value
+ * containing URL-significant characters (`a b&c` → `a%20b%26c`) is
+ * distinctive rather than prose-indistinguishable in encoded form, so an
+ * encoded echo is refused while the raw false-positive class is not
+ * reintroduced. */
+export const MIN_KNOWN_SECRET_CONTENT_LEN = 8;
+
+export function containsKnownSecret(text: string, secrets: readonly (string | null | undefined)[] = []): boolean {
+  for (const secret of secrets) {
+    if (!secret) continue;
+    const belowFloor = secret.length < MIN_KNOWN_SECRET_CONTENT_LEN;
+    // Below the floor the RAW form is excluded (prose-indistinguishable);
+    // the encoded forms stay in — see the doc above. An encoded variant that
+    // EQUALS the raw form (every URL-safe sub-floor value encodes to itself:
+    // "k" → "k", "7" → "7") is the raw form and is excluded with it, or the
+    // floor would be silently void for exactly the values it exists for.
+    const variants: string[] = belowFloor ? [] : [secret];
+    try {
+      const encoded = encodeURIComponent(secret);
+      if (!belowFloor || encoded !== secret) variants.push(encoded);
+    } catch {
+      // Malformed surrogate pairs etc.: the raw variant is still checked.
+    }
+    try {
+      const b64 = Buffer.from(secret, "utf8").toString("base64");
+      if (!belowFloor || b64 !== secret) variants.push(b64);
+    } catch {
+      // Unreachable in practice (Buffer.from/toString don't throw here).
+    }
+    for (const variant of variants) {
+      if (variant !== "" && text.includes(variant)) return true;
+    }
+  }
+  return false;
+}
+
+/** Structural counterpart to `maskKnownSecrets`, for a JSON-shaped provider
+ * body on its way into a persisted artifact (#1037). Same masking, applied
+ * per string LEAF — and, since the #1094 review round 3 key-echo fix, to
+ * every own object KEY as well: array order, numbers, and every structural
+ * token survive byte-for-byte, so a masked artifact is still valid JSON with
+ * the same shape (the marker contains no character JSON requires escaping).
+ * Key masking exists because provider-controlled property NAMES are an echo
+ * surface too — `{ "error": { "<credential>": "rejected" } }` used to persist
+ * the credential in the key while value-only masking cleaned every leaf —
+ * so each own key goes through `maskKnownSecrets` (raw, URL-encoded, and
+ * base64 variants, any length) before the entry is built. Benign keys pass
+ * through unchanged: masking is a pure substring replacement that touches a
+ * key only when a configured value occurs in it, so distinct benign keys
+ * stay distinct and only secret-bearing keys change. A known collision is
+ * accepted: two distinct secret-bearing keys can collapse onto the same
+ * masked name (`Object.fromEntries` keeps the last), losing one diagnostic
+ * entry — a shape cost, never a leak, and the alternative (indexing or
+ * escaping) would fabricate provider-invisible structure. Masking the
+ * serialized
+ * text instead would be wrong twice over — a configured header value carrying
+ * `"` or `\` is JSON-escaped in the artifact, so an exact-substring pass over
+ * the serialized bytes would miss it entirely, and a match on a structural
+ * token (`": "`) would corrupt the document.
+ *
+ * `depth` is an internal recursion bound that keeps a pathologically nested
+ * body from blowing the stack. At the cap the subtree FAILS CLOSED: it is
+ * replaced by `KNOWN_SECRET_REDACTED` rather than serialized. Serializing it
+ * and masking the result — the earlier form — was wrong for the same reason
+ * above: `JSON.stringify` escapes `"` and `\`, so a configured value carrying
+ * either (`gw-abc"def`) came out as `gw-abc\"def`, the literal substring never
+ * matched, and JSON-decoding the artifact recovered the secret. It also had
+ * the flat-text pass's second hazard — a short configured key can match a
+ * structural token of the serialization and corrupt the document — and its
+ * cyclic `catch` returned the subtree RAW, unmasked, which is precisely the
+ * fail-open this module must never take. Losing a >32-level subtree's contents
+ * from one diagnostic artifact is an acceptable cost next to any of those.
+ */
+const MAX_MASK_DEPTH = 32;
+
+export function maskKnownSecretsDeep(value: unknown, secrets: readonly (string | null | undefined)[] = [], depth = 0): unknown {
+  if (typeof value === "string") return maskKnownSecrets(value, secrets);
+  if (depth >= MAX_MASK_DEPTH) return KNOWN_SECRET_REDACTED;
+  if (Array.isArray(value)) return value.map((item) => maskKnownSecretsDeep(item, secrets, depth + 1));
+  if (typeof value === "object" && value !== null) {
+    // `Object.fromEntries` (CreateDataPropertyOrThrow), NOT `out[key] = ...`:
+    // a hostile provider body can carry an OWN `__proto__` key (JSON.parse
+    // produces exactly that), and a plain assignment onto a fresh object
+    // invokes the prototype setter instead of defining the key — the key
+    // would silently vanish from the artifact and `out`'s prototype would
+    // become provider-controlled data. fromEntries defines it as an own data
+    // property, so the documented key-preservation rule holds.
+    // Masking the key above does NOT change this property-definition
+    // mechanism: what reaches fromEntries is just a (possibly rewritten)
+    // STRING, and fromEntries defines whatever string it is given as an own
+    // data property. A key that survives masking unchanged (benign, or an
+    // own `__proto__` no secret matches) lands exactly as before; a key the
+    // masker rewrote is a different property NAME that is defined the same
+    // way — it can never turn into a prototype-setter invocation, and a
+    // rewritten `__proto__` is simply an innocently named own property.
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [maskKnownSecrets(key, secrets), maskKnownSecretsDeep(item, secrets, depth + 1)]),
+    );
+  }
+  return value;
+}
+
 /** Default length cap for `maskDiagnostic`, matching #862's
  * `describeTransportFailure` (300 chars). */
 export const DIAGNOSTIC_MAX_CHARS = 300;

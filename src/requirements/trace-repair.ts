@@ -19,7 +19,15 @@
  * or changes the verdict beyond the missing-claim rows it was asked to fill.
  * Mirrors `src/claims/model.ts`. */
 
-import { MAX_GROUPS_PER_RULE, MAX_GROUP_NAME_CHARS } from "../enforcement/requirement-trace.js";
+import {
+  MAX_GROUPS_PER_RULE,
+  MAX_GROUP_NAME_CHARS,
+  MAX_TRACE_REPAIR_SUMMARY_ERROR_CHARS,
+  MAX_TRACE_REPAIR_SUMMARY_ID_CHARS,
+  MAX_TRACE_REPAIR_SUMMARY_IDS,
+  type RequirementTraceRepairOutcome,
+} from "../enforcement/requirement-trace.js";
+import { maskKnownSecrets, redactText } from "../context/redact.js";
 import { extractSpecialistJson } from "../specialists/normalize.js";
 import { buildSpecialistPayload, type SpecialistPayload } from "../specialists/payload.js";
 import type { SpecialistRequestFn } from "../specialists/runner.js";
@@ -331,4 +339,88 @@ export async function runRequirementTraceRepairPass(input: TraceRepairPassInput)
     return { claims: [], status: errorKind ? "error" : "empty", errorKind, error: parsed.errors[0] ?? null, diffClipped };
   }
   return { claims: parsed.claims, status: "ok", errorKind: null, error: null, diffClipped };
+}
+
+/** #959 status → #1044 summary outcome. "merged" means the pass completed
+ * with claims — how many ids they filled is visible in the post-merge
+ * `missing_ids`, not in the outcome value; the note guard keys off
+ * `attempted` + post-merge membership, never off the outcome. */
+const STATUS_TO_OUTCOME: Partial<Record<TraceRepairPassResult["status"], RequirementTraceRepairOutcome["outcome"]>> = {
+  ok: "merged",
+  empty: "no_claims",
+  error: "errored",
+  timeout: "timeout",
+};
+
+/** #1044: build the bounded, sanitized `requirement_trace_repair` summary
+ * from the pass result (or the throw its fail-soft boundary caught) plus the
+ * gate facts. Never throws; every string that could carry transport/provider
+ * text is credential-masked, pattern-redacted, control-stripped and
+ * length-capped, and that text is diagnostics-only — it must never reach the
+ * rendered markdown. */
+export function traceRepairOutcomeSummary(input: {
+  attempted: boolean;
+  /** `null` when the caller wants the outcome derived below (attempted runs);
+   * for `attempted: false` the caller passes the gate verdict directly. */
+  outcome: RequirementTraceRepairOutcome["outcome"] | null;
+  /** For attempted runs the caller passes the ids STILL missing after the
+   * merge (post-merge coverage), so `missing_ids` means "ids the pass did
+   * not fill" — a partial merge keeps only its leftover ids. */
+  missingIds: readonly string[];
+  /** `null` when the call never ran to completion (the boundary caught). */
+  result?: TraceRepairPassResult | null;
+  /** Set when the try/catch in review.ts caught. */
+  thrownError?: unknown;
+  /** Configured credentials (#1044 review follow-up): masked before any
+   * error text is persisted — transport/provider errors are untrusted
+   * external data and must pass the secret-redaction boundary. */
+  secrets?: readonly (string | null | undefined)[];
+}): RequirementTraceRepairOutcome {
+  const secrets = input.secrets ?? [];
+  const sanitizeId = (id: string): string => id.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_TRACE_REPAIR_SUMMARY_ID_CHARS);
+  // #1044 review follow-up: mask configured credentials BEFORE any
+  // truncation (partial-secret rule), then apply the shared pattern
+  // redactor, then control-strip and code-point-cap. Credential-shaped
+  // transport text must never reach the persisted artifact.
+  const cleanError = (text: string): string =>
+    Array.from(redactText(maskKnownSecrets(text.replace(/[\x00-\x1f\x7f]/g, " "), secrets)))
+      .slice(0, MAX_TRACE_REPAIR_SUMMARY_ERROR_CHARS)
+      .join("");
+  const missing_ids: string[] = [];
+  for (const id of input.missingIds) {
+    const clean = sanitizeId(id);
+    if (clean !== "" && !missing_ids.includes(clean)) missing_ids.push(clean);
+    if (missing_ids.length >= MAX_TRACE_REPAIR_SUMMARY_IDS) break;
+  }
+  if (!input.attempted) {
+    return {
+      attempted: false,
+      outcome: input.outcome ?? (missing_ids.length === 0 ? "no_missing_ids" : "skipped_by_gate"),
+      missing_ids,
+      claims: 0,
+    };
+  }
+  if (input.result === null || input.result === undefined) {
+    const cause = input.thrownError;
+    const message = cause instanceof Error ? cause.message : typeof cause === "string" && cause !== "" ? cause : null;
+    return {
+      attempted: true,
+      outcome: "errored",
+      missing_ids,
+      claims: 0,
+      status: "error",
+      error_kind: "thrown",
+      error: message === null ? null : cleanError(message),
+    };
+  }
+  return {
+    attempted: true,
+    outcome: STATUS_TO_OUTCOME[input.result.status] ?? "errored",
+    missing_ids,
+    claims: input.result.claims.length,
+    status: input.result.status,
+    error_kind: input.result.errorKind,
+    error: input.result.error === null ? null : cleanError(input.result.error),
+    diff_clipped: input.result.diffClipped,
+  };
 }

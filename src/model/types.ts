@@ -272,6 +272,7 @@ export type VerdictParseErrorKind =
   | "invalid_verdict"
   | "empty_markdown"
   | "flattened_markdown"
+  | "known_secret_in_content"
   | "empty_completion";
 
 export class VerdictParseFailure extends Error {

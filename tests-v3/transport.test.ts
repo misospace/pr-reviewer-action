@@ -11,7 +11,7 @@ import {
 } from "../src/transport/http.js";
 import { KNOWN_SECRET_REDACTED, maskKnownSecrets, redactText } from "../src/context/redact.js";
 import { parseStatedTokenCap, runChatRequest } from "../src/transport/transport.js";
-import { ExtraHeadersError } from "../src/transport/headers.js";
+import { callKnownSecrets, ExtraHeadersError } from "../src/transport/headers.js";
 import { startMockServer, sseResponse } from "./helpers.js";
 import type { TransportWirePayload } from "../src/model/types.js";
 
@@ -185,6 +185,61 @@ test("the api key rides only the auth headers — never the URL, body, or failur
   if (refused.status !== "failure") return;
   assert.equal(refused.failure.kind, "network");
   assert.ok(!refused.failure.message.includes(key), "the network-failure message must not carry the key");
+});
+
+test("#1037: configured extra-header VALUES are credentials too — only the wire headers, never the URL, body, or a secret-aware failure detail", async () => {
+  // Same durable invariant as above, extended to the surface this input adds:
+  // an `ai-extra-headers` value routinely carries a proxy/gateway token, so it
+  // joins the per-call known-secret list (`callKnownSecrets`) and must ride
+  // ONLY its request header — never the request URL, never the serialized
+  // wire body, never a locally generated diagnostic that masks against that
+  // list.
+  const key = "sk-secret-7f4c9a1d-no-leak";
+  const canary = "gw-8f2a1c9d3b7e4a10";
+  const extraHeaders = { "x-gateway-credential": canary };
+  const secrets = callKnownSecrets(key, extraHeaders);
+
+  for (const apiFormat of ["openai", "anthropic"] as const) {
+    const seenUrls: string[] = [];
+    const server = await startMockServer((req, body, res) => {
+      seenUrls.push(req.url ?? "");
+      assert.ok(!body.includes(canary), "the wire body must not carry the header value");
+      res.statusCode = 200;
+      res.end(apiFormat === "openai"
+        ? '{"id":"1","choices":[{"message":{"content":"hi"},"finish_reason":"stop"}]}'
+        : '{"id":"m1","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}');
+    });
+    try {
+      const outcome = await runChatRequest({
+        baseUrl: server.url,
+        apiFormat,
+        payload: apiFormat === "openai"
+          ? payload({ model: "m", stream: false })
+          : ({ endpointPath: "/messages", body: { model: "m", stream: false, max_tokens: 8 } } as unknown as TransportWirePayload),
+        apiKey: key,
+        anthropicVersion: "2023-06-01",
+        extraHeaders,
+        requestTimeoutSec: 5,
+        connectTimeoutSec: 5,
+      });
+      assert.equal(outcome.status, "ok");
+      // Positive control: the value WAS sent, and only as its request header.
+      const headers = server.requests.at(-1)!.headers;
+      assert.equal(headers["x-gateway-credential"], canary);
+      assert.ok(!seenUrls.at(-1)!.includes(canary), "the request URL must not carry the header value");
+      // The credential-aware failure detail stays clean even when the
+      // provider echoes the value back in an error body.
+      const leaky = new TransportFailure("http_status", "model endpoint returned HTTP 400", {
+        status: 400,
+        body: JSON.stringify({ error: { message: `upstream rejected the credential ${canary}` } }),
+      });
+      const detail = describeTransportFailure(leaky, { secrets });
+      assert.ok(!detail.includes(canary), detail);
+      assert.match(detail, /HTTP 400/);
+    } finally {
+      await server.close();
+    }
+  }
 });
 
 test("streamed responses reassemble through the transport", async () => {

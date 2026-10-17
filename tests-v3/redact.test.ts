@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import {
   KNOWN_SECRET_REDACTED,
   REDACTED_SOURCE,
+  containsKnownSecret,
   maskAndTruncateSource,
   maskDiagnostic,
   maskKnownSecrets,
+  maskKnownSecretsDeep,
   redactSourceText,
   redactSourceTextDetailed,
   redactText,
@@ -652,4 +654,146 @@ test("#882: describeTransportFailure fully removes configured keys 'E', 'R', 'A'
     assert.ok(!detail.includes(key), `key ${JSON.stringify(key)} survived: ${detail}`);
     assert.ok(detail.includes(KNOWN_SECRET_REDACTED), `expected the known-secret marker in: ${detail}`);
   }
+});
+
+test("#1037: maskKnownSecretsDeep preserves JSON structure — keys, array order, numbers, nesting", () => {
+  const body = JSON.parse('{"a":[1,"two",{"b":"three"}],"n":null,"f":1.5,"t":true}') as Record<string, unknown>;
+  const masked = maskKnownSecretsDeep(body, []) as Record<string, unknown>;
+  assert.equal(JSON.stringify(masked), JSON.stringify(body));
+});
+
+test("#1094: maskKnownSecretsDeep FAILS CLOSED at the depth cap — an escaped secret is not serialized back", () => {
+  // #252 boundary: the hostile shape itself. A configured value carrying `"`
+  // or `\` is JSON-ESCAPED inside the serialized subtree, so the earlier
+  // serialize-then-mask fallback never matched the literal substring and
+  // JSON-decoding the artifact recovered the secret. Both characters are fed
+  // here; a benign stand-in would pass with that fallback in place.
+  const QUOTED = 'gw-abc"def';
+  const BACKSLASHED = "gw-abc\\def";
+  let deep: Record<string, unknown> = { quote: QUOTED, slash: BACKSLASHED };
+  // MAX_MASK_DEPTH is 32: nest well past it from the top-level body.
+  for (let i = 0; i < 40; i++) deep = { nested: deep };
+  const masked = maskKnownSecretsDeep(deep, [QUOTED, BACKSLASHED]) as unknown;
+  const serialized = JSON.stringify(masked);
+  for (const secret of [QUOTED, BACKSLASHED]) {
+    assert.equal(serialized.includes(secret), false, `raw secret survived: ${serialized}`);
+    assert.equal(serialized.includes(JSON.stringify(secret).slice(1, -1)), false, `escaped secret survived: ${serialized}`);
+  }
+  // Fail closed: the over-deep subtree is replaced by the marker, not walked.
+  assert.ok(serialized.includes(KNOWN_SECRET_REDACTED), `expected the fail-closed marker: ${serialized}`);
+  // Nothing below the cap changed behavior: a shallow body still masks per leaf
+  // and preserves structure.
+  const shallow = { a: [`x ${QUOTED}`, { b: QUOTED }], n: 1 };
+  const shallowMasked = maskKnownSecretsDeep(shallow, [QUOTED, BACKSLASHED]) as Record<string, unknown>;
+  assert.deepEqual(shallowMasked, { a: [`x ${KNOWN_SECRET_REDACTED}`, { b: KNOWN_SECRET_REDACTED }], n: 1 });
+});
+
+test("#252 boundary: maskKnownSecretsDeep fed a body with an OWN __proto__ key keeps it an own property and never touches Object.prototype", () => {
+  // The hostile key ITSELF, not a benign stand-in: JSON.parse produces an own
+  // `__proto__` data property, and a naive `out[key] = ...` rebuild invokes the
+  // prototype setter instead — the key vanishes from the artifact and `out`'s
+  // prototype becomes provider-controlled data.
+  const CANARY = "gw-8f2a1c9d3b7e4a10";
+  const body = JSON.parse(`{"__proto__":{"leak":"credential ${CANARY} rejected","keep":1},"safe":"value"}`);
+  const masked = maskKnownSecretsDeep(body, [CANARY]) as Record<string, unknown>;
+  assert.equal(Object.prototype.hasOwnProperty.call(masked, "__proto__"), true, "the own key must survive the rebuild");
+  assert.equal(Object.getPrototypeOf(masked), Object.prototype, "the prototype must stay the plain-object one");
+  assert.equal((masked["__proto__"] as Record<string, unknown>).leak, `credential ${KNOWN_SECRET_REDACTED} rejected`);
+  assert.equal((masked["__proto__"] as Record<string, unknown>).keep, 1);
+  assert.equal(masked.safe, "value");
+  // The serialized artifact keeps the key (still valid JSON, same shape).
+  assert.match(JSON.stringify(masked), /"__proto__":\{"leak"/);
+  assert.equal(JSON.stringify(masked).includes(CANARY), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(Object.prototype, "leak"), false, "no pollution escaped");
+});
+
+test("#1094: maskKnownSecretsDeep masks a canary appearing as an object KEY (raw and encoded variants), preserves distinctness, and stays valid JSON", () => {
+  // The provider-controlled property NAME is an echo surface too: value-only
+  // masking left `{ "error": { "<credential>": "rejected" } }` persisting the
+  // credential in the key. Only secret-bearing keys change — benign keys stay
+  // byte-for-byte.
+  const CANARY = "gw-8f2a1c9d3b7e4a10";
+  const raw = JSON.parse(`{"error":{"${CANARY}":"rejected","keep":1},"safe":"value"}`) as Record<string, unknown>;
+  const maskedRaw = maskKnownSecretsDeep(raw, [CANARY]) as Record<string, unknown>;
+  const error = maskedRaw.error as Record<string, unknown>;
+  assert.equal(Object.hasOwn(error, CANARY), false, "the raw secret key must not survive");
+  assert.equal(error[KNOWN_SECRET_REDACTED], "rejected");
+  assert.equal(error.keep, 1, "sibling keys and values are untouched");
+  assert.equal(maskedRaw.safe, "value");
+  // The serialized artifact is still valid JSON and round-trips exactly.
+  const serializedRaw = JSON.stringify(maskedRaw);
+  assert.equal(serializedRaw.includes(CANARY), false, serializedRaw);
+  assert.ok(serializedRaw.includes(KNOWN_SECRET_REDACTED), serializedRaw);
+  assert.deepEqual(JSON.parse(serializedRaw), maskedRaw);
+
+  // Encoded variants are masked in keys too. The shared CANARY has no
+  // URL-significant characters (its encoded form IS itself), so the
+  // URL-encoded case uses a secret that actually encodes differently, and the
+  // base64 case uses the CANARY's own base64 form.
+  const spaced = "tok a&b";
+  const urlEncoded = encodeURIComponent(spaced);
+  const base64 = Buffer.from(CANARY, "utf8").toString("base64");
+  const encodedBody = { error: { [urlEncoded]: "rejected", [base64]: "also rejected", untouched: 1 } };
+  const maskedEncoded = maskKnownSecretsDeep(encodedBody, [spaced, CANARY]) as Record<string, unknown>;
+  const errorEncoded = maskedEncoded.error as Record<string, unknown>;
+  assert.equal(Object.hasOwn(errorEncoded, urlEncoded), false);
+  assert.equal(Object.hasOwn(errorEncoded, base64), false);
+  assert.equal(errorEncoded[KNOWN_SECRET_REDACTED], "also rejected", "distinct masked keys collide deterministically on the marker");
+  assert.equal(errorEncoded.untouched, 1);
+  const serializedEncoded = JSON.stringify(maskedEncoded);
+  assert.equal(serializedEncoded.includes(urlEncoded), false, serializedEncoded);
+  assert.equal(serializedEncoded.includes(base64), false, serializedEncoded);
+  assert.deepEqual(JSON.parse(serializedEncoded), maskedEncoded);
+
+  // Distinctness is preserved deterministically: the marker splices into the
+  // surviving key material, so two different secret-bearing keys stay
+  // distinguishable and a benign key is never merged with a masked one.
+  const distinct = maskKnownSecretsDeep(
+    { [`a${CANARY}`]: 1, [`${CANARY}a`]: 2, plain: 3 },
+    [CANARY],
+  ) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(distinct).sort(), [`a${KNOWN_SECRET_REDACTED}`, KNOWN_SECRET_REDACTED + "a", "plain"].sort());
+  assert.deepEqual(distinct, { [`a${KNOWN_SECRET_REDACTED}`]: 1, [`${KNOWN_SECRET_REDACTED}a`]: 2, plain: 3 });
+});
+
+test("#1094: containsKnownSecret detects raw, URL-encoded, and base64 variants — the same set maskKnownSecrets replaces", () => {
+  const secret = "gw-8f2a1c9d3b7e4a10";
+  const secrets = [secret];
+  assert.equal(containsKnownSecret(`gateway audit ${secret} ok`, secrets), true, "raw");
+  assert.equal(containsKnownSecret(`gateway audit ${encodeURIComponent(secret)} ok`, secrets), true, "url-encoded");
+  assert.equal(containsKnownSecret(`gateway audit ${Buffer.from(secret, "utf8").toString("base64")} ok`, secrets), true, "base64");
+  assert.equal(containsKnownSecret(secret.repeat(2), secrets), true, "repeated");
+  assert.equal(containsKnownSecret("no credential anywhere in here", secrets), false, "no false positive");
+  // Empty/absent secrets and empty text never match.
+  assert.equal(containsKnownSecret(secret, []), false);
+  assert.equal(containsKnownSecret(secret, ["", null, undefined]), false);
+  assert.equal(containsKnownSecret("", secrets), false);
+  // Consistency contract above the floor: anything the masker would replace
+  // is detected, and the masker only replaces what is detected.
+  const text = `echo ${secret} and ${encodeURIComponent(secret)}`;
+  assert.equal(maskKnownSecrets(text, secrets) !== text, true);
+  assert.equal(containsKnownSecret(maskKnownSecrets(text, secrets), secrets), false, "masked output is clean");
+});
+
+test("#252 boundary: containsKnownSecret's content floor and variant set, fed the marker character itself", () => {
+  // The documented floor: a sub-8-character configured value is
+  // prose-indistinguishable ("k" masks every k in "Looks fine.") and is
+  // handled by the masking surfaces instead — the CONTENT gate refuses only
+  // credential-shaped values, exactly where redactText's generic heuristic
+  // draws its own `{8,}` line. The sub-floor RAW form is excluded, but its
+  // ENCODED forms stay in: a short value with URL-significant characters is
+  // distinctive once encoded, and an encoded echo is a real reflection.
+  assert.equal(containsKnownSecret("value 7 and more", ["7"]), false, "raw below the floor");
+  assert.equal(containsKnownSecret("Lo k fine", ["k"]), false, "raw below the floor");
+  assert.equal(containsKnownSecret("a b&c prose", ["a b&c"]), false, "raw below the floor");
+  assert.equal(containsKnownSecret("echo a%20b%26c here", ["a b&c"]), true, "url-encoded sub-floor variant");
+  assert.equal(containsKnownSecret(`echo ${Buffer.from("a b&c", "utf8").toString("base64")} here`, ["a b&c"]), true, "base64 sub-floor variant");
+  assert.equal(containsKnownSecret("value 12345678 embedded", ["12345678"]), true, "at the floor");
+  assert.equal(containsKnownSecret("value 1234567 embedded", ["1234567"]), false, "raw one under the floor");
+  assert.equal(containsKnownSecret("value 1234567%20x embedded", ["1234567 "]), true, "encoded one under the floor");
+  // Long secrets match in every variant, including the marker's own characters.
+  const long = "gw-8f2a1c9d3b7e4a10";
+  assert.equal(containsKnownSecret("⟦•⟧ residue", ["⟦"]), false, "below the floor");
+  assert.equal(containsKnownSecret(`x ${long} y`, [long]), true);
+  assert.equal(containsKnownSecret("clean text", ["⟦•⟧"]), false);
 });

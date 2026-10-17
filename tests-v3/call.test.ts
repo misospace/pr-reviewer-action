@@ -677,3 +677,51 @@ test("#1037: a profile without extraHeaders sends no extraHeaders key (unchanged
   });
   assert.equal(hadKey, false);
 });
+
+test("#1037: an unusable response echoing a header VALUE masks it in the thrown message AND the diagnostics record", async () => {
+  // Two distinct response-body surfaces of one tier call, both fed a body that
+  // quotes the configured gateway credential: the in-body error surfaced by
+  // the verdict parser, and the provider-controlled `finish_reason` the
+  // diagnostics record keeps. The canary is unframed, so `redactText`'s
+  // heuristics cannot be what removes it.
+  const canary = "gw-8f2a1c9d3b7e4a10";
+  const extraHeaders = { "x-gateway-credential": canary };
+  const unusable = (): ChatRequestOutcome => ({
+    status: "ok",
+    raw: {
+      choices: [{ message: { content: "not json at all" }, finish_reason: `stop (credential ${canary})` }],
+      usage: { completion_tokens: 5 },
+    },
+    response: {
+      id: "", object: "chat.completion", model: "m", content: "", toolCalls: [],
+      finishReason: `stop (credential ${canary})`, usage: null, error: undefined,
+    },
+  });
+  const outcome = await callModelTier(profile({ extraHeaders, retries: 1 }), CONTEXT, {
+    sleep: async () => {},
+    call: async () => unusable(),
+  });
+  assert.equal(outcome.status, "parse_exhausted");
+  if (outcome.status !== "parse_exhausted") return;
+  assert.equal(outcome.failure.message.includes(canary), false, outcome.failure.message);
+  assert.equal(JSON.stringify(outcome.diagnostics?.record).includes(canary), false, JSON.stringify(outcome.diagnostics?.record));
+  assert.match(String(outcome.diagnostics?.record.finish_reason), /⟦•⟧/);
+  assert.equal(outcome.diagnostics?.class, "malformed-json");
+
+  // The same body through the in-body-error path (`surfaceStreamError`).
+  const errorBody = await callModelTier(profile({ extraHeaders, retries: 1 }), CONTEXT, {
+    sleep: async () => {},
+    call: async (): Promise<ChatRequestOutcome> => ({
+      status: "ok",
+      raw: { error: { message: `upstream rejected the credential ${canary}` } },
+      response: {
+        id: "", object: "chat.completion", model: "m", content: "", toolCalls: [],
+        finishReason: "", usage: null, error: { message: `upstream rejected the credential ${canary}` },
+      },
+    }),
+  });
+  assert.equal(errorBody.status, "parse_exhausted");
+  if (errorBody.status !== "parse_exhausted") return;
+  assert.equal(errorBody.failure.message.includes(canary), false, errorBody.failure.message);
+  assert.match(errorBody.failure.message, /Model endpoint returned an error/);
+});

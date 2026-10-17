@@ -749,3 +749,71 @@ test("#762: a finding without the new keys serializes without them (parity)", ()
   assert.equal("suggestion" in finding, false);
   assert.equal("agentPrompt" in finding, false);
 });
+
+// ---------------------------------------------------------------------------
+// #1094 review round 3 (blocker): fail-closed content gate
+// ---------------------------------------------------------------------------
+
+test("#1094: parseVerdictResponse FAILS CLOSED when the completion content embeds a configured secret", () => {
+  const secret = "gw-8f2a1c9d3b7e4a10";
+  // A perfectly VALID verdict whose published prose embeds the credential:
+  // masking would corrupt `review_markdown` for a short configured key, so
+  // the acceptance boundary refuses the response instead of publishing it.
+  const body = openaiResponse(JSON.stringify({ verdict: "approve", review_markdown: `## Review\nLooks fine; gateway audit ${secret}.` }));
+  assert.throws(
+    () => parseVerdictResponse(body, [secret]),
+    (error: unknown) => error instanceof VerdictParseFailure
+      && error.kind === "known_secret_in_content"
+      && error.emptyCompletion === false
+      && /configured credential/.test(error.message)
+      && !error.message.includes(secret),
+  );
+});
+
+test("#1094: the content gate covers content-part arrays and the URL-encoded variant", () => {
+  const secret = "gw-8f2a1c9d3b7e4a10";
+  // `extractContent` joins content-part items before the parse — the gate
+  // must evaluate the SAME joined text, so the encoded variant smuggled into
+  // a part is refused too.
+  const arrayBody = openaiResponse([
+    { type: "text", text: JSON.stringify({ verdict: "approve", review_markdown: `see ${encodeURIComponent(secret)}` }) },
+  ]);
+  assert.throws(
+    () => parseVerdictResponse(arrayBody, [secret]),
+    (error: unknown) => error instanceof VerdictParseFailure && error.kind === "known_secret_in_content",
+  );
+});
+
+test("#1094: the content gate does not fire on metadata-only echoes (other surfaces, other seams)", () => {
+  const secret = "gw-8f2a1c9d3b7e4a10";
+  const body = openaiResponse(JSON.stringify({ verdict: "approve", review_markdown: "## Review\nclean" }), {
+    system_fingerprint: `fp_${secret}`,
+    id: `chatcmpl-${secret}`,
+    metadata: { credential: secret },
+  });
+  // The metadata echo is the masking/projection surfaces' job (response-side
+  // masking, native-loop envelope projection); the content gate refuses only
+  // the content itself.
+  const verdict = parseVerdictResponse(body, [secret]);
+  assert.equal(verdict.verdict, "approve");
+});
+
+test("#1094: without secrets in scope the content gate is inert (v2-parity callers unchanged)", () => {
+  const secret = "gw-8f2a1c9d3b7e4a10";
+  const body = openaiResponse(JSON.stringify({ verdict: "approve", review_markdown: `mentions ${secret}` }));
+  assert.equal(parseVerdictResponse(body).verdict, "approve");
+});
+
+test("#1094: the content gate's documented floor — a prose-indistinguishable short key is never refused", () => {
+  // A one-character API key masks every `k` in "Looks fine." — refusing that
+  // would make the action unusable, so sub-8-character values are outside the
+  // content gate by contract (they stay masked on every non-content surface).
+  const shortBody = openaiResponse(JSON.stringify({ verdict: "approve", review_markdown: "## Review\nLooks fine." }));
+  assert.equal(parseVerdictResponse(shortBody, ["k"]).verdict, "approve");
+  const numbered = openaiResponse(JSON.stringify({ verdict: "approve", review_markdown: "## Review\nref 12345678 in prose." }));
+  assert.equal(parseVerdictResponse(numbered, ["1234567"]).verdict, "approve", "one under the floor");
+  assert.throws(
+    () => parseVerdictResponse(numbered, ["12345678", "1234567"]),
+    (error: unknown) => error instanceof VerdictParseFailure && error.kind === "known_secret_in_content",
+  );
+});
