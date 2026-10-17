@@ -525,8 +525,8 @@ test("#762: github reviewCommentFeedback keeps only exact +1/-1 reactions with a
     ],
   });
   assert.deepEqual(calls.map(({ method, url }) => [method, url]), [
-    ["GET", `${BASE}/repos/o/r/pulls/comments/1/reactions?per_page=100`],
-    ["GET", `${BASE}/repos/o/r/pulls/comments/2/reactions?per_page=100`],
+    ["GET", `${BASE}/repos/o/r/pulls/comments/1/reactions?per_page=100&page=1`],
+    ["GET", `${BASE}/repos/o/r/pulls/comments/2/reactions?per_page=100&page=1`],
   ]);
   assert.equal(calls.every(({ auth }) => auth === "Bearer test-token"), true);
   assert.deepEqual(await api.reviewCommentFeedback!([]), { supported: true, complete: true, records: [] });
@@ -580,6 +580,65 @@ test("#252: a reaction whose content carries a near-miss kind, a fence-closing b
     complete: true,
     records: [{ commentId: "1", content: "+1", login: "```\n<!-- comment -->" }],
   });
+});
+
+test("#762: a full first reaction page is followed by more pages until a short page completes the read", async () => {
+  const fullPage = Array.from({ length: 100 }, (_, i) => ({ content: "-1", user: { login: `user-${i}` } }));
+  const { fetchImpl, calls } = recorder([
+    [`GET ${BASE}/repos/o/r/pulls/comments/1/reactions?per_page=100&page=2`, 200, [
+      { content: "-1", user: { login: "late-actor" } },
+    ]],
+    [`GET ${BASE}/repos/o/r/pulls/comments/1/reactions`, 200, fullPage],
+  ]);
+  const api = github(fetchImpl);
+  const result = await api.reviewCommentFeedback!(["1"]);
+  assert.equal(result.supported, true);
+  assert.equal(result.complete, true);
+  assert.deepEqual(result.records.slice(0, 2), [
+    { commentId: "1", content: "-1", login: "user-0" },
+    { commentId: "1", content: "-1", login: "user-1" },
+  ]);
+  assert.deepEqual(result.records.at(-1), { commentId: "1", content: "-1", login: "late-actor" });
+  assert.equal(result.records.length, 101);
+  assert.deepEqual(calls.map(({ url }) => url), [
+    `${BASE}/repos/o/r/pulls/comments/1/reactions?per_page=100&page=1`,
+    `${BASE}/repos/o/r/pulls/comments/1/reactions?per_page=100&page=2`,
+  ]);
+});
+
+test("#762: a full final reaction page hits the cap and degrades to complete:false with the records read", async () => {
+  const fullPage = Array.from({ length: 100 }, (_, i) => ({ content: "+1", user: { login: `user-${i}` } }));
+  const { fetchImpl, calls } = recorder([
+    [`GET ${BASE}/repos/o/r/pulls/comments/1/reactions`, 200, fullPage],
+  ]);
+  const result = await github(fetchImpl).reviewCommentFeedback!(["1"]);
+  assert.deepEqual(result, { supported: true, complete: false, records: [
+    ...fullPage, ...fullPage, ...fullPage,
+  ].map((row) => ({ commentId: "1", content: "+1" as const, login: row.user.login })) });
+  assert.deepEqual(calls.map(({ url }) => url), [
+    `${BASE}/repos/o/r/pulls/comments/1/reactions?per_page=100&page=1`,
+    `${BASE}/repos/o/r/pulls/comments/1/reactions?per_page=100&page=2`,
+    `${BASE}/repos/o/r/pulls/comments/1/reactions?per_page=100&page=3`,
+  ]);
+});
+
+test("#762: a later reaction page failing keeps the earlier pages' records and reports complete:false", async () => {
+  const fullPage = Array.from({ length: 100 }, (_, i) => ({ content: "-1", user: { login: `user-${i}` } }));
+  const statuses = recorder([
+    [`GET ${BASE}/repos/o/r/pulls/comments/1/reactions?per_page=100&page=2`, 500, { message: "nope" }],
+    [`GET ${BASE}/repos/o/r/pulls/comments/1/reactions`, 200, fullPage],
+  ]);
+  const failing = recorder([[`GET ${BASE}/repos/o/r/pulls/comments/1/reactions`, 200, fullPage]]);
+  const thrown: FetchLike = async (input, init) => {
+    if (String(input).includes("page=2")) throw new Error("transport down");
+    return failing.fetchImpl(input, init);
+  };
+  for (const [label, fetchImpl] of [["status", statuses.fetchImpl], ["thrown", thrown]] as Array<[string, FetchLike]>) {
+    const result = await github(fetchImpl).reviewCommentFeedback!(["1"]);
+    assert.equal(result.complete, false, `${label}: an unusable later page cannot claim completeness`);
+    assert.equal(result.records.length, 100, `${label}: the records already read are kept`);
+    assert.deepEqual(result.records[0], { commentId: "1", content: "-1", login: "user-0" });
+  }
 });
 
 test("#762: forgejo reviewCommentFeedback degrades explicitly with zero requests", async () => {

@@ -1430,6 +1430,61 @@ test("#762: the bot's own reaction never suppresses, and a 👍 never does eithe
   assert.ok(liked.messages.some((line) => line.includes("0 trusted rejection(s)")));
 });
 
+test("#762: an unresolvable authenticated identity authorizes nobody — the bot-self exclusion is required proof", async () => {
+  for (const [label, identityOverride] of [
+    ["null-identity", undefined],
+    ["throwing-identity", "throws"],
+  ] as Array<[string, "throws" | undefined]>) {
+    const api = feedbackApi({
+      prior: { id: 501, ...PRIOR },
+      records: [{ commentId: "501", content: "-1", login: "maintainer" }],
+      // A permission read that WOULD authorize this actor: only the missing
+      // identity proof must stand between the reaction and suppression.
+      permissions: { maintainer: { permission: "admin", roleName: "", subject: "absent" } },
+      identity: null,
+    });
+    if (identityOverride === "throws") {
+      api.authenticatedIdentity = async () => { throw new Error("identity unavailable"); };
+    }
+    const { body, messages } = await publishActionable(api);
+    assert.ok(body.includes("```suggestion") && body.includes("REPL"), `${label}: nothing is suppressed`);
+    assert.ok(messages.some((line) => line.includes("0 trusted rejection(s)")), `${label}: ${messages.join("\n")}`);
+    assert.deepEqual(api.permissionLookups, [], `${label}: nobody is verified without the exclusion proof`);
+    assert.ok(messages.some((line) => line.includes("usefulness feedback")), `${label}: the read itself still happened`);
+  }
+});
+
+test("#762: the reacting bot's own login is excluded by its resolved identity, and a distinct identity still suppresses", async () => {
+  // The bot's own 👎 — its identity resolves to the reacting login, so the
+  // reaction is the publisher's own and never a rejection signal, even though
+  // its permission would pass the collaborator gate.
+  const own = feedbackApi({
+    prior: { id: 501, ...PRIOR },
+    records: [{ commentId: "501", content: "-1", login: "ci-bot" }],
+    permissions: { "ci-bot": { permission: "admin", roleName: "", subject: "absent" } },
+    identity: "ci-bot",
+  });
+  const selfRejected = await publishActionable(own);
+  assert.ok(selfRejected.body.includes("```suggestion"));
+  assert.ok(selfRejected.messages.some((line) => line.includes("0 trusted rejection(s)")));
+
+  // A distinct identity leaves the trusted-👍 suppression intact end to end,
+  // with the identity read made at most once for the whole run.
+  let identityCalls = 0;
+  const other = feedbackApi({
+    prior: { id: 501, ...PRIOR },
+    records: [{ commentId: "501", content: "-1", login: "maintainer" }],
+    permissions: { maintainer: { permission: "write", roleName: "", subject: "absent" } },
+    identity: "ci-bot",
+  });
+  const resolved = other.authenticatedIdentity.bind(other);
+  other.authenticatedIdentity = async () => { identityCalls += 1; return resolved(); };
+  const suppressed = await publishActionable(other);
+  assert.equal(suppressed.body.includes("```suggestion"), false);
+  assert.ok(suppressed.messages.some((line) => line.includes("1 trusted rejection(s)")));
+  assert.equal(identityCalls, 1);
+});
+
 test("#762: the feedback read is fail-open — an unsupported, incomplete, or throwing read changes nothing", async () => {
   for (const feedback of ["unsupported", "incomplete", "throws"] as const) {
     const api = feedbackApi({

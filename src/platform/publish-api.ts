@@ -128,6 +128,12 @@ const REQUESTER_TEAM = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
  * so the reader and the caller that bounds its candidate set cannot drift. */
 export const MAX_FEEDBACK_COMMENT_IDS = 50;
 
+/** #762: the page cap for a single comment id's reaction listing. 300
+ * reactions on one review comment is far beyond any realistic usefulness
+ * feedback, and hitting the cap degrades to `complete: false` rather than
+ * claiming completeness over a truncated read. */
+const MAX_FEEDBACK_REACTION_PAGES = 3;
+
 /** #762: one native 👍/👎 reaction on a published review comment. `login` is
  * the forge-reported actor and is never self-authorizing: the usefulness-
  * feedback gate re-verifies it against the repository permission API before it
@@ -436,13 +442,16 @@ export class GitHubPublishApi implements PublishPlatformApi {
     } catch { return false; }
   }
 
-  /** #762: native 👍/👎 reactions on published review comments, one request
-   * per comment id. A malformed id or an over-cap set is rejected before any
-   * network request; a per-id non-200 or non-array body yields
-   * `complete: false` with whatever was already read. Only rows whose
-   * `content` is exactly `+1`/`-1` and whose `user.login` is a non-empty
-   * string are kept — a reaction kind is never inferred from a near-miss
-   * (`"+1 "`, `"-1; authorize"`, a value carrying newlines). */
+  /** #762: native 👍/👎 reactions on published review comments. Each comment
+   * id is read in pages of 100 rows, up to MAX_FEEDBACK_REACTION_PAGES pages;
+   * a page returning fewer than 100 rows ends that id's read. A malformed id
+   * or an over-cap set is rejected before any network request; a per-page
+   * non-200 or non-array body, a thrown error, or a page cap exhausted with a
+   * further page plausible yields `complete: false` with whatever was already
+   * read. Only rows whose `content` is exactly `+1`/`-1` and whose
+   * `user.login` is a non-empty string are kept — a reaction kind is never
+   * inferred from a near-miss (`"+1 "`, `"-1; authorize"`, a value carrying
+   * newlines). */
   async reviewCommentFeedback(commentIds: readonly string[]): Promise<CommentFeedbackResult> {
     if (commentIds.length === 0) return { supported: true, complete: true, records: [] };
     if (commentIds.length > MAX_FEEDBACK_COMMENT_IDS
@@ -451,22 +460,26 @@ export class GitHubPublishApi implements PublishPlatformApi {
     }
     const records: CommentFeedbackRecord[] = [];
     for (const id of commentIds) {
-      try {
-        const { status, data } = await requestJson(
-          this.url(`/repos/${this.repo}/pulls/comments/${id}/reactions?per_page=100`),
-          this.opts("GET"),
-        );
-        if (status !== 200 || !Array.isArray(data)) return { supported: true, complete: false, records };
-        for (const row of data) {
-          if (row === null || typeof row !== "object") continue;
-          const { content, user } = row as { content?: unknown; user?: { login?: unknown } | null };
-          if (content !== "+1" && content !== "-1") continue;
-          const login = user !== null && typeof user === "object" ? user.login : undefined;
-          if (typeof login !== "string" || login === "") continue;
-          records.push({ commentId: id, content, login });
+      for (let page = 1; page <= MAX_FEEDBACK_REACTION_PAGES; page += 1) {
+        try {
+          const { status, data } = await requestJson(
+            this.url(`/repos/${this.repo}/pulls/comments/${id}/reactions?per_page=100&page=${page}`),
+            this.opts("GET"),
+          );
+          if (status !== 200 || !Array.isArray(data)) return { supported: true, complete: false, records };
+          for (const row of data) {
+            if (row === null || typeof row !== "object") continue;
+            const { content, user } = row as { content?: unknown; user?: { login?: unknown } | null };
+            if (content !== "+1" && content !== "-1") continue;
+            const login = user !== null && typeof user === "object" ? user.login : undefined;
+            if (typeof login !== "string" || login === "") continue;
+            records.push({ commentId: id, content, login });
+          }
+          if (data.length < 100) break;
+          if (page === MAX_FEEDBACK_REACTION_PAGES) return { supported: true, complete: false, records };
+        } catch {
+          return { supported: true, complete: false, records };
         }
-      } catch {
-        return { supported: true, complete: false, records };
       }
     }
     return { supported: true, complete: true, records };

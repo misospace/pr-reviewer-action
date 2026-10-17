@@ -510,10 +510,14 @@ interface RejectionSnapshot {
  *
  * The whole read is FAIL-OPEN: any thrown error, an unsupported forge, an
  * incomplete enumeration, or an incomplete reaction read yields an empty key
- * set, i.e. exactly today's behavior (every prescription is posted). Nothing
- * here can skip, resolve, retire, or de-duplicate a finding, and nothing can
- * change the verdict. Reaction logins and comment bodies are never returned,
- * rendered, or logged — only counts are. */
+ * set, i.e. exactly today's behavior (every prescription is posted). The
+ * bot-self exclusion, however, is REQUIRED PROOF: if the authenticated
+ * identity cannot be resolved (absent seam, thrown read, or a non-login
+ * result), no reaction can be distinguished from the bot's own, so nobody is
+ * authorized and nothing is suppressed — a fail-open read with fail-closed
+ * trust. Nothing here can skip, resolve, retire, or de-duplicate a finding,
+ * and nothing can change the verdict. Reaction logins and comment bodies are
+ * never returned, rendered, or logged — only counts are. */
 async function readRejectedPrescriptions(
   api: PublishPlatformApi,
   marker: string,
@@ -570,7 +574,19 @@ async function readRejectedPrescriptions(
     for (const login of distinct) {
       if (!selfResolved) {
         selfResolved = true;
-        try { self = (await api.authenticatedIdentity?.()) ?? null; } catch { self = null; }
+        // Resolved at most once, and only because there is at least one
+        // distinct reacting login to authorize. An absent seam, a thrown
+        // read, or a non-login result makes the bot-self exclusion
+        // unprovable, so nobody is authorized.
+        try {
+          const identity = typeof api.authenticatedIdentity === "function"
+            ? await api.authenticatedIdentity()
+            : null;
+          self = typeof identity === "string" && identity.trim() !== "" ? identity : null;
+        } catch { self = null; }
+        if (self === null) {
+          return { keys: new Set<string>(), inspected: bounded.length, logins: distinct.length, trusted: 0, overCap: 0 };
+        }
       }
       // The bot's own reaction is never a rejection signal — it is the
       // publisher of the prescription, not a reviewer of it.
