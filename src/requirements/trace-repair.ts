@@ -27,6 +27,7 @@ import {
   MAX_TRACE_REPAIR_SUMMARY_IDS,
   type RequirementTraceRepairOutcome,
 } from "../enforcement/requirement-trace.js";
+import { maskKnownSecrets, redactText } from "../context/redact.js";
 import { extractSpecialistJson } from "../specialists/normalize.js";
 import { buildSpecialistPayload, type SpecialistPayload } from "../specialists/payload.js";
 import type { SpecialistRequestFn } from "../specialists/runner.js";
@@ -354,8 +355,9 @@ const STATUS_TO_OUTCOME: Partial<Record<TraceRepairPassResult["status"], Require
 /** #1044: build the bounded, sanitized `requirement_trace_repair` summary
  * from the pass result (or the throw its fail-soft boundary caught) plus the
  * gate facts. Never throws; every string that could carry transport/provider
- * text is control-stripped and length-capped, and that text is
- * diagnostics-only — it must never reach the rendered markdown. */
+ * text is credential-masked, pattern-redacted, control-stripped and
+ * length-capped, and that text is diagnostics-only — it must never reach the
+ * rendered markdown. */
 export function traceRepairOutcomeSummary(input: {
   attempted: boolean;
   /** `null` when the caller wants the outcome derived below (attempted runs);
@@ -369,9 +371,21 @@ export function traceRepairOutcomeSummary(input: {
   result?: TraceRepairPassResult | null;
   /** Set when the try/catch in review.ts caught. */
   thrownError?: unknown;
+  /** Configured credentials (#1044 review follow-up): masked before any
+   * error text is persisted — transport/provider errors are untrusted
+   * external data and must pass the secret-redaction boundary. */
+  secrets?: readonly (string | null | undefined)[];
 }): RequirementTraceRepairOutcome {
+  const secrets = input.secrets ?? [];
   const sanitizeId = (id: string): string => id.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_TRACE_REPAIR_SUMMARY_ID_CHARS);
-  const cleanError = (text: string): string => text.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, MAX_TRACE_REPAIR_SUMMARY_ERROR_CHARS);
+  // #1044 review follow-up: mask configured credentials BEFORE any
+  // truncation (partial-secret rule), then apply the shared pattern
+  // redactor, then control-strip and code-point-cap. Credential-shaped
+  // transport text must never reach the persisted artifact.
+  const cleanError = (text: string): string =>
+    Array.from(redactText(maskKnownSecrets(text.replace(/[\x00-\x1f\x7f]/g, " "), secrets)))
+      .slice(0, MAX_TRACE_REPAIR_SUMMARY_ERROR_CHARS)
+      .join("");
   const missing_ids: string[] = [];
   for (const id of input.missingIds) {
     const clean = sanitizeId(id);

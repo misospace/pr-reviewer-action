@@ -1393,17 +1393,23 @@ test("#1044: traceRepairOutcomeSummary maps pass statuses to summary outcomes", 
   assert.deepEqual(partial.missing_ids, ["req-2"]);
 });
 
-test("#1044: traceRepairOutcomeSummary sanitizes control characters and caps fields", () => {
+test("#1044: traceRepairOutcomeSummary sanitizes control characters, caps fields, and masks configured credentials", () => {
   const hostile = traceRepairOutcomeSummary({
     attempted: true,
     outcome: null,
     missingIds: ["req-a\n## forged", "req-`x`", "req-a"],
     result: repairResult("error", { errorKind: "transport", error: "line1\nAuthorization: Bearer k\r\n\x00tail" }),
+    secrets: ["k"],
   });
   assert.ok(!hostile.missing_ids.some((id) => /[\x00-\x1f\x7f`]/.test(id)), JSON.stringify(hostile.missing_ids));
   assert.deepEqual(hostile.missing_ids, ["req-a## forged", "req-x", "req-a"]);
   assert.ok(!/[\x00-\x1f\x7f]/.test(hostile.error ?? ""), JSON.stringify(hostile.error));
-  assert.match(hostile.error ?? "", /line1 Authorization: Bearer k\s+tail/);
+  // #1044 review follow-up: credential-shaped transport text must not
+  // survive into the persisted artifact — the configured secret value is
+  // masked (and the pattern redactor may also mask bearer-shaped text).
+  assert.doesNotMatch(hostile.error ?? "", /Bearer k/);
+  assert.match(hostile.error ?? "", /line1/);
+  assert.match(hostile.error ?? "", /tail/);
   // Caps: ids deduped and bounded at 48, each at 80 chars; error at 200.
   const many = Array.from({ length: 60 }, (_v, i) => `req-${i}`);
   const capped = traceRepairOutcomeSummary({ attempted: false, outcome: "skipped_by_gate", missingIds: many });
@@ -1413,6 +1419,28 @@ test("#1044: traceRepairOutcomeSummary sanitizes control characters and caps fie
   assert.equal(traceRepairOutcomeSummary({ attempted: false, outcome: "skipped_by_gate", missingIds: [longId] }).missing_ids[0]?.length, MAX_TRACE_REPAIR_SUMMARY_ID_CHARS);
   const longError = "e".repeat(500);
   assert.equal(traceRepairOutcomeSummary({ attempted: true, outcome: null, missingIds: [], result: repairResult("error", { error: longError }) }).error?.length, MAX_TRACE_REPAIR_SUMMARY_ERROR_CHARS);
+});
+
+test("#1044 review follow-up: a canary credential never reaches the persisted repair summary, on either error path", () => {
+  const canary = "sk-run-canary-secret";
+  const viaResult = traceRepairOutcomeSummary({
+    attempted: true,
+    outcome: null,
+    missingIds: [],
+    result: repairResult("error", { errorKind: "transport", error: `connect ECONNREFUSED Authorization: Bearer ${canary}` }),
+    secrets: [canary],
+  });
+  assert.ok(!JSON.stringify(viaResult).includes(canary), JSON.stringify(viaResult));
+  const viaThrow = traceRepairOutcomeSummary({
+    attempted: true,
+    outcome: null,
+    missingIds: [],
+    result: null,
+    thrownError: new Error(`x-api-key: ${canary}`),
+    secrets: [canary],
+  });
+  assert.ok(!JSON.stringify(viaThrow).includes(canary), JSON.stringify(viaThrow));
+  assert.equal(viaThrow.error_kind, "thrown");
 });
 
 test("#1044: a repair-pass failure note drives the repair wording on a missing-claim row", () => {

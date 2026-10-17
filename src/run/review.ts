@@ -1077,10 +1077,10 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     const missingTraceIds = missingTraceRequirementIds(repairTarget.requirement_coverage, traceScopeIds);
     const repairRequirements = missingTraceIds.length > 0 ? ledgerRequirementsById(ledgerValue, missingTraceIds) : [];
     if (missingTraceIds.length === 0) {
-      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "no_missing_ids", missingIds: missingTraceIds });
+      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "no_missing_ids", missingIds: missingTraceIds, secrets: [profiles.primary.apiKey] });
     } else if (!promptState.isDefault || analysisEngine === MODEL_UNAVAILABLE_ENGINE || !profiles.primary.baseUrl || !profiles.primary.model || repairRequirements.length === 0) {
       // The pass exists but its own gates kept it from running at all.
-      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "skipped_by_gate", missingIds: missingTraceIds });
+      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "skipped_by_gate", missingIds: missingTraceIds, secrets: [profiles.primary.apiKey] });
     } else {
       const rawTemp = (env.AI_TEMPERATURE ?? "").trim();
       const temperature = rawTemp === "" || Number.isNaN(Number(rawTemp)) ? null : Number(rawTemp);
@@ -1167,13 +1167,14 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       // some not) labels only the genuinely unfilled rows. For "no_claims"/
       // thrown nothing merged, so this equals the pre-run set; a full merge
       // leaves it empty.
-      traceRepairOutcome = traceRepairOutcomeSummary({
-        attempted: true,
-        outcome: null,
-        missingIds: missingTraceRequirementIds(repairTarget.requirement_coverage, traceScopeIds),
-        result: repaired,
-        thrownError: repaired === null ? repairThrow : undefined,
-      });
+traceRepairOutcome = traceRepairOutcomeSummary({
+attempted: true,
+outcome: null,
+missingIds: missingTraceRequirementIds(repairTarget.requirement_coverage, traceScopeIds),
+result: repaired,
+thrownError: repaired === null ? repairThrow : undefined,
+secrets: [profiles.primary.apiKey],
+});
     }
     if (traceRepairOutcome !== null) {
       artifact.requirement_trace_repair = traceRepairOutcome;
