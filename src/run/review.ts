@@ -1161,10 +1161,16 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
           log(`requirement trace: repair pass returned no claims (${repaired.status}${repaired.error ? `: ${repaired.error}` : ""})`);
         }
       }
+      // #1044 review follow-up: derive the summary's `missing_ids` from the
+      // POST-merge coverage — an id still missing after the pass is exactly
+      // the id the retry did not fill, so a partial merge (some ids filled,
+      // some not) labels only the genuinely unfilled rows. For "no_claims"/
+      // thrown nothing merged, so this equals the pre-run set; a full merge
+      // leaves it empty.
       traceRepairOutcome = traceRepairOutcomeSummary({
         attempted: true,
         outcome: null,
-        missingIds: missingTraceIds,
+        missingIds: missingTraceRequirementIds(repairTarget.requirement_coverage, traceScopeIds),
         result: repaired,
         thrownError: repaired === null ? repairThrow : undefined,
       });
@@ -1172,6 +1178,10 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     if (traceRepairOutcome !== null) {
       artifact.requirement_trace_repair = traceRepairOutcome;
     }
+  } else if (!requirementTraceEnabled && artifact !== null) {
+    // #1044 review follow-up: the feature is off, so any model-forged
+    // summary key must not survive into the persisted artifact.
+    delete artifact.requirement_trace_repair;
   }
 
   // ── Enforcement (review.sh) + requirement coverage ───────────────────

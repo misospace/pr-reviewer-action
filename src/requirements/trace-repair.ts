@@ -340,8 +340,10 @@ export async function runRequirementTraceRepairPass(input: TraceRepairPassInput)
   return { claims: parsed.claims, status: "ok", errorKind: null, error: null, diffClipped };
 }
 
-/** #959 status → #1044 summary outcome: a successful pass means the merged
- * claims exist, so the missing rows must never say the repair also failed. */
+/** #959 status → #1044 summary outcome. "merged" means the pass completed
+ * with claims — how many ids they filled is visible in the post-merge
+ * `missing_ids`, not in the outcome value; the note guard keys off
+ * `attempted` + post-merge membership, never off the outcome. */
 const STATUS_TO_OUTCOME: Partial<Record<TraceRepairPassResult["status"], RequirementTraceRepairOutcome["outcome"]>> = {
   ok: "merged",
   empty: "no_claims",
@@ -359,6 +361,9 @@ export function traceRepairOutcomeSummary(input: {
   /** `null` when the caller wants the outcome derived below (attempted runs);
    * for `attempted: false` the caller passes the gate verdict directly. */
   outcome: RequirementTraceRepairOutcome["outcome"] | null;
+  /** For attempted runs the caller passes the ids STILL missing after the
+   * merge (post-merge coverage), so `missing_ids` means "ids the pass did
+   * not fill" — a partial merge keeps only its leftover ids. */
   missingIds: readonly string[];
   /** `null` when the call never ran to completion (the boundary caught). */
   result?: TraceRepairPassResult | null;

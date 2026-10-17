@@ -1663,10 +1663,13 @@ export const MAX_TRACE_REPAIR_SUMMARY_ERROR_CHARS = 200;
  * to the persisted artifact as `requirement_trace_repair` and handed to
  * `validateRequirementTrace` so the published section can distinguish "the
  * reviewer never emitted a claim" from "the bounded repair pass ran and
- * failed". Diagnostics-only: nothing here changes a verdict, and the `error`
- * text never reaches the rendered markdown. Defined here (not in
- * `requirements/trace-repair.ts`) because that module already imports from
- * this one — an import in the other direction would cycle. */
+ * failed". For attempted runs `missing_ids` holds the ids STILL missing after
+ * the pass (recomputed from post-merge coverage), so membership there is
+ * exactly "the retry did not fill this id". Diagnostics-only: nothing here
+ * changes a verdict, and the `error` text never reaches the rendered
+ * markdown. Defined here (not in `requirements/trace-repair.ts`) because that
+ * module already imports from this one — an import in the other direction
+ * would cycle. */
 export interface RequirementTraceRepairOutcome {
   attempted: boolean;
   outcome: "no_missing_ids" | "skipped_by_gate" | "no_claims" | "errored" | "timeout" | "merged";
@@ -1713,7 +1716,7 @@ export function validateRequirementTrace(
     ciState?: string | null | undefined;
     /** #1044: the bounded #959 repair-pass summary, when the pass was in
      * scope for this run — lets a `claim === undefined` row record that the
-     * repair also ran (and still produced nothing) for its id. */
+     * repair also ran (and still left this id unclaimed). */
     traceRepair?: RequirementTraceRepairOutcome | undefined;
   } = {},
 ): RequirementTraceArtifact {
@@ -1821,13 +1824,15 @@ export function validateRequirementTrace(
       test = [];
       reason = "";
       notes.push("not-traced-by-reviewer");
-      // #1044: when the bounded repair pass ran and still produced nothing
-      // for this id, record that so the render can distinguish "the reviewer
-      // never emitted a claim" from "the retry also failed". Never fires for
-      // "merged" — merged ids have claims, so `claim !== undefined` there.
+      // #1044: the summary's `missing_ids` are the ids the pass did NOT fill,
+      // recomputed from the POST-merge coverage — an id here (on an attempted
+      // run) is exactly an id the retry also left unclaimed, so the render can
+      // distinguish "the reviewer never emitted a claim" from "the bounded
+      // repair pass ran and failed for this id". Non-attempted summaries
+      // (gate kept the pass off) never carry the note.
       if (
         context.traceRepair !== undefined
-        && (context.traceRepair.outcome === "no_claims" || context.traceRepair.outcome === "errored" || context.traceRepair.outcome === "timeout")
+        && context.traceRepair.attempted === true
         && context.traceRepair.missing_ids.includes(traceRepairIdKey(entry.id))
       ) {
         notes.push("trace-repair-ran-no-claims");

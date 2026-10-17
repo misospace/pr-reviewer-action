@@ -1386,6 +1386,11 @@ test("#1044: traceRepairOutcomeSummary maps pass statuses to summary outcomes", 
   assert.equal(merged.status, "ok");
   assert.equal(merged.error_kind, null);
   assert.equal(merged.error, null);
+  // For attempted runs the caller passes the POST-merge ids, so `missing_ids`
+  // means "ids the pass did not fill" — a partial merge keeps the leftover id.
+  const partial = traceRepairOutcomeSummary({ ...base, missingIds: ["req-2"], result: repairResult("ok", { claims: [{ requirement_id: "req-1" }] }) });
+  assert.equal(partial.outcome, "merged");
+  assert.deepEqual(partial.missing_ids, ["req-2"]);
 });
 
 test("#1044: traceRepairOutcomeSummary sanitizes control characters and caps fields", () => {
@@ -1414,7 +1419,10 @@ test("#1044: a repair-pass failure note drives the repair wording on a missing-c
   const workspace = makeWorkspace();
   try {
     const ledger = ledgerWith([{ id: "req-1", text: "must validate X", kind: "acceptance" }]);
-    for (const outcome of ["no_claims", "errored", "timeout"] as const) {
+    // The note keys off `attempted` + post-merge membership, never the
+    // outcome value — "merged" with a still-missing id (a partial merge)
+    // IS a row the pass ran for and did not fill.
+    for (const outcome of ["no_claims", "errored", "timeout", "merged"] as const) {
       const trace = validateRequirementTrace([], ledger, workspace, undefined, {
         traceRepair: { attempted: true, outcome, missing_ids: ["req-1"], claims: 0, status: "empty", error_kind: null, error: null },
       });
@@ -1429,10 +1437,9 @@ test("#1044: a repair-pass failure note drives the repair wording on a missing-c
     });
     assert.ok(!other.rows[0]?.notes.includes("trace-repair-ran-no-claims"));
     assert.doesNotMatch(renderRequirementTraceMarkdown(other), /bounded repair pass/);
-    // "merged" and an absent summary keep the original wording — merged ids
-    // have claims, so the row is not missing anyway; this pins the guard.
+    // Non-attempted summaries never carry the note, even when the id is in
+    // their missing_ids (the gate kept the pass off — nobody retried).
     for (const traceRepair of [
-      { attempted: true, outcome: "merged" as const, missing_ids: ["req-1"], claims: 1 },
       { attempted: false, outcome: "skipped_by_gate" as const, missing_ids: ["req-1"], claims: 0 },
       { attempted: false, outcome: "no_missing_ids" as const, missing_ids: [], claims: 0 },
     ]) {
@@ -1445,6 +1452,33 @@ test("#1044: a repair-pass failure note drives the repair wording on a missing-c
     // No summary at all: unchanged behavior.
     const absent = validateRequirementTrace([], ledger, workspace);
     assert.doesNotMatch(renderRequirementTraceMarkdown(absent), /bounded repair pass/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1044: a partial merge leaves the still-missing row noted, the filled row not", () => {
+  const workspace = makeWorkspace();
+  try {
+    // Two requirements, the pass returned ok with a claim for req-2 only:
+    // the post-merge coverage carries req-2's claim, req-1 is still absent.
+    const coverage = [
+      { requirement_id: "req-2", disposition: "met", enforcement: [{ file: "src/real.ts", line: 1 }], test: [{ file: "tests/real.test.ts", line: 1 }], reason: "filled by the repair pass" },
+    ];
+    const ledger = ledgerWith([
+      { id: "req-1", text: "must validate X", kind: "acceptance" },
+      { id: "req-2", text: "must validate Y", kind: "acceptance" },
+    ]);
+    const trace = validateRequirementTrace(coverage, ledger, workspace, undefined, {
+      traceRepair: { attempted: true, outcome: "merged", missing_ids: ["req-1"], claims: 1, status: "ok" },
+    });
+    const byId = new Map(trace.rows.map((row) => [row.requirement_id, row]));
+    assert.ok(byId.get("req-1")?.notes.includes("not-traced-by-reviewer"));
+    assert.ok(byId.get("req-1")?.notes.includes("trace-repair-ran-no-claims"));
+    assert.equal(byId.get("req-2")?.disposition, "met");
+    assert.ok(!byId.get("req-2")?.notes.includes("trace-repair-ran-no-claims"));
+    const md = renderRequirementTraceMarkdown(trace);
+    assert.match(md, /req-1` — \*\*unverifiable\*\* \(the reviewer reported no trace for this requirement, and a bounded repair pass also returned no usable claim/);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
