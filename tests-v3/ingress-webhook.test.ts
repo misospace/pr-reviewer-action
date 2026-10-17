@@ -471,7 +471,10 @@ test("size cap: after a 413 the same server still answers a valid request with 2
 // the delivery onto the GitHub-shaped envelope before normalizeForgejoEvent
 // runs. These drive that projection end-to-end.
 
-function makeNativePrPayload(action: string): Record<string, unknown> {
+function makeNativePrPayload(
+  action: string,
+  prExtras: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     action,
     repository: { full_name: "org/repo" },
@@ -481,6 +484,7 @@ function makeNativePrPayload(action: string): Record<string, unknown> {
       head: { sha: HEAD_SHA, repo: { full_name: "org/repo" } },
       base: { sha: BASE_SHA, repo: { full_name: "org/repo" } },
       user: { login: "octo" },
+      ...prExtras,
     },
     sender: { login: "octo" },
   };
@@ -536,11 +540,11 @@ test("native: pull_request + action 'synchronized' (full PR object) → 202 sync
   assert.equal(h.events[0]!.baseSha, BASE_SHA);
 });
 
-test("native: older pull_request_sync header forces synchronize regardless of the payload action → 202 synchronize", async (t) => {
+test("native: older pull_request_sync header + a synchronized action → 202 synchronize", async (t) => {
   const h = await startTestHandler();
   t.after(() => h.close());
-  // The payload says "opened", but the ungrouped header forces the kind.
-  const body = JSON.stringify(makeNativePrPayload("opened"));
+  // The hint is honored only because the SIGNED action authorizes it.
+  const body = JSON.stringify(makeNativePrPayload("synchronized"));
   const res = await postTyped(h.url, { event: "pull_request_sync", body, signature: sign(body) });
   assert.equal(res.status, 202);
   assert.deepEqual(JSON.parse(res.text), { status: "accepted", kind: "synchronize" });
@@ -617,4 +621,145 @@ test("native: issue_comment + pull_request_comment type, top-level pull_request 
   assert.equal(h.events[0]!.kind, "follow_up");
   assert.equal(h.events[0]!.prNumber, 7);
   assert.equal(h.events[0]!.eventReference, "55");
+});
+
+// ── 21. signed-replay regressions: the event headers are unauthenticated ────
+//
+// The HMAC in signature.ts covers the RAW BODY ONLY, so a captured delivery can
+// be replayed with IDENTICAL body bytes and an IDENTICAL signature while the
+// `X-Gitea-Event` / `X-Gitea-Event-Type` headers change. The signed body's own
+// action must stay authoritative: a hint may refine a projection the signed body
+// already authorizes and can never rewrite one (#1024). These post the SAME
+// body + signature under forged headers and assert the kind never changes into
+// a scheduleable/privileged one.
+
+const FORGED_SYNC_HEADERS: Array<{ event: string; eventType?: string }> = [
+  { event: "pull_request", eventType: "pull_request_sync" },
+  { event: "pull_request_sync" },
+  { event: "pull_request_sync", eventType: "pull_request_sync" },
+];
+
+test("replay: a signed closed body stays pr_merged/pr_closed under forged sync headers", async (t) => {
+  const h = await startTestHandler();
+  t.after(() => h.close());
+  const bodies: Array<{ body: string; kind: string }> = [
+    { body: JSON.stringify(makeNativePrPayload("closed", { merged: true })), kind: "pr_merged" },
+    { body: JSON.stringify(makeNativePrPayload("closed")), kind: "pr_closed" },
+  ];
+  let expected = 0;
+  for (const { body, kind } of bodies) {
+    const signature = sign(body);
+    for (const forged of FORGED_SYNC_HEADERS) {
+      const res = await postTyped(h.url, { ...forged, body, signature });
+      assert.equal(res.status, 202, `${forged.event}/${kind}`);
+      assert.deepEqual(JSON.parse(res.text), { status: "accepted", kind }, `${forged.event}/${kind}`);
+      expected += 1;
+      // The delivery stays terminal: a terminal kind never mints a review
+      // generation through dispatch (`shouldSchedule`).
+      const ev = h.events[expected - 1]!;
+      assert.equal(ev.kind, kind);
+      assert.notEqual(ev.kind, "synchronize", "a forged sync hint must never mint synchronize");
+      assert.equal(ev.prNumber, 7);
+      assert.equal(ev.headSha, HEAD_SHA);
+    }
+  }
+  assert.equal(h.events.length, expected);
+});
+
+test("replay: a signed synchronized body under the same headers is still 202 synchronize", async (t) => {
+  const h = await startTestHandler();
+  t.after(() => h.close());
+  const body = JSON.stringify(makeNativePrPayload("synchronized"));
+  const signature = sign(body);
+  for (const forged of FORGED_SYNC_HEADERS) {
+    const res = await postTyped(h.url, { ...forged, body, signature });
+    assert.equal(res.status, 202, forged.event);
+    assert.deepEqual(JSON.parse(res.text), { status: "accepted", kind: "synchronize" }, forged.event);
+  }
+  assert.equal(h.events.length, FORGED_SYNC_HEADERS.length);
+  assert.ok(h.events.every((ev) => ev.kind === "synchronize"));
+});
+
+test("replay: a forged label hint on a signed non-label body never yields rereview_label", async (t) => {
+  const h = await startTestHandler();
+  t.after(() => h.close());
+  // A signed SYNC body whose PR already carries the trigger label: the forged
+  // label hint must not mine `pull_request.labels` into a re-review trigger.
+  // Both header shapes are forged: the grouped pair (the grouped rule keeps the
+  // signed action → synchronize) and the ungrouped label group (rejected →
+  // passthrough → unknown).
+  const syncBody = JSON.stringify(
+    makeNativePrPayload("synchronized", { labels: [{ name: "ai-review", color: "00ff00" }] }),
+  );
+  const forgeries: Array<{ event: string; eventType?: string; kind: string }> = [
+    { event: "pull_request", eventType: "pull_request_label", kind: "synchronize" },
+    { event: "pull_request_label", eventType: "pull_request_label", kind: "unknown" },
+  ];
+  for (const forged of forgeries) {
+    const res = await postTyped(h.url, { ...forged, body: syncBody, signature: sign(syncBody) });
+    assert.equal(res.status, 202, forged.event);
+    assert.deepEqual(JSON.parse(res.text), { status: "accepted", kind: forged.kind }, forged.event);
+  }
+  assert.equal(h.events.length, forgeries.length);
+  for (const [i, forged] of forgeries.entries()) {
+    const ev = h.events[i]!;
+    assert.equal(ev.kind, forged.kind, forged.event);
+    // The trigger label on the PR is never mined into a re-review kind by a hint.
+    assert.notEqual(ev.kind, "rereview_label", forged.event);
+    assert.equal(ev.labelName, "", forged.event);
+  }
+
+  // A signed terminal body under the ungrouped label header degrades to the
+  // passthrough: still not a re-review, and not a scheduleable kind either.
+  const closedBody = JSON.stringify(makeNativePrPayload("closed", { labels: [{ name: "ai-review" }] }));
+  const res = await postTyped(h.url, {
+    event: "pull_request_label",
+    body: closedBody,
+    signature: sign(closedBody),
+  });
+  assert.equal(res.status, 202);
+  assert.deepEqual(JSON.parse(res.text), { status: "accepted", kind: "unknown" });
+  const ev = h.events[forgeries.length]!;
+  assert.equal(ev.kind, "unknown");
+  assert.equal(ev.labelName, "");
+});
+
+test("replay: a forged comment hint on a signed non-created body never yields follow_up", async (t) => {
+  const h = await startTestHandler();
+  t.after(() => h.close());
+  // A signed terminal body carrying a top-level `pull_request` and a comment
+  // object: re-nesting it into `issue.pull_request` would make it follow_up-
+  // shaped, so the forged hint must leave the envelope alone. Two fences cover
+  // this: the projection now refuses to re-nest without a signed `created` (the
+  // discriminating regression, see the projection unit test) and the normalizer
+  // independently requires `action === "created"` for `follow_up` — this
+  // end-to-end check pins that both hold for a real forged delivery.
+  const body = JSON.stringify({
+    action: "closed",
+    repository: { full_name: "org/repo" },
+    comment: { id: 55, user: { login: "dev" } },
+    issue: { number: 7, title: "a PR" },
+    pull_request: {
+      number: 7,
+      id: 700,
+      head: { sha: HEAD_SHA, repo: { full_name: "org/repo" } },
+      base: { sha: BASE_SHA, repo: { full_name: "org/repo" } },
+      merged: true,
+    },
+    sender: { login: "dev" },
+  });
+  const signature = sign(body);
+  for (const forged of [
+    { event: "issue_comment", eventType: "pull_request_comment" },
+    { event: "pull_request_comment" },
+  ]) {
+    const res = await postTyped(h.url, { ...forged, body, signature });
+    assert.equal(res.status, 202, forged.event);
+    assert.deepEqual(JSON.parse(res.text), { status: "accepted", kind: "unknown" }, forged.event);
+  }
+  assert.equal(h.events.length, 2);
+  for (const ev of h.events) {
+    assert.notEqual(ev.kind, "follow_up");
+    assert.equal(ev.kind, "unknown");
+  }
 });
