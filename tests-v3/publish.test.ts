@@ -15,6 +15,8 @@ import {
 import { cleanupManagedReviews, resolveSupersededThreads } from "../src/publish/cleanup.js";
 import { buildComments, prescriptionKey, prescriptionKeyDigest, FEEDBACK_AFFORDANCE } from "../src/publish/inline-findings.js";
 import { enforcementView, normalizeThread } from "../src/context/review-threads.js";
+import { applyReviewThreadEnforcement } from "../src/enforcement/threads.js";
+import type { ReviewArtifact } from "../src/enforcement/artifact.js";
 import type { TrustedOwnerIdentity } from "../src/platform/owner-identity.js";
 import type { ConditionalSectionPresence } from "../src/publish/sanitize.js";
 import { ForgejoPublishApi, forgejoReviewEvent } from "../src/platform/publish-api.js";
@@ -1991,6 +1993,64 @@ test("#1101 lifecycle: a trusted rejection survives its own comment being retire
   assert.equal(api.permissionLookups.length, lookupsBefore, "a carry-only run verifies nobody");
   // Telemetry stays counts-only: no login and no prescription text leak.
   assert.equal(c.messages.join("\n").includes("maintainer"), false);
+});
+
+test("#762: the author's own different fix settles the finding with no reaction read (A→B→thread)", async () => {
+  const api = new LifecycleApi();
+  const run = (findings: unknown[]) => publishReview(
+    input({
+      mode: "review_verdict", inlineFindings: true, findings,
+      cleanupPreviousNativeReviews: "auto",
+    }),
+    api,
+    { diffText: DIFF },
+  );
+
+  // Run A: the finding publishes with the replacement this reviewer suggested.
+  const a = await run(ACTIONABLE);
+  assert.equal(a.status, "published");
+  const commentA = api.inlineComments[0]!;
+  const bodyA = String(commentA.body);
+  assert.ok(bodyA.includes("```suggestion") && bodyA.includes("REPL"), "A posts the prescription");
+
+  // Run B: the author fixed the defect with their own text, so the review no
+  // longer reports it. `reactTo` is never called — no 👎 exists anywhere.
+  const b = await run([]);
+  assert.equal(b.status, "published");
+  assert.equal(api.feedbackCalls, 0, "neither run reads a reaction");
+  assert.equal(api.permissionLookups.length, 0, "and neither authorizes a reacting actor");
+  assert.deepEqual(api.submitted.at(-1)!.comments ?? [], [], "B posts no inline comment at all");
+  const published = JSON.stringify(api.submitted.at(-1));
+  assert.equal(published.includes("```suggestion"), false, "B publishes no replacement block");
+  assert.equal(published.includes("REPL"), false, "and never re-issues A's replacement text");
+  assert.equal(
+    api.inlineComments.some((row) => String(row.id) === String(commentA.id)), false,
+    "B's own cleanup retired A's comment through the normal path",
+  );
+
+  // The finding settles on A's thread: disposition plus code evidence naming
+  // the author's own change. Nothing here quotes the suggested replacement.
+  const view = enforcementView([normalizeThread({
+    thread_id: "PRRT_1",
+    path: "a.ts",
+    line: 2,
+    original_line: 2,
+    resolved: false,
+    outdated: false,
+    comments: [{ id: 1, user: { login: "bot" }, created_at: "2026-10-17T00:00:00Z", updated_at: "2026-10-17T00:00:00Z", body: bodyA }],
+  })!]);
+  assert.equal(view.length, 1, "A's published body is exactly one review thread");
+  assert.equal(view[0]!.own_finding, true);
+  assert.ok(view[0]!.message.startsWith("A finding"));
+  const evidence = "a.ts:2 now drops the duplicated separator before joining — the author's own implementation";
+  assert.equal(evidence.includes("REPL"), false, "the settlement cites the author's code, not the suggested replacement");
+  const artifact = {
+    verdict: "approve", review_markdown: "review", findings: [],
+    thread_dispositions: [{ thread_id: "PRRT_1", disposition: "fixed", evidence }],
+  } as ReviewArtifact;
+  applyReviewThreadEnforcement(artifact, view, "strict");
+  assert.deepEqual(artifact.thread_dispositions, [{ thread_id: "PRRT_1", disposition: "fixed", evidence }], "the disposition stands, unrejected");
+  assert.equal(artifact.findings.length, 0, "the finding resolves without ever matching the suggested replacement");
 });
 
 test("#1101: the carry grammar is reserved model markdown — it never survives into any published body", async () => {
