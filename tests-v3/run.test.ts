@@ -3523,6 +3523,26 @@ function requirementTracePlatform(): PlatformReadAdapter {
   return platform;
 }
 
+/** #1044: the same linked-issue PR, but the issue body carries TWO MUST
+ * lines, so the ledger holds two in-scope requirements and a repair pass can
+ * fill only one of them (the partial-merge shape). */
+function twoRequirementTracePlatform(): PlatformReadAdapter {
+  const platform = mockPlatform({ body: "Closes #824.\n\nResolve review context from the right identity.\n" });
+  platform.getIssue = async () => ({
+    ok: true,
+    data: {
+      number: 824,
+      title: "resolve review context from repository identity",
+      state: "open",
+      html_url: "https://github.com/o/r/issues/824",
+      labels: [],
+      body: "Context resolution MUST bind to the repository identity plus the source SHA.\n"
+        + "The publish gate MUST compare the publish timestamp against the gate timestamp.\n",
+    },
+  }) as never;
+  return platform;
+}
+
 /** Find the requirement id the ledger rendered for its `- (req-...) `text``
  * list item containing `marker` — anchored to that exact rendered shape
  * (`renderRequirementLedgerMarkdown`), not just "an id appears somewhere
@@ -3965,6 +3985,16 @@ test("#959: a verdict with no trace claim at all gets one bounded repair pass an
     assert.equal(repairRecord.status, "ok");
     assert.equal(repairRecord.claims, 1);
     assert.equal(repairRecord.missing_ids.length, 1);
+
+    // #1044: the persisted artifact carries the bounded repair summary —
+    // the full merge filled every missing id, so `missing_ids` is empty.
+    const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
+      requirement_trace_repair?: { attempted: boolean; outcome: string; claims: number; missing_ids: string[] };
+    };
+    assert.equal(persisted.requirement_trace_repair?.attempted, true);
+    assert.equal(persisted.requirement_trace_repair?.outcome, "merged");
+    assert.equal(persisted.requirement_trace_repair?.claims, 1);
+    assert.deepEqual(persisted.requirement_trace_repair?.missing_ids, []);
   } finally {
     await server.close();
     cleanup();
@@ -4022,6 +4052,208 @@ test("#959: when the repair pass also yields nothing, the section says so instea
     };
     assert.equal(repairRecord.status, "empty");
     assert.equal(repairRecord.claims, 0);
+
+    // #1044: the row is now marked as repair-attempted, the rendered section
+    // says the retry also failed, and the persisted artifact carries the
+    // bounded summary.
+    assert.ok(trace.rows[0]!.notes.includes("trace-repair-ran-no-claims"));
+    assert.match(result.outputs.reviewMarkdown, /the reviewer reported no trace for this requirement, and a bounded repair pass also returned no usable claim/);
+    const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
+      requirement_trace_repair?: { attempted: boolean; outcome: string; claims: number; missing_ids: string[] };
+    };
+    assert.equal(persisted.requirement_trace_repair?.attempted, true);
+    assert.equal(persisted.requirement_trace_repair?.outcome, "no_claims");
+    assert.equal(persisted.requirement_trace_repair?.claims, 0);
+    assert.equal(persisted.requirement_trace_repair?.missing_ids.length, 1);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#1044: a gated-off repair pass records skipped_by_gate and keeps the original wording", async () => {
+  let repairAttempts = 0;
+  const server = await startMockServer((_req, body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    if (String(body).includes("Requirements to trace:")) {
+      repairAttempts += 1;
+      res.end(verdictBody({ requirement_coverage: [] }));
+      return;
+    }
+    // The #947 shape: zero trace claims, and a replace-mode prompt means the
+    // #959 repair (the trace fragment's retry) never runs.
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+        "requirement-trace": "true",
+        "system-prompt": "Operator-supplied review prompt.",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+
+    assert.equal(repairAttempts, 0, "the gated-off pass must never issue a model request");
+    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
+      rows: Array<{ disposition: string; notes: string[] }>;
+    };
+    assert.ok(trace.rows[0]!.notes.includes("not-traced-by-reviewer"));
+    assert.ok(!trace.rows[0]!.notes.includes("trace-repair-ran-no-claims"));
+    assert.match(result.outputs.reviewMarkdown, /the reviewer reported no trace for this requirement/);
+    assert.doesNotMatch(result.outputs.reviewMarkdown, /bounded repair pass/);
+    const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
+      requirement_trace_repair?: { attempted: boolean; outcome: string; claims: number; missing_ids: string[] };
+    };
+    assert.equal(persisted.requirement_trace_repair?.attempted, false);
+    assert.equal(persisted.requirement_trace_repair?.outcome, "skipped_by_gate");
+    assert.equal(persisted.requirement_trace_repair?.claims, 0);
+    assert.equal(persisted.requirement_trace_repair?.missing_ids.length, 1);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#1044: a partial merge leaves the still-missing row noted and the summary names only it", async () => {
+  let repairAttempts = 0;
+  const server = await startMockServer((_req, body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    const text = String(body);
+    if (text.includes("Requirements to trace:")) {
+      repairAttempts += 1;
+      // The pass asks for BOTH missing ids but returns ok with a claim for
+      // only the first — the partial-merge shape that must not mislabel the
+      // other row as "the reviewer reported no trace" without the repair
+      // context.
+      const ids = [...new Set(text.match(/req-[0-9a-f]{12}/g) ?? [])];
+      res.end(verdictBody({
+        requirement_coverage: [{
+          requirement_id: ids[0] ?? "",
+          disposition: "met",
+          enforcement: [{ file: "src/context-resolution.ts", line: 2 }],
+          test: [{ file: "tests/context-resolution.test.ts", line: 1 }],
+          reason: "compares record.sourceSha against ctx.sourceSha and throws on mismatch",
+        }],
+      }));
+      return;
+    }
+    // The primary review verdict: the #947 shape, zero trace claims.
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    mkdirSync(join(runDir, "src"), { recursive: true });
+    mkdirSync(join(runDir, "tests"), { recursive: true });
+    writeFileSync(
+      join(runDir, "src", "context-resolution.ts"),
+      [
+        "export function resolveContext(ctx, record) {",
+        "  if (record.sourceSha !== ctx.sourceSha) {",
+        "    throw new Error('source sha mismatch');",
+        "  }",
+        "  return record;",
+        "}",
+      ].join("\n"),
+    );
+    writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
+
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+        "requirement-trace": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: twoRequirementTracePlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+
+    assert.equal(repairAttempts, 1, "still exactly one bounded repair pass");
+    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
+      rows: Array<{ requirement_id: string; disposition: string; notes: string[] }>;
+    };
+    assert.equal(trace.rows.length, 2);
+    const noted = trace.rows.filter((row) => row.notes.includes("trace-repair-ran-no-claims"));
+    assert.equal(noted.length, 1, JSON.stringify(trace.rows));
+    const filled = trace.rows.find((row) => !row.notes.includes("not-traced-by-reviewer"));
+    assert.ok(filled, JSON.stringify(trace.rows));
+    // #1044 review follow-up: the summary's missing_ids are the ids the pass
+    // did NOT fill — the partial merge keeps only the still-missing id, even
+    // though the outcome is "merged".
+    const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
+      requirement_trace_repair?: { attempted: boolean; outcome: string; claims: number; missing_ids: string[] };
+    };
+    assert.equal(persisted.requirement_trace_repair?.attempted, true);
+    assert.equal(persisted.requirement_trace_repair?.outcome, "merged");
+    assert.equal(persisted.requirement_trace_repair?.claims, 1);
+    assert.deepEqual(persisted.requirement_trace_repair?.missing_ids, [noted[0]!.requirement_id]);
+    assert.notEqual(noted[0]!.requirement_id, filled.requirement_id);
+    assert.match(result.outputs.reviewMarkdown, /and a bounded repair pass also returned no usable claim/);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#1044: a model-forged requirement_trace_repair key is stripped when the feature is off", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    // The model controls its own artifact fields — a forged summary must not
+    // survive persistence when requirement-trace is disabled.
+    res.end(verdictBody(baseVerdict({
+      requirement_trace_repair: { attempted: true, outcome: "merged", missing_ids: [], claims: 9 },
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+        "requirement-trace": "false",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+
+    const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
+      requirement_trace_repair?: unknown;
+    };
+    assert.equal("requirement_trace_repair" in persisted, false);
+    assert.match(result.outputs.reviewMarkdown, /Looks fine/);
   } finally {
     await server.close();
     cleanup();

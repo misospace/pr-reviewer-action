@@ -1654,6 +1654,40 @@ function recordArtifactError(errors: string[], message: string): boolean {
   return true;
 }
 
+/** #1044: caps for the bounded `requirement_trace_repair` summary. */
+export const MAX_TRACE_REPAIR_SUMMARY_IDS = 48;
+export const MAX_TRACE_REPAIR_SUMMARY_ID_CHARS = 80;
+export const MAX_TRACE_REPAIR_SUMMARY_ERROR_CHARS = 200;
+
+/** #1044: bounded, sanitized summary of the #959 trace-repair pass, attached
+ * to the persisted artifact as `requirement_trace_repair` and handed to
+ * `validateRequirementTrace` so the published section can distinguish "the
+ * reviewer never emitted a claim" from "the bounded repair pass ran and
+ * failed". For attempted runs `missing_ids` holds the ids STILL missing after
+ * the pass (recomputed from post-merge coverage), so membership there is
+ * exactly "the retry did not fill this id". Diagnostics-only: nothing here
+ * changes a verdict, and the `error` text never reaches the rendered
+ * markdown. Defined here (not in `requirements/trace-repair.ts`) because that
+ * module already imports from this one — an import in the other direction
+ * would cycle. */
+export interface RequirementTraceRepairOutcome {
+  attempted: boolean;
+  outcome: "no_missing_ids" | "skipped_by_gate" | "no_claims" | "errored" | "timeout" | "merged";
+  missing_ids: string[];
+  claims: number;
+  status?: string;
+  error_kind?: string | null;
+  error?: string | null;
+  diff_clipped?: boolean;
+}
+
+/** #1044: the summary's `missing_ids` are sanitized (control characters and
+ * backticks stripped, length-capped); sanitize a ledger id the same way so
+ * membership matching cannot silently diverge. */
+function traceRepairIdKey(id: string): string {
+  return id.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_TRACE_REPAIR_SUMMARY_ID_CHARS);
+}
+
 /**
  * Validate the model's per-requirement trace claims (read from the same
  * untrusted `requirement_coverage` payload `normalizeRequirementCoverage`
@@ -1680,6 +1714,10 @@ export function validateRequirementTrace(
      * unavailability) so the author sees what the review could and could not
      * observe; it never changes a disposition. */
     ciState?: string | null | undefined;
+    /** #1044: the bounded #959 repair-pass summary, when the pass was in
+     * scope for this run — lets a `claim === undefined` row record that the
+     * repair also ran (and still left this id unclaimed). */
+    traceRepair?: RequirementTraceRepairOutcome | undefined;
   } = {},
 ): RequirementTraceArtifact {
   const { inScope, outOfScope } = requirementTraceScope(ledger, changed, context);
@@ -1786,6 +1824,19 @@ export function validateRequirementTrace(
       test = [];
       reason = "";
       notes.push("not-traced-by-reviewer");
+      // #1044: the summary's `missing_ids` are the ids the pass did NOT fill,
+      // recomputed from the POST-merge coverage — an id here (on an attempted
+      // run) is exactly an id the retry also left unclaimed, so the render can
+      // distinguish "the reviewer never emitted a claim" from "the bounded
+      // repair pass ran and failed for this id". Non-attempted summaries
+      // (gate kept the pass off) never carry the note.
+      if (
+        context.traceRepair !== undefined
+        && context.traceRepair.attempted === true
+        && context.traceRepair.missing_ids.includes(traceRepairIdKey(entry.id))
+      ) {
+        notes.push("trace-repair-ran-no-claims");
+      }
     } else {
       const rawDisposition = typeof claim.disposition === "string" ? claim.disposition.toLowerCase() : null;
       disposition = rawDisposition !== null && TRACE_DISPOSITIONS.includes(rawDisposition) ? rawDisposition : "unverifiable";
@@ -1986,7 +2037,11 @@ export function renderRequirementTraceMarkdown(trace: RequirementTraceArtifact):
     const loc = row.enforcement[0]
       ? `\`${row.enforcement[0].file}:${row.enforcement[0].line}\``
       : row.notes.includes("not-traced-by-reviewer")
-        ? "the reviewer reported no trace for this requirement"
+        // #1044: static text only — the pass's error/status text is
+        // diagnostics and must never reach the rendered markdown.
+        ? row.notes.includes("trace-repair-ran-no-claims")
+          ? "the reviewer reported no trace for this requirement, and a bounded repair pass also returned no usable claim"
+          : "the reviewer reported no trace for this requirement"
         : "no valid enforcement location";
     const details: string[] = [];
     if (row.notes.includes("distributed-topology-overflow")) {
@@ -2125,6 +2180,10 @@ export function applyRequirementTraceEnforcement(
     /** #1062 review follow-up: the CI gate's exact-head conclusion, if this run
      * observed one — diagnostic-only text surfaced in the non-code advisory. */
     ciState?: string | null | undefined;
+    /** #1044: the bounded #959 repair-pass summary for this run, when the
+     * trace feature is enabled — threaded through to
+     * `validateRequirementTrace`. */
+    traceRepair?: RequirementTraceRepairOutcome | undefined;
   },
 ): RequirementTraceEnforcementResult {
   if (!options.enabled) {
@@ -2135,6 +2194,7 @@ export function applyRequirementTraceEnforcement(
     paths: options.paths,
     prBody: options.prBody,
     ciState: options.ciState,
+    traceRepair: options.traceRepair,
   });
   if (trace.rows.length === 0) {
     return { applied: false, trace };
