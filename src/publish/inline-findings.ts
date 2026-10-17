@@ -268,7 +268,8 @@ export function buildComments(
   const mode = opts.linkMode === "inert" || opts.linkMode === "togithub" ? opts.linkMode : "inert";
   const comments: unknown[] = [];
   let skipped = 0;
-  let suppressed = 0;  for (const value of findings) {
+  let suppressed = 0;
+  for (const value of findings) {
     if (!isRecord(value)) { skipped += 1; continue; }
     if (value.thread_id) { skipped += 1; continue; }
     const path = value.file;
@@ -327,6 +328,12 @@ export function buildComments(
         "\n\n</details>";
       body += sanitizeMarkdown(redactText(section), mode);
     }
+    // #762: no model-authored text (message, suggestion, or agent prompt) may
+    // carry the reserved carry-marker grammar: the digest is recomputable
+    // from published state, so an echoed marker line would ride our own
+    // comment's provenance into a permanent self-suppression. Strip any such
+    // line from the assembled body before we append our own marker.
+    body = stripRejectionCarryover(body);
     // #762: a suppressed prescription's rejection survives this run as a
     // digest-only carry marker on the replacement comment — the reaction on
     // the original comment is lost when cleanup retires it, so without the

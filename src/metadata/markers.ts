@@ -29,6 +29,10 @@ export type { MetadataOptions };
 export const RESERVED_MARKER_PATTERNS: readonly RegExp[] = [
   /<!--\s*ai-pr-review-fingerprint\s*:\s*[^>]*-->/gi,
   /<!--\s*ai-pr-review-sha\s*:\s*[^>]*-->/gi,
+  // #762: the rejection carry marker is action-owned state — model markdown
+  // can never carry it into a published body (digest forgery is
+  // withhold-only, but reserved is reserved).
+  /<!--\s*pr-reviewer:rejected-prescriptions\s*:[^>]*-->/gi,
 ];
 
 /** Remove every reserved metadata marker from *text* (port of

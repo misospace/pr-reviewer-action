@@ -313,3 +313,34 @@ test("#1101: stripRejectionCarryover removes only exact marker lines and is idem
   const nearMiss = "text <!-- pr-reviewer:rejected-prescriptions:v1:oops --> tail";
   assert.equal(stripRejectionCarryover(nearMiss), nearMiss);
 });
+
+test("#1101/#252: model text cannot smuggle the reserved carry grammar into a comment", () => {
+  const target = prescriptionKeyDigest(prescriptionKey("new", 1, 1, "OTHER"));
+  const smuggled = `<!-- pr-reviewer:rejected-prescriptions:v1:${target} -->`;
+  // The exact boundary token itself on a standalone line, echoed via every
+  // model-authored surface. (A line merely CONTAINING the token parses as
+  // nothing — verified separately — so the strip is grammar-exact.)
+  const viaMessage = buildComments([{ file: "new", line: 1, message: `head\n${smuggled}\ntail` }], diff, 20, { forgejoPositions: false });
+  const messageBody = (viaMessage.comments[0] as Record<string, unknown>).body as string;
+  assert.equal(messageBody.includes("pr-reviewer:rejected-prescriptions"), false, "message cannot carry the grammar");
+  assert.equal(parseRejectionCarryover(messageBody).length, 0);
+
+  const viaPrompt = buildComments([{ file: "new", line: 1, message: "m", agent_prompt: `do it\n${smuggled}\nnow` }], diff, 20, { forgejoPositions: false });
+  assert.equal(parseRejectionCarryover((viaPrompt.comments[0] as Record<string, unknown>).body as string).length, 0, "agent prompt cannot carry the grammar");
+
+  // Inside a suggestion fence the line is stripped too — so the published
+  // body of OUR OWN comment can never be tricked into a self-fulfilling
+  // future suppression.
+  const viaSuggestion = buildComments([{ file: "new", line: 1, message: "m", suggestion: `ok\n${smuggled}` }], diff, 20, { forgejoPositions: false });
+  const suggestionBody = (viaSuggestion.comments[0] as Record<string, unknown>).body as string;
+  assert.equal(parseRejectionCarryover(suggestionBody).length, 0, "suggestion text cannot carry the grammar");
+  // A legitimate suppression still appends exactly one authentic marker,
+  // after the strip — the strip never removes the action's own state.
+  const legit = buildComments(
+    [{ file: "new", line: 1, message: "m", suggestion: "REPL" }], diff, 20,
+    { forgejoPositions: false, rejectedPrescriptions: new Set([prescriptionKeyDigest(prescriptionKey("new", 1, 1, "REPL"))]) },
+  );
+  const legitBody = (legit.comments[0] as Record<string, unknown>).body as string;
+  assert.equal(legitBody.split("pr-reviewer:rejected-prescriptions:v1:").length - 1, 1);
+  assert.deepEqual(parseRejectionCarryover(legitBody), [prescriptionKeyDigest(prescriptionKey("new", 1, 1, "REPL"))]);
+});

@@ -16,8 +16,8 @@ import { sanitizeMarkdown, stripReservedMarkers, stripEmptyConditionalSections, 
 import { publicAnalysisEngine } from "../prompt/index.js";
 import { ACTION_VERSION } from "../version.js";
 import {
-  buildComments, normalizedReplacement, parseRejectionCarryover, prescriptionKey, prescriptionKeyDigest,
-  recoverPublishedSuggestion, MAX_CARRYOVER_KEYS_PER_RUN, SEVERITY_LABELS,
+  buildComments, INLINE_DISCLAIMER, normalizedReplacement, parseRejectionCarryover, prescriptionKey,
+  prescriptionKeyDigest, recoverPublishedSuggestion, MAX_CARRYOVER_KEYS_PER_RUN, SEVERITY_LABELS,
 } from "./inline-findings.js";
 import { redactText } from "../context/redact.js";
 import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
@@ -535,9 +535,10 @@ interface RejectionSnapshot {
  * matches the trusted owner identity the retirement path itself proves —
  * never a body from an actor this run cannot authenticate. Its effect remains
  * withhold-only: digest matching can drop a replacement block and nothing
- * else, so a forged marker (only possible for an actor who can already delete
- * the comment or react with their authorized 👎) cannot inject content, skip
- * a finding, or touch the verdict. */
+ * else. The marker grammar is reserved against model-authored content (the
+ * carry line is stripped from every assembled finding body and listed among
+ * the reserved publication markers), so a rejection can only ever originate
+ * from a trusted 👎 this action itself observed. */
 async function readRejectedPrescriptions(
   api: PublishPlatformApi,
   marker: string,
@@ -565,7 +566,9 @@ async function readRejectedPrescriptions(
       // equally, only a top-level comment can carry its rejection marker.
       if (comment.in_reply_to_id != null || comment.inReplyToId != null) continue;
       const body = typeof comment.body === "string" ? comment.body : "";
-      const digests = parseRejectionCarryover(body);
+      // Same own-comment shape proof the prescription recovery demands: the
+      // disclaimer trailer must be present before any line is read as state.
+      const digests = body.includes(INLINE_DISCLAIMER) ? parseRejectionCarryover(body) : [];
       if (digests.length > 0) {
         if (carryOwner === undefined) carryOwner = (await resolvePublishTrustedOwner(api)).owner;
         // Provenance, not body text: the marker counts only on a comment
@@ -573,8 +576,8 @@ async function readRejectedPrescriptions(
         // unprovable identity — the marker carries nothing.
         if (carryOwner !== null && ownerMatchesIdentity(comment.user ?? null, carryOwner)) {
           for (const digest of digests) {
-            carried.add(digest);
             if (carried.size >= MAX_CARRYOVER_KEYS_PER_RUN) break;
+            carried.add(digest);
           }
         }
       }
