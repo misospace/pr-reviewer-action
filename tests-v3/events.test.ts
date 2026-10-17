@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  carriesCheckUpdateShape,
   normalizeForgeEvent,
   normalizeForgejoEvent,
   normalizeGitHubEvent,
@@ -395,12 +396,21 @@ test("GitHub issue_comment and Forgejo comment of the SAME comment normalize ide
 
 // ── Repo-scoped events ─────────────────────────────────────────────────────
 
-test("check_run / check_suite / status map to check_update", () => {
+test("check_run / check_suite / status map to check_update (shape-anchored, #1102)", () => {
+  // The name alone is NOT enough: the body must carry the shape that name
+  // requires (the predicate's per-name shape), or the kind degrades to
+  // `unknown` (fail-closed group below).
+  const shapes: Record<string, Record<string, unknown>> = {
+    check_run: { check_run: { id: 1, conclusion: "success" } },
+    check_suite: { check_suite: { id: 2 } },
+    status: { sha: "a".repeat(40), state: "success", context: "ci/jenkins" },
+  };
   for (const name of ["check_run", "check_suite", "status"] as const) {
     const event = normalizeGitHubEvent({
       name,
       repository: { full_name: "owner/repo" },
       pull_requests: [{ id: 5, number: 9 }],
+      ...shapes[name],
     });
     assert.equal(event?.kind, "check_update", name);
     assert.equal(event?.prNumber, 9, name);
@@ -419,6 +429,7 @@ test("check_run payload with FLAT head_sha/base_sha (no nested head/base) normal
     name: "check_run",
     action: "completed",
     repository: { full_name: "owner/repo" },
+    check_run: { id: 11, status: "completed" },
     check_suite: { id: 9 },
     pull_requests: [
       {
@@ -445,6 +456,7 @@ test("nested head/base SHAs win over flat head_sha/base_sha", () => {
     name: "check_run",
     action: "completed",
     repository: { full_name: "owner/repo" },
+    check_run: { id: 11, status: "completed" },
     pull_requests: [
       {
         id: 7,
@@ -466,11 +478,233 @@ test("a malformed flat sha is the sentinel ''", () => {
     name: "check_run",
     action: "completed",
     repository: { full_name: "owner/repo" },
+    check_run: { id: 11, status: "completed" },
     pull_requests: [{ id: 7, number: 42, head_sha: "xyz", base_sha: "a1b2c3d" }],
   });
   assert.notEqual(event, null);
   assert.equal(event!.headSha, "");
   assert.equal(event!.baseSha, "a1b2c3d");
+});
+
+// ── check/status shape gate (#1102): the name alone is never authority ──────
+//
+// The HMAC covers the RAW BODY ONLY, so a captured delivery replays
+// byte-for-byte with a changed event header; at a forge ingress the (header)
+// event name is what reaches the envelope `name`. `check_update` is therefore
+// SHAPE-ANCHORED: without the matching signed shape the kind degrades to
+// `unknown` (not scheduleable), never to a scheduleable kind from a name.
+
+test("fail-closed: a check_run / check_suite name WITHOUT its object is unknown", () => {
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ["check_run", { action: "completed", pull_requests: [{ id: 5, number: 9 }] }],
+    ["check_suite", { action: "completed", pull_requests: [{ id: 5, number: 9 }] }],
+    // A `check_suite` object does NOT satisfy a `check_run` name (and vice
+    // versa): the shapes are not interchangeable.
+    ["check_run", { check_suite: { id: 2 } }],
+    ["check_suite", { check_run: { id: 1 } }],
+  ];
+  for (const [name, body] of cases) {
+    const event = normalizeGitHubEvent({
+      name,
+      repository: { full_name: "owner/repo" },
+      ...body,
+    });
+    assert.notEqual(event, null, name);
+    assert.equal(event!.kind, "unknown", name);
+  }
+});
+
+test("fail-closed: a status name on a PR-shaped body is unknown", () => {
+  const event = normalizeGitHubEvent({
+    name: "status",
+    action: "closed",
+    repository: { full_name: "owner/repo" },
+    pull_request: {
+      number: 7,
+      head: { sha: "a".repeat(40), repo: { full_name: "owner/repo" } },
+      base: { sha: "b".repeat(40), repo: { full_name: "owner/repo" } },
+    },
+    merged: true,
+  });
+  assert.notEqual(event, null);
+  // The PR-shaped body still resolves its identity, but the forged status NAME
+  // can no longer reach the scheduleable check kind.
+  assert.equal(event!.kind, "unknown");
+  assert.equal(event!.prNumber, 7);
+});
+
+test("fail-closed: hostile check/status shapes are unknown", () => {
+  const cases: Array<[string, Record<string, unknown>]> = [
+    // Not plain objects: null, array, primitive.
+    ["check_run", { check_run: null }],
+    ["check_run", { check_run: [] }],
+    ["check_run", { check_run: "x" }],
+    ["check_suite", { check_suite: null }],
+    ["check_suite", { check_suite: [] }],
+    // The status triple must be three NON-EMPTY strings: a number is not a
+    // string, and an empty/whitespace-only value is not present.
+    ["status", { sha: 1, state: "success", context: "ci" }],
+    ["status", { sha: "", state: "success", context: "ci" }],
+    ["status", { sha: "a".repeat(40), state: "  ", context: "ci" }],
+    ["status", { sha: "a".repeat(40), state: "success" }],
+  ];
+  for (const [name, body] of cases) {
+    const event = normalizeGitHubEvent({
+      name,
+      repository: { full_name: "owner/repo" },
+      ...body,
+    });
+    assert.notEqual(event, null, `${name} ${JSON.stringify(body)}`);
+    assert.equal(event!.kind, "unknown", `${name} ${JSON.stringify(body)}`);
+  }
+});
+
+test("FORGEJO real shape: a native status delivery (sha/state/context, no pull_requests) is check_update", () => {
+  // The regression that proves the gate requires NOTHING GitHub-only: Forgejo
+  // emits commit-status webhooks natively with exactly this triple and carries
+  // no `pull_requests`, no `installation`, and no `check_run` object. If the
+  // predicate ever grew a GitHub-only requirement, this real delivery would
+  // silently stop scheduling.
+  const event = normalizeForgejoEvent({
+    name: "status",
+    sha: "a".repeat(40),
+    state: "success",
+    context: "ci/jenkins",
+    repository: { full_name: "o/r" },
+  });
+  assert.notEqual(event, null);
+  assert.equal(event!.kind, "check_update");
+  assert.equal(event!.platform, "forgejo");
+  assert.equal(event!.repoFullName, "o/r");
+});
+
+test("carriesCheckUpdateShape: the truth table", () => {
+  const status = { sha: "a".repeat(40), state: "success", context: "ci" };
+  const cases: Array<[string, unknown, boolean]> = [
+    ["check_run", { check_run: { id: 1 } }, true],
+    ["check_run", { check_run: {} }, true],
+    ["check_run", { check_suite: { id: 1 } }, false],
+    ["check_run", { check_run: null }, false],
+    ["check_run", { check_run: [] }, false],
+    ["check_run", { check_run: "x" }, false],
+    ["check_run", {}, false],
+    ["check_suite", { check_suite: { id: 1 } }, true],
+    ["check_suite", { check_run: { id: 1 } }, false],
+    ["check_suite", { check_suite: 1 }, false],
+    ["check_suite", {}, false],
+    ["status", status, true],
+    // Trimmed-but-nonempty is present; whitespace-only is not.
+    ["status", { ...status, context: "  ci  " }, true],
+    ["status", { ...status, context: "   " }, false],
+    ["status", { ...status, sha: 1 }, false],
+    ["status", { ...status, state: null }, false],
+    ["status", { sha: "a".repeat(40), state: "success" }, false],
+    ["status", {}, false],
+    // Any other name is never check-update-shaped.
+    ["pull_request", { check_run: { id: 1 } }, false],
+    ["issue_comment", status, false],
+    ["", status, false],
+  ];
+  for (const [name, raw, expected] of cases) {
+    assert.equal(
+      carriesCheckUpdateShape(name, raw),
+      expected,
+      `${name} ${JSON.stringify(raw)}`,
+    );
+  }
+  // Never throws on a non-object body.
+  for (const raw of [null, undefined, "x", 7, [status]]) {
+    assert.equal(carriesCheckUpdateShape("status", raw), false, JSON.stringify(raw));
+    assert.equal(carriesCheckUpdateShape("check_run", raw), false, JSON.stringify(raw));
+  }
+});
+
+test("the shape gate reads OWN properties: an INHERITED shape is not this delivery's data", () => {
+  // The hostile input IS the boundary case the gate is defined against: a body
+  // whose check/status shape lives on the PROTOTYPE rather than on the
+  // JSON-parsed own keys a real delivery carries. Without the own-property
+  // read this body would reach the scheduleable `check_update` kind.
+  const inherited = Object.assign(Object.create({ check_run: { id: 1 } }), {
+    name: "check_run",
+    action: "closed",
+    pull_request: {
+      number: 7,
+      head: { sha: "a".repeat(40), repo: { full_name: "owner/repo" } },
+      base: { sha: "b".repeat(40), repo: { full_name: "owner/repo" } },
+    },
+    repository: { full_name: "owner/repo" },
+  });
+  assert.equal(inherited.check_run.id, 1, "the inherited value really is readable");
+  assert.equal(carriesCheckUpdateShape("check_run", inherited), false);
+  const event = normalizeGitHubEvent(inherited);
+  assert.notEqual(event, null);
+  assert.equal(event!.kind, "unknown");
+  assert.equal(
+    carriesCheckUpdateShape(
+      "status",
+      Object.create({ sha: "a".repeat(40), state: "success", context: "ci" }),
+    ),
+    false,
+  );
+  // The own-key form — exactly what the ingress feeds after JSON.parse — passes.
+  assert.equal(carriesCheckUpdateShape("check_run", JSON.parse('{"check_run":{"id":1}}')), true);
+  assert.equal(
+    carriesCheckUpdateShape("status", JSON.parse('{"sha":"x","state":"success","context":"ci"}')),
+    true,
+  );
+});
+
+test("a throwing shape accessor propagates to the boundary that must contain it", () => {
+  // The predicate is a pure shape reader and does NOT swallow a hostile
+  // accessor — the normalizer's documented fail-closed contract is that such a
+  // body drops the WHOLE event (pinned by the sibling test above), and the
+  // forge ingress projection contains it at its own boundary
+  // (`tests-v3/ingress-forgejo-events.test.ts`, "a throwing shape getter cannot
+  // resurrect the forged family name").
+  const hostileRun: Record<string, unknown> = {
+    get check_run(): Record<string, unknown> {
+      throw new Error("boom");
+    },
+  };
+  assert.throws(() => carriesCheckUpdateShape("check_run", hostileRun), /boom/);
+  const hostileStatus: Record<string, unknown> = {
+    get sha(): string {
+      throw new Error("boom");
+    },
+  };
+  assert.throws(() => carriesCheckUpdateShape("status", hostileStatus), /boom/);
+});
+
+test("a check-family name that is not one of the three exact literals is unknown", () => {
+  // Spelling variants skip the family gate (it matches exact names) and land on
+  // the normalizer's fail-closed default arm — never on `check_update`, even
+  // with a body that carries BOTH check shapes.
+  for (const name of ["STATUS", "Status", " check_run", "check_run ", "check_run.", "check-runs", "check_runx"]) {
+    const event = normalizeGitHubEvent({
+      name,
+      check_run: { id: 1 },
+      check_suite: { id: 2 },
+      sha: "a".repeat(40),
+      state: "success",
+      context: "ci",
+      repository: { full_name: "owner/repo" },
+    });
+    assert.notEqual(event, null, name);
+    assert.equal(event!.kind, "unknown", name);
+  }
+});
+
+test("a throwing getter on a check/status shape field never throws out of the normalizer", () => {
+  const hostile: Record<string, unknown> = {
+    name: "status",
+    repository: { full_name: "owner/repo" },
+    get sha(): string {
+      throw new Error("boom");
+    },
+  };
+  // Fail closed at the normalize boundary: the whole event drops (`null`),
+  // never a degraded kind.
+  assert.equal(normalizeGitHubEvent(hostile), null);
 });
 
 test("installation and installation_repositories map to installation_change", () => {

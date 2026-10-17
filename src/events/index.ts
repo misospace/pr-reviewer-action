@@ -5,6 +5,7 @@ export type {
   NormalizeEventOptions,
 } from "./types.js";
 export {
+  carriesCheckUpdateShape,
   COMMENT_ID_PATTERN,
   INSTALLATION_ID_PATTERN,
   normalizeForgeEvent,

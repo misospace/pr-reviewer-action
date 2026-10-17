@@ -763,3 +763,59 @@ test("replay: a forged comment hint on a signed non-created body never yields fo
     assert.equal(ev.kind, "unknown");
   }
 });
+
+// ── 22. signed-replay: a forged check/status header never mints a generation ─
+//
+// The residual the header-driven reclassification left open: the same signed PR
+// bytes replayed under `x-gitea-event: status` / `check_run` used to normalize
+// to the SCHEDULEABLE `check_update` kind, because the family names alone were
+// enough and the group header is unauthenticated. The kind is now shape-anchored
+// (#1102): a body with no check/status shape degrades to `unknown`.
+
+test("replay: a signed PR body under forged check/status headers is unknown, never check_update", async (t) => {
+  const h = await startTestHandler();
+  t.after(() => h.close());
+  // ONE real PR body, signed ONCE, posted byte-for-byte under each forged
+  // family header.
+  const body = JSON.stringify(makeNativePrPayload("closed", { merged: true }));
+  const signature = sign(body);
+  for (const forged of [
+    { event: "status" },
+    { event: "status", eventType: "status" },
+    { event: "check_run" },
+    { event: "check_run", eventType: "check_run" },
+    { event: "check_suite" },
+  ]) {
+    const res = await postTyped(h.url, { ...forged, body, signature });
+    assert.equal(res.status, 202, forged.event);
+    assert.deepEqual(JSON.parse(res.text), { status: "accepted", kind: "unknown" }, forged.event);
+  }
+  assert.equal(h.events.length, 5);
+  for (const ev of h.events) {
+    assert.notEqual(ev.kind, "check_update", "a forged check/status header must never mint check_update");
+    assert.equal(ev.kind, "unknown");
+    // The signed body is untouched: the delivery keeps its own identity.
+    assert.equal(ev.prNumber, 7);
+    assert.equal(ev.headSha, HEAD_SHA);
+  }
+});
+
+test("a genuine signed Forgejo status delivery is accepted as check_update", async (t) => {
+  const h = await startTestHandler();
+  t.after(() => h.close());
+  // Forgejo's native commit-status webhook: the top-level sha/state/context
+  // triple, no `pull_requests`, no `installation`, no `check_run` object. A REAL
+  // delivery must still reach the scheduleable kind.
+  const body = JSON.stringify({
+    sha: HEAD_SHA,
+    state: "success",
+    context: "ci/jenkins",
+    repository: { full_name: "org/repo" },
+  });
+  const res = await postTyped(h.url, { event: "status", body, signature: sign(body) });
+  assert.equal(res.status, 202);
+  assert.deepEqual(JSON.parse(res.text), { status: "accepted", kind: "check_update" });
+  assert.equal(h.events.length, 1);
+  assert.equal(h.events[0]!.kind, "check_update");
+  assert.equal(h.events[0]!.repoFullName, "org/repo");
+});

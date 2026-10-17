@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { projectForgejoWebhookPayload } from "../src/ingress/forgejo-events.js";
+import { normalizeForgejoEvent } from "../src/events/normalize.js";
 
 const DEFAULT_LABEL = "ai-review";
 
@@ -435,6 +436,145 @@ test("replay: a signed non-created body under a forged comment hint is not re-ne
     assert.deepEqual(out.issue, { number: 7, title: "a PR" }, eventHeader);
     assert.deepEqual(out.comment, payload.comment, eventHeader);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Check/status family is shape-anchored (#1102) — the group header alone can
+// never mint the scheduleable `check_update` kind
+// ---------------------------------------------------------------------------
+//
+// The HMAC covers the RAW BODY ONLY, so the same signed bytes replay under a
+// forged `check_run`/`check_suite`/`status` group header. The projection
+// therefore honors the family hint ONLY when the signed body carries the shape
+// that name requires (the event layer's `carriesCheckUpdateShape`); otherwise
+// the projected name is the fixed literal `unknown`, which `mapKind` maps to
+// `unknown` — 202 accepted/unknown, no response-code change.
+
+test("replay: a signed PR body under a forged check/status header projects name 'unknown'", () => {
+  // IDENTICAL signed body bytes under each forged family header, with an empty
+  // and a non-empty type header.
+  const payload = {
+    action: "closed",
+    merged: true,
+    pull_request: {
+      number: 7,
+      head: { sha: "a".repeat(40), repo: { full_name: "o/r" } },
+      base: { sha: "b".repeat(40), repo: { full_name: "o/r" } },
+    },
+    repository: { full_name: "o/r" },
+  };
+  for (const eventHeader of ["check_run", "check_suite", "status"]) {
+    for (const eventTypeHeader of ["", eventHeader]) {
+      const out = project(eventHeader, eventTypeHeader, payload);
+      assert.equal(out.name, "unknown", `${eventHeader}/${eventTypeHeader}`);
+      // The signed action is untouched: nothing is synthesized from the hint.
+      assert.equal(out.action, "closed", `${eventHeader}/${eventTypeHeader}`);
+      assert.notEqual(out.action, "synchronize", eventHeader);
+      assert.deepEqual(out, { ...payload, name: "unknown" }, `${eventHeader}/${eventTypeHeader}`);
+      assert.equal("label" in out, false, eventHeader);
+      assert.equal("check_run" in out, false, eventHeader);
+    }
+  }
+});
+
+test("check/status family: a GENUINE Forgejo status delivery passes through byte-identically", () => {
+  // Forgejo's native commit-status webhook: the top-level sha/state/context
+  // triple, no `pull_requests`, no `installation`, no `check_run` object. This
+  // is a real delivery, so the family hint is honored and nothing changes.
+  const payload = {
+    sha: "a".repeat(40),
+    state: "success",
+    context: "ci/jenkins",
+    repository: { full_name: "o/r" },
+  };
+  const out = project("status", "", payload);
+  assert.equal(out.name, "status");
+  assert.deepEqual(out, { ...payload, name: "status" });
+});
+
+test("check/status family: a genuine status body under a forged check_run header is 'unknown'", () => {
+  // Cross-family: the shapes are not interchangeable, so a captured status
+  // delivery replayed as a check run degrades fail-closed.
+  const payload = { sha: "a".repeat(40), state: "success", context: "ci", repository: { full_name: "o/r" } };
+  for (const eventHeader of ["check_run", "check_suite"]) {
+    const out = project(eventHeader, "", payload);
+    assert.equal(out.name, "unknown", eventHeader);
+    assert.deepEqual(out, { ...payload, name: "unknown" }, eventHeader);
+  }
+});
+
+test("check/status family: a genuine check_run / check_suite delivery keeps its header name", () => {
+  const run = { action: "completed", check_run: { id: 1 }, repository: { full_name: "o/r" } };
+  assert.equal(project("check_run", "", run).name, "check_run");
+  const suite = { action: "completed", check_suite: { id: 2 }, repository: { full_name: "o/r" } };
+  assert.equal(project("check_suite", "", suite).name, "check_suite");
+});
+
+test("check/status family: a hostile shape degrades to 'unknown', never the forged family name", () => {
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ["check_run", { check_run: null }],
+    ["check_run", { check_run: [] }],
+    ["check_run", { check_run: "x" }],
+    ["check_suite", { check_suite: 1 }],
+    ["status", { sha: 1, state: "success", context: "ci" }],
+    ["status", { sha: "", state: "success", context: "ci" }],
+  ];
+  for (const [eventHeader, payload] of cases) {
+    const out = project(eventHeader, "", payload);
+    assert.equal(out.name, "unknown", `${eventHeader} ${JSON.stringify(payload)}`);
+    assert.deepEqual(out, { ...payload, name: "unknown" }, `${eventHeader} ${JSON.stringify(payload)}`);
+  }
+});
+
+test("check/status family: a throwing shape getter cannot resurrect the forged family name", () => {
+  const hostile: Record<string, unknown> = {
+    action: "completed",
+    get check_run(): Record<string, unknown> {
+      throw new Error("boom");
+    },
+  };
+  // `carriesCheckUpdateShape` does NOT swallow a hostile accessor, and neither
+  // does the spread of the hostile payload — so the catch ladder's last-resort
+  // twin answers, with the SAME helper's name, which is why the forged family
+  // name cannot come back. That twin necessarily carries no payload fields (the
+  // spread is what threw), so pin the exact degraded shape here: at the HTTP
+  // handler a JSON-parsed body can never carry a throwing accessor, so this
+  // branch is unreachable there and cannot change a response code.
+  const out = projectForgejoWebhookPayload("check_run", "", hostile, {});
+  assert.equal(out.name, "unknown");
+  assert.deepEqual(out, { name: "unknown" });
+});
+
+test("check/status family: a spelling variant of a family header passes through verbatim and lands on unknown", () => {
+  // The family gate matches EXACT names, so a variant (`STATUS`, a padded or
+  // dotted name) is not gated and not rewritten — it stays the header's own
+  // bytes, and the normalizer's default arm is the fail-closed backstop.
+  const payload = {
+    action: "closed",
+    pull_request: {
+      number: 7,
+      head: { sha: "a".repeat(40), repo: { full_name: "o/r" } },
+      base: { sha: "b".repeat(40), repo: { full_name: "o/r" } },
+    },
+    repository: { full_name: "o/r" },
+  };
+  for (const eventHeader of ["STATUS", " status ", "check_run.", "check-runs"]) {
+    const out = project(eventHeader, "", payload);
+    assert.equal(out.name, eventHeader, eventHeader);
+    assert.deepEqual(out, { ...payload, name: eventHeader }, eventHeader);
+    const event = normalizeForgejoEvent(out);
+    assert.notEqual(event, null, eventHeader);
+    assert.equal(event!.kind, "unknown", eventHeader);
+  }
+});
+
+test("check/status family: a non-family header is never gated on the signed shape", () => {
+  // The gate applies to the check/status family ONLY — an unrelated group with
+  // no matching shape keeps its exact prior passthrough behavior.
+  const payload = { foo: 1, bar: { baz: 2 } };
+  const out = project("some_future_event", "", payload);
+  assert.equal(out.name, "some_future_event");
+  assert.deepEqual(out, { ...payload, name: "some_future_event" });
 });
 
 // ---------------------------------------------------------------------------

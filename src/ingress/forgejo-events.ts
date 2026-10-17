@@ -37,8 +37,9 @@
 // copy of the payload text, so a hostile label cannot forge the trigger. The
 // projection is pure: it never throws, never mutates the input, and always
 // returns a fresh object with `name` set. An unrecognized shape falls through to
-// `{ ...payload, name: eventHeader }` — exactly the behavior the handler had
-// before this module existed — and a hint incompatible with the signed action is
+// `{ ...payload, name: <the name the helper authorizes> }` — for every family
+// except the check/status one, exactly the behavior the handler had before this
+// module existed — and a hint incompatible with the signed action is
 // never forced: it degrades to the grouped rule for its header, or to that same
 // passthrough.
 //
@@ -49,11 +50,19 @@
 //   pull_request_label   -> name `pull_request_label`, action `label_updated`
 //   pull_request_comment -> name `issue_comment`, action `created`
 //
-// Remaining header-only surface (deliberately out of scope here): the
-// normalizer's action-independent `check_run`/`check_suite`/`status` names, so
-// a forged group name can still reach the `check_update` family. Forgejo check
-// runs are a capability degradation (`capabilities.ts`) and the projection is
-// not the seam that owns those kinds.
+// The check/status family is closed here too (#1102): a `check_run`/
+// `check_suite`/`status` GROUP header is honored as a passthrough ONLY when
+// the SIGNED body carries the shape that name requires (the event-layer
+// predicate `carriesCheckUpdateShape`: a top-level `check_run`/`check_suite`
+// object, or the top-level `sha`/`state`/`context` triple Forgejo's native
+// commit-status delivery carries). Otherwise the projected `name` is the fixed
+// literal `unknown` — never the forged family name, so the normalizer can
+// never reach the scheduleable `check_update` kind from a header alone. The
+// `X-Gitea-Event-Type` header is deliberately NOT consulted for this family (as
+// for every non-PR family: only the group header ever reaches the envelope).
+// Forgejo check runs remain a declared capability degradation
+// (`capabilities.ts` `checkRuns: false`), so the required shape drops no real
+// Forgejo delivery.
 //
 // Failure mode is fail-closed throughout: a rejected hint, an unrecognizable
 // label, or an unrecognizable comment projects to a shape the normalizer maps
@@ -61,8 +70,39 @@
 // kind-gating consumer (dispatch) drops unknown kinds; only a null
 // normalization is acked 200-ignored.
 
+import { carriesCheckUpdateShape } from "../events/normalize.js";
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The check/status family names: the group headers that reach the envelope as
+ * a plain passthrough hint but whose kind is only reachable when the SIGNED
+ * body carries the matching shape (#1102). */
+const CHECK_FAMILY_NAMES: ReadonlySet<string> = new Set(["check_run", "check_suite", "status"]);
+
+/** The name the envelope may carry for a passthrough hint: the group header
+ * itself, EXCEPT for the check/status family, where the header alone is not
+ * authority — the signed body must carry that group's shape (the event layer's
+ * `carriesCheckUpdateShape`), or the name degrades to the fixed literal
+ * `unknown` that `mapKind` already maps to `unknown`.
+ *
+ * Fail-closed on a throw: the predicate does NOT swallow a hostile accessor
+ * (the normalizer's contract is that such a body drops the whole event), and
+ * this helper is the boundary that must never throw — its own try/catch takes
+ * the SAME degraded answer. Load-bearing in the catch ladder below: the
+ * last-resort twin calls this helper too, so an unguarded throw there would
+ * escape the projection. The `unknown` literal is never synthesized from
+ * untrusted input — it is a fixed constant. */
+function passthroughName(eventHeader: string, payload: Record<string, unknown>): string {
+  if (CHECK_FAMILY_NAMES.has(eventHeader)) {
+    try {
+      if (!carriesCheckUpdateShape(eventHeader, payload)) return "unknown";
+    } catch {
+      return "unknown";
+    }
+  }
+  return eventHeader;
 }
 
 /** The effective trigger label: the operator-configured value, falling back
@@ -270,15 +310,28 @@ export function projectForgejoWebhookPayload(
     }
 
     // Rule 6 — anything else, and every hint rejected above as incompatible with
-    // the signed body: pass through with the header as name.
-    return { ...payload, name: eventHeader };
+    // the signed body: pass through with the header as name — EXCEPT the
+    // check/status family (`check_run`/`check_suite`/`status`), which
+    // `passthroughName` honors ONLY when the SIGNED body carries the shape that
+    // name requires. A captured delivery replayed byte-for-byte under a forged
+    // family header (the HMAC covers the raw body only) carries some other
+    // shape, so its projected name degrades to the fixed literal `unknown` —
+    // never the forged family name, and never a name that could reach the
+    // scheduleable `check_update` kind from a header alone. The
+    // `X-Gitea-Event-Type` header is deliberately NOT consulted for that
+    // family: for every non-PR family only the group header ever reaches the
+    // envelope, and a second unauthenticated hint would only widen the forgery
+    // surface.
+    return { ...payload, name: passthroughName(eventHeader, payload) };
   } catch {
     // Fail closed, mirroring the normalizeEvent try/catch: any throw degrades
-    // to the passthrough; a throwing copy falls back to the bare hint name.
+    // to the passthrough; a throwing copy falls back to the bare hint name
+    // (through the SAME helper, so a mid-projection throw can never resurrect a
+    // forged check/status family name).
     try {
-      return { ...payload, name: eventHeader };
+      return { ...payload, name: passthroughName(eventHeader, payload) };
     } catch {
-      return { name: eventHeader };
+      return { name: passthroughName(eventHeader, payload) };
     }
   }
 }
