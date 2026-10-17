@@ -1581,17 +1581,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *
  * The reader DERIVES `synthesized` from the redaction count rather than
  * trusting the persisted boolean, and requires the count to be a finite
- * non-negative integer: a record claiming `sanitized_source` with a count of 0
- * (or a stringly-typed count) is a contradiction, and the renderer must not
- * be the component that silently resolves it by coercion. Such a record is
- * unusable and renders nothing. A present-but-non-string `file`/`revision`
- * is equally unusable; an absent one simply renders no such attribute. */
+ * non-negative integer. It also enforces the producer's representation/count
+ * invariant fail-closed (`sourceEvidence` emits `sanitized_source` only for a
+ * positive count and `committed_source` only for zero): a record claiming
+ * `sanitized_source` with a count of 0 — or `committed_source` with a positive
+ * count — is a contradiction, and the renderer must not be the component that
+ * silently resolves it by coercion. Such a record is unusable and renders
+ * nothing. A present-but-non-string `file`/`revision` is equally unusable; an
+ * absent one simply renders no such attribute. */
 function provenanceRecordAttributes(value: unknown): string {
   if (!isRecord(value)) return "";
   const representation = value.representation;
   if (representation !== "committed_source" && representation !== "sanitized_source") return "";
   const count = value.redaction_count;
   if (typeof count !== "number" || !Number.isFinite(count) || !Number.isInteger(count) || count < 0) return "";
+  if (representation === "committed_source" && count > 0) return "";
+  if (representation === "sanitized_source" && count === 0) return "";
   if (value.file !== undefined && typeof value.file !== "string") return "";
   if (value.revision !== undefined && typeof value.revision !== "string") return "";
   const file = typeof value.file === "string" ? value.file : null;

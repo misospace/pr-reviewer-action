@@ -300,6 +300,9 @@ test("the renderer derives provenance from the redaction count and refuses contr
   assert.ok(render({ representation: "committed_source", synthesized: true, redaction_count: 0, file: "x.py" })
     .includes('representation="committed_source" synthesized="false" redaction_count="0" source_file="x.py"'));
   // Unusable records render no attributes at all — the snippet still shows.
+  // The representation/count invariant the producer guarantees (`sourceEvidence`:
+  // sanitized_source ⇔ positive count, committed_source ⇔ zero) is enforced
+  // fail-closed in both mismatch directions.
   for (const unusable of [
     { representation: "sanitized_source", synthesized: "yes", redaction_count: "3" },
     { representation: "sanitized_source", redaction_count: 1.5 },
@@ -307,6 +310,8 @@ test("the renderer derives provenance from the redaction count and refuses contr
     { representation: "sanitized_source", redaction_count: Number.NaN },
     { representation: "sanitized_source" },
     { representation: "untrusted_text", redaction_count: 0 },
+    { representation: "committed_source", redaction_count: 3, file: "x.py" },
+    { representation: "sanitized_source", redaction_count: 0, file: "x.py" },
     { representation: "committed_source", redaction_count: 0, file: 42 },
     { representation: "committed_source", redaction_count: 0, revision: 42 },
     "committed_source",
