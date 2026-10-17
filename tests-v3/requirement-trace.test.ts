@@ -1422,21 +1422,25 @@ test("#1044: traceRepairOutcomeSummary sanitizes control characters, caps fields
 });
 
 test("#1044 review follow-up: a canary credential never reaches the persisted repair summary, on either error path", () => {
-  const canary = "sk-run-canary-secret";
+  // A canary matching no redactText pattern (`sk-` keys, `Bearer` tokens,
+  // `key=value`, header-shaped text) so the assertion pins the
+  // `maskKnownSecrets` pass itself, not a generic heuristic.
+  const canary = "courier-canary-QW7x91";
   const viaResult = traceRepairOutcomeSummary({
     attempted: true,
     outcome: null,
     missingIds: [],
-    result: repairResult("error", { errorKind: "transport", error: `connect ECONNREFUSED Authorization: Bearer ${canary}` }),
+    result: repairResult("error", { errorKind: "transport", error: `connect ECONNREFUSED while calling ${canary}` }),
     secrets: [canary],
   });
+  assert.match(viaResult.error ?? "", /ECONNREFUSED/);
   assert.ok(!JSON.stringify(viaResult).includes(canary), JSON.stringify(viaResult));
   const viaThrow = traceRepairOutcomeSummary({
     attempted: true,
     outcome: null,
     missingIds: [],
     result: null,
-    thrownError: new Error(`x-api-key: ${canary}`),
+    thrownError: new Error(`repair attempt ${canary} aborted`),
     secrets: [canary],
   });
   assert.ok(!JSON.stringify(viaThrow).includes(canary), JSON.stringify(viaThrow));

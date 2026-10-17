@@ -1140,16 +1140,19 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
         });
       } catch (cause) {
         repairThrow = cause;
-        log(`WARNING: requirement trace repair pass failed; continuing without repair: ${cause instanceof Error ? cause.message : String(cause)}`);
+        // Credential-shaped transport/provider text must not reach local
+        // diagnostics either (AGENTS.md security boundaries).
+        log(`WARNING: requirement trace repair pass failed; continuing without repair: ${maskKnownSecrets(cause instanceof Error ? cause.message : String(cause), [profiles.primary.apiKey])}`);
       }
       if (repaired !== null) {
         // Per-run record, mirroring claim-falsification.json: the merged
         // claims land in ai-output.json, but the pass's status is otherwise
-        // unobservable.
+        // unobservable. Error text is provider-controlled, so it passes the
+        // secret-redaction boundary before persistence (#1044 review).
         ws.write("requirement-trace-repair.json", Buffer.from(`${pyJsonDumps({
           status: repaired.status,
           error_kind: repaired.errorKind,
-          error: repaired.error,
+          error: redactText(maskKnownSecrets(repaired.error ?? "", [profiles.primary.apiKey])) || null,
           missing_ids: missingTraceIds,
           claims: repaired.claims.length,
           diff_clipped: repaired.diffClipped,
@@ -1158,7 +1161,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
           repairTarget.requirement_coverage = mergeTraceClaims(repairTarget.requirement_coverage, repaired.claims);
           log(`requirement trace: repair pass returned ${repaired.claims.length} claim(s)`);
         } else {
-          log(`requirement trace: repair pass returned no claims (${repaired.status}${repaired.error ? `: ${repaired.error}` : ""})`);
+          log(`requirement trace: repair pass returned no claims (${repaired.status}${repaired.error ? `: ${redactText(maskKnownSecrets(repaired.error, [profiles.primary.apiKey]))}` : ""})`);
         }
       }
       // #1044 review follow-up: derive the summary's `missing_ids` from the
