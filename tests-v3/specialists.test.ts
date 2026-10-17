@@ -1224,3 +1224,64 @@ test("#1061: combined_scout — a retry that fails to parse is 'failed', never '
   }
   assert.equal(roleEntry(result, "correctness").stop_reason, "max_tokens", "the retained response is the initial one");
 });
+
+test("#1094: a specialist reply embedding a configured credential in its content fails closed — the normalized artifact is dropped, not published", async () => {
+  // #252 boundary, blocker direction: the normalized artifact's lead messages
+  // are published verbatim in the corpus section and specialist-<role>.json;
+  // a gateway echoing a configured header VALUE into the completion content
+  // must refuse the role response (parser error, EMPTY artifact), never
+  // publish it and never mask it into a corrupted lead.
+  const canary = "gw-8f2a1c9d3b7e4a10";
+  const result = await runSpecialists(
+    baseInput({
+      config: { ...baseInput().config, extraHeaders: { "X-Gateway-Credential": canary } },
+      requestFn: async () => ({
+        ok: true,
+        raw: {
+          choices: [{
+            message: { content: JSON.stringify({ leads: [{ severity: "major", category: "bug", file: "a.ts", message: `gateway audit ${canary}` }] }) },
+            finish_reason: "stop",
+          }],
+        },
+      }),
+    }),
+  );
+  const roles = result.aggregate.roles as Array<{ role: string; status: string; error_kind: string | null }>;
+  for (const entry of roles) {
+    assert.equal(entry.status, "error");
+    assert.equal(entry.error_kind, "parser");
+  }
+  const artifactsText = JSON.stringify(result.artifacts);
+  assert.ok(!artifactsText.includes(canary), `per-role artifacts leaked the canary: ${artifactsText}`);
+  const aggregateText = JSON.stringify(result.aggregate);
+  assert.ok(!aggregateText.includes(canary), `aggregate leaked the canary: ${aggregateText}`);
+});
+
+test("#1094: the scout refuses a shared reply embedding a configured credential — every role fails closed", async () => {
+  const canary = "gw-8f2a1c9d3b7e4a10";
+  const result = await runSpecialists(
+    baseInput({
+      config: { ...baseInput().config, execution: "combined_scout", extraHeaders: { "X-Gateway-Credential": canary } },
+      requestFn: async () => ({
+        ok: true,
+        raw: {
+          choices: [{
+            message: { content: JSON.stringify({
+              correctness: { leads: [{ severity: "major", message: `gateway audit ${canary}` }] },
+              security: { leads: [] },
+              tests: { leads: [] },
+            }) },
+            finish_reason: "stop",
+          }],
+        },
+      }),
+    }),
+  );
+  const roles = result.aggregate.roles as Array<{ role: string; status: string; error_kind: string | null }>;
+  for (const entry of roles) {
+    assert.equal(entry.status, "error");
+    assert.equal(entry.error_kind, "parser");
+  }
+  const artifactsText = JSON.stringify(result.artifacts);
+  assert.ok(!artifactsText.includes(canary), `per-role artifacts leaked the canary: ${artifactsText}`);
+});

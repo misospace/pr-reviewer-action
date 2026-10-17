@@ -23,7 +23,8 @@ import { emptyArtifact, extractSpecialistJson, normalizeSpecialistOutput, parseS
 import { buildSpecialistPayload, overrunRetryPayload, payloadBytes, type SpecialistPayload } from "./payload.js";
 import { completionOverran, extractResponseText, extractResponseUsage, mergeUsage, responseStopReason, type SpecialistUsage } from "./wire.js";
 import { renderSpecialistLeadsSection } from "./render.js";
-import { maskDiagnostic, maskKnownSecrets, redactText } from "../context/redact.js";
+import { containsKnownSecret, maskDiagnostic, maskKnownSecrets, maskKnownSecretsDeep, redactText } from "../context/redact.js";
+import { callKnownSecrets } from "../transport/headers.js";
 import { pyStr } from "../platform/py.js";
 import type { SpecialistRoleModel, SpecialistModelSource } from "../routing/tiers.js";
 
@@ -171,6 +172,12 @@ export interface SpecialistRunConfig {
   reasoningEffort?: string;
   /** #998: the Anthropic endpoint opt-in for `output_config.effort`. */
   anthropicEffortSupported?: boolean;
+  /** #1037 (`ai-extra-headers`): the operator headers this lane sends. Their
+   * VALUES are known secrets for every response surface below — the provider
+   * can quote a request header straight back into a 200 error body, a stop
+   * reason, or the persisted `specialist-<role>.response.json`. Unset adds
+   * nothing to the mask list. */
+  extraHeaders?: Readonly<Record<string, string>>;
 }
 
 export interface SpecialistRunInput {
@@ -301,7 +308,7 @@ function roleEntry(
  * mangled), which would defeat the diagnostic. The realistic leak here — the
  * provider echoing the configured API key — is exactly what
  * `maskKnownSecrets` removes. */
-function boundedStopReason(value: string | null, secrets: readonly string[] = []): string | null {
+function boundedStopReason(value: string | null, secrets: readonly (string | null | undefined)[] = []): string | null {
   if (value === null) return null;
   const cleaned = maskKnownSecrets(value, secrets).replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 64);
   return cleaned === "" ? null : cleaned;
@@ -386,6 +393,11 @@ interface RoleRunOutcome {
 async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcome> {
   const { role, userMessage, system, config, deadline, now, sleep, requestFn, cancelled, corpusSource } = options;
   const started = now();
+  // #1037: ONE known-secret list for every response surface of this role —
+  // the in-body-error message, the stop reason, and the persisted response
+  // artifact below — so a configured extra-header VALUE the provider echoes
+  // back is masked identically wherever it lands.
+  const knownSecrets = callKnownSecrets(config.apiKey, config.extraHeaders);
   let requestBytes: number | null = null;
   let overrunRetry = false;
   let retryMaxTokens: number | null = null;
@@ -429,7 +441,14 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
       ...(diagnostics.overrunRetryResult !== undefined && diagnostics.overrunRetryResult !== null ? { overrunRetryResult: diagnostics.overrunRetryResult } : {}),
     }),
     request,
-    response,
+    // #1037: the RAW response body is the provider's reflection surface, and
+    // this is the copy that reaches `specialist-<role>.response.json`; it is
+    // masked per string leaf, so structure and the persisted shape are
+    // untouched. The normalized artifact is deliberately left alone: its
+    // `severity`/`category`/`file` fields drive the aggregate and the corpus
+    // section, and masking them would corrupt published output for any short
+    // configured key.
+    response: maskKnownSecretsDeep(response, knownSecrets),
     artifact,
   });
 
@@ -516,8 +535,8 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
       // re-truncates `errorBodyText`'s own v2-parity 500-char cap, since the
       // whole string (prefix + up to 500 chars of body) never exceeds it.
       const message = maskDiagnostic(
-        `endpoint returned an error body: ${errorBodyText((outcome.raw as Record<string, unknown>).error, [config.apiKey])}`,
-        [config.apiKey],
+        `endpoint returned an error body: ${errorBodyText((outcome.raw as Record<string, unknown>).error, knownSecrets)}`,
+        knownSecrets,
         1000,
       );
       const failureArtifact = emptyArtifact(role);
@@ -591,6 +610,36 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
     // and guard failures are classified at their own return sites, and the
     // Anthropic effort-capability warning stays a separate lane-level concern
     // (see resolveSpecialistProfiles).
+    // #1094 review round 3 (blocker, specialist surface): the normalized
+    // artifact's free-text fields (`leads[].message`, `errors`) are published
+    // verbatim in the corpus section and `specialist-<role>.json` — masking
+    // them would corrupt the aggregate for a short-but-legal configured key,
+    // the same reason the raw response copy above is masked per leaf instead.
+    // A gateway that echoes a configured header VALUE into the completion
+    // content itself therefore fails CLOSED here, after any overrun retry has
+    // had its chance: the role ends as a `parser` error with an EMPTY artifact
+    // (the secret-bearing normalized output is dropped, not published), and
+    // the message is static prose — no secret, no header name — matching the
+    // verdict-parse gate's contract. `response` in `finish` stays the
+    // per-leaf-masked copy.
+    if (containsKnownSecret(responseText, knownSecrets)) {
+      const failureArtifact = emptyArtifact(role);
+      failureArtifact.errors.push("parser: model output embeds a configured credential; the response is refused rather than published");
+      return finish(
+        failureArtifact,
+        "error",
+        "parser",
+        extractResponseUsage(response),
+        payload,
+        response,
+        {
+          stopReason: boundedStopReason(responseStopReason(response), knownSecrets),
+          outputChars: responseText.length,
+          overrunDetected,
+          overrunRetryResult,
+        },
+      );
+    }
     const overrunUnrecovered = completionOverran(response) && artifact.leads.length === 0;
     const parseFailed = !overrunUnrecovered && artifact.errors.length > 0 && artifact.leads.length === 0;
     return finish(
@@ -601,7 +650,7 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
       payload,
       response,
       {
-        stopReason: boundedStopReason(responseStopReason(response), [config.apiKey]),
+        stopReason: boundedStopReason(responseStopReason(response), knownSecrets),
         outputChars: responseText.length,
         overrunDetected,
         overrunRetryResult,
@@ -681,6 +730,9 @@ async function runSpecialistScout(
 ): Promise<{ entries: SpecialistRoleEntry[]; request: SpecialistPayload | null; response: unknown; artifacts: Record<string, SpecialistArtifact> }> {
   const started = now();
   const system = buildScoutSystem(rolePrompts);
+  // #1037: the scout's own response-side known-secret list — same shape as
+  // the per-role one (the scout is one call shared by every role).
+  const knownSecrets = callKnownSecrets(config.apiKey, config.extraHeaders);
   // #846: set only when the terminal failure was an actual HTTP error
   // response (never for input/timeout failures or a 200 carrying an error
   // body).
@@ -755,8 +807,8 @@ async function runSpecialistScout(
       // branch: `maskDiagnostic`'s whole-string pass covers a one-character
       // key coinciding with the static prefix text.
       lastError = maskDiagnostic(
-        `transport: endpoint returned an error body: ${errorBodyText((outcome.raw as Record<string, unknown>).error, [config.apiKey])}`,
-        [config.apiKey],
+        `transport: endpoint returned an error body: ${errorBodyText((outcome.raw as Record<string, unknown>).error, knownSecrets)}`,
+        knownSecrets,
         1000,
       );
       break;
@@ -822,7 +874,16 @@ async function runSpecialistScout(
 
     const finalOverran = completionOverran(response);
     const elapsed = now() - started;
-    const stopReason = boundedStopReason(responseStopReason(response), [config.apiKey]);
+    const stopReason = boundedStopReason(responseStopReason(response), knownSecrets);
+    // #1094 review round 3 (blocker, scout surface): the same fail-closed rule
+    // as `runSpecialistRole` — the shared response's normalized artifacts are
+    // published verbatim, so a gateway echoing a configured header VALUE into
+    // the completion content refuses the whole scout call rather than
+    // publishing the credential. `failureEntries` carries no response
+    // artifact; the static message names no secret and no header.
+    if (containsKnownSecret(responseText, knownSecrets)) {
+      return failureEntries("parser: model output embeds a configured credential; the response is refused rather than published");
+    }
     const entries = roles.map((role) => {
       const artifact = artifacts[role]!;
       // An unrecovered completion-limit truncation with no leads is `overrun`
@@ -843,7 +904,14 @@ async function runSpecialistScout(
       if (overrunRetryResult !== null) diagnostics.overrunRetryResult = overrunRetryResult;
       return roleEntry(role, artifact, overrunUnrecovered ? "degraded" : statusOf(artifact), overrunUnrecovered ? "overrun" : parseFailed ? "parser" : null, elapsed, diagnostics);
     });
-    return { entries, request: payload, response, artifacts };
+    return {
+      entries,
+      request: payload,
+      // #1037: the shared response body masked on its way into the artifact;
+      // the normalized per-role artifacts keep their structural fields.
+      response: maskKnownSecretsDeep(response, knownSecrets),
+      artifacts,
+    };
   }
 
   return failureEntries(lastError ?? "transport: no attempt completed");

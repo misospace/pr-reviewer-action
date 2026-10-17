@@ -34,7 +34,8 @@ import {
 } from "../model/conversation.js";
 import { redactText } from "../context/redact.js";
 import { fenceSafeLength } from "../context/related-context.js";
-import { KNOWN_SECRET_REDACTED, maskAndTruncate, maskDiagnostic, maskKnownSecrets } from "../context/redact.js";
+import { KNOWN_SECRET_REDACTED, maskAndTruncate, maskDiagnostic, maskKnownSecrets, maskKnownSecretsDeep, MIN_KNOWN_SECRET_CONTENT_LEN } from "../context/redact.js";
+import { callKnownSecrets, extraHeadersForEnv } from "../transport/headers.js";
 import { reframeForCorpus, renderRepoMapMarkdown, repoMapFromArtifact, trustFramingOverhead } from "../context/repo-map.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { VerdictParseFailure } from "../model/types.js";
@@ -432,6 +433,222 @@ export function evaluateNativeVerdict(response: unknown, secrets: readonly (stri
   }
 }
 
+function isEnvelopeRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * #1094 review finding 1: the minimal reusable envelope for the accepted
+ * verdict turn's persisted `ai-response.<tier>.json`, in the SAME provider
+ * shape `parseVerdictResponse` reads. The raw body used to be written verbatim
+ * because that artifact is a CONTRACT — `runReview`'s native-loop reuse
+ * re-parses it as the verdict (`src/run/review.ts`) — but a provider/gateway
+ * can echo a configured `ai-extra-headers` VALUE back in any metadata field of
+ * its own HTTP 200 body (`system_fingerprint`, `id`, `model`, an unknown key),
+ * and those bytes landed on disk unmasked. Projecting instead of masking is
+ * what removes that surface: the echo never enters the artifact, and the
+ * verdict still re-parses identically.
+ *
+ * Exactly what `parseVerdictResponse` consumes is carried, nothing else:
+ * `extractContent` (the OpenAI `choices[0].message.content` branch first, the
+ * Anthropic top-level `content` branch second — the projection resolves the
+ * same branch in the same order), `finishReasonOf` (`choices[0].finish_reason`
+ * with its top-level `stop_reason` fallback), `completionTokens`
+ * (`usage.completion_tokens` / `usage.output_tokens`, the `empty_completion`
+ * distinction), and `surfaceStreamError`'s `error` probe, which needs no
+ * projection: this runs only on the ACCEPTED path, where a truthy `error`
+ * would already have failed the verdict evaluation — that accepted-path
+ * precondition is part of this function's contract, so a truthy `error` body
+ * passed to it directly is out of contract (`evaluateNativeVerdict` returns
+ * `ok:false` for it, and the caller never projects such a body).
+ * Beyond the parse itself, every NUMERIC `usage` counter is carried so the
+ * step summary's token counts (`run/summary.ts`) survive the projection; see
+ * the `usage` branch below.
+ *
+ * Two deliberate asymmetries:
+ * - The completion CONTENT follows `extractContent`, not a blanket rule.
+ *   STRING content is carried VERBATIM: it becomes the published verdict, so
+ *   masking it would corrupt verdict fields for a short-but-legal configured
+ *   key (`review_mar⟦•⟧down` → unparseable) — the same reason `ai-output.json`
+ *   and `specialist-*.json` stay unmasked. It is NOT a free pass, though:
+ *   this function only runs on the ACCEPTED path, and acceptance goes through
+ *   `parseVerdictResponse` (via `evaluateNativeVerdict`), whose #1094
+ *   fail-closed gate REFUSES a completion content that embeds a configured
+ *   credential — and for a string the extracted text IS the string, so a
+ *   string that reaches this projection is already known to be secret-free.
+ *   ARRAY content (#1094 review round 3) is PROJECTED to only the text
+ *   `extractContent` consumes — verbatim text, non-text parts and ignored
+ *   metadata dropped by construction. Value-only masking cannot work here (a
+ *   part like `{type:'audit', credential: <value>}` is not text, so the gate
+ *   never sees the credential, yet the old verbatim carry persisted it), and
+ *   the projection is built to re-parse EXACTLY like the original through
+ *   `extractContent`'s own branch semantics:
+ *   - OpenAI (`choices[0].message.content`): the consumed texts (bare
+ *     strings, and `text` of parts typed undefined/null/"text") become an
+ *     array of plain STRINGS — re-parse hits `extractContent`'s bare-string
+ *     push path and yields the identical joined text; an empty consumed set
+ *     stays an empty ARRAY, exactly like the `parts` the branch returns
+ *     today (never a string or null).
+ *   - Anthropic (top-level `content`): the consumed texts become normalized
+ *     `{type:'text', text}` records, because that branch's loop consumes ONLY
+ *     typed text records — projecting bare strings there would re-parse to
+ *     `null` and break the reuse parse. The record form carries only `type`
+ *     and `text` (both our own literals), so ignored fields on a text part
+ *     are dropped too; empty stays an empty array, which re-parses to the
+ *     branch's `parts.length > 0 ? parts : null` null — the same outcome the
+ *     original produces today.
+ *   - Content that is neither a string nor an array (exotic — an object,
+ *     number, ...) is out of contract on the accepted path: `extractContent`
+ *     turns it into `""`-equivalent text and `parseVerdictResponse` always
+ *     fails it (not_object, or empty_completion at zero completion tokens),
+ *     so acceptance can never have passed such a body. It is still not
+ *     carried raw: the fail-closed handling is `maskKnownSecretsDeep`, which
+ *     masks keys and string leaves it may carry while leaving the re-parse
+ *     in the same failure class (the text stays `""`), so a defensive-depth
+ *     or future-contract change can never turn this branch into a secret
+ *     persistence path.
+ * - Every OTHER carried value goes through `maskKnownSecretsDeep`. The finish
+ *   reason is masked because this artifact is only written on the accepted
+ *   path, where the truncation suffix is never consulted.
+ *
+ * Keys are OUR OWN literals, and every object is built with `Object.fromEntries`
+ * (CreateDataPropertyOrThrow), never `out[key] = ...`: a hostile provider body
+ * can carry an OWN `__proto__` (JSON.parse produces exactly that), where a
+ * plain assignment would invoke the prototype setter — the same rule (and the
+ * same reason) as `maskKnownSecretsDeep`. The content projection's own objects
+ * (the Anthropic `{type:'text', text}` records) are built the same way, from
+ * literals only. The `usage` counters map is built by FILTERING the
+ * provider's own entries: a counter survives only when BOTH its name and its
+ * value are untouched by the masker — a provider-controlled usage KEY is the
+ * same echo surface as any other metadata name, so a key that would mask is
+ * dropped with its value, and no provider-controlled name ever becomes a
+ * property here either.
+ */
+/**
+ * #1094 review round 3: the array-projection rule for the completion CONTENT,
+ * shared by both provider shapes of `reusableVerdictEnvelope`. The branch
+ * semantics mirrored here are `extractContent`'s (src/model/verdict.ts) —
+ * OpenAI (`choices[0].message.content`): bare strings, plus the `text` of
+ * parts typed undefined/null/"text"; Anthropic (top-level `content`): only
+ * `{type:'text', text}` records. The returned value re-parses to the SAME
+ * joined text through those branches; see the envelope's doc comment for the
+ * per-shape rationale and the exotic-content fail-closed choice.
+ */
+function projectedVerdictContent(
+  content: unknown,
+  secrets: readonly (string | null | undefined)[],
+  anthropicShape: boolean,
+): unknown {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const consumed: string[] = [];
+    for (const item of content) {
+      if (anthropicShape) {
+        if (isEnvelopeRecord(item) && item.type === "text" && typeof item.text === "string") consumed.push(item.text);
+      } else if (typeof item === "string") {
+        consumed.push(item);
+      } else if (
+        isEnvelopeRecord(item)
+        && (item.type === undefined || item.type === null || item.type === "text")
+        && typeof item.text === "string"
+      ) {
+        consumed.push(item.text);
+      }
+    }
+    if (anthropicShape) {
+      // Bare strings would re-parse to `null` in the Anthropic branch (its
+      // loop consumes typed text records only), so the consumed texts go back
+      // as the exact record shape that branch accepts — `type`/`text` only,
+      // both our own literals, every ignored field dropped.
+      return consumed.map((text) => ({ type: "text", text }));
+    }
+    // OpenAI: an array of plain strings re-parses through the bare-string
+    // push path; an empty consumed set stays an empty array, exactly like the
+    // `parts` the branch returns today.
+    return consumed;
+  }
+  // Exotic content (object/number/...): out of contract on the accepted path
+  // (the parse always fails it), but never carried raw — masked deep so keys
+  // and string leaves cannot persist a credential, with the re-parse left in
+  // today's failure class.
+  return maskKnownSecretsDeep(content, secrets);
+}
+
+export function reusableVerdictEnvelope(
+  response: unknown,
+  secrets: readonly (string | null | undefined)[] = [],
+): Record<string, unknown> {
+  const body = isEnvelopeRecord(response) ? response : {};
+  // Every NUMERIC `usage` counter is carried (the parse needs
+  // `completion_tokens`/`output_tokens`; the step summary in `run/summary.ts`
+  // reports `prompt_tokens`/`completion_tokens` from this artifact, so dropping
+  // the rest would silently degrade a native-loop reuse run's token counts).
+  // Non-numeric `usage` entries are dropped rather than masked: they are free
+  // text a gateway can echo a header VALUE into, and no counter the parse or
+  // the summary reads is a string — so the numeric rule loses no behavior and
+  // keeps the echo surface out. The same holds for the entry NAMES: a
+  // usage KEY is provider-controlled metadata exactly like
+  // `system_fingerprint`, so a key the masker would rewrite is dropped with
+  // its value rather than persisting the echoed credential on disk.
+  // A counter is carried only when masking would not have changed either its
+  // name or its value. That is
+  // not a formality: `maskKnownSecrets` masks a secret of ANY non-empty length,
+  // so a purely NUMERIC configured header value (`X-Team-Id: 7`) is masked in
+  // every string leaf while the same value echoed into a numeric counter would
+  // otherwise survive verbatim on disk. A counter the masker would touch is
+  // dropped, exactly like a non-numeric one.
+  const usageEntries: Array<[string, unknown]> = [];
+  if (isEnvelopeRecord(body.usage)) {
+    const counters = Object.entries(body.usage).filter(([key, value]) =>
+      typeof value === "number"
+      && Number.isFinite(value)
+      && maskKnownSecrets(key, secrets) === key
+      && maskKnownSecrets(String(value), secrets) === String(value));
+    if (counters.length > 0) usageEntries.push(["usage", Object.fromEntries(counters)]);
+  }
+
+  const choices = body.choices;
+  // OpenAI first: `extractContent` consults `choices` before the top-level
+  // `content`, so the projection must resolve the same branch in the same
+  // order — projecting the Anthropic shape here would parse differently.
+  if (Array.isArray(choices) && choices.length > 0) {
+    const first = isEnvelopeRecord(choices[0]) ? choices[0] : {};
+    const message = isEnvelopeRecord(first.message) ? first.message : {};
+    const choiceEntries: Array<[string, unknown]> = [
+      // `content` keeps its exact form when it is a string (the accepted-path
+      // gate already proved it secret-free) and is PROJECTED when it is an
+      // array — only the text `extractContent` consumes survives, so ignored
+      // part metadata cannot ride into the artifact; see the doc comment.
+      ["message", "content" in message ? { content: projectedVerdictContent(message.content, secrets, false) } : {}],
+    ];
+    // `finishReasonOf` reads `choices[0].finish_reason` first and falls back to
+    // the TOP-LEVEL `stop_reason` only when it is absent or non-string. The
+    // fallback therefore belongs at the envelope root, not inside
+    // `choices[0]`: a `choices[0].stop_reason` is a key the parser never
+    // reads, so writing it there would silently hand the next
+    // `finishReasonOf` caller a `null` (dropping the truncation suffix) while
+    // the artifact claims to carry the reason.
+    const rootEntries: Array<[string, unknown]> = [];
+    if (typeof first.finish_reason === "string") {
+      choiceEntries.push(["finish_reason", maskKnownSecretsDeep(first.finish_reason, secrets)]);
+    } else if (typeof body.stop_reason === "string") {
+      rootEntries.push(["stop_reason", maskKnownSecretsDeep(body.stop_reason, secrets)]);
+    }
+    return Object.fromEntries<unknown>([["choices", [Object.fromEntries(choiceEntries)]], ...rootEntries, ...usageEntries]);
+  }
+
+  const entries: Array<[string, unknown]> = [];
+  // Top-level `content` follows the same rule as the OpenAI branch above:
+  // string verbatim (gate-checked), array projected to the consumed text
+  // records (the Anthropic branch of `extractContent`), anything else masked
+  // deep and fail-closed.
+  if ("content" in body) entries.push(["content", projectedVerdictContent(body.content, secrets, true)]);
+  if (typeof body.stop_reason === "string") {
+    entries.push(["stop_reason", maskKnownSecretsDeep(body.stop_reason, secrets)]);
+  }
+  return Object.fromEntries<unknown>([...entries, ...usageEntries]);
+}
+
 export interface NativeVerdictOutcome {
   response: unknown;
   ok: boolean;
@@ -442,6 +659,11 @@ export interface NativeVerdictOutcome {
   detail: string;
   streamFailureKind: NativeVerdictOutcome["reason"];
   streamFailureDetail: string;
+  /** #1037/#1094: the ONE known-secret list this verdict turn was evaluated
+   * against (the lane key plus the configured extra-header VALUES this call
+   * sent). The caller persists the verdict artifact through it, so the
+   * persisted body can never mask a different set than the evaluation did. */
+  knownSecrets: readonly (string | null | undefined)[];
   /** #1047: bounded failure-shape diagnostics for the final unusable
    * response (absent on success). Content-free by construction. */
   diagnostics?: ResponseDiagnostics;
@@ -455,6 +677,9 @@ export interface ProduceVerdictInput {
   baseUrl: string;
   apiFormat: string;
   apiKey: string;
+  /** #1037: the extra headers this lane sends; their VALUES are response-side
+   * known secrets (the transport parses its own copy per request). */
+  extraHeaders?: Readonly<Record<string, string>>;
   turnTimeout: number;
   usageAcc: UsageAccumulator;
   deadline: number | null;
@@ -479,6 +704,10 @@ export interface ProduceVerdictInput {
  */
 export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<NativeVerdictOutcome> {
   const { transport, timeFn } = input;
+  // #1037: one known-secret list for every response surface of this verdict
+  // turn (in-body error message, unusable-response record, and the persisted
+  // `ai-response.<tier>.json` body below).
+  const knownSecrets = callKnownSecrets(input.apiKey, input.extraHeaders);
 
   const request = async (payload: Record<string, unknown>): Promise<{ response: unknown; transportError: string | null }> => {
     try {
@@ -512,7 +741,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
   response = firstAttempt.response;
   if (response !== null) {
     accumulateUsage(input.usageAcc, response, input.apiFormat);
-    const evaluation = evaluateNativeVerdict(response, [input.apiKey]);
+    const evaluation = evaluateNativeVerdict(response, knownSecrets);
     ok = evaluation.ok;
     reason = evaluation.reason;
     detail = evaluation.detail;
@@ -542,7 +771,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
           apiFormat: input.apiFormat,
           profile: input.tier ?? "primary",
           streamed: true,
-          secrets: [input.apiKey],
+          secrets: knownSecrets,
           failureKind: "parse",
         });
         const raised = raisedCompletionBudget(currentTokens);
@@ -566,7 +795,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
     response = retry.response;
     if (response !== null) {
       accumulateUsage(input.usageAcc, response, input.apiFormat);
-      const evaluation = evaluateNativeVerdict(response, [input.apiKey]);
+      const evaluation = evaluateNativeVerdict(response, knownSecrets);
       ok = evaluation.ok;
       reason = evaluation.reason;
       detail = evaluation.detail;
@@ -584,7 +813,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
         apiFormat: input.apiFormat,
         profile: input.tier ?? "primary",
         streamed: !retried && attemptedStream,
-        secrets: [input.apiKey],
+        secrets: knownSecrets,
         failureKind: reason === "transport" ? "network" : reason === "empty" ? "empty_completion" : "not_object",
       });
 
@@ -598,6 +827,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
     detail: ok ? "" : detail,
     streamFailureKind,
     streamFailureDetail,
+    knownSecrets,
     ...(finalDiagnostics !== null ? { diagnostics: finalDiagnostics } : {}),
     ...(finalBudgetRaisedTo !== null ? { budgetRaisedTo: finalBudgetRaisedTo } : {}),
   };
@@ -1297,6 +1527,9 @@ export interface RunNativeLoopInput {
   apiFormat: string;
   model: string;
   apiKey: string;
+  /** #1037: the extra headers this lane sends (masked as known secrets on
+   * every response surface); unset adds nothing to the mask list. */
+  extraHeaders?: Readonly<Record<string, string>>;
   corpusText: string;
   allowedGhApiRepos: Set<string>;
   allowedHosts: string[];
@@ -1336,6 +1569,17 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     maxConversationTokens: loopContextLimits(env, limitsProfile).maxConversationTokens,
   };
   const deadline = input.tier === "smart" ? timeFn() + wallClock : null;
+  // #1094 review round 3: the loop's NON-verdict response surfaces (tool-call
+  // arguments, the closing text, loop errors, tool results) are
+  // provider-influenced too, but they are STRUCTURAL — they feed the verdict
+  // corpus and keyed consumers (`tool_results[].status === "ok"`, tool paths
+  // in ordinary file content). Their masking therefore applies the same
+  // documented floor as the content gate: a sub-floor configured value is
+  // prose-indistinguishable here as well ("k" in "checkout"), and mangling
+  // the corpus over it would degrade the review it exists to protect. Pure
+  // diagnostic surfaces (response bodies, errorLog, transport detail) keep
+  // the masker's any-length rule. See `harnessMaskSecrets`.
+  const harnessSecrets = harnessMaskSecrets(callKnownSecrets(input.apiKey, input.extraHeaders));
 
   // Read-only MCP tools (#245), allowlisted via TOOL_MCP_SERVERS. Fork-gating
   // happens upstream, so reaching here means MCP is permitted. A server that
@@ -1712,17 +1956,19 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     input.result.stop_reason =
       deadline !== null && timeFn() >= deadline ? "wall-clock-exceeded" : outcome.stopReason;
     input.result.planned_request_count = outcome.toolCallsIssued;
-    input.result.tool_calls = outcome.executed.map((call) => ({
-      tool: call.tool,
-      args: call.args,
-      status: (call.result.status as string) ?? "error",
-    }));
-    input.result.tool_results = outcome.executed.map((call) => call.result);
-    input.result.executed_request_count = outcome.executed.filter((c) => c.result.status === "ok").length;
-    input.result.native_loop_usage = usageWithCacheRatio(usageAcc);
-    input.result.native_loop_error = outcome.error || "smart tool-loop deadline exceeded";
-    return false;
-  }
+  input.result.tool_calls = outcome.executed.map((call) => ({
+    tool: call.tool,
+    args: maskKnownSecretsDeep(call.args, harnessSecrets),
+    status: (call.result.status as string) ?? "error",
+  }));
+  input.result.tool_results = outcome.executed.map((call) => maskKnownSecretsDeep(call.result, harnessSecrets));
+  input.result.executed_request_count = outcome.executed.filter((c) => c.result.status === "ok").length;
+  input.result.native_loop_usage = usageWithCacheRatio(usageAcc);
+  input.result.native_loop_error = outcome.error
+    ? maskKnownSecrets(outcome.error, harnessSecrets)
+    : "smart tool-loop deadline exceeded";
+  return false;
+}
   if (outcome.degraded) {
     log(
       "  native_loop degraded: the model issued no tool calls" +
@@ -1732,14 +1978,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     input.result.native_loop_degraded = outcome.stopReason;
     input.result.rounds = outcome.rounds;
     input.result.stop_reason = outcome.stopReason;
-    if (outcome.error) input.result.native_loop_error = outcome.error;
+    if (outcome.error) input.result.native_loop_error = maskKnownSecrets(outcome.error, harnessSecrets);
     input.result.native_loop_usage = usageWithCacheRatio(usageAcc);
     return false;
   }
 
   // Fold the outcome into `result` and build tool-harness.md now, before the
   // verdict turn — the verdict re-sends a corpus built before this harness ran.
-  const harnessMarkdown = summarizeLoopOutcome(input.result, outcome);
+  const harnessMarkdown = summarizeLoopOutcome(input.result, outcome, harnessSecrets);
   if (input.tier === "smart" && outcome.executed.some((c) => c.result.status !== "ok")) {
     input.result.native_loop_verdict_status = "fallback";
     input.result.native_loop_verdict_reason = "tool-error";
@@ -1834,6 +2080,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           baseUrl: input.baseUrl,
           apiFormat: input.apiFormat,
           apiKey: input.apiKey,
+          ...(input.extraHeaders !== undefined ? { extraHeaders: input.extraHeaders } : {}),
           turnTimeout: verdictTimeout,
           usageAcc,
           deadline,
@@ -1856,13 +2103,30 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         if (verdict.budgetRaisedTo !== undefined) {
           input.result.native_loop_verdict_budget_raised_to = verdict.budgetRaisedTo;
         }
-        // Keep the raw response as a diagnostic artifact even when it is
-        // unusable, but never claim success without a reusable body (#637).
+        // Keep a diagnostic artifact even when the response is unusable, but
+        // never claim success without a reusable body (#637).
         // #868: on failure, persist the already-masked `verdict.detail`
         // instead of the raw body — an in-body error (or an SSE stream
         // error) can otherwise echo the configured key straight to disk.
         if (verdict.ok && verdict.response !== null && typeof verdict.response === "object") {
-          deps.writeArtifact(`ai-response.${input.tier}.json`, JSON.stringify(verdict.response));
+          // #1094: a PROJECTION of the reusable envelope, not the raw body.
+          // This artifact is a CONTRACT — the native_loop reuse in `runReview`
+          // re-parses it as the verdict — so the completion content stays
+          // verbatim (masking it here would rewrite the serialized verdict's
+          // own keys for any short configured key, `review_mar⟦•⟧down` →
+          // unparseable, losing the whole reuse fast path). Everything the
+          // parser does not read is DROPPED rather than masked: a gateway can
+          // echo a configured extra-header VALUE in `system_fingerprint`,
+          // `id`, `model`, or any unknown key of its own HTTP 200 body, and
+          // those bytes no longer reach disk at all. `reusableVerdictEnvelope`
+          // carries exactly what `parseVerdictResponse` consumes, in the same
+          // provider shape, so the reuse parse behaves identically; the reuse
+          // parse masks the configured values in its own thrown messages. A
+          // content that embeds a configured credential never gets here at
+          // all: acceptance went through `parseVerdictResponse`'s fail-closed
+          // content gate (#1094 review round 3), and the reuse re-parse
+          // enforces the same gate.
+          deps.writeArtifact(`ai-response.${input.tier}.json`, JSON.stringify(reusableVerdictEnvelope(verdict.response, verdict.knownSecrets)));
         } else if (!verdict.ok && verdict.response !== null && typeof verdict.response === "object") {
           deps.writeArtifact(`ai-response.${input.tier}.json`, JSON.stringify({ error: verdict.detail }));
         } else {
@@ -1883,9 +2147,10 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           input.result.native_loop_verdict_error = verdict.detail;
           // #1047: masked whole against the loop's key — the record carries
           // no response content, but the static field names can collide with
-          // a very short configured key (see callTier's matching mask).
+          // a very short configured key (see callTier's matching mask). The
+          // list is the one the verdict turn itself was evaluated against.
           const diagnosticsLine = verdict.diagnostics !== undefined
-            ? maskKnownSecrets(` [${formatResponseDiagnosticsLine(verdict.diagnostics.record)}]`, [input.apiKey])
+            ? maskKnownSecrets(` [${formatResponseDiagnosticsLine(verdict.diagnostics.record)}]`, verdict.knownSecrets)
             : "";
           log(
             `  native_loop: no reusable in-conversation verdict [${verdict.reason}] ${verdict.detail}${diagnosticsLine} — the standard review call will synthesize the verdict`,
@@ -1927,7 +2192,21 @@ function countOccurrences(text: string, needle: string): number {
  * of `_summarize_loop_outcome`). Runs BEFORE the verdict turn so the verdict
  * corpus can be corrected with real findings.
  */
-export function summarizeLoopOutcome(result: HarnessResult, outcome: LoopOutcome): string {
+/** The harness surfaces' masking list: the configured known secrets at or
+ * above `MIN_KNOWN_SECRET_CONTENT_LEN`, the same floor the #1094 content gate
+ * documents — these surfaces are structural (corpus sections, keyed status
+ * fields, file content), not pure diagnostics, so a sub-floor value's
+ * any-length masking would mangle ordinary prose and repo content over a
+ * reflection that cannot be reliably distinguished from either. */
+function harnessMaskSecrets(knownSecrets: readonly (string | null | undefined)[]): readonly (string | null | undefined)[] {
+  return knownSecrets.filter((secret): secret is string => typeof secret === "string" && secret.length >= MIN_KNOWN_SECRET_CONTENT_LEN);
+}
+
+export function summarizeLoopOutcome(
+  result: HarnessResult,
+  outcome: LoopOutcome,
+  knownSecrets: readonly (string | null | undefined)[] = [],
+): string {
   result.mode = "native_loop";
   result.rounds = outcome.rounds;
   result.stop_reason = outcome.stopReason;
@@ -1938,12 +2217,34 @@ export function summarizeLoopOutcome(result: HarnessResult, outcome: LoopOutcome
     // stop"; the investigation hit the ceiling.
     result.budget_exhausted = true;
   }
-  if (outcome.error) result.loop_error = outcome.error;
+  // #1094 review round 3 (major): every NON-verdict turn of the loop is also
+  // provider-controlled, and this trace lands raw in `tool-harness.json` /
+  // `tool-harness.md` (and from the markdown into the persisted verdict
+  // corpus) with only `redactedJson`'s pattern heuristics for company — a
+  // gateway echoing a configured header VALUE into a tool-call ARGUMENT or
+  // the loop's closing TEXT would otherwise land it on disk unmasked. These
+  // are telemetry surfaces, not a re-parsed contract, so per-leaf masking is
+  // safe here: `maskKnownSecretsDeep` keeps the args' JSON shape, and the
+  // final-text mask runs BEFORE truncation so a split secret cannot survive.
+  // (`buildToolCallsOutput` already excludes model-controlled args from the
+  // PUBLISHED output; this closes the on-disk copy.)
+  const loopError = outcome.error ? maskKnownSecrets(outcome.error, knownSecrets) : outcome.error;
+  if (outcome.error) result.loop_error = loopError;
+  const maskedArgs = outcome.executed.map((executed) => maskKnownSecretsDeep(executed.args, knownSecrets));
+  // The tool RESULTS are repo-tool output, not model output — but a tool
+  // error (or any tool output) can echo a model-controlled ARG back (a
+  // read/list error naming the requested path), so the same per-leaf masking
+  // covers them. The result's own `status` field is the executor's
+  // structural vocabulary ("ok"/"error"), not provider-controlled free text,
+  // so it is restored verbatim — a sub-floor configured key must not mangle
+  // the one field consumers branch on (`tool_results[].status === "ok"`).
+  // Telemetry surfaces; nothing re-parses these.
+  const maskedResults = outcome.executed.map((executed) => maskKnownSecretsDeep(executed.result, knownSecrets));
 
   // Additive structured trace of executed calls (tool + args + status).
-  result.tool_calls = outcome.executed.map((executed) => ({
+  result.tool_calls = outcome.executed.map((executed, i) => ({
     tool: executed.tool,
-    args: executed.args,
+    args: maskedArgs[i],
     status: (executed.result.status as string) ?? "error",
   }));
 
@@ -1971,8 +2272,8 @@ export function summarizeLoopOutcome(result: HarnessResult, outcome: LoopOutcome
   for (let i = 0; i < outcome.executed.length; i++) {
     const executed = outcome.executed[i]!;
     if (executed.result.status === "ok") executedCount++;
-    toolResults.push(executed.result);
-    mdLines.push(...toolResultMdLines(i + 1, executed.tool, executed.args, executed.result));
+    toolResults.push(maskedResults[i]);
+    mdLines.push(...toolResultMdLines(i + 1, executed.tool, maskedArgs[i]!, maskedResults[i]! as Record<string, unknown>));
   }
   result.executed_request_count = executedCount;
   result.tool_results = toolResults;
@@ -1980,7 +2281,7 @@ export function summarizeLoopOutcome(result: HarnessResult, outcome: LoopOutcome
   if (outcome.finalText) {
     mdLines.push("## Evidence summary (from the tool loop, untrusted)");
     mdLines.push("");
-    mdLines.push(maskAndTruncate(outcome.finalText, 4000).text);
+    mdLines.push(maskAndTruncate(maskKnownSecrets(outcome.finalText, knownSecrets), 4000).text);
     mdLines.push("");
   }
 
@@ -2114,12 +2415,24 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
     if (normalized) allowedGhApiRepos.add(normalized);
   }
 
+  // #1037: parse the operator's header set once for the RESPONSE-side mask
+  // list (the transport parses its own copy per request). Fail-soft exactly
+  // like that per-request parse: a malformed set adds nothing here, and the
+  // adapter rejects every request it would have carried.
+  let extraHeaders: Record<string, string> | undefined;
+  try {
+    extraHeaders = extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "");
+  } catch {
+    extraHeaders = undefined;
+  }
+
   const handled = await runNativeLoop({
     repo,
     baseUrl,
     apiFormat,
     model,
     apiKey,
+    ...(extraHeaders !== undefined ? { extraHeaders } : {}),
     corpusText: planning.text,
     allowedGhApiRepos,
     allowedHosts,

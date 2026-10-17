@@ -30,22 +30,32 @@ import { createHash } from "node:crypto";
  * non-ephemeral value change (swapping one `anthropic-beta` token for another)
  * changes the bytes on the wire and must force a fresh review. No raw value
  * ever enters the fingerprint.
+ *
+ * `callKnownSecrets` is the fourth: the known-secret list the RESPONSE side
+ * of a call masks against. A configured value is an outbound secret, and this
+ * module owns what "configured" means, so the list is built here once per call
+ * instead of at every response surface (see its doc comment).
  */
 
 /** Transport-critical headers the action owns; case-insensitive match.
  * Beyond the issue's named six, this covers every header whose override
  * would silently corrupt the request rather than merely restyle it:
  * `accept` (the action owns `Accept: text/event-stream` on streamed
- * Anthropic calls), and the RFC 7230 connection framing set Node manages
- * itself. `__proto__` is also refused case-insensitively: it is a valid
- * RFC 7230 token but assignment onto a plain object is a silent no-op, so
- * an operator must be told, not quietly ignored. */
+ * Anthropic calls), `accept-encoding` (Node decodes the response body as
+ * declared — an operator `accept-encoding: gzip` would silently hand a
+ * gzipped body to the JSON parser, or the header Node itself sets would be
+ * duplicated and the endpoint would pick either), and the RFC 7230
+ * connection framing set Node manages itself. `__proto__` is also refused
+ * case-insensitively: it is a valid RFC 7230 token but assignment onto a
+ * plain object is a silent no-op, so an operator must be told, not quietly
+ * ignored. */
 export const RESERVED_EXTRA_HEADER_NAMES: ReadonlySet<string> = new Set([
   "x-api-key",
   "authorization",
   "anthropic-version",
   "content-type",
   "accept",
+  "accept-encoding",
   "host",
   "content-length",
   "connection",
@@ -211,17 +221,44 @@ export function extraHeadersForEnv(raw: string): Record<string, string> | undefi
   return Object.keys(headers).length === 0 ? undefined : headers;
 }
 
+/** The known-secret list every RESPONSE-BODY surface of one call masks
+ * against: the lane's model API key plus the VALUES of the extra headers that
+ * call actually sent. Header values routinely carry proxy/gateway tokens, and
+ * a provider error body (or a stop reason, or a persisted response artifact)
+ * can quote the request headers straight back — with no `token:`/`Bearer `
+ * framing for `redactText`'s heuristics to catch.
+ *
+ * One builder, one list per call, so every response surface (verdict parse,
+ * unusable-response diagnostics, transport-failure detail, the persisted
+ * `ai-response.<tier>.json`, the errorLog, the summary) masks the same bytes
+ * instead of each call site re-deriving an ad-hoc list and eventually
+ * missing one. Consumes the existing `maskKnownSecrets`/`maskDiagnostic`
+ * seam — this adds no second masking mechanism. Names never appear: a
+ * diagnostic may name a header, never its value. */
+export function callKnownSecrets(
+  apiKey: string | null | undefined,
+  extraHeaders?: Readonly<Record<string, string>>,
+): readonly (string | null | undefined)[] {
+  return [apiKey, ...Object.values(extraHeaders ?? {})];
+}
+
 /** Ephemeral correlation/session/trace headers: their values legitimately
  * change every run (a run id, a trace id), so hashing the value would break
  * the unchanged-diff skip for exactly the canonical use of this input. Matched
  * on the lowercased name — a `-session-id`/`-request-id`/`-correlation-id`/
  * `-trace-id`/`-span-id`/`-run-id` suffix (vendor-prefixed forms like
- * `x-litellm-session-id`) or one of the standard trace-context headers. */
+ * `x-litellm-session-id`) or one of the standard trace-context headers.
+ * `sentry-trace` and `x-sentry-trace` are Sentry's trace-propagation headers:
+ * each value is minted per transaction, so by NAME like the rest — a per-run
+ * trace must not invalidate a cached review. Bare `session-id`/`run-id` stay
+ * value-digested: without a vendor prefix they are equally plausible as a
+ * long-lived operator credential whose change genuinely changes the request. */
 const EPHEMERAL_HEADER_SUFFIXES: readonly string[] = [
   "-session-id", "-request-id", "-correlation-id", "-trace-id", "-span-id", "-run-id",
 ];
 const EPHEMERAL_HEADER_NAMES: ReadonlySet<string> = new Set([
   "traceparent", "tracestate", "x-b3-traceid", "x-b3-spanid", "x-b3-parentspanid",
+  "sentry-trace", "x-sentry-trace",
 ]);
 
 function isEphemeralHeaderName(lower: string): boolean {

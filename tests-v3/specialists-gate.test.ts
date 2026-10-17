@@ -326,6 +326,117 @@ test("#1037: configured extra headers ride every specialist request", async () =
   }
 });
 
+test("#1037: a specialist response echoing a configured header VALUE is masked in every persisted specialist artifact", async () => {
+  // The specialist lane sends the configured headers, so its response body is
+  // the same reflection surface: `specialist-<role>.response.json`, the
+  // normalized `specialist-<role>.json`, `specialists.json`, and the
+  // `specialists.md` corpus section must all be free of the value. The canary
+  // is deliberately unframed, so `redactText`'s heuristics cannot be what
+  // removes it.
+  const canary = "gw-8f2a1c9d3b7e4a10";
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    // A usable lead set whose body ALSO quotes the gateway credential back —
+    // both in a lead message and in a non-content field of the envelope.
+    res.end(JSON.stringify({
+      ...(leadsResponse([{ severity: "major", category: "correctness", file: "a.py", line: 2, message: `handle leak via ${canary}` }]) as Record<string, unknown>),
+      system_fingerprint: `gateway ${canary}`,
+    }));
+  });
+  try {
+    const result = await run({
+      DEEP_REVIEW: "true",
+      AI_BASE_URL: `${server.url}/v1`,
+      AI_SPECIALIST_MODEL: "specialist",
+      AI_EXTRA_HEADERS: `X-Gateway-Credential: ${canary}`,
+    }, { productionTransport: true });
+    assert.equal(result.code, 0);
+    // The provider-reflection surfaces are clean. The normalized
+    // `specialist-<role>.json` / `specialists.md` (which render the model's own
+    // lead prose) are deliberately NOT asserted: their severity/category/file
+    // fields must stay byte-exact for a short configured key, and the model
+    // never sees a header value.
+    for (const name of ["specialists.json", "specialist-correctness.response.json"]) {
+      assert.equal(result.read(name).includes(canary), false, name);
+    }
+    // The raw response artifact keeps its shape — one masked leaf, everything
+    // else byte-identical.
+    assert.match(result.read("specialist-correctness.response.json"), /handle leak via ⟦•⟧/);
+    rmSync(result.root, { recursive: true, force: true });
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1094: a canary echoed as an object KEY in a specialist response is masked in the persisted raw artifact, which stays valid JSON", async () => {
+  // The key-echo companion of the value test above: the provider-controlled
+  // property NAME is a reflection surface too, and the raw
+  // `specialist-<role>.response.json` copy must not persist the credential in
+  // a key. The masked document must still parse as JSON with the same shape.
+  const canary = "gw-8f2a1c9d3b7e4a10";
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      ...(leadsResponse([{ severity: "major", category: "correctness", file: "a.py", line: 2, message: "handle leak" }]) as Record<string, unknown>),
+      gateway_audit: { [canary]: "rejected", keep: 1 },
+    }));
+  });
+  try {
+    const result = await run({
+      DEEP_REVIEW: "true",
+      AI_BASE_URL: `${server.url}/v1`,
+      AI_SPECIALIST_MODEL: "specialist",
+      AI_EXTRA_HEADERS: `X-Gateway-Credential: ${canary}`,
+    }, { productionTransport: true });
+    assert.equal(result.code, 0);
+    const artifact = result.read("specialist-correctness.response.json");
+    assert.equal(artifact.includes(canary), false, artifact);
+    // Still valid JSON, same shape, key masked.
+    const parsed = JSON.parse(artifact) as Record<string, unknown>;
+    const audit = parsed.gateway_audit as Record<string, unknown>;
+    assert.equal(audit[KNOWN_SECRET_REDACTED], "rejected");
+    assert.equal(audit.keep, 1);
+    assert.match(artifact, /"⟦•⟧": "rejected"/);
+    rmSync(result.root, { recursive: true, force: true });
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1037: a 200 in-body error carrying a configured header VALUE is masked in the specialist failure surfaces", async () => {
+  // The other specialist response-body surface, and one the RUNNER masks
+  // itself (not the transport adapter): a 200 whose body carries an error
+  // object, which this runner classifies as a transport failure. The value
+  // must not reach the response artifact, the aggregate, or the corpus
+  // section.
+  const canary = "gw-8f2a1c9d3b7e4a10";
+  const requestFn: SpecialistRequestFn = async () => ({
+    ok: true,
+    raw: {
+      id: "c1",
+      object: "chat.completion",
+      model: "m",
+      choices: [],
+      error: { message: `gateway rejected the credential ${canary}` },
+    },
+  });
+  const result = await run({
+    DEEP_REVIEW: "true",
+    AI_BASE_URL: "http://model.invalid/v1",
+    AI_SPECIALIST_MODEL: "specialist",
+    AI_EXTRA_HEADERS: `X-Gateway-Credential: ${canary}`,
+  }, { requestFn });
+  assert.equal(result.code, 0);
+  assert.equal(result.read("specialists.json").includes(canary), false);
+  assert.equal(result.read("specialists.md").includes(canary), false);
+  for (const role of ["correctness", "security", "tests"]) {
+    const artifact = result.read(`specialist-${role}.response.json`);
+    assert.equal(artifact.includes(canary), false, role);
+    assert.match(artifact, /⟦•⟧/, role);
+  }
+  rmSync(result.root, { recursive: true, force: true });
+});
+
 test("invalid specialist format warns and falls back to the primary transport", async () => {
   const seen: { url: string; model: string }[] = [];
   const server = await startMockServer((req, body, res) => {

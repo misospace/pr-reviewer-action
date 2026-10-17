@@ -536,6 +536,10 @@ test("#1037: malformed or transport-colliding ai-extra-headers fails at config l
     "Content-Type: text/plain",
     "Host: attacker.example",
     "Content-Length: 0",
+    // `accept-encoding` is transport-owned: Node negotiates and decodes the
+    // response body itself, so an operator override would either duplicate
+    // the header or hand a gzipped body to the JSON parser mid-review.
+    "accept-encoding: gzip",
     "no colon on this line",
     "Bad Name: v",
   ]) {
