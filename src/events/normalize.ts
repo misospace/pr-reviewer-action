@@ -26,6 +26,12 @@
  *   still required for `follow_up`. Its headSha/baseSha are "" (the
  *   `url`-only object carries none; the platform adapter hydrates them
  *   later).
+ * - the `check_update` family is SHAPE-ANCHORED: the name alone is NOT enough
+ *   (#1102) — the body must carry the matching check/status shape (`carries-
+ *   CheckUpdateShape`: a top-level `check_run`/`check_suite` object, or the
+ *   top-level `sha`/`state`/`context` triple), or the kind degrades to
+ *   `unknown`. The HMAC covers the raw body only, so a name is never
+ *   authority on its own.
  *
  * Follow-up reference capture: comment-shaped envelopes
  * (`issue_comment`/`comment`) additionally project `comment.id` onto
@@ -122,6 +128,14 @@ function asObject(value: unknown): Record<string, unknown> {
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+/** An OWN property of the untrusted body, else `undefined`. A JSON-parsed
+ * payload carries its keys as own properties, so an inherited value is not this
+ * delivery's data — the same hostile-`__proto__` rule the corpus projections
+ * apply (`src/corpus/projections.ts`). Used by the check/status shape gate. */
+function ownField(raw: Record<string, unknown>, key: string): unknown {
+  return Object.prototype.hasOwnProperty.call(raw, key) ? raw[key] : undefined;
 }
 
 function isPrNumber(value: unknown): value is number {
@@ -315,12 +329,57 @@ function repoFromList(raw: Record<string, unknown>): string {
   return "";
 }
 
+/** The `check_update` family is SHAPE-ANCHORED, not name-anchored (#1102): the
+ * `check_run`/`check_suite`/`status` NAMES alone never mint the scheduleable
+ * kind — the SIGNED body must carry the matching payload shape or the kind
+ * degrades fail-closed to `unknown`. This closes the header-driven
+ * reclassification residual: the HMAC covers the RAW BODY ONLY, so a captured
+ * delivery replays byte-for-byte with a changed event header, and a forge
+ * ingress projects the (unauthenticated) group header into the envelope name.
+ *
+ * Shape rationale — the gate is deliberately the NARROWEST shape each real
+ * delivery already carries, and nothing GitHub-only:
+ * - GitHub's `check_run`/`check_suite` webhooks carry the `check_run`/
+ *   `check_suite` object at top level. Gitea/Forgejo emits NO `check_run`/
+ *   `check_suite` webhook event type at all (and Forgejo check runs are a
+ *   declared capability degradation, `src/ingress/capabilities.ts`
+ *   `checkRuns: false`), so requiring the object drops no real Forgejo
+ *   delivery.
+ * - Gitea/Forgejo DOES emit commit-status webhooks natively, and its payload
+ *   carries the SAME top-level `sha`/`state`/`context` triple as GitHub's
+ *   `status` webhook — so the `status` gate is that triple and NOT
+ *   `pull_requests`/`check_run`/`installation`/`id`/a hex-length SHA (any of
+ *   which would silently drop a real Forgejo status delivery).
+ *
+ * Shape fields are read as OWN properties (`ownField`): the JSON-parsed body
+ * carries them as own keys, so an inherited one is not this delivery's shape.
+ *
+ * Does NOT swallow a hostile accessor: a throwing `sha`/`check_run` getter
+ * propagates exactly like every other captured-field read, so the normalizer's
+ * documented fail-closed contract still holds (the whole event drops to `null`,
+ * never a degraded field). A caller that must not throw — the forge ingress
+ * projection — contains it at its own boundary. */
+export function carriesCheckUpdateShape(name: string, raw: unknown): boolean {
+  if (!isPlainObject(raw)) return false;
+  if (name === "check_run") return isPlainObject(ownField(raw, "check_run"));
+  if (name === "check_suite") return isPlainObject(ownField(raw, "check_suite"));
+  if (name === "status") {
+    return (
+      asString(ownField(raw, "sha")).trim() !== "" &&
+      asString(ownField(raw, "state")).trim() !== "" &&
+      asString(ownField(raw, "context")).trim() !== ""
+    );
+  }
+  return false;
+}
+
 function mapKind(
   name: string,
   action: string,
   pr: PrExtract | null,
   rawLabelName: string,
   rereviewLabel: string,
+  raw: Record<string, unknown>,
 ): ForgeEventKind {
   if (name === "pull_request") {
     switch (action) {
@@ -352,7 +411,9 @@ function mapKind(
     case "check_run":
     case "check_suite":
     case "status":
-      return "check_update";
+      // Name alone is not enough (#1102): the signed body must carry the
+      // matching check/status shape, or the kind degrades to `unknown`.
+      return carriesCheckUpdateShape(name, raw) ? "check_update" : "unknown";
     case "installation":
     case "installation_repositories":
       return "installation_change";
@@ -423,7 +484,7 @@ function normalizeEvent(
           : repoFromList(raw);
     if (repoFullName === "") return null;
 
-    const kind = mapKind(name, action, pr, rawLabelName, rereviewLabel);
+    const kind = mapKind(name, action, pr, rawLabelName, rereviewLabel, raw);
     if (PR_SCOPED_KINDS.has(kind) && (pr === null || pr.prNumber === 0)) return null;
 
     // The triggering user: a comment's author for follow-ups, else the

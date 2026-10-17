@@ -17,7 +17,7 @@ and own their own HTTP server, queue, and worker lifecycle.
 |---|---|
 | `signature.ts` | `X-Gitea-Signature` computation/verification: lowercase-hex HMAC-SHA256 over the raw body, constant-time compare |
 | `webhook-handler.ts` | Node `http` request handler for Forgejo webhook deliveries: size cap, verify-before-parse, fixed response bodies, then the native→canonical projection and the #728 normalizer, and the canonical-event callback |
-| `forgejo-events.ts` | `projectForgejoWebhookPayload`: native Forgejo/Gitea webhook vocabulary → the GitHub-compatible envelope the #728 normalizer expects; runs after signature verification + JSON parse, before `normalizeForgejoEvent` |
+| `forgejo-events.ts` | `projectForgejoWebhookPayload`: native Forgejo/Gitea webhook vocabulary → the GitHub-compatible envelope the #728 normalizer expects; runs after signature verification + JSON parse, before `normalizeForgejoEvent`; each header hint is gated on the signed body (signed `action` for the PR families, the signed check/status shape for the check family) |
 | `endpoints.ts` | Resolve REST API / web / repo-scoped / clone URLs from a configured platform base URL |
 | `api-client.ts` | `ForgejoIngressClient`: read-only authenticated REST reads (`getJson`, `listOpenPullRequests`, `getPullRequest`) |
 | `clone-credentials.ts` | Build a git clone credential as an HTTP Basic `Authorization` header pair |
@@ -54,12 +54,23 @@ and own their own HTTP server, queue, and worker lifecycle.
   re-review-label constant, matched byte-for-byte against `pull_request.labels`
   and re-emitted as that constant — never as a copy of the payload text — so a
   hostile label cannot forge the trigger.
-- Known residual (pre-existing, outside #1024): the normalizer's
-  action-independent `check_run` / `check_suite` / `status` names still mean
-  `check_update` whatever the signed body says, so a forged group name can move
-  a captured delivery into that family. Forgejo check runs are a capability
-  degradation (`capabilities.ts`: `checkRuns: false`) and the projection is not
-  the seam that owns those kinds; tracked as a follow-up issue.
+- The check/status family is shape-anchored (#1102): a `check_run` /
+  `check_suite` / `status` group header is honored as a passthrough **only**
+  when the **signed** body carries the shape that name requires — a top-level
+  `check_run` / `check_suite` object, or the top-level `sha`/`state`/`context`
+  triple. The shape fields are read as **own** properties (the JSON-parsed keys
+   a real delivery carries), so a prototype-carried shape is not this delivery's
+   data. Otherwise the projected `name` is the fixed literal `unknown` (the
+  normalizer maps it to `unknown`; 202 accepted/unknown, no response-code
+  change), never the forged family name, so a captured delivery replayed
+  under a forged check/status header cannot reach the scheduleable
+  `check_update` kind. The gate requires nothing GitHub-only: Gitea/Forgejo
+  emits no `check_run`/`check_suite` webhook event at all (check runs are a
+  capability degradation, `capabilities.ts`: `checkRuns: false`) and does emit
+  commit-status webhooks natively with exactly the `sha`/`state`/`context`
+  triple, so no real Forgejo delivery is dropped. The `X-Gitea-Event-Type`
+  header is not consulted for this family (as for every non-PR family: only
+  the group header ever reaches the envelope).
 - Every response is a fixed status + fixed body; the payload, secret,
   signature, and error text are never reflected. Oversize bodies are
   refused mid-stream (413) and buffering stops immediately; `ping` and
@@ -69,7 +80,8 @@ and own their own HTTP server, queue, and worker lifecycle.
   `forgejo-events.ts`), which runs after the HMAC signature check and
   `JSON.parse` and before the #728 `normalizeForgejoEvent`; it reads only
    the two shape-guarded headers and a small set of field shapes (to remap
-   native vocabulary and gate each hint on the signed action) and forwards
+   native vocabulary, gate each hint on the signed action, and gate the
+   check/status family on the signed body's shape) and forwards
    everything else untouched, so the
    frozen provider-neutral normalizer still sees only the
    GitHub-compatible envelope.
@@ -102,6 +114,10 @@ signed action.
 | `pull_request` + action `reopened` | `pull_request` + `reopen` | `pr_reopened` |
 | `pull_request` + action `label_updated` (hint: the ungrouped `pull_request_label` header — honored only on a `label_updated` body; the grouped `pull_request` delivery needs no hint) | `pull_request` + `labeled`, `label` synthesized | `rereview_label` when the trigger label is present, else ignored |
 | `issue_comment` + action `created` (hint: type `pull_request_comment`, or the ungrouped header — honored only on a `created` body), top-level `pull_request` | `issue_comment` with `pull_request` re-nested under `issue` (top-level key removed) | `follow_up` |
+| `check_run` (required signed shape: top-level `check_run` object) | `check_run` | `check_update` |
+| `check_suite` (required signed shape: top-level `check_suite` object) | `check_suite` | `check_update` |
+| `status` (required signed shape: top-level non-empty `sha` + `state` + `context` strings) | `status` | `check_update` |
+| any of the three family names WITHOUT that signed shape (the type header is not consulted) | the fixed literal `unknown` — never the forged family name | `unknown` (acked 202, dropped by the kind-gating consumer) |
 
 Label synthesis caveat: a native `label_updated` carries no top-level
 `label`, so the projection fires `rereview_label` only when the re-review
@@ -202,7 +218,7 @@ bodies, error strings, or persisted job fields.
 | criterion | where | tests |
 |---|---|---|
 | one self-hosted controller can service Forgejo repositories | `webhook-handler.ts` + `api-client.ts` + `dispatch.ts` + `reconcile.ts` over the #728 contracts | `tests-v3/ingress-webhook.test.ts`, `tests-v3/ingress-client.test.ts`, `tests-v3/ingress-endpoints.test.ts`, `tests-v3/ingress-reconcile.test.ts` |
-| Forgejo jobs are indistinguishable from GitHub jobs after normalization, except explicit capability metadata | `normalizeForgejoEvent` (#728) produces the same `CanonicalForgeEvent` → same `deriveGenerationId` identity; the only forge-specific surface is `capabilities.ts` | `tests-v3/ingress-dispatch.test.ts` (webhook/poll convergence, re-keying), `tests-v3/ingress-webhook.test.ts` (canonical fields), `tests-v3/jobs.test.ts`, `tests-v3/events.test.ts` (identity parity) |
+| Forgejo jobs are indistinguishable from GitHub jobs after normalization, except explicit capability metadata | `normalizeForgejoEvent` (#728) produces the same `CanonicalForgeEvent` → same `deriveGenerationId` identity; the only forge-specific surface is `capabilities.ts`; the `check_update` family is shape-anchored in BOTH layers — the #728 normalizer requires the signed check/status shape (`carriesCheckUpdateShape`) and the Forgejo projection gates the family header on the same predicate (#1102), so GitHub keeps accepting every real shape while a header alone can never mint a generation | `tests-v3/ingress-dispatch.test.ts` (webhook/poll convergence, re-keying), `tests-v3/ingress-webhook.test.ts` (canonical fields + forged check/status headers), `tests-v3/ingress-forgejo-events.test.ts` (family shape gate), `tests-v3/jobs.test.ts`, `tests-v3/events.test.ts` (identity parity, shape gate, genuine Forgejo status shape) |
 | existing v3 Forgejo behavior remains the source of reviewer semantics | unchanged `src/platform/publish-api.ts` (`ForgejoPublishApi`); `capabilities.ts` only describes degradation | `tests-v3/publish-api.test.ts` (GraphQL degradation precedent) |
 
 ## Out of scope (follow-on issues)
