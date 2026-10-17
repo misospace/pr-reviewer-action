@@ -1,5 +1,35 @@
 # Changelog
 
+## [3.6.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.5.0...source-v3.6.0) (2026-10-17)
+
+
+### Features
+
+* **#1037:** send ai-extra-headers on every AI provider request ([#1092](https://github.com/misospace/pr-reviewer-action/issues/1092)) ([a640068](https://github.com/misospace/pr-reviewer-action/commit/a640068e855d45f264737da3b05e30a6566f7816))
+* **deps:** update dependency astro (5.18.2 → 7.4.0) ([#1091](https://github.com/misospace/pr-reviewer-action/issues/1091)) ([4e22d0d](https://github.com/misospace/pr-reviewer-action/commit/4e22d0d0df17f8bf609fd6301b0dee26aa39983d))
+* **findings:** actionable suggestions and durable usefulness feedback ([#1101](https://github.com/misospace/pr-reviewer-action/issues/1101)) ([6db0b06](https://github.com/misospace/pr-reviewer-action/commit/6db0b063586f885e105111920103f7d1a7b8dd03))
+* **reviewer:** stamp provenance on related-code corpus snippets ([#1104](https://github.com/misospace/pr-reviewer-action/issues/1104)) ([041c68d](https://github.com/misospace/pr-reviewer-action/commit/041c68d239a87255910962939e4cf0056e9f33da))
+* **review:** opt-in trusted-base repository skills ([#1081](https://github.com/misospace/pr-reviewer-action/issues/1081)) ([154ead3](https://github.com/misospace/pr-reviewer-action/commit/154ead31350475fc2ba85d2c6ff5790cb0e3ed68))
+
+
+### Bug Fixes
+
+* **#1024:** bind Forgejo event hints to signed payload action ([#1103](https://github.com/misospace/pr-reviewer-action/issues/1103)) ([b2fafa0](https://github.com/misospace/pr-reviewer-action/commit/b2fafa00c5c265b5d0aed27d050d1d22d6e71730))
+* **#1037:** mask configured extra-header values on provider response surfaces ([#1094](https://github.com/misospace/pr-reviewer-action/issues/1094)) ([20d3dc9](https://github.com/misospace/pr-reviewer-action/commit/20d3dc9a5d28012096294841d17d291274644f7f))
+* **#1044:** surface the requirement-trace repair-pass outcome in the artifact and rendered trace ([#1105](https://github.com/misospace/pr-reviewer-action/issues/1105)) ([47fa8cf](https://github.com/misospace/pr-reviewer-action/commit/47fa8cf7c3eb80b7539954f6c5aa8cb6c163db82))
+* **#1093:** trusted Forgejo owner identity; no empty inline reviews on clean re-review ([#1097](https://github.com/misospace/pr-reviewer-action/issues/1097)) ([82d4cbc](https://github.com/misospace/pr-reviewer-action/commit/82d4cbc54decdc4b721cf0aaa9e5f4f721429c75))
+* **#1098:** GitHub sticky upsert only patches trusted-owner comments ([#1100](https://github.com/misospace/pr-reviewer-action/issues/1100)) ([2e7adfb](https://github.com/misospace/pr-reviewer-action/commit/2e7adfb7fe8a3ce31949df2f710779b02257b36b))
+* **#1099:** resolve trusted owner once per publish run ([#1109](https://github.com/misospace/pr-reviewer-action/issues/1109)) ([37fccd2](https://github.com/misospace/pr-reviewer-action/commit/37fccd28d7a107145e65e2ad30b8ad787cccdaf7))
+* **#1102:** bind check update event kinds to signed payload shape ([#1106](https://github.com/misospace/pr-reviewer-action/issues/1106)) ([82c862f](https://github.com/misospace/pr-reviewer-action/commit/82c862f4822b9689c6bcdf5e9adeed6fa2c80ab0))
+* **ci:** follow the fork workflow rename ([05fe106](https://github.com/misospace/pr-reviewer-action/commit/05fe10694099333a178c455e35da2db37f72d619))
+* **ci:** follow the fork workflow rename ([99836fd](https://github.com/misospace/pr-reviewer-action/commit/99836fd12e5264e55229ca4e9e03d1f4731d0059))
+* **requirement-trace:** stop process/risk notes forcing CHANGES_REQUESTED ([#1095](https://github.com/misospace/pr-reviewer-action/issues/1095)) ([#1096](https://github.com/misospace/pr-reviewer-action/issues/1096)) ([584ca94](https://github.com/misospace/pr-reviewer-action/commit/584ca940ede94718352471a5f268211ea04fafb0))
+
+
+### Documentation
+
+* add release-notes house style guide ([#1082](https://github.com/misospace/pr-reviewer-action/issues/1082)) ([438f090](https://github.com/misospace/pr-reviewer-action/commit/438f090c5dae2ae8b7e17bc9db376da237a1d371))
+
 ## [3.5.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.4.1...source-v3.5.0) (2026-10-15)
 
 
