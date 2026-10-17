@@ -1,10 +1,13 @@
 // Forgejo webhook ingress for self-hosted Operator mode (#730).
 // X-Gitea-Signature is HMAC-SHA256 hex over the RAW body — verified BEFORE any
-// JSON.parse; fail closed. Response bodies are fixed and short: payload, secret,
-// signature, and error text are never echoed back to the caller. After the
-// signature is verified, the delivery is projected (see forgejo-events.ts) from
-// native Gitea/Forgejo event vocabulary onto the GitHub-shaped envelope the
-// FROZEN #728 normalizer (normalizeForgejoEvent) already accepts; the normalizer
+// JSON.parse; fail closed. That HMAC covers the BODY ONLY, so the event headers
+// are UNAUTHENTICATED HINTS: they are shape-guarded (not authenticated) and may
+// only refine a projection compatible with the signed payload's own action
+// (#1024). Response bodies are fixed and short: payload, secret, signature, and
+// error text are never echoed back to the caller. After the signature is
+// verified, the delivery is projected (see forgejo-events.ts) from native
+// Gitea/Forgejo event vocabulary onto the GitHub-shaped envelope the FROZEN
+// #728 normalizer (normalizeForgejoEvent) already accepts; the normalizer
 // remains the only consumer of the (projected) body and this seam never
 // inspects untrusted content beyond the event-header shape and the canonical
 // event's kind.
@@ -41,9 +44,14 @@ function send(res: ServerResponse, status: number, body: string): void {
  *   the signature header, and any error text are never reflected;
  * - oversize bodies are refused mid-stream and buffering stops immediately;
  * - the `X-Gitea-Event` header (and the `X-Gitea-Event-Type` header) are
- *   authoritative over any `name`/`event` the payload carries; the delivery is
- *   projected by `projectForgejoWebhookPayload` onto the GitHub-shaped envelope
- *   and `normalizeForgejoEvent` is the only consumer of the (projected) body.
+ *   UNAUTHENTICATED HINTS — the HMAC covers the body only, so shape validation
+ *   is not authentication. They decide the projected `name` (which overrides
+ *   any `name`/`event` the payload carries), but each is honored only when the
+ *   SIGNED payload's own `action` authorizes it; a hint conflicting with that
+ *   action degrades fail-closed instead of re-routing the delivery (#1024).
+ *   The delivery is projected by `projectForgejoWebhookPayload` onto the
+ *   GitHub-shaped envelope and `normalizeForgejoEvent` is the only consumer of
+ *   the (projected) body.
  */
 export function createForgejoWebhookHandler(
   options: ForgejoWebhookHandlerOptions,
@@ -123,23 +131,25 @@ export function createForgejoWebhookHandler(
         return;
       }
 
-      // The specific-type header is trusted like the event header (it is part
-      // of the HMAC-verified delivery) but is accepted only if it passes the
-      // same shape guard; anything else is treated as absent. Deliberate
-      // degradation: a duplicate header (array value) or non-conforming value
-      // is treated as ABSENT (the grouped header alone still drives routing)
-      // — unlike `X-Gitea-Event`, where a duplicate is rejected 400 — because
-      // absence can only narrow, never mis-route.
+      // The specific-type header is a HINT like the event header and is NOT
+      // authenticated (the HMAC covers the body only): it is accepted only if
+      // it passes the same shape guard, and `forgejo-events.ts` honors it only
+      // when the signed payload's action authorizes it. Deliberate degradation:
+      // a duplicate header (array value) or non-conforming value is treated as
+      // ABSENT (the grouped header alone still drives routing) — unlike
+      // `X-Gitea-Event`, where a duplicate is rejected 400 — because absence
+      // can only narrow, never mis-route.
       const typeHeader = req.headers["x-gitea-event-type"];
       const eventTypeHeader =
         typeof typeHeader === "string" && EVENT_HEADER.test(typeHeader) ? typeHeader : "";
 
-      // X-Gitea-Event (and the type header) are authoritative; a hostile
-      // payload name cannot re-route the delivery. The projection maps the
-      // native Gitea/Forgejo vocabulary onto the GitHub-shaped envelope the
-      // normalizer accepts before it runs and never mutates its input, so
-      // the parsed body (guarded above to a non-null, non-array object) is
-      // passed through directly.
+      // X-Gitea-Event (and the type header) decide the projected name, so a
+      // hostile payload name cannot re-route the delivery — but they cannot
+      // override the signed action either: the projection gates every hint on
+      // it. The projection maps the native Gitea/Forgejo vocabulary onto the
+      // GitHub-shaped envelope the normalizer accepts before it runs and never
+      // mutates its input, so the parsed body (guarded above to a non-null,
+      // non-array object) is passed through directly.
       const normalizeOptions =
         options.rereviewLabel === undefined ? {} : { rereviewLabel: options.rereviewLabel };
       const payload = projectForgejoWebhookPayload(

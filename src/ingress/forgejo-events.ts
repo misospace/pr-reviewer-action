@@ -15,29 +15,51 @@
 // only this projection is new, and GitHub behavior is unaffected.
 //
 // Security posture (mirrors `webhook-handler.ts`): the `X-Gitea-Event` and
-// `X-Gitea-Event-Type` headers are TRUSTED — the delivery is HMAC-verified over
-// the raw body and both headers are shape-validated by the handler before this
-// projection runs, and only these headers (never a payload field) decide the
-// projected `name`. The payload is UNTRUSTED: no untrusted string is ever
-// copied into a synthesized field. The only value the projection synthesizes
-// is the trusted rereview-label constant (the operator-configured trigger
-// label, or the "ai-review" default) — it is matched byte-for-byte against the
-// payload's `pull_request.labels` and re-emitted as that trusted constant,
-// never as a copy of the payload text, so a hostile label cannot forge the
-// trigger. The projection is pure: it never throws, never mutates the input,
-// and always returns a fresh object with `name` set. Any unrecognized shape
-// falls through to `{ ...payload, name: eventHeader }` — exactly the behavior
-// the handler had before this module existed.
+// `X-Gitea-Event-Type` headers are UNAUTHENTICATED HINTS, not authenticated
+// facts — `signature.ts` verifies the HMAC over the RAW BODY ONLY, so a
+// captured, still-valid delivery can be replayed byte-for-byte with CHANGED
+// headers (#1024). Both headers are shape-validated by the handler before this
+// projection runs; shape validation is NOT cryptographic authentication. Only
+// these headers (never a payload field) decide the projected `name`. The
+// signed body's own `action` is the authoritative statement of WHAT HAPPENED,
+// so every hint below is gated on COMPATIBILITY with it: a hint may refine a
+// projection the signed body already authorizes and can never rewrite one, and
+// an incompatible hint is simply not forced. A captured terminal delivery
+// (`action: "closed"`) replayed with forged sync headers therefore stays
+// `pr_merged`/`pr_closed` instead of being reclassified into a scheduleable
+// `synchronize` (which would mint a review generation), and a forged label or
+// comment hint cannot synthesize a `label` or re-nest a PR into a follow-up.
+// The payload is UNTRUSTED: no untrusted string is ever copied into a
+// synthesized field. The only value the projection synthesizes is the trusted
+// rereview-label constant (the operator-configured trigger label, or the
+// "ai-review" default) — it is matched byte-for-byte against the payload's
+// `pull_request.labels` and re-emitted as that trusted constant, never as a
+// copy of the payload text, so a hostile label cannot forge the trigger. The
+// projection is pure: it never throws, never mutates the input, and always
+// returns a fresh object with `name` set. An unrecognized shape falls through to
+// `{ ...payload, name: eventHeader }` — exactly the behavior the handler had
+// before this module existed — and a hint incompatible with the signed action is
+// never forced: it degrades to the grouped rule for its header, or to that same
+// passthrough.
 //
-// Grouping table (the `specific` type header):
-//   pull_request_sync   -> header `pull_request` + `action: "synchronized"`
-//   pull_request_label  -> header `pull_request` + `action: "label_updated"`
-//   pull_request_comment-> header `issue_comment` + `action: "created"`
+// Hints and the signed action each one REQUIRES (a hint naming the legacy
+// ungrouped header works the same way; the grouped `pull_request` deliveries
+// need no hint at all — their own action decides):
+//   pull_request_sync    -> name `pull_request`, action `synchronized`/`synchronize`
+//   pull_request_label   -> name `pull_request_label`, action `label_updated`
+//   pull_request_comment -> name `issue_comment`, action `created`
 //
-// Failure mode is fail-closed throughout: an unrecognizable label or comment
-// projects to a shape the normalizer maps to `unknown` — the handler still
-// acks (202) and forwards it, and the kind-gating consumer (dispatch) drops
-// unknown kinds; only a null normalization is acked 200-ignored.
+// Remaining header-only surface (deliberately out of scope here): the
+// normalizer's action-independent `check_run`/`check_suite`/`status` names, so
+// a forged group name can still reach the `check_update` family. Forgejo check
+// runs are a capability degradation (`capabilities.ts`) and the projection is
+// not the seam that owns those kinds.
+//
+// Failure mode is fail-closed throughout: a rejected hint, an unrecognizable
+// label, or an unrecognizable comment projects to a shape the normalizer maps
+// to `unknown` — the handler still acks (202) and forwards it, and the
+// kind-gating consumer (dispatch) drops unknown kinds; only a null
+// normalization is acked 200-ignored.
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -154,11 +176,14 @@ function projectCommentEvent(payload: Record<string, unknown>): Record<string, u
 /** Project a raw native Forgejo delivery onto the GitHub-shaped envelope the
  * #728 normalizer accepts. See the module header for the security posture.
  *
- * @param eventHeader the (trusted, HMAC-verified, shape-validated) value of
- *   the `X-Gitea-Event` header — the GROUPED event name.
- * @param eventTypeHeader the (trusted) value of the `X-Gitea-Event-Type`
- *   header — the specific type — or `""` when absent or invalid.
- * @param payload the parsed (untrusted) webhook body.
+ * @param eventHeader the (UNAUTHENTICATED, shape-validated) value of the
+ *   `X-Gitea-Event` header — the GROUPED event name. It decides the projected
+ *   `name`, but only as a hint: it may not override the signed payload action.
+ * @param eventTypeHeader the (UNAUTHENTICATED, shape-validated) value of the
+ *   `X-Gitea-Event-Type` header — the specific type — or `""` when absent or
+ *   invalid. Likewise a hint: honored only when the signed action authorizes it.
+ * @param payload the parsed (untrusted) webhook body. Its own `action` is
+ *   authoritative — it is inside the HMAC, the headers are not.
  * @param options the re-review trigger label; an absent/empty value falls back
  *   to the "ai-review" default.
  */
@@ -173,16 +198,32 @@ export function projectForgejoWebhookPayload(
     // grouped header (an undivided delivery's type defaults to its group).
     const specific = eventTypeHeader !== "" ? eventTypeHeader : eventHeader;
 
+    // The SIGNED action — the one authenticated statement of what happened.
+    // Every hint below is gated on it, so a header can never rewrite a signed
+    // `closed` into a scheduleable `synchronize` (#1024).
+    const action = typeof payload.action === "string" ? payload.action : "";
+
+    // The effective GROUP for the grouped rule below: the grouped header, with
+    // the legacy ungrouped `pull_request_sync` header mapped to the group it
+    // belongs to, so a rejected sync hint degrades to the same grouped
+    // `pull_request` dispatch a grouped header gets (signed action preserved).
+    const group = eventHeader === "pull_request_sync" ? "pull_request" : eventHeader;
+
     // Rule 1 — PR sync: the older ungrouped `pull_request_sync` header, or the
-    // grouped `pull_request` + `pull_request_sync` type. The header forces the
-    // kind regardless of the payload's own `action`.
+    // grouped `pull_request` + `pull_request_sync` type. Honored ONLY when the
+    // signed action is the sync action (native `synchronized` or the
+    // GitHub-vocabulary `synchronize`). Otherwise the hint is NOT forced and the
+    // grouped rule below decides from the signed action alone — so a captured
+    // terminal delivery replayed with a forged sync header keeps its own action.
     if (eventHeader === "pull_request_sync" || specific === "pull_request_sync") {
-      return { ...payload, name: "pull_request", action: "synchronize" };
+      if (action === "synchronized" || action === "synchronize") {
+        return { ...payload, name: "pull_request", action: "synchronize" };
+      }
     }
 
-    // Rule 2 — grouped `pull_request`: dispatch on the payload's action.
-    if (eventHeader === "pull_request") {
-      const action = typeof payload.action === "string" ? payload.action : "";
+    // Rule 2 — grouped `pull_request`: dispatch on the SIGNED action, which is
+    // authoritative here too (the header only supplies the name).
+    if (group === "pull_request") {
       if (action === "synchronized") {
         return { ...payload, name: "pull_request", action: "synchronize" };
       }
@@ -197,28 +238,43 @@ export function projectForgejoWebhookPayload(
       return { ...payload, name: "pull_request" };
     }
 
-    // Rule 4 — the ungrouped/older `pull_request_label` shape: always a label
-    // event, regardless of the payload's action.
+    // Rule 4 — the ungrouped/older `pull_request_label` group. Honored ONLY
+    // when the signed action is `label_updated`; otherwise it falls through to
+    // the generic passthrough (whose name the normalizer maps to `unknown`), so a
+    // forged label hint on a replayed non-label body can neither project to
+    // `labeled` nor synthesize a trigger `label`. The type header alone is not a
+    // label hint: a grouped `pull_request` delivery is already covered by the
+    // signed-action dispatch above, so consulting `pull_request_label` here
+    // would only let an unauthenticated type header re-group an unrelated
+    // delivery.
     if (eventHeader === "pull_request_label") {
-      return projectLabelEvent(payload, options);
+      if (action === "label_updated") {
+        return projectLabelEvent(payload, options);
+      }
     }
 
     // Rule 5 — PR comments: the ungrouped `pull_request_comment`, the grouped
     // `issue_comment` + `pull_request_comment` type, and a plain `issue_comment`
-    // all normalize to the GitHub `issue_comment` envelope.
+    // all normalize to the GitHub `issue_comment` envelope — but only when the
+    // signed action is `created`. Otherwise the generic passthrough leaves the
+    // top-level `pull_request` where the signed body put it, so a forged comment
+    // hint cannot re-nest it into a `follow_up`-shaped `issue.pull_request`.
     if (
       eventHeader === "issue_comment" ||
       eventHeader === "pull_request_comment" ||
       specific === "pull_request_comment"
     ) {
-      return projectCommentEvent(payload);
+      if (action === "created") {
+        return projectCommentEvent(payload);
+      }
     }
 
-    // Rule 6 — anything else: pass through with the (trusted) header as name.
+    // Rule 6 — anything else, and every hint rejected above as incompatible with
+    // the signed body: pass through with the header as name.
     return { ...payload, name: eventHeader };
   } catch {
     // Fail closed, mirroring the normalizeEvent try/catch: any throw degrades
-    // to the passthrough; a throwing copy falls back to the bare trusted name.
+    // to the passthrough; a throwing copy falls back to the bare hint name.
     try {
       return { ...payload, name: eventHeader };
     } catch {
