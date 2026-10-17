@@ -1,9 +1,0 @@
-{
-  "fixture": "ledger-fit-boundary-drops",
-  "description": "ledger bytes + 31 framing bytes equal to MAX_CORPUS: does not fit (strict `<`), signal empty, ledger JSON kept.",
-  "producer": "ledger-signal",
-  "ledger_md": "- [R1] Must validate input\n- [R2] Must log errors\n",
-  "ledger_json": "{\"sha\": \"s1\"}",
-  "max_corpus": 81,
-  "repo_files": {}
-}

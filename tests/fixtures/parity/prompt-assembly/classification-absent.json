@@ -1,4 +1,0 @@
-{
-  "fixture": "classification-absent",
-  "description": "No classification.json: the kind-gated placeholders are stripped and the user message is the bare base."
-}

@@ -1,7 +1,0 @@
-{
-  "fixture": "steering-unicode",
-  "description": "Non-ASCII and control characters pass through the steering text byte-exact; a NUL is dropped by the shell capture.",
-  "files": {
-    "classification.json": "{\"pr_kind\": \"app_code\", \"risk_flags\": [\"r\\u00e9sum\\u00e9 \\u2014 flag\"], \"risk_flags_with_files\": {\"r\\u00e9sum\\u00e9 \\u2014 flag\": [\"\\u6587\\u4ef6.py\", \"tab\\there.py\"]}, \"must_check\": [\"Does \\u201cquoting\\u201d hold? \\ud83d\\ude00\", \"nul\\u0000byte\"]}"
-  }
-}

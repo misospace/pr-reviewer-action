@@ -49,7 +49,59 @@ inputs:
     v2_id: ai_response_format
     required: false
     default: "off"
-    description: "Structured-output mode for OpenAI-compatible endpoints (including LiteLLM): off (default), json_object, or json_schema (enforces a verdict/review_markdown schema). Ignored for the anthropic format. Improves output reliability with smaller local models. Applies to both the primary and fallback review calls."
+    description: "Structured-output mode: off (default), json_object, or json_schema (enforces a verdict/review_markdown schema). OpenAI-compatible endpoints (including LiteLLM) receive it as response_format. For the anthropic format nothing is sent by default: json_schema is enforced natively (output_config.format) only under the lane's ai-anthropic-structured-output-support opt-in, json_object has no Anthropic-native equivalent and stays prompt-only — either way the run logs what was actually enforced and a capability mismatch 400 is retried once without the parameter. Improves output reliability with smaller local models. Acts as the base/default for ai-primary-response-format, ai-smart-response-format, and ai-fallback-response-format: an unset lane override inherits this value rather than forcing off."
+  - id: ai-primary-response-format
+    required: false
+    default: ""
+    description: "Primary-lane override for the response_format mode (off, json_object, or json_schema). Empty (the default) inherits ai-response-format, so existing single-value workflows stay request-byte compatible. Empty/unset is not coerced to off — a primary model known to reject response_format can be pinned to off here while smart/fallback lanes keep their structured-output selection. On the anthropic format json_schema is enforced only with ai-anthropic-structured-output-support; json_object stays prompt-only. Never silently translated between modes."
+  - id: ai-smart-response-format
+    required: false
+    default: ""
+    description: "Smart-lane override for the response_format mode (off, json_object, or json_schema). Empty (the default) inherits ai-response-format. Used by the reviewer-requested smart re-review (#721) so the smart model can use a richer structured-output setting than the primary lane. On the anthropic format json_schema is enforced only with ai-smart-anthropic-structured-output-support; json_object stays prompt-only."
+  - id: ai-fallback-response-format
+    required: false
+    default: ""
+    description: "Fallback-lane override for the response_format mode (off, json_object, or json_schema). Empty (the default) inherits ai-response-format. The fallback lane is availability recovery, not quality escalation (#965); this input is the per-lane choice, not a promotion. On the anthropic format json_schema is enforced only with ai-fallback-anthropic-structured-output-support; json_object stays prompt-only."
+  - id: ai-reasoning-effort
+    required: false
+    default: ""
+    description: "Base reasoning effort for model calls. Free-form, bounded string (lowercase letters, digits, '-', and '_'; up to 32 characters) passed through verbatim, because providers and proxies define their own effort vocabulary and none is imposed or clamped here. OpenAI-compatible endpoints receive it as reasoning_effort; Anthropic-compatible endpoints receive it as output_config.effort only under that lane's own Anthropic effort-support opt-in (ai-anthropic-effort-support for base/primary, ai-smart-anthropic-effort-support, ai-fallback-anthropic-effort-support, ai-specialist-anthropic-effort-support). Empty (the default) omits the field entirely and leaves request bytes unchanged. Acts as the base/default for ai-primary-reasoning-effort, ai-smart-reasoning-effort, and ai-specialist-reasoning-effort: an unset lane override inherits this value. A value that fails validation is dropped as unset with a warning naming the input."
+  - id: ai-primary-reasoning-effort
+    required: false
+    default: ""
+    description: "Primary-lane override for the reasoning effort. Empty (the default) inherits ai-reasoning-effort, so existing single-value workflows stay request-byte compatible. Values are passed through verbatim like the base input."
+  - id: ai-smart-reasoning-effort
+    required: false
+    default: ""
+    description: "Smart-lane override for the reasoning effort. Empty (the default) inherits ai-reasoning-effort. Used by the reviewer-requested smart re-review (#721) so the smart model can be given a different effort than the primary lane; it is not an escalation trigger. Values are passed through verbatim like the base input."
+  - id: ai-smart-anthropic-effort-support
+    required: false
+    default: "false"
+    description: "Operator assertion that the smart lane's Anthropic-compatible endpoint/proxy is known to accept output_config.effort. Does NOT inherit ai-anthropic-effort-support: the smart route may target a different Anthropic-compatible backend that was never asserted, so a capability assertion never crosses lanes (#1049 review). Default false: smart Anthropic requests carry no effort field even when one is configured, and the run logs a warning naming this input. Ignored for the openai format."
+  - id: ai-anthropic-effort-support
+    required: false
+    default: "false"
+    description: "Operator assertion that the configured Anthropic-compatible endpoint/proxy is known to accept output_config.effort. Scopes the base and primary lanes only; every other lane asserts its own endpoint (ai-smart-anthropic-effort-support, ai-fallback-anthropic-effort-support, ai-specialist-anthropic-effort-support), so enabling it for one endpoint never silently enables it on another. Default false: Anthropic-format requests never carry an effort field, even when an effort is configured — and a configured-but-inactive effort is reported as NOT sent rather than logged as applied. Set true only after confirming the endpoint accepts it. The action never sends OpenAI's reasoning_effort on the Anthropic wire family and never substitutes thinking: {\"type\": \"disabled\"} or an invented effort value. Ignored for the openai format."
+  - id: ai-fallback-anthropic-effort-support
+    required: false
+    default: "false"
+    description: "Operator assertion that the fallback lane's Anthropic-compatible endpoint/proxy is known to accept output_config.effort. Does NOT inherit ai-anthropic-effort-support: the fallback lane runs on its own ai-fallback-base-url, which may be a different Anthropic-compatible backend that was never asserted, so a capability assertion never crosses lanes (#1049 review). The fallback lane still inherits the base reasoning effort; this flag only decides whether that effort is actually sent to the fallback endpoint. Default false: fallback Anthropic requests carry no effort field even when one is configured, and the run logs a warning naming this input. Ignored for the openai format."
+  - id: ai-fallback-reasoning-effort
+    required: false
+    default: ""
+    description: "Fallback-lane override for the reasoning effort. Empty (the default) inherits ai-reasoning-effort, so existing single-value workflows stay request-byte compatible — the fallback lane is availability recovery, never quality escalation (#965). Values are free-form, bounded (lowercase letters, digits, '-', and '_'; up to 32 characters), passed through verbatim like ai-reasoning-effort; a value that fails shape is dropped as unset and the lane then inherits the base, with the drop announced by key. On Anthropic fallback requests the effort is sent as output_config.effort ONLY when ai-fallback-anthropic-effort-support: true is set — other lanes' true flags do NOT authorize fallback, exactly like the per-lane effort opt-in itself. Operator-only: never repo-configurable, matching the other ai-fallback-* reasoning inputs."
+  - id: ai-anthropic-structured-output-support
+    required: false
+    default: "false"
+    description: "Operator assertion that the configured Anthropic-compatible endpoint/proxy is known to accept Anthropic-native structured output (output_config.format with the verdict/review_markdown JSON schema). Scopes the base and primary lanes only; the smart and fallback lanes assert their own endpoints (ai-smart-anthropic-structured-output-support, ai-fallback-anthropic-structured-output-support), so enabling it for one endpoint never silently enables it on another. Default false: Anthropic-format requests carry no structured-output parameter, even when ai-response-format resolved to json_schema — the JSON contract is prompt-only, and the run logs that truthfully instead of implying the parameter was sent. json_object has no Anthropic-native equivalent and is never sent or translated on this wire family regardless of this flag. If the assertion turns out wrong (an HTTP 400 naming the parameter), the request is retried once WITHOUT it so the review degrades to prompted JSON rather than failing. Set true only after confirming the endpoint accepts output_config.format. Ignored for the openai format."
+  - id: ai-smart-anthropic-structured-output-support
+    required: false
+    default: "false"
+    description: "Operator assertion that the smart lane's Anthropic-compatible endpoint/proxy is known to accept output_config.format structured output. Does NOT inherit ai-anthropic-structured-output-support: the smart route may target a different Anthropic-compatible backend that was never asserted, so a capability assertion never crosses lanes. Default false: smart Anthropic requests carry no structured-output parameter even when the lane resolved json_schema, and the run logs a warning naming this input. A wrong assertion degrades safely: one retry without the parameter. Ignored for the openai format."
+  - id: ai-fallback-anthropic-structured-output-support
+    required: false
+    default: "false"
+    description: "Operator assertion that the fallback lane's Anthropic-compatible endpoint/proxy is known to accept output_config.format structured output. Does NOT inherit ai-anthropic-structured-output-support: the fallback lane runs on its own ai-fallback-base-url, which may be a different Anthropic-compatible backend that was never asserted. Default false: fallback Anthropic requests carry no structured-output parameter even when the lane resolved json_schema, and the run logs a warning naming this input. A wrong assertion degrades safely: one retry without the parameter. Ignored for the openai format."
   - id: ai-tokens-param
     v2_id: ai_tokens_param
     required: false
@@ -60,6 +112,10 @@ inputs:
     required: false
     default: "2023-06-01"
     description: "Anthropic API version header used when ai_api_format or ai_fallback_api_format is anthropic"
+  - id: ai-extra-headers
+    required: false
+    default: ""
+    description: "Multi-line 'Name: value' pairs merged into every outbound AI provider request (primary, smart, fallback, and specialist lanes; both anthropic and openai formats), e.g. set 'x-litellm-session-id' to the workflow's github.run_id value (interpolate it in the calling workflow, never as a literal GitHub expression here: GitHub evaluates expressions inside action.yml at load time and fails the run) to group one run's calls in a proxy cost log. Header names are sent case-preserved; empty (the default) sends exactly the headers the action always sent. Malformed lines, control characters, non-latin1 values, duplicate names, and names colliding with the action's own transport or connection-framing headers (x-api-key, Authorization, anthropic-version, Content-Type, Accept, Host, Content-Length, Connection, Keep-Alive, TE, Trailer, Transfer-Encoding, Upgrade, __proto__) are rejected at startup. The whole input is treated as sensitive: header values are redacted from configuration dumps, including the debug config command, and are masked out of provider error text. The review fingerprint treats ephemeral correlation/session/trace headers (a name ending in -session-id, -request-id, -correlation-id, -trace-id, -span-id or -run-id, or one of traceparent, tracestate, x-b3-traceid, x-b3-spanid, x-b3-parentspanid) as name-only, so a per-run correlation value never invalidates a cached review; every other header participates by name plus a one-way digest of its value, so changing a value (e.g. swapping one anthropic-beta token for another) does force a fresh review. No raw header value ever enters the fingerprint as text."
   - id: ai-fallback-base-url
     v2_id: ai_fallback_base_url
     required: false
@@ -99,7 +155,14 @@ inputs:
     v2_id: fail_on_request_changes
     required: false
     default: "false"
-    description: "If true, fail the action step when the final verdict is request_changes, so the review can act as a CI merge gate without a GitHub App. The gate runs after publishing, so the review comment and inline findings still land on the PR. It reads the same final verdict the `verdict` output reports (post-verdict_policy, post-evidence-blocker and tool-failure enforcement), not the raw model verdict. on_model_failure=notice still passes: a model outage produces no verdict and must not wedge merges. Default false — existing consumers see no behaviour change."
+    description: "If true, fail the action step when the final verdict is request_changes, so the review can act as a CI merge gate without a GitHub App. The gate runs after publishing, so the review comment and inline findings still land on the PR. It reads the same final verdict the `verdict` output reports (post-verdict_policy, post-evidence-blocker and tool-failure enforcement), not the raw model verdict. on_model_failure=notice still passes: a model outage produces no verdict and must not wedge merges. Default false — existing consumers see no behaviour change. A degraded review warns and passes only in the narrow cases listed under fail-on-degraded-review; set that input to true to fail on those too."
+    repo-configurable: true
+    repo-policy: true
+  - id: fail-on-degraded-review
+    v2_id: fail_on_degraded_review
+    required: false
+    default: "false"
+    description: "If true, the fail-on-request-changes gate also fails a degraded review that would otherwise warn and pass. Default false. The exemption is deliberately narrow and provenance-aware: it applies only when the blocking verdict came from the model, and only in two cases — the verdict is the on-model-failure=notice, or the review ran on the fallback model with no evidence gathered. A primary review that gathered no evidence still fails the gate, and a request_changes forced by a deterministic layer (evidence blocker, tool-failure enforcement, required-check fail mode, an incomplete requirement trace, or a verdict-policy escalation) fails the gate regardless of this input. Ignored unless fail-on-request-changes is true."
     repo-configurable: true
     repo-policy: true
   - id: verdict-policy
@@ -146,7 +209,7 @@ inputs:
     v2_id: review_routing_mode
     required: false
     default: "off"
-    description: "Route PR reviews between the primary and smart models based on the deterministic classification. 'off' (default) preserves existing primary/fallback behavior. 'auto' sends PRs whose pr_kind or risk_flags match escalate_on_risk_flags to the smart model (when one is configured) and keeps everything else on the primary model."
+    description: "Route PR reviews between the primary and smart models. 'off' (default) preserves legacy behavior: the AI_* model configuration is used as-is with no profile binding. 'auto' is the primary-first policy (#965): the initial review always runs on the primary model, deep-review specialists inherit the primary profile, and the smart model is reached only when the completed primary verdict explicitly sets smart_review_requested=true (#721), bounded to one rerun. Deterministic classification stays available for specialist role selection, required checks, and telemetry — never for model routing."
   - id: ai-primary-model
     v2_id: ai_primary_model
     required: false
@@ -171,7 +234,7 @@ inputs:
     v2_id: ai_smart_model
     required: false
     default: ""
-    description: "Opt-in smarter model for high-risk reviews (review_routing_mode=auto). With no smart model set, auto-routing stays on the primary model and never escalates. After a successful primary review, a smart re-review runs only when the primary reviewer explicitly requests it via the structured smart_review_requested verdict field (#721); heuristic signals (request_changes, low confidence, blockers, incomplete coverage) are telemetry only. The fallback model is NEVER an escalation target — it only catches a primary-availability failure."
+    description: "Opt-in smarter model for high-risk reviews (review_routing_mode=auto). With no smart model set, auto-routing stays on the primary model and never escalates. After a successful primary review, a smart re-review runs only when the primary reviewer explicitly requests it via the structured smart_review_requested verdict field (#721); heuristic signals (request_changes, low confidence, blockers, incomplete coverage) are telemetry only. The fallback model is NEVER an escalation target — it only catches an availability failure of the first-pass (primary) model."
   - id: ai-smart-base-url
     v2_id: ai_smart_base_url
     required: false
@@ -187,11 +250,42 @@ inputs:
     required: false
     default: ""
     description: "API key for the smart model. Defaults to ai_api_key."
-  - id: escalate-on-risk-flags
-    v2_id: escalate_on_risk_flags
+  - id: ai-specialist-model
     required: false
-    default: "linked_security_issue,linked_priority_p0,linked_priority_p1,auth_changes,public_route_changes,file_serving_changes,path_handling_changes,secret_handling_changes,db_or_migration_changes"
-    description: "Comma-separated pr_kind / risk_flag names that route directly to the smart model when review_routing_mode=auto. Matched against route_signals — linked-issue flags and file-based signals backed by an actual changed filename — so a benign PR whose diff merely mentions a pattern (e.g. os.path) does not route."
+    default: ""
+    description: "Model for deep-review specialist calls. Empty (default) inherits the primary profile exactly as before (#966). When set, it activates the specialist profile: specialist transport resolves ai-specialist-* fields with unset fields inheriting the primary route's values."
+  - id: ai-specialist-base-url
+    required: false
+    default: ""
+    description: "Base URL for the specialist profile. Empty inherits the primary route's base URL. Requires ai-specialist-model."
+  - id: ai-specialist-api-format
+    required: false
+    default: ""
+    description: "API format for the specialist profile (openai or anthropic). Empty inherits the primary route's format. Requires ai-specialist-model."
+  - id: ai-specialist-api-key
+    required: false
+    default: ""
+    description: "API key for the specialist profile. Empty inherits the primary route's API key. Requires ai-specialist-model."
+  - id: ai-specialist-correctness-model
+    required: false
+    default: ""
+    description: "Model override for the correctness specialist only. Empty inherits the specialist profile (or the primary profile when no specialist profile is set). Model-only: the shared specialist transport (base URL / API format / key) is not overridden per role; distinct endpoints per role are a documented follow-up. Ignored (with a warning) under DEEP_REVIEW_EXECUTION=combined_scout."
+  - id: ai-specialist-security-model
+    required: false
+    default: ""
+    description: "Model override for the security specialist only. Empty inherits the specialist profile (or the primary profile when no specialist profile is set). Model-only: the shared specialist transport (base URL / API format / key) is not overridden per role; distinct endpoints per role are a documented follow-up. Ignored (with a warning) under DEEP_REVIEW_EXECUTION=combined_scout."
+  - id: ai-specialist-tests-model
+    required: false
+    default: ""
+    description: "Model override for the tests specialist only. Empty inherits the specialist profile (or the primary profile when no specialist profile is set). Model-only: the shared specialist transport (base URL / API format / key) is not overridden per role; distinct endpoints per role are a documented follow-up. Ignored (with a warning) under DEEP_REVIEW_EXECUTION=combined_scout."
+  - id: ai-specialist-reasoning-effort
+    required: false
+    default: ""
+    description: "Reasoning effort for deep-review specialist calls. Empty (the default) inherits the primary lane's resolved value, so specialist calls follow the review call's effort unless an operator separates them. Values are passed through verbatim like ai-reasoning-effort. Operator-only: never repo-configurable, matching the other ai-specialist-* inputs."
+  - id: ai-specialist-anthropic-effort-support
+    required: false
+    default: "false"
+    description: "Operator assertion that the specialist lane's Anthropic-compatible endpoint/proxy is known to accept output_config.effort. Does NOT inherit ai-anthropic-effort-support: the specialist transport may target a different Anthropic-compatible backend that was never asserted, so a capability assertion never crosses lanes (#1049 review). Default false: specialist Anthropic requests carry no effort field even when one is configured, and the specialist phase warns naming this input. Ignored for the openai format. Operator-only: never repo-configurable, matching the other ai-specialist-* inputs."
   - id: ai-stream
     v2_id: ai_stream
     required: false
@@ -241,7 +335,7 @@ inputs:
     v2_id: requirement_trace
     required: false
     default: "false"
-    description: "Require a per-requirement trace (production enforcement + regression test locations, deterministically verified against the checkout) for every acceptance/normative requirement in the ledger before crediting it; an unverifiable or missing trace marks review coverage incomplete, and an unmet requirement without a finding gets a deterministic one. Off by default: not yet measured on the real-PR corpus."
+    description: "Require a per-requirement trace (production enforcement + regression test locations, deterministically verified against the checkout) for every acceptance/normative requirement in the ledger before crediting it; an unverifiable or missing trace marks review coverage incomplete, and an unmet requirement is disclosed in the rendered trace without synthesizing a finding — blocking findings come only from the model's own substantiated violation. Off by default: not yet measured on the real-PR corpus."
     repo-configurable: true
   - id: linear-api-key
     v2_id: linear_api_key
@@ -277,7 +371,7 @@ inputs:
     v2_id: system_prompt_mode
     required: false
     default: "replace"
-    description: "How a supplied system_prompt / system_prompt_file combines with the bundled default. 'replace' (default) uses the supplied prompt verbatim. 'append' keeps the conditionally-assembled bundled default and appends the supplied prompt as a repo-specific addendum — so consumers add conventions without copying (and re-syncing) the whole default."
+    description: "How a supplied system_prompt / system_prompt_file combines with the bundled default. 'replace' (default) uses the supplied prompt verbatim (with one exception: when 'review-triage' is enabled, the triage question is always appended so the tri-state answer stays grounded — see #1003). 'append' keeps the conditionally-assembled bundled default and appends the supplied prompt as a repo-specific addendum — so consumers add conventions without copying (and re-syncing) the whole default."
     repo-configurable: true
     repo-policy: true
   - id: review-verbosity
@@ -316,7 +410,7 @@ inputs:
     v2_id: allow_repo_policy_overrides
     required: false
     default: "false"
-    description: "If true, a repository config file may set policy inputs (marked repo-policy in the v3 contract: verdict policy, blocking categories, required-check and evidence enforcement, fail-on-request-changes, system prompt mode) that the workflow left unset. Defaults to false, so a repository cannot loosen a gate its operator enforces. v3 only."
+    description: "If true, a repository config file may set policy inputs (marked repo-policy in the v3 contract: verdict policy, blocking categories, required-check and evidence enforcement, fail-on-request-changes, fail-on-degraded-review, system prompt mode) that the workflow left unset. Defaults to false, so a repository cannot loosen a gate its operator enforces. v3 only."
   - id: approve-forks
     v2_id: approve_forks
     required: false
@@ -353,6 +447,11 @@ inputs:
     required: false
     default: ""
     description: "Smart tier context window in tokens; empty inherits model_context_tokens/context_limit_mode"
+  - id: fallback-model-context-tokens
+    v2_id: fallback_model_context_tokens
+    required: false
+    default: ""
+    description: "Fallback model context window in tokens; empty inherits model_context_tokens. The fallback reuses the primary review corpus, so when this is set the shared corpus is sized to the smaller of the primary and fallback windows (#922)."
   - id: primary-request-shape
     v2_id: primary_request_shape
     required: false
@@ -414,8 +513,8 @@ inputs:
   - id: deep-review-max-tokens
     v2_id: deep_review_max_tokens
     required: false
-    default: "4096"
-    description: "Maximum completion tokens for each deep-review specialist role; independent of ai_max_tokens. Default 4096."
+    default: "16384"
+    description: "Maximum completion tokens for each deep-review specialist role; independent of ai_max_tokens. Default 16384."
     repo-configurable: true
   - id: deep-review-corpus-max-bytes
     v2_id: deep_review_corpus_max_bytes
@@ -429,6 +528,23 @@ inputs:
     default: "false"
     description: "Opt-in claim falsification pre-pass (#785): a deterministic scan of the PR body and its diff's added comments/docstrings for the PR's own quantified claims and invariants (every/only/never/identical/parity, authority boundaries, compatibility promises), each anchored to the concrete code it describes; falls back to one bounded model call on the primary route only when that scan finds nothing. The review corpus gets a Claims to Falsify section asking the reviewer to check every listed item and report counterexamples as findings. Fail-soft; never changes the verdict policy."
     repo-configurable: true
+  # #1003: operator-only (no repo-configurable key — repository config must
+  # never be able to switch a review behaviour on) and review-only (no
+  # *-enable-for-forks sibling — it grants no tool, repository or access
+  # capability, so there is nothing for a fork gate to hold back).
+  - id: review-triage
+    required: false
+    default: "false"
+    description: "Opt-in human-review triage (#1003): the reviewer additionally answers whether this change needs a specialized/owning human review, as 'not_required', 'required', or 'unknown' (fail-closed: any missing, malformed or unrecognized answer is 'unknown', and a 'not_required' with no usable supporting reason is also 'unknown'). The escalation policy comes from the repository's trusted instruction files already in context; triage never names a reviewer, never requests one, and never changes the verdict, findings, or any tool, evidence or fork access. Publishes review-triage-decision and review-triage-reason, and adds a short section to the published review and the step summary. Off by default: disabled means the outputs stay empty."
+  # #1005: operator-only routing layer on top of the #1003 triage answer. The
+  # model selects only LOGICAL target ids; trusted base-ref configuration
+  # (`.github/pr-reviewer-routing.yml`) maps those ids to concrete GitHub
+  # users/teams. No repo-configurable key and no `-enable-for-forks` sibling:
+  # it can never be switched on by a PR and never mutates on a fork.
+  - id: review-triage-routing-mode
+    required: false
+    default: "off"
+    description: "Optional deterministic reviewer-routing layer on top of #1003 human-review triage: 'off' (default), 'advisory', or 'request'. Only meaningful when review-triage is enabled. The model chooses only from the logical routing targets declared in the trusted base-ref file .github/pr-reviewer-routing.yml; deterministic action code maps those ids to concrete GitHub users/teams. 'advisory' computes and publishes the routing plan but never mutates the forge (safe dogfooding); 'request' additively requests the configured reviewers when triage says required. The model can never emit a GitHub user or team, requests are idempotent and never remove existing reviewers, and an unknown/unconfigured target or any uncertain state causes no mutation. Never mutates on fork pull requests. Reviewer requests are GitHub-only; Forgejo degrades to request_failed with no mutation. Publishes review-triage-routing."
   - id: enrichment-budget-sec
     v2_id: enrichment_budget_sec
     required: false
@@ -487,6 +603,14 @@ inputs:
     required: false
     default: "false"
     description: "If true, allow evidence providers to run on cross-repository pull requests"
+  - id: repository-skills
+    required: false
+    default: "false"
+    description: "Opt in to discovering bounded .agents/skills/*/SKILL.md guidance from the trusted PR base. In native_loop, the model may read relevant skills on demand; this never enables tools or changes deterministic review policy. Disabled for fork PRs."
+  - id: repository-skill-path
+    required: false
+    default: ""
+    description: "Optional exact trusted-base .agents/skills/<name>/SKILL.md path to include as a bounded corpus addendum when native-loop tools are off. Must exist in the trusted base; never reads PR-head content."
   - id: tool-mode
     v2_id: tool_mode
     required: false
@@ -497,6 +621,10 @@ inputs:
     required: false
     default: "600"
     description: "Wall-clock ceiling in seconds for the whole tool_mode=native_loop exchange (all model round-trips plus tool execution). Ignored for other modes."
+  - id: smart-tool-loop-wall-clock-sec
+    required: false
+    default: ""
+    description: "Wall-clock ceiling in seconds for the smart tier's tool-mode=native_loop exchange (the post-review escalation rerun) only. Empty (the default) inherits tool-loop-wall-clock-sec. An explicit value outranks tool-loop-wall-clock-sec on the smart tier and leaves the primary tier untouched. Ignored for other modes."
   - id: tool-loop-summarize
     v2_id: tool_loop_summarize
     required: false
@@ -527,6 +655,10 @@ inputs:
     required: false
     default: ""
     description: "Round budget for tool_mode=native_loop, where a round is a single model turn. Empty (the default) resolves to 4, and the effective round cap also scales with the resolved tool-max-requests budget (#895) — one round per tool call, so a model that reads one file per turn can spend the whole size-scaled or tiered call budget; it is bounded at 32 rounds, and the wall clock is the real bound. Set this explicitly to opt back out of that scaling: the loop then allows up to twice the configured value (capped at 12), exactly as before #895, to leave room for one-call-per-turn chains and repair turns. Ignored when tool_mode=off."
+  - id: smart-tool-max-rounds
+    required: false
+    default: ""
+    description: "Round budget for the smart tier's tool-mode=native_loop run (the post-review escalation rerun) only. Empty (the default) inherits tool-max-rounds, so with both empty the smart round cap scales with its resolved tool budget, bounded at 32 rounds (#895). An explicit value outranks tool-max-rounds on the smart tier and opts that tier alone out of the scaling: its loop then allows up to twice this value (capped at 12). Leaves the primary tier untouched. Ignored when tool-mode=off."
   - id: tool-turn-timeout-sec
     v2_id: tool_turn_timeout_sec
     required: false
@@ -535,8 +667,8 @@ inputs:
   - id: tool-corpus-max-bytes
     v2_id: tool_corpus_max_bytes
     required: false
-    default: "50000"
-    description: "Maximum corpus bytes passed into the native_loop conversation's first turn"
+    default: ""
+    description: "Maximum corpus bytes passed into the native_loop conversation's first turn. Empty (the default) resolves to 50000. When primary-model-context-tokens / smart-model-context-tokens / model-context-tokens declares a window, it derives from it instead: normally about 15% of the window (up to 600000 bytes), and lower for small windows, since it never exceeds ~60% of the loop's conversation budget after the per-turn completion is reserved (#922). An explicit value is an operator override and is used as-is, even beyond that envelope; the operator is then responsible for fitting the model's window."
   - id: tool-max-tokens-per-turn
     v2_id: tool_max_tokens_per_turn
     required: false
@@ -545,8 +677,8 @@ inputs:
   - id: tool-max-response-bytes
     v2_id: tool_max_response_bytes
     required: false
-    default: "12000"
-    description: "Maximum bytes captured from each tool execution result"
+    default: ""
+    description: "Maximum bytes captured from each tool execution result. Empty (the default) resolves to 12000. With a declared context window it derives from it instead: normally about 2% of the window (up to 64000 bytes), and lower for small windows, since it never exceeds ~8% of the loop's conversation budget (#922). An explicit value is an operator override and is used as-is, even beyond that envelope; the operator is then responsible for fitting the model's window."
     repo-configurable: true
   - id: tool-allowed-gh-api-repos
     v2_id: tool_allowed_gh_api_repos
@@ -632,12 +764,12 @@ inputs:
     v2_id: forgejo_token
     required: false
     default: ""
-    description: "Optional Forgejo API token. Defaults to github_token when blank. Use this when the token used for GitHub-compatible operations is not also valid for the Forgejo REST API."
+    description: "Optional Forgejo API token in token mode. Defaults to github_token when blank in that mode. Use this when the token used for GitHub-compatible operations is not also valid for the Forgejo REST API. Must be empty in authorized_integration mode."
   - id: forgejo-auth-method
     v2_id: forgejo_auth_method
     required: false
     default: "token"
-    description: "Forgejo authentication method. 'token' (default) uses a static personal access token via the forgejo_token input. 'authorized_integration' uses Forgejo's authorized integrations flow: the action exchanges the forgejo_authorized_integration_audience for a short-lived JWT via the runner's OIDC token endpoint and authenticates API calls with 'Authorization: Bearer {jwt}'. Requires forgejo_authorized_integration_audience and that the workflow sets 'enable-openid-connect: true'."
+    description: "Forgejo authentication method. 'token' (default) uses a static personal access token via the forgejo_token input. 'authorized_integration' uses Forgejo's authorized integrations flow: the action exchanges the forgejo_authorized_integration_audience for a short-lived JWT via the runner's OIDC token endpoint and authenticates API calls with 'Authorization: Bearer {jwt}'. Requires forgejo_authorized_integration_audience and that the workflow sets 'enable-openid-connect: true'; setting forgejo_token at the same time fails configuration validation."
   - id: forgejo-authorized-integration-audience
     v2_id: forgejo_authorized_integration_audience
     required: false
@@ -663,6 +795,11 @@ inputs:
     required: false
     default: "ai-review"
     description: "Label that, when added to a PR, forces a fresh review even if nothing changed — the easy re-review trigger (only users with write/triage can label, so it is self-authorizing). On a `labeled` event the action reviews iff the added label matches this, then removes the label so re-adding re-triggers; any other label add is ignored. To enable, add `labeled` to the workflow's pull_request types. Default \"ai-review\"."
+  - id: rereview-command
+    v2_id: rereview_command
+    required: false
+    default: "/ai-review"
+    description: "Comment command that forces a fresh full review from a `created` `issue_comment` event on a pull request — the comment re-review trigger. The comment body must be exactly this command (leading/trailing whitespace ignored; v1 takes no arguments — a comment with trailing text never triggers), and the commenter must have triage-or-higher repository permission, verified through the forge API and failing closed on lookup errors: a matching command from an unauthorized or unverifiable commenter skips the run even when `force-review` is set. An empty string disables comment-triggered re-reviews. To enable, consumers add `issue_comment: [created]` to their workflow; fork PRs only get a reply pointing at the `ai-review-fork` label workflow. Default \"/ai-review\"."
   - id: comment-marker
     v2_id: comment_marker
     required: false
@@ -694,19 +831,35 @@ outputs:
     description: "AI verdict, approve or request_changes"
   - id: verdict-source
     v2_id: verdict_source
-    description: "Where the final verdict came from ('model' or 'findings' per verdict_policy, or 'carry_forward' when an unchanged-diff skip retains the prior verdict)"
+    description: "Where the final verdict came from ('model' or 'findings' per verdict_policy, 'enforcement' when a fail-closed enforcement layer forced it, or 'carry_forward' when an unchanged-diff skip retains the prior verdict)"
   - id: required-checks
     v2_id: required_checks
     description: "Required-check validation status ('complete', 'incomplete', or 'none' when validation did not run)"
   - id: review-result
     v2_id: review_result
-    description: "The metadata marker's review_result state ('clean', 'findings', 'partial', or 'issues'), from the same still-open findings and coverage the marker records. #873: 'partial' means the review's own coverage is incomplete (required checks or the tool-loop investigation did not finish) — 'verdict: approve' with 'review-result: partial' is not an approval; gate merges on both, never on verdict alone. Has no v2 equivalent."
+    description: "The metadata marker's review_result state ('clean', 'findings', 'partial', or 'issues'), from the same still-open findings and coverage the marker records. #873/#954: 'partial' means the review has an execution or requirement-traceability gap — 'verdict: approve' with 'review-result: partial' is not an approval; gate merges on both, never on verdict alone. Use incomplete-reason to distinguish the gap. Has no v2 equivalent."
+  - id: incomplete-reason
+    v2_id: incomplete_reason
+    description: "Why the review's coverage is incomplete, distinguishing review-execution gaps from requirement-traceability gaps: 'execution' (tool-loop or required-check coverage did not finish), 'requirement_trace' (the review completed, but an in-scope requirement lacks verifiable enforcement/test evidence), 'both', or 'none' when complete. #954. Has no v2 equivalent."
   - id: review-route
     v2_id: review_route
     description: "Model route used for this review ('legacy', 'primary', 'smart', or 'escalated')"
   - id: escalation-reason
     v2_id: escalation_reason
     description: "primary_requested when review_route is 'escalated' (the primary reviewer's structured smart_review_requested field triggered the smart re-review); empty otherwise"
+  # #1003: v3-only outputs (no v2 counterpart; the v2_id is the mechanical
+  # kebab->snake mapping the contract validator requires). Empty string means
+  # triage did not run (review-triage disabled) — distinct from the fail-closed
+  # 'unknown' answer it produces when it ran and could not decide.
+  - id: review-triage-decision
+    v2_id: review_triage_decision
+    description: "Human-review triage answer (#1003) when review-triage ran: 'not_required', 'required', or 'unknown' (fail-closed for a missing or malformed answer). Empty when review-triage is disabled. Advisory only — never affects the verdict, findings, or any tool/access gating."
+  - id: review-triage-reason
+    v2_id: review_triage_reason
+    description: "Reason behind review-triage-decision (#1003), possibly empty when the model gave none; empty when review-triage is disabled. Model-authored text, redacted before publication."
+  - id: review-triage-routing
+    v2_id: review_triage_routing
+    description: "Deterministic reviewer-routing status (#1005) when review-triage-routing-mode ran: 'not_required', 'no_targets', 'invalid', 'advisory', 'request', or 'fork_blocked'. Empty when review-triage or review-triage-routing-mode is off. The model selects only configured logical target ids; concrete GitHub users/teams come only from trusted base-ref configuration, and an invalid or uncertain state never mutates the forge. This review-step output reports the routing intent; the published review additionally reports the publish-time outcome ('requested' or 'request_failed')."
   - id: findings
     v2_id: findings
     description: "Normalized structured findings as a JSON array (empty array when the model produced none)"
@@ -738,6 +891,10 @@ outputs:
     v2_id: tool_calls
     description: "JSON array of read-only tools executed by the native tool harness, with tool names and statuses"
 removed:
+  - kind: inputs
+    v2_id: escalate_on_risk_flags
+    status: removed
+    reason: "Removed in v3 (#965): deterministic direct-smart pre-routing contradicted the primary-first policy. review_routing_mode=auto now always starts on the primary model; the smart model is reached only via the reviewer-requested post-primary path (#721). route_signals remain available for specialist role selection, required checks, and telemetry."
   - kind: inputs
     v2_id: escalate_on_incomplete_required_checks
     status: removed

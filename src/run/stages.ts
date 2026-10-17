@@ -7,6 +7,8 @@ import { splitChunks } from "../corpus/diff-priority.js";
 import {
   buildBoundedRepoMap,
   buildReviewCorpus,
+  CORPUS_DIFF_SECTION_ARTIFACT,
+  CORPUS_DIFF_SECTION_SMART_ARTIFACT,
   prepareStandardsContext,
   prepareToolHarness,
   type CorpusBuildResult,
@@ -43,6 +45,7 @@ import { runEvidenceProvidersPhase } from "../evidence/index.js";
 import { runToolHarness, type HarnessTransport } from "../tools/harness.js";
 import { runChatRequest } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
+import { extraHeadersForEnv } from "../transport/headers.js";
 import type { NormalizedModelResponse, TransportWirePayload } from "../model/types.js";
 import type { TierBudgets } from "../corpus/budgets.js";
 import type { StageEnv } from "./env.js";
@@ -474,6 +477,7 @@ export function assembleCorpus(
       ciChecksContent,
       versionHintsTruncatedTxt: ws.read("version-hints.truncated.txt"),
       toolHarnessMd: ws.read("tool-harness.md"),
+      repositorySkillAddendumMd: ws.read("repository-skill-addendum.md"),
       toolHarnessSmartMd: ws.read("tool-harness.smart.md"),
       evidenceProvidersMd: ws.read("evidence-providers.md"),
       imageDigestContextMd: ws.read("image-digest-context.md"),
@@ -506,6 +510,14 @@ export function assembleCorpus(
     },
   );
   for (const [name, data] of result.artifacts) ws.write(name, data);
+  // #921/#930: the assembler-certified diff-section payload rides beside the
+  // corpus alias, keyed by the ARTIFACT SLOT it certifies, not the model
+  // tier — the initial harness runs at TOOL_HARNESS_TIER=primary, so keying
+  // by model tier would leave the primary-named sidecar absent on fresh
+  // runs. The harness's tier-keyed read follows the same primary/smart corpus
+  // split: slot=primary builds the review-corpus.truncated.md corpus,
+  // slot=smart the review-corpus.smart.truncated.md one.
+  ws.write(slot === "smart" ? CORPUS_DIFF_SECTION_SMART_ARTIFACT : CORPUS_DIFF_SECTION_ARTIFACT, result.corpusDiffPayload);
   return result;
 }
 
@@ -533,6 +545,11 @@ function ciChecksBytes(env: StageEnv): Uint8Array | null {
 
 export function harnessTransportAdapter(env: StageEnv): HarnessTransport {
   return async (baseUrl, apiFormat, payload, apiKey, timeoutSec) => {
+    // #1037: the tool-harness transport is a provider call like any other.
+    // Parsed per request INSIDE the closure (as pre-fix) so a malformed set
+    // stays fail-soft per request; unset config yields `undefined` and the
+    // key is omitted entirely (byte-identical request, nothing to merge).
+    const extra = extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "");
     const outcome = await runChatRequest({
       baseUrl,
       apiFormat: apiFormat === "anthropic" ? "anthropic" : "openai",
@@ -544,12 +561,17 @@ export function harnessTransportAdapter(env: StageEnv): HarnessTransport {
       anthropicVersion: env.ANTHROPIC_VERSION ?? "2023-06-01",
       requestTimeoutSec: Math.max(1, Math.trunc(timeoutSec)),
       connectTimeoutSec: Number(env.AI_CONNECT_TIMEOUT_SEC ?? "30") || 30,
+      // #1037: unset config omits the key entirely (byte-identical request,
+      // nothing to merge).
+      ...(extra !== undefined ? { extraHeaders: extra } : {}),
     });
     // #846: carry the HTTP status and a redacted body excerpt (plus the
     // ai-api-format hint on a 404) instead of the bare "model endpoint
     // returned HTTP <status>" message. `secrets` masks the configured key
-    // unconditionally, on top of `redactText`'s heuristics.
-    if (outcome.status === "failure") throw new Error(describeTransportFailure(outcome.failure, { secrets: [apiKey] }));
+    // unconditionally, on top of `redactText`'s heuristics. #1037: the
+    // configured extra-header VALUES join that list — a provider error body
+    // can quote them back, and they routinely carry proxy tokens.
+    if (outcome.status === "failure") throw new Error(describeTransportFailure(outcome.failure, { secrets: [apiKey, ...(extra ? Object.values(extra) : [])] }));
     // A streamed turn's `raw` is the reassembled NormalizedModelResponse, not
     // provider JSON. The loop's tool-call extraction and usage accounting
     // read the OpenAI chat shape (as v2's reassembler produced), so project

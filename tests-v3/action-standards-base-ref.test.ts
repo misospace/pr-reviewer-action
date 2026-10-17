@@ -79,6 +79,8 @@ function startGithubMock(baseSha: string, headSha: string): ReturnType<typeof st
       }
       res.end(JSON.stringify({
         number: 7,
+        state: "open",
+        draft: false,
         title: "Loosen the rules",
         body: "",
         head: { sha: headSha, ref: "feature", repo: { full_name: "o/r" } },

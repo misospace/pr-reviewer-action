@@ -1,9 +1,14 @@
 import { ciAttemptTimeoutMs, isTransientCiRead } from "./bounded.js";
 import { ForgejoEnrichClient } from "./enrich.js";
+import { canonicalUserId, integrationOwnerIdFromAudience, type IdentityResolution } from "./owner-identity.js";
 import { PlatformRequestError, requestJson, requestText, type FetchLike } from "./http.js";
 import {
   forgejoReviewCommentId,
   groupForgejoReviewThreads,
+  forgejoSelfStatusMatches,
+  forgejoJobStatusPathsMatch,
+  forgejoStatusTargetsJob,
+  normalizeForgejoRunJobs,
   normalizeExternalChecks,
   normalizeForgejoCommitStatus,
   normalizeForgejoConversationComments,
@@ -11,6 +16,7 @@ import {
   normalizeForgejoPrFiles,
   normalizeForgejoReviews,
   pyJsonDecode,
+  type ForgejoRunJobsNormalization,
   type ExternalCheck,
 } from "./normalize.js";
 import { parseRepoRef, repoScopedUrl } from "./repo-ref.js";
@@ -36,6 +42,7 @@ function errorText(error: unknown): string {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 25_000;
+const FORGEJO_RUN_JOBS_PAGE_SIZE = 50;
 const JWT_TTL_SECONDS = 2700;
 
 export interface ForgejoAdapterOptions {
@@ -43,7 +50,7 @@ export interface ForgejoAdapterOptions {
   prNumber: string;
   /** FORGEJO_API_URL — validated before any credential is attached. */
   baseUrl: string;
-  /** Resolved token (FORGEJO_TOKEN → GITHUB_TOKEN → GH_TOKEN chain). */
+  /** Resolved token; the runner token is only a fallback in token mode. */
   token?: string | undefined;
   /** "token" (default) or "authorized_integration" (#254 lineage). */
   authMethod?: string | undefined;
@@ -55,6 +62,23 @@ export interface ForgejoAdapterOptions {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** #970: the forge-reported author login of a Forgejo comment/review `user`
+ * object. Never reads body content; a missing or non-string login is
+ * `undefined` (unproven ownership, which callers fail closed on). */
+function forgejoAuthor(user: unknown): string | undefined {
+  if (!isObject(user)) return undefined;
+  const login = user.login;
+  return typeof login === "string" && login !== "" ? login : undefined;
+}
+
+/** #1093: the forge-reported author user id of a Forgejo comment/review
+ * `user` object, in its canonical positive-integer string form. Never reads
+ * body content; unusable ids are `undefined` (unproven ownership). */
+function forgejoAuthorId(user: unknown): string | undefined {
+  if (!isObject(user)) return undefined;
+  return canonicalUserId(user.id) ?? undefined;
 }
 
 function parseRepo(repo: string): { owner: string; repo: string } {
@@ -93,7 +117,7 @@ export class ForgejoAdapter implements PlatformReadAdapter {
     this.repo = options.repo;
     this.prNumber = options.prNumber;
     this.token = options.token;
-    this.authMethod = options.authMethod ?? "token";
+    this.authMethod = options.authMethod ?? "";
     this.audience = options.authorizedIntegrationAudience ?? "";
     this.timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.fetchImpl = options.fetchImpl ?? fetch;
@@ -112,16 +136,36 @@ export class ForgejoAdapter implements PlatformReadAdapter {
   }
 
   private isAuthorizedIntegrationMode(): boolean {
-    return this.audience.trim() !== "";
+    // Audience-only direct callers used OIDC before authMethod was wired
+    // through. An explicit method governs when both settings are supplied.
+    const method = this.authMethod.trim().toLowerCase();
+    return method === "authorized_integration" || (method === "" && this.audience.trim() !== "");
   }
 
-  /** Resolve the Authorization header (port of `_resolve_auth_header`):
-   * authorized-integration mode with no explicit token uses the OIDC JWT;
-   * an explicit token always wins; token="" opts out of authentication. */
+  /** Share the adapter's OIDC exchange with Forgejo write operations. */
+  async authorizationHeaderForRequest(): Promise<string | undefined> {
+    return this.authorizationHeader();
+  }
+
+  /** Surface exchange and Forgejo authorization failures before reads can fold them into empty data. */
+  async preflightAuthentication(): Promise<void> {
+    if (!this.isAuthorizedIntegrationMode()) return;
+    const { status } = await requestText(
+      this.repoUrl("/pulls/", this.prNumber),
+      await this.options("application/json"),
+    );
+    if (status !== 200) {
+      throw new PlatformRequestError(
+        `Forgejo authorized-integration credential check failed with status ${status}`,
+        status,
+        "integration-auth",
+      );
+    }
+  }
+
+  /** The selected method owns authentication even if a caller supplies a token. */
   private async authorizationHeader(): Promise<string | undefined> {
     if (this.isAuthorizedIntegrationMode()) {
-      if (this.token === "") return undefined;
-      if (this.token) return `token ${this.token}`;
       return `Bearer ${await this.getJwt()}`;
     }
     if (!this.token) return undefined;
@@ -143,6 +187,13 @@ export class ForgejoAdapter implements PlatformReadAdapter {
   private async getJwt(): Promise<string> {
     const cached = this.jwtCache;
     if (cached && Date.now() - cached.fetchedAt < JWT_TTL_SECONDS * 1000) return cached.token;
+    if (!this.audience.trim()) {
+      throw new PlatformRequestError(
+        "Authorized-integration mode requires FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE",
+        null,
+        "missing-audience",
+      );
+    }
     const requestUrl = process.env.ACTIONS_ID_TOKEN_REQUEST_URL ?? "";
     const requestToken = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN ?? "";
     if (!requestUrl || !requestToken) {
@@ -263,6 +314,8 @@ export class ForgejoAdapter implements PlatformReadAdapter {
           body: typeof comment.body === "string" ? comment.body : "",
           created_at: typeof comment.created_at === "string" ? comment.created_at : typeof comment.created_on === "string" ? comment.created_on : undefined,
           updated_at: typeof comment.updated_at === "string" ? comment.updated_at : typeof comment.updated_on === "string" ? comment.updated_on : undefined,
+          author: forgejoAuthor(comment.user),
+          authorId: forgejoAuthorId(comment.user),
         });
       }
       if (comments.length < 50) break;
@@ -290,19 +343,190 @@ export class ForgejoAdapter implements PlatformReadAdapter {
         body: typeof review.body === "string" ? review.body : "",
         submitted_at:
           typeof review.submitted_at === "string" ? review.submitted_at : typeof review.updated_at === "string" ? review.updated_at : undefined,
+        author: forgejoAuthor(review.user),
+        authorId: forgejoAuthorId(review.user),
       }));
+  }
+
+  /** One `GET /api/v1/user` read shared by `authenticatedIdentity()` and
+   * `resolveTrustedOwner()` (#1093): `{status, data, transportFailed}` —
+   * a transport/auth failure never throws (the callers fold it into their
+   * own fail-closed contracts). A failed response that still carries an HTTP
+   * status (an HTML 401/403/other error page behind a proxy, or a 200 whose
+   * body is unparseable) keeps that status and reports no payload, so the
+   * diagnostics can tell a status-rejected `/user` from a 200 with an
+   * unusable payload and from a transport that never answered. */
+  private async fetchAuthenticatedUser(): Promise<{ status: number; data: unknown; transportFailed: boolean }> {
+    try {
+      const { status, data } = await requestJson(this.apiPath("/user"), await this.options("application/json"));
+      return { status, data, transportFailed: false };
+    } catch (error) {
+      if (error instanceof PlatformRequestError && error.status !== null) {
+        return { status: error.status, data: null, transportFailed: false };
+      }
+      return { status: 0, data: null, transportFailed: true };
+    }
+  }
+
+  /** The usable login of a `/user` payload, or null (payload not usable). */
+  private static loginFromUserPayload(data: unknown): string | null {
+    if (!isObject(data)) return null;
+    const login = data.login;
+    return typeof login === "string" && login.trim() !== "" ? login : null;
+  }
+
+  /** #970: resolve the login this token posts as (`GET /user`). The
+   * authorized-integration mode's OIDC JWT may not resolve to a user there;
+   * any failure is `null` and the precheck fails closed rather than trusting
+   * an unauthenticated marker. */
+  async authenticatedIdentity(): Promise<string | null> {
+    const { status, data } = await this.fetchAuthenticatedUser();
+    // A non-200 body is an error payload, never an identity (the pre-#1093
+    // contract): only a 200 payload may prove a login.
+    return status === 200 ? ForgejoAdapter.loginFromUserPayload(data) : null;
+  }
+
+   /** #1093: the trusted owner identity for skip/carry-forward and cleanup
+    * ownership, with a bounded diagnostics reason. `GET /user` proves a
+    * login when it can; in Authorized Integration mode a repo-scoped JWT
+    * typically lacks the `/user` scope (401/403) or cannot reach it at all,
+    * so whenever `/user` cannot prove a login the audience's owner id — the
+    * same proof sticky-comment ownership already trusts — is the fallback
+    * proof. The audience check runs only as that fallback: with an
+    * unparseable audience the run falls through to the reaction self-write
+    * probe below. Every failure mode leaves the identity null (fail
+    * closed). When a fallback cannot prove an identity either, the `/user`
+    * stage's bounded reason is retained alongside the fallback's (composed
+    * with `-and-`), so an operator can tell whether `/user` was
+    * transport-unreachable, status-rejected, or returned an unusable
+    * payload instead of only seeing the final stage's failure. */
+  async resolveTrustedOwner(): Promise<IdentityResolution> {
+    const user = await this.fetchAuthenticatedUser();
+    let userStageReason: string;
+    if (user.transportFailed) {
+      userStageReason = "user-transport";
+    } else if (user.status === 200) {
+      const login = ForgejoAdapter.loginFromUserPayload(user.data);
+      if (login !== null) return { identity: { kind: "login", login }, reason: "user-login" };
+      userStageReason = "user-payload";
+    } else {
+      userStageReason = `user-http-${user.status}`;
+    }
+    if (this.isAuthorizedIntegrationMode()) {
+      const userId = integrationOwnerIdFromAudience(this.audience);
+      if (userId !== null) return { identity: { kind: "userId", userId }, reason: "integration-user-id" };
+    }
+    // Last fallback for every mode: a repo-scoped token (write:repository +
+    // write:issue, no read:user) cannot read `/user` at all, so the doer is
+    // proven by a reaction self-write on this PR's issue instead. An
+    // identity already proven above (a login from `/user`, or the
+    // integration audience) never reaches the probe.
+    const probe = await this.reactionSelfAttestation();
+    if (probe.identity !== null) return probe;
+    return { identity: null, reason: `${userStageReason}-and-${probe.reason}` };
+  }
+
+  /** #1093: final identity proof — a transient reaction self-write on this
+   * PR's issue. The POST response's `user.id` attests the authenticated
+   * DOER (only an account with issue-write on this repository can create
+   * the reaction), so a repo-scoped PAT can prove its identity without the
+   * `read:user` scope. Both 201 (this run created the reaction) and 200
+   * (a `content:"eyes"` reaction already existed — the forge reports the
+   * doer of the duplicate POST) attest the server-authenticated doer.
+   *
+   * PATCH/edit-style responses are deliberately NOT acceptable identity
+   * sources: they attest the comment's ORIGINAL poster, not the
+   * authenticated doer — a repo-write token PATCHing a spoofed-marker
+   * comment must never adopt the spoofer's identity.
+   *
+   * The DELETE afterwards is best-effort cleanup (exactly one attempt) and
+   * runs ONLY for a 201: this run created that reaction, so it must not
+   * linger. A 200 means the reaction already existed and belongs to
+   * another moment/author — the proof still stands, but this run deletes
+   * nothing rather than destroying pre-existing user data. The cleanup's
+   * body mirrors the POST's so the forge deletes the doer's `eyes`
+   * reaction (an empty-body DELETE binds an empty reaction type and
+   * silently removes nothing). The proof is the POST response, so a failed
+   * cleanup never invalidates the proven identity — it only emits a single
+   * bounded stderr WARN. Diagnostics never carry body, user, network, or
+   * token content. */
+  private async reactionSelfAttestation(): Promise<IdentityResolution> {
+    let url: string;
+    try {
+      url = this.repoUrl("/issues/", `${this.prNumber}/reactions`);
+    } catch {
+      return { identity: null, reason: "reaction-transport" };
+    }
+    let status = 0;
+    let data: unknown = null;
+    try {
+      const result = await requestJson(url, {
+        ...(await this.options("application/json")),
+        method: "POST",
+        body: JSON.stringify({ content: "eyes" }),
+      });
+      status = result.status;
+      data = result.data;
+    } catch (error) {
+      // A non-JSON error response (e.g. an HTML 403/502 page behind a
+      // proxy) still carries its real HTTP status — report it instead of
+      // masking it as a transport failure. True transport failures (no
+      // response at all) stay reaction-transport.
+      if (error instanceof PlatformRequestError && error.status !== null && error.status >= 400) {
+        return { identity: null, reason: `reaction-http-${error.status}` };
+      }
+      return { identity: null, reason: "reaction-transport" };
+    }
+    if (status !== 200 && status !== 201) return { identity: null, reason: `reaction-http-${status}` };
+    const createdHere = status === 201;
+    const user = isObject(data) && isObject(data.user) ? data.user : null;
+    const userId = user === null ? null : canonicalUserId((user as { id?: unknown }).id);
+    if (userId === null) {
+      // A 201 payload that cannot prove the doer still gets the best-effort
+      // DELETE: this run created that reaction, and an unprovable reaction
+      // must not linger on the issue. A 200 payload cannot prove the doer
+      // either, but nothing was created — nothing is deleted.
+      if (createdHere) await this.deleteProbeReaction(url);
+      return { identity: null, reason: "reaction-payload" };
+    }
+    if (createdHere) await this.deleteProbeReaction(url);
+    return { identity: { kind: "userId", userId }, reason: "reaction-self-attested" };
+  }
+
+  /** The best-effort probe cleanup: exactly one attempt; the body mirrors
+   * the POST's so the forge deletes the doer's `eyes` reaction instead of
+   * binding an empty reaction type. Never throws; on non-2xx or transport
+   * failure it emits a single bounded stderr WARN (no body/network/token
+   * content) and nothing else. */
+  private async deleteProbeReaction(url: string): Promise<void> {
+    try {
+      const deletion = await requestText(url, {
+        ...(await this.options("application/json")),
+        method: "DELETE",
+        body: JSON.stringify({ content: "eyes" }),
+      });
+      if (deletion.status !== 200 && deletion.status !== 204) {
+        process.stderr.write(`[forgejo] WARNING: reaction self-write cleanup failed (status ${deletion.status}); the identity proof stands\n`);
+      }
+    } catch {
+      process.stderr.write("[forgejo] WARNING: reaction self-write cleanup failed; the identity proof stands\n");
+    }
   }
 
   /** `_curl` semantics for a read: `{status, text}`, with a transport
    * failure reported as status 0 (v2: curl's nonzero exit code stands in
    * for the HTTP status, so it is never 200). A credential failure (the
    * authorized-integration JWT exchange) throws: v2's CLI raises there. */
-  private async curl(url: string, timeoutMs?: number): Promise<{ status: number; text: string }> {
+  private async curl(url: string, timeoutMs?: number, preserveRedirectStatus = false): Promise<{ status: number; text: string }> {
     const options = await this.options();
     try {
       const { status, text } = await requestText(url, { ...options, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
       return { status, text };
-    } catch {
+    } catch (error) {
+      if (preserveRedirectStatus && error instanceof PlatformRequestError
+        && error.kind === "redirect-blocked" && error.status !== null) {
+        return { status: error.status, text: "" };
+      }
       return { status: 0, text: "" };
     }
   }
@@ -392,6 +616,17 @@ export class ForgejoAdapter implements PlatformReadAdapter {
    * GitHub CI reads (#663); a timeout or exhausted deadline counts as that
    * same failed read. */
   async externalChecks(sha: string, options: ExternalChecksOptions = {}): Promise<ExternalCheck[] | null> {
+    if (options.selfRunNumbers !== undefined && options.selfStatusDiscovery) {
+      options.selfStatusDiscovery.found = false;
+      options.selfStatusDiscovery.ambiguous = false;
+      options.selfStatusDiscovery.matchCount = 0;
+      options.selfStatusDiscovery.context = null;
+      options.selfStatusDiscovery.runJobs ??= "unknown";
+      options.selfStatusDiscovery.runJobCount ??= null;
+      options.selfStatusDiscovery.runJobCountExact ??= false;
+      options.selfStatusDiscovery.runJobHtmlUrl ??= null;
+      options.selfStatusDiscovery.runJobsUnavailableReason ??= null;
+    }
     if (!SHA_RE.test(sha)) return null;
     if (options.transientAsUnknown === true) return this.externalChecksStrict(sha, options);
     const status = await this.read(async (at) => {
@@ -404,7 +639,10 @@ export class ForgejoAdapter implements PlatformReadAdapter {
     });
     // A raising CLI prints nothing (`|| echo ""`).
     const combinedText = status.ok ? status.data : "";
-    return normalizeExternalChecks(FORGEJO_EMPTY_CHECK_RUNS, combinedText, options.runId ?? "", options.statusContext ?? "");
+    if (options.selfRunNumbers === undefined) {
+      return normalizeExternalChecks(FORGEJO_EMPTY_CHECK_RUNS, combinedText, options.runId ?? "", options.statusContext ?? "");
+    }
+    return this.normalizeAutoSelfStatus(combinedText, options);
   }
 
   /** `externalChecks` under the v3 CI gate's transient-read rule: no
@@ -425,7 +663,110 @@ export class ForgejoAdapter implements PlatformReadAdapter {
     });
     if (status.ok && status.data === null) return null;
     const combinedText = status.ok ? status.data ?? "" : "";
-    return normalizeExternalChecks(FORGEJO_EMPTY_CHECK_RUNS, combinedText, options.runId ?? "", options.statusContext ?? "");
+    if (options.selfRunNumbers === undefined) {
+      return normalizeExternalChecks(FORGEJO_EMPTY_CHECK_RUNS, combinedText, options.runId ?? "", options.statusContext ?? "");
+    }
+    return this.normalizeAutoSelfStatus(combinedText, options);
+  }
+
+  private async readRunJobs(options: ExternalChecksOptions): Promise<ForgejoRunJobsNormalization | null> {
+    const runId = options.selfRunId?.trim() ?? "";
+    if (!NUMBER_RE.test(runId)) {
+      if (options.selfStatusDiscovery) options.selfStatusDiscovery.runJobsUnavailableReason = "run-id environment variable is missing or non-numeric";
+      return { state: "unavailable", count: null, exact: false };
+    }
+    const timeoutMs = ciAttemptTimeoutMs(options);
+    if (timeoutMs === null) return null;
+    let response: { status: number; text: string };
+    try {
+      const { owner, repo } = parseRepo(this.repo);
+      const url = this.apiPath(`/repos/${owner}/${repo}/actions/runs/${runId}/jobs`);
+      response = await this.curl(url, timeoutMs, true);
+    } catch {
+      if (options.selfStatusDiscovery) options.selfStatusDiscovery.runJobsUnavailableReason = "invalid repository for run-jobs endpoint";
+      return { state: "unavailable", count: null, exact: false };
+    }
+
+    // Unlike the shared CI-read rule, a jobs lookup treats timeout/early
+    // request responses as retryable rather than proof that the endpoint is absent.
+    if (response.status === 0 || response.status === 408 || response.status === 425
+      || response.status === 429 || response.status >= 500
+      || (response.status === 200 && isTransientCiRead(response.status, response.text))) return null;
+    if (response.status !== 200) {
+      if (options.selfStatusDiscovery) {
+        options.selfStatusDiscovery.runJobsUnavailableReason = `run-jobs endpoint returned HTTP ${response.status}`;
+      }
+      return { state: "unavailable", count: null, exact: false };
+    }
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(response.text);
+    } catch {
+      return null;
+    }
+    const result = normalizeForgejoRunJobs(decoded, FORGEJO_RUN_JOBS_PAGE_SIZE, runId);
+    if (result.state === "unavailable" && options.selfStatusDiscovery) {
+      options.selfStatusDiscovery.runJobsUnavailableReason = "run-jobs response could not prove the run's job count";
+    }
+    return result;
+  }
+
+  private async normalizeAutoSelfStatus(combinedText: string, options: ExternalChecksOptions): Promise<ExternalCheck[] | null> {
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(combinedText.replace(/\n+$/, ""));
+    } catch {
+      if (options.selfStatusDiscovery) {
+        options.selfStatusDiscovery.found = false;
+        options.selfStatusDiscovery.ambiguous = false;
+        options.selfStatusDiscovery.matchCount = 0;
+        options.selfStatusDiscovery.context = null;
+      }
+      return [];
+    }
+    const statuses = isObject(decoded) && Array.isArray(decoded.statuses) ? decoded.statuses : [];
+    const matches = forgejoSelfStatusMatches(
+      statuses,
+      options.selfRunNumbers ?? [],
+      options.selfRunRepo ?? "",
+      options.selfRunOrigin ?? "",
+    );
+    const matchedStatus = matches.index === null ? null : statuses[matches.index];
+    const targetUrl = isObject(matchedStatus) && typeof matchedStatus.target_url === "string" ? matchedStatus.target_url : null;
+    const discovery = options.selfStatusDiscovery;
+    const ambiguous = matches.count > 1;
+    let excludeIndex: number | undefined;
+
+    // Ambiguity in the status payload is conclusive: do not spend a jobs API
+    // read or try to hide one of the sibling checks.
+    if (!ambiguous && matches.count === 1 && discovery?.runJobs === "unknown") {
+      const jobs = await this.readRunJobs(options);
+      if (jobs === null) return null;
+      discovery.runJobs = jobs.state;
+      discovery.runJobCount = jobs.count;
+      discovery.runJobCountExact = jobs.state === "single" || jobs.state === "multi" && jobs.exact;
+      discovery.runJobHtmlUrl = jobs.state === "single" ? jobs.htmlUrl : null;
+    }
+
+    if (discovery) {
+      discovery.found = false;
+      discovery.ambiguous = ambiguous;
+      discovery.matchCount = matches.count;
+      discovery.context = matches.context;
+      if (!ambiguous && matches.count === 1 && discovery.runJobs === "single"
+        && targetUrl !== null
+        && (discovery.runJobHtmlUrl === null
+          ? forgejoStatusTargetsJob(targetUrl, options.selfRunOrigin ?? "")
+          : forgejoJobStatusPathsMatch(discovery.runJobHtmlUrl, targetUrl, options.selfRunOrigin ?? ""))) {
+        discovery.found = true;
+        excludeIndex = matches.index ?? undefined;
+      }
+    }
+
+    return normalizeExternalChecks(FORGEJO_EMPTY_CHECK_RUNS, combinedText, options.runId ?? "", options.statusContext ?? "", {
+      selfRunNumbers: options.selfRunNumbers,
+      selfStatusIndex: excludeIndex,
+    });
   }
 
   /** Linked-source enrichment client whose configured-host credential is
@@ -574,6 +915,10 @@ export class ForgejoAdapter implements PlatformReadAdapter {
       return `/api/v1/repos/${repoKey}${rest}`;
     }
     if (rest === "/issues" || rest.startsWith("/issues/")) return `/api/v1/repos/${repoKey}${rest}`;
+    // #914: the commenter-permission lookup for the comment re-review
+    // command. The GitHub-shaped path is byte-identical on Forgejo's API v1
+    // (and its response carries the same `permission` field).
+    if (rest.startsWith("/collaborators/")) return `/api/v1/repos/${repoKey}${rest}`;
     if (rest === "/compare" || rest.startsWith("/compare/")) {
       return `/api/v1/repos/${repoKey}/compare/${rest.slice("/compare/".length)}`;
     }

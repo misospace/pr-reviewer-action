@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -550,6 +551,125 @@ def test_fixture_hash_mismatch_is_rejected() -> None:
     fixture["sha256"] = "0" * 64
     with pytest.raises(ValueError, match="hash mismatch"):
         _load_semantic_fixture(corpus, fixture)
+
+
+def test_fixture_git_env_disables_background_gc(tmp_path: Path) -> None:
+    from pr_reviewer.semantic_eval import _fixture_git_env
+
+    env = _fixture_git_env()
+    pairs = {
+        env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"]
+        for index in range(int(env["GIT_CONFIG_COUNT"]))
+    }
+    assert pairs == {
+        "gc.auto": "0",
+        "gc.autoDetach": "false",
+        "gc.autoPackLimit": "0",
+        "maintenance.auto": "false",
+    }
+    assert env["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+
+    # Git must actually honour the overrides, not just the dict shape.
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True, env=env)
+    for key, value in pairs.items():
+        observed = subprocess.run(
+            ["git", "-C", str(repo), "config", "--get", key],
+            check=True, capture_output=True, text=True, env=env,
+        )
+        assert observed.stdout.strip() == value, key
+
+
+def test_fixture_git_env_drops_inherited_config(monkeypatch, tmp_path: Path) -> None:
+    from pr_reviewer.semantic_eval import _fixture_git_env
+
+    # Inherited config that must not leak through: an inconsistent
+    # GIT_CONFIG_COUNT (aborts every git call) and GIT_CONFIG=<file>, which
+    # redirects `git config` writes out of .git/config.
+    external = tmp_path / "inherited-gitconfig"
+    external.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG", str(external))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "14")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "commit.gpgsign")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "true")
+
+    env = _fixture_git_env()
+    assert "GIT_CONFIG" not in env
+    assert env["GIT_CONFIG_COUNT"] == "4"
+    keys = {env[f"GIT_CONFIG_KEY_{index}"] for index in range(4)}
+    assert keys == {"gc.auto", "gc.autoDetach", "gc.autoPackLimit", "maintenance.auto"}
+
+    # Exercise the real materialization path (init, identity, commit): a leaked
+    # GIT_CONFIG sends the identity writes to the external file, leaving
+    # .git/config without them (and the commit failing with "Author identity
+    # unknown" wherever git cannot auto-detect one).
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "eval@test"], check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "semantic-eval"], check=True, capture_output=True, env=env)
+    (repo / "file.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--all"], check=True, capture_output=True, env=env)
+    committed = subprocess.run(
+        ["git", "-C", str(repo), "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "-q", "-m", "fixture-head"],
+        capture_output=True, env=env, text=True,
+    )
+    assert committed.returncode == 0, committed.stderr
+    assert "eval@test" in (repo / ".git" / "config").read_text(encoding="utf-8")
+    assert "eval@test" not in external.read_text(encoding="utf-8")
+
+
+def test_fixture_teardown_retries_transient_enotempty(monkeypatch, tmp_path: Path) -> None:
+    from pr_reviewer import semantic_eval
+
+    victim = tmp_path / "semantic-fixture-race"
+    (victim / ".git" / "objects" / "pack").mkdir(parents=True)
+    (victim / ".git" / "objects" / "pack" / "tmp_pack").write_text("x")
+    real_rmtree = shutil.rmtree
+    calls = {"n": 0}
+
+    def flaky(path, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(errno.ENOTEMPTY, "Directory not empty", str(path))
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(semantic_eval.shutil, "rmtree", flaky)
+    semantic_eval._remove_fixture_tree(str(victim))
+    assert calls["n"] == 2
+    assert not victim.exists()
+
+
+def test_fixture_teardown_surfaces_persistent_failure(monkeypatch, tmp_path: Path) -> None:
+    from pr_reviewer import semantic_eval
+
+    victim = tmp_path / "semantic-fixture-stuck"
+    victim.mkdir()
+
+    def always_fail(path, *args, **kwargs):
+        raise OSError(errno.ENOTEMPTY, "Directory not empty", str(path))
+
+    monkeypatch.setattr(semantic_eval.shutil, "rmtree", always_fail)
+    monkeypatch.setattr(semantic_eval, "_FIXTURE_RMTREE_DELAY_SECONDS", 0)
+    with pytest.raises(OSError, match="Directory not empty"):
+        semantic_eval._remove_fixture_tree(str(victim))
+
+
+def test_fixture_teardown_does_not_retry_other_errors(monkeypatch, tmp_path: Path) -> None:
+    from pr_reviewer import semantic_eval
+
+    victim = tmp_path / "semantic-fixture-permission"
+    victim.mkdir()
+    calls = {"n": 0}
+
+    def permission_denied(path, *args, **kwargs):
+        calls["n"] += 1
+        raise PermissionError(errno.EACCES, "Permission denied", str(path))
+
+    monkeypatch.setattr(semantic_eval.shutil, "rmtree", permission_denied)
+    with pytest.raises(PermissionError):
+        semantic_eval._remove_fixture_tree(str(victim))
+    assert calls["n"] == 1
 
 
 def test_live_mode_filtering_uses_standard_and_deep_labels() -> None:

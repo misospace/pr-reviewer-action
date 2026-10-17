@@ -1,8 +1,0 @@
-{
-  "fixture": "context-dials-trailing-newline",
-  "description": "A dial with a trailing newline still reads true (the tr capture strips it).",
-  "env": {
-    "RELATED_CODE_CONTEXT": "true\n",
-    "PR_THREAD_CONTEXT": "True\n\n"
-  }
-}

@@ -1,9 +1,8 @@
-/** Unit tests for the diff-priority port (src/corpus/diff-priority.ts). The
- * cross-implementation contract is pinned byte-for-byte by the parity
- * harness (tests/fixtures/parity/diff-priority/); these pin the invariants
- * that must hold for ANY input: budget never exceeded, source chunks survive
- * ahead of bulk/generated ones, clips land on line boundaries, sub-minimum
- * chunks are omitted rather than stubbed, and the manifest is bounded. */
+/** Unit tests for the diff-priority port (src/corpus/diff-priority.ts). These
+ * pin the invariants that must hold for any input: budget never exceeded,
+ * source chunks survive ahead of bulk/generated ones, clips land on line
+ * boundaries, sub-minimum chunks are omitted rather than stubbed, and the
+ * manifest is bounded. */
 
 import test from "node:test";
 import assert from "node:assert/strict";

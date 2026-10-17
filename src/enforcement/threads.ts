@@ -21,8 +21,16 @@
  * escalates: Minor/Info-only re-emissions must leave an approve standing.
  */
 import type { ArtifactFinding, ReviewArtifact } from "./artifact.js";
+import { isAlwaysNonBlockingCategory, isBlockingSeverity } from "./verdict-policy.js";
 
-export const THREAD_DISPOSITIONS: readonly string[] = ["fixed", "open", "disputed"];
+export const THREAD_DISPOSITIONS: readonly string[] = ["fixed", "open", "disputed", "withdrawn"];
+
+/** #977: the thread kinds a `withdrawn` disposition may close. A reply on a
+ * real code defect cannot withdraw it — only a verification request or an
+ * open question, whose subject the reviewer cannot check in the code. A
+ * `verification` finding is non-blocking by construction and always
+ * withdrawable; a `question` is withdrawable only when it was not blocking. */
+const WITHDRAWABLE_CATEGORIES: ReadonlySet<string> = new Set(["verification", "question"]);
 
 /** The finding severities re-emission may carry; anything else is
  * undeterminable and defaults to minor (#812). */
@@ -60,6 +68,7 @@ export interface EnforcementThread {
   message: string;
   own_finding: boolean;
   replies: number;
+  category?: string | null;
 }
 
 export interface ThreadEnforcementResult {
@@ -112,6 +121,20 @@ export function applyReviewThreadEnforcement(
     } else if (disposition === "fixed" && !evidenceCitesCode(evidence, thread.path)) {
       disposition = "open";
       note = "fixed without evidence citing current code";
+    } else if (disposition === "withdrawn") {
+      if (!WITHDRAWABLE_CATEGORIES.has(thread.category ?? "")) {
+        disposition = "open";
+        note = "withdrawn without a verification/question finding";
+      } else if (!isAlwaysNonBlockingCategory(thread.category) && isBlockingSeverity(thread.severity)) {
+        // #977: a question the model could have blocked on may be a real
+        // defect in disguise — only `fixed`, which demands code evidence,
+        // may close it.
+        disposition = "open";
+        note = "withdrawn on a blocking finding";
+      } else if (evidence === null || evidence.trim() === "") {
+        disposition = "open";
+        note = "withdrawn without evidence from a reply";
+      }
     }
     const record: Record<string, unknown> = { thread_id: threadId, disposition, evidence };
     if (note) {
@@ -119,10 +142,13 @@ export function applyReviewThreadEnforcement(
       downgraded += 1;
     }
     settled.push(record);
-    if (disposition !== "fixed" && !knownThreadIds.has(threadId)) {
+    if (disposition !== "fixed" && disposition !== "withdrawn" && !knownThreadIds.has(threadId)) {
       const finding: ArtifactFinding = {
         severity: reemittedSeverity(thread.severity),
-        category: "other",
+        // #977: carry the non-blocking marker forward so a verification ask
+        // cannot return as a blocking `other` finding on the next run. Every
+        // other kind stays `other` — re-emission never changes what can block.
+        category: thread.category && isAlwaysNonBlockingCategory(thread.category) ? thread.category : "other",
         file: thread.path,
         line: thread.line,
         message: `${thread.message || "Unresolved review thread"} (review thread ${threadId}: ${disposition})`,
@@ -138,7 +164,8 @@ export function applyReviewThreadEnforcement(
   }
   artifact.thread_dispositions = settled;
   artifact.findings = findings;
-  const changed = downgraded > 0 || reemitted.length > 0;
+  const settledWithdrawn = settled.filter((record) => record.disposition === "withdrawn").length;
+  const changed = downgraded > 0 || reemitted.length > 0 || settledWithdrawn > 0;
   if (changed) {
     const lines = ["", "", "## Unresolved Review Threads", ""];
     for (const record of settled) {
@@ -146,7 +173,7 @@ export function applyReviewThreadEnforcement(
       lines.push(`- \`${record.thread_id}\`: ${record.disposition}${suffix}`);
     }
     artifact.review_markdown = (artifact.review_markdown || "") + lines.join("\n");
-    const blockers = reemitted.filter((f) => f.severity === "blocker");
+    const blockers = reemitted.filter((f) => f.severity === "blocker" && !isAlwaysNonBlockingCategory(f.category));
     if (
       verdictPolicy === "findings_severity_gated"
       && blockers.length > 0
@@ -166,6 +193,6 @@ export function applyReviewThreadEnforcement(
   }
   return {
     applied: true,
-    reason: `review threads: ${downgraded} disposition(s) downgraded, ${reemitted.length} finding(s) re-emitted`,
+    reason: `review threads: ${downgraded} disposition(s) downgraded, ${reemitted.length} finding(s) re-emitted${settledWithdrawn > 0 ? `, ${settledWithdrawn} withdrawn` : ""}`,
   };
 }

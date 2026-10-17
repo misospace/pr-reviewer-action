@@ -1,12 +1,13 @@
 import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { isSecretValue, type RuntimeConfig } from "../config/types.js";
 import type { EnvLike } from "../tools/budget.js";
+import { isRepositorySkillPath } from "../context/repository-skills.js";
 
 /**
  * The resolved review environment (#809). The v3 public contract is
  * kebab-case (`INPUT_*` from action metadata), but every ported stage reads
  * the SCREAMING_SNAKE environment the v2 composite steps assembled — that
- * surface is the pinned parity boundary (`config-default-resolution`). This
+ * surface is pinned by `tests-v3/config.test.ts`. This
  * projection is the typed bridge: contract inputs by mechanical name map,
  * plus the ambient runner context and the derived budget bindings v2
  * exported from config.sh. Downstream stage mutations (REVIEW_ROUTE,
@@ -31,6 +32,13 @@ export interface RunContext {
   stepSummaryPath: string;
   /** PR_REVIEWER_BASE_REF: the trusted base for repository config. */
   baseRef: string;
+  repositorySkillsEnabled?: string;
+  repositorySkillPath?: string;
+  repositorySkillsRef?: string;
+  repositorySkillsPaths?: string;
+  repositorySkillsCatalog?: string;
+  repositorySkillsFingerprint?: string;
+  repositorySkillAddendum?: string;
 }
 
 /** Every contract input, projected to the SCREAMING_SNAKE env keys the ported
@@ -60,6 +68,13 @@ export function stageEnvFromContext(context: RunContext): Record<string, string>
     GITHUB_OUTPUT: context.outputFilePath,
     ...(context.stepSummaryPath ? { GITHUB_STEP_SUMMARY: context.stepSummaryPath } : {}),
     PR_REVIEWER_BASE_REF: context.baseRef,
+    ...(context.repositorySkillsEnabled !== undefined ? { REPOSITORY_SKILLS: context.repositorySkillsEnabled } : {}),
+    ...(context.repositorySkillPath !== undefined ? { REPOSITORY_SKILL_PATH: context.repositorySkillPath } : {}),
+    ...(context.repositorySkillsRef !== undefined ? { REPOSITORY_SKILLS_REF: context.repositorySkillsRef } : {}),
+    ...(context.repositorySkillsPaths !== undefined ? { REPOSITORY_SKILLS_PATHS: context.repositorySkillsPaths } : {}),
+    ...(context.repositorySkillsCatalog !== undefined ? { REPOSITORY_SKILLS_CATALOG: context.repositorySkillsCatalog } : {}),
+    ...(context.repositorySkillsFingerprint !== undefined ? { REPOSITORY_SKILLS_FINGERPRINT: context.repositorySkillsFingerprint } : {}),
+    ...(context.repositorySkillAddendum !== undefined ? { REPOSITORY_SKILL_ADDENDUM: context.repositorySkillAddendum } : {}),
   };
 }
 
@@ -77,6 +92,13 @@ const AMBIENT_KEYS = [
   // Tangled identity signal (#583): DID-first auto resolution in
   // src/platform/resolve.ts reads it from the projected stage env.
   "TANGLED_REPO_DID",
+  // #928: env-only knobs the stages read that are not contract inputs. The
+  // eval harness relies on HUMAN_REVIEWS_CONTEXT=false to keep replays blind.
+  "HUMAN_REVIEWS_CONTEXT", "DEEP_REVIEW_EXECUTION", "AI_FALLBACK_RETRIES", "AI_SMART_RETRIES",
+  // #914: the head sha pinned by the dogfood workflow's pre-checkout pr-gate;
+  // the comment-command path compares it with the fetched head so a push that
+  // races the gate skips (superseded-head) instead of reviewing a mismatch.
+  "PR_REVIEWER_GATE_HEAD_SHA",
 ] as const;
 
 export function buildStageEnv(
@@ -109,7 +131,16 @@ export function buildStageEnv(
   return env;
 }
 
-export type StageEnv = EnvLike & Record<string, string>;
+export interface StageEnv extends EnvLike {
+  REPOSITORY_SKILLS?: string;
+  REPOSITORY_SKILL_PATH?: string;
+  REPOSITORY_SKILLS_REF?: string;
+  REPOSITORY_SKILLS_PATHS?: string;
+  REPOSITORY_SKILLS_CATALOG?: string;
+  REPOSITORY_SKILLS_FINGERPRINT?: string;
+  REPOSITORY_SKILL_ADDENDUM?: string;
+  [key: string]: string | undefined;
+}
 
 /** v2 config.sh: required bindings beyond the contract's required inputs. */
 export function validateStageEnv(env: StageEnv): string | null {
@@ -118,5 +149,18 @@ export function validateStageEnv(env: StageEnv): string | null {
   if (!env.AI_BASE_URL) return "Missing required environment variables: AI_BASE_URL";
   if (!env.AI_MODEL) return "Missing required environment variables: AI_MODEL";
   if (!env.GH_TOKEN) return "Missing GitHub token in GH_TOKEN or GITHUB_TOKEN";
+  if (env.REPOSITORY_SKILLS_PATHS !== undefined) {
+    try {
+      const paths: unknown = JSON.parse(env.REPOSITORY_SKILLS_PATHS);
+      if (!Array.isArray(paths) || paths.length > 24 || paths.some(path => typeof path !== "string" || !isRepositorySkillPath(path))) {
+        return "Invalid REPOSITORY_SKILLS_PATHS stage binding";
+      }
+    } catch {
+      return "Invalid REPOSITORY_SKILLS_PATHS stage binding";
+    }
+  }
+  if (env.REPOSITORY_SKILL_PATH && !isRepositorySkillPath(env.REPOSITORY_SKILL_PATH)) {
+    return "Invalid REPOSITORY_SKILL_PATH stage binding";
+  }
   return null;
 }

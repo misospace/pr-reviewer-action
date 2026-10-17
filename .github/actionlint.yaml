@@ -6,6 +6,6 @@ paths:
   .github/workflows/ai-pr-review.yaml:
     ignore:
       - 'file "dist/index\.js" does not exist in "[^"]*"\. it is specified at "main" key in "runs" section'
-  .github/workflows/fork-ai-review.yaml:
+  .github/workflows/ai-pr-review-fork.yaml:
     ignore:
       - 'file "dist/index\.js" does not exist in "[^"]*"\. it is specified at "main" key in "runs" section'

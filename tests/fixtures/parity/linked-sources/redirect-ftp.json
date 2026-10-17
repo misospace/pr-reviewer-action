@@ -1,6 +1,6 @@
 {
   "fixture": "redirect-ftp",
-  "description": "A redirect to ftp:// on an allowlisted host: urllib attempts the FTP hop (logged, refused by the fixture); v3 rejects non-http(s) hop schemes before connecting. The rendered markdown is identical; only the request log differs (approved divergence).",
+  "description": "A redirect to ftp:// on an allowlisted host: urllib attempts the FTP hop (logged, refused by the fixture); v3 rejects non-http(s) hop schemes before connecting. The rendered markdown is identical; only the request log differs (deliberate divergence).",
   "input": {
     "urls": [
       "https://artifacthub.io/ftp"

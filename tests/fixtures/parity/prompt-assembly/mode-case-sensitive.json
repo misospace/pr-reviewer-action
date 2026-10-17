@@ -1,8 +1,0 @@
-{
-  "fixture": "mode-case-sensitive",
-  "description": "SYSTEM_PROMPT_MODE=APPEND is not append (exact match), so the inline prompt replaces the default.",
-  "env": {
-    "SYSTEM_PROMPT_MODE": "APPEND",
-    "SYSTEM_PROMPT": "Replacement prompt."
-  }
-}

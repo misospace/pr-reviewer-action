@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { ParsedReviewVerdict } from "../src/model/types.js";
 import { reviewArtifactFromParsed, type ReviewArtifact } from "../src/enforcement/artifact.js";
-import { applyVerdictPolicy, applyStrictVerdictPolicy, parseNonBlockingCategories, securityRiskFlagged } from "../src/enforcement/verdict-policy.js";
+import { applyVerdictPolicy, applyStrictVerdictPolicy, capCiOnlyFindings, parseNonBlockingCategories, relaxCiOnlyVerdict, securityRiskFlagged } from "../src/enforcement/verdict-policy.js";
+import { capCiEvidenceFindings, parseCiCheckNames } from "../src/enforcement/ci-evidence.js";
 import { enforcementView, prepareThreads, renderReviewThreads } from "../src/context/review-threads.js";
 import { applyRequiredCheckValidation, CHECK_CONCEPTS, validateReview } from "../src/enforcement/completeness.js";
 import { applyReviewThreadEnforcement, evidenceCitesCode } from "../src/enforcement/threads.js";
@@ -29,7 +30,10 @@ function parsed(overrides: Partial<ParsedReviewVerdict> = {}): ParsedReviewVerdi
     requiredCheckDispositions: null, requiredCheckDispositionsEmitted: false,
     threadDispositions: null, threadDispositionsEmitted: false,
     humanReviewDispositions: null, humanReviewDispositionsEmitted: false,
-    smartReviewRequested: false, smartReviewReason: null, extra: {}, ...overrides,
+    smartReviewRequested: false, smartReviewReason: null,
+    reviewTriageDecision: "unknown", reviewTriageReason: "",
+    reviewTriageTargets: [],
+    extra: {}, ...overrides,
   };
 }
 const policyOptions = { nonBlockingCategories: new Set(["tests", "docs"]), securityFlagged: false };
@@ -41,7 +45,7 @@ test("artifact maps verdict, tri-state dispositions, findings, and extra fields"
     requiredCheckDispositionsEmitted: true, requiredCheckDispositions: null,
     threadDispositionsEmitted: true, threadDispositions: [{ threadId: "t1", disposition: "open", evidence: null }],
     humanReviewDispositionsEmitted: false,
-    extra: { custom: 7, verdict: "override" },
+    extra: { custom: 7, verdict: "override", requirement_trace_incomplete: true },
   }));
   assert.equal(result.verdict, "request_changes");
   assert.deepEqual(result.findings[0], { severity: "major", category: "bug", file: "a.ts", line: 8, message: "bad", preliminary_finding: 3 });
@@ -49,6 +53,26 @@ test("artifact maps verdict, tri-state dispositions, findings, and extra fields"
   assert.deepEqual(result.thread_dispositions, [{ thread_id: "t1", disposition: "open", evidence: null }]);
   assert.equal("human_review_dispositions" in result, false);
   assert.equal(result.custom, 7);
+  assert.equal(result.requirement_trace_incomplete, undefined, "model extras cannot forge deterministic trace state");
+  // #1003: the triage answer is persisted verbatim (fail-closed value and all)
+  // so the outputs/publish/step-summary layers share one normalized answer.
+  assert.equal(result.review_triage_decision, "unknown");
+  assert.equal(result.review_triage_reason, "");
+});
+
+test("#1003: the artifact carries the normalized triage decision and reason in snake_case", () => {
+  const result = reviewArtifactFromParsed(parsed({
+    reviewTriageDecision: "required",
+    reviewTriageReason: "touches the payments gateway contract",
+  }));
+  assert.equal(result.review_triage_decision, "required");
+  assert.equal(result.review_triage_reason, "touches the payments gateway contract");
+  // A model-supplied extra with the same name can never overwrite it.
+  const forged = reviewArtifactFromParsed(parsed({
+    reviewTriageDecision: "not_required",
+    extra: { review_triage_decision: "required" },
+  }));
+  assert.equal(forged.review_triage_decision, "not_required");
 });
 
 test("#762: a finding with endLine/suggestion/agentPrompt maps to snake_case artifact fields", () => {
@@ -82,12 +106,220 @@ test("model policy is a no-op and records model source", () => {
   assert.equal(a.verdict_source, "model");
 });
 
+test("CI evidence parser handles escaped cells and requires a conclusion-only restatement", () => {
+  const names = parseCiCheckNames("_context only_\n\n| Check | State |\n| --- | --- |\n| build \\| deploy | cancelled |\n| lint &amp; typecheck | failure |\n");
+  assert.deepEqual([...names], ["build | deploy", "lint & typecheck"]);
+  const findings: import("../src/enforcement/artifact.js").ArtifactFinding[] = [
+    { severity: "blocker", category: "bug", file: null, line: null, message: "build | deploy was cancelled" },
+    { severity: "major", category: "bug", file: "src/a.ts", line: 4, message: "lint & typecheck failed" },
+  ];
+  assert.equal(capCiOnlyFindings(findings, names), true);
+  assert.deepEqual([findings[0]!.severity, findings[0]!.capped_from, findings[0]!.ci_capped], ["info", "blocker", true]);
+  assert.deepEqual([findings[1]!.severity, findings[1]!.ci_capped], ["major", undefined]);
+  const fromTable: import("../src/enforcement/artifact.js").ArtifactFinding[] = [
+    { severity: "blocker", category: "bug", file: null, line: null, message: "lint & typecheck failed" },
+  ];
+  assert.equal(capCiEvidenceFindings(fromTable, "| Check | State |\n| --- | --- |\n| lint &amp; typecheck | failure |\n"), true);
+  assert.equal(fromTable[0]!.severity, "info");
+
+  const hostileName = "build.*|evil`";
+  const hostileTable = "| Check | State |\n| --- | --- |\n| build.*\\|evil\\` | failure |\n";
+  const hostileNames = parseCiCheckNames(hostileTable);
+  assert.deepEqual([...hostileNames], [hostileName], "escaped pipe and backtick stay inside one check name");
+  const notForged: import("../src/enforcement/artifact.js").ArtifactFinding[] = [
+    { severity: "major", category: "bug", file: null, line: null, message: "evil failed" },
+  ];
+  assert.equal(capCiOnlyFindings(notForged, hostileNames), false, "regex metacharacters cannot forge an alternative check-name match");
+  assert.equal(notForged[0]!.severity, "major");
+
+  const escapedName: import("../src/enforcement/artifact.js").ArtifactFinding[] = [
+    { severity: "major", category: "bug", file: null, line: null, message: "build.*|evil` failed" },
+  ];
+  assert.equal(capCiOnlyFindings(escapedName, hostileNames), true, "escaped Markdown and regex syntax remain safe in the status grammar");
+  assert.equal(escapedName[0]!.severity, "info");
+
+  const vocabularyName: import("../src/enforcement/artifact.js").ArtifactFinding[] = [
+    { severity: "major", category: "bug", file: null, line: null, message: "failed build failed" },
+  ];
+  assert.equal(capCiOnlyFindings(vocabularyName, new Set(["failed build"])), true,
+    "a multiword check name is a verified name slot in the grammar");
+  assert.equal(vocabularyName[0]!.severity, "info");
+});
+
+test("CI-only cap accepts only anchored status-restatement syntax", () => {
+  const names = new Set(["build", "test", "validate-toml"]);
+  const accepted = [
+    "build failed",
+    "build has a terminal failure",
+    "build is red",
+    "build timed out",
+    "build was cancelled",
+    "validate-toml has a terminal failure",
+    "The build failed.",
+    "build and test failed",
+    "build, test failed",
+    "build,test failed",
+    "build or test failed",
+    "build failed again",
+    "build again failed",
+    "build still failed",
+  ];
+  for (const message of accepted) {
+    const item: import("../src/enforcement/artifact.js").ArtifactFinding =
+      { severity: "major", category: "bug", file: null, line: null, message };
+    assert.equal(capCiOnlyFindings([item], names), true, message);
+    assert.equal(item.severity, "info", message);
+    assert.equal(item.ci_capped, true, message);
+  }
+
+  const rejected = [
+    "build failed because this workflow should not run",
+    "build failed because workflow runs when it should not",
+    "test failed because authorization regressions are not covered",
+    "build should not run",
+    "build failed and this workflow should not run",
+    "build failed or something worse",
+    "The build failed because release artifacts can be published unsigned",
+  ];
+  for (const message of rejected) {
+    const item: import("../src/enforcement/artifact.js").ArtifactFinding =
+      { severity: "major", category: "bug", file: null, line: null, message };
+    assert.equal(capCiOnlyFindings([item], names), false, message);
+    assert.equal(item.severity, "major", message);
+    assert.equal(item.ci_capped, undefined, message);
+  }
+
+  const repro: import("../src/enforcement/artifact.js").ArtifactFinding =
+    { severity: "blocker", category: "bug", file: null, line: null,
+      message: "build failed because this workflow should not run" };
+  assert.equal(capCiOnlyFindings([repro], names), false);
+  assert.equal(repro.severity, "blocker", "the maintainer's repro must remain blocking");
+  const review = artifact({ verdict: "request_changes", findings: [repro] });
+  assert.equal(relaxCiOnlyVerdict(review, { forced: false }), false);
+  assert.equal(review.verdict, "request_changes", "the maintainer's repro must not trigger solo-finding approval");
+
+  const authorization: import("../src/enforcement/artifact.js").ArtifactFinding =
+    { severity: "blocker", category: "bug", file: null, line: null,
+      message: "test failed because authorization regressions are not covered" };
+  assert.equal(authorization.severity, "blocker");
+  assert.equal(authorization.ci_capped, undefined);
+});
+
+test("generic check names and code-anchored findings stay blocking", () => {
+  const table = "| Check | State |\n| --- | --- |\n| build | failure |\n| test | failure |\n";
+  const findings: import("../src/enforcement/artifact.js").ArtifactFinding[] = [
+    { severity: "major", category: "bug", file: null, line: null, message: "the build script mishandles env vars repo-wide" },
+    { severity: "major", category: "bug", file: null, line: null, message: "test coverage is low in src/foo.ts" },
+  ];
+  assert.equal(capCiEvidenceFindings(findings, table), false);
+  for (const item of findings) {
+    const review = artifact({ verdict: "request_changes", findings: [item] });
+    assert.equal(relaxCiOnlyVerdict(review, { forced: false }), false);
+    assert.equal(review.verdict, "request_changes");
+    assert.ok(item.severity === "blocker" || item.severity === "major");
+  }
+});
+
+test("CI-only request_changes relaxes only after a proven cap and without forced/unresolved checks", () => {
+  const findings = [
+    { severity: "major" as const, category: "bug", file: null, line: null, message: "build is failing" },
+    { severity: "blocker" as const, category: "bug", file: null, line: null, message: "test has a terminal failure" },
+  ];
+  assert.equal(capCiOnlyFindings(findings, new Set(["build", "test"])), true);
+  assert.deepEqual(findings.map((item) => item.severity), ["info", "info"]);
+  const eligible = artifact({ verdict: "request_changes", findings: structuredClone(findings) });
+  assert.equal(relaxCiOnlyVerdict(eligible, { forced: false }), true);
+  assert.equal(eligible.verdict, "approve");
+
+  const mixedFindings: import("../src/enforcement/artifact.js").ArtifactFinding[] = [
+    ...structuredClone(findings),
+    {
+      severity: "major",
+      category: "bug",
+      file: null,
+      line: null,
+      message: "build failed because this workflow should not run",
+    },
+  ];
+  assert.equal(capCiOnlyFindings(mixedFindings, new Set(["build"])), false,
+    "already-capped findings are unchanged and the non-status finding remains uncapped");
+  assert.equal(mixedFindings[2]!.severity, "major");
+  const mixed = artifact({ verdict: "request_changes", findings: mixedFindings });
+  assert.equal(relaxCiOnlyVerdict(mixed, { forced: false }), false);
+  assert.equal(mixed.verdict, "request_changes", "one non-capped finding keeps the solo relaxation closed");
+
+  for (const blocked of [
+    artifact({ verdict: "request_changes", findings: structuredClone(findings), required_check_dispositions: [{ status: "unresolved" }] }),
+    artifact({ verdict: "request_changes", findings: structuredClone(findings), required_checks: "incomplete" }),
+  ]) assert.equal(relaxCiOnlyVerdict(blocked, { forced: false }), false);
+  assert.equal(relaxCiOnlyVerdict(artifact({ verdict: "request_changes", findings: structuredClone(findings) }), { forced: true }), false);
+});
+
 test("findings policy escalates blocker with contractual note", () => {
   const a = artifact({ findings: [finding("blocker")] });
   applyVerdictPolicy(a, "findings_severity_gated", policyOptions);
   assert.equal(a.verdict, "request_changes");
   assert.equal(a.verdict_source, "findings");
   assert.ok(a.review_markdown.includes("_Verdict escalated from structured findings (verdict_policy=findings_severity_gated): 1 blocker finding(s) out of 1; model verdict was 'approve'._"));
+});
+
+test("#1016 findings policy keeps an unverified blocker demotion blocking", () => {
+  // The deterministic boundary demotes an originally-blocker finding to minor
+  // when it could not confirm the source claim, which hides it from the
+  // severity gate: with zero live blockers a model `approve` would survive as
+  // a published approve even though the exact-head source was never read.
+  // Unknown evidence is not refutation, so the gated policy must fail closed
+  // the same way the strict mapping does.
+  const demoted = (overrides: Record<string, unknown> = {}) => ({
+    severity: "minor", category: "bug", file: "src/a.ts", line: 4, message: "finding",
+    capped_from: "blocker", grounding_status: "unverified", ...overrides,
+  });
+
+  const a = artifact({ findings: [demoted()] });
+  applyVerdictPolicy(a, "findings_severity_gated", policyOptions);
+  assert.equal(a.verdict, "request_changes");
+  assert.equal(a.verdict_source, "findings");
+  assert.ok(
+    a.review_markdown.includes("1 blocker finding(s) whose source claim could not be verified against exact-head source (unknown evidence, not refuted; #1016)"),
+    `expected the unknown-evidence attribution in the note, got: ${a.review_markdown}`,
+  );
+  assert.ok(a.review_markdown.includes("model verdict was 'approve'._"));
+
+  // A positively REFUTED demotion is proof the claim is wrong: the model
+  // approve stands and the note never implies an unverifiable blocker.
+  const refuted = artifact({ findings: [demoted({ grounding_status: "refuted" })] });
+  applyVerdictPolicy(refuted, "findings_severity_gated", policyOptions);
+  assert.equal(refuted.verdict, "approve");
+  assert.equal(refuted.verdict_source, "model");
+  assert.ok(!refuted.review_markdown.includes("escalated from structured findings"));
+
+  // The gate is blocker-level only: a demoted major never escalated under
+  // this policy before #1016 and must not start now.
+  const major = artifact({ findings: [demoted({ capped_from: "major" })] });
+  applyVerdictPolicy(major, "findings_severity_gated", policyOptions);
+  assert.equal(major.verdict, "approve");
+  assert.equal(major.verdict_source, "model");
+
+  // #977 verification asks can never request changes, capped or not.
+  const verification = artifact({ findings: [demoted({ category: "verification" })] });
+  applyVerdictPolicy(verification, "findings_severity_gated", policyOptions);
+  assert.equal(verification.verdict, "approve");
+  assert.equal(verification.verdict_source, "model");
+});
+
+test("#1016 findings policy attributes a live blocker and an unverified demotion as one note", () => {
+  // Both signals fire: the composed note names each contribution and keeps the
+  // live blocker count intact, mirroring `strictRequestChangesDetail`.
+  const a = artifact({ findings: [finding("blocker"), {
+    severity: "minor", category: "bug", file: "src/b.ts", line: 4, message: "finding",
+    capped_from: "blocker", grounding_status: "unverified",
+  }] });
+  applyVerdictPolicy(a, "findings_severity_gated", policyOptions);
+  assert.equal(a.verdict, "request_changes");
+  assert.ok(
+    a.review_markdown.includes("_Verdict escalated from structured findings (verdict_policy=findings_severity_gated): 1 blocker finding(s) out of 2; 1 blocker finding(s) whose source claim could not be verified against exact-head source (unknown evidence, not refuted; #1016); model verdict was 'approve'._"),
+    `expected one composed attribution note, got: ${a.review_markdown}`,
+  );
 });
 
 test("#775 caps opted-in blocker/major findings and relaxes only without remaining gates", () => {
@@ -336,6 +568,8 @@ test("coverage evidence vocabulary and caps; payload extraction supports objects
 test("metadata marker preserves exact key order and omits empty/legacy values", () => {
   assert.equal(buildRunMetadataMarker({ headSha: "h", baseSha: "b", reviewResult: "clean", requiredChecks: "complete", reviewRoute: "native", escalationReason: "a,b", cacheHitRatio: "0.5" }),
     '<!-- ai-pr-reviewer:{"version":1,"head_sha":"h","base_sha":"b","review_result":"clean","required_checks":"complete","review_route":"native","escalation_reason":["a","b"],"cache_hit_ratio":0.5} -->');
+  assert.equal(buildRunMetadataMarker({ headSha: "h", baseSha: "b", reviewResult: "partial", incompleteReason: "requirement_trace" }),
+    '<!-- ai-pr-reviewer:{"version":1,"head_sha":"h","base_sha":"b","review_result":"partial","incomplete_reason":"requirement_trace"} -->');
   assert.equal(buildRunMetadataMarker({ headSha: "", baseSha: "", reviewResult: "issues", requiredChecks: "none", reviewRoute: "legacy", escalationReason: "", cacheHitRatio: "-" }),
     '<!-- ai-pr-reviewer:{"version":1,"head_sha":"unknown","base_sha":"","review_result":"issues"} -->');
   assert.throws(() => buildRunMetadataMarker({ headSha: "h", baseSha: "b", reviewResult: "clean", cacheHitRatio: "nope" }), /cache_hit_ratio is not a number/);

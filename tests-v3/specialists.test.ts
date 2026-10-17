@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { parse } from "yaml";
 import {
   normalizeSpecialistOutput,
   parseSpecialistResponse,
@@ -10,11 +12,17 @@ import {
   overrunRetryPayload,
   buildSpecialistCorpus,
   runSpecialists,
+  completionOverran,
+  responseStopReason,
+  DEFAULT_SPECIALIST_MAX_TOKENS,
+  OVERRUN_RETRY_CEILING,
   type SpecialistCorpusWorkspace,
   type SpecialistRunInput,
   type SpecialistTransportOutcome,
 } from "../src/specialists/index.js";
 import { fitToBytes } from "../src/specialists/render.js";
+import { reassembleSse } from "../src/transport/sse.js";
+import { specialistRequestFn } from "../src/gates/specialist-transport.js";
 
 // ---------------------------------------------------------------------------
 // normalize.ts
@@ -359,6 +367,40 @@ function baseInput(overrides: Partial<SpecialistRunInput> = {}): SpecialistRunIn
   };
 }
 
+test("runSpecialists: role model overrides reach payloads and opt-in telemetry only", async () => {
+  const calls: { role: string; model: string }[] = [];
+  const input = baseInput({
+    roleModels: {
+      correctness: { model: "correctness-model", source: "role-override" },
+      security: { model: "specialist-model", source: "specialist-profile" },
+      tests: { model: "primary-model", source: "primary" },
+    },
+    requestFn: async (payload) => {
+      const system = (payload.messages as { content: string }[])[0]!.content;
+      const role = system === "be correct" ? "correctness" : system === "be secure" ? "security" : "tests";
+      calls.push({ role, model: String(payload.model) });
+      return { ok: true, raw: { choices: [{ message: { content: JSON.stringify({ leads: [] }) }, finish_reason: "stop" }] } };
+    },
+  });
+  const result = await runSpecialists(input);
+  assert.deepEqual(calls.sort((a, b) => a.role.localeCompare(b.role)), [
+    { role: "correctness", model: "correctness-model" },
+    { role: "security", model: "specialist-model" },
+    { role: "tests", model: "primary-model" },
+  ]);
+  assert.equal(result.aggregate.specialist_overrides, true);
+  const roles = result.aggregate.roles as Array<{ role: string; model?: string; model_source?: string }>;
+  assert.deepEqual(roles.map(({ role, model, model_source }) => ({ role, model, model_source })), [
+    { role: "correctness", model: "correctness-model", model_source: "role-override" },
+    { role: "security", model: "specialist-model", model_source: "specialist-profile" },
+    { role: "tests", model: "primary-model", model_source: "primary" },
+  ]);
+
+  const legacy = await runSpecialists(baseInput());
+  assert.equal("specialist_overrides" in legacy.aggregate, false);
+  assert.ok((legacy.aggregate.roles as Array<Record<string, unknown>>).every((entry) => !("model" in entry) && !("model_source" in entry)));
+});
+
 test("runSpecialists: three_call happy path produces per-role artifacts and an ok aggregate", async () => {
   const result = await runSpecialists(baseInput());
   assert.equal(result.aggregate.execution, "three_call");
@@ -557,4 +599,628 @@ test("renderSpecialistMarkdown: hostile backtick runs and headings stay inside t
   const inner = lines.slice(lines.indexOf(opener) + 1, lines.lastIndexOf(fence));
   assert.ok(!inner.some((line) => line.startsWith(fence)));
   assert.equal(lines.filter((line) => line.startsWith("## ")).length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// #1061: streamed Anthropic completion-limit detection + overrun recovery
+// ---------------------------------------------------------------------------
+
+test("#1061: the shipped specialist default completion cap is 16384", () => {
+  assert.equal(DEFAULT_SPECIALIST_MAX_TOKENS, 16384);
+});
+
+// #1061: one completion cap across every surface. The runtime default, the
+// canonical contract, the generated action.yml, and the generated docs must
+// agree — drift here is a shipped mismatch, not a cosmetic diff.
+test("#1061: the specialist completion cap agrees across runtime, contract, and generated artifacts", () => {
+  const contract = parse(readFileSync("contracts/action-v3.yml", "utf8")) as {
+    inputs: { id: string; default?: unknown }[];
+  };
+  const declared = contract.inputs.find((input) => input.id === "deep-review-max-tokens");
+  assert.ok(declared, "deep-review-max-tokens must be declared in the contract");
+  assert.equal(declared.default, "16384");
+  assert.equal(Number(declared.default), DEFAULT_SPECIALIST_MAX_TOKENS, "runtime default must match the contract default");
+
+  const action = parse(readFileSync("action.yml", "utf8")) as { inputs: Record<string, { default?: string }> };
+  assert.equal(action.inputs["deep-review-max-tokens"]?.default, String(DEFAULT_SPECIALIST_MAX_TOKENS), "generated action.yml must match the runtime default");
+
+  assert.match(readFileSync("docs/inputs.md", "utf8"), /\| `deep-review-max-tokens` \| `16384` \|/, "generated docs must show the shipped default");
+
+  // The bounded retry ceiling stays above the default and unchanged.
+  assert.equal(OVERRUN_RETRY_CEILING, 32768);
+  assert.ok(OVERRUN_RETRY_CEILING > DEFAULT_SPECIALIST_MAX_TOKENS);
+});
+
+test("#1061: completionOverran recognizes Anthropic max_tokens in every shape", () => {
+  // The v2 completion shape a streamed Anthropic turn becomes (via toV2Completion).
+  assert.equal(completionOverran({ choices: [{ message: { content: "" }, finish_reason: "max_tokens" }] }), true);
+  // The flattened NormalizedModelResponse shape.
+  assert.equal(completionOverran({ finishReason: "max_tokens" }), true);
+  // A raw Anthropic body.
+  assert.equal(completionOverran({ stop_reason: "max_tokens" }), true);
+  // OpenAI's own limit reason keeps working.
+  assert.equal(completionOverran({ choices: [{ message: { content: "" }, finish_reason: "length" }] }), true);
+  assert.equal(completionOverran({ finishReason: "length" }), true);
+  // Negative controls: normal stops, tool calls, and non-records never fire.
+  assert.equal(completionOverran({ choices: [{ message: { content: "{}" }, finish_reason: "stop" }] }), false);
+  assert.equal(completionOverran({ finishReason: "end_turn" }), false);
+  assert.equal(completionOverran({ finish_reason: "tool_calls" }), false);
+  assert.equal(completionOverran({ stop_reason: "end_turn" }), false);
+  assert.equal(completionOverran(null), false);
+  assert.equal(completionOverran("nope"), false);
+});
+
+test("#1061: responseStopReason reads every shape and never the body", () => {
+  assert.equal(responseStopReason({ choices: [{ message: { content: "x" }, finish_reason: "max_tokens" }] }), "max_tokens");
+  assert.equal(responseStopReason({ finishReason: "length" }), "length");
+  assert.equal(responseStopReason({ stop_reason: "end_turn" }), "end_turn");
+  assert.equal(responseStopReason({ choices: [] }), null);
+  assert.equal(responseStopReason(null), null);
+});
+
+const sseData = (obj: unknown): string => `data: ${JSON.stringify(obj)}`;
+
+/** A realistic (long) key so `maskKnownSecrets` cannot coincidentally eat an
+ * ordinary letter out of an enum like `max_tokens` — the same hazard the
+ * specialists-gate tests note for one-character configured keys. */
+const REALISTIC_KEY = "sk-test-0123456789abcdef";
+
+/** A streamed Anthropic turn with the given text and terminal stop_reason. */
+function anthropicStream(text: string, stopReason: string): string {
+  return [
+    sseData({ type: "message_start", message: { id: "msg_1", model: "claude-x", usage: { input_tokens: 10, output_tokens: 1 } } }),
+    sseData({ type: "content_block_delta", delta: { type: "text_delta", text } }),
+    sseData({ type: "message_delta", delta: { stop_reason: stopReason }, usage: { output_tokens: 4096 } }),
+    sseData({ type: "message_stop" }),
+  ].join("\n");
+}
+
+function roleEntry(result: Awaited<ReturnType<typeof runSpecialists>>, role: string): Record<string, unknown> {
+  return (result.aggregate.roles as Array<Record<string, unknown>>).find((entry) => entry.role === role)!;
+}
+
+test("#1061: a streamed Anthropic max_tokens turn is recognized as an overrun and recovered once at the ceiling", async () => {
+  // The real path: reassembleSse → specialistRequestFn → toV2Completion → runner.
+  const truncated = anthropicStream('{"leads":[{"severity":"major","message":"trunc', "max_tokens");
+  const complete = anthropicStream('{"leads":[{"severity":"major","message":"recovered lead"}]}', "end_turn");
+  const seen: { maxTokens: number; stream: boolean }[] = [];
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://anthropic.test",
+    apiKey: "k",
+    anthropicVersion: "2023-06-01",
+    runChat: async (input) => {
+      const body = input.payload.body as { max_tokens: number; stream: boolean };
+      seen.push({ maxTokens: body.max_tokens, stream: body.stream });
+      const text = seen.length === 1 ? truncated : complete;
+      return { status: "ok", response: reassembleSse(text, "anthropic"), raw: {} };
+    },
+  });
+
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, apiFormat: "anthropic", stream: true, maxTokens: 16384 },
+    rolesToRun: ["correctness"],
+    requestFn,
+  }));
+
+  // The initial call ran at 16384 and streamed; exactly one retry ran, at the 32768 ceiling.
+  assert.deepEqual(seen, [{ maxTokens: 16384, stream: true }, { maxTokens: 32768, stream: true }]);
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.status, "ok");
+  assert.equal(entry.error_kind, null);
+  assert.equal(entry.lead_count, 1);
+  assert.equal(entry.overrun_retry, true);
+  assert.equal(entry.retry_max_tokens, 32768);
+  assert.equal(entry.overrun_detected, true);
+  assert.equal(entry.overrun_retry_result, "recovered");
+  assert.equal(entry.stop_reason, "end_turn", "the diagnostic reports the final, recovered response");
+  assert.equal(result.artifacts.perRole.correctness!.leads[0]!.message, "recovered lead");
+});
+
+test("#1061: an unrecovered overrun is classified 'overrun', with a bounded diagnostic", async () => {
+  const truncated = anthropicStream('{"leads":[', "max_tokens");
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://anthropic.test",
+    apiKey: "k",
+    anthropicVersion: "2023-06-01",
+    runChat: async () => ({ status: "ok", response: reassembleSse(truncated, "anthropic"), raw: {} }),
+  });
+
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, apiFormat: "anthropic", stream: true, maxTokens: 16384, apiKey: REALISTIC_KEY },
+    rolesToRun: ["correctness"],
+    requestFn,
+  }));
+
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.status, "degraded");
+  assert.equal(entry.error_kind, "overrun", "an overrun is never a bare degraded/parser failure");
+  assert.equal(entry.overrun_detected, true);
+  assert.equal(entry.overrun_retry, true);
+  assert.equal(entry.retry_max_tokens, 32768);
+  assert.equal(entry.overrun_retry_result, "failed");
+  assert.equal(entry.stop_reason, "max_tokens");
+  assert.equal(entry.output_chars, 10);
+  // The diagnostic is bounded and never the response body.
+  assert.ok(!JSON.stringify(result.aggregate).includes('{"leads":['));
+});
+
+test("#1061: an overrun already at the retry ceiling is skipped, not retried", async () => {
+  const truncated = anthropicStream('{"leads":[', "max_tokens");
+  let calls = 0;
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://anthropic.test",
+    apiKey: "k",
+    anthropicVersion: "2023-06-01",
+    runChat: async () => { calls += 1; return { status: "ok", response: reassembleSse(truncated, "anthropic"), raw: {} }; },
+  });
+
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, apiFormat: "anthropic", stream: true, maxTokens: 32768 },
+    rolesToRun: ["correctness"],
+    requestFn,
+  }));
+
+  assert.equal(calls, 1, "no retry when the cap is already at the ceiling");
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.overrun_retry, false);
+  assert.equal(entry.overrun_retry_result, "skipped");
+  assert.equal(entry.error_kind, "overrun");
+});
+
+test("#1061: a non-streamed Anthropic max_tokens body is also an overrun (negative-control sibling)", async () => {
+  const raw = { content: [{ type: "text", text: '{"leads":[' }], stop_reason: "max_tokens" };
+  let calls = 0;
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://anthropic.test",
+    apiKey: "k",
+    anthropicVersion: "2023-06-01",
+    runChat: async () => { calls += 1; return { status: "ok", response: reassembleSse("", "anthropic"), raw }; },
+  });
+
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, apiFormat: "anthropic", stream: false, maxTokens: 16384, apiKey: REALISTIC_KEY },
+    rolesToRun: ["correctness"],
+    requestFn,
+  }));
+
+  assert.equal(calls, 2, "the one-shot overrun retry fired for the non-streamed path too");
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.overrun_detected, true);
+  assert.equal(entry.stop_reason, "max_tokens");
+  assert.equal(entry.overrun_retry_result, "failed");
+});
+
+test("#1061: valid JSON with a normal stop is a clean ok and carries no recovery fields", async () => {
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async () => {
+      calls += 1;
+      return { ok: true, raw: { choices: [{ message: { content: '{"leads":[{"severity":"info","message":"a real lead"}]}' }, finish_reason: "stop" }] } };
+    },
+  }));
+
+  assert.equal(calls, 1);
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.status, "ok");
+  assert.equal(entry.error_kind, null, "a clean parse is never classified as a failure");
+  assert.equal(entry.lead_count, 1);
+  assert.equal(entry.errors_count, 0);
+  assert.equal(entry.stop_reason, "stop");
+  assert.equal("overrun_detected" in entry, false);
+  assert.equal("overrun_retry_result" in entry, false);
+});
+
+test("#1061: a malformed response with a normal stop is classified 'parser', and never retried", async () => {
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async () => {
+      calls += 1;
+      return { ok: true, raw: { choices: [{ message: { content: "RAW-BODY-NOT-JSON" }, finish_reason: "stop" }] } };
+    },
+  }));
+
+  // An ordinary parse failure is not a completion-limit overrun: exactly one
+  // attempt, no recovery retry.
+  assert.equal(calls, 1, "an ordinary parse failure must never be retried");
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.status, "degraded");
+  assert.equal(entry.error_kind, "parser", "a malformed/no-lead response with a normal stop is a parser failure");
+  assert.equal(entry.stop_reason, "stop");
+  assert.equal(entry.errors_count, 1);
+  assert.equal("overrun_detected" in entry, false);
+  assert.equal("overrun_retry_result" in entry, false);
+  // The persisted role artifact records the parse failure, never the raw body.
+  const artifact = result.artifacts.perRole.correctness!;
+  assert.match(artifact.errors[0]!, /malformed JSON/);
+  assert.ok(!JSON.stringify(artifact).includes("RAW-BODY-NOT-JSON"));
+});
+
+test("#1061: the failure classifications stay mutually distinct (parser vs overrun vs transport vs timeout)", async () => {
+  // parser: malformed, normal stop.
+  const parser = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async () => ({ ok: true, raw: { choices: [{ message: { content: "nope" }, finish_reason: "stop" }] } }),
+  }));
+  assert.equal(roleEntry(parser, "correctness").error_kind, "parser");
+
+  // overrun: completion-limit stop, unrecovered.
+  const overrun = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, maxTokens: 32768 },
+    requestFn: async () => ({ ok: true, raw: { choices: [{ message: { content: "" }, finish_reason: "length" }] } }),
+  }));
+  assert.equal(roleEntry(overrun, "correctness").error_kind, "overrun");
+
+  // transport: a hard failure, no response.
+  const transport = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async () => ({ ok: false, errorMessage: "boom" }),
+  }));
+  assert.equal(roleEntry(transport, "correctness").error_kind, "transport");
+
+  // timeout: a transport outcome flagged as timed out.
+  const timeout = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async () => ({ ok: false, errorMessage: "planner model request timed out", timeout: true }),
+  }));
+  assert.equal(roleEntry(timeout, "correctness").error_kind, "timeout");
+});
+
+test("#1061: the stop-reason diagnostic is redacted and bounded (never a leak vector)", async () => {
+  const key = "sk-live-SECRETKEY";
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://anthropic.test",
+    apiKey: key,
+    anthropicVersion: "2023-06-01",
+    runChat: async () => ({
+      status: "ok",
+      response: reassembleSse(anthropicStream('{"leads":[', `${key}${"x".repeat(200)}`), "anthropic"),
+      raw: {},
+    }),
+  });
+
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, apiFormat: "anthropic", stream: true, maxTokens: 32768, apiKey: key },
+    rolesToRun: ["correctness"],
+    requestFn,
+  }));
+
+  const entry = roleEntry(result, "correctness");
+  assert.equal(typeof entry.stop_reason, "string");
+  assert.ok(!(entry.stop_reason as string).includes(key), "the configured key must be masked out of the diagnostic");
+  assert.ok((entry.stop_reason as string).length <= 64, "the diagnostic is bounded");
+});
+
+test("#1061: OpenAI 'length' still triggers the bounded retry (no regression)", async () => {
+  const seen: number[] = [];
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async (payload) => {
+      calls += 1;
+      seen.push(payload.max_tokens as number);
+      return calls === 1
+        ? { ok: true, raw: { choices: [{ message: { content: "" }, finish_reason: "length" }] } }
+        : { ok: true, raw: { choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "stop" }] } };
+    },
+  }));
+
+  assert.deepEqual(seen, [4096, 16384]);
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.status, "ok");
+  assert.equal(entry.overrun_retry_result, "recovered");
+});
+
+
+// ---------------------------------------------------------------------------
+// #1061: the applicable combined-scout path gets the same treatment
+// ---------------------------------------------------------------------------
+
+test("#1061: combined_scout applies the same overrun detection, recovery, and diagnostics", async () => {
+  const scoutComplete = (lead: string): unknown => ({
+    choices: [{
+      message: {
+        content: JSON.stringify({
+          correctness: { leads: [{ severity: "major", message: lead }] },
+          security: { leads: [] },
+          tests: { leads: [] },
+        }),
+      },
+      finish_reason: "stop",
+    }],
+  });
+  const seen: number[] = [];
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, execution: "combined_scout", maxTokens: 16384 },
+    requestFn: async (payload) => {
+      seen.push(payload.max_tokens as number);
+      return seen.length === 1
+        ? { ok: true, raw: { choices: [{ message: { content: '{"correctness":' }, finish_reason: "max_tokens" }] } }
+        : { ok: true, raw: scoutComplete("recovered scout lead") };
+    },
+  }));
+
+  // One shared call, one bounded retry at the ceiling.
+  assert.deepEqual(seen, [16384, 32768]);
+  const correctness = roleEntry(result, "correctness");
+  assert.equal(correctness.status, "ok");
+  assert.equal(correctness.error_kind, null);
+  assert.equal(correctness.overrun_retry, true);
+  assert.equal(correctness.retry_max_tokens, 32768);
+  assert.equal(correctness.overrun_detected, true);
+  assert.equal(correctness.overrun_retry_result, "recovered");
+  assert.equal(correctness.stop_reason, "stop");
+  assert.equal(result.artifacts.perRole.correctness!.leads[0]!.message, "recovered scout lead");
+});
+
+test("#1061: a streamed Anthropic max_tokens scout response recovers once (combined_scout)", async () => {
+  const truncated = anthropicStream('{"correctness":', "max_tokens");
+  const complete = anthropicStream(
+    JSON.stringify({
+      correctness: { leads: [{ severity: "info", message: "recovered scout lead" }] },
+      security: { leads: [] },
+      tests: { leads: [] },
+    }),
+    "end_turn",
+  );
+  const seen: number[] = [];
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://anthropic.test",
+    apiKey: REALISTIC_KEY,
+    anthropicVersion: "2023-06-01",
+    runChat: async (input) => {
+      const body = input.payload.body as { max_tokens: number };
+      seen.push(body.max_tokens);
+      const text = seen.length === 1 ? truncated : complete;
+      return { status: "ok", response: reassembleSse(text, "anthropic"), raw: {} };
+    },
+  });
+
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, apiFormat: "anthropic", stream: true, execution: "combined_scout", maxTokens: 16384, apiKey: REALISTIC_KEY },
+    requestFn,
+  }));
+
+  assert.deepEqual(seen, [16384, 32768]);
+  const correctness = roleEntry(result, "correctness");
+  assert.equal(correctness.status, "ok");
+  assert.equal(correctness.overrun_retry_result, "recovered");
+  assert.equal(correctness.stop_reason, "end_turn");
+  assert.equal(result.artifacts.perRole.correctness!.leads[0]!.message, "recovered scout lead");
+});
+
+test("#1061: combined_scout classifies an unrecovered overrun and a plain parse failure distinctly", async () => {
+  // Unrecovered overrun already at the retry ceiling: no retry is possible.
+  const overrunCaps: number[] = [];
+  const overrun = await runSpecialists(baseInput({
+    config: { ...baseInput().config, execution: "combined_scout", maxTokens: 32768 },
+    requestFn: async (payload) => {
+      overrunCaps.push(payload.max_tokens as number);
+      return { ok: true, raw: { choices: [{ message: { content: '{"correctness":' }, finish_reason: "length" }] } };
+    },
+  }));
+  assert.equal(overrunCaps.length, 1, "already at the ceiling: no retry");
+  const overrunEntry = roleEntry(overrun, "correctness");
+  assert.equal(overrunEntry.error_kind, "overrun");
+  assert.equal(overrunEntry.overrun_detected, true);
+  assert.equal(overrunEntry.overrun_retry, false);
+  assert.equal(overrunEntry.overrun_retry_result, "skipped");
+
+  // Plain parse failure with a normal stop: parser, never retried.
+  let parserCalls = 0;
+  const parser = await runSpecialists(baseInput({
+    config: { ...baseInput().config, execution: "combined_scout" },
+    requestFn: async () => {
+      parserCalls += 1;
+      return { ok: true, raw: { choices: [{ message: { content: "NOT JSON AT ALL" }, finish_reason: "stop" }] } };
+    },
+  }));
+  assert.equal(parserCalls, 1, "an ordinary parse failure is never retried");
+  const parserEntry = roleEntry(parser, "correctness");
+  assert.equal(parserEntry.error_kind, "parser");
+  assert.equal(parserEntry.stop_reason, "stop");
+  assert.equal("overrun_detected" in parserEntry, false);
+});
+
+// ---------------------------------------------------------------------------
+// #1061: a cleanly parsed but empty response that exhausted the budget is not
+// a clean success — it is eligible for the same one bounded retry.
+// ---------------------------------------------------------------------------
+
+test("#1061: three-call — valid-empty at the cap retries, recovers, skips at the ceiling, and keeps normal-stop empty clean", async () => {
+  const capEmpty = { choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "max_tokens" }] };
+  const stopEmpty = { choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "stop" }] };
+
+  // (a) valid-empty at the cap, retry still truncated → unrecovered overrun.
+  const failedCaps: number[] = [];
+  const failed = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async (payload) => {
+      failedCaps.push(payload.max_tokens as number);
+      return { ok: true, raw: capEmpty };
+    },
+  }));
+  assert.deepEqual(failedCaps, [4096, 16384], "a cleanly parsed empty response at the cap is still retried once");
+  const failedEntry = roleEntry(failed, "correctness");
+  assert.equal(failedEntry.status, "degraded", "an unrecovered zero-lead overrun is not a clean success");
+  assert.equal(failedEntry.error_kind, "overrun");
+  assert.equal(failedEntry.overrun_detected, true);
+  assert.equal(failedEntry.overrun_retry_result, "failed");
+
+  // (b) valid-empty at the cap, retry completes normally → the empty answer is
+  // now trustworthy, so it is a clean ok.
+  let recoveredCalls = 0;
+  const recovered = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async () => {
+      recoveredCalls += 1;
+      return { ok: true, raw: recoveredCalls === 1 ? capEmpty : stopEmpty };
+    },
+  }));
+  assert.equal(recoveredCalls, 2);
+  const recoveredEntry = roleEntry(recovered, "correctness");
+  assert.equal(recoveredEntry.status, "ok");
+  assert.equal(recoveredEntry.error_kind, null);
+  assert.equal(recoveredEntry.overrun_detected, true, "overrun_detected describes the INITIAL completion-limit event");
+  assert.equal(recoveredEntry.overrun_retry_result, "recovered");
+
+  // (c) valid-empty at the cap, already at the ceiling → no retry, still overrun.
+  const ceilingCaps: number[] = [];
+  const ceiling = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, maxTokens: 32768 },
+    requestFn: async (payload) => {
+      ceilingCaps.push(payload.max_tokens as number);
+      return { ok: true, raw: capEmpty };
+    },
+  }));
+  assert.equal(ceilingCaps.length, 1, "no retry is possible above the ceiling");
+  const ceilingEntry = roleEntry(ceiling, "correctness");
+  assert.equal(ceilingEntry.error_kind, "overrun");
+  assert.equal(ceilingEntry.overrun_retry, false);
+  assert.equal(ceilingEntry.overrun_retry_result, "skipped");
+
+  // (d) normal-stop empty → clean ok, never retried.
+  let stopCalls = 0;
+  const clean = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async () => {
+      stopCalls += 1;
+      return { ok: true, raw: stopEmpty };
+    },
+  }));
+  assert.equal(stopCalls, 1, "a normal-stop empty result is a clean success, not a retry trigger");
+  const cleanEntry = roleEntry(clean, "correctness");
+  assert.equal(cleanEntry.status, "ok");
+  assert.equal(cleanEntry.error_kind, null);
+  assert.equal("overrun_detected" in cleanEntry, false);
+});
+
+test("#1061: combined_scout — valid-empty at the cap retries, recovers, skips at the ceiling, and keeps normal-stop empty clean", async () => {
+  const scout = (stopReason: string): unknown => ({
+    choices: [{
+      message: {
+        content: JSON.stringify({ correctness: { leads: [] }, security: { leads: [] }, tests: { leads: [] } }),
+      },
+      finish_reason: stopReason,
+    }],
+  });
+  const scoutConfig = { ...baseInput().config, execution: "combined_scout" as const };
+
+  // (a) all-empty scout at the cap, retry still truncated → unrecovered overrun.
+  const failedCaps: number[] = [];
+  const failed = await runSpecialists(baseInput({
+    config: { ...scoutConfig, maxTokens: 16384 },
+    requestFn: async (payload) => {
+      failedCaps.push(payload.max_tokens as number);
+      return { ok: true, raw: scout("length") };
+    },
+  }));
+  assert.deepEqual(failedCaps, [16384, 32768], "a cleanly parsed all-empty scout at the cap is retried once");
+  const failedEntry = roleEntry(failed, "correctness");
+  assert.equal(failedEntry.status, "degraded");
+  assert.equal(failedEntry.error_kind, "overrun");
+  assert.equal(failedEntry.overrun_detected, true);
+  assert.equal(failedEntry.overrun_retry_result, "failed");
+
+  // (b) all-empty scout at the cap, retry completes normally → clean ok.
+  let recoveredCalls = 0;
+  const recovered = await runSpecialists(baseInput({
+    config: { ...scoutConfig, maxTokens: 16384 },
+    requestFn: async () => {
+      recoveredCalls += 1;
+      return { ok: true, raw: recoveredCalls === 1 ? scout("length") : scout("stop") };
+    },
+  }));
+  assert.equal(recoveredCalls, 2);
+  for (const role of ["correctness", "security", "tests"]) {
+    const entry = roleEntry(recovered, role);
+    assert.equal(entry.status, "ok");
+    assert.equal(entry.error_kind, null);
+    assert.equal(entry.overrun_detected, true, "overrun_detected describes the INITIAL event");
+    assert.equal(entry.overrun_retry_result, "recovered");
+  }
+
+  // (c) all-empty scout at the cap, already at the ceiling → skipped.
+  const ceilingCaps: number[] = [];
+  const ceiling = await runSpecialists(baseInput({
+    config: { ...scoutConfig, maxTokens: 32768 },
+    requestFn: async (payload) => {
+      ceilingCaps.push(payload.max_tokens as number);
+      return { ok: true, raw: scout("length") };
+    },
+  }));
+  assert.equal(ceilingCaps.length, 1, "no retry is possible above the ceiling");
+  const ceilingEntry = roleEntry(ceiling, "correctness");
+  assert.equal(ceilingEntry.error_kind, "overrun");
+  assert.equal(ceilingEntry.overrun_retry_result, "skipped");
+
+  // (d) normal-stop all-empty scout → clean ok, never retried.
+  let stopCalls = 0;
+  const clean = await runSpecialists(baseInput({
+    config: scoutConfig,
+    requestFn: async () => {
+      stopCalls += 1;
+      return { ok: true, raw: scout("stop") };
+    },
+  }));
+  assert.equal(stopCalls, 1, "a normal-stop empty scout is a clean success, not a retry trigger");
+  for (const role of ["correctness", "security", "tests"]) {
+    const entry = roleEntry(clean, role);
+    assert.equal(entry.status, "ok");
+    assert.equal(entry.error_kind, null);
+    assert.equal("overrun_detected" in entry, false);
+  }
+});
+
+// #1061: a retry is only a recovery when its parse is actually adopted.
+test("#1061: three-call — a retry that fails to parse is 'failed', never 'recovered'", async () => {
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, apiKey: REALISTIC_KEY },
+    requestFn: async () => {
+      calls += 1;
+      return calls === 1
+        // Empty at the cap: eligible for the one bounded retry.
+        ? { ok: true, raw: { choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "max_tokens" }] } }
+        // Normal stop, but malformed — the retry is discarded, not adopted.
+        : { ok: true, raw: { choices: [{ message: { content: "NOT JSON AT ALL" }, finish_reason: "stop" }] } };
+    },
+  }));
+
+  assert.equal(calls, 2, "the empty-at-cap response is retried once");
+  const entry = roleEntry(result, "correctness");
+  // The malformed retry is not adopted, so the original truncated response stands.
+  assert.equal(entry.status, "degraded");
+  assert.equal(entry.error_kind, "overrun");
+  assert.equal(entry.overrun_detected, true);
+  assert.equal(entry.overrun_retry_result, "failed", "a discarded retry is not a recovery");
+  assert.equal(entry.stop_reason, "max_tokens", "the retained response is the initial one");
+});
+
+test("#1061: combined_scout — a retry that fails to parse is 'failed', never 'recovered'", async () => {
+  const empty = { correctness: { leads: [] }, security: { leads: [] }, tests: { leads: [] } };
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, execution: "combined_scout", maxTokens: 16384, apiKey: REALISTIC_KEY },
+    requestFn: async () => {
+      calls += 1;
+      return calls === 1
+        ? { ok: true, raw: { choices: [{ message: { content: JSON.stringify(empty) }, finish_reason: "max_tokens" }] } }
+        : { ok: true, raw: { choices: [{ message: { content: "NOT JSON AT ALL" }, finish_reason: "stop" }] } };
+    },
+  }));
+
+  assert.equal(calls, 2, "the empty-at-cap scout is retried once");
+  for (const role of ["correctness", "security", "tests"]) {
+    const entry = roleEntry(result, role);
+    assert.equal(entry.status, "degraded", role);
+    assert.equal(entry.error_kind, "overrun", role);
+    assert.equal(entry.overrun_detected, true, role);
+    assert.equal(entry.overrun_retry_result, "failed", `${role}: a discarded retry is not a recovery`);
+  }
+  assert.equal(roleEntry(result, "correctness").stop_reason, "max_tokens", "the retained response is the initial one");
 });

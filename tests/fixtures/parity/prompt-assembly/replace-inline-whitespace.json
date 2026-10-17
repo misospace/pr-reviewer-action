@@ -1,7 +1,0 @@
-{
-  "fixture": "replace-inline-whitespace",
-  "description": "A whitespace-only inline prompt is non-empty, so replace mode uses it verbatim.",
-  "env": {
-    "SYSTEM_PROMPT": "   "
-  }
-}

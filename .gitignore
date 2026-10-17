@@ -28,3 +28,6 @@ Thumbs.db
 
 # Mock server artifacts
 test_uploads/
+node_modules/
+dist/
+.astro/

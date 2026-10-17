@@ -2,21 +2,26 @@ import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { validateContract } from "../config/contract.js";
 import { loadConfig, type RawInputs } from "../config/load-config.js";
 import { resolveRepositoryConfig } from "../config/repository-config.js";
+import { resolveRequirementOwners } from "../config/requirement-owners.js";
 import { assertSupportedNode } from "../runtime/node-version.js";
 import { createCancellationScope } from "../runtime/signals.js";
 import { resolveTierBudgets } from "../corpus/budgets.js";
 import { prioritizeDiff } from "../corpus/diff-priority.js";
 import { truncateClean } from "../corpus/truncate.js";
-import { readFileSync, appendFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { canonicalChangedFile, normalizeLinkedIssues } from "../context/types.js";
+import { redactText } from "../context/redact.js";
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { buildHarnessObligations } from "../requirements/obligations.js";
 import { externalChecksConclusion } from "../precheck/decide.js";
 import { readStandardsFileAtRef, StandardsFileRefError } from "../context/standards-file-ref.js";
+import { discoverRepositorySkills, readRepositorySkill, renderExplicitSkill, renderSkillCatalog, repositorySkillsAllowed } from "../context/repository-skills.js";
+import { loopContextLimits } from "../tools/harness.js";
 import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
+import { extraHeadersForEnv } from "../transport/headers.js";
 import type { FetchLike } from "../platform/http.js";
 import { normalizePrIdentity } from "../platform/pr.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
@@ -34,7 +39,7 @@ import {
 import { extractRequirementLedger, ledgerToArtifact, renderRequirementLedgerMarkdown } from "../requirements/ledger.js";
 import { requirementLedgerPresence } from "../requirements/presence.js";
 import { classifyPr, classificationToArtifact } from "../classification/classify.js";
-import { resolveReviewRoute, resolveTierProfiles, routeSignalsFromClassification, tierRequestShape, type TierProfiles } from "../routing/tiers.js";
+import { resolveReviewRoute, resolveTierProfiles, tierRequestShape, anthropicEffortInactiveWarning, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, effectiveWireEffort, effectiveWireResponseFormat, type TierProfiles } from "../routing/tiers.js";
 import { reviewerRequestedEscalation } from "../routing/escalation.js";
 import { buildSpecialistCorpus } from "../specialists/corpus.js";
 import { forkGate, type ForkedGate, type GateName, type GateOutcome } from "../gates/gates.js";
@@ -45,24 +50,35 @@ import { runClaimFalsificationPass } from "../claims/pass.js";
 import { renderClaimsSection } from "../claims/render.js";
 import { buildModelRequest } from "../model/request.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
+import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js";
+import { maskKnownSecrets } from "../context/redact.js";
 import { parseVerdictResponse } from "../model/verdict.js";
-import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, publicAnalysisEngine, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
-import { reviewArtifactFromParsed } from "../enforcement/artifact.js";
-import { applyStrictVerdictPolicy, applyVerdictPolicy } from "../enforcement/verdict-policy.js";
+import { resolveReviewTriageDecision } from "../model/triage.js";
+import type { ReviewTriageDecision } from "../model/types.js";
+import { resolveReviewerRouting } from "../config/reviewer-routing.js";
+import { resolveHumanReviewRouting, type HumanReviewRoutingMode, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
+import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, applyReviewTriageFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
+import { reviewArtifactFromParsed, type ArtifactFinding } from "../enforcement/artifact.js";
+import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
+import { applyBlockerVerification } from "../enforcement/blocker-verification.js";
+import { createHeadSourceReader } from "../enforcement/source-verifier.js";
+import { capCiEvidenceFindings } from "../enforcement/ci-evidence.js";
 import { markerReviewResult } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
-import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "../enforcement/enforce.js";
+import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
-import { applyRequirementTraceEnforcement } from "../enforcement/requirement-trace.js";
+import { applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope } from "../enforcement/requirement-trace.js";
+import { runRequirementTraceRepairPass } from "../requirements/trace-repair.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
+import { ACTION_VERSION } from "../version.js";
 import {
   buildCacheHitRatioOutput,
   buildToolCallsOutput,
   formatOutputAssignment,
   formatReviewStepOutputs,
-  renderStepSummary,
+  type IncompleteReason,
   type ReviewStepOutputs,
 } from "../publish/outputs.js";
 import {
@@ -89,6 +105,7 @@ import {
   seededFileTotals,
   specialistWorkspace,
 } from "./stages.js";
+import { writeStepSummary } from "./summary.js";
 import type { ReadResult } from "../platform/types.js";
 
 /**
@@ -130,6 +147,7 @@ export interface RunReviewOptions {
   sleep?: (seconds: number) => Promise<void>;
   log?: (line: string) => void;
   error?: (line: string) => void;
+  annotate?: (line: string) => void;
   /** Override the CI gate branch (tests). Explicit null disables the gate
    * even when ci-status-check is on; undefined = the default subprocess
    * branch re-entering the bundle. */
@@ -176,6 +194,9 @@ export interface RunReviewResult {
    * against (see `adaptiveLoopBudgets` in src/tools/loop.ts). */
   toolRoundsUsed?: number;
   toolMaxRounds?: number;
+  /** #922: the loop's conversation budget and peak (approx tokens). */
+  contextBudget?: number;
+  contextPeak?: number;
   /** Wall-clock seconds for the whole run. */
   durationSec: number;
 }
@@ -193,6 +214,14 @@ const NO_GATE_OUTCOME = (gate: GateName): GateOutcome => ({
 
 /** Scratch file the CI gate child writes its step outputs to. */
 const CI_GATE_OUTPUT_FILE = "ci-gate-outputs.txt";
+
+/** #978: the annotation is a workflow-command line, so untrusted provider
+ * body text must not be able to break out of it — a newline would emit a
+ * second line GitHub parses as its own command, and `::` reads as a command
+ * separator. Control characters collapse to spaces; `::` is split. */
+function annotationSafe(text: string): string {
+  return text.replace(/[\x00-\x1f\x7f]+/g, " ").replace(/::/g, ": :").trim();
+}
 
 /** The CI gate's `ci_status_final` / `ci_status_skipped` step outputs as the
  * contract's kebab-case output assignments. */
@@ -259,6 +288,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   };
   const errorLog = (line: string): void =>
     (options.error ?? ((text) => process.stderr.write(`[v3] ERROR: ${text}\n`)))(line);
+  const annotate = options.annotate ?? ((line: string): void => { process.stdout.write(`${line}\n`); });
 
   assertSupportedNode(process.versions.node);
   if (options.env[GATE_CHILD_ENV] === "1") {
@@ -281,6 +311,10 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     effectiveRaw = resolution.raw;
   }
   const config = loadConfig(contract, effectiveRaw);
+  // Assigned unconditionally below, once the resolved fork flag is known —
+  // skill discovery must wait for the fail-closed fork gate (#1043 review:
+  // CodeQL flagged the dead initializer).
+  let skillCatalog: ReturnType<typeof discoverRepositorySkills>;
 
   // #838: an explicit run dir (the caller's own, or PR_REVIEWER_RUN_DIR) is
   // reused as given; with neither, the default is a fresh private temp dir —
@@ -325,6 +359,13 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     outputFilePath: options.env.GITHUB_OUTPUT ?? "/dev/null",
     stepSummaryPath: options.env.GITHUB_STEP_SUMMARY ?? "",
     baseRef,
+    repositorySkillsEnabled: String(config.repositorySkills === true),
+    repositorySkillPath: typeof config.repositorySkillPath === "string" ? config.repositorySkillPath : "",
+    repositorySkillsRef: "",
+    repositorySkillsPaths: "[]",
+    repositorySkillsCatalog: "",
+    repositorySkillsFingerprint: "",
+    repositorySkillAddendum: "",
   };
   const env = buildStageEnv(config, context, options.env) as StageEnv;
   const missing = validateStageEnv(env);
@@ -334,9 +375,17 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     modelContextTokens: env.MODEL_CONTEXT_TOKENS,
     primaryModelContextTokens: env.PRIMARY_MODEL_CONTEXT_TOKENS,
     smartModelContextTokens: env.SMART_MODEL_CONTEXT_TOKENS,
+    // #922: only a configured fallback model can receive the shared corpus.
+    fallbackModelContextTokens: (env.AI_FALLBACK_MODEL ?? "") !== "" ? env.FALLBACK_MODEL_CONTEXT_TOKENS : undefined,
     aiMaxTokens: env.AI_MAX_TOKENS,
     contextLimitMode: env.CONTEXT_LIMIT_MODE,
   });
+  // #922: a declared window too small for the native loop fails up front,
+  // like a too-small corpus window, rather than overflowing every turn.
+  if ((env.TOOL_MODE ?? "off").toLowerCase() === "native_loop") {
+    loopContextLimits(env, "primary");
+    if (env.AI_SMART_MODEL) loopContextLimits(env, "smart");
+  }
   env.MAX_CORPUS = String(budgets.primary.maxCorpus);
   env.MAX_DIFF = String(budgets.primary.maxDiff);
   env.MAX_FILES = String(budgets.primary.maxFiles);
@@ -353,6 +402,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // sanitizer, the corpus fences, and the never-execute rule.
   const ws = new RunWorkspace(runDir, options.persistArtifacts ?? true);
   const adapter: PlatformReadAdapter = options.platformAdapter ?? buildPlatformReadAdapter(env, options.fetchImpl);
+  await adapter.preflightAuthentication?.();
   const profiles: TierProfiles = resolveTierProfiles(env);
   const streamBool = (env.AI_STREAM ?? "true").toLowerCase() === "true";
 
@@ -393,13 +443,71 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     env.IS_FORK_PR = deriveFork(prObject);
     context.isForkPr = env.IS_FORK_PR;
   }
-  const forkFlag = env.IS_FORK_PR ?? "false";
+  const forkFlag = env.IS_FORK_PR ?? "";
   if (forkFlag === "true") log("Detected cross-repository pull request");
+  const skillsEnabled = repositorySkillsAllowed(config.repositorySkills === true, forkFlag);
+  const explicitSkillPath = typeof config.repositorySkillPath === "string" ? config.repositorySkillPath : "";
+  const canUseExplicitSkill = explicitSkillPath !== "" && forkFlag === "false";
+  skillCatalog = canUseExplicitSkill && baseRef !== ""
+    ? discoverRepositorySkills(baseRef, workspace)
+    : skillsEnabled && forkFlag === "false" && baseRef !== ""
+      ? discoverRepositorySkills(baseRef, workspace)
+      : { skills: [], warnings: [], contentFingerprint: "" };
+  for (const warning of skillCatalog.warnings) log(`WARNING: ${warning}`);
+  const explicitSkill = canUseExplicitSkill && skillCatalog.skills.some(skill => skill.path === explicitSkillPath)
+    ? readRepositorySkill(baseRef, workspace, explicitSkillPath)
+    : null;
+  if (canUseExplicitSkill && explicitSkill === null) log("WARNING: operator-selected repository skill unavailable at trusted base; no fallback to PR-head content");
+  env.REPOSITORY_SKILLS = skillsEnabled ? "true" : "false";
+  env.REPOSITORY_SKILLS_REF = skillsEnabled ? baseRef : "";
+  env.REPOSITORY_SKILLS_PATHS = JSON.stringify(skillsEnabled ? skillCatalog.skills.map(skill => skill.path) : []);
+  env.REPOSITORY_SKILLS_CATALOG = renderSkillCatalog(skillsEnabled ? skillCatalog.skills : []);
+  env.REPOSITORY_SKILLS_FINGERPRINT = (skillsEnabled || explicitSkill !== null) ? skillCatalog.contentFingerprint : "";
+  // #1043 (review, second pass): compute the addendum FIRST, then derive the
+  // runtime path from it — deriving from the not-yet-assigned (initialized "")
+  // addendum cleared the path for every actively selected skill.
+  env.REPOSITORY_SKILL_ADDENDUM = explicitSkill !== null
+    && (!skillsEnabled || (env.TOOL_MODE ?? "off").toLowerCase() !== "native_loop")
+    ? renderExplicitSkill(explicitSkillPath, explicitSkill)
+    : "";
+  // #1043 (review): the env var mirrors the addendum actually in effect —
+  // an addendum present in the corpus but absent from the config env would
+  // dodge the fingerprint, so both are keyed off the same condition.
+  env.REPOSITORY_SKILL_PATH = env.REPOSITORY_SKILL_ADDENDUM !== "" ? explicitSkillPath : "";
+  if (env.REPOSITORY_SKILL_ADDENDUM !== "") {
+    ws.write("repository-skill-addendum.md", env.REPOSITORY_SKILL_ADDENDUM);
+    ws.write("repository-skill-context.json", JSON.stringify({ source: "operator-selected", path: explicitSkillPath, added_to_corpus: true }));
+  } else {
+    // #1043 (review): run dirs can be shared across runs (explicit runDir /
+    // PR_REVIEWER_RUN_DIR), so both skill artifacts must be cleared when no
+    // skill is selected — a stale addendum on disk would be ingested by the
+    // next corpus build while diagnostics claim no skill was applied.
+    ws.remove("repository-skill-addendum.md");
+    ws.remove("repository-skill-context.json");
+  }
+  if (skillsEnabled && skillCatalog.skills.length > 0) {
+    log(`Trusted-base repository skill catalog available: ${skillCatalog.skills.length} skill(s); none are considered applied unless read_skill succeeds.`);
+  }
+  if (explicitSkill !== null && env.REPOSITORY_SKILL_ADDENDUM !== "") {
+    log(`Operator-selected trusted-base skill included in corpus: ${explicitSkillPath}`);
+  } else if (canUseExplicitSkill && explicitSkill === null) {
+    log("Repository skills not applied: selected trusted-base skill unavailable.");
+  }
+  context.repositorySkillsRef = env.REPOSITORY_SKILLS_REF;
+  context.repositorySkillsPaths = env.REPOSITORY_SKILLS_PATHS;
+  context.repositorySkillsCatalog = env.REPOSITORY_SKILLS_CATALOG;
+  context.repositorySkillsFingerprint = env.REPOSITORY_SKILLS_FINGERPRINT;
+  context.repositorySkillAddendum = env.REPOSITORY_SKILL_ADDENDUM;
 
   // Specialist lead artifacts reset (#609): unconditional, before anything
   // can consume a stale value.
   ws.write("specialists.md", "");
   ws.write("specialist-leads-present.txt", "");
+  // #1043 (review): the applied-skills artifact is reset unconditionally —
+  // the loop writes it back only on real read_skill success, so a reused
+  // run dir (zero reads, or tools disabled entirely) never reports the
+  // previous run's skills.
+  ws.remove("repository-skills-applied.json");
 
   let diffText: string;
   const cachedDiff = ws.readText("pr.diff");
@@ -569,6 +677,13 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   const classification = classifyPr({
     prFiles: rawFilesList.map((raw) => canonicalChangedFile(raw)),
     diffText: ws.readText("pr.diff.truncated") ?? "",
+    // #909: the deterministic image-digest kind must see every changed line;
+    // `pr.diff.truncated` is the prioritized context diff and can omit
+    // functional changes. `diffText` here is the complete fetched PR diff.
+    fullDiffText: diffText,
+    // The PR object's authoritative changed-file count; the image-digest rule
+    // reconciles the (single-page) file list and diff against it.
+    authoritativeChangedFiles: totalChangedFiles,
     // classifyPr sits behind the canonical LinkedIssue boundary
     // (src/context/types.ts): the linked-issue stage's raw collection —
     // GitHub refs with labels only when fetched, Linear records — is
@@ -586,20 +701,23 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // up being.
   env.SUBSTANTIAL_CODE_CHANGE = classification.substantialCodeChange ? "true" : "false";
 
-  const { route, reason } = resolveReviewRoute({
-    routingMode: env.REVIEW_ROUTING_MODE ?? "off",
-    routeSignals: routeSignalsFromClassification(classificationArtifact),
-    escalateOnRiskFlags: splitCsv(env.ESCALATE_ON_RISK_FLAGS ?? ""),
-    smartModelResolved: profiles.smart.resolved,
-  });
+  const { route, reason } = resolveReviewRoute({ routingMode: env.REVIEW_ROUTING_MODE ?? "off" });
   env.REVIEW_ROUTE = route;
   env.ROUTE_REASON = reason;
   if (route === "primary") {
-    Object.assign(env, { AI_BASE_URL: profiles.primary.baseUrl, AI_MODEL: profiles.primary.model, AI_API_FORMAT: profiles.primary.apiFormat, AI_API_KEY: profiles.primary.apiKey });
-  } else if (route === "smart") {
-    Object.assign(env, { AI_BASE_URL: profiles.smart.baseUrl, AI_MODEL: profiles.smart.model, AI_API_FORMAT: profiles.smart.apiFormat, AI_API_KEY: profiles.smart.apiKey });
+    Object.assign(env, {
+      AI_BASE_URL: profiles.primary.baseUrl,
+      AI_MODEL: profiles.primary.model,
+      AI_API_FORMAT: profiles.primary.apiFormat,
+      AI_API_KEY: profiles.primary.apiKey,
+      // #998: the route's effort follows the route, exactly like the
+      // transport keys above — env-driven consumers downstream (the tool
+      // harness, the specialist phase) resolve their effort from the primary
+      // lane's value, not the raw base input.
+      AI_REASONING_EFFORT: profiles.primary.reasoningEffort,
+    });
   }
-  env.REVIEW_CONTEXT_PROFILE = route === "smart" ? "smart" : "primary";
+  env.REVIEW_CONTEXT_PROFILE = "primary";
   log(`Review route: ${route} (${reason}) → ${env.AI_MODEL}`);
 
   promptState = applySystemPromptFragments(promptState, {
@@ -607,8 +725,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ...(env.PR_THREAD_CONTEXT !== undefined ? { prThreadContext: env.PR_THREAD_CONTEXT } : {}),
     ...(env.REVIEW_VERBOSITY !== undefined ? { reviewVerbosity: env.REVIEW_VERBOSITY } : {}),
   }, ws);
-  promptState = applyRequirementTraceFragment(promptState, ws, (env.REQUIREMENT_TRACE ?? "false").toLowerCase() === "true");
-  env.SYSTEM_PROMPT = promptState.systemPrompt;
+  env.SYSTEM_PROMPT = `${promptState.systemPrompt}${env.REPOSITORY_SKILLS_CATALOG ?? ""}`;
 
   // ── Corpus stage part 1 (corpus.sh): fork CI, harvest advisory ───────
   const scope = createCancellationScope();
@@ -638,17 +755,20 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // #812: the superseded-discussion rule, appended only now that the
   // discussion sections exist (the fragments phase runs before this stage).
   promptState = applySupersededDiscussionFragment(promptState, ws);
-  env.SYSTEM_PROMPT = promptState.systemPrompt;
+  env.SYSTEM_PROMPT = `${promptState.systemPrompt}${env.REPOSITORY_SKILLS_CATALOG ?? ""}`;
 
   // Corpus build #1 (initial review owns the primary artifact slot).
-  const profileKey: "primary" | "smart" = env.REVIEW_CONTEXT_PROFILE === "smart" ? "smart" : "primary";
+  // #965: the first pass is always the primary profile — the smart tier is
+  // selected at escalation, not before the review runs.
+  const profileKey: "primary" | "smart" = "primary";
   let corpusResult = assembleCorpus(ws, env, budgets, profileKey, "primary", generatedPaths, standards);
   ws.write("review-corpus.truncated.md", ws.read(corpusResult.outputName) ?? new Uint8Array(0));
 
   // ── Claim falsification pre-pass (#785), in flight with the other gates ──
   // Fail-soft: any failure leaves claim-falsification.md empty and the
   // review proceeds unchanged. Deterministic scan first; the bounded model
-  // call on the primary route runs only when that scan finds nothing.
+  // pass on the primary route always runs when configured and merges on top
+  // of the scan's claims (#898).
   ws.write("claim-falsification.md", new Uint8Array(0));
   let claimsPromise: Promise<void> = Promise.resolve();
   if ((env.CLAIM_FALSIFICATION ?? "false").toLowerCase() === "true") {
@@ -658,6 +778,14 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       Number(env.CLAIM_FALSIFICATION_TIMEOUT_SEC ?? "180") || 180,
       Number(env.AI_REQUEST_TIMEOUT_SEC ?? "180") || 180,
     );
+    // #1037: correlation headers ride the pre-pass calls too. Resolved where
+    // the pre-fix code parsed them — inside the branch that actually builds
+    // the claim model, and before the promise exists — so this block's
+    // async-only `.catch` fail-soft surface is unchanged; unset config omits
+    // the key rather than merging an empty map.
+    const claimExtra = profiles.primary.baseUrl && profiles.primary.model
+      ? extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "")
+      : undefined;
     claimsPromise = runClaimFalsificationPass({
       title: String(pr.title ?? ""),
       body: String(pr.body ?? ""),
@@ -673,16 +801,23 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
                 apiKey: profiles.primary.apiKey,
                 maxTokens: Number(env.CLAIM_FALSIFICATION_MAX_TOKENS ?? "4096") || 4096,
                 temperature,
-                responseFormat: env.AI_RESPONSE_FORMAT ?? "off",
+                responseFormat: profiles.primary.responseFormat,
                 tokensParam: env.AI_TOKENS_PARAM ?? "max_tokens",
                 stream: (env.AI_STREAM ?? "true").toLowerCase() === "true",
                 timeoutSec: claimsTimeoutSec,
                 inputMaxBytes: Number(env.CLAIM_FALSIFICATION_INPUT_MAX_BYTES ?? "48000") || 48000,
+                // #998: the pre-pass runs on the primary route, so it uses the
+                // primary lane's resolved effort.
+                reasoningEffort: profiles.primary.reasoningEffort,
+                anthropicEffortSupported: profiles.primary.anthropicEffortSupported,
               },
               requestFn: specialistRequestFn({
                 baseUrl: profiles.primary.baseUrl,
                 apiKey: profiles.primary.apiKey,
                 anthropicVersion: env.ANTHROPIC_VERSION ?? "2023-06-01",
+                // #1037: correlation headers ride specialist/pre-pass calls too;
+                // unset config omits the key.
+                ...(claimExtra !== undefined ? { extraHeaders: claimExtra } : {}),
               }),
             }
           : undefined,
@@ -779,7 +914,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       // carry discussion the system prompt has no superseded-discussion
       // rule for.
       promptState = applySupersededDiscussionFragment(promptState, ws);
-      env.SYSTEM_PROMPT = promptState.systemPrompt;
+      env.SYSTEM_PROMPT = `${promptState.systemPrompt}${env.REPOSITORY_SKILLS_CATALOG ?? ""}`;
     }
   }
 
@@ -792,7 +927,63 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   }
 
   promptState = applySpecialistLeadsFragment(promptState, ws);
-  env.SYSTEM_PROMPT = promptState.systemPrompt;
+  // #935: scope the trace from the FINAL ledger (the #812 same-head refresh
+  // above can rebuild it), so the tool loop, the verdict turn and the
+  // validator below all see the same in-scope requirement ids.
+  const traceChanged = traceChangedText(ws);
+  const requirementTraceEnabled = (env.REQUIREMENT_TRACE ?? "false").toLowerCase() === "true";
+  const traceOwnership = !requirementTraceEnabled || baseRef === "" ? { rules: [], warnings: [] } : resolveRequirementOwners({ baseRef, workspace });
+  for (const warning of traceOwnership.warnings) errorLog(`requirement owners: ${warning}`);
+  const tracePaths = requirementTraceEnabled ? traceChangedFilePaths(ws) : undefined;
+  // #1062: the trusted PR title + body at head, passed to the trace validator as
+  // the ONLY positive-confirmation source for a `documentation`-domain obligation
+  // (e.g. "the PR description records the removed-file inventory"). It is the
+  // authoritative platform PR snapshot, never model output, and is never used to
+  // confirm a code obligation — the validator's classifier gates that out.
+  const tracePrBody = `${String(pr.title ?? "")}\n${String(pr.body ?? "")}`;
+  // #1062 review follow-up: when the CI gate finalized during this run, hand its
+  // exact-head conclusion to the requirement-trace advisory diagnostics (an
+  // `external_state` row reports the known state, or explicitly that none was
+  // observed). Diagnostic-only: it never changes a disposition, and the gate's
+  // read was already paid for by the gate itself — no new forge call here.
+  let traceCiState: string | null = null;
+  if (ciFork !== null) {
+    const gateFinal = /^ci-status-final=([A-Za-z0-9._-]+)$/m.exec(ciGateOutputs(join(runDir, CI_GATE_OUTPUT_FILE)));
+    if (gateFinal?.[1] !== undefined) traceCiState = gateFinal[1];
+  }
+  const ledgerValue = safeJson(ws.read("requirement-ledger.json"));
+  // #959: the in-scope ids are computed once here and reused by the repair
+  // pass below, so the prompt, the repair and the validator all see the same
+  // scope.
+  const traceScopeIds = requirementTraceEnabled
+    ? requirementTraceScope(ledgerValue, traceChanged, { ownership: traceOwnership.rules, paths: tracePaths }).inScope.map((entry) => entry.id)
+    : [];
+  const distributedHints = distributedRequirementHints(ledgerValue, traceOwnership.rules, traceScopeIds);
+  for (const warning of distributedRequirementWarnings(ledgerValue, traceOwnership.rules, traceScopeIds)) {
+    errorLog(`requirement owners: ${warning}`);
+  }
+  promptState = applyRequirementTraceFragment(promptState, ws, requirementTraceEnabled, undefined, traceScopeIds, distributedHints);
+  // #1003 human-review triage: an operator-only, review-only opt-in. The
+  // fragment adds ONE question to the reviewer and nothing else — no tool,
+  // evidence, fork or model-routing capability is gated on or granted by it
+  // (hence no `review-triage-enable-for-forks` sibling), and it can never
+  // move the verdict. Disabled, the assembled prompt below is byte-identical
+  // to pre-#1003.
+  const triageEnabled = config.reviewTriage === true;
+  // #1005: the trusted reviewer-routing config is read from the SAME trusted
+  // base ref as the other repo-owned config, and only when triage is enabled
+  // and routing is not off. The configured LOGICAL target ids are injected
+  // into the triage question so the model can select only capabilities this
+  // repository declared; it never sees a concrete GitHub user or team.
+  const routingMode: HumanReviewRoutingMode = config.reviewTriageRoutingMode === "advisory" || config.reviewTriageRoutingMode === "request"
+    ? config.reviewTriageRoutingMode
+    : "off";
+  const reviewerRouting = triageEnabled && routingMode !== "off" && baseRef !== ""
+    ? resolveReviewerRouting({ baseRef, workspace })
+    : { targets: new Map() as ReadonlyMap<string, { users: readonly string[]; teams: readonly string[] }>, warnings: [] as readonly string[], sourcePath: null };
+  for (const warning of reviewerRouting.warnings) errorLog(`reviewer routing: ${warning}`);
+  promptState = applyReviewTriageFragment(promptState, triageEnabled, [...reviewerRouting.targets.keys()]);
+  env.SYSTEM_PROMPT = `${promptState.systemPrompt}${env.REPOSITORY_SKILLS_CATALOG ?? ""}`;
 
   // ── Native tool harness (corpus.sh tail) ─────────────────────────────
   const toolMode = (env.TOOL_MODE ?? "off").toLowerCase();
@@ -803,6 +994,8 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       ws.write("tool-harness.json", toolGate.json);
     } else {
       log(`Running tool harness in mode: ${toolMode}`);
+      // The tier names the first-pass artifact slot; the loop limits follow
+      // the tier (loopLimitsProfile).
       env.TOOL_HARNESS_TIER = "primary";
       await runToolHarnessPhase(ws, env, workspace, log);
     }
@@ -814,7 +1007,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // ── Review stage (review.sh) ─────────────────────────────────────────
   const userMessage = buildUserMessage(ws, "classification.json");
   const primary = await producePrimaryReview({
-    env, ws, profiles, streamBool, userMessage, log, errorLog, clock, sleep: options.sleep,
+    env, ws, profiles, streamBool, userMessage, log, errorLog, annotate, clock, sleep: options.sleep, budgets,
   });
   let analysisEngine = primary.analysisEngine;
   let primaryProduced = primary.fromPrimary;
@@ -836,7 +1029,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ws.write("ai-output.primary.json", ws.read("ai-output.json") ?? new Uint8Array(0));
     env.TOOL_ESCALATION = "true";
     const smart = await runSmartReview({
-      env, ws, profiles, streamBool, userMessage, log, errorLog, clock, sleep: options.sleep,
+      env, ws, profiles, streamBool, userMessage, log, errorLog, annotate, clock, sleep: options.sleep,
       budgets, generatedPaths, standards, runDir, workspace,
     });
     delete env.TOOL_ESCALATION;
@@ -861,8 +1054,130 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     artifact = safeJson(ws.read("ai-output.json")) ?? (artifact as Record<string, unknown>);
   }
 
+  // ── #959: one bounded trace-repair pass ──────────────────────────────
+  // A verdict can carry no trace claim at all for an in-scope requirement
+  // (the #947 shape: `requirement_coverage: null` even though the prose
+  // review cites real locations). Before publishing, re-ask ONCE, for exactly
+  // the missing ids, on the same route as the primary review — mirroring the
+  // claim-falsification pre-pass. Gated on the default prompt (`isDefault`):
+  // the repair IS the trace fragment's retry, so with an operator replace-mode
+  // prompt there is no fragment to retry and the documented fail-closed
+  // behavior stands. Fail-soft: any failure leaves the artifact unchanged, and
+  // the missing rows then render as "the reviewer reported no trace" rather
+  // than implying enforcement does not exist. A claim that IS present with
+  // unusable locations is never repaired, so this cannot become a way to pass
+  // an untraceable change.
+  if (requirementTraceEnabled && promptState.isDefault && analysisEngine !== MODEL_UNAVAILABLE_ENGINE && artifact !== null) {
+    const repairTarget = (artifact ?? {}) as Record<string, unknown>;
+    const missingTraceIds = missingTraceRequirementIds(repairTarget.requirement_coverage, traceScopeIds);
+    const repairRequirements = missingTraceIds.length > 0 ? ledgerRequirementsById(ledgerValue, missingTraceIds) : [];
+    if (repairRequirements.length > 0 && profiles.primary.baseUrl && profiles.primary.model) {
+      const rawTemp = (env.AI_TEMPERATURE ?? "").trim();
+      const temperature = rawTemp === "" || Number.isNaN(Number(rawTemp)) ? null : Number(rawTemp);
+      const repairTimeoutSec = Math.min(
+        Number(env.REQUIREMENT_TRACE_REPAIR_TIMEOUT_SEC ?? "180") || 180,
+        Number(env.AI_REQUEST_TIMEOUT_SEC ?? "180") || 180,
+      );
+      log(`requirement trace: ${repairRequirements.length} in-scope requirement(s) carried no claim; attempting one bounded repair pass`);
+      // #1047: the repair pass rides the primary route and asks for its own
+      // (non-verdict) JSON contract in the prompt only — an Anthropic-format
+      // repair call never carries a native structured-output parameter, so a
+      // configured response_format must not read as enforced here either.
+      if (profiles.primary.apiFormat === "anthropic" && profiles.primary.responseFormat !== "off") {
+        log(`WARNING: primary lane (trace repair pass): ai-response-format resolved to ${profiles.primary.responseFormat}, which is not sent on the Anthropic wire for the repair contract — the repair JSON is prompt-only`);
+      }
+      // Fail-soft at the boundary too, mirroring the claim-falsification
+      // pre-pass: a throw here must never abort the review.
+      let repaired: Awaited<ReturnType<typeof runRequirementTraceRepairPass>> | null = null;
+      try {
+        // #1037: correlation headers ride the repair pass too; unset config
+        // omits the key. Parsed INSIDE the guarded region (as pre-fix) so a
+        // malformed set can never escape this fail-soft boundary.
+        const repairExtra = extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "");
+        repaired = await runRequirementTraceRepairPass({
+          requirements: repairRequirements.map((entry) => {
+            const groups = distributedHints.find((hint) => hint.requirementId === entry.id)?.groups;
+            return { id: entry.id, text: entry.text, ...(groups ? { groups } : {}) };
+          }),
+          title: String(pr.title ?? ""),
+          files: safeJson(ws.read("pr-files.json")),
+          diff: ws.readText("pr.diff.truncated") ?? ws.readText("pr.diff") ?? "",
+          config: {
+            apiFormat: profiles.primary.apiFormat,
+            model: profiles.primary.model,
+            baseUrl: profiles.primary.baseUrl,
+            apiKey: profiles.primary.apiKey,
+            maxTokens: Number(env.REQUIREMENT_TRACE_REPAIR_MAX_TOKENS ?? "4096") || 4096,
+            temperature,
+            responseFormat: profiles.primary.responseFormat,
+            tokensParam: env.AI_TOKENS_PARAM ?? "max_tokens",
+            stream: (env.AI_STREAM ?? "true").toLowerCase() === "true",
+            timeoutSec: repairTimeoutSec,
+            inputMaxBytes: Number(env.REQUIREMENT_TRACE_REPAIR_INPUT_MAX_BYTES ?? "48000") || 48000,
+            // #998: the repair pass runs on the primary route.
+            reasoningEffort: profiles.primary.reasoningEffort,
+            anthropicEffortSupported: profiles.primary.anthropicEffortSupported,
+          },
+          requestFn: specialistRequestFn({
+            baseUrl: profiles.primary.baseUrl,
+            apiKey: profiles.primary.apiKey,
+            anthropicVersion: env.ANTHROPIC_VERSION ?? "2023-06-01",
+            // #1037: correlation headers ride specialist/pre-pass calls too;
+            // unset config omits the key.
+            ...(repairExtra !== undefined ? { extraHeaders: repairExtra } : {}),
+          }),
+        });
+      } catch (cause) {
+        log(`WARNING: requirement trace repair pass failed; continuing without repair: ${cause instanceof Error ? cause.message : String(cause)}`);
+      }
+      if (repaired !== null) {
+        // Per-run record, mirroring claim-falsification.json: the merged
+        // claims land in ai-output.json, but the pass's status is otherwise
+        // unobservable.
+        ws.write("requirement-trace-repair.json", Buffer.from(`${pyJsonDumps({
+          status: repaired.status,
+          error_kind: repaired.errorKind,
+          error: repaired.error,
+          missing_ids: missingTraceIds,
+          claims: repaired.claims.length,
+          diff_clipped: repaired.diffClipped,
+        })}\n`, "utf8"));
+        if (repaired.claims.length > 0) {
+          repairTarget.requirement_coverage = mergeTraceClaims(repairTarget.requirement_coverage, repaired.claims);
+          log(`requirement trace: repair pass returned ${repaired.claims.length} claim(s)`);
+        } else {
+          log(`requirement trace: repair pass returned no claims (${repaired.status}${repaired.error ? `: ${repaired.error}` : ""})`);
+        }
+      }
+    }
+  }
+
   // ── Enforcement (review.sh) + requirement coverage ───────────────────
   const reviewRecord = (artifact ?? {}) as Record<string, unknown>;
+  const ciChecksContent = ciChecksBytes(env);
+  const ciChecksMarkdown = ciChecksContent === null ? null : Buffer.from(ciChecksContent).toString("utf8");
+  // Defense in depth alongside the reader's hex-SHA check
+  // (source-verifier.ts): pass `null` here whenever the candidate
+  // revision is not a syntactically valid 40/64-char hex SHA. The reader
+  // validates before reading, but the boundary caller should not hand
+  // a non-SHA revision to `authorizesLiteralClaim` and rely on the
+  // downstream reject to do the right thing — pass `null` explicitly
+  // so every `unverified` demotion gets a clear `no-exact-revision`
+  // reason instead of a stringly-typed free-form input. Hoisted so the
+  // blocker-verification artifact (#1016) persists the same validated
+  // revision the verifier received, not the raw free-form input.
+  const HEX_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+  const candidateRevision = context.headSha || String(pr.headRefOid ?? "") || "";
+  const expectedRevision = HEX_SHA_RE.test(candidateRevision) ? candidateRevision : null;
+  let blockerVerification: Awaited<ReturnType<typeof applyBlockerVerification>> | null = null;
+  if (Array.isArray(reviewRecord.findings)) {
+    capCiEvidenceFindings(reviewRecord.findings as ArtifactFinding[], ciChecksMarkdown);
+    const readSource = createHeadSourceReader({ workspace, revision: expectedRevision });
+    blockerVerification = await applyBlockerVerification(reviewRecord.findings as ArtifactFinding[], {
+      readSource,
+      expectedRevision,
+    });
+  }
   const verdictPolicy = env.VERDICT_POLICY ?? "strict";
   // Captured before any layer mutates it: the strict mapping (#811) takes the
   // model verdict as an input, not as the final answer.
@@ -884,15 +1199,16 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     humanReviews: safeJsonArray(ws.read("human-reviews.json")) as never,
     verdictPolicy,
   };
-  // #874: read here (rather than after the verdict is decided, like the
-  // advisory requirement_coverage fold below) because a trace escalation
-  // must be visible to the verdict mapping, not just recorded afterward.
-  const ledgerValue = safeJson(ws.read("requirement-ledger.json"));
-  const requirementTraceEnabled = (env.REQUIREMENT_TRACE ?? "false").toLowerCase() === "true";
+  // #874: the ledger (read above for the #959 trace scope) feeds the trace
+  // escalation, which must be visible to the verdict mapping, not just
+  // recorded afterward.
   let requirementTraceResult: ReturnType<typeof applyRequirementTraceEnforcement> | null = null;
+  let completenessResult: ReturnType<typeof applyRequiredCheckValidation> | null = null;
+  let completenessStatus = "none";
   if (analysisEngine === MODEL_UNAVAILABLE_ENGINE) {
     // on-model-failure=notice (#863): no model reviewed this PR, so the
     // notice's request_changes is final; no verdict policy may relax it.
+    // No enforcement overlay runs on this branch, so its block is entirely notice-derived.
   } else if (verdictPolicy === "strict") {
     // #811 composition (same order as the enforcement-pipeline fixture):
     // coverage, then the enforcement overlays, then the strict mapping over
@@ -901,20 +1217,64 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     // `required_checks` write to have already happened (its own escalation
     // must not be clobbered by it), and its synthesized findings must be in
     // place before the strict mapping counts open findings.
-    const completeness = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace });
+    completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
+    completenessStatus = completenessResult.status;
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     const forced = failClosedEnforcementFired(enforcementInputs)
-      || (completeness.status === "incomplete" && completeness.mode === "fail");
+      || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
+    // #1016: the strict mapping computes the unknown-evidence forcing
+    // signal from the artifact's own `grounding_status` field — any
+    // demoted finding with `grounding_status === "unverified"` forces
+    // `request_changes` with a #1016 attribution note so an approve cannot
+    // silently certify a claim the verifier never checked.
     applyStrictVerdictPolicy(reviewRecord as never, { modelVerdict, forced });
+    // The strict mapping can derive an approve after the enforcement banner
+    // was written; reconcile the markdown with the final verdict.
+    reconcileEnforcedReviewMarkdown(reviewRecord as never);
   } else {
     applyVerdictPolicy(reviewRecord as never, verdictPolicy, {
       nonBlockingCategories: new Set(splitCsv(env.NON_BLOCKING_FINDING_CATEGORIES ?? "")),
       securityFlagged: isSecurityFlagged(classificationArtifact),
     });
-    applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
-    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace });
+    completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
+    completenessStatus = completenessResult.status;
+    requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState });
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
+    // #977: the model's own request_changes is relaxed only when every
+    // still-open finding is a verification ask and no independent
+    // deterministic gate fired. The overlays above have already run, so
+    // their blocks are visible here.
+    const forced = failClosedEnforcementFired(enforcementInputs)
+      || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
+    relaxVerificationOnlyVerdict(reviewRecord as never, { forced });
+    relaxCiOnlyVerdict(reviewRecord as never, { forced });
+    // #1016: relaxUnverifiedBlockerVerdict itself refuses to relax when any
+    // demoted finding has `grounding_status === "unverified"` (unknown
+    // evidence, not a refutation) — the verifier did not disprove the
+    // claim, so a clean review cannot be certified.
+    relaxUnverifiedBlockerVerdict(reviewRecord as never, { forced });
+    // #977: the relaxation can flip the model's request_changes to approve
+    // after the enforcement banner was written; reconcile the markdown with
+    // the final verdict.
+    reconcileEnforcedReviewMarkdown(reviewRecord as never);
+  }
+  if (blockerVerification !== null && blockerVerification.demoted > 0) {
+    ws.write("blocker-verification.json", Buffer.from(`${pyJsonDumps({
+      version: 1,
+      // #1016: persist the validated revision the verifier received — the
+      // raw `context.headSha || String(pr.headRefOid ?? "") || ""` fallback
+      // above can be a free-form string when neither field is a hex SHA,
+      // but the verifier rejects it to `null` before any read. Recording
+      // what was actually validated keeps the artifact consistent with
+      // the verifier's own input and any future consumer that joins on
+      // `expected_revision`.
+      expected_revision: expectedRevision ?? null,
+      demoted: blockerVerification.demoted,
+      findings: blockerVerification.findings,
+    })}\n`, "utf8"));
+    reviewRecord.review_markdown = String(reviewRecord.review_markdown ?? "")
+      + `\n\n_${blockerVerification.demoted} finding(s) asserting committed source text could not be confirmed against exact-head source and are listed above as non-blocking. Deterministic enforcement gates are unaffected._`;
   }
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(reviewRecord)}\n`, "utf8"));
 
@@ -947,8 +1307,39 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // output — persisted immediately below — already reflects a tool-loop
   // coverage gap, not only a completed run's required-check status.
   const partialCoverage = resolvePartialCoverage(harnessForMarker, toolMode === "native_loop", ws.isNonEmpty(enforcementHarness));
+  const executionIncomplete = partialCoverage !== undefined || completenessStatus === "incomplete";
+  const traceIncomplete = reviewRecord.requirement_trace_incomplete === true;
+  const incompleteReason: IncompleteReason = executionIncomplete && traceIncomplete ? "both"
+    : executionIncomplete ? "execution"
+    : traceIncomplete ? "requirement_trace"
+    : "none";
   const outputVerdict = String(reviewRecord.verdict ?? "");
   const outputRequiredChecks = String(reviewRecord.required_checks ?? "none");
+  // #978: persist whether this verdict can bypass fail-on-request-changes,
+  // not merely whether some part of the tool loop degraded.
+  const nativeLoopDegraded = (harnessForMarker as { native_loop_degraded?: unknown } | null)?.native_loop_degraded;
+  const noEvidenceGathered = typeof nativeLoopDegraded === "string" && nativeLoopDegraded.length > 0;
+  // The authoritative trace-incomplete flag covers both unmet and
+  // unverifiable rows. Policy and enforcement have finished before this
+  // snapshot, so the final verdict and provenance are authoritative here.
+  const verdictSource = String(reviewRecord.verdict_source ?? "model");
+  const deterministicBlock = computeDeterministicBlock({
+    enforcementInputs,
+    completeness: completenessResult,
+    requirementTraceIncomplete: traceIncomplete,
+    finalVerdict: outputVerdict,
+    verdictSource,
+  });
+  // The notice branch skips every enforcement overlay, so its request_changes
+  // is entirely notice-derived and there is no deterministic block to override.
+  // No-evidence eligibility is deliberately fallback-only: primary corpus
+  // reviews after zero tool calls do not inherit #978's exemption.
+  const degradedGateBypass = resolveDegradedGateBypass({
+    notice: analysisEngine === MODEL_UNAVAILABLE_ENGINE,
+    fromFallback: primary.fromFallback,
+    noEvidenceGathered,
+    deterministicBlock,
+  });
   // #873 maintainer follow-up: the standalone `publish` CLI is a separate
   // process that cannot see `toolMode`/`enforcementHarness` — trusting the
   // ambient TOOL_MODE/REVIEW_ROUTE stage env it re-derives them from is
@@ -966,15 +1357,61 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     route: env.REVIEW_ROUTE ?? "legacy",
     partial_coverage: partialCoverage ?? null,
     required_checks: outputRequiredChecks,
+    ...(incompleteReason !== "none" ? { incomplete_reason: incompleteReason } : {}),
   };
   ws.write("review-coverage.json", Buffer.from(`${pyJsonDumps(reviewCoverage)}\n`, "utf8"));
+  // #1003: the triage outputs. Disabled means "" for BOTH — "did not run",
+  // deliberately distinct from the fail-closed `unknown` answer, so a
+  // consumer can tell "not asked" from "could not tell". Enabled, the
+  // decision is re-validated against the three literals here too (the parser
+  // already fails closed; this is the publish/step-summary boundary's own
+  // fail-closed check for a carried-forward or hand-edited artifact). Triage
+  // is review-only: no value below feeds the verdict, the marker, or any
+  // tool/fork/evidence gate.
+  const reviewTriageEnabled = config.reviewTriage === true;
+  const triageReason = reviewTriageEnabled && typeof reviewRecord.review_triage_reason === "string"
+    ? reviewRecord.review_triage_reason
+    : "";
+  const triageDecision = reviewTriageEnabled
+    ? resolveReviewTriageDecision(reviewRecord.review_triage_decision, triageReason)
+    : "";
+  // #1005: the deterministic routing plan. Computed only when triage and
+  // routing are both enabled; the resolver validates every model-named logical
+  // target against trusted configuration and fails closed on any uncertain
+  // state, so a model can never cause an unconfigured identity to be
+  // requested. The plan is persisted for the publish step to act on.
+  const triageTargets = Array.isArray(reviewRecord.review_triage_targets)
+    ? reviewRecord.review_triage_targets.filter((target): target is string => typeof target === "string")
+    : [];
+  const routingPlan: HumanReviewRoutingPlan | null = reviewTriageEnabled && routingMode !== "off"
+    ? resolveHumanReviewRouting({
+        mode: routingMode,
+        decision: (triageDecision === "" ? "unknown" : triageDecision) as ReviewTriageDecision,
+        targets: triageTargets,
+        config: reviewerRouting.targets,
+        isForkPr: forkFlag === "true",
+      })
+    : null;
+  if (routingPlan !== null) {
+    ws.write("review-routing.json", `${JSON.stringify({
+      mode: routingPlan.mode,
+      status: routingPlan.status,
+      target_ids: routingPlan.targetIds,
+      users: routingPlan.users,
+      teams: routingPlan.teams,
+      detail: routingPlan.detail,
+    })}\n`);
+  }
+  const routingOutput = routingPlan === null || routingPlan.status === "off" ? "" : routingPlan.status;
   const outputs: ReviewStepOutputs = {
     verdict: outputVerdict,
+    degradedGateBypass,
     verdictSource: String(reviewRecord.verdict_source ?? "model"),
     requiredChecks: outputRequiredChecks,
     // #873: additive alongside verdict — a partial review's verdict can
     // still read "approve" (the strict mapping's own contract), so this is
     // the one output that surfaces the coverage gap on its own.
+    incompleteReason,
     reviewResult: markerReviewResult({
       verdictPolicy,
       verdict: outputVerdict,
@@ -984,13 +1421,16 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     }),
     reviewRoute: env.REVIEW_ROUTE ?? "legacy",
     escalationReason: escalationReasons,
+    reviewTriageDecision: triageDecision,
+    reviewTriageReason: triageReason,
+    reviewTriageRouting: routingOutput,
     reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     findings: pyJsonDumps(Array.isArray(reviewRecord.findings) ? reviewRecord.findings : []),
     toolCalls,
     cacheHitRatio,
     analysisEngine,
   };
-  ws.write("review-body.md", outputs.reviewMarkdown);
+  ws.write("review-body.md", redactText(outputs.reviewMarkdown));
   ws.write("verdict.txt", `${outputs.verdict}\n`);
   ws.write("analysis_engine.txt", `${analysisEngine}\n`);
   persistOutputs(context.outputFilePath, formatReviewStepOutputs(outputs));
@@ -1001,16 +1441,13 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     reviewRecord,
     primaryHarness: safeJson(ws.read("tool-harness.json")),
     smartHarness: safeJson(ws.read("tool-harness.smart.json")),
-    specialistOutcome,
-    deepMode,
     coverage: safeJson(ws.read("requirement-coverage.json")),
     budgets,
-    profiles,
     route: outputs.reviewRoute,
     routeReason: env.ROUTE_REASON ?? "",
     analysisEngine,
-    escalationReasons,
     fallbackUsed: primary.fromFallback,
+    ...(routingPlan !== null ? { reviewRouting: routingPlan } : {}),
   });
 
   const finished = clock();
@@ -1037,6 +1474,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     // Same value the #873 review-result output above already carries.
     reviewResult: outputs.reviewResult,
     requiredChecks: outputs.requiredChecks,
+    ...(incompleteReason !== "none" ? { incompleteReason } : {}),
     reviewRoute: outputs.reviewRoute,
     escalationReason: outputs.escalationReason,
     cacheHitRatio: outputs.cacheHitRatio,
@@ -1047,6 +1485,10 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ...(toolBudgetTelemetry.calls !== undefined ? { toolCalls: toolBudgetTelemetry.calls } : {}),
     ...(toolBudgetTelemetry.rounds !== undefined ? { toolRounds: toolBudgetTelemetry.rounds } : {}),
     ...(toolBudgetTelemetry.maxRounds !== undefined ? { maxRounds: toolBudgetTelemetry.maxRounds } : {}),
+    ...(toolBudgetTelemetry.contextBudget !== undefined ? { contextBudget: toolBudgetTelemetry.contextBudget } : {}),
+    ...(toolBudgetTelemetry.contextPeak !== undefined ? { contextPeak: toolBudgetTelemetry.contextPeak } : {}),
+    actionVersion: ACTION_VERSION,
+    degradedGateBypass: outputs.degradedGateBypass,
   });
   return {
     outputs,
@@ -1069,6 +1511,8 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ...(toolBudgetTelemetry.calls !== undefined ? { toolCallsUsed: toolBudgetTelemetry.calls } : {}),
     ...(toolBudgetTelemetry.rounds !== undefined ? { toolRoundsUsed: toolBudgetTelemetry.rounds } : {}),
     ...(toolBudgetTelemetry.maxRounds !== undefined ? { toolMaxRounds: toolBudgetTelemetry.maxRounds } : {}),
+    ...(toolBudgetTelemetry.contextBudget !== undefined ? { contextBudget: toolBudgetTelemetry.contextBudget } : {}),
+    ...(toolBudgetTelemetry.contextPeak !== undefined ? { contextPeak: toolBudgetTelemetry.contextPeak } : {}),
   };
 }
 
@@ -1080,6 +1524,44 @@ function cachedProjectNumber(bytes: Uint8Array): number | null {
   const value = safeJson(bytes);
   const number = value?.number;
   return typeof number === "number" ? number : null;
+}
+
+/** #978: whether a deterministic, rule-based layer owns the final verdict.
+ * A fail-closed enforcement layer, a required-check fail mode, incomplete
+ * requirement-trace coverage, or any verdict policy/enforcement escalation
+ * (`verdict_source !== "model"`) outranks the degraded gate exemption — an
+ * operator who enabled one of those meant it. `requirement_trace_incomplete`
+ * is authoritative for both `unmet` and `unverifiable` rows (#1095: the trace
+ * no longer synthesizes findings, so incompleteness is the pass's own
+ * signal). A model-originated `request_changes` keeps
+ * `verdict_source === "model"` and stays eligible. */
+export function computeDeterministicBlock(input: {
+  enforcementInputs: EnforcementInputs;
+  completeness: { status: string; mode: string } | null;
+  requirementTraceIncomplete: boolean;
+  finalVerdict: string;
+  verdictSource: string;
+}): boolean {
+  return failClosedEnforcementFired(input.enforcementInputs)
+    || (input.completeness !== null && input.completeness.status === "incomplete" && input.completeness.mode === "fail")
+    || input.requirementTraceIncomplete
+    // verdict_source records whether policy/enforcement forced the final
+    // verdict; a model-originated request_changes remains eligible for #978.
+    || (input.finalVerdict === "request_changes" && input.verdictSource !== "model");
+}
+
+/** #978: whether a final request_changes may bypass fail-on-request-changes.
+ * Only a block the degraded MODEL produced is eligible: a deterministic
+ * fail-closed layer outranks the exemption, and the no-evidence case is
+ * deliberately fallback-only (#978 asked for the fallback with no gathered
+ * evidence, not a primary corpus review after zero tool calls). */
+export function resolveDegradedGateBypass(input: {
+  notice: boolean;
+  fromFallback: boolean;
+  noEvidenceGathered: boolean;
+  deterministicBlock: boolean;
+}): boolean {
+  return input.notice || (input.fromFallback && input.noEvidenceGathered && !input.deterministicBlock);
 }
 
 /** #873: exported so the standalone `publish` CLI entrypoint (a separate
@@ -1121,9 +1603,11 @@ function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): {
   calls?: number;
   rounds?: number;
   maxRounds?: number;
+  contextBudget?: number;
+  contextPeak?: number;
 } {
   if (harness === null) return {};
-  const out: { budget?: number; source?: string; calls?: number; rounds?: number; maxRounds?: number } = {};
+  const out: { budget?: number; source?: string; calls?: number; rounds?: number; maxRounds?: number; contextBudget?: number; contextPeak?: number } = {};
   if (typeof harness.tool_request_budget === "number") out.budget = harness.tool_request_budget;
   if (typeof harness.tool_budget_source === "string" && harness.tool_budget_source !== "") {
     out.source = harness.tool_budget_source;
@@ -1142,6 +1626,47 @@ function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): {
     const budget = (telemetry as Record<string, unknown>).budget;
     if (budget !== null && typeof budget === "object" && typeof (budget as Record<string, unknown>).max_rounds === "number") {
       out.maxRounds = (budget as Record<string, unknown>).max_rounds as number;
+    }
+    // #922: the conversation budget the loop compacted against and its peak.
+    if (budget !== null && typeof budget === "object" && typeof (budget as Record<string, unknown>).max_conversation_tokens === "number") {
+      out.contextBudget = (budget as Record<string, unknown>).max_conversation_tokens as number;
+    }
+    if (usage !== null && typeof usage === "object" && typeof (usage as Record<string, unknown>).peak_conversation_tokens === "number") {
+      out.contextPeak = (usage as Record<string, unknown>).peak_conversation_tokens as number;
+    }
+  }
+  return out;
+}
+
+/** #935: what the change touches, from the FULL raw diff (the budgeted
+ * `pr.diff.truncated` may drop the very hunk that touches a requirement's
+ * subject). Undefined when the raw diff is unavailable, so the trace keeps
+ * every requirement in scope instead of treating missing evidence as an
+ * empty change. */
+export function traceChangedText(ws: Pick<RunWorkspace, "readText" | "read">): string | undefined {
+  const diff = ws.readText("pr.diff");
+  if (diff === null || diff === undefined || diff === "") return undefined;
+  return changedSubjectText(diff, changedFilePaths(safeJsonArray(ws.read("pr-files.json"))));
+}
+
+/** #958: the changed file paths (current and previous names), lowercased, for
+ * owner-glob matching. Undefined when the raw diff is unavailable, mirroring
+ * `traceChangedText`'s fail-closed rule (missing evidence keeps every
+ * requirement in scope rather than treating it as an empty change). */
+export function traceChangedFilePaths(ws: Pick<RunWorkspace, "readText" | "read">): string[] | undefined {
+  const diff = ws.readText("pr.diff");
+  if (diff === null || diff === undefined || diff === "") return undefined;
+  return changedFilePaths(safeJsonArray(ws.read("pr-files.json"))).map((path) => path.toLowerCase());
+}
+
+/** Changed file paths (current and previous names) from `pr-files.json`. */
+function changedFilePaths(files: unknown[] | null): string[] {
+  const out: string[] = [];
+  for (const file of files ?? []) {
+    if (!file || typeof file !== "object") continue;
+    for (const key of ["filename", "previous_filename"]) {
+      const value = (file as Record<string, unknown>)[key];
+      if (typeof value === "string" && value !== "") out.push(value);
     }
   }
   return out;
@@ -1234,6 +1759,7 @@ interface ReviewCallInput {
   userMessage: string;
   log: (line: string) => void;
   errorLog: (line: string) => void;
+  annotate: (line: string) => void;
   clock: () => number;
   readonly sleep?: ((seconds: number) => Promise<void>) | undefined;
 }
@@ -1242,6 +1768,10 @@ function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | 
   const resolved = tier === "fallback" ? profiles.fallback : tier === "smart" ? profiles.smart : profiles.primary;
   const aiMaxTokens = Number(env.AI_MAX_TOKENS ?? "8192") || 8192;
   const temperatureRaw = env.AI_TEMPERATURE ?? "0.1";
+  // #1037: same operator headers on every lane; unset config yields
+  // `undefined` and the profile omits the field, keeping requests
+  // byte-identical.
+  const extraHeaders = extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "");
   return {
     label: tier === "fallback" ? "Fallback" : tier === "smart" ? "Smart" : "Primary",
     baseUrl: resolved.baseUrl,
@@ -1254,11 +1784,19 @@ function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | 
     connectTimeoutSec: resolved.connectTimeoutSec,
     retries: resolved.retries,
     retryDelaySec: resolved.retryDelaySec,
-    shape: tierRequestShape(tier === "smart" ? "smart" : tier === "fallback" ? "fallback" : (env.REVIEW_CONTEXT_PROFILE === "smart" ? "smart" : "primary"), env),
+    shape: tierRequestShape(tier === "smart" ? "smart" : tier === "fallback" ? "fallback" : "primary", env),
     maxTokens: aiMaxTokens,
     temperature: temperatureRaw === "" ? "" : Number(temperatureRaw) || 0.1,
-    responseFormat: (env.AI_RESPONSE_FORMAT ?? "off") as TierProfile["responseFormat"],
+    responseFormat: resolved.responseFormat,
     tokensParam: (env.AI_TOKENS_PARAM ?? "max_tokens") as TierProfile["tokensParam"],
+    // #998: the lane's resolved effort; "" omits the provider field entirely.
+    // #1049 review: the Anthropic opt-in is the lane's own assertion —
+    // the smart lane never inherits the base flag.
+    reasoningEffort: resolved.reasoningEffort,
+    anthropicEffortSupported: resolved.anthropicEffortSupported,
+    // #1047: the lane's own structured-output assertion, same per-lane rule.
+    anthropicStructuredOutputSupported: resolved.anthropicStructuredOutputSupported,
+    ...(extraHeaders !== undefined ? { extraHeaders } : {}),
   };
 }
 
@@ -1270,8 +1808,25 @@ async function callTier(
   requestArtifact: string,
   responseArtifact: string,
 ): Promise<{ ok: boolean; artifact: Record<string, unknown> | null; rawResponse: unknown }> {
-  const { env, ws, log, errorLog } = input;
+  const { env, ws, log, errorLog, annotate } = input;
   const corpusText = ws.readText(corpusName) ?? "";
+  // #998 (#1049 review): an Anthropic effort the operator configured but the
+  // lane's endpoint opt-in refuses is NOT sent. Say so once, per call, at the
+  // runtime boundary — a silently dropped parameter is exactly the confusion
+  // this feature exists to remove.
+  if (profile.apiFormat === "anthropic" && profile.reasoningEffort !== "" && !profile.anthropicEffortSupported) {
+    log(`WARNING: ${anthropicEffortInactiveWarning(tier, profile.reasoningEffort, " (review call)")}`);
+  }
+  // #1047: same truth-telling for structured output. A resolved json_schema
+  // the endpoint opt-in refuses is NOT enforced, and json_object has no
+  // Anthropic-native wire form at all — either way the JSON contract is
+  // prompt-only, and the operator is told so by name instead of believing a
+  // parameter was sent.
+  if (profile.apiFormat === "anthropic" && profile.responseFormat === "json_schema" && !profile.anthropicStructuredOutputSupported) {
+    log(`WARNING: ${anthropicStructuredOutputInactiveWarning(tier, " (review call)")}`);
+  } else if (profile.apiFormat === "anthropic" && profile.responseFormat === "json_object") {
+    log(`WARNING: ${anthropicJsonObjectsPromptOnlyWarning(tier, "json_object", " (review call)")}`);
+  }
   // Persist the request artifact before the first attempt (v2 writes it once).
   const requestPayload = buildModelRequest({
     apiFormat: profile.apiFormat,
@@ -1285,6 +1840,9 @@ async function callTier(
     temperature: profile.temperature,
     responseFormat: profile.responseFormat,
     tokensParam: profile.tokensParam,
+    reasoningEffort: profile.reasoningEffort,
+    anthropicEffortSupported: profile.anthropicEffortSupported,
+    anthropicStructuredOutputSupported: profile.anthropicStructuredOutputSupported,
   });
   ws.write(requestArtifact, pyJsonDumps(requestPayload.body));
   ws.write(responseArtifact, "");
@@ -1296,52 +1854,125 @@ async function callTier(
   }, {
     ...(input.sleep !== undefined ? { sleep: input.sleep } : {}),
     call: async (chatInput) => {
-      const result = await runChatRequest(chatInput);
+      // #1058: the injected clock must reach the transport's own 429/5xx
+      // backoff too (that loop counts in ms, the model-tier one in seconds),
+      // or a test that opts into a deterministic clock still pays the real
+      // 1s/2s waits. Production passes no `sleep`, so nothing changes there.
+      const result = await runChatRequest(
+        input.sleep === undefined ? chatInput : { ...chatInput, sleep: (ms: number) => input.sleep!(ms / 1000) },
+      );
       if (result.status === "failure") return result;
       ws.write(responseArtifact, pyJsonDumps(result.raw));
       return result;
     },
   });
+  // #1047: the bounded, content-free failure-shape record — logged as one
+  // line and persisted beside the error so a degraded run explains itself.
+  // #1047: bounded failure-shape diagnostics. The record carries no response
+  // content by construction, and its one provider-controlled free-text field
+  // (finish_reason) was already masked in-record — but the LINE is still
+  // masked whole against the tier's key before it is logged, because the
+  // static field names ("failure_kind" contains a "k") can collide with a
+  // very short configured key. Over-redacting a few incidental letters is the
+  // accepted cost (the same second-pass rationale as describeTransportFailure).
+  const diagnosticsLine = outcome.status !== "ok" && outcome.diagnostics !== undefined
+    ? maskKnownSecrets(` [${formatResponseDiagnosticsLine(outcome.diagnostics.record)}]`, [profile.apiKey])
+    : "";
   if (outcome.status === "ok") {
-    log(`${profile.label} model attempt ${outcome.attempts}/${profile.retries}: ${profile.model} @ ${profile.baseUrl} (${profile.apiFormat})`);
+    // #998: the effective effort is part of which request produced this
+    // verdict, so the per-call debug line carries it — appended only when one
+    // was actually sent, keeping the line unchanged for every existing setup.
+    const wireEffort = effectiveWireEffort(profile.apiFormat, profile.reasoningEffort, profile.anthropicEffortSupported);
+    const effortNote = wireEffort === "" ? "" : `, effort=${wireEffort}`;
+    // #1047 (review): report the format the SUCCESSFUL request actually
+    // carried, never the configuration. The transport's one-shot strip retry
+    // can recover a capability-mismatch 400 without the parameter — the
+    // verdict then came from a prompt-only request, so `format=json_schema`
+    // would be a lie. The strip is announced once, by surface and outcome,
+    // and persisted as bounded attempt evidence beside the initial request
+    // artifact (which keeps its original bytes: it records what was FIRST
+    // sent). No secrets and no response content — the note carries only the
+    // parameter name and the attempt count.
+    const stripped = outcome.strippedStructuredOutput;
+    if (stripped !== undefined) {
+      log(`WARNING: ${profile.label}: the endpoint rejected the structured-output parameter (${stripped}) with HTTP 400; the request was retried once without it and recovered prompt-only`);
+      const effectiveArtifact = requestArtifact.replace(/\.json$/, ".effective.json");
+      ws.write(effectiveArtifact, Buffer.from(`${pyJsonDumps({
+        removed: stripped,
+        note: "structured output removed after HTTP 400; request recovered prompt-only",
+        attempts: outcome.attempts,
+      })}\n`, "utf8"));
+    }
+    const wireFormat = effectiveWireResponseFormat(profile.apiFormat, profile.responseFormat, profile.anthropicStructuredOutputSupported);
+    const formatNote = wireFormat === "json_schema" && profile.apiFormat === "anthropic" && stripped === undefined ? ", format=json_schema" : "";
+    const raisedNote = outcome.budgetRaisedTo !== undefined ? ` (completion budget raised to ${outcome.budgetRaisedTo} after a token-cap failure)` : "";
+    log(`${profile.label} model attempt ${outcome.attempts}/${profile.retries}: ${profile.model} @ ${profile.baseUrl} (${profile.apiFormat}${effortNote}${formatNote})${raisedNote}`);
     const parsed = parseVerdictResponse(outcome.rawResponse, [profile.apiKey]);
     const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
     ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
     return { ok: true, artifact, rawResponse: outcome.rawResponse };
   }
   if (outcome.status === "empty_completion") {
-    errorLog(`${profile.label}: model returned an empty completion; not retrying ${tier}`);
+    errorLog(`${profile.label}: model returned an empty completion; not retrying ${tier}${diagnosticsLine}`);
+    if (outcome.diagnostics !== undefined) {
+      ws.write(responseArtifact, pyJsonDumps({ error: outcome.failure.message, diagnostics: outcome.diagnostics.record }));
+    }
   } else if (outcome.status === "parse_exhausted") {
     // #868: the raw response artifact was written before parsing could tell
     // whether the body carried an in-body error (already-masked message
     // below, via `parseVerdictResponse`'s `secrets` — see
     // `surfaceStreamError`); replace it so an unmasked provider body never
     // survives on disk, mirroring the transport-exhausted branch below.
-    errorLog(`${profile.label}: parse/validate failures exhausted (${outcome.failure.message})`);
-    ws.write(responseArtifact, pyJsonDumps({ error: outcome.failure.message }));
+    errorLog(`${profile.label}: parse/validate failures exhausted (${outcome.failure.message})${diagnosticsLine}`);
+    ws.write(responseArtifact, pyJsonDumps(outcome.diagnostics !== undefined
+      ? { error: outcome.failure.message, diagnostics: outcome.diagnostics.record }
+      : { error: outcome.failure.message }));
   } else {
     // #846: carry the HTTP status and a redacted, length-capped body excerpt
     // (plus the ai-api-format hint on a 404) instead of the bare "model
     // endpoint returned HTTP <status>" message. `secrets` masks this tier's
     // configured key unconditionally, on top of `redactText`'s heuristics.
-    const detail = describeTransportFailure(outcome.failure, { secrets: [profile.apiKey] });
-    errorLog(`${profile.label}: transport failures exhausted (${detail})`);
-    ws.write(responseArtifact, pyJsonDumps({ error: detail }));
+    // #1037: this lane's configured extra-header VALUES join that list (a
+    // provider error body can quote them back, and they carry proxy tokens).
+    const detail = describeTransportFailure(outcome.failure, { secrets: [profile.apiKey, ...Object.values(profile.extraHeaders ?? {})] });
+    errorLog(`${profile.label}: transport failures exhausted (${detail})${diagnosticsLine}`);
+    if (outcome.nonRetryable === true) {
+      annotate(`::error::${profile.label}: model endpoint returned a non-retryable HTTP status; failing over without retrying (${annotationSafe(detail)})`);
+    }
+    ws.write(responseArtifact, pyJsonDumps(outcome.diagnostics !== undefined
+      ? { error: detail, diagnostics: outcome.diagnostics.record }
+      : { error: detail }));
   }
   return { ok: false, artifact: null, rawResponse: null };
 }
 
+/** Every API key the run could have sent, longest first so a key that
+ * contains another is masked whole: the route-bound AI_API_KEY plus each
+ * configured profile, so the mask holds if the route binding changes. */
+function configuredApiKeys(routeKey: string | undefined, profiles: TierProfiles): string[] {
+  const keys = [routeKey, profiles.primary.apiKey, profiles.smart.apiKey, profiles.fallback.apiKey]
+    .filter((key): key is string => typeof key === "string" && key !== "");
+  return [...new Set(keys)].sort((a, b) => b.length - a.length);
+}
+
 /** review.sh: the primary call (native-verdict fast path, then the standard
  * corpus review) and the fallback on total primary failure. */
-async function producePrimaryReview(input: ReviewCallInput & { runDir?: string }): Promise<{
+async function producePrimaryReview(input: ReviewCallInput & {
+  runDir?: string;
+  budgets: ReturnType<typeof resolveTierBudgets>;
+}): Promise<{
   artifact: Record<string, unknown> | null;
   analysisEngine: string;
   fromPrimary: boolean;
   fromFallback: boolean;
 }> {
-  const { env, ws, profiles, log, errorLog } = input;
+  const { env, ws, profiles, log, errorLog, budgets } = input;
   const toolMode = (env.TOOL_MODE ?? "off").toLowerCase();
   const harness = safeJson(ws.read("tool-harness.json"));
+  // #965: the first pass is always the primary tier — the resolver never
+  // emits "smart", and the code encodes that instead of trusting it.
+  const firstTier = "primary" as const;
+  const firstProfile = tierProfileFrom(profiles, firstTier, env);
 
   // native_loop in-conversation verdict (#205/#637): parse the harness's own
   // verdict response and skip the separate review call when it is reusable.
@@ -1350,7 +1981,9 @@ async function producePrimaryReview(input: ReviewCallInput & { runDir?: string }
     if (responseBytes !== null && responseBytes.length > 0) {
       log("native_loop produced an in-conversation verdict; using it and skipping the separate review call");
       try {
-        const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")), [profiles.primary.apiKey]);
+        // The native loop calls the route-bound AI_* environment, which can
+        // differ from an explicit primary profile override, so mask every key.
+        const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")), configuredApiKeys(env.AI_API_KEY, profiles));
         const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
         ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
         return {
@@ -1376,11 +2009,13 @@ async function producePrimaryReview(input: ReviewCallInput & { runDir?: string }
     log(`native_loop did not produce a reusable in-conversation verdict (${String(harness.native_loop_verdict_reason ?? "unknown")}); falling back to the standard review call`);
   }
 
-  const primaryProfile = tierProfileFrom(profiles, "primary", env);
-  const engineBase = analysisEngineBase(env.AI_MODEL ?? "", env.AI_BASE_URL ?? "", env.AI_API_FORMAT ?? "openai");
-  const primary = await callTier("primary", primaryProfile, input, "review-corpus.truncated.md", "ai-request.primary.json", "ai-response.primary.json");
+  const engineBase = analysisEngineBase(firstProfile.model, firstProfile.baseUrl, firstProfile.apiFormat);
+  // The *.primary.json names are the first-pass slot, not the model. Read
+  // the model from the request body or the analysis-engine line, never from
+  // the filename.
+  const primary = await callTier(firstTier, firstProfile, input, "review-corpus.truncated.md", "ai-request.primary.json", "ai-response.primary.json");
   if (primary.ok) {
-    log("Primary model succeeded");
+    log(`${firstProfile.label} model succeeded`);
     return {
       artifact: primary.artifact,
       analysisEngine: annotateAnalysisEngine(engineBase, "primary", {
@@ -1394,15 +2029,21 @@ async function producePrimaryReview(input: ReviewCallInput & { runDir?: string }
 
   // Fallback is availability recovery, never quality escalation.
   if (!profiles.fallback.resolved) {
-    const outcome = handleModelFailure("Primary model unavailable and no fallback model configured", env.ON_MODEL_FAILURE ?? "fail");
+    const outcome = handleModelFailure(`${firstProfile.label} model unavailable and no fallback model configured`, env.ON_MODEL_FAILURE ?? "fail");
     if (outcome.action === "fail") throw new RunReviewError(outcome.reason);
     log("on_model_failure=notice: emitting a request_changes notice instead of failing the check");
     return noticeResult(ws, outcome);
   }
 
-  errorLog(`Primary model unavailable after retries; trying fallback: ${profiles.fallback.model} @ ${profiles.fallback.baseUrl} (${profiles.fallback.apiFormat})`);
-  // #368: the fallback re-truncates the initial corpus at 120000 bytes.
-  ws.write("review-corpus.fallback.truncated.md", truncateClean(ws.read("review-corpus.md") ?? new Uint8Array(0), 120000, "…[content truncated]\n"));
+  errorLog(`${firstProfile.label} model unavailable after retries; trying fallback: ${profiles.fallback.model} @ ${profiles.fallback.baseUrl} (${profiles.fallback.apiFormat})`);
+  // #368: the fallback re-truncates the initial corpus. #940: the bound is
+  // the declared fallback capacity — the fallback window can be smaller
+  // than the primary tier's — never above the historical 120000-byte
+  // constant.
+  const fallbackCorpusBudget = budgets.fallback !== null
+    ? Math.min(120000, budgets.fallback.maxCorpus)
+    : 120000;
+  ws.write("review-corpus.fallback.truncated.md", truncateClean(ws.read("review-corpus.md") ?? new Uint8Array(0), fallbackCorpusBudget, "…[content truncated]\n"));
   const fallbackProfile = tierProfileFrom(profiles, "fallback", env);
   const fallback = await callTier("fallback", fallbackProfile, input, "review-corpus.fallback.truncated.md", "ai-request.fallback.json", "ai-response.fallback.json");
   if (fallback.ok) {
@@ -1412,6 +2053,7 @@ async function producePrimaryReview(input: ReviewCallInput & { runDir?: string }
       analysisEngine: annotateAnalysisEngine(
         analysisEngineBase(profiles.fallback.model, profiles.fallback.baseUrl, profiles.fallback.apiFormat),
         "fallback",
+        { ...(env.REVIEW_ROUTE !== undefined ? { reviewRoute: env.REVIEW_ROUTE } : {}) },
       ),
       fromPrimary: false,
       fromFallback: true,
@@ -1460,11 +2102,35 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
       ws.write("tool-harness.smart.json", '{"tier":"smart","mode":"native_loop","skipped":true,"skip_reason":"fork-pr","rounds":0,"planned_request_count":0,"executed_request_count":0,"tool_results":[]}\n');
       log("Smart tool harness skipped for a cross-repository pull request.");
     } else {
+      // Build the smart-tier corpus BEFORE the harness: the native loop
+      // plans its investigation from review-corpus.smart.truncated.md
+      // (#969 — the primary flow builds its corpus before the harness too).
+      const prebuild = assembleCorpus(ws, input.env as StageEnv, input.budgets, "smart", "smart", input.generatedPaths, input.standards);
+      if (prebuild.overBudget) errorLog("ERROR: assembled smart corpus exceeds its context budget");
+      // The tier-smart harness reads its endpoint from the SMART_* env keys
+      // (tier-keyed, unlike the AI_* transport the loop uses at tier
+      // primary); bind the resolved smart profile for the harness phase.
+      const smartEnvKeys = ["SMART_BASE_URL", "SMART_MODEL", "SMART_API_FORMAT", "SMART_API_KEY", "SMART_REASONING_EFFORT"] as const;
+      const savedSmartEnv = smartEnvKeys.map((key) => [key, env[key]] as const);
+      env.SMART_BASE_URL = profiles.smart.baseUrl;
+      env.SMART_MODEL = profiles.smart.model;
+      env.SMART_API_FORMAT = profiles.smart.apiFormat;
+      env.SMART_API_KEY = profiles.smart.apiKey;
+      // #998: bind the smart lane's resolved effort beside its transport keys
+      // so the harness's loop rounds, summarizer turn, and closing verdict
+      // turn all send the smart effort rather than the base one.
+      env.SMART_REASONING_EFFORT = profiles.smart.reasoningEffort;
       env.TOOL_HARNESS_TIER = "smart";
       try {
         await runToolHarnessPhase(ws, env, input.workspace, log);
-      } catch {
+      } catch (cause) {
+        errorLog(`smart tool harness failed: ${cause instanceof Error ? cause.message : String(cause)}`);
         ws.write("tool-harness.smart.json", '{"tier":"smart","mode":"native_loop","error":"execution failed","stop_reason":"request-error","rounds":0,"planned_request_count":0,"executed_request_count":0,"tool_results":[]}\n');
+      } finally {
+        for (const [key, value] of savedSmartEnv) {
+          if (value === undefined) delete env[key];
+          else env[key] = value;
+        }
       }
       const smartHarness = safeJson(ws.read("tool-harness.smart.json")) ?? {};
       const status = String(smartHarness.stop_reason ?? smartHarness.native_loop_degraded ?? "");
@@ -1473,7 +2139,7 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
       const responseBytes = ws.read("ai-response.smart.json");
       if (status !== "request-error" && status !== "wall-clock-exceeded" && produced && responseBytes !== null && responseBytes.length > 0) {
         try {
-          const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")), [input.profiles.smart.apiKey]);
+          const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")), configuredApiKeys(env.AI_API_KEY, profiles));
           const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
           ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
           log("Smart tool harness produced a verdict");
@@ -1488,8 +2154,8 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
     }
   }
 
-  // Build the smart-tier corpus (slot smart → dedicated artifact names) and
-  // call the smart tier.
+  // Rebuild the smart-tier corpus with the harness's tool evidence included
+  // (slot smart → dedicated artifact names) and call the smart tier.
   const build = assembleCorpus(ws, input.env as StageEnv, input.budgets, "smart", "smart", input.generatedPaths, input.standards);
   if (build.overBudget) errorLog("ERROR: assembled smart corpus exceeds its context budget");
   const smartProfile = tierProfileFrom(profiles, "smart", env);
@@ -1498,150 +2164,3 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
 }
 
 // ---------------------------------------------------------------------------
-// Step summary (review.sh write_step_summary)
-// ---------------------------------------------------------------------------
-
-interface SummaryInput {
-  outputs: ReviewStepOutputs;
-  env: StageEnv;
-  ws: RunWorkspace;
-  reviewRecord: Record<string, unknown>;
-  primaryHarness: Record<string, unknown> | null;
-  smartHarness: Record<string, unknown> | null;
-  specialistOutcome: GateOutcome;
-  deepMode: string;
-  coverage: Record<string, unknown> | null;
-  budgets: ReturnType<typeof resolveTierBudgets>;
-  profiles: TierProfiles;
-  route: string;
-  routeReason: string;
-  analysisEngine: string;
-  escalationReasons: string;
-  fallbackUsed: boolean;
-}
-
-/** Port of write_step_summary: the observability table a debugging user
- * reads instead of raw logs. Written only when GITHUB_STEP_SUMMARY is set. */
-function writeStepSummary(stepSummaryPath: string, input: SummaryInput): void {
-  if (stepSummaryPath === "") return;
-  const { env, ws, reviewRecord, primaryHarness, smartHarness } = input;
-  const toolMode = (env.TOOL_MODE ?? "off").toLowerCase();
-  const findings = Array.isArray(reviewRecord.findings) ? reviewRecord.findings as unknown[] : [];
-  const toolCalls = Array.isArray(primaryHarness?.tool_calls) ? primaryHarness?.tool_calls as unknown[] : [];
-  const okCalls = toolCalls.filter((call) => (call as { status?: string }).status === "ok").length;
-  const coverageSummary = (input.coverage?.summary ?? {}) as Record<string, unknown>;
-  const total = typeof coverageSummary.total === "number" ? coverageSummary.total : 0;
-  const unknown = typeof coverageSummary.unknown === "number" ? coverageSummary.unknown : 0;
-
-  const profileKey = input.route === "escalated" || env.REVIEW_CONTEXT_PROFILE === "smart" ? "smart" : "primary";
-  const budget = input.budgets[profileKey];
-  const corpusName = input.route === "escalated" ? "review-corpus.smart.truncated.md" : "review-corpus.truncated.md";
-  const corpusBytes = byteLength(ws.read(corpusName));
-  const diffBytes = byteLength(ws.read("pr.diff"));
-
-  const usageFile = input.route === "escalated" && ws.isFile("ai-response.smart.json")
-    ? "ai-response.smart.json"
-    : input.fallbackUsed && ws.isFile("ai-response.fallback.json")
-      ? "ai-response.fallback.json"
-      : "ai-response.primary.json";
-  const usage = (safeJson(ws.read(usageFile))?.usage ?? {}) as Record<string, unknown>;
-
-  const nativeStatus = String(primaryHarness?.native_loop_verdict_status ?? "");
-  const deepReview = ws.isFile("specialists.json") ? safeJson(ws.read("specialists.json")) : null;
-
-  const table = renderStepSummary({
-    analysisEngine: publicAnalysisEngine(input.analysisEngine),
-    verdict: input.outputs.verdict || "unknown",
-    verdictSource: input.outputs.verdictSource,
-    findingsCount: findings.length,
-    blockersCount: findings.filter((f) => (f as { severity?: string }).severity === "blocker").length,
-    requiredChecksStatus: input.outputs.requiredChecks,
-    ...(total > 0 ? { requirementCoverage: { total, unknown } } : {}),
-    primaryTools: {
-      executedRequestCount: typeof primaryHarness?.executed_request_count === "number" ? primaryHarness.executed_request_count : 0,
-      successfulToolCalls: okCalls,
-      rounds: typeof primaryHarness?.rounds === "number" ? primaryHarness.rounds : 0,
-      stopReason: String(primaryHarness?.stop_reason ?? primaryHarness?.skip_reason ?? (toolMode === "native_loop" ? "unknown" : "disabled")),
-    },
-    ...(smartHarness !== null && toolMode === "native_loop"
-      ? {
-        smartTools: {
-          issuedToolCalls: Array.isArray(smartHarness.tool_calls) ? (smartHarness.tool_calls as unknown[]).length : 0,
-          rounds: typeof smartHarness.rounds === "number" ? smartHarness.rounds : 0,
-          requests: numberAt(smartHarness.usage, "requests") ?? numberAt(smartHarness.native_loop_usage, "requests") ?? 0,
-          stopReason: String(smartHarness.stop_reason ?? smartHarness.native_loop_degraded ?? smartHarness.skip_reason ?? smartHarness.error ?? "unknown"),
-          verdictStatus: String(smartHarness.native_loop_verdict_status ?? "corpus"),
-        },
-      }
-      : {}),
-    ...(nativeStatus !== ""
-      ? {
-        nativeVerdict: {
-          status: nativeStatus,
-          ...(primaryHarness?.native_loop_verdict_transport !== undefined && primaryHarness.native_loop_verdict_transport !== null
-            ? { transport: String(primaryHarness.native_loop_verdict_transport) }
-            : {}),
-          attempts: typeof primaryHarness?.native_loop_verdict_attempts === "number" ? primaryHarness.native_loop_verdict_attempts : 0,
-          retried: primaryHarness?.native_loop_verdict_retried === true,
-          ...(primaryHarness?.native_loop_verdict_reason !== undefined && primaryHarness.native_loop_verdict_reason !== null
-            ? { reason: String(primaryHarness.native_loop_verdict_reason) }
-            : {}),
-        },
-      }
-      : {}),
-    route: input.route,
-    ...(input.routeReason !== "" ? { routeReason: input.routeReason } : {}),
-    ...(deepReview !== null
-      ? {
-        deepReview: {
-          leads: String(deepReview.total_leads ?? 0),
-          errors: deepReview.any_errors === true,
-          ...(deepReview.deep_review_mode === "auto" && typeof deepReview.selection === "object" && deepReview.selection !== null
-            ? {
-              autoSelection: {
-                selected: arrayLength((deepReview.selection as Record<string, unknown>).selected_roles),
-                skipped: arrayLength((deepReview.selection as Record<string, unknown>).skipped_roles),
-              },
-            }
-            : {}),
-        },
-      }
-      : {}),
-    budget: /^\d+$/.test(env.MODEL_CONTEXT_TOKENS ?? "") ? `model_context_tokens=${env.MODEL_CONTEXT_TOKENS}` : `context_limit_mode=${env.CONTEXT_LIMIT_MODE ?? "normal"}`,
-    finalContext: `tier=${profileKey}; model_context_tokens=${contextCapacity(env, profileKey)}; corpus_budget=${budget.maxCorpus}B; corpus_actual=${corpusBytes}B; diff_budget=${budget.maxDiff}B; diff_actual=${diffBytes}B; request_shape=${profileKey === "smart" ? env.SMART_REQUEST_SHAPE ?? "default" : env.PRIMARY_REQUEST_SHAPE ?? "default"}`,
-    diffBytes: { actual: `${diffBytes}B`, truncated: diffBytes > budget.maxDiff ? `yes (cap ${budget.maxDiff})` : "no" },
-    corpusBytes: { actual: `${corpusBytes}B`, truncated: corpusBytes > budget.maxCorpus ? `yes (cap ${budget.maxCorpus})` : "no" },
-    promptTokens: stringAt(usage, "prompt_tokens"),
-    completionTokens: stringAt(usage, "completion_tokens"),
-    cacheHitRatio: input.outputs.cacheHitRatio,
-  });
-  try {
-    appendFileSync(stepSummaryPath, table);
-  } catch {
-    // The summary is observability; a write failure never fails the review.
-  }
-}
-
-function byteLength(bytes: Uint8Array | null | undefined): number {
-  return bytes === null || bytes === undefined ? 0 : bytes.length;
-}
-
-function arrayLength(value: unknown): number {
-  return Array.isArray(value) ? value.length : 0;
-}
-
-function numberAt(record: unknown, key: string): number | null {
-  if (record === null || typeof record !== "object") return null;
-  const value = (record as Record<string, unknown>)[key];
-  return typeof value === "number" ? value : null;
-}
-
-function stringAt(record: Record<string, unknown>, key: string): string {
-  const value = record[key];
-  return value === undefined || value === null ? "-" : String(value);
-}
-
-function contextCapacity(env: StageEnv, profileKey: "primary" | "smart"): string {
-  const tier = profileKey === "smart" ? env.SMART_MODEL_CONTEXT_TOKENS : env.PRIMARY_MODEL_CONTEXT_TOKENS;
-  return tier || env.MODEL_CONTEXT_TOKENS || "unset";
-}

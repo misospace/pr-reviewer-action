@@ -4,12 +4,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  ALLOWED_COMMANDS, UNTRACKED_PATH_ERROR, allowlistedHost, buildTrackedIndex, executeToolRequest, findFiles, ghApi, gitGrep,
+  ALLOWED_COMMANDS, UNTRACKED_PATH_ERROR, allowlistedHost, buildTrackedIndex, executeToolRequest, findFiles, ghApi, gitBlame, gitGrep,
   listTree, readFile, resolveWorkspacePath, runCommand, validateEndpoint,
   webFetch, webSearch, type ToolContext,
 } from "../src/tools/executors.js";
 import { McpToolset, isReadOnlyTool, parseServerSpecs, splitNamespaced } from "../src/tools/mcp.js";
 import { USER_AGENT } from "../src/platform/user-agent.js";
+import { REDACTED_SOURCE } from "../src/context/redact.js";
 
 function fixture(fn: (root: string, outside: string) => Promise<void> | void): Promise<void> {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "tools-test-")), root = path.join(base, "x"), outside = path.join(base, "xy");
@@ -19,6 +20,43 @@ function fixture(fn: (root: string, outside: string) => Promise<void> | void): P
 }
 const deps = () => ({ env: {}, runProcess: async (options: any) => ({ status: "exited", exitCode: 0, signal: null, stdout: Buffer.from(" ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456 AKIA1234567890ABCDEF "), stderr: Buffer.from(""), stdoutTruncated: false, stderrTruncated: false, durationMs: 1, termination: null }) as any });
 const ctx = (root: string, extra: Partial<ToolContext> = {}): ToolContext => ({ workspaceRoot: root, deps: deps(), ...extra });
+
+/** Test seam for the #1015 bound read: when the executor routes a workspace
+ * read through `git show <rev>:<path>` to bind the bytes to a committed
+ * revision, mock that call to read the actual file content from disk. The
+ * test never relies on the unverified fallback path here — every
+ * `sourceRevision`-bearing assertion below installs this mock so committed
+ * bytes are byte-identical to the bytes the masker sees. */
+function trackingRunProcess(cwd: string) {
+  const argvs: string[][] = [];
+  const runProcess = async (options: any) => {
+    argvs.push([options.file, ...(options.args ?? [])]);
+    const file = options.file;
+    const args: string[] = options.args ?? [];
+    if (file === "git" && args[0] === "show") {
+      const revPath = args[1] ?? "";
+      const colon = revPath.indexOf(":");
+      if (colon > 0) {
+        const rel = revPath.slice(colon + 1);
+        const full = path.resolve(cwd, rel);
+        if (full.startsWith(path.resolve(cwd) + path.sep) && fs.existsSync(full)) {
+          try {
+            return { status: "exited", exitCode: 0, signal: null, stdout: fs.readFileSync(full), stderr: Buffer.from(""), stdoutTruncated: false, stderrTruncated: false, durationMs: 1, termination: null } as any;
+          } catch (e) {
+            return { status: "exited", exitCode: 1, signal: null, stdout: Buffer.from(""), stderr: Buffer.from(String(e)), stdoutTruncated: false, stderrTruncated: false, durationMs: 1, termination: null } as any;
+          }
+        }
+      }
+      return { status: "exited", exitCode: 1, signal: null, stdout: Buffer.from(""), stderr: Buffer.from("git show: unknown revision or path not in the working tree"), stdoutTruncated: false, stderrTruncated: false, durationMs: 1, termination: null } as any;
+    }
+    return { status: "exited", exitCode: 0, signal: null, stdout: Buffer.from(" ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456 AKIA1234567890ABCDEF "), stderr: Buffer.from(""), stdoutTruncated: false, stderrTruncated: false, durationMs: 1, termination: null } as any;
+  };
+  return { argvs, deps: { env: {}, runProcess } as any };
+}
+const trackingCtx = (root: string, extra: Partial<ToolContext> = {}): { ctx: ToolContext; argvs: string[][] } => {
+  const t = trackingRunProcess(root);
+  return { ctx: { workspaceRoot: root, deps: t.deps, ...extra }, argvs: t.argvs };
+};
 
 test("workspace path guards reject traversal, absolute paths, NUL, symlink escape, secrets, denied names and sibling prefixes", async () => fixture((root, outside) => {
   fs.writeFileSync(path.join(root, "ok.txt"), "ok"); fs.writeFileSync(path.join(outside, "secret.txt"), "outside");
@@ -62,6 +100,97 @@ test("gh endpoint guard applies repo and denied-path policy on repo and root rou
   for (const route of ["repos/o/r/actions/secrets", "issues/actions/secrets", "search/actions/secrets"]) assert.match(validateEndpoint(route, ["o/r"]).error!, /Path segment denied/);
   assert.match(validateEndpoint("file:///etc/passwd", []).error!, /Dot-segment not allowed/);
   const bad = await ghApi("repos/o/r/actions/secrets", ctx("/tmp", { allowedGhRepos: ["o/r"], deps: { ...deps(), ghGet: async () => { throw Error("must not call"); } } })); assert.match(bad.error, /Path segment denied/);
+});
+
+test("gh_api decodes Contents API file objects instead of slicing base64 (#913)", async () => {
+  const call = (payload: unknown) =>
+    executeToolRequest("gh_api", { endpoint: "repos/o/r/contents/action.yml" },
+      ctx("/tmp", { allowedGhRepos: ["o/r"], deps: { ...deps(), env: { GH_TOKEN: "test-token" }, ghGet: async () => ({ status: 200, body: JSON.stringify(payload) }) } }));
+  const fileObj = (path: string, bytes: Buffer, shaSeed: string) => ({
+    type: "file", encoding: "base64", path, sha: shaSeed.repeat(40), size: bytes.length,
+    content: bytes.toString("base64").replace(/(.{60})/g, "$1\n"),
+  });
+
+  // The regression: a large action.yml read through gh_api arrives readable
+  // and flagged, not as an unreadable slice of base64.
+  const fileText = "name: CI\non: pull_request\n" + "  run: echo verify-inputs\n".repeat(1200);
+  const decoded = await call(fileObj("action.yml", Buffer.from(fileText, "utf8"), "a"));
+  assert.equal(decoded.status, "ok");
+  assert.equal(decoded.result.path, "action.yml");
+  assert.equal(decoded.result.sha, "a".repeat(40));
+  assert.equal(decoded.result.size, Buffer.byteLength(fileText));
+  assert.match(decoded.result.content, /^name: CI\non: pull_request\n/);
+  assert.equal(decoded.result.truncated, true);
+  assert.equal(decoded.result.content, fileText.slice(0, 12000) + "\n[truncated]");
+  assert.equal(decoded.result.response, undefined);
+
+  // A small file is complete and untruncated.
+  const smallText = "name: Small\njobs: {}\n";
+  const small = await call(fileObj("small.yml", Buffer.from(smallText, "utf8"), "b"));
+  assert.equal(small.result.content, smallText);
+  assert.equal(small.result.truncated, false);
+
+  // Decoded file text is repository source content: source-safe masking (#876).
+  const secretText = "token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456\n";
+  const secret = await call(fileObj("cfg.yml", Buffer.from(secretText, "utf8"), "c"));
+  assert.match(secret.result.content, /redacted:credential/);
+  assert.doesNotMatch(secret.result.content, /ghp_/);
+
+  // A credential straddling the cap boundary is masked whole (#926): the
+  // masker sees the full decoded text before any truncation. In a code file
+  // with no secret-named key, a partial ghp_ token (27 visible chars here)
+  // matches no masker pattern, so a decode-then-truncate order would leak
+  // the fragment; the token starts at byte 11969 and ends at 12008.
+  const straddleText = "x".repeat(11957) + "\n" + 'const v = "ghp_' + "A".repeat(36) + '";\n' + "tail();\n".repeat(10);
+  const straddle = await call(fileObj("src/app.ts", Buffer.from(straddleText, "utf8"), "f"));
+  assert.match(straddle.result.content, /redacted:credential/);
+  assert.doesNotMatch(straddle.result.content, /ghp_/);
+  assert.equal(straddle.result.truncated, true);
+
+  // Binary and invalid-UTF-8 payloads return safe metadata without bytes.
+  const binary = await call(fileObj("img.png", Buffer.from([0x89, 0x00, 0x50, 0x4e]), "d"));
+  assert.deepEqual(binary.result, { path: "img.png", sha: "d".repeat(40), size: 4, binary: true, truncated: false });
+  const badUtf8 = await call(fileObj("bin.dat", Buffer.from([0xff, 0x28]), "e"));
+  assert.equal(badUtf8.result.binary, true);
+
+  // Directory listings and non-file objects keep the raw compact-JSON response.
+  const dir = await call([{ type: "dir", path: "src" }, { type: "file", path: "src/a.ts" }]);
+  assert.equal(dir.result.content, undefined);
+  assert.match(dir.result.response, /^\[\{"type":"dir","path":"src"\}/);
+  const meta = await call({ number: 913, title: "x" });
+  assert.equal(meta.result.response, '{"number":913,"title":"x"}');
+});
+
+test("repo_contents masks credentials before truncating decoded files (#927)", async () => {
+  const call = (bytes: Buffer | string) => executeToolRequest("repo_contents", { repo: "o/r", path: "src/app.ts" },
+    ctx("tmp", { allowedGhRepos: ["o/r"], deps: { ...deps(), env: { GH_TOKEN: "test-token" }, ghGet: async (url) => {
+      if (url === "https://api.github.com/repos/o/r/contents/src") {
+        return { status: 200, body: JSON.stringify([{ name: "app.ts", type: "file", path: "src/app.ts", sha: "f".repeat(40) }]) };
+      }
+      if (url === `https://api.github.com/repos/o/r/git/blobs/${"f".repeat(40)}`) {
+        const encoded = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes, "utf8");
+        return { status: 200, body: JSON.stringify({ encoding: "base64", content: encoded.toString("base64") }) };
+      }
+      throw new Error(`Unexpected GitHub URL: ${url}`);
+    } } }));
+
+  const straddleText = "x".repeat(11957) + "\n" + 'const v = "ghp_' + "A".repeat(36) + '";\n' + "tail();\n".repeat(10);
+  const straddle = await call(straddleText);
+  assert.match(straddle.result.content, /redacted:credential/);
+  assert.doesNotMatch(straddle.result.content, /ghp_/);
+  assert.equal(straddle.result.truncated, true);
+
+  const smallText = "const x = 1;\n";
+  const small = await call(smallText);
+  assert.equal(small.result.content, smallText);
+  assert.equal(small.result.truncated, false);
+
+  // Binary and invalid-UTF-8 files still return metadata without bytes, so no
+  // content key reaches the masker (same guardrails as the gh_api test).
+  const binary = await call(Buffer.from([0x89, 0x00, 0x50, 0x4e]));
+  assert.deepEqual(binary.result, { repo: "o/r", path: "src/app.ts", type: "file", binary: true, truncated: false });
+  const badUtf8 = await call(Buffer.from([0xff, 0x28]));
+  assert.equal(badUtf8.result.binary, true);
 });
 
 test("web fetch checks exact hosts and every redirect; search sanitizes result schemes", async () => {
@@ -217,3 +346,246 @@ test("workspace tools expose only the committed tree when a tracked index is pre
   assert.deepEqual(findFiles("*.json", unfiltered).files, ["pr.json"]);
   assert.equal((await readFile("pr.json", unfiltered)).content, "{}\n");
 }));
+
+test("source-derived tools attach evidence provenance (#1015)", async () => fixture(async (root) => {
+  const revision = "a".repeat(40);
+
+  // A real credential in committed source is sanitized; provenance says so.
+  fs.writeFileSync(path.join(root, "creds.ts"), 'const k = "ghp_' + "A".repeat(36) + '";\n');
+  const sanitizedCtx = trackingCtx(root, { sourceRevision: revision });
+  const sanitized = await executeToolRequest("read_file", { path: "creds.ts" }, sanitizedCtx.ctx);
+  assert.equal(sanitized.status, "ok");
+  assert.doesNotMatch(sanitized.result.content, /ghp_/);
+  assert.ok(sanitized.result.content.includes(REDACTED_SOURCE));
+  assert.equal(sanitized.provenance.representation, "sanitized_source");
+  assert.equal(sanitized.provenance.synthesized, true);
+  assert.ok(sanitized.provenance.redactionCount >= 1);
+  assert.equal(sanitized.provenance.file, "creds.ts");
+  assert.equal(sanitized.provenance.revision, revision);
+  // The bound read routes through `git show <rev>:<path>` — committed bytes
+  // are byte-identical to the disk content the masker saw.
+  assert.ok(sanitizedCtx.argvs.some((argv) => argv[0] === "git" && argv[1] === "show"));
+
+  // A secret-named key assigned a code expression is NOT a credential (#876):
+  // committed source, zero redactions.
+  fs.writeFileSync(path.join(root, "config.ts"), "apiKey: config.apiKey\n");
+  const committedCtx = trackingCtx(root, { sourceRevision: revision });
+  const committed = await executeToolRequest("read_file", { path: "config.ts" }, committedCtx.ctx);
+  assert.equal(committed.result.content, "apiKey: config.apiKey\n");
+  assert.equal(committed.provenance.representation, "committed_source");
+  assert.equal(committed.provenance.redactionCount, 0);
+  assert.equal(committed.provenance.synthesized, false);
+
+  // A literal `[REDACTED]` in committed source is distinguishable from a
+  // sanitizer-inserted marker: it stays committed source with count 0.
+  fs.writeFileSync(path.join(root, "literal.ts"), 'const m = "[REDACTED]";\n');
+  const literalCtx = trackingCtx(root, { sourceRevision: revision });
+  const literal = await executeToolRequest("read_file", { path: "literal.ts" }, literalCtx.ctx);
+  assert.equal(literal.result.content, 'const m = "[REDACTED]";\n');
+  assert.equal(literal.provenance.representation, "committed_source");
+  assert.equal(literal.provenance.redactionCount, 0);
+}));
+
+test("gh_api Contents provenance records the blob sha as the revision (#1015)", async () => {
+  const sha = "b".repeat(40);
+  const secretText = "token: ghp_" + "A".repeat(36) + "\n";
+  const payload = {
+    type: "file", encoding: "base64", path: "cfg.yml", sha, size: Buffer.byteLength(secretText),
+    content: Buffer.from(secretText, "utf8").toString("base64"),
+  };
+  const res = await executeToolRequest("gh_api", { endpoint: "repos/o/r/contents/cfg.yml" },
+    ctx("/tmp", {
+      allowedGhRepos: ["o/r"],
+      sourceRevision: "c".repeat(40),
+      deps: { ...deps(), env: { GH_TOKEN: "test-token" }, ghGet: async () => ({ status: 200, body: JSON.stringify(payload) }) },
+    }));
+  assert.equal(res.status, "ok");
+  assert.match(res.result.content, /redacted:credential/);
+  assert.equal(res.provenance.representation, "sanitized_source");
+  assert.equal(res.provenance.file, "cfg.yml");
+  assert.equal(res.provenance.revision, sha);
+});
+
+test("non-source tools carry no provenance (#1015)", async () => fixture(async (root) => {
+  fs.writeFileSync(path.join(root, "a.txt"), "x");
+  const res = await executeToolRequest("find_files", { pattern: "*" }, ctx(root, { sourceRevision: "a".repeat(40) }));
+  assert.equal(res.status, "ok");
+  assert.equal(res.provenance, undefined);
+}));
+
+test("source reads bind to the committed tree, never the working tree (#1015 regression)", async () => {
+  // The blocker this test exists to keep fixed: a checkout at HEAD may have
+  // tracked files modified on disk during build/test/preparation. The
+  // provenance the model sees MUST be byte-true to the revision it claims;
+  // otherwise `authorizesLiteralClaim(provenance, HEAD)` could succeed for a
+  // literal that does not exist at HEAD. This regression test stands up a
+  // real git repo, commits a tracked file, mutates the file on disk, and
+  // asserts that the returned bytes equal the committed blob and that the
+  // provenance is `committed_source` for the bound revision. It is the only
+  // regression test that does not mock `git show` — the assertion is that
+  // `git show <rev>:<path>` is what reaches the masker.
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "bound-read-"));
+  const root = path.join(base, "r");
+  fs.mkdirSync(root);
+  const cp = require("node:child_process") as typeof import("node:child_process");
+  const runGit = (args: string[]): { status: number; out: string; err: string } => {
+    const r = cp.spawnSync("git", args, {
+      cwd: root,
+      env: { ...process.env, GIT_AUTHOR_NAME: "x", GIT_AUTHOR_EMAIL: "x@x", GIT_COMMITTER_NAME: "x", GIT_COMMITTER_EMAIL: "x@x" },
+      encoding: "buffer",
+    });
+    return { status: r.status ?? 0, out: r.stdout?.toString("utf8") ?? "", err: r.stderr?.toString("utf8") ?? "" };
+  };
+  // Direct subprocess wrapper that bypasses the pgrep preflight (which
+  // refuses to launch under test sandboxes) so the regression test runs the
+  // same `git show <rev>:<path>` / `git grep <rev>` the production code path
+  // calls. The wrapper is byte-exact in args/cwd, so the bytes the masker
+  // sees are the literal bytes of the committed tree.
+  const directRunProcess = async (options: any): Promise<any> => {
+    const r = cp.spawnSync(options.file, options.args ?? [], { cwd: options.cwd, env: options.env, encoding: "buffer" });
+    return {
+      status: r.error ? "spawn_error" : "exited",
+      exitCode: r.status ?? null,
+      signal: r.signal ?? null,
+      stdout: r.stdout ?? Buffer.from(""),
+      stderr: r.stderr ?? Buffer.from(""),
+      stdoutTruncated: false,
+      stderrTruncated: false,
+      durationMs: 1,
+      termination: null,
+      launchError: r.error?.message,
+    };
+  };
+  try {
+    runGit(["init", "-q"]);
+    runGit(["config", "user.email", "x@x"]);
+    runGit(["config", "user.name", "x"]);
+    const committed = "const COMMITTED = 'alpha';\n";
+    fs.writeFileSync(path.join(root, "src.ts"), committed);
+    fs.writeFileSync(path.join(root, ".gitignore"), "");
+    runGit(["add", "src.ts"]);
+    runGit(["commit", "-q", "-m", "init"]);
+    const head = runGit(["rev-parse", "HEAD"]).out.trim();
+    assert.match(head, /^[0-9a-f]{40}$/, "git rev-parse HEAD must return a full SHA");
+
+    // Working-tree mutation that is NOT in HEAD's tree. The review pipeline
+    // must never see these bytes stamped as committed_source @ HEAD.
+    const mutated = "const WORKING_TREE_LITERAL = 'phantom';\nconst COMMITTED = 'alpha';\n";
+    fs.writeFileSync(path.join(root, "src.ts"), mutated);
+
+    const tracked = buildTrackedIndex("src.ts\0");
+    const context: ToolContext = { workspaceRoot: root, trackedIndex: tracked, sourceRevision: head, deps: { env: {}, runProcess: directRunProcess } };
+    const res = await readFile("src.ts", context);
+    assert.equal(res.error, undefined);
+    assert.equal(res.committed, true, "bound read must route through git show");
+    assert.equal(res.content, committed, "read_file must return the committed blob, not the working-tree mutation");
+    const toolRes = await executeToolRequest("read_file", { path: "src.ts" }, context);
+    assert.equal(toolRes.status, "ok");
+    assert.equal(toolRes.provenance.representation, "committed_source");
+    assert.equal(toolRes.provenance.file, "src.ts");
+    assert.equal(toolRes.provenance.revision, head);
+    assert.equal(toolRes.provenance.synthesized, false);
+
+    // The downstream verifier contract: a literal that exists ONLY in the
+    // working tree (the mutation) must NOT authorize against the bound
+    // provenance, because the bytes the masker saw are the committed bytes
+    // — the mutation was never seen. A literal that DOES exist at HEAD must
+    // authorize. (We mirror the policy primitives here; the contract is
+    // what matters, not the specific helper.)
+    const committedLiteral = "alpha";
+    const phantomLiteral = "phantom";
+    assert.ok(res.content.includes(committedLiteral));
+    assert.ok(!res.content.includes(phantomLiteral), "the working-tree mutation must not reach the model");
+    assert.equal(
+      toolRes.provenance.representation === "committed_source"
+        && !toolRes.provenance.synthesized
+        && toolRes.provenance.revision === head,
+      true,
+      "provenance must satisfy the literal-claim contract",
+    );
+
+    // Untouched tracked file still binds correctly.
+    fs.writeFileSync(path.join(root, "untouched.ts"), "untouched bytes\n");
+    runGit(["add", "untouched.ts"]);
+    runGit(["commit", "-q", "-m", "untouched"]);
+    const head2 = runGit(["rev-parse", "HEAD"]).out.trim();
+    const tracked2 = buildTrackedIndex("src.ts\0untouched.ts\0");
+    const ctx2: ToolContext = { workspaceRoot: root, trackedIndex: tracked2, sourceRevision: head2, deps: { env: {}, runProcess: directRunProcess } };
+    const unt = await readFile("untouched.ts", ctx2);
+    assert.equal(unt.error, undefined);
+    assert.equal(unt.content, "untouched bytes\n");
+    assert.equal(unt.committed, true);
+
+    // Untracked file: the existing UNTRACKED_PATH_ERROR check fires before
+    // the bound read runs (the trackedIndex membership is the gate); the
+    // bound read must not relax that.
+    fs.writeFileSync(path.join(root, "loose.ts"), "loose");
+    const looseRes = await executeToolRequest("read_file", { path: "loose.ts" }, ctx2);
+    assert.equal(looseRes.result.error, UNTRACKED_PATH_ERROR);
+
+    // File removed in a later revision: a read against the new HEAD where
+    // the file no longer exists in the tree must NOT silently read working-
+    // tree bytes and stamp them committed_source. The fallback returns the
+    // working-tree content so the model still sees something, but the
+    // provenance is `untrusted_text` and `authorizesLiteralClaim` cannot
+    // succeed against it.
+    fs.writeFileSync(path.join(root, "outdated.ts"), "canonical\n");
+    runGit(["add", "outdated.ts"]);
+    runGit(["commit", "-q", "-m", "add outdated"]);
+    fs.rmSync(path.join(root, "outdated.ts"));
+    runGit(["add", "-A"]);
+    runGit(["commit", "-q", "-m", "remove outdated"]);
+    const head3 = runGit(["rev-parse", "HEAD"]).out.trim();
+    fs.writeFileSync(path.join(root, "outdated.ts"), "phantom-literal\n");
+    const tracked3 = buildTrackedIndex("src.ts\0untouched.ts\0outdated.ts\0");
+    const ctx3: ToolContext = { workspaceRoot: root, trackedIndex: tracked3, sourceRevision: head3, deps: { env: {}, runProcess: directRunProcess } };
+    const outdatedRes = await readFile("outdated.ts", ctx3);
+    assert.equal(outdatedRes.error, undefined);
+    assert.equal(outdatedRes.committed, false, "missing-from-tree reads must NOT claim committed bytes");
+    assert.equal(outdatedRes.content, "phantom-literal\n", "fallback reads the working tree so the model still sees content");
+    const outdatedTool = await executeToolRequest("read_file", { path: "outdated.ts" }, ctx3);
+    assert.equal(outdatedTool.provenance.representation, "untrusted_text");
+    assert.equal(outdatedTool.provenance.revision, null);
+
+    // git_grep routes through `<rev>` when bound: a literal that exists
+    // ONLY in the working tree must not surface.
+    fs.writeFileSync(path.join(root, "grep-target.ts"), "const CANARY = 'committed-grep-literal';\n");
+    runGit(["add", "grep-target.ts"]);
+    runGit(["commit", "-q", "-m", "add grep target"]);
+    const head4 = runGit(["rev-parse", "HEAD"]).out.trim();
+    fs.writeFileSync(path.join(root, "grep-target.ts"), "const PHANTOM = 'working-tree-grep-literal';\n");
+    const tracked4 = buildTrackedIndex("src.ts\0untouched.ts\0outdated.ts\0grep-target.ts\0");
+    const ctx4: ToolContext = { workspaceRoot: root, trackedIndex: tracked4, sourceRevision: head4, deps: { env: {}, runProcess: directRunProcess } };
+    const grepRes = await gitGrep("CANARY", ctx4);
+    assert.ok(!grepRes.error);
+    assert.deepEqual(grepRes.matches, ["grep-target.ts:1:const CANARY = 'committed-grep-literal';"]);
+    const phantom = await gitGrep("PHANTOM", ctx4);
+    assert.deepEqual(phantom.matches, [], "a literal that exists ONLY in the working tree must not surface from a bound grep");
+
+    // git_blame routes through `<rev>` when bound: blame against the
+    // committed revision shows lines from that tree, not the working tree.
+    const blameRes = await gitBlame("grep-target.ts", ctx4);
+    assert.ok(!blameRes.error);
+    assert.ok(blameRes.blame.includes("committed-grep-literal"), "blame must show committed bytes, not the working-tree mutation");
+    assert.ok(!blameRes.blame.includes("working-tree-grep-literal"), "blame must not leak working-tree mutation");
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("source-bound tool executors stay forge-agnostic (#1015 / fork privilege separation)", async () => {
+  // Regression-style guard for the fork privilege separation invariant:
+  // #1015's bound source-read plumbing lives in src/tools/executors.ts. The
+  // module is shared by fork and same-repo runs and must NOT branch on fork
+  // context — a fork author must not be able to influence a literal-claim
+  // authorization by reaching for fork-only flags. Reading the source as
+  // text keeps the assertion deterministic and side-effect free.
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  const here = path.dirname(__filename);
+  const modulePath = path.resolve(here, "../../src/tools/executors.ts");
+  const source = await fs.readFile(modulePath, "utf8");
+  for (const token of ["FORK_PRIMARY", "FORK_SMART", "FORK_LITELLM", "ai-review-fork", "isFork", "is_fork", "pull_request_target"]) {
+    assert.ok(!source.includes(token), `executors.ts must not reference fork-specific token: ${token}`);
+  }
+});

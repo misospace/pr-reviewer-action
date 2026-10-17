@@ -352,6 +352,11 @@ export interface SafeFetchLikeOptions {
   exchange?: Exchange | undefined;
   maxBytes?: number | undefined;
   timeoutMs?: number | undefined;
+  /** Test seam only; production uses `isPublicAddress`. A permissive policy
+   * passes this helper's resolution gate, but the DEFAULT `nodeExchange`
+   * re-validates every address with `isPublicAddress` at pin time (fail
+   * closed); a caller that genuinely needs a permissive connect must also
+   * pass a matching `createNodeExchange(policy)` as `exchange`. */
   addressPolicy?: AddressPolicy | undefined;
 }
 

@@ -1,48 +1,15 @@
 import { validateContract } from "./config/contract.js";
 import { loadConfig } from "./config/load-config.js";
 import { toJSON } from "./config/types.js";
-import { assertSupportedNode } from "./runtime/node-version.js";
-import { runRequestBuilderMode, runRequiredCheckCoverageMode, runToolBudgetMode, runVerdictParserMode } from "./modes/parity.js";
-import { classificationFixtureMain } from "./classification/fixture.js";
-import { runPrecheckFixture } from "./precheck/index.js";
-import { requirementLedgerFixtureMain } from "./requirements/fixture.js";
-import {
-  runEnrichmentFixture,
-  runHumanReviewsFixture,
-  runImageProvenanceFixture,
-  runPrThreadFixture,
-  runReviewThreadsFixture,
-  runRelatedCodeFixture,
-  runRepoMapFixture,
-  runChangeAnchorsFixture,
-} from "./context/fixture.js";
-import { runCorpusFixture, runDiffPriorityFixture } from "./corpus/index.js";
-import { conversationFixtureMain } from "./model/fixture.js";
-import { escalationFixtureMain } from "./routing/fixture.js";
-import { toolLoopFixtureMain } from "./tools/fixture.js";
-import {
-  runSpecialistCorpusFixture,
-  runSpecialistNormalizeFixture,
-  runSpecialistPayloadFixture,
-} from "./specialists/fixture.js";
-import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
-import { runEnforcementFixture, runRequirementCoverageFixture } from "./enforcement/fixture.js";
-import { runMetadataMarkersFixture } from "./metadata/fixture.js";
-import { runSanitizeFixture } from "./publish/fixture.js";
-import { runInlineFindingsFixture } from "./publish/inline-findings-fixture.js";
-import { runRepositoryConfigFixture } from "./config/fixture.js";
 import { resolveRepositoryConfig } from "./config/repository-config.js";
-import { asciiJson, runPlatformNormalizationFixture } from "./platform/fixture.js";
+import { assertSupportedNode } from "./runtime/node-version.js";
+import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 import { runPromptAssemblyFixture } from "./prompt/fixture.js";
-import { runContextProducersFixture } from "./context/producers-fixture.js";
-import { runLinkedSourcesFixture, runStripSourceTextFixture } from "./context/linked-sources-fixture.js";
-import { runCiGateFixture } from "./gates/ci-wait-fixture.js";
-import { runSpecialistsGateFixture } from "./gates/specialists-gate-fixture.js";
+import { runStripSourceTextFixture } from "./context/linked-sources-fixture.js";
 import { CI_GATE_SUBMODE, SPECIALIST_GATE_SUBMODE, ciGateMain, exitAfterFlush, specialistsGateMain } from "./gates/workloads.js";
 import { runReview, RunReviewError } from "./run/index.js";
 import { precheckMain, publishMain } from "./run/entrypoints.js";
 import { actionMain } from "./run/action.js";
-import { runEvidenceProvidersFixture } from "./evidence/fixture.js";
 
 export function main(): void {
   assertSupportedNode(process.versions.node);
@@ -75,58 +42,8 @@ export function main(): void {
   }
 }
 
-/** Fixture-mode precheck CLI for the #673 parity harness and tests-v3:
- * `node dist/index.js precheck-fixture <fixture.json>` prints a single JSON
- * line `{ok, values, stderr}` describing the precheck decision outputs. */
-export async function precheckFixtureMain(fixturePath: string): Promise<void> {
-  assertSupportedNode(process.versions.node);
-  const result = await runPrecheckFixture(fixturePath);
-  process.stdout.write(`${JSON.stringify(result)}\n`);
-}
-
-/** Fixture-mode classification CLI for the #675 parity harness and tests-v3:
- * `node dist/index.js classification-fixture <fixture.json>` prints a single
- * JSON line `{ok, values}` describing the canonical classification and the
- * specialist role selection. */
-export async function classificationParityMain(fixturePath: string): Promise<void> {
-  assertSupportedNode(process.versions.node);
-  await classificationFixtureMain(fixturePath);
-}
-
-/** Fixture-mode requirement-ledger CLI for the #675 parity harness and
- * tests-v3: `node dist/index.js requirement-ledger-fixture <fixture.json>`
- * prints a single JSON line `{ok, values}` with the ledger artifact and its
- * rendered markdown. */
-export async function requirementLedgerParityMain(fixturePath: string): Promise<void> {
-  assertSupportedNode(process.versions.node);
-  await requirementLedgerFixtureMain(fixturePath);
-}
-
-/** Fixture-mode corpus-assembly CLI for the #676 parity harness and
- * tests-v3: `node dist/index.js corpus-fixture <fixture.json>` prints a
- * single JSON line `{ok, values, stderr}` comparing the assembled corpus and
- * its diagnostic artifacts byte-for-byte with the v2 shell pipeline. */
-export async function corpusFixtureMain(fixturePath: string): Promise<void> {
-  assertSupportedNode(process.versions.node);
-  const result = runCorpusFixture(fixturePath);
-  process.stdout.write(`${JSON.stringify(result)}\n`);
-}
-
-async function contextFixtureMain(mode: string, fixturePath: string): Promise<void> {
-  assertSupportedNode(process.versions.node);
-  const result = await (mode === "enrichment-fixture" ? Promise.resolve(runEnrichmentFixture(fixturePath))
-    : mode === "repo-map-fixture" ? Promise.resolve(runRepoMapFixture(fixturePath))
-    : mode === "pr-thread-fixture" ? Promise.resolve(runPrThreadFixture(fixturePath))
-    : mode === "review-threads-fixture" ? Promise.resolve(runReviewThreadsFixture(fixturePath))
-    : mode === "human-reviews-fixture" ? Promise.resolve(runHumanReviewsFixture(fixturePath))
-    : mode === "related-code-fixture" ? runRelatedCodeFixture(fixturePath)
-    : runImageProvenanceFixture(fixturePath));
-  process.stdout.write(`${JSON.stringify(result)}\n`);
-}
-
 if (require.main === module) {
   const argv = process.argv.slice(2);
-  const mode = process.env.PR_REVIEWER_V3_MODE ?? "";
   const firstArg = argv[0] ?? "";
   if (process.env.PR_REVIEWER_GATE_CHILD === "1" && firstArg !== CI_GATE_SUBMODE && firstArg !== SPECIALIST_GATE_SUBMODE) {
     // Recursion guard: a gate child only ever runs its gate workload.
@@ -169,140 +86,12 @@ if (require.main === module) {
       // wait_for_ci.sh's fatal code is 2; run_specialists.py dies with 1.
       exitAfterFlush(firstArg === CI_GATE_SUBMODE ? 2 : 1);
     });
-  } else if (firstArg === "precheck-fixture") {
-    precheckFixtureMain(argv[1] ?? "").catch((error: unknown) => {
-      process.stderr.write(`v3 precheck fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
-      process.exitCode = 1;
-    });
-  } else if (firstArg === "classification-fixture") {
-    classificationParityMain(argv[1] ?? "").catch((error: unknown) => {
-      process.stderr.write(`v3 classification fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
-      process.exitCode = 1;
-    });
-  } else if (firstArg === "requirement-ledger-fixture") {
-    requirementLedgerParityMain(argv[1] ?? "").catch((error: unknown) => {
-      process.stderr.write(`v3 requirement-ledger fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
-      process.exitCode = 1;
-    });
-  } else if (["enrichment-fixture", "repo-map-fixture", "pr-thread-fixture", "review-threads-fixture", "human-reviews-fixture", "related-code-fixture", "image-provenance-fixture"].includes(firstArg)) {
-    contextFixtureMain(firstArg, argv[1] ?? "").catch((error: unknown) => {
-      process.stderr.write(`v3 context fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
-      process.exitCode = 1;
-    });
   } else if (firstArg === "strip-source-text-fixture") {
     assertSupportedNode(process.versions.node);
     process.stdout.write(`${JSON.stringify(runStripSourceTextFixture(argv[1] ?? ""))}\n`);
-  } else if (firstArg === "linked-sources-fixture") {
-    assertSupportedNode(process.versions.node);
-    runLinkedSourcesFixture(argv[1] ?? "").then(
-      (result) => { process.stdout.write(`${JSON.stringify(result)}\n`); },
-      (error: unknown) => {
-        process.stderr.write(`v3 linked-sources fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
-        process.exitCode = 1;
-      },
-    );
-  } else if (firstArg === "platform-normalization-fixture") {
-    assertSupportedNode(process.versions.node);
-    runPlatformNormalizationFixture(argv[1] ?? "").then(
-      (result) => { process.stdout.write(`${JSON.stringify(result)}\n`); },
-      (error: unknown) => {
-        process.stderr.write(`v3 platform-normalization fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
-        process.exitCode = 1;
-      },
-    );
-  } else if (firstArg === "change-anchors-fixture") {
-    assertSupportedNode(process.versions.node);
-    process.stdout.write(`${JSON.stringify(runChangeAnchorsFixture(argv[1] ?? ""))}\n`);
   } else if (firstArg === "prompt-assembly-fixture") {
     assertSupportedNode(process.versions.node);
     process.stdout.write(`${JSON.stringify(runPromptAssemblyFixture(argv[1] ?? ""))}\n`);
-  } else if (firstArg === "context-producers-fixture") {
-    assertSupportedNode(process.versions.node);
-    runContextProducersFixture(argv[1] ?? "").then(
-      (result) => { process.stdout.write(`${JSON.stringify(result)}\n`); },
-      (error: unknown) => {
-        process.stderr.write(`v3 context-producers fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
-        process.exitCode = 1;
-      },
-    );
-  } else if (firstArg === "ci-gate-fixture") {
-    assertSupportedNode(process.versions.node);
-    runCiGateFixture(argv[1] ?? "").then(
-      // ASCII-escaped: hostile check names may carry U+2028/U+0085, which the
-      // harness would treat as line breaks.
-      (result) => { process.stdout.write(`${asciiJson(result)}\n`); },
-      (error: unknown) => {
-        process.stderr.write(`v3 ci-gate fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
-        process.exitCode = 1;
-      },
-    );
-  } else if (firstArg === "specialists-gate-fixture") {
-    assertSupportedNode(process.versions.node);
-    runSpecialistsGateFixture(argv[1] ?? "").then(
-      (result) => { process.stdout.write(`${JSON.stringify(result)}\n`); },
-      (error: unknown) => {
-        process.stderr.write(`v3 specialists-gate fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
-        process.exitCode = 1;
-      },
-    );
-  } else if (firstArg === "evidence-providers-fixture") {
-    assertSupportedNode(process.versions.node);
-    runEvidenceProvidersFixture(argv[1] ?? "").then(
-      (result) => { process.stdout.write(`${JSON.stringify(result)}\n`); },
-      (error: unknown) => {
-        process.stderr.write(`v3 evidence-providers fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
-        process.exitCode = 1;
-      },
-    );
-  } else if (firstArg === "diff-priority-fixture") {
-    assertSupportedNode(process.versions.node);
-    process.stdout.write(`${JSON.stringify(runDiffPriorityFixture(argv[1] ?? ""))}\n`);
-  } else if (firstArg === "corpus-fixture") {
-    corpusFixtureMain(argv[1] ?? "").catch((error: unknown) => {
-      process.stderr.write(`v3 corpus fixture error: ${error instanceof Error ? error.message : "unknown error"}\n`);
-      process.exitCode = 1;
-    });
-  } else if (firstArg === "conversation-fixture") {
-    conversationFixtureMain(argv[1] ?? "").catch((error: unknown) => { process.stderr.write(`v3 conversation fixture error: ${error instanceof Error ? error.message : "unknown error"}\\n`); process.exitCode = 1; });
-  } else if (firstArg === "escalation-fixture") {
-    escalationFixtureMain(argv[1] ?? "");
-  } else if (firstArg === "tool-loop-fixture") {
-    toolLoopFixtureMain(argv[1] ?? "").catch((error: unknown) => { process.stderr.write(`v3 tool-loop fixture error: ${error instanceof Error ? error.message : "unknown error"}\\n`); process.exitCode = 1; });
-  } else if (firstArg === "enforcement-fixture") {
-    assertSupportedNode(process.versions.node);
-    process.stdout.write(`${JSON.stringify(runEnforcementFixture(argv[1] ?? ""))}\n`);
-  } else if (firstArg === "requirement-coverage-fixture") {
-    assertSupportedNode(process.versions.node);
-    process.stdout.write(`${JSON.stringify(runRequirementCoverageFixture(argv[1] ?? ""))}\n`);
-  } else if (firstArg === "repository-config-fixture") {
-    assertSupportedNode(process.versions.node);
-    process.stdout.write(`${JSON.stringify(runRepositoryConfigFixture(argv[1] ?? ""))}\n`);
-  } else if (firstArg === "metadata-markers-fixture") {
-    assertSupportedNode(process.versions.node);
-    process.stdout.write(`${JSON.stringify(runMetadataMarkersFixture(argv[1] ?? ""))}\n`);
-  } else if (firstArg === "sanitize-fixture") {
-    assertSupportedNode(process.versions.node);
-    process.stdout.write(`${JSON.stringify(runSanitizeFixture(argv[1] ?? ""))}\n`);
-  } else if (firstArg === "inline-findings-fixture") {
-    assertSupportedNode(process.versions.node);
-    process.stdout.write(`${JSON.stringify(runInlineFindingsFixture(argv[1] ?? ""))}\n`);
-  } else if (firstArg === "required-check-coverage-fixture") {
-    runRequiredCheckCoverageMode(argv[1] ?? "");
-  } else if (firstArg === "specialist-corpus-fixture") {
-    process.stdout.write(`${JSON.stringify(runSpecialistCorpusFixture(argv[1] ?? ""))}\n`);
-  } else if (firstArg === "specialist-payload-fixture") {
-    process.stdout.write(`${JSON.stringify(runSpecialistPayloadFixture(argv[1] ?? ""))}\n`);
-  } else if (firstArg === "specialist-normalize-fixture") {
-    process.stdout.write(`${JSON.stringify(runSpecialistNormalizeFixture(argv[1] ?? ""))}\n`);
-  } else if (mode === "v3-request-builder" && firstArg) {
-    runRequestBuilderMode(firstArg);
-  } else if (mode === "v3-verdict-parser" && firstArg) {
-    runVerdictParserMode(firstArg);
-  } else if (mode === "tool-budget" && firstArg) {
-    runToolBudgetMode(firstArg);
-  } else if (mode !== "") {
-    process.stderr.write(`v3 runtime: unknown parity mode '${mode}'\n`);
-    process.exitCode = 1;
   } else if (firstArg === "config") {
     // Validate the inputs and (with PR_REVIEWER_V3_DEBUG=true) print the
     // resolved, redacted config.

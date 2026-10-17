@@ -12,7 +12,7 @@ import { classificationToArtifact } from "../src/classification/classify.js";
 import { canonicalChangedFile, normalizeLinkedIssues } from "../src/context/index.js";
 
 function files(...names: string[]) {
-  return names.map((name) => canonicalChangedFile({ filename: name }));
+  return names.map((name) => canonicalChangedFile({ filename: name, status: "modified" }));
 }
 
 // ── pr_kind precedence (#675 port of pr_reviewer/classifier.py) ───────────
@@ -45,6 +45,373 @@ test("k8s manifests beat dependency files", () => {
   assert.equal(result.prKind, "k8s_manifest");
 });
 
+// ── image digest refreshes (#909) ─────────────────────────────────────────
+const DIGEST_A = "a".repeat(64);
+const DIGEST_B = "b".repeat(64);
+
+/** A modified image manifest with the platform's line totals, as production
+ * supplies them (the completeness reconciliation reads both). */
+function digestFile(name: string, additions: number, deletions: number) {
+  return canonicalChangedFile({ filename: name, status: "modified", additions, deletions });
+}
+
+test("image-digest-only manifest PRs classify as image_digest_only", () => {
+  // A HelmRelease `tag:` line: repository and tag unchanged, digest refreshed.
+  const result = classifyPr({
+    prFiles: [digestFile("k8s/lemonade.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText: `-    tag: latest@sha256:${DIGEST_A}\n+    tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "image_digest_only");
+  assert.deepEqual(result.riskFlags, []);
+  assert.deepEqual(result.mustCheck, ["verify only image digests changed; repository and tag unchanged"]);
+});
+
+test("image_digest_only covers compose image: and Dockerfile FROM forms", () => {
+  const compose = classifyPr({
+    prFiles: [digestFile("docker-compose.yml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText: `-    image: ghcr.io/o/app:v1@sha256:${DIGEST_A}\n+    image: ghcr.io/o/app:v1@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(compose.prKind, "image_digest_only");
+
+  const dockerfile = classifyPr({
+    prFiles: [digestFile("Dockerfile", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText: `-FROM node:20@sha256:${DIGEST_A} AS build\n+FROM node:20@sha256:${DIGEST_B} AS build\n`,
+  });
+  assert.equal(dockerfile.prKind, "image_digest_only");
+});
+
+test("a repository or tag change is not image_digest_only", () => {
+  const tagChange = classifyPr({
+    prFiles: files("k8s/lemonade.yaml"),
+    diffText: `-    tag: 1.2.3@sha256:${DIGEST_A}\n+    tag: 1.2.4@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(tagChange.prKind, "k8s_manifest");
+
+  const repoChange = classifyPr({
+    prFiles: files("docker-compose.yml"),
+    diffText: `-    image: ghcr.io/o/old:v1@sha256:${DIGEST_A}\n+    image: ghcr.io/o/new:v1@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(repoChange.prKind, "app_code");
+});
+
+test("a mixed diff keeps the current classification (digest + other change)", () => {
+  const result = classifyPr({
+    prFiles: files("k8s/lemonade.yaml"),
+    diffText:
+      `-    tag: latest@sha256:${DIGEST_A}\n+    tag: latest@sha256:${DIGEST_B}\n` +
+      "-  replicas: 3\n+  replicas: 5\n",
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("a per-hunk mixed diff is not image_digest_only", () => {
+  // First hunk is a clean digest refresh; the second (separate hunk) changes a
+  // non-image line. The per-block boundary must not let the first hunk stand in
+  // for the whole PR.
+  const result = classifyPr({
+    prFiles: [digestFile("k8s/lemonade.yaml", 2, 2)],
+    authoritativeChangedFiles: 1,
+    diffText:
+      "diff --git a/k8s/lemonade.yaml b/k8s/lemonade.yaml\n" +
+      "@@ -9,1 +9,1 @@\n" +
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n` +
+      "@@ -20,1 +20,1 @@\n" +
+      "-  replicas: 3\n" +
+      "+  replicas: 5\n",
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("a digest change outside a YAML/Dockerfile manifest is not image_digest_only", () => {
+  const result = classifyPr({
+    prFiles: files("scripts/pin.txt"),
+    diffText: `-image: ghcr.io/o/app:v1@sha256:${DIGEST_A}\n+image: ghcr.io/o/app:v1@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "app_code");
+});
+
+test("a multi-image digest refresh keeps each image's repository/tag in place", () => {
+  const result = classifyPr({
+    prFiles: [digestFile("k8s/leaves.yaml", 2, 2)],
+    authoritativeChangedFiles: 1,
+    diffText:
+      `-    image: ghcr.io/o/api:v1@sha256:${DIGEST_A}\n` +
+      `-    image: ghcr.io/o/worker:v1@sha256:${DIGEST_B}\n` +
+      `+    image: ghcr.io/o/api:v1@sha256:${"c".repeat(64)}\n` +
+      `+    image: ghcr.io/o/worker:v1@sha256:${"d".repeat(64)}\n`,
+  });
+  assert.equal(result.prKind, "image_digest_only");
+});
+
+test("swapping which digest belongs to which image is not image_digest_only", () => {
+  // The ref multiset is unchanged, but the images swapped digests — that is a
+  // functional change, not a digest refresh.
+  const result = classifyPr({
+    prFiles: files("k8s/leaves.yaml"),
+    diffText:
+      `-    image: ghcr.io/o/api:v1@sha256:${DIGEST_A}\n` +
+      `-    image: ghcr.io/o/worker:v1@sha256:${DIGEST_B}\n` +
+      `+    image: ghcr.io/o/worker:v1@sha256:${"c".repeat(64)}\n` +
+      `+    image: ghcr.io/o/api:v1@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("a realistic hunk with context lines still classifies as image_digest_only", () => {
+  const result = classifyPr({
+    prFiles: [digestFile("k8s/lemonade.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText:
+      "diff --git a/k8s/lemonade.yaml b/k8s/lemonade.yaml\n" +
+      "@@ -9,7 +9,7 @@ spec:\n" +
+      "   image:\n" +
+      "     repository: ghcr.io/o/lemonade\n" +
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n` +
+      "     pullPolicy: IfNotPresent\n",
+  });
+  assert.equal(result.prKind, "image_digest_only");
+});
+
+test("changing the YAML key or indentation around a digest is not image_digest_only", () => {
+  const keyChange = classifyPr({
+    prFiles: files("k8s/lemonade.yaml"),
+    diffText: `-    tag: latest@sha256:${DIGEST_A}\n+    image: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(keyChange.prKind, "k8s_manifest");
+
+  const indentChange = classifyPr({
+    prFiles: files("k8s/lemonade.yaml"),
+    diffText: `-    tag: latest@sha256:${DIGEST_A}\n+      tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(indentChange.prKind, "k8s_manifest");
+});
+
+test("changing Dockerfile platform or stage around a digest is not image_digest_only", () => {
+  const platform = classifyPr({
+    prFiles: files("Dockerfile"),
+    diffText: `-FROM --platform=linux/amd64 node:20@sha256:${DIGEST_A} AS build\n+FROM --platform=linux/arm64 node:20@sha256:${DIGEST_B} AS build\n`,
+  });
+  assert.equal(platform.prKind, "app_code");
+
+  const stage = classifyPr({
+    prFiles: files("Dockerfile"),
+    diffText: `-FROM node:20@sha256:${DIGEST_A} AS build\n+FROM node:20@sha256:${DIGEST_B} AS runtime\n`,
+  });
+  assert.equal(stage.prKind, "app_code");
+});
+
+test("relocating an image reference between files is not image_digest_only", () => {
+  const result = classifyPr({
+    prFiles: files("k8s/a.yaml", "k8s/b.yaml"),
+    diffText:
+      "diff --git a/k8s/a.yaml b/k8s/a.yaml\n" +
+      "@@ -1 +0,0 @@\n" +
+      `-    image: ghcr.io/o/api:v1@sha256:${DIGEST_A}\n` +
+      "diff --git a/k8s/b.yaml b/k8s/b.yaml\n" +
+      "@@ -0,0 +1 @@\n" +
+      `+    image: ghcr.io/o/api:v1@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("relocating an image reference between hunks is not image_digest_only", () => {
+  const result = classifyPr({
+    prFiles: files("k8s/a.yaml"),
+    diffText:
+      "diff --git a/k8s/a.yaml b/k8s/a.yaml\n" +
+      "@@ -1 +0,0 @@\n" +
+      `-    image: ghcr.io/o/api:v1@sha256:${DIGEST_A}\n` +
+      "@@ -10,0 +10 @@\n" +
+      `+    image: ghcr.io/o/api:v1@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("a renamed manifest with an otherwise digest-only hunk is not image_digest_only", () => {
+  const renamed = canonicalChangedFile({ filename: "k8s/b.yaml", status: "renamed" });
+  const result = classifyPr({
+    prFiles: [renamed],
+    diffText:
+      "diff --git a/k8s/a.yaml b/k8s/b.yaml\n" +
+      "similarity index 90%\n" +
+      "rename from k8s/a.yaml\n" +
+      "rename to k8s/b.yaml\n" +
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("rename metadata fails closed even when the file status is modified", () => {
+  // The file-list entry says modified, but the diff carries rename metadata:
+  // the structural-line guard must catch it, not just the status guard.
+  const result = classifyPr({
+    prFiles: [digestFile("k8s/b.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText:
+      "diff --git a/k8s/a.yaml b/k8s/b.yaml\n" +
+      "similarity index 90%\n" +
+      "rename from k8s/a.yaml\n" +
+      "rename to k8s/b.yaml\n" +
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("a line with more than one digest token is not image_digest_only", () => {
+  const result = classifyPr({
+    prFiles: [digestFile("Dockerfile", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText:
+      `-FROM node:20@sha256:${DIGEST_A} AS sha256:${DIGEST_B}\n` +
+      `+FROM node:20@sha256:${"c".repeat(64)} AS sha256:${"d".repeat(64)}\n`,
+  });
+  assert.equal(result.prKind, "app_code");
+});
+
+test("a mode change around a digest is not image_digest_only", () => {
+  const result = classifyPr({
+    prFiles: files("k8s/lemonade.yaml"),
+    diffText:
+      "diff --git a/k8s/lemonade.yaml b/k8s/lemonade.yaml\n" +
+      "old mode 100644\n" +
+      "new mode 100755\n" +
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("a truncation marker around a digest-only hunk is not image_digest_only", () => {
+  const result = classifyPr({
+    prFiles: files("k8s/lemonade.yaml"),
+    diffText:
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n` +
+      "…[diff truncated to fit context budget]\n",
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("image_digest_only reads the full diff, not the truncated context diff", () => {
+  const truncated =
+    `-    tag: latest@sha256:${DIGEST_A}\n` +
+    `+    tag: latest@sha256:${DIGEST_B}\n` +
+    "…[diff truncated to fit context budget]\n";
+  // The complete diff has no hidden changes: still digest-only.
+  const clean = classifyPr({
+    prFiles: [digestFile("k8s/lemonade.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText: truncated,
+    fullDiffText: `-    tag: latest@sha256:${DIGEST_A}\n+    tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(clean.prKind, "image_digest_only");
+
+  // The complete diff hides a functional change behind the truncation marker:
+  // the visible hunk alone would have been digest-only.
+  const hidden = classifyPr({
+    prFiles: files("k8s/lemonade.yaml"),
+    diffText: truncated,
+    fullDiffText:
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n` +
+      "-  replicas: 3\n" +
+      "+  replicas: 5\n",
+  });
+  assert.equal(hidden.prKind, "k8s_manifest");
+});
+
+test("a file list shorter than the authoritative changed_files count is not image_digest_only", () => {
+  // changed_files=2 but only one file was supplied (e.g. the single-page list
+  // was capped): the evidence is incomplete.
+  const result = classifyPr({
+    prFiles: [digestFile("k8s/lemonade.yaml", 1, 1)],
+    authoritativeChangedFiles: 2,
+    diffText: `-    tag: latest@sha256:${DIGEST_A}\n+    tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("line totals that disagree with the diff are not image_digest_only", () => {
+  // Metadata claims 2 additions / 2 deletions; the diff has one digest pair.
+  const result = classifyPr({
+    prFiles: [digestFile("k8s/lemonade.yaml", 2, 2)],
+    authoritativeChangedFiles: 1,
+    diffText: `-    tag: latest@sha256:${DIGEST_A}\n+    tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("missing line metadata is not image_digest_only", () => {
+  // additions/deletions are absent (null), so completeness cannot be proven.
+  const result = classifyPr({
+    prFiles: files("k8s/lemonade.yaml"),
+    authoritativeChangedFiles: 1,
+    diffText: `-    tag: latest@sha256:${DIGEST_A}\n+    tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("complete evidence with matching counts and pure digests is image_digest_only", () => {
+  const result = classifyPr({
+    prFiles: [digestFile("k8s/lemonade.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText: `-    tag: latest@sha256:${DIGEST_A}\n+    tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "image_digest_only");
+});
+
+test("a binary sibling manifest defeats image_digest_only", () => {
+  // File A is a clean digest refresh (+1/-1); file B is a modified binary that
+  // contributes no +/- lines. Without the binary/zero-line guard the aggregate
+  // line totals still match, so the kind would fire on a hidden change.
+  const result = classifyPr({
+    prFiles: [digestFile("k8s/lemonade.yaml", 1, 1), digestFile("k8s/opaque.yaml", 0, 0)],
+    authoritativeChangedFiles: 2,
+    diffText:
+      "diff --git a/k8s/lemonade.yaml b/k8s/lemonade.yaml\n" +
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n` +
+      "diff --git a/k8s/opaque.yaml b/k8s/opaque.yaml\n" +
+      "Binary files a/k8s/opaque.yaml and b/k8s/opaque.yaml differ\n",
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("a GIT binary patch marker defeats image_digest_only", () => {
+  const result = classifyPr({
+    prFiles: [digestFile("k8s/lemonade.yaml", 1, 1), digestFile("k8s/opaque.yaml", 0, 0)],
+    authoritativeChangedFiles: 2,
+    diffText:
+      "diff --git a/k8s/lemonade.yaml b/k8s/lemonade.yaml\n" +
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n` +
+      "diff --git a/k8s/opaque.yaml b/k8s/opaque.yaml\n" +
+      "GIT binary patch\n",
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
+test("a zero-line modified manifest defeats image_digest_only", () => {
+  // No binary marker, but a participating file reports +0/-0: it cannot be a
+  // digest refresh and must fail closed.
+  const result = classifyPr({
+    prFiles: [digestFile("k8s/lemonade.yaml", 1, 1), digestFile("k8s/opaque.yaml", 0, 0)],
+    authoritativeChangedFiles: 2,
+    diffText:
+      "diff --git a/k8s/lemonade.yaml b/k8s/lemonade.yaml\n" +
+      `-    tag: latest@sha256:${DIGEST_A}\n` +
+      `+    tag: latest@sha256:${DIGEST_B}\n`,
+  });
+  assert.equal(result.prKind, "k8s_manifest");
+});
+
 test("secret handling precedes auth", () => {
   const result = classifyPr({ prFiles: files("src/secret_handler.py") });
   assert.equal(result.prKind, "secret_handling_changes");
@@ -68,6 +435,10 @@ test("path handling can match diff content only (#749: untrusted input flow)", (
 test("the default kind is app_code", () => {
   assert.equal(classifyPr({ prFiles: files("src/anything.go") }).prKind, "app_code");
   assert.ok(PR_KINDS.includes("app_code"));
+  // The new digest kind sits between the lockfile digest kind and the
+  // dependency kind, ahead of k8s_manifest (#909). Pin the documented order so
+  // an accidental reorder is caught directly by this assertion.
+  assert.deepEqual(PR_KINDS.slice(0, 3), ["renovate_digest_only", "image_digest_only", "dependency_upgrade"]);
   assert.ok(RISK_FLAGS.includes("linked_security_issue"));
 });
 
@@ -701,17 +1072,291 @@ test("#749: lexical material classes need executable context", () => {
     const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
     assert.equal(result.prKind, "path_handling_changes", diff);
   }
-  // Other classes keep their existing semantics: traversal literals and
-  // archive operations are meaningful even in comments and docs.
+  // #960: a comment is not executable, so the non-lexical classes no longer
+  // fire from a comment-only mention either — the neutralizer blanks comment
+  // spans before every content class scans. This is a deliberate spec change:
+  // this block previously asserted that `+# blocks ../traversal` and
+  // `+# uses extractall` FIRE. The decision stays visible as a discounted
+  // `diff_comment` signal, never a silent drop.
+  const commentNeutralized: [string, string, string][] = [
+    ["+# blocks ../traversal\n", "src/app.py", "traversal_literal"],
+    ["+# uses extractall\n", "src/app.py", "archive_extraction"],
+    ["+// see ../etc/passwd\n", "src/app.ts", "traversal_literal"],
+  ];
+  for (const [diff, filename, signal] of commentNeutralized) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "app_code", diff);
+    assert.equal(result.pathHandlingProvenance.fired, false, diff);
+    assert.ok(
+      result.pathHandlingProvenance.discounted.some((s) => s.signal === signal && s.source === "diff_comment"),
+      `${diff}: expected a discounted ${signal} signal, got ${JSON.stringify(result.pathHandlingProvenance.discounted)}`,
+    );
+  }
+  // A documentation FILE is prose, not a comment: a doc line that names a
+  // real traversal keeps its existing semantics.
   const preserved: [string, string][] = [
-    ["+# blocks ../traversal\n", "src/app.py"],
     ["+see ../etc/passwd\n", "README.md"],
-    ["+# uses extractall\n", "src/app.py"],
   ];
   for (const [diff, filename] of preserved) {
     const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
     assert.equal(result.prKind, "path_handling_changes", diff);
   }
+});
+
+// ── #960: a `../` module reference in a doc comment is not traversal ──────
+
+test("#960: a `../` that appears only in a comment or doc comment is not a traversal literal", () => {
+  const negatives: [string, string][] = [
+    // The #947 repro: a JSDoc continuation line carries no marker of its own,
+    // so only block-comment state can recognize it.
+    [
+      "+/**\n+ * The job a canonical forge event (`../events/types.js`) can spawn: the\n+ */\n",
+      "src/jobs/types.ts",
+    ],
+    // A backtick-quoted module reference in a `#` comment.
+    ["+# See `../events/types.js` for the shape.\n", "src/jobs/types.py"],
+    // ... in a `--` comment.
+    ["+-- see ../events/types.js for the shape\n", "src/jobs/query.lua"],
+    // ... in a `//` line comment.
+    ["+// see ../events/types.js for the shape\n", "src/jobs/types.ts"],
+    // ... and in a one-line block comment.
+    ["+/* see ../events/types.js */\n", "src/jobs/types.ts"],
+    // A plain multi-line block comment with no space after the opener, and a
+    // mid-line opener: both are real comments, not phantom blocks.
+    ["+/*hello world\n+see ../events/types.js\n+*/\n", "src/jobs/types.ts"],
+    ["+func() /*\n+see ../events/types.js\n+*/\n", "src/jobs/types.ts"],
+    // An unspaced marker right after a statement terminator is still a comment.
+    ["+x=1;//see ../events/types.js\n", "src/jobs/types.ts"],
+    ["+x=1;#see ../events/types.js\n", "src/jobs/types.py"],
+    // An unspaced `//` is a comment: its non-comment uses always sit against a
+    // non-space character, which the preceding-character rule already refuses.
+    ["+//see ../events/types.js\n", "src/jobs/types.ts"],
+    // In a block-comment language a `/*` glued to a preceding token is still a
+    // comment opener (C maximal munch), so it is blanked like any other.
+    ["+a/*see ../events/types.js\n+*/\n", "src/jobs/types.ts"],
+    ["+x=1/*see ../events/types.js\n+*/\n", "src/jobs/types.ts"],
+  ];
+  for (const [diff, filename] of negatives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "app_code", diff);
+    assert.ok(!result.riskFlags.includes("path_handling_changes"), diff);
+    assert.equal(result.pathHandlingProvenance.fired, false, diff);
+    // The decision is recorded, not silently dropped.
+    assert.ok(
+      result.pathHandlingProvenance.discounted.some(
+        (s) => s.signal === "traversal_literal" && s.source === "diff_comment",
+      ),
+      `${diff}: expected a discounted traversal_literal, got ${JSON.stringify(result.pathHandlingProvenance.discounted)}`,
+    );
+  }
+});
+
+test("#960: a traversal literal in real code still fires, including next to an import and past a string-literal marker", () => {
+  const positives: [string, string][] = [
+    // Plain code, no comment anywhere.
+    ["+const p = path.join(base, '../../etc/passwd');\n", "src/app.ts"],
+    // Same line as an import specifier: the specifier is neutralized, the real
+    // traversal is not.
+    ['+import { a } from "../lib"; fs.readFileSync("../../etc/passwd");\n', "src/app.ts"],
+    // Adversarial (#252): the `//` inside the string literal is data, not a
+    // comment marker — it must not truncate the line and hide the traversal.
+    ['+const url = "https://example.com"; fs.readFileSync("../../etc/passwd");\n', "src/app.ts"],
+    // Adversarial: a `#` inside a string literal must not comment out the code
+    // that follows it.
+    ['+const tag = "#heading"; p = open("../../etc/passwd")\n', "src/app.py"],
+    // A real comment on the same line as code leaves the code intact.
+    ['+x = 1  # note: see ../docs\n+with open("../../etc/passwd") as fh:\n', "src/app.py"],
+    // `--` that is a decrement, not a comment marker.
+    ['+i--; fs.readFileSync("../../etc/passwd");\n', "src/app.ts"],
+    // A CSS hex colour is not a `#` comment: the relative url() is real.
+    ["+background: #fff url(../../img/bg.png);\n", "src/styles/app.css"],
+    // An unspaced floor division is not a `//` comment.
+    ['+n = total//count; p = open("../../etc/passwd")\n', "src/app.py"],
+    // An unquoted URL's `//` is not a comment marker.
+    ['+const url = http://host/x; p = open("../../etc/passwd")\n', "src/app.py"],
+    // An escaped slash in a regex literal is not a comment marker.
+    ['+const re = /a\\//; p = fs.readFileSync("../../etc/passwd");\n', "src/app.ts"],
+    // A shell glob is not a block comment — shell has none. `/*` must not
+    // blank the real traversal that follows it, no closer or closer found.
+    ['+rm -rf /*\n+const p = fs.readFileSync("../../etc/passwd");\n', "scripts/build.sh"],
+    // ... and a glob whose `/*` is followed by more glob text is no different:
+    // the phantom cannot pair with the closing marker inside the string.
+    ['+rm -rf /*foo\n+cp ../../etc/passwd .\n+echo "*/"\n', "scripts/build.sh"],
+    // `--` is not a comment marker in shell: it ends the options, and the
+    // traversal after it is real code.
+    ['+cp -- ../../etc/passwd ./dest\n', "scripts/build.sh"],
+    // `//` is not a comment marker in Python: spaced floor division is code.
+    ['+chunk = total // workers; save("../etc/passwd")\n', "src/jobs/stats.py"],
+    // An unknown file type gets no comment blanking at all: with no language
+    // there is no basis for treating any marker as a comment.
+    ["+/* note: see ../events/types.js */\n", "jobs/config.weird"],
+    // Markup has no `//` comment: a `//` in HTML text is data, and blanking
+    // it would hide the traversal that follows.
+    ["+<p>note: // see ../../etc/passwd for details</p>\n", "src/page.html"],
+    // `#` is not a comment marker in C: a spaced preprocessor directive is
+    // code, and its macro body is a real path reference.
+    ["+# define DATA_DIR ../etc\n", "src/app.c"],
+    // A real one-line comment whose quoted closing marker is followed by code:
+    // quotes have no syntax inside a comment, so the FIRST closing marker
+    // closes it and the code after it is scanned as code.
+    ['+/* "*/ const p = fs.readFileSync("../../etc/passwd"); /* "*/\n', "src/app.ts"],
+    // A block comment that documents the delimiter is cut short at the quoted
+    // closing marker, exactly as C/JS/CSS lexes it — its tail is code, and the
+    // traversal there must fire.
+    ['+/* The token is "*/" and then\n+ * see ../events/types.js\n+ */\n', "src/jobs/types.ts"],
+  ];
+  for (const [diff, filename] of positives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", diff);
+    assert.ok(result.riskFlags.includes("path_handling_changes"), diff);
+    assert.ok(
+      result.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"),
+      `${diff}: expected a fired traversal_literal, got ${JSON.stringify(result.pathHandlingProvenance.signals)}`,
+    );
+  }
+});
+
+test("#960: block-comment state is tracked per diff stream, so it never hides real code", () => {
+  // A removed line that opens a block comment must not blank an added line's
+  // real traversal — a false negative would be worse than the false positive
+  // this change fixes.
+  const removedOpener = classifyPr({
+    prFiles: files("src/app.ts"),
+    diffText: '-/* legacy note about ../old\n+const p = fs.readFileSync("../../etc/passwd");\n',
+    linkedIssues: [],
+  });
+  assert.equal(removedOpener.prKind, "path_handling_changes");
+  assert.ok(removedOpener.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"));
+
+  // The mirror case: an ADDED opener blanks a context continuation line, which
+  // sits inside the block in the new file. Both are the new-file stream.
+  const addedOpener = classifyPr({
+    prFiles: files("src/app.ts"),
+    diffText: '+/*\n const p = fs.readFileSync("../../etc/passwd");\n+*/\n',
+    linkedIssues: [],
+  });
+  assert.equal(addedOpener.prKind, "app_code");
+  assert.equal(addedOpener.pathHandlingProvenance.fired, false);
+
+  // A regex literal's `/*` is not a block opener: it must not open a phantom
+  // block and swallow the real traversal on the next line.
+  const regexLiteral = classifyPr({
+    prFiles: files("src/app.ts"),
+    diffText: '+const re = /\\/*foo\\//g;\n+const p = fs.readFileSync("../../etc/passwd");\n',
+    linkedIssues: [],
+  });
+  assert.equal(regexLiteral.prKind, "path_handling_changes");
+  assert.ok(regexLiteral.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"));
+
+  // A shell glob cannot open one either.
+  const glob = classifyPr({
+    prFiles: files("scripts/build.sh"),
+    diffText: "+rm -rf build/*\n+cp ../../etc/passwd .\n",
+    linkedIssues: [],
+  });
+  assert.equal(glob.prKind, "path_handling_changes");
+  assert.ok(glob.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"));
+});
+
+test("#960: commentFree is the sole comment authority — no downstream path re-interprets markers", () => {
+  // Spaced Python floor division is not a `//` comment: the lexical
+  // code-only class after it must still fire. The retired generic stripper
+  // truncated at the first `#`/`//` and hid `sanitize_path` behind it.
+  const floorDivision = classifyPr({
+    prFiles: files("src/jobs/stats.py"),
+    diffText: '+x = total // workers; sanitize_path(p)\n',
+    linkedIssues: [],
+  });
+  assert.equal(floorDivision.prKind, "path_handling_changes");
+  assert.ok(
+    floorDivision.pathHandlingProvenance.signals.some(
+      (s) => s.signal === "path_containment_or_sanitization",
+    ),
+    JSON.stringify(floorDivision.pathHandlingProvenance.signals),
+  );
+
+  // Same marker, same lesson, inside a construction call's operand list: the
+  // operand after the floor division is real input for untrusted_source_join.
+  const flowOperand = classifyPr({
+    prFiles: files("src/jobs/stats.py"),
+    diffText: '+dest = path.join(root, total // workers, request.args["path"])\n',
+    linkedIssues: [],
+  });
+  assert.equal(flowOperand.prKind, "path_handling_changes");
+  assert.ok(
+    flowOperand.pathHandlingProvenance.signals.some((s) => s.signal === "untrusted_source_join"),
+    JSON.stringify(flowOperand.pathHandlingProvenance.signals),
+  );
+
+  // Tcl's `#` is a comment only in command position; mid-command it is an
+  // argument, so it must not blank the traversal after it.
+  const tcl = classifyPr({
+    prFiles: files("lib/setup.tcl"),
+    diffText: "+set p [file join # ../../etc/passwd]\n",
+    linkedIssues: [],
+  });
+  assert.equal(tcl.prKind, "path_handling_changes");
+  assert.ok(tcl.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"));
+
+  // Dockerfile `#` is likewise position-sensitive (a comment line vs an
+  // instruction argument), so it gets no blanking either.
+  const dockerfile = classifyPr({
+    prFiles: files("deploy/Dockerfile"),
+    diffText: "+LABEL notes # see ../../etc/passwd\n",
+    linkedIssues: [],
+  });
+  assert.equal(dockerfile.prKind, "path_handling_changes");
+  assert.ok(dockerfile.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"));
+
+  // The cost of refusing position-sensitive `#` languages is explicit:
+  // genuine comments in Tcl and Dockerfile now fire — a false positive,
+  // which is the direction the invariant prefers.
+  const tclComment = classifyPr({
+    prFiles: files("lib/setup.tcl"),
+    diffText: "+proc foo {} {\n+    # see ../../etc/passwd\n+}\n",
+    linkedIssues: [],
+  });
+  assert.equal(tclComment.prKind, "path_handling_changes");
+  const dockerfileComment = classifyPr({
+    prFiles: files("deploy/Dockerfile"),
+    diffText: "+# build steps for ../../etc/passwd\n",
+    linkedIssues: [],
+  });
+  assert.equal(dockerfileComment.prKind, "path_handling_changes");
+
+  // jsx/tsx get no comment blanking at all: their grammar is mixed, so a
+  // `//` (or a block comment) in JSX text can be literal markup hiding real
+  // code that follows on the line. If the lightweight lexer cannot prove
+  // something is a comment, it is scanned as code — the cost is that genuine
+  // TS comments in .tsx fire, the direction the invariant prefers.
+  const jsxText = classifyPr({
+    prFiles: files("src/ui/view.tsx"),
+    diffText: '+const view = <div> // note {fs.readFileSync("../../etc/passwd")}</div>;\n',
+    linkedIssues: [],
+  });
+  assert.equal(jsxText.prKind, "path_handling_changes");
+  assert.ok(jsxText.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"));
+  const jsxBlock = classifyPr({
+    prFiles: files("src/ui/view.tsx"),
+    diffText: '+const v = <div> /* note */ {fs.readFileSync("../../etc/passwd")}</div>;\n',
+    linkedIssues: [],
+  });
+  assert.equal(jsxBlock.prKind, "path_handling_changes");
+  const tsxComment = classifyPr({
+    prFiles: files("src/ui/view.tsx"),
+    diffText: "+// see ../events/types.js for the shape\n",
+    linkedIssues: [],
+  });
+  assert.equal(tsxComment.prKind, "path_handling_changes");
+
+  // PHP is the same mixed-grammar class: HTML text between `?>` and `<?php`
+  // can carry a literal `//` ahead of a real PHP island on the same line.
+  const phpIsland = classifyPr({
+    prFiles: files("src/page.php"),
+    diffText: '+<div> // note <?php fopen("../etc/passwd", "r"); ?></div>\n',
+    linkedIssues: [],
+  });
+  assert.equal(phpIsland.prKind, "path_handling_changes");
 });
 
 test("#871: a bare `pathname` is a WHATWG URL component, not a path variable, unless the file also touches a filesystem/path-construction API", () => {
@@ -916,6 +1561,148 @@ test("#749: headerless diffs degrade conservatively", () => {
   assert.equal(withProduction.prKind, "path_handling_changes");
 });
 
+// ── #1034: a script reading its own symlink is self-location bookkeeping ──
+
+function selfLocationDiff(file: string, lines: string[]): string {
+  return `diff --git a/${file} b/${file}\n${lines.join("\n")}\n`;
+}
+
+function firesSymlinkSensitive(result: ReturnType<typeof classifyPr>): boolean {
+  return result.pathHandlingProvenance.signals.some(
+    (s) => s.signal === "symlink_sensitive" && s.source === "diff",
+  );
+}
+
+const SH_SELF_LOCATION_LOOP = [
+  '+_src="${BASH_SOURCE[0]}"',
+  '+while [ -L "$_src" ]; do',
+  '+  _link="$(readlink "$_src")"',
+  '+  _src="$_link"',
+  "+done",
+];
+const PY_SELF_LOCATION_LOOP = ["+src = __file__", "+while os.path.islink(src):", "+    src = os.readlink(src)"];
+const asContext = (lines: string[]): string[] => lines.map((line) => ` ${line.slice(1)}`);
+/** The shell loop with its anchor line modified and the rest in context. */
+const modifiedLoopAnchor = (from: string, to: string): string[] => [
+  "@@ -1,5 +1,5 @@",
+  `-_src="${from}"`,
+  `+_src="${to}"`,
+  ...asContext(SH_SELF_LOCATION_LOOP.slice(1)),
+];
+
+test("#1034: self-location readlink no longer fires symlink_sensitive", () => {
+  const cases: [string, string, string[]][] = [
+    // The issue's five rows.
+    ["python direct", "tools/tool.py", ["+HERE = os.readlink(__file__)"]],
+    ["python one-hop loop", "tools/tool.py", [...PY_SELF_LOCATION_LOOP, "+HERE = os.path.dirname(src)"]],
+    ["shell dirname/readlink -f one-liner", "scripts/run.sh", ['+DIR="$(dirname "$(readlink -f "$0")")"']],
+    ["shell BASH_SOURCE direct", "scripts/run.sh", ['+SRC="$(readlink "${BASH_SOURCE[0]}")"']],
+    ["shell wrapper loop", "scripts/run.sh", SH_SELF_LOCATION_LOOP],
+    // The other recognised forms.
+    ["bare readlink $0", "scripts/run.sh", ['+readlink "$0"']],
+    ["readlink -f BASH_SOURCE", "scripts/run.sh", ['+readlink -f "${BASH_SOURCE[0]}"']],
+    ["cd into the resolved dir", "scripts/run.sh", ['+cd "$(dirname "$(readlink -f "$0")")"']],
+    ["local assignment", "scripts/run.sh", ["+resolve() {", '+  local here="$(readlink -f "$0")"', '+  echo "$here"', "+}"]],
+    ["[[ -L ]] guard", "scripts/run.sh", SH_SELF_LOCATION_LOOP.map((l) => l.replace('[ -L "$_src" ]', '[[ -L "$_src" ]]'))],
+    ["-h guard", "scripts/run.sh", SH_SELF_LOCATION_LOOP.map((l) => l.replace("-L", "-h"))],
+    ["uppercase loop variables", "scripts/run.sh", SH_SELF_LOCATION_LOOP.map((l) => l.replace(/_src/g, "SRC").replace(/_link/g, "LINK"))],
+    ["python trailing comma", "tools/tool.py", ["+HERE = os.readlink(__file__,)"]],
+    ["python identifier containing readlink", "tools/tool.py", ["+readlink_result = os.readlink(__file__)"]],
+    ["shell identifier containing readlink", "scripts/run.sh", ['+my_readlink="$(readlink "$0")"']],
+    ["unquoted assignment", "scripts/run.sh", ['+SCRIPT=$(readlink -f "$0")']],
+    ["unquoted dirname assignment", "scripts/run.sh", ['+SCRIPT_DIR=$(dirname "$(readlink -f "$0")")']],
+    [
+      "shell loop with unquoted assignments",
+      "scripts/run.sh",
+      ["+_src=${BASH_SOURCE[0]}", '+while [ -L "$_src" ]; do', '+  _link=$(readlink "$_src")', "+  _src=$_link", "+done"],
+    ],
+    ["dirname with a /lib suffix", "scripts/run.sh", ['+LIB="$(dirname "$(readlink -f "$0")")/lib"']],
+    ["dirname with a /.. suffix", "scripts/run.sh", ['+ROOT="$(dirname "$(readlink -f "$0")")/.."']],
+    // Ordinary neighbours in the same file.
+    ["Path(__file__) beside the python loop", "tools/tool.py", ["+ROOT = Path(__file__).parent", ...PY_SELF_LOCATION_LOOP]],
+    ["strict mode beside the shell loop", "scripts/run.sh", ["+set -euo pipefail", ...SH_SELF_LOCATION_LOOP]],
+    ["readonly beside the shell loop", "scripts/run.sh", ["+readonly VERSION=1", ...SH_SELF_LOCATION_LOOP]],
+    ["heredoc usage beside the shell loop", "scripts/run.sh", ["+usage() {", "+  cat <<EOF", "+usage: run <file>", "+EOF", "+}", ...SH_SELF_LOCATION_LOOP]],
+    ["trailing comment, python", "tools/tool.py", ["+HERE = os.readlink(__file__)  # resolve our own link"]],
+    ["trailing comment, shell", "scripts/run.sh", ['+DIR="$(dirname "$(readlink -f "$0")")"  # our own dir']],
+    // The extensionless bin/ wrapper.
+    ["extensionless wrapper", "bin/tool", SH_SELF_LOCATION_LOOP],
+    // Diff shapes.
+    ["loop in context, unrelated line added", "scripts/run.sh", ["@@ -1,5 +1,6 @@", ...asContext(SH_SELF_LOCATION_LOOP), "+set -e"]],
+    ["anchor changed from $0 to BASH_SOURCE, loop in context", "scripts/run.sh", modifiedLoopAnchor("$0", "${BASH_SOURCE[0]}")],
+  ];
+  for (const [label, file, lines] of cases) {
+    const result = classifyPr({ prFiles: files(file), diffText: selfLocationDiff(file, lines), linkedIssues: [] });
+    assert.equal(result.prKind, "app_code", label);
+    assert.equal(result.pathHandlingProvenance.fired, false, label);
+    assert.ok(!firesSymlinkSensitive(result), `${label}: unexpected symlink_sensitive`);
+  }
+
+  // A `../` suffix still fires traversal_literal, a separate class; only the
+  // readlink stops counting.
+  const sibling = classifyPr({
+    prFiles: files("scripts/run.sh"),
+    diffText: selfLocationDiff("scripts/run.sh", ['+LIB="$(dirname "$(readlink -f "$0")")/../lib"']),
+    linkedIssues: [],
+  });
+  assert.ok(!firesSymlinkSensitive(sibling));
+  assert.ok(sibling.pathHandlingProvenance.signals.some(
+    (s) => s.signal === "traversal_literal" && s.source === "diff",
+  ));
+});
+
+test("#1034: real symlink surfaces and near-miss self-location shapes keep firing", () => {
+  const cases: [string, string, string[]][] = [
+    // Scope counterexamples.
+    ["untrusted python operand", "src/app.py", ["+os.readlink(user_path)"]],
+    ["python reassignment", "src/app.py", ["+src = __file__", '+src = request.args["path"]', "+os.readlink(src)"]],
+    ["os.symlink", "src/app.py", ["+os.symlink(target, dest)"]],
+    ["shell positional operand", "scripts/run.sh", ['+readlink "$1"']],
+    ["shell reassignment", "scripts/run.sh", ['+src="${BASH_SOURCE[0]}"', '+src="$1"', '+readlink "$src"']],
+    // Ordinary near-misses.
+    ["python loop body with a second statement", "tools/tool.py", [...PY_SELF_LOCATION_LOOP, "+    hops += 1"]],
+    ["python loop reads another variable", "tools/tool.py", ["+src = __file__", "+while os.path.islink(src):", "+    src = os.readlink(user_path)"]],
+    ["shell loop reads another variable", "scripts/run.sh", SH_SELF_LOCATION_LOOP.map((l) => l.replace('readlink "$_src"', 'readlink "$target"'))],
+    ["shell loop copies another variable", "scripts/run.sh", SH_SELF_LOCATION_LOOP.map((l) => l.replace('_src="$_link"', '_src="$target"'))],
+    ["statement between anchor and guard", "scripts/run.sh", [SH_SELF_LOCATION_LOOP[0] ?? "", '+_src="$1"', ...SH_SELF_LOCATION_LOOP.slice(1)]],
+    ["second readlink on the line, shell", "scripts/run.sh", ['+readlink "$0"; readlink "$1"']],
+    ["unbalanced outer quote", "scripts/run.sh", ['+SCRIPT="$(readlink -f "$0")']],
+    ["second readlink on the line, python", "tools/tool.py", ["+x = os.readlink(__file__) or os.readlink(p)"]],
+    ["anchor changed from $0 to $1, loop in context", "scripts/run.sh", modifiedLoopAnchor("$0", "$1")],
+    ["anchor changed from $1 to $0, loop in context", "scripts/run.sh", modifiedLoopAnchor("$1", "$0")],
+    ["shell loop in a .js file", "src/run.js", SH_SELF_LOCATION_LOOP],
+    ["shell loop in a .zsh file", "scripts/run.zsh", SH_SELF_LOCATION_LOOP],
+    ["os.lstat", "src/app.py", ["+os.lstat(path)"]],
+    // Declared limits: false positives that exist today and stay.
+    [
+      "relative-link wrapper loop",
+      "scripts/run.sh",
+      [
+        '+_src="${BASH_SOURCE[0]}"',
+        '+while [ -L "$_src" ]; do',
+        '+  _link="$(readlink "$_src")"',
+        '+  case "$_link" in',
+        '+    /*) _src="$_link" ;;',
+        '+    *) _src="$(dirname "$_src")/$_link" ;;',
+        "+  esac",
+        "+done",
+      ],
+    ],
+    ["symlink word in a string literal", "scripts/run.sh", ['+echo "too many symlink levels" >&2']],
+    ["comment in an extensionless file", "bin/tool", ["+# follow readlink until the real file", ...SH_SELF_LOCATION_LOOP]],
+    ["single-line compound", "scripts/run.sh", ['+[ -L "$0" ] && readlink "$0"']],
+    ["braced ${0}", "scripts/run.sh", ['+readlink "${0}"']],
+    ["unquoted $0", "scripts/run.sh", ["+readlink $0"]],
+    ["readlink -e", "scripts/run.sh", ['+readlink -e "$0"']],
+    ["CRLF line", "scripts/run.sh", ['+readlink "$0"\r']],
+    ["suffix with a variable", "scripts/run.sh", ['+cd "$(dirname "$(readlink -f "$0")")/$1"']],
+  ];
+  for (const [label, file, lines] of cases) {
+    const result = classifyPr({ prFiles: files(file), diffText: selfLocationDiff(file, lines), linkedIssues: [] });
+    assert.ok(firesSymlinkSensitive(result), `${label}: expected a symlink_sensitive signal`);
+  }
+});
+
 // ── Specialist role selection (#633 port) ─────────────────────────────────
 
 test("lane tables select roles from kind and flags", () => {
@@ -931,6 +1718,13 @@ test("digest-only with no flags selects zero roles via the documented gate", () 
   assert.deepEqual(selection.selectedRoles, []);
   assert.deepEqual(selection.skippedRoles, SPECIALIST_ROLES_ORDER);
   assert.match(selection.zeroSelectionReason, /digest-only lockfile change/);
+});
+
+test("image-digest-only with no flags selects zero roles via the documented gate", () => {
+  const selection = selectFromArtifact({ pr_kind: "image_digest_only", risk_flags: [], changed_files_summary: ["k8s/lemonade.yaml"] });
+  assert.deepEqual(selection.selectedRoles, []);
+  assert.deepEqual(selection.skippedRoles, SPECIALIST_ROLES_ORDER);
+  assert.match(selection.zeroSelectionReason, /image-digest-only change/);
 });
 
 test("docs/meta-only app_code PRs select zero roles; workflows keep correctness", () => {

@@ -11,18 +11,18 @@ This file is the durable standards context injected into every agent and reviewe
 - **Forge agnostic** — GitHub and Forgejo behind the platform seam (`src/platform/`). No forge-specific logic outside the adapters.
 - **Repository agnostic** — product behavior never special-cases this repository's identity, paths, or metadata.
 - **Provider/model agnostic** — OpenAI `POST /chat/completions` and Anthropic `POST /messages` wire formats; cloud and local/self-hosted endpoints are both first-class.
-- **Deployment/runtime agnostic** — GitHub Actions and Forgejo Actions (composite wrapper + committed Node bundle).
+- **Deployment/runtime compatible** — GitHub Actions and qualified Forgejo Actions runners use the native JavaScript Action (`runs.using: node24`). `dist/` is built by CI and packaged on release-tag commits, not committed to `main`.
 - **Independent of the maintainer's infrastructure** — no dependency on the homelab, LiteLLM topology, Kubernetes, Flux, Courier, Dispatch, or home-ops.
 
-Do not freeze temporary v2 implementation details into permanent product rules. The v2→v3 state is migration, not policy — see `docs/v3-migration.md`.
+Do not freeze temporary v2 implementation details into permanent product rules. The completed v2→v3 migration is historical context, not policy — see `docs/v3-migration.md`.
 
 ## Authority model (normative)
 
 - **Deterministic policy owns deterministic decisions.** The classifier, precheck, verdict policy, required-check validation, and skip logic (`src/classification/`, `src/precheck/`, `src/enforcement/`) are rule-based; models do not override them.
-- **Path-handling classification requires a real untrusted-path surface (#749).** Trusted path scaffolding (`Path(__file__).resolve()` root discovery, `__dirname`/`import.meta` anchors, module specifiers, constant-path pathlib usage) and test-file fixture paths never fire `path_handling_changes` by themselves; traversal literals, containment/sanitization logic, untrusted-source joins, archive extraction, and symlink operations do. Every decision is explainable from the bounded `path_handling_provenance` artifact field. `src/classification/classify.ts` implements the signal model; parity goldens pin it.
+- **Path-handling classification requires a real untrusted-path surface (#749).** Trusted path scaffolding (`Path(__file__).resolve()` root discovery, `__dirname`/`import.meta` anchors, module specifiers, constant-path pathlib usage), test-file fixture paths, and mentions that survive only inside a comment in a language whose comment syntax is recognized (#960) never fire `path_handling_changes` by themselves; traversal literals, containment/sanitization logic, untrusted-source joins, archive extraction, and symlink operations do. Every decision is explainable from the bounded `path_handling_provenance` artifact field. `src/classification/classify.ts` implements the signal model; classification snapshots pin it.
 - **The final reviewer owns the model verdict.** Specialist leads, tool-harness output, and evidence-provider findings are advisory evidence sources — they never flip or produce the verdict, and specialist severity is capped below `blocker`.
 - **Fallback is availability recovery, not quality escalation.** A fallback model call exists only to complete a review the primary could not.
-- **Post-primary smart escalation is reviewer-requested only** (#721): after a successful primary review, the sole escalation trigger is the verdict's `smart_review_requested` field. The historical `should_escalate` heuristics are telemetry only.
+- **Post-primary smart escalation is reviewer-requested only (#721).** After a successful primary review, the sole escalation trigger is the verdict's `smart_review_requested` field; the historical `should_escalate` heuristics are telemetry only. There is no deterministic pre-primary route to the smart model either (#965): `review-routing-mode: auto` always starts on the primary profile.
 
 ## Security boundaries (normative)
 
@@ -39,12 +39,13 @@ Do not freeze temporary v2 implementation details into permanent product rules. 
 | Area | Purpose |
 |---|---|
 | `action.yml` | Shipped action definition, generated from `contracts/action-v3.yml` (`node24` JavaScript action; precheck → review → publish run in one process) |
+| `docs/inputs.md` | Inputs/outputs reference, generated from `contracts/action-v3.yml` + `scripts/docs/input-groups.json` by `node scripts/generate-inputs-doc.mjs` (a test fails when stale; add new inputs to a group) |
 | `src/` | The TypeScript runtime — the shipped production path (`node dist/index.js`, entry `src/run/action.ts`): `platform/`, `precheck/`, `prompt/`, `context/`, `classification/`, `requirements/`, `corpus/`, `model/`, `transport/`, `runtime/`, `gates/`, `evidence/` |
 | `scripts/` | Repository tooling (eval, harvest, fork gate, judge, release, v3 build assets); not part of the action |
 | `pr_reviewer/` | Python modules for the semantic-eval and judge tooling; not part of the action |
-| `tests/`, `tests-v3/` | pytest + shell tests (tooling, parity harness, retained gates); node:test for v3; parity fixtures and goldens under `tests/fixtures/parity/` |
+| `tests/`, `tests-v3/` | node:test for the shipped v3 runtime; pytest + shell for retained Python auxiliary tooling (eval, harvest, judge, fork gate) and repo/workflow structural gates; shared JSON fixtures under `tests/fixtures/` |
 | `evals/` | graded eval corpora driven by `scripts/eval_harness.py` through the v3 runtime (runbook: `docs/evals.md`) |
-| `.github/workflows/fork-ai-review.yaml` | privilege-separated fork-PR reviewer (`docs/fork-review.md`) |
+| `.github/workflows/ai-pr-review-fork.yaml` | privilege-separated fork-PR reviewer (`docs/fork-review.md`) |
 
 Full per-module detail, the pipeline architecture, corpus section order, and descriptive behavioral contracts: [`docs/architecture/code-map.md`](docs/architecture/code-map.md).
 
@@ -52,16 +53,14 @@ Full per-module detail, the pipeline architecture, corpus section order, and des
 
 ```bash
 npm ci && npm run typecheck && npm test     # v3 TypeScript (node --test)
-npm run build                                # dist/ is not committed; npm test and the parity harness need it built
-pytest tests/ -v --tb=short                 # Python tests: parity harness, eval tooling, retained gates
-GIT_CONFIG_GLOBAL=/dev/null python3 tests/parity_harness.py   # v2/v3 parity boundaries (needs dist/ built)
+npm run build                                # dist/ is not committed
+pytest tests/ -v --tb=short                 # Python tests: eval tooling, retained gates
 ```
 
 ## Development conventions (normative)
 
 - **`dist/` is release-only**: never commit it. CI builds it; releases commit it onto the tagged release commit (off `main`) via `scripts/release/tag-with-dist.sh`.
-- **Parity boundaries are frozen**: `tests/parity_harness.py` compares v3 against v2 goldens recorded before v2 was removed (`tests/fixtures/parity/goldens/`). A deliberate behavior change at a boundary needs an exact entry in `tests/fixtures/parity/approved-divergences.json`; never edit a golden to make a diff pass.
-- **Naming**: v2 public contract snake_case (`action.yml`); v3 public contract kebab-case (`contracts/action-v3.yml`). TypeScript internals camelCase; snake_case survives only at persisted/parity serialization boundaries via explicit converters.
+- **Naming**: current public Action input/output IDs are kebab-case in `contracts/action-v3.yml` and the generated `action.yml`. TypeScript internals use camelCase; snake_case survives only in explicit persisted/compatibility serialization and historical v2 migration mappings.
 - **Model API credentials travel only through the HTTP auth headers** the provider defines (e.g. `Authorization: Bearer` / `x-api-key`) over the typed Node transport (`src/transport/`); they must never appear in process argv, request URLs or bodies, or locally generated diagnostics and error messages. Do not reintroduce a shell/curl transport.
 - **Versioning**: `vX.Y.Z` semver tags with floating major tags (`v1`, `v2`, …). Follow the README's "Versioning policy" for patch/minor/major criteria; release via **Actions → Manual Release** after CI is green on `main`.
 - **Documentation**: keep runbooks and implementation detail in `docs/`; `AGENTS.md` carries durable rules and pointers only.
@@ -106,9 +105,15 @@ Name only paths you are confident about. An issue that names files the diff does
 - [`docs/architecture/code-map.md`](docs/architecture/code-map.md) — per-module map, pipeline architecture, review-corpus sections, behavioral contracts
 - [`docs/architecture/v3-typescript-runtime.md`](docs/architecture/v3-typescript-runtime.md) — composite/Node runtime decision and platform boundary
 - [`docs/architecture/deep-review-execution-shape.md`](docs/architecture/deep-review-execution-shape.md) — specialist execution-shape ADR
+- [`docs/architecture/distributed-requirement-proof.md`](docs/architecture/distributed-requirement-proof.md) — #962 distributed-enforcement proof contract: trusted seam topology, collective validation, anti-abuse
+- [`docs/architecture/durable-review-queue.md`](docs/architecture/durable-review-queue.md) — #731 durable review-queue semantics: lifecycle state machine, supersession, leases, recovery (library for the future controller daemon)
+- [`docs/architecture/source-evidence-provenance.md`](docs/architecture/source-evidence-provenance.md) — #1015 source-evidence provenance: committed vs sanitized representations, exact-revision authority, safe span verification
 - [`docs/fork-review.md`](docs/fork-review.md) — fork PR privilege separation, threat model, `FORK_*` configuration
 - [`docs/v3-migration.md`](docs/v3-migration.md) — v2→v3 migration state and contract mapping
 - [`docs/repository-config.md`](docs/repository-config.md) — v3 repository config file: keys, base-side trust, narrowing precedence
+- [`docs/architecture/operator-config-and-adoption.md`](docs/architecture/operator-config-and-adoption.md) — #727 operator-mode contract: instance schema, repository config extension keys, adoption policy, effective-config fingerprint
+- [`docs/architecture/self-hosted-forgejo-ingress.md`](docs/architecture/self-hosted-forgejo-ingress.md) — #730 self-hosted Forgejo ingress: webhook trust boundary, endpoint/credential model, ledger dedupe, capability degradation
 - [`docs/evals.md`](docs/evals.md) — eval harness runbook, merge-safety scoring, semantic judge, deep-review A/B
+- [`docs/release-notes.md`](docs/release-notes.md) — house style and process for turning release-please output into published release notes
 - `README.md` — action inputs/outputs, usage recipes, troubleshooting, versioning policy, security notes
 - [`SECURITY.md`](SECURITY.md) — threat model and operational security guidance

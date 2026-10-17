@@ -10,6 +10,7 @@ import {
   dedupeVerdictCorpus,
   truncateText,
 } from "../src/model/conversation.js";
+import { sanitizedSourceProvenance } from "../src/context/evidence-provenance.js";
 
 test("tool results are wrapped in an untrusted envelope with defanged delimiters", () => {
   const c = new Conversation();
@@ -25,6 +26,26 @@ test("tool results are wrapped in an untrusted envelope with defanged delimiters
   assert.equal((msg.content.match(/<\/untrusted_tool_result>/g) ?? []).length, 1);
   assert.equal((msg.content.match(/<_untrusted_tool_result/g) ?? []).length, 2);
   assert.ok(msg.content.trimEnd().endsWith("</untrusted_tool_result>"));
+});
+
+test("tool results carry bounded provenance attributes when evidence is provided", () => {
+  const c = new Conversation();
+  c.addToolResult("c1", { content: "x" }, { provenance: sanitizedSourceProvenance(1, "src/x.ts", "abc123") });
+  const msg = (c.renderOpenAiMessages() as Array<{ role: string; content: string }>).find((m) => m.role === "tool")!;
+  assert.match(
+    msg.content,
+    /^<untrusted_tool_result provenance="tool_result" call_id="c1" status="ok" representation="sanitized_source" synthesized="true" redaction_count="1" source_file="src\/x\.ts" source_revision="abc123">\n/,
+  );
+  assert.ok(msg.content.includes('representation="sanitized_source"'));
+  assert.ok(msg.content.includes('synthesized="true"'));
+  assert.ok(msg.content.includes('redaction_count="1"'));
+  assert.ok(msg.content.includes('source_file="src/x.ts"'));
+  assert.ok(msg.content.includes('source_revision="abc123"'));
+  // The no-provenance case is byte-identical to the historical envelope.
+  const plain = new Conversation();
+  plain.addToolResult("c2", { content: "x" });
+  const plainMsg = (plain.renderOpenAiMessages() as Array<{ role: string; content: string }>).find((m) => m.role === "tool")!;
+  assert.ok(plainMsg.content.startsWith('<untrusted_tool_result provenance="tool_result" call_id="c2" status="ok">\n'));
 });
 
 test("error results carry status=error and the Anthropic is_error flag", () => {
@@ -136,7 +157,7 @@ test("dedupeVerdict_corpus drops only byte-identical sections and preserves Rela
     "# Related Code (truncated)",
     "more refs",
     "",
-    "# PR Diff (truncated)",
+    "# PR Diff",
     "+line",
   ].join("\n");
   const planning = ["# PR Classification", "kind: app_code"].join("\n");
@@ -203,10 +224,22 @@ test("the strict verdict schema literal stays contractually identical", () => {
   const schema = (OPENAI_VERDICT_JSON_SCHEMA as { json_schema: { schema: Record<string, unknown> } }).json_schema.schema;
   assert.deepEqual(schema.required, [
     "verdict", "review_markdown", "smart_review_requested", "smart_review_reason",
+    "review_triage_decision", "review_triage_reason", "review_triage_targets",
     "findings", "requirement_coverage", "required_check_dispositions",
   ]);
-  const props = schema.properties as Record<string, { enum?: string[] }>;
+  const props = schema.properties as Record<string, { enum?: string[]; type?: unknown }>;
   assert.deepEqual(props.verdict!.enum, ["approve", "request_changes"]);
+  // #1003: both schema copies are kept in lockstep — the triage pair is
+  // present here exactly as in src/model/request.ts.
+  assert.deepEqual(props.review_triage_decision!.enum, ["not_required", "required", "unknown"]);
+  assert.deepEqual(props.review_triage_reason!.type, ["string", "null"]);
+  // #1005: routing targets are a bounded array of LOGICAL ids, nullable so a
+  // not_required decision / disabled routing can emit null under strict mode.
+  assert.deepEqual(props.review_triage_targets!.type, ["array", "null"]);
+  assert.deepEqual(
+    (props.review_triage_targets as { items: { type: string } }).items.type,
+    "string",
+  );
   const dispositions = props.required_check_dispositions as { items: { properties: { status: { enum: string[] } } } };
   assert.deepEqual(dispositions.items.properties.status.enum, ["satisfied", "not_applicable", "unresolved"]);
   assert.equal(WEB_SEARCH_SCHEMA.name, "web_search");

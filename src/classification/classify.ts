@@ -16,6 +16,7 @@ import type { ChangedFile, IssueLabel, LinkedIssue } from "../context/types.js";
 /** The authoritative pr_kind enumeration (order = documentation order). */
 export const PR_KINDS: readonly string[] = [
   "renovate_digest_only",
+  "image_digest_only",
   "dependency_upgrade",
   "app_code",
   "k8s_manifest",
@@ -50,6 +51,14 @@ const RENOVATE_DIGEST_FILE_PATTERNS: readonly RegExp[] = [
   /npm-shrinkwrap\.json/,
   /yarn\.lock/,
   /pnpm-lock\.yaml/,
+];
+
+/** Manifest files that can pin a container image by digest: Kubernetes/Helm/
+ * compose YAML and Dockerfiles (#909). */
+const IMAGE_DIGEST_FILE_PATTERNS: readonly RegExp[] = [
+  /\.ya?ml$/i,
+  /(^|\/)Dockerfile(\..+)?$/i,
+  /\.dockerfile$/i,
 ];
 
 /** Dependency-related files (lockfiles, manifests). */
@@ -117,6 +126,13 @@ const FILE_SERVING_PATTERNS: readonly RegExp[] = [
  *   trusted path bookkeeping (never fires alone)
  *     - repository-root discovery: `Path(__file__).resolve().parent...`,
  *       `os.path.dirname(os.path.abspath(__file__))`, `__dirname` joins;
+ *     - self-location `readlink` (#1034): `os.readlink(__file__)`, shell
+ *       `readlink [-f] "$0"` / `"${BASH_SOURCE[0]}"` as a whole statement or
+ *       inside `dirname`/`cd`, and the Python and shell symlink-resolution
+ *       loops. It holds for ordinary code only: rebinding the anchor, a
+ *       template line that is really string content, a second file and
+ *       obfuscated spellings can evade it, as `getattr(os, "read" + "link")`
+ *       evades the class scan already;
  *     - module resolution specifiers (`from "../x.js"` — kept from #720);
  *     - path-library usage with no untrusted input flow
  *       (`Path("/etc/myapp/config.yaml")`, `path_join(base, "static")`);
@@ -390,14 +406,502 @@ function neutralizePathFalsePositives(
     .replace(TRUSTED_ANCHOR_TOKEN, '""');
 }
 
-function neutralizeChunkLines(lines: string[]): string[] {
+const DIFF_MARKERS: ReadonlySet<string> = new Set(["+", "-", " "]);
+
+/** The unified-diff line marker, or NUL for a header line that has none. */
+function diffMarker(line: string): string {
+  const first = line[0] ?? "";
+  return DIFF_MARKERS.has(first) ? first : "\u0000";
+}
+
+/** #1034: a script reading its OWN symlink (`os.readlink(__file__)`, shell
+ * `readlink "$0"`, the portable symlink-resolution loop) is self-location
+ * bookkeeping like `realpath(__file__)`, not a symlink-sensitive surface.
+ * Recognition is closed and line-whole: a handful of complete statements and
+ * two loop templates of consecutive lines, matched by static patterns, so an
+ * untrusted operand, an intervening reassignment or a second operation on
+ * the line keeps firing. It reads each line as ordinary code: a rebound
+ * anchor, a template line that is really string content, or a second file
+ * that changes what the anchor means can evade it. */
+type SelfLocationFamilies = { python: boolean; shell: boolean };
+
+/** Language gate: `.py`/`.pyw` Python, `.sh`/`.bash` shell, an extensionless
+ * file (a `bin/` wrapper) either, anything else (a dotfile included) neither. */
+function selfLocationFamilies(path: string | null): SelfLocationFamilies {
+  const base = path?.split("/").pop() ?? "";
+  if (base === "" || base.startsWith(".")) return { python: false, shell: false };
+  if (!base.includes(".")) return { python: true, shell: true };
+  const kind = fileKindToken(base);
+  return { python: kind === "py" || kind === "pyw", shell: kind === "sh" || kind === "bash" };
+}
+
+/** Identifiers are bounded so a pathological name fails to match rather than
+ * costing time. */
+const SELF_LOCATION_IDENT = String.raw`[A-Za-z_]\w{0,63}`;
+const SH_ANCHOR_WORD = String.raw`(?:\$0|\$\{BASH_SOURCE\[0\]\})`;
+const SH_ANCHOR = String.raw`"${SH_ANCHOR_WORD}"`;
+const SH_READLINK_ANCHOR = String.raw`readlink[ \t]+(?:-f[ \t]+)?${SH_ANCHOR}`;
+/** A literal path after the resolved directory (`")/.."`, `")/lib"`): plain
+ * path characters only, bounded. */
+const SH_PATH_SUFFIX = String.raw`(?:/[\w.-]{0,64}){0,8}`;
+const SH_DIRNAME_ANCHOR = String.raw`\$\(dirname[ \t]+"\$\(${SH_READLINK_ANCHOR}\)"\)${SH_PATH_SUFFIX}`;
+
+/** Whole-statement direct forms. Python: `[NAME =] os.readlink(__file__)`.
+ * Shell: `readlink [-f] A`, `NAME="$(readlink [-f] A)"`,
+ * `NAME="$(dirname "$(readlink [-f] A)")"`, `cd "$(dirname "$(readlink [-f] A)")"`,
+ * with A a quoted `$0` or `${BASH_SOURCE[0]}` and an optional `local`. An
+ * assignment's right-hand side is not word-split, so its outer quotes are
+ * optional, as a matched pair (`("?)...\N`); the shell loop lines take the
+ * same rule. */
+const PY_DIRECT_STATEMENT = new RegExp(
+  String.raw`^[ \t]*(?:${SELF_LOCATION_IDENT}[ \t]*=[ \t]*)?os\.readlink[ \t]*\([ \t]*__file__[ \t]*(?:,[ \t]*)?\)[ \t]*$`,
+);
+const SH_DIRECT_STATEMENT = new RegExp(
+  String.raw`^[ \t]*(?:${SH_READLINK_ANCHOR}|(?:local[ \t]+)?${SELF_LOCATION_IDENT}=("?)\$\(${SH_READLINK_ANCHOR}\)\1|(?:local[ \t]+)?${SELF_LOCATION_IDENT}=("?)${SH_DIRNAME_ANCHOR}\2|cd[ \t]+"${SH_DIRNAME_ANCHOR}")[ \t]*$`,
+);
+
+/** Python loop template lines; indentation is captured and compared as text. */
+const PY_LOOP_ANCHOR = new RegExp(String.raw`^([ \t]*)(${SELF_LOCATION_IDENT})[ \t]*=[ \t]*__file__[ \t]*$`);
+const PY_LOOP_GUARD = new RegExp(
+  String.raw`^([ \t]*)while[ \t]+os\.path\.islink[ \t]*\([ \t]*(${SELF_LOCATION_IDENT})[ \t]*\)[ \t]*:[ \t]*$`,
+);
+const PY_LOOP_UPDATE = new RegExp(
+  String.raw`^([ \t]*)(${SELF_LOCATION_IDENT})[ \t]*=[ \t]*os\.readlink[ \t]*\([ \t]*(${SELF_LOCATION_IDENT})[ \t]*\)[ \t]*$`,
+);
+
+/** Shell loop template lines. */
+const SH_LOOP_ANCHOR = new RegExp(String.raw`^[ \t]*(${SELF_LOCATION_IDENT})=("?)${SH_ANCHOR_WORD}\2[ \t]*$`);
+const SH_LOOP_GUARD = new RegExp(
+  String.raw`^[ \t]*while[ \t]+(?:\[[ \t]+-[Lh][ \t]+"\$(${SELF_LOCATION_IDENT})"[ \t]+\]|\[\[[ \t]+-[Lh][ \t]+"\$(${SELF_LOCATION_IDENT})"[ \t]+\]\])[ \t]*;[ \t]*do[ \t]*$`,
+);
+const SH_LOOP_READ = new RegExp(
+  String.raw`^[ \t]*(${SELF_LOCATION_IDENT})=("?)\$\(readlink[ \t]+"\$(${SELF_LOCATION_IDENT})"\)\2[ \t]*$`,
+);
+const SH_LOOP_COPY = new RegExp(
+  String.raw`^[ \t]*(${SELF_LOCATION_IDENT})=("?)\$(${SELF_LOCATION_IDENT})\2[ \t]*$`,
+);
+const SH_LOOP_DONE = /^[ \t]*done[ \t]*$/;
+
+/** Python template at run position k: `T = __file__`, `while os.path.islink(T):`
+ * at the same indentation, one body line `T = os.readlink(T)` indented under
+ * it, then a dedent to the guard's level (or further) or the end of the run.
+ * Returns the body line's position, or null. */
+function pythonSelfLocationLoop(codes: readonly string[], k: number): number | null {
+  const anchor = PY_LOOP_ANCHOR.exec(codes[k] ?? "");
+  const guard = PY_LOOP_GUARD.exec(codes[k + 1] ?? "");
+  const update = PY_LOOP_UPDATE.exec(codes[k + 2] ?? "");
+  if (!anchor || !guard || !update) return null;
+  const [, indent = "", ident = ""] = anchor;
+  if (guard[1] !== indent || guard[2] !== ident) return null;
+  const bodyIndent = update[1] ?? "";
+  if (bodyIndent.length <= indent.length || !bodyIndent.startsWith(indent)) return null;
+  if (update[2] !== ident || update[3] !== ident) return null;
+  for (let j = k + 3; j < codes.length; j++) {
+    const code = codes[j] ?? "";
+    if (code.trim() === "") continue;
+    const lead = /^[ \t]*/.exec(code)?.[0] ?? "";
+    return indent.startsWith(lead) ? k + 2 : null;
+  }
+  return k + 2;
+}
+
+/** Shell template, five consecutive lines: `T="${BASH_SOURCE[0]}"` (or `"$0"`),
+ * `while [ -L "$T" ]; do`, `L="$(readlink "$T")"`, `T="$L"`, `done`. Returns
+ * the readlink line's position, or null. */
+function shellSelfLocationLoop(codes: readonly string[], k: number): number | null {
+  const anchor = SH_LOOP_ANCHOR.exec(codes[k] ?? "");
+  const guard = SH_LOOP_GUARD.exec(codes[k + 1] ?? "");
+  const read = SH_LOOP_READ.exec(codes[k + 2] ?? "");
+  const copy = SH_LOOP_COPY.exec(codes[k + 3] ?? "");
+  if (!anchor || !guard || !read || !copy || !SH_LOOP_DONE.test(codes[k + 4] ?? "")) return null;
+  const ident = anchor[1] ?? "";
+  const link = read[1] ?? "";
+  if (link === ident || (guard[1] ?? guard[2]) !== ident || read[3] !== ident) return null;
+  return copy[1] === ident && copy[3] === link ? k + 2 : null;
+}
+
+/** Lines whose `readlink` is a recognised self-location read. A direct
+ * statement is line-local. Loops are matched per diff side: the new side reads
+ * added and context lines, the old side removed and context lines, and a
+ * header line ends both runs; a context line counts only when both sides
+ * recognise it. */
+function selfLocationReadlinkLines(lines: readonly string[], path: string | null): Set<number> {
+  const families = selfLocationFamilies(path);
+  const approved = new Set<number>();
+  if (!families.python && !families.shell) return approved;
+  const codes = lines.map((line) => line.slice(1));
+  const inLoop = { "+": new Set<number>(), "-": new Set<number>() };
+  for (const side of ["+", "-"] as const) {
+    let run: number[] = [];
+    const flush = (): void => {
+      const runCodes = run.map((index) => codes[index] ?? "");
+      for (let k = 0; k < run.length; k++) {
+        const hit =
+          (families.python ? pythonSelfLocationLoop(runCodes, k) : null) ??
+          (families.shell ? shellSelfLocationLoop(runCodes, k) : null);
+        if (hit !== null) inLoop[side].add(run[hit] ?? -1);
+      }
+      run = [];
+    };
+    lines.forEach((line, index) => {
+      const marker = diffMarker(line);
+      if (marker === "\u0000") flush();
+      else if (marker === side || marker === " ") run.push(index);
+    });
+    flush();
+  }
+  lines.forEach((line, index) => {
+    const marker = diffMarker(line);
+    if (marker === "\u0000") return;
+    const code = codes[index] ?? "";
+    const direct =
+      (families.python && PY_DIRECT_STATEMENT.test(code)) || (families.shell && SH_DIRECT_STATEMENT.test(code));
+    const onNew = inLoop["+"].has(index);
+    const onOld = inLoop["-"].has(index);
+    const loop = marker === "+" ? onNew : marker === "-" ? onOld : onNew && onOld;
+    if (direct || loop) approved.add(index);
+  });
+  return approved;
+}
+
+/** A recognised line with `readlink` blanked. The line matched a whole
+ * statement, so any other occurrence is inside an identifier
+ * (`readlink_result = os.readlink(__file__)`). */
+function blankSelfLocationReadlink(line: string): string {
+  return line.replaceAll("readlink", '""');
+}
+
+/** Characters that end a statement or expression, after which a comment marker
+ * cannot be part of a larger token (a URL scheme, a division, a regex). */
+const STATEMENT_TERMINATORS: ReadonlySet<string> = new Set([";", ")", "}", "]", ",", "{"]);
+
+/** True when a line-comment marker at index `i` is a comment rather than part
+ * of a token that merely contains the same characters. Two shapes qualify:
+ * right after a statement terminator (`x=1;// note`, `);// note`), where a URL
+ * scheme, an unspaced floor division, or an escaped regex slash is impossible;
+ * or at code start / after whitespace (`// note`, `# note`, `x = 1  # note`).
+ * `requireTrailingSpace` additionally demands whitespace or end-of-line after
+ * the marker: `#` and `--` need it (a CSS hex colour `#fff` and a
+ * pre-decrement `--i` both follow whitespace or the line start), while `//`
+ * does not (its non-comment uses — `a//b` floor division, `https://`, `/a\//`
+ * — are always attached to a non-space character). When the marker is
+ * ambiguous the text is scanned as CODE, which can only add signal, never hide
+ * it: this rule fails toward detection. */
+function commentMarkerAt(
+  chars: readonly string[],
+  i: number,
+  prefix: number,
+  length: number,
+  requireTrailingSpace: boolean,
+): boolean {
+  const prev = i > 0 ? chars[i - 1] ?? "" : "";
+  if (STATEMENT_TERMINATORS.has(prev)) return true;
+  if (i !== prefix && !/\s/.test(prev)) return false;
+  if (!requireTrailingSpace) return true;
+  const next = chars[i + length] ?? "";
+  return next === "" || /\s/.test(next);
+}
+
+/** The only `/*` refused outright as a cross-line block opener is one preceded
+ * by a backslash — the escaped slash of a regex literal (`/\*foo\//`). In a
+ * language that actually has `/*` block comments, every other `/*` outside a
+ * string IS a comment (C maximal munch makes `a/*b` a comment opener, and
+ * globs are a shell concept shell never reaches here — see
+ * `commentMarkersFor`). Whether the candidate really is a comment is then
+ * decided by `findBlockClose`: an opener with no closer is left as code rather
+ * than blanking what follows. A single-line `/* ... *​/` is blanked inline
+ * regardless, since its closer is on the same line and cannot leak. */
+function isBlockOpener(chars: readonly string[], i: number): boolean {
+  return (i > 0 ? chars[i - 1] ?? "" : "") !== "\\";
+}
+
+/** Search bound for a block comment's closer. A real comment is far shorter; a
+ * phantom opener simply fails to find one and is discarded. */
+const MAX_BLOCK_CARRY_LINES = 200;
+
+/** File-type token used to pick the comment markers: the extension after the
+ * last dot (`ts` for `src/app.ts`, `gitignore` for `.gitignore`), or the whole
+ * basename when there is no dot (`makefile`). */
+function fileKindToken(path: string): string {
+  const base = path.split("/").pop() ?? "";
+  const lower = base.toLowerCase();
+  const dot = lower.lastIndexOf(".");
+  return dot >= 0 ? lower.slice(dot + 1) : lower;
+}
+
+/** Comment syntax is a fact about the file's language, not something local
+ * syntax can decide: `rm -rf /*foo` and `x = 1 /* note` are
+ * character-identical shapes, and only the language tells them apart. A
+ * marker that is not a comment in the file's language must NEVER blank text —
+ * in shell, `/*` is a glob, `--` an end-of-options terminator
+ * (`cp -- ../etc/passwd dest`), and `//` a doubled slash or (in Python) spaced
+ * floor division (`x = total // workers; open("../out")`), so blanking there
+ * hides real code: a false negative. Unknown file types get no comment
+ * blanking at all, which also fails toward detection. `#` is gated too: it is
+ * a comment in most scripting and config languages but a preprocessor
+ * directive in C (`# define X ../y`) and an ID selector in CSS. */
+
+/** `#` line comments: shell family, Python, Ruby, Perl, and the config
+ * languages that borrow the convention. Tcl and Dockerfile are deliberately
+ * absent: there `#` is a comment only in command position (start of command /
+ * comment line), which the shared standalone-or-terminator placement rule
+ * cannot express — blanking a mid-line `#` there would hide real arguments
+ * (`set p [file join # ../etc/passwd]`). No blanking fails toward
+ * detection. */
+const HASH_LINE_COMMENT_KINDS = new Set([
+  "sh", "bash", "zsh", "ksh", "csh", "tcsh", "fish", "bashrc", "zshrc",
+  "bash_profile", "profile", "py", "pyw", "pyi", "rb", "rake", "gemspec",
+  "raku", "pl", "pm", "r", "jl", "ps1", "psm1", "psd1", "yaml", "yml",
+  "toml", "ini", "cfg", "conf", "cnf", "env", "properties", "cmake", "mk",
+  "make", "makefile", "graphql", "gql", "nim", "nims", "cr",
+  "coffee", "hcl", "tf", "tfvars", "nix", "ex", "exs", "gitignore",
+  "gitattributes", "gitmodules", "gitconfig", "editorconfig", "crontab",
+]);
+
+/** `//` line comments: the C family and languages that borrowed it. Markup
+ * formats (HTML, component templates) and mixed-grammar files (jsx/tsx —
+ * JSX text between elements — and PHP, which interleaves HTML text between
+ * `?>` and `<?php`) are deliberately absent: a `//` there can be literal
+ * text, and blanking it would hide real code that follows on the line. If
+ * the lightweight lexer cannot prove something is a comment, it is scanned
+ * as code; embedded script comments simply fire instead. */
+const SLASH_LINE_COMMENT_KINDS = new Set([
+  "js", "mjs", "cjs", "ts", "cts", "mts", "c", "h", "cc", "cpp",
+  "cxx", "hpp", "hh", "cs", "java", "go", "rs", "swift", "kt", "kts", "scala",
+  "sc", "dart", "zig", "jsonc", "json5", "sass", "scss",
+  "less", "proto", "fbs", "thrift", "groovy", "gradle", "ino", "glsl", "vert",
+  "frag", "comp", "hlsl", "hcl", "tf", "tfvars",
+]);
+
+/** `--` line comments: SQL, Lua, Haskell, Ada, Elm. */
+const DASH_LINE_COMMENT_KINDS = new Set([
+  "sql", "lua", "hs", "lhs", "ada", "adb", "ads", "elm", "vhdl", "vhd",
+]);
+
+/** `/* ... *​/` block comments: the C family, CSS, SQL, and schema/HCL
+ * languages. Markup and mixed-grammar formats are absent for the same
+ * reason as above. */
+const BLOCK_COMMENT_KINDS = new Set([
+  "js", "mjs", "cjs", "ts", "cts", "mts", "c", "h", "cc", "cpp",
+  "cxx", "hpp", "hh", "cs", "java", "go", "rs", "swift", "kt", "kts", "scala",
+  "sc", "dart", "css", "scss", "sass", "less", "sql",
+  "jsonc", "json5", "proto", "fbs", "thrift", "groovy", "gradle", "ino",
+  "glsl", "vert", "frag", "comp", "hlsl", "hcl", "tf", "tfvars", "nix",
+]);
+
+/** Which comment markers the file's language actually has. A null path (a
+ * headerless or synthetic chunk) yields none: with no language there is no
+ * basis for treating any marker as a comment, and scanning everything as code
+ * is the conservative direction. */
+function commentMarkersFor(path: string | null): {
+  hash: boolean;
+  slash: boolean;
+  dash: boolean;
+  block: boolean;
+} {
+  if (path === null) {
+    return { hash: false, slash: false, dash: false, block: false };
+  }
+  const kind = fileKindToken(path);
+  return {
+    hash: HASH_LINE_COMMENT_KINDS.has(kind),
+    slash: SLASH_LINE_COMMENT_KINDS.has(kind),
+    dash: DASH_LINE_COMMENT_KINDS.has(kind),
+    block: BLOCK_COMMENT_KINDS.has(kind),
+  };
+}
+/** The closing marker for a block opened at column `startCol` of the stream
+ * line at `startK`, or null when none appears within `MAX_BLOCK_CARRY_LINES`
+ * lines. The search is quote-agnostic: the first closing marker wins, because
+ * quotes have no syntax inside a block comment — a quoted one is still text
+ * that closes it (the C/JS/CSS rule). */
+function findBlockClose(
+  lines: readonly string[],
+  indices: readonly number[],
+  startK: number,
+  startCol: number,
+): { k: number; col: number } | null {
+  for (let k = startK; k < indices.length && k <= startK + MAX_BLOCK_CARRY_LINES; k++) {
+    const text = lines[indices[k] ?? 0] ?? "";
+    const col = text.indexOf("*/", k === startK ? startCol : 0);
+    if (col !== -1) return { k, col };
+  }
+  return null;
+}
+
+/** Blank one diff stream's lines — the line indices belonging to one side of
+ * the diff. A cross-line block comment is blanked only once its closing marker
+ * is actually found within the stream, so an opener that never closes (a
+ * phantom such as a shell glob or a regex literal) is left as code and can
+ * never hide the real traversal that follows it. Returns the replacement text
+ * for the lines it touched. */
+function blankStream(
+  lines: readonly string[],
+  indices: readonly number[],
+  markers: { hash: boolean; slash: boolean; dash: boolean; block: boolean },
+): Map<number, string> {
+  const chars = new Map<number, string[]>();
+  const charsFor = (index: number): string[] => {
+    let arr = chars.get(index);
+    if (arr === undefined) {
+      arr = (lines[index] ?? "").split("");
+      chars.set(index, arr);
+    }
+    return arr;
+  };
+  let k = 0;
+  let col = 0;
+  while (k < indices.length) {
+    const index = indices[k] ?? 0;
+    const line = lines[index] ?? "";
+    const arr = charsFor(index);
+    const n = arr.length;
+    const prefix = DIFF_MARKERS.has(diffMarker(line)) ? 1 : 0;
+    let i = col;
+    let jumped = false;
+    let quote: string | null = null;
+    while (i < n) {
+      const ch = arr[i] ?? "";
+      if (quote !== null) {
+        if (ch === "\\" && i + 1 < n) {
+          i += 2;
+          continue;
+        }
+        if (ch === quote) quote = null;
+        i += 1;
+        continue;
+      }
+      if (ch === "'" || ch === '"' || ch === "`") {
+        quote = ch;
+        i += 1;
+        continue;
+      }
+      if (markers.block && ch === "/" && arr[i + 1] === "*") {
+        // Quote-agnostic: the first closing marker wins. Quotes have no
+        // syntax inside a block comment, so skipping a quoted one to keep
+        // scanning would pair quotes across the executable code that follows
+        // and blank it — a false negative.
+        const close = line.indexOf("*/", i + 2);
+        if (close === -1) {
+          if (isBlockOpener(arr, i)) {
+            const end = findBlockClose(lines, indices, k, i + 2);
+            if (end !== null) {
+              for (let c = i; c < n; c++) arr[c] = " ";
+              for (let m = k + 1; m < end.k; m++) {
+                const mid = charsFor(indices[m] ?? 0);
+                for (let c = 0; c < mid.length; c++) mid[c] = " ";
+              }
+              const closer = charsFor(indices[end.k] ?? 0);
+              for (let c = 0; c <= end.col + 1 && c < closer.length; c++) closer[c] = " ";
+              k = end.k;
+              col = end.col + 2;
+              jumped = true;
+              break;
+            }
+          }
+          i += 1;
+          continue;
+        }
+        for (let c = i; c <= close + 1 && c < n; c++) arr[c] = " ";
+        i = close + 2;
+        continue;
+      }
+      if (
+        markers.slash &&
+        ch === "/" &&
+        arr[i + 1] === "/" &&
+        commentMarkerAt(arr, i, prefix, 2, false)
+      ) {
+        for (let c = i; c < n; c++) arr[c] = " ";
+        break;
+      }
+      if (markers.hash && ch === "#" && commentMarkerAt(arr, i, prefix, 1, true)) {
+        for (let c = i; c < n; c++) arr[c] = " ";
+        break;
+      }
+      if (
+        markers.dash &&
+        ch === "-" &&
+        arr[i + 1] === "-" &&
+        commentMarkerAt(arr, i, prefix, 2, true)
+      ) {
+        for (let c = i; c < n; c++) arr[c] = " ";
+        break;
+      }
+      i += 1;
+    }
+    if (!jumped) {
+      k += 1;
+      col = 0;
+    }
+  }
+  return new Map([...chars].map(([index, arr]) => [index, arr.join("")]));
+}
+
+/** Blank every comment span in a diff chunk's lines, replacing it with spaces
+ * so line structure and character offsets are preserved. Language-aware: only
+ * markers that are comments in the chunk file's language are blanked
+ * (`commentMarkersFor`) — a `/*` in a shell file is a glob, not a comment, and
+ * blanking it would hide the real code that follows. Quote-aware (a `#`,
+ * `//`, or `--` inside a string literal is data, not a marker) and
+ * block-aware, so a JSDoc continuation line — which carries no marker of its
+ * own — is blanked along with the `/**` that opened it.
+ *
+ * Every rule here fails toward detection, because a false negative (a real
+ * traversal hidden) is worse than a false positive (a prose mention fired):
+ *   - a unified diff's `-` lines are the old file and its `+`/context lines are
+ *     the new one, and each stream is blanked independently, so a removed
+ *     line's `/*` can never blank an added line's code;
+ *   - a line-comment marker must be a standalone token or follow a statement
+ *     terminator (`commentMarkerAt`), so a CSS hex colour, a URL scheme, an
+ *     escaped regex slash, and an unspaced floor division stay code;
+ *   - a cross-line block is blanked only when its closer is found
+ *     (`findBlockClose`), so a phantom opener cannot blank what follows, and
+ *     the closer search takes the FIRST closing marker — quotes have no
+ *     syntax inside a comment, so a quoted one still closes it;
+ *   - a cross-line opener must look like a comment, not a glob (`build/*`,
+ *     `src/*.py`, `rm -rf /*` — see `isBlockOpener`), because with a
+ *     quote-agnostic closer a glob could pair with a later closing marker and
+ *     blank the code in between;
+ *   - only markers that are comments in the chunk file's language are blanked
+ *     (`commentMarkersFor`); unknown types blank nothing, and languages whose
+ *     marker placement is stricter than the shared rule (Tcl, Dockerfile `#`)
+ *     blank nothing rather than guess;
+ *   - commentFree is the SOLE comment authority: every downstream scan
+ *     (lexical classes, fs evidence, operand extraction) consumes these
+ *     comment-free lines and never re-interprets markers itself;
+ *   - quote state is per-line, so a marker inside a string that spans lines —
+ *     a heredoc body, a triple-quoted docstring — is still treated as a
+ *     comment and blanks the rest of its line: a known, accepted limitation;
+ *   - an unterminated quote is left as-is, so the rest of the line is still
+ *     scanned rather than being swallowed as a comment. */
+function blankCommentSpans(lines: string[], path: string | null): string[] {
+  const markers = commentMarkersFor(path);
+  const out = lines.slice();
+  const streams = new Map<string, number[]>();
+  lines.forEach((line, index) => {
+    const marker = diffMarker(line);
+    const key = marker === "-" ? "-" : marker === "\u0000" ? "\u0000" : "+";
+    const bucket = streams.get(key);
+    if (bucket === undefined) streams.set(key, [index]);
+    else bucket.push(index);
+  });
+  for (const indices of streams.values()) {
+    for (const [index, text] of blankStream(lines, indices, markers)) out[index] = text;
+  }
+  return out;
+}
+
+function neutralizeChunkLines(commentFree: string[], path: string | null): string[] {
   /** Neutralize a diff chunk line by line, feeding each line its adjacent
-   * RAW neighbors for the one-hop untrusted-flow refusal. */
-  return lines.map((line, index) =>
+   * comment-free neighbors for the one-hop untrusted-flow refusal. A
+   * recognised self-location `readlink` (#1034) is blanked first. */
+  const selfLocation = selfLocationReadlinkLines(commentFree, path);
+  return commentFree.map((line, index) =>
     neutralizePathFalsePositives(
-      line,
-      index > 0 ? lines[index - 1] ?? "" : "",
-      index + 1 < lines.length ? lines[index + 1] ?? "" : "",
+      selfLocation.has(index) ? blankSelfLocationReadlink(line) : line,
+      index > 0 ? commentFree[index - 1] ?? "" : "",
+      index + 1 < commentFree.length ? commentFree[index + 1] ?? "" : "",
     ),
   );
 }
@@ -411,8 +915,10 @@ function neutralizeChunkLines(lines: string[]): string[] {
  * paths`, `Use sanitize_path before opening files.`) without constructing
  * any path, so these classes are skipped for documentation-only files and
  * scanned over comment-stripped code text. Deliberately NOT a phrase
- * blacklist: the distinction is executable-vs-prose context. All other
- * classes keep their existing semantics. */
+ * blacklist: the distinction is executable-vs-prose context. The remaining
+ * content classes scan the same comment-free text (see blankCommentSpans), so
+ * a mention that survives only inside a comment is discounted for every
+ * class, not just these two — `diff_comment` in the provenance records it. */
 const LEXICAL_CODE_ONLY_CLASSES = new Set<string>([
   "path_containment_or_sanitization",
   "path_reference_identifier",
@@ -450,7 +956,8 @@ const PATH_HANDLING_CONTENT_CLASSES: readonly (readonly [string, readonly RegExp
     /\b(?:ZipFile|TarFile)\b/i,
     /\bunzip\s*\(/i,
   ]],
-  // Symlink-sensitive filesystem operations.
+  // Symlink-sensitive filesystem operations. A recognised self-location
+  // `readlink` (#1034) is blanked before this scan runs.
   ["symlink_sensitive", [
     /symlink|readlink|lstat|follow_symlinks|O_NOFOLLOW/i,
   ]],
@@ -623,28 +1130,13 @@ function pathSample(line: string): string {
   return cleaned.trim().slice(0, MAX_PATH_SAMPLE_CHARS);
 }
 
-/** Truncate a quote-stripped line at its first comment marker (`#` or `//`).
- * String literals are already stripped, so a residual marker is a real
- * comment; interpolation-shaped literals may retain one (conservative
- * truncation of contrived content only). */
-function stripLineComment(line: string): string {
-  let cut = line.length;
-  for (const marker of ["#", "//"]) {
-    const pos = line.indexOf(marker);
-    if (pos !== -1 && pos < cut) cut = pos;
-  }
-  return line.slice(0, cut);
-}
-
-/** Line reduced to its executable-code text for the LEXICAL code-only
- * material classes: quoted spans are blanked whole (escape-aware — a `#` or
- * `//` inside a string literal is data, not a comment marker, and string
- * contents — including interpolation-shaped literals — are data, not code
- * identifiers), and the line is truncated at the first comment marker (`#`
- * or `//`) outside quotes. The distinction these classes need is
- * executable-vs-prose context: `function sanitizePath(p)` is code,
- * `// sanitize_path helper` and `log.info("sanitize_path ran")` are prose. */
-function stripCodeComments(line: string): string {
+/** Lexical view of a line for the code-only material classes: every quoted
+ * span is removed (quote chars doubled, contents dropped — string contents,
+ * interpolation included, are data, not code identifiers). Comments are NOT
+ * handled here: the comment-free lines from `blankCommentSpans` are the sole
+ * comment authority, so this runs only on text that has already been through
+ * them. */
+function stripQuotedSpans(line: string): string {
   const out: string[] = [];
   let i = 0;
   const n = line.length;
@@ -665,7 +1157,6 @@ function stripCodeComments(line: string): string {
       i = j < n ? j + 1 : n;
       continue;
     }
-    if (ch === "#" || (ch === "/" && i + 1 < n && line[i + 1] === "/")) break;
     out.push(ch);
     i += 1;
   }
@@ -720,13 +1211,14 @@ function pathlibDivisionTail(line: string, start = 0): number | null {
  * `index`: complete one-level-nested argument lists, and — for a call left
  * open across the line break — the balanced continuation lines up to and
  * including the closing paren. Only call arguments are included: trailing
- * comments (cut at the first `#`/`//`) and sibling statements after the
- * closer are excluded, and nested parentheses are tracked so an inner `)`
- * never ends the scan while outer operands remain. Static quoted literals
- * are stripped before extraction. Empty string when the line constructs no
- * path. */
+ * comments (already blanked in the comment-free lines this consumes —
+ * `blankCommentSpans` is the sole comment authority) and sibling statements
+ * after the closer are excluded, and nested parentheses are tracked so an
+ * inner `)` never ends the scan while outer operands remain. Static quoted
+ * literals are stripped before extraction. Empty string when the line
+ * constructs no path. */
 function constructionOperandSpans(lines: string[], index: number): string {
-  const line = stripLineComment(stripStaticStringLiterals(lines[index] ?? ""));
+  const line = stripStaticStringLiterals(lines[index] ?? "");
   const spans: string[] = [];
   for (const { pattern, isPathlib } of PATH_CONSTRUCTION_HEAD_PATTERNS) {
     for (const m of line.matchAll(pattern)) {
@@ -740,7 +1232,7 @@ function constructionOperandSpans(lines: string[], index: number): string {
         let depth = 1 + (piece.match(/\(/g) ?? []).length - (piece.match(/\)/g) ?? []).length;
         let accumulated = piece;
         for (let j = index + 1; j < Math.min(index + 1 + MAX_CONSTRUCTION_CONTINUATION_LINES, lines.length); j++) {
-          const continuation = stripLineComment(stripStaticStringLiterals(lines[j] ?? ""));
+          const continuation = stripStaticStringLiterals(lines[j] ?? "");
           const c = balancedClose(continuation, depth);
           if (c === null) {
             accumulated += `\n${continuation}`;
@@ -772,7 +1264,7 @@ function constructionOperandSpans(lines: string[], index: number): string {
  * files, and bounded line excerpts. */
 export interface PathHandlingSignal {
   signal: string;
-  source: "filename" | "diff" | "diff_test_file" | "filename_test_file";
+  source: "filename" | "diff" | "diff_test_file" | "filename_test_file" | "diff_comment";
   files: string[];
   samples: string[];
 }
@@ -804,7 +1296,9 @@ function recordSignal(
 }
 
 /** Bounded provenance for the path-handling signal model — why path handling
- * fired and which test-file signals were deliberately discounted. */
+ * fired, and which signals were deliberately discounted: test-file backing
+ * (`diff_test_file` / `filename_test_file`) and prose mentions that survive
+ * only inside a comment (`diff_comment`, #960). */
 export interface PathHandlingProvenance {
   fired: boolean;
   signals: PathHandlingSignal[];
@@ -849,7 +1343,11 @@ export function evaluatePathHandlingSignals(
     filenames.length > 0 && filenames.every((name) => isTestPath(name));
   for (const [chunkFile, lines] of splitDiffChunks(diffText)) {
     if (lines.length === 0) continue;
-    const neutralized = neutralizeChunkLines(lines);
+    // A headerless chunk has no language of its own; fall back to the single
+    // changed file when there is exactly one, and blank nothing otherwise.
+    const chunkPath = chunkFile ?? (filenames.length === 1 ? filenames[0] ?? null : null);
+    const commentFree = blankCommentSpans(lines, chunkPath);
+    const neutralized = neutralizeChunkLines(commentFree, chunkPath);
     const isTest =
       chunkFile !== null ? isTestPath(chunkFile) : allFilesAreTests;
     const buckets = isTest ? discountedBuckets : firedBuckets;
@@ -867,13 +1365,29 @@ export function evaluatePathHandlingSignals(
     for (const [className, patterns] of PATH_HANDLING_CONTENT_CLASSES) {
       const codeOnly = LEXICAL_CODE_ONLY_CLASSES.has(className);
       if (codeOnly && isDocumentation) continue;
+      let fired = false;
       for (let index = 0; index < neutralized.length; index++) {
-        const scanLine = codeOnly
-          ? stripCodeComments(neutralized[index] ?? "")
-          : (neutralized[index] ?? "");
-        if (!matchesAny(scanLine, patterns)) continue;
-        recordSignal(buckets, className, source, chunkFile, pathSample(lines[index] ?? ""));
-        break; // one bucket entry per class per chunk; samples merge across chunks
+        const raw = lines[index] ?? "";
+        // commentFree is the sole comment authority; the lexical view only
+        // additionally strips quoted spans.
+        const base = neutralized[index] ?? "";
+        const scanLine = codeOnly ? stripQuotedSpans(base) : base;
+        if (matchesAny(scanLine, patterns)) {
+          if (!fired) {
+            recordSignal(buckets, className, source, chunkFile, pathSample(raw));
+            fired = true;
+          }
+          continue;
+        }
+        // #960: a hit that survives in the raw line but is gone once comments
+        // are blanked is a prose mention, not a path surface. Record it as
+        // discounted (never fired) so the neutralization is explainable from
+        // the artifact alone, and so a future false positive is diagnosable
+        // without reading classifier internals.
+        if (matchesAny(commentFree[index] ?? "", patterns)) continue;
+        if (matchesAny(raw, patterns)) {
+          recordSignal(discountedBuckets, className, "diff_comment", chunkFile, pathSample(raw));
+        }
       }
     }
 
@@ -883,12 +1397,12 @@ export function evaluatePathHandlingSignals(
     // as likely to be a WHATWG URL component (`url.pathname`,
     // `location.pathname`) as a filesystem path variable (#854/#749).
     if (!isDocumentation) {
-      const fsEvidence = lines.some((line) =>
-        FS_API_EVIDENCE_PATTERN.test(stripCodeComments(stripStaticStringLiterals(line))),
+      const fsEvidence = lines.some((_line, index) =>
+        FS_API_EVIDENCE_PATTERN.test(stripQuotedSpans(commentFree[index] ?? "")),
       );
       if (fsEvidence) {
         for (let index = 0; index < neutralized.length; index++) {
-          const scanLine = stripCodeComments(neutralized[index] ?? "");
+          const scanLine = stripQuotedSpans(neutralized[index] ?? "");
           if (!PATHNAME_IDENTIFIER_PATTERN.test(scanLine)) continue;
           recordSignal(buckets, "path_reference_identifier", source, chunkFile, pathSample(lines[index] ?? ""));
           break;
@@ -904,7 +1418,7 @@ export function evaluatePathHandlingSignals(
     // inside the call's operands). Co-occurrence never fires.
     for (let index = 0; index < lines.length; index++) {
       const rawLine = lines[index] ?? "";
-      const flowText = constructionOperandSpans(lines, index);
+      const flowText = constructionOperandSpans(commentFree, index);
       if (!flowText) continue;
       if (matchesAny(flowText, UNTRUSTED_SOURCE_PATTERNS)) {
         recordSignal(buckets, "untrusted_source_join", source, chunkFile, pathSample(rawLine));
@@ -912,7 +1426,7 @@ export function evaluatePathHandlingSignals(
       }
       for (const adjIndex of [index - 1, index + 1]) {
         if (adjIndex < 0 || adjIndex >= lines.length) continue;
-        const target = untrustedAssignmentTarget(lines[adjIndex] ?? "");
+        const target = untrustedAssignmentTarget(commentFree[adjIndex] ?? "");
         if (target && mentionsIdentifier(flowText, target)) {
           recordSignal(buckets, "untrusted_source_join", source, chunkFile, pathSample(rawLine));
           break;
@@ -926,8 +1440,8 @@ export function evaluatePathHandlingSignals(
 
 /** Path-handling kind rule: fires only when the signal model found a
  * material (non-discounted) untrusted-path surface. */
-function isPathHandling(filenames: readonly string[], diffText: string): boolean {
-  return evaluatePathHandlingSignals(filenames, diffText).fired.length > 0;
+function isPathHandling(files: readonly ChangedFile[], diffText: string): boolean {
+  return evaluatePathHandlingSignals(files.map((file) => file.filename), diffText).fired.length > 0;
 }
 
 /** Secret handling changes. */
@@ -993,10 +1507,9 @@ export interface PRClassification {
    * path_handling match (too weak to route, per routeSignals) cannot also
    * be the sole reason correctness gets skipped on a real, sizable change.
    * Deliberately NOT part of `classificationToArtifact`'s persisted shape:
-   * v2 has no equivalent field, and the parity harness's classification
-   * boundary compares that artifact as one opaque canonical-JSON string per
-   * fixture — adding a key there would touch every existing golden. The
-   * production run instead threads this signal to the specialists gate via
+   * v2 has no equivalent field, and the artifact must remain byte-identical
+   * to v2. Tests pin that serialized shape. The production run instead
+   * threads this signal to the specialists gate via
    * the `SUBSTANTIAL_CODE_CHANGE` env var (see run/review.ts and
    * gates/specialists-gate.ts), entirely outside classification.json. */
   substantialCodeChange: boolean;
@@ -1035,8 +1548,8 @@ function evaluateSubstantialCodeChange(files: readonly ChangedFile[]): boolean {
 
 /** Serialize the internal classification to the persisted v2-identical
  * snake_case artifact (`classification.json`). Key order mirrors the v2
- * dataclass; the parity harness compares `sort_keys` canonical JSON, so the
- * artifact bytes are v2-identical regardless. */
+ * dataclass; canonical JSON serialization keeps the artifact bytes
+ * v2-identical. */
 export function classificationToArtifact(classification: PRClassification): Record<string, unknown> {
   return {
     pr_kind: classification.prKind,
@@ -1062,9 +1575,15 @@ export function classificationToArtifact(classification: PRClassification): Reco
 
 /** Classification is a declarative table evaluated top-to-bottom; the FIRST
  * matching rule wins, so table order is precedence (most-specific first). */
-type KindPredicate = (filenames: string[], diffText: string) => boolean;
+type KindPredicate = (
+  files: readonly ChangedFile[],
+  diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+) => boolean;
 const KIND_RULES: readonly { kind: string; matches: KindPredicate }[] = [
   { kind: "renovate_digest_only", matches: isRenovateDigestOnly },
+  { kind: "image_digest_only", matches: isImageDigestOnly },
   { kind: "dependency_upgrade", matches: isDependencyUpgrade },
   { kind: "k8s_manifest", matches: filenameMatches(K8S_PATTERNS) },
   // secret handling before auth (more specific)
@@ -1092,7 +1611,7 @@ const KIND_RULES: readonly { kind: string; matches: KindPredicate }[] = [
 export const DEFAULT_PR_KIND = "app_code";
 
 function filenameMatches(patterns: readonly RegExp[]): KindPredicate {
-  return (filenames) => filenames.some((name) => matchesAny(name, patterns));
+  return (files) => files.some((file) => matchesAny(file.filename, patterns));
 }
 
 /** True only when EVERY changed file is a known lockfile — guards
@@ -1110,23 +1629,210 @@ function hasVersionBump(diffText: string): boolean {
   return false;
 }
 
-function isRenovateDigestOnly(filenames: string[], diffText: string): boolean {
-  return allFilesAreLockfiles(filenames) && !hasVersionBump(diffText);
+function isRenovateDigestOnly(files: readonly ChangedFile[], diffText: string): boolean {
+  return allFilesAreLockfiles(files.map((file) => file.filename)) && !hasVersionBump(diffText);
+}
+
+/** True only when EVERY changed file is a modified YAML/Dockerfile image
+ * manifest. A rename, copy, addition, or removal changes the manifest's
+ * location/shape and must not take the digest-only path (#909). */
+function allFilesAreImageManifests(files: readonly ChangedFile[]): boolean {
+  if (files.length === 0) return false;
+  return files.every((file) => file.status === "modified" && matchesAny(file.filename, IMAGE_DIGEST_FILE_PATTERNS));
+}
+
+/** Git metadata lines that signal a rename, copy, or mode change — a
+ * structural change to the manifest, not a digest refresh. */
+const STRUCTURAL_DIFF_LINE_RE =
+  /^(?:old mode|new mode|rename from|rename to|copy from|copy to|similarity index|dissimilarity index|new file mode|deleted file mode)\b/;
+
+/** `prioritizeDiff` evidence-completeness markers (src/corpus/diff-priority.ts).
+ * Their presence means the supplied diff is missing changed lines, so no
+ * "only the digest changed" claim is safe. The classifier normally receives the
+ * full diff for this rule, but a caller that only has the truncated context
+ * diff must fail closed rather than reason over incomplete evidence (#909). */
+const DIFF_TRUNCATION_MARKER_RE = /…\[diff truncated|…\[file diff clipped:|Files omitted from this diff \(/;
+
+/** Binary diffs carry no `+`/`-` lines, so a binary (or otherwise unparsed)
+ * manifest would contribute nothing to the line reconciliation while hiding a
+ * real change. Both git binary forms fail closed (#909). */
+const BINARY_DIFF_LINE_RE = /^(?:Binary files .* differ|GIT binary patch)$/;
+
+/** An allowed image-reference line form, optionally behind a YAML
+ * `image:`/`tag:` key or a Dockerfile `FROM [--platform=...]` directive (with
+ * an optional trailing `AS <stage>`). Captures the `@sha256:` digest; every
+ * other byte of the line (key, indentation, platform, stage, ref) must stay
+ * identical across a paired removal and addition. */
+const IMAGE_DIGEST_LINE_RE =
+  /^\s*(?:FROM\s+(?:--platform=\S+\s+)?|(?:image|tag)\s*:\s*)?["']?[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:([0-9a-fA-F]{64})["']?(?:\s+AS\s+\S+)?\s*$/i;
+
+const DIGEST_TOKEN_RE = /sha256:[0-9a-fA-F]{64}/;
+
+/** Parse a changed line (without its diff `+`/`-` prefix) into a normalized
+ * form with the digest blanked out, plus the digest itself. Null when the line
+ * is not an allowed image-reference form. */
+function parseImageDigestLine(content: string): { normalized: string; digest: string } | null {
+  const match = IMAGE_DIGEST_LINE_RE.exec(content);
+  if (match === null) return null;
+  // Exactly one digest token per line. The anchored regex admits a single
+  // `@sha256:` (the ref charset excludes `@`), but a second `sha256:<hex>`
+  // could sit in the optional `AS <stage>` tail; blanking an ambiguous token
+  // would let a non-digest difference normalize away. Fail closed instead.
+  if ((content.match(/sha256:[0-9a-fA-F]{64}/g) ?? []).length !== 1) return null;
+  return {
+    normalized: content.replace(DIGEST_TOKEN_RE, "sha256:<DIGEST>"),
+    digest: match[1]!.toLowerCase(),
+  };
+}
+
+/** Validate one contiguous change block — a run of removed lines immediately
+ * followed by added lines, with no context/header line between. Each removed
+ * line must pair with an added line at the same position whose only difference
+ * is the digest. Returns whether any paired digest differed, or null when the
+ * block is not a pure digest refresh. */
+function evaluateDigestBlock(
+  removed: readonly { normalized: string; digest: string }[],
+  added: readonly { normalized: string; digest: string }[],
+): boolean | null {
+  if (removed.length === 0 || removed.length !== added.length) return null;
+  let digestChanged = false;
+  for (let index = 0; index < removed.length; index += 1) {
+    const before = removed[index]!;
+    const after = added[index]!;
+    // Everything except the digest — key, indentation, platform, stage, ref —
+    // must be byte-identical, which is what proves "only the digest changed".
+    if (before.normalized !== after.normalized) return null;
+    if (before.digest !== after.digest) digestChanged = true;
+  }
+  return digestChanged;
+}
+
+/** Renovate image-digest-only refresh: every changed line is a single image
+ * reference whose repository and tag are unchanged and only the `@sha256:`
+ * digest differs (YAML `image:`/`tag:`, compose, Dockerfile `FROM`). A mixed
+ * diff — any other changed line, or any other change around the digest — is
+ * left to the existing rules (notably k8s_manifest), which would otherwise
+ * demand a check a digest-only change cannot answer (#909).
+ *
+ * Removed and added lines are paired within each contiguous change block
+ * (a run of removals immediately followed by additions, delimited by context,
+ * hunk headers, or file headers), so an image cannot move between hunks or
+ * files and still count as a digest refresh. Comparing refs globally would
+ * accept either a digest swap or a relocation.
+ *
+ * Parsed against `fullDiffText` — the complete PR diff — because `diffText` is
+ * the prioritized/truncated context diff and can omit functional changes
+ * (#909). A truncation marker in the supplied diff fails closed. */
+function isImageDigestOnly(
+  files: readonly ChangedFile[],
+  _diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+): boolean {
+  if (!allFilesAreImageManifests(files)) return false;
+  let removed: { normalized: string; digest: string }[] = [];
+  let added: { normalized: string; digest: string }[] = [];
+  let sawBlock = false;
+  let anyDigestChanged = false;
+  let totalRemoved = 0;
+  let totalAdded = 0;
+
+  const flushBlock = (): boolean => {
+    if (removed.length === 0 && added.length === 0) return true;
+    const changed = evaluateDigestBlock(removed, added);
+    if (changed === null) return false;
+    sawBlock = true;
+    anyDigestChanged = anyDigestChanged || changed;
+    removed = [];
+    added = [];
+    return true;
+  };
+
+  for (const line of fullDiffText.split("\n")) {
+    // Rename/copy/mode metadata is a structural change, never a digest
+    // refresh — fail closed even if the file status looks like a plain edit.
+    if (STRUCTURAL_DIFF_LINE_RE.test(line)) return false;
+    // A truncation marker means changed lines are missing: not complete
+    // evidence, so never claim digest-only.
+    if (DIFF_TRUNCATION_MARKER_RE.test(line)) return false;
+    // A binary diff has no `+`/`-` lines, so it would otherwise vanish from
+    // the line reconciliation below.
+    if (BINARY_DIFF_LINE_RE.test(line)) return false;
+    const isRemoved = line.startsWith("-") && !line.startsWith("---");
+    const isAdded = line.startsWith("+") && !line.startsWith("+++");
+    if (!isRemoved && !isAdded) {
+      // Context line, hunk header (`@@`), file header, or any other line:
+      // the current change block is complete.
+      if (!flushBlock()) return false;
+      continue;
+    }
+    const parsed = parseImageDigestLine(line.slice(1));
+    if (parsed === null) return false;
+    if (isRemoved) {
+      // Git emits a block's removals before its additions; a removal after an
+      // addition means the block boundary was mis-detected, so fail closed.
+      if (added.length > 0) return false;
+      removed.push(parsed);
+      totalRemoved += 1;
+    } else {
+      added.push(parsed);
+      totalAdded += 1;
+    }
+  }
+  if (!flushBlock()) return false;
+  if (!sawBlock || !anyDigestChanged) return false;
+  return evidenceIsComplete(files, authoritativeChangedFiles, totalAdded, totalRemoved);
+}
+
+/** Prove the supplied file list and diff are complete before claiming every
+ * changed line is digest-only. Both platform reads can be incomplete — GitHub's
+ * file listing is a single capped page and the raw diff carries no completeness
+ * proof — so reconcile the authoritative changed-file count and the per-file
+ * line totals against the diff actually parsed. Missing metadata or any count
+ * mismatch fails closed (#909). */
+function evidenceIsComplete(
+  files: readonly ChangedFile[],
+  authoritativeChangedFiles: number | undefined,
+  totalAdded: number,
+  totalRemoved: number,
+): boolean {
+  if (!Number.isInteger(authoritativeChangedFiles) || authoritativeChangedFiles !== files.length) {
+    return false;
+  }
+  let expectedAdded = 0;
+  let expectedRemoved = 0;
+  for (const file of files) {
+    const additions = file.additions;
+    const deletions = file.deletions;
+    if (!Number.isInteger(additions) || !Number.isInteger(deletions)) return false;
+    // A zero-line side contributes nothing to the reconciliation and can hide
+    // a binary or otherwise unparsed change, so a pure digest refresh must move
+    // at least one line on each side of every file.
+    if (additions! <= 0 || deletions! <= 0) return false;
+    expectedAdded += additions!;
+    expectedRemoved += deletions!;
+  }
+  return totalAdded === expectedAdded && totalRemoved === expectedRemoved;
 }
 
 /** A dependency/manifest file changed, but NOT a k8s manifest (which happens
  * to reference versions and must classify as k8s_manifest instead). */
-function isDependencyUpgrade(filenames: string[], _diffText: string): boolean {
+function isDependencyUpgrade(files: readonly ChangedFile[], _diffText: string): boolean {
+  const filenames = files.map((file) => file.filename);
   const hasDepFile = filenames.some((name) => matchesAny(name, DEPENDENCY_PATTERNS));
   if (!hasDepFile) return false;
   const hasK8s = filenames.some((name) => matchesAny(name, K8S_PATTERNS));
   return !hasK8s;
 }
 
-function classifyPrKind(files: readonly ChangedFile[], diffText: string): string {
-  const filenames = files.map((file) => file.filename);
+function classifyPrKind(
+  files: readonly ChangedFile[],
+  diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+): string {
   for (const rule of KIND_RULES) {
-    if (rule.matches(filenames, diffText)) return rule.kind;
+    if (rule.matches(files, diffText, fullDiffText, authoritativeChangedFiles)) return rule.kind;
   }
   return DEFAULT_PR_KIND;
 }
@@ -1232,6 +1938,7 @@ function detectRiskFlags(
  * app_code PR still pulls in the auth checklist (#157). */
 const KIND_CHECKS: Readonly<Record<string, readonly string[]>> = {
   renovate_digest_only: ["verify no functional changes beyond lockfile hashes"],
+  image_digest_only: ["verify only image digests changed; repository and tag unchanged"],
   dependency_upgrade: [
     "check for breaking API changes in updated dependencies",
     "run full test suite after upgrade",
@@ -1409,6 +2116,15 @@ function linkedMetadataUncertainty(metadataStatus: unknown): { uncertain: boolea
 export interface ClassifyInput {
   prFiles: readonly ChangedFile[];
   diffText?: string | undefined;
+  /** The complete PR diff, when available. The deterministic image-digest check
+   * (#909) must see every changed line; the primary `diffText` is the
+   * prioritized/truncated context diff and can omit functional changes. Falls
+   * back to `diffText`. */
+  fullDiffText?: string | undefined;
+  /** The platform PR object's authoritative `changed_files` count. The
+   * image-digest check reconciles the supplied file list and diff against it
+   * and fails closed when either is short (#909). */
+  authoritativeChangedFiles?: number | undefined;
   linkedIssues?: readonly LinkedIssue[] | undefined;
   maxSummaryFiles?: number | undefined;
   metadataStatus?: unknown;
@@ -1417,7 +2133,15 @@ export interface ClassifyInput {
 /** Run deterministic classification on a PR. Pure and synchronous — no model
  * calls, no network, no command execution. */
 export function classifyPr(input: ClassifyInput): PRClassification {
-  const { prFiles, diffText = "", linkedIssues = [], maxSummaryFiles = 50, metadataStatus = null } = input;
+  const {
+    prFiles,
+    diffText = "",
+    fullDiffText,
+    authoritativeChangedFiles,
+    linkedIssues = [],
+    maxSummaryFiles = 50,
+    metadataStatus = null,
+  } = input;
 
   const uncertainty = linkedMetadataUncertainty(metadataStatus);
 
@@ -1433,7 +2157,7 @@ export function classifyPr(input: ClassifyInput): PRClassification {
     discounted: pathEvaluation.discounted,
   };
 
-  const prKind = classifyPrKind(prFiles, diffText);
+  const prKind = classifyPrKind(prFiles, diffText, fullDiffText ?? diffText, authoritativeChangedFiles);
   const { flags, flagsWithFiles } = detectRiskFlags(prFiles, diffText, linkedIssues);
   const mustCheck = buildMustCheck(prKind, flags, flagsWithFiles);
 

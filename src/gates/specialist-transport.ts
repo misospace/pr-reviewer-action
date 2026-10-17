@@ -26,6 +26,9 @@ export interface SpecialistTransportConfig {
   baseUrl: string;
   apiKey: string;
   anthropicVersion: string;
+  /** #1037 (`ai-extra-headers`): operator correlation headers merged into
+   * every specialist request; empty/absent merges nothing. */
+  extraHeaders?: Readonly<Record<string, string>>;
   /** Test seam: replaces the HTTP transport. */
   runChat?: (input: ChatRequestInput) => Promise<ChatRequestOutcome>;
   sleep?: (ms: number) => Promise<void>;
@@ -56,7 +59,11 @@ export function toV2Completion(response: NormalizedModelResponse): Record<string
   return result;
 }
 
-function failureMessage(outcome: Extract<ChatRequestOutcome, { status: "failure" }>, apiKey: string): { message: string; timeout: boolean; status?: number; statusDetail?: string } {
+function failureMessage(
+  outcome: Extract<ChatRequestOutcome, { status: "failure" }>,
+  apiKey: string,
+  extraSecrets: readonly string[],
+): { message: string; timeout: boolean; status?: number; statusDetail?: string } {
   const failure = outcome.failure;
   if (failure.kind === "connect_timeout" || failure.kind === "request_timeout") {
     return { message: "planner model request timed out", timeout: true };
@@ -68,8 +75,9 @@ function failureMessage(outcome: Extract<ChatRequestOutcome, { status: "failure"
     // the persisted artifact errors. `secrets` masks the specialist call's
     // configured key unconditionally, on top of `redactText`'s heuristics —
     // a provider echoing the bare key in prose would otherwise pass every
-    // heuristic pattern untouched.
-    const statusDetail = describeTransportFailure(failure, { maxBodyChars: 300, secrets: [apiKey] });
+    // heuristic pattern untouched. #1037: the configured extra-header VALUES
+    // ride the same list (a provider error body can quote them back).
+    const statusDetail = describeTransportFailure(failure, { maxBodyChars: 300, secrets: [apiKey, ...extraSecrets] });
     return { message: `planner model request failed with ${statusDetail}`, timeout: false, status: failure.status, statusDetail };
   }
   return { message: failure.message, timeout: false };
@@ -79,10 +87,14 @@ export function specialistRequestFn(config: SpecialistTransportConfig): Speciali
   const runChat = config.runChat ?? runChatRequest;
   return async (payload, apiFormat, timeoutSec): Promise<SpecialistTransportOutcome> => {
     const format: ApiFormat = apiFormat === "anthropic" ? "anthropic" : "openai";
-    const wire = {
+const wire = {
       endpointPath: format === "anthropic" ? "/messages" : "/chat/completions",
       body: payload,
     } as unknown as TransportWirePayload;
+    // #1037: the configured extra-header VALUES are known secrets for every
+    // diagnostic this lane emits (they carry proxy tokens and a provider
+    // error body can quote them back); unset config adds nothing.
+    const extraSecrets = Object.values(config.extraHeaders ?? {});
     let outcome: ChatRequestOutcome;
     try {
       outcome = await runChat({
@@ -94,19 +106,20 @@ export function specialistRequestFn(config: SpecialistTransportConfig): Speciali
         requestTimeoutSec: timeoutSec,
         // curl --max-time bounds the whole attempt in v2, connect included.
         connectTimeoutSec: timeoutSec,
+        ...(config.extraHeaders !== undefined ? { extraHeaders: config.extraHeaders } : {}),
         ...(config.sleep !== undefined ? { sleep: config.sleep } : {}),
       });
     } catch (error) {
       const rawMessage = error instanceof Error ? error.message : String(error);
-      const masked = codePointSlice(redactText(maskKnownSecrets(rawMessage, [config.apiKey])), 500);
+      const masked = codePointSlice(redactText(maskKnownSecrets(rawMessage, [config.apiKey, ...extraSecrets])), 500);
       return { ok: false, errorMessage: masked, timeout: masked.toLowerCase().includes("timed out") };
     }
     if (outcome.status === "ok") {
       const raw = payload.stream === true ? toV2Completion(outcome.response) : outcome.raw;
       return { ok: true, raw };
     }
-    const { message, timeout, status, statusDetail } = failureMessage(outcome, config.apiKey);
-    const masked = codePointSlice(redactText(maskKnownSecrets(message, [config.apiKey])), 500);
+    const { message, timeout, status, statusDetail } = failureMessage(outcome, config.apiKey, extraSecrets);
+    const masked = codePointSlice(redactText(maskKnownSecrets(message, [config.apiKey, ...extraSecrets])), 500);
     return {
       ok: false,
       errorMessage: masked,

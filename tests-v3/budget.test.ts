@@ -19,7 +19,7 @@ test("primary override wins on the primary route only and reports its source", (
 });
 
 test("without a size signal the resolver keeps the pre-#810 tier defaults", () => {
-  // No third argument at all (the parity fixture mode's call shape).
+  // No third argument: exercise the no-size-signal call shape.
   assert.deepEqual(resolveToolMaxRequests("primary", {}), { route: "primary", budget: 24, source: "tier-default", configured: null });
   assert.deepEqual(resolveToolMaxRequests("smart", {}), { route: "smart", budget: 32, source: "tier-default", configured: null });
   assert.deepEqual(resolveToolMaxRequests("smart", { TOOL_ESCALATION: "true" }), { route: "escalated", budget: 40, source: "tier-default", configured: null });

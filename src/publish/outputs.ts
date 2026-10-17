@@ -13,14 +13,158 @@
  * orchestrator supplies the telemetry objects the v2 pipeline scraped from
  * run artifacts. Rows render only when their data is supplied.
  */
+import { sanitizeMarkdown, type UpstreamLinkMode } from "./sanitize.js";
+import { redactText } from "../context/redact.js";
+import { escapeTableCell } from "../gates/ci-wait.js";
+import { SEVERITY_LABELS } from "./inline-findings.js";
+import { resolveReviewTriageDecision } from "../model/triage.js";
+import { isHumanReviewRoutingStatus } from "../routing/human-review-routing.js";
+
+//
+// ---------------------------------------------------------------------------
+// #1003 human-review triage: the decision is resolved fail-closed — exact
+// literal, and `not_required` only with a usable supporting reason — by
+// src/model/triage.ts, shared with the parser and every other boundary. This
+// module only bounds and escapes the model-authored reason for the two public
+// surfaces (the published review body and the step summary).
+// ---------------------------------------------------------------------------
+
+/** Cap on the model-authored reason rendered on a public surface. The cap is
+ * applied to the text BEFORE pipe-escaping (escaping expands `\` and `|`
+ * two-fold, and cutting an escape pair in half would itself be a rendering
+ * bug), so the published bytes are bounded at roughly twice this. */
+export const MAX_REVIEW_TRIAGE_REASON_CHARS = 300;
+
+// ---------------------------------------------------------------------------
+// Findings summary (moved from publish.ts, #975): the per-finding table a
+// reader sees in place of bare counts, shared by the strict publish body and
+// the step summary.
+// ---------------------------------------------------------------------------
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Rows rendered before the visible "N more" cap keeps the body bounded
+ * (50 findings of up to 2000 characters each would overrun a comment). */
+export const FINDINGS_SUMMARY_MAX_ROWS = 50;
+
+const SEVERITY_RANK = ["blocker", "major", "minor", "info"] as const;
+
+/** Per-severity counts in rank order, zero entries omitted: `2 major, 4 minor`. */
+export function severityCountsLabel(findings: unknown): string {
+  if (!Array.isArray(findings)) return "";
+  const counts = new Map<string, number>();
+  for (const finding of findings) {
+    const severity = isRecord(finding) && typeof finding.severity === "string"
+      ? finding.severity
+      : "info";
+    counts.set(severity, (counts.get(severity) ?? 0) + 1);
+  }
+  const ordered = [
+    ...SEVERITY_RANK.filter((severity) => counts.has(severity)),
+    ...[...counts.keys()].filter((severity) => !(SEVERITY_RANK as readonly string[]).includes(severity)).sort(),
+  ];
+  return ordered.map((severity) => `${counts.get(severity)} ${severity}`).join(", ");
+}
+
+/** Wrap an already-escaped body in a fence-safe inline-code span: the
+ * delimiter is one backtick longer than the longest backtick run inside the
+ * body, so embedded backticks (escaped to `\`` by `escapeTableCell`) or
+ * Markdown link syntax cannot close the span and render clickable. Same
+ * fail-closed strategy as `inlineCodeValue` (#903).
+ *
+ * A backtick-bearing body is additionally SPACE-PADDED (`delim + " " + body
+ * + " " + delim`). Without the padding, a trailing escaped backtick runs
+ * straight into the closing delimiter and merges with it into a longer run
+ * (the 1-backtick escape + the 2-backtick fence = a 3-run) that no
+ * CommonMark/GFM parser accepts as the equal-length closing delimiter, so
+ * the span is left unterminated and the payload renders as live Markdown.
+ * CommonMark strips exactly one leading+trailing space, so the visible span
+ * content is unchanged. A backtick-free body stays an unpadded single-backtick
+ * fence, byte-identical to `inlineCodeValue`. */
+function fenceInlineCode(body: string): string {
+  if (!body.includes("`")) return `\`${body}\``;
+  const longest = Math.max(0, ...(body.match(/`+/g) ?? []).map((run) => run.length));
+  const delim = "`".repeat(longest + 1);
+  return `${delim} ${body} ${delim}`;
+}
+
+/** A path (model-controlled) as one bounded code span: whitespace collapsed
+ * and fenced by a backtick run longer than any inside it, so it cannot open
+ * markdown structure; pipes are escaped because GFM tables split cells even
+ * inside code spans. */
+function locationCell(finding: Record<string, unknown>): string {
+  const file = typeof finding.file === "string" ? finding.file : "";
+  const line = typeof finding.line === "number" && Number.isFinite(finding.line) ? String(finding.line) : "";
+  if (file === "" && line === "") return "";
+  const raw = file === "" ? line : line === "" ? file : `${file}:${line}`;
+  return fenceInlineCode(escapeTableCell(raw.replace(/\s+/g, " ").trim()));
+}
+
+/**
+ * The `### Findings (…)` section: one row per normalized still-open finding
+ * — severity, `file:line` (or `file`, or blank), message — the same array
+ * the verdict was decided on, so the body is the one place a reader sees the
+ * whole set. Messages get redact_text, upstream-link neutralization,
+ * whitespace collapse, a length cap, and table-cell escaping; a hostile
+ * message cannot split the row or forge headings. Returns "" when there is
+ * nothing to render.
+ *
+ * Per-surface policy for the message cell (#975 / #988): the strict
+ * published body (publish.ts) calls this with no opts, keeping the operator's
+ * `upstream-link-mode` (linkMode) rendering verbatim; the step summary
+ * (renderStepSummary) passes `messageAsInlineCode: true` and additionally
+ * fences each non-empty message in a code span, so model-controlled Markdown
+ * links/autolinks (e.g. `[x](https://evil.example)`) can never render
+ * clickable. Maintainer review on PR #988 (head 43a0808); same fail-closed
+ * rationale as `inlineCodeValue` (#903).
+ */
+export function renderFindingsSummary(
+  findings: unknown,
+  linkMode: UpstreamLinkMode,
+  opts?: { messageAsInlineCode?: boolean },
+): string {
+  if (!Array.isArray(findings)) return "";
+  const rows = findings.filter((item): item is Record<string, unknown> => isRecord(item));
+  if (rows.length === 0) return "";
+  const counts = severityCountsLabel(rows);
+  const lines = [
+    `### Findings${counts ? ` (${counts})` : ""}`,
+    "",
+    "| Severity | Location | Finding |",
+    "| --- | --- | --- |",
+  ];
+  for (const finding of rows.slice(0, FINDINGS_SUMMARY_MAX_ROWS)) {
+    const rawSeverity = typeof finding.severity === "string" ? finding.severity : "info";
+    const label = Object.hasOwn(SEVERITY_LABELS, rawSeverity) ? SEVERITY_LABELS[rawSeverity]! : rawSeverity;
+    const body = escapeTableCell(
+      sanitizeMarkdown(redactText(String(finding.message ?? "")), linkMode)
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 300),
+    );
+    // #988: fence only non-empty messages; an empty message stays an empty cell.
+    const message = opts?.messageAsInlineCode === true && body !== "" ? fenceInlineCode(body) : body;
+    lines.push(`| ${escapeTableCell(label)} | ${locationCell(finding)} | ${message} |`);
+  }
+  if (rows.length > FINDINGS_SUMMARY_MAX_ROWS) {
+    lines.push("", `_…and ${rows.length - FINDINGS_SUMMARY_MAX_ROWS} more finding(s) not listed._`);
+  }
+  return `\n\n${lines.join("\n")}\n`;
+}
 
 export const REVIEW_STEP_OUTPUT_IDS = [
   "verdict",
   "verdict-source",
   "required-checks",
   "review-result",
+  "incomplete-reason",
   "review-route",
   "escalation-reason",
+  "review-triage-decision",
+  "review-triage-reason",
+  "review-triage-routing",
   "findings",
   "review-markdown",
   "analysis-engine",
@@ -30,8 +174,18 @@ export const REVIEW_STEP_OUTPUT_IDS = [
 
 export type ReviewStepOutputId = (typeof REVIEW_STEP_OUTPUT_IDS)[number];
 
+export type IncompleteReason = "none" | "execution" | "requirement_trace" | "both";
+export const INCOMPLETE_REASON_VALUES: readonly IncompleteReason[] = ["none", "execution", "requirement_trace", "both"];
+export function isIncompleteReason(value: unknown): value is IncompleteReason {
+  return typeof value === "string" && INCOMPLETE_REASON_VALUES.includes(value as IncompleteReason);
+}
+
 export interface ReviewStepOutputs {
   verdict: string;
+  /** #978: this verdict is eligible for the fail-on-request-changes bypass.
+   * Read in-process by the gate and marker carry-forward; deliberately NOT a
+   * published output id. */
+  degradedGateBypass: boolean;
   verdictSource: string;
   requiredChecks: string;
   /** #873: the metadata marker's review_result state (clean/findings/
@@ -39,8 +193,22 @@ export interface ReviewStepOutputs {
    * a partial review still reports verdict "approve" here and the
    * incompleteness surfaces only through this field. */
   reviewResult: string;
+  /** #954: why coverage is incomplete; "none" when complete. */
+  incompleteReason: string;
   reviewRoute: string;
   escalationReason: string;
+  /** #1003: the human-review triage decision — one of "not_required",
+   * "required", "unknown" — or "" when `review-triage` is disabled. "" means
+   * "did not run", which is deliberately distinct from the fail-closed
+   * "unknown" answer. */
+  reviewTriageDecision: string;
+  /** #1003: the triage reason (possibly "" when the model gave none), or ""
+   * when triage is disabled. */
+  reviewTriageReason: string;
+  /** #1005: the deterministic reviewer-routing status — one of the
+   * non-`off` statuses — or "" when review-triage or review-triage-routing is
+   * off ("routing did not run"). Never model text. */
+  reviewTriageRouting: string;
   /** Compact JSON array of the normalized findings. */
   findings: string;
   /** Full review markdown (model-controlled text). */
@@ -79,18 +247,36 @@ export function formatOutputAssignment(
  * are derived from `REVIEW_STEP_OUTPUT_IDS` so the constant and the writer
  * cannot drift apart. */
 export function formatReviewStepOutputs(
-  outputs: ReviewStepOutputs,
+  outputs: Omit<ReviewStepOutputs, "degradedGateBypass">,
   randomBytes?: () => Uint8Array,
 ): string {
+  // #1003: re-resolve rather than trust the caller, so an unsubstantiated
+  // `not_required` (or any non-literal decision) can never be written as a
+  // public step output. "" means triage did not run and stays "".
+  const triageDecision = outputs.reviewTriageDecision === ""
+    ? ""
+    : resolveReviewTriageDecision(outputs.reviewTriageDecision, outputs.reviewTriageReason);
   const assignments: Array<[string, string]> = [
     ["verdict", outputs.verdict],
     ["verdict-source", outputs.verdictSource],
     ["required-checks", outputs.requiredChecks],
     ["review-result", outputs.reviewResult],
+    ["incomplete-reason", outputs.incompleteReason],
     ["review-route", outputs.reviewRoute],
     ["escalation-reason", outputs.escalationReason],
-    ["review-markdown", outputs.reviewMarkdown],
-    ["findings", outputs.findings],
+    // #1003: triage telemetry. The decision is re-resolved above, and the
+    // reason is model-authored text, so it takes the same redaction as
+    // review-markdown/findings — a public step output must never carry raw
+    // credentials.
+    ["review-triage-decision", triageDecision],
+    ["review-triage-reason", redactText(outputs.reviewTriageReason)],
+    // #1005: the routing status is a closed action-owned token; re-validate it
+    // here so a carried-forward or hand-edited value can never be written as a
+    // public output. "" means routing did not run and stays "".
+    ["review-triage-routing", isHumanReviewRoutingStatus(outputs.reviewTriageRouting) ? outputs.reviewTriageRouting : ""],
+    // Models echo diff lines; the public step output must not carry raw credentials; redactText is idempotent with the publish boundary.
+    ["review-markdown", redactText(outputs.reviewMarkdown)],
+    ["findings", redactText(outputs.findings)],
     ["tool-calls", outputs.toolCalls],
     ["cache-hit-ratio", outputs.cacheHitRatio],
     ["analysis-engine", outputs.analysisEngine],
@@ -174,6 +360,15 @@ export interface StepSummaryTelemetry {
   findingsCount: number;
   blockersCount: number;
   requiredChecksStatus: string;
+  /** #975: normalized still-open findings rendered as a table below the
+   * counts row; empty/absent renders nothing (byte-identical to the v2 table). */
+  findings?: unknown;
+  /** #975: upstream-link neutralization for finding messages, mirroring the
+   * strict publish body's link mode. The step summary additionally fences each
+   * non-empty message cell in an inline-code span (see `renderFindingsSummary`)
+   * so model-controlled Markdown links/autolinks can never render clickable on
+   * this surface, independent of the link-mode choice. */
+  upstreamLinkMode?: UpstreamLinkMode;
   requirementCoverage?: { total: number; unknown: number };
   primaryTools: HarnessSummaryTelemetry;
   smartTools?: HarnessSummaryTelemetry;
@@ -183,9 +378,25 @@ export interface StepSummaryTelemetry {
     attempts: number;
     retried: boolean;
     reason?: string;
+    /** #1047: bounded failure-shape line (content-free) for a verdict turn
+     * that produced no usable body — `class=… profile=… …`. */
+    diagnostics?: string;
+    /** #1047: the raised completion budget the single retry used, when the
+     * failure shape justified one. */
+    budgetRaisedTo?: number;
   };
   route: string;
   routeReason?: string;
+  /** #1003: human-review triage telemetry, supplied only when triage
+   * actually ran (`review-triage` enabled) — absent renders no row, so a
+   * disabled run's summary is byte-identical to pre-#1003. `unknown` is a
+   * real answer and renders like any other: the point of failing closed is
+   * that the gap is visible, not silently reported as "not required". */
+  reviewTriage?: { decision: string; reason: string };
+  /** #1005: reviewer-routing telemetry, supplied only when routing ran
+   * (mode != off) — absent renders no row. All action-owned/trusted-config
+   * values, never model text. */
+  reviewRouting?: { status: string; targetIds: string[]; users: string[]; teams: string[] };
   /** #633 deep-review telemetry row (rendered only when deep review ran). */
   deepReview?: { leads: string; errors: boolean; autoSelection?: { selected: number; skipped: number } };
   budget: string;
@@ -228,10 +439,44 @@ export function renderStepSummary(telemetry: StepSummaryTelemetry): string {
     if (telemetry.nativeVerdict.reason) {
       row += `, reason: ${telemetry.nativeVerdict.reason}`;
     }
-    row += ") |";
+    if (telemetry.nativeVerdict.budgetRaisedTo !== undefined) {
+      row += `, budget raised to ${telemetry.nativeVerdict.budgetRaisedTo}`;
+    }
+    row += ")";
+    if (telemetry.nativeVerdict.diagnostics) {
+      row += ` — ${telemetry.nativeVerdict.diagnostics}`;
+    }
+    row += " |";
     rows.push(row);
   }
   rows.push(`| Route | ${telemetry.route} (${telemetry.routeReason ?? ""}) |`);
+  // #1003: compact one-row triage summary, rendered only when triage ran.
+  if (telemetry.reviewTriage) {
+    // The decision is re-resolved here rather than trusted: this summary is
+    // a public surface, so a carried-forward or hand-edited value — including
+    // an unsubstantiated `not_required` — must fail closed to `unknown`,
+    // exactly as the parser and the publish body do.
+    const decision = resolveReviewTriageDecision(telemetry.reviewTriage.decision, telemetry.reviewTriage.reason);
+    // Model-authored reason: redact, flatten to one cell, and escape pipes so
+    // a hostile string cannot forge a row (same discipline as the findings
+    // table's message cell). Capped at the same 300 characters as the
+    // published-body section so one answer reads identically on both.
+    const reason = escapeTableCell(
+      redactText(telemetry.reviewTriage.reason).replace(/\s+/g, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS),
+    );
+    rows.push(`| Review triage | ${decision}${reason === "" ? "" : `: ${reason}`} (advisory only) |`);
+  }
+  // #1005: compact one-row routing summary, rendered only when routing ran.
+  // Every value is action-owned or trusted-config; model text never appears.
+  if (telemetry.reviewRouting) {
+    const routing = telemetry.reviewRouting;
+    const targets = routing.targetIds.length > 0 ? ` target(s): ${escapeTableCell(routing.targetIds.join(", "))}` : "";
+    const resolved: string[] = [];
+    if (routing.users.length > 0) resolved.push(`users: ${escapeTableCell(routing.users.join(", "))}`);
+    if (routing.teams.length > 0) resolved.push(`teams: ${escapeTableCell(routing.teams.join(", "))}`);
+    const reviewers = resolved.length > 0 ? `; ${resolved.join("; ")}` : "";
+    rows.push(`| Reviewer routing | ${escapeTableCell(routing.status)}${targets}${reviewers} |`);
+  }
   const budgetRows: string[] = [];
   for (const harness of [telemetry.primaryTools, telemetry.smartTools]) {
     const budget = harness?.budget;
@@ -268,5 +513,6 @@ export function renderStepSummary(telemetry: StepSummaryTelemetry): string {
   rows.push(`| Completion tokens | ${telemetry.completionTokens} |`);
 
   const lines = ["### AI PR Review", "", "| Field | Value |", "| --- | --- |", ...rows, ""];
-  return lines.join("\n");
+  const block = renderFindingsSummary(telemetry.findings ?? [], telemetry.upstreamLinkMode ?? "inert", { messageAsInlineCode: true });
+  return lines.join("\n") + block;
 }

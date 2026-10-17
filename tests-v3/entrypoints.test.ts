@@ -33,6 +33,8 @@ function mockAdapter(): PlatformReadAdapter {
     listIssueComments: () => Promise.resolve([]),
     listPrReviews: () => Promise.resolve([]),
     repoPermission: () => Promise.resolve(null),
+    // #970: unprovable identity — a managed body can never authorize a skip.
+    authenticatedIdentity: () => Promise.resolve(null),
     ghApi: () => Promise.resolve({ error: "n/a" }),
     externalChecks: () => Promise.resolve([]),
   } as unknown as PlatformReadAdapter;
@@ -56,6 +58,46 @@ test("precheck entrypoint writes the precheck ABI outputs", async () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("publishInputFromEnv reads internal degraded gate-bypass eligibility", () => {
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", DEGRADED_GATE_BYPASS: "true" } as NodeJS.ProcessEnv, "github").degradedGateBypass, true);
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", DEGRADED_GATE_BYPASS: "false" } as NodeJS.ProcessEnv, "github").degradedGateBypass, false);
+});
+
+// #1003: a standalone `publish` re-publish must carry the same triage section
+// the review run wrote. An empty decision means triage never ran and renders no
+// section; the fail-closed `unknown` is a real answer and still renders.
+test("#1003: publishInputFromEnv carries the triage answer, and omits it when triage did not run", () => {
+  const ran = publishInputFromEnv({
+    PUBLISH_MODE: "comment",
+    REVIEW_TRIAGE_DECISION: "required",
+    REVIEW_TRIAGE_REASON: "touches the auth subsystem",
+  } as NodeJS.ProcessEnv, "github");
+  assert.deepEqual(ran.reviewTriage, { decision: "required", reason: "touches the auth subsystem" });
+
+  const unknown = publishInputFromEnv({ PUBLISH_MODE: "comment", REVIEW_TRIAGE_DECISION: "unknown" } as NodeJS.ProcessEnv, "github");
+  assert.deepEqual(unknown.reviewTriage, { decision: "unknown", reason: "" });
+
+  const didNotRun = publishInputFromEnv({ PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+  assert.equal(didNotRun.reviewTriage, undefined);
+
+  // #1003 fail-closed: `not_required` is a positive claim and needs a usable
+  // supporting statement. A carried-forward or hand-edited env with no usable
+  // reason must not cross this boundary as a confident negative.
+  const unsubstantiated = publishInputFromEnv({
+    PUBLISH_MODE: "comment",
+    REVIEW_TRIAGE_DECISION: "not_required",
+    REVIEW_TRIAGE_REASON: "   ",
+  } as NodeJS.ProcessEnv, "github");
+  assert.equal(unsubstantiated.reviewTriage?.decision, "unknown");
+
+  const substantiated = publishInputFromEnv({
+    PUBLISH_MODE: "comment",
+    REVIEW_TRIAGE_DECISION: "not_required",
+    REVIEW_TRIAGE_REASON: "no owning team in the escalation policy",
+  } as NodeJS.ProcessEnv, "github");
+  assert.deepEqual(substantiated.reviewTriage, { decision: "not_required", reason: "no owning team in the escalation policy" });
 });
 
 test("publish entrypoint rejects an invalid publish mode fail-closed", async () => {
@@ -128,6 +170,8 @@ class MinimalPublishApi implements PublishPlatformApi {
   async listIssueComments(): Promise<PublishCommentRef[]> { return []; }
   async upsertStickyComment(): Promise<{ ok: boolean; created: boolean }> { return { ok: true, created: true }; }
   async listReviews(): Promise<PublishReviewRef[]> { return []; }
+  async listManagedInlineComments() { return { supported: true, complete: true, comments: [] }; }
+  async retireInlineComment() { return true; }
   async createReview(request: NativeReviewRequest): Promise<{ ok: boolean }> { this.submitted.push(request); return { ok: true }; }
   async dismissReview(): Promise<boolean> { return true; }
   async minimizedReviewIds(): Promise<string[]> { return []; }
@@ -137,6 +181,9 @@ class MinimalPublishApi implements PublishPlatformApi {
   }
   async resolveThread(): Promise<boolean> { return true; }
   async removeLabel(): Promise<boolean> { return true; }
+  async requestReviewers(): ReturnType<PublishPlatformApi["requestReviewers"]> {
+    return { ok: true, supported: true, requestedUsers: [], requestedTeams: [], alreadyRequestedUsers: [], alreadyRequestedTeams: [] };
+  }
 }
 
 function withRunDir<T>(fn: (dir: string) => T): T {
@@ -185,7 +232,8 @@ function writeCoverageArtifact(dir: string, overrides: Partial<{
   enforcement_harness: string | null;
   route: string;
   partial_coverage: unknown;
-  required_checks: string;
+  required_checks: string | undefined;
+  incomplete_reason: string;
 }> = {}): void {
   const artifact = {
     version: 1,
@@ -198,6 +246,37 @@ function writeCoverageArtifact(dir: string, overrides: Partial<{
   };
   writeFileSync(join(dir, "review-coverage.json"), JSON.stringify(artifact));
 }
+
+test("#954: publishInputFromEnv carries valid incomplete reasons and derives execution for legacy artifacts", () => {
+  withRunDir((dir) => {
+    writeCoverageArtifact(dir, { required_checks: "incomplete", incomplete_reason: "requirement_trace" });
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(input.requiredChecks, "incomplete");
+    assert.equal(input.incompleteReason, "requirement_trace");
+  });
+  withRunDir((dir) => {
+    writeCoverageArtifact(dir, { required_checks: "complete", incomplete_reason: "requirement_trace" });
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(input.requiredChecks, "incomplete", "trace reason fail-closes stale complete metadata");
+    assert.equal(input.incompleteReason, "requirement_trace");
+  });
+  withRunDir((dir) => {
+    writeCoverageArtifact(dir, { required_checks: undefined, incomplete_reason: "requirement_trace" });
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(input.coverageUnknown, true, "an artifact missing required_checks remains unknown");
+    assert.equal(input.requiredChecks, "incomplete");
+  });
+  withRunDir((dir) => {
+    writeCoverageArtifact(dir, { required_checks: "incomplete", incomplete_reason: "none" });
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(input.incompleteReason, "execution");
+  });
+  withRunDir((dir) => {
+    writeCoverageArtifact(dir, { required_checks: "incomplete", incomplete_reason: "not-a-reason" });
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(input.incompleteReason, "execution");
+  });
+});
 
 test("#873: publishInputFromEnv reads partial coverage straight from the artifact's own partial_coverage field", () => {
   withRunDir((dir) => {
@@ -604,6 +683,95 @@ test("readEvent never sets event.label for a non-labeled event (no stray empty l
     assert.equal(event?.name, "pull_request");
     assert.equal(event?.action, "synchronize");
     assert.equal("label" in (event ?? {}), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #914: readEvent's issue_comment payload (the /ai-review re-review) ─────
+//
+// A real GitHub `issue_comment` payload has NO top-level `name` and NO
+// top-level `pull_request`. The PR number, when the comment is on a PR,
+// lives on `issue.number` — and `issue.pull_request` is present ONLY for
+// comments on a PR (absent for comments on a plain issue). That presence is
+// the honest signal the action's workflow/PR check uses to tell a real PR
+// re-review from a no-op: a plain-issue comment must yield NO prNumber.
+// The payload also carries a top-level `comment` (`{ id, body, user: {
+// login } }`) which we parse defensively into `event.comment`.
+
+test("readEvent parses an issue_comment ON A PR: prNumber from issue.number, comment populated, NO headSha", () => {
+  const dir = mkdtempSync(join(tmpdir(), "v3-readevent-issue-comment-pr-"));
+  try {
+    const eventPath = join(dir, "event.json");
+    writeFileSync(eventPath, JSON.stringify({
+      action: "created",
+      // `issue.pull_request` present → this comment is on a PR.
+      issue: { number: 42, pull_request: { url: "https://api.github.com/repos/o/r/pulls/42" } },
+      comment: { id: 123, body: "please re-review", user: { login: "alice" } },
+    }));
+    const { event, prNumber, headSha } = readEvent({
+      GITHUB_EVENT_PATH: eventPath,
+      GITHUB_EVENT_NAME: "issue_comment",
+    } as unknown as NodeJS.ProcessEnv);
+    assert.equal(event?.name, "issue_comment");
+    assert.equal(event?.action, "created");
+    assert.deepEqual(event?.comment, { id: 123, body: "please re-review", user: "alice" });
+    assert.equal(prNumber, "42");
+    // issue_comment payloads genuinely have no head SHA — never fabricated.
+    assert.equal(headSha, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readEvent parses an issue_comment ON A PLAIN ISSUE: comment present, prNumber stays undefined", () => {
+  const dir = mkdtempSync(join(tmpdir(), "v3-readevent-issue-comment-issue-"));
+  try {
+    const eventPath = join(dir, "event.json");
+    // No `issue.pull_request` → this is a comment on a plain issue, not a PR.
+    writeFileSync(eventPath, JSON.stringify({
+      action: "created",
+      issue: { number: 99 },
+      comment: { id: 555, body: "a question", user: { login: "bob" } },
+    }));
+    const { event, prNumber } = readEvent({
+      GITHUB_EVENT_PATH: eventPath,
+      GITHUB_EVENT_NAME: "issue_comment",
+    } as unknown as NodeJS.ProcessEnv);
+    assert.equal(event?.name, "issue_comment");
+    assert.equal(event?.action, "created");
+    assert.deepEqual(event?.comment, { id: 555, body: "a question", user: "bob" });
+    // The honest no-op signal: NO prNumber for a plain-issue comment.
+    assert.equal(prNumber, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readEvent degrades a junky issue_comment payload gracefully (never throws)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "v3-readevent-issue-comment-junk-"));
+  try {
+    const eventPath = join(dir, "event.json");
+    writeFileSync(eventPath, JSON.stringify({
+      action: "created",
+      issue: { number: 42, pull_request: { url: "https://api.github.com/repos/o/r/pulls/42" } },
+      // id is a valid number (kept); body is a non-string (dropped); user
+      // has no login (dropped). A malformed / hostile comment degrades —
+      // it never throws.
+      comment: { id: 123, body: 456, user: {} },
+    }));
+    const { event, prNumber } = readEvent({
+      GITHUB_EVENT_PATH: eventPath,
+      GITHUB_EVENT_NAME: "issue_comment",
+    } as unknown as NodeJS.ProcessEnv);
+    assert.equal(event?.name, "issue_comment");
+    assert.equal(event?.action, "created");
+    assert.ok(event?.comment);
+    assert.equal(event?.comment?.id, 123);
+    assert.equal(event?.comment?.body, undefined);
+    assert.equal(event?.comment?.user, undefined);
+    // prNumber still resolved from the PR-shaped issue.
+    assert.equal(prNumber, "42");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

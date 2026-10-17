@@ -1,12 +1,12 @@
-import type { NormalizedFinding, NormalizedHumanReviewDisposition, NormalizedRequiredCheckDisposition, NormalizedThreadDisposition, ParsedReviewVerdict, RequiredCheckStatus, VerdictValue } from "./types.js";
+import type { NormalizedFinding, NormalizedHumanReviewDisposition, NormalizedRequiredCheckDisposition, NormalizedThreadDisposition, ParsedReviewVerdict, RequiredCheckStatus, ReviewTriageDecision, VerdictValue } from "./types.js";
+import { resolveReviewTriageDecision } from "./triage.js";
 import { VerdictParseFailure } from "./types.js";
 import { maskDiagnostic } from "../context/redact.js";
 
 /**
  * Port of pr_reviewer/response_parser.py: tolerant model-output parsing and
  * strict verdict validation. Error messages match the v2 strings byte for
- * byte — the parity harness `verdict-parsing` boundary compares error
- * categories derived from them.
+ * byte; `tests-v3/verdict.test.ts` pins the error categories derived from them.
  */
 
 const APPROVE_VERDICTS = new Set(["approve", "approved", "approval", "lgtm"]);
@@ -23,7 +23,7 @@ const SEVERITY_ALIASES: Readonly<Record<string, NormalizedFinding["severity"]>> 
   info: "info", note: "info", nit: "info", suggestion: "info",
 };
 
-const FINDING_CATEGORIES = new Set(["bug", "security", "performance", "style", "docs", "tests", "question", "other"]);
+const FINDING_CATEGORIES = new Set(["bug", "security", "performance", "style", "docs", "tests", "question", "other", "verification"]);
 
 const MAX_FINDINGS = 50;
 const MAX_FINDING_MESSAGE_CHARS = 2000;
@@ -63,6 +63,8 @@ const THREAD_DISPOSITION_ALIASES: Readonly<Record<string, NormalizedThreadDispos
   disputed: "disputed",
   disagree: "disputed",
   rejected: "disputed",
+  withdrawn: "withdrawn",
+  answered: "withdrawn",
 });
 const MAX_THREAD_DISPOSITIONS = 100;
 const MAX_THREAD_ID_CHARS = 200;
@@ -221,7 +223,67 @@ function normalizeSmartReviewRequest(parsed: Record<string, unknown>): {
   return { requested, reason };
 }
 
+/**
+ * #1003: normalize the opt-in human-review triage answer. Exact-literal match
+ * only; every other shape (absent, null, non-string, a near-miss like
+ * "required " or "Required", an unknown word) is uncertainty and becomes
+ * `unknown` — triage must never read a malformed answer as "not required",
+ * which would turn a parser failure into a silent pass. An unsubstantiated
+ * `not_required` (no usable reason) fails closed to `unknown` too, so the
+ * positive claim can never rest on a parser gap. The reason is kept as a
+ * bounded, control-char-free single line ("" when absent or blank).
+ */
+function normalizeReviewTriage(parsed: Record<string, unknown>): {
+  decision: ReviewTriageDecision;
+  reason: string;
+} {
+  const reason = typeof parsed.review_triage_reason === "string"
+    ? parsed.review_triage_reason.replace(SMART_REVIEW_REASON_CONTROL, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS)
+    : "";
+  const decision = resolveReviewTriageDecision(parsed.review_triage_decision, reason);
+  return { decision, reason };
+}
+
+/**
+ * #1005: normalize the model's `review_triage_targets` — the logical routing
+ * target IDs it selected. The model can only ever name a LOGICAL id here; the
+ * deterministic resolver validates every id against trusted configuration
+ * before any reviewer request, so this pass only bounds and cleans the list:
+ * non-arrays become `[]`, non-string entries are dropped, each id is
+ * control-char-collapsed and trimmed (lowercased for comparison), empty or
+ * oversized ids are dropped, duplicates collapse, and the list is capped.
+ * It never interprets an id as a concrete GitHub identity.
+ */
+function normalizeReviewTriageTargets(parsed: Record<string, unknown>): string[] {
+  const raw = parsed.review_triage_targets;
+  if (!Array.isArray(raw)) return [];
+  const targets: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    const target = item.replace(SMART_REVIEW_REASON_CONTROL, " ").trim().toLowerCase();
+    if (target === "" || target.length > MAX_REVIEW_TRIAGE_TARGET_CHARS) continue;
+    if (seen.has(target)) continue;
+    seen.add(target);
+    targets.push(target);
+    if (targets.length >= MAX_REVIEW_TRIAGE_TARGETS) break;
+  }
+  return targets;
+}
+
 const TRUNCATION_REASONS = new Set(["length", "max_tokens", "max_output_tokens"]);
+
+// #1003: the parser-side bound on the model-authored reason. The published
+// surfaces render a shorter, 300-char cap (see src/publish/outputs.ts).
+// Decision resolution — including the unsubstantiated-`not_required`
+// fail-closed rule — lives in ./triage.ts, shared with every downstream
+// boundary.
+const MAX_REVIEW_TRIAGE_REASON_CHARS = 400;
+
+// #1005: bounds on the model's logical routing-target selection. One model
+// answer; a configured logical id is a short slug.
+const MAX_REVIEW_TRIAGE_TARGETS = 32;
+const MAX_REVIEW_TRIAGE_TARGET_CHARS = 64;
 
 const TRUNC_SUFFIX = " (model output appears truncated at the token limit; increase ai_max_tokens)";
 
@@ -701,6 +763,10 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
       key !== "verdict" && key !== "review_markdown" && key !== "findings"
       && key !== "requirement_coverage"
       && key !== "smart_review_requested" && key !== "smart_review_reason"
+      // #1003: known structured fields, not model extras — a triage answer is
+      // read by the parser (fail-closed), never passed through unparsed.
+      && key !== "review_triage_decision" && key !== "review_triage_reason"
+      && key !== "review_triage_targets"
       && key !== "required_check_dispositions"
       && key !== "thread_dispositions"
       && key !== "human_review_dispositions"
@@ -709,6 +775,7 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
     }
   }
   const smartRequest = normalizeSmartReviewRequest(parsed);
+  const triage = normalizeReviewTriage(parsed);
   const dispositions = normalizeRequiredCheckDispositions(
     parsed.required_check_dispositions,
     "required_check_dispositions" in parsed,
@@ -734,6 +801,9 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
     humanReviewDispositionsEmitted: humanReviewDispositions.present,
     smartReviewRequested: smartRequest.requested,
     smartReviewReason: smartRequest.reason,
+    reviewTriageDecision: triage.decision,
+    reviewTriageReason: triage.reason,
+    reviewTriageTargets: normalizeReviewTriageTargets(parsed),
     extra,
   };
 }
@@ -749,8 +819,8 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
  * this call, if known to the caller) is masked into the message via
  * `maskDiagnostic` — `kind`/`truncated` (and the `emptyCompletion` it
  * derives) are preserved so every caller's failure-kind branching is
- * unaffected. Callers with no key in scope (e.g. the parity harness) may
- * omit `secrets`; the v2-parity message text is untouched in that case.
+ * unaffected. Callers with no key in scope may omit `secrets`; the
+ * v2-identical message text is untouched in that case.
  */
 export function parseVerdictResponse(response: unknown, secrets: readonly (string | null | undefined)[] = []): ParsedReviewVerdict {
   try {

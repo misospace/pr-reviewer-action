@@ -1,16 +1,18 @@
-/** Shared secret-redaction for v3 context producers (#675): a verbatim
- * TypeScript port of `scripts/redact.py`'s `redact_text`. The pr-thread and
+/** Shared secret-redaction for v3 context producers (#675).
+ * TypeScript is now the sole authoritative implementation; the v2 Python
+ * original is gone, so there is no Python side to stay in lockstep with. The
+ * `[REDACTED]` marker and pattern application order remain the contract callers
+ * rely on, and new patterns may be added here directly. The pr-thread and
  * related-code builders feed untrusted bodies and grep snippets through this
- * before anything reaches the corpus, exactly like their v2 counterparts.
- * The patterns, their application order, and the `[REDACTED]` marker are
- * contractual (v2/v3 parity compares the redacted bytes), so this module must
- * stay in lockstep with the Python original — it is a normalization seam, not
- * a security-policy one: no network, no process, no policy decisions. */
+ * before anything reaches the corpus. This is a normalization seam, not a
+ * security-policy one: no network, no process, no policy decisions. */
+
+import { committedSourceProvenance, sanitizedSourceProvenance } from "./evidence-provenance.js";
 
 const REDACTED = "[REDACTED]";
 
-// In application order (same as scripts/redact.py). Each pattern replaces
-// every occurrence; later patterns see the already-redacted text.
+// In application order. Each pattern replaces every occurrence; later
+// patterns see the already-redacted text.
 const MASKERS: readonly RegExp[] = [
   // GitHub personal access tokens (classic & fine-grained)
   /ghp_[A-Za-z0-9]{30,}/g,
@@ -22,13 +24,20 @@ const MASKERS: readonly RegExp[] = [
   /(api[_-]?key|token|password|secret|access[_-]?key|auth[_-]?token)\s*[:=]\s*['"]?[^\s'"]{8,}/gi,
   // AWS-style access keys
   /AKIA[0-9A-Z]{16}/g,
+  // OpenAI-style provider keys (`sk-`, `sk-proj-`, `sk-ant-…`, `sk-or-v1-…`).
+  // The lookbehind rejects a preceding letter or digit, so the rule cannot
+  // match inside ordinary hyphenated prose (`task-runner-with-a-long-name`) or
+  // a longer identifier. It is deliberately NOT `\b`: `_` is a word character,
+  // so `\b` would skip a key written straight after one — e.g. the underscore
+  // emphasis a model reaches for when quoting a key, `_sk-…`.
+  /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}/g,
   // Kubernetes / kubeconfig credentials (credential-bearing keys only — the
   // old (server|username|...) form destroyed ordinary `server:` YAML context)
   /(password|client-certificate-data|client-key-data|certificate-authority-data|bearer[_-]?token)\s*:\s*\S+/gi,
 ];
 
 /** Return *text* with credential-like values replaced by `[REDACTED]`.
- * Best-effort heuristic redaction, exactly like the Python original. */
+ * Best-effort heuristic redaction for untrusted prose and logs. */
 export function redactText(text: string | null | undefined): string {
   if (!text) return "";
   let redacted = text;
@@ -128,26 +137,193 @@ function isConfigLikePath(filePath: string | null | undefined): boolean {
  * an unquoted secret-named scalar as a literal; code files (and unknown
  * paths) never do, because there an unquoted value is a code expression. A
  * QUOTED literal is masked either way — quoting is a value-shape signal a
- * code expression never has. */
+ * code expression never has.
+ *
+ * Marker contract (#1016): the rules below write credentials INTO the
+ * `REDACTED_SOURCE` marker, never OUT of it. A `⟦redacted:credential⟧`
+ * substring that is already present in the source (legitimately committed
+ * text, or any byte sequence that happens to match the marker) is preserved
+ * verbatim — the masker only uses the marker as a replacement target, never
+ * as an input pattern. The blocker-verification boundary at
+ * `src/enforcement/blocker-verification.ts` relies on this: a finding that
+ * cites the literal marker must observe the same marker in the exact-head
+ * read for the positive (`marker-present`) path to fire, and a future
+ * masker change that redacted the marker out of committed source would
+ * silently flip that path to `refuted`. `tests-v3/source-verifier.test.ts`
+ * pins the positive path; do not change this contract without updating
+ * both the test and the boundary. */
+export interface RedactSourceResult { text: string; redactionCount: number; }
+
+function replaceAndCount(
+  text: string,
+  pattern: RegExp,
+  replacement: string | ((...args: any[]) => string),
+): RedactSourceResult {
+  let redactionCount = 0;
+  const result = text.replace(pattern, (...args: any[]) => {
+    const match = args[0] as string;
+    const replaced = typeof replacement === "string" ? replacement : replacement(...args);
+    if (replaced !== match) redactionCount += 1;
+    return replaced;
+  });
+  return { text: result, redactionCount };
+}
+
 export function redactSourceText(text: string | null | undefined, filePath?: string | null): string {
-  if (!text) return "";
+  return redactSourceTextDetailed(text, filePath).text;
+}
+
+export function redactSourceTextDetailed(text: string | null | undefined, filePath?: string | null): RedactSourceResult {
+  if (!text) return { text: "", redactionCount: 0 };
   let redacted = text;
+  let redactionCount = 0;
+  const replace = (pattern: RegExp, replacement: string | ((...args: any[]) => string)) => {
+    const result = replaceAndCount(redacted, pattern, replacement);
+    redacted = result.text;
+    redactionCount += result.redactionCount;
+  };
 
   // Bare token-shape secrets: the whole match IS the literal, nothing else
   // to preserve.
-  redacted = redacted.replace(/ghp_[A-Za-z0-9]{30,}/g, REDACTED_SOURCE);
-  redacted = redacted.replace(/github_pat_[A-Za-z0-9_]{20,}/g, REDACTED_SOURCE);
-  redacted = redacted.replace(/AKIA[0-9A-Z]{16}/g, REDACTED_SOURCE);
-  redacted = redacted.replace(/sk-[A-Za-z0-9]{20,}/g, REDACTED_SOURCE);
+  replace(/ghp_[A-Za-z0-9]{30,}/g, REDACTED_SOURCE);
+  replace(/github_pat_[A-Za-z0-9_]{20,}/g, REDACTED_SOURCE);
+  replace(/AKIA[0-9A-Z]{16}/g, REDACTED_SOURCE);
+  // OpenAI-style `sk-` legacy bare shape (`sk-<20+ alnum>`), retained exactly
+  // as it was. Its one ambiguity — a kebab token whose leading word is 20+
+  // characters (`sk-internationalization-notes`) is masked — is pre-existing
+  // and irreducible without weakening the pin, and over-redaction is the
+  // module's stated preference over a leaked credential.
+  replace(/sk-[A-Za-z0-9]{20,}/g, REDACTED_SOURCE);
+
+  // The dash-separated families (#996), ENUMERATED, with the body's first
+  // segment required to be an alphanumeric run of at least 20 characters that
+  // carries at least one DIGIT or UPPERCASE character — and that entropy
+  // character may sit ANYWHERE in the segment, not only within its first 20
+  // characters: the scan covers the whole first alphanumeric segment, so
+  // `sk-proj-<20 lowercase><uppercase>` is masked.
+  //
+  // This is a HIGH-CONFIDENCE HEURISTIC with explicitly bounded tradeoffs, not
+  // a classifier. No shape-only rule can both mask every real family body and
+  // spare every kebab token that begins with a family prefix, because the two
+  // are the same token shape: `sk-proj-internationalization2024-notes` is a
+  // path, `sk-proj-<24-char base64url body>` is a key, and they differ only in
+  // whether the segment is an English word. Each part below exists because its
+  // absence let ordinary source through as a key:
+  //  - the prefix is closed to families a provider actually issues (a generic
+  //    `sk-<seg>-` chain ate `docs/sk-deployment-internationalization-notes`);
+  //  - the run must be the body's FIRST segment, because a token that merely
+  //    CONTAINS a long word is still a path
+  //    (`docs/sk-proj-card-internationalization-notes`);
+  //  - the run must carry a digit or uppercase, because `internationalization`
+  //    is itself 20 lowercase characters
+  //    (`docs/sk-proj-internationalization-notes`).
+  //
+  // The entropy test is base64url-INFORMED, not base64url-correct: base64url
+  // does NOT guarantee an uppercase letter or digit in a body, or in any
+  // window of one. A first alphanumeric segment that carries neither is
+  // vanishingly unlikely in a real key body, so that miss is accepted rather
+  // than traded for the false positive a longer or looser rule would cost. The
+  // trailing `[A-Za-z0-9_-]*` still
+  // consumes the rest of a `-`/`_`-bearing body, so a real key is masked as ONE
+  // literal. `ant-api03` is version-bearing: a future `apiNN` bump is a
+  // one-line change here.
+  //
+  // Accepted boundaries, each pinned by test in `tests-v3/redact.test.ts`:
+  //  - FALSE NEGATIVE — a real body whose FIRST alphanumeric segment carries
+  //    no digit or uppercase is not masked, wherever that segment ends
+  //    (`sk-or-v1-<all-letter hex>`, or `sk-proj-<20 lowercase>-<entropy in a
+  //    later segment>`). Syntactically valid base64url; practically unobserved
+  //    in real keys.
+  //  - FALSE NEGATIVE — a real body carrying `-`/`_` inside its first 20
+  //    characters (`sk-proj-ab-<40 alnum>`) is not masked; covering it needs
+  //    the run hunted anywhere in the body, which reopens the path above.
+  //  - FALSE POSITIVE — a kebab token whose segment after the family prefix is
+  //    20+ characters AND carries a digit or uppercase
+  //    (`docs/sk-proj-internationalization2024-notes`) is masked. Closing this
+  //    needs parsing words — the framing/context signal deliberately kept out
+  //    of scope; #996's acceptance is amended to accept it instead.
+  // Pre-#997 left all three classes alone; the amended #996 acceptance trades
+  // them for covering the three families.
+  replace(
+    /(?<![A-Za-z0-9])sk-(?:proj|ant-api03|or-v1)-(?=[A-Za-z0-9]*[0-9A-Z])[A-Za-z0-9]{20,}[A-Za-z0-9_-]*/g,
+    REDACTED_SOURCE,
+  );
+
+  /* #999: close verified OpenAI/Anthropic families without broadening #997's
+   * generic family heuristic. OpenAI keys (legacy plus `proj`, `svcacct`,
+   * `admin`, and niche `None`) carry the fixed `T3BlbkFJ` fragment: gitleaks
+   * and TruffleHog keyword-anchor on it, and OpenAI docs cover project and
+   * service-account shapes. `admin` is detector-backed; `None` is community-
+   * only (OpenAI forum thread 879912), so this anchored rule avoids making
+   * either prefix alone a reason to redact. The marker makes ordinary path,
+   * class, or identifier over-redaction structurally impossible. The pre-marker
+   * `{0,256}` bound is load-bearing: without it, marker-free repeated `sk-`
+   * input is quadratic (4.3s / 17.6s / 70.2s at 90k / 180k / 360k characters);
+   * the bounded rule takes ~0.4s at 1.2M characters. The trailing run is
+   * deliberately unbounded, like #997's, so a real key is masked whole. A
+   * marker more than 256 characters into a token is not reached at all: this is
+   * an accepted clean miss, never a partial mask. Observed bodies are 58–148
+   * characters total, with the marker roughly 20–80 characters in, so 256
+   * gives >2x headroom.
+   *
+   * Anthropic's `api03` and `admin01` rules pin gitleaks/TruffleHog and provider-
+   * documented shapes: exactly 93 base64url characters plus `AA`. `AA` ends
+   * the token, so the trailing guard keeps the shape exact on the upper edge:
+   * a longer base64url token survives whole rather than being redacted through
+   * its first 95 body characters (which would leave the tail behind). The `oat01`
+   * rule follows provider docs and gitleaks PR #2159: a base64url OAuth access
+   * token with at least 40 characters. For real keys, these shape pins cover a
+   * superset of #997's generic first-run heuristic matches. The pin's
+   * contribution is #997's documented early-separator miss: a `-`/`_` inside
+   * the body's first 20 characters, which #997's `[A-Za-z0-9]{20,}` cannot
+   * cross. If an api03 body's first 20 characters are unbroken alphanumerics,
+   * #997 already matches it and the pin is a no-op. #997's two `sk-` rules
+   * remain byte-identical as required by this issue. `ant-api03` is
+   * version-bearing: a future `apiNN` bump is a one-line edit.
+   *
+   * Deliberate exclusions and evidence tiers: `sk-ant-api04-` is unverifiable
+   * (CSDN/JP blog noise only; absent from Anthropic docs, gitleaks, TruffleHog,
+   * and GitHub secret-scanning patterns); `sk-ant-ort01-` (OAuth refresh) and
+   * `sk-ant-sid01-` (Claude.ai session) are real but excluded pending the same
+   * provider-doc or published-scanner evidence bar. `sk-service-` is only a
+   * TruffleHog regex alias with no OpenAI source. No capitalized-prefix rule is
+   * added for `sk-Proj-`, but the marker rule is prefix-agnostic: a
+   * `sk-Proj-…T3BlbkFJ…` token is still masked because the marker, not the
+   * prefix, is the discriminator. The surviving
+   * `sk-Proj-configuration-reference` kebab case is pinned by test. Keep
+   * `sk-ant-admin-` (without `01`) out of the rules; tests pin it as a survivor.
+   *
+   * Accepted shape residual: an `oat01` token followed by 40+ characters of
+   * hyphenated kebab text is indistinguishable from a body and will be masked.
+   * A token ends at the first character outside the base64url charset; that
+   * character and everything after it are preserved (`sk-ant-oat01-<40>.XYZ`
+   * becomes `⟦redacted:credential⟧.XYZ`). This is the same boundary contract
+   * followed by every bare-token rule (`ghp_`, `AKIA`, `sk-`), not a partial
+   * leak: a base64url body cannot contain `.`, whitespace, or quotes. The
+   * api03/admin01 shape is exact on both edges: a token continuing past `AA`
+   * with further base64url characters is not that shape and survives whole,
+   * since matching it partially would leak the tail. */
+  replace(
+    /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{0,256}T3BlbkFJ[A-Za-z0-9_-]*/g,
+    REDACTED_SOURCE,
+  );
+  replace(
+    /(?<![A-Za-z0-9])sk-ant-(?:api03|admin01)-[A-Za-z0-9_-]{93}AA(?![A-Za-z0-9_-])/g,
+    REDACTED_SOURCE,
+  );
+  replace(
+    /(?<![A-Za-z0-9])sk-ant-oat01-[A-Za-z0-9_-]{40,}/g,
+    REDACTED_SOURCE,
+  );
 
   // Bearer / Basic auth headers: keep the scheme word, mask only the token.
-  redacted = redacted.replace(
+  replace(
     /\b(Bearer|Basic)(\s+)([A-Za-z0-9._+/=-]{20,})/gi,
     (_m, scheme: string, ws: string) => `${scheme}${ws}${REDACTED_SOURCE}`,
   );
 
   // PEM private key blocks: keep the BEGIN/END lines, mask only the body.
-  redacted = redacted.replace(
+  replace(
     /(-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)([\s\S]*?)(-----END [A-Z0-9 ]*PRIVATE KEY-----)/g,
     (_m, begin: string, _body: string, end: string) => `${begin}\n${REDACTED_SOURCE}\n${end}`,
   );
@@ -157,7 +333,7 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
   // `!GetAtt ...`) is captured whole, to end of line, so it is judged (and,
   // being a reference, left alone) as ONE value rather than truncated at its
   // first space — `!Ref ClientKeyData` must never become `⟦…⟧ ClientKeyData`.
-  redacted = redacted.replace(
+  replace(
     /(client-certificate-data|client-key-data|certificate-authority-data)(\s*:\s*)(![^\n]*|\S+)/gi,
     (m, key: string, sep: string, value: string) =>
       isReferenceValue(value.trim(), false) ? m : `${key}${sep}${REDACTED_SOURCE}`,
@@ -169,7 +345,7 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
   // matching value quotes and no quote inside the value, so a code
   // expression (unquoted) never matches. A quoted reference (e.g.
   // `apiKey: "${API_KEY}"`) is left alone.
-  redacted = redacted.replace(
+  replace(
     new RegExp(`(["'\`]?)(${SECRET_KEY_ALTERNATION})\\1(\\s*[:=]\\s*)(["'\`])([^"'\`]{8,})\\4`, "gi"),
     (m, keyQuote: string, key: string, sep: string, quote: string, value: string) =>
       isReferenceValue(value, true) ? m : `${keyQuote}${key}${keyQuote}${sep}${quote}${REDACTED_SOURCE}${quote}`,
@@ -183,14 +359,14 @@ export function redactSourceText(text: string | null | undefined, filePath?: str
   // `"token": hunter2hunter2`), and the same whole-value-to-end-of-line
   // capture for a tagged reference form.
   if (isConfigLikePath(filePath)) {
-    redacted = redacted.replace(
+    replace(
       new RegExp(`(["'\`]?)(${SECRET_KEY_ALTERNATION})\\1(\\s*[:=]\\s*)(![^\\n#]*|[^\\s#'"]{8,})`, "gi"),
       (m, keyQuote: string, key: string, sep: string, value: string) =>
         isReferenceValue(value.trim(), false) ? m : `${keyQuote}${key}${keyQuote}${sep}${REDACTED_SOURCE}`,
     );
   }
 
-  return redacted;
+  return { text: redacted, redactionCount };
 }
 
 /** Marker used for known-secret masking (`maskKnownSecrets`/`maskDiagnostic`/
@@ -220,10 +396,11 @@ export const KNOWN_SECRET_REDACTED = "⟦•⟧";
  * #846/security-review: mask every literal occurrence of a caller-supplied
  * secret (an operator's configured model API key), plus its URL-encoded and
  * base64 forms. This is deliberately separate from `redactText`'s
- * pattern-based heuristics (parity-locked, see the module doc) — a known
+ * pattern-based heuristics (see the module doc) — a known
  * exact secret must be nuked unconditionally, even when it doesn't happen to
- * match any heuristic pattern (e.g. an opaque key like `sk-...` echoed bare
- * in a provider's error body, with no `key=`/`Bearer `/etc. framing).
+ * match any heuristic pattern (e.g. a short or oddly-shaped opaque key
+ * echoed bare in a provider's error body, with no `key=`/`Bearer `/etc.
+ * framing).
  * Case-sensitive substring replacement; every non-empty secret is masked
  * regardless of length — `ai-api-key` has no configured minimum, a
  * one-character local key is plausible, and over-redaction in a diagnostic
@@ -293,7 +470,7 @@ export function maskDiagnostic(
 }
 
 /**
- * Port of `scripts/redact.py`'s `mask_and_truncate`: redact secrets, then
+ * Originally ported from v2's `mask_and_truncate`: redact secrets, then
  * truncate to *maxBytes* UTF-8 bytes with a visible `\n[truncated]` marker.
  * Truncation happens after masking so the byte length reflects the redacted
  * content. The tool-executor layer applies this to every tool result before
@@ -316,16 +493,40 @@ export function maskAndTruncate(
  * contract, but masks with `redactSourceText` so repository source content
  * (tool file reads, grep matches, blame) survives byte-for-byte apart from
  * actual credential values. */
+export interface MaskSourceResult { text: string; truncated: boolean; redactionCount: number; }
+
 export function maskAndTruncateSource(
   text: string | null | undefined,
   maxBytes: number,
   filePath?: string | null,
 ): { text: string; truncated: boolean } {
-  const masked = redactSourceText(text, filePath);
-  const raw = Buffer.from(masked, "utf8");
+  const { text: masked, truncated } = maskAndTruncateSourceDetailed(text, maxBytes, filePath);
+  return { text: masked, truncated };
+}
+
+export function maskAndTruncateSourceDetailed(
+  text: string | null | undefined,
+  maxBytes: number,
+  filePath?: string | null,
+): MaskSourceResult {
+  const result = redactSourceTextDetailed(text, filePath);
+  const raw = Buffer.from(result.text, "utf8");
   if (raw.length <= maxBytes) {
-    return { text: masked, truncated: false };
+    return { ...result, truncated: false };
   }
   const clipped = raw.subarray(0, maxBytes).toString("utf8");
-  return { text: clipped + "\n[truncated]", truncated: true };
+  return { ...result, text: clipped + "\n[truncated]", truncated: true };
+}
+
+export function sourceEvidence(
+  text: string | null | undefined,
+  filePath: string | null | undefined,
+  file: string | null,
+  revision: string | null,
+): { text: string; provenance: import("./evidence-provenance.js").EvidenceProvenance } {
+  const result = redactSourceTextDetailed(text, filePath);
+  const provenance = result.redactionCount > 0
+    ? sanitizedSourceProvenance(result.redactionCount, file, revision)
+    : committedSourceProvenance(file, revision);
+  return { text: result.text, provenance };
 }

@@ -11,6 +11,7 @@ import {
 } from "../src/transport/http.js";
 import { KNOWN_SECRET_REDACTED, maskKnownSecrets, redactText } from "../src/context/redact.js";
 import { parseStatedTokenCap, runChatRequest } from "../src/transport/transport.js";
+import { ExtraHeadersError } from "../src/transport/headers.js";
 import { startMockServer, sseResponse } from "./helpers.js";
 import type { TransportWirePayload } from "../src/model/types.js";
 
@@ -1299,4 +1300,348 @@ test("describeTransportFailure: a secret in a status-less failure's bare message
   const failure = new TransportFailure("network", `model request failed: proxy rejected ${secret}`);
   const detail = describeTransportFailure(failure, { secrets: [secret] });
   assert.ok(!detail.includes(secret));
+});
+
+// ── #1047: the single structured-output strip on a capability-mismatch 400 ──
+
+test("#1047: a 400 naming response_format is retried once without it (openai)", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  let requests = 0;
+  const server = await startMockServer((_req, body, res) => {
+    requests++;
+    bodies.push(JSON.parse(body) as Record<string, unknown>);
+    if (requests === 1) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: { message: "response_format is not supported by this model" } }));
+      return;
+    }
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, response_format: { type: "json_object" } }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "ok");
+    assert.equal(requests, 2);
+    assert.ok(bodies[0]!.response_format, "the first attempt carried the parameter");
+    assert.equal("response_format" in bodies[1]!, false, "the retry stripped it");
+    // #1047 (review): the successful outcome is TAGGED with the surface the
+    // effective request dropped, so callers report the stripped state.
+    assert.equal(outcome.status === "ok" && outcome.strippedStructuredOutput, "response_format");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1047: a 400 naming output_config.format strips only the format key, keeping sibling keys (anthropic)", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  let requests = 0;
+  const server = await startMockServer((_req, body, res) => {
+    requests++;
+    bodies.push(JSON.parse(body) as Record<string, unknown>);
+    if (requests === 1) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: { message: "output_config.format is not supported here" } }));
+      return;
+    }
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "anthropic",
+      payload: payload({
+        model: "m", max_tokens: 64, stream: false, system: "s",
+        messages: [{ role: "user", content: "u" }],
+        output_config: { format: { type: "json_schema", schema: { type: "object" } }, effort: "medium" },
+      }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "ok");
+    assert.equal(requests, 2);
+    assert.ok((bodies[0]!.output_config as Record<string, unknown>).format);
+    // The operator's asserted effort survives; only the unsupported format goes.
+    assert.deepEqual(bodies[1]!.output_config, { effort: "medium" });
+    assert.equal(outcome.status === "ok" && outcome.strippedStructuredOutput, "output_config.format");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1047: a plain success carries no strip metadata", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: {} }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, response_format: { type: "json_object" } }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "ok");
+    assert.equal(outcome.status === "ok" && outcome.strippedStructuredOutput, undefined);
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1047: the strip is strictly evidence-gated and once-per-request", async () => {
+  // A 400 that does NOT name the parameter never triggers a strip.
+  let requests = 0;
+  const unrelated = await startMockServer((_req, _body, res) => {
+    requests++;
+    res.statusCode = 400;
+    res.end(JSON.stringify({ error: { message: "max_tokens: 64 > 8, which is the maximum allowed number of output tokens" } }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: unrelated.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, max_tokens: 64, response_format: { type: "json_object" } }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "failure");
+    // The token clamp handled it, not the strip — but either way the request
+    // never re-ran with a silently stripped parameter on an unrelated 400.
+    assert.equal(requests, 2);
+    assert.equal(requests === 2 && outcome.status, "failure");
+  } finally {
+    await unrelated.close();
+  }
+
+  // A payload carrying no structured-output parameter never strips anything.
+  let plainRequests = 0;
+  const plain = await startMockServer((_req, _body, res) => {
+    plainRequests++;
+    res.statusCode = 400;
+    res.end(JSON.stringify({ error: { message: "response_format is not supported by this model" } }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: plain.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "failure");
+    assert.equal(plainRequests, 1, "nothing to strip: no retry");
+  } finally {
+    await plain.close();
+  }
+});
+
+// ── #1037: ai-extra-headers on the wire ───────────────────────────────────
+
+test("#1037: extra headers ride every request format with case-preserved names", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.end(JSON.stringify({ id: "1", choices: [{ message: { content: "hi" }, finish_reason: "stop" }] }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, messages: [] }),
+      apiKey: "sk-test",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+      extraHeaders: { "X-LiteLLM-Session-Id": "run-42", "x-team-id": "platform" },
+    });
+    assert.equal(outcome.status, "ok");
+    assert.equal(server.requests.length, 1);
+    assert.equal(server.requests[0]!.headers["x-litellm-session-id"], "run-42");
+    assert.equal(server.requests[0]!.headers["x-team-id"], "platform");
+    // Case preservation is asserted on the RAW wire names, not the
+    // Node-lowercased `headers` view.
+    const rawNames = server.requests[0]!.rawHeaders.filter((_v, i) => i % 2 === 0);
+    assert.ok(rawNames.includes("X-LiteLLM-Session-Id"), `raw names: ${rawNames.join(",")}`);
+    assert.ok(rawNames.includes("x-team-id"), `raw names: ${rawNames.join(",")}`);
+    // The action's own headers are untouched alongside the extras.
+    assert.equal(server.requests[0]!.headers.authorization, "Bearer sk-test");
+    assert.equal(server.requests[0]!.headers["content-type"], "application/json");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1037: anthropic format carries the extras next to x-api-key and the streamed Accept header", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.end(JSON.stringify({ id: "m1", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "anthropic",
+      payload: payload({ model: "m", stream: false, messages: [] }),
+      apiKey: "sk-ant",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+      extraHeaders: { "anthropic-beta": "pdfs-2024-05-04" },
+    });
+    assert.equal(outcome.status, "ok");
+    assert.equal(server.requests[0]!.headers["anthropic-beta"], "pdfs-2024-05-04");
+    assert.equal(server.requests[0]!.headers["x-api-key"], "sk-ant");
+    assert.equal(server.requests[0]!.headers["anthropic-version"], "2023-06-01");
+    assert.equal(server.requests[0]!.headers.authorization, undefined);
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1037: unset extraHeaders leaves the outbound header set without any extras", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.end(JSON.stringify({ id: "1", choices: [{ message: { content: "hi" }, finish_reason: "stop" }] }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, messages: [] }),
+      apiKey: "sk-test",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    assert.equal(outcome.status, "ok");
+    const names = Object.keys(server.requests[0]!.headers);
+    assert.ok(!names.some((name) => name.includes("session") || name.includes("team") || name.includes("beta")),
+      `unexpected extra headers: ${names.join(",")}`);
+    assert.equal(server.requests[0]!.headers.authorization, "Bearer sk-test");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1037: extras survive the max_tokens clamp retry and the 429 retry on the same request", async () => {
+  let served = 0;
+  const server = await startMockServer((_req, body, res) => {
+    served++;
+    if (served === 1) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: { message: "max_tokens: 8000 > 4096, which is the maximum allowed number of output tokens" } }));
+      return;
+    }
+    assert.equal(JSON.parse(body).max_tokens, 4096);
+    res.statusCode = 200;
+    res.end(JSON.stringify({ id: "1", choices: [{ message: { content: "hi" }, finish_reason: "stop" }] }));
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false, max_tokens: 8000, messages: [] }),
+      apiKey: "sk-test",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+      extraHeaders: { "x-litellm-trace-id": "trace-1" },
+    });
+    assert.equal(outcome.status, "ok");
+    assert.equal(server.requests.length, 2);
+    assert.equal(server.requests[0]!.headers["x-litellm-trace-id"], "trace-1");
+    assert.equal(server.requests[1]!.headers["x-litellm-trace-id"], "trace-1");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1037: a hand-built reserved header fails closed at the wire boundary before any request", async () => {
+  let served = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    served++;
+    res.statusCode = 200;
+    res.end("{}");
+  });
+  try {
+    await assert.rejects(
+      () => runHttpRequest({
+        baseUrl: server.url,
+        apiFormat: "anthropic",
+        bodyText: "{}",
+        apiKey: "sk-real",
+        anthropicVersion: "2023-06-01",
+        requestTimeoutSec: 5,
+        connectTimeoutSec: 5,
+        stream: false,
+        extraHeaders: { "X-API-Key": "attacker" },
+      }),
+      /collides with a transport header/,
+    );
+    assert.equal(served, 0, "no request may reach the endpoint with a colliding header");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#252 boundary: hostile extra-header pairs fail closed at the wire before ANY request", async () => {
+  // The attack tokens themselves, fed directly into the outbound request —
+  // the startup parser is deliberately bypassed here, so the wire fence has to
+  // revalidate every rule on its own (#252: a mock that omits the attack
+  // encodes the same blind spot as the code).
+  let served = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    served++;
+    res.statusCode = 200;
+    res.end("{}");
+  });
+  const hostile: [string, Record<string, string>][] = [
+    ["empty name", { "": "v" }],
+    ["space in name", { "X Foo": "v" }],
+    ["crlf injection value", { "X-Injection": "prefix\r\nX-Evil: 1" }],
+    ["nul in value", { "X-Injection": "prefix\u0000suffix" }],
+    ["non-latin1 value", { "X-Emoji": "run-\u{1F600}" }],
+    ["duplicate name", { "X-Team-Id": "a", "x-team-id": "b" }],
+    ["over the bound", Object.fromEntries(Array.from({ length: 17 }, (_u, i) => [`X-H-${i}`, "v"]))],
+  ];
+  try {
+    for (const [label, extraHeaders] of hostile) {
+      await assert.rejects(
+        () => runHttpRequest({
+          baseUrl: server.url,
+          apiFormat: "anthropic",
+          bodyText: "{}",
+          apiKey: "sk-real",
+          anthropicVersion: "2023-06-01",
+          requestTimeoutSec: 5,
+          connectTimeoutSec: 5,
+          stream: false,
+          extraHeaders,
+        }),
+        ExtraHeadersError,
+        label,
+      );
+    }
+    assert.equal(served, 0, "no request may reach the endpoint with a hostile header pair");
+  } finally {
+    await server.close();
+  }
 });

@@ -1,5 +1,0 @@
-{
-  "fixture": "empty",
-  "description": "No comments survive: empty list renders an empty document so the corpus section is omitted by the -s gate.",
-  "comments": []
-}

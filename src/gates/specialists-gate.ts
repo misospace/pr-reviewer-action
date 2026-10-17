@@ -19,6 +19,8 @@ import {
 import { DEFAULT_SPECIALIST_MAX_TOKENS, MAX_INPUT_BYTES, SPECIALIST_ROLES_ORDER, type SpecialistArtifact } from "../specialists/types.js";
 import { guardedWrite, resolveArtifactPath, resolveRoot } from "./guarded-write.js";
 import { specialistRequestFn } from "./specialist-transport.js";
+import { extraHeadersForEnv } from "../transport/headers.js";
+import { resolveSpecialistProfiles, anthropicJsonObjectsPromptOnlyWarning, tierResponseFormat } from "../routing/tiers.js";
 
 /**
  * Specialists gate workload (#706 PR 6): the glue around `runSpecialists`
@@ -216,6 +218,12 @@ function roleLine(entry: SpecialistRoleEntry): string {
   // "error (transport)" line with no clue the endpoint answered 404.
   const httpDetail = entry.error_status !== undefined && entry.error_detail ? ` — ${entry.error_detail}` : "";
   if (entry.overrun_retry === true) usageNote += ` overrun-retry(max_tokens=${pyStr(entry.retry_max_tokens ?? null)})`;
+  // #1061: the bounded role diagnostic — a full-budget no-lead failure must be
+  // explainable from the log line alone (stop reason, output length, overrun
+  // recovery outcome), never a bare "degraded — 0 lead(s), 1 error(s)".
+  if (entry.stop_reason !== undefined && entry.stop_reason !== null) usageNote += ` stop_reason=${entry.stop_reason}`;
+  if (entry.output_chars !== undefined && entry.output_chars !== null) usageNote += ` output_chars=${pyStr(entry.output_chars)}`;
+  if (entry.overrun_retry_result !== undefined && entry.overrun_retry_result !== null) usageNote += ` overrun=${entry.overrun_retry_result}`;
   return `specialist ${entry.role}: ${entry.status}${suffix}${reason}${httpDetail} — ${entry.lead_count} lead(s), ${entry.errors_count} error(s), ${pyFloatRepr(entry.elapsed_sec)}s${usageNote}`;
 }
 
@@ -317,8 +325,8 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
       }
     }
     // #871: the persisted classification.json never carries
-    // substantialCodeChange (see PRClassification's field doc — the parity
-    // boundary compares that artifact as one opaque string per fixture).
+    // substantialCodeChange (see PRClassification's field doc — the persisted
+    // artifact keeps its v2-compatible shape).
     // review.ts threads the in-memory signal here via this env var instead,
     // set from the same classification the run already computed.
     const rebuilt = classificationFromArtifact(classification);
@@ -338,13 +346,25 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
     stdout(note);
   }
 
-  const baseUrl = envStr(env, "AI_BASE_URL");
-  const apiFormat = envStr(env, "AI_API_FORMAT", "openai").trim().toLowerCase();
-  const model = envStr(env, "AI_MODEL");
-  const apiKey = envStr(env, "AI_API_KEY");
+  const profiles = resolveSpecialistProfiles(env);
+  const configuredRoleOverrides = ["CORRECTNESS", "SECURITY", "TESTS"].some((role) =>
+    envStr(env, `AI_SPECIALIST_${role}_MODEL`).trim() !== "",
+  );
+  const { baseUrl, apiFormat, model, apiKey } = profiles.transport;
   const maxTokens = envInt(env, "DEEP_REVIEW_MAX_TOKENS", DEFAULT_SPECIALIST_MAX_TOKENS);
   const temperature = envTemperature(env);
-  const responseFormat = envStr(env, "AI_RESPONSE_FORMAT", "off").trim().toLowerCase();
+  // #1009: the specialist phase inherits the primary lane's effective
+  // response_format through the SAME tier-aware helper the rest of the v3
+  // config chain uses (#1065 review): an explicitly empty (or whitespace-
+  // only) `ai-primary-response-format` inherits `ai-response-format`, and an
+  // unresolvable value falls back to off — never the raw ambient bytes.
+  const responseFormat = tierResponseFormat("primary", env);
+  // #998: the specialist lane's reasoning effort — ai-specialist-reasoning-
+  // effort when set, else the primary lane's resolved value. The Anthropic
+  // `output_config.effort` opt-in is the operator's per-endpoint assertion and
+  // applies to whichever format the specialist transport resolved.
+  const reasoningEffort = profiles.transport.reasoningEffort;
+  const anthropicEffort = profiles.transport.anthropicEffortSupported;
   const tokensParam = envStr(env, "AI_TOKENS_PARAM", "max_tokens").trim().toLowerCase();
   const stream = envStr(env, "AI_STREAM", "true").trim().toLowerCase() === "true";
   const roleTimeoutSec = envInt(env, "AI_REQUEST_TIMEOUT_SEC", 300);
@@ -363,6 +383,20 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
   if (adversarialActive && execution === "combined_scout") {
     execution = "three_call";
     stdout("WARNING: adversarial correctness corpus is incompatible with DEEP_REVIEW_EXECUTION=combined_scout; forcing three_call");
+  }
+  for (const warning of profiles.warnings) stdout(`WARNING: ${warning}`);
+  // #1047: specialist calls ask for their (non-verdict) JSON contracts in the
+  // prompt only — no Anthropic-native structured-output parameter exists for
+  // them to carry, so a configured response_format must not read as enforced
+  // on an Anthropic-format specialist transport.
+  if (apiFormat === "anthropic" && (responseFormat === "json_object" || responseFormat === "json_schema")) {
+    stdout(`WARNING: ${anthropicJsonObjectsPromptOnlyWarning("specialist", responseFormat as "json_object" | "json_schema")}`);
+  }
+  const roleModels = profiles.overridesActive && !(execution === "combined_scout" && configuredRoleOverrides)
+    ? profiles.roleModels
+    : undefined;
+  if (execution === "combined_scout" && configuredRoleOverrides) {
+    stdout("WARNING: specialist model overrides ignored under DEEP_REVIEW_EXECUTION=combined_scout; the scout call runs on the specialist profile (or primary) model");
   }
 
   // #875: an optional correctness-only "Equivalent Paths to Compare"
@@ -387,10 +421,15 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
     if (prompt !== undefined) rolePrompts[role] = prompt;
   }
 
+  // #1037: correlation headers ride specialist calls too; unset config
+  // omits the key rather than merging an empty map.
+  const extra = extraHeadersForEnv(envStr(env, "AI_EXTRA_HEADERS"));
+
   const requestFn = deps.requestFn ?? specialistRequestFn({
     baseUrl,
     apiKey,
     anthropicVersion: envStr(env, "ANTHROPIC_VERSION", "2023-06-01"),
+    ...(extra !== undefined ? { extraHeaders: extra } : {}),
   });
 
   const timers = cancellableSleep();
@@ -408,6 +447,8 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
       roleTimeoutSec,
       phaseTimeoutSec,
       execution: execution as ExecutionMode,
+      reasoningEffort,
+      anthropicEffortSupported: anthropicEffort,
     },
     corpus: corpus.text,
     corpusError: corpus.error,
@@ -415,6 +456,7 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
     rolesToRun,
     skippedReasons,
     rolePrompts,
+    ...(roleModels !== undefined ? { roleModels } : {}),
     requestFn,
     ...(selectionArtifact !== undefined ? { selectionArtifact } : {}),
     deepReviewMode: deepMode,

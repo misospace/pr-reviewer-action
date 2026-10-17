@@ -52,7 +52,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
           cache: npm
@@ -77,24 +77,26 @@ jobs:
           # between local and CI is how the duplicate-key regression test first
           # shipped broken (passed on local 3.9, ModuleNotFoundError on CI 3.x).
           python-version: '3.14'
+          # #1058: this is the critical-path job and the hashed install was its
+          # largest non-test step (4-14s measured); the wheel cache makes it
+          # the cheap step. Keyed on the pinned set, so a changed pin refetches.
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install test dependencies
         run: pip install --require-hashes -r requirements.txt
 
       - name: Set up Node.js
-        # Node 24 must be on PATH for the parity harness (tests/test_parity_harness.py
-        # runs `node dist/index.js`, and package.json engines requires node >=24).
-        # On the pre-split serial job this came from the shared setup-node step;
-        # dropping it here made shutil.which("node") resolve the runner image's
-        # older default node and fail every v3 parity fixture.
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        # The semantic-eval dataflow gate compiles tsconfig.test.json with tsc
+        # and runs node --test; retained runtime integration tests also use Node.
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
           cache: npm
           cache-dependency-path: package-lock.json
 
       - name: Build v3 bundle
-        # dist/ is not committed; the parity harness runs the built bundle.
+        # dist/ is not committed; retained runtime integration tests need it.
         run: npm ci && npm run build
 
       - name: Check Python scripts
@@ -109,7 +111,7 @@ jobs:
 
       - name: Upload semantic regression report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: semantic-eval-report
           path: semantic-eval-report/report.json
@@ -206,6 +208,9 @@ jobs:
           # Same pinned interpreter as validate-python so bash suites that shell
           # out to python3 see the same version (see the skew note above).
           python-version: '3.14'
+          # #1058: same hashed install as validate-python; cache it here too.
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install test dependencies
         # Some suites import PyYAML in inline python (it arrives transitively

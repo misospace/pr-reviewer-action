@@ -125,9 +125,8 @@ export interface SpecialistSelection {
 }
 
 /** Serialize the internal selection to the persisted v2-identical snake_case
- * artifact (`role-selection.json`). Key order mirrors the v2 artifact; the
- * parity harness compares `sort_keys` canonical JSON, so the bytes are
- * v2-identical regardless. */
+ * artifact (`role-selection.json`). Key order mirrors the v2 artifact; after
+ * canonical JSON serialization, the bytes remain v2-identical. */
 export function selectionToArtifact(selection: SpecialistSelection): Record<string, unknown> {
   return {
     version: selection.version,
@@ -263,6 +262,13 @@ function trivialZeroReason(kind: string, flags: readonly string[], files: readon
   if (kind === "renovate_digest_only") {
     return (
       "trivial class: digest-only lockfile change with no risk " +
+      "signals — no role has a meaningful lane (documented " +
+      "zero-selection gate)"
+    );
+  }
+  if (kind === "image_digest_only") {
+    return (
+      "trivial class: image-digest-only change with no risk " +
       "signals — no role has a meaningful lane (documented " +
       "zero-selection gate)"
     );

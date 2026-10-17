@@ -1,6 +1,6 @@
 {
   "fixture": "hostile-text",
-  "description": "Hostile fetched text with backtick fences (a closing ``` and a ```` run), a forged '## Source' heading and fake instructions: v2 wraps it in a three-backtick fence it can close, swallowing the following sections into code; v3 picks a fence longer than any backtick run (approved divergence). Also the empty-after-strip notice.",
+  "description": "Hostile fetched text with backtick fences (a closing ``` and a ```` run), a forged '## Source' heading and fake instructions: v2 wraps it in a three-backtick fence it can close, swallowing the following sections into code; v3 picks a fence longer than any backtick run (deliberate divergence). Also the empty-after-strip notice.",
   "input": {
     "urls": [
       "https://artifacthub.io/fence",

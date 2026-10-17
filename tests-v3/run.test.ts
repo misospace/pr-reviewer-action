@@ -5,18 +5,22 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { resolvePartialCoverage, runReview } from "../src/run/review.js";
+import { ANTHROPIC_VERDICT_OUTPUT_FORMAT } from "../src/model/request.js";
+import { failOnRequestChanges } from "../src/run/action.js";
+import { parseMetadata } from "../src/precheck/metadata.js";
 import { authoritativeBodyRevision, harnessTransportAdapter, type PrBodyRevision } from "../src/run/stages.js";
 import type { StageEnv } from "../src/run/env.js";
 import { forkGate } from "../src/gates/gates.js";
 import { startMockServer } from "./helpers.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { publishReview } from "../src/publish/publish.js";
+import { FINDING_TRAILER } from "../src/context/review-threads.js";
 import type { NativeReviewRequest, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
 
 /** A minimal in-memory platform adapter: the reads a small PR needs, served
  * without network. Everything else must not be reached by the pipeline with
  * the feature flags the tests set. */
-function mockPlatform(options: { diff?: string; files?: unknown[]; title?: string; body?: string; additions?: number; deletions?: number } = {}): PlatformReadAdapter {
+function mockPlatform(options: { diff?: string; files?: unknown[]; title?: string; body?: string; additions?: number; deletions?: number; threads?: unknown[] } = {}): PlatformReadAdapter {
   return {
     platform: "github",
     getPr: () => {
@@ -41,11 +45,15 @@ function mockPlatform(options: { diff?: string; files?: unknown[]; title?: strin
     },
     getIssue: () => Promise.resolve({ ok: false, error: "not served" }),
     listPrConversationComments: () => Promise.resolve({ ok: true, data: [] }),
-    listReviewThreads: () => Promise.resolve({ ok: true, data: [] }),
+    listReviewThreads: () => Promise.resolve({ ok: true, data: options.threads ?? [] }),
     listPrReviewsPaginated: () => Promise.resolve({ ok: true, data: [] }),
     listIssueComments: () => Promise.resolve([]),
     listPrReviews: () => Promise.resolve([]),
     repoPermission: () => Promise.resolve(null),
+    // #970: no forge identity is provable here, so a managed body can never
+    // authorize a skip in this mock (explicit rather than relying on the
+    // missing-method catch).
+    authenticatedIdentity: () => Promise.resolve(null),
     ghApi: () => Promise.resolve({ error: "not served" }),
     externalChecks: () => Promise.resolve([]),
   } as unknown as PlatformReadAdapter;
@@ -112,6 +120,7 @@ test("runs the full review end to end: artifacts, outputs, marker", async () => 
     });
     // Verdict surfaced through the typed outputs.
     assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.outputs.degradedGateBypass, false);
     assert.equal(result.outputs.reviewRoute, "legacy");
     assert.equal(result.outputs.analysisEngine, "m@http://127.0.0.1:" + new URL(server.url).port + " (openai)");
     assert.match(result.outputs.analysisEngine, /^m@http/);
@@ -125,7 +134,7 @@ test("runs the full review end to end: artifacts, outputs, marker", async () => 
     }
     // The corpus embeds the diff and the classification.
     const corpus = readFileSync(join(runDir, "review-corpus.truncated.md"), "utf8");
-    assert.match(corpus, /# PR Diff \(truncated\)/);
+    assert.match(corpus, /^# PR Diff$/m);
     assert.match(corpus, /# PR Classification/);
     assert.match(corpus, /# Repository Standards/);
     // GITHUB_OUTPUT got the kebab-case contract assignments.
@@ -141,6 +150,153 @@ test("runs the full review end to end: artifacts, outputs, marker", async () => 
     await server.close();
     cleanup();
   }
+});
+
+test("#975: the step summary renders the findings table and counts for a findings verdict", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      findings: [
+        { id: "f1", severity: "blocker", file: "prom/rules.yml", line: 12, message: "rule drops alerts" },
+        { id: "f2", severity: "minor", file: "README.md", line: 4, message: "typo" },
+      ],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const outputFile = join(runDir, "gh-output.txt");
+    const stepSummaryFile = join(runDir, "step-summary.md");
+    await runReview({
+      env: { GITHUB_OUTPUT: outputFile, GITHUB_STEP_SUMMARY: stepSummaryFile },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+    const stepSummary = readFileSync(stepSummaryFile, "utf8");
+    assert.ok(stepSummary.includes("### Findings"), "the findings section renders in the step summary");
+    assert.ok(stepSummary.includes("prom/rules.yml:12"), "the blocker finding's location renders");
+    assert.ok(stepSummary.includes("| Findings | 2 (blockers: 1) |"), "the counts row reflects the open findings");
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+async function runVerificationThreadVerdict(
+  modelVerdict: Record<string, unknown>,
+  options: { policy?: string; threadBody?: string } = {},
+): Promise<Record<string, unknown>> {
+  const policy = options.policy ?? "model";
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict(modelVerdict)));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const body = options.threadBody ?? `**⚠️ Major (verification):** confirm the production metric exists\n\n${FINDING_TRAILER}`;
+    await runReview({
+      env: { VERDICT_POLICY: policy },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "verdict-policy": policy,
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform({
+        threads: [{
+          thread_id: "PRRT_1",
+          path: "README.md",
+          line: 1,
+          original_line: 1,
+          resolved: false,
+          outdated: false,
+          comments: [{
+            id: 1,
+            user: { login: "bot" },
+            created_at: "2026-10-01T00:00:00Z",
+            updated_at: "2026-10-01T00:00:00Z",
+            body,
+          }],
+        }],
+      }),
+      persistArtifacts: true,
+      quiet: true,
+    });
+    return JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as Record<string, unknown>;
+  } finally {
+    await server.close();
+    cleanup();
+  }
+}
+
+test("#977: runReview removes the enforcement banner after unresolved verification relaxes the verdict", async () => {
+  const artifact = await runVerificationThreadVerdict({
+    verdict: "request_changes",
+    review_markdown: "Please confirm the metric exists.\n",
+    findings: [{ severity: "major", category: "verification", file: null, line: null, message: "confirm the production metric exists" }],
+  });
+  assert.equal(artifact.verdict, "approve");
+  assert.doesNotMatch(String(artifact.review_markdown), /Final Recommendation/);
+  assert.doesNotMatch(String(artifact.review_markdown), /Request changes/);
+  // Prove the model-policy relaxation ran (not the strict derivation, which
+  // would also approve): only the #977 relaxation writes this note.
+  assert.match(String(artifact.review_markdown), /_Verdict relaxed from structured findings \(#977\)/);
+});
+
+test("#977: runReview removes the enforcement banner after a verification thread withdrawal", async () => {
+  const artifact = await runVerificationThreadVerdict({
+    verdict: "request_changes",
+    review_markdown: "Please confirm the metric exists.\n",
+    findings: [{ severity: "major", category: "verification", file: null, line: null, message: "confirm the production metric exists" }],
+    thread_dispositions: [{ thread_id: "PRRT_1", disposition: "withdrawn", evidence: "human confirmed the metric exists" }],
+  });
+  assert.equal(artifact.verdict, "approve");
+  assert.doesNotMatch(String(artifact.review_markdown), /Final Recommendation/);
+  assert.doesNotMatch(String(artifact.review_markdown), /Request changes/);
+  assert.match(String(artifact.review_markdown), /_Verdict relaxed from structured findings \(#977\)/);
+});
+
+test("#977: runReview does not attribute a non-forcing settlement to enforcement", async () => {
+  const artifact = await runVerificationThreadVerdict({
+    verdict: "request_changes",
+    review_markdown: "Please fix the real defect.\n",
+    findings: [{ severity: "major", category: "bug", file: null, line: null, message: "real defect" }],
+  }, {
+    policy: "model",
+    threadBody: `**⚠️ Major (bug):** real defect\n\n${FINDING_TRAILER}`,
+  });
+  assert.equal(artifact.verdict, "request_changes");
+  assert.doesNotMatch(String(artifact.review_markdown), /Final Recommendation/);
+});
+
+test("#977: runReview keeps the banner when thread settlement actually escalates", async () => {
+  const artifact = await runVerificationThreadVerdict({
+    verdict: "approve",
+    review_markdown: "Looks fine.\n",
+    findings: [],
+  }, {
+    policy: "findings_severity_gated",
+    threadBody: `**🛑 Blocker (bug):** real defect\n\n${FINDING_TRAILER}`,
+  });
+  assert.equal(artifact.verdict, "request_changes");
+  assert.match(String(artifact.review_markdown), /## Final Recommendation/);
 });
 
 test("#838: with no runDir/PR_REVIEWER_RUN_DIR, run never treats the checkout (cwd) as its own artifacts", async () => {
@@ -343,6 +499,7 @@ test("primary failure with a configured fallback publishes the fallback review",
       runDir,
       workspace: runDir,
       platformAdapter: mockPlatform(),
+      sleep: async () => {},
       quiet: true,
     });
     assert.equal(result.outputs.verdict, "approve");
@@ -382,9 +539,11 @@ for (const withFallback of [false, true]) {
         runDir,
         workspace: runDir,
         platformAdapter: mockPlatform(),
+        sleep: async () => {},
         quiet: true,
       });
       assert.equal(result.outputs.verdict, "request_changes");
+      assert.equal(result.outputs.degradedGateBypass, true);
       const artifact = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as { verdict: string; review_markdown: string };
       assert.equal(artifact.verdict, "request_changes");
       assert.match(artifact.review_markdown, /automated notice, not a substantive review/);
@@ -394,6 +553,47 @@ for (const withFallback of [false, true]) {
     }
   });
 }
+
+test("#1058: the injected clock also covers the transport's own 429/5xx backoff", async () => {
+  // The transport retries a retryable status three times with a real 1s/2s
+  // wait unless the caller's deterministic clock reaches it; without that
+  // seam every retryable-status test pays ~3s of wall time (#1058).
+  const deadServer = await startMockServer((_req, _body, res) => {
+    res.statusCode = 500;
+    res.end('{"error":"down"}');
+  });
+  const { runDir, cleanup } = withRunDir();
+  const sleeps: number[] = [];
+  try {
+    await assert.rejects(() => runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": deadServer.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        // One model-tier attempt, so the only sleeps observed are the
+        // transport's own backoff for the retryable 500.
+        "ai-primary-retries": "1",
+        "ai-primary-retry-delay-sec": "0",
+        "on-model-failure": "fail",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async (seconds) => { sleeps.push(seconds); },
+      quiet: true,
+    }));
+    assert.equal(deadServer.requests.length, 3, "the transport must still make all three HTTP attempts");
+    assert.deepEqual(sleeps, [1, 2], "the caller's clock must cover the transport backoff, in seconds");
+  } finally {
+    await deadServer.close();
+    cleanup();
+  }
+});
 
 test("#867: a non-2xx primary reply (ai-primary-retries: 0) is a transport failure, never a parse failure", async () => {
   let calls = 0;
@@ -546,6 +746,7 @@ test("#867: primary and fallback both classify a non-2xx reply as transport, and
       `the parse-retry path must not be taken on either route, got: ${JSON.stringify(errors)}`,
     );
     assert.equal(result.outputs.verdict, "request_changes");
+    assert.equal(result.outputs.degradedGateBypass, true);
     const artifact = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as { verdict: string; review_markdown: string };
     assert.equal(artifact.verdict, "request_changes");
     assert.match(artifact.review_markdown, /automated notice, not a substantive review/);
@@ -556,11 +757,11 @@ test("#867: primary and fallback both classify a non-2xx reply as transport, and
   }
 });
 
-test("reviewer-requested escalation publishes the smart review", async () => {
-  let call = 0;
+test("#965: auto routing escalates only after the primary reviewer requests it", async () => {
+  const models: string[] = [];
   const server = await startMockServer((_req, body, res) => {
-    call += 1;
     const model = (JSON.parse(body) as { model: string }).model;
+    models.push(model);
     res.setHeader("Content-Type", "application/json");
     if (model === "primary-m") {
       res.end(verdictBody(baseVerdict({
@@ -600,12 +801,805 @@ test("reviewer-requested escalation publishes the smart review", async () => {
     assert.equal(result.outputs.escalationReason, "primary_requested");
     assert.match(result.outputs.analysisEngine, /— escalated \(primary_requested\)/);
     assert.match(result.outputs.reviewMarkdown, /Escalated review\./);
+    assert.deepEqual(models, ["primary-m", "smart-m"], "smart must run only after the primary requests escalation");
     // The published verdict can no longer request another escalation.
     const published = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as Record<string, unknown>;
     assert.equal(published.smart_review_requested, false);
-    assert.ok(call >= 2, "expected at least a primary and a smart call");
   } finally {
     await server.close();
+    cleanup();
+  }
+});
+
+test("#969: native_loop + smart_review_requested escalates through a working smart harness", async () => {
+  // The smart tier's native loop plans from review-corpus.smart.truncated.md;
+  // #969 builds it BEFORE the harness (and rebuilds it after, for the
+  // plain-call path below). Without the pre-build the smart harness starts
+  // with no planning corpus and the escalation dies.
+  const scripted = (marker: string, extra: Record<string, unknown> = {}, opts: { breakVerdictTurn?: boolean } = {}) => {
+    let calls = 0;
+    return (_req: unknown, body: string, res: { setHeader: (k: string, v: string) => void; end: (b: string) => void }) => {
+      calls += 1;
+      res.setHeader("Content-Type", "application/json");
+      const req = JSON.parse(body) as { tools?: unknown[] };
+      const hasTools = Array.isArray(req.tools) && req.tools.length > 0;
+      if (calls === 1 && hasTools) {
+        res.end(JSON.stringify({
+          id: "c0", object: "chat.completion", model: "x",
+          choices: [{ index: 0, finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "t1", type: "function", function: { name: "read_file", arguments: '{"path":"README.md"}' } }] } }],
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        }));
+        return;
+      }
+      // A no-tools response that carries no choices cannot produce a reusable
+      // native verdict — it drives the harness into the fall-through path.
+      if (opts.breakVerdictTurn === true && !hasTools && calls === 2) {
+        res.end(JSON.stringify({ choices: [] }));
+        return;
+      }
+      res.end(verdictBody(baseVerdict({ review_markdown: `${marker}\n`, ...extra })));
+    };
+  };
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "SMART-CORPUS-969 evidence marker\n");
+    gitInit(runDir);
+    const base = {
+      "github-token": "tok", repo: "o/r", "pr-number": "7",
+      "ai-stream": "false", "review-routing-mode": "auto", "tool-mode": "native_loop", "deep-review": "false",
+    };
+
+    // (a) The smart harness completes and its verdict publishes as escalated.
+    const primaryServer = await startMockServer(scripted("Primary review.", { smart_review_requested: true, smart_review_reason: "tool coverage gap" }));
+    const smartServer = await startMockServer(scripted("Escalated review."));
+    try {
+      const result = await runReview({
+        env: { IS_FORK_PR: "false" },
+        inputs: {
+          ...base,
+          "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+          "ai-smart-base-url": smartServer.url, "ai-smart-model": "smart-m", "ai-smart-api-key": "smart-key",
+        },
+        runDir, workspace: runDir,
+        platformAdapter: mockPlatform(), quiet: true,
+      });
+      assert.equal(result.outputs.reviewRoute, "escalated");
+      assert.equal(result.outputs.escalationReason, "primary_requested");
+      assert.match(result.outputs.reviewMarkdown, /Escalated review\./);
+      assert.ok(existsSync(join(runDir, "review-corpus.smart.truncated.md")), "the smart corpus must exist before the smart harness plans from it");
+      const smartHarness = JSON.parse(readFileSync(join(runDir, "tool-harness.smart.json"), "utf8")) as { executed_request_count?: number; stop_reason?: string; native_loop_verdict_status?: string; tool_results?: Array<{ result?: { content?: string } }> };
+      assert.equal(smartHarness.stop_reason, "model-stopped");
+      assert.equal(smartHarness.native_loop_verdict_status, "accepted", "the smart harness must produce a reusable verdict");
+      assert.ok((smartHarness.executed_request_count ?? 0) >= 1, "the smart harness must run its tool turn");
+      assert.ok(
+        (smartHarness.tool_results ?? []).some((call) => (call.result?.content ?? "").includes("SMART-CORPUS-969 evidence marker")),
+        "the smart harness must actually have read the changed file",
+      );
+      assert.equal(primaryServer.requests.length, 3, "the primary review's own native loop runs on the primary endpoint (tool turn + verdict turns); escalation calls land on the smart endpoint");
+      assert.ok(primaryServer.requests.every((request) => request.headers.authorization === "Bearer primary-key"));
+      assert.ok(smartServer.requests.length >= 2);
+      assert.ok(smartServer.requests.every((request) => request.headers.authorization === "Bearer smart-key"));
+    } finally {
+      await primaryServer.close();
+      await smartServer.close();
+    }
+
+    // (b) Harness verdict unavailable (the verdict turn returns no usable
+    // body): the plain smart call must carry the tool evidence from the
+    // rebuilt smart corpus.
+    const primaryServerB = await startMockServer(scripted("Primary review.", { smart_review_requested: true, smart_review_reason: "tool coverage gap" }));
+    const smartServerB = await startMockServer(scripted("Escalated review.", {}, { breakVerdictTurn: true }));
+    const { runDir: runDirB, cleanup: cleanupB } = withRunDir();
+    try {
+      writeFileSync(join(runDirB, "README.md"), "SMART-CORPUS-969 evidence marker\n");
+      gitInit(runDirB);
+      const resultB = await runReview({
+        env: { IS_FORK_PR: "false" },
+        inputs: {
+          ...base,
+          "ai-base-url": primaryServerB.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+          "ai-smart-base-url": smartServerB.url, "ai-smart-model": "smart-m", "ai-smart-api-key": "smart-key",
+          "tool-max-requests": "1",
+        },
+        runDir: runDirB, workspace: runDirB,
+        platformAdapter: mockPlatform(), quiet: true,
+      });
+      assert.equal(resultB.outputs.reviewRoute, "escalated");
+      assert.match(resultB.outputs.reviewMarkdown, /Escalated review\./);
+      const request = JSON.parse(readFileSync(join(runDirB, "ai-request.smart.json"), "utf8")) as { messages?: Array<{ content?: string }> };
+      const corpusText = JSON.stringify(request.messages ?? []);
+      assert.ok(corpusText.includes("SMART-CORPUS-969 evidence marker"), "the final smart call must include the tool evidence gathered by the smart harness");
+      assert.ok(existsSync(join(runDirB, "tool-harness.smart.json")));
+    } finally {
+      await primaryServerB.close();
+      await smartServerB.close();
+      cleanupB();
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test("#965: auto routing starts on primary even for an auth-risk PR", async () => {
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ review_markdown: "Primary review.\n" })));
+  });
+  const smartServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ review_markdown: "Smart review.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const inputs = {
+    "github-token": "tok", repo: "o/r", "pr-number": "7",
+    "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+    "ai-smart-base-url": smartServer.url, "ai-smart-model": "smart-m", "ai-smart-api-key": "smart-key",
+    "ai-stream": "false", "review-routing-mode": "auto",
+    "tool-mode": "off", "deep-review": "false",
+  };
+  try {
+    const primaryResult = await runReview({
+      env: {}, inputs, runDir, workspace: runDir,
+      platformAdapter: mockPlatform({
+        files: [{ filename: "src/auth/login.ts", status: "modified", additions: 1, deletions: 1, changes: 2 }],
+        diff: "diff --git a/src/auth/login.ts b/src/auth/login.ts\n--- a/src/auth/login.ts\n+++ b/src/auth/login.ts\n@@ -1 +1 @@\n-old\n+new\n",
+      }),
+      quiet: true,
+    });
+    assert.equal(primaryResult.outputs.reviewRoute, "primary");
+    assert.equal(primaryServer.requests.length, 1, "auto routing must call primary even for an auth-risk PR");
+    assert.equal(smartServer.requests.length, 0, "risk flags alone must not trigger smart escalation");
+    assert.equal(primaryServer.requests[0]!.headers.authorization, "Bearer primary-key");
+    assert.equal((JSON.parse(primaryServer.requests[0]!.body) as { model: string }).model, "primary-m");
+    assert.equal((JSON.parse(readFileSync(join(runDir, "ai-request.primary.json"), "utf8")) as { model: string }).model, "primary-m");
+    const classification = JSON.parse(readFileSync(join(runDir, "classification.json"), "utf8")) as { risk_flags: string[] };
+    assert.ok(classification.risk_flags.includes("auth_changes"), "fixture must actually classify as an auth-risk PR");
+    assert.equal(primaryResult.outputs.analysisEngine, `primary-m@${primaryServer.url} (openai) — primary route`);
+    assert.match(primaryResult.outputs.reviewMarkdown, /Primary review\./);
+  } finally {
+    await primaryServer.close();
+    await smartServer.close();
+    cleanup();
+  }
+});
+
+test("primary non-retryable failure fast-fails to the availability fallback", async () => {
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    res.statusCode = 400;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "primary unavailable" }));
+  });
+  let smartCalls = 0;
+  const smartServer = await startMockServer((_req, _body, res) => {
+    smartCalls += 1;
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ review_markdown: "Smart should not run.\n" })));
+  });
+  const fallbackServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ review_markdown: "Fallback review.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-smart-base-url": smartServer.url, "ai-smart-model": "smart-m", "ai-smart-api-key": "smart-key",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "ai-stream": "false", "review-routing-mode": "auto",
+        "ai-primary-retries": "8", "ai-primary-retry-delay-sec": "0", "ai-connect-timeout-sec": "2",
+        "ai-request-timeout-sec": "2", "tool-mode": "off", "deep-review": "false",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform({ files: [{ filename: "src/auth/login.ts", status: "modified", additions: 1, deletions: 1, changes: 2 }] }),
+      sleep: async () => { assert.fail("HTTP 400 must not incur retry backoff"); }, quiet: true,
+    });
+    assert.equal(result.outputs.reviewRoute, "primary");
+    assert.equal(primaryServer.requests.length, 1, "non-retryable HTTP 400 gets one primary attempt before fallback");
+    assert.equal(smartCalls, 0, "risk flags alone must not route a failure to smart");
+    assert.ok(primaryServer.requests.every((request) => request.headers.authorization === "Bearer primary-key"));
+    assert.equal(fallbackServer.requests.length, 1);
+    assert.equal(fallbackServer.requests[0]!.headers.authorization, "Bearer fallback-key");
+    assert.equal(result.outputs.analysisEngine, `fallback-m@${fallbackServer.url} (openai) — fallback (primary failed)`);
+    assert.match(result.outputs.reviewMarkdown, /Fallback review\./);
+    assert.equal(result.outputs.escalationReason, "");
+  } finally {
+    await primaryServer.close();
+    await smartServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
+test("#978: a 403 gets one primary request before fallback and publishes the fallback verdict", async () => {
+  let primaryReviewAttempts = 0;
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    primaryReviewAttempts += 1;
+    res.setHeader("Content-Type", "text/plain");
+    res.statusCode = 403;
+    res.end("model forbidden\n::warning::echoed key known-primary-api-key-978");
+  });
+  const fallbackServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ review_markdown: "Fallback review after forbidden primary.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const sleeps: number[] = [];
+  const annotations: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "known-primary-api-key-978",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "off", "deep-review": "false",
+        "ai-primary-retries": "8", "ai-primary-retry-delay-sec": "15",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async (seconds) => { sleeps.push(seconds); },
+      annotate: (line) => { annotations.push(line); },
+      quiet: true,
+    });
+    assert.equal(primaryServer.requests.length, 1, "HTTP 403 must make exactly one primary request despite the retry budget of 8");
+    assert.equal(primaryReviewAttempts, 1);
+    assert.equal(fallbackServer.requests.length, 1, "the fallback must run after the primary 403");
+    assert.deepEqual(sleeps, [], "a non-retryable 403 must not incur backoff");
+    assert.equal(annotations.length, 1, "the primary 403 should emit exactly one workflow annotation");
+    assert.match(annotations[0]!, /::error::.*HTTP 403/);
+    assert.ok(!annotations[0]!.includes("known-primary-api-key-978"), "the annotation must not expose the configured API key");
+    assert.ok(!/[\r\n]/.test(annotations[0]!), "provider body text must not break out of the annotation line");
+    assert.ok(!annotations[0]!.includes("::warning::"), "provider body text must not inject another workflow command");
+    assert.equal(result.outputs.verdict, "approve");
+    assert.match(result.outputs.analysisEngine, /fallback-m@.*fallback \(primary failed\)/);
+    assert.match(result.outputs.reviewMarkdown, /Fallback review after forbidden primary\./);
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
+test("#1006: a primary HTTP 524 consumes the configured tier retry budget before fallback", async () => {
+  let primaryReviewAttempts = 0;
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    primaryReviewAttempts += 1;
+    res.setHeader("Content-Type", "application/json");
+    res.statusCode = 524;
+    res.end(JSON.stringify({ error: "primary gateway timeout" }));
+  });
+  const fallbackServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ review_markdown: "Fallback review after primary 524.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const sleeps: number[] = [];
+  const annotations: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "ai-primary-retries": "3", "ai-primary-retry-delay-sec": "15",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "off", "deep-review": "false",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async (seconds) => { sleeps.push(seconds); },
+      annotate: (line) => { annotations.push(line); },
+      quiet: true,
+    });
+    assert.equal(primaryServer.requests.length, 3, "HTTP 524 must consume all three configured primary attempts");
+    assert.equal(primaryReviewAttempts, 3);
+    assert.deepEqual(sleeps, [15, 30]);
+    assert.ok(!annotations.some((line) => /non-retryable/.test(line)), "HTTP 524 must not emit a non-retryable annotation");
+    assert.equal(fallbackServer.requests.length, 1, "fallback must run once after primary retries are exhausted");
+    assert.match(result.outputs.reviewMarkdown, /Fallback review after primary 524\./);
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
+test("#978: native-loop fallback request_changes without deterministic blockers passes the gate by default", async () => {
+  const primaryServer = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      // The planning turn gets no tool calls and records native_loop_degraded.
+      res.end(verdictBody(baseVerdict()));
+      return;
+    }
+    res.statusCode = 500;
+    res.end(JSON.stringify({ error: "primary unavailable" }));
+  });
+  const fallbackServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ verdict: "request_changes", review_markdown: "Fallback request-changes review.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop", "tool-max-requests": "1",
+        "verdict-policy": "model", "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2", "deep-review": "false",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      quiet: true,
+    });
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_degraded?: string };
+    assert.equal(harness.native_loop_degraded, "no-tool-calls", "the planning turn must exercise degraded native-loop coverage");
+    assert.ok(primaryServer.requests.length >= 2, "the primary must serve its native-loop turn and fail over to the fallback");
+    assert.equal(fallbackServer.requests.length, 1, "fallback must provide the final verdict");
+    assert.equal(result.outputs.verdict, "request_changes");
+    assert.equal(result.outputs.verdictSource, "model", "the fallback itself returned request_changes");
+    assert.match(result.outputs.analysisEngine, /fallback-m@.*fallback \(primary failed\)/);
+    assert.match(result.outputs.reviewMarkdown, /Fallback request-changes review\./);
+    assert.equal(result.outputs.degradedGateBypass, true, "the fallback received no evidence and no deterministic block fired");
+    assert.equal(parseMetadata(result.marker)?.degraded_gate_bypass, true);
+    assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 0);
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
+test("#978: primary no-evidence review does not qualify for the fallback gate bypass", async () => {
+  const server = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(Array.isArray(request.tools) && request.tools.length > 0
+      ? baseVerdict()
+      : baseVerdict({ verdict: "request_changes", review_markdown: "Primary corpus-only review.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": server.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop", "tool-max-requests": "1",
+        "verdict-policy": "model", "ai-primary-retries": "0", "deep-review": "false",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      quiet: true,
+    });
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_degraded?: string };
+    assert.equal(harness.native_loop_degraded, "no-tool-calls");
+    assert.equal(result.outputs.verdict, "request_changes");
+    assert.equal(result.outputs.degradedGateBypass, false);
+    assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 1);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#978: fallback no-evidence does not bypass when requirement-trace enforcement adds a finding", async () => {
+  const primaryServer = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      res.end(verdictBody(baseVerdict()));
+      return;
+    }
+    res.statusCode = 500;
+    res.end(JSON.stringify({ error: "primary unavailable" }));
+  });
+  const fallbackServer = await startMockServer((_req, body, res) => {
+    const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      verdict: "request_changes",
+      review_markdown: "Fallback request-changes review.\n",
+      requirement_coverage: [{
+        requirement_id: reqId,
+        disposition: "unmet",
+        enforcement: [],
+        test: [],
+        reason: "no code path compares source SHA or target branch at all",
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    const platform = requirementTracePlatform();
+    platform.getPrDiff = async () => `diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+world\n`;
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop", "tool-max-requests": "1",
+        "verdict-policy": "model", "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2", "deep-review": "false",
+        "ci-status-check": "false", "requirement-trace": "true",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: platform,
+      sleep: async () => {},
+      quiet: true,
+    });
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_degraded?: string };
+    assert.equal(harness.native_loop_degraded, "no-tool-calls");
+    assert.match(result.outputs.analysisEngine, /fallback-m@.*fallback \(primary failed\)/);
+    assert.equal(result.outputs.verdict, "request_changes");
+    const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
+    // #1095: the trace fabricates no finding — but the unmet row still marks
+    // requirement_trace_incomplete, which is itself a deterministic block.
+    assert.ok(!findings.some((finding) => finding.message.startsWith("requirement not enforced: ")));
+    assert.equal(result.outputs.degradedGateBypass, false, "the incomplete trace is a deterministic block");
+    assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 1);
+    assert.equal(parseMetadata(result.marker)?.degraded_gate_bypass, undefined, "ineligible bypass state must not be persisted");
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
+test("#978: fallback no-evidence unverifiable trace blocks bypass without synthesizing a finding", async () => {
+  const primaryServer = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      res.end(verdictBody(baseVerdict()));
+      return;
+    }
+    res.statusCode = 500;
+    res.end(JSON.stringify({ error: "primary unavailable" }));
+  });
+  const fallbackServer = await startMockServer((_req, body, res) => {
+    const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      verdict: "request_changes",
+      review_markdown: "Fallback request-changes review with unverifiable trace.\n",
+      requirement_coverage: [{
+        requirement_id: reqId,
+        disposition: "unverifiable",
+        enforcement: [],
+        test: [],
+        reason: "The available evidence does not establish that source SHA is checked.",
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    const platform = requirementTracePlatform();
+    platform.getPrDiff = async () => `diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+world\n`;
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop", "tool-max-requests": "1",
+        "verdict-policy": "model", "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2", "deep-review": "false",
+        "ci-status-check": "false", "requirement-trace": "true",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: platform,
+      sleep: async () => {},
+      quiet: true,
+    });
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_degraded?: string };
+    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as { rows: Array<{ disposition: string }>; incomplete: boolean };
+    assert.equal(harness.native_loop_degraded, "no-tool-calls");
+    assert.equal(trace.incomplete, true);
+    assert.equal(trace.rows[0]?.disposition, "unverifiable");
+    assert.equal(result.reviewArtifact.requirement_trace_incomplete, true);
+    assert.match(result.outputs.analysisEngine, /fallback-m@.*fallback \(primary failed\)/);
+    assert.equal(result.outputs.verdict, "request_changes");
+    const findings = JSON.parse(result.outputs.findings) as Array<{ message: string }>;
+    assert.ok(!findings.some((finding) => finding.message.startsWith("requirement not enforced: ")), "unverifiable claims do not synthesize unmet findings");
+    assert.equal(result.outputs.degradedGateBypass, false);
+    assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 1);
+    assert.equal(parseMetadata(result.marker)?.degraded_gate_bypass, undefined, "ineligible bypass state must not be persisted");
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
+async function runFallbackFindingEscalation(
+  verdictPolicy: "strict" | "findings_severity_gated",
+  severity: "major" | "blocker",
+) {
+  const primaryServer = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      res.end(verdictBody(baseVerdict()));
+      return;
+    }
+    res.statusCode = 500;
+    res.end(JSON.stringify({ error: "primary unavailable" }));
+  });
+  const fallbackServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      verdict: "approve",
+      review_markdown: "Fallback approve with a blocking finding.\n",
+      findings: [{
+        severity,
+        category: "bug",
+        title: `${severity} fallback finding`,
+        detail: "A blocking issue.",
+        file: "README.md",
+        line: 2,
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    return await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop", "tool-max-requests": "1",
+        "verdict-policy": verdictPolicy, "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2", "deep-review": "false",
+        "ci-status-check": "false",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      quiet: true,
+    });
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+}
+
+test("#978: strict blocker finding from fallback cannot bypass fail-on-request-changes", async () => {
+  const result = await runFallbackFindingEscalation("strict", "major");
+  const harness = JSON.parse(result.artifacts.get("tool-harness.json")?.toString() ?? "{}") as { native_loop_degraded?: string };
+  assert.equal(harness.native_loop_degraded, "no-tool-calls");
+  assert.equal(result.outputs.verdict, "request_changes");
+  assert.equal(result.outputs.verdictSource, "findings");
+  assert.equal(result.outputs.degradedGateBypass, false);
+  assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 1);
+  assert.equal(parseMetadata(result.marker)?.degraded_gate_bypass, undefined, "ineligible bypass state must not be persisted");
+});
+
+test("#978: findings_severity_gated blocker from fallback cannot bypass fail-on-request-changes", async () => {
+  const result = await runFallbackFindingEscalation("findings_severity_gated", "blocker");
+  const harness = JSON.parse(result.artifacts.get("tool-harness.json")?.toString() ?? "{}") as { native_loop_degraded?: string };
+  assert.equal(harness.native_loop_degraded, "no-tool-calls");
+  assert.equal(result.outputs.verdict, "request_changes");
+  assert.equal(result.outputs.verdictSource, "findings");
+  assert.equal(result.outputs.degradedGateBypass, false);
+  assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, result.outputs.verdict, result.outputs.degradedGateBypass, false), 1);
+  assert.equal(parseMetadata(result.marker)?.degraded_gate_bypass, undefined, "ineligible bypass state must not be persisted");
+});
+
+test("#940: the declared fallback capacity bounds primary and recovery corpora", async () => {
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    res.statusCode = 400;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "primary unavailable" }));
+  });
+  let smartCalls = 0;
+  const smartServer = await startMockServer((_req, _body, res) => {
+    smartCalls += 1;
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ review_markdown: "Smart should not run.\n" })));
+  });
+  const fallbackServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ review_markdown: "Fallback review.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    // The declared fallback window also caps the initial primary corpus. Place
+    // a sentinel beyond that shared budget and verify neither request sees it.
+    const filler = (n: number): string => `+padding ${String(n).padStart(6, "0")} of inert context filler for the review corpus`;
+    const lines: string[] = [
+      "diff --git a/big.txt b/big.txt",
+      "index 0000000..1111111 100644",
+      "--- a/big.txt",
+      "+++ b/big.txt",
+      "@@ -1,2 +1,2600 @@",
+      "+HEAD-SENTINEL-940 retained within the shared capacity",
+    ];
+    let size = lines.join("\n").length;
+    let n = 0;
+    for (; size < 60000; n += 1) {
+      const line = filler(n);
+      lines.push(line);
+      size += line.length + 1;
+    }
+    lines.push("+MID-SENTINEL-940 beyond the shared capacity");
+    size += lines[lines.length - 1]!.length + 1;
+    for (; size < 156000; n += 1) {
+      const line = filler(n);
+      lines.push(line);
+      size += line.length + 1;
+    }
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-smart-base-url": smartServer.url, "ai-smart-model": "smart-m", "ai-smart-api-key": "smart-key",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "primary-model-context-tokens": "400000", "fallback-model-context-tokens": "24000", "ai-max-tokens": "16384",
+        "ai-stream": "false", "review-routing-mode": "auto",
+        "ai-primary-retries": "1", "ai-primary-retry-delay-sec": "0", "tool-mode": "off", "deep-review": "false",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform({
+        diff: `${lines.join("\n")}\n`,
+        files: [{ filename: "src/auth/login.ts", status: "modified", additions: 1, deletions: 1, changes: 2 }],
+      }),
+      sleep: async () => {}, quiet: true,
+    });
+    assert.equal(result.outputs.reviewRoute, "primary");
+    assert.equal(primaryServer.requests.length, 1, "the primary request must fail before fallback recovery");
+    assert.equal(smartCalls, 0, "a primary failure must not trigger smart review");
+
+    const primaryCorpus = readFileSync(join(runDir, "review-corpus.truncated.md"));
+    assert.ok(primaryCorpus.length <= 16848, `primary corpus must respect the fallback-derived capacity, got ${primaryCorpus.length}`);
+    assert.ok(primaryCorpus.includes("HEAD-SENTINEL-940"), "the primary corpus must retain its head");
+    assert.ok(!primaryCorpus.includes("MID-SENTINEL-940"), "the primary corpus must omit content beyond the shared capacity");
+
+    // The recovery request uses the same declared fallback capacity.
+    const fallbackCorpus = readFileSync(join(runDir, "review-corpus.fallback.truncated.md"));
+    assert.ok(fallbackCorpus.length <= 16848, `fallback corpus must fit the derived capacity, got ${fallbackCorpus.length}`);
+    assert.equal(fallbackServer.requests.length, 1);
+    const fallbackBody = String(fallbackServer.requests[0]!.body);
+    assert.ok(fallbackBody.includes("HEAD-SENTINEL-940"), "the recovery request must still carry the corpus head");
+    assert.ok(!fallbackBody.includes("MID-SENTINEL-940"), "the recovery request must drop content beyond the fallback capacity");
+    assert.match(result.outputs.reviewMarkdown, /Fallback review\./);
+  } finally {
+    await primaryServer.close();
+    await smartServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
+test("#965: auto native loop starts on primary with the primary context window", async () => {
+  let primaryToolCallSent = false;
+  const primaryServer = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    if (!primaryToolCallSent && Array.isArray(request.tools) && request.tools.length > 0) {
+      primaryToolCallSent = true;
+      res.end(JSON.stringify({
+        id: "p0", object: "chat.completion", model: "primary-m",
+        choices: [{ index: 0, finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "pt1", type: "function", function: { name: "read_file", arguments: '{"path":"README.md"}' } }] } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      }));
+      return;
+    }
+    res.end(verdictBody(baseVerdict({ review_markdown: "Primary native review.\n" })));
+  });
+  const smartServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ review_markdown: "Smart should not run.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-smart-base-url": smartServer.url, "ai-smart-model": "smart-m", "ai-smart-api-key": "smart-key",
+        "primary-model-context-tokens": "200000", "smart-model-context-tokens": "400000",
+        "ai-stream": "false", "review-routing-mode": "auto",
+        "tool-mode": "native_loop", "deep-review": "false",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform({ files: [{ filename: "src/auth/login.ts", status: "modified", additions: 1, deletions: 1, changes: 2 }] }),
+      quiet: true,
+    });
+    assert.equal(result.outputs.reviewRoute, "primary");
+    assert.ok(primaryServer.requests.length >= 2, "the primary native loop must execute its tool and verdict turns");
+    assert.ok(primaryServer.requests.every((request) => request.headers.authorization === "Bearer primary-key"));
+    assert.equal(smartServer.requests.length, 0, "an auth-risk classification alone must not invoke smart");
+    assert.equal(existsSync(join(runDir, "tool-harness.smart.json")), false, "the initial pass stays in the primary artifact slot");
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as {
+      tool_loop_telemetry?: { route?: string; budget?: { max_conversation_tokens?: number } };
+    };
+    const telemetry = harness.tool_loop_telemetry;
+    assert.equal(telemetry?.route, "primary");
+    // The initial pass uses its declared 200k primary context window.
+    assert.equal(telemetry?.budget?.max_conversation_tokens, 50000);
+    assert.match(result.outputs.reviewMarkdown, /Primary native review\./);
+  } finally {
+    await primaryServer.close();
+    await smartServer.close();
+    cleanup();
+  }
+});
+
+test("legacy native-loop verdict reports the routed model when a primary override differs", async () => {
+  let toolCallSent = false;
+  const baseServer = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(body) as { tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    if (!toolCallSent && Array.isArray(request.tools) && request.tools.length > 0) {
+      toolCallSent = true;
+      res.end(JSON.stringify({
+        id: "c0", object: "chat.completion", model: "base-m",
+        choices: [{ index: 0, finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "t1", type: "function", function: { name: "read_file", arguments: '{"path":"README.md"}' } }] } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      }));
+      return;
+    }
+    res.end(verdictBody(baseVerdict()));
+  });
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": baseServer.url, "ai-model": "base-m", "ai-api-key": "base-key",
+        "ai-primary-base-url": primaryServer.url, "ai-primary-model": "primary-m", "ai-primary-api-key": "primary-key",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop",
+        "tool-max-requests": "1", "deep-review": "false",
+      },
+      runDir, workspace: runDir, platformAdapter: mockPlatform(), quiet: true,
+    });
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_verdict_produced?: boolean };
+    assert.equal(harness.native_loop_verdict_produced, true, "the native verdict path must be exercised");
+    assert.equal(result.outputs.reviewRoute, "legacy");
+    assert.equal(result.outputs.analysisEngine, `base-m@${baseServer.url} (openai)`);
+    assert.equal(primaryServer.requests.length, 0);
+    assert.ok(baseServer.requests.length >= 2);
+    assert.ok(baseServer.requests.every((request) => request.headers.authorization === "Bearer base-key"));
+  } finally {
+    await baseServer.close();
+    await primaryServer.close();
     cleanup();
   }
 });
@@ -893,6 +1887,8 @@ class MinimalPublishApi implements PublishPlatformApi {
   async listIssueComments(): Promise<PublishCommentRef[]> { return []; }
   async upsertStickyComment(): Promise<{ ok: boolean; created: boolean }> { return { ok: true, created: true }; }
   async listReviews(): Promise<PublishReviewRef[]> { return []; }
+  async listManagedInlineComments() { return { supported: true, complete: true, comments: [] }; }
+  async retireInlineComment() { return true; }
   async createReview(request: NativeReviewRequest): Promise<{ ok: boolean }> { this.submitted.push(request); return { ok: true }; }
   async dismissReview(): Promise<boolean> { return true; }
   async minimizedReviewIds(): Promise<string[]> { return []; }
@@ -902,6 +1898,9 @@ class MinimalPublishApi implements PublishPlatformApi {
   }
   async resolveThread(): Promise<boolean> { return true; }
   async removeLabel(): Promise<boolean> { return true; }
+  async requestReviewers(): ReturnType<PublishPlatformApi["requestReviewers"]> {
+    return { ok: true, supported: true, requestedUsers: [], requestedTeams: [], alreadyRequestedUsers: [], alreadyRequestedTeams: [] };
+  }
 }
 
 test("#873: required-check coverage incomplete + a model approve never publishes APPROVE (PR #854 regression)", async () => {
@@ -969,6 +1968,15 @@ function gitInit(dir: string): void {
 }
 
 test("#810: a budget-exhausted tool loop publishes partial coverage in the run marker", async () => {
+  // #921: the small README diff sits in the corpus whole and is credited
+  // without a read, so the gap comes from a large docs file whose diff the
+  // corpus budget truncates — that file stays strictly unread. The paths
+  // keep the PR classifying as docs so no specialist lane consumes a mock
+  // response before the loop's first turn.
+  const bigDiff =
+    "diff --git a/docs/big-guide.md b/docs/big-guide.md\nindex 1111111..2222222 100644\n--- a/docs/big-guide.md\n+++ b/docs/big-guide.md\n" +
+    Array.from({ length: 5000 }, (_, i) => `@@ -${i * 10 + 1},9 +${i * 10 + 1},10 @@\n ${i} context\n+${i} added line that makes this diff far larger than the corpus diff budget\n`).join("");
+  const rawDiff = `diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+world\n` + bigDiff;
   let calls = 0;
   const server = await startMockServer((_req, _body, res) => {
     calls += 1;
@@ -1004,18 +2012,101 @@ test("#810: a budget-exhausted tool loop publishes partial coverage in the run m
       },
       runDir,
       workspace: runDir,
-      platformAdapter: mockPlatform(),
+      platformAdapter: mockPlatform({
+        diff: rawDiff,
+        files: [
+          { filename: "README.md", status: "modified", additions: 1, deletions: 0, changes: 1 },
+          { filename: "docs/big-guide.md", status: "modified", additions: 5000, deletions: 0, changes: 5000 },
+        ],
+        additions: 5001,
+        deletions: 0,
+      }),
       persistArtifacts: true,
       quiet: true,
     });
     const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as Record<string, unknown>;
     assert.equal(harness.stop_reason, "tool-call-budget-exhausted");
-    assert.deepEqual((harness.partial_coverage as { unread_files: string[] }).unread_files, ["README.md"]);
+    const coverage = harness.partial_coverage as { unread_files: string[] };
+    assert.deepEqual(coverage.unread_files, ["docs/big-guide.md"]);
+    // #930: the credit audit lives on the harness result, not in the gap record.
+    assert.deepEqual(harness.corpus_diff_covered_files, ["README.md"]);
     // The strict default reports the gap instead of a plain clean approve.
     assert.equal(result.outputs.verdict, "approve");
     assert.match(result.marker, /review_result.{0,4}partial/);
     assert.match(result.marker, /coverage.{0,4}partial/);
     assert.match(result.marker, /coverage_stop_reason.{0,4}tool-call-budget-exhausted/);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#930: primary review grants corpus-diff credit through the primary artifact slot", async () => {
+  // The primary profile builds tier=primary into the first-pass artifact
+  // slot (review-corpus.truncated.md), and the initial harness runs at
+  // TOOL_HARNESS_TIER=primary. A tiny diff sits in the corpus whole; the
+  // loop spends its one request on discovery, the budget stops, and the
+  // credit completes coverage with no gap record at all.
+  //
+  // The mock discriminates by request shape, not call order: loop turns
+  // carry a `tools` array and get the scripted tool call; specialist and
+  // review calls (which can run before the loop on an auth-classified PR)
+  // get verdict bodies.
+  const toolCallResponse = JSON.stringify({
+    id: "c0", object: "chat.completion", model: "m",
+    choices: [{ index: 0, finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "t1", type: "function", function: { name: "find_files", arguments: '{"pattern":"*.ts"}' } }] } }],
+    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+  });
+  const server = await startMockServer((_req, body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    let tools: unknown[] = [];
+    try {
+      const parsed = JSON.parse(String(body ?? "{}")) as { tools?: unknown };
+      if (Array.isArray(parsed.tools)) tools = parsed.tools;
+    } catch { /* non-JSON body: treat as a non-loop call */ }
+    res.end(tools.length > 0 ? toolCallResponse : verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    mkdirSync(join(runDir, "src"), { recursive: true });
+    writeFileSync(join(runDir, "src", "auth.ts"), "export const check = (t: string): boolean => t.length > 0;\n");
+    gitInit(runDir);
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "tool-mode": "native_loop",
+        "tool-max-requests": "1",
+        "review-routing-mode": "auto",
+        "ai-smart-model": "m",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform({
+        title: "Tighten the auth check",
+        files: [{ filename: "src/auth.ts", status: "modified", additions: 1, deletions: 0, changes: 1 }],
+        diff: "diff --git a/src/auth.ts b/src/auth.ts\nindex 1111111..2222222 100644\n--- a/src/auth.ts\n+++ b/src/auth.ts\n@@ -1 +1 @@\n export const check = (t: string): boolean => t.length > 0;\n",
+        additions: 1,
+        deletions: 0,
+      }),
+      persistArtifacts: true,
+      quiet: true,
+    });
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as Record<string, unknown>;
+    // Fixture sanity: the run used primary-first routing and built the
+    // primary-profile corpus into the first-pass slot.
+    assert.equal(result.outputs.reviewRoute, "primary");
+    assert.ok(existsSync(join(runDir, "pr.diff.truncated")), "the primary-profile build must have run");
+    assert.equal(harness.stop_reason, "tool-call-budget-exhausted");
+    assert.equal(harness.partial_coverage, undefined, "complete coverage: the corpus credit resolves the only changed file");
+    assert.deepEqual(harness.corpus_diff_covered_files, ["src/auth.ts"]);
+    assert.equal(result.outputs.verdict, "approve");
   } finally {
     await server.close();
     cleanup();
@@ -2338,6 +3429,29 @@ test("#846 security review: harnessTransportAdapter masks the configured API key
   }
 });
 
+test("#1037: configured extra headers ride every harness-transport request", async () => {
+  // Key ABSENCE on the unset path is deliberately not asserted here:
+  // `harnessTransportAdapter` calls `runChatRequest` directly and the suite
+  // has no transport-injection seam (no `mock.module` harness exists), so "no
+  // header on the wire" cannot distinguish an omitted key from `{}`. The
+  // absence itself is pinned at the `specialistRequestFn` seam and on
+  // `extraHeadersForEnv("") === undefined` in tests-v3/extra-headers.test.ts.
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ id: "1", choices: [{ message: { content: "hi" }, finish_reason: "stop" }] }));
+  });
+  try {
+    const configured = harnessTransportAdapter({ AI_EXTRA_HEADERS: "X-LiteLLM-Session-Id: run-9\nx-team-id: platform" } as StageEnv);
+    await configured(server.url, "openai", { model: "m", stream: false, messages: [] }, "sk-test", 5);
+    assert.equal(server.requests.length, 1);
+    assert.equal(server.requests[0]!.headers["x-litellm-session-id"], "run-9");
+    assert.equal(server.requests[0]!.headers["x-team-id"], "platform");
+  } finally {
+    await server.close();
+  }
+});
+
 test("#846 security review: a one-character or three-character configured API key is masked in the primary error log and artifact", async () => {
   for (const apiKey of ["k", "abc"]) {
     const server = await startMockServer((_req, _body, res) => {
@@ -2488,6 +3602,56 @@ test("#874 malformed-location regression: a 'met' claim citing a non-existent en
   }
 });
 
+test("#954: completed investigation with an unverifiable requirement exposes trace-only incompleteness", async () => {
+  const server = await startMockServer((_req, body, res) => {
+    const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      requirement_coverage: [{
+        requirement_id: reqId,
+        disposition: "unverifiable",
+        enforcement: [],
+        test: [],
+        reason: "The available evidence does not establish that source SHA is checked.",
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+        "requirement-trace": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+
+    const coverage = JSON.parse(readFileSync(join(runDir, "review-coverage.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(result.outputs.requiredChecks, "incomplete");
+    assert.equal(result.outputs.incompleteReason, "requirement_trace");
+    const ghOutput = readFileSync(join(runDir, "gh-output.txt"), "utf8");
+    assert.match(ghOutput, /^incomplete-reason=requirement_trace$/m);
+    assert.equal(result.outputs.reviewResult, "partial");
+    assert.match(result.marker, /"incomplete_reason":"requirement_trace"/);
+    assert.equal(coverage.incomplete_reason, "requirement_trace");
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
 test("#874 #854-reproduction: a 'met' claim citing a real line that only copies the value (never compares it) is downgraded, coverage goes partial", async () => {
   const server = await startMockServer((_req, body, res) => {
     const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
@@ -2562,7 +3726,7 @@ test("#874 #854-reproduction: a 'met' claim citing a real line that only copies 
   }
 });
 
-test("#874: an 'unmet' requirement with no finding gets a synthesized one and forces request_changes", async () => {
+test("#874/#1095: an 'unmet' requirement with no model finding is disclosed, never synthesized, and cannot force request_changes", async () => {
   const server = await startMockServer((_req, body, res) => {
     const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
     res.setHeader("Content-Type", "application/json");
@@ -2598,14 +3762,17 @@ test("#874: an 'unmet' requirement with no finding gets a synthesized one and fo
       quiet: true,
     });
 
+    // #1095: the enforcement pass fabricates no finding from the ledger text
+    // alone — the model's unsubstantiated unmet stays disclosed in the trace
+    // and keeps coverage incomplete, but a blocking review must rest on a
+    // substantiated violation (the model's own finding), which this payload
+    // does not carry.
     const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
-    assert.equal(findings.length, 1);
-    assert.equal(findings[0]!.severity, "major");
-    assert.match(findings[0]!.message, /^requirement not enforced: /);
-    assert.match(findings[0]!.message, /source SHA/);
+    assert.equal(findings.length, 0);
 
-    assert.equal(result.outputs.verdict, "request_changes");
-    assert.match(result.marker, /"review_result":"issues"/);
+    assert.equal(result.outputs.verdict, "approve");
+    assert.match(result.marker, /"review_result":"partial"/);
+    assert.match(result.marker, /"incomplete_reason":"requirement_trace"/);
   } finally {
     await server.close();
     cleanup();
@@ -2649,19 +3816,12 @@ test("#874: verdict-policy=model — an unmet trace stops coverage and the marke
     });
 
     const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
-    assert.equal(findings.length, 1);
-    assert.equal(findings[0]!.severity, "major");
-    assert.match(findings[0]!.message, /^requirement not enforced: /);
-    assert.match(findings[0]!.message, /source SHA/);
+    assert.equal(findings.length, 0);
 
-    // The synthesized major finding is present, but the non-strict verdict
-    // mapping runs before trace enforcement and leaves the model's approve
-    // in place — which is exactly why the trace is ALSO a coverage stop:
-    // required_checks=incomplete is what withholds approval (#878 guard)
-    // and keeps the marker from reading clean under this policy.
-    assert.equal(findings.length, 1);
-    assert.equal(findings[0]!.severity, "major");
-    assert.match(findings[0]!.message, /^requirement not enforced: /);
+    // #1095: no synthesized finding under any verdict policy. The trace is
+    // still a coverage stop: required_checks=incomplete is what withholds
+    // approval (#878 guard) and keeps the marker from reading clean under
+    // this policy.
     assert.equal(result.outputs.verdict, "approve");
     assert.equal(result.outputs.requiredChecks, "incomplete");
     assert.match(result.marker, /"required_checks":"incomplete"/);
@@ -2710,24 +3870,158 @@ test("#874: verdict-policy=findings_severity_gated — an unmet trace stops cove
     });
 
     const findings = JSON.parse(result.outputs.findings) as Array<{ severity: string; message: string }>;
-    assert.equal(findings.length, 1);
-    assert.equal(findings[0]!.severity, "major");
-    assert.match(findings[0]!.message, /^requirement not enforced: /);
-    assert.match(findings[0]!.message, /source SHA/);
+    assert.equal(findings.length, 0);
 
-    // The synthesized major finding is present, but the non-strict verdict
-    // mapping runs before trace enforcement and leaves the model's approve
-    // in place — which is exactly why the trace is ALSO a coverage stop:
-    // required_checks=incomplete is what withholds approval (#878 guard)
-    // and keeps the marker from reading clean under this policy.
-    assert.equal(findings.length, 1);
-    assert.equal(findings[0]!.severity, "major");
-    assert.match(findings[0]!.message, /^requirement not enforced: /);
+    // #1095: no synthesized finding under any verdict policy. The trace is
+    // still a coverage stop: required_checks=incomplete is what withholds
+    // approval (#878 guard) and keeps the marker from reading clean under
+    // this policy.
     assert.equal(result.outputs.verdict, "approve");
     assert.equal(result.outputs.requiredChecks, "incomplete");
     assert.match(result.marker, /"required_checks":"incomplete"/);
     assert.match(result.marker, /"review_result":"partial"/);
     assert.ok(!result.marker.includes('"review_result":"clean"'));
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#959: a verdict with no trace claim at all gets one bounded repair pass and the trace goes met", async () => {
+  const repairRequests: string[] = [];
+  const server = await startMockServer((_req, body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    const text = String(body);
+    if (text.includes("Requirements to trace:")) {
+      repairRequests.push(text);
+      const reqId = /req-[0-9a-f]{12}/.exec(text)?.[0] ?? "";
+      res.end(verdictBody({
+        requirement_coverage: [{
+          requirement_id: reqId,
+          disposition: "met",
+          enforcement: [{ file: "src/context-resolution.ts", line: 2 }],
+          test: [{ file: "tests/context-resolution.test.ts", line: 1 }],
+          reason: "compares record.sourceSha against ctx.sourceSha and throws on mismatch",
+        }],
+      }));
+      return;
+    }
+    // The primary review verdict: the #947 shape, zero trace claims.
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    mkdirSync(join(runDir, "src"), { recursive: true });
+    mkdirSync(join(runDir, "tests"), { recursive: true });
+    writeFileSync(
+      join(runDir, "src", "context-resolution.ts"),
+      [
+        "export function resolveContext(ctx, record) {",
+        "  if (record.sourceSha !== ctx.sourceSha) {",
+        "    throw new Error('source sha mismatch');",
+        "  }",
+        "  return record;",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
+
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+        "requirement-trace": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+
+    assert.equal(repairRequests.length, 1, "exactly one bounded repair pass");
+    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
+      rows: Array<{ disposition: string; notes: string[] }>;
+      incomplete: boolean;
+    };
+    assert.equal(trace.rows.length, 1);
+    assert.equal(trace.rows[0]!.disposition, "met");
+    assert.deepEqual(trace.rows[0]!.notes, []);
+    assert.equal(trace.incomplete, false);
+    assert.notEqual(result.outputs.requiredChecks, "incomplete");
+    assert.doesNotMatch(result.outputs.reviewMarkdown, /reported no trace/);
+
+    const repairRecord = JSON.parse(readFileSync(join(runDir, "requirement-trace-repair.json"), "utf8")) as {
+      status: string; claims: number; missing_ids: string[];
+    };
+    assert.equal(repairRecord.status, "ok");
+    assert.equal(repairRecord.claims, 1);
+    assert.equal(repairRecord.missing_ids.length, 1);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#959: when the repair pass also yields nothing, the section says so instead of implying no enforcement exists", async () => {
+  let repairAttempts = 0;
+  const server = await startMockServer((_req, body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    if (String(body).includes("Requirements to trace:")) {
+      repairAttempts += 1;
+      // A well-formed repair response that still omits the requirement.
+      res.end(verdictBody({ requirement_coverage: [] }));
+      return;
+    }
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+        "requirement-trace": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+
+    assert.equal(repairAttempts, 1, "still only one bounded repair pass");
+    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
+      rows: Array<{ disposition: string; notes: string[] }>;
+      incomplete: boolean;
+    };
+    assert.equal(trace.rows[0]!.disposition, "unverifiable");
+    assert.ok(trace.rows[0]!.notes.includes("not-traced-by-reviewer"));
+    assert.equal(trace.incomplete, true);
+    assert.match(result.outputs.reviewMarkdown, /the reviewer reported no trace for this requirement/);
+    assert.doesNotMatch(result.outputs.reviewMarkdown, /no valid enforcement location/);
+    assert.equal(result.outputs.requiredChecks, "incomplete");
+
+    const repairRecord = JSON.parse(readFileSync(join(runDir, "requirement-trace-repair.json"), "utf8")) as {
+      status: string; claims: number;
+    };
+    assert.equal(repairRecord.status, "empty");
+    assert.equal(repairRecord.claims, 0);
   } finally {
     await server.close();
     cleanup();
@@ -2741,4 +4035,974 @@ test("#899: a native loop whose harness artifact is unreadable records partial c
   assert.equal(resolvePartialCoverage({ mode: "native_loop" }, true, true), undefined);
   const recorded = { stop_reason: "max-rounds", changed_files_total: 3, unread_files: ["a.ts"], leads_total: 0, unresolved_leads: [] };
   assert.deepEqual(resolvePartialCoverage({ partial_coverage: recorded }, true, true), recorded);
+});
+
+test("#1016: blocker-verification artifact persists the validated head SHA the verifier received, not the raw input", async () => {
+  // The verifier rejects any non-hex-SHA revision to `null` before reading,
+  // but the artifact used to record the raw free-form input (e.g.
+  // `context.headSha || String(pr.headRefOid ?? "") || ""`). A future
+  // consumer that joins on `expected_revision` against the verifier input
+  // would see a recorded value the verifier actually rejected, so the
+  // artifact now persists what the verifier received: the validated SHA,
+  // or `null` when no field is a 40/64-char hex.
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({
+      verdict: "request_changes",
+      findings: [{
+        // Asserts the marker is committed source (cite: exists, not a
+        // mention/expectation cue). The empty workspace means the source
+        // reader returns unavailable, demoting this finding to
+        // grounding_status="unverified" — the demotion path that writes
+        // the artifact.
+        severity: "blocker",
+        category: "bug",
+        file: "src/missing.ts",
+        line: 1,
+        message: "the file commits the literal `[REDACTED]`",
+      }],
+    })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+    const artifactPath = join(runDir, "blocker-verification.json");
+    assert.ok(existsSync(artifactPath), "blocker-verification.json must be written when a finding is demoted");
+    const artifact = JSON.parse(readFileSync(artifactPath, "utf8")) as { expected_revision: string | null; demoted: number };
+    // mockPlatform's head SHA is "a".repeat(40) — a valid 40-char hex SHA.
+    // The verifier received this same value, so the artifact must record it
+    // (not the raw `context.headSha` literal, which happens to match here).
+    assert.equal(artifact.expected_revision, "a".repeat(40));
+    assert.equal(artifact.demoted, 1);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+for (const direction of ["added", "removed"] as const) {
+  test(`#935: a same-head refresh that ${direction === "added" ? "adds" : "removes"} a linked-issue requirement re-scopes the trace prompt`, async () => {
+    const requests: string[] = [];
+    const server = await startMockServer((_req, body, res) => {
+      requests.push(String(body));
+      res.setHeader("Content-Type", "application/json");
+      res.end(verdictBody(baseVerdict()));
+    });
+    let prBody = direction === "added" ? "Original description." : "Fixes #40";
+    const platform = mockPlatform();
+    const base = platform.getPr.bind(platform);
+    platform.getPr = async () => ({ ...(await base() as Record<string, unknown>), body: prBody }) as never;
+    platform.getIssue = (async () => ({
+      ok: true,
+      data: { number: 40, title: "Resolver", state: "open", labels: [], body: "## Acceptance criteria\n- [ ] Resolution MUST compare the source SHA.\n" },
+    })) as never;
+    const { runDir, cleanup } = withRunDir();
+    try {
+      await runReview({
+        env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+        inputs: {
+          "github-token": "tok", repo: "o/r", "pr-number": "7",
+          "ai-base-url": server.url, "ai-model": "m", "ai-stream": "false", "ai-api-key": "k",
+          "ci-status-check": "true", "requirement-trace": "true",
+        },
+        runDir, workspace: runDir, platformAdapter: platform,
+        ciGate: { file: "", envAllowlist: [], workload: async () => { prBody = direction === "added" ? "Fixes #40" : "No linked issue."; return 0; } },
+        persistArtifacts: true, quiet: true,
+      });
+      const ledger = JSON.parse(readFileSync(join(runDir, "requirement-ledger.json"), "utf8")) as { requirements: { id: string; text: string }[] };
+      // #959: the review prompt is identified by its user-message preamble,
+      // not by position — a missing-trace repair pass (also a model request)
+      // can follow it when the verdict carries no trace claim.
+      const reviewRequest = requests.find((r) => r.includes("Analyze this pull request corpus")) ?? "";
+      if (direction === "added") {
+        const req = ledger.requirements.find((r) => /source SHA/.test(r.text));
+        assert.ok(req, "the refreshed ledger carries the linked-issue requirement");
+        assert.match(reviewRequest, new RegExp(`trace scope \\(${req.id}\\)`));
+      } else {
+        assert.equal(ledger.requirements.some((r) => /source SHA/.test(r.text)), false);
+        assert.doesNotMatch(reviewRequest, /trace scope \(/);
+      }
+    } finally {
+      await server.close();
+      cleanup();
+    }
+  });
+}
+
+// ── #998 (#1049 review): the Anthropic effort opt-in at the runtime/logging boundary
+
+test("#998 (#1049 review): the run reports the Anthropic effort the wire actually carried", async () => {
+  // The exact P1 configuration from the review: an Anthropic-format endpoint
+  // with a configured effort. Without the lane's opt-in the field is NOT sent,
+  // so the run must say so loudly and must never log the held-back value as
+  // applied; with the opt-in the field is transmitted and the log agrees.
+  const anthropicVerdict = (text: string): string => JSON.stringify({
+    id: "msg_1",
+    model: "m",
+    role: "assistant",
+    content: [{ type: "text", text }],
+    stop_reason: "end_turn",
+  });
+  for (const support of ["", "true"] as const) {
+    const expectSent = support === "true";
+    const bodies: Record<string, unknown>[] = [];
+    const server = await startMockServer((_req, body, res) => {
+      bodies.push(JSON.parse(body) as Record<string, unknown>);
+      res.setHeader("Content-Type", "application/json");
+      res.end(anthropicVerdict(JSON.stringify(baseVerdict())));
+    });
+    const { runDir, cleanup } = withRunDir();
+    const logs: string[] = [];
+    const errors: string[] = [];
+    try {
+      const result = await runReview({
+        env: {},
+        inputs: {
+          "github-token": "tok",
+          repo: "o/r",
+          "pr-number": "7",
+          "ai-base-url": server.url,
+          "ai-model": "m",
+          "ai-api-format": "anthropic",
+          "ai-stream": "false",
+          "ai-api-key": "k",
+          "ai-primary-reasoning-effort": "medium",
+          ...(support === "" ? {} : { "ai-anthropic-effort-support": support }),
+        },
+        runDir,
+        workspace: runDir,
+        platformAdapter: mockPlatform(),
+        log: (line) => logs.push(line),
+        error: (line) => errors.push(line),
+      });
+      assert.equal(result.outputs.verdict, "approve");
+      const reviewBody = bodies[0];
+      assert.ok(reviewBody, "the review call must have reached the mock endpoint");
+      if (expectSent) {
+        assert.deepEqual(reviewBody.output_config, { effort: "medium" });
+        assert.ok(logs.some((line) => line.includes("effort=medium")), logs.join(" | "));
+        assert.equal(errors.some((line) => line.includes("NOT sent")), false, errors.join(" | "));
+      } else {
+        assert.equal("output_config" in reviewBody, false, "no effort field without the opt-in");
+        // One warning per configured lane: the review call and the specialist
+        // phase each name the lane input they need (both are Anthropic here).
+        assert.ok(
+          logs.some((line) => line.includes("NOT sent") && line.includes("(review call)") && line.includes("set ai-anthropic-effort-support: true")),
+          logs.join(" | "),
+        );
+        assert.equal(logs.filter((line) => line.includes("(review call)") && line.includes("NOT sent")).length, 1, logs.join(" | "));
+        assert.equal(logs.some((line) => line.includes("effort=")), false, `a held-back effort is never logged as applied: ${logs.join(" | ")}`);
+      }
+    } finally {
+      await server.close();
+      cleanup();
+    }
+  }
+});
+
+test("#998 (#1049 review): the fallback lane asserts its own Anthropic endpoint at the wire and in the log", async () => {
+  // The fallback route runs on ai-fallback-base-url, which may be a different
+  // Anthropic-compatible backend than the asserted primary one, so it needs
+  // its own assertion — and, like every lane, it reports only what it sent.
+  const deadServer = await startMockServer((_req, _body, res) => {
+    res.statusCode = 500;
+    res.end('{"error":"down"}');
+  });
+  for (const support of ["", "true"] as const) {
+    const expectSent = support === "true";
+    const bodies: Record<string, unknown>[] = [];
+    const fallbackServer = await startMockServer((_req, body, res) => {
+      bodies.push(JSON.parse(body) as Record<string, unknown>);
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({
+        content: [{ type: "text", text: JSON.stringify(baseVerdict({ review_markdown: "Fallback review.\n" })) }],
+        stop_reason: "end_turn",
+      }));
+    });
+    const { runDir, cleanup } = withRunDir();
+    const logs: string[] = [];
+    try {
+      const result = await runReview({
+        env: {},
+        inputs: {
+          "github-token": "tok",
+          repo: "o/r",
+          "pr-number": "7",
+          "ai-base-url": deadServer.url,
+          "ai-model": "m",
+          "ai-api-format": "anthropic",
+          "ai-stream": "false",
+          "ai-api-key": "k",
+          "ai-primary-retries": "1",
+          "ai-primary-retry-delay-sec": "0",
+          "ai-fallback-model": "fb",
+          "ai-fallback-base-url": fallbackServer.url,
+          "ai-fallback-api-format": "anthropic",
+          "ai-reasoning-effort": "low",
+          // The primary endpoint IS asserted here: that must not carry over.
+          "ai-anthropic-effort-support": "true",
+          ...(support === "" ? {} : { "ai-fallback-anthropic-effort-support": support }),
+        },
+        runDir,
+        workspace: runDir,
+        platformAdapter: mockPlatform(),
+        sleep: async () => {},
+        log: (line) => logs.push(line),
+      });
+      assert.equal(result.outputs.verdict, "approve");
+      const fallbackBody = bodies[0];
+      assert.ok(fallbackBody, "the fallback call must have reached its own endpoint");
+      const fallbackLogs = logs.filter((line) => line.includes("Fallback model attempt"));
+      if (expectSent) {
+        assert.deepEqual(fallbackBody.output_config, { effort: "low" });
+        assert.ok(fallbackLogs.some((line) => line.includes("effort=low")), logs.join(" | "));
+        assert.equal(logs.some((line) => line.includes("fallback lane") && line.includes("NOT sent")), false, logs.join(" | "));
+      } else {
+        assert.equal("output_config" in fallbackBody, false);
+        assert.ok(
+          logs.some((line) =>
+            line.includes("fallback lane") && line.includes("NOT sent") && line.includes("set ai-fallback-anthropic-effort-support: true")),
+          logs.join(" | "),
+        );
+        assert.ok(fallbackLogs.every((line) => !line.includes("effort=")), fallbackLogs.join(" | "));
+      }
+    } finally {
+      await fallbackServer.close();
+      cleanup();
+    }
+  }
+  await deadServer.close();
+});
+
+test("#1053: the fallback lane picks its own reasoning effort on the OpenAI wire when overridden", async () => {
+  // ai-reasoning-effort=low + ai-fallback-reasoning-effort=high ⇒ the primary
+  // request carries "low" (or is retried on the dead primary here), and the
+  // fallback request carries "high". The per-lane override is independent of
+  // the base, exactly like the primary and smart lane overrides.
+  const deadServer = await startMockServer((_req, _body, res) => {
+    res.statusCode = 500;
+    res.end('{"error":"down"}');
+  });
+  const bodies: Record<string, unknown>[] = [];
+  const fallbackServer = await startMockServer((_req, body, res) => {
+    bodies.push(JSON.parse(body) as Record<string, unknown>);
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ review_markdown: "Fallback review.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const logs: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": deadServer.url,
+        "ai-model": "m",
+        "ai-api-format": "openai",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ai-primary-retries": "1",
+        "ai-primary-retry-delay-sec": "0",
+        "ai-fallback-model": "fb",
+        "ai-fallback-base-url": fallbackServer.url,
+        "ai-fallback-api-format": "openai",
+        "ai-reasoning-effort": "low",
+        "ai-fallback-reasoning-effort": "high",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      log: (line) => logs.push(line),
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    const fallbackBody = bodies[0];
+    assert.ok(fallbackBody, "the fallback call must have reached its own endpoint");
+    assert.equal(fallbackBody.reasoning_effort, "high", "fallback request carries the per-lane override, not the base");
+    const fallbackLogs = logs.filter((line) => line.includes("Fallback model attempt"));
+    assert.ok(fallbackLogs.some((line) => line.includes("effort=high")), logs.join(" | "));
+  } finally {
+    await fallbackServer.close();
+    await deadServer.close();
+    cleanup();
+  }
+});
+
+test("#1053: the fallback Anthropic wire picks the fallback override when its opt-in is true", async () => {
+  // ai-fallback-anthropic-effort-support=true + ai-fallback-reasoning-effort=high
+  // ⇒ the fallback Anthropic body carries output_config.effort: "high", even
+  // though the base ai-reasoning-effort is "low" and the primary opt-in
+  // (ai-anthropic-effort-support) is also asserted — only the lane's own
+  // opt-in authorizes its wire.
+  const deadServer = await startMockServer((_req, _body, res) => {
+    res.statusCode = 500;
+    res.end('{"error":"down"}');
+  });
+  const bodies: Record<string, unknown>[] = [];
+  const fallbackServer = await startMockServer((_req, body, res) => {
+    bodies.push(JSON.parse(body) as Record<string, unknown>);
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      content: [{ type: "text", text: JSON.stringify(baseVerdict({ review_markdown: "Fallback review.\n" })) }],
+      stop_reason: "end_turn",
+    }));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const logs: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": deadServer.url,
+        "ai-model": "m",
+        "ai-api-format": "anthropic",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ai-primary-retries": "1",
+        "ai-primary-retry-delay-sec": "0",
+        "ai-fallback-model": "fb",
+        "ai-fallback-base-url": fallbackServer.url,
+        "ai-fallback-api-format": "anthropic",
+        "ai-reasoning-effort": "low",
+        "ai-fallback-reasoning-effort": "high",
+        "ai-anthropic-effort-support": "true",
+        "ai-fallback-anthropic-effort-support": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      log: (line) => logs.push(line),
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    const fallbackBody = bodies[0];
+    assert.ok(fallbackBody, "the fallback call must have reached its own endpoint");
+    assert.deepEqual(fallbackBody.output_config, { effort: "high" });
+    const fallbackLogs = logs.filter((line) => line.includes("Fallback model attempt"));
+    assert.ok(fallbackLogs.some((line) => line.includes("effort=high")), logs.join(" | "));
+  } finally {
+    await fallbackServer.close();
+    await deadServer.close();
+    cleanup();
+  }
+});
+
+test("#1053: an unset ai-fallback-reasoning-effort still inherits the base effort on Anthropic fallback when its opt-in is true", async () => {
+  // With the new input empty, the Anthropic fallback body uses the base
+  // ai-reasoning-effort value — exactly the #998 byte-compat behavior. The
+  // ai-fallback-anthropic-effort-support opt-in authorizes the wire for the
+  // fallback lane alone.
+  const deadServer = await startMockServer((_req, _body, res) => {
+    res.statusCode = 500;
+    res.end('{"error":"down"}');
+  });
+  const bodies: Record<string, unknown>[] = [];
+  const fallbackServer = await startMockServer((_req, body, res) => {
+    bodies.push(JSON.parse(body) as Record<string, unknown>);
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      content: [{ type: "text", text: JSON.stringify(baseVerdict({ review_markdown: "Fallback review.\n" })) }],
+      stop_reason: "end_turn",
+    }));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const logs: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": deadServer.url,
+        "ai-model": "m",
+        "ai-api-format": "anthropic",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ai-primary-retries": "1",
+        "ai-primary-retry-delay-sec": "0",
+        "ai-fallback-model": "fb",
+        "ai-fallback-base-url": fallbackServer.url,
+        "ai-fallback-api-format": "anthropic",
+        "ai-reasoning-effort": "low",
+        // ai-fallback-reasoning-effort is intentionally omitted.
+        "ai-fallback-anthropic-effort-support": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      log: (line) => logs.push(line),
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    const fallbackBody = bodies[0];
+    assert.ok(fallbackBody, "the fallback call must have reached its own endpoint");
+    assert.deepEqual(fallbackBody.output_config, { effort: "low" });
+    const fallbackLogs = logs.filter((line) => line.includes("Fallback model attempt"));
+    assert.ok(fallbackLogs.some((line) => line.includes("effort=low")), logs.join(" | "));
+  } finally {
+    await fallbackServer.close();
+    await deadServer.close();
+    cleanup();
+  }
+});
+
+// ── #1047: truthful Anthropic structured-output semantics at the wire
+
+test("#1047: the run enforces json_schema on Anthropic only under the lane opt-in, and says which mode ran", async () => {
+  // The #1033 shape: ai-response-format resolved onto an Anthropic-format
+  // endpoint. Without the opt-in NO structured-output parameter may reach the
+  // wire (prompt-only), the log must say so by name, and a held-back mode
+  // must never be reported as enforced. With the opt-in the request carries
+  // output_config.format with the verdict schema.
+  const anthropicVerdict = (text: string): string => JSON.stringify({
+    id: "msg_1",
+    model: "m",
+    role: "assistant",
+    content: [{ type: "text", text }],
+    stop_reason: "end_turn",
+  });
+  for (const support of ["", "true"] as const) {
+    const expectSent = support === "true";
+    const bodies: Record<string, unknown>[] = [];
+    const server = await startMockServer((_req, body, res) => {
+      bodies.push(JSON.parse(body) as Record<string, unknown>);
+      res.setHeader("Content-Type", "application/json");
+      res.end(anthropicVerdict(JSON.stringify(baseVerdict())));
+    });
+    const { runDir, cleanup } = withRunDir();
+    const logs: string[] = [];
+    const errors: string[] = [];
+    try {
+      const result = await runReview({
+        env: {},
+        inputs: {
+          "github-token": "tok",
+          repo: "o/r",
+          "pr-number": "7",
+          "ai-base-url": server.url,
+          "ai-model": "m",
+          "ai-api-format": "anthropic",
+          "ai-stream": "false",
+          "ai-api-key": "k",
+          "ai-response-format": "json_schema",
+          ...(support === "" ? {} : { "ai-anthropic-structured-output-support": support }),
+        },
+        runDir,
+        workspace: runDir,
+        platformAdapter: mockPlatform(),
+        log: (line) => logs.push(line),
+        error: (line) => errors.push(line),
+      });
+      assert.equal(result.outputs.verdict, "approve");
+      const reviewBody = bodies[0];
+      assert.ok(reviewBody, "the review call must have reached the mock endpoint");
+      if (expectSent) {
+        const outputConfig = reviewBody.output_config as Record<string, unknown> | undefined;
+        assert.ok(outputConfig, "output_config must be sent under the opt-in");
+        assert.deepEqual(outputConfig.format, ANTHROPIC_VERDICT_OUTPUT_FORMAT);
+        assert.ok(
+          logs.some((line) => line.includes("Primary model attempt") && line.includes("format=json_schema")),
+          logs.join(" | "),
+        );
+        assert.equal(
+          logs.some((line) => line.includes("prompt-only")),
+          false,
+          `an asserted endpoint is never told the contract is prompt-only: ${logs.join(" | ")}`,
+        );
+      } else {
+        assert.equal("output_config" in reviewBody, false, "no structured-output parameter without the opt-in");
+        assert.equal("response_format" in reviewBody, false, "never an OpenAI response_format on the Anthropic wire");
+        assert.ok(
+          logs.some((line) =>
+            line.includes("prompt-only") && line.includes("(review call)") && line.includes("set ai-anthropic-structured-output-support: true")),
+          logs.join(" | "),
+        );
+        assert.equal(
+          logs.some((line) => line.includes("format=json_schema")),
+          false,
+          `a held-back mode is never logged as enforced: ${logs.join(" | ")}`,
+        );
+      }
+    } finally {
+      await server.close();
+      cleanup();
+    }
+  }
+});
+
+test("#1047: json_object on an Anthropic lane is reported prompt-only and never translated", async () => {
+  // json_object has no Anthropic-native equivalent — no flag exists that
+  // could enforce it — so the wire must stay clean and the run must name the
+  // mode's truth (prompt-only) instead of implying enforcement.
+  const bodies: Record<string, unknown>[] = [];
+  const server = await startMockServer((_req, body, res) => {
+    bodies.push(JSON.parse(body) as Record<string, unknown>);
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      id: "msg_1", model: "m", role: "assistant",
+      content: [{ type: "text", text: JSON.stringify(baseVerdict()) }],
+      stop_reason: "end_turn",
+    }));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const logs: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-api-format": "anthropic",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ai-response-format": "json_object",
+        // Even the opt-in cannot make json_object enforceable; assert it to
+        // prove the flag alone does not fabricate a wire parameter.
+        "ai-anthropic-structured-output-support": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      log: (line) => logs.push(line),
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    const reviewBody = bodies[0]!;
+    assert.equal("output_config" in reviewBody, false, "json_object is never translated into an Anthropic parameter");
+    assert.equal("response_format" in reviewBody, false);
+    assert.ok(
+      logs.some((line) => line.includes("no Anthropic-native equivalent") && line.includes("prompt-only")),
+      logs.join(" | "),
+    );
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#1047: an unusable reasoning-only verdict carries bounded diagnostics and recovers via the standard call", async () => {
+  // The #1033 shape, bounded to one lane: the primary's review call answers
+  // with thinking blocks and no visible text. The run must NOT fail: the
+  // tier loop's raise applies (budget spent invisibly), the final failure
+  // carries a content-free diagnostic record, and the fallback produces the
+  // verdict. No response text may appear in the diagnostics.
+  const reasoningOnly = JSON.stringify({
+    id: "msg_r", model: "m", role: "assistant",
+    content: [{ type: "thinking", thinking: "ALL-THE-SECRET-REASONING", signature: "sig" }],
+    stop_reason: "end_turn",
+    usage: { input_tokens: 100, output_tokens: 4096 },
+  });
+  const fallbackVerdict = JSON.stringify({
+    id: "msg_f", model: "fb", role: "assistant",
+    content: [{ type: "text", text: JSON.stringify(baseVerdict({ review_markdown: "Fallback review.\n" })) }],
+    stop_reason: "end_turn",
+  });
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(reasoningOnly);
+  });
+  const fallbackServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(fallbackVerdict);
+  });
+  const { runDir, cleanup } = withRunDir();
+  const logs: string[] = [];
+  const errors: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": primaryServer.url,
+        "ai-model": "m",
+        "ai-api-format": "anthropic",
+        "ai-stream": "false",
+        "ai-api-key": "test-key-1047-0123456789",
+        "ai-max-tokens": "1024",
+        "ai-primary-retries": "2",
+        "ai-primary-retry-delay-sec": "0",
+        "ai-fallback-model": "fb",
+        "ai-fallback-base-url": fallbackServer.url,
+        "ai-fallback-api-format": "anthropic",
+        "ai-fallback-stream": "false",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      log: (line) => logs.push(line),
+      error: (line) => errors.push(line),
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    // Tier failures ride the error channel, diagnostics line attached.
+    assert.ok(
+      errors.some((line) => line.includes("response_class=reasoning-only") && line.includes("thinking_blocks=1") && line.includes("profile=Primary")),
+      `the diagnostics line must classify the failure: ${errors.join(" | ")}`,
+    );
+    // The raised budget after the token-cap-shaped failure is visible, and
+    // the secret reasoning text never enters any line.
+    assert.ok(errors.some((line) => line.includes("response_class=reasoning-only") && line.includes("completion_budget_raised_to=4096")), errors.join(" | "));
+    assert.equal([...logs, ...errors].some((line) => line.includes("ALL-THE-SECRET-REASONING")), false, "reasoning text must never leak into logs");
+    // The published review came from the fallback, marked as such in the
+    // analysis-engine provenance.
+    assert.match(result.analysisEngine, /fallback/);
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
+test("#1047 (review): a 400 strip recovery reports prompt-only truthfully and persists attempt evidence", async () => {
+  // The blocking review shape: the endpoint is asserted to accept
+  // output_config.format but rejects it. The transport strips it for exactly
+  // one retry and the verdict succeeds — the run must then report
+  // prompt-only (never format=json_schema), warn once by surface, keep the
+  // INITIAL request artifact bytes as first-sent evidence, and persist a
+  // bounded effective-request record. No secrets or response content may
+  // appear in any of it.
+  const bodies: Record<string, unknown>[] = [];
+  let requests = 0;
+  const server = await startMockServer((_req, body, res) => {
+    requests++;
+    bodies.push(JSON.parse(body) as Record<string, unknown>);
+    if (requests === 1) {
+      res.statusCode = 400;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: { message: "output_config.format is not supported by this backend" } }));
+      return;
+    }
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      id: "msg_ok", model: "m", role: "assistant",
+      content: [{ type: "text", text: JSON.stringify(baseVerdict()) }],
+      stop_reason: "end_turn",
+    }));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const logs: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-api-format": "anthropic",
+        "ai-stream": "false",
+        "ai-api-key": "test-key-1047-0123456789",
+        "ai-response-format": "json_schema",
+        "ai-anthropic-structured-output-support": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      log: (line) => logs.push(line),
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(requests, 2, "exactly one strip retry");
+    // Wire evidence: first attempt carried the format, the successful retry did not.
+    assert.ok((bodies[0]!.output_config as Record<string, unknown>).format, "first attempt carried output_config.format");
+    assert.equal("output_config" in bodies[1]!, false, "the effective (successful) request carried no format");
+    // Truthful log: the strip is announced by surface with the prompt-only
+    // outcome, and the success line NEVER claims enforcement.
+    assert.ok(
+      logs.some((line) =>
+        line.includes("rejected the structured-output parameter (output_config.format)")
+        && line.includes("recovered prompt-only")
+        && line.includes("Primary"),
+      ),
+      logs.join(" | "),
+    );
+    assert.equal(
+      logs.some((line) => line.includes("format=json_schema")),
+      false,
+      `a stripped request must never be reported as enforced: ${logs.join(" | ")}`,
+    );
+    // Persisted evidence: the INITIAL request artifact keeps its original
+    // bytes (what was first sent), and the effective-request record is
+    // bounded, secret-free, and content-free.
+    const initial = JSON.parse(readFileSync(join(runDir, "ai-request.primary.json"), "utf8")) as Record<string, unknown>;
+    assert.ok((initial.output_config as Record<string, unknown>).format, "initial artifact preserves the first-sent bytes");
+    const effective = JSON.parse(readFileSync(join(runDir, "ai-request.primary.effective.json"), "utf8")) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(effective).sort(), ["attempts", "note", "removed"]);
+    assert.equal(effective.removed, "output_config.format");
+    assert.equal(effective.attempts, 1);
+    assert.equal(JSON.stringify(effective).includes("test-key-1047"), false, "no secret in the effective-request record");
+    assert.equal(JSON.stringify(effective).includes("verdict"), false, "no response content in the effective-request record");
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+test("#1047 (review): a >64-char configured key echoed in a stop reason never survives diagnostics or logs", async () => {
+  // Adversarial companion to the reasoning-only e2e: the broken endpoint
+  // echoes the operator's over-64-char API key inside the stop reason. The
+  // diagnostics must mask the COMPLETE key before any truncation, so no
+  // prefix survives in the error log line or the persisted response artifact.
+  const apiKey = `sk-live-${"e".repeat(80)}`; // 88 chars
+  const reasoningOnly = JSON.stringify({
+    id: "msg_r", model: "m", role: "assistant",
+    content: [{ type: "thinking", thinking: "hidden reasoning", signature: "sig" }],
+    stop_reason: `end_turn cred=${apiKey}`,
+    usage: { input_tokens: 100, output_tokens: 4096 },
+  });
+  const primaryServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(reasoningOnly);
+  });
+  const fallbackServer = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      id: "msg_f", model: "fb", role: "assistant",
+      content: [{ type: "text", text: JSON.stringify(baseVerdict({ review_markdown: "Fallback review.\n" })) }],
+      stop_reason: "end_turn",
+    }));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const errors: string[] = [];
+  try {
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": primaryServer.url,
+        "ai-model": "m",
+        "ai-api-format": "anthropic",
+        "ai-stream": "false",
+        "ai-api-key": apiKey,
+        "ai-max-tokens": "1024",
+        "ai-primary-retries": "2",
+        "ai-primary-retry-delay-sec": "0",
+        "ai-fallback-model": "fb",
+        "ai-fallback-base-url": fallbackServer.url,
+        "ai-fallback-api-format": "anthropic",
+        "ai-fallback-stream": "false",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      log: () => {},
+      error: (line) => errors.push(line),
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    const diagnosticsLines = errors.filter((line) => line.includes("response_class="));
+    assert.ok(diagnosticsLines.length > 0, `expected a diagnostics line: ${errors.join(" | ")}`);
+    // No 8-char window of the key may survive in ANY error line.
+    const windows: string[] = [];
+    for (let i = 0; i + 8 <= apiKey.length; i++) windows.push(apiKey.slice(i, i + 8));
+    for (const line of errors) {
+      for (const window of windows) {
+        assert.equal(line.includes(window), false, `log line leaked key window ${window}: ${line}`);
+      }
+    }
+    // The persisted diagnostics record is clean too.
+    const artifact = JSON.parse(readFileSync(join(runDir, "ai-response.primary.json"), "utf8")) as {
+      diagnostics?: Record<string, unknown>;
+    };
+    assert.ok(artifact.diagnostics, "the failure artifact carries the diagnostics record");
+    const artifactJson = JSON.stringify(artifact);
+    for (const window of windows) {
+      assert.equal(artifactJson.includes(window), false, `artifact leaked key window ${window}`);
+    }
+    assert.equal(artifact.diagnostics.finish_reason, "end_turn cred=\u27e6\u2022\u27e7");
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
+test("#1043 review: a reused run dir never ingests a stale repository-skill addendum", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  // A trusted base with one skill; the run workspace IS the fixture repo so
+  // base-ref reads resolve against it.
+  const repo = mkdtempSync(join(tmpdir(), "v3-skill-repo-"));
+  const git = (...args: string[]): string =>
+    execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
+  git("init", "-q");
+  git("config", "user.email", "test@example.invalid");
+  git("config", "user.name", "test");
+  mkdirSync(join(repo, ".agents/skills/dependency-upgrades"), { recursive: true });
+  const skillPath = ".agents/skills/dependency-upgrades/SKILL.md";
+  writeFileSync(
+    join(repo, skillPath),
+    "---\nname: Dependency upgrades\ndescription: How to review dependency bumps.\n---\nEXPAND-CONTRACT-ROLLOUT-MARKER\n",
+  );
+  git("add", ".");
+  git("commit", "-qm", "skill");
+  const baseSha = git("rev-parse", "HEAD");
+  const { runDir, cleanup } = withRunDir();
+  const baseInputs = {
+    "github-token": "tok",
+    repo: "o/r",
+    "pr-number": "7",
+    "ai-base-url": server.url,
+    "ai-model": "m",
+    "ai-stream": "false",
+    "ai-api-key": "k",
+  };
+  const runOnce = async (env: Record<string, string>, inputs: Record<string, string>): Promise<void> => {
+    await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), GITHUB_STEP_SUMMARY: join(runDir, "step-summary.md"), ...env },
+      inputs,
+      runDir,
+      workspace: repo,
+      platformAdapter: mockPlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+  };
+  try {
+    // Run 1: the operator-selected skill is applied to the corpus. The
+    // precheck stage resolves IS_FORK_PR before the review stage; the mock
+    // PR object carries no repo identity, so the test supplies the resolved
+    // flag the way the pipeline does.
+    await runOnce({ PR_REVIEWER_BASE_REF: baseSha, IS_FORK_PR: "false" }, { ...baseInputs, "repository-skill-path": skillPath });
+    assert.ok(existsSync(join(runDir, "repository-skill-addendum.md")), "run 1 writes the addendum");
+    const corpus1 = readFileSync(join(runDir, "review-corpus.truncated.md"), "utf8");
+    assert.match(corpus1, /EXPAND-CONTRACT-ROLLOUT-MARKER/);
+    // The runtime stage path must match the actually loaded addendum
+    // (#1043 review: deriving the path from a not-yet-computed addendum
+    // cleared it for every active selection).
+    const skillContext = JSON.parse(readFileSync(join(runDir, "repository-skill-context.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(skillContext.path, skillPath);
+    assert.equal(skillContext.added_to_corpus, true);
+    // Run 2: same run dir, skills disabled — the stale addendum must not
+    // survive into the second corpus. IS_FORK_PR stays "false"; the point
+    // is the stale-artifact cleanup, not the fork gate.
+    await runOnce({ IS_FORK_PR: "false" }, { ...baseInputs });
+    assert.equal(existsSync(join(runDir, "repository-skill-addendum.md")), false, "run 2 removes the stale addendum");
+    assert.equal(existsSync(join(runDir, "repository-skill-context.json")), false, "run 2 removes the stale context record");
+    const corpus2 = readFileSync(join(runDir, "review-corpus.truncated.md"), "utf8");
+    assert.doesNotMatch(corpus2, /EXPAND-CONTRACT-ROLLOUT-MARKER/);
+  } finally {
+    await server.close();
+    cleanup();
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("#1043 review: repository-skills-applied.json resets on reused run dirs", async () => {
+  let skillPathApplied = "";
+  // Request 1 gets a model turn that reads one skill; everything after gets
+  // a plain verdict (so later runs degrade with zero read_skill calls).
+  let modelRequests = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    modelRequests++;
+    res.setHeader("Content-Type", "application/json");
+    if (modelRequests === 1) {
+      res.end(JSON.stringify({
+        id: "c1",
+        object: "chat.completion",
+        model: "m",
+        choices: [{
+          index: 0,
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [{
+              id: "t1",
+              type: "function",
+              function: { name: "read_skill", arguments: JSON.stringify({ path: skillPathApplied }) },
+            }],
+          },
+          finish_reason: "tool_calls",
+        }],
+        usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 },
+      }));
+      return;
+    }
+    res.end(verdictBody(baseVerdict()));
+  });
+  const repo = mkdtempSync(join(tmpdir(), "v3-applied-repo-"));
+  const git = (...args: string[]): string =>
+    execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
+  git("init", "-q");
+  git("config", "user.email", "test@example.invalid");
+  git("config", "user.name", "test");
+  mkdirSync(join(repo, ".agents/skills/dependency-upgrades"), { recursive: true });
+  skillPathApplied = ".agents/skills/dependency-upgrades/SKILL.md";
+  writeFileSync(
+    join(repo, skillPathApplied),
+    "---\nname: Dependency upgrades\ndescription: How to review dependency bumps.\n---\nROLLOUT-ADVICE-MARKER\n",
+  );
+  git("add", ".");
+  git("commit", "-qm", "skill");
+  const baseSha = git("rev-parse", "HEAD");
+  const { runDir, cleanup } = withRunDir();
+  const baseInputs = {
+    "github-token": "tok",
+    repo: "o/r",
+    "pr-number": "7",
+    "ai-base-url": server.url,
+    "ai-model": "m",
+    "ai-stream": "false",
+    "ai-api-key": "k",
+  };
+  const runOnce = async (env: Record<string, string>, inputs: Record<string, string>): Promise<void> => {
+    await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), GITHUB_STEP_SUMMARY: join(runDir, "step-summary.md"), ...env },
+      inputs,
+      runDir,
+      workspace: repo,
+      platformAdapter: mockPlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+  };
+  try {
+    // Run 1: the loop reads the skill through read_skill — the artifact and
+    // the result diagnostics both record exactly that one distinct read.
+    await runOnce({ PR_REVIEWER_BASE_REF: baseSha, IS_FORK_PR: "false" }, { ...baseInputs, "repository-skills": "true" });
+    assert.ok(existsSync(join(runDir, "repository-skills-applied.json")), "run 1 writes the applied artifact");
+    const applied = JSON.parse(readFileSync(join(runDir, "repository-skills-applied.json"), "utf8")) as Array<{ path: string }>;
+    assert.deepEqual(applied.map((skill) => skill.path), [skillPathApplied]);
+    // The harness summary markdown records the read truthfully too.
+    const harnessMd = readFileSync(join(runDir, "tool-harness.md"), "utf8");
+    assert.match(harnessMd, /\*\*Repository skills read:\*\* dependency-upgrades/);
+    // Run 2: same run dir, tools disabled — the stale artifact must be gone.
+    await runOnce({ IS_FORK_PR: "false" }, { ...baseInputs, "tool-mode": "off" });
+    assert.equal(existsSync(join(runDir, "repository-skills-applied.json")), false, "run 2 (tools off) clears the stale artifact");
+    // Run 3: same run dir, tools on, zero read_skill calls — still absent.
+    await runOnce({ PR_REVIEWER_BASE_REF: baseSha, IS_FORK_PR: "false" }, { ...baseInputs, "repository-skills": "true" });
+    assert.equal(existsSync(join(runDir, "repository-skills-applied.json")), false, "run 3 (zero reads) leaves no artifact");
+  } finally {
+    await server.close();
+    cleanup();
+    rmSync(repo, { recursive: true, force: true });
+  }
 });

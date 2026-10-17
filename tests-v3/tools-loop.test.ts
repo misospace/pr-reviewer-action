@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Conversation } from "../src/model/conversation.js";
+import { sanitizedSourceProvenance } from "../src/context/evidence-provenance.js";
 import {
   STOP_BUDGET,
   STOP_MAX_ROUNDS,
@@ -13,6 +14,7 @@ import {
   driveToolLoop,
   extractToolCalls,
 } from "../src/tools/loop.js";
+import { buildSummarizerConversation } from "../src/tools/harness.js";
 
 function scriptedLoop(responses: unknown[], execResults: Record<string, unknown>[], clock: number[] = []) {
   let responseIndex = 0;
@@ -70,6 +72,36 @@ test("model stops voluntarily after gathering evidence", async () => {
   assert.equal(outcome.finalText, "done");
   assert.equal(outcome.executed.length, 1);
   assert.equal(outcome.requestsRemaining, 3);
+});
+
+test("executor provenance rides through the loop into the rendered tool result", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const { postFn, executeFn, timeFn } = scriptedLoop(
+    [openAiCall("c1", "read_file", '{"path":"src/x.ts"}'), openAiText("done")],
+    [
+      {
+        tool: "read_file",
+        status: "ok",
+        result: { content: "x" },
+        provenance: sanitizedSourceProvenance(1, "src/x.ts", "abc123"),
+      },
+    ],
+  );
+  await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(2, 4, 120),
+    timeFn,
+  });
+  const event = conversation.events.find((e) => e.kind === "tool_result") as { evidence?: unknown };
+  assert.ok(event.evidence);
+  const msg = (conversation.renderOpenAiMessages() as Array<{ role: string; content: string }>).find((m) => m.role === "tool")!;
+  assert.ok(msg.content.includes('representation="sanitized_source"'));
+  assert.ok(msg.content.includes('synthesized="true"'));
+  assert.ok(msg.content.includes('redaction_count="1"'));
+  assert.ok(msg.content.includes('source_file="src/x.ts"'));
+  assert.ok(msg.content.includes('source_revision="abc123"'));
 });
 
 test("round budget exhausts with the doubled cap", async () => {
@@ -236,6 +268,70 @@ test("compaction: blunt truncation backstops when no summarizer frees enough", a
   assert.ok(Buffer.byteLength(event.content, "utf8") <= 100);
 });
 
+test("#1043 review: compaction replaces a read_skill result with a truthful marker, never a partial body", async () => {
+  const conversation = new Conversation();
+  conversation.system = "s";
+  conversation.addUser("x".repeat(500));
+  conversation.addAssistantToolCalls([{ id: "s1", name: "read_skill", arguments: "{}" }]);
+  const skillPayload = {
+    path: ".agents/skills/dependency-upgrades/SKILL.md",
+    content: `skill body ${"y".repeat(40_000)}`,
+    source: "trusted-base",
+    content_complete: true,
+  };
+  conversation.addToolResult("s1", skillPayload, { tool: "read_skill", maxBytes: 60_000 });
+  conversation.addAssistantToolCalls([{ id: "c2", name: "read_file", arguments: "{}" }]);
+  conversation.addToolResult("c2", { blob: "z".repeat(30_000) }, { maxBytes: 40_000 });
+  const { postFn, executeFn, timeFn } = scriptedLoop([openAiText("done")], []);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: { ...adaptiveLoopBudgets(1, 8, 120), maxConversationTokens: 100, truncatedResultBytes: 100 },
+    timeFn,
+  });
+  assert.ok(outcome.compactionTruncate >= 1);
+  const events = conversation.events.filter((e) => e.kind === "tool_result") as Array<{ call_id: string; content: string }>;
+  const skill = events.find((e) => e.call_id === "s1")!;
+  assert.match(skill.content, /\[repository skill \(\.agents\/skills\/dependency-upgrades\/SKILL\.md\) discarded during context compaction/);
+  assert.doesNotMatch(skill.content, /skill body/, "no partial skill content survives");
+  const normal = events.find((e) => e.call_id === "c2")!;
+  assert.ok(Buffer.byteLength(normal.content, "utf8") <= 100, "non-skill results still blunt-truncate");
+});
+
+test("#1043 review: digest folding leaves skill results out of the digest and marks them discarded", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("x".repeat(500));
+  conversation.addAssistantToolCalls([{ id: "s1", name: "read_skill", arguments: "{}" }]);
+  conversation.addToolResult(
+    "s1",
+    { path: ".agents/skills/app-security/SKILL.md", content: "SECRET-SKILL-ADVICE check auth boundaries", content_complete: true, source: "trusted-base" },
+    { tool: "read_skill", maxBytes: 60_000 },
+  );
+  conversation.addAssistantToolCalls([{ id: "c1", name: "read_file", arguments: "{}" }]);
+  conversation.addToolResult("c1", "old file evidence");
+  conversation.addAssistantToolCalls([{ id: "c2", name: "read_file", arguments: "{}" }]);
+  conversation.addToolResult("c2", "newest file evidence");
+  const { postFn, executeFn, timeFn } = scriptedLoop([openAiText("done")], []);
+  const summarizeFn = (block: string) => {
+    assert.doesNotMatch(block, /SECRET-SKILL-ADVICE/, "skill bodies never enter the digest prompt");
+    assert.match(block, /old file evidence/);
+    return "digest of old evidence";
+  };
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: { ...adaptiveLoopBudgets(1, 8, 120), maxConversationTokens: 10, summarizeKeepNewest: 1 },
+    summarizeFn,
+    timeFn,
+  });
+  assert.ok(outcome.compactionSummarize >= 1);
+  const events = conversation.events.filter((e) => e.kind === "tool_result") as Array<{ call_id: string; content: string }>;
+  assert.match(events[0]!.content, /\[repository skill \(\.agents\/skills\/app-security\/SKILL\.md\) discarded during context compaction/);
+  assert.doesNotMatch(events[0]!.content, /SECRET-SKILL-ADVICE/);
+  assert.match(events[1]!.content, /Condensed digest/);
+  assert.equal(events.at(-1)!.content, "newest file evidence");
+});
+
 test("compaction: the model-generated digest folds old results, newest stay verbatim", async () => {
   const conversation = new Conversation();
   conversation.addUser("x".repeat(500));
@@ -341,7 +437,23 @@ test("#895: a small non-explicit budget still gets at least the doubled-rounds f
   assert.equal(adaptiveLoopBudgets(4, 6, 600, false).maxRounds, 8); // max(4*2, 6)
 });
 
-test("a non-explicit round cap allows one round per tool call", () => {
-  assert.equal(adaptiveLoopBudgets(4, 24, 600, false).maxRounds, 24);
+test("a non-explicit round cap allows one round per tool call", () => {  assert.equal(adaptiveLoopBudgets(4, 24, 600, false).maxRounds, 24);
   assert.equal(adaptiveLoopBudgets(4, 32, 600, false).maxRounds, 32);
+});
+
+test("#1043 review: the summarizer request advertises no tools in either wire format", () => {
+  // The digest request rides postFn with no executor — a fresh Conversation
+  // inherits the global TOOL_SCHEMAS, so the summarizer must clear them and
+  // the payload must omit the field entirely (an empty array is still a
+  // tools field some providers reject).
+  const summarizer = buildSummarizerConversation("compress these results");
+  const openai = summarizer.toRequestPayload("openai", "m", { stream: false, maxTokens: 128 }) as Record<string, unknown>;
+  assert.equal("tools" in openai, false);
+  const anthropic = summarizer.toRequestPayload("anthropic", "m", { stream: false, maxTokens: 128 }) as Record<string, unknown>;
+  assert.equal("tools" in anthropic, false);
+  assert.match(String(openai.messages ? JSON.stringify(openai.messages) : ""), /compress these results/);
+  // Sanity: the default loop conversation still advertises the tool set.
+  const loopConversation = new Conversation();
+  const loopPayload = loopConversation.toRequestPayload("openai", "m", { stream: false }) as Record<string, unknown>;
+  assert.ok(Array.isArray(loopPayload.tools) && (loopPayload.tools as unknown[]).length > 0);
 });

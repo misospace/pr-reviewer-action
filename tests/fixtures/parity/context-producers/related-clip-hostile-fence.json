@@ -1,8 +1,0 @@
-{
-  "fixture": "related-clip-hostile-fence",
-  "description": "ADVERSARIAL (PR 252 convention): content carrying the clip marker itself and inner ``` / ~~~ lines inside a four-backtick fence; a cut inside that fence drops back to before its opener, so no inner delimiter can pose as the closer.",
-  "producer": "related-clip",
-  "markdown": "# Related Code Context\n\n[related-code context truncated]\n\n## `src/x.md`\n\n````md\n```\nnot a closer for the four-backtick fence\n~~~\n```\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\nbody line\n````\n\n- Tests: none\n",
-  "max_bytes": 313,
-  "repo_files": {}
-}

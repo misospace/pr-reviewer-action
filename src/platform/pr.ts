@@ -47,3 +47,22 @@ export function deriveIsFork(raw: unknown): boolean {
   if (!identity.headRepoFullName) return true;
   return identity.headRepoFullName !== identity.baseRepoFullName;
 }
+
+/** Which side a caller should fail to when the draft state is uncertain. */
+export type DraftState = "draft" | "not-draft" | "unknown";
+
+/**
+ * The ONE draft derivation (#961): a PR the forge reports as a draft is
+ * never reviewed. Only an explicit boolean `draft` value is authoritative:
+ * `true` → draft, `false` → not-draft (the Forgejo adapter normalizes its
+ * payload to a boolean at the seam; the GitHub pulls API sends one). A
+ * missing, null, or unrecognizable draft value is `unknown` — the caller
+ * decides which side uncertainty fails to, and the precheck fails closed:
+ * a PR whose reviewability cannot be PROVEN is not reviewed.
+ */
+export function deriveDraftState(raw: unknown): DraftState {
+  const value = asObject(raw).draft;
+  if (value === true) return "draft";
+  if (value === false) return "not-draft";
+  return "unknown";
+}

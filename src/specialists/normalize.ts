@@ -206,7 +206,7 @@ function normalizeAdversarialFields(
     // case), else "consequence"; the " and consequence" suffix is appended
     // whenever trigger is present (i.e. only when consequence alone is
     // missing), which reads oddly ("missing consequence and consequence")
-    // but is v2's actual behavior and is pinned by the parity fixtures.
+    // but is v2's actual behavior and is pinned by tests.
     const missingTrigger = lead.trigger === undefined;
     const which = missingTrigger ? "trigger" : "consequence";
     const andConsequence = !missingTrigger ? " and consequence" : "";

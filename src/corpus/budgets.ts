@@ -11,11 +11,16 @@
  *   system prompt, standards section and formatting) is reserved FIRST, the
  *   remainder converts at ~3 bytes/token (deliberately under-filling), and
  *   MAX_DIFF / MAX_FILES take 60% / 15% of that byte pool with small floors.
- * - Tier overrides are capped at 166,666 usable tokens and REFUSE (error) a
+ * - Tier overrides are capped at TIER_USABLE_TOKENS_CAP usable tokens (#922:
+ *   was 166,666) and REFUSE (error) a
  *   window that cannot fit the output headroom plus a 2000-token input
  *   budget; the legacy global setting floors at 2000 instead of refusing.
  * - The runtime budgets always reflect the PRIMARY tier; the smart tier
- *   profile is what `build_review_corpus smart` consumes (#658/#668). */
+ *   profile is what `build_review_corpus smart` consumes (#658/#668). The
+ *   fallback tier's own budgets (#940) ride along for the recovery path:
+ *   the smart tier is deliberately left uncapped by the fallback window,
+ *   so the availability-fallback request sizes its re-truncated corpus
+ *   from `fallback` instead. */
 
 export class BudgetError extends Error {}
 
@@ -32,6 +37,9 @@ export interface BudgetInputs {
   primaryModelContextTokens?: string | undefined;
   /** SMART_MODEL_CONTEXT_TOKENS. */
   smartModelContextTokens?: string | undefined;
+  /** FALLBACK_MODEL_CONTEXT_TOKENS (#922): the fallback reuses the primary
+   * corpus, so a declared fallback window caps the primary budgets. */
+  fallbackModelContextTokens?: string | undefined;
   /** AI_MAX_TOKENS (default 8192). */
   aiMaxTokens?: string | undefined;
   /** CONTEXT_LIMIT_MODE (default normal). */
@@ -39,6 +47,9 @@ export interface BudgetInputs {
 }
 
 const DEFAULT_AI_MAX_TOKENS = 8192;
+
+/** #922: usable-token ceiling for a declared tier window (v2: 166,666). */
+export const TIER_USABLE_TOKENS_CAP = 400000;
 
 function positiveIntOrEmpty(value: string | undefined): string | null | undefined {
   if (value === undefined || value === "") {
@@ -80,8 +91,8 @@ function applyContextLimits(
     }
     // Explicit tier overrides cannot allocate an unbounded corpus. The legacy
     // global setting retains its historical calculation when no override is set.
-    if (isTier && usable > 166666) {
-      usable = 166666;
+    if (isTier && usable > TIER_USABLE_TOKENS_CAP) {
+      usable = TIER_USABLE_TOKENS_CAP;
     }
     const totalBytes = usable * 3;
     let maxDiff = Math.trunc((totalBytes * 6) / 10);
@@ -109,15 +120,26 @@ function namedModeBudgets(contextLimitMode: string): TierBudgets {
  * `BudgetError` with the v2-identical message when a tier token override is
  * invalid or cannot fit the output headroom; the caller decides whether that
  * aborts the run (v2: `exit 1`). */
-export function resolveTierBudgets(inputs: BudgetInputs): { primary: TierBudgets; smart: TierBudgets } {
+export function resolveTierBudgets(inputs: BudgetInputs): {
+  primary: TierBudgets;
+  smart: TierBudgets;
+  /** #940: the fallback tier's own derivation, or null when no fallback
+   * window is declared. #922 caps the primary tier with these budgets, but
+   * the smart tier is returned uncapped — the smart tier's declared window
+   * can exceed a smaller fallback's capacity, so the recovery request reads
+   * its bound from here. */
+  fallback: TierBudgets | null;
+} {
   const aiMaxTokens = inputs.aiMaxTokens !== undefined && inputs.aiMaxTokens !== ""
     ? Number(inputs.aiMaxTokens)
     : DEFAULT_AI_MAX_TOKENS;
   const contextLimitMode = inputs.contextLimitMode ?? "normal";
 
   // v2 validates the tier variables up front with per-variable messages.
-  for (const tier of ["PRIMARY", "SMART"] as const) {
-    const raw = tier === "PRIMARY" ? inputs.primaryModelContextTokens : inputs.smartModelContextTokens;
+  for (const tier of ["PRIMARY", "SMART", "FALLBACK"] as const) {
+    const raw = tier === "PRIMARY"
+      ? inputs.primaryModelContextTokens
+      : tier === "SMART" ? inputs.smartModelContextTokens : inputs.fallbackModelContextTokens;
     const checked = positiveIntOrEmpty(raw);
     if (checked === null) {
       throw new BudgetError(`Invalid ${tier}_MODEL_CONTEXT_TOKENS: expected a positive integer`);
@@ -141,14 +163,23 @@ function resolveFrom(
   inputs: BudgetInputs,
   aiMaxTokens: number,
   contextLimitMode: string,
-): { primary: TierBudgets; smart: TierBudgets } {
+): { primary: TierBudgets; smart: TierBudgets; fallback: TierBudgets | null } {
   let primary = base;
   let smart = base;
+  let fallback: TierBudgets | null = null;
   if (inputs.primaryModelContextTokens !== undefined && inputs.primaryModelContextTokens !== "") {
     primary = applyContextLimits(inputs.primaryModelContextTokens, "tier", aiMaxTokens, contextLimitMode);
   }
   if (inputs.smartModelContextTokens !== undefined && inputs.smartModelContextTokens !== "") {
     smart = applyContextLimits(inputs.smartModelContextTokens, "tier", aiMaxTokens, contextLimitMode);
   }
-  return { primary, smart };
+  if (inputs.fallbackModelContextTokens !== undefined && inputs.fallbackModelContextTokens !== "") {
+    fallback = applyContextLimits(inputs.fallbackModelContextTokens, "tier", aiMaxTokens, contextLimitMode);
+    primary = {
+      maxCorpus: Math.min(primary.maxCorpus, fallback.maxCorpus),
+      maxDiff: Math.min(primary.maxDiff, fallback.maxDiff),
+      maxFiles: Math.min(primary.maxFiles, fallback.maxFiles),
+    };
+  }
+  return { primary, smart, fallback };
 }

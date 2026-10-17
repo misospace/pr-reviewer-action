@@ -6,6 +6,8 @@ import type { ResolvedPlatform } from "./resolve.js";
  * fail-loud guard every adapter-construction site runs, and the Spindle
  * runtime-context normalization later tickets will consume.
  *
+ * The read-side Bobbin client + canonical pull resolver live in tangled-bobbin.ts (#584).
+ *
  * The context port mirrors `pr_reviewer/tangled_context.py` semantics:
  * environment-driven, stdlib-only, never reads GitHub event JSON, never
  * makes network calls. `TANGLED_REPO_DID` is the repository *owner's* DID
@@ -44,6 +46,25 @@ export function requireImplementedBackend(
   platform: ResolvedPlatform,
 ): asserts platform is Exclude<ResolvedPlatform, "tangled"> {
   if (platform === "tangled") throw new TangledNotImplementedError();
+}
+
+/** A Tangled read capability that #585 has not wired yet. The message names
+ * the specific capability so a caller can see exactly what is missing; the
+ * class stays in the `TangledNotImplementedError` family so existing
+ * `instanceof` guards keep matching. Unlike the zero-arg guard error above,
+ * the capability is caller-supplied. */
+export class TangledCapabilityError extends TangledNotImplementedError {
+  constructor(capability: string) {
+    super();
+    this.message = `tangled ${capability} is not implemented yet (#585 wires metadata reads only)`;
+    this.name = "TangledCapabilityError";
+  }
+}
+
+/** Build a capability-scoped `TangledNotImplementedError` for one specific
+ * unimplemented Tangled read (see `TangledAdapter`). */
+export function tangledCapabilityError(capability: string): TangledCapabilityError {
+  return new TangledCapabilityError(capability);
 }
 
 /** Plaintext http is accepted for these hosts only (local test instances). */

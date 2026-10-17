@@ -1,6 +1,6 @@
 {
   "fixture": "site-local-divergence",
-  "description": "An allowlisted hostname resolving into fec0::/10 (deprecated IPv6 site-local): CPython's ipaddress lists it in no private/reserved table, so v2 treats it as public and fetches; v3 blocks it (approved divergence).",
+  "description": "An allowlisted hostname resolving into fec0::/10 (deprecated IPv6 site-local): CPython's ipaddress lists it in no private/reserved table, so v2 treats it as public and fetches; v3 blocks it (deliberate divergence).",
   "input": {
     "urls": [
       "https://artifacthub.io/site-local"

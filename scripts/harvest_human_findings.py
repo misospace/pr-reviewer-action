@@ -28,9 +28,13 @@ after the fact — so the approval decision is read from the bot's
 present (``review_result: "clean"``), and only falls back to the raw
 ``state`` when no marker parses.
 
-GitHub reads only (``gh api`` when available, otherwise ``urllib`` with a
-token from the environment — never argv). This script never writes to
-GitHub: it only ever rewrites the local corpus JSON file.
+GitHub reads only — every request goes through ``pr_reviewer.forge``,
+the configured forge capability, the one module that knows how to
+authenticate and how to refuse redirects safely. This script never shells
+out to a forge CLI and never hand-rolls an ``urllib`` request; the forge
+module is the only thing in this script that knows the API URL or carries
+the token. This script never writes to GitHub: it only ever rewrites the
+local corpus JSON file.
 
 Everything is agnostic: repos, maintainer logins and bot logins are inputs
 (argparse or environment), never hardcoded.
@@ -42,14 +46,10 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
-import shutil
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
-from urllib.request import Request
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
@@ -59,7 +59,7 @@ for _p in (str(ROOT), str(SCRIPT_DIR)):
 
 from eval_harness import RealPRCorpus  # noqa: E402
 from pr_reviewer.metadata import parse_metadata  # noqa: E402
-from pr_reviewer.http_safe import OPENER_NO_REDIRECT  # noqa: E402
+from pr_reviewer.forge import ForgeError, ForgeClient  # noqa: E402
 
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 
@@ -70,70 +70,63 @@ _MAJOR_RE = re.compile(r"\bmajor\b", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
-# GitHub read access
+# Forge read access
 # ---------------------------------------------------------------------------
 
 
-class GitHubAPIError(RuntimeError):
-    """A GitHub REST read failed."""
+# Re-export the forge error under the script's historical name so existing
+# callers/tests that catch ``GitHubAPIError`` keep working without churn.
+GitHubAPIError = ForgeError
 
 
 class GitHubClient:
-    """Read-only GitHub REST client.
+    """Read-only GitHub REST client backed by the configured forge capability.
 
-    Uses the ``gh`` CLI when it's on PATH (so auth flows through gh's own
-    token handling), otherwise falls back to ``urllib`` with a token read
-    from the environment. The token is never passed via argv either way, and
-    no method here performs a write.
+    The script used to fork between the ``gh`` CLI (when present) and a
+    ``urllib`` fallback — two transports, two failure modes, and a token
+    that had to be threaded into both. The forge boundary now lives in
+    ``pr_reviewer.forge``: every read goes through
+    :class:`pr_reviewer.forge.ForgeClient`, the redirect-safe transport
+    lives there once, and the token is configured (never argv) by the
+    forge module.
     """
 
-    def __init__(self, token: str | None = None, use_gh_cli: bool | None = None):
-        self.token = token
-        self.use_gh_cli = shutil.which("gh") is not None if use_gh_cli is None else use_gh_cli
+    def __init__(self, token: str | None = None, **_unused: Any) -> None:
+        # ``token`` is accepted for backwards compatibility with callers
+        # that still pass an explicit token (e.g. tests); the forge module
+        # is the one that decides what to do with it (env override or
+        # explicit value). The unused kwargs swallow the historical
+        # ``use_gh_cli`` flag without raising on legacy call sites.
+        self._forge = ForgeClient(token=token)
 
     def _request(self, path_with_query: str) -> Any:
-        if self.use_gh_cli:
-            result = subprocess.run(
-                ["gh", "api", path_with_query],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if result.returncode != 0:
-                raise GitHubAPIError(
-                    f"gh api {path_with_query} failed: {result.stderr.strip()}"
-                )
-            return json.loads(result.stdout)
-
-        # Read GitHub API base URL at call time (can be overridden via GITHUB_API_URL env for testing)
-        github_api_base = os.environ.get("GITHUB_API_URL", "https://api.github.com")
-        url = f"{github_api_base}{path_with_query}"
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        req = Request(url, headers=headers)
+        if "?" in path_with_query:
+            path, query = path_with_query.split("?", 1)
+            params: dict[str, str] = {}
+            for part in query.split("&"):
+                if not part:
+                    continue
+                key, _, value = part.partition("=")
+                params[key] = value
+        else:
+            path, params = path_with_query, {}
         try:
-            with OPENER_NO_REDIRECT.open(req, timeout=30) as resp:  # noqa: S310 - fixed https host
-                return json.loads(resp.read().decode("utf-8"))
-        except Exception as exc:  # noqa: BLE001
-            raise GitHubAPIError(f"GET {path_with_query} failed: {exc}") from exc
+            return self._forge.get(path, params)
+        except ForgeError as exc:
+            raise GitHubAPIError(str(exc)) from None
 
     def get_pages(self, path: str, params: dict[str, str] | None = None) -> Iterator[Any]:
         """Yield every item across all pages of a GitHub list endpoint."""
-        params = dict(params or {})
-        params.setdefault("per_page", "100")
+        coerced: dict[str, Any] = dict(params or {})
+        coerced.setdefault("per_page", "100")
         page = 1
         while True:
-            params["page"] = str(page)
-            full_path = f"{path}?{urlencode(params)}"
-            data = self._request(full_path)
+            coerced["page"] = str(page)
+            data = self._forge.get(path, coerced)
             if not isinstance(data, list) or not data:
                 return
             yield from data
-            if len(data) < int(params["per_page"]):
+            if len(data) < int(coerced["per_page"]):
                 return
             page += 1
 
@@ -166,10 +159,6 @@ class GitHubClient:
 
     def list_files(self, repo: str, number: int) -> list[dict[str, Any]]:
         return list(self.get_pages(f"/repos/{repo}/pulls/{number}/files"))
-
-
-def _resolve_token() -> str | None:
-    return os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
 
 
 # ---------------------------------------------------------------------------
@@ -647,7 +636,7 @@ def main(argv: list[str] | None = None) -> int:
     vulnerable = block.setdefault("vulnerable", [])
     existing_ids = {e.get("id") for e in vulnerable if isinstance(e, dict)}
 
-    client = GitHubClient(token=_resolve_token())
+    client = GitHubClient()
 
     all_findings: list[dict[str, Any]] = []
     for repo in repos:

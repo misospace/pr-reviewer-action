@@ -3,10 +3,10 @@
  * skipped, so a review is never blocked on a slow upstream; the first time the
  * budget is found exhausted a single warning goes to stderr.
  *
- * The clocks are injectable so the parity harness can drive budget
- * exhaustion deterministically: `BudgetTracker` reads its clock exactly as
- * v2 does (once at construction, twice per `ok()`), so a fixture's fake clock
- * sees the same call sequence on both sides. */
+ * The clocks are injectable so tests can drive budget exhaustion
+ * deterministically: `BudgetTracker` reads its clock exactly as v2 does (once
+ * at construction, twice per `ok()`), so an injected fake clock sees the same
+ * call sequence. */
 
 export type Clock = () => number;
 

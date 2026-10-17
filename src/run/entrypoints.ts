@@ -4,6 +4,7 @@ import { resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
 import { GitHubAdapter } from "../platform/github.js";
 import { ForgejoAdapter } from "../platform/forgejo.js";
+import { forgejoTokenFromEnv } from "../platform/forgejo-auth.js";
 import type { PlatformAdapter } from "../platform/types.js";
 import { GitHubPublishApi } from "../platform/publish-api.js";
 import { ForgejoPublishApi } from "../platform/publish-api.js";
@@ -14,6 +15,9 @@ import type { UpstreamLinkMode } from "../publish/sanitize.js";
 import { nonEmpty } from "./run-dir.js";
 import { partialCoverageOf } from "./review.js";
 import type { PartialCoverage } from "../tools/coverage.js";
+import { isIncompleteReason, type IncompleteReason } from "../publish/outputs.js";
+import { resolveReviewTriageDecision } from "../model/triage.js";
+import { isHumanReviewRoutingStatus, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 
 /**
  * Production entrypoints for the #706 composite cutover: the precheck and
@@ -46,7 +50,7 @@ export function buildAdapter(env: NodeJS.ProcessEnv): PlatformAdapter {
       repo,
       prNumber,
       baseUrl: env.FORGEJO_API_URL ?? "",
-      token: env.FORGEJO_TOKEN || env.GITHUB_TOKEN || env.GH_TOKEN || undefined,
+      token: forgejoTokenFromEnv(env),
       ...(env.FORGEJO_AUTH_METHOD !== undefined ? { authMethod: env.FORGEJO_AUTH_METHOD } : {}),
       ...(env.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE !== undefined
         ? { authorizedIntegrationAudience: env.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE }
@@ -62,10 +66,21 @@ export function buildAdapter(env: NodeJS.ProcessEnv): PlatformAdapter {
   });
 }
 
+// #914: the `issue_comment` payload's top-level `comment` object, parsed
+// defensively into a flat shape the /ai-review re-review command consumes.
+// Each sub-field is optional because a malformed / hostile comment must
+// degrade to fewer fields, never a throw.
+export interface StepEventComment {
+  id?: number | string;
+  body?: string;
+  user?: string;
+}
+
 export interface StepEvent {
   name?: string;
   action?: string;
   label?: string;
+  comment?: StepEventComment;
 }
 
 export function readEvent(env: NodeJS.ProcessEnv): { event?: StepEvent; headSha?: string; prNumber?: string } {
@@ -77,6 +92,13 @@ export function readEvent(env: NodeJS.ProcessEnv): { event?: StepEvent; headSha?
       action?: string;
       label?: unknown;
       pull_request?: { number?: number; head?: { sha?: string } };
+      // #914: the `issue_comment` payload shape. The comment's `issue`
+      // carries the PR number on `issue.number`, and `issue.pull_request` is
+      // present ONLY for comments on a PR (GitHub includes that key only
+      // then). A top-level `comment` (`{ id, body, user: { login } }`)
+      // carries the comment the re-review command acts on.
+      issue?: { number?: number; pull_request?: unknown };
+      comment?: { id?: unknown; body?: unknown; user?: { login?: unknown } };
     };
     const event: StepEvent = {};
     // #892: the GitHub (and Forgejo act_runner) event payload has no
@@ -91,10 +113,43 @@ export function readEvent(env: NodeJS.ProcessEnv): { event?: StepEvent; headSha?
     // path in action.ts already does, so the precheck gate sees a string.
     const labelName = eventLabelName(parsed.label);
     if (labelName !== "") event.label = labelName;
+    // #914: a real `issue_comment` payload has a top-level `comment`
+    // (`{ id, body, user: { login } }`). Parse it defensively: each
+    // sub-field is kept only when present AND the right type, so a
+    // malformed / hostile comment degrades to fewer fields, never a throw.
+    // `comment` is omitted entirely when the payload has no comment object.
+    const rawComment = parsed.comment;
+    if (rawComment !== null && typeof rawComment === "object" && !Array.isArray(rawComment)) {
+      const comment: StepEventComment = {};
+      const commentId = rawComment.id;
+      if (typeof commentId === "number" || typeof commentId === "string") comment.id = commentId;
+      if (typeof rawComment.body === "string") comment.body = rawComment.body;
+      const commentUser = rawComment.user;
+      if (commentUser !== null && typeof commentUser === "object" && !Array.isArray(commentUser)) {
+        const commentLogin = commentUser.login;
+        if (typeof commentLogin === "string") comment.user = commentLogin;
+      }
+      event.comment = comment;
+    }
+    // #914: an `issue_comment` payload has NO top-level `pull_request`, so
+    // the PR number lives on `issue.number` — but ONLY when the comment is
+    // on a PR, i.e. ONLY when `issue.pull_request` is present. A comment on
+    // a plain issue (no `issue.pull_request`) must yield NO prNumber: that
+    // absence is the honest signal the workflow/PR check uses to no-op.
+    // (headSha is unchanged: issue_comment payloads genuinely have no head
+    // SHA and we never fabricate one — the action fetches the PR later.)
+    const prNumber =
+      typeof parsed.pull_request?.number === "number"
+        ? String(parsed.pull_request.number)
+        : parsed.pull_request === undefined
+          && parsed.issue?.pull_request !== undefined
+          && typeof parsed.issue?.number === "number"
+          ? String(parsed.issue.number)
+          : undefined;
     return {
       ...(Object.keys(event).length > 0 ? { event } : {}),
       ...(parsed.pull_request?.head?.sha !== undefined ? { headSha: parsed.pull_request.head.sha } : {}),
-      ...(typeof parsed.pull_request?.number === "number" ? { prNumber: String(parsed.pull_request.number) } : {}),
+      ...(prNumber !== undefined ? { prNumber } : {}),
     };
   } catch {
     return {};
@@ -114,10 +169,19 @@ function persistOutputs(filePath: string, assignments: ReadonlyArray<[string, st
 /** `node dist/index.js precheck` — the typed successor of
  * `scripts/check_review_needed.sh` in the composite. */
 export async function precheckMain(env: NodeJS.ProcessEnv): Promise<number> {
-  const { event, headSha: eventHeadSha } = readEvent(env);
+  const { event, headSha: eventHeadSha, prNumber } = readEvent(env);
+  // #914: an `issue_comment` payload's only PR-number source is
+  // `issue.number` — the action entry merges it via actionStageEnv; this
+  // CLI subcommand must apply the same fallback or a comment-triggered
+  // precheck would fail on a missing PR_NUMBER.
+  const stage = prNumber !== undefined && (env.PR_NUMBER ?? "") === ""
+    ? { ...env, PR_NUMBER: prNumber }
+    : env;
+  const adapter = buildAdapter(stage);
+  await adapter.preflightAuthentication?.();
   const output = await runPrecheck({
-    env: env as Record<string, string>,
-    adapter: buildAdapter(env),
+    env: stage as Record<string, string>,
+    adapter,
     ...(event !== undefined ? { event: event as never } : {}),
     ...(eventHeadSha !== undefined ? { eventHeadSha } : {}),
   });
@@ -186,6 +250,7 @@ interface CoverageResolution {
   partialCoverage: PartialCoverage | undefined;
   unknown: boolean;
   requiredChecks: string;
+  incompleteReason: string;
 }
 
 /** Validates one field of #873's authoritative `review-coverage.json`
@@ -254,12 +319,14 @@ const ENFORCEMENT_HARNESS_NAMES: ReadonlySet<string> = new Set(["tool-harness.js
  *   cleanly settles the question, either way. */
 function partialCoverageFromRunDir(env: NodeJS.ProcessEnv): CoverageResolution {
   const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
-  if (runDir === undefined) return { partialCoverage: undefined, unknown: true, requiredChecks: "none" };
+  if (runDir === undefined) return { partialCoverage: undefined, unknown: true, requiredChecks: "none", incompleteReason: "none" };
   const artifact = readJsonObject(join(runDir, "review-coverage.json"));
   if (artifact === null || artifact.version !== 1 || typeof artifact.tool_loop_ran !== "boolean") {
-    return { partialCoverage: undefined, unknown: true, requiredChecks: "none" };
+    return { partialCoverage: undefined, unknown: true, requiredChecks: "none", incompleteReason: "none" };
   }
-  const requiredChecks = validateRequiredChecks(artifact.required_checks);
+  let requiredChecks = validateRequiredChecks(artifact.required_checks);
+  const recordedGap = parsePartialCoverageField(artifact.partial_coverage);
+  const recordedReason = isIncompleteReason(artifact.incomplete_reason) ? artifact.incomplete_reason : undefined;
   if (requiredChecks === undefined) {
     // #873 maintainer follow-up: the run writer always emits this field, so
     // an absent or invalid value means the artifact is not one this runtime
@@ -267,20 +334,44 @@ function partialCoverageFromRunDir(env: NodeJS.ProcessEnv): CoverageResolution {
     // instead — coverage unknown, and the publish input carries the
     // conservative "incomplete" so no policy branch can read the
     // required-check dimension as clean.
-    return { partialCoverage: undefined, unknown: true, requiredChecks: "incomplete" };
+    return { partialCoverage: undefined, unknown: true, requiredChecks: "incomplete", incompleteReason: recordedReason ?? "execution" };
   }
-  if (!artifact.tool_loop_ran) return { partialCoverage: undefined, unknown: false, requiredChecks };
+  if (recordedReason === "requirement_trace" || recordedReason === "both") requiredChecks = "incomplete";
+  const incompleteReason: IncompleteReason = recordedReason !== undefined && recordedReason !== "none"
+    ? recordedReason
+    : (requiredChecks === "incomplete" || recordedGap !== undefined) ? "execution" : "none";
+  if (!artifact.tool_loop_ran) return { partialCoverage: undefined, unknown: false, requiredChecks, incompleteReason };
 
-  const recordedGap = parsePartialCoverageField(artifact.partial_coverage);
-  if (recordedGap !== undefined) return { partialCoverage: recordedGap, unknown: false, requiredChecks };
+  if (recordedGap !== undefined) return { partialCoverage: recordedGap, unknown: false, requiredChecks, incompleteReason };
 
   const harnessName = typeof artifact.enforcement_harness === "string" && ENFORCEMENT_HARNESS_NAMES.has(artifact.enforcement_harness)
     ? artifact.enforcement_harness
     : undefined;
-  if (harnessName === undefined) return { partialCoverage: undefined, unknown: true, requiredChecks };
+  if (harnessName === undefined) return { partialCoverage: undefined, unknown: true, requiredChecks, incompleteReason };
   const harness = readJsonObject(join(runDir, harnessName));
-  if (harness === null) return { partialCoverage: undefined, unknown: true, requiredChecks };
-  return { partialCoverage: partialCoverageOf(harness), unknown: false, requiredChecks };
+  if (harness === null) return { partialCoverage: undefined, unknown: true, requiredChecks, incompleteReason };
+  return { partialCoverage: partialCoverageOf(harness), unknown: false, requiredChecks, incompleteReason };
+}
+
+/** #1005: read the persisted reviewer-routing plan from the run dir (never
+ * cwd). A missing, unparseable, or structurally unrecognizable plan yields
+ * `undefined` (no routing) so an uncertain plan can never mutate the forge. */
+function reviewRoutingFromRunDir(env: NodeJS.ProcessEnv): HumanReviewRoutingPlan | undefined {
+  const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
+  if (runDir === undefined) return undefined;
+  const record = readJsonObject(join(runDir, "review-routing.json"));
+  if (record === null) return undefined;
+  if (!isHumanReviewRoutingStatus(record.status)) return undefined;
+  if (record.mode !== "off" && record.mode !== "advisory" && record.mode !== "request") return undefined;
+  const strArray = (value: unknown): string[] => Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+  return {
+    mode: record.mode,
+    status: record.status,
+    targetIds: strArray(record.target_ids),
+    users: strArray(record.users),
+    teams: strArray(record.teams),
+    detail: typeof record.detail === "string" ? record.detail : "",
+  };
 }
 
 /** The platform publish seam (GitHub REST/GraphQL or Forgejo /api/v1). */
@@ -289,9 +380,7 @@ export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformA
   const prNumber = env.PR_NUMBER ?? "";
   const platform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "", env.TANGLED_REPO_DID ?? "");
   requireImplementedBackend(platform);
-  const token = platform === "forgejo"
-    ? (env.FORGEJO_TOKEN || env.GITHUB_TOKEN || env.GH_TOKEN || "")
-    : ghToken(env);
+  const token = platform === "forgejo" ? forgejoTokenFromEnv(env) : ghToken(env);
   const apiOptions = {
     repo,
     prNumber,
@@ -300,7 +389,13 @@ export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformA
   };
   const diffProvider = async (): Promise<string> => buildAdapter(env).getPrDiff();
   const api: PublishPlatformApi = platform === "forgejo"
-    ? new ForgejoPublishApi({ ...apiOptions, baseUrl: env.FORGEJO_API_URL ?? "", diffProvider })
+    ? new ForgejoPublishApi({
+      ...apiOptions,
+      baseUrl: env.FORGEJO_API_URL ?? "",
+      authMethod: env.FORGEJO_AUTH_METHOD,
+      authorizedIntegrationAudience: env.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE,
+      diffProvider,
+    })
     : new GitHubPublishApi(apiOptions);
   return { api, platform, diffProvider };
 }
@@ -314,6 +409,7 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
   // env, which (like `TOOL_MODE`/`REVIEW_ROUTE` before it) can be omitted
   // or stale for the run actually being published.
   const coverage = partialCoverageFromRunDir(env);
+  const reviewRouting = reviewRoutingFromRunDir(env);
   return {
     mode: publishMode(env.PUBLISH_MODE),
     reviewMarkdown: env.REVIEW_MARKDOWN ?? "",
@@ -325,6 +421,7 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
     commentMarker: env.COMMENT_MARKER ?? "",
     ...(env.BROAD_FINGERPRINT !== undefined ? { broadFingerprint: env.BROAD_FINGERPRINT } : {}),
     requiredChecks: coverage.requiredChecks,
+    incompleteReason: coverage.incompleteReason,
     reviewRoute: env.REVIEW_ROUTE ?? "",
     escalationReason: env.ESCALATION_REASON ?? "",
     cacheHitRatio: env.CACHE_HIT_RATIO ?? "",
@@ -344,7 +441,27 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
       toolHarnessResults: isFileNonEmpty(env, "tool-harness.md"),
     },
     ...(env.REREVIEW_LABEL ? { rerunLabel: env.REREVIEW_LABEL } : {}),
+    // #1003: the human-review triage answer, mirrored from the action's own
+    // publish env so a standalone `publish` re-publish carries the same
+    // section the review run would have written. Empty means triage did not
+    // run — distinct from the fail-closed `unknown` answer, which is a real
+    // value here and must still render. A value that is neither empty nor one
+    // of the three literals — and an unsubstantiated `not_required` — fails
+    // closed here too, at this boundary, rather than relying on a downstream
+    // renderer to reject it.
+    ...(env.REVIEW_TRIAGE_DECISION
+      ? {
+        reviewTriage: {
+          decision: resolveReviewTriageDecision(env.REVIEW_TRIAGE_DECISION, env.REVIEW_TRIAGE_REASON ?? ""),
+          reason: env.REVIEW_TRIAGE_REASON ?? "",
+        },
+      }
+      : {}),
     ...(env.VERDICT_POLICY ? { verdictPolicy: env.VERDICT_POLICY } : {}),
+    degradedGateBypass: env.DEGRADED_GATE_BYPASS === "true",
+    // #1005: the deterministic reviewer-routing plan the review step persisted
+    // (read from the run dir, never cwd). Absent when routing did not run.
+    ...(reviewRouting ? { reviewRouting } : {}),
     // #873: the same coverage-gap record `run` computed, read back from its
     // persisted artifact so a partial-coverage run can never publish
     // APPROVE through the standalone `publish` CLI path either. `unknown`

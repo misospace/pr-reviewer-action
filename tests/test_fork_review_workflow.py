@@ -1,10 +1,11 @@
 """Structural security tests for the fork AI review workflow (issue: fork PRs).
 
-The fork reviewer (``.github/workflows/fork-ai-review.yaml``) is a privileged
+The fork reviewer (``.github/workflows/ai-pr-review-fork.yaml``) is a privileged
 workflow: it holds model credentials and publishes reviews. These tests pin
-its security invariants as text assertions (no YAML parser in the CI test env
-— same approach as ``test_dogfood_workflow.py``), so a later "cleanup" cannot
-silently weaken the boundary:
+its security invariants as text assertions (matching
+``test_dogfood_workflow.py``; PyYAML is available but the raw text pins
+ordering and shell bodies the parsed document would hide), so a later
+"cleanup" cannot silently weaken the boundary:
 
 1.  same-repo PRs stay on the dogfood reviewer; the fork path denies them;
 2.  fork PRs without ``ai-review-fork`` invoke no model (default-deny gate);
@@ -33,7 +34,7 @@ import pytest
 from test_dogfood_workflow import _extract_with_block, _unquote
 
 ROOT = Path(__file__).resolve().parent.parent
-FORK_WORKFLOW = ROOT / ".github" / "workflows" / "fork-ai-review.yaml"
+FORK_WORKFLOW = ROOT / ".github" / "workflows" / "ai-pr-review-fork.yaml"
 DOGFOOD_WORKFLOW = ROOT / ".github" / "workflows" / "ai-pr-review.yaml"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yaml"
 LABELS = ROOT / ".github" / "labels.yaml"
@@ -94,7 +95,7 @@ def test_fork_workflow_never_triggers_on_unprivileged_pull_request(fork_text) ->
     (maintainer label).
     """
     assert not re.search(r"^  pull_request:\s*$", fork_text, re.M), (
-        "fork-ai-review.yaml must not trigger on the unprivileged pull_request event"
+        "ai-pr-review-fork.yaml must not trigger on the unprivileged pull_request event"
     )
     assert re.search(r"^  workflow_run:", fork_text, re.M)
     assert re.search(r"^  pull_request_target:", fork_text, re.M)
@@ -319,6 +320,9 @@ def test_fork_model_policy_pinned_to_fork_variables(fork_text) -> None:
     assert values.get("ai-smart-model") == "${{ vars.FORK_SMART_MODEL }}"
     assert values.get("ai-smart-api-format") == "${{ vars.FORK_SMART_FORMAT }}"
     assert values.get("review-routing-mode") == "auto"
+    # #922: context windows come from fork pins too, never the dogfood ones.
+    assert values.get("primary-model-context-tokens") == "${{ vars.FORK_PRIMARY_CONTEXT_TOKENS }}"
+    assert values.get("smart-model-context-tokens") == "${{ vars.FORK_SMART_CONTEXT_TOKENS }}"
 
 
 def test_fork_model_policy_ignores_org_dogfood_variables(fork_text) -> None:
@@ -621,23 +625,31 @@ def test_dogfood_job_if_semantics() -> None:
         "github.event.pull_request.head.repo.id": repository_id,
         "github.repository_id": repository_id,
         "github.event.pull_request.draft": False,
+        # #914: present (an object) only when the comment is on a PR.
+        "github.event.issue.pull_request": None,
     }
 
-    def ctx(event_name: str, head_repo_id: object, draft: object) -> dict:
+    def ctx(event_name: str, head_repo_id: object, draft: object, issue_pr: object = None) -> dict:  # noqa: ANN001
         local = dict(base)
         local["github.event_name"] = event_name
         local["github.event.pull_request.head.repo.id"] = head_repo_id
         local["github.event.pull_request.draft"] = draft
+        local["github.event.issue.pull_request"] = issue_pr
         return local
 
     # Same-repo, ready PR → the dogfood reviewer runs.
     assert _eval_github_expr(expr, ctx("pull_request", repository_id, False)) is True
-    # Fork PR → skipped cleanly (the fork-ai-review workflow owns it).
+    # Fork PR → skipped cleanly (the ai-pr-review-fork workflow owns it).
     assert _eval_github_expr(expr, ctx("pull_request", 222222, False)) is False
     # Same-repo draft → skipped (pre-existing behavior preserved).
     assert _eval_github_expr(expr, ctx("pull_request", repository_id, True)) is False
     # workflow_dispatch (no PR context at all) → runs.
     assert _eval_github_expr(expr, ctx("workflow_dispatch", None, None)) is True
+    # #914: a comment on a PR (issue.pull_request relation present) → runs;
+    # fork-ness and authorization are decided API-side (pr-gate + action).
+    assert _eval_github_expr(expr, ctx("issue_comment", None, None, issue_pr={"url": "..."})) is True
+    # A comment on a plain issue (no relation) → no-op.
+    assert _eval_github_expr(expr, ctx("issue_comment", None, None)) is False
 
 
 if __name__ == "__main__":

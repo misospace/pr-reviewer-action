@@ -1,5 +1,5 @@
 /**
- * Fixture-mode enforcement CLI for the #680 parity harness and tests-v3.
+ * Fixture-mode enforcement CLI for tests-v3 (#680).
  *
  * `node dist/index.js enforcement-fixture <fixture.json>` runs the exact
  * production enforcement pipeline — verdict policy → completeness
@@ -12,9 +12,10 @@ import { readFileSync } from "node:fs";
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { ledgerToArtifact, loadLedgerFromValue } from "../requirements/ledger.js";
 import { reviewArtifactFromParsed, type ReviewArtifact } from "./artifact.js";
-import { applyVerdictPolicy, applyStrictVerdictPolicy, parseNonBlockingCategories, securityRiskFlagged } from "./verdict-policy.js";
+import { applyVerdictPolicy, applyStrictVerdictPolicy, relaxCiOnlyVerdict, relaxVerificationOnlyVerdict, parseNonBlockingCategories, securityRiskFlagged } from "./verdict-policy.js";
+import { capCiEvidenceFindings } from "./ci-evidence.js";
 import { applyRequiredCheckValidation, type RequiredCheckValidationResult } from "./completeness.js";
-import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "./enforce.js";
+import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "./enforce.js";
 import type { EnforcementThread } from "./threads.js";
 import type { EnforcementHumanReview } from "./human-reviews.js";
 import { normalizeRequirementCoverage, extractCoveragePayload } from "./requirement-coverage.js";
@@ -24,6 +25,7 @@ interface EnforcementFixture {
   /** The parsed ai-output.json artifact (snake_case persisted shape). */
   artifact: Record<string, unknown>;
   evidence?: Record<string, unknown> | null;
+  ci_checks_content?: string | null;
   tool_harness?: Record<string, unknown> | null;
   threads?: EnforcementThread[] | null;
   human_reviews?: EnforcementHumanReview[] | null;
@@ -64,11 +66,12 @@ export function runEnforcementFixture(fixturePath: string): {
   }
   try {
     const artifact = asArtifact(structuredClone(fixture.artifact));
+    capCiEvidenceFindings(artifact.findings, fixture.ci_checks_content);
     const config = fixture.config;
     // The fixture contract's default mirrors the v2 runtime default
     // (VERDICT_POLICY:-model), NOT the v3 contract default ("strict" since
-    // #811): this CLI is the parity oracle for v2 semantics, and every
-    // fixture states its policy explicitly.
+    // #811): this CLI mirrors the v2 runtime default, and every fixture
+    // states its policy explicitly.
     const policy = config.verdict_policy ?? "model";
     const categories = parseNonBlockingCategories(config.non_blocking_finding_categories);
     const securityFlagged = securityRiskFlagged(fixture.classification ?? null);
@@ -106,6 +109,7 @@ export function runEnforcementFixture(fixturePath: string): {
       const forced = failClosedEnforcementFired(inputs)
         || (completeness.status === "incomplete" && completeness.mode === "fail");
       applyStrictVerdictPolicy(artifact, { modelVerdict, forced });
+      reconcileEnforcedReviewMarkdown(artifact);
     } else {
       // Order mirrors apply_all_enforcement_wrapper: verdict policy, then
       // completeness validation, then enforcement overlays.
@@ -126,6 +130,11 @@ export function runEnforcementFixture(fixturePath: string): {
         verdictPolicy: policy,
       };
       applied = applyAllEnforcement(artifact, inputs);
+      const forced = failClosedEnforcementFired(inputs)
+        || (completeness.status === "incomplete" && completeness.mode === "fail");
+      relaxVerificationOnlyVerdict(artifact, { forced });
+      relaxCiOnlyVerdict(artifact, { forced });
+      reconcileEnforcedReviewMarkdown(artifact);
     }
 
     // Requirement-coverage fold (#624): advisory, never a verdict.

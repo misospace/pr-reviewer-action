@@ -1,17 +1,39 @@
 /** Platform adapter contract (#674): the typed seam every host-forge
  * interaction goes through. Shapes mirror the v2 platform seam so callers
- * cannot tell which platform served a payload. */
+ * cannot tell which platform served a payload.
+ *
+ * `platform` names the backend that served the payload. GitHub and Forgejo
+ * are full read/write backends; Tangled (#585) is a read-only, metadata-only
+ * backend — it resolves the canonical pull and projects it into the same
+ * GitHub-REST pull shape, and everything beyond metadata reads fails closed.
+ */
+
+import type { IdentityResolution } from "./owner-identity.js";
 
 export interface ManagedComment {
   id?: number | string | undefined;
   body: string;
   created_at?: string | undefined;
   updated_at?: string | undefined;
+  /** #970: the forge-reported author login (never body content). Undefined
+   * when the forge did not report one — treated as unproven ownership. */
+  author?: string | undefined;
+  /** #1093: forge-reported author user id (never body content). Undefined
+   * when the forge did not report one — treated as unproven ownership for
+   * user-id identities. */
+  authorId?: number | string | undefined;
 }
 
 export interface ManagedReview {
   body: string;
   submitted_at?: string | undefined;
+  /** #970: the forge-reported author login (never body content). Undefined
+   * when the forge did not report one — treated as unproven ownership. */
+  author?: string | undefined;
+  /** #1093: forge-reported author user id (never body content). Undefined
+   * when the forge did not report one — treated as unproven ownership for
+   * user-id identities. */
+  authorId?: number | string | undefined;
 }
 
 export interface GhApiResult {
@@ -20,13 +42,34 @@ export interface GhApiResult {
 }
 
 export interface PlatformAdapter {
-  readonly platform: "github" | "forgejo";
+  readonly platform: "github" | "forgejo" | "tangled";
+  /** Fail before review work when the selected platform auth needs an exchange. */
+  preflightAuthentication?(): Promise<void>;
   /** PR object (GitHub REST shape) or null when the fetch fails. */
   getPr(): Promise<unknown | null>;
   /** Raw unified diff text; "" when unavailable. */
   getPrDiff(): Promise<string>;
   listIssueComments(): Promise<ManagedComment[]>;
   listPrReviews(): Promise<ManagedReview[]>;
+  /** #970: the forge-authenticated login this run's token posts as. GitHub
+   * resolves it from GraphQL `query { viewer { login } }` — the only source
+   * that answers for a GitHub App installation token or `GITHUB_TOKEN` (REST
+   * `GET /user` returns 403 "Resource not accessible by integration" for
+   * both) — with REST `/user` as a fallback; Forgejo uses `/user`. It returns
+   * the app's bot account (`<slug>[bot]`), `github-actions[bot]` for
+   * `GITHUB_TOKEN`, and the user login for a PAT/OAuth token, so it survives
+   * supported token/identity changes and is never inferred from a comment
+   * body. `null` when ownership cannot be proven (no token, transport/auth
+   * failure, or an unusable payload) — callers must fail closed rather than
+   * treat an unproven identity as trusted. */
+  authenticatedIdentity(): Promise<string | null>;
+  /** #1093: the forge-authenticated owner identity with a bounded
+   * diagnostics reason. A `userId` proof is authoritative only in Forgejo
+   * Authorized Integration mode (the audience's owner id — the same trust
+   * sticky-comment ownership already extends); a `login` proof behaves like
+   * `authenticatedIdentity()`. Absent → callers fall back to
+   * `authenticatedIdentity()` (login-kind). */
+  resolveTrustedOwner?(): Promise<IdentityResolution>;
   /** "read" | "write" | "admin" | "unknown" | null (transport failure).
    * GitHub returns "unknown": coarse repo permission cannot infer the
    * unit-scoped GitHub App token permissions. */
@@ -51,13 +94,53 @@ export interface CiBoundOptions {
   now?: (() => number) | undefined;
 }
 
+export interface ForgejoSelfStatusDiscovery {
+  found: boolean;
+  ambiguous: boolean;
+  matchCount: number;
+  context: string | null;
+  runJobs: "unknown" | "single" | "multi" | "unavailable";
+  runJobCount: number | null;
+  runJobCountExact: boolean;
+  runJobHtmlUrl: string | null;
+  runJobsUnavailableReason: string | null;
+}
+
+export interface ExternalCheck {
+  name: unknown;
+  /** Collapsed state used only for CI gate finalization and skip decisions. */
+  state: string;
+  /** Raw forge conclusion/state for review context; absent when pending or unavailable. */
+  conclusion?: string | undefined;
+}
+
 export interface ExternalChecksOptions extends CiBoundOptions {
   /** `GITHUB_RUN_ID`: our own workflow run's check runs are excluded. */
   runId?: string | undefined;
+  /** Own-workflow identity used for GitHub check-run name exclusion. */
+  githubWorkflow?: string | undefined;
+  /** Own-job identity used for GitHub check-run name exclusion. */
+  githubJob?: string | undefined;
   /** `CI_STATUS_CONTEXT` (default `pr-reviewer-action`): our own commit
    * status context is excluded. */
   statusContext?: string | undefined;
-  /** v3 CI gate (#706 PR 6, approved divergence): a transient read failure
+  /** Forgejo auto mode: candidate per-repository run numbers. When provided,
+   * context-based exclusion and its guessed default are disabled because
+   * Forgejo contexts are unstable. */
+  selfRunNumbers?: readonly string[] | undefined;
+  /** Trusted Forgejo origin for absolute target-URL host validation. */
+  selfRunOrigin?: string | undefined;
+  /** Forgejo workflow run database ID used only for the Actions jobs API,
+   * never as a target-URL matching candidate. */
+  selfRunId?: string | undefined;
+  /** Repo full name used to scope Forgejo Actions target URLs. */
+  selfRunRepo?: string | undefined;
+  /** Mutable per-gate discovery cache filled by the Forgejo adapter in auto
+   * mode. `runJobs` is retried while unknown and cached after a definitive
+   * single/multi/unavailable result. `runJobHtmlUrl` is the exact-join key
+   * when supplied; null with a single job means the API job's run ID matched. */
+  selfStatusDiscovery?: ForgejoSelfStatusDiscovery | undefined;
+  /** v3 CI gate (#706 PR 6, deliberate divergence): a transient read failure
    * of EITHER underlying read — no response (timeout, transport error,
    * exhausted deadline), HTTP 429/5xx, or a body that is not JSON — yields
    * `null` ("unknown, retry") instead of folding into the checks list. Off
@@ -70,8 +153,8 @@ export interface ExternalChecksOptions extends CiBoundOptions {
 /**
  * The read seams the v3 orchestrator consumes (#706 PR 1). Every method
  * matches the v2 seam's output shape (`scripts/platform_api.sh` /
- * `pr_reviewer/forgejo_backend.py`) byte for byte at the value level; the
- * `platform-normalization` parity boundary pins it.
+ * `pr_reviewer/forgejo_backend.py`) byte for byte at the value level; pinned
+ * by `tests-v3/platform.test.ts` / `platform-reads.test.ts`.
  */
 export interface PlatformReadAdapter extends PlatformAdapter {
   /** `platform_pr_files`: first page (100) of changed files — GitHub REST
@@ -98,8 +181,10 @@ export interface PlatformReadAdapter extends PlatformAdapter {
    * human_reviews.py consumes. */
   listPrReviewsPaginated(): Promise<ReadResult<unknown[]>>;
   /** `platform_external_checks`: normalized external checks with
-   * self-exclusion; `null` when both underlying reads came back empty (the
-   * caller's transient-failure signal) or, under `transientAsUnknown`, when
-   * either read failed transiently. Never throws. */
-  externalChecks(sha: string, options?: ExternalChecksOptions): Promise<{ name: unknown; state: string }[] | null>;
+   * self-exclusion; `state` is the collapsed gate state and optional
+   * `conclusion` preserves the forge's raw check conclusion/state for review
+   * context. `null` when both underlying reads came back empty (the caller's
+   * transient-failure signal) or, under `transientAsUnknown`, when either
+   * read failed transiently. Never throws. */
+  externalChecks(sha: string, options?: ExternalChecksOptions): Promise<ExternalCheck[] | null>;
 }

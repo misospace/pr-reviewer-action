@@ -6,14 +6,101 @@
  * Managed reviews are matched by the marker their bodies START with, never
  * by author — author matching was structurally broken for installation
  * tokens (#190) and marker matching keeps working when the workflow's token
- * identity changes. Cleanup runs before the new review is posted, so it can
- * never touch the review the current run is about to create. Review content
+ * identity changes. Cleanup excludes the replacement review id so it can
+ * never touch the review the current run just created. Review content
  * is never modified — the review is hidden or dismissed, not rewritten.
  */
 import { isManagedBody } from "../metadata/markers.js";
 import type { PublishPlatformApi, PublishReviewRef } from "../platform/publish-api.js";
+import { hasUsableOwner, ownerMatchesIdentity, type IdentityResolution, type TrustedOwnerIdentity } from "../platform/owner-identity.js";
 
 export type CleanupLog = (line: string) => void;
+
+/** #1093: the trusted owner identity the cleanup decisions run under.
+ * Prefers the adapter's `resolveTrustedOwner()` (which carries a bounded
+ * diagnostics reason and the Forgejo Authorized Integration user-id proof);
+ * falls back to `authenticatedIdentity()` (login-kind) when the adapter does
+ * not implement it. `null` when neither can prove an identity — callers
+ * fail closed (no deletions). */
+export async function resolvePublishTrustedOwner(api: PublishPlatformApi): Promise<{ owner: TrustedOwnerIdentity | null; reason: string }> {
+  if (typeof api.resolveTrustedOwner === "function") {
+    try {
+      const resolution: IdentityResolution = await api.resolveTrustedOwner();
+      return { owner: resolution.identity, reason: resolution.reason };
+    } catch {
+      return { owner: null, reason: "unavailable" };
+    }
+  }
+  let identity: string | null = null;
+  try {
+    identity = await api.authenticatedIdentity?.() ?? null;
+  } catch {
+    identity = null;
+  }
+  return identity === null || identity.trim() === ""
+    ? { owner: null, reason: "unavailable" }
+    : { owner: { kind: "login", login: identity }, reason: "user-login" };
+}
+
+/** Best-effort retirement after replacement publication; never trusts comment text alone. */
+export async function retireManagedInlineComments(
+  api: PublishPlatformApi, reviews: readonly PublishReviewRef[], marker: string, log: CleanupLog,
+  mayDelete: () => Promise<boolean> = async () => true,
+): Promise<void> {
+  const { owner, reason } = await resolvePublishTrustedOwner(api);
+  if (owner === null) {
+    log(`  WARN: Could not verify authenticated owner (identity reason: ${reason}); no inline comments retired`);
+    return;
+  }
+  const managed = reviews.filter((r) => isManagedBody(typeof r.body === "string" ? r.body : "", marker)
+    && ownerMatchesIdentity(r.user, owner));
+  const ids = managed.map((r) => String(r.id)).filter((id) => /^[1-9]\d*$/.test(id));
+  // #1093: an empty eligible set is a real, bounded outcome (nothing prior to
+  // retire) and must be distinguishable from the unusable-snapshot refusals
+  // below (unsupported forge, incomplete enumeration) and from a run that
+  // never reached cleanup at all. No ids, bodies, or comment text are logged.
+  if (ids.length === 0) {
+    log("  NOTE: No managed native reviews owned by the trusted identity; nothing to retire");
+    return;
+  }
+  const listed = await api.listManagedInlineComments(ids);
+  if (!listed.supported) { log("  NOTE: Inline-comment retirement unsupported by this forge"); return; }
+  if (!listed.complete) { log("  WARN: Inline-comment enumeration incomplete; no comments retired"); return; }
+  if (listed.comments.length > 100) { log("  WARN: More than 100 inline comments; processing only the first 100"); }
+  let retired = 0, replies = 0, failed = 0, eligible = 0;
+  const seen = new Set<string>();
+  if (listed.comments.length === 0) { log("  Inline comments: eligible=0 retired=0 skipped-discussion=0 failed=0"); return; }
+  const authors = new Map(ids.map((id) => [id, owner]));
+  const foreignReviews = new Set<string>();
+  for (const comment of listed.comments) {
+    const reviewOwner = authors.get(String(comment.reviewId));
+    if (!reviewOwner || !ownerMatchesIdentity(comment.user, reviewOwner)) foreignReviews.add(String(comment.reviewId));
+  }
+  for (const comment of listed.comments.slice(0, 100)) {
+    const key = `${String(comment.reviewId)}:${String(comment.id)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const review = managed.find((r) => String(r.id) === String(comment.reviewId));
+    if (foreignReviews.has(String(comment.reviewId))) { replies++; continue; }
+    if (!review || !/^[1-9]\d*$/.test(String(comment.id ?? ""))) { failed++; continue; }
+    // Adapters derive discussion status from complete listings; unknown status fails closed.
+    if (comment.inReplyToId != null || comment.in_reply_to_id != null || comment.hasReplies !== false || !hasUsableOwner(comment.user)) { replies++; continue; }
+    eligible++;
+    try {
+      if (!(await mayDelete())) { log("  WARN: Head or latest review changed; stopping inline-comment retirement"); break; }
+      // Replies may arrive after the initial listing. Refresh discussion state before mutation.
+      const fresh = await api.listManagedInlineComments([String(review.id)]);
+      if (!fresh.supported || !fresh.complete) { log("WARN: Discussion revalidation incomplete; stopping retirement"); break; }
+      const current = fresh.comments.find((row) => String(row.id) === String(comment.id));
+      if (fresh.comments.some((row) => !ownerMatchesIdentity(row.user, owner))
+        || (current && (current.hasReplies !== false || current.in_reply_to_id != null || current.inReplyToId != null))) { replies++; continue; }
+      if (!(await mayDelete())) break;
+      if (await api.retireInlineComment(String(review.id), String(comment.id))) retired++;
+      else { failed++; break; }
+    } catch { failed++; break; }
+  }
+  log(`  Inline comments: eligible=${eligible} retired=${retired} skipped-discussion=${replies} failed=${failed}`);
+}
 
 const DISMISSAL_MESSAGE = "Superseded by a newer automated review for this pull request.";
 
@@ -71,11 +158,13 @@ export async function cleanupManagedReviews(
   prNumber: string,
   marker: string,
   log: CleanupLog,
+  excludeReviewIds: readonly string[] = [],
+  snapshot?: readonly PublishReviewRef[],
 ): Promise<string[]> {
   log(`Cleaning up previous managed native reviews for #${prNumber}`);
   let reviews: PublishReviewRef[];
   try {
-    reviews = await api.listReviews();
+    reviews = snapshot ? [...snapshot] : await api.listReviews();
   } catch {
     log(`  WARN: Could not list reviews for #${prNumber}; skipping cleanup`);
     return [];
@@ -91,7 +180,8 @@ export async function cleanupManagedReviews(
     log(`  NOTE: Skipping GraphQL minimized-state query (platform=${api.platform}; no GraphQL API)`);
   }
 
-  const managed = selectManagedReviews(reviews, marker, minimizedIds);
+  const excluded = new Set(excludeReviewIds.map(String));
+  const managed = selectManagedReviews(reviews, marker, minimizedIds).filter((review) => !excluded.has(review.id));
   if (managed.length === 0) {
     log(`  No previous managed native reviews to clean up for #${prNumber}`);
     return [];

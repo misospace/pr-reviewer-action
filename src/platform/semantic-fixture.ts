@@ -73,6 +73,13 @@ export class SemanticFixtureAdapter implements PlatformReadAdapter {
     return [];
   }
 
+  /** #970: fixture mode never reaches a forge, so the run's own identity is
+   * unprovable — `null` makes the precheck fail closed, exactly as it would
+   * against an unreachable forge. */
+  async authenticatedIdentity(): Promise<string | null> {
+    return null;
+  }
+
   /** Not intercepted by the shell seam: GitHub answers "unknown"; Forgejo
    * would query the API, which fixture mode never does. */
   async repoPermission(): Promise<string | null> {
@@ -110,6 +117,19 @@ export class SemanticFixtureAdapter implements PlatformReadAdapter {
   }
 
   async externalChecks(_sha: string, options: ExternalChecksOptions = {}): Promise<ExternalCheck[] | null> {
-    return normalizeExternalChecks(FIXTURE_CHECK_RUNS, FIXTURE_COMMIT_STATUS, options.runId ?? "", options.statusContext ?? "");
+    if (options.selfRunNumbers !== undefined && options.selfStatusDiscovery) {
+      options.selfStatusDiscovery.found = false;
+      options.selfStatusDiscovery.ambiguous = false;
+      options.selfStatusDiscovery.matchCount = 0;
+      options.selfStatusDiscovery.context = null;
+      options.selfStatusDiscovery.runJobs = "unavailable";
+      options.selfStatusDiscovery.runJobsUnavailableReason = "semantic fixture does not expose the Forgejo jobs API";
+      options.selfStatusDiscovery.runJobCount = null;
+      options.selfStatusDiscovery.runJobCountExact = false;
+      options.selfStatusDiscovery.runJobHtmlUrl = null;
+    }
+    return normalizeExternalChecks(FIXTURE_CHECK_RUNS, FIXTURE_COMMIT_STATUS, options.runId ?? "", options.statusContext ?? "", {
+      selfRunNumbers: options.selfRunNumbers,
+    });
   }
 }

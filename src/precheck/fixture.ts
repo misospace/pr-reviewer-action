@@ -1,14 +1,14 @@
 import type { FetchLike } from "../platform/http.js";
 import type { GhApiResult, ManagedComment, ManagedReview, PlatformAdapter } from "../platform/types.js";
+import { canonicalUserId, type IdentityResolution } from "../platform/owner-identity.js";
 import { type LinkedIssue } from "../context/types.js";
-import { runPrecheck, type PrecheckEventLabel, type PrecheckOutput } from "./decide.js";
+import { type PrecheckEventComment, type PrecheckEventLabel } from "./decide.js";
 import { extractIssueIdentifiers, LINEAR_PRIORITY_LABELS, type CollectResult } from "./linear.js";
 
-/** Fixture-driven precheck for the #673 parity harness (#674): a
- * PlatformAdapter whose responses come from the fixture JSON, plus the CLI
- * entry both the v3 parity runner and tests-v3 use. The fixture adapter
- * consumes the SAME platform responses the v2 runner replays through its
- * gh/curl stubs, so both implementations observe identical platform state. */
+/** Fixture-driven precheck (#674): a PlatformAdapter whose responses come
+ * from the fixture JSON, plus the CLI entry tests-v3 use. The fixture adapter
+ * consumes the same platform responses the v2 implementation saw through its
+ * gh/curl stubs, so both observe identical platform state. */
 
 export interface PrecheckFixture {
   fixture?: string;
@@ -18,7 +18,15 @@ export interface PrecheckFixture {
   // event actually carries, not just a bare string — a `label?: string`
   // field here let the fixture/test surface diverge from production and
   // hide the object-vs-string bug this issue was about.
-  event?: { name?: string; action?: string; label?: PrecheckEventLabel } | null | undefined;
+  // #914: `comment` carries the `issue_comment` payload the re-review
+  // command acts on; the shape is shared with `PrecheckEvent` (decide.ts)
+  // so the fixture surface cannot drift from production.
+  event?: {
+    name?: string;
+    action?: string;
+    label?: PrecheckEventLabel;
+    comment?: PrecheckEventComment | null;
+  } | null | undefined;
   event_head_sha?: string | undefined;
   platform: {
     diff?: string;
@@ -27,6 +35,16 @@ export interface PrecheckFixture {
     pr_error?: boolean;
     comments?: ManagedComment[];
     reviews?: ManagedReview[];
+    /** #970: the login the fixture's token posts as (the value
+     * `authenticatedIdentity()` returns). Omitted → unproven ownership, so a
+     * marker-bearing body can never authorize a skip. */
+    identity?: string;
+    /** #1093: the forge-reported user id of the fixture's integration
+     * identity. Used only when `identity` is absent/unusable: then
+     * `resolveTrustedOwner()` proves the `userId` kind (Forgejo Authorized
+     * Integration semantics) and marker-bearing bodies may be owned by user
+     * id alone. */
+    identity_user_id?: string;
     permission?: string | null;
     permission_error?: boolean;
     /** Responses for the validated `ghApi` seam, keyed by endpoint. */
@@ -63,6 +81,27 @@ export class FixtureAdapter implements PlatformAdapter {
 
   async listPrReviews(): Promise<ManagedReview[]> {
     return this.spec.reviews ?? [];
+  }
+
+  async authenticatedIdentity(): Promise<string | null> {
+    return this.spec.identity ?? null;
+  }
+
+  /** #1093: the trusted owner identity, explicit so fixtures can drive both
+   * proof kinds. `identity` set → login-kind (`user-login`); only a usable
+   * `identity_user_id` (with `identity` absent/unusable) → `userId`-kind
+   * (`integration-user-id`); neither → null (`unavailable`), and callers
+   * fall back to `authenticatedIdentity()`. */
+  async resolveTrustedOwner(): Promise<IdentityResolution> {
+    const identity = this.spec.identity;
+    if (typeof identity === "string" && identity.trim() !== "") {
+      return { identity: { kind: "login", login: identity }, reason: "user-login" };
+    }
+    const userId = typeof this.spec.identity_user_id === "string" ? this.spec.identity_user_id : "";
+    if (canonicalUserId(userId) !== null) {
+      return { identity: { kind: "userId", userId }, reason: "integration-user-id" };
+    }
+    return { identity: null, reason: "unavailable" };
   }
 
   async repoPermission(): Promise<string | null> {
@@ -120,33 +159,4 @@ export function fixtureLinearCollector(spec: PrecheckFixture["platform"]): (titl
     return { issues, errors };
   };
 }
-
-export async function runPrecheckFixture(fixturePath: string): Promise<{ ok: boolean; values?: PrecheckOutput; stderr?: string }> {
-  const { readFileSync } = await import("node:fs");
-  const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as PrecheckFixture;
-  const platform = fixture.env.PLATFORM === "forgejo" || fixture.env.FORGEJO_API_URL
-    ? "forgejo" as const
-    : "github" as const;
-  const adapter = new FixtureAdapter(platform, fixture.platform ?? {});
-  try {
-    const output = await runPrecheck({
-      env: fixture.env ?? {},
-      adapter,
-      event: fixture.event ?? undefined,
-      eventHeadSha: fixture.event_head_sha,
-      linearCollect: fixtureLinearCollector(fixture.platform ?? {}),
-    });
-    return { ok: true, values: output };
-  } catch (error) {
-    return { ok: false, stderr: error instanceof Error ? error.message : String(error) };
-  }
-}
-
-/** The parity-relevant v2 output surface for a fixture, used by tests-v3 to
- * assert against the same key set the v2 GITHUB_OUTPUT file carries. */
-export function outputKeys(output: PrecheckOutput): string[] {
-  return Object.keys(output).sort();
-}
-
-// Re-exported output key surface used by tests-v3.
 

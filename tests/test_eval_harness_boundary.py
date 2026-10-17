@@ -128,7 +128,7 @@ fi
 
 python3 - <<'PY'
 import json, os
-snap = {k: os.environ.get(k) for k in ("REPO", "PR_NUMBER", "DEEP_REVIEW", "TOOL_MODE", "GITHUB_WORKSPACE", "PR_REVIEWER_RUN_DIR", "CLAIM_FALSIFICATION")}
+snap = {k: os.environ.get(k) for k in ("REPO", "PR_NUMBER", "DEEP_REVIEW", "TOOL_MODE", "GITHUB_WORKSPACE", "PR_REVIEWER_RUN_DIR", "CLAIM_FALSIFICATION", "AI_MODEL", "AI_BASE_URL", "AI_API_KEY", "AI_API_FORMAT", "AI_SPECIALIST_MODEL", "AI_SPECIALIST_BASE_URL", "AI_SPECIALIST_API_FORMAT", "AI_SPECIALIST_API_KEY", "AI_SPECIALIST_CORRECTNESS_MODEL", "AI_SPECIALIST_SECURITY_MODEL", "AI_SPECIALIST_TESTS_MODEL")}
 with open("env-snapshot.json", "w", encoding="utf-8") as f:
     json.dump(snap, f)
 PY
@@ -927,6 +927,60 @@ class TestPromptOverrideArms:
         assert snap["SYSTEM_PROMPT"] in (None, "")
         assert snap["SYSTEM_PROMPT_FILE"] in (None, "")
         assert snap["SYSTEM_PROMPT_MODE"] in (None, "")
+
+
+class TestLaneEnvironmentBoundary:
+    def test_heterogeneous_lane_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        repo_path = _work_dir_with_repo(tmp_path)
+        script = _write_fake_script(tmp_path / "fake_lane.sh", deep=True)
+        config = dict(MODEL_CONFIG)
+        config.update({
+            "model": "lane-primary", "base_url": "https://primary.invalid",
+            "api_key": "primary-key", "lane_active": True,
+            "extra_env": {
+                "AI_API_FORMAT": "openai",
+                "AI_SPECIALIST_MODEL": "lane-specialist",
+                "AI_SPECIALIST_BASE_URL": "https://specialist.invalid",
+                "AI_SPECIALIST_API_FORMAT": "anthropic",
+                "AI_SPECIALIST_API_KEY": "specialist-key",
+                "AI_SPECIALIST_SECURITY_MODEL": "security-model",
+            },
+        })
+        run = run_review_for_pr(PR_ENTRY, "native_loop", tmp_path, config, deep_review=True, review_script=script)
+        assert run.error is None
+        snap = _read_snapshot(repo_path)
+        assert (snap["AI_MODEL"], snap["AI_BASE_URL"], snap["AI_API_KEY"], snap["AI_API_FORMAT"]) == (
+            "lane-primary", "https://primary.invalid", "primary-key", "openai"
+        )
+        assert snap["AI_SPECIALIST_MODEL"] == "lane-specialist"
+        assert snap["AI_SPECIALIST_BASE_URL"] == "https://specialist.invalid"
+        assert snap["AI_SPECIALIST_API_FORMAT"] == "anthropic"
+        assert snap["AI_SPECIALIST_API_KEY"] == "specialist-key"
+        assert snap["AI_SPECIALIST_SECURITY_MODEL"] == "security-model"
+
+    def test_primary_only_clears_ambient_specialist_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        repo_path = _work_dir_with_repo(tmp_path)
+        script = _write_fake_script(tmp_path / "fake_lane.sh", deep=False)
+        for key in eval_harness.eval_lanes.SPECIALIST_ENV_KEYS:
+            monkeypatch.setenv(key, "ambient-value")
+        config = dict(MODEL_CONFIG, lane_active=True, extra_env={"AI_API_FORMAT": "openai"})
+        run = run_review_for_pr(PR_ENTRY, "native_loop", tmp_path, config, deep_review=False, review_script=script)
+        assert run.error is None
+        snap = _read_snapshot(repo_path)
+        assert snap["DEEP_REVIEW"] in (None, "")
+        assert all(snap[key] in (None, "") for key in eval_harness.eval_lanes.SPECIALIST_ENV_KEYS)
+
+    def test_same_model_lane_deep_without_specialist_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        repo_path = _work_dir_with_repo(tmp_path)
+        script = _write_fake_script(tmp_path / "fake_lane.sh", deep=True)
+        for key in eval_harness.eval_lanes.SPECIALIST_ENV_KEYS:
+            monkeypatch.delenv(key, raising=False)
+        config = dict(MODEL_CONFIG, lane_active=True, extra_env={"AI_API_FORMAT": "openai"})
+        run = run_review_for_pr(PR_ENTRY, "native_loop", tmp_path, config, deep_review=True, review_script=script)
+        assert run.error is None
+        snap = _read_snapshot(repo_path)
+        assert snap["DEEP_REVIEW"] == "true"
+        assert all(snap[key] in (None, "") for key in ("AI_SPECIALIST_MODEL", "AI_SPECIALIST_BASE_URL", "AI_SPECIALIST_API_FORMAT", "AI_SPECIALIST_API_KEY", "AI_SPECIALIST_SECURITY_MODEL"))
 
 
 if __name__ == "__main__":

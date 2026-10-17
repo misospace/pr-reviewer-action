@@ -57,10 +57,18 @@ export const MAX_FILE_CHARS = 512;
 export const MAX_ERRORS = 100;
 export const MAX_INPUT_BYTES = 1_000_000;
 
-/** Default completion-token cap for one specialist role call (#632). A
- * conservative allowance for the short structured advisory JSON a specialist
- * returns, deliberately independent of the final reviewer's `ai_max_tokens`. */
-export const DEFAULT_SPECIALIST_MAX_TOKENS = 4096;
+/** Default completion-token cap for one specialist role call (#632, raised by
+ * #1061). Deliberately independent of the final reviewer's `ai_max_tokens`.
+ *
+ * 4096 was too tight for reasoning-heavy models: they spend the same
+ * completion budget on thinking and on the short structured advisory JSON, so
+ * the repo's own benchmark measured 4096-default specialists truncating at
+ * exactly 4095 completion tokens and degrading to zero leads, while raised
+ * caps (~16.4k) produced completions up to ~13.1k. 16384 gives roughly 25%
+ * headroom over that observed peak without an arbitrary 32k initial cap. It
+ * remains a per-role cap: an explicit `deep-review-max-tokens` (or
+ * `DEEP_REVIEW_MAX_TOKENS`) still overrides it for small-output-cap models. */
+export const DEFAULT_SPECIALIST_MAX_TOKENS = 16384;
 
 /** Largest markdown fence (in backticks) the renderer will emit; longer
  * hostile runs are neutralized so the fence stays closed. */

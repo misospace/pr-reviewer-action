@@ -3,8 +3,9 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { validateContract } from "../config/contract.js";
 import { loadConfig } from "../config/load-config.js";
-import { eventLabelName, runPrecheck, type PrecheckOutput } from "../precheck/decide.js";
+import { commentBodyTriggersCommentCommand, eventLabelName, runPrecheck, type PrecheckOutput } from "../precheck/decide.js";
 import { resolvePlatform } from "../platform/resolve.js";
+import { forgejoAncillaryWrite, forgejoApiBase } from "../platform/forgejo-ancillary.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
 import { repoScopedUrl } from "../platform/repo-ref.js";
 import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
@@ -12,6 +13,7 @@ import { stageEnvFromConfig } from "./env.js";
 import { buildAdapter, buildPublishApi, publishInputFromEnv, publishWith, readEvent, type StepEvent } from "./entrypoints.js";
 import { rawInputsFromEnv, runReview } from "./review.js";
 import { createRunDir } from "./run-dir.js";
+import { blockingGateSummary, escapeWorkflowData, renderBlockingAnnotations } from "./blocking-findings.js";
 
 export { createRunDir };
 
@@ -44,6 +46,34 @@ export function writeOutputs(env: NodeJS.ProcessEnv, outputs: ReadonlyArray<[str
   if (text !== "") appendFileSync(file, text);
 }
 
+/** #903: append one already-rendered line to the job's step summary. Like
+ * `writeOutputs`, a no-op outside a runner (no path, or the /dev/null
+ * sentinel). */
+export function appendStepSummary(env: NodeJS.ProcessEnv, line: string): void {
+  const file = env.GITHUB_STEP_SUMMARY ?? "";
+  if (file === "" || file === "/dev/null") return;
+  appendFileSync(file, `${line}\n`);
+}
+
+/** Render untrusted inline text as an inert Markdown code span, following
+ * the repo-wide fence-safe strategy (e.g. `src/context/repo-map.ts`
+ * `codeSpan`): the delimiter is one backtick longer than the longest run in
+ * the content, so embedded backticks, link syntax, or emphasis characters
+ * can neither close the span nor render as Markdown. Padding spaces keep a
+ * boundary backtick from merging into the delimiter — a leading backtick
+ * plus the generated fence would otherwise form a longer opening run,
+ * leaving the span unterminated and the payload exposed as live Markdown.
+ * Control characters are flattened first: the step summary line must stay
+ * one line. */
+function inlineCodeValue(text: string): string {
+  const flat = text.replace(/[\u0000-\u001f\u007f]+/g, " ");
+  if (!flat.includes("`")) return `\`${flat}\``;
+  let maxRun = 0;
+  for (const run of flat.match(/`+/g) ?? []) maxRun = Math.max(maxRun, run.length);
+  const delim = "`".repeat(maxRun + 1);
+  return `${delim} ${flat} ${delim}`;
+}
+
 /** The label a `labeled` event carries (GitHub sends `{ name }`). Moved to
  * `precheck/decide.ts` (#892) so both `decide.ts`'s label gate and this
  * cleanup path normalize the same way; re-exported here for callers (and
@@ -55,12 +85,18 @@ export { eventLabelName };
  * composite used to compute in its env blocks. */
 export function actionStageEnv(env: NodeJS.ProcessEnv): Env {
   const contract = validateContract(V3_CONTRACT);
-  const config = loadConfig(contract, rawInputsFromEnv(contract, env));
+  const rawInputs = rawInputsFromEnv(contract, env);
+  // Forgejo Actions injects FORGEJO_TOKEN into the runner environment. It is
+  // not an explicit action input, so it must not reject integration mode.
+  rawInputs["forgejo-token"] = env["INPUT_FORGEJO-TOKEN"] ?? env.INPUT_FORGEJO_TOKEN;
+  const config = loadConfig(contract, rawInputs);
   const stage: Env = { ...env, ...stageEnvFromConfig(config) };
   // stageEnvFromConfig projects `github-token` (secret-revealed) as GITHUB_TOKEN.
   const token = stage.GITHUB_TOKEN || env.GH_TOKEN || "";
   stage.GH_TOKEN = token;
-  stage.FORGEJO_TOKEN = stage.FORGEJO_TOKEN || token;
+  if ((stage.FORGEJO_AUTH_METHOD ?? "token").trim().toLowerCase() !== "authorized_integration") {
+    stage.FORGEJO_TOKEN = stage.FORGEJO_TOKEN || env.FORGEJO_TOKEN || token;
+  }
   stage.REPO = stage.REPO || env.GITHUB_REPOSITORY || "";
   stage.PR_NUMBER = stage.PR_NUMBER || readEvent(env).prNumber || "";
   const server = env.GITHUB_SERVER_URL ?? "";
@@ -80,10 +116,38 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
   const { event, headSha: eventHeadSha } = readEvent(env);
   stage.EVENT_HEAD_SHA = eventHeadSha ?? "";
 
+  // ── Comment on a plain issue: clean no-op ─────────────────────────────
+  // #914: a `created` `issue_comment` on a PLAIN issue (the payload's
+  // `issue` has no `pull_request`) is not a re-review request at all.
+  // `runPrecheck` REQUIRES a PR number (it throws without one), so this
+  // must be a clean green no-op HERE, before precheck, not a crash.
+  // `readEvent` only fills PR_NUMBER from `issue.number` when
+  // `issue.pull_request` is present, so an empty PR_NUMBER is the honest
+  // "this comment is not on a PR" signal. The reason is one of this
+  // action's fixed constants; no untrusted text is rendered.
+  if (
+    event?.name === "issue_comment"
+    && event.action === "created"
+    && (stage.PR_NUMBER ?? "") === ""
+  ) {
+    writeOutputs(env, [
+      ["should-review", "false"],
+      ["skip-reason", "comment-not-on-pr"],
+      ["verdict", ""],
+      ["verdict-source", ""],
+      ["review-result", ""],
+    ]);
+    process.stderr.write("[v3] Review skipped: comment-not-on-pr\n");
+    appendStepSummary(env, "**AI PR Review skipped:** `comment-not-on-pr`");
+    return 0;
+  }
+
   // ── Precheck ──────────────────────────────────────────────────────────
+  const precheckAdapter = buildAdapter(stage);
+  await precheckAdapter.preflightAuthentication?.();
   const pre: PrecheckOutput = await runPrecheck({
     env: stage as Record<string, string>,
-    adapter: buildAdapter(stage),
+    adapter: precheckAdapter,
     ...(event !== undefined ? { event: event as never } : {}),
     ...(eventHeadSha !== undefined ? { eventHeadSha } : {}),
   });
@@ -93,9 +157,63 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
     ["diff-fingerprint", pre.diff_fingerprint],
   ]);
   if (pre.should_review !== "true") {
-    writeOutputs(env, [["verdict", pre.verdict], ["verdict-source", pre.verdict_source], ["review-result", pre.review_result]]);
+    writeOutputs(env, [["verdict", pre.verdict], ["verdict-source", pre.verdict_source], ["review-result", pre.review_result], ["incomplete-reason", pre.incomplete_reason]]);
+    // #903: this branch used to exit silently — outputs written, no log
+    // line, no step summary — so a labeler-triggered skip showed the same
+    // green check as a run that crashed before doing anything. The event
+    // label is untrusted payload and the two surfaces are different fences:
+    // the stderr line quotes it as JSON (control characters become
+    // escapes, so no forged log lines), while the Markdown summary renders
+    // it as a fence-safe code span (JSON escaping does not neutralize
+    // backticks or link syntax). The reason is one of this action's fixed
+    // constants and is interpolated directly.
+    const skipLabel = eventLabelName(event?.label);
+    const carryLabel = pre.skip_reason === "unrelated-label" && skipLabel !== "";
+    const skipReason = pre.skip_reason || "<none>";
+    process.stderr.write(
+      `[v3] Review skipped: ${skipReason}${carryLabel ? ` (label: ${JSON.stringify(skipLabel)})` : ""}\n`,
+    );
+    appendStepSummary(
+      env,
+      `**AI PR Review skipped:** \`${skipReason}\`${carryLabel ? ` (label: ${inlineCodeValue(skipLabel)})` : ""}`,
+    );
+    // #914: a matching re-review command on a FORK PR is not reviewable with
+    // a repo token (fork PRs belong to the fork workflow — see
+    // docs/fork-review.md), so the run replies to the comment pointing the
+    // commenter there. The reply body is fixed wording plus the
+    // operator-configured command (never comment content) — and the reply is
+    // additionally gated on the
+    // comment-body trigger: `comment-fork-pr` is only reachable with a
+    // matched authorized comment, but the gate keeps that invariant honest
+    // at this seam. Best-effort: a failed reply never fails the run. No ack
+    // reaction on this path (no review started).
+    if (pre.skip_reason === "comment-fork-pr" && acceptedViaCommentCommand(stage, event)) {
+      process.stderr.write(`[v3] posting re-review fork reply on PR ${JSON.stringify(stage.PR_NUMBER ?? "")}\n`);
+      await postForkPrCommentReply(stage).catch(() => undefined);
+    }
     await maybeClearRereviewLabel(stage, event);
-    return failOnRequestChanges(stage, pre.verdict ?? "");
+    // #975: a carried request_changes verdict means the last review — of
+    // `pre.head_sha`, trusted precheck metadata — already recorded the
+    // findings; this run has none of its own, so nothing is carried as
+    // findings, and the pointer names the run to look at.
+    const carriedPointer = pre.verdict === "request_changes"
+      ? `The verdict was carried from the review of ${pre.head_sha !== "" ? pre.head_sha : "<unknown>"}; its findings are in that run's step summary.`
+      : "";
+    return failOnRequestChanges(stage, pre.verdict ?? "", pre.degradedGateBypass === true, (stage.FAIL_ON_DEGRADED_REVIEW ?? "false").toLowerCase() === "true", "", carriedPointer);
+  }
+
+  // #914: an accepted comment-command re-review gets an immediate 👀 ack
+  // reaction on the triggering comment, BEFORE the (slow) review stage, so
+  // the commenter knows the run picked the command up. Best-effort: a
+  // failed reaction degrades to a log line, never a failed run.
+  if (pre.should_review === "true" && acceptedViaCommentCommand(stage, event)) {
+    const commentId = event?.comment?.id;
+    if (isUsableCommentId(commentId)) {
+      process.stderr.write(`[v3] posting re-review ack reaction on comment ${JSON.stringify(commentId)}\n`);
+      await postCommentAckReaction(stage, commentId).catch(() => undefined);
+    } else {
+      process.stderr.write(`[v3] re-review ack skipped: comment id ${JSON.stringify(commentId) ?? "null"}\n`);
+    }
   }
 
   // ── Review ────────────────────────────────────────────────────────────
@@ -129,10 +247,15 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       REQUIRED_CHECKS: review.outputs.requiredChecks,
       REVIEW_ROUTE: review.outputs.reviewRoute,
       ESCALATION_REASON: review.outputs.escalationReason,
+      // #1003: both empty when review-triage is disabled ("did not run"),
+      // distinct from the fail-closed "unknown" answer.
+      REVIEW_TRIAGE_DECISION: review.outputs.reviewTriageDecision,
+      REVIEW_TRIAGE_REASON: review.outputs.reviewTriageReason,
       REVIEW_MARKDOWN: review.outputs.reviewMarkdown,
       FINDINGS: review.outputs.findings,
       ANALYSIS_ENGINE: review.outputs.analysisEngine,
       CACHE_HIT_RATIO: review.outputs.cacheHitRatio,
+      DEGRADED_GATE_BYPASS: review.outputs.degradedGateBypass ? "true" : "false",
       VERDICT_POLICY: review.verdictPolicy,
     };
     const seam = buildPublishApi(publishEnv as NodeJS.ProcessEnv);
@@ -153,6 +276,21 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       ...(review.toolCallsUsed !== undefined ? { toolCalls: review.toolCallsUsed } : {}),
       ...(review.toolRoundsUsed !== undefined ? { toolRounds: review.toolRoundsUsed } : {}),
       ...(review.toolMaxRounds !== undefined ? { maxRounds: review.toolMaxRounds } : {}),
+      ...(review.contextBudget !== undefined ? { contextBudget: review.contextBudget } : {}),
+      ...(review.contextPeak !== undefined ? { contextPeak: review.contextPeak } : {}),
+      // #1003: the human-review triage answer reaches the published body
+      // only when triage ran (the decision output is "" when the input is
+      // off), so a disabled run's published review is byte-identical to
+      // pre-#1003. Triage grants no capability: this thread changes the
+      // comment text only, never fork/tool/evidence gating or the verdict.
+      ...(review.outputs.reviewTriageDecision !== ""
+        ? {
+          reviewTriage: {
+            decision: review.outputs.reviewTriageDecision,
+            reason: review.outputs.reviewTriageReason,
+          },
+        }
+        : {}),
     };
     publishFailed = (await publishWith(input, seam)) !== 0;
   }
@@ -160,18 +298,83 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
   // ── Re-review label ───────────────────────────────────────────────────
   await maybeClearRereviewLabel(stage, event);
 
-  const gate = failOnRequestChanges(stage, review.outputs.verdict);
+  const gate = failOnRequestChanges(
+    stage,
+    review.outputs.verdict,
+    review.outputs.degradedGateBypass,
+    (stage.FAIL_ON_DEGRADED_REVIEW ?? "false").toLowerCase() === "true",
+    review.outputs.findings,
+    "",
+  );
   return publishFailed ? Math.max(gate, 1) : gate;
 }
 
-function failOnRequestChanges(stage: Env, verdict: string): number {
+/** #975: the fail-on-request-changes gate. Exported for tests (the
+ * blocking-finding renderer it calls is pure — see
+ * `./blocking-findings.ts`). A blocking verdict writes the blocking
+ * findings FIRST, as `::error file=...::` workflow-command annotations, so
+ * they land on the failed check and the Files tab; then the gate line
+ * itself, whose one-line summary names the blocking count and the first
+ * finding. `carriedPointer` (a run skipped by precheck that carries a
+ * `request_changes` verdict from an earlier review — this run recorded no
+ * findings of its own) is appended, space-separated, to BOTH the gate line
+ * and the step summary, so the (otherwise empty) summary still points at
+ * the run whose findings explain the failure. A degraded-review-eligible
+ * `request_changes` verdict (fallback with no evidence, or a model-failure
+ * notice) warns and returns 0 unless `failOnDegraded` is set. */
+export function failOnRequestChanges(
+  stage: Env,
+  verdict: string,
+  degradedGateBypassEligible = false,
+  failOnDegraded = false,
+  findingsJson = "",
+  carriedPointer = "",
+): number {
   if ((stage.FAIL_ON_REQUEST_CHANGES ?? "false").toLowerCase() !== "true") return 0;
-  if (verdict === "request_changes") {
-    process.stdout.write("::error::Final verdict is request_changes; failing the step (fail-on-request-changes=true).\n");
-    return 1;
+  if (verdict !== "request_changes") {
+    process.stdout.write(`Final verdict is '${verdict || "<none>"}'; not blocking (fail-on-request-changes=true).\n`);
+    return 0;
   }
-  process.stdout.write(`Final verdict is '${verdict || "<none>"}'; not blocking (fail-on-request-changes=true).\n`);
-  return 0;
+  if (degradedGateBypassEligible && !failOnDegraded) {
+    process.stdout.write("::warning::Final verdict is request_changes, but this review is eligible for the degraded gate bypass (fallback with no evidence, or model-failure notice); not blocking (fail-on-request-changes=true, fail-on-degraded-review=false).\n");
+    return 0;
+  }
+  let parsed: unknown = [];
+  if (findingsJson !== "") {
+    try {
+      const value = JSON.parse(findingsJson);
+      if (Array.isArray(value)) parsed = value;
+    } catch {
+      parsed = [];
+    }
+  }
+  for (const line of renderBlockingAnnotations(parsed)) {
+    process.stdout.write(line + "\n");
+  }
+  const summary = blockingGateSummary(parsed);
+  // `blockingGateSummary` returns "" only when no blocker/major finding
+  // exists at all — a locationless blocker still counts there.
+  const gate = summary !== "" ? summary : "no blocker/major finding was recorded";
+  const suffix = carriedPointer !== "" ? ` ${carriedPointer}` : "";
+  // The finding text is model-controlled, so both surfaces get their own
+  // escaping: control-character flattening keeps every rendered string one
+  // line, `escapeWorkflowData` on the command data (percent LAST would
+  // re-encode, so it runs percent-first inside the helper) stops a literal
+  // `%0A`/`%25` surviving into the runner's decode as a forged newline or
+  // command, and the Markdown step summary gets the file's fence-safe
+  // `inlineCodeValue` code span — one line, and it cannot open a link,
+  // heading, or fence (#903 precedent for untrusted text on this surface).
+  // `sanitizeMarkdown(..., "inert")` used to be this fence, but its inert
+  // mode is an identity for non-GitHub markdown links, so a hostile
+  // `](https://…)` payload stayed a clickable untrusted link on the
+  // summary.
+  const message = `fail-on-request-changes=true and the final verdict is request_changes: ${gate}${suffix}`
+    .replace(/[\u0000-\u001f\u007f]+/g, " ");
+  process.stdout.write(`::error::${escapeWorkflowData(message)}\n`);
+  if (carriedPointer !== "") {
+    appendStepSummary(stage, `**AI PR Review failed:** ${inlineCodeValue(message)}`);
+  }
+  return 1;
 }
 
 /** Clears the rerun label whenever this run was actually triggered by it —
@@ -194,14 +397,110 @@ async function clearRereviewLabel(stage: Env): Promise<void> {
   const pr = stage.PR_NUMBER ?? "";
   if (label === "" || !/^\d+$/.test(pr)) return;
   const base = platform === "forgejo"
-    ? `${(stage.FORGEJO_API_URL ?? "").replace(/\/+$/, "")}/api/v1`
+    ? forgejoApiBase(stage)
     : (stage.GITHUB_API_URL || "https://api.github.com");
   const url = repoScopedUrl(base, stage.REPO ?? "", `/issues/${pr}/labels`, `/${encodeURIComponent(label)}`);
   if (url === null) return;
-  const token = platform === "forgejo" ? (stage.FORGEJO_TOKEN ?? "") : (stage.GH_TOKEN ?? "");
+  if (platform === "forgejo") {
+    await forgejoAncillaryWrite(stage, url, "DELETE");
+    return;
+  }
   await fetch(url, {
     method: "DELETE",
-    headers: { Authorization: platform === "forgejo" ? `token ${token}` : `Bearer ${token}`, Accept: "application/json" },
+    headers: { Authorization: `Bearer ${stage.GH_TOKEN ?? ""}`, Accept: "application/json" },
     signal: AbortSignal.timeout(15000),
   });
+}
+
+/** #914: "this run was accepted via the comment command" — a `created`
+ * `issue_comment` whose body is exactly the configured command. The command
+ * match here is RECOGNITION only: precheck has already authorized the run
+ * (permission check, fork gate) or skipped it, and a disabled command can
+ * never reach `should_review: "true"` in the first place. */
+function acceptedViaCommentCommand(stage: Env, event: StepEvent | undefined): boolean {
+  return (
+    event?.name === "issue_comment"
+    && event.action === "created"
+    && typeof event.comment?.body === "string"
+    && commentBodyTriggersCommentCommand(event.comment.body, (stage.REREVIEW_COMMAND ?? "").trim())
+  );
+}
+
+/** #914: a comment id that may safely appear in a URL path: a finite number
+ * or an all-digit string (GitHub/Forgejo comment ids). Anything else means
+ * no ack — the run is never degraded by an unusable id. */
+function isUsableCommentId(id: number | string | undefined): id is number | string {
+  if (typeof id === "number") return Number.isFinite(id);
+  if (typeof id === "string") return /^\d+$/.test(id);
+  return false;
+}
+
+/** #914: best-effort 👀 (ack) reaction on the comment that triggered an
+ * accepted re-review. Same seam as `clearRereviewLabel` (resolvePlatform +
+ * requireImplementedBackend, repoScopedUrl, Bearer/token Authorization,
+ * 15 s timeout); the fetch failure is swallowed — the ack must never fail
+ * the run. */
+async function postCommentAckReaction(stage: Env, commentId: number | string): Promise<void> {
+  const platform = resolvePlatform(stage.PLATFORM, stage.FORGEJO_API_URL ?? "", stage.GITHUB_SERVER_URL ?? "", stage.TANGLED_REPO_DID ?? "");
+  requireImplementedBackend(platform);
+  const base = platform === "forgejo"
+    ? forgejoApiBase(stage)
+    : (stage.GITHUB_API_URL || "https://api.github.com");
+  const url = repoScopedUrl(base, stage.REPO ?? "", `/issues/comments/${encodeURIComponent(String(commentId))}/reactions`);
+  if (url === null) return;
+  if (platform === "forgejo") {
+    await forgejoAncillaryWrite(stage, url, "POST", { content: "eyes" });
+    return;
+  }
+  await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${stage.GH_TOKEN ?? ""}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ content: "eyes" }),
+    signal: AbortSignal.timeout(15000),
+  }).catch(() => undefined);
+}
+
+/** #914: best-effort reply to a re-review command comment on a fork PR,
+ * pointing the commenter at the `ai-review-fork` label workflow. The body
+ * names the configured `rereview-command` — trusted operator input, rendered
+ * in backticks only when it is a non-empty run of printable ASCII (no
+ * whitespace, ≤ 80 chars) carrying no backtick of its own (a backtick in
+ * the command would close the code span early); any other value falls back
+ * to backtick-free wording that names no command at all. Same seam as the
+ * ack reaction; the fetch failure is swallowed — a failed reply must never
+ * fail the run. */
+async function postForkPrCommentReply(stage: Env): Promise<void> {
+  const platform = resolvePlatform(stage.PLATFORM, stage.FORGEJO_API_URL ?? "", stage.GITHUB_SERVER_URL ?? "", stage.TANGLED_REPO_DID ?? "");
+  requireImplementedBackend(platform);
+  const pr = stage.PR_NUMBER ?? "";
+  if (!/^\d+$/.test(pr)) return;
+  const base = platform === "forgejo"
+    ? forgejoApiBase(stage)
+    : (stage.GITHUB_API_URL || "https://api.github.com");
+  const url = repoScopedUrl(base, stage.REPO ?? "", `/issues/${pr}/comments`);
+  if (url === null) return;
+  const command = (stage.REREVIEW_COMMAND ?? "").trim();
+  const namesCommand =
+    command.length > 0 && command.length <= 80 && /^[\x21-\x7E]+$/.test(command) && !command.includes("`");
+  const replyBody = namesCommand
+    ? `The \`${command}\` command does not run on fork PRs. To review a fork PR, a maintainer adds the \`ai-review-fork\` label — see docs/fork-review.md.`
+    : "The re-review command does not run on fork PRs. To review a fork PR, a maintainer adds the ai-review-fork label — see docs/fork-review.md.";
+  if (platform === "forgejo") {
+    await forgejoAncillaryWrite(stage, url, "POST", { body: replyBody });
+    return;
+  }
+  await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${stage.GH_TOKEN ?? ""}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ body: replyBody }),
+    signal: AbortSignal.timeout(15000),
+  }).catch(() => undefined);
 }

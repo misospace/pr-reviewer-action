@@ -9,11 +9,11 @@ import { ForgejoAdapter } from "../src/platform/forgejo.js";
 import { GitHubAdapter, nextLink } from "../src/platform/github.js";
 import type { FetchLike } from "../src/platform/http.js";
 import { compareCodePoints, jqCompact } from "../src/platform/jq.js";
-import { GITHUB_CONVERSATION_COMMENTS_QUERY, GITHUB_PR_BODY_REVISION_QUERY, GITHUB_REVIEW_THREADS_QUERY, normalizeExternalChecks, projectPrFiles } from "../src/platform/normalize.js";
+import { forgejoJobStatusPathsMatch, forgejoSelfStatusMatches, forgejoSelfRunOrigin, GITHUB_CONVERSATION_COMMENTS_QUERY, GITHUB_PR_BODY_REVISION_QUERY, GITHUB_REVIEW_THREADS_QUERY, normalizeExternalChecks, normalizeForgejoRunJobs, projectPrFiles } from "../src/platform/normalize.js";
 import { pyQuote, pyStr } from "../src/platform/py.js";
 import { parseRepoRef, repoScopedUrl } from "../src/platform/repo-ref.js";
 import { SemanticFixtureAdapter, semanticFixtureDir } from "../src/platform/semantic-fixture.js";
-import { TangledNotImplementedError } from "../src/platform/tangled.js";
+import { TangledAdapter } from "../src/platform/tangled-adapter.js";
 import { buildPlatformReadAdapter } from "../src/run/platform.js";
 
 interface Seen {
@@ -116,6 +116,198 @@ test("github externalChecks: error bodies are relayed like gh's stdout and HTTP 
   assert.equal(await adapter.externalChecks("../evil"), null);
 });
 
+test("Forgejo run-jobs normalization is pagination-conservative and joins the exact job URL", () => {
+  assert.deepEqual(normalizeForgejoRunJobs([{ html_url: "/o/r/actions/runs/171447/jobs/11" }]), {
+    state: "single", count: 1, exact: true, htmlUrl: "/o/r/actions/runs/171447/jobs/11",
+  });
+  assert.deepEqual(normalizeForgejoRunJobs([{ html_url: "/one" }, { html_url: "/two" }]), {
+    state: "multi", count: 2, exact: true,
+  });
+  assert.deepEqual(normalizeForgejoRunJobs({ total_count: 2, jobs: [{ html_url: "/one" }] }), {
+    state: "multi", count: 2, exact: true,
+  });
+  assert.deepEqual(normalizeForgejoRunJobs({ total_count: 1, jobs: [{ html_url: "/one" }] }), {
+    state: "single", count: 1, exact: true, htmlUrl: "/one",
+  });
+  assert.deepEqual(normalizeForgejoRunJobs({ has_more: true, jobs: [{ html_url: "/one" }] }), {
+    state: "multi", count: 2, exact: false,
+  });
+  assert.deepEqual(normalizeForgejoRunJobs(Array.from({ length: 50 }, () => ({ html_url: "/job" }))), {
+    state: "multi", count: 50, exact: false,
+  });
+  assert.equal(forgejoJobStatusPathsMatch(
+    "https://forgejo.example/o/r/actions/runs/171447/jobs/11",
+    "/o/r/actions/runs/171447/jobs/11", "https://forgejo.example",
+  ), true);
+  assert.equal(forgejoJobStatusPathsMatch(
+    "/o/r/actions/runs/171447/jobs/12", "/o/r/actions/runs/171447/jobs/11", "https://forgejo.example",
+  ), false);
+  assert.equal(forgejoJobStatusPathsMatch(
+    "https://forgejo.example:443/o/r/actions/runs/171447/jobs/11",
+    "https://forgejo.example/o/r/actions/runs/171447/jobs/11", "https://forgejo.example",
+  ), true);
+  assert.equal(forgejoJobStatusPathsMatch(
+    "https://forgejo.example:444/o/r/actions/runs/171447/jobs/11",
+    "https://forgejo.example/o/r/actions/runs/171447/jobs/11", "https://forgejo.example",
+  ), false);
+});
+
+test("Forgejo v16 jobs without html_url prove a single job only for the queried run", () => {
+  const job = { id: 42, run_id: 987654, name: "review", status: "running" };
+  assert.deepEqual(normalizeForgejoRunJobs([job], 50, "987654"), {
+    state: "single", count: 1, exact: true, htmlUrl: null,
+  });
+  assert.deepEqual(normalizeForgejoRunJobs([job], 50, "987655"), {
+    state: "unavailable", count: null, exact: false,
+  });
+  assert.deepEqual(normalizeForgejoRunJobs([{ run_id: 987654 }], 50, "987654"), {
+    state: "unavailable", count: null, exact: false,
+  });
+  assert.deepEqual(normalizeForgejoRunJobs({ has_more: true, jobs: [job] }, 50, "987654"), {
+    state: "multi", count: 2, exact: false,
+  });
+  assert.deepEqual(normalizeForgejoRunJobs([job, { ...job, id: 43 }], 50, "987654"), {
+    state: "multi", count: 2, exact: true,
+  });
+});
+
+test("Forgejo self-status candidates are pending-only, unique, repo-scoped, and same-origin", () => {
+  const runNumbers = ["", "abc", " 171447 "];
+  const runRepo = "o/r";
+  const origin = forgejoSelfRunOrigin("https://forgejo.example/api/v1", "");
+  const one = [{ context: "reviewer", status: "pending", target_url: "/o/r/actions/runs/171447/jobs/11" }];
+  assert.deepEqual(forgejoSelfStatusMatches(one, runNumbers, runRepo, origin), { count: 1, index: 0, context: "reviewer" });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    { context: "run-one", status: "pending", target_url: "/o/r/actions/runs/171447/jobs/1" },
+    { context: "run-two", status: "pending", target_url: "/o/r/actions/runs/171448/jobs/1" },
+  ], ["171447", "171448"], runRepo, origin), { count: 2, index: null, context: null });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    ...one,
+    { context: "unit", status: "failure", target_url: "/o/r/actions/runs/171447/jobs/1" },
+    { context: "security", state: "pending", target_url: "/o/r/actions/runs/171447/jobs/2" },
+  ], runNumbers, runRepo, origin), { count: 2, index: null, context: null });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    { context: "unit", status: "failure", target_url: "/o/r/actions/runs/171447/jobs/1" },
+  ], runNumbers, runRepo, origin), { count: 0, index: null, context: null });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    { context: "wrong-host", status: "pending", target_url: "https://elsewhere.example/o/r/actions/runs/171447/jobs/1" },
+    { context: "wrong-repo", status: "pending", target_url: "/x/r/actions/runs/171447/jobs/1" },
+    { context: "query-redirect", status: "pending", target_url: "https://forgejo.example/?redirect=/o/r/actions/runs/171447/jobs/1" },
+  ], runNumbers, runRepo, origin), { count: 0, index: null, context: null });
+  assert.deepEqual(forgejoSelfStatusMatches(one, ["171447"], "o/r", ""), { count: 1, index: 0, context: "reviewer" });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    { context: "dot-segment", status: "pending", target_url: "/o/r/../x/r/actions/runs/171447/jobs/1" },
+  ], ["171447"], runRepo, origin), { count: 0, index: null, context: null });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    { context: "relative-no-leading-slash", status: "pending", target_url: "o/r/actions/runs/171447/jobs/1" },
+  ], ["171447"], runRepo, origin), { count: 1, index: 0, context: "relative-no-leading-slash" });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    { context: "absolute-needs-origin", status: "pending", target_url: "https://forgejo.example/o/r/actions/runs/171447/jobs/1" },
+  ], ["171447"], runRepo, ""), { count: 0, index: null, context: null });
+  assert.deepEqual(forgejoSelfStatusMatches(one, [], runRepo, origin), { count: 0, index: null, context: null });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    { context: "literal", state: "pending", target_url: "/org.name/repo+/actions/runs/171447/jobs/1" },
+  ], ["171447"], "org.name/repo+", origin), { count: 1, index: 0, context: "literal" });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    { context: "regex-wildcard", state: "pending", target_url: "/orgXname/repoo/actions/runs/171447/jobs/1" },
+  ], ["171447"], "org.name/repo+", origin), { count: 0, index: null, context: null });
+  assert.deepEqual(forgejoSelfStatusMatches(one, ["171447"], "", origin), { count: 0, index: null, context: null });
+  assert.deepEqual(forgejoSelfStatusMatches([
+    { context: "reviewer", state: "pending", target_url: "/o/r/actions/runs/1714470/jobs/1" },
+  ], ["171447"], runRepo, origin), { count: 0, index: null, context: null });
+});
+
+test("external-check auto mode excludes only the uniquely identified pending status", () => {
+  const combined = JSON.stringify({ statuses: [
+    { context: "pr-reviewer-action", state: "pending" },
+    { context: "self", state: "pending", status: "pending", target_url: "/o/r/actions/runs/171447/jobs/11" },
+    { context: "external", state: "success", status: "success" },
+  ] });
+  assert.deepEqual(normalizeExternalChecks("{}", combined, "", "", { selfRunNumbers: ["171447"], selfStatusIndex: 1 }), [
+    { name: "pr-reviewer-action", state: "pending", conclusion: "pending" },
+    { name: "external", state: "success", conclusion: "success" },
+  ]);
+  assert.deepEqual(normalizeExternalChecks("{}", combined, "", "", { selfRunNumbers: ["171447"] }), [
+    { name: "pr-reviewer-action", state: "pending", conclusion: "pending" },
+    { name: "self", state: "pending", conclusion: "pending" },
+    { name: "external", state: "success", conclusion: "success" },
+  ]);
+  assert.deepEqual(normalizeExternalChecks("{}", combined, "", "", { selfRunNumbers: [] }), [
+    { name: "pr-reviewer-action", state: "pending", conclusion: "pending" },
+    { name: "self", state: "pending", conclusion: "pending" },
+    { name: "external", state: "success", conclusion: "success" },
+  ]);
+  assert.deepEqual(normalizeExternalChecks("{}", combined, "", ""), [
+    { name: "self", state: "pending", conclusion: "pending" },
+    { name: "external", state: "success", conclusion: "success" },
+  ]);
+});
+
+test("external-check fold: commit statuses preserve duplicate contexts", () => {
+  const statuses = JSON.stringify({ statuses: [
+    { context: "ci/build", state: "success" },
+    { context: "ci/build", state: "failure" },
+  ] });
+  assert.deepEqual(normalizeExternalChecks("{}", statuses, "", ""), [
+    { name: "ci/build", state: "success", conclusion: "success" },
+    { name: "ci/build", state: "failure", conclusion: "failure" },
+  ]);
+});
+
+test("external-check fold: superseded runs collapse to the newest raw conclusion", () => {
+  const runs = JSON.stringify({ check_runs: [
+    { name: "build", status: "completed", conclusion: "cancelled", started_at: "2026-01-01T00:00:00Z", completed_at: "2026-01-01T00:01:00Z" },
+    { name: "build", status: "completed", conclusion: "success", started_at: "2026-01-01T00:02:00Z", completed_at: "2026-01-01T00:03:00Z" },
+    { name: "cancelled-only", status: "completed", conclusion: "cancelled" },
+    { name: "skipped", status: "completed", conclusion: "skipped" },
+    { name: "neutral", status: "completed", conclusion: "neutral" },
+  ] });
+  assert.deepEqual(normalizeExternalChecks(runs, "{}", "", ""), [
+    { name: "build", state: "success", conclusion: "success" },
+    { name: "cancelled-only", state: "failure", conclusion: "cancelled" },
+    { name: "skipped", state: "success", conclusion: "skipped" },
+    { name: "neutral", state: "success", conclusion: "neutral" },
+  ]);
+  const olderPending = JSON.stringify({ check_runs: [
+    { name: "unit", status: "in_progress", conclusion: null, started_at: "2026-01-01T00:01:00Z" },
+    { name: "unit", status: "completed", conclusion: "cancelled", started_at: "2026-01-01T00:04:00Z", completed_at: "2026-01-01T00:05:00Z" },
+  ] });
+  assert.deepEqual(normalizeExternalChecks(olderPending, "{}", "", ""), [
+    { name: "unit", state: "failure", conclusion: "cancelled" },
+  ], "a newer completed rerun displaces an older stuck pending run and preserves raw conclusion");
+
+  const newerPending = JSON.stringify({ check_runs: [
+    { name: "unit", status: "completed", conclusion: "cancelled", started_at: "2026-01-01T00:01:00Z", completed_at: "2026-01-01T00:02:00Z" },
+    { name: "unit", status: "in_progress", conclusion: null, started_at: "2026-01-01T00:04:00Z" },
+  ] });
+  assert.deepEqual(normalizeExternalChecks(newerPending, "{}", "", ""), [{ name: "unit", state: "pending" }],
+    "a genuinely newer pending rerun remains live and keeps the gate waiting");
+});
+
+test("external-check own workflow exclusion: run id, suite siblings, and guarded workflow/job names", () => {
+  const runs = JSON.stringify({ check_runs: [
+    { name: "review / gate", status: "completed", conclusion: "success", details_url: "https://x/actions/runs/42/job/1", check_suite: { id: 100 }, app: { slug: "github-actions" } },
+    { name: "same-suite-other", status: "completed", conclusion: "failure", check_suite: { url: "https://api.github.com/repos/o/r/check-suites/100" }, app: { slug: "github-actions" } },
+    { name: "review / unit", status: "completed", conclusion: "success", check_suite: { id: 101 }, app: { slug: "github-actions" } },
+    { name: "test (node 20)", status: "completed", conclusion: "success", check_suite: { id: 102 }, app: { slug: "github-actions" } },
+    { name: "review / foreign", status: "completed", conclusion: "failure", check_suite: { id: 103 }, app: { slug: "other-app" } },
+  ] });
+  assert.deepEqual(normalizeExternalChecks(runs, "{}", "42", "", { githubWorkflow: "review", githubJob: "test" }), [
+    { name: "review / foreign", state: "failure", conclusion: "failure" },
+  ]);
+  assert.deepEqual(normalizeExternalChecks(runs, "{}", "", "", { githubWorkflow: "review", githubJob: "test" }), [
+    { name: "review / foreign", state: "failure", conclusion: "failure" },
+  ]);
+  const noIdentity = JSON.stringify({ check_runs: [
+    { name: "review / unit", status: "completed", conclusion: "success", app: { slug: "github-actions" } },
+  ] });
+  assert.equal(normalizeExternalChecks(noIdentity, "{}", "", "", { githubWorkflow: "review" })?.length, 0);
+  const unknownApp = JSON.stringify({ check_runs: [
+    { name: "review / unit", status: "completed", conclusion: "success" },
+  ] });
+  assert.equal(normalizeExternalChecks(unknownApp, "{}", "", "", { githubWorkflow: "review" })?.length, 1);
+});
+
 test("external-check fold: self-exclusion, state mapping, combined fallback, transient vs degraded", () => {
   const runs = JSON.stringify({ check_runs: [
     { name: "self", status: "completed", conclusion: "failure", details_url: "https://x/actions/runs/9/job/1" },
@@ -123,7 +315,7 @@ test("external-check fold: self-exclusion, state mapping, combined fallback, tra
     { name: "wip", status: "in_progress" },
   ] });
   const combined = JSON.stringify({ statuses: [{ context: "pr-reviewer-action", state: "pending" }, { context: "ci", state: "error" }] });
-  assert.equal(jqCompact(normalizeExternalChecks(runs, combined, "9", "")), '[{"name":"prefix","state":"success"},{"name":"wip","state":"pending"},{"name":"ci","state":"failure"}]');
+  assert.equal(jqCompact(normalizeExternalChecks(runs, combined, "9", "")), '[{"name":"prefix","state":"success","conclusion":"success"},{"name":"wip","state":"pending"},{"name":"ci","state":"failure","conclusion":"error"}]');
   assert.equal(normalizeExternalChecks("", "\n", "", ""), null);
   assert.deepEqual(normalizeExternalChecks("{}", JSON.stringify({ total_count: 2, state: "success", statuses: [] }), "", ""), [{ name: "(combined)", state: "success" }]);
   assert.deepEqual(normalizeExternalChecks("not json", "{}", "", ""), []);
@@ -191,6 +383,125 @@ test("github pagination never follows a Link to another origin with the credenti
   assert.deepEqual(seen.map((s) => s.url), ["https://api.github.com/repos/o/r/pulls/7/reviews?per_page=100"]);
 });
 
+test("#971: GitHub managed comments follow Link rel=next and merge all bodies in order", async () => {
+  const pageOne = Array.from({ length: 100 }, (_, index) => ({
+    id: index + 1,
+    body: index === 0 ? "OLD managed body" : `comment ${index}`,
+    user: { login: "pr-reviewer[bot]" },
+  }));
+  const { fetchImpl, seen } = recorder((url) => {
+    if (url.searchParams.get("page") === "2") return json([{ id: 101, body: "NEWEST managed body", user: { login: "pr-reviewer[bot]" } }]);
+    return json(pageOne, 200, { Link: '<https://api.github.com/repos/o/r/issues/7/comments?per_page=100&page=2>; rel="next"' });
+  });
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl });
+  const comments = await adapter.listIssueComments();
+  assert.equal(comments.length, 101);
+  assert.deepEqual(comments.filter((comment) => comment.body.includes("managed body")).map((comment) => comment.body), [
+    "OLD managed body",
+    "NEWEST managed body",
+  ]);
+  assert.equal(seen[1]?.url, "https://api.github.com/repos/o/r/issues/7/comments?per_page=100&page=2");
+});
+
+test("#971: GitHub managed reviews follow Link rel=next and merge all bodies in order", async () => {
+  const pageOne = Array.from({ length: 100 }, (_, index) => ({
+    id: index + 1,
+    body: index === 0 ? "OLD managed body" : `review ${index}`,
+    user: { login: "pr-reviewer[bot]" },
+  }));
+  const { fetchImpl, seen } = recorder((url) => {
+    if (url.searchParams.get("page") === "2") return json([{ id: 101, body: "NEWEST managed body", user: { login: "pr-reviewer[bot]" } }]);
+    return json(pageOne, 200, { Link: '<https://api.github.com/repos/o/r/pulls/7/reviews?per_page=100&page=2>; rel="next"' });
+  });
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl });
+  const reviews = await adapter.listPrReviews();
+  assert.equal(reviews.length, 101);
+  assert.deepEqual(reviews.filter((review) => review.body.includes("managed body")).map((review) => review.body), [
+    "OLD managed body",
+    "NEWEST managed body",
+  ]);
+  assert.equal(seen[1]?.url, "https://api.github.com/repos/o/r/pulls/7/reviews?per_page=100&page=2");
+});
+
+test("#971: GitHub managed reads preserve the single-page response when there is no next Link", async () => {
+  const { fetchImpl, seen } = recorder((url) => url.pathname.endsWith("/comments")
+    ? json([{ id: 1, body: "comment body", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-02T00:00:00Z", user: { login: "commenter" } }])
+    : json([{ id: 2, body: "review body", submitted_at: "2026-01-03T00:00:00Z", user: { login: "reviewer" } }]));
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl });
+  assert.deepEqual(await adapter.listIssueComments(), [
+    { body: "comment body", author: "commenter", id: 1, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-02T00:00:00Z" },
+  ]);
+  assert.deepEqual(await adapter.listPrReviews(), [
+    { body: "review body", author: "reviewer", submitted_at: "2026-01-03T00:00:00Z" },
+  ]);
+  assert.equal(seen.length, 2);
+});
+
+test("#971: GitHub managed reads fail closed on failed later pages", async () => {
+  const pageOne = Array.from({ length: 100 }, (_, index) => ({
+    id: index + 1,
+    body: index === 0 ? "OLD managed body" : `entry ${index}`,
+    user: { login: "pr-reviewer[bot]" },
+  }));
+  const failedPage = (url: URL, path: string): boolean => url.pathname.endsWith(path) && url.searchParams.get("page") === "2";
+  const comments = recorder((url) => failedPage(url, "/comments")
+    ? json({ message: "server error" }, 500)
+    : json(pageOne, 200, { Link: '<https://api.github.com/repos/o/r/issues/7/comments?per_page=100&page=2>; rel="next"' }));
+  const commentAdapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl: comments.fetchImpl });
+  assert.deepEqual(await commentAdapter.listIssueComments(), []);
+  assert.equal(comments.seen.length, 2);
+
+  const reviews = recorder((url) => failedPage(url, "/reviews")
+    ? json({ message: "server error" }, 500)
+    : json(pageOne, 200, { Link: '<https://api.github.com/repos/o/r/pulls/7/reviews?per_page=100&page=2>; rel="next"' }));
+  const reviewAdapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl: reviews.fetchImpl });
+  assert.deepEqual(await reviewAdapter.listPrReviews(), []);
+  assert.equal(reviews.seen.length, 2);
+
+  const transport = recorder((url) => {
+    if (url.searchParams.get("page") === "2") throw new Error("page two unavailable");
+    return json(pageOne, 200, { Link: '<https://api.github.com/repos/o/r/issues/7/comments?per_page=100&page=2>; rel="next"' });
+  });
+  assert.deepEqual(await new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl: transport.fetchImpl }).listIssueComments(), []);
+  assert.equal(transport.seen.length, 2);
+});
+
+test("#971: GitHub managed reads stop at MAX_PAGES and fail closed", async () => {
+  const alwaysNext = (url: URL): Response => {
+    const page = Number(url.searchParams.get("page") ?? "1");
+    const next = page + 1;
+    return json([], 200, { Link: `<https://api.github.com/repos/o/r/${url.pathname.endsWith("/comments") ? `issues/7/comments` : `pulls/7/reviews`}?per_page=100&page=${next}>; rel="next"` });
+  };
+  const comments = recorder((url) => alwaysNext(url));
+  const commentAdapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl: comments.fetchImpl });
+  assert.deepEqual(await commentAdapter.listIssueComments(), []);
+  assert.equal(comments.seen.length, 100);
+
+  const reviews = recorder((url) => alwaysNext(url));
+  const reviewAdapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl: reviews.fetchImpl });
+  assert.deepEqual(await reviewAdapter.listPrReviews(), []);
+  assert.equal(reviews.seen.length, 100);
+});
+
+test("#971: GitHub managed reads refuse an off-origin next Link before sending credentials", async () => {
+  const hostile = (): Response => json([{ id: 1, body: "managed body", user: { login: "pr-reviewer[bot]" } }], 200, {
+    Link: '<https://evil.example/steal?page=2>; rel="next"',
+  });
+  const comments = recorder(() => hostile());
+  const commentAdapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer secret", fetchImpl: comments.fetchImpl });
+  assert.deepEqual(await commentAdapter.listIssueComments(), []);
+  assert.equal(comments.seen.length, 1);
+  assert.equal(comments.seen[0]?.auth, "Bearer secret");
+  assert.equal(new URL(comments.seen[0]!.url).origin, "https://api.github.com");
+
+  const reviews = recorder(() => hostile());
+  const reviewAdapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer secret", fetchImpl: reviews.fetchImpl });
+  assert.deepEqual(await reviewAdapter.listPrReviews(), []);
+  assert.equal(reviews.seen.length, 1);
+  assert.equal(reviews.seen[0]?.auth, "Bearer secret");
+  assert.equal(new URL(reviews.seen[0]!.url).origin, "https://api.github.com");
+});
+
 test("nextLink parses RFC 8288 rel=next among several relations", () => {
   assert.equal(nextLink('<https://a/x?page=2>; rel="next", <https://a/x?page=5>; rel="last"'), "https://a/x?page=2");
   assert.equal(nextLink('<https://a/x?page=5>; rel="last"'), null);
@@ -220,7 +531,7 @@ test("forgejo review threads fetch each integer review's comments; externalCheck
   });
   const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example/sub/", token: "t", fetchImpl });
   assert.deepEqual(await adapter.listReviewThreads(), { ok: true, data: [] });
-  assert.deepEqual(await adapter.externalChecks("abc"), [{ name: "ci", state: "success" }]);
+  assert.deepEqual(await adapter.externalChecks("abc"), [{ name: "ci", state: "success", conclusion: "success" }]);
   assert.deepEqual(seen.map((s) => s.url), [
     "https://git.example/sub/api/v1/repos/o/r/pulls/5/reviews",
     "https://git.example/sub/api/v1/repos/o/r/pulls/5/reviews/4/comments",
@@ -242,7 +553,10 @@ test("forgejo reads fail (not empty) when the authorized-integration credential 
   delete process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
   try {
     const { fetchImpl, seen } = recorder(() => json([]));
-    const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", authorizedIntegrationAudience: "aud", fetchImpl });
+    const adapter = new ForgejoAdapter({
+      repo: "o/r", prNumber: "5", baseUrl: "https://git.example",
+      token: "static-token", authMethod: "authorized_integration", authorizedIntegrationAudience: "aud", fetchImpl,
+    });
     assert.equal((await adapter.listPrFiles()).ok, false);
     assert.equal((await adapter.listReviewThreads()).ok, false);
     assert.equal(seen.length, 0);
@@ -250,6 +564,37 @@ test("forgejo reads fail (not empty) when the authorized-integration credential 
     if (saved.url !== undefined) process.env.ACTIONS_ID_TOKEN_REQUEST_URL = saved.url;
     if (saved.token !== undefined) process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN = saved.token;
   }
+});
+
+test("Forgejo integration reads use OIDC even when a direct caller supplies a token", async () => {
+  const saved = { url: process.env.ACTIONS_ID_TOKEN_REQUEST_URL, token: process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN };
+  process.env.ACTIONS_ID_TOKEN_REQUEST_URL = "https://oidc.example/token?job=1";
+  process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN = "runner-oidc";
+  try {
+    const { fetchImpl, seen } = recorder((url) => json(url.origin === "https://oidc.example" ? { value: "integration-jwt" } : []));
+    const adapter = new ForgejoAdapter({
+      repo: "o/r", prNumber: "5", baseUrl: "https://git.example",
+      token: "static-token", authMethod: "authorized_integration", authorizedIntegrationAudience: "aud", fetchImpl,
+    });
+    assert.equal((await adapter.listPrFiles()).ok, true);
+    assert.deepEqual(seen.map(({ auth }) => auth), ["bearer runner-oidc", "Bearer integration-jwt"]);
+  } finally {
+    if (saved.url === undefined) delete process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+    else process.env.ACTIONS_ID_TOKEN_REQUEST_URL = saved.url;
+    if (saved.token === undefined) delete process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+    else process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN = saved.token;
+  }
+});
+
+test("an explicit Forgejo token method ignores a configured OIDC audience", async () => {
+  const { fetchImpl, seen } = recorder(() => json([]));
+  const adapter = new ForgejoAdapter({
+    repo: "o/r", prNumber: "5", baseUrl: "https://git.example",
+    token: "pat", authMethod: "token", authorizedIntegrationAudience: "aud", fetchImpl,
+  });
+  assert.equal((await adapter.listPrFiles()).ok, true);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]!.auth, "token pat");
 });
 
 test("forgejo ghApi joins the translated /api/v1 path to the bare base exactly once", async () => {
@@ -374,6 +719,83 @@ test("forgejo reads make ZERO requests for a dot-segment repo ref", async () => 
     await assert.rejects(adapter.repoPermission(), /Invalid repo full name/);
   }
   assert.equal(seen.length, 0);
+});
+
+// ── #970: forge-authenticated provenance ─────────────────────────────────
+
+test("#970: GitHub managed reads carry the forge-reported author login", async () => {
+  const { fetchImpl } = recorder((url) => {
+    if (url.pathname.endsWith("/comments")) {
+      return json([{ id: 1, body: "<!-- ai-pr-reviewer -->", created_at: "2024-01-01T00:00:00Z", updated_at: "2024-01-02T00:00:00Z", user: { login: "pr-reviewer[bot]" } }]);
+    }
+    return json([{ id: 2, body: "<!-- ai-pr-reviewer -->", submitted_at: "2024-01-02T00:00:00Z", user: { login: "pr-reviewer[bot]" } }]);
+  });
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl });
+  const comments = await adapter.listIssueComments();
+  assert.equal(comments[0]?.author, "pr-reviewer[bot]");
+  assert.equal(comments[0]?.body, "<!-- ai-pr-reviewer -->");
+  const reviews = await adapter.listPrReviews();
+  assert.equal(reviews[0]?.author, "pr-reviewer[bot]");
+  // A body with no usable user object is unproven, never a fabricated author.
+  const { fetchImpl: bare } = recorder(() => json([{ id: 3, body: "x" }]));
+  assert.equal((await new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl: bare }).listIssueComments())[0]?.author, undefined);
+  // GitHub returns `user: null` for a deleted author — still unproven.
+  const { fetchImpl: deleted } = recorder(() => json([{ id: 4, body: "x", user: null }]));
+  assert.equal((await new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl: deleted }).listIssueComments())[0]?.author, undefined);
+});
+
+test("#970: GitHub authenticatedIdentity uses GraphQL viewer (installation-token safe) with a REST /user fallback", async () => {
+  // GraphQL `viewer` answers for installation tokens, GITHUB_TOKEN, and PATs;
+  // REST GET /user 403s for installation tokens, so it must be tried second.
+  const gql = recorder((url) => url.pathname === "/graphql"
+    ? json({ data: { viewer: { login: "its-saffron[bot]" } } })
+    : json({ message: "Resource not accessible by integration" }, 403));
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl: gql.fetchImpl });
+  assert.equal(await adapter.authenticatedIdentity(), "its-saffron[bot]");
+  assert.ok(gql.seen[0]?.url.endsWith("/graphql"));
+  assert.equal(gql.seen.length, 1, "no REST /user call is needed when GraphQL answers");
+
+  // REST /user fallback for credentials where GraphQL is unavailable.
+  const rest = recorder((url) => url.pathname === "/graphql"
+    ? json({ errors: [{ message: "GraphQL not available" }] })
+    : json({ login: "joryirving", type: "User" }));
+  const fallback = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl: rest.fetchImpl });
+  assert.equal(await fallback.authenticatedIdentity(), "joryirving");
+  assert.ok(rest.seen.some((entry) => entry.url.endsWith("/user")));
+
+  // No token: nothing to authenticate as.
+  assert.equal(await new GitHubAdapter({ repo: "o/r", prNumber: "7", fetchImpl: gql.fetchImpl }).authenticatedIdentity(), null);
+  // Transport failure on both.
+  const failing = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl: (async () => { throw new Error("boom"); }) as never });
+  assert.equal(await failing.authenticatedIdentity(), null);
+  // GraphQL 200 without a viewer; REST 200 without a usable login.
+  const unusable = new GitHubAdapter({
+    repo: "o/r", prNumber: "7", token: "Bearer t",
+    fetchImpl: recorder((url) => url.pathname === "/graphql" ? json({ data: {} }) : json({ id: 1 })).fetchImpl,
+  });
+  assert.equal(await unusable.authenticatedIdentity(), null);
+  // An explicit `viewer: null` falls through to REST, which then decides.
+  const nullViewer = new GitHubAdapter({
+    repo: "o/r", prNumber: "7", token: "Bearer t",
+    fetchImpl: recorder((url) => url.pathname === "/graphql" ? json({ data: { viewer: null } }) : json({ login: "fallback-user" })).fetchImpl,
+  });
+  assert.equal(await nullViewer.authenticatedIdentity(), "fallback-user");
+  // Both sources reject.
+  const denied = new GitHubAdapter({ repo: "o/r", prNumber: "7", token: "Bearer t", fetchImpl: recorder(() => json({ message: "Bad credentials" }, 401)).fetchImpl });
+  assert.equal(await denied.authenticatedIdentity(), null);
+});
+
+test("#970: Forgejo managed reads carry the author login and authenticatedIdentity resolves /user", async () => {
+  const { fetchImpl, seen } = recorder((url) => {
+    if (url.pathname.endsWith("/user")) return json({ login: "pr-reviewer" });
+    if (url.pathname.endsWith("/reviews")) return json([{ id: 2, body: "<!-- ai-pr-reviewer -->", user: { login: "pr-reviewer" } }]);
+    return json([{ id: 1, body: "<!-- ai-pr-reviewer -->", created_at: "2024-01-01T00:00:00Z", user: { login: "pr-reviewer" } }]);
+  });
+  const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+  assert.equal((await adapter.listIssueComments())[0]?.author, "pr-reviewer");
+  assert.equal((await adapter.listPrReviews())[0]?.author, "pr-reviewer");
+  assert.equal(await adapter.authenticatedIdentity(), "pr-reviewer");
+  assert.ok(seen.some((entry) => entry.url.endsWith("/api/v1/user")));
 });
 
 test("enrichment clients make ZERO requests for a dot-segment repo ref or ref tail", async () => {
@@ -550,20 +972,21 @@ test("github getPrBodyRevision returns body and lastEditedAt from ONE GraphQL do
   assert.equal(await new GitHubAdapter({ repo: "o/r", prNumber: "1", fetchImpl: failing.fetchImpl }).getPrBodyRevision(), null);
 });
 
-test("a resolved tangled platform fails closed before fixture interception (#583)", () => {
-  // Same ordering as `_platform_tangled_guard` in scripts/platform_api.sh:
-  // the guard runs before the eval fixture seam, so tangled can never fall
-  // back into any adapter construction path, fixture or real.
+test("a resolved tangled platform builds the Tangled read adapter before fixture interception (#585)", () => {
+  // Same ordering as the v2 shell seam's tangled guard: the Tangled branch
+  // runs before the fixture seam, so a resolved Tangled run never falls back
+  // into the fixture path (or any github/forgejo adapter) — it gets the
+  // read-only TangledAdapter. Tangled addresses repos by DID, not owner/repo,
+  // so the env carries no REPO/PR_NUMBER.
   const dir = mkdtempSync(join(tmpdir(), "semantic-"));
   try {
     mkdirSync(join(dir, ".semantic-fixture"));
     writeFileSync(join(dir, ".semantic-fixture", "pr.json"), "{}");
     const env: Record<string, string> = {
-      REPO: "o/r", PR_NUMBER: "9",
       PLATFORM: "tangled", TANGLED_REPO_DID: "did:plc:repo",
       SEMANTIC_FIXTURE_MODE: "true", SEMANTIC_FIXTURE_DIR: dir,
     };
-    assert.throws(() => buildPlatformReadAdapter(env), TangledNotImplementedError);
+    assert.ok(buildPlatformReadAdapter(env) instanceof TangledAdapter);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

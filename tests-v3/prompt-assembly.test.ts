@@ -167,8 +167,16 @@ test("annotateAnalysisEngine explains the route", () => {
   const e = "m@u (openai)";
   assert.equal(annotateAnalysisEngine(e, "primary"), e);
   assert.equal(annotateAnalysisEngine(e, "primary", { reviewRoute: "primary" }), `${e} — primary route`);
-  assert.equal(annotateAnalysisEngine(e, "primary", { reviewRoute: "smart" }), `${e} — routed smart (risk match)`);
+  // #965: no direct smart route exists; a smart second pass reports as
+  // "escalated", and an unknown primary-origin route renders bare.
+  assert.equal(annotateAnalysisEngine(e, "primary", { reviewRoute: "smart" }), e);
   assert.equal(annotateAnalysisEngine(e, "fallback"), `${e} — fallback (primary failed)`);
+  assert.equal(annotateAnalysisEngine(e, "fallback", { reviewRoute: "legacy" }), `${e} — fallback (primary failed)`);
+  assert.equal(annotateAnalysisEngine(e, "fallback", { reviewRoute: "primary" }), `${e} — fallback (primary failed)`);
+  assert.equal(annotateAnalysisEngine(e, "fallback", { reviewRoute: "smart" }), `${e} — fallback (smart failed)`);
+  // An unmapped route names itself instead of reading as a primary failure.
+  assert.equal(annotateAnalysisEngine(e, "fallback", { reviewRoute: "local" }), `${e} — fallback (local failed)`);
+  assert.equal(annotateAnalysisEngine(e, "fallback", { reviewRoute: "toString" }), `${e} — fallback (toString failed)`);
   assert.equal(annotateAnalysisEngine(e, "escalated", { escalationReasons: "r" }), `${e} — escalated (r)`);
   assert.equal(annotateAnalysisEngine(e, "escalated"), `${e} — escalated (unknown)`);
 });

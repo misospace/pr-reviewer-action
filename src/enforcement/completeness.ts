@@ -15,8 +15,9 @@
  * malformed disposition.
  *
  * The version-1 coverage artifact itself is `evaluateRequiredCheckCoverage`
- * in `src/enforcement/required-checks.ts` (the #750 parity boundary); this
- * module composes it and owns the mode handling and markdown consequences.
+ * in `src/enforcement/required-checks.ts` (the #750 structured-coverage
+ * boundary); this module composes it and owns the mode handling and markdown
+ * consequences.
  */
 import type { ReviewArtifact } from "./artifact.js";
 import {
@@ -36,10 +37,9 @@ export interface RequiredCheckValidationResult {
 }
 
 /**
- * Legacy keyword concept table kept ONLY as the documented v2 oracle for the
- * parity qualification of the cutover (the v3 path never consults it — see
- * the module docstring). Ported verbatim so an approved-divergence fixture
- * can pin exactly what the removal changes.
+ * Legacy keyword concept table kept ONLY as the documented v2 reference for
+ * the cutover (the v3 path never consults it — see the module docstring).
+ * Ported verbatim so the fixture can pin exactly what the removal changes.
  */
 export const CHECK_CONCEPTS: Readonly<Record<string, readonly string[]>> = {
   "verify no functional changes beyond lockfile hashes": ["lockfile", "hash", "digest", "functional change"],
@@ -77,13 +77,13 @@ function fallbackKeywords(item: string): string[] {
   return filtered.length > 0 ? filtered : [item.toLowerCase()];
 }
 
-/** v2 `is_addressed` — keyword oracle only (see module docstring). */
+/** v2 `is_addressed` — keyword reference only (see module docstring). */
 export function isAddressed(item: string, reviewLower: string): boolean {
   const keywords = CHECK_CONCEPTS[item] ?? fallbackKeywords(item);
   return keywords.some((keyword) => reviewLower.includes(keyword));
 }
 
-/** v2 `validate_review` — keyword oracle only (see module docstring). */
+/** v2 `validate_review` — keyword reference only (see module docstring). */
 export function validateReview(mustCheck: readonly string[], reviewMarkdown: string): {
   validated: boolean;
   missing: string[];

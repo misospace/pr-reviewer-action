@@ -8,18 +8,21 @@ import { validateContract } from "../src/config/contract.js";
 import { loadConfig } from "../src/config/load-config.js";
 import { GitHubAdapter } from "../src/platform/github.js";
 import { SemanticFixtureAdapter } from "../src/platform/semantic-fixture.js";
-import { TangledNotImplementedError } from "../src/platform/tangled.js";
+import { TangledAdapter } from "../src/platform/tangled-adapter.js";
 import { buildPlatformReadAdapter } from "../src/run/platform.js";
 import { resolveLoopLimits } from "../src/tools/harness.js";
 import { adaptiveLoopBudgets } from "../src/tools/loop.js";
 import { stageEnvFromConfig, buildStageEnv, validateStageEnv, type RunContext } from "../src/run/env.js";
+import { buildHumanReviewsSection } from "../src/run/stages.js";
+import { RunWorkspace } from "../src/run/workspace.js";
+import { rawInputsFromEnv } from "../src/run/review.js";
+import { collectConfigLines, computeConfigHash } from "../src/precheck/fingerprint.js";
 
 /**
  * The kebab→SCREAMING_SNAKE projection the orchestrator feeds the ported
- * stages (#809). The `config-default-resolution` parity boundary pins the
- * v2 side; this pins the v3 projection itself — every contract input lands
- * under the exact stage-ABI name the ported stages read, secrets arrive as
- * revealed values, and the GH_TOKEN binding follows config.sh's fallback.
+ * stages (#809): every contract input lands under the exact stage-ABI name
+ * the ported stages read, secrets arrive as revealed values, and the
+ * GH_TOKEN binding follows config.sh's fallback.
  */
 
 const contract = validateContract(V3_CONTRACT);
@@ -59,8 +62,10 @@ test("projection values: defaults, numbers, booleans, and revealed secrets", () 
   assert.equal(env.AI_API_FORMAT, "anthropic");
   assert.equal(env.AI_MAX_TOKENS, "4096");
   assert.equal(env.CI_STATUS_CHECK, "true");
+  assert.equal(env.FAIL_ON_DEGRADED_REVIEW, "false");
   assert.equal(env.GITHUB_TOKEN, "tok", "secrets are revealed on the stage ABI, never redacted");
   assert.equal(env.AI_TEMPERATURE, "0.1", "contract default applies when the input is unset");
+  assert.equal(env.REPOSITORY_SKILLS, "false", "typed repository skill opt-in flows through config projection");
 });
 
 test("GH_TOKEN follows config.sh's binding: GH_TOKEN || GITHUB_TOKEN, then the token input", () => {
@@ -89,6 +94,8 @@ test("validateStageEnv fails closed with the v2 messages on missing bindings", (
     /Missing GitHub token/,
   );
   assert.equal(validateStageEnv({ ...empty, REPO: "o/r", PR_NUMBER: "1", AI_BASE_URL: "u", AI_MODEL: "m", GH_TOKEN: "t" } as never), null);
+  assert.match(validateStageEnv({ ...empty, REPO: "o/r", PR_NUMBER: "1", AI_BASE_URL: "u", AI_MODEL: "m", GH_TOKEN: "t", REPOSITORY_SKILLS_PATHS: "not-json" } as never) ?? "", /REPOSITORY_SKILLS_PATHS/);
+  assert.equal(validateStageEnv({ ...empty, REPO: "o/r", PR_NUMBER: "1", AI_BASE_URL: "u", AI_MODEL: "m", GH_TOKEN: "t", REPOSITORY_SKILLS_PATHS: "[]" } as never), null);
 });
 
 test("eval fixture keys survive the stage-env projection and yield the offline adapter", async () => {
@@ -147,8 +154,8 @@ test("the Tangled identity signal survives the stage-env projection (#583)", () 
   });
   assert.equal(env.TANGLED_REPO_DID, "did:plc:repo");
   // End to end through the real adapter boundary: the projected DID flips
-  // auto to tangled, which fails loudly instead of constructing an adapter.
-  assert.throws(() => buildPlatformReadAdapter(env), TangledNotImplementedError);
+  // auto to the Tangled read adapter (#585) instead of the GitHub fallback.
+  assert.ok(buildPlatformReadAdapter(env) instanceof TangledAdapter);
   // Without the signal the same projection builds the GitHub adapter.
   const plain = buildPlatformReadAdapter(
     buildStageEnv(config, base, { REPO: "o/r", PR_NUMBER: "9", GITHUB_TOKEN: "tok" }),
@@ -164,4 +171,157 @@ test("#895: an omitted tool-max-rounds scales the round cap through the real con
   };
   assert.ok(rounds(required) >= 16, "the contract default must leave the round cap free to scale with a 32-call budget");
   assert.equal(rounds({ ...required, "tool-max-rounds": "4" }), 8);
+});
+
+test("#1020: smart-tier round and wall-clock inputs reach resolveLoopLimits from the runner's INPUT_ channel", async (t) => {
+  const base: RunContext = {
+    workspace: "/ws", runDir: "/run", repo: "o/r", prNumber: "9", headSha: "",
+    isForkPr: "false", platform: "auto", forgejoApiUrl: "", ciChecksFile: "",
+    outputFilePath: "/dev/null", stepSummaryPath: "", baseRef: "",
+  };
+  // The runner exports composite inputs as INPUT_<ID> with kebab IDs kept.
+  const runnerEnv = (inputs: Record<string, string>, ambient: Record<string, string> = {}): NodeJS.ProcessEnv => {
+    const env: NodeJS.ProcessEnv = { ...ambient };
+    for (const input of contract.inputs.filter((entry) => entry.required)) {
+      env[`INPUT_${input.id.toUpperCase()}`] = `required-${input.id}`;
+    }
+    for (const [id, value] of Object.entries(inputs)) env[`INPUT_${id.toUpperCase()}`] = value;
+    return env;
+  };
+  const stageFor = (env: NodeJS.ProcessEnv): Record<string, string> =>
+    buildStageEnv(loadConfig(contract, rawInputsFromEnv(contract, env)), base, env);
+  const caps = (stage: Record<string, string>, tier: "smart" | "primary", budget: number): number => {
+    const [maxRounds, wallClock, explicit] = resolveLoopLimits(stage, tier);
+    return adaptiveLoopBudgets(maxRounds, budget, wallClock, explicit).maxRounds;
+  };
+  const cases: {
+    name: string;
+    inputs: Record<string, string>;
+    ambient?: Record<string, string>;
+    smart: [number, number, boolean];
+    smartCap: number;
+    primary: [number, number, boolean];
+    primaryCap: number;
+  }[] = [
+    {
+      name: "runner default: smart inputs exported empty",
+      inputs: { "smart-tool-max-rounds": "", "smart-tool-loop-wall-clock-sec": "" },
+      smart: [4, 600, false], smartCap: 32, primary: [4, 600, false], primaryCap: 24,
+    },
+    {
+      name: "smart inherits an explicit primary pair",
+      inputs: { "tool-max-rounds": "3", "tool-loop-wall-clock-sec": "300" },
+      smart: [3, 300, true], smartCap: 6, primary: [3, 300, true], primaryCap: 6,
+    },
+    {
+      name: "smart override with the primary pair unset",
+      inputs: { "smart-tool-max-rounds": "5", "smart-tool-loop-wall-clock-sec": "120" },
+      smart: [5, 120, true], smartCap: 10, primary: [4, 600, false], primaryCap: 24,
+    },
+    {
+      name: "smart override beats an explicit primary pair",
+      inputs: {
+        "tool-max-rounds": "2", "smart-tool-max-rounds": "6",
+        "tool-loop-wall-clock-sec": "300", "smart-tool-loop-wall-clock-sec": "900",
+      },
+      smart: [6, 900, true], smartCap: 12, primary: [2, 300, true], primaryCap: 4,
+    },
+    {
+      name: "ambient SCREAMING_SNAKE env is not a route",
+      inputs: {},
+      ambient: { SMART_TOOL_MAX_ROUNDS: "6", SMART_TOOL_LOOP_WALL_CLOCK_SEC: "120" },
+      smart: [4, 600, false], smartCap: 32, primary: [4, 600, false], primaryCap: 24,
+    },
+  ];
+  for (const entry of cases) {
+    await t.test(entry.name, () => {
+      const stage = stageFor(runnerEnv(entry.inputs, entry.ambient));
+      assert.deepEqual(resolveLoopLimits(stage, "smart"), entry.smart, "smart limits");
+      assert.equal(caps(stage, "smart", 32), entry.smartCap, "smart rounds cap");
+      assert.deepEqual(resolveLoopLimits(stage, "primary"), entry.primary, "primary limits");
+      assert.equal(caps(stage, "primary", 24), entry.primaryCap, "primary rounds cap");
+    });
+  }
+  await t.test("the smart round cap is part of the config fingerprint", () => {
+    const stage = stageFor(runnerEnv({ "smart-tool-max-rounds": "5", "smart-tool-loop-wall-clock-sec": "120" }));
+    assert.ok(collectConfigLines(stage).includes("SMART_TOOL_MAX_ROUNDS=5"));
+  });
+  // A longer loop can finish more rounds, so a wall-clock change on an
+  // unchanged diff has to re-review rather than skip as already reviewed.
+  for (const id of ["tool-loop-wall-clock-sec", "smart-tool-loop-wall-clock-sec"]) {
+    await t.test(`changing ${id} changes the config hash`, () => {
+      const hashOf = (value: string) => computeConfigHash(collectConfigLines(stageFor(runnerEnv({ [id]: value }))));
+      assert.notEqual(hashOf("120"), hashOf("900"));
+    });
+  }
+});
+
+test("#928: env-only stage knobs survive buildStageEnv, so blind replays really skip human reviews", async () => {
+  const base: RunContext = {
+    workspace: "/ws", runDir: "/run", repo: "o/r", prNumber: "7", headSha: "",
+    isForkPr: "false", platform: "github", forgejoApiUrl: "", ciChecksFile: "",
+    outputFilePath: "/dev/null", stepSummaryPath: "", baseRef: "",
+  };
+  const config = loadConfig(contract, { "repo": "o/r", "pr-number": "7", "ai-base-url": "http://m/v1", "ai-model": "m" });
+  const env = buildStageEnv(config, base, {
+    HUMAN_REVIEWS_CONTEXT: "false", DEEP_REVIEW_EXECUTION: "prime_then_fanout", AI_FALLBACK_RETRIES: "2", AI_SMART_RETRIES: "1",
+  });
+  assert.equal(env.HUMAN_REVIEWS_CONTEXT, "false");
+  assert.equal(env.DEEP_REVIEW_EXECUTION, "prime_then_fanout");
+  assert.equal(env.AI_FALLBACK_RETRIES, "2");
+  assert.equal(env.AI_SMART_RETRIES, "1");
+
+  const review = { id: 1, state: "CHANGES_REQUESTED", user: { login: "maintainer", type: "User" }, body: "Blocker: the resolver ignores ctx.sourceSha.", commit_id: "a".repeat(40), submitted_at: "2026-09-30T00:00:00Z" };
+  const adapter = { listPrReviewsPaginated: () => Promise.resolve({ ok: true, data: [review] }) } as never;
+  const blind = new RunWorkspace(mkdtempSync(join(tmpdir(), "v3-hr-blind-")), false);
+  await buildHumanReviewsSection(blind, adapter, "a".repeat(40), env as never);
+  assert.equal(blind.readText("human-reviews.md") ?? "", "");
+  const seeing = new RunWorkspace(mkdtempSync(join(tmpdir(), "v3-hr-open-")), false);
+  await buildHumanReviewsSection(seeing, adapter, "a".repeat(40), buildStageEnv(config, base, {}) as never);
+  assert.match(seeing.readText("human-reviews.md") ?? "", /ctx\.sourceSha/);
+});
+
+test("#1053: an unset fallback override stays out of the config fingerprint through the production projection", () => {
+  // loadConfig → stageEnvFromConfig → collectConfigLines is exactly the
+  // shipped precheck path. An installation that sets only
+  // `ai-reasoning-effort` must NOT gain an `AI_FALLBACK_REASONING_EFFORT`
+  // line from the new input's inheritance, or every cached review of that
+  // configuration invalidates on upgrade; a configured override must add
+  // the line and flip the hash.
+  const unset = loadConfig(contract, {
+    "repo": "o/r", "pr-number": "7",
+    "ai-base-url": "http://m/v1", "ai-model": "m",
+    "ai-reasoning-effort": "low",
+  });
+  const unsetLines = collectConfigLines(stageEnvFromConfig(unset));
+  assert.equal(unsetLines.some((line) => line.startsWith("AI_FALLBACK_REASONING_EFFORT")), false);
+  // A projection from a build without the input at all hashes identically:
+  // the empty new key is invisible to the fingerprint.
+  const withoutFeature = { ...stageEnvFromConfig(unset) };
+  delete withoutFeature.AI_FALLBACK_REASONING_EFFORT;
+  assert.deepEqual(unsetLines, collectConfigLines(withoutFeature));
+  assert.equal(computeConfigHash(unsetLines), computeConfigHash(collectConfigLines(withoutFeature)));
+
+  const overridden = loadConfig(contract, {
+    "repo": "o/r", "pr-number": "7",
+    "ai-base-url": "http://m/v1", "ai-model": "m",
+    "ai-reasoning-effort": "low",
+    "ai-fallback-reasoning-effort": "high",
+  });
+  const overriddenLines = collectConfigLines(stageEnvFromConfig(overridden));
+  assert.ok(overriddenLines.includes("AI_FALLBACK_REASONING_EFFORT=high"));
+  assert.notEqual(computeConfigHash(overriddenLines), computeConfigHash(unsetLines));
+});
+
+test("#914: the pr-gate's pinned head sha is projected from the ambient env into the stage env", () => {
+  const base: RunContext = {
+    workspace: "/ws", runDir: "/run", repo: "o/r", prNumber: "7", headSha: "",
+    isForkPr: "false", platform: "github", forgejoApiUrl: "", ciChecksFile: "",
+    outputFilePath: "/dev/null", stepSummaryPath: "", baseRef: "",
+  };
+  const config = loadConfig(contract, { "repo": "o/r", "pr-number": "7", "ai-base-url": "http://m/v1", "ai-model": "m" });
+  const pinned = buildStageEnv(config, base, { PR_REVIEWER_GATE_HEAD_SHA: "a".repeat(40) });
+  assert.equal(pinned.PR_REVIEWER_GATE_HEAD_SHA, "a".repeat(40));
+  const unpinned = buildStageEnv(config, base, {});
+  assert.equal(unpinned.PR_REVIEWER_GATE_HEAD_SHA, undefined);
 });

@@ -14,13 +14,18 @@
  */
 import { sanitizeMarkdown, stripReservedMarkers, stripEmptyConditionalSections, type ConditionalSectionPresence, type UpstreamLinkMode } from "./sanitize.js";
 import { publicAnalysisEngine } from "../prompt/index.js";
+import { ACTION_VERSION } from "../version.js";
 import { buildComments, SEVERITY_LABELS } from "./inline-findings.js";
 import { redactText } from "../context/redact.js";
-import { buildRunMetadataMarker, emitReviewMarkers, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
-import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, type CleanupLog } from "./cleanup.js";
+import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
+import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, retireManagedInlineComments, resolvePublishTrustedOwner, type CleanupLog } from "./cleanup.js";
+import { ownerMatchesIdentity } from "../platform/owner-identity.js";
 import { strictReviewResult } from "../enforcement/verdict-policy.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
 import { COVERAGE_NOTICE_MAX_ITEMS, type PartialCoverage } from "../tools/coverage.js";
+import { isIncompleteReason, renderFindingsSummary, severityCountsLabel, MAX_REVIEW_TRIAGE_REASON_CHARS, type IncompleteReason } from "./outputs.js";
+import { resolveReviewTriageDecision } from "../model/triage.js";
+import type { HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 import type { NativeReviewComment, NativeReviewRequest, PublishPlatformApi } from "../platform/publish-api.js";
 
 export type PublishMode = "comment" | "review_comment" | "review_verdict";
@@ -45,6 +50,8 @@ export interface PublishInput {
   broadFingerprint?: string;
   /** Required-checks validation status for the metadata marker. */
   requiredChecks: string;
+  /** #954: why coverage is incomplete (see IncompleteReason). Absent means derive from requiredChecks/partialCoverage (legacy callers). */
+  incompleteReason?: string;
   reviewRoute: string;
   escalationReason: string;
   cacheHitRatio: string;
@@ -84,6 +91,8 @@ export interface PublishInput {
    * publish could not confirm completeness, so it fails closed exactly like
    * a confirmed gap — see `markerReviewResult`. */
   coverageUnknown?: boolean;
+  /** #978: whether the final verdict may bypass fail-on-request-changes. */
+  degradedGateBypass?: boolean;
   /** #847: the #810/#702 tool-loop request budget this run resolved, so the
    * size-scaled default can be measured from published reviews alone.
    * Omitted when no tool harness ran. */
@@ -96,6 +105,18 @@ export interface PublishInput {
   /** #895: loop rounds used, and the round cap they ran against. */
   toolRounds?: number;
   maxRounds?: number;
+  /** #922: the loop's conversation budget and peak (approx tokens). */
+  contextBudget?: number;
+  contextPeak?: number;
+  /** #1003: the human-review triage answer, present ONLY when triage ran
+   * (`review-triage` enabled) and the review produced one. Absent means
+   * "did not run" and renders no section — never a silent "not required". */
+  reviewTriage?: { decision: string; reason: string };
+  /** #1005: the deterministic reviewer-routing plan, present ONLY when
+   * routing ran. Its `status` is action-owned; `users`/`teams` come only from
+   * trusted base-ref configuration. The publish step performs the reviewer
+   * request only for `status: "request"`. */
+  reviewRouting?: HumanReviewRoutingPlan;
 }
 
 export interface PublishResult {
@@ -113,6 +134,8 @@ const VERDICT_PREFIXES: Record<string, string> = {
  * incomplete: never "APPROVE", since the coverage notice right below it
  * says the review did not finish. */
 const INCOMPLETE_COVERAGE_PREFIX = "🟡 **Automated recommendation: INCOMPLETE — not an approval**";
+const TRACE_INCOMPLETE_PREFIX = "🟡 **Automated recommendation: APPROVAL WITHHELD — requirement trace incomplete**";
+const BOTH_INCOMPLETE_PREFIX = "🟡 **Automated recommendation: APPROVAL WITHHELD — review coverage incomplete**";
 
 /**
  * Sanitize model output: strip reserved metadata markers (the model can
@@ -124,9 +147,16 @@ export function sanitizeForPublication(
   linkMode: UpstreamLinkMode,
   presence: ConditionalSectionPresence,
 ): string {
-  return stripEmptyConditionalSections(
-    sanitizeMarkdown(stripReservedMarkers(reviewMarkdown), linkMode),
-    presence,
+  // The model echoes diff lines: redact on the published body, not only on
+  // finding messages. Redaction last so markdown escaping cannot re-expose
+  // a redacted span; redactText is idempotent on its own marker. Redaction
+  // also runs first so escaping cannot split a secret shape before the outer
+  // pass sees it (idempotent either way).
+  return redactText(
+    stripEmptyConditionalSections(
+      sanitizeMarkdown(stripReservedMarkers(redactText(reviewMarkdown)), linkMode),
+      presence,
+    ),
   );
 }
 
@@ -173,11 +203,30 @@ export function reviewCoverageIncomplete(reviewResult: string): boolean {
   return reviewResult === "partial";
 }
 
+export function resolveIncompleteReason(input: {
+  requiredChecks: string;
+  incompleteReason?: string | undefined;
+  partialCoverage?: PartialCoverage | undefined;
+  coverageUnknown?: boolean | undefined;
+}): IncompleteReason {
+  const reason = isIncompleteReason(input.incompleteReason) ? input.incompleteReason : undefined;
+  const trace = reason === "requirement_trace" || reason === "both";
+  const execution = reason === "execution" || reason === "both"
+    || (reason === undefined || reason === "none") && input.requiredChecks === "incomplete"
+    || Boolean(input.partialCoverage)
+    || Boolean(input.coverageUnknown);
+  return execution && trace ? "both"
+    : execution ? "execution"
+    : trace ? "requirement_trace"
+    : "none";
+}
+
 /** Build the published body: marker preamble + engine line + the optional
  * action-owned #810 coverage notice + the strict state block (#811, when
- * present) + sanitized review. Both blocks are inserted AFTER sanitization
- * (action-owned, never model text) so no stripping pass can drop them, and
- * sit near the top so a partial-coverage run cannot read as complete. */
+ * present) + the optional #1003 human-review triage section + sanitized
+ * review. Every block is action-owned and inserted AFTER sanitization (never
+ * model text) so no stripping pass can drop them, and they sit near the top
+ * so a partial-coverage run cannot read as complete. */
 export function buildPublishedBody(options: {
   markers: string;
   header?: string;
@@ -188,6 +237,13 @@ export function buildPublishedBody(options: {
   coverageNotice?: string;
   /** Rendered coverage-gap notice + findings summary for verdict_policy=strict. */
   stateBlock?: string | undefined;
+  /** #1003: rendered human-review triage section (only when triage ran). */
+  triageBlock?: string | undefined;
+  /** #1005: rendered reviewer-routing section (only when routing ran and the
+   * status carries a decision). */
+  routingBlock?: string | undefined;
+  /** #915: defaults to the build-time stamp; explicit "" forces unstamped. */
+  actionVersion?: string;
 }): string {
   const lines = [options.markers];
   if (options.header) {
@@ -196,15 +252,107 @@ export function buildPublishedBody(options: {
   if (options.note) {
     lines.push(options.note, "");
   }
-  lines.push(`_Analysis engine: ${publicAnalysisEngine(options.analysisEngine)}_`, "");
+  const actionVersion = options.actionVersion ?? ACTION_VERSION;
+  const versionSuffix = actionVersion === "" ? "" : ` · pr-reviewer-action ${actionVersion}`;
+  lines.push(`_Analysis engine: ${publicAnalysisEngine(options.analysisEngine)}${versionSuffix}_`, "");
   if (options.coverageNotice) {
     lines.push(options.coverageNotice, "");
   }
   if (options.stateBlock) {
     lines.push(options.stateBlock, "");
   }
+  if (options.triageBlock) {
+    lines.push(options.triageBlock, "");
+  }
+  if (options.routingBlock) {
+    lines.push(options.routingBlock, "");
+  }
   lines.push(options.sanitizedMarkdown);
   return `${lines.join("\n")}\n`;
+}
+
+/** #1003: the three literal triage decisions live with the other publish-layer
+ * triage constants in outputs.js, so the published body and the step summary
+ * validate against one set. */
+
+const REVIEW_TRIAGE_LABELS: Record<string, string> = {
+  not_required: "no specialized human review required",
+  required: "specialized human review required",
+  unknown: "unknown — the reviewer could not determine this",
+};
+
+/**
+ * #1003: the compact human-review triage section. Action-owned prose (never
+ * model text), rendered only when triage ran, and it carries the reason for
+ * ALL three decisions — `unknown` in particular must be visible rather than
+ * read as "nothing to do". The reason is model-authored, so it takes the same
+ * discipline as every other untrusted string on this surface: redaction,
+ * link sanitization, whitespace flattening, a length cap and pipe escaping,
+ * none of which can break out of the blockquote line.
+ */
+export function renderReviewTriageBlock(
+  triage: { decision: string; reason: string },
+  linkMode: UpstreamLinkMode,
+): string {
+  const decision = resolveReviewTriageDecision(triage.decision, triage.reason);
+  const reason = escapeTableCell(
+    sanitizeMarkdown(redactText(String(triage.reason ?? "")), linkMode).replace(/\s+/g, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS),
+  );
+  const label = REVIEW_TRIAGE_LABELS[decision]!;
+  const line = reason === ""
+    ? `> **Human review triage: ${label}**`
+    : `> **Human review triage: ${label}** — ${reason}`;
+  const lines = [
+    "## Human Review Triage",
+    "",
+    line,
+    ">",
+    "_Advisory only: this triage answer does not change the review's verdict or findings, and it requests no reviewer._",
+  ];
+  return lines.join("\n");
+}
+
+/** #1005: labels for the reviewer-routing statuses that render a section.
+ * `off`/`not_required`/`no_targets` render nothing (there is nothing to
+ * report), so a common triage-enabled run's published body stays compact. */
+const REVIEW_ROUTING_LABELS: Record<string, string> = {
+  invalid: "invalid selection — no reviewer requested",
+  advisory: "advisory — no reviewer requested",
+  requested: "configured reviewers requested",
+  request_failed: "reviewer request failed",
+  fork_blocked: "blocked on a fork pull request — no reviewer requested",
+};
+
+/** A single-line code span for a trusted-config value; no `@` so an advisory
+ * block never pings a reviewer that was not actually requested. */
+function routingCodeSpan(value: string, maxChars: number): string {
+  return escapeCodeSpan(value, maxChars);
+}
+
+/**
+ * #1005: the compact reviewer-routing section. Every value is action-owned
+ * (the status label) or trusted base-ref configuration (the logical target ids
+ * and the concrete reviewers) — model text never appears here, and the model
+ * cannot name a concrete identity. Rendered only for statuses that carry a
+ * decision (invalid/advisory/requested/request_failed/fork_blocked).
+ */
+export function renderReviewRoutingBlock(routing: HumanReviewRoutingPlan): string {
+  const label = REVIEW_ROUTING_LABELS[routing.status];
+  if (label === undefined) return "";
+  const targets = routing.targetIds.map((id) => routingCodeSpan(id, 120)).join(", ");
+  const reviewers: string[] = [
+    ...routing.users.map((user) => routingCodeSpan(user, 60)),
+    ...routing.teams.map((team) => routingCodeSpan(`team:${team}`, 120)),
+  ];
+  const lines = ["## Reviewer Routing", "", `> **Reviewer routing: ${label}**`];
+  if (targets !== "") {
+    lines.push(">", `> Configured target(s): ${targets}`);
+  }
+  if (reviewers.length > 0) {
+    lines.push(">", `> Reviewer(s): ${reviewers.join(", ")}`);
+  }
+  lines.push(">", "_Advisory: reviewer routing never changes the review's verdict or findings, and concrete reviewers come only from trusted repository configuration._");
+  return lines.join("\n");
 }
 
 /**
@@ -282,6 +430,7 @@ export function buildInlineComments(options: {
 
 /** Resolve the cleanup flag exactly like `resolve_cleanup_flag`. */
 export { resolveCleanupFlag } from "./cleanup.js";
+export { renderFindingsSummary, severityCountsLabel, FINDINGS_SUMMARY_MAX_ROWS } from "./outputs.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -329,96 +478,28 @@ export function renderOutsideDiffSection(findings: unknown, linkMode: UpstreamLi
 // Opt-out policies keep today's bodies byte-for-byte.
 // ---------------------------------------------------------------------------
 
-/** Rows rendered before the visible "N more" cap keeps the body bounded
- * (50 findings of up to 2000 characters each would overrun a comment). */
-export const FINDINGS_SUMMARY_MAX_ROWS = 50;
-
-const SEVERITY_RANK = ["blocker", "major", "minor", "info"] as const;
-
-/** Per-severity counts in rank order, zero entries omitted: `2 major, 4 minor`. */
-export function severityCountsLabel(findings: unknown): string {
-  if (!Array.isArray(findings)) return "";
-  const counts = new Map<string, number>();
-  for (const finding of findings) {
-    const severity = isRecord(finding) && typeof finding.severity === "string"
-      ? finding.severity
-      : "info";
-    counts.set(severity, (counts.get(severity) ?? 0) + 1);
+/** The deterministic coverage-gap notice rendered above the findings, with
+ * separate prose for execution incompleteness and requirement traceability. */
+export function renderCoverageGapNotice(reason: string): string {
+  const execution = "\n\n> **Partial coverage**: required-check coverage is incomplete — this review did not resolve every required check and must not be read as a complete pass.\n";
+  const trace = "\n\n> **Requirement traceability gap**: the review itself completed, but one or more in-scope requirements could not be verified against enforcement or test evidence. Approval is withheld until that requirement is covered.\n";
+  const both = "\n\n> **Partial coverage and requirement traceability gap**: required-check coverage is incomplete, and one or more in-scope requirements could not be verified against enforcement or test evidence. Approval is withheld until both gaps are addressed.\n";
+  switch (reason === "incomplete" ? "execution" : reason) {
+    case "execution": return execution;
+    case "requirement_trace": return trace;
+    case "both": return both;
+    default: return "";
   }
-  const ordered = [
-    ...SEVERITY_RANK.filter((severity) => counts.has(severity)),
-    ...[...counts.keys()].filter((severity) => !(SEVERITY_RANK as readonly string[]).includes(severity)).sort(),
-  ];
-  return ordered.map((severity) => `${counts.get(severity)} ${severity}`).join(", ");
-}
-
-/** A path (model-controlled) as one bounded code span: whitespace collapsed
- * and fenced by a backtick run longer than any inside it, so it cannot open
- * markdown structure; pipes are escaped because GFM tables split cells even
- * inside code spans. */
-function locationCell(finding: Record<string, unknown>): string {
-  const file = typeof finding.file === "string" ? finding.file : "";
-  const line = typeof finding.line === "number" && Number.isFinite(finding.line) ? String(finding.line) : "";
-  if (file === "" && line === "") return "";
-  const raw = file === "" ? line : line === "" ? file : `${file}:${line}`;
-  const body = escapeTableCell(raw.replace(/\s+/g, " ").trim());
-  const longest = Math.max(0, ...(body.match(/`+/g) ?? []).map((run) => run.length));
-  return "`".repeat(longest + 1) + body + "`".repeat(longest + 1);
-}
-
-/**
- * The `### Findings (…)` section: one row per normalized still-open finding
- * — severity, `file:line` (or `file`, or blank), message — the same array
- * the verdict was decided on, so the body is the one place a reader sees the
- * whole set. Messages get redact_text, upstream-link neutralization,
- * whitespace collapse, a length cap, and table-cell escaping; a hostile
- * message cannot split the row or forge headings. Returns "" when there is
- * nothing to render.
- */
-export function renderFindingsSummary(findings: unknown, linkMode: UpstreamLinkMode): string {
-  if (!Array.isArray(findings)) return "";
-  const rows = findings.filter((item): item is Record<string, unknown> => isRecord(item));
-  if (rows.length === 0) return "";
-  const counts = severityCountsLabel(rows);
-  const lines = [
-    `### Findings${counts ? ` (${counts})` : ""}`,
-    "",
-    "| Severity | Location | Finding |",
-    "| --- | --- | --- |",
-  ];
-  for (const finding of rows.slice(0, FINDINGS_SUMMARY_MAX_ROWS)) {
-    const rawSeverity = typeof finding.severity === "string" ? finding.severity : "info";
-    const label = Object.hasOwn(SEVERITY_LABELS, rawSeverity) ? SEVERITY_LABELS[rawSeverity]! : rawSeverity;
-    const message = escapeTableCell(
-      sanitizeMarkdown(redactText(String(finding.message ?? "")), linkMode)
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, 300),
-    );
-    lines.push(`| ${escapeTableCell(label)} | ${locationCell(finding)} | ${message} |`);
-  }
-  if (rows.length > FINDINGS_SUMMARY_MAX_ROWS) {
-    lines.push("", `_…and ${rows.length - FINDINGS_SUMMARY_MAX_ROWS} more finding(s) not listed._`);
-  }
-  return `\n\n${lines.join("\n")}\n`;
-}
-
-/** The deterministic coverage-gap notice rendered above the findings when
- * required-check validation ended incomplete (#811; #810's tool-loop
- * partial coverage will render beside it once implemented). */
-export function renderCoverageGapNotice(requiredChecks: string): string {
-  if (requiredChecks !== "incomplete") return "";
-  return "\n\n> **Partial coverage**: required-check coverage is incomplete — this review did not resolve every required check and must not be read as a complete pass.\n";
 }
 
 /** The top-of-body state block for verdict_policy=strict: coverage gap first
  * (it qualifies the whole review), then the findings summary. */
 function renderStrictStateBlock(options: {
-  requiredChecks: string;
+  incompleteReason: string;
   findings: unknown;
   linkMode: UpstreamLinkMode;
 }): string {
-  return renderCoverageGapNotice(options.requiredChecks)
+  return renderCoverageGapNotice(options.incompleteReason)
     + renderFindingsSummary(options.findings, options.linkMode);
 }
 
@@ -457,7 +538,7 @@ export async function submitNativeReview(
     commitId: string;
     comments: NativeReviewComment[];
   },
-): Promise<{ ok: boolean; inlineCount: number; fellBack: boolean; error?: string }> {
+): Promise<{ ok: boolean; inlineCount: number; fellBack: boolean; error?: string; reviewId?: number | string }> {
   if (options.event !== "APPROVE" && options.event !== "REQUEST_CHANGES" && options.event !== "COMMENT") {
     return { ok: false, inlineCount: 0, fellBack: false, error: `Unsupported native review event: ${options.event}` };
   }
@@ -474,11 +555,11 @@ export async function submitNativeReview(
   }
   const created = await api.createReview(request);
   if (created.ok) {
-    return { ok: true, inlineCount, fellBack: false };
+    return { ok: true, inlineCount, fellBack: false, ...(created.reviewId !== undefined ? { reviewId: created.reviewId } : {}) };
   }
   const plain = await api.createReview({ body: options.body, event: options.event });
   if (plain.ok) {
-    return { ok: true, inlineCount, fellBack: true };
+    return { ok: true, inlineCount, fellBack: true, ...(plain.reviewId !== undefined ? { reviewId: plain.reviewId } : {}) };
   }
   const error = plain.error ?? created.error;
   return error === undefined
@@ -505,6 +586,22 @@ export async function publishReview(
   options: { diffText: string },
 ): Promise<PublishResult> {
   const messages: string[] = [];
+  let nativeReviewId: number | string | undefined;
+  // #1093: the sticky summary comment as the replacement checkpoint when
+  // review_comment mode publishes no inline findings review (a clean re-review
+  // must not emit an empty native "Inline findings" review just to anchor
+  // cleanup). The PATCH/POST response timestamp anchors it.
+  let stickyCommentId: number | string | undefined;
+  let stickyUpdatedAt: string | undefined;
+  // #1093: the exact sticky body this run published — the checkpoint's
+  // body anchor, so a same-second re-publication by an overlapping run
+  // (refreshed timestamp equal to the checkpoint) with a DIFFERENT body
+  // cannot pass for this run's own sticky state.
+  let stickyBody: string | undefined;
+  // #1093: the sticky is a complete replacement only when the run had no
+  // inline findings to post or that findings review was actually created;
+  // a failed findings submission leaves the previous set un-replaced.
+  let stickyCheckpointUsable = true;
 
   if (!input.prNumber) {
     return { status: "failed", messages, error: `publish_${input.mode} requires a pull_request event or explicit pr_number` };
@@ -524,6 +621,45 @@ export async function publishReview(
     return { status: "superseded", messages };
   }
 
+  // #1005: perform the additive reviewer request for a "request" plan. Runs
+  // only after the head-sha guard, so a stale review never requests a
+  // reviewer. The boundary re-checks the plan's own invariants rather than
+  // trusting a carried-forward artifact: the mode must itself be `request`,
+  // and a fork PR (or an unknown fork state, `null`) never mutates. A failure
+  // is surfaced clearly and never substitutes another reviewer; it does not
+  // fail the review publication (the request is auxiliary, and the published
+  // section reports the outcome).
+  let reviewRouting = input.reviewRouting;
+  if (reviewRouting && reviewRouting.status === "request") {
+    if (reviewRouting.mode === "request" && input.isForkPr === false) {
+      const request = await api.requestReviewers(reviewRouting.users, reviewRouting.teams);
+      if (request.ok) {
+        const sent = [
+          ...request.requestedUsers,
+          ...request.requestedTeams.map((team) => `team:${team}`),
+        ];
+        const already = [
+          ...request.alreadyRequestedUsers,
+          ...request.alreadyRequestedTeams.map((team) => `team:${team}`),
+        ];
+        messages.push(
+          `Reviewer routing: requested ${sent.length > 0 ? sent.join(", ") : "(none new)"}`
+          + (already.length > 0 ? `; already requested: ${already.join(", ")}` : ""),
+        );
+        reviewRouting = { ...reviewRouting, status: "requested" };
+      } else {
+        messages.push(`WARN: reviewer routing failed (${request.supported ? "request" : "unsupported platform"}): ${request.error ?? "unknown error"}`);
+        reviewRouting = { ...reviewRouting, status: "request_failed" };
+      }
+    } else {
+      // A carried-forward/tampered artifact claims a request while its mode is
+      // not `request` or the PR is a fork/unknown: refuse to mutate and report
+      // the inconsistency rather than a phantom request.
+      messages.push("WARN: reviewer routing plan is inconsistent at the publish boundary; no reviewer was requested");
+      reviewRouting = { ...reviewRouting, status: "invalid" };
+    }
+  }
+
   // Sanitize model output first — the same pipeline for every mode. Any
   // outside-diff findings are appended as their own section: unlike inline
   // comments (which can only anchor in-diff findings), every publish mode
@@ -538,8 +674,14 @@ export async function publishReview(
   // rely on; the unchanged-diff carry-forward reads this field
   // (findings/partial carry an approve).
   const strict = input.verdictPolicy === "strict";
+  const incompleteReason = resolveIncompleteReason(input);
   const reviewResult = markerReviewResult(input);
   const coverageNotice = input.partialCoverage ? renderPartialCoverageNotice(input.partialCoverage) : "";
+  // #1003: rendered only when triage ran; the three modes share the one
+  // block so a triage answer can never differ by publish mode.
+  const triageBlock = input.reviewTriage ? renderReviewTriageBlock(input.reviewTriage, input.upstreamLinkMode) : "";
+  // #1005: rendered only when routing ran and the status carries a decision.
+  const routingBlock = reviewRouting ? renderReviewRoutingBlock(reviewRouting) : "";
   const markerContext: RunMarkerContext = {
     headSha: input.headSha,
     baseSha: input.baseSha,
@@ -548,12 +690,17 @@ export async function publishReview(
     reviewRoute: input.reviewRoute,
     escalationReason: input.escalationReason,
     cacheHitRatio: input.cacheHitRatio,
+    ...(incompleteReason !== "none" ? { incompleteReason } : {}),
     ...(input.ciState !== undefined && input.ciState !== "" ? { ciState: input.ciState } : {}),
+    degradedGateBypass: input.degradedGateBypass === true,
     ...(input.toolBudget !== undefined ? { toolBudget: input.toolBudget } : {}),
     ...(input.toolBudgetSource !== undefined && input.toolBudgetSource !== "" ? { toolBudgetSource: input.toolBudgetSource } : {}),
     ...(input.toolCalls !== undefined ? { toolCalls: input.toolCalls } : {}),
     ...(input.toolRounds !== undefined ? { toolRounds: input.toolRounds } : {}),
     ...(input.maxRounds !== undefined ? { maxRounds: input.maxRounds } : {}),
+    ...(input.contextBudget !== undefined ? { contextBudget: input.contextBudget } : {}),
+    ...(input.contextPeak !== undefined ? { contextPeak: input.contextPeak } : {}),
+    actionVersion: ACTION_VERSION,
   };
   if (input.partialCoverage) {
     // #810: the marker records partial coverage additively; a complete run
@@ -586,20 +733,17 @@ export async function publishReview(
     });
   }
 
-  // Cleanup of previous managed native reviews runs before anything new is
-  // posted, in both native modes.
-  if (input.mode !== "comment") {
-    const flag = resolveCleanupFlag(input.cleanupPreviousNativeReviews, input.mode);
-    if (flag === "true") {
-      const cleanupLog: CleanupLog = (line) => messages.push(line);
-      const managedIds = await cleanupManagedReviews(api, input.prNumber, input.commentMarker, cleanupLog);
-      if (api.platform === "github") {
-        await resolveSupersededThreads(api, managedIds, cleanupLog);
-      } else {
-        messages.push(`  NOTE: Skipping review-thread resolution (platform=${api.platform}; no GraphQL API)`);
-      }
-    }
+  const cleanupEnabled = input.mode !== "comment"
+    && resolveCleanupFlag(input.cleanupPreviousNativeReviews, input.mode) === "true";
+  const cleanupLog: CleanupLog = (line) => messages.push(line);
+  let previousReviews: Awaited<ReturnType<PublishPlatformApi["listReviews"]>> = [];
+  if (cleanupEnabled) {
+    try { previousReviews = await api.listReviews(); }
+    catch { messages.push("WARN: Could not snapshot previous reviews; cleanup skipped"); }
   }
+  const completeCoverage = !input.partialCoverage && !input.coverageUnknown
+    && reviewResult !== "partial" && incompleteReason === "none" && input.degradedGateBypass !== true;
+  let fallbackSubmission = false;
 
   try {
     if (input.mode === "comment") {
@@ -611,7 +755,9 @@ export async function publishReview(
       // contradict the body directly below it.
       const prefix = (
         input.verdict === "approve" && reviewCoverageIncomplete(reviewResult)
-          ? INCOMPLETE_COVERAGE_PREFIX
+          ? incompleteReason === "requirement_trace" ? TRACE_INCOMPLETE_PREFIX
+            : incompleteReason === "both" ? BOTH_INCOMPLETE_PREFIX
+            : INCOMPLETE_COVERAGE_PREFIX
           : (VERDICT_PREFIXES[input.verdict] ?? "✅ **Automated recommendation: APPROVE**")
       ) + suffix;
       const body = buildPublishedBody({
@@ -621,8 +767,10 @@ export async function publishReview(
         sanitizedMarkdown: sanitized,
         coverageNotice,
         stateBlock: strict
-          ? renderStrictStateBlock({ requiredChecks: input.requiredChecks, findings: input.findings, linkMode: input.upstreamLinkMode })
+          ? renderStrictStateBlock({ incompleteReason, findings: input.findings, linkMode: input.upstreamLinkMode })
           : undefined,
+        triageBlock: triageBlock || undefined,
+        routingBlock: routingBlock || undefined,
       });
       const result = await api.upsertStickyComment(input.commentMarker, body);
       if (!result.ok) {
@@ -636,21 +784,34 @@ export async function publishReview(
         sanitizedMarkdown: sanitized,
         coverageNotice,
         stateBlock: strict
-          ? renderStrictStateBlock({ requiredChecks: input.requiredChecks, findings: input.findings, linkMode: input.upstreamLinkMode })
+          ? renderStrictStateBlock({ incompleteReason, findings: input.findings, linkMode: input.upstreamLinkMode })
           : undefined,
+        triageBlock: triageBlock || undefined,
+        routingBlock: routingBlock || undefined,
       });
       const result = await api.upsertStickyComment(input.commentMarker, body);
       if (!result.ok) {
         return { status: "failed", messages, error: `sticky comment publication failed: ${result.error ?? "unknown error"}` };
       }
-      // Best-effort inline findings as a separate COMMENT review carrying the
-      // managed marker: the summary comment above is already published.
+      stickyCommentId = result.commentId;
+      stickyUpdatedAt = result.updatedAt;
+      stickyBody = body;
+      // #1093: inline findings reviews are created ONLY when there are inline
+      // findings — a clean re-review must not publish an empty native review
+      // just so cleanup has a checkpoint. The sticky comment (with its
+      // response timestamp) is the replacement checkpoint instead.
       if (inlineComments.length > 0) {
         const inlineBody = `${input.commentMarker}\n_Inline findings from the automated review (summary in the sticky comment)._`;
-        const submitted = await api.createReview({ body: inlineBody, event: "COMMENT", comments: inlineComments });
+        const submitted = await api.createReview({ body: inlineBody, event: "COMMENT", commit_id: input.headSha, comments: inlineComments });
         if (submitted.ok) {
+          nativeReviewId = submitted.reviewId;
           messages.push(`Attached ${inlineComments.length} inline finding comment(s)`);
         } else {
+          // The findings review is this run's replacement for the previous
+          // inline set; without it the sticky summary is NOT a complete
+          // replacement, so the sticky checkpoint must not authorize
+          // retiring the old owned comments.
+          stickyCheckpointUsable = false;
           messages.push("WARN: inline findings review submission failed; summary comment was still published");
         }
       }
@@ -677,8 +838,10 @@ export async function publishReview(
         sanitizedMarkdown: sanitized,
         coverageNotice,
         stateBlock: strict
-          ? renderStrictStateBlock({ requiredChecks: input.requiredChecks, findings: input.findings, linkMode: input.upstreamLinkMode })
+          ? renderStrictStateBlock({ incompleteReason, findings: input.findings, linkMode: input.upstreamLinkMode })
           : undefined,
+        triageBlock: triageBlock || undefined,
+        routingBlock: routingBlock || undefined,
       });
       if (input.verdict === "approve" && !canApprove) {
         if (!guardrails.canApprove) {
@@ -698,10 +861,16 @@ export async function publishReview(
           // rather than guess it was clean.
           body += `\n> **Approval withheld**: this review's tool-loop coverage could not be verified (no run directory was available to confirm it), so it is publishing as an advisory comment rather than an approval.\n`;
           messages.push(`Withholding native approval for #${input.prNumber} (review coverage unknown)`);
+        } else if (incompleteReason === "requirement_trace") {
+          body += "\n> **Approval withheld**: the review completed, but an in-scope requirement lacks verifiable enforcement or test evidence, so it is publishing as an advisory comment rather than an approval.\n";
+          messages.push(`Withholding native approval for #${input.prNumber} (requirement trace incomplete)`);
+        } else if (incompleteReason === "both") {
+          body += "\n> **Approval withheld**: this review has incomplete execution coverage and an in-scope requirement lacks verifiable enforcement or test evidence, so it is publishing as an advisory comment rather than an approval.\n";
+          messages.push(`Withholding native approval for #${input.prNumber} (execution and requirement trace incomplete)`);
         } else {
           // #873: the guardrails would allow it, but the review's own
-          // coverage signals say it did not finish — fail closed rather
-          // than publish an approval the metadata marker itself disputes.
+          // execution-coverage signals say it did not finish — fail closed
+          // rather than publish an approval the metadata marker itself disputes.
           body += `\n> **Approval withheld**: this review's coverage is incomplete — required-check coverage or the tool-loop investigation did not finish, so it is publishing as an advisory comment rather than an approval.\n`;
           messages.push(`Withholding native approval for #${input.prNumber} (review coverage incomplete)`);
         }
@@ -720,6 +889,7 @@ export async function publishReview(
         commitId: input.headSha,
         comments: inlineComments,
       });
+      fallbackSubmission = submitted.fellBack;
       if (submitted.fellBack) {
         messages.push("WARN: commit-bound review submission failed; falling back to plain review");
       }
@@ -730,6 +900,7 @@ export async function publishReview(
         }
         return { status: "failed", messages, error: `native review submission failed: ${submitted.error ?? "unknown error"}` };
       }
+      nativeReviewId = submitted.reviewId;
       messages.push(`Submitted native review (${event}) with ${submitted.inlineCount} inline comment(s)`);
     }
   } catch (error) {
@@ -738,6 +909,132 @@ export async function publishReview(
       messages,
       error: error instanceof Error ? error.message : String(error),
     };
+  }
+
+  // Retire old inline findings only after a complete replacement at the expected head.
+  if (cleanupEnabled) {
+    // #1093: what proves this run fully replaced the previous publication.
+    // review-verdict/inline-finding runs use the native review they created;
+    // a review_comment run with no inline findings uses the sticky summary
+    // comment plus its publication timestamp (a clean re-review creates no
+    // native review at all). Missing both: no cleanup (fail closed).
+    type ReplacementCheckpoint =
+      | { kind: "review"; reviewId: number | string }
+      | { kind: "sticky"; commentId: number | string; updatedAt: string; body: string };
+    const replacementCheckpoint: ReplacementCheckpoint | undefined =
+      nativeReviewId !== undefined
+        ? { kind: "review", reviewId: nativeReviewId }
+        : stickyCheckpointUsable && stickyCommentId !== undefined && stickyUpdatedAt !== undefined && stickyBody !== undefined
+          ? { kind: "sticky", commentId: stickyCommentId, updatedAt: stickyUpdatedAt, body: stickyBody }
+          : undefined;
+    const replacementComplete = completeCoverage && !fallbackSubmission && replacementCheckpoint !== undefined;
+    if (replacementComplete && replacementCheckpoint !== undefined) {
+      try {
+        const verifiedHead = await api.getHeadSha();
+        if (verifiedHead !== input.headSha) {
+          messages.push("  WARN: Missing replacement review id or head changed; leaving previous inline comments unchanged");
+        } else {
+          // #1093: ownership decisions run under the shared forge-agnostic
+          // owner-identity policy (login proof, or - for Forgejo Authorized
+          // Integration - the audience-derived user id). Unproven identity
+          // fails closed: nothing is deleted.
+          const { owner, reason } = await resolvePublishTrustedOwner(api);
+          if (owner === null) {
+            messages.push("WARN: Could not verify authenticated owner (identity reason: " + reason + "); no inline comments retired");
+          } else {
+            const previous = previousReviews.filter((r) => ownerMatchesIdentity(r.user, owner));
+            const reviewInstant = (r: { submitted_at?: string; updated_at?: string }): string => {
+              if (typeof r.submitted_at === "string" && r.submitted_at !== "") return r.submitted_at;
+              return typeof r.updated_at === "string" && r.updated_at !== "" ? r.updated_at : "";
+            };
+            let olderManaged: typeof previous;
+            if (replacementCheckpoint.kind === "review") {
+              const newestId = BigInt(String(replacementCheckpoint.reviewId));
+              olderManaged = previous.filter((r) => {
+                if (!isManagedBody(typeof r.body === "string" ? r.body : "", input.commentMarker)) return false;
+                try { return BigInt(String(r.id)) < newestId; } catch { return false; }
+              });
+            } else {
+              const checkpointMs = Date.parse(replacementCheckpoint.updatedAt);
+              olderManaged = Number.isNaN(checkpointMs)
+                ? []
+                : previous.filter((r) => {
+                  if (!isManagedBody(typeof r.body === "string" ? r.body : "", input.commentMarker)) return false;
+                  const instant = reviewInstant(r);
+                  const stamp = instant === "" ? Number.NaN : Date.parse(instant);
+                  return !Number.isNaN(stamp) && stamp < checkpointMs;
+                });
+            }
+            if (olderManaged.length > 100) {
+              messages.push("WARN: Previous managed review snapshot exceeds cleanup bound; cleanup skipped");
+            } else {
+              const stillCurrent = async () => {
+                if (await api.getHeadSha() !== input.headSha) return false;
+                if (replacementCheckpoint.kind === "review") {
+                  const latest = await api.listReviews();
+                  const replacement = latest.find((r) => String(r.id) === String(replacementCheckpoint.reviewId));
+                  if (!replacement || !isManagedBody(typeof replacement.body === "string" ? replacement.body : "", input.commentMarker)) return false;
+                  const newest = latest
+                    .filter((r) => isManagedBody(typeof r.body === "string" ? r.body : "", input.commentMarker))
+                    .reduce<bigint | null>((max, r) => { try { const id = BigInt(String(r.id)); return max === null || id > max ? id : max; } catch { return max; } }, null);
+                  return newest === BigInt(String(replacementCheckpoint.reviewId));
+                }
+                // Sticky checkpoint: the sticky comment must still exist, still
+                // be the managed body owned by this run, and must not have been
+                // re-published after the checkpoint - and no managed review of
+                // ANY author may be newer than the checkpoint (a foreign
+                // model's review supersedes the run too). A review without a
+                // usable timestamp fails closed.
+                const checkpointMs = Date.parse(replacementCheckpoint.updatedAt);
+                if (Number.isNaN(checkpointMs)) return false;
+                const latest = await api.listReviews();
+                const stickyLatest = (await api.listIssueComments()).find((c) => String(c.id) === String(replacementCheckpoint.commentId));
+                if (!stickyLatest || !isManagedBody(typeof stickyLatest.body === "string" ? stickyLatest.body : "", input.commentMarker)) return false;
+                if (!ownerMatchesIdentity(stickyLatest.user, owner)) return false;
+                // The sticky body must be byte-identical to what THIS run
+                // published: an overlapping run re-publishing in the same
+                // second (refreshed timestamp equal to the checkpoint) with a
+                // different body would otherwise pass for this run's state.
+                if (stickyLatest.body !== replacementCheckpoint.body) return false;
+                const refreshedMs = Date.parse(stickyLatest.updated_at ?? "");
+                // A newer instant means the sticky was re-published after
+                // this checkpoint (an overlapping run owns the replacement);
+                // a missing/older one is unproven. Either way: fail closed.
+                if (Number.isNaN(refreshedMs) || refreshedMs !== checkpointMs) return false;
+                return !latest.some((r) => {
+                  if (!isManagedBody(typeof r.body === "string" ? r.body : "", input.commentMarker)) return false;
+                  const instant = reviewInstant(r);
+                  const stamp = instant === "" ? Number.NaN : Date.parse(instant);
+                  // Fail closed on ties too: a competing managed review
+                  // submitted in the SAME second as the checkpoint cannot be
+                  // proven older than it.
+                  return Number.isNaN(stamp) || stamp >= checkpointMs;
+                });
+              };
+              if (await stillCurrent()) {
+                await retireManagedInlineComments(api, olderManaged, input.commentMarker, cleanupLog, stillCurrent);
+                if (await stillCurrent()) {
+                  const managedIds = await cleanupManagedReviews(api, input.prNumber, input.commentMarker, cleanupLog, [], olderManaged);
+                  if (api.platform === "github") await resolveSupersededThreads(api, managedIds, cleanupLog);
+                  else messages.push("NOTE: Skipping review-thread resolution (platform=forgejo; no GraphQL API)");
+                }
+              } else messages.push("WARN: A newer review superseded this run; cleanup skipped");
+            }
+          }
+        }
+      } catch { messages.push("WARN: Cleanup failed safely; replacement review remains published"); }
+    } else if (cleanupEnabled && replacementCheckpoint === undefined) {
+      // #1093: distinguish "cleanup never had a checkpoint" from the other
+      // skip reasons so operators can tell retirement did not run at all
+      // (e.g. a failed inline-findings submission, or a forge response
+      // without a usable sticky timestamp).
+      messages.push("WARN: No replacement checkpoint (no native review id and no sticky publication timestamp); previous inline comments left in place");
+    } else if (cleanupEnabled) {
+      // #1093: a checkpoint DOES exist here, so the honest cause is an
+      // incomplete replacement — partial inline coverage or a fallback
+      // submission — not a missing checkpoint.
+      messages.push("WARN: Replacement checkpoint is not a complete replacement (incomplete coverage or fallback submission); previous inline comments left in place");
+    }
   }
 
   // Re-review label cleanup: best-effort, never fails the run.

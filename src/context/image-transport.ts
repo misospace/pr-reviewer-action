@@ -29,7 +29,7 @@
  * hop must additionally be https without userinfo. Registry/CDN redirects to
  * public hosts keep working. A refused hop fails the read before any
  * request to it is made. Responses are capped at `MAX_IMAGE_RESPONSE_BYTES`.
- * v2's curl followed redirects to any address (approved divergence, fixture
+ * v2's curl followed redirects to any address (deliberate divergence, fixture
  * `transport-redirect-ssrf`).
  *
  * Tightened (fail closed, #670/#682 lineage): the first request must target

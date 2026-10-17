@@ -1,7 +1,7 @@
 /** Byte-exact replica of `json.dumps(..., ensure_ascii=False, indent=N)`
  * (default separators `,` / `: `, insertion order preserved) for the v3
- * context artifacts whose persisted documents are compared byte-for-byte by
- * the #675 parity harness (`repo-map.json`, `related-code.json`). The existing
+ * context artifacts whose persisted documents must stay byte-for-byte
+ * identical to v2 (`repo-map.json`, `related-code.json`). The existing
  * `pythonJsonStringify` (sort_keys=True) covers the canonical-artifact VALUES;
  * this variant covers the *rendered documents*, whose v2 renderers emit keys
  * in fixed insertion order. Only the JSON shapes the artifacts contain are

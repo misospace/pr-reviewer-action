@@ -1,5 +1,0 @@
-{
- "fixture": "related-code-consumers-of-changed-keys",
- "description": "End-to-end chain: the source_diff and repo_files of the related-code fixture 'consumers-of-changed-keys' through both extractors; matches_expected_anchors proves that fixture's anchors input is exactly what the extractor produces.",
- "related_code_fixture": "consumers-of-changed-keys"
-}

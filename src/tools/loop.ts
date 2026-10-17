@@ -31,6 +31,8 @@ import {
   pyDumpsSorted,
   type ToolCallRecord,
 } from "../model/conversation.js";
+import type { EvidenceProvenance } from "../context/evidence-provenance.js";
+import { SKILL_RESULT_MAX_BYTES } from "../context/repository-skills.js";
 
 // Stop reasons (LoopOutcome.stopReason)
 export const STOP_MODEL_DONE = "model-stopped";
@@ -162,6 +164,8 @@ export interface LoopOutcome {
   toolResultBytes: number;
   compactionSummarize: number;
   compactionTruncate: number;
+  /** #922: largest approximate conversation size seen before a turn. */
+  peakConversationTokens: number;
 }
 
 /**
@@ -260,6 +264,10 @@ export interface DriveToolLoopOptions {
   stream?: boolean;
   tokensParam?: string;
   cachePrefix?: boolean;
+  /** #998: the tier's resolved reasoning effort ("" = omit the field). */
+  reasoningEffort?: string;
+  /** #998: the Anthropic endpoint opt-in for `output_config.effort`. */
+  anthropicEffortSupported?: boolean;
   /** Best-effort summarizer for context compaction; may be async. */
   summarizeFn?: ((block: string) => string | Promise<string>) | null;
   /** Injectable clock (seconds) for deterministic tests. */
@@ -309,6 +317,7 @@ export async function driveToolLoop(
     toolResultBytes: 0,
     compactionSummarize: 0,
     compactionTruncate: 0,
+    peakConversationTokens: 0,
   };
   const started = timeFn();
   let callsExecuted = 0;
@@ -329,6 +338,7 @@ export async function driveToolLoop(
     // wired, fold them into a model-generated digest that preserves salient
     // facts; otherwise (or if it frees nothing / fails) fall back to blunt
     // truncation, which is the guaranteed backstop.
+    outcome.peakConversationTokens = Math.max(outcome.peakConversationTokens, conversation.approxTokens());
     if (conversation.approxTokens() > budgets.maxConversationTokens) {
       let summarized = 0;
       if (summarizeFn !== null) {
@@ -373,6 +383,10 @@ export async function driveToolLoop(
       temperature,
       tokensParam,
       cachePrefix,
+      // #998: the tier's effort rides every loop round (and the summarizer
+      // turn the harness builds from the same options), verbatim.
+      reasoningEffort: options.reasoningEffort ?? "",
+      anthropicEffortSupported: options.anthropicEffortSupported ?? false,
     });
     let response: unknown;
     try {
@@ -489,6 +503,15 @@ export async function driveToolLoop(
       }
       conversation.addToolResult(disposition.callId, result.result ?? {}, {
         isError: result.status !== "ok",
+        tool: exec.name,
+        provenance: (result as { provenance?: EvidenceProvenance }).provenance,
+        // #1043 (review): read_skill results carry the complete trusted-base
+        // skill body — the executor never truncates one, and the default
+        // tool-result budget here must not silently re-truncate it at
+        // conversation append. The executor has verified the serialized
+        // result fits exactly this budget, so `content_complete: true` holds
+        // end to end.
+        ...(exec.name === "read_skill" ? { maxBytes: SKILL_RESULT_MAX_BYTES } : {}),
       });
     }
 

@@ -1,5 +1,10 @@
 # v2 teardown plan: file-by-file consumer audit (#706)
 
+> **Historical record.** The #706 teardown is complete. The parity/snapshot
+> harness this plan dispositions (`tests/parity_harness.py`) and its fixture
+> goldens were retired in #974; nothing below is a current instruction to run
+> or update them.
+
 The cutover (#815) made the TypeScript runtime the shipped production path:
 the no-subcommand JavaScript action entry (`src/run/action.ts`, the
 `firstArg === ""` branch of the bundled `dist/index.js`) runs every stage
@@ -22,8 +27,7 @@ and `tests/parity_runners/` is dispositioned as one of:
   `scripts/harvest_human_findings.py` and friends), the fork workflow
   (`scripts/fork_review_gate.py`), release tooling, or the v3 build itself.
 - **(c) keep temporarily** — a parity oracle the parity harness
-  (`tests/parity_harness.py`) still executes, with the condition for
-  deleting it.
+  (`tests/parity_harness.py`) executed, with the condition for deleting it.
 
 Every (b) and (c) row names its concrete consumer (workflow file, script, or
 test). Classifications were derived by reference scan, not by assuming a
@@ -85,7 +89,7 @@ Four consumer groups keep v2 code alive after the cutover. Everything in
   docs that described v2 as live updated (AGENTS.md code map, `README.md`,
   `docs/architecture/code-map.md`, `docs/v3-migration.md`, `SECURITY.md`,
   `.github/ai-review-rules.md`, and the `scripts/verify_pr_head.sh` mention
-  in `.github/workflows/fork-ai-review.yaml`). This re-point landed before
+  in `.github/workflows/ai-pr-review-fork.yaml`). This re-point landed before
   the #681 measurement work (#810, #796), which has to measure v3.
   Port-provenance comments inside `src/` are history, not consumers, and stay.
 - **Wave 1 — delete the (a) set** (v2 production runtime, its tests, and the
@@ -284,7 +288,7 @@ the `validate-static` "Verify smoke test helper is executable" step (see
 | `scripts/merge_bot_branch_corpus.py` | `harvest-human-findings.yaml` and `scripts/push_harvest_branch.sh`; `tests/test_merge_bot_branch_corpus.py`. |
 | `scripts/push_harvest_branch.sh` | `harvest-human-findings.yaml`; `tests/test_push_harvest_branch.sh`. |
 | `scripts/resolve_harvest_scope.sh` | `harvest-human-findings.yaml`; `tests/test_resolve_harvest_scope.sh`. |
-| `scripts/fork_review_gate.py` | `.github/workflows/fork-ai-review.yaml` (`gate` and `verify` steps); `tests/test_fork_review_gate.py`, `tests/test_fork_review_workflow.py`. |
+| `scripts/fork_review_gate.py` | `.github/workflows/ai-pr-review-fork.yaml` (`gate` and `verify` steps); `tests/test_fork_review_gate.py`, `tests/test_fork_review_workflow.py`. |
 | `scripts/release/tag-with-dist.sh` | `.github/workflows/manual-release.yml`; `tests/test_release_tag_with_dist.sh`. |
 
 ### pr_reviewer/
@@ -300,11 +304,9 @@ the `validate-static` "Verify smoke test helper is executable" step (see
 
 | File | Consumer(s) / subject |
 | --- | --- |
-| `test_action_inputs.py`, `test_action_v3_contract.py` | Pin the shipped `action.yml` / `contracts/action-v3.yml` (v3 CI). |
 | `test_agents_md_budget.py` | AGENTS.md budget regression guard (repo hygiene, not v2). |
 | `test_dogfood_workflow.py` | Pins `.github/workflows/ai-pr-review.yaml` + `action.yml` defaults. |
 | `test_html_entities_table.py` | Pins `src/context/html-entities.ts` (v3) to CPython's `html.entities` tables. |
-| `test_parity_harness.py` | The parity harness itself (CLI/exit-code contract). |
 | `test_eval_harness.py`, `test_eval_harness_boundary.py`, `test_eval_harness_fixture_fork.py`, `test_eval_harness_real_pr_corpus.py`, `test_eval_harness_repo_context.py`, `test_eval_harness_scout.py`, `test_eval_harness_semantic.py`, `test_eval_harness_specialists.py`, `test_eval_harness_specialists_corpus.py`, `test_eval_harness_workflow_lint.py`, `test_eval_weekly_summary.py` | Import/exercise `scripts/eval_harness.py` and `scripts/eval_weekly_summary.py`. Wave-0 landed: the boundary tests drive the default branch through the v3 invocation (the `RUNTIME_ENTRYPOINT` seam) and the corpus path strings stay as historical replay data; `test_eval_harness_repo_context.py` is a pure grader over historical corpus facts and never executed the pipeline. |
 | `test_semantic_eval.py`, `test_semantic_judge.py` | Import `pr_reviewer/semantic_eval.py` / `semantic_judge.py`; `test_semantic_eval.py` also asserts `scripts/sections/corpus.sh` content — re-point that assertion in wave 2 when the sections go. |
 | `test_live_judge_score.py`, `test_run_judge_calibration.py` | The judge tooling above. |
@@ -315,8 +317,8 @@ the `validate-static` "Verify smoke test helper is executable" step (see
 | `tests/_lib/assert.sh` | Bash helper sourced by every retained suite. |
 
 Preserved data (not Python/bash, listed for completeness): `tests/fixtures/`
-(`parity/`, `forgejo/`, `requirement-ledger/`, `v3-runtime/`, `failure_paths/`,
-`eval_weekly_summary/`) and the `evals/` corpora — the deterministic parity,
+(`parity/`, `forgejo/`, `golden-replay/`, `v3-runtime/`, `eval_weekly_summary/`,
+`strip-source-text/`) and the `evals/` corpora — the deterministic parity,
 #662, and Forgejo qualification fixtures #706 says to preserve.
 
 ## (c) keep temporarily — parity oracles, with deletion conditions
@@ -461,8 +463,9 @@ Per #706's required verification, each deletion wave proves:
   `src/` excluded as history);
 - `npm ci && npm run typecheck && npm test` stays green (the shipped action
   never required Python; no `jq`/`curl`/`gh` for internal orchestration);
-- the parity harness (retained boundaries), the semantic gate
-  (`scripts/run_semantic_eval_ci.py`), and the Forgejo E2E smoke stay green;
+- the parity harness (retained boundaries — since retired in #974), the
+  semantic gate (`scripts/run_semantic_eval_ci.py`), and the Forgejo E2E
+  smoke stayed green;
 - the surviving `pytest tests/` selection passes with the re-baselined
   coverage gate;
 - CodeQL, gitleaks, actionlint, and bundle-freshness checks stay green;

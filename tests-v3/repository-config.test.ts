@@ -318,7 +318,20 @@ test("readRepositoryConfigFromRef returns undefined when no candidate exists at 
 test("readRepositoryConfigFromRef requires a non-empty ref and rejects a workspace with no git repository", () => {
   assert.throws(() => readRepositoryConfigFromRef("", "/tmp"), RepositoryConfigError);
   const root = mkdtempSync(join(tmpdir(), "repo-config-nogit-"));
-  assert.equal(readRepositoryConfigFromRef("HEAD", root), undefined);
+  // A non-git workspace is a base-ref read failure, never "no config": the
+  // review must not silently proceed as if the repository had none (#727
+  // resolution failure vs genuine absence).
+  assert.throws(() => readRepositoryConfigFromRef("HEAD", root), RepositoryConfigError);
+});
+
+test("an unresolvable ref in a valid repository is a read failure, not genuine absence", () => {
+  const root = initRepo();
+  writeFileSync(join(root, "README.md"), "seed\n");
+  commit(root, "seed");
+  assert.throws(
+    () => readRepositoryConfigFromRef("definitely-not-a-ref", root),
+    (error: unknown) => error instanceof RepositoryConfigError && /could not be resolved/.test(error.message),
+  );
 });
 
 test("resolveRepositoryConfig ties the git read and the precedence merge together", () => {
@@ -337,6 +350,21 @@ test("resolveRepositoryConfig degrades to the operator's inputs, with a warning,
   const resolution = resolveRepositoryConfig(contract, operatorRaw, { baseRef: "", workspace: "/tmp" });
   assert.deepEqual(resolution.raw, operatorRaw);
   assert.equal(resolution.warnings.length, 1);
+});
+
+test("resolveRepositoryConfig surfaces the bounded diagnostic when the base ref cannot be resolved", () => {
+  // The #727 fail-open hole this closes: an unresolvable ref used to be
+  // silently read as "no repository config" with no diagnostic at all. It
+  // must degrade conservatively (operator inputs only) WITH the warning.
+  const root = initRepo();
+  writeFileSync(join(root, "README.md"), "seed\n");
+  commit(root, "seed");
+  const operatorRaw = baseOperatorRaw();
+  const resolution = resolveRepositoryConfig(contract, operatorRaw, { baseRef: "definitely-not-a-ref", workspace: root });
+  assert.deepEqual(resolution.raw, operatorRaw);
+  assert.equal(resolution.sourcePath, null);
+  assert.equal(resolution.warnings.length, 1);
+  assert.match(resolution.warnings[0]!, /could not be read from the base ref/);
 });
 
 // ---------------------------------------------------------------------------

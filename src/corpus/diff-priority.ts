@@ -3,8 +3,8 @@
  * that survive are chosen by path class (source/config/docs, then bulk data,
  * then generated/lock files) and water-filled within a class so one huge
  * file cannot starve its siblings. Every branch mirrors the Python module;
- * the parity harness pins the two implementations
- * (`tests/fixtures/parity/diff-priority/`).
+ * the v2 semantics are pinned byte-for-byte by
+ * `tests-v3/diff-priority.test.ts`.
  *
  * All inputs and outputs are raw bytes (`Uint8Array`), never strings. */
 

@@ -18,6 +18,7 @@
  * (`src/tools/harness.ts` `resolveReviewSystemPrompt`). */
 
 import { BUNDLED_PROMPT_ASSETS, rawFragment, type PromptAssets } from "./assets.js";
+import { MAX_DISTRIBUTED_HINTS, MAX_GROUPS_PER_RULE, MAX_GROUP_NAME_CHARS } from "../enforcement/requirement-trace.js";
 import { bashCapture, bashLowerCapture, bashReadCapture, bashReplaceFirst, jqRawPrKind, type PromptWorkspace } from "./bash.js";
 
 /** Workspace artifacts the fragment gates read, written by earlier phases. */
@@ -128,7 +129,7 @@ export function applySystemPromptFragments(
     const bytes = workspace.readBytes(PROMPT_PRESENCE_FILES.classification);
     const kind = bytes === null ? "" : jqRawPrKind(bytes.toString("utf8"));
     const infra = kind === "dependency_upgrade" || kind === "k8s_manifest";
-    const digest = kind === "renovate_digest_only";
+    const digest = kind === "renovate_digest_only" || kind === "image_digest_only";
     sub("VERSION_BUMP_GUIDANCE", infra ? guidance(assets, "version_bump") : "");
     sub("IMAGE_DIGEST_GUIDANCE", digest ? guidance(assets, "image_digest") : "");
     sub("RELEASE_NOTES_GUIDANCE", infra || digest ? guidance(assets, "release_notes") : "");
@@ -173,13 +174,89 @@ export function applyRequirementTraceFragment(
   workspace: PromptWorkspace,
   enabled: boolean,
   assets: PromptAssets = BUNDLED_PROMPT_ASSETS,
+  scopeIds?: readonly string[],
+  distributedHints?: readonly { requirementId: string; groups: readonly string[] }[],
 ): SystemPromptState {
   if (!state.isDefault || !enabled) return state;
   if (!workspace.isNonEmpty(PROMPT_PRESENCE_FILES.requirementLedger)) return state;
-  const trace = bashCapture(rawFragment(assets, "requirement_trace"));
+  // #935: with a deterministic scope, ask only for the in-scope requirements
+  // (none in scope: no trace instructions at all).
+  if (scopeIds !== undefined && scopeIds.length === 0) return state;
+  let trace = bashCapture(rawFragment(assets, "requirement_trace"));
   if (trace === "") return state;
+  if (scopeIds !== undefined) {
+    trace = trace.replace(
+      "For every acceptance/normative requirement in the Requirement Ledger,",
+      `For every requirement in trace scope (${scopeIds.join(", ")}); other ledger requirements need no trace,`,
+    );
+  }
+  if (distributedHints && distributedHints.length > 0) {
+    const cleanName = (name: string): string => name.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_GROUP_NAME_CHARS);
+    const hintLine = `Distributed requirements — cite one enforcement location and one matching test in each declared seam (a single location cannot satisfy them): ${distributedHints
+      .slice(0, MAX_DISTRIBUTED_HINTS)
+      .map((hint) => `\`${cleanName(hint.requirementId)}\` → ${hint.groups.slice(0, MAX_GROUPS_PER_RULE).map(cleanName).join(", ")}`)
+      .join("; ")}`;
+    trace += `\n${hintLine}`;
+  }
   if (state.systemPrompt.includes(trace)) return state;
   return { ...state, systemPrompt: `${state.systemPrompt}\n${trace}` };
+}
+
+/**
+ * #1003: the human-review triage instructions, appended only when the
+ * `review-triage` input is enabled. Deliberately ungated by any presence
+ * file (unlike the #874 trace fragment): the question is answerable from the
+ * corpus plus the repository's trusted instruction files, and a missing
+ * ledger is not a reason to stay silent — the fragment itself tells the
+ * reviewer to answer `unknown` when the escalation policy is not in context.
+ *
+ * Opt-in and review-only: with the input off the assembled prompt is
+ * byte-identical to pre-#1003 (no mention of triage anywhere), and with it on
+ * nothing about tool, evidence, fork or model routing changes — triage grants
+ * no capability. Same idempotent appended-fragment discipline as the others.
+ *
+ * Deliberate exception to the `isDefault`-only rule every other fragment
+ * follows: #1003's acceptance requires triage to compose with custom system
+ * prompts, so an operator replace-mode prompt is preserved verbatim and the
+ * triage instructions are appended as one extra line. The other fragments
+ * stay tied to the default because they assume the placeholder discipline
+ * the bundled default ships with; triage is opt-in by config — the operator
+ * has explicitly switched it on — so omitting it would silently degrade the
+ * answer to `unknown` for any operator using a custom prompt.
+ */
+export function applyReviewTriageFragment(
+  state: SystemPromptState,
+  enabled: boolean,
+  allowedTargets: readonly string[] = [],
+  assets: PromptAssets = BUNDLED_PROMPT_ASSETS,
+): SystemPromptState {
+  if (!enabled) return state;
+  const triage = bashCapture(rawFragment(assets, "review_triage"));
+  if (triage === "") return state;
+  const routing = renderReviewTriageRoutingFragment(allowedTargets);
+  let prompt = state.systemPrompt;
+  if (!prompt.includes(triage)) {
+    prompt = `${prompt}\n${triage}`;
+  }
+  if (routing !== "" && !prompt.includes(routing)) {
+    prompt = `${prompt}\n${routing}`;
+  }
+  return prompt === state.systemPrompt ? state : { ...state, systemPrompt: prompt };
+}
+
+/**
+ * #1005: the routing addendum appended after the triage question ONLY when
+ * `review-triage-routing` is enabled and at least one logical target is
+ * configured. It names the exact configured logical ids the model may choose
+ * from — the model can never name a concrete GitHub user or team — and it is
+ * constructed here rather than in the bundled `review_triage.txt` fragment so
+ * the v2-parity fragment text (shared with the v2 runtime) is unchanged and a
+ * disabled run's prompt stays byte-identical.
+ */
+export function renderReviewTriageRoutingFragment(allowedTargets: readonly string[]): string {
+  const ids = [...new Set(allowedTargets.map((id) => id.trim().toLowerCase()).filter((id) => id !== ""))].sort();
+  if (ids.length === 0) return "";
+  return `Routing targets are configured for this repository. When \`review_triage_decision\` is \`required\`, also set \`review_triage_targets\` to the configured capability ids that apply, chosen only from this exact list: ${ids.join(", ")}. Use the ids verbatim; never invent, rename, or guess an id, and never put a GitHub username, team name, or @handle in the field. Leave \`review_triage_targets\` empty whenever \`review_triage_decision\` is not \`required\`.`;
 }
 
 /**

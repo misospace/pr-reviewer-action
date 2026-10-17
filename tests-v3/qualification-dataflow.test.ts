@@ -12,7 +12,7 @@ import { classifyPr, classificationToArtifact } from "../src/classification/clas
 import { classificationFromArtifact, selectSpecialistRoles } from "../src/classification/role-selection.js";
 import { canonicalChangedFile, normalizeLinkedIssues } from "../src/context/index.js";
 import { buildLinkedIssueContext } from "../src/context/linked-issue-context.js";
-import { resolveReviewRoute, routeSignalsFromClassification } from "../src/routing/tiers.js";
+import { resolveReviewRoute } from "../src/routing/tiers.js";
 import { runPrecheck } from "../src/precheck/decide.js";
 import type { PlatformAdapter } from "../src/platform/types.js";
 import type { ReadResult } from "../src/platform/types.js";
@@ -23,17 +23,14 @@ import { readFileSync } from "node:fs";
 const enc = (text: string): Uint8Array => Buffer.from(text, "utf8");
 const dec = (data: Uint8Array | undefined): string => Buffer.from(data ?? new Uint8Array(0)).toString("utf8");
 const noLinear = { apiKey: "", prefixes: "", timeoutSec: "20", enableForForks: "false" };
-const ESCALATE_ON = ["linked_security_issue", "linked_priority_p0", "linked_priority_p1"];
-
 // ── github-label-routing (#633) ───────────────────────────────────────────
 // v2 subject: tests/test_linked_issue_classification.sh. The linked-issue
 // context pipeline must enrich the canonical linked-issues.json with fetched
 // GitHub labels so classify.ts (which reads that value) emits the linked
-// risk flags, deep_review=auto role selection sees them, and the smart-route
-// resolver reacts to the exact classification artifact — never a
+// risk flags and deep_review=auto role selection sees them — never a
 // helper-only echo of the right answer.
 
-test("github-label-routing: fetched labels reach linked-issues, risk flags, role selection and the smart route", async () => {
+test("github-label-routing: fetched labels reach linked-issues, risk flags and role selection", async () => {
   const issues: Record<string, unknown> = {
     "12": { number: 12, labels: [{ name: "security" }] },
     "13": { number: 13, labels: [{ name: "priority/p0" }] },
@@ -60,44 +57,24 @@ test("github-label-routing: fetched labels reach linked-issues, risk flags, role
   const selection = selectSpecialistRoles(classification);
   assert.deepEqual(selection.selectedRoles, ["correctness", "security"]);
 
-  const smart = resolveReviewRoute({
-    routingMode: "auto",
-    routeSignals: classification.routeSignals,
-    escalateOnRiskFlags: ESCALATE_ON,
-    smartModelResolved: true,
-  });
-  assert.equal(smart.route, "smart");
-
-  // A valid helper result cannot compensate for a stale/bare canonical
-  // artifact: strip the fetched labels back out and the route degrades.
-  const bare = normalized.map((item) => ({ ...item, labels: [] }));
-  const bareClassification = classifyPr({ prFiles: [], linkedIssues: bare });
-  const primary = resolveReviewRoute({
-    routingMode: "auto",
-    routeSignals: bareClassification.routeSignals,
-    escalateOnRiskFlags: ESCALATE_ON,
-    smartModelResolved: true,
-  });
-  assert.equal(primary.route, "primary");
-
-  // Restoring the enriched canonical artifact restores smart routing.
-  assert.equal(
-    resolveReviewRoute({
-      routingMode: "auto",
-      routeSignals: classification.routeSignals,
-      escalateOnRiskFlags: ESCALATE_ON,
-      smartModelResolved: true,
-    }).route,
-    "smart",
-  );
-
-  // The v2 route resolver read a persisted classification.json artifact,
-  // not the in-memory classifier result; prove the artifact round trip
-  // carries the same route signals into resolveReviewRoute.
   const artifact = JSON.parse(JSON.stringify(classificationToArtifact(classification))) as Record<string, unknown>;
   const rebuilt = classificationFromArtifact(artifact);
   assert.ok(rebuilt !== null);
-  assert.deepEqual(routeSignalsFromClassification(artifact), classification.routeSignals);
+  assert.deepEqual(rebuilt.riskFlags, classification.riskFlags);
+  assert.deepEqual(rebuilt.routeSignals, classification.routeSignals);
+  assert.deepEqual(selectSpecialistRoles(rebuilt).selectedRoles, ["correctness", "security"]);
+
+  // Linked metadata changes classification and specialist selection, never
+  // the primary-first model route.
+  assert.deepEqual(resolveReviewRoute({ routingMode: "auto" }), {
+    route: "primary",
+    reason: "primary-first: the primary reviews first; smart is reviewer-requested only (#721)",
+  });
+  const bare = normalized.map((item) => ({ ...item, labels: [] }));
+  const bareClassification = classifyPr({ prFiles: [], linkedIssues: bare });
+  assert.ok(!bareClassification.riskFlags.includes("linked_security_issue"));
+  assert.ok(!bareClassification.riskFlags.includes("linked_priority_p0"));
+  assert.deepEqual(selectSpecialistRoles(bareClassification).selectedRoles, ["correctness"]);
 });
 
 test("github-label-routing: a failed GitHub fetch is fail-soft data but fails selection toward scrutiny", async () => {
@@ -259,9 +236,11 @@ function precheckAdapter(opts: {
   baseRepo: string;
   title?: string;
   body?: string;
-  comments: { body: string; created_at: string; updated_at: string }[];
+  comments: { body: string; created_at: string; updated_at: string; author?: string }[];
 }): PlatformAdapter {
   const prObject = {
+    state: "open",
+    draft: false,
     title: opts.title ?? "OPS-42: fix the thing",
     body: opts.body ?? "Fixes #12",
     head: { sha: "a".repeat(40), repo: { full_name: opts.headRepo } },
@@ -274,6 +253,7 @@ function precheckAdapter(opts: {
     listIssueComments: async () => opts.comments,
     listPrReviews: async () => [],
     repoPermission: async () => "write",
+    authenticatedIdentity: async () => "pr-reviewer[bot]",
     ghApi: async (endpoint: string) => {
       if (endpoint.endsWith("/pulls/7")) return { data: prObject };
       if (endpoint.endsWith("/issues/12")) return { data: { number: 12, labels: [{ name: "security" }] } };
@@ -322,6 +302,7 @@ test("linear-composite-precheck: identical inputs with the stored marker skip (b
     body: `<!-- ai-pr-reviewer -->\n<!-- ai-pr-review-fingerprint:${run1.diff_fingerprint} -->`,
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
+    author: "pr-reviewer[bot]",
   }];
   const run2 = await runPrecheck({
     env: baseEnv(),
@@ -357,6 +338,7 @@ test("linear-composite-precheck: an unavailable Linear lookup forces a fresh rev
     body: `<!-- ai-pr-reviewer -->\n<!-- ai-pr-review-fingerprint:${run1.diff_fingerprint} -->`,
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
+    author: "pr-reviewer[bot]",
   }];
   const stderrWrite = process.stderr.write.bind(process.stderr);
   let warned = "";
@@ -397,6 +379,7 @@ test("linear-composite-precheck: non-auto modes never invoke the Linear builder,
     body: `<!-- ai-pr-reviewer -->\n<!-- ai-pr-review-fingerprint:${run1.diff_fingerprint} -->`,
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
+    author: "pr-reviewer[bot]",
   }];
   const run2 = await runPrecheck({
     env: baseEnv({ DEEP_REVIEW: "false" }),

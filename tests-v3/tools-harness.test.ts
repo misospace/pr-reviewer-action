@@ -3,12 +3,15 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, buildPlanningContext, accumulateUsage, usageWithCacheRatio, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
+import { LoopContextError, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
+import { OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
 import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
 import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
 import { reassembleSse } from "../src/transport/sse.js";
 import { normalizedToOpenAiChat } from "../src/run/stages.js";
+import { prioritizeDiff } from "../src/corpus/diff-priority.js";
+import { CORPUS_DIFF_SECTION_ARTIFACT, CORPUS_DIFF_SECTION_SMART_ARTIFACT } from "../src/corpus/assemble.js";
 
 function workspace(): { root: string; deps: (overrides?: Partial<HarnessDeps>) => HarnessDeps } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "harness-test-"));
@@ -72,7 +75,7 @@ test("missing corpus aborts pre-loop with the version-1 telemetry shape", async 
 
 test("missing model config aborts pre-loop as missing-config", async () => {
   const { root, deps } = workspace();
-  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff (truncated)\n+ x");
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ x");
   const d = deps();
   delete (d.env as Record<string, string>).AI_MODEL;
   const { result } = await runToolHarness(d);
@@ -82,7 +85,7 @@ test("missing model config aborts pre-loop as missing-config", async () => {
 
 test("no tool calls degrades to a corpus-only review without a verdict turn", async () => {
   const { root, deps } = workspace();
-  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff (truncated)\n+ x");
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ x");
   let transportCalls = 0;
   const { result } = await runToolHarness(deps({
     transport: async () => {
@@ -102,7 +105,7 @@ test("the loop gathers evidence and the in-conversation verdict is produced and 
   const { root, deps } = workspace();
   fs.writeFileSync(
     path.join(root, "review-corpus.truncated.md"),
-    "# PR Diff (truncated)\n+ change\n",
+    "# PR Diff\n+ change\n",
   );
   fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
   const scripted = [openAiCall("c1", "read_file", '{"path":"src.ts"}'), openAiText("evidence gathered"), validVerdict()];
@@ -131,7 +134,7 @@ test("the loop gathers evidence and the in-conversation verdict is produced and 
 
 test("an unusable verdict body leaves the produced flag unset so the standard review synthesizes it", async () => {
   const { root, deps } = workspace();
-  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff (truncated)\n+ change\n");
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
   const scripted = [openAiCall("c1", "read_file", '{"path":"src.ts"}'), openAiText("summary"), openAiText("this is not json at all")];
   let transportCalls = 0;
   const { result } = await runToolHarness(deps({
@@ -147,7 +150,7 @@ test("an unusable verdict body leaves the produced flag unset so the standard re
 
 test("#868: a 200 verdict-turn reply carrying an in-body error masks the configured key everywhere it is logged or persisted", async () => {
   const { root, deps } = workspace();
-  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff (truncated)\n+ change\n");
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
   const apiKey = "sk-configured-real-secret-98765";
   const patShaped = "ghp_" + "e".repeat(36);
   const scripted = [
@@ -192,7 +195,7 @@ test("#868 maintainer follow-up: a 200 verdict-turn reply that parses to {verdic
   // character presence; the long key gets the broad, unambiguous scan.
   for (const apiKey of ["sk-native-loop-long-configured-secret", "k"]) {
     const { root, deps } = workspace();
-    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff (truncated)\n+ change\n");
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
     const scripted = [
       openAiCall("c1", "read_file", '{"path":"src.ts"}'),
       openAiText("summary"),
@@ -231,7 +234,7 @@ test("#868 maintainer follow-up: a 200 verdict-turn reply that parses to {verdic
 
 test("smart-tier tool failures fall back to the primary review without a smart verdict", async () => {
   const { root, deps } = workspace();
-  fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff (truncated)\n+ change\n");
+  fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff\n+ change\n");
   const env = {
     TOOL_HARNESS_TIER: "smart",
     REPO: "o/r",
@@ -264,7 +267,7 @@ test("smart-tier tool failures fall back to the primary review without a smart v
 
 test("smart-tier wall-clock exhaustion stops the loop with the deadline stop reason", async () => {
   const { root, deps } = workspace();
-  fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff (truncated)\n+ change\n");
+  fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff\n+ change\n");
   const env = {
     TOOL_HARNESS_TIER: "smart",
     REPO: "o/r",
@@ -301,7 +304,7 @@ test("invalid env integers crash loudly like v2's int()", async () => {
 });
 
 test("harness-findings section substitution and tool-request normalization helpers", () => {
-  const corpus = "# Tool Harness Findings\nTool harness planning pending.\n\n# PR Diff (truncated)\n+ x";
+  const corpus = "# Tool Harness Findings\nTool harness planning pending.\n\n# PR Diff\n+ x";
   const outcome = {
     executed: [{ tool: "read_file", args: { path: "a.ts" }, result: { status: "ok", result: {} } }],
     rounds: 1,
@@ -310,7 +313,7 @@ test("harness-findings section substitution and tool-request normalization helpe
   } as unknown as LoopOutcome;
   const replaced = replaceHarnessFindingsSection(corpus, verdictHarnessFindingsBody(outcome));
   assert.match(replaced, /# Tool Harness Findings\nThe tool harness ran for this review: 1 tool call\(s\)/);
-  assert.ok(replaced.includes("# PR Diff (truncated)"));
+  assert.ok(replaced.includes("# PR Diff"));
   assert.equal(replaceHarnessFindingsSection("# No Sections Here", "body"), "# No Sections Here");
   // Planner-repair tolerance: top-level params promoted, gh_api path alias.
   assert.deepEqual(
@@ -435,6 +438,13 @@ test("#910: a cache-less stream keeps the v2 usage shape", () => {
   assert.deepEqual(plain.usage, { promptTokens: 3, completionTokens: 1, totalTokens: 4 });
 });
 
+test("loopLimitsProfile: first-pass defaults to primary; smart profile and escalation use smart", () => {
+  assert.equal(loopLimitsProfile({}, "primary"), "primary");
+  assert.equal(loopLimitsProfile({ REVIEW_CONTEXT_PROFILE: "primary" }, "primary"), "primary");
+  assert.equal(loopLimitsProfile({ REVIEW_CONTEXT_PROFILE: "smart" }, "primary"), "smart");
+  assert.equal(loopLimitsProfile({ REVIEW_CONTEXT_PROFILE: "primary" }, "smart"), "smart");
+});
+
 test("resolveLoopLimits: defaults are 4 rounds / 600s; smart overrides; bounds clamp", () => {
   assert.deepEqual(resolveLoopLimits({}, "primary"), [4, 600, false]);
   assert.deepEqual(resolveLoopLimits({ TOOL_MAX_ROUNDS: "9", TOOL_LOOP_WALL_CLOCK_SEC: "5000" }, "primary"), [6, 900, true]);
@@ -503,7 +513,7 @@ test("#810: a large PR's harness budget scales above the tier default, under the
 
 test("#810: a budget-exhausted loop records the exact unread files and leads and persists them", async () => {
   const { root, deps } = workspace();
-  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff (truncated)\n+ change\n");
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
   fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify([
     { filename: "src/a.ts", status: "modified", additions: 1, deletions: 0, changes: 1 },
     { filename: "src/b.ts", status: "modified", additions: 1, deletions: 0, changes: 1 },
@@ -541,9 +551,87 @@ test("#810: a budget-exhausted loop records the exact unread files and leads and
   assert.deepEqual(artifact.partial_coverage, coverage);
 });
 
+test("#921: a docs PR whose small files are fully in the corpus lists only the truncated file as unread", async () => {
+  const { root, deps } = workspace();
+  const chunk = (path: string, body: string[]): string =>
+    `diff --git a/${path} b/${path}\nindex 1111111..2222222 100644\n--- a/${path}\n+++ b/${path}\n` +
+    `@@ -1,${body.length} +1,${body.length} @@\n${body.join("\n")}\n`;
+  const rawDiff =
+    chunk("docs/new-guide.md", ["+## New guide", "+", "+All new content."]) +
+    chunk("README.md", ["-Old line.", "+New line."]) +
+    chunk("src/large.ts", Array.from({ length: 60 }, (_, i) => `+line ${i} of a very large change that keeps going`));
+  const section = Buffer.from(prioritizeDiff(Buffer.from(rawDiff, "utf8"), 900)).toString("utf8");
+  assert.ok(section.includes("…[diff truncated to fit context budget]"), "fixture must actually truncate");
+  fs.writeFileSync(path.join(root, "pr.diff"), rawDiff);
+  // #930: the coverage rule consumes the assembler-certified sidecar, not
+  // the rendered corpus.
+  fs.writeFileSync(path.join(root, CORPUS_DIFF_SECTION_ARTIFACT), section);
+  fs.writeFileSync(
+    path.join(root, "review-corpus.truncated.md"),
+    `# Repository Standards and Conventions (AGENTS.md)\n\n# PR Diff\n\`\`\`diff\n${section}\`\`\`\n\n# Tool Harness Findings\n\nnone\n`,
+  );
+  fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify([
+    { filename: "docs/new-guide.md", status: "added", additions: 3, deletions: 0, changes: 3 },
+    { filename: "README.md", status: "modified", additions: 1, deletions: 1, changes: 2 },
+    { filename: "src/large.ts", status: "modified", additions: 60, deletions: 0, changes: 60 },
+  ]));
+  // The loop spends its one request on discovery, then the budget stops:
+  // no changed file was tool-read, so the corpus must carry the credit.
+  const scripted = [openAiCall("c1", "find_files", '{"pattern":"*.md"}'), validVerdict()];
+  let transportCalls = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => scripted[transportCalls++],
+    env: { TOOL_MAX_REQUESTS: "1", SYSTEM_PROMPT: "You are the reviewer." },
+  }));
+  assert.equal(result.stop_reason, "tool-call-budget-exhausted");
+  const coverage = result.partial_coverage;
+  assert.ok(coverage, "partial coverage must be recorded on a budget stop");
+  assert.equal(coverage.changed_files_total, 3);
+  assert.deepEqual(coverage.unread_files, ["src/large.ts"]);
+  // #930: the credit audit lives on the harness result, not inside the gap
+  // record, so it survives complete coverage too.
+  assert.deepEqual(result.corpus_diff_covered_files, ["README.md", "docs/new-guide.md"]);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  assert.deepEqual(artifact.partial_coverage, coverage);
+  assert.deepEqual(artifact.corpus_diff_covered_files, ["README.md", "docs/new-guide.md"]);
+});
+
+test("#930: the smart-tier harness consumes the smart-named sidecar", async () => {
+  const { root, deps } = workspace();
+  const chunk = (path: string, body: string[]): string =>
+    `diff --git a/${path} b/${path}\nindex 1111111..2222222 100644\n--- a/${path}\n+++ b/${path}\n` +
+    `@@ -1,${body.length} +1,${body.length} @@\n${body.join("\n")}\n`;
+  const rawDiff =
+    chunk("docs/new-guide.md", ["+## New guide", "+", "+All new content."]) +
+    chunk("src/large.ts", Array.from({ length: 60 }, (_, i) => `+line ${i} of a very large change that keeps going`));
+  const section = Buffer.from(prioritizeDiff(Buffer.from(rawDiff, "utf8"), 900)).toString("utf8");
+  fs.writeFileSync(path.join(root, "pr.diff"), rawDiff);
+  fs.writeFileSync(path.join(root, CORPUS_DIFF_SECTION_SMART_ARTIFACT), section);
+  fs.writeFileSync(
+    path.join(root, "review-corpus.smart.truncated.md"),
+    `# PR Diff\n\`\`\`diff\n${section}\`\`\`\n\n# Tool Harness Findings\n\nnone\n`,
+  );
+  fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify([
+    { filename: "docs/new-guide.md", status: "added", additions: 3, deletions: 0, changes: 3 },
+    { filename: "src/large.ts", status: "modified", additions: 60, deletions: 0, changes: 60 },
+  ]));
+  const scripted = [openAiCall("c1", "find_files", '{"pattern":"*.md"}'), validVerdict()];
+  let transportCalls = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => scripted[transportCalls++],
+    env: {
+      TOOL_HARNESS_TIER: "smart", TOOL_MAX_REQUESTS: "1", SYSTEM_PROMPT: "You are the reviewer.",
+      SMART_BASE_URL: "http://model.test/v1", SMART_MODEL: "m1", SMART_API_KEY: "k", SMART_STREAM: "false",
+    },
+  }));
+  assert.equal(result.stop_reason, "tool-call-budget-exhausted");
+  assert.deepEqual(result.partial_coverage?.unread_files, ["src/large.ts"]);
+  assert.deepEqual(result.corpus_diff_covered_files, ["docs/new-guide.md"]);
+});
+
 test("#810: a model-chosen stop leaves no partial-coverage record", async () => {
   const { root, deps } = workspace();
-  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff (truncated)\n+ change\n");
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
   fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify([
     { filename: "src/a.ts", status: "modified", additions: 1, deletions: 0, changes: 1 },
     { filename: "src/b.ts", status: "modified", additions: 1, deletions: 0, changes: 1 },
@@ -588,7 +676,7 @@ test("#847: buildToolLoopTelemetry folds the #810 size signal into the budget ob
 
 test("#847: a size-scaled run persists route/budget/source/size, stop reason and calls used in tool-harness.json", async () => {
   const { root, deps } = workspace();
-  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff (truncated)\n+ change\n");
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
   fs.writeFileSync(path.join(root, "pr.json"), JSON.stringify({ changedFiles: 54, additions: 4346, deletions: 181 }));
   fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
   const scripted = [openAiCall("c1", "read_file", '{"path":"src.ts"}'), openAiText("evidence gathered"), validVerdict()];
@@ -629,4 +717,160 @@ test("#899: redactedJson stays valid JSON when a secret pattern would swallow a 
 test("#899: redactedJson keeps the serialized-redaction bytes whenever they parse", () => {
   const summary = { tool_results: [{ result: { content: "plain text" } }], stop_reason: "model-stopped" };
   assert.equal(redactedJson(summary), JSON.stringify(summary, null, 2));
+});
+
+test("#922: without a declared window the loop keeps the v3.1 context limits", () => {
+  assert.deepEqual(loopContextLimits({}, "primary"), { maxConversationTokens: 24000, corpusMaxBytes: 50000, maxResponseBytes: 12000 });
+  assert.deepEqual(loopContextLimits({ TOOL_CORPUS_MAX_BYTES: "", TOOL_MAX_RESPONSE_BYTES: "" }, "smart"), { maxConversationTokens: 24000, corpusMaxBytes: 50000, maxResponseBytes: 12000 });
+});
+
+test("#922: a declared window scales the loop's context limits per tier", () => {
+  assert.deepEqual(loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "1000000" }, "primary"), { maxConversationTokens: 250000, corpusMaxBytes: 450000, maxResponseBytes: 60000 });
+  assert.deepEqual(loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "262144" }, "primary"), { maxConversationTokens: 65536, corpusMaxBytes: 117964, maxResponseBytes: 15728 });
+  // A small window reserves the per-turn completion first: 32768 - 16384 - 2000.
+  assert.deepEqual(
+    loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "32768", TOOL_MAX_TOKENS_PER_TURN: "16384" }, "primary"),
+    { maxConversationTokens: 14384, corpusMaxBytes: 25891, maxResponseBytes: 3452 },
+  );
+  assert.deepEqual(
+    loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "32768", TOOL_MAX_TOKENS_PER_TURN: "4096" }, "primary"),
+    { maxConversationTokens: 24000, corpusMaxBytes: 43200, maxResponseBytes: 5760 },
+  );
+  // The smart tier reads its own window, then the global one.
+  assert.equal(loopContextLimits({ SMART_MODEL_CONTEXT_TOKENS: "400000", PRIMARY_MODEL_CONTEXT_TOKENS: "32768" }, "smart").maxConversationTokens, 100000);
+  assert.equal(loopContextLimits({ MODEL_CONTEXT_TOKENS: "400000" }, "smart").maxConversationTokens, 100000);
+});
+
+test("#922: explicit byte inputs override the window-derived limits", () => {
+  const limits = loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "1000000", TOOL_CORPUS_MAX_BYTES: "70000", TOOL_MAX_RESPONSE_BYTES: "20000" }, "primary");
+  assert.equal(limits.corpusMaxBytes, 70000);
+  assert.equal(limits.maxResponseBytes, 20000);
+  assert.equal(limits.maxConversationTokens, 250000);
+});
+
+test("#922: loop telemetry carries the conversation budget and peak only when the loop reported them", () => {
+  const base: HarnessResult = {
+    tool_budget_tier: "primary",
+    tool_request_budget: 24,
+    tool_budget_source: "tier-default",
+    tool_budget_configured: null,
+    stop_reason: "model-stopped",
+    tool_loop_meta: { max_rounds: 24, wall_clock_sec: 1.2, requests_remaining: 10, elapsed_sec: 0.5, tool_result_bytes: 0 },
+  };
+  const legacy = buildToolLoopTelemetry({ ...base });
+  assert.equal((legacy!.budget as Record<string, unknown>).max_conversation_tokens, undefined);
+  assert.equal((legacy!.usage as Record<string, unknown>).peak_conversation_tokens, undefined);
+
+  const withContext = buildToolLoopTelemetry({
+    ...base,
+    tool_loop_meta: { ...(base.tool_loop_meta as Record<string, unknown>), max_conversation_tokens: 250000, peak_conversation_tokens: 61234 },
+  });
+  assert.equal((withContext!.budget as Record<string, unknown>).max_conversation_tokens, 250000);
+  assert.equal((withContext!.usage as Record<string, unknown>).peak_conversation_tokens, 61234);
+});
+
+test("#922: the conversation plus the per-turn completion always fits a declared window", () => {
+  for (const window of [24576, 32768, 65536, 131072, 262144, 1000000]) {
+    const limits = loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: String(window), TOOL_MAX_TOKENS_PER_TURN: "16384" }, "primary");
+    assert.ok(limits.maxConversationTokens + 16384 + 2000 <= window, `window ${window}`);
+    assert.ok(limits.corpusMaxBytes / 3 <= limits.maxConversationTokens, `window ${window}`);
+  }
+});
+
+test("#922: a declared window too small for the per-turn completion is refused", () => {
+  assert.throws(
+    () => loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "16384", TOOL_MAX_TOKENS_PER_TURN: "16384" }, "primary"),
+    LoopContextError,
+  );
+});
+
+test("#998 (#1049 review): the smart loop asserts its own Anthropic endpoint and never inherits the base opt-in", async () => {
+  // A heterogeneous configuration: an Anthropic-compatible smart backend that
+  // was never asserted to accept output_config.effort. The loop's own requests
+  // must carry the field ONLY under the smart lane's assertion, and a held-back
+  // effort must be announced once rather than silently dropped every round.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff\n+ change\n");
+  const smartEnv = {
+    TOOL_HARNESS_TIER: "smart",
+    REPO: "o/r",
+    SMART_BASE_URL: "http://smart.test/v1",
+    SMART_MODEL: "s1",
+    SMART_API_FORMAT: "anthropic",
+    SMART_API_KEY: "sk",
+    AI_SMART_REASONING_EFFORT: "medium",
+    SYSTEM_PROMPT: "You are the reviewer.",
+  };
+  const runLoop = async (overrides: Record<string, string>) => {
+    const payloads: Record<string, unknown>[] = [];
+    const logs: string[] = [];
+    await runToolHarness(deps({
+      env: { ...smartEnv, ...overrides },
+      transport: async (_url: string, _format: string, payload: Record<string, unknown>) => {
+        payloads.push(payload);
+        return { content: [{ type: "text", text: "no tool calls" }] };
+      },
+      log: (line: string) => logs.push(line),
+    }));
+    return { payloads, logs };
+  };
+
+  const unasserted = await runLoop({});
+  assert.ok(unasserted.payloads.length > 0, "the loop must have made a request");
+  assert.ok(unasserted.payloads.every((payload) => payload.output_config === undefined && !("reasoning_effort" in payload)));
+  assert.equal(unasserted.logs.filter((line) => line.includes("ai-smart-anthropic-effort-support")).length, 1, unasserted.logs.join(" | "));
+
+  // The base assertion never scopes the smart route.
+  const baseAsserted = await runLoop({ AI_ANTHROPIC_EFFORT_SUPPORT: "true" });
+  assert.ok(baseAsserted.payloads.every((payload) => payload.output_config === undefined));
+
+  const asserted = await runLoop({ AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "true" });
+  assert.ok(asserted.payloads.every((payload) => JSON.stringify(payload.output_config) === '{"effort":"medium"}' && !("reasoning_effort" in payload)));
+  assert.equal(asserted.logs.some((line) => line.includes("NOT sent")), false, asserted.logs.join(" | "));
+
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("#1047 (review): an explicit-empty lane response-format override inherits the base in the verdict turn", async () => {
+  // The review follow-up on #1065: the verdict turn's per-lane resolution now
+  // runs through tierResponseFormat, so an explicit-empty `ai-primary-response-
+  // format` inherits `ai-response-format` here exactly as loadConfig resolves
+  // it upstream — a direct harness entrypoint can never read the empty
+  // override as "off". The verdict turn is the one request that carries
+  // response_format, so its body is the observable.
+  const runVerdictTurn = async (envOverrides: Record<string, string>) => {
+    const { root, deps } = workspace();
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+    fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+    const scripted = [openAiCall("c1", "read_file", '{"path":"src.ts"}'), openAiText("evidence gathered"), validVerdict()];
+    let transportCalls = 0;
+    const verdictPayloads: Record<string, unknown>[] = [];
+    const { result } = await runToolHarness(deps({
+      ...withPrompt,
+      env: { ...withPrompt.env, ...envOverrides },
+      transport: async (_url: string, _format: string, payload: Record<string, unknown>) => {
+        transportCalls++;
+        if (transportCalls === 3) verdictPayloads.push(payload);
+        return scripted[transportCalls - 1];
+      },
+    }));
+    assert.equal(result.native_loop_verdict_produced, true);
+    assert.equal(verdictPayloads.length, 1);
+    fs.rmSync(root, { recursive: true, force: true });
+    return verdictPayloads[0]!;
+  };
+
+  // Explicit empty on the lane override: inherits the base json_schema —
+  // NOT silently off.
+  const inherited = await runVerdictTurn({ AI_RESPONSE_FORMAT: "json_schema", AI_PRIMARY_RESPONSE_FORMAT: "" });
+  assert.ok(inherited.response_format, "the verdict turn must carry the inherited base response_format");
+  assert.deepEqual(
+    inherited.response_format,
+    JSON.parse(JSON.stringify(OPENAI_VERDICT_JSON_SCHEMA)),
+  );
+  // An explicit off stays off, and a lane override still beats the base.
+  const off = await runVerdictTurn({ AI_RESPONSE_FORMAT: "json_schema", AI_PRIMARY_RESPONSE_FORMAT: "off" });
+  assert.equal("response_format" in off, false);
+  const overridden = await runVerdictTurn({ AI_RESPONSE_FORMAT: "off", AI_PRIMARY_RESPONSE_FORMAT: "json_object" });
+  assert.deepEqual(overridden.response_format, { type: "json_object" });
 });

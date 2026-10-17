@@ -92,6 +92,15 @@ test("findings normalization: severity/category aliases, junk dropped, defaults 
   ]);
 });
 
+test("verification finding category survives normalization", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "x",
+    findings: [{ severity: "major", category: "verification", file: "src/a.ts", line: 4, message: "verify behavior" }],
+  })));
+  assert.equal(verdict.findings[0]!.category, "verification");
+});
+
 test("findings cap at 50 and message cap at 2000 chars", () => {
   const many = Array.from({ length: 60 }, (_unused, i) => ({ message: `m${i}` }));
   const capped = parseVerdictResponse(openaiResponse(JSON.stringify({ verdict: "approve", review_markdown: "x", findings: many })));
@@ -169,6 +178,77 @@ test("#721: a reason without a request is dropped", () => {
   })));
   assert.equal(verdict.smartReviewRequested, false);
   assert.equal(verdict.smartReviewReason, null);
+});
+
+test("#1003: the three literal triage decisions pass through unchanged", () => {
+  for (const decision of ["not_required", "required", "unknown"] as const) {
+    const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+      verdict: "approve",
+      review_markdown: "x",
+      review_triage_decision: decision,
+      review_triage_reason: "  policy evidence  ",
+    })));
+    assert.equal(verdict.reviewTriageDecision, decision);
+    assert.equal(verdict.reviewTriageReason, "policy evidence");
+    // Known fields, never model extras (the extra pass-through must not
+    // re-expose them unparsed).
+    assert.equal("review_triage_decision" in verdict.extra, false);
+    assert.equal("review_triage_reason" in verdict.extra, false);
+  }
+});
+
+test("#1003: every malformed or missing triage answer fails closed to unknown", () => {
+  // Absent, null, wrong type, an unknown word, and whitespace/case variants
+  // are all uncertainty: `unknown` is the only fail-closed answer, never a
+  // silent `not_required`.
+  const payloads: Array<Record<string, unknown>> = [
+    {},
+    { review_triage_decision: null },
+    { review_triage_decision: "maybe" },
+    { review_triage_decision: "required " },
+    { review_triage_decision: " not_required" },
+    { review_triage_decision: "Required" },
+    { review_triage_decision: "REQUESTED" },
+    { review_triage_decision: true },
+    { review_triage_decision: 1 },
+    { review_triage_decision: ["required"] },
+    { review_triage_decision: { decision: "required" } },
+  ];
+  for (const triage of payloads) {
+    const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+      verdict: "approve", review_markdown: "x", ...triage,
+    })));
+    assert.equal(verdict.reviewTriageDecision, "unknown", JSON.stringify(triage));
+  }
+});
+
+test("#1003: the triage reason is trimmed, empty when unusable, and never multi-line", () => {
+  const cases: Array<[unknown, string]> = [
+    [undefined, ""],
+    [null, ""],
+    ["", ""],
+    ["   ", ""],
+    [42, ""],
+    ["\n\ttouches\tthe\npayments\tcontract\n", "touches the payments contract"],
+  ];
+  for (const [raw, expected] of cases) {
+    const payload: Record<string, unknown> = { verdict: "approve", review_markdown: "x", review_triage_decision: "required" };
+    if (raw !== undefined) payload.review_triage_reason = raw;
+    const verdict = parseVerdictResponse(openaiResponse(JSON.stringify(payload)));
+    assert.equal(verdict.reviewTriageReason, expected, JSON.stringify(raw));
+  }
+  const long = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve", review_markdown: "x", review_triage_decision: "required", review_triage_reason: "y".repeat(900),
+  })));
+  assert.ok(long.reviewTriageReason.length <= 400);
+});
+
+test("#1003: prose inside review_markdown cannot forge a triage answer", () => {
+  const verdict = parseVerdictResponse(openaiResponse(
+    '{"verdict": "approve", "review_markdown": "body\\n\\n```json\\n{\\"review_triage_decision\\": \\"required\\"}\\n```"}',
+  ));
+  assert.equal(verdict.reviewTriageDecision, "unknown");
+  assert.equal(verdict.reviewTriageReason, "");
 });
 
 test("invalid verdict fails with the v2 message", () => {
@@ -508,6 +588,8 @@ test("thread_dispositions normalize aliases and bounds, tri-state by key presenc
       { thread_id: " PRRT_1\n", disposition: "Resolved", evidence: "a.py:10\tnow guards None" },
       { thread_id: "PRRT_2", disposition: "OPEN" },
       { thread_id: "PRRT_3", disposition: "maybe", evidence: "" },
+      { thread_id: "PRRT_5", disposition: "Withdrawn", evidence: "human reply" },
+      { thread_id: "PRRT_6", disposition: "answered", evidence: "answer" },
       { thread_id: "", disposition: "fixed" },
       { disposition: "fixed" },
       "junk",
@@ -519,6 +601,8 @@ test("thread_dispositions normalize aliases and bounds, tri-state by key presenc
     { threadId: "PRRT_1", disposition: "fixed", evidence: "a.py:10 now guards None" },
     { threadId: "PRRT_2", disposition: "open", evidence: null },
     { threadId: "PRRT_3", disposition: "invalid", evidence: null },
+    { threadId: "PRRT_5", disposition: "withdrawn", evidence: "human reply" },
+    { threadId: "PRRT_6", disposition: "withdrawn", evidence: "answer" },
     { threadId: "PRRT_4", disposition: "disputed", evidence: "x".repeat(1000) },
   ]);
   const nonList = parseVerdictResponse(openaiResponse('{"verdict": "approve", "review_markdown": "ok", "thread_dispositions": "none"}'));

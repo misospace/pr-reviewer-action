@@ -3,6 +3,8 @@
 export {
   buildBoundedRepoMap,
   buildReviewCorpus,
+  CORPUS_DIFF_SECTION_ARTIFACT,
+  CORPUS_DIFF_SECTION_SMART_ARTIFACT,
   gateFeatureForForks,
   prepareStandardsContext,
   prepareToolHarness,
@@ -12,8 +14,7 @@ export {
   type CorpusTier,
   type CorpusWorkspace,
 } from "./assemble.js";
-export { BudgetError, resolveTierBudgets, type BudgetInputs, type TierBudgets } from "./budgets.js";
-export { runCorpusFixture, runDiffPriorityFixture } from "./fixture.js";
+export { BudgetError, resolveTierBudgets, TIER_USABLE_TOKENS_CAP, type BudgetInputs, type TierBudgets } from "./budgets.js";
 export { replaceHarnessFindingsSection } from "./harness-section.js";
 export { classificationLine, prMetadataLine, ProjectionError } from "./projections.js";
 export { decodeUtf8Ignore, truncateClean } from "./truncate.js";

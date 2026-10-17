@@ -1,14 +1,16 @@
-/** Bounded model fallback for the claim falsification pre-pass (#785).
+/** Bounded model pass for the claim falsification pre-pass (#785).
  *
  * The deterministic scan (`src/claims/extract.ts`) is the primary source: it
  * needs no model call and anchors every claim to a concrete diff location.
- * This module is invoked only when that scan finds nothing usable — one
- * bounded, fail-soft model call on the SAME transport/credentials as the
- * primary review route, reusing the specialist wire format
- * (`src/specialists/payload.ts`) and JSON extraction
- * (`src/specialists/normalize.ts`). Any failure (missing config, transport
- * error, timeout, malformed output, zero claims) yields an empty artifact —
- * it never blocks or changes the review. */
+ * This module runs ONE bounded, fail-soft model call on the SAME
+ * transport/credentials as the primary review route on every flagged run,
+ * and its claims merge after the deterministic ones (#898 and its review —
+ * the scan is evidence, never proof the body was fully captured). It reuses
+ * the specialist wire format (`src/specialists/payload.ts`) and JSON
+ * extraction (`src/specialists/normalize.ts`). Any failure (missing config,
+ * transport error, timeout, malformed output, zero claims) yields an empty
+ * artifact — it never blocks or changes the review, and a failure on top of
+ * a non-empty deterministic scan keeps that scan's claims. */
 
 import { extractSpecialistJson } from "../specialists/normalize.js";
 import { buildSpecialistPayload, type SpecialistPayload } from "../specialists/payload.js";
@@ -231,6 +233,10 @@ export interface ClaimModelPassConfig {
   stream: boolean;
   timeoutSec: number;
   inputMaxBytes: number;
+  /** #998: the primary lane's resolved reasoning effort ("" = omit). */
+  reasoningEffort?: string;
+  /** #998: the Anthropic endpoint opt-in for `output_config.effort`. */
+  anthropicEffortSupported?: boolean;
 }
 
 export interface ClaimModelPassInput {
@@ -271,6 +277,10 @@ export async function runClaimFalsificationModelPass(input: ClaimModelPassInput)
     responseFormat: input.config.responseFormat,
     tokensParam: input.config.tokensParam,
     stream: input.config.stream,
+    // #998: the primary lane's effort, so the pre-pass sends the same
+    // request bytes shape as the review call.
+    ...(input.config.reasoningEffort !== undefined ? { reasoningEffort: input.config.reasoningEffort } : {}),
+    ...(input.config.anthropicEffortSupported !== undefined ? { anthropicEffortSupported: input.config.anthropicEffortSupported } : {}),
   });
   const requestBytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
 

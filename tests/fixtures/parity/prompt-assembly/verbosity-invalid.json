@@ -1,7 +1,0 @@
-{
-  "fixture": "verbosity-invalid",
-  "description": "An unrecognized verbosity assembles the normal prompt.",
-  "env": {
-    "REVIEW_VERBOSITY": "verbose"
-  }
-}

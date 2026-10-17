@@ -36,19 +36,19 @@ Usage:
     python3 scripts/check_corpus_anchor_in_diff.py evals/corpus-human-findings.json
     python3 scripts/check_corpus_anchor_in_diff.py evals/corpus-real-prs.json --verbose
 
-Reads exclusively via the `gh` CLI (auth flows through gh's own token
-handling; this deliberately has no direct-HTTP fallback — a hand-rolled
-`Authorization: Bearer` header over `urllib.request.urlopen` follows
-redirects by default and would forward the token cross-origin on a 3xx).
-Requires `gh` on PATH and authenticated.
+Forge reads go through ``pr_reviewer.forge`` — the configured
+forge capability, the one module that talks to the host API. This script
+no longer shells out to the ``gh`` CLI; the forge module's redirect-safe
+transport is what the script relies on for safe auth. The
+``GITHUB_API_URL`` and ``GITHUB_TOKEN``/``GH_TOKEN`` environment variables
+configure the forge capability, exactly as they configure the rest of the
+tooling.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -60,32 +60,34 @@ for _p in (str(ROOT), str(SCRIPT_DIR)):
         sys.path.insert(0, _p)
 
 from eval_harness import _finding_file_matches_anchor, _normalize_path_for_match  # noqa: E402
+from pr_reviewer.forge import ForgeError, default_forge  # noqa: E402
 
 
-class GitHubAPIError(RuntimeError):
-    """A GitHub REST read failed."""
+# Re-export the forge error under the script's historical name so existing
+# callers/tests that catch ``GitHubAPIError`` keep working without churn.
+GitHubAPIError = ForgeError
 
 
 class GitHubClient:
-    """Read-only GitHub REST client, `gh` CLI only.
+    """Read-only GitHub REST client backed by the configured forge capability.
 
-    No direct-HTTP fallback on purpose (#855-class risk): a hand-rolled
-    `Authorization: Bearer <token>` header over `urlopen` follows redirects
-    by default, which can forward the token cross-origin on a 3xx response.
-    The `gh` CLI handles auth and redirects safely on its own.
+    The script used to require the ``gh`` CLI on PATH — auth flowed through
+    ``gh``'s own token handling, so a hand-rolled ``Authorization: Bearer``
+    over ``urllib.request.urlopen`` (which follows redirects by default and
+    would forward the token cross-origin on a 3xx) was deliberately
+    avoided. The forge boundary now lives in ``pr_reviewer.forge``: the
+    redirect-safe transport lives there once, and this script simply calls
+    it. No subprocess, no CLI, no argv-borne token.
     """
 
-    def __init__(self):
-        if shutil.which("gh") is None:
-            raise GitHubAPIError("the `gh` CLI is required and was not found on PATH")
+    def __init__(self) -> None:
+        self._forge = default_forge()
 
     def get(self, path: str) -> Any:
-        result = subprocess.run(
-            ["gh", "api", path], capture_output=True, text=True, check=False,
-        )
-        if result.returncode != 0:
-            raise GitHubAPIError(f"gh api {path} failed: {result.stderr.strip()}")
-        return json.loads(result.stdout)
+        try:
+            return self._forge.get(path)
+        except ForgeError as exc:
+            raise GitHubAPIError(str(exc)) from None
 
     def compare(self, repo: str, base: str, head: str) -> dict[str, Any]:
         return self.get(f"/repos/{repo}/compare/{base}...{head}")

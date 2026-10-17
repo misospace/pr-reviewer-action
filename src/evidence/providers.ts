@@ -146,7 +146,7 @@ export interface RunEvidenceProviderOptions {
   ambientEnv?: NodeJS.ProcessEnv;
   /** Working directory for the child (v2: the review workspace cwd). */
   cwd?: string;
-  /** Monotonic clock in milliseconds (injected by the parity fixtures). */
+  /** Monotonic clock in milliseconds (injected by tests). */
   clock?: () => number;
   /** Diagnostic sink (v2: the logging module's stderr fallback). */
   log?: (line: string) => void;

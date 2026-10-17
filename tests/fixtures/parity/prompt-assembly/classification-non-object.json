@@ -1,7 +1,0 @@
-{
-  "fixture": "classification-non-object",
-  "description": "A JSON array classification: jq raises (no kind), Python's non-dict guard returns the base message.",
-  "files": {
-    "classification.json": "[\"k8s_manifest\"]"
-  }
-}

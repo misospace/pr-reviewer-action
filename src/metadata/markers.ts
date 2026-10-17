@@ -76,6 +76,8 @@ export interface RunMarkerContext {
   coverage?: string;
   /** #810: the loop stop reason behind coverage: partial. */
   coverageStopReason?: string;
+  /** #954: why coverage is incomplete ("execution" | "requirement_trace" | "both"); omitted when complete. */
+  incompleteReason?: string;
   /** #812: folded external-CI conclusion at the reviewed head; omitted when
    * CI was not read so complete runs keep their pre-#812 marker bytes. */
   ciState?: string;
@@ -92,6 +94,13 @@ export interface RunMarkerContext {
   toolRounds?: number;
   /** #895: the resolved round cap the loop ran against for this run. */
   maxRounds?: number;
+  /** #922: the loop's conversation budget and peak (approx tokens). */
+  contextBudget?: number;
+  contextPeak?: number;
+  /** #915 build-time stamp; ""/unset means unstamped and is omitted. */
+  actionVersion?: string;
+  /** #978: true when the final verdict is eligible for the gate bypass. */
+  degradedGateBypass?: boolean;
 }
 
 /**
@@ -109,6 +118,8 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
   const chr = context.cacheHitRatio ?? "";
   const cov = context.coverage ?? "";
   const covStop = context.coverageStopReason ?? "";
+  const incompleteReason = context.incompleteReason ?? "";
+  const av = context.actionVersion ?? "";
   let cacheHitRatio: number | null = null;
   if (chr !== "" && chr !== "-") {
     const parsed = Number(chr);
@@ -127,12 +138,17 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
     cache_hit_ratio: cacheHitRatio,
     coverage: cov === "" ? null : cov,
     coverage_stop_reason: covStop === "" ? null : covStop,
+    incomplete_reason: incompleteReason === "" || incompleteReason === "none" ? null : incompleteReason,
     ci_state: context.ciState ?? null,
     tool_budget: context.toolBudget ?? null,
     tool_budget_source: context.toolBudgetSource ?? null,
     tool_calls: context.toolCalls ?? null,
     tool_rounds: context.toolRounds ?? null,
     max_rounds: context.maxRounds ?? null,
+    context_budget: context.contextBudget ?? null,
+    context_peak: context.contextPeak ?? null,
+    action_version: av === "" ? null : av,
+    degradedGateBypass: context.degradedGateBypass === true ? true : null,
   });
 }
 

@@ -7,6 +7,9 @@ import {
   strictReviewResult,
   type StrictReviewResult,
 } from "../src/enforcement/verdict-policy.js";
+import { resolveIncompleteReason } from "../src/publish/publish.js";
+import { failOnRequestChanges } from "../src/run/action.js";
+import { computeDeterministicBlock, resolveDegradedGateBypass } from "../src/run/review.js";
 import { applyRequiredCheckValidation } from "../src/enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "../src/enforcement/enforce.js";
 import { applyReviewThreadEnforcement } from "../src/enforcement/threads.js";
@@ -44,10 +47,14 @@ function runStrictPipeline(
   modelVerdict: string,
   findings: Array<Record<string, unknown>>,
   options: { coverage?: "complete" | "incomplete"; mode?: string; enforcement?: Partial<EnforcementInputs> } = {},
-): { artifact: ReviewArtifact; outcome: ReturnType<typeof applyStrictVerdictPolicy> } {
+): {
+  artifact: ReviewArtifact;
+  completeness: ReturnType<typeof applyRequiredCheckValidation>;
+  outcome: ReturnType<typeof applyStrictVerdictPolicy>;
+} {
   const a = artifact(modelVerdict, findings);
   const mode = options.mode ?? "warn";
-  applyRequiredCheckValidation(a, {
+  const completeness = applyRequiredCheckValidation(a, {
     enabled: "auto",
     mode,
     mustCheck: options.coverage === "incomplete" ? ["run the test suite"] : [],
@@ -59,8 +66,8 @@ function runStrictPipeline(
   const inputs: EnforcementInputs = { ...NO_ENFORCEMENT, ...options.enforcement };
   applyAllEnforcement(a, inputs);
   const forced = failClosedEnforcementFired(inputs)
-    || (options.coverage === "incomplete" && mode === "fail");
-  return { artifact: a, outcome: applyStrictVerdictPolicy(a, { modelVerdict, forced }) };
+    || (completeness.status === "incomplete" && completeness.mode === "fail");
+  return { artifact: a, completeness, outcome: applyStrictVerdictPolicy(a, { modelVerdict, forced }) };
 }
 
 const HIGHEST: Record<string, Array<Record<string, unknown>>> = {
@@ -106,6 +113,16 @@ const TABLE: Array<{
 ];
 
 const NOTE = "_Verdict set from open findings (verdict_policy=strict):";
+
+test("#954: incomplete-reason resolver separates trace and execution while retaining fail-closed legacy behavior", () => {
+  assert.equal(resolveIncompleteReason({ requiredChecks: "incomplete", incompleteReason: "requirement_trace" }), "requirement_trace");
+  assert.equal(resolveIncompleteReason({ requiredChecks: "incomplete", incompleteReason: "both" }), "both");
+  assert.equal(resolveIncompleteReason({ requiredChecks: "incomplete", incompleteReason: "none" }), "execution");
+  assert.equal(resolveIncompleteReason({ requiredChecks: "incomplete", incompleteReason: "invalid" }), "execution");
+  assert.equal(resolveIncompleteReason({ requiredChecks: "complete", incompleteReason: "requirement_trace" }), "requirement_trace");
+  assert.equal(resolveIncompleteReason({ requiredChecks: "complete", partialCoverage: { stop_reason: "budget-exhausted" } as never, incompleteReason: "requirement_trace" }), "both");
+  assert.equal(resolveIncompleteReason({ requiredChecks: "complete", incompleteReason: "both" }), "both");
+});
 
 test("verdict table: model verdict x highest open severity x coverage", () => {
   for (const row of TABLE) {
@@ -157,6 +174,43 @@ test("mapping agrees with the model verdict: no note, model source", () => {
   assert.equal(agreedForced.artifact.verdict_source, "model");
 });
 
+test("computeDeterministicBlock covers every fail-closed source and final verdict provenance", () => {
+  const forcedEnforcement: EnforcementInputs = {
+    ...NO_ENFORCEMENT,
+    evidenceBlockerEnabled: true,
+    evidence: { has_blocker: true, providers: [{ id: "scanner", provider_severity: "blocker" }] },
+  };
+  const base = {
+    enforcementInputs: NO_ENFORCEMENT,
+    completeness: null,
+    requirementTraceIncomplete: false,
+    finalVerdict: "approve",
+    verdictSource: "model",
+  };
+  assert.equal(computeDeterministicBlock(base), false);
+  assert.equal(computeDeterministicBlock({ ...base, enforcementInputs: forcedEnforcement }), true);
+  assert.equal(computeDeterministicBlock({
+    ...base,
+    completeness: { status: "incomplete", mode: "fail" },
+  }), true);
+  assert.equal(computeDeterministicBlock({ ...base, requirementTraceIncomplete: true }), true, "trace incompleteness independently blocks the degraded bypass");
+  assert.equal(computeDeterministicBlock({
+    ...base,
+    finalVerdict: "request_changes",
+    verdictSource: "findings",
+  }), true);
+  assert.equal(computeDeterministicBlock({
+    ...base,
+    finalVerdict: "request_changes",
+    verdictSource: "model",
+  }), false, "a model-originated request_changes remains eligible for #978");
+  assert.equal(computeDeterministicBlock({
+    ...base,
+    finalVerdict: "approve",
+    verdictSource: "findings",
+  }), false, "non-model provenance only blocks when the final verdict is request_changes");
+});
+
 test("enforcement-forced request_changes discloses the forced provenance", () => {
   const { artifact: a, outcome } = runStrictPipeline("approve", [], {
     coverage: "complete",
@@ -177,6 +231,31 @@ test("enforcement-forced request_changes discloses the forced provenance", () =>
   assert.ok(a.review_markdown.includes("## Evidence Provider Blockers"));
 });
 
+test("evidence blocker prevents the degraded fallback gate bypass", () => {
+  const enforcement: EnforcementInputs = {
+    ...NO_ENFORCEMENT,
+    evidenceBlockerEnabled: true,
+    evidence: { has_blocker: true, providers: [{ id: "scanner", provider_severity: "blocker" }] },
+  };
+  const { artifact: a } = runStrictPipeline("approve", [], { coverage: "complete", enforcement });
+  assert.equal(a.verdict, "request_changes");
+
+  const deterministicBlock = computeDeterministicBlock({
+    enforcementInputs: enforcement,
+    completeness: null,
+    requirementTraceIncomplete: false,
+    finalVerdict: String(a.verdict),
+    verdictSource: String(a.verdict_source ?? "model"),
+  });
+  assert.equal(deterministicBlock, true);
+  const degradedGateBypass = resolveDegradedGateBypass({
+    notice: false, fromFallback: true, noEvidenceGathered: true, deterministicBlock,
+  });
+  assert.equal(degradedGateBypass, false);
+  assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, "request_changes", degradedGateBypass, false), 1);
+  assert.equal(failOnRequestChanges({ FAIL_ON_REQUEST_CHANGES: "true" }, "request_changes", degradedGateBypass, true), 1);
+});
+
 test("required_check_validation_mode=fail still forces request_changes under strict", () => {
   const { artifact: a, outcome } = runStrictPipeline("approve", [finding("minor")], {
     coverage: "incomplete", mode: "fail",
@@ -186,6 +265,26 @@ test("required_check_validation_mode=fail still forces request_changes under str
   // The model said approve; the forced verdict is the enforcement layer's.
   assert.equal(a.verdict_source, "enforcement");
   assert.ok(a.review_markdown.includes("fail-closed enforcement layer forced request_changes"));
+});
+
+test("required-check mode=fail incompleteness prevents the degraded fallback gate bypass", () => {
+  const { artifact: a, completeness } = runStrictPipeline("approve", [finding("minor")], {
+    coverage: "incomplete", mode: "fail",
+  });
+  assert.equal(a.verdict, "request_changes");
+  assert.equal(completeness.status, "incomplete");
+  assert.equal(completeness.mode, "fail");
+  const deterministicBlock = computeDeterministicBlock({
+    enforcementInputs: NO_ENFORCEMENT,
+    completeness,
+    requirementTraceIncomplete: false,
+    finalVerdict: String(a.verdict),
+    verdictSource: String(a.verdict_source ?? "model"),
+  });
+  assert.equal(deterministicBlock, true);
+  assert.equal(resolveDegradedGateBypass({
+    notice: false, fromFallback: true, noEvidenceGathered: true, deterministicBlock,
+  }), false);
 });
 
 test("a fail-closed layer firing beside a model request_changes is never relaxed", () => {
@@ -258,10 +357,10 @@ test("strict marker values carry an approve through the unchanged-diff skip", ()
   const marker = (reviewResult: string) => buildRunMetadataMarker({ headSha: "h", baseSha: "b", reviewResult });
   for (const result of ["findings", "partial"]) {
     const carried = carriedVerdict(`${marker(result)}\nbody`);
-    assert.deepEqual(carried, { verdict: "approve", verdictSource: "carry_forward", reviewResult: result }, result);
+    assert.deepEqual(carried, { verdict: "approve", verdictSource: "carry_forward", reviewResult: result, degradedGateBypass: false }, result);
   }
-  assert.deepEqual(carriedVerdict(`${marker("issues")}\nbody`), { verdict: "request_changes", verdictSource: "carry_forward", reviewResult: "issues" });
-  assert.deepEqual(carriedVerdict(`${marker("clean")}\nbody`), { verdict: "approve", verdictSource: "carry_forward", reviewResult: "clean" });
+  assert.deepEqual(carriedVerdict(`${marker("issues")}\nbody`), { verdict: "request_changes", verdictSource: "carry_forward", reviewResult: "issues", degradedGateBypass: false });
+  assert.deepEqual(carriedVerdict(`${marker("clean")}\nbody`), { verdict: "approve", verdictSource: "carry_forward", reviewResult: "clean", degradedGateBypass: false });
 });
 
 // ---------------------------------------------------------------------------
@@ -283,6 +382,8 @@ class MockPublishApi implements PublishPlatformApi {
   async listIssueComments() { return this.comments; }
   async upsertStickyComment(marker: string, body: string) { this.sticky.push({ marker, body }); return { ok: true, created: true }; }
   async listReviews() { return this.reviews; }
+  async listManagedInlineComments() { return { supported: true, complete: true, comments: [] }; }
+  async retireInlineComment() { return true; }
   async createReview(request: Parameters<PublishPlatformApi["createReview"]>[0]) { this.submitted.push(request); return { ok: true }; }
   async dismissReview(): Promise<boolean> { return true; }
   async minimizedReviewIds(): Promise<string[]> { return []; }
@@ -290,6 +391,9 @@ class MockPublishApi implements PublishPlatformApi {
   async unresolvedSupersededThreads() { return { ok: true, threads: [], hasNextPage: false }; }
   async resolveThread(): Promise<boolean> { return true; }
   async removeLabel(label: string): Promise<boolean> { this.removedLabels.push(label); return true; }
+  async requestReviewers(): ReturnType<PublishPlatformApi["requestReviewers"]> {
+    return { ok: true, supported: true, requestedUsers: [], requestedTeams: [], alreadyRequestedUsers: [], alreadyRequestedTeams: [] };
+  }
 }
 
 function publishInput(overrides: Record<string, unknown> = {}): Parameters<typeof publishReview>[0] {
@@ -337,6 +441,52 @@ test("partial coverage renders the gap notice above the review and a partial mar
   assert.ok(body.includes("> **Partial coverage**: required-check coverage is incomplete"));
   assert.ok(body.indexOf("Partial coverage") < body.indexOf("## Review"));
   assert.ok(body.includes('"review_result":"partial"'));
+});
+
+test("#954: trace-only incompleteness renders trace-appropriate prose and preserves partial result", async () => {
+  const api = new MockPublishApi();
+  await publishReview(publishInput({ requiredChecks: "incomplete", incompleteReason: "requirement_trace" }), api, { diffText: "" });
+  const body = api.sticky[0]!.body;
+  assert.ok(body.includes("🟡 **Automated recommendation: APPROVAL WITHHELD — requirement trace incomplete**"));
+  assert.ok(body.includes("**Requirement traceability gap**"));
+  assert.ok(body.includes('"review_result":"partial"'));
+  assert.ok(!body.includes("did not resolve every required check"));
+
+  const native = new MockPublishApi();
+  await publishReview(publishInput({
+    mode: "review_verdict", allowApprove: true,
+    requiredChecks: "incomplete", incompleteReason: "requirement_trace",
+  }), native, { diffText: "" });
+  const nativeBody = native.submitted[0]!.body;
+  assert.ok(nativeBody.includes("**Approval withheld**: the review completed, but an in-scope requirement lacks verifiable enforcement or test evidence"));
+  assert.ok(!nativeBody.includes("required-check coverage or the tool-loop investigation did not finish"));
+});
+
+test("#954: execution plus trace incompleteness gets combined prose", async () => {
+  const api = new MockPublishApi();
+  await publishReview(publishInput({ requiredChecks: "incomplete", incompleteReason: "both" }), api, { diffText: "" });
+  const body = api.sticky[0]!.body;
+  assert.ok(body.includes("🟡 **Automated recommendation: APPROVAL WITHHELD — review coverage incomplete**"));
+  assert.ok(body.includes("**Partial coverage and requirement traceability gap**"));
+  assert.ok(body.includes("required-check coverage is incomplete, and one or more in-scope requirements could not be verified"));
+
+  const native = new MockPublishApi();
+  await publishReview(publishInput({ mode: "review_verdict", allowApprove: true, requiredChecks: "incomplete", incompleteReason: "both" }), native, { diffText: "" });
+  assert.ok(native.submitted[0]!.body.includes("execution coverage and an in-scope requirement lacks verifiable enforcement or test evidence"));
+});
+
+test("#954: execution and legacy incomplete publish callers keep the generic coverage notice", async () => {
+  for (const overrides of [
+    { requiredChecks: "incomplete", incompleteReason: "execution" },
+    { requiredChecks: "incomplete" },
+  ]) {
+    const api = new MockPublishApi();
+    await publishReview(publishInput(overrides), api, { diffText: "" });
+    const body = api.sticky[0]!.body;
+    assert.ok(body.includes("did not resolve every required check"));
+    assert.ok(body.includes("🟡 **Automated recommendation: INCOMPLETE — not an approval**"));
+    assert.ok(!body.includes("Requirement traceability gap"));
+  }
 });
 
 test("blocking strict review shows the blocker beside the verdict and an issues marker", async () => {

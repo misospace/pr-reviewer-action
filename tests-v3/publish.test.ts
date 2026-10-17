@@ -5,16 +5,22 @@ import {
   evaluateApprovalGuardrails,
   markerReviewResult,
   publishReview,
+  renderFindingsSummary,
+  renderOutsideDiffSection,
   renderPartialCoverageNotice,
   resolveCleanupFlag,
+  sanitizeForPublication,
 } from "../src/publish/publish.js";
 import { cleanupManagedReviews, resolveSupersededThreads } from "../src/publish/cleanup.js";
+import type { TrustedOwnerIdentity } from "../src/platform/owner-identity.js";
+import type { ConditionalSectionPresence } from "../src/publish/sanitize.js";
 import { ForgejoPublishApi, forgejoReviewEvent } from "../src/platform/publish-api.js";
 import type {
   NativeReviewRequest,
   PublishCommentRef,
   PublishPlatformApi,
   PublishReviewRef,
+  ReviewerRequestResult,
 } from "../src/platform/publish-api.js";
 
 const MARKER = "<!-- ai-pr-review -->";
@@ -34,19 +40,55 @@ class MockPublishApi implements PublishPlatformApi {
   comments: PublishCommentRef[] = [];
   minimizeIds: string[] = [];
   listReviewsError = false;
-  stickyResult: { ok: boolean; created: boolean; error?: string } = { ok: true, created: true };
+  stickyResult: { ok: boolean; created: boolean; commentId?: number | string; updatedAt?: string; error?: string } = { ok: true, created: true };
   reviewResults: { ok: boolean; error?: string }[] = [];
   dismissResult = true;
   minimizeResult = true;
   resolveResult = true;
   threadQueryError = false;
+  reviewerRequests: { users: string[]; teams: string[] }[] = [];
+  reviewerRequestResult: ReviewerRequestResult = {
+    ok: true,
+    supported: true,
+    requestedUsers: [],
+    requestedTeams: [],
+    alreadyRequestedUsers: [],
+    alreadyRequestedTeams: [],
+  };
 
   constructor(platform: "github" | "forgejo" = "github") { this.platform = platform; }
   async getHeadSha(): Promise<string | null> { return this.head; }
   async listIssueComments(): Promise<PublishCommentRef[]> { return this.comments; }
-  async upsertStickyComment(marker: string, body: string) { this.sticky.push({ marker, body }); return this.stickyResult; }
+  async upsertStickyComment(marker: string, body: string) {
+    this.sticky.push({ marker, body });
+    // #1093: mirror the real forge — a successful upsert stores the exact
+    // published body on the sticky comment, so the checkpoint's body
+    // equality read observes the same bytes the run published.
+    if (this.stickyResult.ok && this.stickyResult.commentId !== undefined) {
+      const id = String(this.stickyResult.commentId);
+      this.comments = this.comments.map((c) => String(c.id) === id ? { ...c, body } : c);
+    }
+    return this.stickyResult;
+  }
   async listReviews(): Promise<PublishReviewRef[]> { if (this.listReviewsError) throw new Error("list failed"); return this.reviews; }
-  async createReview(request: NativeReviewRequest) { this.submitted.push(request); return this.reviewResults.shift() ?? { ok: true }; }
+  async authenticatedIdentity() { return this.identity; }
+  /** #1093: the trusted-owner seam; `identity === null` models an unprovable
+   * identity so the fail-closed cleanup behavior can be exercised. */
+  identity: string | null = "bot";
+  async resolveTrustedOwner(): Promise<{ identity: TrustedOwnerIdentity | null; reason: string }> {
+    if (this.identity === null) return { identity: null, reason: "unavailable" };
+    return { identity: { kind: "login", login: this.identity }, reason: "user-login" };
+  }
+  async listManagedInlineComments(_ids: readonly string[]): ReturnType<PublishPlatformApi["listManagedInlineComments"]> { return { supported: true, complete: true, comments: [] }; }
+  async retireInlineComment(_review: string, _comment: string) { return true; }
+  async createReview(request: NativeReviewRequest) {
+    this.submitted.push(request);
+    const result = this.reviewResults.shift() ?? { ok: true };
+    if (!result.ok) return result;
+    const reviewId = 1000 + this.submitted.length;
+    this.reviews = [...this.reviews, { id: reviewId, body: request.body, user: { login: "bot" } }];
+    return { ...result, reviewId };
+  }
   async dismissReview(id: number | string): Promise<boolean> { this.dismissed.push(String(id)); return this.dismissResult; }
   async minimizedReviewIds(): Promise<string[]> { return this.minimizeIds; }
   async minimizeReview(id: string): Promise<boolean> { this.minimized.push(id); return this.minimizeResult; }
@@ -55,6 +97,10 @@ class MockPublishApi implements PublishPlatformApi {
   }
   async resolveThread(id: string): Promise<boolean> { this.resolved.push(id); return this.resolveResult; }
   async removeLabel(label: string): Promise<boolean> { this.removedLabels.push(label); return true; }
+  async requestReviewers(users: readonly string[], teams: readonly string[]): Promise<ReviewerRequestResult> {
+    this.reviewerRequests.push({ users: [...users], teams: [...teams] });
+    return this.reviewerRequestResult;
+  }
 }
 
 function input(overrides: Partial<Parameters<typeof publishReview>[0]> = {}): Parameters<typeof publishReview>[0] {
@@ -105,6 +151,20 @@ test("comment publication appends findings tagged outside the diff", async () =>
   assert.ok(body.includes("## Findings Outside This Diff"));
   assert.ok(body.includes("(outside this diff) Caller breaks"));
   assert.ok(!body.includes("(outside this diff) A finding"));
+});
+
+test("#989: provider keys are redacted in published findings and outside-diff lines", () => {
+  const key = "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345";
+  const finding = { file: "a.ts", line: 2, severity: "major", message: `Leaked ${key}`, outside_diff: true };
+
+  const summary = renderFindingsSummary([finding], "inert");
+  assert.ok(summary.includes("### Findings"));
+  assert.ok(summary.includes("[REDACTED]"));
+  assert.ok(!summary.includes(key));
+
+  const appendix = renderOutsideDiffSection([finding], "inert");
+  assert.ok(appendix.includes("(outside this diff) Leaked [REDACTED]"));
+  assert.ok(!appendix.includes(key));
 });
 
 test("comment publication upserts a marked body with verdict and sanitized markdown", async () => {
@@ -225,7 +285,9 @@ test("cleanup listing failure skips cleanup; Forgejo degrades GraphQL operations
   assert.ok(failureLogs.some((line) => line.includes("skipping cleanup")));
 
   const forgejo = new MockPublishApi("forgejo");
-  forgejo.reviews = [{ id: 8, node_id: "node-8", state: "COMMENTED", body: MARKER }];
+  forgejo.stickyResult = { ok: true, created: true, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  forgejo.comments = [{ id: 9, body: MARKER, updated_at: "2026-01-01T00:00:00Z", user: { login: "bot" } }];
+  forgejo.reviews = [{ id: 8, node_id: "node-8", state: "COMMENTED", body: MARKER, submitted_at: "2025-01-01T00:00:00Z" }];
   forgejo.minimizeResult = false;
   const logs: string[] = [];
   await cleanupManagedReviews(forgejo, "42", MARKER, (line) => logs.push(line));
@@ -390,6 +452,15 @@ test("#895: tool_rounds / max_rounds reach the published marker", async () => {
   assert.ok(marker.includes('"max_rounds":16'));
 });
 
+test("#922: the loop's context budget and peak reach the published marker", async () => {
+  const api = new MockPublishApi();
+  await publishReview(input({ toolBudget: 24, toolCalls: 10, toolRounds: 6, maxRounds: 24, contextBudget: 250000, contextPeak: 61234 }), api, { diffText: "" });
+  const marker = api.sticky[0]!.body.split("\n").find((line) => line.startsWith("<!-- ai-pr-reviewer:"));
+  assert.ok(marker);
+  assert.ok(marker.includes('"context_budget":250000'));
+  assert.ok(marker.includes('"context_peak":61234'));
+});
+
 test("#847: without a tool harness the marker stays byte-identical to the pre-#847 shape", async () => {
   const api = new MockPublishApi();
   await publishReview(input(), api, { diffText: "" });
@@ -521,4 +592,661 @@ test("review_verdict: allow_approve=false still reports the pre-#873 policy-bloc
   assert.equal(api.submitted[0]!.event, "COMMENT");
   assert.match(api.submitted[0]!.body, /Approval blocked by policy/);
   assert.ok(!api.submitted[0]!.body.includes("Approval withheld"));
+});
+
+test("#1017: a credential echoed in the model markdown is redacted on the published body", () => {
+  const key = "sk-fixtureSYNTHETIC-NOT-REAL-KEY-EXAMPLE";
+  const body = "Summary of this review.\n\nThe diff echoes the provider key " + key + " in a log line, and one earlier note is already [REDACTED] by the harness.\n\n<!-- ai-pr-review-sha:forged -->\nSafe.";
+  const presence: ConditionalSectionPresence = {
+    linkedIssue: true, evidenceProvider: true, standards: true,
+    toolHarnessFindings: true, toolHarnessResults: true,
+  };
+  const published = sanitizeForPublication(body, "inert", presence);
+  assert.ok(!published.includes(key), "raw provider key must not reach the published body");
+  assert.ok(published.includes("[REDACTED]"), "redaction marker present");
+  assert.equal(published.match(/\[REDACTED\]/g)?.length, 2, "key redacted once, pre-existing marker left intact (idempotent)");
+  assert.ok(published.includes("Summary of this review"), "ordinary prose survives");
+  assert.ok(published.includes("The diff echoes the provider key [REDACTED] in a log line"));
+  assert.ok(!published.includes("ai-pr-review-sha:forged"), "reserved marker still stripped");
+});
+
+
+for (const platform of ["github", "forgejo"] as const) {
+  for (const mode of ["review_comment", "review_verdict"] as const) {
+    test(`${platform} ${mode}: complete clean replacement retires owned old inline comments after publication`, async () => {
+      const api = new MockPublishApi(platform);
+      api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" } }];
+      api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+      const deleted: string[] = [];
+      api.retireInlineComment = async (_review, comment) => { assert.ok(api.submitted.length > 0); deleted.push(comment); return true; };
+      const result = await publishReview(input({ mode, inlineFindings: true, findings: FINDINGS, cleanupPreviousNativeReviews: "auto" }), api, { diffText: DIFF });
+      assert.equal(result.status, "published");
+      assert.deepEqual(deleted, ["11"]);
+      assert.equal(api.submitted[0]?.commit_id, HEAD);
+    });
+  }
+}
+
+for (const [name, overrides] of [
+  ["partial", { requiredChecks: "incomplete" }],
+  ["unknown coverage", { coverageUnknown: true }],
+  ["degraded", { degradedGateBypass: true }],
+  ["disabled", { cleanupPreviousNativeReviews: "false" }],
+  ["comment mode", { mode: "comment" }],
+] as const) {
+  test(`${name}: prior inline findings are never deleted`, async () => {
+    const api = new MockPublishApi();
+    api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" } }];
+    api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+    api.retireInlineComment = async () => { assert.fail("unsafe delete"); };
+    await publishReview(input({ mode: "review_verdict", cleanupPreviousNativeReviews: "true", ...overrides }), api, { diffText: DIFF });
+    assert.deepEqual(api.dismissed, []);
+  });
+}
+
+for (const race of ["head", "newer"] as const) {
+  test(`${race} race after publish preserves previous findings`, async () => {
+    const api = new MockPublishApi();
+    api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" } }];
+    const create = api.createReview.bind(api);
+    api.createReview = async (request) => {
+      const result = await create(request);
+      if (race === "head") api.head = "different";
+      else api.reviews.push({ id: 2000, body: MARKER, user: { login: "bot" } });
+      return result;
+    };
+    api.retireInlineComment = async () => { assert.fail("unsafe race deletion"); };
+    await publishReview(input({ mode: "review_verdict", cleanupPreviousNativeReviews: "true" }), api, { diffText: DIFF });
+    assert.deepEqual(api.dismissed, []);
+  });
+}
+
+test("failed and plain fallback native submissions preserve previous findings", async () => {
+  for (const results of [[{ ok: false }, { ok: false }], [{ ok: false }, { ok: true }]]) {
+    const api = new MockPublishApi();
+    api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" } }];
+    api.reviewResults = results;
+    api.retireInlineComment = async () => { assert.fail("unsafe failure deletion"); };
+    await publishReview(input({ mode: "review_verdict", cleanupPreviousNativeReviews: "true" }), api, { diffText: DIFF });
+    assert.deepEqual(api.dismissed, []);
+  }
+});
+
+
+test("cleanup cap skips cleanup but still removes the rerun label", async () => {
+  const api = new MockPublishApi();
+  // #1093: no inline findings means the sticky comment is the checkpoint.
+  api.stickyResult = { ok: true, created: true, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.comments = [{ id: 9, body: MARKER, updated_at: "2026-01-01T00:00:00Z", user: { login: "bot" } }];
+  api.reviews = Array.from({ length: 101 }, (_, i) => ({ id: i + 1, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }));
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "true", rerunLabel: "ai-review" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.deepEqual(api.removedLabels, ["ai-review"]);
+  assert.ok(result.messages.some((line) => line.includes("cleanup skipped")));
+  assert.deepEqual(api.dismissed, []);
+});
+
+test("spoofed managed marker in a human review grants no cleanup authority", async () => {
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, state: "CHANGES_REQUESTED", user: { login: "human" } }];
+  api.retireInlineComment = async () => { assert.fail("human review mutation"); };
+  await publishReview(input({ mode: "review_verdict", cleanupPreviousNativeReviews: "true" }), api, { diffText: DIFF });
+  assert.deepEqual(api.dismissed, []);
+  assert.deepEqual(api.resolved, []);
+});
+
+// ---------------------------------------------------------------------------
+// #1093: a clean re-review must not emit an empty native "Inline findings"
+// review; cleanup keys on the sticky summary comment (or the replacement
+// review) under the shared owner-identity policy.
+// ---------------------------------------------------------------------------
+
+test("#1093: a clean review_comment re-review publishes no empty native review and retires via the sticky checkpoint", async () => {
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  api.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.listManagedInlineComments = async (ids) => ids.length === 1 && ids[0] === "7"
+    ? { supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] }
+    : { supported: true, complete: false, comments: [] };
+  const deleted: string[] = [];
+  api.retireInlineComment = async (review, comment) => { deleted.push(`${review}/${comment}`); return true; };
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.deepEqual(api.submitted, [], "a clean re-review must not create an empty native Inline findings review");
+  assert.deepEqual(deleted, ["7/11"], "the previous run's owned inline comment is retired under the sticky checkpoint");
+  assert.equal(api.sticky.length, 1);
+  assert.ok(result.messages.some((line) => line.includes("Inline comments: eligible=1 retired=1")));
+  assert.deepEqual(api.dismissed, []);
+});
+
+test("#1093: an unprovable identity fails closed — nothing is retired or dismissed, publication still succeeds", async () => {
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  api.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  api.identity = null;
+  api.retireInlineComment = async () => { assert.fail("unprovable identity must never delete"); };
+  api.dismissReview = async () => { assert.fail("unprovable identity must never dismiss"); };
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.ok(
+    result.messages.some((line) => line.includes("Could not verify authenticated owner") && line.includes("identity reason: unavailable")),
+  );
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")), "no retirement ran");
+});
+
+test("#1093: a managed review published after the sticky checkpoint supersedes the run; cleanup is skipped", async () => {
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  api.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  const sticky = api.upsertStickyComment.bind(api);
+  api.upsertStickyComment = async (marker, body) => {
+    const result = await sticky(marker, body);
+    api.reviews = [...api.reviews, { id: 2000, body: MARKER, user: { login: "bot" }, submitted_at: "2026-06-01T00:00:00Z" }];
+    return result;
+  };
+  api.retireInlineComment = async () => { assert.fail("a superseded run must never delete"); };
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
+});
+
+test("#1093: a sticky publication without a usable timestamp provides no cleanup checkpoint", async () => {
+  // Missing updatedAt entirely: no checkpoint exists, so cleanup is skipped
+  // with a bounded WARN (fail closed) — nothing is retired or dismissed.
+  const missing = new MockPublishApi();
+  missing.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  missing.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-01-01T00:00:00Z" }];
+  missing.stickyResult = { ok: true, created: false, commentId: 9 };
+  missing.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  missing.retireInlineComment = async () => { assert.fail("no checkpoint must never delete"); };
+  const missingResult = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), missing, { diffText: "" });
+  assert.equal(missingResult.status, "published");
+  assert.ok(missingResult.messages.some((line) => line.includes("No replacement checkpoint")));
+  assert.ok(!missingResult.messages.some((line) => line.includes("Inline comments:")));
+  assert.deepEqual(missing.dismissed, []);
+
+  // An unparseable timestamp still anchors a checkpoint, but the refreshed
+  // sticky state can never satisfy it: cleanup is skipped with a WARN.
+  const unparseable = new MockPublishApi();
+  unparseable.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  unparseable.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-01-01T00:00:00Z" }];
+  unparseable.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "not-a-timestamp" };
+  unparseable.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  unparseable.retireInlineComment = async () => { assert.fail("an unusable checkpoint must never delete"); };
+  const unparseableResult = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), unparseable, { diffText: "" });
+  assert.equal(unparseableResult.status, "published");
+  assert.ok(unparseableResult.messages.some((line) => line.includes("cleanup skipped")));
+  assert.ok(!unparseableResult.messages.some((line) => line.includes("Inline comments:")));
+  assert.deepEqual(unparseable.dismissed, []);
+});
+
+test("#1093: a failed inline-findings submission leaves the sticky unable to authorize retiring the previous set", async () => {
+  // The native findings review IS the replacement for the old inline set.
+  // If its submission fails, the sticky summary alone is not a complete
+  // replacement, so cleanup must not retire the previous owned comments
+  // (the invariant: retire only after a complete replacement at the head).
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  api.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.reviewResults = [{ ok: false, error: "422 unanchored finding" }];
+  api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  api.retireInlineComment = async () => { assert.fail("an unreplaced findings set must never be retired"); };
+  const result = await publishReview(input({
+    mode: "review_comment", inlineFindings: true, findings: FINDINGS,
+    cleanupPreviousNativeReviews: "auto",
+  }), api, { diffText: DIFF });
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted.length, 1, "the findings review submission was attempted");
+  assert.ok(result.messages.some((line) => line.includes("inline findings review submission failed")));
+  assert.ok(result.messages.some((line) => line.includes("No replacement checkpoint")));
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")), "no retirement ran");
+  assert.deepEqual(api.dismissed, []);
+});
+
+test("#1093: a sticky re-published after the checkpoint fails the still-current guard; cleanup is skipped", async () => {
+  // Two overlapping same-head runs: run B PATCHes the sticky after run A
+  // captured its checkpoint timestamp. Run A's refreshed-sticky read now
+  // shows a NEWER instant, which proves re-publication, not still-current
+  // state — run A must retire nothing.
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-06-01T00:00:00Z" }];
+  api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  api.retireInlineComment = async () => { assert.fail("a re-published sticky invalidates this run's checkpoint"); };
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
+  assert.deepEqual(api.dismissed, []);
+});
+
+// ---------------------------------------------------------------------------
+// #1093: Forgejo Authorized Integration cleanup over the offline REST seam —
+// the audience's owner id (`u:<id>:<uuid>`) proves ownership even though the
+// repo-scoped JWT cannot read `GET /user`; credentials travel only in
+// Authorization headers.
+// ---------------------------------------------------------------------------
+
+const FORGEJO_BASE = "https://forgejo.test";
+const INTEGRATION_AUDIENCE = "u:7:12345678-1234-1234-1234-123456789abc";
+const OIDC_ENDPOINT = "https://oidc.example/token?job=1";
+const OIDC_REQUEST_URL = `${OIDC_ENDPOINT}&audience=${encodeURIComponent(INTEGRATION_AUDIENCE)}`;
+const JWT_VALUE = "integration-jwt-value";
+const OIDC_TOKEN_VALUE = "runner-oidc";
+
+function withIntegrationOidcEnv(fn: () => Promise<void>): Promise<void> {
+  const saved = {
+    url: process.env.ACTIONS_ID_TOKEN_REQUEST_URL,
+    token: process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+  };
+  process.env.ACTIONS_ID_TOKEN_REQUEST_URL = OIDC_ENDPOINT;
+  process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN = OIDC_TOKEN_VALUE;
+  return fn().finally(() => {
+    if (saved.url === undefined) delete process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+    else process.env.ACTIONS_ID_TOKEN_REQUEST_URL = saved.url;
+    if (saved.token === undefined) delete process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+    else process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN = saved.token;
+  });
+}
+
+interface ForgejoCleanupScenario {
+  reviews: unknown[];
+  review5Comments: unknown[];
+  review6Comments?: unknown[];
+  userStatus?: number;
+}
+
+async function runIntegrationCleanupScenario(scenario: ForgejoCleanupScenario): Promise<{
+  result: Awaited<ReturnType<typeof publishReview>>;
+  requests: Array<{ method: string; url: string; auth: string | null; body: string }>;
+}> {
+  const requests: Array<{ method: string; url: string; auth: string | null; body: string }> = [];
+  // The PATCH really does refresh the sticky comment's timestamp AND stores
+  // the exact published body; later reads must observe both or the checkpoint
+  // anchor could never be satisfied.
+  let stickyUpdatedAt = "2025-01-01T00:00:00Z";
+  let stickyBody = MARKER;
+  const fetchImpl = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    const body = typeof init?.body === "string" ? init.body : "";
+    const auth = new Headers(init?.headers).get("authorization");
+    requests.push({ method, url, auth, body });
+    if (url === OIDC_REQUEST_URL) return Response.json({ value: JWT_VALUE });
+    if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42`) {
+      return Response.json({ number: 42, head: { sha: HEAD } });
+    }
+    if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/issues/42/comments?limit=50&page=1`) {
+      return Response.json([{ id: 3, body: stickyBody, user: { id: 7 }, updated_at: stickyUpdatedAt }]);
+    }
+    if (method === "PATCH" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/issues/comments/3`) {
+      stickyUpdatedAt = "2026-01-01T00:00:00Z";
+      try { stickyBody = (JSON.parse(body) as { body?: string }).body ?? stickyBody; } catch { /* keep previous */ }
+      return Response.json({ id: 3, updated_at: stickyUpdatedAt });
+    }
+    if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42/reviews?limit=100&page=1`) {
+      return Response.json(scenario.reviews);
+    }
+    if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42/reviews/5/comments`) {
+      return Response.json(scenario.review5Comments);
+    }
+    if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42/reviews/6/comments`) {
+      return Response.json(scenario.review6Comments ?? []);
+    }
+    if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/user`) {
+      return Response.json({}, { status: scenario.userStatus ?? 403 });
+    }
+    if (method === "DELETE" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42/reviews/5/comments/11`) {
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`unexpected ${method} ${url}`);
+  };
+  const api = new ForgejoPublishApi({
+    repo: "o/r", prNumber: "42", baseUrl: FORGEJO_BASE, authMethod: "authorized_integration",
+    authorizedIntegrationAudience: INTEGRATION_AUDIENCE, fetchImpl,
+  });
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  return { result, requests };
+}
+
+test("#1093: Forgejo authorized integration — a clean re-review retires the owned inline comment by user id without creating a native review", async () => withIntegrationOidcEnv(async () => {
+  const { result, requests } = await runIntegrationCleanupScenario({
+    reviews: [
+      { id: 5, body: MARKER, user: { id: 7 }, state: "COMMENTED", submitted_at: "2025-01-01T00:00:00Z" },
+      { id: 6, body: MARKER, user: { id: 99, login: "human" }, state: "CHANGES_REQUESTED", submitted_at: "2025-06-01T00:00:00Z" },
+    ],
+    review5Comments: [{ id: 11, pull_request_review_id: 5, user: { id: 7 } }],
+    review6Comments: [{ id: 12, pull_request_review_id: 6, user: { id: 99, login: "human" } }],
+  });
+  assert.equal(result.status, "published");
+  assert.equal(
+    requests.filter((r) => r.method === "POST" && r.url.endsWith("/pulls/42/reviews")).length,
+    0,
+    "a clean re-review must not create an empty native Inline findings review",
+  );
+  assert.deepEqual(
+    requests.filter((r) => r.method === "DELETE").map((r) => r.url),
+    [`${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42/reviews/5/comments/11`],
+    "the owned inline comment (id-only author) is retired via the audience's user id",
+  );
+  assert.ok(!requests.some((r) => r.url.includes("/reviews/6/")), "the human's review and its comments are never touched");
+  assert.ok(result.messages.some((line) => line.includes("Inline comments: eligible=1 retired=1")));
+  // Secret travel: the JWT and the runner OIDC token appear only in
+  // Authorization headers — never in any Forgejo URL or request body.
+  for (const request of requests) {
+    if (request.url !== FORGEJO_BASE && !request.url.startsWith(`${FORGEJO_BASE}/`)) continue;
+    assert.equal(request.auth, `Bearer ${JWT_VALUE}`);
+    assert.ok(!request.url.includes("token=") && !request.url.includes(JWT_VALUE) && !request.url.includes(OIDC_TOKEN_VALUE));
+    assert.ok(!request.body.includes(JWT_VALUE) && !request.body.includes(OIDC_TOKEN_VALUE));
+  }
+  const exchange = requests.find((r) => r.url === OIDC_REQUEST_URL);
+  assert.equal(exchange?.auth, `bearer ${OIDC_TOKEN_VALUE}`);
+}));
+
+test("#1093: Forgejo authorized integration — an inline comment whose author id does not match the audience is never deleted", async () => withIntegrationOidcEnv(async () => {
+  const { result, requests } = await runIntegrationCleanupScenario({
+    reviews: [{ id: 5, body: MARKER, user: { id: 8 }, state: "COMMENTED", submitted_at: "2025-01-01T00:00:00Z" }],
+    review5Comments: [{ id: 11, pull_request_review_id: 5, user: { id: 8 } }],
+  });
+  assert.equal(result.status, "published");
+  assert.equal(requests.filter((r) => r.method === "DELETE").length, 0);
+  // #1093: an empty eligible set is a bounded, reported outcome — distinct
+  // from the incomplete-enumeration refusal asserted in the next test and
+  // from a run that never reached cleanup.
+  assert.ok(
+    result.messages.some((line) => line.includes("No managed native reviews owned by the trusted identity")),
+    "no eligible prior managed reviews is reported, not silent",
+  );
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
+}));
+
+test("#1093: Forgejo authorized integration — an inline comment with no attributed author fails the enumeration closed", async () => withIntegrationOidcEnv(async () => {
+  const { result, requests } = await runIntegrationCleanupScenario({
+    reviews: [{ id: 5, body: MARKER, user: { id: 7 }, state: "COMMENTED", submitted_at: "2025-01-01T00:00:00Z" }],
+    review5Comments: [{ id: 11, pull_request_review_id: 5 }],
+  });
+  assert.equal(result.status, "published");
+  assert.equal(requests.filter((r) => r.method === "DELETE").length, 0);
+  assert.ok(result.messages.some((line) => line.includes("Inline-comment enumeration incomplete; no comments retired")));
+}));
+
+// ---------------------------------------------------------------------------
+// #1093: repo-scoped Forgejo PAT cleanup over the offline REST seam — the
+// token lacks the /user scope (403), so ownership is proven by the reaction
+// self-write probe on the PR issue; the POST response's user.id attests the
+// doer and the DELETE is best-effort.
+// ---------------------------------------------------------------------------
+
+const REPO_PAT = "repo-scoped-pat";
+const REACTIONS_URL = `${FORGEJO_BASE}/api/v1/repos/o/r/issues/42/reactions`;
+
+interface ForgejoTokenCleanupScenario {
+  reviews: unknown[];
+  review5Comments: unknown[];
+  review6Comments?: unknown[];
+  reactionPost?: { status: number; payload?: unknown };
+  reactionDeleteStatus?: number;
+  /** What the comments listing serves after the upsert; defaults to the exact body this run published. */
+  stickyBodyOverride?: string;
+}
+
+async function runTokenCleanupScenario(scenario: ForgejoTokenCleanupScenario): Promise<{
+  result: Awaited<ReturnType<typeof publishReview>>;
+  requests: Array<{ method: string; url: string; auth: string | null; body: string }>;
+}> {
+  const requests: Array<{ method: string; url: string; auth: string | null; body: string }> = [];
+  let stickyUpdatedAt = "2025-01-01T00:00:00Z";
+  let stickyBody = MARKER;
+  const fetchImpl = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    const body = typeof init?.body === "string" ? init.body : "";
+    const auth = new Headers(init?.headers).get("authorization");
+    requests.push({ method, url, auth, body });
+    if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42`) {
+      return Response.json({ number: 42, head: { sha: HEAD } });
+    }
+    if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/issues/42/comments?limit=50&page=1`) {
+      return Response.json([{ id: 3, body: stickyBody, user: { id: 7 }, updated_at: stickyUpdatedAt }]);
+    }
+    if (method === "PATCH" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/issues/comments/3`) {
+      stickyUpdatedAt = "2026-01-01T00:00:00Z";
+      try { stickyBody = (JSON.parse(body) as { body?: string }).body ?? stickyBody; } catch { /* keep previous */ }
+      if (scenario.stickyBodyOverride !== undefined) stickyBody = scenario.stickyBodyOverride;
+      return Response.json({ id: 3, updated_at: stickyUpdatedAt });
+    }
+    if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42/reviews?limit=100&page=1`) {
+      return Response.json(scenario.reviews);
+    }
+    if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42/reviews/5/comments`) {
+      return Response.json(scenario.review5Comments);
+    }
+    if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42/reviews/6/comments`) {
+      return Response.json(scenario.review6Comments ?? []);
+    }
+    if (method === "GET" && url === `${FORGEJO_BASE}/api/v1/user`) {
+      return Response.json({}, { status: 403 });
+    }
+    if (method === "POST" && url === REACTIONS_URL) {
+      return Response.json(scenario.reactionPost?.payload ?? { user: { id: 7 } }, { status: scenario.reactionPost?.status ?? 201 });
+    }
+    if (method === "DELETE" && url === REACTIONS_URL) {
+      // The cleanup must mirror the POST's body so the forge deletes the
+      // doer's `eyes` reaction instead of binding an empty reaction type.
+      assert.equal(body, '{"content":"eyes"}', "DELETE body mirrors the POST");
+      assert.equal(new Headers(init?.headers).get("content-type"), "application/json", "DELETE carries an explicit JSON content type");
+      return new Response(null, { status: scenario.reactionDeleteStatus ?? 204 });
+    }
+    if (method === "DELETE" && url === `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42/reviews/5/comments/11`) {
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`unexpected ${method} ${url}`);
+  };
+  const api = new ForgejoPublishApi({
+    repo: "o/r", prNumber: "42", baseUrl: FORGEJO_BASE, token: REPO_PAT, fetchImpl,
+  });
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  return { result, requests };
+}
+
+test("#1093: Forgejo repo-scoped PAT — cleanup retires only self-authored managed inline comments via the reaction-proven identity", async () => {
+  const { result, requests } = await runTokenCleanupScenario({
+    reviews: [
+      { id: 5, body: MARKER, user: { id: 7 }, state: "COMMENTED", submitted_at: "2025-01-01T00:00:00Z" },
+      { id: 6, body: MARKER, user: { id: 9, login: "foreign-bot" }, state: "COMMENTED", submitted_at: "2025-06-01T00:00:00Z" },
+    ],
+    review5Comments: [{ id: 11, pull_request_review_id: 5, user: { id: 7 } }],
+    review6Comments: [{ id: 12, pull_request_review_id: 6, user: { id: 9, login: "foreign-bot" } }],
+  });
+  assert.equal(result.status, "published");
+  // The cleanup flow resolves the trusted owner twice (in publishReview and
+  // again inside retireManagedInlineComments), so the probe runs per
+  // resolution; each POST is the bounded repo-scoped eyes reaction.
+  assert.deepEqual(
+    requests.filter((r) => r.method === "POST" && r.url === REACTIONS_URL).map((r) => r.body),
+    ['{"content":"eyes"}', '{"content":"eyes"}'],
+    "the probe posts repo-scoped eyes reactions",
+  );
+  assert.deepEqual(
+    requests.filter((r) => r.method === "DELETE").map((r) => r.url),
+    [REACTIONS_URL, REACTIONS_URL, `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42/reviews/5/comments/11`],
+    "each reaction is cleaned up once and only the self-authored inline comment is retired",
+  );
+  assert.ok(!requests.some((r) => r.url.includes("/reviews/6/")), "the foreign-bot review and its comments are never touched");
+  assert.ok(result.messages.some((line) => line.includes("Inline comments: eligible=1 retired=1")));
+  // Secret travel: the PAT appears only in Authorization headers.
+  for (const request of requests) {
+    assert.equal(request.auth, `token ${REPO_PAT}`);
+    assert.ok(!request.url.includes(REPO_PAT) && !request.body.includes(REPO_PAT));
+  }
+});
+
+test("#1093: Forgejo repo-scoped PAT — a refused reaction probe fails closed and nothing is retired", async () => {
+  const { result, requests } = await runTokenCleanupScenario({
+    reviews: [{ id: 5, body: MARKER, user: { id: 7 }, state: "COMMENTED", submitted_at: "2025-01-01T00:00:00Z" }],
+    review5Comments: [{ id: 11, pull_request_review_id: 5, user: { id: 7 } }],
+    reactionPost: { status: 403, payload: {} },
+  });
+  assert.equal(result.status, "published");
+  assert.ok(
+    result.messages.some((line) => line.includes("Could not verify authenticated owner") && line.includes("identity reason: user-http-403-and-reaction-http-403") && line.includes("no inline comments retired")),
+  );
+  assert.equal(
+    requests.filter((r) => r.method === "DELETE" && r.url !== REACTIONS_URL).length,
+    0,
+    "no inline comments are retired when the probe is refused",
+  );
+});
+
+test("#1093: Forgejo REST seam — a same-second sticky re-publication with a different body fails the still-current guard", async () => {
+  // The REST-seam variant of the MockPublishApi scenario: the sticky
+  // comment's stored body differs from the body this run published (an
+  // overlapping run re-published it in the same second), so the checkpoint's
+  // body anchor fails the still-current guard even though the refreshed
+  // timestamp equals the checkpoint.
+  const { result, requests } = await runTokenCleanupScenario({
+    reviews: [{ id: 5, body: MARKER, user: { id: 7 }, state: "COMMENTED", submitted_at: "2025-01-01T00:00:00Z" }],
+    review5Comments: [{ id: 11, pull_request_review_id: 5, user: { id: 7 } }],
+    stickyBodyOverride: `${MARKER}\nbody of the overlapping run`,
+  });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
+  assert.equal(
+    requests.filter((r) => r.method === "DELETE" && r.url !== REACTIONS_URL).length,
+    0,
+    "a same-second re-publication with a different body retires nothing",
+  );
+});
+
+test("#1093: a managed review submitted in the same second as the sticky checkpoint supersedes the run; cleanup is skipped", async () => {
+  // The tie case: a competing managed review carries a timestamp EQUAL to the
+  // sticky checkpoint, so it cannot be proven older than the checkpoint —
+  // fail closed.
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2026-01-01T00:00:00Z" }];
+  api.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  api.retireInlineComment = async () => { assert.fail("a same-second managed review must fail the cleanup closed"); };
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
+  assert.deepEqual(api.dismissed, []);
+});
+
+test("#1093: a managed review with no usable timestamp fails the still-current guard closed; cleanup is skipped", async () => {
+  // The absent-timestamp arm, distinct from the same-second tie above: a
+  // managed review of ANY author (here a foreign identity, proving the check
+  // is not ownership-scoped) with neither submitted_at nor updated_at cannot
+  // be proven older than the checkpoint, so it fails the gate closed.
+  const api = new MockPublishApi();
+  api.reviews = [
+    { id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" },
+    { id: 2000, body: MARKER, user: { login: "human" } },
+  ];
+  api.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  api.retireInlineComment = async () => { assert.fail("an unplaceable managed review must never delete"); };
+  api.dismissReview = async () => { assert.fail("an unplaceable managed review must never dismiss"); };
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
+  assert.deepEqual(api.dismissed, []);
+});
+
+test("#1093: a sticky checkpoint comment owned by a foreign identity fails the still-current guard; cleanup is skipped", async () => {
+  // Pins the sticky-ownership guard: the checkpoint comment must still be
+  // authored by the identity this run proved. A foreign author's comment at
+  // the checkpoint id attests nothing, so the gate fails closed.
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  api.comments = [{ id: 9, body: MARKER, user: { login: "human" }, updated_at: "2026-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  api.retireInlineComment = async () => { assert.fail("a foreign-authored sticky must never delete"); };
+  api.dismissReview = async () => { assert.fail("a foreign-authored sticky must never dismiss"); };
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
+  assert.deepEqual(api.dismissed, []);
+});
+
+test("#1093: a sticky checkpoint comment that is not the managed body fails the still-current guard; cleanup is skipped", async () => {
+  // Pins the managed-body guard on the refreshed sticky: an unannotated (or
+  // near-miss) body at the checkpoint id is not this action's publication, so
+  // it can never authorize retiring the previous owned inline comments.
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  api.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  // The stored comment loses the managed marker (near-miss prefix) after the
+  // upsert, as a human edit or a spoofed id would.
+  const sticky = api.upsertStickyComment.bind(api);
+  api.upsertStickyComment = async (marker, body) => {
+    const result = await sticky(marker, body);
+    api.comments = api.comments.map((c) => String(c.id) === "9" ? { ...c, body: `${MARKER}x not this action's body` } : c);
+    return result;
+  };
+  api.retireInlineComment = async () => { assert.fail("an unmanaged sticky must never delete"); };
+  api.dismissReview = async () => { assert.fail("an unmanaged sticky must never dismiss"); };
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
+  assert.deepEqual(api.dismissed, []);
+});
+
+test("#1093: a same-second sticky re-publication with a different body fails the still-current guard; cleanup is skipped", async () => {
+  // An overlapping run re-publishes the sticky in the SAME second (refreshed
+  // timestamp equals the checkpoint) but with a DIFFERENT body; the
+  // refreshedMs equality guard alone cannot detect this, so the checkpoint
+  // also pins the exact published body.
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  api.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  const sticky = api.upsertStickyComment.bind(api);
+  api.upsertStickyComment = async (marker, body) => {
+    const result = await sticky(marker, body);
+    api.comments = api.comments.map((c) => String(c.id) === "9" ? { ...c, body: `${MARKER}\nbody of the overlapping run` } : c);
+    return result;
+  };
+  api.retireInlineComment = async () => { assert.fail("a same-second re-publication with a different body must fail cleanup closed"); };
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
+  assert.deepEqual(api.dismissed, []);
+});
+
+test("#1093: a sticky with the identical published body but a strictly later timestamp fails the refreshed-sticky guard; cleanup is skipped", async () => {
+  // The body matches byte-for-byte, but the refreshed timestamp is strictly
+  // later than the checkpoint: the existing refreshedMs guard alone fails
+  // the still-current check closed.
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-06-01T00:00:00Z" }];
+  api.listManagedInlineComments = async () => ({ supported: true, complete: true, comments: [{ id: 11, reviewId: "7", user: { login: "bot" }, hasReplies: false }] });
+  api.retireInlineComment = async () => { assert.fail("a re-published sticky invalidates this run's checkpoint"); };
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
+  assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
+  assert.deepEqual(api.dismissed, []);
 });

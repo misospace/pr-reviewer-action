@@ -48,6 +48,8 @@ export interface MetadataOptions {
   coverage?: string | null;
   /** #810: the loop stop reason behind coverage: partial. */
   coverage_stop_reason?: string | null;
+  /** #954: the metadata marker's incomplete_reason key. */
+  incomplete_reason?: string | null;
   /** #812: the folded external-CI conclusion at the reviewed head
    * ("success" | "failure" | "pending" | "none"). The skip re-check compares
    * it against the live state; omitted (null/empty) when unknown so the
@@ -73,6 +75,15 @@ export interface MetadataOptions {
    * `adaptiveLoopBudgets` in src/tools/loop.ts). Omitted alongside
    * `tool_rounds`. */
   max_rounds?: number | null;
+  /** #922: the loop's conversation budget (approx tokens) and the largest
+   * conversation it actually reached. Omitted when no loop ran. */
+  context_budget?: number | null;
+  context_peak?: number | null;
+  /** #915: build-time action release stamp, appended last under the additive
+   * key discipline of #810/#847/#895/#922; unstamped builds preserve pre-#915 bytes. */
+  action_version?: string | null;
+  /** #978: gate-bypass eligibility; false/absent is omitted. */
+  degradedGateBypass?: boolean | null;
 }
 
 /** Build a metadata marker string for insertion into managed comments
@@ -104,6 +115,9 @@ export function buildMetadataMarker(options: MetadataOptions = {}): string {
   if (options.coverage_stop_reason !== null && options.coverage_stop_reason !== undefined && options.coverage_stop_reason !== "") {
     data.coverage_stop_reason = options.coverage_stop_reason;
   }
+  if (options.incomplete_reason !== null && options.incomplete_reason !== undefined && options.incomplete_reason !== "" && options.incomplete_reason !== "none") {
+    data.incomplete_reason = options.incomplete_reason;
+  }
   if (options.ci_state !== null && options.ci_state !== undefined && options.ci_state !== "") {
     data.ci_state = options.ci_state;
   }
@@ -124,6 +138,22 @@ export function buildMetadataMarker(options: MetadataOptions = {}): string {
   }
   if (options.max_rounds !== null && options.max_rounds !== undefined) {
     data.max_rounds = options.max_rounds;
+  }
+  if (options.context_budget !== null && options.context_budget !== undefined) {
+    data.context_budget = options.context_budget;
+  }
+  if (options.context_peak !== null && options.context_peak !== undefined) {
+    data.context_peak = options.context_peak;
+  }
+  // #915 additive key: appended last, same discipline as the #810/#847 keys
+  // above — an unstamped build serializes byte-identically to pre-#915.
+  if (options.action_version !== null && options.action_version !== undefined && options.action_version !== "") {
+    data.action_version = options.action_version;
+  }
+  // #978 additive key: older markers omit it; append it without moving any
+  // existing fields. Persist only true; false and absent preserve old bytes.
+  if (options.degradedGateBypass === true) {
+    data.degraded_gate_bypass = true;
   }
   return `<!-- ai-pr-reviewer:${jsonCompact(data)} -->`;
 }

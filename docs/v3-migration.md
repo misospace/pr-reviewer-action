@@ -103,8 +103,8 @@ for the most consequential one:
 - **`inline-findings`** defaults to `true` (v2: `false`) — findings get
   line-anchored inline comments by default.
 
-Set any of these explicitly to reproduce v2 behavior exactly; the parity
-harness pins each one as an approved, intentional divergence.
+Set any of these explicitly to reproduce v2 behavior exactly; the
+`config-default-resolution` snapshots pin each v3 default.
 
 ### 7. Before/after example
 
@@ -172,7 +172,7 @@ The defaults are the recommended setup, so a drop-in workflow sets only `ai-base
 | `publish-mode` | `comment` | `review_comment` |
 | `inline-findings` | `false` | `true` |
 
-Set any of them explicitly to keep the v2 behavior; the parity harness pins each change as an approved divergence.
+Set any of them explicitly to keep the v2 behavior; the `config-default-resolution` snapshots pin each v3 default.
 
 ## Retained inputs
 
@@ -198,6 +198,7 @@ Set any of them explicitly to keep the v2 behavior; the parity harness pins each
 | `ai_primary_retry_delay_sec` | `ai-primary-retry-delay-sec` |
 | `on_model_failure` | `on-model-failure` |
 | `fail_on_request_changes` | `fail-on-request-changes` |
+| `fail_on_degraded_review` | `fail-on-degraded-review` |
 | `verdict_policy` | `verdict-policy` |
 | `non_blocking_finding_categories` | `non-blocking-finding-categories` |
 | `inline_findings` | `inline-findings` |
@@ -213,7 +214,6 @@ Set any of them explicitly to keep the v2 behavior; the parity harness pins each
 | `ai_smart_base_url` | `ai-smart-base-url` |
 | `ai_smart_api_format` | `ai-smart-api-format` |
 | `ai_smart_api_key` | `ai-smart-api-key` |
-| `escalate_on_risk_flags` | `escalate-on-risk-flags` |
 | `ai_stream` | `ai-stream` |
 | `ai_fallback_stream` | `ai-fallback-stream` |
 | `allowed_source_hosts` | `allowed-source-hosts` |
@@ -321,13 +321,12 @@ low-budget pivot to blocker hypotheses, `tool-call-budget-exhausted` kept as
 a distinct stop reason); the contract description for `tool-max-requests`
 carries the same semantics.
 
-The behavior is pinned by the `tool-request-budget` parity boundary
+The behavior is pinned by the `tool-request-budget` snapshot boundary
 (#673): `tests/fixtures/parity/tool-budget/tool-budget-tiers.json` carries
-the expected (route, budget) per case, `tests/parity_runners/v2_tool_budget.py`
-runs the real v2 harness resolver, and `src/tools/budget.ts` is the v3 port
-(`PR_REVIEWER_V3_MODE=tool-budget`). Both sides fail closed on any
-expectation mismatch, so #678 cannot regress to a single undifferentiated
-request ceiling.
+the fixture cases, the recorded snapshot pins the (route, budget) each
+resolves to, and `src/tools/budget.ts` is the v3 implementation
+(`PR_REVIEWER_V3_MODE=tool-budget`). A mismatch fails the harness, so #678
+cannot regress to a single undifferentiated request ceiling.
 
 ### Size-scaled default and honest partial coverage (#810)
 
@@ -347,13 +346,12 @@ not exceed the tier default, the #702 provenance `source` stays
 `tier-default`; when it does, it reports `size-scaled` (a new
 `tool_budget_size` artifact field records the exact signal either way).
 
-The scaling is v3-only by design: the v2 resolver stays at the flat tier
-default until #681. The parity fixture deliberately pins only the range
-where both sides agree — its cases carry env only (no workspace artifacts),
-so both sides resolve the tier defaults, explicit values, and override
-precedence identically, and no approved divergence is needed. The scaling
-itself is pinned by v3-only tests (`tests-v3/budget.test.ts`, the harness
-tests in `tests-v3/tools-harness.test.ts`). Per #810's acceptance, the
+The scaling is v3-only by design: the v2 resolver stayed at the flat tier
+default through #681. The snapshot fixtures cover the shared range — their
+cases carry env only (no workspace artifacts), so tier defaults, explicit
+values, and override precedence resolve identically. The scaling itself is
+pinned by v3-only tests (`tests-v3/budget.test.ts`, the harness tests in
+`tests-v3/tools-harness.test.ts`). Per #810's acceptance, the
 default is to be measured on `evals/corpus-human-findings.json` (3 runs per
 arm) before shipping; that measurement is part of the #681 release qualification (the scaled default only reaches consumers at the v3 release).
 
@@ -432,6 +430,10 @@ Inputs with no v2 implementation.
 | `claim-falsification` | `false` |
 | `equivalent-paths` | `false` |
 | `equivalent-paths-max-bytes` | `6000` |
+| `fallback-model-context-tokens` | empty |
+| `rereview-command` | `/ai-review` |
+| `review-triage` | `false` |
+| `review-triage-routing-mode` | `off` |
 
 ## New outputs
 
@@ -440,6 +442,28 @@ Outputs with no v2 implementation.
 | v3 output | Description |
 | --- | --- |
 | `review-result` | The metadata marker's `review_result` state (`clean`/`findings`/`partial`/`issues`), additive alongside `verdict` (#873). `verdict: approve` with `review-result: partial` is not an approval; gate merges on both, never on `verdict` alone. |
+| `incomplete-reason` | Why coverage is incomplete: `execution` / `requirement_trace` / `both` / `none` (#954). Distinguishes a finished review with an unverified requirement from a review that stopped early; `review-result` stays `partial` for both. |
+| `review-triage-decision` | Opt-in human-review triage answer (#1003): `not_required` / `required` / `unknown`, or empty when `review-triage` is disabled. Fail-closed: a missing or malformed answer, or a `not_required` with no usable supporting reason, is `unknown` — never a confident negative. Advisory only — it never changes the verdict, the findings, or any tool/evidence/fork access. |
+| `review-triage-reason` | The evidence behind `review-triage-decision` (#1003), possibly empty, or empty when `review-triage` is disabled. Redacted before publication. |
+| `review-triage-routing` | Deterministic reviewer-routing status (#1005) when `review-triage-routing-mode` ran: `not_required` / `no_targets` / `invalid` / `advisory` / `request` / `fork_blocked`. Empty when triage or routing is off. The review-step output reports the intent; the published review additionally reports the publish-time outcome (`requested` / `request_failed`). |
+
+`review-triage` (#1003) is operator-only (repository config can never switch a
+review behaviour on) and review-only: it asks the reviewer one extra question
+and grants nothing, so it has no `*-enable-for-forks` sibling. Disabled, both
+outputs stay empty ("did not run"), the assembled prompt is byte-identical to
+pre-#1003, and the published review gains no section — a disabled run is
+distinguishable from one that ran and answered `unknown`.
+
+`review-triage-routing-mode` (#1005) is an operator-only layer on top of
+`review-triage`: `off` (default), `advisory`, or `request`. The model may select
+only the LOGICAL routing targets declared in the trusted base-ref file
+`.github/pr-reviewer-routing.yml` (`.pr-reviewer-routing.yml` as a root-dotfile
+fallback); deterministic action code maps those ids to concrete GitHub
+users/teams. The model can never name a GitHub identity, and an unknown or
+unconfigured target, or any uncertain state, causes no mutation. Requests are
+idempotent and additive only (existing reviewers are never removed), `advisory`
+dogfoods the plan without mutating, and fork pull requests never mutate. It has
+no `*-enable-for-forks` sibling and no `repo-configurable` key.
 
 `requirement-trace` depends on a bundled prompt fragment that asks the model to
 emit the trace fields. With `system-prompt-mode=replace` that fragment is
@@ -492,16 +516,21 @@ These v2 fields have no v3 ID or compatibility alias:
 | `escalate_on_fast_low_confidence` | Input | Remove it. Deprecated since #721; no longer affects escalation. |
 | `escalate_on_tool_or_evidence_blockers` | Input | Remove it. Deprecated since #721; no longer affects escalation (deterministic evidence/tool enforcement is unaffected). |
 | `escalate_on_tool_planning_failure` | Input | Remove it. Deprecated since #721; no longer affects escalation. |
+| `escalate_on_risk_flags` | Input | Remove it. Removed in v3 by #965: deterministic direct-smart pre-routing contradicted the primary-first policy. `review-routing-mode: auto` now always starts on the primary model; the smart model is reached only via the reviewer-requested post-primary path (#721). `route_signals` remain available for specialist role selection, required checks, and telemetry. |
 
 The `tool_planning_*` inputs are currently deprecated fallback inputs in v2
 and are removed in v3. They are intentionally not copied into the v3 contract.
 
-The five `escalate_on_*` inputs above are also currently deprecated in v2
+The `escalate_on_*` inputs above are also currently deprecated in v2
 (accepted for backward compatibility since #721 but already inert — they no
 longer trigger escalation, which is reviewer-requested only via the
 structured `smart_review_requested` verdict field). #777's moderate input
 trim drops this dead weight from the v3 contract too; they are not copied
-forward under any name.
+forward under any name. #965 completes that arc: `escalate_on_risk_flags`
+— the one `escalate_on_*` input v3 still carried as a live pre-routing
+control — is removed as well, and `review-routing-mode: auto` means
+primary-first (the initial review always runs on the primary model; smart
+is reachable only through the reviewer-requested post-primary path).
 
 ## Repository config (#727, adopted for the Action by #777)
 
@@ -604,13 +633,10 @@ coverage-gap notice, and the model verdict passthrough (with
 `findings_severity_gated`'s existing blocker escalation). The `verdict`
 output remains `approve` | `request_changes` under every policy.
 
-The default change is pinned as the `verdictPolicy` divergence on the
-`config-default-resolution` fixtures in
-[`tests/fixtures/parity/approved-divergences.json`](../tests/fixtures/parity/approved-divergences.json).
-The publish-side rendering and the marker states are v3-only behavior
-covered by `tests-v3/strict-verdict.test.ts`; no parity fixture exercises
-them, because the enforcement-pipeline boundary pins the v2 policies, whose
-behavior is unchanged.
+The default change is pinned by `tests-v3/config.test.ts`.
+The publish-side rendering and marker states are v3-only behavior covered by
+`tests-v3/strict-verdict.test.ts`; the enforcement-pipeline boundary exercises
+the unchanged policies.
 
 ## Contributor notes: migration history
 
@@ -619,81 +645,28 @@ TypeScript port itself (parity boundaries, port-by-port notes, the removed
 shadow-comparison tooling, and the teardown sequencing). It is not needed to
 upgrade a workflow — see [Upgrading from v2](#upgrading-from-v2) above for
 that. It is kept for anyone auditing how a specific behavior was proven
-equivalent, or bisecting a regression back to its port.
+equivalent, or bisecting a regression back to its port. The v2 scripts,
+`tests/parity_runners/` files, and the snapshot harness it names were removed
+in the #706 teardown and #974; the v3 sources and the focused `tests-v3/`
+suites are what remain.
 
-## Parity harness (#673)
+## Boundary fixtures (historical; harness retired in #974)
 
-**Frozen at the #681 release gate.** Each boundary's v2 side was recorded
-into a golden (`tests/fixtures/parity/goldens/<boundary>/<fixture>.json`,
-temp and repository paths replaced by placeholders) and the v2 runtime was
-then removed (#706 wave 2). The harness now runs only the v3 side and compares
-it with the golden under the same rules below; the golden run reproduced the
-live v2-versus-v3 run for all 530 fixtures before the removal. The v2 files
-this section names are the recorded sources of those goldens and no longer
-exist.
+The v2→v3 boundary fixtures under `tests/fixtures/parity/` and the snapshot
+harness that compared them (`tests/parity_harness.py`) were retired in #974.
+The per-boundary notes below record what each boundary proved while the port
+was in flight; they are history, not a live contract. Current behavior is
+pinned by the focused `tests-v3/` suites.
 
-The `tests/parity_harness.py` harness blocks the TypeScript cutover on
-observable behavior drift, not on source comparison or unit-test counts. It
-runs equivalent v2/v3 runtime stages against the same fixtures, normalizes
-only expected-to-vary nondeterministic values (temp paths, timestamps,
-durations, PIDs, request ids — never verdicts, risk flags, roles, corpus
-content, security-gate decisions, routing, or error categories), and emits a
-structured report naming the first divergent boundary.
-
-- **Boundaries** are declared in `BOUNDARIES` in the harness; each knows how
-  to run one fixture through both implementations. Currently:
-  `config-default-resolution` (v2: action.yml env-block expression resolution
-  plus `scripts/sections/config.sh` vs v3: the typed loader in
-  `dist/index.js`), `dataflow-662-corpus-truncation` (the #662
-  broken-arrow counterexample: the vulnerable variant must fail parity, the
-  fixed variant must pass), `model-request-construction` (#677: the v2
-  `build_model_request` jq assembly versus the v3 typed builder in
-  `src/model/request.ts`) and `verdict-parsing` (#677: the v2 tolerant
-  response parser in `pr_reviewer/response_parser.py` versus the v3 port in
-  `src/model/verdict.ts`).
-- **Fixtures** live under `tests/fixtures/parity/<boundary>/*.json`. Later
-  migration tickets add fixtures for their boundary as JSON only — never
-  harness logic.
-- **Approved divergences** (`tests/fixtures/parity/approved-divergences.json`)
-  pin intentional v3 contract changes to the EXACT divergence: boundary +
-  fixture(s) + key + the expected old AND new values (for outcome-level
-  drift, the `ok` / `error:<category>` tokens). An approval never extends
-  beyond the pinned fixture and value pair — if v3 starts returning a
-  different wrong value for an approved key, the run fails. Drift on any
-  fixture/key/value not pinned here fails the run.
-- **Counterexample fixtures** (fixtures whose `expected.outcome` is `drift`)
-  must declare their divergence signature: every key that must drift with
-  its exact old/new values, and nothing beyond them. A missing declared
-  drift, a changed drift value, or any undeclared extra drift fails the run.
-- **Numeric equality** applies only to keys the v3 contract declares numeric
-  (`INTEGER_INPUTS`/`FLOAT_INPUTS`); every other key — including strings
-  that look numeric — compares as an exact canonical string.
-- **Error categories** fail closed: two errors that both map to no known
-  category never compare equal by category — their scrubbed texts must
-  match byte-for-byte or the fixture drifts, forcing the boundary's category
-  table to name the category.
-- **Migration gates** run before the boundaries: the #698 production dataflow
-  qualification (`tests/test_issue_662_dataflow.py`) and the #661/#666
-  semantic qualification (`scripts/run_semantic_eval_ci.py` over
-  `evals/corpus-historical-dogfood.json`). A gate failure fails the harness;
-  the scorer is referenced, not duplicated.
-
-```bash
-python3 tests/parity_harness.py                      # gates + all boundaries
-python3 tests/parity_harness.py --report parity-report.json
-python3 tests/parity_harness.py --boundary config-default-resolution --skip-gates
-```
-
-Config-boundary notes: the v2 side replays the action.yml env-block
+The `config-default-resolution` fixtures resolve v2 `action.yml` env-block
 expressions (plain `inputs.x`, `a || b` chains, the `x != '' && x || y`
 legacy-fallback idiom; `github.*` context terms come from the fixture's
 `ambient` map; unmodelable expressions are skipped and reported as
 `unresolved_bindings`). Inputs the v2 pipeline never transports through the
-resolved environment (it reads them from the raw input in later steps) are
-mechanically scoped out of the config boundary and reported as
-`excluded_keys`. The v2 `github_token` binding is compared through `GH_TOKEN`
-(config.sh's `GH_TOKEN:-${GITHUB_TOKEN:-}` fallback). Numeric-class values
-compare by numeric equality; secrets compare by redacted presence only.
+resolved environment are mechanically scoped out of this boundary and
+reported as `excluded_keys`. The v2 `github_token` binding is read through
+`GH_TOKEN` (config.sh's `GH_TOKEN:-${GITHUB_TOKEN:-}` fallback). Secret
+values are redacted in the snapshots.
 
 ### The `precheck-decision` boundary (#674)
 
@@ -708,14 +681,12 @@ failed metadata lookups, fork-disabled private lookups, forced rereview,
 unrelated-label no-ops, superseded heads, and GitHub vs Forgejo — each
 compared over the exact `$GITHUB_OUTPUT` key/value surface.
 
-The selection-signature hash is compared byte-for-byte whenever the
-signature is determinate; when a fixture declares
-`"selection": "unavailable"`, the conservative per-run-unique sentinel makes
-the config-hash half nondeterministic by design (it must never match a
-stored marker), so both sides' hash half is normalized to a shared
-placeholder while the diff half and the forced-review decision still compare
-as-is. Error cases compare through the boundary's category table
-(missing input, unsupported platform, Forgejo permission refusal modes).
+The selection-signature hash is determinate when metadata is available.
+When a fixture declares `"selection": "unavailable"`, the conservative
+per-run-unique sentinel makes the config-hash half nondeterministic by
+design: it must never match a stored marker, while the diff half and
+forced-review decision remain meaningful. Fixtures also cover missing input,
+unsupported platforms, and Forgejo permission refusal modes.
 
 ### The #812 consistent re-reviews change
 
@@ -834,11 +805,11 @@ routing, the #721 reviewer-requested escalation contract, the fallback
 availability path, the conversation state machine, the read-only executor
 catalogue with its guards, the MCP client, the loop driver, the planning
 context, the in-conversation verdict turn, and the #702 telemetry object.
-The Python side of these modules is now a temporary oracle for the parity
-boundaries above; production wiring still invokes the v2 scripts until the
-#681 orchestrator cutover. Remaining Python-only runtime after #678 (the
-#680/#706 backlog): the v2 publish/precheck shell pipeline, and the platform
-`gh` subprocess seams behind `scripts/platform_api.sh`.
+During the migration, the Python side of these modules served as the
+comparison implementation for the boundaries above; the #681 orchestrator
+cutover replaced the v2 production wiring. Remaining Python-only runtime
+after #678 (the #680/#706 backlog) was the v2 publish/precheck shell pipeline
+and the platform `gh` subprocess seams behind `scripts/platform_api.sh`.
 
 ### The deep-review specialist runtime (#776)
 
@@ -851,11 +822,10 @@ runner half of `scripts/run_specialists.py` (per-role payload construction,
 the three #635 execution shapes, the completion-overrun retry, request
 metering). The port is transport/filesystem-agnostic by design — the caller
 supplies a `requestFn` and receives artifacts to persist, matching the
-#678 routing/tool-loop modules — since no v3 orchestrator yet exists to wire
-a real workspace writer or the `gates.ts` `specialists` branch's subprocess
-before #681. `src/tools/harness.ts`'s `renderSpecialistLeads` seam is wired
-to the real `renderSpecialistLeadsSection` port. New parity boundaries:
-`specialist-corpus`, `specialist-payload`, `specialist-normalize`
+#678 routing/tool-loop modules — so the orchestrator can wire its workspace
+writer and the `gates.ts` `specialists` branch. `src/tools/harness.ts`'s `renderSpecialistLeads` seam is wired
+to the real `renderSpecialistLeadsSection` port. The migration's comparison
+boundaries were `specialist-corpus`, `specialist-payload`, `specialist-normalize`
 (`tests/fixtures/parity/specialist-*/`, `tests/parity_runners/v2_specialist_*.py`).
 
 ### The `enforcement-pipeline` boundary (#680)
@@ -878,10 +848,10 @@ settlement (downgrades, re-emitted `thread_id` findings, blocker
 escalation), #774 human change-request settlement, malformed/missing
 structured coverage, and the enforced banner normalization.
 
-One approved divergence pins the #680 contract change: when the model emits
-no structured required-check dispositions at all, v2 fell back to the legacy
-shallow keyword match; v3 is structured-authoritative and treats key absence
-as conservatively unresolved (`key-absence-legacy-bridge`).
+The #680 contract change is that when the model emits no structured
+required-check dispositions, v2 fell back to the legacy shallow keyword
+match; v3 is structured-authoritative and treats key absence as
+conservatively unresolved (`key-absence-legacy-bridge`).
 
 ### The `requirement-coverage` boundary (#680)
 
@@ -911,9 +881,8 @@ Three boundaries pin the publish path:
 The publish *orchestration* (mode dispatch, head re-check, approval
 guardrails, cleanup sequencing, output writing) is covered by `tests-v3/publish.test.ts`
 and `tests-v3/outputs.test.ts` over a mock platform seam rather than a
-bash-vs-TS boundary: the v2 side is a shell dispatcher whose observable
-behavior depends on `gh`/`forgejo` subprocess stubs, and the #681 cutover
-will qualify it end-to-end through the runner.
+bash-vs-TS boundary: the v2 side was a shell dispatcher whose observable
+behavior depended on `gh`/`forgejo` subprocess stubs.
 
 ### The `platform-normalization` boundary (#706)
 
@@ -927,11 +896,10 @@ the v3 adapters through an injected fetch (`node dist/index.js
 platform-normalization-fixture`). Both sides emit each read's `{ok, data}`
 as order-preserving ASCII JSON, the byte-significant artifacts (the
 `pr-files.json` line, the external-checks line, the raw diff), and the
-request log. Each fixture also records its expected output, pinned against
-the v2 side by `tests/test_platform_normalization_goldens.py`.
+request log. Each fixture also recorded its expected output, pinned against
+the v2 side by the since-removed `tests/test_platform_normalization_goldens.py`.
 
-v2 quirks kept for parity (candidates for approved divergences once the
-orchestrator owns these reads): a failed Forgejo issue fetch is a successful
+v2 quirks retained by v3: a failed Forgejo issue fetch is a successful
 read of `null`; a failed Forgejo file, comment or review listing is an empty
 list; a failed or unparseable commit-status read folds to `[]` ("no external
 CI") rather than to the empty transient signal; and the Forgejo
@@ -997,7 +965,7 @@ byte-identical to them. The specialist loader (`src/specialists/prompts.ts`)
 still reads `scripts/prompt_fragments/` relative to the cwd and should move
 to the embedded map when the orchestrator wires it.
 
-v2 semantics kept for parity: the three `pr_kind` placeholders are stripped
+v2 semantics retained in v3: the three `pr_kind` placeholders are stripped
 (first occurrence) from a replace-mode operator prompt too; the kind is read
 with jq (a leading BOM is skipped and a multi-document file still gates)
 while the user message parses with Python `json.load` (either shape falls
@@ -1020,16 +988,16 @@ urllib's `http(s)_open`, stub `gh`/`curl` binaries, and the budget clock
 resolver, the `Exchange` transport, the enrich clients' fetch, and the
 `BudgetTracker` clock. Both emit the rendered `linked-sources.md`, the
 sorted request log, and the budget-warning count;
-`tests/test_linked_sources_goldens.py` pins each fixture's recorded v2
-output.
+The since-removed `tests/test_linked_sources_goldens.py` pinned each fixture's
+recorded v2 output.
 
 The v3 fetch (`src/platform/safe-fetch.ts`) resolves each hop once, requires
 every address to be public (`src/platform/ip-policy.ts`, CPython 3.14's
 `ipaddress` classification), and pins the socket to those addresses through
-its `lookup` hook, closing the rebinding window v2's urllib left open. TLS
-SNI and `Host` keep the hostname.
+its `lookup` hook, closing the rebinding window in the former urllib path.
+TLS SNI and `Host` keep the hostname.
 
-Approved divergences (all fail closed):
+Deliberate v3 differences (all fail closed):
 
 - `100.64.0.0/10` (CGNAT) and `fec0::/10` (site-local) are blocked; CPython
   classifies neither as private or reserved.
@@ -1062,8 +1030,8 @@ v2 behavior kept: github.com is never fetched raw (its release/compare
 metadata comes from the API), and gitlab.com/bitbucket.org are skipped as
 known non-Forgejo hosts whose pages are client-rendered. JSON goes
 through `JSON.parse`, so integer-valued floats, integers beyond 2^53 and
-integer-like object keys do not round-trip byte for byte (approved
-divergence, fixture `json-number-precision`).
+integer-like object keys do not round-trip byte for byte (fixture
+`json-number-precision`).
 
 ### The `context-producers` boundary (#706)
 
@@ -1084,7 +1052,7 @@ the ledger/anchor/related-context builders). Every artifact is compared
 byte for byte (`file:<name>`, strict UTF-8 or `!b64:`).
 
 Checkout containment (#805) is a production fix in both runtimes, so the
-two sides still agree and no divergence is approved. A repository path
+two sides agreed. A repository path
 (changed manifests, standards-file candidates and a relative or in-checkout
 `standards_file`) is read only when it names a regular file reachable
 without following any symlink and without `..`
@@ -1127,7 +1095,7 @@ clock. Fixtures serve per-route response sequences and compare exit code,
 `$GITHUB_OUTPUT`, the `ci-checks-context.md` bytes, leftover temp files, the
 request log, elapsed virtual time and the log lines.
 
-The first approved divergence is the commit-status quirk above: the v3 CI gate
+A deliberate v3 difference is the commit-status quirk above: the v3 CI gate
 reads with `transientAsUnknown`, so no response, HTTP 429/5xx, or a non-JSON
 body on either read is "unknown, retry" instead of `[]`. v2 could finalize
 `none` (or a partial list) while CI was still running. It is pinned for the
@@ -1176,7 +1144,7 @@ the explicit allowlist, not v2's scrubbed `os.environ`; output capture is
 bounded at `4 * max_output_bytes + 64 KiB` (v2 read unbounded), and an
 overflowing capture is cut back to its last whitespace before masking so a
 split credential cannot survive, then always marked truncated; timeouts kill
-the process tree. v2 quirks kept for parity: an argv provider whose program
+the process tree. v2 quirks retained in v3: an argv provider whose program
 cannot be spawned, an `int(inf)` override, or a JSON integer over 4300 digits
 aborts the whole phase into the fallback artifacts, as does a lone surrogate
 that cannot be written.
@@ -1192,27 +1160,27 @@ Every hop, the first and each redirect, goes through #808's `safeFetchLike`
 validated addresses), redirect hops must be https, and responses are capped
 at 32 MiB. Public registry/CDN redirects still work (fixture
 `transport-redirect-cdn`). v2's curl followed redirects to any address;
-refusing the internal hops is an approved divergence (fixture
+refusing the internal hops is a deliberate v3 security difference (fixture
 `transport-redirect-ssrf`: link-local metadata and an RFC1918 hostname).
 
 ## What #680 removed from the Python runtime surface
 
 `src/enforcement/`, `src/publish/`, and `src/metadata/` now own the
 deterministic enforcement, managed metadata, publication, and output
-boundaries in TypeScript; the Python/bash side of these modules remains
-only as the temporary parity oracle above until the #681 orchestrator
-cutover. Two deliberate contract changes ship with the port:
+boundaries in TypeScript; the Python/bash side of these modules served as
+the comparison implementation until the #681 orchestrator cutover. Two
+deliberate contract changes shipped with the port:
 
-- the legacy keyword-completeness bridge is removed (structured
-  dispositions are authoritative; pinned as the approved divergence above);
+- the legacy keyword-completeness bridge was removed; structured
+  dispositions are authoritative;
 - the managed metadata marker serializes with insertion-order keys
   (`json.dumps(..., separators=(',', ':'))` / jq object order), which the
   earlier precheck-side port had canonicalized with sorted keys.
 
-Remaining Python-only runtime after #680: the deep-review specialist
+Python-only runtime remaining after #680 was the deep-review specialist
 runner/corpus (`scripts/run_specialists.py`, `pr_reviewer/specialist_corpus.py`
-— the #706 backlog) and the v2 shell orchestration itself (`scripts/run_review.sh`
-and the composite action steps), which the #681 cutover replaces.
+— the #706 backlog) and the v2 shell orchestration (`scripts/run_review.sh`
+and the composite action steps), replaced by the #681 cutover.
 
 ## The v3 run entry (#809)
 
@@ -1222,27 +1190,25 @@ config, context, enrichment, classification/routing, gates, corpus, native
 tool harness, review call with fallback and reviewer-requested escalation,
 deterministic enforcement, requirement-coverage fold, and the kebab-case step
 outputs — with typed in-memory state between stages and a write-through
-workspace (`src/run/workspace.ts`) persisting the v2-named artifacts
+workspace (`src/run/workspace.ts`) persisting the established artifact names
 (`ai-output.json`, `review-corpus.truncated.md`, `classification.json`, ...)
-under `PR_REVIEWER_RUN_DIR` for outputs, evals, diagnostics and the shadow
-comparison. No Python and no shell run anywhere in the path; the CI gate
-still launches as its least-privilege subprocess (`gate-ci`), while the
-specialist phase runs in-process against the real v3 transport.
+under `PR_REVIEWER_RUN_DIR` for outputs, evals and diagnostics. No Python or
+shell runs anywhere in the path; the CI gate launches as its least-privilege
+subprocess (`gate-ci`), while the specialist phase runs in-process against
+the v3 transport.
 
-The entry never publishes and (until the #706 cutover) is not the shipped
-production path — production still runs the v2 composite. It reads the
-kebab-case contract inputs as `INPUT_*` environment variables (the shape the
-v3 action metadata will export) plus the ambient runner context
+The entry never publishes; the #706 cutover made it the shipped production
+path. It reads the kebab-case contract inputs as `INPUT_*` environment
+variables plus the ambient runner context
 (`PR_HEAD_SHA`, `IS_FORK_PR`, `PLATFORM`, ...).
 
 ### Shadow mode (#809) — historical, removed
 
 During the migration the dogfood workflow ran the v3 entry beside v2 on
-every same-repo PR and diffed their outputs (`scripts/v3_shadow_run.mjs`),
-to catch behavior drift before the cutover. The comparison is no longer part
-of the repository: v2 has been fully removed, so there is nothing left to
-shadow against. The script and its test were deleted in the #706 wave-1
-teardown; see [`docs/v3-teardown-audit.md`](v3-teardown-audit.md) for the
+every same-repo PR and diffed their outputs (`scripts/v3_shadow_run.mjs`)
+to catch behavior drift before cutover. The comparison is no longer part of
+the repository; the script and its test were deleted in the #706 wave-1
+teardown. See [`docs/v3-teardown-audit.md`](v3-teardown-audit.md) for the
 disposition record.
 
 ## The verification ledger (#796)
@@ -1285,6 +1251,7 @@ Teardown then proceeded in waves per
 `scripts/eval_harness.py` and the Forgejo E2E smoke at the v3 runtime; wave 1
 deleted the v2 production runtime and its tests; wave 2 froze the parity
 boundaries on recorded goldens and deleted the remaining v2 code. All three
-waves are complete — the "Parity harness" and per-boundary sections above
-describe what was proven equivalent before each deletion, not a live v2
-runtime.
+waves are complete — the per-boundary sections above describe what was proven
+equivalent before each deletion, not a live v2 runtime. The snapshot harness
+and its goldens were themselves retired later (#974); current behavior is
+pinned by the focused `tests-v3/` suites.

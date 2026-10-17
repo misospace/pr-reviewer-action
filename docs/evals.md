@@ -367,6 +367,108 @@ lean. The weekly scheduled sweep remains standard-only (`deep`
 absent → `false`), and none of this changes production defaults:
 `deep-review` is still off by default for action users.
 
+## Heterogeneous model/profile lanes (#967 instrument)
+
+This instrument makes the #967 reviewer-panel controls reproducible. Before
+it, the harness could compare deep review but could not drive the trusted
+specialist-profile overrides added in #966. A lane plan is operator-supplied
+configuration; it is never loaded from PR or repository content.
+
+Version 1 lane plans have this shape:
+
+```json
+{
+  "version": 1,
+  "profiles": {
+    "primary": {
+      "model": "primary-model",
+      "base_url": "https://models.example/v1",
+      "api_format": "openai",
+      "api_key_env": "PRIMARY_API_KEY"
+    },
+    "specialists": {
+      "model": "specialist-model",
+      "base_url": "https://specialists.example/v1",
+      "api_format": "openai",
+      "api_key_env": "SPECIALIST_API_KEY"
+    }
+  },
+  "lanes": [
+    { "id": "primary-only", "kind": "primary_only", "primary_profile": "primary" },
+    { "id": "same-model", "kind": "same_model_specialists", "primary_profile": "primary" },
+    {
+      "id": "heterogeneous",
+      "kind": "heterogeneous_specialists",
+      "primary_profile": "primary",
+      "specialist_profile": "specialists",
+      "role_models": {
+        "correctness": "correctness-model",
+        "security": "security-model",
+        "tests": "tests-model"
+      }
+    }
+  ]
+}
+```
+
+`profiles` map names to a model and optional endpoint format, base URL, and
+credential environment-variable name (`api_format` defaults to `openai`;
+`api_key_env` defaults to `AI_API_KEY`). Each lane selects its primary
+profile. `specialist_profile` is required only for
+`heterogeneous_specialists`; `role_models` is optional and is supported only
+for that kind. Lane IDs must be unique and the version and plan are validated
+fail-closed.
+
+For example, save that plan as `eval-lanes.json`, then validate and inspect a
+redacted lane without credentials or endpoint access:
+
+```bash
+python scripts/eval_harness.py \
+    --lanes-file eval-lanes.json \
+    --lane heterogeneous \
+    --dry-run
+```
+
+Run a lane against the specialist fixture corpus with its own named report:
+
+```bash
+python scripts/eval_harness.py \
+    --lanes-file eval-lanes.json \
+    --lane heterogeneous \
+    --corpus evals/corpus-specialists.json \
+    --modes native_loop \
+    --runs-per-mode 10 \
+    --output eval-report/eval-report-heterogeneous.json
+```
+
+Run each lane separately and give each run its own `--output` report; the
+reports are the diffable artifacts, as elsewhere in this eval workflow.
+`primary_only` disables deep review and clears specialist overrides;
+`same_model_specialists` enables deep review without overrides, so specialists
+inherit the primary model; `heterogeneous_specialists` enables deep review
+and projects the shared specialist profile and optional role models into the
+`AI_SPECIALIST_*` environment contract. Credentials are read only from the
+environment variable named by `api_key_env`: keys are never stored in the
+plan or report. Dry-run validates and prints a redacted plan without needing
+credentials or contacting an endpoint. The report records resolved lane
+identity and redacted profile provenance under `metadata.lane`; existing
+`mode_summary` keys do not change. For lane runs, the harness clears ambient
+`AI_SPECIALIST_*` variables so shell exports cannot leak between lanes, and
+each run receives its own private artifact directory.
+
+This is partial progress against #967, not the panel experiment. It provides
+reproducible controls for primary-only, same-model specialists, and
+heterogeneous specialist profiles, including #966's overrides. Heterogeneous
+specialist lanes require deep review and therefore run on fixture corpora
+such as `evals/corpus-specialists.json`, not the real-PR corpus path, which
+does not wire `--deep-review`. Independent-generalist panel arms (one and two
+models), candidate union/verification, adjudicated unique-true-finding,
+false-positive, token, and latency results, and the live comparison remain
+pending. No live model calls or results are included; this does not answer
+#967's ship/do-not-ship question, and the panel remains unshipped. A follow-up
+feature issue is still needed if a panel is eventually approved for shipping.
+Refs #967.
+
 ## Real-PR corpus (#779)
 
 Every other corpus on this page is compact reconstructed fixtures — even the

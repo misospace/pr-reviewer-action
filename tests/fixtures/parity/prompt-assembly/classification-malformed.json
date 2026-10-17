@@ -1,7 +1,0 @@
-{
-  "fixture": "classification-malformed",
-  "description": "Unparseable classification.json: jq yields no kind; json.load fails so the user message falls back to the base.",
-  "files": {
-    "classification.json": "{\"pr_kind\": \"k8s_manifest\""
-  }
-}
