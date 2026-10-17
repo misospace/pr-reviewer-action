@@ -12,7 +12,7 @@ import {
   resolveCleanupFlag,
   sanitizeForPublication,
 } from "../src/publish/publish.js";
-import { cleanupManagedReviews, resolveSupersededThreads } from "../src/publish/cleanup.js";
+import { cleanupManagedReviews, retireManagedInlineComments, resolveSupersededThreads } from "../src/publish/cleanup.js";
 import { buildComments, prescriptionKey, prescriptionKeyDigest, FEEDBACK_AFFORDANCE } from "../src/publish/inline-findings.js";
 import { enforcementView, normalizeThread } from "../src/context/review-threads.js";
 import { applyReviewThreadEnforcement } from "../src/enforcement/threads.js";
@@ -1080,18 +1080,19 @@ test("#1093: Forgejo repo-scoped PAT — cleanup retires only self-authored mana
     review6Comments: [{ id: 12, pull_request_review_id: 6, user: { id: 9, login: "foreign-bot" } }],
   });
   assert.equal(result.status, "published");
-  // The cleanup flow resolves the trusted owner twice (in publishReview and
-  // again inside retireManagedInlineComments), so the probe runs per
-  // resolution; each POST is the bounded repo-scoped eyes reaction.
+  // #1099: the trusted owner is resolved once per publish run (in
+  // publishReview) and threaded into retireManagedInlineComments, so the
+  // Forgejo reaction self-write probe fires exactly once; the POST is the
+  // bounded repo-scoped eyes reaction.
   assert.deepEqual(
     requests.filter((r) => r.method === "POST" && r.url === REACTIONS_URL).map((r) => r.body),
-    ['{"content":"eyes"}', '{"content":"eyes"}'],
-    "the probe posts repo-scoped eyes reactions",
+    ['{"content":"eyes"}'],
+    "the probe posts exactly one repo-scoped eyes reaction per run",
   );
   assert.deepEqual(
     requests.filter((r) => r.method === "DELETE").map((r) => r.url),
-    [REACTIONS_URL, REACTIONS_URL, `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42/reviews/5/comments/11`],
-    "each reaction is cleaned up once and only the self-authored inline comment is retired",
+    [REACTIONS_URL, `${FORGEJO_BASE}/api/v1/repos/o/r/pulls/42/reviews/5/comments/11`],
+    "the reaction is cleaned up once and only the self-authored inline comment is retired",
   );
   assert.ok(!requests.some((r) => r.url.includes("/reviews/6/")), "the foreign-bot review and its comments are never touched");
   assert.ok(result.messages.some((line) => line.includes("Inline comments: eligible=1 retired=1")));
@@ -1116,6 +1117,25 @@ test("#1093: Forgejo repo-scoped PAT — a refused reaction probe fails closed a
     requests.filter((r) => r.method === "DELETE" && r.url !== REACTIONS_URL).length,
     0,
     "no inline comments are retired when the probe is refused",
+  );
+});
+
+test("#1099: a resolved null identity threaded into retireManagedInlineComments retires nothing", async () => {
+  // The identity proof is threaded in by the caller (#1099); when the run
+  // resolved no trusted owner, retirement must fail closed before any
+  // enumeration or deletion — and still emit the bounded identity-reason WARN.
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 5, body: MARKER, user: { login: "bot" }, state: "COMMENTED", submitted_at: "2025-01-01T00:00:00Z" }];
+  api.listManagedInlineComments = async () => {
+    assert.fail("a null identity must never reach comment enumeration");
+  };
+  api.retireInlineComment = async () => {
+    assert.fail("a null identity must never delete a comment");
+  };
+  const lines: string[] = [];
+  await retireManagedInlineComments(api, api.reviews, MARKER, (line) => lines.push(line), { owner: null, reason: "unavailable" });
+  assert.ok(
+    lines.some((line) => line.includes("Could not verify authenticated owner") && line.includes("identity reason: unavailable") && line.includes("no inline comments retired")),
   );
 });
 

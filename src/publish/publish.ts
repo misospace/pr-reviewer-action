@@ -1265,7 +1265,9 @@ export async function publishReview(
                 });
               };
               if (await stillCurrent()) {
-                await retireManagedInlineComments(api, olderManaged, input.commentMarker, cleanupLog, stillCurrent);
+                // #1099: the identity resolved above is threaded into retirement
+                // (one resolution, one Forgejo reaction probe per publish run).
+                await retireManagedInlineComments(api, olderManaged, input.commentMarker, cleanupLog, { owner, reason }, stillCurrent);
                 if (await stillCurrent()) {
                   const managedIds = await cleanupManagedReviews(api, input.prNumber, input.commentMarker, cleanupLog, [], olderManaged);
                   if (api.platform === "github") await resolveSupersededThreads(api, managedIds, cleanupLog);
