@@ -52,12 +52,22 @@ export function prescriptionKeyDigest(key: string): string {
   return createHash("sha256").update(key, "utf8").digest("hex");
 }
 
-/** #762: carry-marker grammar. One line, exact prefix, comma-separated
- * lowercase-64-hex digests, terminated by the HTML comment close — anything
- * else parses as nothing. A forged copy can only ever name digests, whose one
- * and only effect is withholding a replacement block, so the marker cannot
- * inject content, promote itself, or change a verdict. */
-const CARRYOVER_LINE_RE = /^<!-- pr-reviewer:rejected-prescriptions:v1:([0-9a-f,]+) -->$/;
+/** #762: carry-marker grammar. One line: the exact prefix, then a
+ * comma-separated run of tokens that are EACH exactly 64 lowercase hex chars,
+ * then the exact HTML comment close. Nothing else is the grammar — a
+ * 63/65-char token, an uppercase one, a list with one bad token, or any
+ * trailing text is ordinary content, not state.
+ *
+ * This is the ONE predicate `parseRejectionCarryover` and
+ * `stripRejectionCarryover` both run, so the two can never disagree: a line
+ * is either stripped from publication AND parseable, or retained in
+ * publication AND unparseable. A near-miss line therefore survives verbatim
+ * into our own comment (fail-open, no state smuggled) while a line the parser
+ * honors can never linger as content a model dressed up as grammar. A forged
+ * canonical copy can only name digests, whose one and only effect is
+ * withholding a replacement block, so the marker cannot inject content,
+ * promote itself, or change a verdict. */
+const CARRYOVER_LINE_RE = /^<!-- pr-reviewer:rejected-prescriptions:v1:((?:[0-9a-f]{64})(?:,[0-9a-f]{64})*) -->$/;
 const CARRYOVER_DIGEST_RE = /^[0-9a-f]{64}$/;
 
 /** #762: upper bounds on carry-marker content per comment and per run's read. */
@@ -73,9 +83,10 @@ export function renderRejectionCarryover(digests: readonly string[]): string {
 }
 
 /** #762: recover the carry digests from a previously published comment body.
- * Only a standalone line matching the exact grammar counts; every token must
- * be 64-char lowercase hex; duplicates collapse and the per-comment cap binds,
- * so a hostile body cannot bloat or spoof the set beyond naming digests. */
+ * Only a standalone line matching the exact canonical grammar
+ * (`CARRYOVER_LINE_RE`, the same predicate the strip runs) counts; duplicates
+ * collapse and the per-comment cap binds, so a hostile body cannot bloat or
+ * spoof the set beyond naming digests. */
 export function parseRejectionCarryover(body: string): string[] {
   if (typeof body !== "string" || !body.includes("pr-reviewer:rejected-prescriptions:v1:")) return [];
   const found: string[] = [];
@@ -94,7 +105,11 @@ export function parseRejectionCarryover(body: string): string[] {
 
 /** #762: remove any carry-marker line from a body — the marker is this action's
  * machine state, never finding content, so message extraction must not see it
- * (same rule as the disclaimer trailer and the usefulness affordance). */
+ * (same rule as the disclaimer trailer and the usefulness affordance).
+ *
+ * Shared grammar with `parseRejectionCarryover` by construction: a stripped
+ * line is one the parser honors, and a line the parser would refuse (a
+ * near-miss) stays in the body as ordinary content. */
 export function stripRejectionCarryover(body: string): string {
   if (!body.includes("pr-reviewer:rejected-prescriptions:v1:")) return body;
   return body
@@ -200,14 +215,27 @@ export function normalizedReplacement(suggestion: string): string {
   return suggestion.replace(/[\r\n]+$/, "");
 }
 
-/** #762: derive the one-click suggestion action from the finding record, or
- * null when the suggestion is absent/blank, fence-hostile (any line whose
+/** #762/#1101: derive the one-click suggestion action from the finding record,
+ * or null when the suggestion is absent/blank, fence-hostile (any line whose
  * trim() begins with 3+ backticks or 3+ tildes), or the [start..end_line]
  * range is not fully presentable in the diff. The anchor line is already
- * validated by the caller's existing anchor check. */
+ * validated by the caller's existing anchor check.
+ *
+ * The replacement is made marker-free HERE, before it is digested, rendered,
+ * or recovered: the suppression digest must describe exactly the text the
+ * published fence carries, or a later run recomputes it from the published
+ * (marker-free) body and fails to suppress the prescription it did reject.
+ * It is derived normalized -> stripped -> normalized so the emptiness
+ * predicate is the SAME one `recoverPublishedSuggestion` applies to a
+ * published body: stripping a marker line out of `<marker>\n\n\n<marker>`
+ * leaves whitespace, which is not `""`, so an un-re-normalized replacement
+ * would publish a content-free ```suggestion block (with the affordance) that
+ * recovery can never find again. Stripping to nothing drops the action
+ * entirely — no replacement block, no affordance, no digest to misdescribe
+ * one. */
 function validateAction(rec: Finding, line: number, pathPositions: Map<number, number>): Actionable | null {
   if (typeof rec.suggestion !== "string") return null;
-  const replacement = normalizedReplacement(rec.suggestion);
+  const replacement = normalizedReplacement(stripRejectionCarryover(normalizedReplacement(rec.suggestion)));
   if (replacement === "") return null;
   for (const suggestionLine of replacement.split("\n")) {
     if (/^(`{3,}|~{3,})/.test(suggestionLine.trim())) return null;
@@ -299,6 +327,9 @@ export function buildComments(
       // text over the whole validated range, so a rejection of a 1-2 range
       // can never drop a different single-line-at-2 prescription. The set is
       // keyed by digest so carry markers never carry raw prescription text.
+      // #1101: `action.replacement` is already the marker-free string published
+      // into the fence below, so this digest and the one a later run computes
+      // from `recoverPublishedSuggestion` of that body are the same key.
       const digest = prescriptionKeyDigest(prescriptionKey(path, action.start, action.end, redactText(action.replacement)));
       const rejected = opts.rejectedPrescriptions?.has(digest) === true;
       if (rejected) {
@@ -332,7 +363,9 @@ export function buildComments(
     // carry the reserved carry-marker grammar: the digest is recomputable
     // from published state, so an echoed marker line would ride our own
     // comment's provenance into a permanent self-suppression. Strip any such
-    // line from the assembled body before we append our own marker.
+    // line from the assembled body before we append our own marker. (The
+    // suggestion region is already marker-free by `validateAction`, so this is
+    // a no-op there; it still covers `message` and `agent_prompt`.)
     body = stripRejectionCarryover(body);
     // #762: a suppressed prescription's rejection survives this run as a
     // digest-only carry marker on the replacement comment — the reaction on
