@@ -30,7 +30,7 @@ import {
 // findings. It is rendered for humans but is not finding content, so it is
 // stripped from the deterministic message extraction below exactly as the
 // finding trailer is.
-import { FEEDBACK_AFFORDANCE } from "../publish/inline-findings.js";
+import { FEEDBACK_AFFORDANCE, stripRejectionCarryover } from "../publish/inline-findings.js";
 
 export const SCHEMA_VERSION = 1;
 export const MAX_THREADS_DEFAULT = 20;
@@ -97,11 +97,12 @@ function collapseWhitespace(text: string): string {
 }
 
 /** #762: the static parts this action appends to its own finding bodies — the
- * disclaimer trailer and the usefulness affordance. Neither is finding
- * content, so both are removed before the message text is extracted (the
- * rendered body is unchanged: humans still see them). */
+ * disclaimer trailer, the usefulness affordance, and (durable suppression)
+ * the rejection carry marker. None is finding content, so all are removed
+ * before the message text is extracted (the rendered body is unchanged:
+ * humans still see them). */
 function stripFindingFooter(body: string): string {
-  return body.replaceAll(FINDING_TRAILER, "").replaceAll(FEEDBACK_AFFORDANCE, "");
+  return stripRejectionCarryover(body.replaceAll(FINDING_TRAILER, "").replaceAll(FEEDBACK_AFFORDANCE, ""));
 }
 
 function findingFields(body: string): [string, string, string | null] {

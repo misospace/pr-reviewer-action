@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildComments, diffPositions, findingToBody, parseInlineFindingsMax, prescriptionKey, recoverPublishedSuggestion, FEEDBACK_AFFORDANCE } from "../src/publish/inline-findings.js";
+import {
+  buildComments, diffPositions, findingToBody, parseInlineFindingsMax, parseRejectionCarryover, prescriptionKey,
+  prescriptionKeyDigest, recoverPublishedSuggestion, renderRejectionCarryover, stripRejectionCarryover,
+  MAX_CARRYOVER_KEYS_PER_COMMENT,
+  FEEDBACK_AFFORDANCE,
+} from "../src/publish/inline-findings.js";
 
 const diff = [
   "diff --git a/old b/new", "--- a/old", "+++ b/new", "@@ -1,2 +1,3 @@",
@@ -144,7 +149,7 @@ test("#762: the affordance line appears exactly once on an actionable finding an
 });
 
 test("#762: a rejected prescription drops only the replacement block, keeping the finding", () => {
-  const rejected = new Set([prescriptionKey("new", 1, 1, "REPL")]);
+  const rejected = new Set([prescriptionKeyDigest(prescriptionKey("new", 1, 1, "REPL"))]);
   const result = buildComments(
     [{ file: "new", line: 1, severity: "major", category: "bug", message: "m", suggestion: "REPL", agent_prompt: "apply the fix" }],
     diff, 20, { forgejoPositions: false, rejectedPrescriptions: rejected },
@@ -171,7 +176,7 @@ test("#762: a rejected prescription drops only the replacement block, keeping th
 test("#762: suppression needs the identical replacement at the identical path and line", () => {
   const at = (path: string, line: number, replacement: string) => buildComments(
     [{ file: path, line, message: "m", suggestion: replacement }], diff, 20,
-    { forgejoPositions: false, rejectedPrescriptions: new Set([prescriptionKey("new", 1, 1, "REPL")]) },
+    { forgejoPositions: false, rejectedPrescriptions: new Set([prescriptionKeyDigest(prescriptionKey("new", 1, 1, "REPL"))]) },
   );
   assert.equal(at("new", 1, "OTHER").suppressed, 0, "a different replacement at the same line is not suppressed");
   assert.equal(at("new", 1, "REPL").suppressed, 1);
@@ -190,7 +195,7 @@ test("#762: suppression needs the identical replacement at the identical path an
 
 test("#762: a suppressed Forgejo replacement drops the degraded block too", () => {
   const result = buildComments([{ file: "new", line: 2, message: "m", suggestion: "REPL" }], diff, 20, {
-    forgejoPositions: true, rejectedPrescriptions: new Set([prescriptionKey("new", 2, 2, "REPL")]),
+    forgejoPositions: true, rejectedPrescriptions: new Set([prescriptionKeyDigest(prescriptionKey("new", 2, 2, "REPL"))]),
   });
   const body = (result.comments[0] as Record<string, unknown>).body as string;
   assert.equal(result.suppressed, 1);
@@ -218,10 +223,93 @@ test("#252: a replacement carrying the boundary tokens still renders inside our 
   const drop = buildComments([{ file: "new", line: 1, message: "m", suggestion: hostile }], diff, 20, { forgejoPositions: false });
   assert.equal(((drop.comments[0] as Record<string, unknown>).body as string).includes("```suggestion"), false);
   const kept = buildComments([{ file: "new", line: 1, message: "m", suggestion: `a ${hostile.trim()} b` }], diff, 20, {
-    forgejoPositions: false, rejectedPrescriptions: new Set([prescriptionKey("new", 1, 1, `a ${hostile.trim()} b`)]),
+    forgejoPositions: false, rejectedPrescriptions: new Set([prescriptionKeyDigest(prescriptionKey("new", 1, 1, `a ${hostile.trim()} b`))]),
   });
   // The boundary token only reaches the fence-safe render; a rejection key
   // built from it can suppress nothing it does not name, and nothing escapes.
   assert.equal(kept.suppressed, 1);
   assert.equal(((kept.comments[0] as Record<string, unknown>).body as string).includes("```suggestion"), false);
+});
+
+// ---------------------------------------------------------------------------
+// #1101 durable suppression: the digest carry marker.
+// ---------------------------------------------------------------------------
+
+test("#1101: render/parse round-trips exact digests and nothing else", () => {
+  const d1 = "a".repeat(64);
+  const d2 = "0123456789abcdef".repeat(4);
+  const rendered = renderRejectionCarryover([d1, d2]);
+  assert.equal(rendered, `\n\n<!-- pr-reviewer:rejected-prescriptions:v1:${d1},${d2} -->`);
+  assert.deepEqual(parseRejectionCarryover(`body\n${rendered}`), [d1, d2]);
+  assert.deepEqual(parseRejectionCarryover(rendered), [d1, d2]);
+  assert.equal(renderRejectionCarryover([]), "");
+  assert.deepEqual(parseRejectionCarryover("no marker here"), []);
+});
+
+test("#252: the carry parser refuses every hostile shape, not just benign input", () => {
+  const d = "a".repeat(64);
+  // The boundary token itself: a truncated/close-less/extra-text marker.
+  assert.deepEqual(parseRejectionCarryover(`<!-- pr-reviewer:rejected-prescriptions:v1:${d}`), []);
+  assert.deepEqual(parseRejectionCarryover(`prefix <!-- pr-reviewer:rejected-prescriptions:v1:${d} -->`), []);
+  assert.deepEqual(parseRejectionCarryover(`<!-- pr-reviewer:rejected-prescriptions:v1:${d} --> suffix`), []);
+  assert.deepEqual(parseRejectionCarryover(`<!-- pr-reviewer:rejected-prescriptions:v1: -->`), []);
+  // Non-digest tokens never pass, valid siblings of a hostile list still do.
+  assert.deepEqual(parseRejectionCarryover(`<!-- pr-reviewer:rejected-prescriptions:v1:${"A".repeat(64)} -->`), [], "uppercase is not canonical hex");
+  assert.deepEqual(parseRejectionCarryover(`<!-- pr-reviewer:rejected-prescriptions:v1:${"a".repeat(63)} -->`), []);
+  assert.deepEqual(parseRejectionCarryover(`<!-- pr-reviewer:rejected-prescriptions:v1:${"a".repeat(65)} -->`), []);
+  assert.deepEqual(parseRejectionCarryover(`<!-- pr-reviewer:rejected-prescriptions:v1:${d},${"z".repeat(64)}${d} -->`), []);
+  assert.deepEqual(parseRejectionCarryover(`<!-- pr-reviewer:rejected-prescriptions:v1:${d},oops,${d} -->`), [], "one non-hex token rejects the whole line");
+  assert.deepEqual(parseRejectionCarryover(`<!-- pr-reviewer:rejected-prescriptions:v1:${d},${d} -->`), [d], "duplicates collapse");
+  // CRLF-terminated lines still parse exactly.
+  assert.deepEqual(parseRejectionCarryover(`body\r\n<!-- pr-reviewer:rejected-prescriptions:v1:${d} -->\r\n`), [d]);
+  // The per-comment cap binds: 200 listed digests yield at most the cap.
+  const many = Array.from({ length: 200 }, (_, i) => i.toString(16).padStart(64, "0")).join(",");
+  assert.equal(parseRejectionCarryover(`<!-- pr-reviewer:rejected-prescriptions:v1:${many} -->`).length, MAX_CARRYOVER_KEYS_PER_COMMENT);
+});
+
+test("#1101: prescriptionKeyDigest is stable, key-sensitive, and 64-char lowercase hex", () => {
+  const key = prescriptionKey("a.ts", 1, 2, "R1\nR2");
+  const digest = prescriptionKeyDigest(key);
+  assert.match(digest, /^[0-9a-f]{64}$/);
+  assert.equal(prescriptionKeyDigest(key), digest);
+  assert.notEqual(digest, prescriptionKeyDigest(prescriptionKey("a.ts", 2, 2, "R1\nR2")));
+  assert.notEqual(digest, prescriptionKeyDigest(prescriptionKey("a.ts", 1, 2, "R1\nR3")));
+});
+
+test("#1101: a suppressed comment carries exactly its own digest marker, a published one never does", () => {
+  const rejected = new Set([prescriptionKeyDigest(prescriptionKey("new", 1, 1, "REPL"))]);
+  const suppressed = buildComments(
+    [{ file: "new", line: 1, message: "m", suggestion: "REPL" }], diff, 20,
+    { forgejoPositions: false, rejectedPrescriptions: rejected },
+  );
+  const body = (suppressed.comments[0] as Record<string, unknown>).body as string;
+  assert.equal(suppressed.suppressed, 1);
+  assert.deepEqual(parseRejectionCarryover(body), [...rejected]);
+  assert.equal(body.split("pr-reviewer:rejected-prescriptions:v1:").length - 1, 1);
+  // The carried comment is byte-clean apart from the marker and the dropped block.
+  assert.equal(recoverPublishedSuggestion(body), null, "a suppressed comment carries no recoverable prescription");
+  assert.deepEqual(parseRejectionCarryover(stripRejectionCarryover(body)), []);
+
+  const posted = buildComments([{ file: "new", line: 1, message: "m", suggestion: "REPL" }], diff, 20, { forgejoPositions: false });
+  const postedBody = (posted.comments[0] as Record<string, unknown>).body as string;
+  assert.deepEqual(parseRejectionCarryover(postedBody), [], "a posted prescription carries nothing");
+
+  const degraded = buildComments(
+    [{ file: "new", line: 2, message: "m", suggestion: "REPL" }], diff, 20,
+    { forgejoPositions: true, rejectedPrescriptions: new Set([prescriptionKeyDigest(prescriptionKey("new", 2, 2, "REPL"))]) },
+  );
+  assert.deepEqual(parseRejectionCarryover((degraded.comments[0] as Record<string, unknown>).body as string).length, 1, "Forgejo suppressions carry too");
+});
+
+test("#1101: stripRejectionCarryover removes only exact marker lines and is idempotent", () => {
+  const d = "a".repeat(64);
+  const body = `**Info:** m\n\n_Automated finding from AI PR review._\n\n<!-- pr-reviewer:rejected-prescriptions:v1:${d} -->\n`;
+  const stripped = stripRejectionCarryover(body);
+  assert.equal(stripped.includes("pr-reviewer"), false);
+  assert.ok(stripped.includes("**Info:** m"));
+  assert.ok(stripped.includes("_Automated finding from AI PR review._"));
+  assert.equal(stripRejectionCarryover(stripped), stripped);
+  // Near-miss lines survive: stripping is grammar-exact, not prefix-vague.
+  const nearMiss = "text <!-- pr-reviewer:rejected-prescriptions:v1:oops --> tail";
+  assert.equal(stripRejectionCarryover(nearMiss), nearMiss);
 });

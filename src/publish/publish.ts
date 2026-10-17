@@ -15,7 +15,10 @@
 import { sanitizeMarkdown, stripReservedMarkers, stripEmptyConditionalSections, type ConditionalSectionPresence, type UpstreamLinkMode } from "./sanitize.js";
 import { publicAnalysisEngine } from "../prompt/index.js";
 import { ACTION_VERSION } from "../version.js";
-import { buildComments, normalizedReplacement, prescriptionKey, recoverPublishedSuggestion, SEVERITY_LABELS } from "./inline-findings.js";
+import {
+  buildComments, normalizedReplacement, parseRejectionCarryover, prescriptionKey, prescriptionKeyDigest,
+  recoverPublishedSuggestion, MAX_CARRYOVER_KEYS_PER_RUN, SEVERITY_LABELS,
+} from "./inline-findings.js";
 import { redactText } from "../context/redact.js";
 import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
 import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, retireManagedInlineComments, resolvePublishTrustedOwner, selectManagedReviews, type CleanupLog } from "./cleanup.js";
@@ -415,9 +418,9 @@ export function renderPartialCoverageNotice(coverage: PartialCoverage): string {
 /** Build inline review comments from structured findings against the diff.
  * `max` is clamped to at least 1 here (v2 clamps in main()); this is the one
  * clamp site so it cannot drift from `parseInlineFindingsMax`. #762:
- * `rejectedPrescriptions` drops only the replacement block of an already
- * rejected prescription (the finding itself always posts) and `suppressed`
- * counts how many were dropped. */
+ * `rejectedPrescriptions` holds the digests of already-rejected prescriptions
+ * and drops only the replacement block of a matching finding (the finding
+ * itself always posts); `suppressed` counts how many were dropped. */
 export function buildInlineComments(options: {
   findings: unknown;
   diffText: string;
@@ -491,7 +494,8 @@ function feedbackActorAuthorized(reading: CollaboratorPermissionReading | null, 
 }
 
 interface RejectionSnapshot {
-  /** The prescription keys a trusted actor has rejected. */
+  /** Digests of the prescriptions a trusted actor has rejected (directly, or
+   * through a carry marker this action itself published). */
   keys: ReadonlySet<string>;
   /** How many prior comments carrying a recoverable prescription were read. */
   inspected: number;
@@ -502,6 +506,9 @@ interface RejectionSnapshot {
   /** How many distinct actors exceeded the verification cap and were therefore
    * never looked up. */
   overCap: number;
+  /** How many rejection digests were inherited from carry markers this
+   * action's own prior comments published, rather than from live reactions. */
+  carried: number;
 }
 
 /** #762: read the usefulness feedback for the prescriptions a previous run
@@ -509,20 +516,33 @@ interface RejectionSnapshot {
  * reject.
  *
  * The whole read is FAIL-OPEN: any thrown error, an unsupported forge, an
- * incomplete enumeration, or an incomplete reaction read yields an empty key
- * set, i.e. exactly today's behavior (every prescription is posted). The
- * bot-self exclusion, however, is REQUIRED PROOF: if the authenticated
- * identity cannot be resolved (absent seam, thrown read, or a non-login
- * result), no reaction can be distinguished from the bot's own, so nobody is
- * authorized and nothing is suppressed — a fail-open read with fail-closed
+ * incomplete enumeration, or an incomplete reaction read contributes no
+ * reaction-derived key, i.e. exactly today's behavior (every prescription is
+ * posted). The bot-self exclusion, however, is REQUIRED PROOF: if the
+ * authenticated identity cannot be resolved (absent seam, thrown read, or a
+ * non-login result), no reaction can be distinguished from the bot's own, so
+ * nobody is authorized from reactions — a fail-open read with fail-closed
  * trust. Nothing here can skip, resolve, retire, or de-duplicate a finding,
  * and nothing can change the verdict. Reaction logins and comment bodies are
- * never returned, rendered, or logged — only counts are. */
+ * never returned, rendered, or logged — only counts are.
+ *
+ * DURABLE CARRY (review round on #1101): the reaction lives on the comment
+ * cleanup retires, so a rejection read from reactions alone lasts exactly one
+ * re-review. The prior run therefore embeds the SHA-256 digest of each
+ * suppressed prescription key in a hidden HTML carry marker on the
+ * replacement comment it publishes. A carry marker is trusted only with
+ * provenance: a top-level comment of a marker-managed review whose author
+ * matches the trusted owner identity the retirement path itself proves —
+ * never a body from an actor this run cannot authenticate. Its effect remains
+ * withhold-only: digest matching can drop a replacement block and nothing
+ * else, so a forged marker (only possible for an actor who can already delete
+ * the comment or react with their authorized 👎) cannot inject content, skip
+ * a finding, or touch the verdict. */
 async function readRejectedPrescriptions(
   api: PublishPlatformApi,
   marker: string,
 ): Promise<RejectionSnapshot> {
-  const none: RejectionSnapshot = { keys: new Set<string>(), inspected: 0, logins: 0, trusted: 0, overCap: 0 };
+  const none: RejectionSnapshot = { keys: new Set<string>(), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: 0 };
   if (typeof api.reviewCommentFeedback !== "function" || typeof api.collaboratorPermission !== "function") return none;
   try {
     const reviews = await api.listReviews();
@@ -533,12 +553,31 @@ async function readRejectedPrescriptions(
     const listed = await api.listManagedInlineComments(reviewIds);
     if (!listed.supported || !listed.complete) return none;
     const candidates: Array<{ id: string; key: string }> = [];
+    const carried = new Set<string>();
+    // The carry-marker authority is resolved lazily and at most once, and
+    // only because some comment actually carries a marker to authenticate.
+    let carryOwner: Awaited<ReturnType<typeof resolvePublishTrustedOwner>>["owner"] | undefined;
     for (const comment of listed.comments) {
       const id = String(comment.id ?? "");
       if (!/^[1-9]\d*$/.test(id)) continue;
       // A reply inherits its parent review's id, so only a TOP-LEVEL comment
-      // of ours can carry the prescription region this action published.
+      // of ours can carry the prescription region this action published — and
+      // equally, only a top-level comment can carry its rejection marker.
       if (comment.in_reply_to_id != null || comment.inReplyToId != null) continue;
+      const body = typeof comment.body === "string" ? comment.body : "";
+      const digests = parseRejectionCarryover(body);
+      if (digests.length > 0) {
+        if (carryOwner === undefined) carryOwner = (await resolvePublishTrustedOwner(api)).owner;
+        // Provenance, not body text: the marker counts only on a comment
+        // this run can prove its own identity published. Unprovable author,
+        // unprovable identity — the marker carries nothing.
+        if (carryOwner !== null && ownerMatchesIdentity(comment.user ?? null, carryOwner)) {
+          for (const digest of digests) {
+            carried.add(digest);
+            if (carried.size >= MAX_CARRYOVER_KEYS_PER_RUN) break;
+          }
+        }
+      }
       const path = comment.path;
       // A published range is reported with its END as `line` and its start as
       // `start_line`: reconstruct the exact range the key describes, and skip
@@ -549,25 +588,33 @@ async function readRejectedPrescriptions(
       if (!Number.isInteger(start) || start <= 0 || start > end) continue;
       // Only our own previously published suggestion region is parsed; an
       // unrecoverable one simply carries no prior prescription.
-      const replacement = recoverPublishedSuggestion(typeof comment.body === "string" ? comment.body : "");
+      const replacement = recoverPublishedSuggestion(body);
       if (replacement === null) continue;
-      candidates.push({ id, key: prescriptionKey(path, start, end, replacement) });
+      candidates.push({ id, key: prescriptionKeyDigest(prescriptionKey(path, start, end, replacement)) });
     }
-    if (candidates.length === 0) return none;
+    if (candidates.length === 0) {
+      // Carry-only survival: the reacted-to comment was retired and only a
+      // replacement comment's marker remains — no reaction request is needed.
+      if (carried.size === 0) return none;
+      return { keys: new Set(carried), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: carried.size };
+    }
     // Newest first, so the bounded read covers the comments most likely to
     // still be on screen.
     candidates.sort((a, b) => (a.id === b.id ? 0 : BigInt(a.id) > BigInt(b.id) ? -1 : 1));
     const bounded = candidates.slice(0, MAX_FEEDBACK_COMMENT_IDS);
     const feedback = await api.reviewCommentFeedback(bounded.map((candidate) => candidate.id));
-    if (!feedback.supported || !feedback.complete) return none;
+    if (!feedback.supported || !feedback.complete) {
+      return carried.size === 0 ? none : { keys: new Set(carried), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: carried.size };
+    }
     const rejections = feedback.records.filter((record) => record.content === "-1");
     const distinct = [...new Set(rejections.map((record) => record.login))].filter((login) => login !== "");
     // Untrusted reaction data must never control the request budget: past the
-    // cap, verify nobody and trust no rejection.
+    // cap, verify nobody and trust no rejection (carried digests need no
+    // lookup and keep standing).
     if (distinct.length > FEEDBACK_ACTOR_CAP) {
-      return { keys: new Set<string>(), inspected: bounded.length, logins: distinct.length, trusted: 0, overCap: distinct.length };
+      return { keys: new Set(carried), inspected: bounded.length, logins: distinct.length, trusted: 0, overCap: distinct.length, carried: carried.size };
     }
-    const keys = new Set<string>();
+    const keys = new Set(carried);
     let trusted = 0;
     let self: string | null = null;
     let selfResolved = false;
@@ -577,7 +624,7 @@ async function readRejectedPrescriptions(
         // Resolved at most once, and only because there is at least one
         // distinct reacting login to authorize. An absent seam, a thrown
         // read, or a non-login result makes the bot-self exclusion
-        // unprovable, so nobody is authorized.
+        // unprovable, so nobody is authorized from reactions.
         try {
           const identity = typeof api.authenticatedIdentity === "function"
             ? await api.authenticatedIdentity()
@@ -585,7 +632,7 @@ async function readRejectedPrescriptions(
           self = typeof identity === "string" && identity.trim() !== "" ? identity : null;
         } catch { self = null; }
         if (self === null) {
-          return { keys: new Set<string>(), inspected: bounded.length, logins: distinct.length, trusted: 0, overCap: 0 };
+          return { keys: new Set(carried), inspected: bounded.length, logins: distinct.length, trusted: 0, overCap: 0, carried: carried.size };
         }
       }
       // The bot's own reaction is never a rejection signal — it is the
@@ -602,7 +649,7 @@ async function readRejectedPrescriptions(
         if (prior !== undefined) keys.add(prior.key);
       }
     }
-    return { keys, inspected: bounded.length, logins: distinct.length, trusted, overCap: 0 };
+    return { keys, inspected: bounded.length, logins: distinct.length, trusted, overCap: 0, carried: carried.size };
   } catch {
     return none;
   }
@@ -911,7 +958,7 @@ export async function publishReview(
     // prescription, so the read (and every request behind it) is skipped.
     const feedback = hasActionablePrescription(input.findings)
       ? await readRejectedPrescriptions(api, input.commentMarker)
-      : { keys: new Set<string>(), inspected: 0, logins: 0, trusted: 0, overCap: 0 };
+      : { keys: new Set<string>(), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: 0 };
     const built = buildInlineComments({
       findings: input.findings,
       diffText: options.diffText,
@@ -921,11 +968,14 @@ export async function publishReview(
       rejectedPrescriptions: feedback.keys,
     });
     inlineComments = built.comments;
-    if (feedback.inspected > 0) {
+    if (feedback.inspected > 0 || feedback.carried > 0) {
       messages.push(
         `Inline finding usefulness feedback: inspected ${feedback.inspected} prior comment(s), `
           + `${feedback.logins} distinct rejection login(s), ${feedback.trusted} trusted rejection(s), `
           + `${built.suppressed} suppressed prescription(s)`
+          + (feedback.carried > 0
+            ? `; ${feedback.carried} carried rejection key(s) inherited from this action's own prior comments`
+            : "")
           + (feedback.overCap > 0
             ? `; ${feedback.overCap} login(s) past the verification cap — none verified`
             : ""),

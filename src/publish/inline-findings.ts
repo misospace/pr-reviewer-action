@@ -1,6 +1,7 @@
 /** Inline finding anchoring port of `scripts/build_review_comments.py` (#680).
  * The diff walk preserves both final-file lines and patch-relative positions so
  * GitHub and Forgejo publish the same validated findings. */
+import { createHash } from "node:crypto";
 import { redactText } from "../context/redact.js";
 import { sanitizeMarkdown } from "./sanitize.js";
 
@@ -39,6 +40,70 @@ export const FEEDBACK_AFFORDANCE =
  * path, line, or replacement text can be arranged to collide with another key. */
 export function prescriptionKey(path: string, rangeStart: number, rangeEnd: number, replacement: string): string {
   return `${path}\u0000${rangeStart}\u0000${rangeEnd}\u0000${replacement}`;
+}
+
+/** #762 (review round: durable suppression): the rejection memory must outlive
+ * the comment the trusted 👎 landed on, because cleanup retires that comment.
+ * The memory travels as the SHA-256 digest of the prescription key — never the
+ * replacement text (which can carry content resembling secrets) and never any
+ * forgeable identity claim — embedded in the replacement comment this action
+ * publishes as a hidden single-line HTML carry marker. */
+export function prescriptionKeyDigest(key: string): string {
+  return createHash("sha256").update(key, "utf8").digest("hex");
+}
+
+/** #762: carry-marker grammar. One line, exact prefix, comma-separated
+ * lowercase-64-hex digests, terminated by the HTML comment close — anything
+ * else parses as nothing. A forged copy can only ever name digests, whose one
+ * and only effect is withholding a replacement block, so the marker cannot
+ * inject content, promote itself, or change a verdict. */
+const CARRYOVER_LINE_RE = /^<!-- pr-reviewer:rejected-prescriptions:v1:([0-9a-f,]+) -->$/;
+const CARRYOVER_DIGEST_RE = /^[0-9a-f]{64}$/;
+
+/** #762: upper bounds on carry-marker content per comment and per run's read. */
+export const MAX_CARRYOVER_KEYS_PER_COMMENT = 64;
+export const MAX_CARRYOVER_KEYS_PER_RUN = 256;
+
+/** #762: render the carry marker for the digests a suppressed prescription
+ * leaves behind, or "" when there is nothing to carry. */
+export function renderRejectionCarryover(digests: readonly string[]): string {
+  const kept = digests.slice(0, MAX_CARRYOVER_KEYS_PER_COMMENT);
+  if (kept.length === 0) return "";
+  return `\n\n<!-- pr-reviewer:rejected-prescriptions:v1:${kept.join(",")} -->`;
+}
+
+/** #762: recover the carry digests from a previously published comment body.
+ * Only a standalone line matching the exact grammar counts; every token must
+ * be 64-char lowercase hex; duplicates collapse and the per-comment cap binds,
+ * so a hostile body cannot bloat or spoof the set beyond naming digests. */
+export function parseRejectionCarryover(body: string): string[] {
+  if (typeof body !== "string" || !body.includes("pr-reviewer:rejected-prescriptions:v1:")) return [];
+  const found: string[] = [];
+  for (const rawLine of body.split("\n")) {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    const match = CARRYOVER_LINE_RE.exec(line);
+    if (match === null) continue;
+    for (const token of match[1]!.split(",")) {
+      if (!CARRYOVER_DIGEST_RE.test(token)) continue;
+      if (!found.includes(token)) found.push(token);
+      if (found.length >= MAX_CARRYOVER_KEYS_PER_COMMENT) return found;
+    }
+  }
+  return found;
+}
+
+/** #762: remove any carry-marker line from a body — the marker is this action's
+ * machine state, never finding content, so message extraction must not see it
+ * (same rule as the disclaimer trailer and the usefulness affordance). */
+export function stripRejectionCarryover(body: string): string {
+  if (!body.includes("pr-reviewer:rejected-prescriptions:v1:")) return body;
+  return body
+    .split("\n")
+    .filter((rawLine) => {
+      const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+      return CARRYOVER_LINE_RE.exec(line) === null;
+    })
+    .join("\n");
 }
 
 /** Verbatim diff-position walk from `scripts/build_review_comments.py` (#680). */
@@ -203,8 +268,7 @@ export function buildComments(
   const mode = opts.linkMode === "inert" || opts.linkMode === "togithub" ? opts.linkMode : "inert";
   const comments: unknown[] = [];
   let skipped = 0;
-  let suppressed = 0;
-  for (const value of findings) {
+  let suppressed = 0;  for (const value of findings) {
     if (!isRecord(value)) { skipped += 1; continue; }
     if (value.thread_id) { skipped += 1; continue; }
     const path = value.file;
@@ -221,19 +285,24 @@ export function buildComments(
     // (Forgejo) + opt-in agent-prompt section. Findings without the new keys
     // render byte-identically to before.
     const action = validateAction(value, line, positions.get(path)!);
+    // #762: the digest a suppressed prescription carries into this comment so
+    // the rejection outlives the comment the trusted 👎 landed on.
+    let carriedDigest: string | null = null;
     if (action) {
       // #762: a rejected prescription (a trusted 👎 on the prior run's
-      // identical replacement at this exact published range) removes ONLY the
-      // replacement block. The comment still posts with its message, severity,
-      // category, and agent prompt; the finding is never skipped, resolved, or
-      // deduped, and the verdict is untouched. The key covers the rendered
-      // (redacted) text over the whole validated range, so a rejection of a
-      // 1-2 range can never drop a different single-line-at-2 prescription.
-      const rejected = opts.rejectedPrescriptions?.has(
-        prescriptionKey(path, action.start, action.end, redactText(action.replacement)),
-      ) === true;
+      // identical replacement at this exact published range, or the carry
+      // marker a later run inherited from it) removes ONLY the replacement
+      // block. The comment still posts with its message, severity, category,
+      // and agent prompt; the finding is never skipped, resolved, or deduped,
+      // and the verdict is untouched. The key covers the rendered (redacted)
+      // text over the whole validated range, so a rejection of a 1-2 range
+      // can never drop a different single-line-at-2 prescription. The set is
+      // keyed by digest so carry markers never carry raw prescription text.
+      const digest = prescriptionKeyDigest(prescriptionKey(path, action.start, action.end, redactText(action.replacement)));
+      const rejected = opts.rejectedPrescriptions?.has(digest) === true;
       if (rejected) {
         suppressed += 1;
+        carriedDigest = digest;
       } else {
         if (opts.forgejoPositions) {
           body +=
@@ -258,6 +327,11 @@ export function buildComments(
         "\n\n</details>";
       body += sanitizeMarkdown(redactText(section), mode);
     }
+    // #762: a suppressed prescription's rejection survives this run as a
+    // digest-only carry marker on the replacement comment — the reaction on
+    // the original comment is lost when cleanup retires it, so without the
+    // carry the next run would re-post the rejected text.
+    if (carriedDigest !== null) body += renderRejectionCarryover([carriedDigest]);
     comment.body = body;
     comments.push(comment);
     if (comments.length >= maxComments) break;
