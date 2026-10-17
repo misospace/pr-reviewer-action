@@ -18,6 +18,29 @@ export const SEVERITY_LABELS: Record<string, string> = {
 type PositionMap = Map<string, Map<number, number>>;
 type Finding = Record<string, unknown>;
 
+/** The per-comment disclaimer every inline finding body carries. Exported so
+ * the usefulness-feedback recovery can prove a comment is one of ours before
+ * it reads a prescription out of it. */
+export const INLINE_DISCLAIMER = "_Automated finding from AI PR review._";
+
+/** #762: the single static usefulness affordance appended to an actionable
+ * finding. Static text only — never model-authored, so no finding text can
+ * forge or extend it — and advisory by construction: a reaction is telemetry
+ * and can never resolve a finding or change this review's verdict. Appended
+ * only where a replacement block was actually rendered, exactly once. */
+export const FEEDBACK_AFFORDANCE =
+  "👍 helpful · 👎 not helpful — advisory only; it never changes this review's verdict.";
+
+/** #762: the correlation key for "this exact prescription at this exact
+ * published range". The range — not a single line — is part of the key because
+ * a multi-line prescription is published anchored at its END line: keying on
+ * one line would let a rejection of a 1-2 range silently drop a different,
+ * single-line-at-2 prescription with the same text. NUL-separated, so no
+ * path, line, or replacement text can be arranged to collide with another key. */
+export function prescriptionKey(path: string, rangeStart: number, rangeEnd: number, replacement: string): string {
+  return `${path}\u0000${rangeStart}\u0000${rangeEnd}\u0000${replacement}`;
+}
+
 /** Verbatim diff-position walk from `scripts/build_review_comments.py` (#680). */
 export function diffPositions(diffText: string): PositionMap {
   const positionsByPath: PositionMap = new Map();
@@ -71,7 +94,7 @@ export function findingToBody(finding: Finding, linkMode: string): string {
   const category = finding.category;
   const suffix = category && category !== "other" ? ` (${String(category)})` : "";
   const message = String(finding.message || "").trim();
-  const body = `**${label}${suffix}:** ${message}\n\n_Automated finding from AI PR review._`;
+  const body = `**${label}${suffix}:** ${message}\n\n${INLINE_DISCLAIMER}`;
   const mode = linkMode === "inert" || linkMode === "togithub" ? linkMode : "inert";
   return sanitizeMarkdown(redactText(body), mode);
 }
@@ -105,6 +128,13 @@ function wrapFence(content: string, lang = ""): string {
   return `${fence}${lang}\n${content}\n${fence}`;
 }
 
+/** #762: the trailing-newline trim a suggestion is rendered with, so a
+ * published prescription and the rejection key describing it carry the same
+ * text. */
+export function normalizedReplacement(suggestion: string): string {
+  return suggestion.replace(/[\r\n]+$/, "");
+}
+
 /** #762: derive the one-click suggestion action from the finding record, or
  * null when the suggestion is absent/blank, fence-hostile (any line whose
  * trim() begins with 3+ backticks or 3+ tildes), or the [start..end_line]
@@ -112,7 +142,7 @@ function wrapFence(content: string, lang = ""): string {
  * validated by the caller's existing anchor check. */
 function validateAction(rec: Finding, line: number, pathPositions: Map<number, number>): Actionable | null {
   if (typeof rec.suggestion !== "string") return null;
-  const replacement = rec.suggestion.replace(/[\r\n]+$/, "");
+  const replacement = normalizedReplacement(rec.suggestion);
   if (replacement === "") return null;
   for (const suggestionLine of replacement.split("\n")) {
     if (/^(`{3,}|~{3,})/.test(suggestionLine.trim())) return null;
@@ -128,19 +158,52 @@ function validateAction(rec: Finding, line: number, pathPositions: Map<number, n
   return { start: line, end, replacement };
 }
 
+/** #762: the one-click suggestion region this module writes — a blank line, a
+ * ````suggestion` opener, the replacement, and a lone ````` terminator. */
+const SUGGESTION_OPENER = "```suggestion";
+const FENCE_TERMINATOR = "```";
+
+/** #762: recover the replacement a previously published comment of ours
+ * carried, or null when it carries none that can be recovered unambiguously.
+ * Only this module's own region is read, and only when the body still carries
+ * our disclaimer: `validateAction` refuses any replacement line whose trim
+ * starts with three backticks or tildes, so no inner lone fence line can exist
+ * and the terminator is unambiguous. Zero or several openers, a missing
+ * terminator, and a blank replacement all mean "no prior prescription" — the
+ * caller then posts the current one. */
+export function recoverPublishedSuggestion(body: string): string | null {
+  if (typeof body !== "string" || !body.includes(INLINE_DISCLAIMER)) return null;
+  const lines = body.split("\n");
+  let opener = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index] !== SUGGESTION_OPENER || index === 0 || lines[index - 1] !== "") continue;
+    if (opener !== -1) return null;
+    opener = index;
+  }
+  if (opener === -1) return null;
+  let end = -1;
+  for (let index = opener + 1; index < lines.length; index += 1) {
+    if (lines[index] === FENCE_TERMINATOR) { end = index; break; }
+  }
+  if (end === -1) return null;
+  const replacement = lines.slice(opener + 1, end).join("\n");
+  return normalizedReplacement(replacement) === "" ? null : replacement;
+}
+
 /** Build anchorable comments; thread-backed findings are deduplicated (#766). */
 export function buildComments(
   findings: unknown,
   diffText: string,
   maxComments: number,
-  opts: { forgejoPositions: boolean; linkMode?: string },
-): { comments: unknown[]; skipped: number } {
-  if (!Array.isArray(findings)) return { comments: [], skipped: 0 };
+  opts: { forgejoPositions: boolean; linkMode?: string; rejectedPrescriptions?: ReadonlySet<string> },
+): { comments: unknown[]; skipped: number; suppressed: number } {
+  if (!Array.isArray(findings)) return { comments: [], skipped: 0, suppressed: 0 };
   const positions = diffPositions(diffText);
   // #762: same inert/togithub normalization `findingToBody` applies.
   const mode = opts.linkMode === "inert" || opts.linkMode === "togithub" ? opts.linkMode : "inert";
   const comments: unknown[] = [];
   let skipped = 0;
+  let suppressed = 0;
   for (const value of findings) {
     if (!isRecord(value)) { skipped += 1; continue; }
     if (value.thread_id) { skipped += 1; continue; }
@@ -159,18 +222,33 @@ export function buildComments(
     // render byte-identically to before.
     const action = validateAction(value, line, positions.get(path)!);
     if (action) {
-      if (opts.forgejoPositions) {
-        body +=
-          `\n\nReplacement for lines ${action.start}-${action.end} (this forge cannot apply a one-click suggestion):\n\n\`\`\`\n` +
-          redactText(action.replacement) +
-          "\n```";
+      // #762: a rejected prescription (a trusted 👎 on the prior run's
+      // identical replacement at this exact published range) removes ONLY the
+      // replacement block. The comment still posts with its message, severity,
+      // category, and agent prompt; the finding is never skipped, resolved, or
+      // deduped, and the verdict is untouched. The key covers the rendered
+      // (redacted) text over the whole validated range, so a rejection of a
+      // 1-2 range can never drop a different single-line-at-2 prescription.
+      const rejected = opts.rejectedPrescriptions?.has(
+        prescriptionKey(path, action.start, action.end, redactText(action.replacement)),
+      ) === true;
+      if (rejected) {
+        suppressed += 1;
       } else {
-        body += `\n\n\`\`\`suggestion\n${redactText(action.replacement)}\n\`\`\``;
-        comment.line = action.end;
-        if (action.end > action.start) {
-          comment.start_line = action.start;
-          comment.start_side = "RIGHT";
+        if (opts.forgejoPositions) {
+          body +=
+            `\n\nReplacement for lines ${action.start}-${action.end} (this forge cannot apply a one-click suggestion):\n\n\`\`\`\n` +
+            redactText(action.replacement) +
+            "\n```";
+        } else {
+          body += `\n\n\`\`\`suggestion\n${redactText(action.replacement)}\n\`\`\``;
+          comment.line = action.end;
+          if (action.end > action.start) {
+            comment.start_line = action.start;
+            comment.start_side = "RIGHT";
+          }
         }
+        body += `\n\n${FEEDBACK_AFFORDANCE}`;
       }
     }
     if (typeof value.agent_prompt === "string" && value.agent_prompt.trim() !== "") {
@@ -184,7 +262,7 @@ export function buildComments(
     comments.push(comment);
     if (comments.length >= maxComments) break;
   }
-  return { comments, skipped };
+  return { comments, skipped, suppressed };
 }
 
 /** Parse INLINE_FINDINGS_MAX with Python's ValueError fallback and lower

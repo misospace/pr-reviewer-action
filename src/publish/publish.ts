@@ -15,10 +15,10 @@
 import { sanitizeMarkdown, stripReservedMarkers, stripEmptyConditionalSections, type ConditionalSectionPresence, type UpstreamLinkMode } from "./sanitize.js";
 import { publicAnalysisEngine } from "../prompt/index.js";
 import { ACTION_VERSION } from "../version.js";
-import { buildComments, SEVERITY_LABELS } from "./inline-findings.js";
+import { buildComments, normalizedReplacement, prescriptionKey, recoverPublishedSuggestion, SEVERITY_LABELS } from "./inline-findings.js";
 import { redactText } from "../context/redact.js";
 import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
-import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, retireManagedInlineComments, resolvePublishTrustedOwner, type CleanupLog } from "./cleanup.js";
+import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, retireManagedInlineComments, resolvePublishTrustedOwner, selectManagedReviews, type CleanupLog } from "./cleanup.js";
 import { ownerMatchesIdentity } from "../platform/owner-identity.js";
 import { strictReviewResult } from "../enforcement/verdict-policy.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
@@ -26,7 +26,8 @@ import { COVERAGE_NOTICE_MAX_ITEMS, type PartialCoverage } from "../tools/covera
 import { isIncompleteReason, renderFindingsSummary, severityCountsLabel, MAX_REVIEW_TRIAGE_REASON_CHARS, type IncompleteReason } from "./outputs.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
 import type { HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
-import type { NativeReviewComment, NativeReviewRequest, PublishPlatformApi } from "../platform/publish-api.js";
+import { MAX_FEEDBACK_COMMENT_IDS } from "../platform/publish-api.js";
+import type { CollaboratorPermissionReading, NativeReviewComment, NativeReviewRequest, PublishPlatformApi } from "../platform/publish-api.js";
 
 export type PublishMode = "comment" | "review_comment" | "review_verdict";
 export type NativeReviewEvent = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
@@ -413,19 +414,182 @@ export function renderPartialCoverageNotice(coverage: PartialCoverage): string {
 
 /** Build inline review comments from structured findings against the diff.
  * `max` is clamped to at least 1 here (v2 clamps in main()); this is the one
- * clamp site so it cannot drift from `parseInlineFindingsMax`. */
+ * clamp site so it cannot drift from `parseInlineFindingsMax`. #762:
+ * `rejectedPrescriptions` drops only the replacement block of an already
+ * rejected prescription (the finding itself always posts) and `suppressed`
+ * counts how many were dropped. */
 export function buildInlineComments(options: {
   findings: unknown;
   diffText: string;
   max: number;
   forgejoPositions: boolean;
   linkMode: UpstreamLinkMode;
-}): NativeReviewComment[] {
-  const { comments } = buildComments(options.findings, options.diffText, Math.max(1, options.max), {
+  rejectedPrescriptions?: ReadonlySet<string>;
+}): { comments: NativeReviewComment[]; suppressed: number } {
+  const { comments, suppressed } = buildComments(options.findings, options.diffText, Math.max(1, options.max), {
     forgejoPositions: options.forgejoPositions,
     linkMode: options.linkMode,
+    ...(options.rejectedPrescriptions === undefined ? {} : { rejectedPrescriptions: options.rejectedPrescriptions }),
   });
-  return comments as NativeReviewComment[];
+  return { comments: comments as NativeReviewComment[], suppressed };
+}
+
+/** #762: whether any finding can contribute a prescription at all — the cheap
+ * pre-check `validateAction` implies (a non-empty, trimmed suggestion string).
+ * A false answer means the feedback read (and every request behind it) has
+ * nothing it could ever correlate, so it never runs. */
+function hasActionablePrescription(findings: unknown): boolean {
+  if (!Array.isArray(findings)) return false;
+  return findings.some(
+    (finding) => isRecord(finding)
+      && typeof finding.suggestion === "string"
+      && normalizedReplacement(finding.suggestion) !== "",
+  );
+}
+
+/** #762: the bound on the distinct reaction logins this run will verify. Each
+ * login costs one collaborator request and the logins arrive from untrusted
+ * reaction data, so the count is capped: past the cap this run verifies nobody
+ * and trusts no rejection (fail-open) instead of letting drive-by reactors
+ * drive the run's own request budget. */
+export const FEEDBACK_ACTOR_CAP = 20;
+
+/** #762: the trusted-actor bar for a 👎 suppression — the same bar the
+ * comment-command re-review applies (#914, `src/precheck/decide.ts:170-184`),
+ * duplicated rather than imported so the publish seam takes no dependency on
+ * the precheck policy module: the repository permission levels that authorize
+ * triage-or-higher, plus the un-collapsed `role_name` that is the only proof
+ * when a forge collapses GitHub `triage`/`maintain` into `permission: "read"`.
+ * Everything else — `read`, `none`, and any unrecognized value — fails
+ * closed. */
+const FEEDBACK_AUTHORIZED_PERMISSIONS: ReadonlySet<string> = new Set([
+  "admin",
+  "maintain",
+  "write",
+  "triage",
+  "owner",
+]);
+
+/** #762: `role_name` values that prove triage-or-higher behind a collapsed
+ * `read` permission. Custom roles are deliberately not authorized — an
+ * unrecognizable role cannot prove the bar. */
+const FEEDBACK_AUTHORIZED_ROLE_NAMES: ReadonlySet<string> = new Set([
+  "triage",
+  "triage_plus",
+]);
+
+/** #762: the fail-closed authorization decision for one reaction actor. A
+ * null reading (lookup error, non-200, no usable permission), an unusable or
+ * mismatched response subject, and any permission below the bar are all "not
+ * trusted" — an untrusted reaction stays telemetry. */
+function feedbackActorAuthorized(reading: CollaboratorPermissionReading | null, login: string): boolean {
+  if (reading === null) return false;
+  if (reading.subject === "unusable") return false;
+  if (reading.subject === "named" && reading.subjectLogin !== login.toLowerCase()) return false;
+  if (FEEDBACK_AUTHORIZED_PERMISSIONS.has(reading.permission)) return true;
+  return reading.permission === "read" && FEEDBACK_AUTHORIZED_ROLE_NAMES.has(reading.roleName);
+}
+
+interface RejectionSnapshot {
+  /** The prescription keys a trusted actor has rejected. */
+  keys: ReadonlySet<string>;
+  /** How many prior comments carrying a recoverable prescription were read. */
+  inspected: number;
+  /** How many distinct actors reacted with a negative reaction. */
+  logins: number;
+  /** How many of those actors passed the trusted-actor gate. */
+  trusted: number;
+  /** How many distinct actors exceeded the verification cap and were therefore
+   * never looked up. */
+  overCap: number;
+}
+
+/** #762: read the usefulness feedback for the prescriptions a previous run
+ * published, and turn trusted 👎 into the keys of the prescriptions they
+ * reject.
+ *
+ * The whole read is FAIL-OPEN: any thrown error, an unsupported forge, an
+ * incomplete enumeration, or an incomplete reaction read yields an empty key
+ * set, i.e. exactly today's behavior (every prescription is posted). Nothing
+ * here can skip, resolve, retire, or de-duplicate a finding, and nothing can
+ * change the verdict. Reaction logins and comment bodies are never returned,
+ * rendered, or logged — only counts are. */
+async function readRejectedPrescriptions(
+  api: PublishPlatformApi,
+  marker: string,
+): Promise<RejectionSnapshot> {
+  const none: RejectionSnapshot = { keys: new Set<string>(), inspected: 0, logins: 0, trusted: 0, overCap: 0 };
+  if (typeof api.reviewCommentFeedback !== "function" || typeof api.collaboratorPermission !== "function") return none;
+  try {
+    const reviews = await api.listReviews();
+    // Same managed-review derivation the cleanup path uses (marker-prefixed
+    // bodies, never author matching).
+    const reviewIds = selectManagedReviews(reviews, marker, []).map((review) => review.id);
+    if (reviewIds.length === 0) return none;
+    const listed = await api.listManagedInlineComments(reviewIds);
+    if (!listed.supported || !listed.complete) return none;
+    const candidates: Array<{ id: string; key: string }> = [];
+    for (const comment of listed.comments) {
+      const id = String(comment.id ?? "");
+      if (!/^[1-9]\d*$/.test(id)) continue;
+      // A reply inherits its parent review's id, so only a TOP-LEVEL comment
+      // of ours can carry the prescription region this action published.
+      if (comment.in_reply_to_id != null || comment.inReplyToId != null) continue;
+      const path = comment.path;
+      // A published range is reported with its END as `line` and its start as
+      // `start_line`: reconstruct the exact range the key describes, and skip
+      // the comment rather than guess when any part of it is unusable.
+      const end = comment.line;
+      if (typeof path !== "string" || path === "" || typeof end !== "number" || !Number.isInteger(end) || end <= 0) continue;
+      const start = comment.start_line ?? end;
+      if (!Number.isInteger(start) || start <= 0 || start > end) continue;
+      // Only our own previously published suggestion region is parsed; an
+      // unrecoverable one simply carries no prior prescription.
+      const replacement = recoverPublishedSuggestion(typeof comment.body === "string" ? comment.body : "");
+      if (replacement === null) continue;
+      candidates.push({ id, key: prescriptionKey(path, start, end, replacement) });
+    }
+    if (candidates.length === 0) return none;
+    // Newest first, so the bounded read covers the comments most likely to
+    // still be on screen.
+    candidates.sort((a, b) => (a.id === b.id ? 0 : BigInt(a.id) > BigInt(b.id) ? -1 : 1));
+    const bounded = candidates.slice(0, MAX_FEEDBACK_COMMENT_IDS);
+    const feedback = await api.reviewCommentFeedback(bounded.map((candidate) => candidate.id));
+    if (!feedback.supported || !feedback.complete) return none;
+    const rejections = feedback.records.filter((record) => record.content === "-1");
+    const distinct = [...new Set(rejections.map((record) => record.login))].filter((login) => login !== "");
+    // Untrusted reaction data must never control the request budget: past the
+    // cap, verify nobody and trust no rejection.
+    if (distinct.length > FEEDBACK_ACTOR_CAP) {
+      return { keys: new Set<string>(), inspected: bounded.length, logins: distinct.length, trusted: 0, overCap: distinct.length };
+    }
+    const keys = new Set<string>();
+    let trusted = 0;
+    let self: string | null = null;
+    let selfResolved = false;
+    for (const login of distinct) {
+      if (!selfResolved) {
+        selfResolved = true;
+        try { self = (await api.authenticatedIdentity?.()) ?? null; } catch { self = null; }
+      }
+      // The bot's own reaction is never a rejection signal — it is the
+      // publisher of the prescription, not a reviewer of it.
+      if (self !== null && self.trim().toLowerCase() === login.toLowerCase()) continue;
+      let reading: CollaboratorPermissionReading | null;
+      try { reading = await api.collaboratorPermission(login); }
+      catch { reading = null; }
+      if (!feedbackActorAuthorized(reading, login)) continue;
+      trusted += 1;
+      for (const record of rejections) {
+        if (record.login !== login) continue;
+        const prior = bounded.find((candidate) => candidate.id === record.commentId);
+        if (prior !== undefined) keys.add(prior.key);
+      }
+    }
+    return { keys, inspected: bounded.length, logins: distinct.length, trusted, overCap: 0 };
+  } catch {
+    return none;
+  }
 }
 
 /** Resolve the cleanup flag exactly like `resolve_cleanup_flag`. */
@@ -724,13 +888,33 @@ export async function publishReview(
   // Structured findings → inline comments (both review modes, when enabled).
   let inlineComments: NativeReviewComment[] = [];
   if (input.mode !== "comment" && input.inlineFindings && input.findings !== undefined && input.findings !== null) {
-    inlineComments = buildInlineComments({
+    // #762: usefulness feedback from the prior run's published prescriptions.
+    // Read immediately before the build and fail-open end to end, so the
+    // published review is unchanged when the read is unsupported or uncertain.
+    // A finding set carrying no usable suggestion can never contain a
+    // prescription, so the read (and every request behind it) is skipped.
+    const feedback = hasActionablePrescription(input.findings)
+      ? await readRejectedPrescriptions(api, input.commentMarker)
+      : { keys: new Set<string>(), inspected: 0, logins: 0, trusted: 0, overCap: 0 };
+    const built = buildInlineComments({
       findings: input.findings,
       diffText: options.diffText,
       max: input.inlineFindingsMax,
       forgejoPositions: input.forgejoPositions,
       linkMode: input.upstreamLinkMode,
+      rejectedPrescriptions: feedback.keys,
     });
+    inlineComments = built.comments;
+    if (feedback.inspected > 0) {
+      messages.push(
+        `Inline finding usefulness feedback: inspected ${feedback.inspected} prior comment(s), `
+          + `${feedback.logins} distinct rejection login(s), ${feedback.trusted} trusted rejection(s), `
+          + `${built.suppressed} suppressed prescription(s)`
+          + (feedback.overCap > 0
+            ? `; ${feedback.overCap} login(s) past the verification cap — none verified`
+            : ""),
+      );
+    }
   }
 
   const cleanupEnabled = input.mode !== "comment"

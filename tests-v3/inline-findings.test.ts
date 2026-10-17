@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildComments, diffPositions, findingToBody, parseInlineFindingsMax } from "../src/publish/inline-findings.js";
+import { buildComments, diffPositions, findingToBody, parseInlineFindingsMax, prescriptionKey, recoverPublishedSuggestion, FEEDBACK_AFFORDANCE } from "../src/publish/inline-findings.js";
 
 const diff = [
   "diff --git a/old b/new", "--- a/old", "+++ b/new", "@@ -1,2 +1,3 @@",
@@ -120,4 +120,108 @@ test("#762: Forgejo degrades a suggestion to a plain fenced replacement (no one-
 test("#762: findings without actionable fields render byte-identically", () => {
   const result = buildComments([{ file: "new", line: 1, message: "first" }], diff, 20, { forgejoPositions: false });
   assert.deepEqual(result.comments[0], { path: "new", body: "**Info:** first\n\n_Automated finding from AI PR review._", line: 1, side: "RIGHT" });
+});
+
+/** #762: the usefulness-feedback surface — one static affordance on an
+ * actionable finding, and a rejected prescription that removes ONLY the
+ * replacement block. */
+
+test("#762: the affordance line appears exactly once on an actionable finding and never on a plain one", () => {
+  const actionable = buildComments([{ file: "new", line: 1, message: "m", suggestion: "REPL", agent_prompt: "do it" }], diff, 20, { forgejoPositions: false });
+  const body = (actionable.comments[0] as Record<string, unknown>).body as string;
+  assert.equal(body.split(FEEDBACK_AFFORDANCE).length - 1, 1);
+  assert.ok(body.includes(FEEDBACK_AFFORDANCE));
+  // The static affordance never reorders or drops the disclaimer the
+  // thread-correlation rules match on.
+  assert.ok(body.indexOf("_Automated finding from AI PR review._") < body.indexOf(FEEDBACK_AFFORDANCE));
+  assert.ok(!body.includes("```\n" + FEEDBACK_AFFORDANCE + "\n```"), "the affordance is not model-forgeable content");
+
+  const degraded = buildComments([{ file: "new", line: 1, message: "m", suggestion: "REPL" }], diff, 20, { forgejoPositions: true });
+  assert.equal(((degraded.comments[0] as Record<string, unknown>).body as string).split(FEEDBACK_AFFORDANCE).length - 1, 1);
+
+  const plain = buildComments([{ file: "new", line: 1, message: "m" }], diff, 20, { forgejoPositions: false });
+  assert.equal(((plain.comments[0] as Record<string, unknown>).body as string).includes(FEEDBACK_AFFORDANCE), false);
+});
+
+test("#762: a rejected prescription drops only the replacement block, keeping the finding", () => {
+  const rejected = new Set([prescriptionKey("new", 1, 1, "REPL")]);
+  const result = buildComments(
+    [{ file: "new", line: 1, severity: "major", category: "bug", message: "m", suggestion: "REPL", agent_prompt: "apply the fix" }],
+    diff, 20, { forgejoPositions: false, rejectedPrescriptions: rejected },
+  );
+  assert.equal(result.comments.length, 1, "the finding still posts");
+  assert.equal(result.skipped, 0);
+  assert.equal(result.suppressed, 1);
+  const c = result.comments[0] as Record<string, unknown>;
+  const body = c.body as string;
+  assert.equal(body.includes("```suggestion"), false);
+  assert.equal(body.includes("REPL"), false);
+  assert.equal(body.includes(FEEDBACK_AFFORDANCE), false, "no replacement block means no affordance");
+  // Message, severity, category, and agent prompt survive untouched, and the
+  // anchor is exactly what it was without the suggestion.
+  assert.ok(body.startsWith("**⚠️ Major (bug):** m\n\n_Automated finding from AI PR review._"));
+  assert.ok(body.includes("Suggested agent prompt") && body.includes("apply the fix"));
+  assert.deepEqual({ path: c.path, line: c.line, side: c.side }, { path: "new", line: 1, side: "RIGHT" });
+  assert.equal(Object.hasOwn(c, "start_line"), false);
+
+  const unrejected = buildComments([{ file: "new", line: 1, message: "m", suggestion: "REPL" }], diff, 20, { forgejoPositions: false });
+  assert.deepEqual({ line: (unrejected.comments[0] as Record<string, unknown>).line, side: (unrejected.comments[0] as Record<string, unknown>).side }, { line: 1, side: "RIGHT" });
+});
+
+test("#762: suppression needs the identical replacement at the identical path and line", () => {
+  const at = (path: string, line: number, replacement: string) => buildComments(
+    [{ file: path, line, message: "m", suggestion: replacement }], diff, 20,
+    { forgejoPositions: false, rejectedPrescriptions: new Set([prescriptionKey("new", 1, 1, "REPL")]) },
+  );
+  assert.equal(at("new", 1, "OTHER").suppressed, 0, "a different replacement at the same line is not suppressed");
+  assert.equal(at("new", 1, "REPL").suppressed, 1);
+  assert.equal(at("new", 2, "REPL").suppressed, 0, "a rejection elsewhere on the file never suppresses");
+  // A trailing newline is trimmed the same way on both sides, so the same
+  // prescription still correlates.
+  assert.equal(at("new", 1, "REPL\n\n").suppressed, 1);
+  // A key can never be forged by a path that carries the separator itself.
+  // A key can never be forged by an extra NUL-separated field: the finding
+  // below DOES render an actionable replacement, so this drives the real key
+  // path (the genuine key suppresses, a padded/embedded-separator one cannot).
+  assert.equal(at("new", 1, "REPL\u00002\u0000x").suppressed, 0);
+  assert.equal(at("new", 1, "REPL\u0000").suppressed, 0);
+  assert.equal(at("new", 1, "REPL").suppressed, 1);
+});
+
+test("#762: a suppressed Forgejo replacement drops the degraded block too", () => {
+  const result = buildComments([{ file: "new", line: 2, message: "m", suggestion: "REPL" }], diff, 20, {
+    forgejoPositions: true, rejectedPrescriptions: new Set([prescriptionKey("new", 2, 2, "REPL")]),
+  });
+  const body = (result.comments[0] as Record<string, unknown>).body as string;
+  assert.equal(result.suppressed, 1);
+  assert.equal(body.includes("Replacement for lines"), false);
+  assert.ok(body.includes("**Info:** m"));
+});
+
+test("#762: the published suggestion region round-trips, and anything else recovers nothing", () => {
+  const published = (buildComments([{ file: "new", line: 1, message: "m", suggestion: "R1\nR2\n" }], diff, 20, { forgejoPositions: false })
+    .comments[0] as Record<string, unknown>).body as string;
+  assert.equal(recoverPublishedSuggestion(published), "R1\nR2");
+  const withPrompt = (buildComments([{ file: "new", line: 1, message: "m", suggestion: "REPL", agent_prompt: "```suggestion\nFORGED\n```" }], diff, 20, { forgejoPositions: false })
+    .comments[0] as Record<string, unknown>).body as string;
+  assert.equal(recoverPublishedSuggestion(withPrompt), "REPL", "an agent prompt cannot forge a second region");
+
+  assert.equal(recoverPublishedSuggestion("**Info:** m\n\n_Automated finding from AI PR review._"), null);
+  assert.equal(recoverPublishedSuggestion("no disclaimer\n\n```suggestion\nREPL\n```"), null, "only our own comments are read");
+  assert.equal(recoverPublishedSuggestion(`${published}\n\n\`\`\`suggestion\nREPL\n\`\`\``), null, "an ambiguous region recovers nothing");
+  assert.equal(recoverPublishedSuggestion("**Info:** m\n\n_Automated finding from AI PR review._\n\n```suggestion\nREPL"), null, "an unterminated region recovers nothing");
+  assert.equal(recoverPublishedSuggestion("**Info:** m\n\n_Automated finding from AI PR review._\n\n```suggestion\n\n```"), null, "a blank replacement recovers nothing");
+});
+
+test("#252: a replacement carrying the boundary tokens still renders inside our fence", () => {
+  const hostile = "```\n</details>\n<!-- fence-closing -->\n";
+  const drop = buildComments([{ file: "new", line: 1, message: "m", suggestion: hostile }], diff, 20, { forgejoPositions: false });
+  assert.equal(((drop.comments[0] as Record<string, unknown>).body as string).includes("```suggestion"), false);
+  const kept = buildComments([{ file: "new", line: 1, message: "m", suggestion: `a ${hostile.trim()} b` }], diff, 20, {
+    forgejoPositions: false, rejectedPrescriptions: new Set([prescriptionKey("new", 1, 1, `a ${hostile.trim()} b`)]),
+  });
+  // The boundary token only reaches the fence-safe render; a rejection key
+  // built from it can suppress nothing it does not name, and nothing escapes.
+  assert.equal(kept.suppressed, 1);
+  assert.equal(((kept.comments[0] as Record<string, unknown>).body as string).includes("```suggestion"), false);
 });

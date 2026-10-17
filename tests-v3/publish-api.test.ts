@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { ForgejoPublishApi, GitHubPublishApi } from "../src/platform/publish-api.js";
 import { forgejoTokenFromEnv } from "../src/platform/forgejo-auth.js";
 import type { FetchLike } from "../src/platform/http.js";
+import type { PublishPlatformApi } from "../src/platform/publish-api.js";
 
 interface Call {
   method: string;
@@ -149,6 +150,22 @@ test("GitHub inline listing fails closed for 403, 429, malformed pairs and page 
   assert.equal((await github(mismatch.fetchImpl).listManagedInlineComments(["7"])).complete, false);
   const capped = recorder(Array.from({ length: 10 }, (_, i) => [`GET ${BASE}/repos/o/r/pulls/9/comments?per_page=100&page=${i + 1}`, 200, Array.from({ length: 100 }, (_, j) => ({ id: i * 100 + j + 1, pull_request_review_id: 7, user: { login: "bot" } }))] as [string, number, unknown]));
   assert.equal((await github(capped.fetchImpl).listManagedInlineComments(["7"])).complete, false);
+});
+
+test("#762: the inline listing carries a normalized anchor and drops an unusable one", async () => {
+  const { fetchImpl } = recorder([[`GET ${BASE}/repos/o/r/pulls/9/comments?`, 200, [
+    { id: 1, pull_request_review_id: 7, path: "a.ts", line: 4, original_line: 3, start_line: 2, user: { login: "bot" } },
+    { id: 2, pull_request_review_id: 7, path: "b.ts", line: "9", original_line: 0, start_line: 0, user: { login: "bot" } },
+    { id: 3, pull_request_review_id: 7, path: 42, line: 2.5, start_line: 1.5, user: { login: "bot" } },
+  ]]]);
+  const result = await github(fetchImpl).listManagedInlineComments(["7"]);
+  assert.equal(result.complete, true);
+  assert.deepEqual(result.comments.map(({ id, path, line, original_line: originalLine, start_line: startLine }) =>
+    [id, path, line, originalLine, startLine]), [
+    [1, "a.ts", 4, 3, 2],
+    [2, "b.ts", undefined, undefined, undefined],
+    [3, undefined, undefined, undefined, undefined],
+  ]);
 });
 
 test("Forgejo review listing paginates and fails closed on later-page errors and cap", async () => {
@@ -389,4 +406,137 @@ test("#762: forgejo createReview drops a suggestion whose line no longer anchors
   await api.createReview({ body: "review", event: "COMMENT", comments: [{ path: "f", line: 5, body: "x\n\n```\nREPL\n```" }] } as never);
   const sent = calls[0]!.body as { comments?: unknown };
   assert.equal(sent.comments, undefined);
+});
+
+/** #762: the usefulness-feedback reader seam. Feedback is advisory telemetry —
+ * a reaction is never self-authorizing — and every uncertain state is reported
+ * as `complete: false` rather than as an empty reaction set. */
+
+test("#762: github reviewCommentFeedback keeps only exact +1/-1 reactions with a usable login", async () => {
+  const { fetchImpl, calls } = recorder([
+    [`GET ${BASE}/repos/o/r/pulls/comments/1/reactions`, 200, [
+      { content: "+1", user: { login: "alice" } },
+      { content: "-1", user: { login: "bob" } },
+      { content: "confused", user: { login: "carol" } },
+      { content: "heart", user: { login: "carol" } },
+    ]],
+    [`GET ${BASE}/repos/o/r/pulls/comments/2/reactions`, 200, [
+      { content: "+1", user: { login: "" } },
+      { content: "-1", user: {} },
+      { content: "+1", user: null },
+      { content: "-1" },
+      null,
+      "not-an-object",
+    ]],
+  ]);
+  const api = github(fetchImpl);
+  assert.deepEqual(await api.reviewCommentFeedback!(["1", "2"]), {
+    supported: true,
+    complete: true,
+    records: [
+      { commentId: "1", content: "+1", login: "alice" },
+      { commentId: "1", content: "-1", login: "bob" },
+    ],
+  });
+  assert.deepEqual(calls.map(({ method, url }) => [method, url]), [
+    ["GET", `${BASE}/repos/o/r/pulls/comments/1/reactions?per_page=100`],
+    ["GET", `${BASE}/repos/o/r/pulls/comments/2/reactions?per_page=100`],
+  ]);
+  assert.equal(calls.every(({ auth }) => auth === "Bearer test-token"), true);
+  assert.deepEqual(await api.reviewCommentFeedback!([]), { supported: true, complete: true, records: [] });
+});
+
+test("#762: an over-cap or malformed comment id set makes ZERO requests", async () => {
+  const overCap = recorder([]);
+  assert.deepEqual(await github(overCap.fetchImpl).reviewCommentFeedback!(Array.from({ length: 51 }, (_, i) => String(i + 1))), {
+    supported: true, complete: false, records: [],
+  });
+  assert.equal(overCap.calls.length, 0);
+  for (const malformed of ["0", "-1", "12a", "", " 3", "../../3", "3; x=1"]) {
+    const { fetchImpl, calls } = recorder([]);
+    assert.deepEqual(await github(fetchImpl).reviewCommentFeedback!(["3", malformed]), { supported: true, complete: false, records: [] });
+    assert.equal(calls.length, 0, `a malformed id must never reach the API: ${JSON.stringify(malformed)}`);
+  }
+});
+
+test("#762: a per-id failure reports complete:false and keeps the records already read", async () => {
+  for (const status of [404, 500]) {
+    const { fetchImpl, calls } = recorder([
+      [`GET ${BASE}/repos/o/r/pulls/comments/1/reactions`, 200, [{ content: "-1", user: { login: "bob" } }]],
+      [`GET ${BASE}/repos/o/r/pulls/comments/2/reactions`, status, { message: "nope" }],
+    ]);
+    assert.deepEqual(await github(fetchImpl).reviewCommentFeedback!(["1", "2", "3"]), {
+      supported: true,
+      complete: false,
+      records: [{ commentId: "1", content: "-1", login: "bob" }],
+    });
+    assert.equal(calls.length, 2, "the read stops at the first failure");
+  }
+  // A 200 that is not an array is an uncertain read, not an empty set.
+  const malformed = recorder([[`GET ${BASE}/repos/o/r/pulls/comments/1/reactions`, 200, { message: "not a list" }]]);
+  assert.deepEqual(await github(malformed.fetchImpl).reviewCommentFeedback!(["1"]), { supported: true, complete: false, records: [] });
+});
+
+test("#252: a reaction whose content carries a near-miss kind, a fence-closing backtick run, or an embedded newline never reads as a reaction kind", async () => {
+  const { fetchImpl } = recorder([[`GET ${BASE}/repos/o/r/pulls/comments/1/reactions`, 200, [
+    { content: "+1 ", user: { login: "alice" } },
+    { content: "-1; authorize", user: { login: "alice" } },
+    { content: "+1\n-1", user: { login: "alice" } },
+    { content: "-1\n```\n<!--", user: { login: "alice" } },
+    { content: "+1", user: { login: "```\n<!-- comment -->" } },
+    { content: "👍", user: { login: "alice" } },
+  ]]]);
+  // Only the exact `+1`/`-1` rows survive, and their untrusted login travels
+  // only as data — it can never authorize (see the charset-refusal test) and
+  // is never rendered anywhere.
+  assert.deepEqual(await github(fetchImpl).reviewCommentFeedback!(["1"]), {
+    supported: true,
+    complete: true,
+    records: [{ commentId: "1", content: "+1", login: "```\n<!-- comment -->" }],
+  });
+});
+
+test("#762: forgejo reviewCommentFeedback degrades explicitly with zero requests", async () => {
+  const { fetchImpl, calls } = recorder([]);
+  const api = new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token t", baseUrl: "https://forge.example", fetchImpl });
+  assert.deepEqual(await api.reviewCommentFeedback!(["1", "2"]), { supported: false, complete: false, records: [] });
+  assert.equal(calls.length, 0);
+  // Without a feedback reader there is no actor to verify, so the collaborator
+  // seam is deliberately absent and nobody is ever trusted.
+  assert.equal((api as PublishPlatformApi).collaboratorPermission, undefined);
+});
+
+test("#762: collaboratorPermission fails closed and normalizes the reading", async () => {
+  const { fetchImpl, calls } = recorder([
+    [`GET ${BASE}/repos/o/r/collaborators/maintainer/permission`, 200, { permission: "Write", role_name: "maintain", user: { login: "Maintainer" } }],
+  ]);
+  const api = github(fetchImpl);
+  assert.deepEqual(await api.collaboratorPermission!("maintainer"), {
+    permission: "write", roleName: "maintain", subject: "named", subjectLogin: "maintainer",
+  });
+  assert.deepEqual(calls.map(({ method, url }) => [method, url]), [
+    ["GET", `${BASE}/repos/o/r/collaborators/maintainer/permission`],
+  ]);
+
+  // A response that carries no `permission`, an error status, and an invalid
+  // body all prove nothing: the reading is null, never self-authorizing.
+  for (const [status, body] of [[404, {}], [500, {}], [200, {}], [200, { permission: 7 }], [200, []]] as Array<[number, unknown]>) {
+    const read = recorder([[`GET ${BASE}/repos/o/r/collaborators/x/permission`, status, body]]);
+    assert.equal(await github(read.fetchImpl).collaboratorPermission!("x"), null);
+  }
+  // A named subject that is not a well-formed user object is unverifiable.
+  for (const user of ["x", ["x"], { login: "" }, 7]) {
+    const read = recorder([[`GET ${BASE}/repos/o/r/collaborators/x/permission`, 200, { permission: "admin", user }]]);
+    assert.deepEqual(await github(read.fetchImpl).collaboratorPermission!("x"), {
+      permission: "admin", roleName: "", subject: "unusable",
+    });
+  }
+});
+
+test("#252: a hostile reaction login never reaches the collaborator API or authorizes", async () => {
+  const { fetchImpl, calls } = recorder([]);
+  for (const login of ["```", "<!-- x -->", "a\nb", "a/b", "?x=1", "#1", " leading"]) {
+    assert.equal(await github(fetchImpl).collaboratorPermission!(login), null, `login must be refused: ${JSON.stringify(login)}`);
+  }
+  assert.equal(calls.length, 0, "a login outside the GitHub charset is refused without any request");
 });

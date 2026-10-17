@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   APPROVAL_FAILURE_GUIDANCE,
   evaluateApprovalGuardrails,
+  FEEDBACK_ACTOR_CAP,
   markerReviewResult,
   publishReview,
   renderFindingsSummary,
@@ -12,10 +13,15 @@ import {
   sanitizeForPublication,
 } from "../src/publish/publish.js";
 import { cleanupManagedReviews, resolveSupersededThreads } from "../src/publish/cleanup.js";
+import { buildComments, FEEDBACK_AFFORDANCE } from "../src/publish/inline-findings.js";
+import { enforcementView, normalizeThread } from "../src/context/review-threads.js";
 import type { TrustedOwnerIdentity } from "../src/platform/owner-identity.js";
 import type { ConditionalSectionPresence } from "../src/publish/sanitize.js";
 import { ForgejoPublishApi, forgejoReviewEvent } from "../src/platform/publish-api.js";
 import type {
+  CollaboratorPermissionReading,
+  CommentFeedbackRecord,
+  CommentFeedbackResult,
   NativeReviewRequest,
   PublishCommentRef,
   PublishPlatformApi,
@@ -56,6 +62,10 @@ class MockPublishApi implements PublishPlatformApi {
     alreadyRequestedTeams: [],
   };
 
+  /** #762: the usefulness-feedback seams, assigned per test — an instance that
+   * leaves them undefined models a forge without the capability. */
+  reviewCommentFeedback?: (commentIds: readonly string[]) => Promise<CommentFeedbackResult>;
+  collaboratorPermission?: (login: string) => Promise<CollaboratorPermissionReading | null>;
   constructor(platform: "github" | "forgejo" = "github") { this.platform = platform; }
   async getHeadSha(): Promise<string | null> { return this.head; }
   async listIssueComments(): Promise<PublishCommentRef[]> { return this.comments; }
@@ -1249,4 +1259,414 @@ test("#1093: a sticky with the identical published body but a strictly later tim
   assert.ok(result.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
   assert.ok(!result.messages.some((line) => line.includes("Inline comments:")));
   assert.deepEqual(api.dismissed, []);
+});
+
+// ---------------------------------------------------------------------------
+// #762: the usefulness-feedback surface, end to end. A trusted 👎 on the
+// prior run's identical prescription removes only the replacement block; every
+// uncertain state (unsupported reader, incomplete read, lookup failure, an
+// unauthorized actor, the bot's own reaction) leaves publication exactly as
+// it was, and the verdict is never involved.
+// ---------------------------------------------------------------------------
+
+interface PriorComment {
+  /** Absent when the caller names the id at the use site. */
+  id?: number;
+  path: string;
+  /** The published anchor: for a multi-line prescription this is its END. */
+  line: number;
+  /** Present exactly when the comment was published as a multi-line range. */
+  startLine?: number;
+  body: string;
+  /** Set to model a reply that inherited its parent review's id. */
+  inReplyToId?: number;
+}
+
+/** The comment a previous run of this action published for a finding. */
+function priorPrescription(file: string, line: number, suggestion: string, endLine?: number): PriorComment {
+  const diff = `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -0,0 +1,3 @@\n a\n+b\n+c\n`;
+  const finding: Record<string, unknown> = { file, line, message: "m", suggestion };
+  if (endLine !== undefined) finding.end_line = endLine;
+  const built = buildComments([finding], diff, 20, { forgejoPositions: false });
+  const comment = built.comments[0] as { path: string; body: string; line: number; start_line?: number };
+  return {
+    path: comment.path, line: comment.line, body: comment.body,
+    ...(comment.start_line === undefined ? {} : { startLine: comment.start_line }),
+  };
+}
+
+/** A mock whose feedback seams report the given prior comment and reactions,
+ * counting every request each seam is asked to make. */
+function feedbackApi(options: {
+  prior?: PriorComment;
+  records?: CommentFeedbackRecord[];
+  permissions?: Record<string, CollaboratorPermissionReading | "error">;
+  feedback?: "unsupported" | "incomplete" | "throws";
+  identity?: string | null;
+}): MockPublishApi & { feedbackCalls: number; permissionLookups: string[] } {
+  const api = new MockPublishApi() as MockPublishApi & { feedbackCalls: number; permissionLookups: string[] };
+  api.feedbackCalls = 0;
+  api.permissionLookups = [];
+  api.identity = options.identity === undefined ? "bot" : options.identity;
+  api.reviews = [{ id: 7, body: `${MARKER}\n_Inline findings_`, user: { login: api.identity ?? "bot" } }];
+  api.listManagedInlineComments = async () => ({
+    supported: true,
+    complete: true,
+    comments: options.prior === undefined ? [] : [{
+      id: options.prior.id ?? 501, reviewId: "7", path: options.prior.path, line: options.prior.line,
+      ...(options.prior.startLine === undefined ? {} : { start_line: options.prior.startLine }),
+      ...(options.prior.inReplyToId === undefined ? {} : { in_reply_to_id: options.prior.inReplyToId }),
+      body: options.prior.body, user: { login: api.identity ?? "bot" }, hasReplies: false,
+    }],
+  });
+  api.reviewCommentFeedback = async (ids: readonly string[]) => {
+    api.feedbackCalls += 1;
+    if (options.feedback === "throws") throw new Error("reactions unavailable");
+    if (options.feedback === "unsupported") return { supported: false, complete: false, records: [] };
+    if (options.feedback === "incomplete") return { supported: true, complete: false, records: options.records ?? [] };
+    return { supported: true, complete: true, records: options.records ?? [] };
+  };
+  api.collaboratorPermission = async (login: string) => {
+    api.permissionLookups.push(login);
+    const reading = options.permissions?.[login];
+    if (reading === undefined) return null;
+    if (reading === "error") throw new Error("collaborator lookup failed");
+    return reading;
+  };
+  return api;
+}
+
+const PRIOR = priorPrescription("a.ts", 2, "REPL");
+const ACTIONABLE = [{ file: "a.ts", line: 2, severity: "major", message: "A finding", suggestion: "REPL", agent_prompt: "apply the fix" }];
+
+async function publishActionable(api: MockPublishApi, findings: unknown[] = ACTIONABLE): Promise<{ body: string; messages: string[] }> {
+  const result = await publishReview(
+    input({ mode: "review_comment", inlineFindings: true, findings, cleanupPreviousNativeReviews: "false" }),
+    api,
+    { diffText: DIFF },
+  );
+  assert.equal(result.status, "published");
+  const comment = api.submitted.at(-1)?.comments?.[0];
+  return { body: comment?.body ?? "", messages: result.messages };
+}
+
+test("#762: a trusted 👎 on the prior run's identical prescription suppresses the replacement only", async () => {
+  const api = feedbackApi({
+    prior: { id: 501, ...PRIOR },
+    records: [{ commentId: "501", content: "-1", login: "maintainer" }],
+    permissions: { maintainer: { permission: "write", roleName: "", subject: "absent" } },
+  });
+  const { body, messages } = await publishActionable(api);
+  assert.equal(body.includes("```suggestion"), false);
+  assert.equal(body.includes("REPL"), false);
+  assert.ok(body.startsWith("**⚠️ Major:** A finding"));
+  assert.ok(body.includes("Suggested agent prompt") && body.includes("apply the fix"));
+  assert.equal(body.includes(FEEDBACK_AFFORDANCE), false, "a suppressed prescription offers no affordance");
+  assert.deepEqual(api.submitted.at(-1)!.comments?.[0], { path: "a.ts", line: 2, side: "RIGHT", body });
+  const telemetry = messages.filter((line) => line.includes("usefulness feedback"));
+  assert.equal(telemetry.length, 1);
+  assert.ok(telemetry[0]!.includes("inspected 1 prior comment(s)"));
+  assert.ok(telemetry[0]!.includes("1 trusted rejection(s)"));
+  assert.ok(telemetry[0]!.includes("1 suppressed prescription(s)"));
+  // Telemetry is counts only: no reaction login and no comment body.
+  assert.equal(messages.join("\n").includes("maintainer"), false);
+  assert.equal(messages.join("\n").includes("A finding"), false);
+});
+
+test("#762: only an authorized actor's rejection suppresses; every uncertain actor stays telemetry", async () => {
+  const cases: Array<[string, CollaboratorPermissionReading | "error" | undefined]> = [
+    ["write", { permission: "write", roleName: "", subject: "absent" }],
+    ["admin", { permission: "admin", roleName: "", subject: "absent" }],
+    ["owner", { permission: "owner", roleName: "", subject: "absent" }],
+    ["collapsed-triage", { permission: "read", roleName: "triage", subject: "absent" }],
+    ["named-self", { permission: "write", roleName: "", subject: "named", subjectLogin: "reviewer" }],
+    ["read", { permission: "read", roleName: "", subject: "absent" }],
+    ["none", { permission: "none", roleName: "", subject: "absent" }],
+    ["unknown-value", { permission: "some-future-role", roleName: "", subject: "absent" }],
+    ["lookup-error", "error"],
+    ["no-reading", undefined],
+    ["other-subject", { permission: "admin", roleName: "", subject: "named", subjectLogin: "someone-else" }],
+    ["unusable-subject", { permission: "admin", roleName: "", subject: "unusable" }],
+  ];
+  for (const [label, reading] of cases) {
+    // The trusted-actor bar, restated: an authorized permission (with the
+    // un-collapsed role name when the forge collapsed it) AND a response
+    // subject that either names this actor or names none. A lookup failure,
+    // a missing reading, and an unusable subject are all "not trusted".
+    const suppressing = reading !== undefined && reading !== "error"
+      && reading.subject !== "unusable"
+      && (reading.subject === "absent" || reading.subjectLogin === "reviewer")
+      && (["admin", "maintain", "write", "triage", "owner"].includes(reading.permission)
+        || (reading.permission === "read" && ["triage", "triage_plus"].includes(reading.roleName)));
+    const api = feedbackApi({
+      prior: { id: 501, ...PRIOR },
+      records: [{ commentId: "501", content: "-1", login: "reviewer" }],
+      permissions: reading === undefined ? {} : { reviewer: reading },
+    });
+    const { body, messages } = await publishActionable(api);
+    assert.equal(body.includes("```suggestion"), !suppressing, `${label}: suppression must be ${suppressing}`);
+    const telemetry = messages.find((line) => line.includes("usefulness feedback")) ?? "";
+    assert.ok(telemetry.includes(suppressing ? "1 trusted rejection(s)" : "0 trusted rejection(s)"), `${label}: ${telemetry}`);
+  }
+});
+
+test("#762: the bot's own reaction never suppresses, and a 👍 never does either", async () => {
+  const own = feedbackApi({
+    prior: { id: 501, ...PRIOR },
+    records: [{ commentId: "501", content: "-1", login: "bot" }],
+    permissions: { bot: { permission: "admin", roleName: "", subject: "absent" } },
+  });
+  const selfRejected = await publishActionable(own);
+  assert.equal(selfRejected.body.includes("```suggestion"), true);
+  assert.ok(selfRejected.messages.some((line) => line.includes("0 trusted rejection(s)")));
+
+  const thumbs = feedbackApi({
+    prior: { id: 501, ...PRIOR },
+    records: [{ commentId: "501", content: "+1", login: "maintainer" }],
+    permissions: { maintainer: { permission: "admin", roleName: "", subject: "absent" } },
+  });
+  const liked = await publishActionable(thumbs);
+  assert.equal(liked.body.includes("```suggestion"), true);
+  assert.ok(liked.messages.some((line) => line.includes("0 trusted rejection(s)")));
+});
+
+test("#762: the feedback read is fail-open — an unsupported, incomplete, or throwing read changes nothing", async () => {
+  for (const feedback of ["unsupported", "incomplete", "throws"] as const) {
+    const api = feedbackApi({
+      prior: { id: 501, ...PRIOR },
+      records: [{ commentId: "501", content: "-1", login: "maintainer" }],
+      permissions: { maintainer: { permission: "admin", roleName: "", subject: "absent" } },
+      feedback,
+    });
+    const { body, messages } = await publishActionable(api);
+    assert.ok(body.includes("```suggestion") && body.includes("REPL"), `${feedback}: the prescription still posts`);
+    assert.equal(messages.some((line) => line.includes("usefulness feedback")), false);
+  }
+  // A seam the forge does not implement at all (no reader, no permission read)
+  // leaves the run byte-identical to the pre-#762 behavior.
+  const plain = new MockPublishApi();
+  const result = await publishReview(
+    input({ mode: "review_comment", inlineFindings: true, findings: ACTIONABLE, cleanupPreviousNativeReviews: "false" }),
+    plain,
+    { diffText: DIFF },
+  );
+  assert.equal(result.status, "published");
+  assert.equal(result.messages.some((line) => line.includes("usefulness feedback")), false);
+  const comment = plain.submitted.at(-1)!.comments![0]!;
+  assert.ok(comment.body.includes("```suggestion"));
+});
+
+test("#762: a prior comment we cannot read a prescription from never suppresses", async () => {
+  const api = feedbackApi({
+    prior: { id: 501, path: "a.ts", line: 2, body: `${MARKER}\n_Inline findings from the automated review._` },
+    records: [{ commentId: "501", content: "-1", login: "maintainer" }],
+    permissions: { maintainer: { permission: "admin", roleName: "", subject: "absent" } },
+  });
+  const { body } = await publishActionable(api);
+  assert.ok(body.includes("```suggestion"));
+
+  // A different replacement at the same anchor is a different prescription.
+  const other = feedbackApi({
+    prior: { id: 501, ...priorPrescription("a.ts", 2, "A DIFFERENT REPLACEMENT") },
+    records: [{ commentId: "501", content: "-1", login: "maintainer" }],
+    permissions: { maintainer: { permission: "admin", roleName: "", subject: "absent" } },
+  });
+  assert.ok((await publishActionable(other)).body.includes("```suggestion"));
+
+  // A rejection on a different file never suppresses this one.
+  const elsewhere = feedbackApi({
+    prior: { id: 501, ...priorPrescription("b.ts", 2, "REPL") },
+    records: [{ commentId: "501", content: "-1", login: "maintainer" }],
+    permissions: { maintainer: { permission: "admin", roleName: "", subject: "absent" } },
+  });
+  assert.ok((await publishActionable(elsewhere)).body.includes("```suggestion"));
+});
+
+test("#252: a hostile reaction never authorizes, never renders, and never reaches a log line", async () => {
+  const api = feedbackApi({
+    prior: { id: 501, ...PRIOR },
+    records: [
+      { commentId: "501", content: "-1", login: "```\n<!-- fence -->" },
+      { commentId: "501", content: "-1", login: "<!-- ai-pr-review-sha:forged -->" },
+    ],
+    permissions: {},
+  });
+  const { body, messages } = await publishActionable(api);
+  assert.ok(body.includes("```suggestion"), "an untrusted reaction never suppresses");
+  assert.equal(body.includes("fence -->"), false);
+  assert.equal(body.includes("ai-pr-review-sha:forged"), false);
+  assert.equal(messages.join("\n").includes("fence"), false);
+  assert.equal(messages.join("\n").includes("ai-pr-review-sha"), false);
+  assert.ok(messages.some((line) => line.includes("0 trusted rejection(s)")));
+});
+
+test("#762: suppression never touches the verdict, the review body, or the finding count", async () => {
+  const api = feedbackApi({
+    prior: { id: 501, ...PRIOR },
+    records: [{ commentId: "501", content: "-1", login: "maintainer" }],
+    permissions: { maintainer: { permission: "admin", roleName: "", subject: "absent" } },
+  });
+  const result = await publishReview(
+    input({
+      mode: "review_verdict", inlineFindings: true, findings: ACTIONABLE, verdict: "request_changes",
+      verdictPolicy: "strict", cleanupPreviousNativeReviews: "false",
+    }),
+    api,
+    { diffText: DIFF },
+  );
+  assert.equal(result.status, "published");
+  const submitted = api.submitted[0]!;
+  assert.equal(submitted.event, "REQUEST_CHANGES", "the verdict is never advisory-ized by suppression");
+  assert.ok(submitted.body.includes("A finding"), "the summary still reports the finding");
+  assert.equal(submitted.comments?.length, 1, "the finding is never skipped, deduped, or resolved");
+  const comment = submitted.comments![0]!;
+  assert.equal(comment.line, 2, "the anchor is unchanged");
+  assert.equal(comment.body.includes("```suggestion"), false, "only the replacement is gone");
+});
+
+// ---------------------------------------------------------------------------
+// #762 follow-ups: the range-aware correlation key, the verified-actor cap,
+// and the bounded read.
+// ---------------------------------------------------------------------------
+
+const MULTILINE_REPLACEMENT = "R1\nR2";
+
+/** The exact comment a prior run published for a multi-line (1-2) finding. */
+const PRIOR_RANGE = priorPrescription("a.ts", 1, MULTILINE_REPLACEMENT, 2);
+
+test("#762: a trusted 👎 on a prior MULTI-LINE prescription suppresses the identical re-run", async () => {
+  assert.equal(PRIOR_RANGE.line, 2, "the prior run published the range END as its anchor");
+  assert.equal(PRIOR_RANGE.startLine, 1);
+  const api = feedbackApi({
+    prior: { id: 501, ...PRIOR_RANGE },
+    records: [{ commentId: "501", content: "-1", login: "maintainer" }],
+    permissions: { maintainer: { permission: "write", roleName: "", subject: "absent" } },
+  });
+  const { body, messages } = await publishActionable(api, [
+    { file: "a.ts", line: 1, end_line: 2, severity: "major", message: "A finding", suggestion: MULTILINE_REPLACEMENT },
+  ]);
+  assert.equal(body.includes("```suggestion"), false, "the identical 1-2 prescription is not re-posted");
+  assert.equal(body.includes("R1"), false);
+  assert.ok(body.includes("**⚠️ Major:** A finding"));
+  assert.ok(messages.some((line) => line.includes("1 suppressed prescription(s)")));
+});
+
+test("#762: a prior 1-2 rejection never suppresses a single-line-at-2 finding with the same text", async () => {
+  const api = feedbackApi({
+    prior: { id: 501, ...PRIOR_RANGE },
+    records: [{ commentId: "501", content: "-1", login: "maintainer" }],
+    permissions: { maintainer: { permission: "admin", roleName: "", subject: "absent" } },
+  });
+  const { body } = await publishActionable(api, [
+    { file: "a.ts", line: 2, severity: "major", message: "A finding", suggestion: MULTILINE_REPLACEMENT },
+  ]);
+  assert.ok(body.includes("```suggestion"), "a different published range is a different prescription");
+  assert.ok(body.includes("R1\nR2"));
+});
+
+test("#762: key equality requires identical replacement text over the same range", async () => {
+  const api = feedbackApi({
+    prior: { id: 501, ...PRIOR_RANGE },
+    records: [{ commentId: "501", content: "-1", login: "maintainer" }],
+    permissions: { maintainer: { permission: "admin", roleName: "", subject: "absent" } },
+  });
+  const { body } = await publishActionable(api, [
+    { file: "a.ts", line: 1, end_line: 2, severity: "major", message: "A finding", suggestion: "R1\nDIFFERENT" },
+  ]);
+  assert.ok(body.includes("```suggestion"));
+  assert.ok(body.includes("DIFFERENT"));
+});
+
+test("#762: past the verification cap no actor is looked up and nothing is suppressed", async () => {
+  const logins = Array.from({ length: FEEDBACK_ACTOR_CAP + 1 }, (_, i) => `reactor-${i}`);
+  const permissions: Record<string, CollaboratorPermissionReading> = {};
+  for (const login of logins) permissions[login] = { permission: "admin", roleName: "", subject: "absent" };
+  const api = feedbackApi({
+    prior: { id: 501, ...PRIOR },
+    records: logins.map((login) => ({ commentId: "501", content: "-1", login })),
+    permissions,
+  });
+  const { body, messages } = await publishActionable(api);
+  assert.deepEqual(api.permissionLookups, [], "untrusted reactors can never drive a request");
+  assert.equal(api.feedbackCalls, 1);
+  assert.ok(body.includes("```suggestion"), "an over-cap read trusts nobody (fail-open)");
+  const telemetry = messages.find((line) => line.includes("usefulness feedback")) ?? "";
+  assert.ok(telemetry.includes("0 trusted rejection(s)"), telemetry);
+  assert.ok(telemetry.includes(`${FEEDBACK_ACTOR_CAP + 1} login(s) past the verification cap`), telemetry);
+  assert.equal(telemetry.includes("reactor-0"), false, "telemetry is counts only");
+  // At the cap exactly, the read proceeds.
+  const atCap = feedbackApi({
+    prior: { id: 501, ...PRIOR },
+    records: logins.slice(0, FEEDBACK_ACTOR_CAP).map((login) => ({ commentId: "501", content: "-1", login })),
+    permissions,
+  });
+  await publishActionable(atCap);
+  assert.equal(atCap.permissionLookups.length, FEEDBACK_ACTOR_CAP);
+});
+
+test("#762: a run with no usable suggestion issues zero feedback or permission requests", async () => {
+  const api = feedbackApi({
+    prior: { id: 501, ...PRIOR },
+    records: [{ commentId: "501", content: "-1", login: "maintainer" }],
+    permissions: { maintainer: { permission: "admin", roleName: "", subject: "absent" } },
+  });
+  const nonActionable: unknown[][] = [
+    [],
+    [{ file: "a.ts", line: 2, message: "A finding" }],
+    [{ file: "a.ts", line: 2, message: "m", suggestion: "\n" }],
+    [{ file: "a.ts", line: 2, message: "m", suggestion: 7 }],
+    [{ file: "a.ts", line: 2, message: "m", suggestion: null }],
+  ];
+  for (const findings of nonActionable) {
+    await publishActionable(api, findings);
+    assert.equal(api.feedbackCalls, 0);
+    assert.deepEqual(api.permissionLookups, []);
+  }
+  // An actionable finding in the same run does turn the read back on — and the
+  // pre-check uses exactly the validation the renderer uses, so a
+  // whitespace-only replacement (which validateAction still renders) counts.
+  await publishActionable(api, [{ file: "a.ts", line: 2, message: "m", suggestion: "  " }]);
+  assert.equal(api.feedbackCalls, 1);
+  await publishActionable(api);
+  assert.equal(api.feedbackCalls, 2);
+});
+
+test("#762: a reply that inherited the review id is never a candidate", async () => {
+  for (const inReplyToId of [7, 9001]) {
+    const api = feedbackApi({
+      prior: { id: 501, ...PRIOR, inReplyToId },
+      records: [{ commentId: "501", content: "-1", login: "maintainer" }],
+      permissions: { maintainer: { permission: "admin", roleName: "", subject: "absent" } },
+    });
+    const { body, messages } = await publishActionable(api);
+    assert.ok(body.includes("```suggestion"), `in_reply_to_id ${inReplyToId} must not enter the candidate set`);
+    assert.equal(messages.some((line) => line.includes("usefulness feedback")), false);
+    assert.equal(api.feedbackCalls, 0);
+  }
+});
+
+test("#762: the affordance is not finding content — the deterministic thread message stays clean", async () => {
+  const actionable = buildComments(
+    [{ file: "pr_reviewer/x.py", line: 1, severity: "major", category: "bug", message: "retry drops the separator", suggestion: "REPL" }],
+    "diff --git a/pr_reviewer/x.py b/pr_reviewer/x.py\n--- a/pr_reviewer/x.py\n+++ b/pr_reviewer/x.py\n@@ -0,0 +1,2 @@\n a\n+b\n",
+    20,
+    { forgejoPositions: false },
+  ).comments[0] as { body: string };
+  assert.ok(actionable.body.includes(FEEDBACK_AFFORDANCE), "the affordance still renders for humans");
+  const view = enforcementView([normalizeThread({
+    thread_id: "PRRT_1",
+    path: "pr_reviewer/x.py",
+    line: 1,
+    original_line: 1,
+    resolved: false,
+    outdated: false,
+    comments: [{ id: 1, user: { login: "bot" }, created_at: "2026-09-25T22:32:00Z", updated_at: "2026-09-25T22:32:00Z", body: actionable.body }],
+  })!]);
+  assert.equal(view[0]!.own_finding, true);
+  assert.equal(view[0]!.severity, "major");
+  assert.equal(view[0]!.category, "bug");
+  assert.ok(view[0]!.message.startsWith("retry drops the separator"));
+  assert.equal(view[0]!.message.includes("👍"), false, "the affordance is not finding content");
+  assert.equal(view[0]!.message.includes("not helpful"), false, "the affordance is not finding content");
+  assert.equal(view[0]!.message.includes("this review's verdict"), false);
 });
