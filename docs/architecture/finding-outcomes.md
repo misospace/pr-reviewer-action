@@ -42,13 +42,16 @@ the same discipline as the #762 rejection carry marker:
 | `resolved` | thread resolved while the head **provably** advanced | `forge-thread` |
 | `dismissed` | thread resolved with the head unchanged or unprovable; bounded `reason` (`thread_resolved` / `thread_resolved_head_unverified`) | `forge-thread` |
 | `still_open` | prior finding's thread is still unresolved | `forge-thread` |
-| `unknown` | ledger-tracked identity gone from both findings and observations (lost history) | `prior-ledger` |
+| `unknown` | ledger-tracked identity whose latest status was open, now gone from both findings and observations (lost history) | `prior-ledger` |
 | `feedback` | 👍/👎 reaction tallies from the #762 signal — informational only | `forge-reaction` |
 | `adjudication` | explicit human label (`confirmed_valid_defect`, `confirmed_false_positive`, `valid_but_unhelpful`, `uncertain`) with who/when/provenance | `operator` |
 
 Trust separation is structural: only an `adjudication` event moves the
-adjudicated precision denominator. A resolved thread, a thumbs-down, or a
-vanished comment can change open/resolved/dismissed counts and reaction
+adjudicated precision denominator, and it moves it **per finding** — the
+latest adjudication for an identity (by timestamp, then array order) is its
+label, counted once, so a corrected label replaces the one it corrects
+instead of landing in both denominators. A resolved thread, a thumbs-down, or
+a vanished comment can change open/resolved/dismissed counts and reaction
 tallies, but never an adjudicated label. Forge-derived feedback is always
 `trusted: false`; reactions never resolve, dismiss, or reclassify anything,
 and never touch severity or verdict.
@@ -61,17 +64,22 @@ of the built comments — a finding the anchor validation skipped never
 produces a `reported` event for a comment that does not exist). Within one
 derivation, events are emitted chronologically — prior published state
 first, current review last — and the aggregate reads latest state by event
-timestamp (ties fall back to array order), so a finding re-reported after
-its old thread was resolved is open again. An unprovable thread state
+instant (an unprovable instant sorts oldest; ties fall back to array order),
+so a finding re-reported after its old thread was resolved is open again. An
+unprovable thread state
 (`resolved: null`) emits no resolution claim at all, and "resolved after a
 newer head" is claimed only when both heads are known and differ; the prior
-head comes only from the managed sticky comment's metadata marker, never
-from forge-supplied review metadata.
+head comes only from an **owned** managed sticky comment's metadata marker
+(plus a caller-supplied fallback accepted under the same hex proof rule),
+never from forge-supplied review metadata (see Collection).
 
 With a prior ledger (operator mode), the run's events are merged after the
 ledger events, exact duplicates collapse, the ledger keeps its latest
-`MAX_LEDGER_EVENTS` (1000), and identities the ledger tracked as live that
-are now absent from both findings and observations become `unknown`.
+`MAX_LEDGER_EVENTS` (1000), and an identity becomes `unknown` only when its
+**latest status-bearing** ledger event is still open (by instant, then
+array order — the same latest-wins rule the aggregate uses) and it is now
+absent from both findings and observations. A finding already `resolved` or
+`dismissed` before the run is never re-declared unknown.
 
 ## Collection (Action mode)
 
@@ -92,12 +100,30 @@ and no outcomes. The enumeration itself is forge-agnostic: a forge without
 the collaborator-permission seam (Forgejo) still derives reported/repeated/
 resolution events, with zeroed tallies and degraded thread state.
 
+A *completed* enumeration that proves no managed review of ours exists is a
+**positive** reading of the prior set — provably empty, not uncertain — so
+the first-ever publication on a repository still derives `reported` events
+and writes the artifact. `enumerated: false` is reserved for the fail-closed
+cases: a thrown review read, or an unsupported/incomplete inline-comment
+enumeration.
+
 Identity provenance: an identity marker counts only on a top-level comment
 of a managed review whose author matches the trusted owner identity the
-carry-marker path itself proves (`resolvePublishTrustedOwner`) — the same
-bar the rejection carry marker applies, because `selectManagedReviews`
-matches by body prefix and any repo reader could post a marker-shaped
-comment. Unprovable authors contribute nothing.
+carry-marker path itself proves (`resolvePublishTrustedOwner` — resolved once
+per read and threaded from there into the prior-head read, not once per publish
+run) — the same bar the rejection
+carry marker applies, because `selectManagedReviews` matches by body prefix
+and any repo reader could post a marker-shaped comment. Unprovable authors
+contribute nothing. The prior published head obeys the same bar: only an
+owned managed sticky comment's marker is read, and among owned candidates the
+**newest** one is authoritative — the same selection the sticky upsert uses to
+find its patch target, so a stale legacy sticky is history rather than a
+competing candidate. No candidate, an unresolvable owner, or an unusable head
+on the newest candidate fails closed to "unprovable head" (the thread becomes
+a `thread_resolved_head_unverified` dismissal, never a `resolved`); an
+unusable newest head never falls back to an older comment, and the
+caller-supplied fallback head is accepted only under the same hex proof rule,
+so an unproven value can never stand in for the missing marker.
 
 ## Export and report
 
@@ -106,14 +132,24 @@ serialized ledger: schema, generation metadata, events, aggregate) into the
 run directory — only when the review actually published (a superseded run
 returns before outcomes exist, a failed publication or a failed
 inline-findings submission never carries outcomes) and only when the
-derivation itself proved prior state. The producer runs its own event
+enumeration was proven — either a provably empty prior review list or at
+least one prior observation. The producer runs its own event
 normalizer before serializing, so the artifact always parses under the same
 rules a reader applies, with the endpoint URL stripped from the model field
-(`publicAnalysisEngine`). `aggregateOutcomeEvents` produces the denominator-aware
+(`publicAnalysisEngine`). Past the 1000-event cap the producer drops the
+OLDEST events, the same end readers keep, so an overflowing run exports the
+newest state. `aggregateOutcomeEvents` produces the denominator-aware
 aggregate (unique findings, open/resolved/dismissed/unknown, reaction
 tallies, adjudicated counts and precision — `null` when no adjudication pair
-exists), and `renderOutcomeReportMarkdown` renders a minimal operator report
+exists, and the latest adjudication per finding counted once), and
+`renderOutcomeReportMarkdown` renders a minimal operator report
 (counts only: no paths, no message text, no logins).
+
+Reader side: `parseOutcomeLedger` is fail-closed (one bad event, wrong
+schema, or unparseable generation metadata nulls the whole ledger, and the
+1000-event cap applies) and it **recomputes** the aggregate from the events
+it validated instead of trusting the serialized counts, so a tampered or
+stale `aggregate` can never reach a reader.
 
 Privacy: events carry digests, counts, and bounded metadata only — no
 finding message text, no reaction logins, no review content; free-text

@@ -22,6 +22,7 @@ import {
   normalizeOutcomeEvent,
   parseOutcomeLedger,
   serializeOutcomeLedger,
+  type AdjudicationLabel,
   type OutcomeEvent,
 } from "../src/outcomes/schema.js";
 
@@ -346,8 +347,19 @@ test("#1027 ledger: fail-closed parse and stable round-trip", () => {
   assert.equal(parseOutcomeLedger(JSON.stringify({ ...ledger, schema: "finding-outcomes/v2" })), null);
   assert.equal(parseOutcomeLedger(JSON.stringify({ ...ledger, events: [{ finding_id: "nope" }] })), null);
   assert.equal(parseOutcomeLedger(JSON.stringify({ ...ledger, generated_at: "nope" })), null);
-  assert.equal(parseOutcomeLedger(JSON.stringify({ ...ledger, aggregate: null })), null);
   assert.equal(parseOutcomeLedger(""), null);
+  // #1027: the serialized aggregate is never trusted. A tampered or stale one
+  // is recomputed from the events the reader will actually see.
+  const tampered = parseOutcomeLedger(JSON.stringify({
+    ...ledger,
+    aggregate: { unique_findings: 99, open: 99, resolved: 99, dismissed: 99, unknown: 99, reactions: { helpful: 9, not_helpful: 9 }, adjudicated: { confirmed_valid_defect: 7, confirmed_false_positive: 3, valid_but_unhelpful: 0, uncertain: 0, precision: 0.7 } },
+  }))!;
+  assert.deepEqual(tampered.aggregate, aggregateOutcomeEvents(events));
+  assert.equal(tampered.aggregate.unique_findings, 1);
+  assert.equal(tampered.aggregate.adjudicated.precision, null);
+  // A missing or garbage aggregate is simply recomputed, never fatal.
+  assert.deepEqual(parseOutcomeLedger(JSON.stringify({ ...ledger, aggregate: null }))!.aggregate, aggregateOutcomeEvents(events));
+  assert.deepEqual(parseOutcomeLedger(JSON.stringify({ ...ledger, aggregate: { unique_findings: "nope" } }))!.aggregate, aggregateOutcomeEvents(events));
 });
 
 test("#1027 buildComments: identity marker appended exactly once per posted comment", async () => {
@@ -530,6 +542,53 @@ test("#1027 publish integration: unsupported or incomplete reads degrade to no o
   assert.equal(legacy.status, "published");
   assert.equal(legacy.outcomes, undefined);
   assert.equal(legacy.messages.some((message) => message.startsWith("Finding outcomes:")), false);
+  // The fail-closed side must not regress: an incomplete enumeration is an
+  // UNCERTAIN prior even when this run's own finding would otherwise post a
+  // `reported` event, so no artifact is produced.
+  const postable = { file: "a.ts", line: 2, severity: "major", category: "bug", message: "unchecked null deref" };
+  const diff = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,1 +1,2 @@\n old\n+new line\n";
+  const incompletePosting = await publishReview(
+    { ...input, findings: [postable] },
+    { ...base, listManagedInlineComments: async () => ({ supported: true, complete: false, comments: [] }) } as never,
+    { diffText: diff },
+  );
+  assert.equal(incompletePosting.status, "published");
+  assert.equal(incompletePosting.outcomes, undefined);
+  // The same finding with a COMPLETE enumeration does produce the artifact, so
+  // the assertion above is about the enumeration, not about posting.
+  const completePosting = await publishReview(
+    { ...input, findings: [postable] },
+    { ...base, listManagedInlineComments: async () => ({ supported: true, complete: true, comments: [] }) } as never,
+    { diffText: diff },
+  );
+  assert.deepEqual(parseOutcomeLedger(completePosting.outcomes!)!.events.map((event) => event.kind), ["reported"]);
+});
+
+test("#1027 publishWith writes the artifact on a repository with no prior review at all", async () => {
+  const { mkdtempSync, existsSync, readFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { publishWith } = await import("../src/run/entrypoints.js");
+  const currentRecord = findingRecord({ file: "a.ts", line: 2 });
+  const diff = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,1 +1,2 @@\n old\n+new line\n";
+  // A completed enumeration that finds NO managed review of ours proves the
+  // prior set is empty — a positive reading, not an uncertain one. The
+  // first-ever publication on a repository must still write the artifact.
+  const api = { ...outcomesFake({ platform: "forgejo", comments: [] }), listReviews: async () => [] };
+  const seam = { api, platform: "forgejo", diffProvider: async () => diff };
+  const runDir = mkdtempSync(join(tmpdir(), "outcomes-empty-prior-"));
+  try {
+    const exit = await publishWith(publishInputFor({ findings: [currentRecord] }) as never, seam as never, runDir);
+    assert.equal(exit, 0);
+    const artifact = join(runDir, "finding-outcomes.json");
+    assert.equal(existsSync(artifact), true);
+    const ledger = parseOutcomeLedger(readFileSync(artifact, "utf8"))!;
+    assert.deepEqual(ledger.events.map((event) => event.kind), ["reported"]);
+    assert.equal(ledger.aggregate.unique_findings, 1);
+    assert.equal(ledger.aggregate.open, 1);
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
+  }
 });
 
 test("#1027 publishWith writes the artifact into the run dir; nothing without a run dir", async () => {
@@ -610,6 +669,10 @@ test("#1027 publishWith writes the artifact into the run dir; nothing without a 
 function outcomesFake(options: {
   comments?: Array<{ id: number; body: string; user?: { login: string } | null }>;
   stickyBody?: string;
+  /** Issue comments (sticky candidates) in the order the forge returns them
+   * (oldest-first); `id` defaults to the array position, `user` to the trusted
+   * owner — the only author the prior published head may be read from. */
+  stickyComments?: Array<{ body: string; id?: number; updated_at?: string; user?: { login: string } | null }>;
   threadStates?: { supported: boolean; complete: boolean; threads: Array<{ threadId: string; resolved: boolean; firstCommentId: string }> } | null;
   feedbackRecords?: Array<{ commentId: string; content: "+1" | "-1"; login: string }>;
   submissionOk?: boolean;
@@ -618,10 +681,18 @@ function outcomesFake(options: {
   head?: string;
 }): Record<string, unknown> {
   const MARKER = "<!-- ai-pr-review -->";
+  const sticky = options.stickyComments !== undefined
+    ? options.stickyComments.map((comment, index) => ({
+      id: comment.id ?? index + 1,
+      ...(comment.updated_at === undefined ? {} : { updated_at: comment.updated_at }),
+      body: comment.body,
+      user: comment.user === undefined ? { login: "bot" } : comment.user,
+    }))
+    : options.stickyBody === undefined ? [] : [{ id: 1, body: options.stickyBody, user: { login: "bot" } }];
   return {
     platform: options.platform ?? "github",
     getHeadSha: async () => options.head ?? "b".repeat(40),
-    listIssueComments: async () => options.stickyBody === undefined ? [] : [{ id: 1, body: options.stickyBody }],
+    listIssueComments: async () => sticky,
     upsertStickyComment: async () => ({ ok: true, commentId: 5, updatedAt: "now" }),
     listReviews: async () => [{ id: 500, body: `${MARKER}\nreview`, user: { login: "bot" }, state: "COMMENT" }],
     listManagedInlineComments: async () => ({
@@ -723,6 +794,102 @@ test("#1027: prior published head comes from the managed sticky comment's metada
   assert.equal(unknownLedger.events.find((event) => event.kind === "dismissed")!.reason, "thread_resolved_head_unverified");
 });
 
+test("#1027: the prior published head is read only from an OWNED managed sticky comment", async () => {
+  const { publishReview } = await import("../src/publish/publish.js");
+  const digest = findingIdentityFromRecord(findingRecord())!;
+  const priorBody = `**Major (bug):** unchecked null deref\n\n${INLINE_DISCLAIMER}\n\n<!-- pr-reviewer:finding-id:v1:${digest} -->`;
+  const resolvedThread = { supported: true as const, complete: true as const, threads: [{ threadId: "t1", resolved: true, firstCommentId: "77" }] };
+  const run = (stickyComments: Array<{ body: string; id?: number; updated_at?: string; user?: { login: string } }>) =>
+    publishReview(
+      publishInputFor({}) as never,
+      outcomesFake({ comments: [{ id: 77, body: priorBody }], stickyComments, threadStates: resolvedThread }) as never,
+      { diffText: "" },
+    );
+  // A foreign contributor's marker-shaped sticky must not move the head. The
+  // forged one comes FIRST and claims the CURRENT head, which would have made
+  // the prior head equal and turned the resolution into a dismissal.
+  const owned = await run([
+    { body: STICKY_WITH_HEAD("b".repeat(40)), user: { login: "pr-author" } },
+    { body: STICKY_WITH_HEAD("a".repeat(40)) },
+  ]);
+  const ownedLedger = parseOutcomeLedger(owned.outcomes!)!;
+  assert.equal(ownedLedger.aggregate.resolved, 1, "the head comes from the owned sticky");
+  assert.equal(ownedLedger.aggregate.dismissed, 0);
+  // Only a foreign sticky: the head is unprovable, so a resolved thread is an
+  // explicit head-unverified dismissal — never a `resolved` code claim.
+  const foreignOnly = await run([{ body: STICKY_WITH_HEAD("a".repeat(40)), user: { login: "pr-author" } }]);
+  const foreignLedger = parseOutcomeLedger(foreignOnly.outcomes!)!;
+  assert.equal(foreignLedger.events.some((event) => event.kind === "resolved"), false);
+  assert.equal(foreignLedger.aggregate.dismissed, 1);
+  assert.equal(foreignLedger.events.find((event) => event.kind === "dismissed")!.reason, "thread_resolved_head_unverified");
+  // Two OWNED stickies that disagree: the NEWEST owned publication is the
+  // authoritative one, exactly as the sticky upsert picks its patch target —
+  // the older one is history, not a competing candidate (requiring global
+  // agreement would leave a repo carrying a legacy sticky unable to resolve
+  // anything, ever). The OLDER candidate carries the CURRENT head here, so
+  // picking it by mistake yields a dismissal, not a resolution: the two
+  // candidate orders are distinguishable.
+  const twoOwned = await run([
+    { body: STICKY_WITH_HEAD("b".repeat(40)) },
+    { body: STICKY_WITH_HEAD("a".repeat(40)) },
+  ]);
+  const twoOwnedLedger = parseOutcomeLedger(twoOwned.outcomes!)!;
+  assert.equal(twoOwnedLedger.aggregate.resolved, 1, "the newest owned sticky is authoritative");
+  assert.equal(twoOwnedLedger.aggregate.dismissed, 0);
+  // `updated_at` is the primary key of that selection, ahead of the id and the
+  // list order: the LIVE publication here is the second comment (a later run
+  // re-published the sticky, so its `updated_at` is the newest) and it carries
+  // the current head, while the older comment still shows the previous head. A
+  // first-in-list or id-first selection reads the stale one and would claim the
+  // head advanced.
+  const newestByUpdate = await run([
+    { body: STICKY_WITH_HEAD("a".repeat(40)), id: 1, updated_at: "2026-10-01T00:00:00Z" },
+    { body: STICKY_WITH_HEAD("b".repeat(40)), id: 2, updated_at: "2026-10-05T00:00:00Z" },
+  ]);
+  const editedLedger = parseOutcomeLedger(newestByUpdate.outcomes!)!;
+  assert.equal(editedLedger.aggregate.dismissed, 1, "updated_at decides over id and list order");
+  assert.equal(editedLedger.aggregate.resolved, 0);
+  // An unusable head on the newest owned candidate fails closed instead of
+  // falling back to an older comment.
+  const unusableNewest = await run([
+    { body: STICKY_WITH_HEAD("a".repeat(40)) },
+    { body: "<!-- ai-pr-review -->\nreview body without metadata" },
+  ]);
+  const unusableLedger = parseOutcomeLedger(unusableNewest.outcomes!)!;
+  assert.equal(unusableLedger.events.some((event) => event.kind === "resolved"), false);
+  assert.equal(unusableLedger.events.find((event) => event.kind === "dismissed")!.reason, "thread_resolved_head_unverified");
+  // Owned stickies that AGREE are not ambiguous.
+  const agreeing = await run([
+    { body: STICKY_WITH_HEAD("a".repeat(40)) },
+    { body: STICKY_WITH_HEAD("a".repeat(40)) },
+  ]);
+  assert.equal(parseOutcomeLedger(agreeing.outcomes!)!.aggregate.resolved, 1);
+  // The caller-provided fallback is held to the same proof rule as the read:
+  // an unprovable value may not stand in for the missing marker and turn a
+  // head-unverified dismissal into a "resolved after a newer head" claim.
+  const unprovenFallback = await publishReview(
+    publishInputFor({ priorHeadSha: "not-a-sha" }) as never,
+    outcomesFake({
+      comments: [{ id: 77, body: priorBody }],
+      threadStates: { supported: true, complete: true, threads: [{ threadId: "t1", resolved: true, firstCommentId: "77" }] },
+    }) as never,
+    { diffText: "" },
+  );
+  const fallbackLedger = parseOutcomeLedger(unprovenFallback.outcomes!)!;
+  assert.equal(fallbackLedger.events.some((event) => event.kind === "resolved"), false);
+  assert.equal(fallbackLedger.events.find((event) => event.kind === "dismissed")!.reason, "thread_resolved_head_unverified");
+  // A hex fallback is still usable when no sticky comment exists at all.
+  const provenFallback = await publishReview(
+    publishInputFor({ priorHeadSha: "a".repeat(40) }) as never,
+    outcomesFake({
+      comments: [{ id: 77, body: priorBody }],
+      threadStates: { supported: true, complete: true, threads: [{ threadId: "t1", resolved: true, firstCommentId: "77" }] },
+    }) as never,
+    { diffText: "" },
+  );
+  assert.equal(parseOutcomeLedger(provenFallback.outcomes!)!.aggregate.resolved, 1);
+});
+
 test("#1027: a foreign-authored managed comment mints no outcome identity", async () => {
   const { publishReview } = await import("../src/publish/publish.js");
   const digest = findingIdentityFromRecord(findingRecord())!;
@@ -737,7 +904,6 @@ test("#1027: a foreign-authored managed comment mints no outcome identity", asyn
   // would produce a resolved event; the bar must keep the ledger empty of
   // prior-state events entirely.
   assert.ok(result.outcomes === undefined, "no provable prior, no outcomes");
-  assert.ok(api.resolveTrustedOwner !== undefined);
 });
 
 test("#1027: a Forgejo-shaped run still derives reported/repeated without reaction or thread seams", async () => {
@@ -770,6 +936,118 @@ test("#1027: outcomes are dropped when the inline comments were never published"
     { diffText: "" },
   );
   assert.equal(commentMode.outcomes, undefined);
+});
+
+test("#1027 reconcile: lost history reads the LATEST status-bearing ledger event", () => {
+  const identity = "a".repeat(64);
+  const T1 = "2026-10-01T00:00:00.000Z";
+  const T2 = "2026-10-02T00:00:00.000Z";
+  const ledgerEvent = (kind: OutcomeEvent["kind"], at: string): OutcomeEvent => ({
+    finding_id: identity,
+    kind,
+    at,
+    head_sha: HEAD_A,
+    route: null,
+    model: null,
+    provenance: kind === "reported" || kind === "repeated" ? "current-review" : "forge-thread",
+  });
+  const unknownIds = (events: OutcomeEvent[]): string[] =>
+    events.filter((event) => event.kind === "unknown").map((event) => event.finding_id);
+  const derive = (priorLedger: OutcomeEvent[]): OutcomeEvent[] =>
+    deriveOutcomeEvents({ postedIdentities: [], prior: [], priorHeadSha: null, currentHeadSha: HEAD_B, ...META, priorLedger });
+  // Reported, then resolved: the finding was accounted for, so its absence
+  // from this run is NOT lost history.
+  assert.deepEqual(unknownIds(derive([ledgerEvent("reported", T1), ledgerEvent("resolved", T2)])), []);
+  // Same history in reversed array order: the timestamp decides, not the index.
+  assert.deepEqual(unknownIds(derive([ledgerEvent("resolved", T2), ledgerEvent("reported", T1)])), []);
+  // Still open at the latest status — exactly one unknown, either order.
+  assert.deepEqual(unknownIds(derive([ledgerEvent("reported", T1), ledgerEvent("still_open", T2)])), [identity]);
+  assert.deepEqual(unknownIds(derive([ledgerEvent("still_open", T2), ledgerEvent("reported", T1)])), [identity]);
+  // A dismissal before the run is closed, not lost either.
+  assert.deepEqual(unknownIds(derive([ledgerEvent("dismissed", T1), ledgerEvent("reported", T2)])), [identity]);
+  // Equal instants fall back to array order (last wins).
+  assert.deepEqual(unknownIds(derive([ledgerEvent("reported", AT), ledgerEvent("resolved", AT)])), []);
+  assert.deepEqual(unknownIds(derive([ledgerEvent("resolved", AT), ledgerEvent("reported", AT)])), [identity]);
+  // Instants compare as instants: `2026-10-01T23:00:00-05:00` IS 04:00Z on the
+  // 2nd, so the resolution really is the latest status and nothing is lost —
+  // even though its text sorts BEFORE the earlier-in-the-day UTC instant.
+  assert.deepEqual(unknownIds(derive([
+    ledgerEvent("reported", "2026-10-02T01:00:00Z"),
+    ledgerEvent("resolved", "2026-10-01T23:00:00-05:00"),
+  ])), []);
+});
+
+test("#1027 aggregate: adjudication counts the LATEST label per finding, exactly once", () => {
+  const identity = "b".repeat(64);
+  const T1 = "2026-10-01T00:00:00.000Z";
+  const T2 = "2026-10-02T00:00:00.000Z";
+  const adjudicated = (findingId: string, label: AdjudicationLabel, at: string): OutcomeEvent => ({
+    finding_id: findingId,
+    kind: "adjudication",
+    at,
+    head_sha: null,
+    route: null,
+    model: null,
+    provenance: "operator",
+    label,
+    actor: "maintainer",
+  });
+  // Corrected over time: false_positive@t1 → valid@t2 is ONE finding, and the
+  // correction replaces the label it corrects (never 50% precision).
+  const corrected = aggregateOutcomeEvents([
+    adjudicated(identity, "confirmed_false_positive", T1),
+    adjudicated(identity, "confirmed_valid_defect", T2),
+  ]);
+  assert.equal(corrected.unique_findings, 1);
+  assert.equal(corrected.adjudicated.confirmed_valid_defect, 1);
+  assert.equal(corrected.adjudicated.confirmed_false_positive, 0);
+  assert.equal(corrected.adjudicated.precision, 1);
+  // Out-of-order array: the timestamp decides.
+  assert.equal(
+    aggregateOutcomeEvents([
+      adjudicated(identity, "confirmed_valid_defect", T2),
+      adjudicated(identity, "confirmed_false_positive", T1),
+    ]).adjudicated.precision,
+    1,
+  );
+  // Two identical labels for one finding are still one finding.
+  const duplicated = aggregateOutcomeEvents([
+    adjudicated(identity, "confirmed_valid_defect", AT),
+    adjudicated(identity, "confirmed_valid_defect", AT),
+  ]);
+  assert.equal(duplicated.unique_findings, 1);
+  assert.equal(duplicated.adjudicated.confirmed_valid_defect, 1);
+  assert.equal(duplicated.adjudicated.precision, 1);
+  // Distinct findings still contribute one label each.
+  assert.equal(
+    aggregateOutcomeEvents([
+      adjudicated(identity, "confirmed_valid_defect", AT),
+      adjudicated("c".repeat(64), "confirmed_false_positive", AT),
+    ]).adjudicated.precision,
+    0.5,
+  );
+  // Resolution and reactions move status/reaction counts, never the
+  // adjudicated numbers.
+  const noisy = aggregateOutcomeEvents([
+    adjudicated(identity, "confirmed_valid_defect", AT),
+    { finding_id: identity, kind: "resolved", at: AT, head_sha: HEAD_B, route: null, model: null, provenance: "forge-thread" },
+    { finding_id: identity, kind: "feedback", at: AT, head_sha: null, route: null, model: null, provenance: "forge-reaction", signal: "not_helpful", count: 5, trusted: false },
+  ]);
+  assert.equal(noisy.resolved, 1);
+  assert.equal(noisy.reactions.not_helpful, 5);
+  assert.equal(noisy.adjudicated.confirmed_valid_defect, 1);
+  assert.equal(noisy.adjudicated.confirmed_false_positive, 0);
+  assert.equal(noisy.adjudicated.precision, 1);
+  // Instants are compared as instants, not as raw text: an offset-bearing
+  // timestamp later in the day must still win over an earlier UTC one.
+  const offsetCorrected = aggregateOutcomeEvents([
+    // 2026-10-01T23:00:00-05:00 IS 2026-10-02T04:00Z, so this correction is the
+    // LATER event even though its text sorts BEFORE the 01:00Z one.
+    adjudicated(identity, "confirmed_valid_defect", "2026-10-01T23:00:00-05:00"),
+    adjudicated(identity, "confirmed_false_positive", "2026-10-02T01:00:00Z"),
+  ]);
+  assert.equal(offsetCorrected.adjudicated.confirmed_valid_defect, 1);
+  assert.equal(offsetCorrected.adjudicated.precision, 1);
 });
 
 test("#1027: the identity marker never reaches the review-thread corpus or the extracted finding fields", async () => {

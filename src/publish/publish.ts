@@ -26,7 +26,7 @@ import { parseFindingIdentityMarker } from "../outcomes/identity.js";
 import { deriveOutcomeEvents, type PriorFindingObservation } from "../outcomes/reconcile.js";
 import { aggregateOutcomeEvents } from "../outcomes/report.js";
 import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, retireManagedInlineComments, resolvePublishTrustedOwner, selectManagedReviews, type CleanupLog } from "./cleanup.js";
-import { ownerMatchesIdentity } from "../platform/owner-identity.js";
+import { ownerMatchesIdentity, type TrustedOwnerIdentity } from "../platform/owner-identity.js";
 import { strictReviewResult } from "../enforcement/verdict-policy.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
 import { COVERAGE_NOTICE_MAX_ITEMS, type PartialCoverage } from "../tools/coverage.js";
@@ -581,7 +581,15 @@ async function readFeedbackState(
     // Same managed-review derivation the cleanup path uses (marker-prefixed
     // bodies, never author matching).
     const reviewIds = selectManagedReviews(reviews, marker, []).map((review) => review.id);
-    if (reviewIds.length === 0) return none;
+    // #1027: an enumeration that COMPLETED and proves no managed review of
+    // ours exists is a positive reading of the prior set — provably empty —
+    // not an uncertain one. Only a thrown read or an
+    // unsupported/incomplete inline-comment enumeration is
+    // `enumerated: false`. The first-ever publication on a repository must
+    // still derive its `reported` events and write the artifact; treating
+    // "no prior" as "no proof" made the whole contract invisible exactly
+    // where it has the least prior state to reason about.
+    if (reviewIds.length === 0) return { snapshot: noneSnapshot, observations: [], enumerated: true, priorHeadSha: null };
     const listed = await api.listManagedInlineComments(reviewIds);
     if (!listed.supported || !listed.complete) return none;
     const candidates: Array<{ id: string; key: string | null; identity: string | null; path: string | null; user: { id?: number | string; login?: string } | null }> = [];
@@ -776,8 +784,9 @@ function tallyReactions(records: readonly { commentId: string; content: "+1" | "
  *   lazily, at most once) — the same bar the rejection carry marker applies,
  *   because `selectManagedReviews` matches by body prefix and any repo reader
  *   can post a marker-shaped comment.
- * - The prior head comes only from the managed sticky comment's metadata
- *   marker (action-owned state), never from forge-supplied review metadata.
+ * - The prior head comes only from an OWNED managed sticky comment's metadata
+ *   marker (action-owned state, proven by the same trusted owner), never from
+ *   forge-supplied review metadata.
  *
  * The thread-state query and the sticky read are the new requests this
  * feature adds, both made only when identity-bearing observations survive
@@ -807,7 +816,7 @@ async function collectOutcomeObservations(
     });
   }
   if (observations.length === 0) return { observations, priorHeadSha: null };
-  const priorHeadSha = await readPriorPublishedHead(api, marker);
+  const priorHeadSha = await readPriorPublishedHead(api, marker, trustedOwner ?? null);
   if (typeof api.reviewThreadStates !== "function") return { observations, priorHeadSha };
   try {
     const states = await api.reviewThreadStates(reviewIds);
@@ -825,23 +834,61 @@ async function collectOutcomeObservations(
 }
 
 /** #1027: the head sha of the prior published review, read from the managed
- * sticky comment's metadata marker (the same marker the precheck reads). A
- * missing marker, an unparseable body, or a non-hex value yields null — the
- * reconcile layer then refuses to claim "resolved after a newer head". */
-async function readPriorPublishedHead(api: PublishPlatformApi, marker: string): Promise<string | null> {
+ * sticky comment's metadata marker (the same marker the precheck reads).
+ *
+ * Provenance, not body text: a marker-shaped sticky comment is visible to
+ * every reader of the repository, so the head counts ONLY on a comment the
+ * trusted owner identity (already resolved once by the caller) proves this
+ * action authored. Without that bar a foreign contributor could forge a
+ * `head_sha` and turn a head-unverified `dismissed` into a `resolved`.
+ *
+ * Selection is the same policy the sticky upsert uses to find the live
+ * publication (`upsertStickyComment` in `src/platform/publish-api.ts`): among
+ * comments this owner proved it authored, the NEWEST one is the authoritative
+ * publication and an older one — a legacy-marker comment, or one left behind
+ * by a marker change — is history, not a competing candidate. (Requiring
+ * global agreement instead would silently degrade every resolved thread to
+ * `thread_resolved_head_unverified` on any repository that still carries an
+ * older owned sticky.) A missing marker, an unparseable body, a non-hex value,
+ * an unprovable owner, or a thrown read all yield null, and an unusable head on
+ * the newest owned candidate never falls back to an older one. */
+async function readPriorPublishedHead(
+  api: PublishPlatformApi,
+  marker: string,
+  owner: TrustedOwnerIdentity | null,
+): Promise<string | null> {
+  if (owner === null) return null;
   try {
     const comments = await api.listIssueComments();
+    let newest: { updatedAt: string; id: string; body: string } | null = null;
     for (const comment of comments) {
+      if (!ownerMatchesIdentity(comment.user, owner)) continue;
       const body = typeof comment.body === "string" ? comment.body : "";
       if (!isManagedBody(body, marker)) continue;
-      const metadata = parseMetadata(body);
-      const head = metadata?.head_sha;
-      return typeof head === "string" && /^[0-9a-f]{1,64}$/.test(head) ? head : null;
+      const updatedAt = typeof comment.updated_at === "string" ? comment.updated_at : "";
+      const id = String(comment.id ?? "");
+      if (newest === null || newerPublishedComment(updatedAt, id, newest.updatedAt, newest.id)) {
+        newest = { updatedAt, id, body };
+      }
     }
-    return null;
-  } catch {
-    return null;
-  }
+    if (newest === null) return null;
+    const head = parseMetadata(newest.body)?.head_sha;
+    return typeof head === "string" && /^[0-9a-f]{1,64}$/.test(head) ? head : null;
+  } catch { return null; }
+}
+
+/** Order two managed sticky candidates newest-first: `updated_at` decides,
+ * and a numeric comment id breaks the tie deterministically (ids only compare
+ * when both are decimal, so an unusable id never decides anything). */
+function newerPublishedComment(
+  updatedAt: string,
+  id: string,
+  bestUpdatedAt: string,
+  bestId: string,
+): boolean {
+  if (updatedAt !== bestUpdatedAt) return updatedAt > bestUpdatedAt;
+  const numeric = /^[1-9]\d*$/;
+  return numeric.test(id) && numeric.test(bestId) ? BigInt(id) > BigInt(bestId) : false;
 }
 
 /** Resolve the cleanup flag exactly like `resolve_cleanup_flag`. */
@@ -1184,9 +1231,15 @@ export async function publishReview(
         reactions: observation.reactions,
       }));
       if (feedbackState.enumerated && (prior.length > 0 || postedIdentities.length > 0)) {
-        // The prior head: the managed sticky comment's metadata marker
-        // (proven action state), falling back to the caller-provided value.
-        const priorHeadSha = feedbackState.priorHeadSha ?? input.priorHeadSha ?? null;
+        // The prior head: the OWNED managed sticky comment's metadata marker
+        // (proven action state). The caller-provided fallback is accepted only
+        // under the SAME proof rule — an unvalidated value would turn "head
+        // unprovable" into the strong "the code was fixed" claim, which is
+        // exactly the outcome the fail-closed read exists to withhold.
+        const fallback = typeof input.priorHeadSha === "string" && /^[0-9a-f]{1,64}$/.test(input.priorHeadSha)
+          ? input.priorHeadSha
+          : null;
+        const priorHeadSha = feedbackState.priorHeadSha ?? fallback;
         const events = deriveOutcomeEvents({
           postedIdentities,
           prior,
@@ -1199,21 +1252,27 @@ export async function publishReview(
         if (events.length > 0) {
           // The producer runs its own normalizer before serialization, so the
           // artifact always parses under the same rules a reader applies.
+          // Past the cap the OLDEST events are dropped (the newest state is
+          // what readers aggregate), matching `MAX_LEDGER_EVENTS` and the
+          // reader-side cap — a run that overflowed would otherwise export
+          // the opposite end of its history than a reader keeps.
           const normalized: OutcomeEvent[] = [];
           for (const event of events) {
             const safe = normalizeOutcomeEvent(event);
             if (safe !== null) normalized.push(safe);
-            if (normalized.length >= MAX_LEDGER_EVENTS) break;
           }
-          if (normalized.length > 0) {
-            const aggregate = aggregateOutcomeEvents(normalized);
+          const capped = normalized.length > MAX_LEDGER_EVENTS
+            ? normalized.slice(normalized.length - MAX_LEDGER_EVENTS)
+            : normalized;
+          if (capped.length > 0) {
+            const aggregate = aggregateOutcomeEvents(capped);
             const ledger: OutcomeLedger = {
               schema: FINDING_OUTCOMES_SCHEMA,
               generated_at: at,
               head_sha: /^[0-9a-f]{1,64}$/.test(input.headSha) ? input.headSha : "",
               route: input.reviewRoute || null,
               model: publicAnalysisEngine(input.analysisEngine) || null,
-              events: normalized,
+              events: capped,
               aggregate,
             };
             outcomes = serializeOutcomeLedger(ledger);

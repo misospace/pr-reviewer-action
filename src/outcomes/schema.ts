@@ -17,6 +17,7 @@
  */
 import { redactText } from "../context/redact.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
+import { aggregateOutcomeEvents } from "./report.js";
 import type { OutcomeAggregate } from "./report.js";
 
 export const FINDING_OUTCOMES_SCHEMA = "finding-outcomes/v1";
@@ -174,7 +175,11 @@ export function serializeOutcomeLedger(ledger: OutcomeLedger): string {
 /** Fail-closed parse of a prior ledger (operator-mode persistence): any
  * malformed shape, wrong schema string, or unusable event makes the whole
  * ledger null — callers then run without prior history rather than acting on
- * unprovable state. */
+ * unprovable state.
+ *
+ * The `aggregate` field is DERIVED, never trusted: the serialized counts in an
+ * untrusted ledger string are recomputed from the already-validated events, so
+ * a tampered or stale aggregate can never reach a reader. */
 export function parseOutcomeLedger(raw: string): OutcomeLedger | null {
   if (typeof raw !== "string" || raw.trim() === "") return null;
   let parsed: unknown;
@@ -198,45 +203,16 @@ export function parseOutcomeLedger(raw: string): OutcomeLedger | null {
     if (event === null) return null;
     events.push(event);
   }
-  const aggregate = parseAggregate(rec.aggregate);
-  if (aggregate === null) return null;
+  const capped = events.length > MAX_LEDGER_EVENTS ? events.slice(events.length - MAX_LEDGER_EVENTS) : events;
   return {
     schema: FINDING_OUTCOMES_SCHEMA,
     generated_at: generatedAt,
     head_sha: rec.head_sha,
     route: boundedText(rec.route, 200),
     model: boundedText(rec.model, 200),
-    events: events.length > MAX_LEDGER_EVENTS ? events.slice(events.length - MAX_LEDGER_EVENTS) : events,
-    aggregate,
-  };
-}
-
-function parseAggregate(raw: unknown): OutcomeAggregate | null {
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const rec = raw as Record<string, unknown>;
-  const count = (value: unknown): number => (typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0);
-  const adjudicated = rec.adjudicated !== null && typeof rec.adjudicated === "object" && !Array.isArray(rec.adjudicated)
-    ? rec.adjudicated as Record<string, unknown>
-    : {};
-  const precision = typeof adjudicated.precision === "number" && Number.isFinite(adjudicated.precision)
-    ? adjudicated.precision
-    : null;
-  return {
-    unique_findings: count(rec.unique_findings),
-    open: count(rec.open),
-    resolved: count(rec.resolved),
-    dismissed: count(rec.dismissed),
-    unknown: count(rec.unknown),
-    reactions: {
-      helpful: count((rec.reactions as Record<string, unknown> | undefined)?.helpful),
-      not_helpful: count((rec.reactions as Record<string, unknown> | undefined)?.not_helpful),
-    },
-    adjudicated: {
-      confirmed_valid_defect: count(adjudicated.confirmed_valid_defect),
-      confirmed_false_positive: count(adjudicated.confirmed_false_positive),
-      valid_but_unhelpful: count(adjudicated.valid_but_unhelpful),
-      uncertain: count(adjudicated.uncertain),
-      precision,
-    },
+    events: capped,
+    // Recomputed over exactly the events a reader sees, so the aggregate can
+    // never disagree with them.
+    aggregate: aggregateOutcomeEvents(capped),
   };
 }
