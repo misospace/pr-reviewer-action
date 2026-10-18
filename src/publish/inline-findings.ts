@@ -203,11 +203,17 @@ function safePath(path: unknown): path is string {
 export type Actionable = { start: number; end: number; replacement: string };
 
 /** #762: longest run of consecutive backticks in *content* (0 when none) —
- * the fence length must outlast it so no inner run can close the block. */
+ * the fence length must outlast it so no inner run can close the block.
+ * #1107 review round: reservation escapes a dissolved block's fence
+ * characters ("\`\`\`"); such a line can never close a fence, but it still
+ * reads as a run of backticks, so measure escaped backticks as the runs they
+ * render as and keep the wrap strictly longer than anything the content
+ * shows. */
 function longestBacktickRun(content: string): number {
+  const visible = content.replace(/\\`/g, "`");
   let longest = 0;
   let run = 0;
-  for (const ch of content) {
+  for (const ch of visible) {
     run = ch === "`" ? run + 1 : 0;
     if (run > longest) longest = run;
   }

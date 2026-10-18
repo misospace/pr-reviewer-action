@@ -54,17 +54,121 @@ export const RESERVED_MARKER_PATTERNS: readonly RegExp[] = [
  * anything of its own. Matched at any indent, with either fence character and
  * any fence length, case-insensitively and `\r`-tolerant, so no spelling of the
  * opener survives as a fence. The fence characters are dropped and the word
- * kept, so the author still reads `suggestion` and no fence is left to open —
- * and a body without the token is returned byte-identical.
+ * kept, so the author still reads `suggestion`.
  */
-const SUGGESTION_OPENER_RE = /^([ \t]*)(?:`{3,}|~{3,})[ \t]*suggestion[ \t\r]*$/gim;
+const SUGGESTION_OPENER_RE = /^([ \t]*)(`{3,}|~{3,})[ \t]*suggestion[ \t]*$/i;
+
+/** Any fence-shaped line: optional whitespace, then a run of 3+ backticks or
+ * tildes — an opener (with or without an info string), a closer, or a fence
+ * too short to close the block it sits in. Loose on purpose: while a reserved
+ * block is dissolving, every fence-shaped line inside it must be caught. */
+const FENCE_SHAPED_RE = /^([ \t]*)(`{3,}|~{3,})/;
+
+/**
+ * The closing fence of an open block, CommonMark-accurate: up to three spaces
+ * of indentation, the same character, at least the opening length, and nothing
+ * but whitespace after. Stricter than loose here is what fails closed —
+ * treating an indented content line as the closer would end the dissolution
+ * early and let a later fence of the block survive live.
+ */
+function closesFence(core: string, ch: string, minLength: number): boolean {
+  return new RegExp(`^ {0,3}\\${ch}{${minLength},}[ \\t]*$`).test(core);
+}
+
+/** One fenced-code block the scanner is inside of. `dissolving` marks a block
+ * that began at a RESERVED opener: its fence characters are gone from the
+ * output, so the block no longer exists in the rendered text and every other
+ * fence-shaped line inside it would otherwise become a live fence in the
+ * rewritten prose. */
+interface FenceState {
+  ch: string;
+  minLength: number;
+  dissolving: boolean;
+}
+
+/**
+ * Classify a line as a fenced-code opener, CommonMark-accurate: up to three
+ * spaces of indentation (a tab or a 4-space indent makes the line an indented
+ * code block, not a fence), and an info string on a backtick fence may not
+ * itself contain a backtick. Only a REAL opener may start or close tracking —
+ * misreading an indented code line as a fence would hide a following reserved
+ * opener inside a phantom block and leave its closer live.
+ */
+function fenceOpener(core: string): { ch: string; minLength: number } | null {
+  const match = /^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$/.exec(core);
+  if (match === null) return null;
+  const ch = match[1]![0]!;
+  if (ch === "`" && match[2]!.includes("`")) return null;
+  return { ch, minLength: match[1]!.length };
+}
+
+/** Backslash-escape the fence characters of a line inside a dissolved block:
+ * the line stops being a fence (it no longer starts with a fence character)
+ * while still rendering the characters the author wrote. A pure rewrite, so
+ * nothing is deleted and a second pass is a no-op. */
+function escapeFence(line: string): string {
+  return line.replace(FENCE_SHAPED_RE, (_match, indent: string, run: string) =>
+    indent + [...run].map((ch) => `\\${ch}`).join(""),
+  );
+}
 
 /** #1107: drop the fence from every model-authored prescription opener, keeping
- * the `suggestion` word. Idempotent, and a no-op on text with no opener. */
+ * the `suggestion` word — and dissolve the rest of that block, so the rewrite
+ * cannot leave a fence behind. Rewriting only the opener would turn its
+ * closing fence (and any other fence-shaped line inside the block) into a live
+ * plain-fence opener in the rendered prose, which captures everything the
+ * action appends afterward — including the one prescription this action DID
+ * validate. So the pass walks the original fence structure: while a reserved
+ * block is dissolving, its closer and every fence-shaped line inside it are
+ * escaped (`\`\`\`` renders as text and opens nothing); fences outside a
+ * dissolved block pass through untouched, so benign code blocks are intact and
+ * text without the token is returned byte-identically. Idempotent. */
 export function reserveSuggestionOpeners(text: string): string {
   if (!text.toLowerCase().includes("suggestion")) return text;
-  SUGGESTION_OPENER_RE.lastIndex = 0;
-  return text.replace(SUGGESTION_OPENER_RE, (_match, indent: string) => `${indent}suggestion`);
+  const out: string[] = [];
+  let open: FenceState | null = null;
+  for (const line of text.split("\n")) {
+    const core = line.endsWith("\r") ? line.slice(0, -1) : line;
+    const reserved = SUGGESTION_OPENER_RE.test(core);
+    const opener = reserved ? null : fenceOpener(core);
+    if (open === null) {
+      if (reserved) {
+        // The rewrite is loose (any indent, `\r`-tolerant) so no spelling of
+        // the opener survives; the dissolution it starts is strict, because
+        // only a real fence (CommonMark indent, no open block) leaves a closer
+        // behind that could capture what the action appends next.
+        const real = fenceOpener(core);
+        out.push(`${core.match(SUGGESTION_OPENER_RE)![1]!}suggestion`);
+        if (real !== null) open = { ch: real.ch, minLength: real.minLength, dissolving: true };
+        continue;
+      }
+      if (opener !== null) open = { ch: opener.ch, minLength: opener.minLength, dissolving: false };
+      out.push(line);
+      continue;
+    }
+    if (reserved) {
+      // A reserved shape inside an open block is content there — the same
+      // fail-closed rewrite the top-level opener gets — and never changes
+      // which line closes the block we are already inside.
+      out.push(`${core.match(SUGGESTION_OPENER_RE)![1]!}suggestion`);
+      continue;
+    }
+    if (open.dissolving) {
+      if (closesFence(core, open.ch, open.minLength)) {
+        out.push(escapeFence(line));
+        open = null;
+        continue;
+      }
+      out.push(FENCE_SHAPED_RE.test(core) ? escapeFence(line) : line);
+      continue;
+    }
+    if (closesFence(core, open.ch, open.minLength)) open = null;
+    out.push(line);
+  }
+  // A reserved block still open at end of text left no closer behind: its
+  // opener is gone and nothing inside it was left a fence, so the output ends
+  // fence-closed by construction.
+  return out.join("\n");
 }
 
 /** Remove every reserved metadata marker from *text* (port of

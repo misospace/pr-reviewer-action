@@ -556,6 +556,7 @@ test("#1107: #252 discipline — a message carrying the opener itself publishes 
   ).comments[0] as Record<string, unknown>).body as string;
   assert.equal(mixed.split("```suggestion").length - 1, 1, "exactly one opener line exists in the body");
   assert.equal(recoverPublishedSuggestion(mixed), "REPL", "the validated replacement is recovered verbatim");
+  assertRenderedPrescription(mixed, "REPL", "the hostile block's dissolved closer cannot capture the region we published");
 
   // #252: the opener is not reserved by accident of where the template happens
   // to put its text. Severity and category are model-authored too and are
@@ -595,4 +596,75 @@ test("#1107: every spelling of the opener is reserved — indent, longer fence, 
     assert.ok(body.includes("INJECTED"), `${label}: the author's prose survives`);
     assert.equal(recoverPublishedSuggestion(body), null, `${label}: nothing a later run could recover`);
   }
+});
+
+/** Rendering-sensitive check the #1107 review round asked for: walk the body
+ * the way a Markdown renderer tracks fence state instead of counting raw
+ * opener lines. Exactly one live ```` ```suggestion ```` opener may occur
+ * outside any fence, it must carry exactly the validated replacement, and the
+ * body must end fence-closed — no model-authored fence may still be open where
+ * the action's own region (or anything else) is appended. */
+function assertRenderedPrescription(body: string, replacement: string, message?: string): void {
+  const lines = body.split("\n");
+  let open: { ch: string; len: number } | null = null;
+  let inPrescription: string[] | null = null;
+  const prescriptions: string[] = [];
+  for (const line of lines) {
+    const match = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (open !== null) {
+      if (match !== null && match[1]![0] === open.ch && match[1]!.length >= open.len && line.trim() === match[1]) {
+        if (inPrescription !== null) prescriptions.push(inPrescription.join("\n"));
+        inPrescription = null;
+        open = null;
+      } else if (inPrescription !== null) {
+        inPrescription.push(line);
+      }
+      continue;
+    }
+    if (match !== null) {
+      open = { ch: match[1]![0]!, len: match[1]!.length };
+      inPrescription = line === "```suggestion" ? [] : null;
+    }
+  }
+  assert.deepEqual(prescriptions, [replacement], message ?? "exactly one live prescription renders, carrying the validated replacement");
+  assert.equal(open, null, `${message ?? "body"}: ends fence-closed, so nothing the model wrote captures appended content`);
+}
+
+test("#1107 review round: the dissolved hostile block cannot capture the validated prescription", () => {
+  // The adversarial shape behind the request-changes review: reserving only
+  // the opener left the hostile block's closing fence as a live plain-fence
+  // opener, and the action-authored suggestion region appended after it was
+  // swallowed as that fence's content — a validated prescription rendered
+  // inert. Each arm pairs a hostile message with a REAL suggestion and checks
+  // the rendered fence state, not raw line counts.
+  const arms: Array<[string, string]> = [
+    ["paired hostile block", `note\n${HOSTILE_OPENER}\ntail`],
+    ["unclosed hostile opener", "head\n```suggestion"],
+    ["fences nested inside the hostile block", "````suggestion\n```\n~~~\nINJECTED\n````"],
+    ["tilde block after the opener", "```suggestion\n~~~\nINJECTED\n```"],
+  ];
+  for (const [label, message] of arms) {
+    const result = buildComments(
+      [{ file: "new", line: 1, message, suggestion: "REPL" }], diff, 20, { forgejoPositions: false },
+    );
+    assert.equal(result.comments.length, 1, `${label}: the finding still posts`);
+    const body = (result.comments[0] as Record<string, unknown>).body as string;
+    assertRenderedPrescription(body, "REPL", label);
+    assert.ok(body.includes("INJECTED") || !message.includes("INJECTED"), `${label}: the author's prose survives`);
+    assert.equal(recoverPublishedSuggestion(body), "REPL", `${label}: recovery still reads exactly what rendered`);
+  }
+
+  // Dissolution must not over-reach: fences OUTSIDE the reserved block survive
+  // byte-for-byte, and only the dissolved region's fences are neutralized.
+  const benign = buildComments(
+    [{
+      file: "new", line: 1,
+      message: "see:\n```ts\nconst x = 1;\n```\nand a ```suggestion``` mention",
+      suggestion: "REPL",
+    }],
+    diff, 20, { forgejoPositions: false },
+  );
+  const benignBody = (benign.comments[0] as Record<string, unknown>).body as string;
+  assert.ok(benignBody.includes("```ts\nconst x = 1;\n```"), "a benign code block in the same message is untouched");
+  assertRenderedPrescription(benignBody, "REPL", "benign fences keep the region live");
 });

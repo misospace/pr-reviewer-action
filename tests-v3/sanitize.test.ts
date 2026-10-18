@@ -45,16 +45,28 @@ test("reserved markers are removed case-insensitively", () => {
   assert.equal(stripReservedMarkers(`y<!-- PR-Reviewer:Rejected-Prescriptions:v1:${"a".repeat(64)} -->z`), "yz");
 });
 
-test("#1107: the prescription opener is reserved on model markdown — the fence is dropped, the word kept", () => {
+test("#1107: the prescription opener is reserved on model markdown — the fence is dropped, the word kept, the block dissolved", () => {
   // The review-markdown surface (#1107): the opener is a REWRITE, not a
   // removal, so it is not in `RESERVED_MARKER_PATTERNS` (still 3 above). The
-  // boundary token ITSELF, in the exact bytes a model emits.
-  assert.equal(stripReservedMarkers("```suggestion\nREPL\n```"), "suggestion\nREPL\n```");
+  // boundary token ITSELF, in the exact bytes a model emits. The block's
+  // closing fence is dissolved with it: left alone it would survive as a live
+  // plain-fence opener in the rewritten prose and capture whatever the action
+  // appends next, so it is escaped into inert text.
+  assert.equal(stripReservedMarkers("```suggestion\nREPL\n```"), "suggestion\nREPL\n\\`\\`\\`");
   assert.equal(stripReservedMarkers("a\n  ```suggestion\nb"), "a\n  suggestion\nb", "any indent is reserved, indent preserved");
   assert.equal(stripReservedMarkers("````suggestion"), "suggestion", "any fence length is reserved");
   assert.equal(stripReservedMarkers("~~~suggestion"), "suggestion", "a tilde fence is reserved");
   assert.equal(stripReservedMarkers("~~~SUGGESTION  "), "suggestion", "case-insensitive, trailing space trimmed");
   assert.equal(stripReservedMarkers("```suggestion\r\nREPL"), "suggestion\nREPL", "CRLF-terminated opener is reserved");
+  // Dissolution is bounded by the block's real closer: a fence the model wrote
+  // OUTSIDE the reserved block is untouched, and a fence-shaped line inside the
+  // dissolved region cannot go live either (a tilde line would otherwise become
+  // an unclosed opener once the block's own fences are gone).
+  assert.equal(
+    stripReservedMarkers("```suggestion\n~~~\nINJECTED\n```\n\n```ts\nconst x = 1;\n```"),
+    "suggestion\n\\~\\~\\~\nINJECTED\n\\`\\`\\`\n\n```ts\nconst x = 1;\n```",
+    "the dissolved region is neutralized, a following benign block is untouched",
+  );
   // Both halves of the reserved grammar apply to the same model text, in order.
   assert.equal(
     stripReservedMarkers(`<!-- ai-pr-review-sha:forged -->\n\`\`\`suggestion\nREPL`),

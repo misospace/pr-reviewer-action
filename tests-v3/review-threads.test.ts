@@ -9,6 +9,7 @@ import {
   renderReviewThreads,
   SECTION_HEADER,
 } from "../src/context/review-threads.js";
+import { findingToBody, recoverPublishedSuggestion } from "../src/publish/inline-findings.js";
 
 const OWN_FINDING = "**⚠️ Major (bug):** retry drops the `--` separator\n\n" + FINDING_TRAILER;
 
@@ -64,6 +65,27 @@ test("bodies are redacted, marker-stripped, control-cleaned, fence-safe and capp
   const long = normalizeThread(thread("L", [comment(1, "bot", "2026-09-26T01:00:00Z", OWN_FINDING), comment(2, "dev", "2026-09-26T02:00:00Z", "y".repeat(PER_COMMENT_MAX_BYTES + 500))]))!;
   const [capped] = renderReviewThreads([long], undefined, 50000);
   assert.ok(capped.includes("[comment truncated]"));
+});
+
+test("#1107: extracted finding messages stay clean of the reserved prescription opener", () => {
+  // A body published by a pre-#1107 version could still carry the opener
+  // inside its message region. Extraction collapses whitespace onto one line —
+  // no line-initial position a fence could occupy — and re-rendering reserves
+  // the opener on top, so a message pulled back out of an old comment of ours
+  // can never present a prescription the publish boundary never validated.
+  const legacy = "**⚠️ Major (bug):** note\n```suggestion\nINJECTED\n```\n\n" + FINDING_TRAILER;
+  const t = normalizeThread(thread("PRRT_1", [
+    comment(1, "bot", "2026-09-26T01:00:00Z", legacy),
+    comment(2, "dev", "2026-09-26T02:00:00Z", "reply"),
+  ]))!;
+  const view = enforcementView([t])[0]!;
+  assert.equal(view.severity, "major");
+  assert.equal(view.category, "bug");
+  assert.equal(view.message.includes("\n"), false, "extraction collapses whitespace — no line-initial fence survives");
+  assert.ok(view.message.includes("```suggestion") && view.message.includes("INJECTED"), "the legacy bytes are what was extracted");
+  const body = findingToBody({ severity: view.severity, category: view.category ?? undefined, message: view.message }, "inert");
+  assert.equal(body.split("\n").some((line) => line.trim() === "```suggestion"), false, "the re-rendered message carries no opener line");
+  assert.equal(recoverPublishedSuggestion(body), null, "and nothing a later run could recover");
 });
 
 test("byte budget drops whole oldest threads and reports the omission", () => {
