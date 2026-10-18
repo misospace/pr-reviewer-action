@@ -224,5 +224,6 @@ jobs:
           requirement-trace: "true"
           review-routing-mode: auto
           repository-skills: "true"
+          review-verbosity: concise
           smart-model-context-tokens: ${{ vars.SMART_CONTEXT_TOKENS }}
           tool-allowed-gh-api-repos: "*"
