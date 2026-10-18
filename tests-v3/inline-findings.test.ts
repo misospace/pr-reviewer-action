@@ -644,6 +644,15 @@ test("#1107 review round: the dissolved hostile block cannot capture the validat
     ["fences nested inside the hostile block", "````suggestion\n```\n~~~\nINJECTED\n````"],
     ["tilde block after the opener", "```suggestion\n~~~\nINJECTED\n```"],
     ["lone-CR line endings (GitHub renders CR as a break)", "```suggestion\rINJECTED\r```"],
+    // The review round's over-indented/tab shapes, WITH the closing fence the
+    // reviewer flagged: the rewrite keeps the original indentation
+    // (`indent + "suggestion"`), so the line is an indented code block (or, as
+    // embedded here, a paragraph continuation) both before and after the
+    // rewrite — its matching closer is inert in both renderings, and the
+    // appended validated prescription stays live.
+    ["over-indented opener with its own closer", "head\n    ```suggestion\nINJECTED\n    ```"],
+    ["tab-indented opener with its own closer", "head\n\t```suggestion\nINJECTED\n\t```"],
+    ["over-indented opener after a blank line (indented code block)", "head\n\n    ```suggestion\nINJECTED\n    ```"],
   ];
   for (const [label, message] of arms) {
     const result = buildComments(
