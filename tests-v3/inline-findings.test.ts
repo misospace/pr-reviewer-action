@@ -679,3 +679,42 @@ test("#1107 review round: the dissolved hostile block cannot capture the validat
   assert.ok(benignBody.includes("```ts\nconst x = 1;\n```"), "a benign code block in the same message is untouched");
   assertRenderedPrescription(benignBody, "REPL", "benign fences keep the region live");
 });
+
+test("#1136: an unclosed ordinary fence in the message cannot swallow the validated prescription", () => {
+  // #252 discipline: feed the boundary shape itself — an ordinary,
+  // non-reserved fenced block the model never closed, paired with a REAL
+  // validated `suggestion` on the same finding — and assert the rendered
+  // fence state, not raw line counts. Pinned policy: the fence-state walk
+  // dissolves an ordinary block still open at end of text, so the appended
+  // prescription region always renders live.
+  const arms: Array<[string, string]> = [
+    ["token-free unclosed fence", "note\n```ts\nconst x = 1;"],
+    ["token-bearing unclosed fence", "see a ```suggestion``` mention\n```ts\nconst x = 1;"],
+    ["unclosed fence with interior fence-shaped line", "note\n```ts\n~~~\nconst x = 1;"],
+    ["unclosed fence is the whole message", "```ts"],
+  ];
+  for (const [label, message] of arms) {
+    const result = buildComments(
+      [{ file: "new", line: 1, message, suggestion: "REPL" }], diff, 20, { forgejoPositions: false },
+    );
+    assert.equal(result.comments.length, 1, `${label}: the finding still posts`);
+    const body = (result.comments[0] as Record<string, unknown>).body as string;
+    assertRenderedPrescription(body, "REPL", label);
+    assert.ok(body.includes("const x = 1;") || !message.includes("const x = 1;"), `${label}: the author's prose survives`);
+    assert.equal(recoverPublishedSuggestion(body), "REPL", `${label}: recovery still reads exactly what rendered`);
+  }
+
+  // Container-prefixed unclosed block (`> ```ts`, no closer), pinned policy:
+  // CommonMark ends an unclosed fence with its enclosing block construct, and
+  // the assembled finding body always carries a blank line after the model
+  // message, so the blockquote self-limits before the appended region. The
+  // walk need not track container prefixes for this shape — the prescription
+  // stays live deterministically.
+  const blockquoted = buildComments(
+    [{ file: "new", line: 1, message: "note\n> ```ts\n> const x = 1;", suggestion: "REPL" }],
+    diff, 20, { forgejoPositions: false },
+  );
+  const quotedBody = (blockquoted.comments[0] as Record<string, unknown>).body as string;
+  assertRenderedPrescription(quotedBody, "REPL", "container-prefixed unclosed block");
+  assert.equal(recoverPublishedSuggestion(quotedBody), "REPL", "container case: recovery still reads what rendered");
+});

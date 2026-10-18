@@ -97,6 +97,41 @@ test("#1107: the prescription opener is reserved on model markdown — the fence
   assert.ok(opened.includes("hi") && opened.includes("tail") && opened.includes("rm -rf /"), "the surrounding text is untouched");
 });
 
+test("#1136: an ordinary block still open at end of text is dissolved, walk output ends fence-closed", () => {
+  // The boundary shape itself: a model message ending in an unclosed
+  // ordinary fence leaves the walk open, so anything appended after this
+  // pass — the validated prescription region in particular — would render
+  // as its content. Pinned policy: the walk dissolves it like a reserved
+  // block (opener and interior fence-shaped lines escaped). This must hold
+  // WITHOUT the `suggestion` token too: a token-free unclosed fence is
+  // exactly the shape that would swallow a validated prescription on the
+  // same finding silently, so the old token-gated early return was the
+  // hazard's blind spot.
+  assert.equal(
+    stripReservedMarkers("note\n```ts\nconst x = 1;"),
+    "note\n\\`\\`\\`ts\nconst x = 1;",
+    "token-free unclosed fence dissolved",
+  );
+  assert.equal(
+    stripReservedMarkers("head\n```ts\n~~~\nconst x = 1;"),
+    "head\n\\`\\`\\`ts\n\\~\\~\\~\nconst x = 1;",
+    "interior fence-shaped lines of the unclosed block cannot go live either",
+  );
+  assert.equal(
+    stripReservedMarkers("note\n```ts\n```suggestion\nconst x = 1;"),
+    "note\n\\`\\`\\`ts\nsuggestion\nconst x = 1;",
+    "a reserved opener inside the unclosed block is rewritten, not left to reopen anything",
+  );
+  // A block that IS closed never reaches the end-of-text branch: byte-identical,
+  // CRLF endings included (the fast path returns the original string).
+  const closed = "Review.\r\n\r\n```ts\r\nconst x = 1;\r\n```\r\ndone";
+  assert.equal(stripReservedMarkers(closed), closed, "benign closed block stays byte-identical, CRLF intact");
+  assert.equal(stripReservedMarkers(""), "");
+  // Idempotent: dissolving twice changes nothing.
+  const once = stripReservedMarkers("note\n```ts\nconst x = 1;");
+  assert.equal(stripReservedMarkers(once), once);
+});
+
 test("unknown link mode throws", () => {
   assert.throws(() => sanitizeMarkdown("#1", "other" as never), /unknown upstream link mode/);
 });

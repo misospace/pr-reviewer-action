@@ -124,12 +124,19 @@ function escapeFence(line: string): string {
  * validate. So the pass walks the original fence structure: while a reserved
  * block is dissolving, its closer and every fence-shaped line inside it are
  * escaped (`\`\`\`` renders as text and opens nothing); fences outside a
- * dissolved block pass through untouched, so benign code blocks are intact and
- * text without the token is returned byte-identically. Idempotent. */
+ * dissolved block pass through untouched, so benign code blocks are intact.
+ * #1136: an ordinary block still open at end of text — the model's unclosed
+ * fence — is dissolved the same way, so the output ALWAYS ends fence-closed
+ * and nothing appended after this pass (the validated prescription region)
+ * can be swallowed as its content. Text without the token that already ends
+ * fence-closed is returned byte-identically. Idempotent. */
 export function reserveSuggestionOpeners(text: string): string {
-  if (!text.toLowerCase().includes("suggestion")) return text;
   const out: string[] = [];
   let open: FenceState | null = null;
+  // #1136: the output index of the line that opened the current ordinary
+  // (non-reserved) block, so a block still open at end of text can be
+  // dissolved from its opener onward.
+  let openIndex = -1;
   // A CommonMark line ends at CR, LF, or CRLF — GitHub normalizes a lone CR
   // into a line break, so splitting on LF alone would hide a live opener
   // inside what this pass treats as one long line. Only token-bearing text
@@ -150,7 +157,10 @@ export function reserveSuggestionOpeners(text: string): string {
         if (real !== null) open = { ch: real.ch, minLength: real.minLength, dissolving: true };
         continue;
       }
-      if (opener !== null) open = { ch: opener.ch, minLength: opener.minLength, dissolving: false };
+      if (opener !== null) {
+        open = { ch: opener.ch, minLength: opener.minLength, dissolving: false };
+        openIndex = out.length;
+      }
       out.push(line);
       continue;
     }
@@ -173,6 +183,30 @@ export function reserveSuggestionOpeners(text: string): string {
     if (closesFence(line, open.ch, open.minLength)) open = null;
     out.push(line);
   }
+  // #1136: an ORDINARY block still open at end of text is the model's
+  // unclosed fence, and everything appended after this pass — the action's
+  // validated prescription region in particular — would render as its
+  // content. Policy, pinned: the walk dissolves it the same way a reserved
+  // block is dissolved — its opener and every fence-shaped line inside it are
+  // escaped, so the output ends fence-closed by construction and the
+  // validated prescription stays live. A block that IS closed never reaches
+  // this branch and its bytes pass through untouched.
+  //
+  // This must hold regardless of the `suggestion` token: a message whose
+  // unclosed fence carries no token is exactly the shape where a validated
+  // prescription on the same finding would be swallowed silently, so the
+  // token-free fast path below only applies when the walk also ends
+  // fence-closed.
+  if (open !== null && !open.dissolving) {
+    for (let index = openIndex; index < out.length; index += 1) {
+      if (FENCE_SHAPED_RE.test(out[index]!)) out[index] = escapeFence(out[index]!);
+    }
+    return out.join("\n");
+  }
+  // Token-free text that already ends fence-closed is returned byte-identical
+  // (CR/CRLF endings included); the pass would otherwise only normalize line
+  // endings, which benign text must not pay for.
+  if (open === null && !text.toLowerCase().includes("suggestion")) return text;
   // A reserved block still open at end of text left no closer behind: its
   // opener is gone and nothing inside it was left a fence, so the output ends
   // fence-closed by construction.
