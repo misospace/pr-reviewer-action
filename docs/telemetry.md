@@ -37,6 +37,7 @@ Every key below is the literal JSON key in the marker.
 | `max_rounds` | number, omitted | The resolved round cap the loop ran against for this run (see [`docs/tool-loop.md`](tool-loop.md#round-cap)). Omitted alongside `tool_rounds`. |
 | `context_budget` | number, omitted | The loop's conversation budget in approximate tokens: past it, older tool results are compacted. 24,000 unless a context window is declared (see [Context limits](tool-loop.md#context-limits)). Omitted when no loop ran. |
 | `context_peak` | number, omitted | The largest conversation the loop reached (approximate tokens). Close to `context_budget` means compaction was in play. Omitted alongside `context_budget`. |
+| `tool_stop_reason` | string, omitted | The tool loop's own stop reason for the route the marker was built from — one of the values in [`docs/tool-loop.md`](tool-loop.md#stop-reasons-and-partial-coverage) (`model-stopped`, `no-tool-calls`, `max-rounds`, `tool-call-budget-exhausted`, `wall-clock-exceeded`, `request-error`), or `harness-abort` when the harness aborted before the loop ran. Recorded on every harness run: unlike `coverage_stop_reason` (only on a confirmed coverage gap), a budget stop with complete coverage is recorded too, so budget-exhaustion rates are measurable per `tool_budget_source`. Omitted when no tool harness reported one. |
 
 Two more action-owned markers can follow on their own line, outside the
 `ai-pr-reviewer:{...}` JSON: `<!-- ai-pr-review-sha:<sha> -->` (the head SHA,
@@ -104,9 +105,20 @@ Or, to compare tool-budget provenance across a set of PRs (how often the
 size-scaled default kicks in versus the tier default):
 
 ```bash
-gh api "repos/OWNER/REPO/issues/comments?per_page=100" --paginate \
+gh api "repos/OWNER/REPO/issues/comments?per_page=100" \
   --jq '.[].body' \
   | grep -o '"tool_budget_source":"[a-z-]*"' \
+  | sort | uniq -c
+```
+
+Or, to compare budget-exhaustion rates by provenance (the #847 measurement —
+`tool_stop_reason` rides every harness run, so budget stops that left
+nothing unread are counted, not just the `coverage: "partial"` ones):
+
+```bash
+gh api "repos/OWNER/REPO/issues/comments?per_page=100" \
+  --jq '.[].body' \
+  | grep -oE '"tool_budget_source":"[a-z-]*"[^}]*"tool_stop_reason":"[a-z-]*"' \
   | sort | uniq -c
 ```
 

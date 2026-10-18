@@ -112,6 +112,10 @@ export interface PublishInput {
   /** #922: the loop's conversation budget and peak (approx tokens). */
   contextBudget?: number;
   contextPeak?: number;
+  /** #847 measurement follow-up: the tool loop's stop reason, recorded on
+   * every harness run so budget stops with complete coverage stay visible in
+   * published markers. Omitted when no harness reported one. */
+  toolStopReason?: string;
   /** #1003: the human-review triage answer, present ONLY when triage ran
    * (`review-triage` enabled) and the review produced one. Absent means
    * "did not run" and renders no section — never a silent "not required". */
@@ -917,6 +921,7 @@ export async function publishReview(
     ...(input.maxRounds !== undefined ? { maxRounds: input.maxRounds } : {}),
     ...(input.contextBudget !== undefined ? { contextBudget: input.contextBudget } : {}),
     ...(input.contextPeak !== undefined ? { contextPeak: input.contextPeak } : {}),
+    ...(input.toolStopReason !== undefined && input.toolStopReason !== "" ? { toolStopReason: input.toolStopReason } : {}),
     actionVersion: ACTION_VERSION,
   };
   if (input.partialCoverage) {

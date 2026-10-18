@@ -109,3 +109,53 @@ test("#895: buildRunMetadataMarker omits tool_rounds/max_rounds when unset", () 
   assert.doesNotMatch(marker, /tool_rounds/);
   assert.doesNotMatch(marker, /max_rounds/);
 });
+
+// ---------------------------------------------------------------------------
+// #847 (measurement follow-up) — tool_stop_reason records the loop's stop
+// reason on EVERY harness run, so a budget stop with complete coverage
+// (no `coverage`/`coverage_stop_reason` gap) is still measurable.
+// ---------------------------------------------------------------------------
+
+test("#847: buildMetadataMarker appends tool_stop_reason last, after the #978 key", () => {
+  const marker = buildMetadataMarker({
+    head_sha: "h",
+    base_sha: "b",
+    review_result: "clean",
+    tool_budget: 26,
+    tool_budget_source: "size-scaled",
+    tool_calls: 26,
+    degradedGateBypass: true,
+    tool_stop_reason: "tool-call-budget-exhausted",
+  });
+  assert.equal(
+    marker,
+    '<!-- ai-pr-reviewer:{"version":1,"head_sha":"h","base_sha":"b","review_result":"clean",' +
+      '"tool_budget":26,"tool_budget_source":"size-scaled","tool_calls":26,' +
+      '"degraded_gate_bypass":true,"tool_stop_reason":"tool-call-budget-exhausted"} -->',
+  );
+});
+
+test("#847: buildMetadataMarker omits tool_stop_reason when unset (byte-identical)", () => {
+  const marker = buildMetadataMarker({
+    head_sha: "h", base_sha: "b", review_result: "clean", tool_budget: 26, tool_calls: 26,
+  });
+  assert.doesNotMatch(marker, /tool_stop_reason/);
+});
+
+test("#847: buildRunMetadataMarker wires toolStopReason through additively", () => {
+  const marker = buildRunMetadataMarker({
+    headSha: "h",
+    baseSha: "b",
+    reviewResult: "clean",
+    toolBudget: 16,
+    toolBudgetSource: "tier-default",
+    toolCalls: 16,
+    toolStopReason: "max-rounds",
+  });
+  assert.match(marker, /"tool_stop_reason":"max-rounds"/);
+});
+
+test("#847: buildRunMetadataMarker omits tool_stop_reason when no harness reported one", () => {
+  const marker = buildRunMetadataMarker({ headSha: "h", baseSha: "b", reviewResult: "clean" });
+  assert.doesNotMatch(marker, /tool_stop_reason/);
+});
