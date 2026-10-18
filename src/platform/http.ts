@@ -14,6 +14,25 @@ export class PlatformRequestError extends Error {
   }
 }
 
+/**
+ * #726 (engine cancellation): wrap a fetch implementation so every request
+ * is ALSO bound to a caller-owned cancellation signal. The option's own
+ * signal (the per-request timeout) is preserved by composing both with
+ * `AbortSignal.any`, so cancellation and timeout keep their independent
+ * semantics and an abort mid-flight rejects the pending fetch. Used by the
+ * engine when `ReviewRequest.signal` is present; absent a signal callers
+ * keep the unwrapped implementation.
+ */
+export function withCancellationSignal(fetchImpl: FetchLike | undefined, signal: AbortSignal): FetchLike {
+  const base = fetchImpl ?? fetch;
+  return (input, init) => base(input, {
+    ...init,
+    signal: init?.signal !== null && init?.signal !== undefined
+      ? AbortSignal.any([init.signal, signal])
+      : signal,
+  });
+}
+
 export interface RequestOptions {
   method?: string | undefined;
   /** Pre-formatted Authorization header value (e.g. "Bearer x" / "token x"). */

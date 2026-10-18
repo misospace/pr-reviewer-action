@@ -29,7 +29,15 @@ export async function engineMain(argv: string[], _env: NodeJS.ProcessEnv = proce
     process.stderr.write("engine: request field 'inputs' must be an object\n");
     return 2;
   }
+  // #726: the local entrypoint drives the typed cancellation lifecycle —
+  // Ctrl-C / SIGTERM aborts the run through `ReviewRequest.signal` instead
+  // of killing the process mid-write.
+  const controller = new AbortController();
+  for (const signalName of ["SIGINT", "SIGTERM"] as const) {
+    process.on(signalName, () => controller.abort(signalName));
+  }
   const request: ReviewRequest = {
+    signal: controller.signal,
     repository: stringField("repository"),
     prNumber: stringField("prNumber"),
     headSha: stringField("headSha"),

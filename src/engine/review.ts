@@ -22,7 +22,7 @@ import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js"
 import { runChatRequest } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
 import { callKnownSecrets, extraHeadersForEnv } from "../transport/headers.js";
-import type { FetchLike } from "../platform/http.js";
+import { withCancellationSignal, type FetchLike } from "../platform/http.js";
 import { normalizePrIdentity } from "../platform/pr.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
 import { buildPlatformReadAdapter } from "../run/platform.js";
@@ -434,7 +434,14 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // sanitizer, the corpus fences, and the never-execute rule.
   const ws = new RunWorkspace(runDir, dependencies.persistArtifacts ?? true);
   ws.write("review-request.json", Buffer.from(JSON.stringify({ schema_version: "1", repository: request.repository, pr_number: prNumber, head_sha: request.headSha, base_ref: request.baseRef, is_fork_pr: request.isForkPr, platform: request.platform, forgejo_api_url: request.forgejoApiUrl, trigger_reason: request.triggerReason, force_rereview: request.forceRereview }, null, 2) + "\n", "utf8"));
-  const adapter: PlatformReadAdapter = dependencies.adapter ?? buildPlatformReadAdapter(env, dependencies.fetchImpl);
+  // #726: platform reads are cancellable too. The default adapter's fetch is
+  // wrapped with the run's cancellation scope (timeout semantics preserved);
+  // a host that injects its own adapter binds the request signal at
+  // construction — see docs/architecture/engine-boundary.md.
+  const adapter: PlatformReadAdapter = dependencies.adapter
+    ?? buildPlatformReadAdapter(env, request.signal !== undefined
+      ? withCancellationSignal(dependencies.fetchImpl, request.signal)
+      : dependencies.fetchImpl);
   await adapter.preflightAuthentication?.();
   checkpoint();
   const profiles: TierProfiles = resolveTierProfiles(env);
@@ -1050,7 +1057,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       // The tier names the first-pass artifact slot; the loop limits follow
       // the tier (loopLimitsProfile).
       env.TOOL_HARNESS_TIER = "primary";
-      await runToolHarnessPhase(ws, env, workspace, log);
+      await runToolHarnessPhase(ws, env, workspace, log, cancellation.scope.signal);
       checkpoint();
     }
     corpusResult = assembleCorpus(ws, env, budgets, profileKey, "primary", generatedPaths, standards);
@@ -1065,6 +1072,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const userMessage = buildUserMessage(ws, "classification.json");
   const primary = await producePrimaryReview({
     env, ws, profiles, streamBool, userMessage, log, errorLog, annotate, clock, sleep: dependencies.sleep, budgets,
+    signal: cancellation.scope.signal,
   });
   checkpoint();
   let analysisEngine = primary.analysisEngine;
@@ -1089,6 +1097,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     const smart = await runSmartReview({
       env, ws, profiles, streamBool, userMessage, log, errorLog, annotate, clock, sleep: dependencies.sleep,
       budgets, generatedPaths, standards, runDir, workspace,
+      signal: cancellation.scope.signal,
     });
     delete env.TOOL_ESCALATION;
     checkpoint();
@@ -1881,6 +1890,10 @@ interface ReviewCallInput {
   annotate: (line: string) => void;
   clock: () => number;
   readonly sleep?: ((seconds: number) => Promise<void>) | undefined;
+  /** #726: the run's cancellation scope signal. Attached to every model
+   * request this input produces so an aborted caller tears the in-flight
+   * provider request down instead of abandoning it. */
+  readonly signal?: AbortSignal;
 }
 
 function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | "smart", env: StageEnv): TierProfile {
@@ -1984,9 +1997,14 @@ async function callTier(
       // backoff too (that loop counts in ms, the model-tier one in seconds),
       // or a test that opts into a deterministic clock still pays the real
       // 1s/2s waits. Production passes no `sleep`, so nothing changes there.
-      const result = await runChatRequest(
-        input.sleep === undefined ? chatInput : { ...chatInput, sleep: (ms: number) => input.sleep!(ms / 1000) },
-      );
+      // #726: the cancellation scope rides every model request of this run,
+      // so an abort physically tears down the provider request instead of
+      // leaving it running against a caller that already left.
+      const result = await runChatRequest({
+        ...chatInput,
+        ...(input.sleep !== undefined ? { sleep: (ms: number) => input.sleep!(ms / 1000) } : {}),
+        ...(input.signal !== undefined ? { signal: input.signal } : {}),
+      });
       if (result.status === "failure") return result;
       // #1037: mask the raw provider body on its way into the artifact — the
       // response can echo a configured header value, and this artifact is read
@@ -2292,7 +2310,7 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
       env.SMART_REASONING_EFFORT = profiles.smart.reasoningEffort;
       env.TOOL_HARNESS_TIER = "smart";
       try {
-        await runToolHarnessPhase(ws, env, input.workspace, log);
+        await runToolHarnessPhase(ws, env, input.workspace, log, input.signal);
       } catch (cause) {
         errorLog(`smart tool harness failed: ${cause instanceof Error ? cause.message : String(cause)}`);
         ws.write("tool-harness.smart.json", '{"tier":"smart","mode":"native_loop","error":"execution failed","stop_reason":"request-error","rounds":0,"planned_request_count":0,"executed_request_count":0,"tool_results":[]}\n');

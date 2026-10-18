@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { getEventListeners } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -123,6 +123,36 @@ test("cancelling mid-flight rejects the run instead of returning the in-flight m
   } finally { await server.close(); f.cleanup(); }
 });
 
+test("cancelling mid-flight tears the in-flight provider request down", async () => {
+  // #726 (round-3 review): racing the pipeline is not enough — the active
+  // model request must receive the cancellation and physically stop.
+  const controller = new AbortController();
+  let tornDown!: () => void;
+  const closed = new Promise<void>((resolve) => { tornDown = resolve; });
+  const live: { res: { destroy(): void } | null } = { res: null };
+  const server = await startMockServer((_req, _body, res) => {
+    live.res = res;
+    res.on("close", () => tornDown());
+    // The cancellation lands while the primary model request is in flight;
+    // the server never answers, so only the client-side teardown closes it.
+    controller.abort();
+  });
+  const f = fixture();
+  try {
+    await assert.rejects(
+      runReviewEngine({ ...request(server.url, f.runDir), signal: controller.signal }, engineDeps(f.root, f.runDir)),
+      (error: unknown) => error instanceof RunReviewError && /cancelled/.test(error.message),
+    );
+    // Hang guard (same pattern as the gate test): a regression that abandons
+    // the provider request fails the assertion instead of hanging the suite.
+    const torn = await Promise.race([closed.then(() => true), new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 2000))]);
+    assert.equal(torn, true, "the in-flight provider request was physically torn down");
+  } finally {
+    try { live.res?.destroy(); } catch { /* already closed */ }
+    await server.close(); f.cleanup();
+  }
+});
+
 test("cancelling mid-flight finalizes the gate fork the run still owns", async () => {
   // The model is never reached: the run is cancelled while the CI gate is
   // still in flight. The server only supplies a resolvable `ai-base-url`.
@@ -177,6 +207,44 @@ test("a completed run detaches from the caller's signal", async () => {
     const result = await runReviewEngine({ ...request(server.url, f.runDir), signal: controller.signal }, engineDeps(f.root, f.runDir));
     assert.equal(result.outputs.verdict, "approve");
     assert.deepEqual(getEventListeners(controller.signal, "abort"), []);
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("a symlinked artifact name in the run dir cannot escape the engine's write boundary", async () => {
+  // Required-check pin (edge-case paths): a full engine run whose run dir
+  // carries a planted symlink must refuse the mirrored write outside it.
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.setHeader("Connection", "close"); res.end(verdictBody()); });
+  const f = fixture();
+  const outside = join(f.root, "outside");
+  mkdirSync(outside);
+  const outsideFile = join(outside, "verdict.txt");
+  writeFileSync(outsideFile, "SENTINEL");
+  symlinkSync(outsideFile, join(f.runDir, "verdict.txt"));
+  try {
+    const result = await runReviewEngine(request(server.url, f.runDir), engineDeps(f.root, f.runDir));
+    // The in-memory artifact bus is authoritative, so the review completes…
+    assert.equal(result.outputs.verdict, "approve");
+    // …but the guarded disk mirror refused to follow the symlink out.
+    assert.equal(readFileSync(outsideFile, "utf8"), "SENTINEL", "nothing was written through the symlink");
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("a null byte in the CLI request's runDir fails clean without writing outside", async () => {
+  // Required-check pin (edge-case paths): the engine CLI boundary never
+  // throws an unsurfaced error and never writes through a poisoned path.
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.setHeader("Connection", "close"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    const poisoned = `${f.runDir}\u0000escape`;
+    const data = { ...request(server.url, poisoned), workspace: f.root, runDir: poisoned, outputsSink: "/dev/null", stepSummaryPath: "", persistArtifacts: true, ambient: { GITHUB_API_URL: server.url } };
+    const file = join(f.root, "nul-request.json");
+    writeFileSync(file, JSON.stringify(data));
+    const code = await engineMain(["--request", file]);
+    assert.ok(code === 0 || code === 1, `clean exit code, got ${code}`);
+    // Nothing escaped into the workspace: the untouched real run dir has no
+    // artifacts, and no NUL-named path exists beside it.
+    assert.ok(!existsSync(join(f.runDir, "review-request.json")), "no artifacts in the real run dir");
+    assert.ok(!existsSync(f.root + "/outside-writes"), "nothing written outside");
   } finally { await server.close(); f.cleanup(); }
 });
 

@@ -24,6 +24,10 @@ export interface ChatRequestInput {
   /** #1037 (`ai-extra-headers`): carried verbatim to every attempt of this
    * request, including clamp/strip retries (they spread this input). */
   extraHeaders?: Readonly<Record<string, string>>;
+  /** #726 (engine cancellation): caller-owned abort, propagated to every
+   * attempt of this request (including clamp/strip retries). Once aborted,
+   * the loop makes no further attempt and returns the `cancelled` failure. */
+  signal?: AbortSignal;
 }
 
 /** #1047: the structured-output surface a strip retry removed from the wire:
@@ -80,6 +84,12 @@ export async function runChatRequest(input: ChatRequestInput): Promise<ChatReque
 async function runChatRequestLoop(input: ChatRequestInput, clampRemaining: boolean, stripRemaining = true): Promise<ChatRequestOutcome> {
   const sleep = input.sleep ?? defaultSleep;
   for (let attempt = 1; ; attempt++) {
+    // #726: checked before every attempt, so an abort landing during a retry
+    // backoff (or a clamp/strip retry) ends the request instead of firing a
+    // new one into an endpoint the caller has abandoned.
+    if (input.signal?.aborted) {
+      return { status: "failure", failure: new TransportFailure("cancelled", "model request cancelled") };
+    }
     const outcome = await runChatRequestOnce(input);
     if (outcome.status === "failure") {
       const clamp = clampRemaining
@@ -291,6 +301,7 @@ async function runChatRequestOnce(input: ChatRequestInput): Promise<ChatRequestO
       stream: streaming,
       ...(input.maxResponseBytes !== undefined ? { maxResponseBytes: input.maxResponseBytes } : {}),
       ...(input.extraHeaders !== undefined ? { extraHeaders: input.extraHeaders } : {}),
+      ...(input.signal !== undefined ? { signal: input.signal } : {}),
     });
     if (!streaming) {
       let parsed: unknown;

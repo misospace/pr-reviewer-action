@@ -543,7 +543,7 @@ function ciChecksBytes(env: StageEnv): Uint8Array | null {
 // corpus.sh tail: the native tool harness
 // ---------------------------------------------------------------------------
 
-export function harnessTransportAdapter(env: StageEnv): HarnessTransport {
+export function harnessTransportAdapter(env: StageEnv, signal?: AbortSignal): HarnessTransport {
   return async (baseUrl, apiFormat, payload, apiKey, timeoutSec) => {
     // #1037: the tool-harness transport is a provider call like any other.
     // Parsed per request INSIDE the closure (as pre-fix) so a malformed set
@@ -564,6 +564,9 @@ export function harnessTransportAdapter(env: StageEnv): HarnessTransport {
       // #1037: unset config omits the key entirely (byte-identical request,
       // nothing to merge).
       ...(extra !== undefined ? { extraHeaders: extra } : {}),
+      // #726 (engine cancellation): the harness's model turns bind to the
+      // run's cancellation scope; unset signal keeps the request unchanged.
+      ...(signal !== undefined ? { signal } : {}),
     });
     // #846: carry the HTTP status and a redacted body excerpt (plus the
     // ai-api-format hint on a 404) instead of the bare "model endpoint
@@ -611,7 +614,7 @@ export function normalizedToOpenAiChat(response: NormalizedModelResponse): Recor
   return shaped;
 }
 
-export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDir: string, log: (line: string) => void): Promise<void> {
+export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDir: string, log: (line: string) => void, signal?: AbortSignal): Promise<void> {
   await runToolHarness({
     env,
     cwd: runDir,
@@ -621,7 +624,8 @@ export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDi
       ws.write(name, text);
     },
     deleteArtifact: (name) => ws.remove(name),
-    transport: harnessTransportAdapter(env),
+    transport: harnessTransportAdapter(env, signal),
+    ...(signal !== undefined ? { signal } : {}),
     log,
   });
 }

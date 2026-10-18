@@ -172,6 +172,9 @@ async function defaultSleep(seconds: number): Promise<void> {
 /** #1006: Only the tier-level permanent set skips the retry budget. The
  * transport's same-request retry policy is independent. */
 function isRetryableTransportFailure(failure: TransportFailure): boolean {
+  // #726: a caller cancellation is terminal — never retry a request the
+  // operator (or the engine's cancellation scope) has already abandoned.
+  if (failure.kind === "cancelled") return false;
   if (failure.kind !== "http_status") return true;
   if (failure.status === undefined) return true;
   return !TIER_PERMANENT_HTTP_STATUSES.has(failure.status);

@@ -4,6 +4,7 @@ import {
   PlatformRequestError,
   requestBytes,
   requestText,
+  withCancellationSignal,
   type BytesRequestOptions,
   type FetchLike,
   type RequestOptions,
@@ -299,4 +300,40 @@ test("requestBytes: an explicit timeoutMs still carries an abort signal", async 
     fetchImpl,
   });
   assert.ok(calls[0]!.signal instanceof AbortSignal, "a custom timeout still passes an AbortSignal");
+});
+
+// ── #726: withCancellationSignal (engine-bound platform cancellation) ────
+
+test("withCancellationSignal: composes the caller's abort with the per-request timeout signal", async () => {
+  const controller = new AbortController();
+  const { fetchImpl, calls } = makeFetch(() => new Response("ok"));
+  const wrapped = withCancellationSignal(fetchImpl, controller.signal);
+  const timeout = AbortSignal.timeout(50);
+  const response = await wrapped("https://pds.example.com/blob", { signal: timeout });
+  assert.equal(response.status, 200);
+  const seen = calls[0]!.signal!;
+  assert.ok(seen !== timeout && seen !== controller.signal, "a composed signal is passed to the base fetch");
+  assert.equal(seen.aborted, false, "unrelated signals leave the composed one live");
+  controller.abort();
+  assert.equal(seen.aborted, true, "the caller's abort trips the composed signal");
+});
+
+test("withCancellationSignal: no per-request signal still carries the caller's cancellation", async () => {
+  const controller = new AbortController();
+  const { fetchImpl, calls } = makeFetch(() => new Response("ok"));
+  const wrapped = withCancellationSignal(fetchImpl, controller.signal);
+  await wrapped("https://pds.example.com/blob", {});
+  assert.equal(calls[0]!.signal, controller.signal, "the caller signal is passed through unchanged");
+});
+
+test("withCancellationSignal: an already-aborted caller signal fails the request at the seam", async () => {
+  let baseCalled = 0;
+  const base: FetchLike = async (_input, init) => {
+    baseCalled += 1;
+    if (init?.signal?.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
+    return new Response("ok");
+  };
+  const wrapped = withCancellationSignal(base, AbortSignal.abort());
+  await assert.rejects(wrapped("https://pds.example.com/blob", {}), (error: unknown) => (error as Error).name === "AbortError");
+  assert.equal(baseCalled, 1);
 });
