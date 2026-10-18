@@ -1277,7 +1277,7 @@ export async function publishReview(
                   // hidden presentation-only. Nothing is deleted and no
                   // APPROVED/CHANGES_REQUESTED verdict is dismissed: a partial
                   // review must never make a blocking review disappear.
-                  messages.push("NOTE: Replacement is not complete (incomplete coverage or fallback submission); previous inline comments and verdicts left in place, superseded advisory review bodies minimized");
+                  messages.push("NOTE: Replacement is not complete (incomplete coverage or fallback submission); previous inline comments and verdicts left in place, attempting presentation-only minimization of superseded advisory review bodies");
                   await minimizeSupersededAdvisoryReviews(api, olderManaged, input.commentMarker, cleanupLog, { owner, reason }, [], stillCurrent);
                 }
               } else messages.push("WARN: A newer review superseded this run; cleanup skipped");

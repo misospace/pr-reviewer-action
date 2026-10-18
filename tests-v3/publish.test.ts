@@ -2294,7 +2294,7 @@ test("#1114: successive requirement-trace-partial re-runs minimize superseded ad
   assert.equal(api.inlineListCalls, 0, "no inline-comment enumeration or deletion on the partial path");
   assert.equal(api.threadQueryCalls, 0, "no review-thread resolution on the partial path");
   assert.deepEqual(api.dismissed, []);
-  assert.ok(c.messages.some((line) => line.includes("superseded advisory review bodies minimized")));
+  assert.ok(c.messages.some((line) => line.includes("attempting presentation-only minimization of superseded advisory review bodies")));
 });
 
 test("#1114: a complete replacement keeps the existing dismiss/retire semantics", async () => {
@@ -2348,4 +2348,60 @@ test("#1114: fail-closed guards block advisory minimization on an incomplete re-
   assert.equal(competingResult.status, "published");
   assert.deepEqual(competing.minimized, [], "a stale run never hides the newer review");
   assert.ok(competingResult.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
+});
+
+test("#1114: a partial review_comment run minimizes through the sticky checkpoint; a competing managed review blocks it", async () => {
+  const staleAdvisory = [
+    { id: 7, node_id: "node-7", state: "COMMENTED", body: `${MARKER}\nold advisory`, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" },
+  ];
+  const partialSticky = { mode: "review_comment", cleanupPreviousNativeReviews: "auto", requiredChecks: "incomplete" } as const;
+
+  const api = new MockPublishApi();
+  api.reviews = staleAdvisory;
+  api.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-01-01T00:00:00Z" }];
+  api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  const result = await publishReview(input(partialSticky), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.deepEqual(api.minimized, ["node-7"], "the sticky checkpoint authorizes advisory minimization");
+  assert.equal(api.inlineListCalls, 0);
+  assert.deepEqual(api.dismissed, []);
+
+  // An overlapping managed review submitted after the checkpoint fails the
+  // sticky still-current revalidation: the stale run hides nothing.
+  const competing = new MockPublishApi();
+  competing.reviews = staleAdvisory;
+  competing.comments = [{ id: 9, body: MARKER, user: { login: "bot" }, updated_at: "2026-01-01T00:00:00Z" }];
+  competing.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  const sticky = competing.upsertStickyComment.bind(competing);
+  competing.upsertStickyComment = async (marker, body) => {
+    const upserted = await sticky(marker, body);
+    competing.reviews = [...competing.reviews, { id: 2000, node_id: "node-2000", state: "COMMENTED", body: MARKER, user: { login: "bot" }, submitted_at: "2099-01-01T00:00:00Z" }];
+    return upserted;
+  };
+  const competingResult = await publishReview(input(partialSticky), competing, { diffText: "" });
+  assert.equal(competingResult.status, "published");
+  assert.deepEqual(competing.minimized, [], "a competing managed review newer than the sticky checkpoint blocks minimization");
+  assert.ok(competingResult.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
+});
+
+test("#1114: a fallback-submitted review is an incomplete replacement and takes the advisory-only path", async () => {
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 600, node_id: "node-600", state: "COMMENTED", body: `${MARKER}\nold advisory`, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  api.reviewResults = [{ ok: false, error: "commit-bound submission rejected" }];
+  const result = await publishReview(input({ mode: "review_verdict", cleanupPreviousNativeReviews: "true" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("falling back to plain review")));
+  assert.deepEqual(api.minimized, ["node-600"]);
+  assert.equal(api.inlineListCalls, 0, "a fallback submission never retires inline comments");
+  assert.deepEqual(api.dismissed, []);
+});
+
+test("#1114: minimize failures are counted with a bounded diagnostic and never abort the run", async () => {
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 1, node_id: "node-1", state: "COMMENTED", body: `${MARKER}\nstale advisory`, user: { login: "bot" } }];
+  api.minimizeResult = false;
+  const logs: string[] = [];
+  await minimizeSupersededAdvisoryReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
+  assert.deepEqual(api.minimized, ["node-1"]);
+  assert.ok(logs.some((line) => line.includes("Advisory reviews: eligible=1 minimized=0 failed=1")));
 });
