@@ -164,13 +164,16 @@ def test_dogfood_workflow_exists() -> None:
 # The dogfood workflow runs the recommended setup (#706): the action defaults,
 # plus only the overrides that are genuinely this repository's choice. The
 # reasoning-effort knobs (#998) are operator-only model controls, so they are
-# this repository's choice too.
+# this repository's choice too. Repository skills intentionally exercise the new
+# trusted-base path in dogfood, and concise verbosity keeps this repo's review output compact.
 DOGFOOD_OVERRIDES = {
     "github-token",
     "tool-allowed-gh-api-repos",
     "claim-falsification",
     "equivalent-paths",
     "requirement-trace",
+    "repository-skills",
+    "review-verbosity",
     "ai-base-url",
     "ai-api-format",
     "ai-model",
