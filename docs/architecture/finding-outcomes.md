@@ -47,6 +47,17 @@ the same discipline as the #762 rejection carry marker:
 | `feedback` | 👍/👎 reaction tallies from the #762 signal — informational only | `forge-reaction` |
 | `adjudication` | explicit human label (`confirmed_valid_defect`, `confirmed_false_positive`, `valid_but_unhelpful`, `uncertain`) with who/when/provenance | `operator` |
 
+The table is enforced structurally, not just documented:
+`normalizeOutcomeEvent` rejects any event whose provenance is not the single
+seam listed for its kind (an untrusted ledger can neither re-label where an
+observation came from nor mint a lifecycle outcome it never observed),
+rejects a `dismissed` event without a bounded reason, and rejects `feedback`
+claiming `trusted: true`. This validates WHAT a payload claims, not WHO wrote
+it: an `operator`-provenance adjudication is meaningful only because the
+persistence channel that stores ledgers is itself the trusted-operator seam
+(ledger authenticity is that channel's guarantee, never inferable from the
+event bytes).
+
 Trust separation is structural: only an `adjudication` event moves the
 adjudicated precision denominator, and it moves it **per finding** — the
 latest adjudication for an identity (by timestamp, then array order) is its

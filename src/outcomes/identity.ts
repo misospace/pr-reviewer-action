@@ -80,8 +80,24 @@ export function findingIdentityFromRecord(rec: unknown): string | null {
 /** #1027: the marker grammar. One line — the exact prefix, exactly 64
  * lowercase hex chars, the exact HTML comment close. Nothing else is the
  * grammar: a 63/65-char token, an uppercase one, or any trailing text is
- * ordinary content, not state. */
-const FINDING_ID_LINE_RE = /^<!-- pr-reviewer:finding-id:v1:([0-9a-f]{64}) -->$/;
+ * ordinary content, not state. A "line" ends at CR, CRLF, or LF — the same
+ * normalization premise #1107 encodes for fence openers (`reserveSuggestionOpeners`):
+ * a forge may turn a lone CR into a line break, so a CR-terminated marker
+ * must be STATE for the parser exactly when it is stripped on publication.
+ * `FINDING_ID_LINE_SOURCE` is shared by parse and strip by construction: a
+ * stripped line is one the parser honors, and a line the parser would
+ * refuse stays in the body as ordinary content. */
+const FINDING_ID_LINE_SOURCE = "^<!-- pr-reviewer:finding-id:v1:([0-9a-f]{64}) -->$";
+const FINDING_ID_LINE_GLOBAL_RE = new RegExp(FINDING_ID_LINE_SOURCE, "gm");
+/** Strip form of the same line grammar: a mid/end-of-body marker line is
+ * removed together with its PRECEDING terminator (the join the old
+ * split-and-filter implementation produced); a body-leading marker line has
+ * no preceding terminator to take, and removing one would eat a surviving
+ * line's break, so it is dropped alone. */
+const FINDING_ID_STRIP_RE = new RegExp(
+  `(?:[\\r\\n]${FINDING_ID_LINE_SOURCE}|^${FINDING_ID_LINE_SOURCE})(?=[\\r\\n]|$)`,
+  "gm",
+);
 const FINDING_ID_DIGEST_RE = /^[0-9a-f]{64}$/;
 
 /** Render the hidden identity marker appended to a published inline finding
@@ -100,10 +116,7 @@ export function renderFindingIdentityMarker(digest: string): string | null {
 export function parseFindingIdentityMarker(body: string): string | null {
   if (typeof body !== "string" || !body.includes("pr-reviewer:finding-id:v1:")) return null;
   let found: string | null = null;
-  for (const rawLine of body.split("\n")) {
-    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-    const match = FINDING_ID_LINE_RE.exec(line);
-    if (match === null) continue;
+  for (const match of body.matchAll(FINDING_ID_LINE_GLOBAL_RE)) {
     const digest = match[1];
     if (digest === undefined) continue;
     if (found !== null && found !== digest) return null;
@@ -120,11 +133,5 @@ export function parseFindingIdentityMarker(body: string): string | null {
  * parser would refuse stays in the body as ordinary content. */
 export function stripFindingIdentityMarkers(body: string): string {
   if (!body.includes("pr-reviewer:finding-id:v1:")) return body;
-  return body
-    .split("\n")
-    .filter((rawLine) => {
-      const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-      return FINDING_ID_LINE_RE.exec(line) === null;
-    })
-    .join("\n");
+  return body.replace(FINDING_ID_STRIP_RE, "");
 }

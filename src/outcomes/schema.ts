@@ -66,8 +66,9 @@ export interface OutcomeEvent {
   signal?: "helpful" | "not_helpful";
   /** `feedback` only: how many reactions of `signal` were observed. */
   count?: number;
-  /** `feedback` only: true only when the caller proved the reacting actors
-   * trusted. Forge-derived v1 feedback is always false (informational). */
+  /** `feedback` only: how the reacting actors were proven trusted. v1
+   * feedback is always forge-derived, so the normalizer only ever emits
+   * false; a ledger claiming true fails closed (informational counts only). */
   trusted?: boolean;
 }
 
@@ -81,6 +82,21 @@ const PROVENANCES: ReadonlySet<OutcomeProvenance> = new Set([
   "current-review", "forge-thread", "forge-reaction", "prior-ledger", "operator",
 ]);
 const FEEDBACK_SIGNALS: ReadonlySet<"helpful" | "not_helpful"> = new Set(["helpful", "not_helpful"]);
+/** The contract table (docs/architecture/finding-outcomes.md): each kind has
+ * exactly ONE permitted provenance — the seam that could observe it. Kind and
+ * provenance validated independently would let an untrusted ledger claim an
+ * observation it never made (a `resolved` thread "seen" by the current review,
+ * forge reaction counts asserting a trusted actor). Pairing is structural. */
+const KIND_PROVENANCE: Readonly<Record<OutcomeEventKind, OutcomeProvenance>> = {
+  reported: "current-review",
+  repeated: "current-review",
+  resolved: "forge-thread",
+  dismissed: "forge-thread",
+  still_open: "forge-thread",
+  unknown: "prior-ledger",
+  feedback: "forge-reaction",
+  adjudication: "operator",
+};
 const FINDING_ID_RE = /^[0-9a-f]{64}$/;
 const HEAD_SHA_RE = /^[0-9a-f]{1,64}$/;
 const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T/;
@@ -105,7 +121,9 @@ function isoTimestamp(value: unknown): string | null {
 /** Normalize one untrusted candidate event, or null when it cannot be
  * proven to be a well-formed event of its claimed kind. Kind-specific
  * fields are dropped for every other kind, so a forged event cannot smuggle
- * an adjudication label into a `feedback` record. */
+ * an adjudication label into a `feedback` record, and the claimed provenance
+ * must be the ONE seam that could produce that kind (`KIND_PROVENANCE`), so
+ * an untrusted ledger cannot re-label where an observation came from. */
 export function normalizeOutcomeEvent(raw: unknown): OutcomeEvent | null {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
   const rec = raw as Record<string, unknown>;
@@ -113,6 +131,7 @@ export function normalizeOutcomeEvent(raw: unknown): OutcomeEvent | null {
   if (typeof rec.kind !== "string" || !EVENT_KINDS.has(rec.kind as OutcomeEventKind)) return null;
   const kind = rec.kind as OutcomeEventKind;
   if (typeof rec.provenance !== "string" || !PROVENANCES.has(rec.provenance as OutcomeProvenance)) return null;
+  if (KIND_PROVENANCE[kind] !== rec.provenance) return null;
   const headSha = typeof rec.head_sha === "string" && HEAD_SHA_RE.test(rec.head_sha) ? rec.head_sha : null;
   const event: OutcomeEvent = {
     finding_id: rec.finding_id,
@@ -124,16 +143,18 @@ export function normalizeOutcomeEvent(raw: unknown): OutcomeEvent | null {
     provenance: rec.provenance as OutcomeProvenance,
   };
   if (kind === "dismissed") {
+    // A dismissal without a reason is exactly the silent promotion the
+    // contract forbids (head-unchanged resolution read as a code fix), so
+    // the bounded reason is REQUIRED, not optional decoration.
     const reason = boundedText(rec.reason, 200);
-    if (reason !== null) event.reason = reason;
+    if (reason === null) return null;
+    event.reason = reason;
   }
   if (kind === "adjudication") {
-    // #1027: adjudications are the one trusted surface — they may only come
-    // from operator input carrying WHO recorded it. A forge-derived or
-    // otherwise unproven record claiming an adjudication label is not an
-    // adjudication; it fails closed here so it can never reach the
-    // precision denominator.
-    if (rec.provenance !== "operator") return null;
+    // #1027: adjudications are the one trusted surface — the pairing check
+    // above already forces `operator` provenance; the record must also carry
+    // WHO recorded it. An otherwise unproven claim of an adjudication label
+    // fails closed here so it can never reach the precision denominator.
     if (typeof rec.label !== "string" || !ADJUDICATION_LABELS.has(rec.label as AdjudicationLabel)) return null;
     const actor = boundedText(rec.actor, 200);
     if (actor === null) return null;
@@ -146,7 +167,11 @@ export function normalizeOutcomeEvent(raw: unknown): OutcomeEvent | null {
     if (typeof rec.count === "number" && Number.isSafeInteger(rec.count) && rec.count >= 0) {
       event.count = rec.count;
     }
-    event.trusted = rec.trusted === true;
+    // The pairing check forces `forge-reaction` provenance, and forge-derived
+    // feedback is ALWAYS untrusted — a ledger claiming `trusted: true` asserts
+    // an actor proof this contract can never derive, so it fails closed.
+    if (rec.trusted === true) return null;
+    event.trusted = false;
   }
   return event;
 }
