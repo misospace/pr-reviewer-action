@@ -4,6 +4,7 @@ import type { RawInputs } from "../config/load-config.js";
 import { createRunDir, nonEmpty } from "./run-dir.js";
 import { runReviewEngine, GATE_CHILD_ENV } from "../engine/review.js";
 import type { ReviewDependencies, ReviewRequest } from "../engine/types.js";
+import type { RunReviewResult } from "../engine/review.js";
 import type { FetchLike } from "../platform/http.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
 import { ciGateBranch } from "../gates/workloads.js";
@@ -52,7 +53,7 @@ export function rawInputsFromEnv(
   ]));
 }
 
-export async function runReview(options: RunReviewOptions): Promise<import("../engine/review.js").RunReviewResult> {
+export async function runReview(options: RunReviewOptions): Promise<RunReviewResult> {
   const env = options.env;
   const contract = validateContract(V3_CONTRACT);
   const inputs = options.inputs ?? rawInputsFromEnv(contract, env);

@@ -211,10 +211,10 @@ export function ciGateOutputs(path: string): string {
 /** Set on every gate child; a process carrying it never starts a review. */
 export const GATE_CHILD_ENV = "PR_REVIEWER_GATE_CHILD";
 
-/** The bundle a gate child is launched from: an explicit PR_REVIEWER_ENTRY,
- * or this process's own entry when it is the built `dist/index.js`. Anything
- * else (a test runner file) is not a runtime entry — launching it would
- * re-run that file instead of the gate. */
+/** The action-independent v3 review engine (#726): one engine for the Action
+ * adapter, the `run` CLI and any future self-hosted worker (#725). Canonical
+ * intent/state arrives as `ReviewRequest`, external capabilities as
+ * `ReviewDependencies` — see docs/architecture/engine-boundary.md. */
 export async function runReviewEngine(request: ReviewRequest, dependencies: ReviewDependencies): Promise<RunReviewResult> {
   const scope = createCancellationScope();
   if (request.signal !== undefined) {
