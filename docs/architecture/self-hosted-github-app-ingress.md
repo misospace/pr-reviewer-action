@@ -53,7 +53,10 @@ safety margin), never globally and never pinned to one configured repository. A
 missing or unparseable `expires_at` falls back to a **conservative** 3600 s
 lifetime: an over-short cache entry only costs one extra mint, while an over-long
 one would hand out a token GitHub has already revoked. Inside the margin the
-token is re-minted rather than handed out.
+token is re-minted rather than handed out. The cache is bounded by scope count
+(512 entries); on overflow it is dropped whole rather than evicted selectively —
+tokens are cheap to re-mint and short-lived, so a flush costs one extra mint per
+live scope and can never serve a stale one.
 
 ### Cache keying rule
 
@@ -118,9 +121,20 @@ a traversal-shaped repository can never become a token scope.
 same marker identity the production publisher uses (`src/platform/publish-api.ts`)
 — and **PATCHes** it; it POSTs only when no managed comment exists. A retry after
 a partial publication failure therefore converges on ONE managed comment instead
-of duplicating the managed output. A failed lookup is propagated rather than
-degraded to "no comment exists", because that degradation would turn a read
-failure into a duplicate create.
+of duplicating the managed output.
+
+Two failure modes that would each produce a duplicate are refused rather than
+absorbed:
+
+- **A failed lookup is propagated**, never degraded to "no comment exists" —
+  that degradation would turn a read failure into a duplicate create.
+- **Exhausting the comment page bound fails loudly** instead of reporting
+  "absent". GitHub returns issue comments oldest-first, so the comment this seam
+  just published is the one on the *last* page — precisely the page a silent
+  truncation drops. A bound that reports absence is worse than no bound.
+- **The body must carry the marker.** A comment published without one cannot be
+  located by the next run, so every publication would duplicate it. The marker is
+  not the caller's to omit.
 
 ## Managed-comment ownership is proven, not assumed
 
@@ -147,12 +161,26 @@ Outcomes, all fail-closed:
 |---|---|
 | App identity proven, marker comment authored by it | PATCH that comment |
 | identity unprovable (`GET /app` refused, unusable payload, transport failure) | no PATCH **and** no POST |
-| a marker comment exists but is foreign-authored, or carries no forge-reported author | no PATCH **and** no POST |
+| a marker comment exists but is foreign-authored, or carries no forge-reported author, and no owned match exists | no PATCH **and** no POST |
+| a foreign marker comment exists *alongside* a proven-owned match | the owned one is PATCHed |
+
+**Documented divergence from the shipped publisher.** `publish-api.ts:352-355`
+blocks only on an *unattributable* author and otherwise POSTs beside a foreign
+marker; this seam also blocks on a merely *foreign* one. That is stricter, and
+it is deliberate — the App path has no second publisher to fall back on. The
+cost is an availability edge: a PR author who posts the marker once suppresses
+the managed comment on that PR for as long as the foreign comment is the only
+match. Fail-closed is the correct default here (`AGENTS.md`, "Fail closed where
+required"), so the stricter rule stays; a controller that needs to publish over
+a marker-squatted PR should surface it rather than weaken the check.
 
 An unprovable identity is never treated as trusted, matching
 `PlatformAdapter.authenticatedIdentity()`'s contract in `src/platform/types.ts`.
 A failure is never cached as a negative identity: the next call re-proves, so a
-transient 5xx cannot pin the publisher into a permanently broken state. The
+transient 5xx cannot pin the publisher into a permanently broken state. A
+*successful* proof is cached for 15 minutes — bounded because the App slug is
+renameable, and a login cached forever would strand every managed comment as
+foreign after a rename with no recovery short of a restart. The
 refinement over the marker is implemented **here** rather than deferred to
 `src/platform/publish-api.ts`, because #729 lists "own-comment/review identity
 cannot be spoofed by PR author" as a required property of this seam.
@@ -175,7 +203,7 @@ semantics.
 | `X-Hub-Signature-256` is verified fail-closed over the raw body | `github-app-signature.ts` | `tests-v3/ingress-github-app-signature.test.ts` |
 | every forge read/write goes through the configured capability | `github-app-client.ts` reads + writes, per-call repo-scoped credential, capability-gated check runs | `tests-v3/ingress-github-app-client.test.ts` |
 | credentials and key material stay inside the seam | `#private` key containment, header-only credentials, fixed credential-free errors, origin binding | `tests-v3/ingress-github-app-auth.test.ts`, `tests-v3/ingress-github-app-client.test.ts` |
-| a retried publication converges | marker lookup → PATCH, POST only when absent | `tests-v3/ingress-github-app-client.test.ts` |
+| a retried publication converges | marker lookup → PATCH, POST only when absent; loud failure on a failed lookup, on page-bound exhaustion, and on a marker-less body | `tests-v3/ingress-github-app-client.test.ts` |
 | managed-comment identity cannot be spoofed by the PR author | `appIdentity()` (`GET /app` with the App JWT) + `ownerMatchesIdentity` before any PATCH; foreign/unknown/unprovable ownership fails closed | `tests-v3/ingress-github-app-client.test.ts` |
 | webhook handler + reconciliation for the App path | not in this phase | — |
 

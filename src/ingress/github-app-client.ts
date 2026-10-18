@@ -81,6 +81,11 @@ const MAX_MARKER_CHARS = 512;
 const MAX_CONTEXT_CHARS = 100;
 const MAX_REQUEST_BYTES = 262_144;
 const CONTROL_RE = /[\u0000-\u001f\u007f]/;
+/** Same, but permitting the horizontal-tab and line-break bytes a markdown body
+ * legitimately carries. Bodies are JSON-encoded, so a line break there cannot
+ * inject anything; single-line fields (marker, context, path) keep the stricter
+ * `CONTROL_RE`. */
+const BODY_CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 
 /** Commit sha shape used in a URL path: hex only, so a sha can never carry a
  * path separator or query marker. */
@@ -227,12 +232,19 @@ export class GitHubAppCapabilityClient {
    * publication failure converges on one comment instead of duplicating the
    * managed output. An author-posted marker is never overwritten: that fails
    * closed instead.
+   *
+   * The body MUST carry the marker. A comment published without one cannot be
+   * located by the next run, so every publication would duplicate — the caller
+   * cannot opt out of the idempotency contract this method advertises.
    */
   async upsertIssueComment(repo: string, prNumber: number, marker: string, body: string): Promise<WriteResult> {
     if (!isPrNumber(prNumber)) return { ok: false, error: "invalid PR number" };
     if (!isUsableMarker(marker)) return { ok: false, error: "invalid comment marker" };
     if (typeof body !== "string" || body.trim() === "" || Buffer.byteLength(body, "utf8") > MAX_COMMENT_BYTES) {
       return { ok: false, error: "invalid comment body" };
+    }
+    if (!body.includes(marker)) {
+      return { ok: false, error: "comment body does not carry the managed marker" };
     }
 
     const existing = await this.#findManagedComment(repo, prNumber, marker);
@@ -344,6 +356,7 @@ export class GitHubAppCapabilityClient {
 
     let best: { readonly id: number; readonly updatedAt: string } | null = null;
     let foreignMarker = false;
+    let exhausted = false;
     for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
       const url = repoScopedUrl(
         this.apiBase,
@@ -364,9 +377,12 @@ export class GitHubAppCapabilityClient {
         };
         if (typeof comment.body !== "string" || !comment.body.includes(marker)) continue;
         if (typeof comment.id !== "number" || !Number.isSafeInteger(comment.id)) continue;
-        // A marker comment this seam does not own is recorded as a blocker even
-        // when a proven-owned match is also present: the owned one is the patch
-        // target, but the foreign one means the marker is not a private signal.
+        // A marker comment this seam does not own is recorded as a blocker. When
+        // a proven-owned match is ALSO present, the owned one remains the patch
+        // target — a foreign marker alongside it does not suppress a legitimate
+        // update (that would hand the PR author a way to freeze the managed
+        // comment permanently). The blocker only applies when no owned match
+        // exists, which is exactly the `best === null` case below.
         if (!ownerMatchesIdentity(comment.user, identity)) {
           foreignMarker = true;
           continue;
@@ -374,7 +390,20 @@ export class GitHubAppCapabilityClient {
         const updatedAt = typeof comment.updated_at === "string" ? comment.updated_at : "";
         if (best === null || updatedAt > best.updatedAt) best = { id: comment.id, updatedAt };
       }
-      if (result.data.length < COMMENT_PAGE_SIZE) break;
+      if (result.data.length < COMMENT_PAGE_SIZE) {
+        exhausted = false;
+        break;
+      }
+      exhausted = true;
+    }
+    // Loud failure, never a silent "not found": exhausting the page bound means
+    // the managed comment may sit on a page this loop never fetched, and
+    // reporting "absent" would turn the bound into a DUPLICATE managed comment —
+    // the one outcome the idempotency contract exists to prevent. GitHub returns
+    // issue comments oldest-first, so the comment we just published is the one on
+    // the last page, i.e. precisely the one truncation hides.
+    if (exhausted) {
+      return { ok: false, error: "managed comment lookup exceeded paging bound" };
     }
     if (best === null && foreignMarker) {
       return { ok: false, error: "managed comment ownership is unknown" };
@@ -452,6 +481,24 @@ function isBoundedText(value: string, maxChars: number): boolean {
   );
 }
 
+/** Byte-bounded variant, for every value whose limit is a WIRE ceiling rather
+ * than a field-length bound. Comment/review bodies are limited in bytes
+ * everywhere (GitHub's own comment limit, `MAX_REQUEST_BYTES`), so bounding a
+ * body in characters would let a multi-byte payload through at several times
+ * the intended size.
+ *
+ * Bodies permit newline and tab — a markdown review comment is multi-line by
+ * definition, and the body is JSON-encoded, so a newline inside it cannot inject
+ * a header or a second request. Every other C0/DEL byte is still refused. */
+function isBoundedBytes(value: string, maxBytes: number): boolean {
+  return (
+    typeof value === "string" &&
+    value.trim() !== "" &&
+    Buffer.byteLength(value, "utf8") <= maxBytes &&
+    !BODY_CONTROL_RE.test(value)
+  );
+}
+
 function isUsableMarker(marker: string): boolean {
   return isBoundedText(marker, MAX_MARKER_CHARS);
 }
@@ -465,9 +512,7 @@ function encodeReviewPayload(payload: ReviewPayload): string | null {
   if (!REVIEW_EVENTS.has(event)) return null;
   const body: Record<string, unknown> = { event };
   if (payload.body !== undefined) {
-    if (typeof payload.body !== "string" || Buffer.byteLength(payload.body, "utf8") > MAX_COMMENT_BYTES) {
-      return null;
-    }
+    if (!isBoundedBytes(payload.body, MAX_COMMENT_BYTES)) return null;
     body.body = payload.body;
   }
   if (payload.comments !== undefined) {
@@ -475,7 +520,7 @@ function encodeReviewPayload(payload: ReviewPayload): string | null {
     const comments: Record<string, unknown>[] = [];
     for (const comment of payload.comments as readonly ReviewCommentPayload[]) {
       if (typeof comment !== "object" || comment === null) return null;
-      if (!isBoundedText(comment.path, 1024) || !isBoundedText(comment.body, MAX_COMMENT_BYTES)) return null;
+      if (!isBoundedText(comment.path, 1024) || !isBoundedBytes(comment.body, MAX_COMMENT_BYTES)) return null;
       const entry: Record<string, unknown> = { path: comment.path, body: comment.body };
       if (comment.line !== undefined) {
         if (!isPrNumber(comment.line)) return null;

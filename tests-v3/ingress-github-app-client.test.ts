@@ -28,6 +28,13 @@ function ownedComment(id: number, body: string, updatedAt: string): Record<strin
   return { id, body, updated_at: updatedAt, user: { login: BOT_LOGIN } };
 }
 
+/** A publishable comment body: the managed marker plus review text. `upsertIssueComment`
+ * refuses a body without the marker, because a comment the next run cannot locate
+ * would be republished every time. */
+function managedBody(text: string): string {
+  return `${MARKER}\n${text}`;
+}
+
 interface Call {
   readonly url: string;
   readonly auth: string | null;
@@ -159,7 +166,7 @@ test("upsertIssueComment POSTs when no managed comment exists", async () => {
   const { fetchImpl, apiCalls } = makeForge((call) =>
     call.method === "GET" ? json([]) : json({ id: 99 }, 201),
   );
-  const result = await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, "## Review\nbody");
+  const result = await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, managedBody("## Review\nbody"));
   assert.equal(result.ok, true);
   if (result.ok) {
     assert.equal(result.created, true);
@@ -173,7 +180,7 @@ test("upsertIssueComment POSTs when no managed comment exists", async () => {
       `POST ${API_BASE}/repos/owner/repo/issues/7/comments`,
     ],
   );
-  assert.equal(JSON.parse(api[1]!.body!).body, "## Review\nbody");
+  assert.equal(JSON.parse(api[1]!.body!).body, managedBody("## Review\nbody"));
 });
 
 test("a retry PATCHes the existing managed comment instead of POSTing a second one", async () => {
@@ -186,7 +193,7 @@ test("a retry PATCHes the existing managed comment instead of POSTing a second o
         ])
       : json({ id: 12 }),
   );
-  const result = await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, "## Review\nbody");
+  const result = await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, managedBody("## Review\nbody"));
   assert.equal(result.ok, true);
   if (result.ok) {
     assert.equal(result.created, false, "an update is not a create");
@@ -196,13 +203,13 @@ test("a retry PATCHes the existing managed comment instead of POSTing a second o
   assert.equal(api.length, 2, "one lookup and exactly one write — no duplicate POST");
   assert.equal(api[1]!.method, "PATCH");
   assert.equal(api[1]!.url, `${API_BASE}/repos/owner/repo/issues/comments/12`);
-  assert.equal(JSON.parse(api[1]!.body!).body, "## Review\nbody");
+  assert.equal(JSON.parse(api[1]!.body!).body, managedBody("## Review\nbody"));
   assert.equal(api[1]!.auth, `Bearer ${INSTALLATION_TOKEN}`);
 });
 
 test("a failed managed-comment lookup never degrades into a duplicate create", async () => {
   const { fetchImpl, apiCalls } = makeForge((call) => (call.method === "GET" ? json({ nope: true }) : json({ id: 1 }, 201)));
-  const result = await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, "body");
+  const result = await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, managedBody("body"));
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.error, "unexpected response");
   assert.equal(apiCalls().filter((call) => call.method !== "GET").length, 0, "no write after a failed lookup");
@@ -220,6 +227,33 @@ test("an unusable marker or an over-sized comment body is refused before any req
   assert.equal(calls.length, 0);
 });
 
+test("a body without the managed marker is refused, so a comment is never unlocatable", async () => {
+  // A comment published without the marker cannot be found by the next run, so
+  // every publication would duplicate it. The marker is not the caller's choice.
+  const { fetchImpl, calls } = makeForge(() => json([]));
+  const result = await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, "## Review\nno marker here");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error, "comment body does not carry the managed marker");
+  assert.equal(calls.length, 0, "refused before any mint, read, or write");
+});
+
+test("exhausting the managed-comment page bound fails loudly instead of POSTing a duplicate", async () => {
+  // Every page is FULL, so the loop can only leave by hitting MAX_COMMENT_PAGES.
+  // GitHub returns issue comments oldest-first, so the comment this seam just
+  // published sits on a page past the bound — reporting "absent" would duplicate
+  // the managed comment, the one outcome idempotency exists to prevent.
+  const full = Array.from({ length: 100 }, (_, i) => ownedComment(i, "human chatter", "2024-01-01T00:00:00Z"));
+  const { fetchImpl, apiCalls } = makeForge((call) =>
+    call.method === "GET" ? json(full) : json({ id: 1 }, 201),
+  );
+  const result = await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, managedBody("body"));
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.ok(result.error.includes("paging bound"), result.error);
+  const reads = apiCalls().filter((call) => call.method === "GET");
+  assert.ok(reads.length > 1, "the bound is actually exercised, not a single page");
+  assert.equal(apiCalls().filter((call) => call.method !== "GET").length, 0, "no POST after a truncated lookup");
+});
+
 // ── managed-comment ownership cannot be spoofed (#729) ───────────────────────
 
 test("a PR author's own marker comment is never overwritten, and never duplicated beside", async () => {
@@ -228,7 +262,7 @@ test("a PR author's own marker comment is never overwritten, and never duplicate
       ? json([{ id: 77, body: `I am the reviewer ${MARKER}`, updated_at: "2024-05-05T00:00:00Z", user: { login: "attacker" } }])
       : json({ id: 77 }),
   );
-  const result = await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, "## Review\nbody");
+  const result = await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, managedBody("## Review\nbody"));
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.error, "managed comment ownership is unknown");
   const writes = apiCalls().filter((call) => call.method !== "GET");
@@ -241,7 +275,7 @@ test("a marker comment with no forge-reported author fails closed", async () => 
       ? json([{ id: 78, body: `${MARKER}`, updated_at: "2024-05-05T00:00:00Z" }])
       : json({ id: 78 }),
   );
-  const result = await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, "body");
+  const result = await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, managedBody("body"));
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.error, "managed comment ownership is unknown");
   assert.equal(apiCalls().filter((call) => call.method !== "GET").length, 0);
@@ -256,7 +290,7 @@ test("a proven-owned comment is still PATCHed even when a foreign marker comment
         ])
       : json({ id: 90 }),
   );
-  const result = await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, "body");
+  const result = await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, managedBody("body"));
   assert.equal(result.ok, true);
   if (result.ok) assert.equal(result.id, 90, "the owned comment is the patch target");
   const write = apiCalls().find((call) => call.method !== "GET")!;
@@ -265,7 +299,7 @@ test("a proven-owned comment is still PATCHed even when a foreign marker comment
 
 test("the owner login is proved from GET /app with the App JWT, never from the installation token", async () => {
   const { fetchImpl, calls } = makeForge((call) => (call.method === "GET" ? json([]) : json({ id: 1 }, 201)));
-  await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, "body");
+  await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, managedBody("body"));
   const identity = calls.find((call) => call.url === `${API_BASE}/app`)!;
   assert.ok(identity !== undefined, "the App identity was resolved");
   // A JWT, not the installation token: the installation token is repo-scoped and
@@ -273,6 +307,28 @@ test("the owner login is proved from GET /app with the App JWT, never from the i
   assert.ok(identity.auth!.startsWith("Bearer ey"), `expected a JWT, got ${identity.auth}`);
   assert.ok(!identity.auth!.includes(INSTALLATION_TOKEN));
   assert.equal(identity.method, "GET");
+});
+
+test("an unprovable App identity fails closed even when the located comment's author matches", async () => {
+  // The failure mode this pins is a GUESS instead of a fail-closed: if an
+  // unprovable identity fell back to some default login, the ownership matcher
+  // downstream would happily accept a comment authored by exactly that login.
+  // The comment here is authored by the most plausible guess, so ONLY the
+  // fail-closed guard can block the write.
+  for (const guessed of [BOT_LOGIN, "anyone[bot]", "github-actions[bot]", "octocat[bot]"]) {
+    const { fetchImpl, apiCalls } = makeForge(
+      (call) =>
+        call.method === "GET"
+          ? json([{ id: 1, body: `${MARKER} prior run`, updated_at: "2024-01-01T00:00:00Z", user: { login: guessed } }])
+          : json({ id: 1 }),
+      INSTALLATION_TOKEN,
+      () => json({ slug: APP_SLUG }, 403),
+    );
+    const result = await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, managedBody("body"));
+    assert.equal(result.ok, false, `guessed identity ${guessed} must not be trusted`);
+    if (!result.ok) assert.ok(result.error.includes("could not be verified"), result.error);
+    assert.equal(apiCalls().filter((call) => call.method !== "GET").length, 0, "no write on a guessed identity");
+  }
 });
 
 test("an unprovable App identity fails closed before any comment write", async () => {
@@ -289,16 +345,19 @@ test("an unprovable App identity fails closed before any comment write", async (
       INSTALLATION_TOKEN,
       appIdentity,
     );
-    const result = await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, "body");
+    const result = await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, managedBody("body"));
     assert.equal(result.ok, false, "an unproven identity is never treated as trusted");
     if (!result.ok) assert.ok(result.error.includes("could not be verified"), result.error);
     assert.equal(apiCalls().filter((call) => call.method !== "GET").length, 0, "no write without a proven owner");
   }
 });
 
-test("a hostile /app payload cannot inject a login that then matches a chosen comment author", async () => {
-  // The server claims a slug that is not in the App-slug charset, and tries to
-  // make the client accept "attacker" as the identity it posts as.
+test("a proven login never matches a plain user account that happens to share the slug", async () => {
+  // "attacker" IS a legal App slug, so this `/app` response is accepted and the
+  // proven identity becomes `attacker[bot]`. The point of this case is the
+  // suffix: a comment authored by the plain login `attacker` is a DIFFERENT
+  // identity and must not be adopted. (The out-of-charset slug shapes are the
+  // table above; this one pins that a legal slug still cannot buy ownership.)
   const { fetchImpl, apiCalls } = makeForge(
     (call) =>
       call.method === "GET"
@@ -307,9 +366,7 @@ test("a hostile /app payload cannot inject a login that then matches a chosen co
     INSTALLATION_TOKEN,
     () => json({ slug: "attacker", name: "attacker" }),
   );
-  // "attacker" IS a legal slug, so the proven identity is `attacker[bot]` — and
-  // the comment authored by plain `attacker` is still not that identity.
-  const result = await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, "body");
+  const result = await client(fetchImpl).upsertIssueComment("owner/repo", 7, MARKER, managedBody("body"));
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.error, "managed comment ownership is unknown");
   assert.equal(apiCalls().filter((call) => call.method !== "GET").length, 0);
@@ -328,6 +385,31 @@ test("createReview posts a typed review payload", async () => {
   assert.equal(call.method, "POST");
   assert.equal(call.url, `${API_BASE}/repos/owner/repo/pulls/7/reviews`);
   assert.deepEqual(JSON.parse(call.body!), { event: "REQUEST_CHANGES", body: "## Review\nplease fix" });
+});
+
+test("createReview carries multi-line inline comments, and still refuses non-whitespace controls", async () => {
+  // A markdown review comment is multi-line by definition, so line breaks in a
+  // body must be allowed — the body is JSON-encoded and cannot inject anything.
+  const { fetchImpl, apiCalls } = makeForge(() => json({ id: 5 }, 200));
+  const inlineBody = "**nit**: this is wrong\n\n```ts\nconst a = 1;\n```\n";
+  const result = await client(fetchImpl).createReview("owner/repo", 7, {
+    event: "COMMENT",
+    comments: [{ path: "src/a.ts", line: 12, side: "RIGHT", body: inlineBody }],
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(JSON.parse(apiCalls()[0]!.body!), {
+    event: "COMMENT",
+    comments: [{ path: "src/a.ts", body: inlineBody, line: 12, side: "RIGHT" }],
+  });
+
+  const { fetchImpl: badImpl } = makeForge(() => json({ id: 5 }, 200));
+  const bad = await client(badImpl).createReview("owner/repo", 7, {
+    event: "COMMENT",
+    // A NUL byte is not markdown — it stays refused.
+    comments: [{ path: "src/a.ts", body: "before\u0000after" }],
+  });
+  assert.equal(bad.ok, false);
+  if (!bad.ok) assert.equal(bad.error, "invalid review payload");
 });
 
 test("createReview refuses an unknown event and an invalid PR number before any request", async () => {
@@ -416,7 +498,7 @@ test("no request ever carries a credential in its URL or query string", async ()
   );
   const api = client(fetchImpl);
   await api.listOpenPullRequests("owner/repo");
-  await api.upsertIssueComment("owner/repo", 7, MARKER, "body");
+  await api.upsertIssueComment("owner/repo", 7, MARKER, managedBody("body"));
   await api.createReview("owner/repo", 7, { event: "COMMENT", body: "b" });
   await api.createCommitStatus("owner/repo", "abc1234", "success", "ctx");
   await api.createCheckRun("owner/repo", { name: "x", headSha: "abc1234", status: "queued" });
@@ -441,7 +523,7 @@ test("an authentication failure surfaces as a fixed reason and stops the call be
     assert.ok(read.error.includes("403"), read.error);
     assert.ok(!read.error.includes("ghs_"), "no credential in the error");
   }
-  const write = await api.upsertIssueComment("owner/repo", 7, MARKER, "body");
+  const write = await api.upsertIssueComment("owner/repo", 7, MARKER, managedBody("body"));
   assert.equal(write.ok, false);
   if (!write.ok) assert.ok(!write.error.includes("eyJ"), "no JWT in the error");
   // Both App-authenticated credential-plane calls (mint and identity proof) may

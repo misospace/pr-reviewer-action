@@ -104,6 +104,26 @@ test("duplicate header array is refused, not picked from", () => {
   );
 });
 
+test("a duplicate header as Node actually delivers it — one comma-joined string — is refused", () => {
+  // Per AGENTS.md #252 the fence is fed the boundary input the PRODUCTION path
+  // produces. A Node `http` server does not hand back an array for repeated
+  // non-`set-cookie` headers: it joins them into a single comma-separated
+  // string, so that is the form `req.headers["x-hub-signature-256"]` carries.
+  // A joined value that happens to be a valid signature must not be accepted.
+  const body = "hello, github";
+  const signature = signatureOf(body);
+  const joined = `${signature}, ${signature}`;
+  assert.equal(typeof joined, "string", "this is the shape the http server produces");
+  assert.equal(verifyGitHubWebhookSignature(SECRET, joined, body), false);
+  // And the mixed case: the attacker's own value second.
+  assert.equal(
+    verifyGitHubWebhookSignature(SECRET, `${signature}, ${signatureOf("other", "other-secret")}`, body),
+    false,
+  );
+  // A joined value that is NOT prefixed at all must fail too.
+  assert.equal(verifyGitHubWebhookSignature(SECRET, `sha256= ${signature}`, body), false);
+});
+
 test("empty configured secret verifies false even when the header matches the empty-secret computation", () => {
   const body = "hello, github";
   const emptySecretSignature = computeGitHubWebhookSignature("", body);

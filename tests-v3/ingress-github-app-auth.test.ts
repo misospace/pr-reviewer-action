@@ -140,6 +140,33 @@ test("a scoped mint sends the repository scope in the body, never in the URL", a
   assert.ok(!calls[0]!.url.includes("owner"), "no repository scope in the URL");
 });
 
+test("the outbound repository scope is de-duplicated and deterministically ordered", async () => {
+  // The cache key and the request body must be derived from the SAME canonical
+  // form, or a caller could receive a token minted for a scope it did not ask
+  // for. Entries differing only by case/whitespace collapse to ONE entry — the
+  // first spelling seen wins, because GitHub treats full names case-insensitively
+  // and the body is what GitHub reads back.
+  const { fetchImpl, calls } = mintingFetch(() => "a");
+  await authenticator(fetchImpl).installationToken("42", {
+    repositories: ["Owner/App", "owner/app", " owner/other ", "owner/beta"],
+  });
+  const body = JSON.parse(calls[0]!.body!) as { repositories: string[] };
+  assert.deepEqual(body.repositories, ["Owner/App", "owner/beta", "owner/other"]);
+  assert.equal(new Set(body.repositories.map((r) => r.toLowerCase())).size, body.repositories.length);
+});
+
+test("two scopes of the same installation mint separately, never sharing a token", async () => {
+  const { fetchImpl, calls } = mintingFetch(() => "a");
+  const auth = authenticator(fetchImpl);
+  const wide = await auth.installationToken("42", { repositories: ["owner/app", "owner/other"] });
+  const narrow = await auth.installationToken("42", { repositories: ["owner/app"] });
+  assert.equal(wide.ok, true);
+  assert.equal(narrow.ok, true);
+  assert.equal(calls.length, 2, "a narrower scope is not served from the wider scope's cached token");
+  assert.deepEqual(JSON.parse(calls[0]!.body!), { repositories: ["owner/app", "owner/other"] });
+  assert.deepEqual(JSON.parse(calls[1]!.body!), { repositories: ["owner/app"] });
+});
+
 test("an unscoped mint sends an empty JSON object", async () => {
   const { fetchImpl, calls } = mintingFetch(() => "a");
   await authenticator(fetchImpl).installationToken("42", { repositories: [] });

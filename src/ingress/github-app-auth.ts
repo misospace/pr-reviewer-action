@@ -83,6 +83,10 @@ const INSTALLATION_ID_RE = /^[1-9][0-9]{0,18}$/;
 /** Upper bound on a single scoped mint request, so one call cannot be turned
  * into an unbounded body by a caller-supplied repository list. */
 const MAX_SCOPE_ENTRIES = 100;
+/** Upper bound on distinct (installation, scope) entries one broker instance
+ * caches. Reached only by a caller fanning out over more scopes than any
+ * controller legitimately uses; see the flush policy at the cache write. */
+const MAX_CACHED_SCOPES = 512;
 
 /** GitHub caps an App JWT at 10 minutes; we mint the full window but skew the
  * issued-at backwards so a verifier whose clock runs fast still accepts it. */
@@ -93,6 +97,10 @@ const JWT_CLOCK_SKEW_SECONDS = 60;
  * over-short cache entry only costs one extra mint, while an over-long one would
  * hand out a token GitHub has already revoked. */
 const DEFAULT_INSTALLATION_TOKEN_LIFETIME_SECONDS = 3600;
+/** How long a proven App bot login is reused before it is re-proven. Long enough
+ * to keep the common path to one `/app` read, short enough that an App rename is
+ * picked up without a restart. */
+const BOT_LOGIN_TTL_MS = 900_000;
 
 /** Refresh this far ahead of `expires_at` so a token is never handed to a
  * request that outlives it. */
@@ -158,6 +166,11 @@ export class GitHubAppAuthenticator {
    * so caching it leaks nothing — but it is still `#private` so no caller can
    * write a forged identity into the cache. */
   #botLogin: string | null;
+  /** Epoch millis after which the cached login is re-proven. Bounded because the
+   * App slug is renameable: a login cached forever would permanently strand
+   * every managed comment as foreign-authored after a rename, with no way to
+   * recover short of a process restart. */
+  #botLoginAt: number;
 
   constructor(opts: GitHubAppAuthenticatorOptions) {
     // ORIGIN BINDING FIRST. A malformed base (embedded credentials, non-http(s),
@@ -181,9 +194,10 @@ export class GitHubAppAuthenticator {
     this.#privateKeyPem = opts.privateKeyPem;
     this.#timeoutMs = opts.timeoutMs;
     this.#fetchImpl = opts.fetchImpl;
-    this.#now = opts.now ?? Date.now;
+    this.#now = opts.now ?? (() => Date.now());
     this.#cache = new Map<string, InstallationToken>();
     this.#botLogin = null;
+    this.#botLoginAt = 0;
   }
 
   #nowSeconds(): number {
@@ -307,6 +321,12 @@ export class GitHubAppAuthenticator {
       expiresAt: minted.expiresAt ?? now + DEFAULT_INSTALLATION_TOKEN_LIFETIME_SECONDS,
     };
     this.#cache.set(key, entry);
+    // Bound the cache by scope count, not by repository: an unbounded map keyed
+    // by (installation, scope) would grow for as long as the process runs. On
+    // overflow the WHOLE cache is dropped rather than evicted one entry at a
+    // time — tokens are cheap to re-mint and short-lived, so a flush costs one
+    // extra mint per live scope and can never hand out a stale token.
+    if (this.#cache.size > MAX_CACHED_SCOPES) this.#cache.clear();
     return { ok: true, data: entry };
   }
 
@@ -329,7 +349,8 @@ export class GitHubAppAuthenticator {
    * pinning a negative identity into the publisher.
    */
   async appIdentity(): Promise<string | null> {
-    if (this.#botLogin !== null) return this.#botLogin;
+    const nowMs = this.#now();
+    if (this.#botLogin !== null && nowMs - this.#botLoginAt < BOT_LOGIN_TTL_MS) return this.#botLogin;
 
     let jwt: string;
     try {
@@ -359,14 +380,18 @@ export class GitHubAppAuthenticator {
     const login = botLoginFrom(data);
     if (login === null) return null;
     this.#botLogin = login;
+    this.#botLoginAt = nowMs;
     return login;
   }
 }
 
 /** Normalized, de-duplicated, sorted repository scope for the request body. The
  * caller's casing is preserved (GitHub is case-insensitive on full names, and
- * the body is what GitHub sees); only key derivation lowercases. */
-function normalizeScope(repositories: readonly string[]): string[] | null {
+ * the body is what GitHub sees); only key derivation lowercases. Sorted with a
+ * plain `.sort()` so the body order is byte-deterministic and matches
+ * `installationScopeKey`'s ordering — `localeCompare` is ICU/locale-dependent,
+ * and a key whose ordering depends on the host locale is not a stable key. */
+function normalizeScope(repositories: readonly string[]): readonly string[] | null {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const entry of repositories) {
@@ -378,7 +403,7 @@ function normalizeScope(repositories: readonly string[]): string[] | null {
     out.push(trimmed);
   }
   if (out.length > MAX_SCOPE_ENTRIES) return null;
-  return out.sort((a, b) => a.localeCompare(b));
+  return [...out].sort();
 }
 
 /** Fixed status → classification map. The reason is built from a LITERAL plus
