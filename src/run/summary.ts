@@ -87,6 +87,19 @@ export function writeStepSummary(stepSummaryPath: string, input: SummaryInput): 
         },
       }
       : {}),
+    // #1073: present only when the confidence scorer ran (all five outputs
+    // are "" when it is disabled), so a disabled run's summary gains no row.
+    ...(input.outputs.confidenceStatus !== undefined && input.outputs.confidenceStatus !== ""
+      ? {
+        confidence: {
+          status: input.outputs.confidenceStatus,
+          score: input.outputs.confidenceScore ?? "",
+          risk: input.outputs.confidenceRisk ?? "",
+          reason: input.outputs.confidenceReason ?? "",
+          model: input.outputs.confidenceModel ?? "",
+        },
+      }
+      : {}),
     ...(total > 0 ? { requirementCoverage: { total, unknown } } : {}),
     primaryTools: {
       executedRequestCount: typeof primaryHarness?.executed_request_count === "number" ? primaryHarness.executed_request_count : 0,

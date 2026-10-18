@@ -16,6 +16,7 @@ test("review step output IDs exactly match the kebab-case contract", () => {
   assert.deepEqual(REVIEW_STEP_OUTPUT_IDS, [
     "verdict", "verdict-source", "required-checks", "review-result", "incomplete-reason", "review-route", "escalation-reason",
     "review-triage-decision", "review-triage-reason", "review-triage-routing",
+    "confidence-status", "confidence-score", "confidence-risk", "confidence-reason", "confidence-model",
     "findings", "review-markdown", "analysis-engine", "tool-calls", "cache-hit-ratio",
   ]);
   for (const id of REVIEW_STEP_OUTPUT_IDS) {
@@ -62,6 +63,7 @@ test("review output formatting serializes all keys in contract order with kebab-
   assert.deepEqual(headers, [
     "verdict", "verdict-source", "required-checks", "review-result", "incomplete-reason", "review-route", "escalation-reason",
     "review-triage-decision", "review-triage-reason", "review-triage-routing",
+    "confidence-status", "confidence-score", "confidence-risk", "confidence-reason", "confidence-model",
     "review-markdown", "findings", "tool-calls", "cache-hit-ratio", "analysis-engine",
   ]);
   assert.ok(result.includes("review-result=clean\n"));

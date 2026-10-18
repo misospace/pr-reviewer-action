@@ -87,7 +87,13 @@
       "ai-specialist-anthropic-effort-support",
       "ai-anthropic-structured-output-support",
       "ai-smart-anthropic-structured-output-support",
-      "ai-fallback-anthropic-structured-output-support"
+      "ai-fallback-anthropic-structured-output-support",
+      "ai-confidence-model",
+      "ai-confidence-base-url",
+      "ai-confidence-api-format",
+      "ai-confidence-api-key",
+      "ai-confidence-reasoning-effort",
+      "ai-confidence-timeout-sec"
     ]
   },
   {

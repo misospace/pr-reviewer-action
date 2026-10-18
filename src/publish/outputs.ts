@@ -165,6 +165,11 @@ export const REVIEW_STEP_OUTPUT_IDS = [
   "review-triage-decision",
   "review-triage-reason",
   "review-triage-routing",
+  "confidence-status",
+  "confidence-score",
+  "confidence-risk",
+  "confidence-reason",
+  "confidence-model",
   "findings",
   "review-markdown",
   "analysis-engine",
@@ -209,6 +214,15 @@ export interface ReviewStepOutputs {
    * non-`off` statuses — or "" when review-triage or review-triage-routing is
    * off ("routing did not run"). Never model text. */
   reviewTriageRouting: string;
+  /** #1073: the confidence scorer's outputs, all "" when the scorer is
+   * disabled (`ai-confidence-model` empty) — never a spurious `0`. Optional
+   * in the type only so legacy literal callers keep compiling; the run
+   * always populates all five. */
+  confidenceStatus?: string;
+  confidenceScore?: string;
+  confidenceRisk?: string;
+  confidenceReason?: string;
+  confidenceModel?: string;
   /** Compact JSON array of the normalized findings. */
   findings: string;
   /** Full review markdown (model-controlled text). */
@@ -243,6 +257,33 @@ export function formatOutputAssignment(
   return `${key}<<${delimiter}\n${value}\n${delimiter}\n`;
 }
 
+const CONFIDENCE_RISK_OUTPUT_VALUES = ["low", "medium", "high", "critical"] as const;
+
+/** #1073: the five `confidence-*` output assignments, fail-closed at the
+ * output boundary: only the exact literals `scored`/`unscored` are written,
+ * the integer only for a scored answer, the risk only from the closed enum,
+ * and the model-authored reason always redacted. Disabled/absent → all "". */
+function confidenceAssignments(outputs: Omit<ReviewStepOutputs, "degradedGateBypass">): Array<[string, string]> {
+  const status = outputs.confidenceStatus === "scored" || outputs.confidenceStatus === "unscored"
+    ? outputs.confidenceStatus
+    : "";
+  const score = status === "scored" && /^[0-5]$/.test(outputs.confidenceScore ?? "")
+    ? outputs.confidenceScore!
+    : "";
+  const risk = status === "unscored"
+    ? "unknown"
+    : status === "scored" && (CONFIDENCE_RISK_OUTPUT_VALUES as readonly string[]).includes(outputs.confidenceRisk ?? "")
+      ? outputs.confidenceRisk!
+      : "";
+  return [
+    ["confidence-status", status],
+    ["confidence-score", score],
+    ["confidence-risk", risk],
+    ["confidence-reason", status === "scored" ? redactText(outputs.confidenceReason ?? "") : ""],
+    ["confidence-model", status === "" ? "" : (outputs.confidenceModel ?? "").slice(0, 200)],
+  ];
+}
+
 /** Serialize all review-step outputs in contract order. The assignment keys
  * are derived from `REVIEW_STEP_OUTPUT_IDS` so the constant and the writer
  * cannot drift apart. */
@@ -274,6 +315,13 @@ export function formatReviewStepOutputs(
     // here so a carried-forward or hand-edited value can never be written as a
     // public output. "" means routing did not run and stays "".
     ["review-triage-routing", isHumanReviewRoutingStatus(outputs.reviewTriageRouting) ? outputs.reviewTriageRouting : ""],
+    // #1073: the confidence scorer's outputs, fail-closed at this boundary
+    // like every other closed-vocabulary field: "" (disabled) stays "",
+    // `scored`/`unscored` pass, anything else is dropped. The integer is
+    // written ONLY for a scored answer (never a spurious 0), the reason is
+    // model-authored text and takes the same redaction as the other public
+    // model-text outputs.
+    ...confidenceAssignments(outputs),
     // Models echo diff lines; the public step output must not carry raw credentials; redactText is idempotent with the publish boundary.
     ["review-markdown", redactText(outputs.reviewMarkdown)],
     ["findings", redactText(outputs.findings)],
@@ -397,6 +445,10 @@ export interface StepSummaryTelemetry {
    * (mode != off) — absent renders no row. All action-owned/trusted-config
    * values, never model text. */
   reviewRouting?: { status: string; targetIds: string[]; users: string[]; teams: string[] };
+  /** #1073: the independent confidence scorer's telemetry, supplied only
+   * when the scorer ran (`ai-confidence-model` set) — absent renders no
+   * row, so a disabled run's summary is byte-identical to pre-#1073. */
+  confidence?: { status: string; score: string; risk: string; reason: string; model: string };
   /** #633 deep-review telemetry row (rendered only when deep review ran). */
   deepReview?: { leads: string; errors: boolean; autoSelection?: { selected: number; skipped: number } };
   budget: string;
@@ -476,6 +528,30 @@ export function renderStepSummary(telemetry: StepSummaryTelemetry): string {
     if (routing.teams.length > 0) resolved.push(`teams: ${escapeTableCell(routing.teams.join(", "))}`);
     const reviewers = resolved.length > 0 ? `; ${resolved.join("; ")}` : "";
     rows.push(`| Reviewer routing | ${escapeTableCell(routing.status)}${targets}${reviewers} |`);
+  }
+  // #1073: compact one-row confidence summary, rendered only when the scorer
+  // ran. The reason is model-authored: redacted, flattened, capped and
+  // pipe-escaped exactly like the triage reason.
+  if (telemetry.confidence) {
+    const confidence = telemetry.confidence;
+    const reason = escapeTableCell(
+      redactText(confidence.reason).replace(/\s+/g, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS),
+    );
+    let value: string;
+    if (confidence.status === "scored" && /^[0-5]$/.test(confidence.score)) {
+      value = `scored ${confidence.score}/5, risk: ${escapeTableCell(confidence.risk || "unknown")}`;
+    } else if (confidence.status === "unscored") {
+      value = "unscored";
+    } else {
+      value = escapeTableCell(confidence.status);
+    }
+    if (confidence.model !== "") {
+      value += ` (model: ${escapeTableCell(confidence.model)})`;
+    }
+    if (reason !== "") {
+      value += ` — ${reason}`;
+    }
+    rows.push(`| Independent confidence | ${value} (advisory only) |`);
   }
   const budgetRows: string[] = [];
   for (const harness of [telemetry.primaryTools, telemetry.smartTools]) {

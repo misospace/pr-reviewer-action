@@ -40,7 +40,7 @@ test("current canonical contract validates and maps every input once", () => {
     assert.ok(Object.hasOwn(config, toCamelCase(input.id)), input.id);
     assert.equal(toCamelCase(input.id).includes("_"), false);
   }
-  assert.equal(contract.inputs.length, 160);
+  assert.equal(contract.inputs.length, 166);
   assert.equal(Object.hasOwn(config, "ai_base_url"), false);
 });
 
@@ -551,4 +551,62 @@ test("#1037: malformed or transport-colliding ai-extra-headers fails at config l
       bad,
     );
   }
+});
+
+test("#1073: ai-confidence-* inputs default to a disabled scorer with empty values", () => {
+  const config = loadConfig(contract, { "ai-base-url": "https://primary", "ai-model": "main" });
+  assert.equal(config.aiConfidenceModel, "");
+  assert.equal(config.aiConfidenceBaseUrl, "");
+  assert.equal(config.aiConfidenceApiFormat, "");
+  assert.ok(isSecretValue(config.aiConfidenceApiKey) && !config.aiConfidenceApiKey.present);
+  assert.equal(config.aiConfidenceReasoningEffort, "");
+  assert.equal(config.aiConfidenceTimeoutSec, 120);
+  // Deliberate non-inheritance (like ai-fallback-reasoning-effort): the
+  // resolved config must keep the scorer's unset fields distinguishable from
+  // configured ones, so the fingerprint stays conditional and the routing
+  // resolver decides the inheritance itself.
+  assert.notEqual(config.aiConfidenceBaseUrl, config.aiBaseUrl);
+  assert.notEqual(config.aiConfidenceApiFormat, config.aiApiFormat);
+});
+
+test("#1073: ai-confidence-* typed validation (enum, positive integer, secret)", () => {
+  const base = { "ai-base-url": "https://primary", "ai-model": "main" };
+  assert.throws(
+    () => loadConfig(contract, { ...base, "ai-confidence-api-format": "provider" }),
+    /ai-confidence-api-format.*must be one of: openai, anthropic/,
+  );
+  assert.equal(loadConfig(contract, { ...base, "ai-confidence-api-format": "anthropic" }).aiConfidenceApiFormat, "anthropic");
+  // An explicit empty string is preserved (empty = inherit), like the other
+  // per-lane format overrides.
+  assert.equal(loadConfig(contract, { ...base, "ai-confidence-api-format": "" }).aiConfidenceApiFormat, "");
+
+  for (const bad of ["0", "-1", "1.5", "abc"]) {
+    assert.throws(
+      () => loadConfig(contract, { ...base, "ai-confidence-timeout-sec": bad }),
+      (error: unknown) => error instanceof Error && /ai-confidence-timeout-sec/.test(error.message),
+      bad,
+    );
+  }
+  assert.equal(loadConfig(contract, { ...base, "ai-confidence-timeout-sec": "30" }).aiConfidenceTimeoutSec, 30);
+
+  const withKey = loadConfig(contract, { ...base, "ai-confidence-api-key": "sk-confidence-probe" });
+  assert.ok(isSecretValue(withKey.aiConfidenceApiKey) && withKey.aiConfidenceApiKey.present);
+  assert.equal(JSON.stringify(redactConfig(withKey)).includes("sk-confidence-probe"), false);
+  assert.equal(JSON.parse(JSON.stringify(redactConfig(withKey))).aiConfidenceApiKey, "[REDACTED]");
+});
+
+test("#1073: ai-confidence-reasoning-effort is registered for the free-form shape check", () => {
+  // The drift guard in the #1057 test pins the whole -reasoning-effort
+  // family both ways; this pins the scorer lane's runtime behavior directly.
+  const base = { "ai-base-url": "https://primary", "ai-model": "main" };
+  const warnings: string[] = [];
+  const originalEmit = process.emitWarning;
+  process.emitWarning = (warning: string) => { warnings.push(warning); };
+  try {
+    assert.equal(loadConfig(contract, { ...base, "ai-confidence-reasoning-effort": " High " }).aiConfidenceReasoningEffort, "high");
+    assert.equal(loadConfig(contract, { ...base, "ai-confidence-reasoning-effort": "-bad" }).aiConfidenceReasoningEffort, "");
+  } finally {
+    process.emitWarning = originalEmit;
+  }
+  assert.ok(warnings.some((message) => message.includes("ai-confidence-reasoning-effort")));
 });

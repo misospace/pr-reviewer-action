@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { isLowConfidence, reviewerRequestedEscalation, shouldEscalate } from "../src/routing/escalation.js";
-import { anthropicEffortInactiveWarning, anthropicEffortSupported, anthropicEffortSupportInput, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, anthropicStructuredOutputSupportInput, effectiveWireEffort, effectiveWireResponseFormat, laneAnthropicEffortSupported, laneAnthropicStructuredOutputSupported, normalizeReasoningEffort, resolveReviewRoute, resolveSpecialistProfiles, resolveTierProfiles, tierReasoningEffort, tierRequestShape, tierResponseFormat } from "../src/routing/tiers.js";
+import { anthropicEffortInactiveWarning, anthropicEffortSupported, anthropicEffortSupportInput, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, anthropicStructuredOutputSupportInput, effectiveWireEffort, effectiveWireResponseFormat, laneAnthropicEffortSupported, laneAnthropicStructuredOutputSupported, normalizeReasoningEffort, resolveConfidenceProfile, resolveReviewRoute, resolveSpecialistProfiles, resolveTierProfiles, tierReasoningEffort, tierRequestShape, tierResponseFormat } from "../src/routing/tiers.js";
 
 const flags = { onIncomplete: true, onRequestChanges: true, onLowConfidence: true, onBlockers: true, onPlanningFailure: true };
 const longReview = "The change is reviewed carefully and the behavior appears correct. No concerns identified in the touched paths.";
@@ -529,4 +529,98 @@ test("#1047: the warnings name the lane and the exact input that turns enforceme
   assert.equal(anthropicStructuredOutputSupportInput("primary"), "ai-anthropic-structured-output-support");
   assert.equal(anthropicStructuredOutputSupportInput("smart"), "ai-smart-anthropic-structured-output-support");
   assert.equal(anthropicStructuredOutputSupportInput("fallback"), "ai-fallback-anthropic-structured-output-support");
+});
+
+test("#1073: confidence profile inherits the primary lane when ai-confidence-base-url is empty", () => {
+  const resolved = resolveConfidenceProfile({
+    AI_BASE_URL: " https://primary ", AI_MODEL: " main-model ", AI_API_FORMAT: " Anthropic ", AI_API_KEY: " primary-key ",
+    AI_PRIMARY_BASE_URL: " https://primary-route ", AI_PRIMARY_API_KEY: " primary-route-key ",
+    AI_CONFIDENCE_MODEL: " scorer-model ",
+  });
+  assert.equal(resolved.profile.enabled, true);
+  assert.deepEqual(resolved.profile, {
+    enabled: true,
+    baseUrl: "https://primary-route",
+    model: "scorer-model",
+    apiFormat: "anthropic",
+    apiKey: "primary-route-key",
+    requestTimeoutSec: 120,
+    reasoningEffort: "",
+    inheritedTransport: true,
+    credentialSource: "primary",
+  });
+  assert.deepEqual(resolved.warnings, []);
+});
+
+test("#1073: a distinct confidence base URL never inherits the primary credential", () => {
+  const resolved = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: " primary-key ",
+    AI_CONFIDENCE_MODEL: "scorer-model", AI_CONFIDENCE_BASE_URL: " https://independent ", AI_CONFIDENCE_API_KEY: " scorer-key ",
+  });
+  assert.equal(resolved.profile.baseUrl, "https://independent");
+  assert.equal(resolved.profile.apiKey, "scorer-key");
+  assert.equal(resolved.profile.inheritedTransport, false);
+  assert.deepEqual(resolved.warnings, []);
+
+  // A distinct endpoint WITHOUT an explicit key gets no primary credential —
+  // the warning names both inputs, never any secret value.
+  const keyless = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_CONFIDENCE_MODEL: "scorer-model", AI_CONFIDENCE_BASE_URL: "https://independent",
+  });
+  assert.equal(keyless.profile.apiKey, "");
+  assert.equal(keyless.profile.apiFormat, "openai");
+  assert.equal(keyless.warnings.length, 1);
+  assert.match(keyless.warnings[0]!, /ai-confidence-base-url is set but ai-confidence-api-key is empty/);
+  assert.equal(keyless.warnings[0]!.includes("primary-key"), false);
+});
+
+test("#1073: same-endpoint same-model scoring emits the independence warning", () => {
+  const same = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_CONFIDENCE_MODEL: "main",
+  });
+  assert.equal(same.profile.enabled, true);
+  assert.equal(same.warnings.length, 1);
+  assert.match(same.warnings[0]!, /same-model scoring is less independent/);
+
+  // Same endpoint, different model: no warning.
+  const otherModel = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "other",
+  });
+  assert.deepEqual(otherModel.warnings, []);
+});
+
+test("#1073: confidence profile resolves timeout, effort, and disabled state", () => {
+  const configured = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_CONFIDENCE_MODEL: "scorer", AI_CONFIDENCE_TIMEOUT_SEC: "45", AI_CONFIDENCE_REASONING_EFFORT: " high ",
+  });
+  assert.equal(configured.profile.requestTimeoutSec, 45);
+  assert.equal(configured.profile.reasoningEffort, "high");
+  assert.deepEqual(configured.warnings, []);
+
+  // A malformed effort is dropped as unset and announced by key.
+  const dropped = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_CONFIDENCE_MODEL: "scorer", AI_CONFIDENCE_REASONING_EFFORT: "-bad",
+  });
+  assert.equal(dropped.profile.reasoningEffort, "");
+  assert.ok(dropped.warnings.some((message) => message.includes("AI_CONFIDENCE_REASONING_EFFORT")));
+
+  // Disabled by default: no model, empty profile, timeout default.
+  const disabled = resolveConfidenceProfile({ AI_BASE_URL: "https://primary", AI_MODEL: "main" });
+  assert.deepEqual(disabled.profile, {
+    enabled: false, baseUrl: "", model: "", apiFormat: "", apiKey: "",
+    requestTimeoutSec: 120, reasoningEffort: "", inheritedTransport: false,
+    credentialSource: "own",
+  });
+  assert.deepEqual(disabled.warnings, []);
+
+  // Orphan transport fields without a model are reported, not fatal.
+  const orphan = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_BASE_URL: "https://independent",
+  });
+  assert.equal(orphan.profile.enabled, false);
+  assert.deepEqual(orphan.warnings, ["confidence scorer disabled: ai-confidence-base-url set without ai-confidence-model"]);
 });

@@ -125,6 +125,18 @@ export interface PublishInput {
    * trusted base-ref configuration. The publish step performs the reviewer
    * request only for `status: "request"`. */
   reviewRouting?: HumanReviewRoutingPlan;
+  /** #1073: the independent confidence scorer's result, present ONLY when
+   * the scorer ran (`ai-confidence-model` set). Purely advisory — it renders
+   * a section and marker keys and changes nothing else. */
+  confidence?: {
+    status: string;
+    score: string;
+    risk: string;
+    reason: string;
+    model: string;
+    /** Bounded advisory concerns (scored answers only); never findings. */
+    concerns?: Array<{ file: string; line: number | null; evidence: string }>;
+  };
 }
 
 export interface PublishResult {
@@ -250,6 +262,9 @@ export function buildPublishedBody(options: {
   /** #1005: rendered reviewer-routing section (only when routing ran and the
    * status carries a decision). */
   routingBlock?: string | undefined;
+  /** #1073: rendered independent-confidence section (only when the scorer
+   * ran). */
+  confidenceBlock?: string | undefined;
   /** #915: defaults to the build-time stamp; explicit "" forces unstamped. */
   actionVersion?: string;
 }): string {
@@ -274,6 +289,9 @@ export function buildPublishedBody(options: {
   }
   if (options.routingBlock) {
     lines.push(options.routingBlock, "");
+  }
+  if (options.confidenceBlock) {
+    lines.push(options.confidenceBlock, "");
   }
   lines.push(options.sanitizedMarkdown);
   return `${lines.join("\n")}\n`;
@@ -360,6 +378,65 @@ export function renderReviewRoutingBlock(routing: HumanReviewRoutingPlan): strin
     lines.push(">", `> Reviewer(s): ${reviewers.join(", ")}`);
   }
   lines.push(">", "_Advisory: reviewer routing never changes the review's verdict or findings, and concrete reviewers come only from trusted repository configuration._");
+  return lines.join("\n");
+}
+
+/** #1073: labels for the confidence scorer's outcome. `disabled` never
+ * reaches this renderer (absent input = disabled = no section). */
+const CONFIDENCE_STATUS_LABELS: Record<string, string> = {
+  scored: "scored",
+  unscored: "unscored — the scorer did not produce a usable score",
+};
+
+/**
+ * #1073: the compact independent-confidence section. Rendered only when the
+ * scorer ran. The score/risk/status values are closed-vocabulary or
+ * validated integers; the reason and the concern bullets carry
+ * model-authored text, so every one takes the full untrusted-text
+ * discipline (redaction, link neutralization, whitespace flattening, a
+ * length cap, fence-safe code spans for locations). Purely advisory: the
+ * section states so itself, and nothing downstream reads it as a finding.
+ */
+export function renderIndependentConfidenceBlock(
+  confidence: {
+    status: string;
+    score: string;
+    risk: string;
+    reason: string;
+    model: string;
+    concerns?: Array<{ file: string; line: number | null; evidence: string }>;
+  },
+  linkMode: UpstreamLinkMode,
+): string {
+  const status = CONFIDENCE_STATUS_LABELS[confidence.status];
+  if (status === undefined) return "";
+  const scored = confidence.status === "scored" && /^[0-5]$/.test(confidence.score);
+  const head = scored
+    ? `**Independent confidence: ${confidence.score}/5, risk: ${escapeCodeSpan(confidence.risk || "unknown", 40)}**`
+    : `**Independent confidence: ${status}**`;
+  const modelNote = confidence.model !== "" ? ` (model: ${escapeCodeSpan(confidence.model, 120)})` : "";
+  const lines = ["## Independent Confidence", "", `> ${head}${modelNote}`];
+  const reason = escapeTableCell(
+    sanitizeMarkdown(redactText(String(confidence.reason ?? "")), linkMode).replace(/\s+/g, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS),
+  );
+  if (reason !== "") {
+    lines.push(">", `> ${reason}`);
+  }
+  // Advisory concern bullets: explicitly NOT findings — bounded, sanitized,
+  // locations rendered as inert code spans, and the bullet text says so.
+  for (const concern of (confidence.concerns ?? []).slice(0, 8)) {
+    const file = escapeCodeSpan(String(concern.file ?? "").slice(0, 300), 300);
+    const line = typeof concern.line === "number" && Number.isInteger(concern.line) && concern.line >= 0
+      ? `:${concern.line}`
+      : "";
+    const evidence = escapeTableCell(
+      sanitizeMarkdown(redactText(String(concern.evidence ?? "")), linkMode).replace(/\s+/g, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS),
+    );
+    const location = file !== "" || line !== "" ? `${file}${line}` : "";
+    const body = evidence !== "" ? ` — ${evidence}` : "";
+    lines.push(">", `> - Advisory concern${location !== "" ? ` at ${location}` : ""}${body}`);
+  }
+  lines.push(">", "_Advisory only: this independent confidence grade is telemetry from a second model call — it does not change the review's verdict, findings, or approval, and its concerns are not findings._");
   return lines.join("\n");
 }
 
@@ -903,6 +980,15 @@ export async function publishReview(
   const triageBlock = input.reviewTriage ? renderReviewTriageBlock(input.reviewTriage, input.upstreamLinkMode) : "";
   // #1005: rendered only when routing ran and the status carries a decision.
   const routingBlock = reviewRouting ? renderReviewRoutingBlock(reviewRouting) : "";
+  // #1073: rendered only when the scorer ran; the whole block passes
+  // sanitizeForPublication before it can touch the body.
+  const confidenceBlock = input.confidence
+    ? sanitizeForPublication(
+      renderIndependentConfidenceBlock(input.confidence, input.upstreamLinkMode),
+      input.upstreamLinkMode,
+      input.conditionalPresence,
+    )
+    : "";
   const markerContext: RunMarkerContext = {
     headSha: input.headSha,
     baseSha: input.baseSha,
@@ -922,6 +1008,14 @@ export async function publishReview(
     ...(input.contextBudget !== undefined ? { contextBudget: input.contextBudget } : {}),
     ...(input.contextPeak !== undefined ? { contextPeak: input.contextPeak } : {}),
     ...(input.toolStopReason !== undefined && input.toolStopReason !== "" ? { toolStopReason: input.toolStopReason } : {}),
+    // #1073: the scorer's marker keys, only when the scorer ran — disabled
+    // and skipped runs keep the pre-#1073 marker bytes exactly.
+    ...(input.confidence && input.confidence.status !== ""
+      ? { confidenceStatus: input.confidence.status === "scored" || input.confidence.status === "unscored" ? input.confidence.status : "" }
+      : {}),
+    ...(input.confidence && input.confidence.status === "scored" && /^[0-5]$/.test(input.confidence.score)
+      ? { confidenceScore: Number(input.confidence.score) }
+      : {}),
     actionVersion: ACTION_VERSION,
   };
   if (input.partialCoverage) {
@@ -1019,6 +1113,7 @@ export async function publishReview(
           : undefined,
         triageBlock: triageBlock || undefined,
         routingBlock: routingBlock || undefined,
+        confidenceBlock: confidenceBlock || undefined,
       });
       const result = await api.upsertStickyComment(input.commentMarker, body);
       if (!result.ok) {
@@ -1036,6 +1131,7 @@ export async function publishReview(
           : undefined,
         triageBlock: triageBlock || undefined,
         routingBlock: routingBlock || undefined,
+        confidenceBlock: confidenceBlock || undefined,
       });
       const result = await api.upsertStickyComment(input.commentMarker, body);
       if (!result.ok) {
@@ -1090,6 +1186,7 @@ export async function publishReview(
           : undefined,
         triageBlock: triageBlock || undefined,
         routingBlock: routingBlock || undefined,
+        confidenceBlock: confidenceBlock || undefined,
       });
       if (input.verdict === "approve" && !canApprove) {
         if (!guardrails.canApprove) {

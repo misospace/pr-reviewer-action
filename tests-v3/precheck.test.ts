@@ -1559,3 +1559,67 @@ test("#1037: ai-extra-headers hashes ephemeral correlation headers by NAME and e
   const blank = collectConfigLines({ AI_MODEL: "m", AI_EXTRA_HEADERS: "  \n " });
   assert.ok(!blank.some((line) => line.startsWith("AI_EXTRA_HEADERS")));
 });
+
+test("#1073: the confidence-scorer family is fingerprint-conditional — disabled contributes nothing", () => {
+  const baseline = collectConfigLines({ AI_MODEL: "m", AI_BASE_URL: "https://primary" });
+  // Upgrade safety: the contract's DEFAULT resolved config (empty model,
+  // empty strings, and a NON-empty AI_CONFIDENCE_TIMEOUT_SEC=120 default
+  // projected by stageEnvFromConfig) must leave the config hash byte-identical
+  // to a build without the feature.
+  const withDefaults = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "",
+    AI_CONFIDENCE_BASE_URL: "",
+    AI_CONFIDENCE_API_FORMAT: "",
+    AI_CONFIDENCE_REASONING_EFFORT: "",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+    AI_CONFIDENCE_API_KEY: "",
+  });
+  assert.deepEqual(withDefaults, baseline);
+  assert.equal(computeConfigHash(withDefaults), computeConfigHash(baseline));
+
+  // Enabling the scorer changes the hash.
+  const enabled = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+  });
+  assert.ok(enabled.includes("AI_CONFIDENCE_MODEL=scorer-model"));
+  assert.ok(enabled.includes("AI_CONFIDENCE_TIMEOUT_SEC=120"));
+  assert.notEqual(computeConfigHash(enabled), computeConfigHash(baseline));
+
+  // Changing the scorer's model changes the hash again.
+  const otherModel = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "other-scorer",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+  });
+  assert.notEqual(computeConfigHash(otherModel), computeConfigHash(enabled));
+
+  // The scorer's API key never influences the hash — the *_API_KEY exclusion
+  // holds for AI_CONFIDENCE_API_KEY in both states.
+  const withKey = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+    AI_CONFIDENCE_API_KEY: "sk-confidence-secret",
+  });
+  assert.deepEqual(withKey, enabled);
+  assert.equal(computeConfigHash(withKey), computeConfigHash(enabled));
+  assert.ok(!withKey.some((line) => line.includes("sk-confidence-secret")));
+
+  // A scorer-enabled config with default-shaped empties still differs from
+  // the baseline (the model line alone carries the change), and a timeout
+  // change matters too.
+  const timeoutChanged = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TIMEOUT_SEC: "45",
+  });
+  assert.notEqual(computeConfigHash(timeoutChanged), computeConfigHash(enabled));
+});

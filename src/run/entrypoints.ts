@@ -458,6 +458,20 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
       }
       : {}),
     ...(env.VERDICT_POLICY ? { verdictPolicy: env.VERDICT_POLICY } : {}),
+    // #1073: the confidence scorer's result, present only when the scorer ran
+    // (confidence-status is "" when disabled). Advisory only.
+    ...(env.CONFIDENCE_STATUS
+      ? {
+        confidence: {
+          status: env.CONFIDENCE_STATUS,
+          score: env.CONFIDENCE_SCORE ?? "",
+          risk: env.CONFIDENCE_RISK ?? "",
+          reason: env.CONFIDENCE_REASON ?? "",
+          model: env.CONFIDENCE_MODEL ?? "",
+          ...(confidenceConcernsFromEnv(env.CONFIDENCE_CONCERNS ?? "")),
+        },
+      }
+      : {}),
     degradedGateBypass: env.DEGRADED_GATE_BYPASS === "true",
     // #1005: the deterministic reviewer-routing plan the review step persisted
     // (read from the run dir, never cwd). Absent when routing did not run.
@@ -498,5 +512,28 @@ function parseJsonish(raw: string): unknown {
     return JSON.parse(raw) as unknown;
   } catch {
     return raw;
+  }
+}
+
+/** #1073: bounded confidence concerns from the review step, serialized as
+ * JSON. Absent or malformed means none render — never a garbage bullet. */
+function confidenceConcernsFromEnv(raw: string): { concerns: Array<{ file: string; line: number | null; evidence: string }> } | Record<string, never> {
+  if (raw.trim() === "") return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return {};
+    const concerns = parsed
+      .filter((entry): entry is Record<string, unknown> =>
+        typeof entry === "object" && entry !== null && !Array.isArray(entry))
+      .slice(0, 8)
+      .map((entry) => ({
+        file: typeof entry.file === "string" ? entry.file.slice(0, 300) : "",
+        line: typeof entry.line === "number" && Number.isInteger(entry.line) && entry.line >= 0 ? entry.line : null,
+        evidence: typeof entry.evidence === "string" ? entry.evidence.slice(0, 400) : "",
+      }))
+      .filter((concern) => concern.file !== "" || concern.evidence !== "");
+    return concerns.length > 0 ? { concerns } : {};
+  } catch {
+    return {};
   }
 }

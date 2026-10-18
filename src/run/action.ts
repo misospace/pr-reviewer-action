@@ -257,6 +257,15 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       CACHE_HIT_RATIO: review.outputs.cacheHitRatio,
       DEGRADED_GATE_BYPASS: review.outputs.degradedGateBypass ? "true" : "false",
       VERDICT_POLICY: review.verdictPolicy,
+      // #1073: the confidence scorer's results, all empty when disabled.
+      CONFIDENCE_STATUS: review.outputs.confidenceStatus ?? "",
+      CONFIDENCE_SCORE: review.outputs.confidenceScore ?? "",
+      CONFIDENCE_RISK: review.outputs.confidenceRisk ?? "",
+      CONFIDENCE_REASON: review.outputs.confidenceReason ?? "",
+      CONFIDENCE_MODEL: review.outputs.confidenceModel ?? "",
+      ...(review.confidenceConcerns !== undefined
+        ? { CONFIDENCE_CONCERNS: JSON.stringify(review.confidenceConcerns) }
+        : {}),
     };
     const seam = buildPublishApi(publishEnv as NodeJS.ProcessEnv);
     // The event-gated maybeClearRereviewLabel below owns label cleanup here;

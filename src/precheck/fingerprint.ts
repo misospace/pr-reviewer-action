@@ -184,6 +184,22 @@ const CONDITIONAL_AI_KEYS: ReadonlySet<string> = new Set([
   // #1037: excluded from the unconditional sweep and re-emitted through the
   // canonical extra-header fingerprint below (see CANONICALIZED_AI_KEYS).
   "AI_EXTRA_HEADERS",
+  // #1073: the confidence-scorer family. `stageEnvFromConfig` projects every
+  // contract input even when empty, and `AI_CONFIDENCE_TIMEOUT_SEC` has a
+  // NON-empty contract default (120), so the unconditional sweep would add a
+  // new line for every existing installation and invalidate every cached
+  // review on upgrade. The whole family is conditional below: with the
+  // scorer disabled (the default) it contributes NOTHING — the config hash
+  // is byte-identical to a build without the feature — and with the scorer
+  // enabled its non-empty values contribute. `AI_CONFIDENCE_API_KEY` is
+  // excluded from the sweep by the `*_API_KEY` rule and stays excluded here
+  // (the loop only ever emits non-secret config keys).
+  "AI_CONFIDENCE_MODEL",
+  "AI_CONFIDENCE_BASE_URL",
+  "AI_CONFIDENCE_API_FORMAT",
+  "AI_CONFIDENCE_REASONING_EFFORT",
+  "AI_CONFIDENCE_TIMEOUT_SEC",
+  "AI_CONFIDENCE_API_KEY",
 ]);
 
 /** #1037: the `ai-extra-headers` surface is hashed by its canonical
@@ -296,6 +312,20 @@ export function collectConfigLines(env: Record<string, string>): string[] {
     }
     if (ANTHROPIC_EFFORT_SUPPORT_KEYS.has(key)) {
       if ((env[key] ?? "").trim().toLowerCase() === "true") lines.push(`${key}=true`);
+      continue;
+    }
+    // #1073: the confidence-scorer family contributes only while the scorer
+    // is enabled (`AI_CONFIDENCE_MODEL` non-empty). Disabled — the default —
+    // emits nothing, so `AI_CONFIDENCE_TIMEOUT_SEC=120` (a non-empty contract
+    // default) never invalidates an existing cached review on upgrade. The
+    // `*_API_KEY` exclusion holds here too: the key is listed in
+    // CONDITIONAL_AI_KEYS only so the sweep can never pick it up, and this
+    // loop must not re-admit it.
+    if (key.startsWith("AI_CONFIDENCE_")) {
+      if (key.endsWith("_API_KEY")) continue;
+      const scorerEnabled = (env.AI_CONFIDENCE_MODEL ?? "").trim() !== "";
+      const value = (env[key] ?? "").trim();
+      if (scorerEnabled && value !== "") lines.push(`${key}=${value}`);
       continue;
     }
     const effort = (env[key] ?? "").trim();

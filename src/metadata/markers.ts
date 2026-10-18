@@ -262,6 +262,12 @@ export interface RunMarkerContext {
   actionVersion?: string;
   /** #978: true when the final verdict is eligible for the gate bypass. */
   degradedGateBypass?: boolean;
+  /** #1073: the confidence scorer's status ("scored" | "unscored"), only
+   * when the scorer ran; omitted (empty) for disabled/skipped runs so the
+   * pre-#1073 marker bytes are preserved. */
+  confidenceStatus?: string;
+  /** #1073: the scorer's integer 0..5, only when status is "scored". */
+  confidenceScore?: number;
 }
 
 /**
@@ -281,6 +287,16 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
   const covStop = context.coverageStopReason ?? "";
   const incompleteReason = context.incompleteReason ?? "";
   const av = context.actionVersion ?? "";
+  const confidenceStatus = context.confidenceStatus === "scored" || context.confidenceStatus === "unscored"
+    ? context.confidenceStatus
+    : "";
+  const confidenceScore = confidenceStatus === "scored"
+    && typeof context.confidenceScore === "number"
+    && Number.isInteger(context.confidenceScore)
+    && context.confidenceScore >= 0
+    && context.confidenceScore <= 5
+    ? context.confidenceScore
+    : null;
   let cacheHitRatio: number | null = null;
   if (chr !== "" && chr !== "-") {
     const parsed = Number(chr);
@@ -311,6 +327,11 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
     tool_stop_reason: context.toolStopReason ?? null,
     action_version: av === "" ? null : av,
     degradedGateBypass: context.degradedGateBypass === true ? true : null,
+    // #1073: the scorer's keys, appended last under the additive-key
+    // discipline — present only when the scorer ran, so disabled/skipped
+    // runs serialize byte-identically to the pre-#1073 marker.
+    confidence_status: confidenceStatus ?? null,
+    confidence_score: confidenceScore ?? null,
   });
 }
 
