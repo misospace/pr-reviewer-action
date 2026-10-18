@@ -746,6 +746,17 @@ function outcomesFake(options: {
   platform?: "github" | "forgejo";
   /** The head the publication-boundary re-check reports (defaults to B). */
   head?: string;
+  /** #1027: report the sticky enumeration as TRUNCATED — the comments are
+   * still returned, but a newer one may exist beyond the failed page. */
+  stickyCommentsTruncated?: boolean;
+  /** #1027: drop the completeness-proving enumeration seam entirely (an
+   * adapter that cannot prove its issue-comment list is complete). */
+  omitCommentEnumeration?: boolean;
+  /** #1027: return a MALFORMED completeness envelope instead of the
+   * well-formed one. The sticky comments are still carried in it, so a
+   * fail-closed assertion here is about the `complete` field being unreadable
+   * as `true`, never about the list happening to be empty. */
+  malformedEnumeration?: Record<string, unknown>;
 }): Record<string, unknown> {
   const MARKER = "<!-- ai-pr-review -->";
   const sticky = options.stickyComments !== undefined
@@ -760,6 +771,11 @@ function outcomesFake(options: {
     platform: options.platform ?? "github",
     getHeadSha: async () => options.head ?? "b".repeat(40),
     listIssueComments: async () => sticky,
+    ...(options.omitCommentEnumeration === true ? {} : {
+      listIssueCommentsResult: async () => (options.malformedEnumeration === undefined
+        ? { complete: options.stickyCommentsTruncated !== true, comments: sticky }
+        : { ...options.malformedEnumeration, comments: sticky }),
+    }),
     upsertStickyComment: async () => ({ ok: true, commentId: 5, updatedAt: "now" }),
     listReviews: async () => [{ id: 500, body: `${MARKER}\nreview`, user: { login: "bot" }, state: "COMMENT" }],
     listManagedInlineComments: async () => ({
@@ -955,6 +971,70 @@ test("#1027: the prior published head is read only from an OWNED managed sticky 
     { diffText: "" },
   );
   assert.equal(parseOutcomeLedger(provenFallback.outcomes!)!.aggregate.resolved, 1);
+});
+
+test("#1027: an incomplete issue-comment enumeration proves no prior head at all", async () => {
+  const { publishReview } = await import("../src/publish/publish.js");
+  const digest = findingIdentityFromRecord(findingRecord())!;
+  const priorBody = `**Major (bug):** unchecked null deref\n\n${INLINE_DISCLAIMER}\n\n<!-- pr-reviewer:finding-id:v1:${digest} -->`;
+  const resolvedThread = { supported: true as const, complete: true as const, threads: [{ threadId: "t1", resolved: true, firstCommentId: "77" }] };
+  // The exact review finding: the enumeration returned an OLDER owned sticky
+  // (head A) and then FAILED on the page that carried the NEWER owned sticky
+  // (head B). Reading the older one would claim a `resolved` "the head
+  // advanced" for a finding never re-reviewed on a newer head.
+  const truncated = await publishReview(
+    publishInputFor({}) as never,
+    outcomesFake({
+      comments: [{ id: 77, body: priorBody }],
+      stickyComments: [{ body: STICKY_WITH_HEAD("a".repeat(40)), id: 1, updated_at: "2026-10-01T00:00:00Z" }],
+      stickyCommentsTruncated: true,
+      threadStates: resolvedThread,
+    }) as never,
+    { diffText: "" },
+  );
+  const ledger = parseOutcomeLedger(truncated.outcomes!)!;
+  assert.equal(ledger.events.some((event) => event.kind === "resolved"), false, "a truncated enumeration proves no head");
+  assert.equal(ledger.aggregate.resolved, 0);
+  assert.equal(ledger.aggregate.dismissed, 1);
+  assert.equal(ledger.events.find((event) => event.kind === "dismissed")!.reason, "thread_resolved_head_unverified");
+  // An adapter with no completeness-proving seam at all is the same fail-closed
+  // answer: its untyped comment array cannot prove no newer sticky exists.
+  const noEnumerationSeam = await publishReview(
+    publishInputFor({}) as never,
+    outcomesFake({
+      comments: [{ id: 77, body: priorBody }],
+      stickyComments: [{ body: STICKY_WITH_HEAD("a".repeat(40)), id: 1, updated_at: "2026-10-01T00:00:00Z" }],
+      omitCommentEnumeration: true,
+      threadStates: resolvedThread,
+    }) as never,
+    { diffText: "" },
+  );
+  const seamLedger = parseOutcomeLedger(noEnumerationSeam.outcomes!)!;
+  assert.equal(seamLedger.events.some((event) => event.kind === "resolved"), false);
+  assert.equal(seamLedger.aggregate.dismissed, 1);
+  assert.equal(seamLedger.events.find((event) => event.kind === "dismissed")!.reason, "thread_resolved_head_unverified");
+  // A malformed completeness envelope is the same fail-closed answer, and the
+  // boundary VALUE itself is what must be fed: a truthy-looking string
+  // (`"true"`) and an absent `complete` key are the two shapes a loose
+  // comparison would wave through. Both still carry the older owned sticky, so
+  // these assertions are about the envelope, not an empty list.
+  for (const envelope of [{ complete: "true" }, {}]) {
+    const malformed = await publishReview(
+      publishInputFor({}) as never,
+      outcomesFake({
+        comments: [{ id: 77, body: priorBody }],
+        stickyComments: [{ body: STICKY_WITH_HEAD("a".repeat(40)), id: 1, updated_at: "2026-10-01T00:00:00Z" }],
+        malformedEnumeration: envelope,
+        threadStates: resolvedThread,
+      }) as never,
+      { diffText: "" },
+    );
+    const malformedLedger = parseOutcomeLedger(malformed.outcomes!)!;
+    assert.equal(malformedLedger.events.some((event) => event.kind === "resolved"), false, JSON.stringify(envelope));
+    assert.equal(malformedLedger.aggregate.resolved, 0, JSON.stringify(envelope));
+    assert.equal(malformedLedger.aggregate.dismissed, 1, JSON.stringify(envelope));
+    assert.equal(malformedLedger.events.find((event) => event.kind === "dismissed")!.reason, "thread_resolved_head_unverified", JSON.stringify(envelope));
+  }
 });
 
 test("#1027: a foreign-authored managed comment mints no outcome identity", async () => {

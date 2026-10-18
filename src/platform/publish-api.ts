@@ -27,6 +27,13 @@ export interface PublishCommentRef {
   user?: { id?: number | string; login?: string } | null;
 }
 
+export interface IssueCommentEnumeration {
+  /** False when the forge read failed or truncated mid-pagination, so
+   * `comments` is NOT the complete set (a newer comment may exist). */
+  complete: boolean;
+  comments: PublishCommentRef[];
+}
+
 export interface PublishReviewRef {
   id: number | string;
   node_id?: string;
@@ -184,8 +191,18 @@ export interface PublishPlatformApi {
    * Authorized Integration mode. Absent → callers fall back to
    * `authenticatedIdentity()` (login-kind). */
   resolveTrustedOwner?(): Promise<IdentityResolution>;
-  /** Issue comments (paginated), oldest-first as returned by the API. */
+  /** Issue comments (paginated), oldest-first as returned by the API.
+   * Untyped as to completeness: a partial list is indistinguishable from a
+   * complete one, so a reader that must reason about ABSENCE (no newer
+   * publication exists) uses `listIssueCommentsResult` instead. */
   listIssueComments(): Promise<PublishCommentRef[]>;
+  /** #1027: the same issue-comment read plus an explicit completeness
+   * signal. Optional, matching how this seam already expresses read-capability
+   * degradations (`listManagedInlineComments`, `reviewCommentFeedback`,
+   * `reviewThreadStates`): an adapter without it CANNOT prove its list is
+   * complete, which is the fail-closed answer — never an assumption that the
+   * array holds every comment. */
+  listIssueCommentsResult?(): Promise<IssueCommentEnumeration>;
   /** Create or update the sticky managed comment (marker semantics shared). */
   upsertStickyComment(marker: string, body: string): Promise<StickyResult>;
   listReviews(): Promise<PublishReviewRef[]>;
@@ -320,6 +337,15 @@ export class GitHubPublishApi implements PublishPlatformApi {
   }
 
   async listIssueComments(): Promise<PublishCommentRef[]> {
+    return (await this.listIssueCommentsResult()).comments;
+  }
+
+  /** #1027: only a short page PROVES the enumeration finished. Every exit
+   * that used to be a bare `break` — a non-200 or non-array page, a thrown
+   * request, and exhausting the page cap while the last page was still full —
+   * returns `complete: false` with whatever was accumulated, so a truncated
+   * read can never be read as "this is the whole set". */
+  async listIssueCommentsResult(): Promise<IssueCommentEnumeration> {
     const comments: PublishCommentRef[] = [];
     for (let page = 1; page <= 10; page += 1) {
       try {
@@ -327,14 +353,14 @@ export class GitHubPublishApi implements PublishPlatformApi {
           this.url(`/repos/${this.repo}/issues/${this.prNumber}/comments?per_page=100&page=${page}`),
           this.opts("GET"),
         );
-        if (status !== 200 || !Array.isArray(data)) break;
+        if (status !== 200 || !Array.isArray(data)) return { complete: false, comments };
         comments.push(...(data as PublishCommentRef[]));
-        if ((data as unknown[]).length < 100) break;
+        if ((data as unknown[]).length < 100) return { complete: true, comments };
       } catch {
-        break;
+        return { complete: false, comments };
       }
     }
-    return comments;
+    return { complete: false, comments };
   }
 
   async upsertStickyComment(marker: string, body: string): Promise<StickyResult> {
@@ -830,6 +856,16 @@ export class ForgejoPublishApi implements PublishPlatformApi {
       return typeof head?.sha === "string" ? head.sha : null;
     } catch {
       return null;
+    }
+  }
+
+  /** #1027: the strict read either enumerates to a proven end or throws, so
+   * completeness is exactly "it did not throw". */
+  async listIssueCommentsResult(): Promise<IssueCommentEnumeration> {
+    try {
+      return { complete: true, comments: await this.listIssueCommentsStrict() };
+    } catch {
+      return { complete: false, comments: [] };
     }
   }
 

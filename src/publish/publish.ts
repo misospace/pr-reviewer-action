@@ -851,7 +851,16 @@ async function collectOutcomeObservations(
  * `thread_resolved_head_unverified` on any repository that still carries an
  * older owned sticky.) A missing marker, an unparseable body, a non-hex value,
  * an unprovable owner, or a thrown read all yield null, and an unusable head on
- * the newest owned candidate never falls back to an older one. */
+ * the newest owned candidate never falls back to an older one.
+ *
+ * #1027: the enumeration must be PROVEN complete. "Newest owned sticky" is a
+ * claim about absence — it says no newer publication exists — so a page that
+ * failed or truncated silently is indistinguishable from a complete list and
+ * would let the reader select an OLDER owned sticky and claim a `resolved`
+ * "the head advanced" for a finding never re-reviewed on a newer head. A read
+ * through `listIssueCommentsResult` that is absent, throws, is incomplete, or
+ * is malformed therefore yields no head at all (never a fallback to the
+ * untyped `listIssueComments`). */
 async function readPriorPublishedHead(
   api: PublishPlatformApi,
   marker: string,
@@ -859,7 +868,11 @@ async function readPriorPublishedHead(
 ): Promise<string | null> {
   if (owner === null) return null;
   try {
-    const comments = await api.listIssueComments();
+    if (typeof api.listIssueCommentsResult !== "function") return null;
+    const enumeration = await api.listIssueCommentsResult();
+    if (enumeration === null || typeof enumeration !== "object" || enumeration.complete !== true) return null;
+    const comments = enumeration.comments;
+    if (!Array.isArray(comments)) return null;
     let newest: { updatedAt: string; id: string; body: string } | null = null;
     for (const comment of comments) {
       if (!ownerMatchesIdentity(comment.user, owner)) continue;

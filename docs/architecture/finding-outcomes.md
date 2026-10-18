@@ -124,7 +124,14 @@ on the newest candidate fails closed to "unprovable head" (the thread becomes
 a `thread_resolved_head_unverified` dismissal, never a `resolved`); an
 unusable newest head never falls back to an older comment, and the
 caller-supplied fallback head is accepted only under the same hex proof rule,
-so an unproven value can never stand in for the missing marker.
+so an unproven value can never stand in for the missing marker. "Newest" is a
+claim about absence — no newer publication exists — so the read must be a
+PROVEN enumeration: an issue-comment read that is absent, thrown, truncated
+mid-pagination, or malformed (`listIssueCommentsResult`, whose `complete` flag
+the GitHub adapter sets only on a short page) yields no READ-DERIVED prior
+head, never a head selected from a partial comment list; the operator-supplied
+`priorHeadSha` fallback (`PRIOR_HEAD_SHA`) stays available under its own hex
+proof rule.
 
 ## Export and report
 

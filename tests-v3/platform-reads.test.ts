@@ -11,6 +11,7 @@ import type { FetchLike } from "../src/platform/http.js";
 import { compareCodePoints, jqCompact } from "../src/platform/jq.js";
 import { forgejoJobStatusPathsMatch, forgejoSelfStatusMatches, forgejoSelfRunOrigin, GITHUB_CONVERSATION_COMMENTS_QUERY, GITHUB_PR_BODY_REVISION_QUERY, GITHUB_REVIEW_THREADS_QUERY, normalizeExternalChecks, normalizeForgejoRunJobs, projectPrFiles } from "../src/platform/normalize.js";
 import { pyQuote, pyStr } from "../src/platform/py.js";
+import { GitHubPublishApi, ForgejoPublishApi } from "../src/platform/publish-api.js";
 import { parseRepoRef, repoScopedUrl } from "../src/platform/repo-ref.js";
 import { SemanticFixtureAdapter, semanticFixtureDir } from "../src/platform/semantic-fixture.js";
 import { TangledAdapter } from "../src/platform/tangled-adapter.js";
@@ -989,5 +990,79 @@ test("a resolved tangled platform builds the Tangled read adapter before fixture
     assert.ok(buildPlatformReadAdapter(env) instanceof TangledAdapter);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── #1027: the publish-side issue-comment completeness signal ──────────────
+
+test("github publish issue-comment enumeration reports completeness (#1027)", async () => {
+  const publish = (fetchImpl: FetchLike) => new GitHubPublishApi({ repo: "o/r", prNumber: "9", token: "Bearer t", fetchImpl });
+  const comment = (id: number) => ({ id, body: `c${id}` });
+  // A full first page followed by a short page proves the enumeration ended.
+  const complete = recorder((url) => (url.searchParams.get("page") === "1"
+    ? json(Array.from({ length: 100 }, (_, index) => comment(index)))
+    : json([comment(100)])));
+  const proven = await publish(complete.fetchImpl).listIssueCommentsResult();
+  assert.equal(proven.complete, true);
+  assert.equal(proven.comments.length, 101);
+
+  // Page 1 full, page 2 fails: the accumulated comments still come back, but
+  // completeness is explicitly false — a newer comment may live on the page
+  // that failed, which is what makes the old untyped list unsafe to read.
+  const truncated = recorder((url) => (url.searchParams.get("page") === "1"
+    ? json(Array.from({ length: 100 }, (_, index) => comment(index)))
+    : json({ message: "boom" }, 502)));
+  const incomplete = await publish(truncated.fetchImpl).listIssueCommentsResult();
+  assert.equal(incomplete.complete, false);
+  assert.equal(incomplete.comments.length, 100);
+  // The untyped read keeps its exact behavior: the same accumulated list.
+  assert.deepEqual(await publish(truncated.fetchImpl).listIssueComments(), incomplete.comments);
+
+  // A THROWN page-2 request is the other truncation shape and must report the
+  // same thing — the boundary input is the transport failure itself, not a
+  // synthesized empty page.
+  const throwing = recorder((url) => {
+    if (url.searchParams.get("page") === "2") throw new Error("page two unavailable");
+    return json(Array.from({ length: 100 }, (_, index) => comment(index)));
+  });
+  const thrown = await publish(throwing.fetchImpl).listIssueCommentsResult();
+  assert.equal(thrown.complete, false);
+  assert.equal(thrown.comments.length, 100);
+  assert.equal(throwing.seen.length, 2);
+
+  // Every page full means the enumeration never PROVED an end: the page cap
+  // is an incomplete read, so it fails closed rather than claiming the
+  // accumulated set is the whole set.
+  const neverEnds = recorder(() => json(Array.from({ length: 100 }, (_, index) => comment(index))));
+  const capped = await publish(neverEnds.fetchImpl).listIssueCommentsResult();
+  assert.equal(capped.complete, false);
+  assert.equal(capped.comments.length, 1000);
+  assert.equal(neverEnds.seen.length, 10);
+});
+
+// ── #1027: the Forgejo publish-side enumeration is fail-closed too ─────────
+
+test("forgejo publish issue-comment enumeration reports completeness (#1027)", async () => {
+  const forgejo = (fetchImpl: FetchLike) =>
+    new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "t", baseUrl: "https://forge.example", fetchImpl });
+  const comment = (id: number) => ({ id, body: `c${id}` });
+  // A short final page (< the forge's 50-per-page) is a proven enumeration.
+  const complete = recorder(() => json([comment(1), comment(2)]));
+  assert.deepEqual(await forgejo(complete.fetchImpl).listIssueCommentsResult(), {
+    complete: true,
+    comments: [comment(1), comment(2)],
+  });
+  assert.equal(complete.seen.length, 1);
+
+  // On THIS platform a failed read is the NORMAL outcome (the strict reader
+  // throws rather than returning a partial list), so both failure shapes must
+  // report an unusable enumeration — and the untyped read keeps returning the
+  // empty list it always did on those failures.
+  for (const failing of [
+    recorder(() => json({ message: "boom" }, 502)),
+    recorder(() => { throw new Error("instance unreachable"); }),
+  ]) {
+    assert.deepEqual(await forgejo(failing.fetchImpl).listIssueCommentsResult(), { complete: false, comments: [] });
+    assert.deepEqual(await forgejo(failing.fetchImpl).listIssueComments(), []);
   }
 });
