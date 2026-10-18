@@ -48,6 +48,58 @@ test("reserved markers are removed case-insensitively", () => {
   assert.equal(stripReservedMarkers(`w<!-- PR-Reviewer:Finding-Id:v1:${"b".repeat(64)} -->z`), "wz");
 });
 
+test("#1107: the prescription opener is reserved on model markdown — the fence is dropped, the word kept, the block dissolved", () => {
+  // The review-markdown surface (#1107): the opener is a REWRITE, not a
+  // removal, so it is not in `RESERVED_MARKER_PATTERNS` (still 3 above). The
+  // boundary token ITSELF, in the exact bytes a model emits. The block's
+  // closing fence is dissolved with it: left alone it would survive as a live
+  // plain-fence opener in the rewritten prose and capture whatever the action
+  // appends next, so it is escaped into inert text.
+  assert.equal(stripReservedMarkers("```suggestion\nREPL\n```"), "suggestion\nREPL\n\\`\\`\\`");
+  assert.equal(stripReservedMarkers("a\n  ```suggestion\nb"), "a\n  suggestion\nb", "any indent is reserved, indent preserved");
+  assert.equal(stripReservedMarkers("````suggestion"), "suggestion", "any fence length is reserved");
+  assert.equal(stripReservedMarkers("~~~suggestion"), "suggestion", "a tilde fence is reserved");
+  assert.equal(stripReservedMarkers("~~~SUGGESTION  "), "suggestion", "case-insensitive, trailing space trimmed");
+  assert.equal(stripReservedMarkers("```suggestion\r\nREPL"), "suggestion\nREPL", "CRLF-terminated opener is reserved");
+  // A lone CR is a line ending to a Markdown renderer (GitHub normalizes it),
+  // so an opener it hides must be reserved too — not passed through as one
+  // "line" this pass cannot see.
+  assert.equal(stripReservedMarkers("```suggestion\rEVIL\r```"), "suggestion\nEVIL\n\\`\\`\\`");
+  assert.equal(stripReservedMarkers("```suggestion\r```"), "suggestion\n\\`\\`\\`", "a CR-only block still leaves no live opener");
+  // Dissolution is bounded by the block's real closer: a fence the model wrote
+  // OUTSIDE the reserved block is untouched, and a fence-shaped line inside the
+  // dissolved region cannot go live either (a tilde line would otherwise become
+  // an unclosed opener once the block's own fences are gone).
+  assert.equal(
+    stripReservedMarkers("```suggestion\n~~~\nINJECTED\n```\n\n```ts\nconst x = 1;\n```"),
+    "suggestion\n\\~\\~\\~\nINJECTED\n\\`\\`\\`\n\n```ts\nconst x = 1;\n```",
+    "the dissolved region is neutralized, a following benign block is untouched",
+  );
+  // Both halves of the reserved grammar apply to the same model text, in order.
+  assert.equal(
+    stripReservedMarkers(`<!-- ai-pr-review-sha:forged -->\n\`\`\`suggestion\nREPL`),
+    "\nsuggestion\nREPL",
+  );
+  // Byte-identical without the token — including text that merely mentions the
+  // word, and a fence whose info string is something else.
+  const clean = "Review.\n\nA ```suggestion``` block would apply this.\n\n```ts\nconst x = 1;\n```";
+  assert.equal(stripReservedMarkers(clean), clean);
+  assert.equal(stripReservedMarkers(""), "");
+  // Idempotent: a second pass over reserved text changes nothing.
+  const once = stripReservedMarkers("```suggestion\nREPL\n```");
+  assert.equal(stripReservedMarkers(once), once);
+
+  // #252: the opener is reserved LAST, so the boundary token cannot be
+  // MANUFACTURED by the very pass that removes a reserved marker — the marker
+  // and the fence share one line, so an opener check that ran first would miss
+  // it and leave a live prescription behind the marker.
+  const smuggled = "hi\n<!-- ai-pr-review-fingerprint:deadbeef -->```suggestion\nrm -rf /\n```\ntail";
+  const opened = stripReservedMarkers(smuggled);
+  assert.equal(opened.includes("```suggestion"), false, "no opener survives the marker removal next to it");
+  assert.equal(opened.split("\n").some((line) => line.trim() === "```suggestion"), false);
+  assert.ok(opened.includes("hi") && opened.includes("tail") && opened.includes("rm -rf /"), "the surrounding text is untouched");
+});
+
 test("unknown link mode throws", () => {
   assert.throws(() => sanitizeMarkdown("#1", "other" as never), /unknown upstream link mode/);
 });

@@ -16,7 +16,7 @@ import { sanitizeMarkdown, stripReservedMarkers, stripEmptyConditionalSections, 
 import { publicAnalysisEngine } from "../prompt/index.js";
 import { ACTION_VERSION } from "../version.js";
 import {
-  buildComments, INLINE_DISCLAIMER, normalizedReplacement, parseRejectionCarryover, prescriptionKey,
+  buildComments, hasPublishablePrescription, INLINE_DISCLAIMER, parseRejectionCarryover, prescriptionKey,
   prescriptionKeyDigest, recoverPublishedSuggestion, MAX_CARRYOVER_KEYS_PER_RUN, SEVERITY_LABELS,
 } from "./inline-findings.js";
 import { redactText } from "../context/redact.js";
@@ -441,20 +441,6 @@ export function buildInlineComments(options: {
     ...(options.rejectedPrescriptions === undefined ? {} : { rejectedPrescriptions: options.rejectedPrescriptions }),
   });
   return { comments: comments as NativeReviewComment[], suppressed };
-}
-
-/** #762: whether any finding can contribute a prescription at all — the cheap
- * pre-check `validateAction` implies (a non-empty, trimmed suggestion string).
- * A false answer means the reaction read (and every request behind it) has
- * nothing it could ever correlate, so it never runs; the #1027 observation
- * enumeration still runs for thread-state outcomes, but reads no reactions. */
-function hasActionablePrescription(findings: unknown): boolean {
-  if (!Array.isArray(findings)) return false;
-  return findings.some(
-    (finding) => isRecord(finding)
-      && typeof finding.suggestion === "string"
-      && normalizedReplacement(finding.suggestion) !== "",
-  );
 }
 
 /** #762: the bound on the distinct reaction logins this run will verify. Each
@@ -1155,17 +1141,20 @@ export async function publishReview(
   // Structured findings → inline comments (both review modes, when enabled).
   let inlineComments: NativeReviewComment[] = [];
   if (input.mode !== "comment" && input.inlineFindings && input.findings !== undefined && input.findings !== null) {
-    // #762: usefulness feedback from the prior run's published prescriptions.
-    // Read immediately before the build and fail-open end to end, so the
-    // published review is unchanged when the read is unsupported or uncertain.
-    // A finding set carrying no usable suggestion can never contain a
-    // prescription, so the reaction read (and every permission request behind
-    // it) is skipped even when the enumeration below still runs.
+    // #762/#1107: usefulness feedback from the prior run's published
+    // prescriptions. Read immediately before the build and fail-open end to
+    // end, so the published review is unchanged when the read is unsupported or
+    // uncertain. A finding set that can carry no prescription — blank,
+    // fence-hostile, out-of-range, or marker-stripped-to-nothing — can never
+    // contain one, so the reaction read (and every permission request behind
+    // it) is skipped even when the enumeration below still runs;
+    // `hasPublishablePrescription` is the same predicate publication renders
+    // through, over the same diff, so the pre-check cannot be weaker.
     // #1027: the same bounded enumeration also harvests the prior run's
     // finding observations (identity markers, thread resolution, and the
     // reaction tallies it already fetched) for the outcome ledger — no
     // additional reaction or permission request is ever made for outcomes.
-    const feedbackState = await readFeedbackState(api, input.commentMarker, hasActionablePrescription(input.findings));
+    const feedbackState = await readFeedbackState(api, input.commentMarker, hasPublishablePrescription(input.findings, options.diffText));
     const feedback = feedbackState.snapshot;
     const built = buildInlineComments({
       findings: input.findings,

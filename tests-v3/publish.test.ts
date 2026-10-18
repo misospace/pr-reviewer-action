@@ -1748,11 +1748,85 @@ test("#762: a run with no usable suggestion issues zero feedback or permission r
   }
   // An actionable finding in the same run does turn the read back on — and the
   // pre-check uses exactly the validation the renderer uses, so a
-  // whitespace-only replacement (which validateAction still renders) counts.
+  // whitespace-only replacement (which publishablePrescription still renders) counts.
   await publishActionable(api, [{ file: "a.ts", line: 2, message: "m", suggestion: "  " }]);
   assert.equal(api.feedbackCalls, 1);
   await publishActionable(api);
   assert.equal(api.feedbackCalls, 2);
+});
+
+test("#1107: the feedback pre-check and publication agree — the read runs exactly when a prescription renders", async () => {
+  // #1107: the pre-check asks publication's own question through publication's
+  // own predicates, so a shape that renders no prescription must spend ZERO
+  // reaction reads and ZERO permission lookups. Each arm below pins one of the
+  // four ways `publishablePrescription` returns null, plus the positive control
+  // that turns the read back on.
+  const MARKER_LINE = `<!-- pr-reviewer:rejected-prescriptions:v1:${"a".repeat(64)} -->`;
+  const arms: Array<[string, unknown[], boolean]> = [
+    // Blank: the replacement normalizes to nothing, so no block is rendered.
+    // (A spaces-only replacement is NOT this shape — it renders a whitespace
+    // block, and is pinned as actionable by the "no usable suggestion" test
+    // above.)
+    ["empty-string", [{ file: "a.ts", line: 2, message: "A finding", suggestion: "" }], false],
+    ["newline-only", [{ file: "a.ts", line: 2, message: "A finding", suggestion: "\n" }], false],
+    ["newline-only-multi", [{ file: "a.ts", line: 2, message: "A finding", suggestion: "\n\n\n" }], false],
+    // Fence-hostile: a line whose trim opens a backtick or tilde fence.
+    ["fence-hostile-backtick", [{ file: "a.ts", line: 2, message: "A finding", suggestion: "ok\n```\nbad" }], false],
+    ["fence-hostile-tilde", [{ file: "a.ts", line: 2, message: "A finding", suggestion: "ok\n   ~~~\nbad" }], false],
+    // Out-of-range: DIFF presents a.ts lines 1-2 only, so end_line 3 (and 99)
+    // leave the diff and the whole range is refused.
+    ["out-of-range-adjacent", [{ file: "a.ts", line: 2, end_line: 3, message: "A finding", suggestion: "REPL" }], false],
+    ["out-of-range-far", [{ file: "a.ts", line: 1, end_line: 99, message: "A finding", suggestion: "R1\nR2" }], false],
+    // Marker-stripped-to-nothing: the replacement is only reserved carry lines.
+    ["marker-only", [{ file: "a.ts", line: 2, message: "A finding", suggestion: MARKER_LINE }], false],
+    ["marker-only-spaced", [{ file: "a.ts", line: 2, message: "A finding", suggestion: `${MARKER_LINE}\n\n\n${MARKER_LINE}` }], false],
+    // Positive control: the same harness, same prior comment, same trusted
+    // rejection — but the replacement differs from the prior run's, so
+    // publication renders a prescription and the read ran to find that out.
+    ["valid-suggestion", [{ file: "a.ts", line: 2, severity: "major", message: "A finding", suggestion: "A DIFFERENT REPLACEMENT" }], true],
+  ];
+  for (const [label, findings, publishes] of arms) {
+    const api = feedbackApi({
+      prior: { id: 501, ...PRIOR },
+      records: [{ commentId: "501", content: "-1", login: "maintainer" }],
+      permissions: { maintainer: { permission: "admin", roleName: "", subject: "absent" } },
+    });
+    const { body, messages } = await publishActionable(api, findings);
+    // What publication rendered...
+    assert.equal(body.includes("```suggestion"), publishes, `${label}: publication`);
+    assert.equal(body.includes(FEEDBACK_AFFORDANCE), publishes, `${label}: affordance follows the replacement block`);
+    // ...and what the pre-check cost for it. `feedbackCalls` counts every
+    // `reviewCommentFeedback` request, i.e. every reaction read.
+    assert.equal(api.feedbackCalls, publishes ? 1 : 0, `${label}: reaction reads`);
+    assert.deepEqual(api.permissionLookups, publishes ? ["maintainer"] : [], `${label}: permission lookups`);
+    assert.equal(
+      messages.some((line) => line.includes("usefulness feedback")), publishes,
+      `${label}: the usefulness-feedback read was ${publishes ? "made" : "skipped"}`,
+    );
+    if (publishes) {
+      assert.ok(messages.some((line) => line.includes("inspected 1 prior comment(s)")), `${label}: the prior comment was read`);
+      assert.ok(body.includes("A DIFFERENT REPLACEMENT"), `${label}: the current replacement is what renders`);
+    } else {
+      assert.ok(body.startsWith("**Info:** A finding"), `${label}: the finding itself still posts unchanged`);
+      assert.ok(body.includes("_Automated finding from AI PR review._"), `${label}: the comment is still published`);
+    }
+  }
+
+  // The pre-check asks about PUBLISHABILITY, not about whether the published
+  // block survives suppression: the identical, already-rejected prescription
+  // still runs the read (and still verifies the reacting actor) — it is a
+  // prescription publication could render, so the read may find the rejection
+  // that withholds it.
+  const suppressed = feedbackApi({
+    prior: { id: 501, ...PRIOR },
+    records: [{ commentId: "501", content: "-1", login: "maintainer" }],
+    permissions: { maintainer: { permission: "admin", roleName: "", subject: "absent" } },
+  });
+  const suppressedRun = await publishActionable(suppressed, ACTIONABLE);
+  assert.equal(suppressedRun.body.includes("```suggestion"), false, "the rejection withheld the replacement");
+  assert.equal(suppressed.feedbackCalls, 1, "a publishable-but-rejected prescription still spends the read");
+  assert.deepEqual(suppressed.permissionLookups, ["maintainer"]);
+  assert.ok(suppressedRun.messages.some((line) => line.includes("1 suppressed prescription(s)")), suppressedRun.messages.join("\n"));
 });
 
 test("#762: a reply that inherited the review id is never a candidate", async () => {

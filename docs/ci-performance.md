@@ -119,11 +119,40 @@ the 12 baseline runs, a few seconds on average) while ~55–60s of TypeScript
 runner time is reclaimed per run. The aggregate wall clock is now Python-bound;
 the remaining lever is the `pytest` step itself — see below.
 
-## Follow-up
+## Applied: the `pytest` step (#1078)
 
-`validate-python`'s `pytest` step (67–70s of a 87–95s job) is now the dominant
-single cost on the path, and `validate-typescript` is no longer the straggler.
-Its slowest tests are the ~14 cases that spawn the semantic-eval runner as a
-subprocess, each re-running the corpus and rebuilding `.test-build`; the corpus
-evaluation is repeated per invocation. Trimming that is a separate change with
-its own isolation/risk trade-off and is not part of this one.
+`validate-python`'s `pytest` step (67–70s of a 87–95s job) became the dominant
+single cost. Measuring it locally (`--durations`, plus in-process timing of the
+corpus pipeline) corrected the issue's premise: the subprocess spawns are cheap
+(`tsc -p tsconfig.test.json` is ~0.7s; the three runner-spawning cases were
+~1.4–2.9s each) and were never ~14 of them. The real cost was the git-based
+fixture-integrity guard: `validate_semantic_fixture_integrity` spawns ~10 git
+processes per fixture to re-apply each diff, `validate_semantic_corpus` runs it
+over all ~39 fixtures, and nearly every semantic test loads or evaluates the
+corpus through it — ~1.2–1.4s per test, ~1.4s of the 2.2s inside
+`evaluate_semantic_corpus`.
+
+Fix (both in the guard, not in what it asserts):
+
+1. **Content-keyed integrity memo.** `pr_reviewer/semantic_eval.py` caches
+   positive verdicts keyed by the fixture's content hash. The verdict is a pure
+   function of fixture content within a process, so a memo hit re-asserts
+   nothing weaker; failures are never cached, tampered content hashes
+   differently and pays the full git check, and each pytest run (and each
+   runner subprocess) still verifies every distinct fixture content once from
+   scratch. The `.test-build` always-recompile guard is untouched.
+2. **Fail-fast in `scripts/run_semantic_eval_ci.py`.** Scenario-coverage
+   errors (missing/unexpected/no-offline-runs) are corpus-level facts and are
+   now checked before the corpus evaluation and before building the
+   `.test-build` gate, so malformed corpora fail without paying for — or
+   hiding behind — a tsc compile and node-test run.
+
+No coverage was removed; the gate's exit codes, messages, and report schema are
+unchanged — the only content delta is that a coverage-failure payload now
+carries an empty `scenarios` list, precisely because evaluation was skipped.
+
+Local before/after (same machine, same interpreter, the exact CI pytest
+command): **82s → 31s**, 1006 → 1008 tests passed (two new memo/fail-fast
+pinning tests), coverage 86.8% → 87.0%. The remaining top durations are the
+redirect-refusal tests' fixed 0.5s/1.0s HTTP-client timeouts and the one
+runner-spawning happy-path case (~2.1s) — the floor without weakening those.

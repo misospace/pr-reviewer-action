@@ -114,14 +114,15 @@ def main() -> int:
     try:
         corpus = SemanticCorpus.from_file(args.corpus)
         validate_semantic_corpus(corpus)
-        report = evaluate_semantic_corpus(corpus)
-        report["production_dataflow_checks"] = run_dataflow_checks()
-        report["passed"] = report["passed"] and all(
-            item["passed"] for item in report["production_dataflow_checks"]
-        )
+        # Scenario coverage is decided by the corpus alone, so it is checked
+        # before the corpus evaluation and before the .test-build gate: a
+        # malformed corpus must fail without paying for a full tsc compile and
+        # node-test run (#1078). "no offline runs" keeps its meaning after
+        # validate: offline_runs entries are required to be objects, and the
+        # evaluator scores exactly one run per entry.
         scenario_numbers = {scenario.number for scenario in corpus.scenarios}
         missing_scenarios = sorted(DETERMINISTIC_SCENARIOS - scenario_numbers)
-        no_run_scenarios = sorted(item["scenario_number"] for item in report["scenarios"] if not item["runs"])
+        no_run_scenarios = sorted(scenario.number for scenario in corpus.scenarios if not scenario.offline_runs)
         unexpected = sorted(scenario_numbers - DETERMINISTIC_SCENARIOS)
         errors = []
         if missing_scenarios:
@@ -132,6 +133,11 @@ def main() -> int:
             errors.append("unexpected scenario(s): " + ", ".join(map(str, unexpected)))
         if errors:
             raise ValueError("; ".join(errors))
+        report = evaluate_semantic_corpus(corpus)
+        report["production_dataflow_checks"] = run_dataflow_checks()
+        report["passed"] = report["passed"] and all(
+            item["passed"] for item in report["production_dataflow_checks"]
+        )
     except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError) as error:
         message = str(error)
         print(message, file=sys.stderr)

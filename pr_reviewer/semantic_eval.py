@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import hashlib
 import json
 import math
 import os
@@ -766,7 +767,32 @@ def _fixture_directory() -> Iterator[str]:
         _remove_fixture_tree(directory)
 
 
+# Fixture integrity is a pure function of the fixture content: the temp git
+# repo, the isolated env, and the patch checks depend on nothing else that can
+# change inside one process. Every corpus load re-validates the same ~40
+# immutable fixtures (≈10 git subprocess spawns each), and per-pytest-run that
+# dominated the semantic-eval cost (#1078). Positive verdicts are therefore
+# memoized by content hash; a failure is never cached, and tampered content
+# hashes differently, so a verdict can no more be reused falsely than a stale
+# `.test-build` can — the first sighting of any given content still pays the
+# full git verification.
+_FIXTURE_INTEGRITY_VERIFIED: set[str] = set()
+
+
+def _fixture_integrity_cache_key(fixture: dict[str, Any]) -> str | None:
+    """Content key for the integrity memo, or None when the fixture cannot be
+    canonicalized (then the check simply never hits the cache)."""
+    try:
+        payload = json.dumps(fixture, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(payload).hexdigest()
+
+
 def validate_semantic_fixture_integrity(fixture: dict[str, Any]) -> None:
+    cache_key = _fixture_integrity_cache_key(fixture)
+    if cache_key is not None and cache_key in _FIXTURE_INTEGRITY_VERIFIED:
+        return
     files = fixture.get("files")
     diff = fixture.get("diff")
     if not isinstance(files, list):
@@ -839,6 +865,8 @@ def validate_semantic_fixture_integrity(fixture: dict[str, Any]) -> None:
                 raise SemanticCorpusError(
                     f"semantic fixture patch new side does not match files: {relative_name}"
                 )
+    if cache_key is not None:
+        _FIXTURE_INTEGRITY_VERIFIED.add(cache_key)
 
 
 def _require(condition: bool, message: str) -> None:

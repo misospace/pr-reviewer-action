@@ -3,6 +3,7 @@
  * GitHub and Forgejo publish the same validated findings. */
 import { createHash } from "node:crypto";
 import { redactText } from "../context/redact.js";
+import { reserveSuggestionOpeners } from "../metadata/markers.js";
 import { findingIdentityFromRecord, renderFindingIdentityMarker, stripFindingIdentityMarkers } from "../outcomes/identity.js";
 import { sanitizeMarkdown } from "./sanitize.js";
 
@@ -167,17 +168,28 @@ export function diffPositions(diffText: string): PositionMap {
   return positionsByPath;
 }
 
-/** Render one finding using the v2 label, redaction, and markdown boundaries (#561). */
+/** Render one finding using the v2 label, redaction, and markdown boundaries (#561).
+ *
+ * #1107: every model-authored string is reserved twice on purpose. Before
+ * assembly, so a fence the model wrote stays line-initial inside its own field
+ * and is caught there rather than only after this function's own `**label:** `
+ * prefix has been glued onto its front (which would leave the token sitting
+ * where a later template edit could make it live). After assembly, because the
+ * transforms ahead of it delete text — a reserved marker stripped next to a
+ * fence, or a message that reads as a suggestion only once redaction has
+ * rewritten part of its line — and either can leave a live one-click
+ * prescription this run never validated. Nothing appended after this point can
+ * hold a fence. A finding without the token renders byte-identically. */
 export function findingToBody(finding: Finding, linkMode: string): string {
   const severity = finding.severity || "info";
   const rawSeverity = String(severity);
   const label = Object.hasOwn(SEVERITY_LABELS, rawSeverity) ? SEVERITY_LABELS[rawSeverity]! : rawSeverity;
   const category = finding.category;
   const suffix = category && category !== "other" ? ` (${String(category)})` : "";
-  const message = String(finding.message || "").trim();
-  const body = `**${label}${suffix}:** ${message}\n\n${INLINE_DISCLAIMER}`;
+  const message = reserveSuggestionOpeners(String(finding.message || "").trim());
+  const body = `**${reserveSuggestionOpeners(label)}${reserveSuggestionOpeners(suffix)}:** ${message}\n\n${INLINE_DISCLAIMER}`;
   const mode = linkMode === "inert" || linkMode === "togithub" ? linkMode : "inert";
-  return sanitizeMarkdown(redactText(body), mode);
+  return reserveSuggestionOpeners(sanitizeMarkdown(redactText(body), mode));
 }
 
 function isRecord(value: unknown): value is Finding {
@@ -188,14 +200,21 @@ function safePath(path: unknown): path is string {
   return typeof path === "string" && path.length > 0 && !path.startsWith("/") && !path.split("/").includes("..");
 }
 
-type Actionable = { start: number; end: number; replacement: string };
+/** #762: the validated one-click suggestion action for a comment. */
+export type Actionable = { start: number; end: number; replacement: string };
 
 /** #762: longest run of consecutive backticks in *content* (0 when none) —
- * the fence length must outlast it so no inner run can close the block. */
+ * the fence length must outlast it so no inner run can close the block.
+ * #1107 review round: reservation escapes a dissolved block's fence
+ * characters ("\`\`\`"); such a line can never close a fence, but it still
+ * reads as a run of backticks, so measure escaped backticks as the runs they
+ * render as and keep the wrap strictly longer than anything the content
+ * shows. */
 function longestBacktickRun(content: string): number {
+  const visible = content.replace(/\\`/g, "`");
   let longest = 0;
   let run = 0;
-  for (const ch of content) {
+  for (const ch of visible) {
     run = ch === "`" ? run + 1 : 0;
     if (run > longest) longest = run;
   }
@@ -216,11 +235,17 @@ export function normalizedReplacement(suggestion: string): string {
   return suggestion.replace(/[\r\n]+$/, "");
 }
 
-/** #762/#1101: derive the one-click suggestion action from the finding record,
- * or null when the suggestion is absent/blank, fence-hostile (any line whose
- * trim() begins with 3+ backticks or 3+ tildes), or the [start..end_line]
- * range is not fully presentable in the diff. The anchor line is already
- * validated by the caller's existing anchor check.
+/** #1107: the publishable one-click prescription this finding carries, or null
+ * when publication would render none: `suggestion` absent/blank,
+ * fence-hostile (any line whose trim() begins with 3+ backticks or 3+ tildes),
+ * or a [start..end_line] range not fully presentable in the diff. The anchor
+ * line is already validated by the caller's existing anchor check.
+ *
+ * THE single predicate: `buildComments` renders a prescription exactly when it
+ * returns non-null, and the usefulness-feedback pre-check
+ * (`hasPublishablePrescription`) asks the same question through the same
+ * function, so the pre-check cannot drift weaker than publication and spend
+ * reads on prescriptions that cannot exist.
  *
  * The replacement is made marker-free HERE, before it is digested, rendered,
  * or recovered: the suppression digest must describe exactly the text the
@@ -234,7 +259,7 @@ export function normalizedReplacement(suggestion: string): string {
  * recovery can never find again. Stripping to nothing drops the action
  * entirely — no replacement block, no affordance, no digest to misdescribe
  * one. */
-function validateAction(rec: Finding, line: number, pathPositions: Map<number, number>): Actionable | null {
+export function publishablePrescription(rec: Finding, line: number, pathPositions: Map<number, number>): Actionable | null {
   if (typeof rec.suggestion !== "string") return null;
   const replacement = normalizedReplacement(stripRejectionCarryover(normalizedReplacement(rec.suggestion)));
   if (replacement === "") return null;
@@ -252,6 +277,52 @@ function validateAction(rec: Finding, line: number, pathPositions: Map<number, n
   return { start: line, end, replacement };
 }
 
+/** #1107: the anchor a finding needs to be commented at all, or null for every
+ * finding `buildComments` skips. Both the publish loop and the feedback
+ * pre-check run this one predicate, so neither can answer for a finding the
+ * other would drop. */
+interface CommentAnchor {
+  path: string;
+  line: number;
+  pathPositions: Map<number, number>;
+}
+
+function commentAnchor(value: Finding, positions: PositionMap): CommentAnchor | null {
+  if (value.thread_id) return null;
+  const path = value.file;
+  const line = value.line;
+  if (!safePath(path) || typeof line !== "number" || !Number.isInteger(line) || line <= 0) return null;
+  const pathPositions = positions.get(path);
+  if (!pathPositions?.has(line)) return null;
+  return { path, line, pathPositions };
+}
+
+/** #1107: whether this finding set contains a prescription publication would
+ * actually render — the usefulness-feedback pre-check's question, asked through
+ * exactly the predicates publication uses (`commentAnchor` +
+ * `publishablePrescription`). A false answer means the feedback read, and every
+ * forge request behind it, has nothing it could ever correlate, so it never
+ * runs: a fence-hostile, out-of-range, marker-stripped-to-nothing, or blank
+ * `suggestion` costs no `listReviews`, no reaction read, and no permission
+ * lookup.
+ *
+ * Deliberately NOT bounded by `maxComments`: that cap is a publication-volume
+ * policy applied after the findings that carry prescriptions are known, and
+ * mirroring it here would duplicate its semantics for a read this action would
+ * merely waste. The bound is fail-open on cost only — it can never change a
+ * suppression decision. */
+export function hasPublishablePrescription(findings: unknown, diffText: string): boolean {
+  if (!Array.isArray(findings)) return false;
+  const positions = diffPositions(diffText);
+  for (const value of findings) {
+    if (!isRecord(value)) continue;
+    const anchor = commentAnchor(value, positions);
+    if (anchor === null) continue;
+    if (publishablePrescription(value, anchor.line, anchor.pathPositions) !== null) return true;
+  }
+  return false;
+}
+
 /** #762: the one-click suggestion region this module writes — a blank line, a
  * ````suggestion` opener, the replacement, and a lone ````` terminator. */
 const SUGGESTION_OPENER = "```suggestion";
@@ -260,11 +331,16 @@ const FENCE_TERMINATOR = "```";
 /** #762: recover the replacement a previously published comment of ours
  * carried, or null when it carries none that can be recovered unambiguously.
  * Only this module's own region is read, and only when the body still carries
- * our disclaimer: `validateAction` refuses any replacement line whose trim
- * starts with three backticks or tildes, so no inner lone fence line can exist
- * and the terminator is unambiguous. Zero or several openers, a missing
+ * our disclaimer: `publishablePrescription` refuses any replacement line whose
+ * trim starts with three backticks or tildes, so no inner lone fence line can
+ * exist and the terminator is unambiguous. Zero or several openers, a missing
  * terminator, and a blank replacement all mean "no prior prescription" — the
- * caller then posts the current one. */
+ * caller then posts the current one.
+ *
+ * #1107: "several openers" can no longer be reached through model prose — every
+ * model-authored surface reserves the opener before assembly — so the ambiguous
+ * read stays a defensive branch and cannot become the fail-open path a second
+ * opener used to open. */
 export function recoverPublishedSuggestion(body: string): string | null {
   if (typeof body !== "string" || !body.includes(INLINE_DISCLAIMER)) return null;
   const lines = body.split("\n");
@@ -300,21 +376,18 @@ export function buildComments(
   let suppressed = 0;
   for (const value of findings) {
     if (!isRecord(value)) { skipped += 1; continue; }
-    if (value.thread_id) { skipped += 1; continue; }
-    const path = value.file;
-    const line = value.line;
-    if (!safePath(path) || typeof line !== "number" || !Number.isInteger(line) || line <= 0 || !positions.get(path)?.has(line)) {
-      skipped += 1;
-      continue;
-    }
+    // #1107: one anchor predicate, shared with the usefulness-feedback pre-check.
+    const anchor = commentAnchor(value, positions);
+    if (anchor === null) { skipped += 1; continue; }
+    const { path, line, pathPositions } = anchor;
     let body = findingToBody(value, opts.linkMode ?? "inert");
     const comment: Record<string, unknown> = { path, body };
-    if (opts.forgejoPositions) comment.new_position = positions.get(path)!.get(line)!;
+    if (opts.forgejoPositions) comment.new_position = pathPositions.get(line)!;
     else { comment.line = line; comment.side = "RIGHT"; }
     // #762: actionable one-click suggestion (GitHub) / degraded plain block
     // (Forgejo) + opt-in agent-prompt section. Findings without the new keys
     // render byte-identically to before.
-    const action = validateAction(value, line, positions.get(path)!);
+    const action = publishablePrescription(value, line, pathPositions);
     // #762: the digest a suppressed prescription carries into this comment so
     // the rejection outlives the comment the trusted 👎 landed on.
     let carriedDigest: string | null = null;
@@ -354,19 +427,27 @@ export function buildComments(
       }
     }
     if (typeof value.agent_prompt === "string" && value.agent_prompt.trim() !== "") {
+      // #1107: the prompt is model text, so its opener is reserved both before
+      // the wrap — where a fence it wrote is still line-initial in its own text
+      // — and on the assembled section, since the wrap and the sanitizers ahead
+      // of that edit text. `recoverPublishedSuggestion` also reads raw lines
+      // fence-blind, so an opener left anywhere in here would still count as a
+      // second one.
       const section =
         `\n\n<details><summary>Suggested agent prompt</summary>\n\n` +
-        wrapFence(value.agent_prompt) +
+        wrapFence(reserveSuggestionOpeners(value.agent_prompt)) +
         "\n\n</details>";
-      body += sanitizeMarkdown(redactText(section), mode);
+      body += reserveSuggestionOpeners(sanitizeMarkdown(redactText(section), mode));
     }
     // #762: no model-authored text (message, suggestion, or agent prompt) may
     // carry the reserved carry-marker grammar: the digest is recomputable
     // from published state, so an echoed marker line would ride our own
     // comment's provenance into a permanent self-suppression. Strip any such
     // line from the assembled body before we append our own marker. (The
-    // suggestion region is already marker-free by `validateAction`, so this is
-    // a no-op there; it still covers `message` and `agent_prompt`.)
+    // suggestion region is already marker-free by `publishablePrescription`, so
+    // this is a no-op there; it still covers `message` and `agent_prompt`.)
+    // #1027: the same hygiene strips a model-authored finding-identity
+    // marker — it is this action's state and never the model's to mint.
     body = stripRejectionCarryover(stripFindingIdentityMarkers(body));
     // #762: a suppressed prescription's rejection survives this run as a
     // digest-only carry marker on the replacement comment — the reaction on
