@@ -619,24 +619,28 @@ test("#726: a caller cancellation reaches the tool subprocess and fetch seams", 
   assert.equal(web.content, "ok");
   assert.equal(fetchSignal, controller.signal, "the web fetch init carries the caller's signal");
 
-  // (d) defaultFetch composes the caller abort with the per-request timeout.
+  // (d) defaultFetch composes the caller abort with the per-request timeout:
+  // the abort REASON the fetch's signal carries must be the caller's, and it
+  // must arrive without waiting for the per-call timeout (guarded, so a
+  // reverted composition fails the assertion instead of hanging the suite).
   const caller = new AbortController();
+  const marker = "caller-cancel-marker";
   const originalFetch = globalThis.fetch;
   let initSignal: AbortSignal | undefined;
   (globalThis as any).fetch = async (_url: string, init: any) => {
     initSignal = init.signal;
     await new Promise<never>((_resolve, reject) => {
-      init.signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })), { once: true });
+      init.signal.addEventListener("abort", () => reject(new Error(`aborted reason=${String((init.signal as AbortSignal).reason?.message ?? "none")}`)), { once: true });
     });
     throw new Error("unreachable");
   };
   try {
     const depsOnly = ctx(root, { allowedHosts: ["example.com"], signal: caller.signal, deps: { env: {} } as any });
     const pending = webFetch("http://example.com/x", depsOnly);
-    caller.abort();
-    const outcome = await pending;
-    assert.equal(typeof outcome.error, "string", "the aborted default fetch degrades to a tool error");
-    assert.ok(initSignal !== undefined && initSignal.aborted, "the composed signal carried the caller's abort");
+    caller.abort(new Error(marker));
+    const outcome = await Promise.race([pending, new Promise<{ error: string }>((resolve) => setTimeout(() => resolve({ error: "__guard__" }), 2000))]);
+    assert.match(String(outcome.error), new RegExp(marker), "the default fetch carries the caller's cancellation, not just its own timeout");
+    assert.ok(initSignal !== undefined && initSignal.aborted);
   } finally {
     (globalThis as any).fetch = originalFetch;
   }
