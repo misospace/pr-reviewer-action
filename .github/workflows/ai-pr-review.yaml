@@ -223,5 +223,6 @@ jobs:
           publish-mode: review_verdict
           requirement-trace: "true"
           review-routing-mode: auto
+          repository-skills: "true"
           smart-model-context-tokens: ${{ vars.SMART_CONTEXT_TOKENS }}
           tool-allowed-gh-api-repos: "*"
