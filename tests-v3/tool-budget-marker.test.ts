@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { buildMetadataMarker } from "../src/precheck/metadata.js";
 import { buildRunMetadataMarker } from "../src/metadata/markers.js";
+import { toolBudgetTelemetryOf } from "../src/run/review.js";
 
 // ---------------------------------------------------------------------------
 // #847 — the metadata marker records the #810/#702 tool-budget provenance
@@ -158,4 +159,32 @@ test("#847: buildRunMetadataMarker wires toolStopReason through additively", () 
 test("#847: buildRunMetadataMarker omits tool_stop_reason when no harness reported one", () => {
   const marker = buildRunMetadataMarker({ headSha: "h", baseSha: "b", reviewResult: "clean" });
   assert.doesNotMatch(marker, /tool_stop_reason/);
+});
+
+test("#847: toolBudgetTelemetryOf lifts the top-level stop_reason", () => {
+  const lifted = toolBudgetTelemetryOf({ stop_reason: "tool-call-budget-exhausted" });
+  assert.equal(lifted.stopReason, "tool-call-budget-exhausted");
+});
+
+test("#847: toolBudgetTelemetryOf falls back to the #702 telemetry stop_reason (pre-loop harness-abort)", () => {
+  // A pre-loop abort artifact carries no top-level stop_reason; its
+  // "harness-abort" lives only in the buildToolLoopTelemetry pre-loop shape.
+  const lifted = toolBudgetTelemetryOf({
+    tool_request_budget: 16,
+    tool_loop_telemetry: { phase: "pre-loop", stop_reason: "harness-abort" },
+  });
+  assert.equal(lifted.stopReason, "harness-abort");
+});
+
+test("#847: the top-level stop_reason wins over the nested telemetry value", () => {
+  const lifted = toolBudgetTelemetryOf({
+    stop_reason: "max-rounds",
+    tool_loop_telemetry: { phase: "loop", stop_reason: "max-rounds" },
+  });
+  assert.equal(lifted.stopReason, "max-rounds");
+});
+
+test("#847: an empty nested stop_reason is treated as absent", () => {
+  const lifted = toolBudgetTelemetryOf({ tool_loop_telemetry: { phase: "loop", stop_reason: "" } });
+  assert.equal(lifted.stopReason, undefined);
 });

@@ -105,7 +105,7 @@ Or, to compare tool-budget provenance across a set of PRs (how often the
 size-scaled default kicks in versus the tier default):
 
 ```bash
-gh api "repos/OWNER/REPO/issues/comments?per_page=100" \
+gh api "repos/OWNER/REPO/issues/comments?per_page=100" --paginate \
   --jq '.[].body' \
   | grep -o '"tool_budget_source":"[a-z-]*"' \
   | sort | uniq -c
@@ -116,7 +116,7 @@ Or, to compare budget-exhaustion rates by provenance (the #847 measurement —
 nothing unread are counted, not just the `coverage: "partial"` ones):
 
 ```bash
-gh api "repos/OWNER/REPO/issues/comments?per_page=100" \
+gh api "repos/OWNER/REPO/issues/comments?per_page=100" --paginate \
   --jq '.[].body' \
   | grep -oE '"tool_budget_source":"[a-z-]*"[^}]*"tool_stop_reason":"[a-z-]*"' \
   | sort | uniq -c

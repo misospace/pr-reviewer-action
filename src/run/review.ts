@@ -1638,7 +1638,7 @@ export function partialCoverageOf(harness: Record<string, unknown> | null): Part
  * the marker then omits `tool_budget`/`tool_budget_source`/`tool_calls`
  * exactly as it did before #847.
  */
-function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): {
+export function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): {
   budget?: number;
   source?: string;
   calls?: number;
@@ -1655,11 +1655,22 @@ function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): {
     out.source = harness.tool_budget_source;
   }
   // #847 measurement follow-up: the loop's own stop reason (written by
-  // runToolHarness on every path that ran the loop, plus the pre-loop
-  // "harness-abort"). Recorded regardless of coverage so a budget stop that
-  // left nothing unread is still measurable from published markers.
+  // runToolHarness on every path that ran the loop). A pre-loop abort has no
+  // top-level stop_reason; its `harness-abort` lives only in the #702
+  // telemetry object (buildToolLoopTelemetry's `phase: "pre-loop"` shape),
+  // so fall back to it there — the loop-shape nested value is the same
+  // constant, never new information. Recorded regardless of coverage so a
+  // budget stop that left nothing unread is still measurable from published
+  // markers.
   if (typeof harness.stop_reason === "string" && harness.stop_reason !== "") {
     out.stopReason = harness.stop_reason;
+  } else if (
+    harness.tool_loop_telemetry !== null
+    && typeof harness.tool_loop_telemetry === "object"
+    && typeof (harness.tool_loop_telemetry as Record<string, unknown>).stop_reason === "string"
+    && (harness.tool_loop_telemetry as Record<string, unknown>).stop_reason !== ""
+  ) {
+    out.stopReason = (harness.tool_loop_telemetry as Record<string, unknown>).stop_reason as string;
   }
   if (typeof harness.executed_request_count === "number") out.calls = harness.executed_request_count;
   // #895: the rounds actually used and the resolved round cap the loop ran
