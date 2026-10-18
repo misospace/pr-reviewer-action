@@ -543,6 +543,64 @@ def test_fixture_integrity_rejects_tampered_head() -> None:
         validate_semantic_fixture_integrity(fixture)
 
 
+def test_fixture_integrity_memoizes_verified_content_but_not_tampered_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1078: the git-based integrity verdict is memoized per fixture content
+    (identical content never re-spawns git within a process), but the memo is
+    keyed by content: a tampered fixture hashes differently and pays the full
+    verification, so a cached verdict can never mask tampering."""
+    from pr_reviewer import semantic_eval
+
+    fixture = json.loads((ROOT / "evals" / "historical-dogfood" / "644.json").read_text(encoding="utf-8"))
+    real_run = subprocess.run
+    calls = {"n": 0}
+
+    def counting_run(argv, *args, **kwargs):
+        calls["n"] += 1
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(semantic_eval.subprocess, "run", counting_run)
+    semantic_eval._FIXTURE_INTEGRITY_VERIFIED.clear()
+    validate_semantic_fixture_integrity(fixture)
+    assert calls["n"] > 0, "the first sighting of a fixture must run the git verification"
+    calls["n"] = 0
+    validate_semantic_fixture_integrity(json.loads(json.dumps(fixture)))
+    assert calls["n"] == 0, "identical content must be served from the memo, not re-verified"
+    calls["n"] = 0
+    tampered = json.loads(json.dumps(fixture))
+    tampered["files"][0]["content"] = "stale prompt\n"
+    with pytest.raises(SemanticCorpusError, match="new side does not match|reverse patch"):
+        validate_semantic_fixture_integrity(tampered)
+    assert calls["n"] > 0, "tampered content must never be memo-served"
+
+
+def test_offline_runner_rejects_bad_corpus_before_building_the_gate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """#1078: scenario-coverage failures are corpus-level facts; they must fail
+    without paying for (or hiding behind) the tsc build and node-test gate."""
+    import scripts.run_semantic_eval_ci as runner
+
+    def explode() -> list[dict[str, object]]:
+        raise AssertionError("the .test-build gate must not run for a corpus that fails coverage")
+
+    monkeypatch.setattr(runner, "run_dataflow_checks", explode)
+    source = json.loads(CORPUS.read_text(encoding="utf-8"))
+    report = tmp_path / "report.json"
+
+    unexpected = dict(source["semantic_corpus"][0], number=999)
+    bad = tmp_path / "unexpected.json"
+    bad.write_text(json.dumps({**source, "semantic_corpus": [*source["semantic_corpus"], unexpected]}), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", [str(RUNNER), "--corpus", str(bad), "--output", str(report)])
+    assert runner.main() == 2
+    assert "unexpected scenario" in json.loads(report.read_text(encoding="utf-8"))["error"]
+
+    no_runs = json.loads(json.dumps(source))
+    no_runs["semantic_corpus"][0]["offline_runs"] = []
+    empty = tmp_path / "no-runs.json"
+    empty.write_text(json.dumps(no_runs), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", [str(RUNNER), "--corpus", str(empty), "--output", str(report)])
+    assert runner.main() == 2
+    assert "no offline runs" in json.loads(report.read_text(encoding="utf-8"))["error"]
+
+
 def test_fixture_hash_mismatch_is_rejected() -> None:
     from eval_harness import _load_semantic_fixture
 
