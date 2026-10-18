@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { getEventListeners } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runReview, RunReviewError } from "../src/run/review.js";
 import { runReviewEngine } from "../src/engine/review.js";
-import type { ReviewRequest } from "../src/engine/types.js";
+import type { ReviewDependencies, ReviewRequest } from "../src/engine/types.js";
 import { engineMain } from "../src/engine/cli.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { startMockServer } from "./helpers.js";
@@ -44,6 +45,12 @@ function request(aiBaseUrl: string, runDir: string): ReviewRequest {
   return { repository: "o/r", prNumber: "7", headSha: "a".repeat(40), baseRef: "", isForkPr: "false", platform: "github", forgejoApiUrl: "", ciChecksFile: join(runDir, "ci-checks-context.md"), inputs: { ...inputs, "ai-base-url": aiBaseUrl }, ambient: {}, triggerReason: "manual", forceRereview: false };
 }
 
+/** Engine dependencies over the shared fixture; `overrides` supplies the one
+ * seam a cancellation test needs to control (a gate branch, a sink). */
+function engineDeps(root: string, runDir: string, overrides: Partial<ReviewDependencies> = {}): ReviewDependencies {
+  return { workspace: root, runDir, outputsSink: "/dev/null", stepSummaryPath: join(root, "summary.md"), adapter: mockPlatform(), persistArtifacts: true, quiet: true, ...overrides };
+}
+
 test("engine runs a full review without Action-only environment", async () => {
   const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
   const f = fixture();
@@ -79,6 +86,98 @@ test("pre-aborted engine request refuses to start", async () => {
   try {
     await assert.rejects(runReviewEngine({ ...request("", f.runDir), signal: AbortSignal.abort() }, { workspace: f.root, runDir: f.runDir, outputsSink: "/dev/null", adapter: mockPlatform() }), (error: unknown) => error instanceof RunReviewError && /cancelled/.test(error.message));
   } finally { f.cleanup(); }
+});
+
+test("cancelling mid-flight rejects the run instead of returning the in-flight model verdict", async () => {
+  // Deterministic seam: the provider answers only AFTER the cancellation
+  // landed, so the engine is handed a complete, approving verdict it must
+  // still refuse — no sleeps, no wall-clock race.
+  const controller = new AbortController();
+  let answered!: () => void;
+  const modelAnswered = new Promise<void>((resolve) => { answered = resolve; });
+  const server = await startMockServer((_req, _body, res) => {
+    controller.abort(); // cancellation lands while the primary model request is in flight
+    // The answer goes out on the next macrotask, strictly after the abort.
+    setImmediate(() => {
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Connection", "close");
+      res.end(verdictBody());
+      answered();
+    });
+  });
+  const f = fixture();
+  try {
+    await assert.rejects(
+      runReviewEngine({ ...request(server.url, f.runDir), signal: controller.signal }, engineDeps(f.root, f.runDir)),
+      (error: unknown) => error instanceof RunReviewError && /cancelled/.test(error.message),
+    );
+    // The cancelled run produced no publishable verdict surface.
+    assert.ok(!existsSync(join(f.runDir, "verdict.txt")), "verdict.txt");
+    assert.ok(!existsSync(join(f.runDir, "review-body.md")), "review-body.md");
+    // The caller's abort listener is detached: a long-lived worker signal
+    // must not retain a finished run.
+    assert.deepEqual(getEventListeners(controller.signal, "abort"), []);
+    // The cancelled request was answered anyway — the verdict arrived too
+    // late to be accepted, and the run never handed one out.
+    await modelAnswered;
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("cancelling mid-flight finalizes the gate fork the run still owns", async () => {
+  // The model is never reached: the run is cancelled while the CI gate is
+  // still in flight. The server only supplies a resolvable `ai-base-url`.
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.setHeader("Connection", "close"); res.end(verdictBody()); });
+  const f = fixture();
+  const controller = new AbortController();
+  let gateStarted!: () => void;
+  const gateInFlight = new Promise<void>((resolve) => { gateStarted = resolve; });
+  let releaseGate!: () => void;
+  const gateReleased = new Promise<number>((resolve) => { releaseGate = () => resolve(1); });
+  let gateTerminated = false;
+  try {
+    const running = runReviewEngine(
+      { ...request(server.url, f.runDir), signal: controller.signal, inputs: { ...inputs, "ai-base-url": server.url, "ci-status-check": "true" } },
+      engineDeps(f.root, f.runDir, {
+        ciGate: {
+          file: "",
+          envAllowlist: [],
+          // Stands in for the CI-gate child: it runs until the engine cuts it,
+          // so the run is cancelled with an owned fork still outstanding.
+          workload: async (signal: AbortSignal) => {
+            signal.addEventListener("abort", () => { gateTerminated = true; releaseGate(); }, { once: true });
+            // Report the gate in flight only once the fork's own promise chain
+            // settled, so the engine has already taken ownership of it.
+            await new Promise<void>((resolve) => { setImmediate(resolve); });
+            gateStarted();
+            return gateReleased;
+          },
+        },
+      }),
+    );
+    await gateInFlight;
+    controller.abort();
+    // Hang guard: a regression that never finalizes the fork unblocks it on
+    // the next macrotask and fails the assertion below instead of hanging.
+    const escape = setImmediate(releaseGate);
+    try {
+      await assert.rejects(running, (error: unknown) => error instanceof RunReviewError && /cancelled/.test(error.message));
+      // finalize() is awaited before the rejection is observable: no owned
+      // gate child outlives the cancelled run.
+      assert.equal(gateTerminated, true, "the outstanding owned gate fork was aborted");
+      assert.deepEqual(getEventListeners(controller.signal, "abort"), []);
+    } finally { clearImmediate(escape); }
+  } finally { releaseGate(); await server.close(); f.cleanup(); }
+});
+
+test("a completed run detaches from the caller's signal", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.setHeader("Connection", "close"); res.end(verdictBody()); });
+  const f = fixture();
+  const controller = new AbortController();
+  try {
+    const result = await runReviewEngine({ ...request(server.url, f.runDir), signal: controller.signal }, engineDeps(f.root, f.runDir));
+    assert.equal(result.outputs.verdict, "approve");
+    assert.deepEqual(getEventListeners(controller.signal, "abort"), []);
+  } finally { await server.close(); f.cleanup(); }
 });
 
 test("engineMain accepts an explicit request file and reports usage errors", async () => {

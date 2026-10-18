@@ -35,7 +35,10 @@ export interface ReviewRequest {
   forceRereview: boolean;
   /** Cancellation: when provided and aborted, the engine aborts its internal
    * v3 cancellation scope (src/runtime/signals.ts) and refuses to start when
-   * already aborted. */
+   * already aborted. An abort at any later point also throws — a cancelled run
+   * never resolves with a result. Provenance-only fields: `triggerReason` and
+   * `forceRereview` are recorded, never consulted (rerun admission stays with
+   * the host — see docs/architecture/engine-boundary.md). */
   signal?: AbortSignal;
 }
 

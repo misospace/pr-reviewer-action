@@ -4,7 +4,7 @@ import { loadConfig, type RawInputs } from "../config/load-config.js";
 import { resolveRepositoryConfig } from "../config/repository-config.js";
 import { resolveRequirementOwners } from "../config/requirement-owners.js";
 import { assertSupportedNode } from "../runtime/node-version.js";
-import { createCancellationScope } from "../runtime/signals.js";
+import { createCancellationScope, type CancellationScope } from "../runtime/signals.js";
 import { resolveTierBudgets } from "../corpus/budgets.js";
 import { prioritizeDiff } from "../corpus/diff-priority.js";
 import { truncateClean } from "../corpus/truncate.js";
@@ -214,16 +214,127 @@ export function ciGateOutputs(path: string): string {
 /** Set on every gate child; a process carrying it never starts a review. */
 export const GATE_CHILD_ENV = "PR_REVIEWER_GATE_CHILD";
 
+/** Cancellation ownership for one run (#726 review). The typed scope the
+ * pipeline is bound to, the checkpoints that make an aborted run
+ * un-completable, and the owned gate forks the cancellation path finalizes.
+ * Lives beside the engine so no caller has to re-implement any of it. */
+interface RunCancellation {
+  /** Wired into `forkGate`, which terminates both active gate trees. */
+  readonly scope: CancellationScope;
+  /** Rejects as soon as the caller's signal aborts (the explicit race). */
+  readonly cancelled: Promise<never>;
+  /** The only way an aborted run leaves the pipeline: throws. */
+  checkpoint(): void;
+  /** Track an owned gate fork so cancellation finalizes it. */
+  own(fork: ForkedGate): void;
+  /** Stop tracking a fork this run has already joined. */
+  release(fork: ForkedGate): void;
+  /** Abort every still-outstanding owned fork. Idempotent. */
+  finalize(): Promise<void>;
+  /** Detach from the caller's signal (a long-lived worker signal must not
+   * retain a completed run). */
+  dispose(): void;
+}
+
+/** #726 review: mid-run cancellation. The engine aborts only its own scope —
+ * the run must also STOP, and must never report a verdict the caller already
+ * cancelled. Three cooperating surfaces, no caller-visible partial success:
+ * - `cancelled` is raced against the pipeline, so the run stops being awaited
+ *   the moment the caller's signal aborts;
+ * - `checkpoint()` throws at every main stage boundary, so the abandoned
+ *   pipeline terminates at the next boundary instead of finishing (and
+ *   instead of an in-flight model verdict reaching the fallback, escalation
+ *   or enforcement stages);
+ * - `finalize()` aborts the gate forks this run owns, awaited BEFORE the
+ *   rejection is observable, so no gate child outlives a cancelled run.
+ * `dispose()` removes the caller's abort listener on both exit paths.
+ */
+function createRunCancellation(request: ReviewRequest): RunCancellation {
+  const scope = createCancellationScope();
+  const forks = new Set<ForkedGate>();
+  const detail = request.triggerReason === "" ? "" : ` (${request.triggerReason})`;
+  const scopeReason = `request cancelled${detail}`;
+  const message = `review request cancelled${detail}`;
+  let rejectCancelled!: (error: RunReviewError) => void;
+  const cancelled = new Promise<never>((_resolve, reject) => { rejectCancelled = reject; });
+  // The run usually wins the race; a rejection nobody awaits would otherwise
+  // surface as an unhandled rejection.
+  void cancelled.catch(() => {});
+  const onAbort = (): void => {
+    // Owned gate children first, then the rejection: the gates learn about
+    // the cancellation synchronously, the caller hears about it next.
+    scope.abort(scopeReason);
+    rejectCancelled(new RunReviewError(message, 1));
+  };
+  request.signal?.addEventListener("abort", onAbort, { once: true });
+  const forget = async (fork: ForkedGate): Promise<void> => {
+    try {
+      await fork.abort();
+    } catch {
+      // A gate whose own abort failed is already gone or unlaunchable; the
+      // cancellation rejection must not be replaced by its cleanup error.
+    }
+  };
+  return {
+    scope,
+    cancelled,
+    checkpoint(): void {
+      if (scope.signal.aborted) throw new RunReviewError(message, 1);
+    },
+    own(fork: ForkedGate): void {
+      // Cancelled between the last checkpoint and the launch: never track a
+      // fork nobody will finalize — cut it now instead.
+      if (scope.signal.aborted) { void forget(fork); return; }
+      forks.add(fork);
+    },
+    release(fork: ForkedGate): void {
+      forks.delete(fork);
+    },
+    async finalize(): Promise<void> {
+      const outstanding = [...forks];
+      forks.clear();
+      await Promise.all(outstanding.map(forget));
+    },
+    dispose(): void {
+      request.signal?.removeEventListener("abort", onAbort);
+    },
+  };
+}
+
 /** The action-independent v3 review engine (#726): one engine for the Action
  * adapter, the `run` CLI and any future self-hosted worker (#725). Canonical
  * intent/state arrives as `ReviewRequest`, external capabilities as
- * `ReviewDependencies` — see docs/architecture/engine-boundary.md. */
+ * `ReviewDependencies` — see docs/architecture/engine-boundary.md.
+ *
+ * A cancelled run never resolves with a result: an abort at ANY point before
+ * completion throws `RunReviewError`, so a verdict reached after the caller
+ * cancelled cannot reach a later publisher. Nothing about this changes when
+ * `request.signal` is absent (the Action adapter path). */
 export async function runReviewEngine(request: ReviewRequest, dependencies: ReviewDependencies): Promise<RunReviewResult> {
-  const scope = createCancellationScope();
-  if (request.signal !== undefined) {
-    if (request.signal.aborted) throw new RunReviewError("review request cancelled before start", 1);
-    request.signal.addEventListener("abort", () => scope.abort(request.triggerReason === "" ? "request cancelled" : `request cancelled (${request.triggerReason})`), { once: true });
+  if (request.signal !== undefined && request.signal.aborted) throw new RunReviewError("review request cancelled before start", 1);
+  const cancellation = createRunCancellation(request);
+  try {
+    const run = runReviewStages(request, dependencies, cancellation);
+    // Cancellation abandons this promise mid-flight; its outcome is already
+    // owned by the race below, and must never become an unhandled rejection.
+    void run.catch(() => {});
+    const result = await Promise.race([run, cancellation.cancelled]);
+    // The last word: a result is accepted only while the caller's signal is
+    // un-aborted, closing the window between the last checkpoint and here.
+    cancellation.checkpoint();
+    return result;
+  } finally {
+    // Awaited before the rejection is observable: owned gate children are
+    // gone by the time the caller learns the run was cancelled.
+    await cancellation.finalize();
+    cancellation.dispose();
   }
+}
+
+/** review.sh `run_review`: the pipeline body. Cancellation boundaries are the
+ * `checkpoint()` calls; everything else here is the unchanged pipeline. */
+async function runReviewStages(request: ReviewRequest, dependencies: ReviewDependencies, cancellation: RunCancellation): Promise<RunReviewResult> {
+  const checkpoint = (): void => cancellation.checkpoint();
   const clock = dependencies.now ?? ((): number => Date.now() / 1000);
   const started = clock();
   const log = (line: string): void => {
@@ -325,6 +436,7 @@ export async function runReviewEngine(request: ReviewRequest, dependencies: Revi
   ws.write("review-request.json", Buffer.from(JSON.stringify({ schema_version: "1", repository: request.repository, pr_number: prNumber, head_sha: request.headSha, base_ref: request.baseRef, is_fork_pr: request.isForkPr, platform: request.platform, forgejo_api_url: request.forgejoApiUrl, trigger_reason: request.triggerReason, force_rereview: request.forceRereview }, null, 2) + "\n", "utf8"));
   const adapter: PlatformReadAdapter = dependencies.adapter ?? buildPlatformReadAdapter(env, dependencies.fetchImpl);
   await adapter.preflightAuthentication?.();
+  checkpoint();
   const profiles: TierProfiles = resolveTierProfiles(env);
   const streamBool = (env.AI_STREAM ?? "true").toLowerCase() === "true";
 
@@ -358,6 +470,7 @@ export async function runReviewEngine(request: ReviewRequest, dependencies: Revi
   // soften discussion against a description the corpus never showed. Null
   // (no seam, failed read) keeps the REST body and labels nothing.
   let bodyRevision = await authoritativeBodyRevision(adapter);
+  checkpoint();
   if (bodyRevision !== null) pr.body = bodyRevision.body;
   let supersededCutoff = bodyRevision === null ? null : bodyRevision.editedAt;
   ws.write("pr.json", pyJsonDumps(pr));
@@ -438,6 +551,7 @@ export async function runReviewEngine(request: ReviewRequest, dependencies: Revi
     diffText = cachedDiff;
   } else {
     diffText = await adapter.getPrDiff();
+    checkpoint();
     ws.write("pr.diff", diffText);
   }
   const identity = normalizePrIdentity(prObject);
@@ -470,6 +584,7 @@ export async function runReviewEngine(request: ReviewRequest, dependencies: Revi
     ws.write("pr-files.raw.json", pyJsonDumps(rawFilesList));
   } else {
     const filesResult = await adapter.listPrFiles();
+    checkpoint();
     if (!filesResult.ok) throw new RunReviewError(`platform_pr_files failed: ${filesResult.error}`);
     const prFilesRaw = filesResult.data;
     ws.write("pr-files.raw.json", pyJsonDumps(prFilesRaw));
@@ -517,6 +632,7 @@ export async function runReviewEngine(request: ReviewRequest, dependencies: Revi
   // its anchors and related context are the #796 obligation inputs. It
   // reads only the diff, the file list and the checkout.
   const relatedInputs = await buildRelatedCodeSection(ws, env, workspace);
+  checkpoint();
   const obligationsOn = (env.HARNESS_OBLIGATIONS ?? "false").toLowerCase() === "true";
   const harnessObligations = relatedInputs === null || !obligationsOn ? [] : buildHarnessObligations(relatedInputs);
 
@@ -566,6 +682,7 @@ export async function runReviewEngine(request: ReviewRequest, dependencies: Revi
     return linkedResult;
   };
   const linked = await buildMetadataContext(pr, supersededCutoff);
+  checkpoint();
 
   // Manifest context (context.sh tail).
   const manifest = buildManifestContext(rawFilesList, workspace);
@@ -593,6 +710,7 @@ export async function runReviewEngine(request: ReviewRequest, dependencies: Revi
   // Repository impact/history scan (classification.sh) — needs the
   // version hints the extraction just wrote.
   const impact = await buildRepoImpactHistory({ pr, versionHintsTruncated: ws.read("version-hints.truncated.txt"), workspace });
+  checkpoint();
   for (const [name, data] of impact.artifacts) ws.write(name, data);
 
   // ── Classification + routing (classification.sh) ─────────────────────
@@ -654,13 +772,18 @@ export async function runReviewEngine(request: ReviewRequest, dependencies: Revi
   if ((env.CI_STATUS_CHECK ?? "false").toLowerCase() === "true" && dependencies.ciGate !== null) {
     const entry = dependencies.ciGate ? "" : (dependencies.ciGateEntry ?? "");
     if (dependencies.ciGate || entry !== "") {
+      // Never launch an owned gate for a run the caller already cancelled.
+      checkpoint();
       // The gate child is marked so it can never start a review (or another
       // gate) itself: the recursion stops at depth one.
       ciFork = await forkGate("ci", dependencies.ciGate ?? ciGateBranch({ entry }), {
         // GITHUB_OUTPUT is the ported v2 stage ABI the CI gate child writes.
         ambientEnv: { ...request.ambient, [GATE_CHILD_ENV]: "1", GITHUB_OUTPUT: join(runDir, CI_GATE_OUTPUT_FILE) },
-        scope,
+        scope: cancellation.scope,
       });
+      // Owned from here: cancellation finalizes it even if the run dies
+      // between this fork and its join.
+      cancellation.own(ciFork);
       log("CI status gating launched concurrently");
       env.CI_GATE_ACTIVE = "true";
     } else {
@@ -669,9 +792,11 @@ export async function runReviewEngine(request: ReviewRequest, dependencies: Revi
   }
 
   await Promise.all([enrichmentPromise, imageDigestPromise, evidencePromise]);
+  checkpoint();
 
   // PR-thread context (corpus.sh) — same pass cutoff as the review threads.
   await buildPrThreadSection(ws, adapter, env, supersededCutoff);
+  checkpoint();
   // #812: the superseded-discussion rule, appended only now that the
   // discussion sections exist (the fragments phase runs before this stage).
   promptState = applySupersededDiscussionFragment(promptState, ws);
@@ -784,6 +909,7 @@ export async function runReviewEngine(request: ReviewRequest, dependencies: Revi
       ws.write("specialist-equivalent-paths.md", equivalentPathsMd);
       equivalentPathsArgv.push("--equivalent-paths", "specialist-equivalent-paths.md");
     }
+    checkpoint();
     const specialistFork = await forkGate("specialists", {
       file: "",
       envAllowlist: [],
@@ -797,16 +923,23 @@ export async function runReviewEngine(request: ReviewRequest, dependencies: Revi
         stderr: (line) => errorLog(line),
         ...(dependencies.sleep !== undefined ? { sleep: dependencies.sleep } : {}),
       }),
-    }, { scope });
+    }, { scope: cancellation.scope });
+    cancellation.own(specialistFork);
     specialistOutcome = await specialistFork.join();
+    cancellation.release(specialistFork);
   }
   await claimsPromise;
   if (ciFork !== null) {
     const outcome = await ciFork.join();
+    // Joined: the second (result-building) join reads the cached outcome and
+    // never touches the child again, so the fork is no longer outstanding.
+    cancellation.release(ciFork);
+    checkpoint();
     env.CI_GATE_ACTIVE = outcome.ran ? "true" : "false";
     if (!outcome.ok) log("CI status gating exited non-zero; continuing (CI evidence is advisory)");
     persistOutputs(context.outputFilePath, ciGateOutputs(join(runDir, CI_GATE_OUTPUT_FILE)));
   }
+  checkpoint();
 
   // #812: the PR body, linked issues and thread context are re-read after
   // the CI wait, so edits made while CI ran (push first, then update the
@@ -918,6 +1051,7 @@ export async function runReviewEngine(request: ReviewRequest, dependencies: Revi
       // the tier (loopLimitsProfile).
       env.TOOL_HARNESS_TIER = "primary";
       await runToolHarnessPhase(ws, env, workspace, log);
+      checkpoint();
     }
     corpusResult = assembleCorpus(ws, env, budgets, profileKey, "primary", generatedPaths, standards);
     if (corpusResult.overBudget) errorLog(`ERROR: assembled corpus exceeds its context budget`);
@@ -925,10 +1059,14 @@ export async function runReviewEngine(request: ReviewRequest, dependencies: Revi
   }
 
   // ── Review stage (review.sh) ─────────────────────────────────────────
+  // A model verdict that arrives after the caller cancelled is refused here,
+  // before it can reach the escalation, repair or enforcement stages.
+  checkpoint();
   const userMessage = buildUserMessage(ws, "classification.json");
   const primary = await producePrimaryReview({
     env, ws, profiles, streamBool, userMessage, log, errorLog, annotate, clock, sleep: dependencies.sleep, budgets,
   });
+  checkpoint();
   let analysisEngine = primary.analysisEngine;
   let primaryProduced = primary.fromPrimary;
   let artifact = primary.artifact;
@@ -953,6 +1091,7 @@ export async function runReviewEngine(request: ReviewRequest, dependencies: Revi
       budgets, generatedPaths, standards, runDir, workspace,
     });
     delete env.TOOL_ESCALATION;
+    checkpoint();
     if (smart.ok) {
       // No-recursion invariant: the smart review cannot request another.
       const smartArtifact = safeJson(ws.read("ai-output.json"));
@@ -1422,6 +1561,9 @@ secrets: [profiles.primary.apiKey],
     const checks = await adapter.externalChecks(reviewedHead).catch(() => null);
     if (checks !== null) ciState = externalChecksConclusion(checks);
   }
+  // The run's last awaited stage: a cancellation that landed anywhere since
+  // the review stage must still cost the run its verdict.
+  checkpoint();
   const marker = buildRunMetadataMarker({
     // The composite passes PR_HEAD_SHA; fall back to the fetched PR object's
     // head so the marker never claims a wrong binding.
