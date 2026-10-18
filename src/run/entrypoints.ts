@@ -8,11 +8,15 @@ import { forgejoTokenFromEnv } from "../platform/forgejo-auth.js";
 import type { PlatformAdapter } from "../platform/types.js";
 import { GitHubPublishApi } from "../platform/publish-api.js";
 import { ForgejoPublishApi } from "../platform/publish-api.js";
+import { TangledPublishApi } from "../platform/tangled-publish.js";
+import { TangledAtprotoClient, atprotoConfigFromEnv } from "../platform/tangled-atproto.js";
+import { tangledContextFromEnv } from "../platform/tangled.js";
 import { eventLabelName, runPrecheck } from "../precheck/decide.js";
 import { publishReview, type PublishInput, type PublishResult, type PublishMode } from "../publish/publish.js";
 import type { PublishPlatformApi } from "../platform/publish-api.js";
 import type { UpstreamLinkMode } from "../publish/sanitize.js";
 import { nonEmpty } from "./run-dir.js";
+import { buildPlatformReadAdapter } from "./platform.js";
 import { partialCoverageOf } from "./review.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { isIncompleteReason, type IncompleteReason } from "../publish/outputs.js";
@@ -374,11 +378,26 @@ function reviewRoutingFromRunDir(env: NodeJS.ProcessEnv): HumanReviewRoutingPlan
   };
 }
 
-/** The platform publish seam (GitHub REST/GraphQL or Forgejo /api/v1). */
+/** The platform publish seam (GitHub REST/GraphQL, Forgejo /api/v1, or the
+ * Tangled ATProto record client). */
 export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformApi; platform: string; diffProvider: () => Promise<string> } {
   const repo = env.REPO ?? "";
   const prNumber = env.PR_NUMBER ?? "";
   const platform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "", env.TANGLED_REPO_DID ?? "");
+  // #588: Tangled publishes through its own ATProto record seam — it is
+  // never routed through the GitHub/Forgejo publish APIs below. The
+  // canonical pull identity comes from the Bobbin resolver (#584) inside
+  // the adapter; missing ATProto configuration fails closed here with a
+  // descriptive error naming the missing variable.
+  if (platform === "tangled") {
+    const context = tangledContextFromEnv(env);
+    const api = new TangledPublishApi({
+      context,
+      atproto: new TangledAtprotoClient(atprotoConfigFromEnv(env)),
+    });
+    const diffProvider = async (): Promise<string> => buildPlatformReadAdapter(env).getPrDiff();
+    return { api, platform, diffProvider };
+  }
   requireImplementedBackend(platform);
   const token = platform === "forgejo" ? forgejoTokenFromEnv(env) : ghToken(env);
   const apiOptions = {

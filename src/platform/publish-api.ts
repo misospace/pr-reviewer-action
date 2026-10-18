@@ -18,7 +18,7 @@ import { ForgejoAdapter } from "./forgejo.js";
 import { canonicalUserId, hasUsableOwner, integrationOwnerIdFromAudience, ownerMatchesIdentity, type IdentityResolution, type TrustedOwnerIdentity } from "./owner-identity.js";
 import { parsePlatformBaseUrl, GITHUB_API_BASE } from "./urls.js";
 
-export type PublishPlatformName = "github" | "forgejo";
+export type PublishPlatformName = "github" | "forgejo" | "tangled";
 
 export interface PublishCommentRef {
   id: number | string;
