@@ -25,6 +25,10 @@ export type { MetadataOptions };
  * a model must never be able to emit them into a published body, because the
  * precheck scans comment bodies for them (skip-on-unchanged, carry-forward).
  * The patterns stop at the first `>` so they cannot swallow past `-->`.
+ *
+ * This list is the *removal* half of the reserved-grammar boundary; #1107's
+ * prescription opener is the other half (`reserveSuggestionOpeners`), which is a
+ * rewrite rather than a removal and so lives beside `stripReservedMarkers`.
  */
 export const RESERVED_MARKER_PATTERNS: readonly RegExp[] = [
   /<!--\s*ai-pr-review-fingerprint\s*:\s*[^>]*-->/gi,
@@ -35,17 +39,54 @@ export const RESERVED_MARKER_PATTERNS: readonly RegExp[] = [
   /<!--\s*pr-reviewer:rejected-prescriptions\s*:[^>]*-->/gi,
 ];
 
+/**
+ * #1107: the reserved prescription opener — a fence line whose info string is
+ * exactly `suggestion`. GitHub renders that as a live one-click prescription
+ * over model prose, and the publish boundary never validated it:
+ * `publishablePrescription` in `src/publish/inline-findings.ts` is the only
+ * producer of one we ever publish. A second opener inside a comment of ours
+ * also makes `recoverPublishedSuggestion` bail ("several openers"), so that
+ * comment's real prescription becomes permanently uncorrelatable and a trusted
+ * 👎 on it can never suppress the replacement it reviewed (fail-open).
+ *
+ * Reserved the same way the carry-marker grammar is: on every model-authored
+ * surface, on the text that is finally rendered, before the action appends
+ * anything of its own. Matched at any indent, with either fence character and
+ * any fence length, case-insensitively and `\r`-tolerant, so no spelling of the
+ * opener survives as a fence. The fence characters are dropped and the word
+ * kept, so the author still reads `suggestion` and no fence is left to open —
+ * and a body without the token is returned byte-identical.
+ */
+const SUGGESTION_OPENER_RE = /^([ \t]*)(?:`{3,}|~{3,})[ \t]*suggestion[ \t\r]*$/gim;
+
+/** #1107: drop the fence from every model-authored prescription opener, keeping
+ * the `suggestion` word. Idempotent, and a no-op on text with no opener. */
+export function reserveSuggestionOpeners(text: string): string {
+  if (!text.toLowerCase().includes("suggestion")) return text;
+  SUGGESTION_OPENER_RE.lastIndex = 0;
+  return text.replace(SUGGESTION_OPENER_RE, (_match, indent: string) => `${indent}suggestion`);
+}
+
 /** Remove every reserved metadata marker from *text* (port of
- * `strip_reserved_markers`). Applied to model-produced markdown before any
- * action-owned marker is appended, so model output cannot forge the markers
- * the precheck and cleanup logic trust. */
+ * `strip_reserved_markers`), and reserve the prescription opener #1107 adds to
+ * the same reserved-grammar boundary. Applied to model-produced markdown before
+ * any action-owned marker is appended, so model output can neither forge the
+ * markers the precheck and cleanup logic trust nor present a prescription this
+ * action never validated. */
 export function stripReservedMarkers(text: string): string {
   let stripped = text;
   for (const pattern of RESERVED_MARKER_PATTERNS) {
     pattern.lastIndex = 0;
     stripped = stripped.replace(pattern, "");
   }
-  return stripped;
+  // #1107: reserve the opener LAST, on the text that is actually rendered.
+  // Removing a marker can leave what it sat next to: a model that writes
+  // `<!-- ai-pr-review-fingerprint:x -->```suggestion` on one line passes an
+  // opener check that ran first and is left with a live one-click prescription
+  // the moment the marker next to it is removed. Scanning the final string can
+  // only ever catch less, never more, and no earlier transform here can
+  // manufacture a fence the published body would not have shown us.
+  return reserveSuggestionOpeners(stripped);
 }
 
 /** The bare legacy prefix reviews created by older action versions carry. */

@@ -101,11 +101,17 @@ test("#762: an agent prompt is fenced so it cannot forge a suggestion and its me
   const result = buildComments([{ file: "new", line: 1, message: "m", agent_prompt: prompt }], diff, 20, { forgejoPositions: false });
   const body = (result.comments[0] as Record<string, unknown>).body as string;
   assert.ok(body.includes("<details>") && body.includes("Suggested agent prompt"));
-  // The prompt contains a run of 3 backticks, so it is wrapped in a strictly
-  // longer (4+) fence that opens BEFORE any injected "```suggestion" line, so
-  // GitHub cannot read the injected text as a real one-click suggestion.
+  // #1107: the opener is reserved in the model text before the wrap, so the
+  // prompt cannot carry a prescription opener into the body at all — the
+  // guarantee is now stronger than "a fence GitHub cannot read past": the
+  // opener is absent and only the bare word survives as inert prose.
+  assert.equal(body.includes("```suggestion"), false);
+  assert.ok(body.includes("\nsuggestion\n") && body.includes("INJECTED"));
+  // The prompt's remaining run of 3 backticks is still wrapped in a strictly
+  // longer (4+) fence that opens BEFORE the injected text, so GitHub cannot
+  // read the prompt as a one-click suggestion.
   const fourFence = body.indexOf("````");
-  const injected = body.indexOf("```suggestion");
+  const injected = body.indexOf("INJECTED");
   assert.ok(fourFence !== -1 && injected !== -1 && fourFence < injected);
   // The prompt's mention and bare ref are neutralized like all model prose.
   assert.equal(body.includes("@octocat"), false);
@@ -494,4 +500,99 @@ test("#1101: Forgejo degraded mode publishes no grammar and carries exactly one 
   assert.ok(body.includes("**Info:** m"), "the finding still posts");
   assert.deepEqual(parseRejectionCarryover(body), [digest], "exactly one marker, and it is ours");
   assert.equal(body.split("pr-reviewer:rejected-prescriptions:v1:").length - 1, 1);
+});
+
+// ---------------------------------------------------------------------------
+// #1107: the reserved prescription opener on the model-authored surfaces.
+// ---------------------------------------------------------------------------
+
+/** The boundary token ITSELF, in the exact spelling a model would emit: an
+ * opener line, replacement-looking content, and a closing fence. A paraphrase
+ * ("a suggestion fence") would prove nothing about the real byte sequence. */
+const HOSTILE_OPENER = "```suggestion\nINJECTED\n```";
+
+test("#1107: #252 discipline — a message carrying the opener itself publishes no prescription and recovers nothing", () => {
+  // #252: feed the boundary token, not a paraphrase of it. The message arrives
+  // with a live-looking ```suggestion region already inside it; publication
+  // never validated one, so none may reach the comment.
+  const hostile = buildComments(
+    [{ file: "new", line: 1, message: `review note\n${HOSTILE_OPENER}\ntrailing prose` }],
+    diff, 20, { forgejoPositions: false },
+  );
+  assert.equal(hostile.comments.length, 1, "the finding still posts");
+  const body = (hostile.comments[0] as Record<string, unknown>).body as string;
+  assert.equal(body.includes("```suggestion"), false, "the body carries no live prescription region");
+  assert.equal(body.split("\n").some((line) => line === "```suggestion"), false, "no line of our comment IS the opener");
+  // The author's prose survives; only the fence is gone, so they still read the
+  // word they wrote.
+  assert.ok(body.includes("review note") && body.includes("INJECTED") && body.includes("trailing prose"));
+  assert.ok(body.includes("\nsuggestion\n"), "the bare word survives, unfenced");
+  // No prescription this run validated => nothing to recover: the hostile
+  // opener can no longer make recovery bail (the "several openers" arm) or
+  // mis-read a region we never published.
+  assert.equal(recoverPublishedSuggestion(body), null, "a body with no validated prescription recovers nothing");
+
+  // Paired control 1: a message with no token renders byte-identically to the
+  // pre-#1107 renderer — the reservation is a no-op, not a rewrite.
+  assert.deepEqual(
+    buildComments([{ file: "new", line: 1, message: "first" }], diff, 20, { forgejoPositions: false }).comments[0],
+    { path: "new", body: "**Info:** first\n\n_Automated finding from AI PR review._", line: 1, side: "RIGHT" },
+  );
+
+  // Paired control 2: a benign message on a finding that DOES carry a valid
+  // suggestion still publishes and recovers it verbatim.
+  const valid = (buildComments(
+    [{ file: "new", line: 1, message: "first", suggestion: "R1\nR2\n" }], diff, 20, { forgejoPositions: false },
+  ).comments[0] as Record<string, unknown>).body as string;
+  assert.ok(valid.includes("```suggestion"), "the validated prescription still renders");
+  assert.equal(recoverPublishedSuggestion(valid), "R1\nR2", "recovery is unchanged for the region we published");
+
+  // Paired control 3: a hostile message cannot poison the validated region on
+  // the SAME comment — the body's own opener is the only one, and the stray
+  // fence the message left behind precedes it, so recovery still reads exactly
+  // the replacement we published.
+  const mixed = (buildComments(
+    [{ file: "new", line: 1, message: HOSTILE_OPENER, suggestion: "REPL" }], diff, 20, { forgejoPositions: false },
+  ).comments[0] as Record<string, unknown>).body as string;
+  assert.equal(mixed.split("```suggestion").length - 1, 1, "exactly one opener line exists in the body");
+  assert.equal(recoverPublishedSuggestion(mixed), "REPL", "the validated replacement is recovered verbatim");
+
+  // #252: the opener is not reserved by accident of where the template happens
+  // to put its text. Severity and category are model-authored too and are
+  // spliced into the label; a token behind our own `:**` reads as an info
+  // string, not a suggestion, so what is pinned here is the invariant — no line
+  // of our comment IS an opener, and nothing is recoverable.
+  const spliced = (buildComments(
+    [{ file: "new", line: 1, severity: "major\n```suggestion", category: "cat\n```suggestion", message: "m" }],
+    diff, 20, { forgejoPositions: false },
+  ).comments[0] as Record<string, unknown>).body as string;
+  assert.equal(spliced.split("\n").some((line) => line.trim() === "```suggestion"), false, "no opener line survives a label/category splice");
+  // Discriminator: the severity field's own opener is reserved BEFORE assembly,
+  // so it does not survive as a fence sitting mid-label. (Without that pass the
+  // body starts "**major\n```suggestion (cat" and nothing else here fails.)
+  assert.ok(spliced.includes("\nsuggestion (cat"), `severity opener reserved before assembly: ${JSON.stringify(spliced)}`);
+  assert.ok(spliced.includes("major") && spliced.includes("cat") && spliced.includes("_Automated finding from AI PR review._"));
+  assert.equal(recoverPublishedSuggestion(spliced), null, "and nothing a later run could recover");
+});
+
+test("#1107: every spelling of the opener is reserved — indent, longer fence, tilde, uppercase, CRLF", () => {
+  for (const opener of [
+    "```suggestion",
+    "  ```suggestion",
+    "\t```suggestion",
+    "````suggestion",
+    "~~~suggestion",
+    "~~~SUGGESTION  ",
+    "```suggestion\r",
+  ]) {
+    const label = JSON.stringify(opener);
+    const finding = { file: "new", line: 1, message: `head\n${opener}\nINJECTED\n\`\`\`` };
+    const result = buildComments([finding], diff, 20, { forgejoPositions: false });
+    assert.equal(result.comments.length, 1, `${label}: the finding still posts`);
+    const body = (result.comments[0] as Record<string, unknown>).body as string;
+    assert.equal(body.includes("```suggestion"), false, `${label}: no live prescription region`);
+    assert.equal(body.split("\n").some((line) => line.trim() === "```suggestion"), false, `${label}: no opener line survives`);
+    assert.ok(body.includes("INJECTED"), `${label}: the author's prose survives`);
+    assert.equal(recoverPublishedSuggestion(body), null, `${label}: nothing a later run could recover`);
+  }
 });
