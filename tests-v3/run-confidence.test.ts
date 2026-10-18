@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runReview } from "../src/run/review.js";
@@ -464,10 +464,15 @@ test("#1073: a keyless non-loopback scorer endpoint never dials and never leaks 
     // this run: not in the confidence artifacts, not in the outputs, not in
     // any persisted diagnostic.
     for (const path of allFiles(run.runDir)) {
-      if (statSync(path).isFile()) {
-        const bytes = readFileSync(path, "utf8");
-        assert.ok(!bytes.includes("primary-secret-k"), `primary key leaked into ${path}`);
+      let bytes: string;
+      try {
+        bytes = readFileSync(path, "utf8");
+      } catch {
+        // The entry vanished between the directory listing and this read;
+        // nothing leaked, so nothing to assert.
+        continue;
       }
+      assert.ok(!bytes.includes("primary-secret-k"), `primary key leaked into ${path}`);
     }
   } finally {
     await server.close();
