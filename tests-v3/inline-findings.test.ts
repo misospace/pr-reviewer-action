@@ -605,14 +605,15 @@ test("#1107: every spelling of the opener is reserved — indent, longer fence, 
  * body must end fence-closed — no model-authored fence may still be open where
  * the action's own region (or anything else) is appended. */
 function assertRenderedPrescription(body: string, replacement: string, message?: string): void {
-  const lines = body.split("\n");
+  const lines = body.split(/\r\n|\n|\r/);
   let open: { ch: string; len: number } | null = null;
   let inPrescription: string[] | null = null;
   const prescriptions: string[] = [];
   for (const line of lines) {
-    const match = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    const match = /^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$/.exec(line);
+    const realFence = match !== null && !(match[1]![0] === "`" && match[2]!.includes("`"));
     if (open !== null) {
-      if (match !== null && match[1]![0] === open.ch && match[1]!.length >= open.len && line.trim() === match[1]) {
+      if (realFence && match![1]![0] === open.ch && match![1]!.length >= open.len && line.trim() === match![1]) {
         if (inPrescription !== null) prescriptions.push(inPrescription.join("\n"));
         inPrescription = null;
         open = null;
@@ -621,8 +622,8 @@ function assertRenderedPrescription(body: string, replacement: string, message?:
       }
       continue;
     }
-    if (match !== null) {
-      open = { ch: match[1]![0]!, len: match[1]!.length };
+    if (realFence) {
+      open = { ch: match![1]![0]!, len: match![1]!.length };
       inPrescription = line === "```suggestion" ? [] : null;
     }
   }
@@ -642,6 +643,7 @@ test("#1107 review round: the dissolved hostile block cannot capture the validat
     ["unclosed hostile opener", "head\n```suggestion"],
     ["fences nested inside the hostile block", "````suggestion\n```\n~~~\nINJECTED\n````"],
     ["tilde block after the opener", "```suggestion\n~~~\nINJECTED\n```"],
+    ["lone-CR line endings (GitHub renders CR as a break)", "```suggestion\rINJECTED\r```"],
   ];
   for (const [label, message] of arms) {
     const result = buildComments(

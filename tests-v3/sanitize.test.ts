@@ -58,6 +58,11 @@ test("#1107: the prescription opener is reserved on model markdown — the fence
   assert.equal(stripReservedMarkers("~~~suggestion"), "suggestion", "a tilde fence is reserved");
   assert.equal(stripReservedMarkers("~~~SUGGESTION  "), "suggestion", "case-insensitive, trailing space trimmed");
   assert.equal(stripReservedMarkers("```suggestion\r\nREPL"), "suggestion\nREPL", "CRLF-terminated opener is reserved");
+  // A lone CR is a line ending to a Markdown renderer (GitHub normalizes it),
+  // so an opener it hides must be reserved too — not passed through as one
+  // "line" this pass cannot see.
+  assert.equal(stripReservedMarkers("```suggestion\rEVIL\r```"), "suggestion\nEVIL\n\\`\\`\\`");
+  assert.equal(stripReservedMarkers("```suggestion\r```"), "suggestion\n\\`\\`\\`", "a CR-only block still leaves no live opener");
   // Dissolution is bounded by the block's real closer: a fence the model wrote
   // OUTSIDE the reserved block is untouched, and a fence-shaped line inside the
   // dissolved region cannot go live either (a tilde line would otherwise become

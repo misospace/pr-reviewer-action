@@ -52,9 +52,12 @@ export const RESERVED_MARKER_PATTERNS: readonly RegExp[] = [
  * Reserved the same way the carry-marker grammar is: on every model-authored
  * surface, on the text that is finally rendered, before the action appends
  * anything of its own. Matched at any indent, with either fence character and
- * any fence length, case-insensitively and `\r`-tolerant, so no spelling of the
- * opener survives as a fence. The fence characters are dropped and the word
- * kept, so the author still reads `suggestion`.
+ * any fence length, case-insensitively, across CR / LF / CRLF line endings —
+ * GitHub normalizes a lone CR into a line break, so a spelling that only
+ * renders as an opener after that normalization must be caught too. The fence
+ * characters are dropped and the word kept, so the author still reads
+ * `suggestion`. (The boundary is line-initial, unprefixed openers; a marker
+ * prefix like a blockquote `>` around one is tracked as a follow-up.)
  */
 const SUGGESTION_OPENER_RE = /^([ \t]*)(`{3,}|~{3,})[ \t]*suggestion[ \t]*$/i;
 
@@ -127,18 +130,23 @@ export function reserveSuggestionOpeners(text: string): string {
   if (!text.toLowerCase().includes("suggestion")) return text;
   const out: string[] = [];
   let open: FenceState | null = null;
-  for (const line of text.split("\n")) {
-    const core = line.endsWith("\r") ? line.slice(0, -1) : line;
-    const reserved = SUGGESTION_OPENER_RE.test(core);
-    const opener = reserved ? null : fenceOpener(core);
+  // A CommonMark line ends at CR, LF, or CRLF — GitHub normalizes a lone CR
+  // into a line break, so splitting on LF alone would hide a live opener
+  // inside what this pass treats as one long line. Only token-bearing text
+  // reaches this pass (the early return above keeps token-free text
+  // byte-identical), so rejoining with LF loses nothing the boundary cares
+  // about and makes the output uniform for the passes that follow.
+  for (const line of text.split(/\r\n|\n|\r/)) {
+    const reserved = SUGGESTION_OPENER_RE.test(line);
+    const opener = reserved ? null : fenceOpener(line);
     if (open === null) {
       if (reserved) {
-        // The rewrite is loose (any indent, `\r`-tolerant) so no spelling of
-        // the opener survives; the dissolution it starts is strict, because
-        // only a real fence (CommonMark indent, no open block) leaves a closer
-        // behind that could capture what the action appends next.
-        const real = fenceOpener(core);
-        out.push(`${core.match(SUGGESTION_OPENER_RE)![1]!}suggestion`);
+        // The rewrite is loose (any indent) so no spelling of the opener
+        // survives; the dissolution it starts is strict, because only a real
+        // fence (CommonMark indent, no open block) leaves a closer behind
+        // that could capture what the action appends next.
+        const real = fenceOpener(line);
+        out.push(`${line.match(SUGGESTION_OPENER_RE)![1]!}suggestion`);
         if (real !== null) open = { ch: real.ch, minLength: real.minLength, dissolving: true };
         continue;
       }
@@ -150,19 +158,19 @@ export function reserveSuggestionOpeners(text: string): string {
       // A reserved shape inside an open block is content there — the same
       // fail-closed rewrite the top-level opener gets — and never changes
       // which line closes the block we are already inside.
-      out.push(`${core.match(SUGGESTION_OPENER_RE)![1]!}suggestion`);
+      out.push(`${line.match(SUGGESTION_OPENER_RE)![1]!}suggestion`);
       continue;
     }
     if (open.dissolving) {
-      if (closesFence(core, open.ch, open.minLength)) {
+      if (closesFence(line, open.ch, open.minLength)) {
         out.push(escapeFence(line));
         open = null;
         continue;
       }
-      out.push(FENCE_SHAPED_RE.test(core) ? escapeFence(line) : line);
+      out.push(FENCE_SHAPED_RE.test(line) ? escapeFence(line) : line);
       continue;
     }
-    if (closesFence(core, open.ch, open.minLength)) open = null;
+    if (closesFence(line, open.ch, open.minLength)) open = null;
     out.push(line);
   }
   // A reserved block still open at end of text left no closer behind: its
