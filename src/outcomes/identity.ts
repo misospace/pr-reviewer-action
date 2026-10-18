@@ -41,17 +41,21 @@ export interface FindingIdentityInput {
 
 /** The stable identity digest for one finding. Fields are normalized the
  * same way every time (trim, lowercase severity/category, redact → collapse
- * → bound the message) and NUL-joined, so no field value can arrange a
- * collision with another tuple. Digests are low-cardinality by construction
+ * → bound the message) and serialized as a JSON array, so no field value can
+ * arrange a collision with another tuple: the encoding is injective even for
+ * fields that themselves contain NUL — a bare NUL join is not, because a
+ * model-authored path, severity, category, or message may carry `\u0000`
+ * (`\s` does not match it), which would let one tuple's field boundary be
+ * forged inside another field. Digests are low-cardinality by construction
  * and carry no secret material: the message is redacted before hashing. */
 export function findingIdentity(input: FindingIdentityInput): string {
   const message = codepointSlice(collapseWhitespace(redactText(input.message)), MAX_IDENTITY_MESSAGE_CODEPOINTS);
-  const key = [
+  const key = JSON.stringify([
     input.path.trim(),
     input.severity.trim().toLowerCase(),
     (input.category ?? "").trim().toLowerCase(),
     message,
-  ].join("\u0000");
+  ]);
   return createHash("sha256").update(key, "utf8").digest("hex");
 }
 

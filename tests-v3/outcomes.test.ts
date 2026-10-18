@@ -80,6 +80,40 @@ test("#1027 identity: malformed records prove nothing", () => {
   assert.match(findingIdentityFromRecord({ file: "a.ts", message: "x" })!, /^[0-9a-f]{64}$/);
 });
 
+test("#1027 identity: edge-case paths stay digest inputs and never collide", () => {
+  // Unanchorable paths fail closed before any hashing: empty, absolute, and
+  // any `..` segment (leading, interior, or trailing). These never reach a
+  // filesystem here — paths are only ever fed to the digest — but the same
+  // fail-closed bar the publish link renderer applies must hold here too.
+  for (const file of ["", "/", "/abs/path.ts", "../traversal.ts", "src/../secrets.env", "..", "a/.."]) {
+    assert.equal(findingIdentityFromRecord(findingRecord({ file })), null, `file: ${JSON.stringify(file)}`);
+  }
+  // Symlink-shaped and NUL-bearing paths are ordinary digest inputs: they
+  // hash deterministically and are never touched, resolved, or rejected as
+  // traversal when no `..` segment is present.
+  const symlinked = findingIdentity({ path: "link/real.ts", severity: "major", category: "bug", message: "m" });
+  assert.match(symlinked, /^[0-9a-f]{64}$/);
+  assert.equal(symlinked, findingIdentity({ path: "link/real.ts", severity: "major", category: "bug", message: "m" }));
+  // A symlink path and its resolved-looking target are DIFFERENT findings —
+  // the digest never canonicalizes a path it cannot see through.
+  assert.notEqual(symlinked, findingIdentity({ path: "real/real.ts", severity: "major", category: "bug", message: "m" }));
+  const nulled = findingIdentity({ path: "a\u0000.ts", severity: "info", category: "", message: "m" });
+  assert.match(nulled, /^[0-9a-f]{64}$/);
+  assert.equal(nulled, findingIdentity({ path: "a\u0000.ts", severity: "info", category: "", message: "m" }));
+  // The field encoding is injective even when a field carries the historical
+  // NUL separator: these two tuples shared a digest under a bare NUL join
+  // ("a\0x\0y\0\0m"), which would have merged two distinct findings into one
+  // identity — one finding's dismissal could then be read as the other's.
+  assert.notEqual(
+    findingIdentity({ path: "a\u0000x", severity: "y", category: "", message: "m" }),
+    findingIdentity({ path: "a", severity: "x\u0000y", category: "", message: "m" }),
+  );
+  assert.notEqual(
+    findingIdentity({ path: "a.ts", severity: "major", category: "x\u0000y", message: "z" }),
+    findingIdentity({ path: "a.ts", severity: "major", category: "x", message: "y\u0000z" }),
+  );
+});
+
 test("#1027 marker: strict grammar round-trip and near-miss retention", () => {
   const digest = findingIdentity({ path: "a.ts", severity: "info", message: "m" });
   const marker = renderFindingIdentityMarker(digest)!;
@@ -275,6 +309,39 @@ test("#1027 reconcile: ledger merge, lost history, dedupe, cap", () => {
   });
   assert.equal(capped.length, MAX_LEDGER_EVENTS);
   assert.equal(capped.at(-1)!.count, MAX_LEDGER_EVENTS + 9);
+});
+
+test("#1027 ledger dedupe: separator-bearing fields cannot collapse two distinct events", () => {
+  const fid = observation().findingId;
+  const T = "2026-01-01T00:00:00.000Z";
+  // Both events pass the fail-closed normalizer: the odd `at` keeps the ISO
+  // prefix and Date.parse accepts its trailing NULs, and `reason` is bounded
+  // free text that never strips NUL.
+  const forgedAt = normalizeOutcomeEvent({
+    finding_id: fid, kind: "dismissed", at: `${T}\u0000\u0000forged-reason`,
+    reason: "x", provenance: "current-review",
+  });
+  const plain = normalizeOutcomeEvent({
+    finding_id: fid, kind: "dismissed", at: T,
+    reason: "forged-reason\u0000\u0000x", provenance: "current-review",
+  });
+  assert.notEqual(forgedAt, null);
+  assert.notEqual(plain, null);
+  assert.notEqual(forgedAt!.at, plain!.at);
+  assert.notEqual(forgedAt!.reason, plain!.reason);
+  // Under the old bare-NUL join these two DISTINCT events produced ONE key
+  // ("…T\0\0forged-reason\0\0x\0…"), so the merge silently dropped the
+  // second dismissal; the JSON-encoded key keeps them distinct.
+  const merged = deriveOutcomeEvents({
+    postedIdentities: [],
+    prior: [],
+    priorHeadSha: null,
+    currentHeadSha: HEAD_B,
+    ...META,
+    priorLedger: [forgedAt!, plain!],
+  });
+  assert.equal(merged.length, 2);
+  assert.deepEqual(merged.map((event) => event.reason), ["x", "forged-reason\u0000\u0000x"]);
 });
 
 test("#1027 ACCEPTANCE FIXTURE: resolution and dislike never inflate adjudicated precision", () => {

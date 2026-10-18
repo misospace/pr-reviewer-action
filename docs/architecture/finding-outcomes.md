@@ -10,9 +10,10 @@ later; `parseOutcomeLedger` is the fail-closed seam for that.
 ## Finding identity
 
 `findingIdentity({ path, severity, category, message })` is a SHA-256 digest
-over the NUL-joined tuple of the trimmed path, lowercased severity and
+over the JSON-serialized tuple of the trimmed path, lowercased severity and
 category, and the **redacted**, whitespace-collapsed, 500-codepoint-bounded
-message. The anchor line and range are deliberately **not** part of the
+message (JSON, not a bare NUL join, so the encoding stays injective when a
+model-authored field itself contains a NUL byte). The anchor line and range are deliberately **not** part of the
 identity, so line drift and force-push keep the same identity; a rewritten
 message is honestly a NEW identity — the contract records only what it can
 prove deterministically and never fuzzy-matches prose. Accepted consequence:
