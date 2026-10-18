@@ -147,8 +147,9 @@ Fix (both in the guard, not in what it asserts):
    `.test-build` gate, so malformed corpora fail without paying for — or
    hiding behind — a tsc compile and node-test run.
 
-No coverage was removed; the gate's exit codes, messages, and report shape are
-unchanged.
+No coverage was removed; the gate's exit codes, messages, and report schema are
+unchanged — the only content delta is that a coverage-failure payload now
+carries an empty `scenarios` list, precisely because evaluation was skipped.
 
 Local before/after (same machine, same interpreter, the exact CI pytest
 command): **82s → 31s**, 1006 → 1008 tests passed (two new memo/fail-fast

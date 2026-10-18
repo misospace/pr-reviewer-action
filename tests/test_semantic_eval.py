@@ -578,10 +578,14 @@ def test_offline_runner_rejects_bad_corpus_before_building_the_gate(monkeypatch:
     without paying for (or hiding behind) the tsc build and node-test gate."""
     import scripts.run_semantic_eval_ci as runner
 
-    def explode() -> list[dict[str, object]]:
+    def explode_dataflow() -> list[dict[str, object]]:
         raise AssertionError("the .test-build gate must not run for a corpus that fails coverage")
 
-    monkeypatch.setattr(runner, "run_dataflow_checks", explode)
+    def explode_evaluate(corpus: object) -> dict[str, object]:
+        raise AssertionError("the corpus evaluation must not run for a corpus that fails coverage")
+
+    monkeypatch.setattr(runner, "run_dataflow_checks", explode_dataflow)
+    monkeypatch.setattr(runner, "evaluate_semantic_corpus", explode_evaluate)
     source = json.loads(CORPUS.read_text(encoding="utf-8"))
     report = tmp_path / "report.json"
 
@@ -590,7 +594,11 @@ def test_offline_runner_rejects_bad_corpus_before_building_the_gate(monkeypatch:
     bad.write_text(json.dumps({**source, "semantic_corpus": [*source["semantic_corpus"], unexpected]}), encoding="utf-8")
     monkeypatch.setattr(sys, "argv", [str(RUNNER), "--corpus", str(bad), "--output", str(report)])
     assert runner.main() == 2
-    assert "unexpected scenario" in json.loads(report.read_text(encoding="utf-8"))["error"]
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert "unexpected scenario" in payload["error"]
+    # The failure payload keeps its key contract; the evaluated scenario list
+    # is empty precisely because evaluation was skipped.
+    assert payload["passed"] is False and payload["scenarios"] == []
 
     no_runs = json.loads(json.dumps(source))
     no_runs["semantic_corpus"][0]["offline_runs"] = []
