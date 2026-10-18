@@ -8,6 +8,7 @@ import { runPromptAssemblyFixture } from "./prompt/fixture.js";
 import { runStripSourceTextFixture } from "./context/linked-sources-fixture.js";
 import { CI_GATE_SUBMODE, SPECIALIST_GATE_SUBMODE, ciGateMain, exitAfterFlush, specialistsGateMain } from "./gates/workloads.js";
 import { runReview, RunReviewError } from "./run/index.js";
+import { engineMain } from "./engine/cli.js";
 import { precheckMain, publishMain } from "./run/entrypoints.js";
 import { actionMain } from "./run/action.js";
 
@@ -76,6 +77,14 @@ if (require.main === module) {
       .catch((error: unknown) => {
         process.stderr.write(`v3 run error: ${error instanceof Error ? error.message : "unknown error"}\n`);
         exitAfterFlush(error instanceof RunReviewError ? error.exitCode : 1);
+      });
+  } else if (firstArg === "engine") {
+    assertSupportedNode(process.versions.node);
+    engineMain(argv.slice(1))
+      .then((code) => exitAfterFlush(code))
+      .catch((error: unknown) => {
+        process.stderr.write(`v3 engine error: ${error instanceof Error ? error.message : "unknown error"}\n`);
+        exitAfterFlush(1);
       });
   } else if (firstArg === CI_GATE_SUBMODE || firstArg === SPECIALIST_GATE_SUBMODE) {
     // Gate workloads (#706 PR 6), launched by runConcurrentGates.

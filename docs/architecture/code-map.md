@@ -65,22 +65,18 @@ Design rationale and the composite/Node runtime decision:
 - **`src/platform/publish-api.ts`** — The write-side platform seam (#680): sticky-comment upsert with the shared latest-marker-containing-comment semantics (never `--edit-last`'s author-based selection), GitHub-shaped native review creation (Forgejo re-validates inline positions against the fresh diff and maps events to ReviewStateType), review dismissal, and the GraphQL-only capabilities (minimized state, minimize, superseded-thread query/resolve) that degrade explicitly on Forgejo.
 - **`src/tools/`** — The native tool-loop runtime (#678): `loop.ts` drives the scripted-transcript agentic loop (round/call/wall-clock budgets, dedup, malformed-argument repair, compaction, the #701 exhaustion-aware turn notes, `tool-call-budget-exhausted` kept as a distinct stop reason); `executors.ts` is the read-only executor catalogue (allowlisted `gh_api`/`web_fetch`/web search, path-containment and sensitive-file guards, tracked-file filtering); `mcp.ts` is the read-only MCP client; `harness.ts` ports `scripts/run_tool_harness.py` (planning context, in-conversation verdict turn with #637 validation, #702 `tool_loop_telemetry`); `budget.ts` resolves the tier-aware request budget (#701), which #810 scales from the PR's changed files/lines and specialist leads (`ceil(files/4) + ceil(lines/400) + 2*leads`, floored at the tier default so small PRs keep the pre-#810 budget, capped at 50, explicit overrides still winning — the v2↔v3 shared range is pinned by `tests-v3/budget.test.ts`, the scaling is pinned v3-only); `coverage.ts` (#810) folds the loop's own call log against the changed-file manifest and specialist lead artifacts into the `partial_coverage` record (unread changed files, unresolved specialist leads) emitted on any budget stop — the model is never asked about its own coverage. #921 adds a second, verified path to coverage: a changed file whose complete per-file chunk from the raw `pr.diff` appears byte-exact inside the assembler-certified diff-section payload is covered without a tool read (a diff the corpus budget truncated or omitted breaks the exact match and keeps the strict tool-read rule; new/renamed/mode-only files ride the same rule; deleted files ride the credit rule via their removal chunk while staying excluded from `unread_files`), and the harness result's `corpus_diff_covered_files` names the corpus-credited files for audit — at the result level, not inside the gap record, so the audit survives a budget stop the credit fully resolves (no gap record is emitted then). #930 hardens the trust boundary: the corpus assembler certifies the retained diff section by construction (`corpusDiffPayload` — exact section bytes re-verified at their recorded body offset after truncation, persisted per ARTIFACT SLOT as `pr.diff.corpus-section.txt` / `pr.diff.smart.corpus-section.txt` — the direct-smart initial review builds tier=smart into the primary slot while its harness runs at TOOL_HARNESS_TIER=primary, so the sidecar keys to the slot the corpus alias carries, never to the model tier), and coverage consumes only that sidecar, never the rendered corpus document, whose earlier sections are repository-controlled and can forge any heading.
 
-### v3 run orchestrator (`src/run/`) (#809)
+### v3 review engine and Action adapter (#726, #809)
 
-The end-to-end review entry: `run/review.ts` chains every ported stage in the
-v2 `run_review.sh` order with typed in-memory state — config → context →
-advisory phases (enrichment, image digests, evidence, in-process now) →
-classification/routing → corpus → concurrent gates → native tool harness →
-review call/fallback/escalation → enforcement → outputs. `run/env.ts`
-projects the kebab-case contract config onto the SCREAMING_SNAKE stage ABI
-(the `config-default-resolution` boundary) plus the ambient runner context;
-`run/workspace.ts` is the write-through artifact bus (in-memory state is
-authoritative, disk is the diagnostics mirror); `run/platform.ts` builds the
-real `PlatformReadAdapter`. The specialist gate runs in-process
-(`gates.ts` workload branches + `forkGate` for the asymmetric CI fork/join
-schedule); `src/specialists/prompts.ts` reads build-time-embedded fragments.
-`node dist/index.js run` never publishes — the publish boundary stays with
-the action entry's publish stage (`src/publish/`).
+`src/engine/review.ts` owns the shared review pipeline, independent of Action
+environment bindings. `src/engine/types.ts` defines the request and injected
+capability contract; `src/engine/cli.ts` provides the local `engine --request`
+entrypoint. The `src/run/review.ts` adapter translates Action/`run` CLI
+environment into that contract. `src/run/env.ts` projects resolved config and
+context onto the SCREAMING_SNAKE stage ABI; `run/workspace.ts` is the
+write-through artifact bus; `run/platform.ts` builds the read adapter. The
+specialist gate runs in-process (`gates.ts` workload branches + `forkGate` for
+the asymmetric CI fork/join schedule). The engine and `node dist/index.js run`
+never publish; final forge publication stays outside the engine.
 
 ### Fork review workflow (privilege-separated)
 
@@ -98,11 +94,12 @@ the action entry's publish stage (`src/publish/`).
 ## Architecture
 
 The shipped runtime is one Node process (`node dist/index.js`, entry
-`src/run/action.ts`). The review flow (`src/run/review.ts`):
+`src/run/action.ts`). The shared review flow lives in `src/engine/review.ts`;
+`src/run/review.ts` adapts the Action/`run` CLI environment:
 
 ```
 node dist/index.js precheck     → should_review + diff_fingerprint (src/precheck/)
-node dist/index.js run          → the review orchestrator (src/run/review.ts):
+node dist/index.js run          → environment adapter → shared engine (`src/engine/review.ts`):
   ├─ config                     → contract config → stage env (src/run/env.ts, src/config/)
   ├─ platform adapter           → GitHub/Forgejo read seam (src/platform/, src/run/platform.ts)
   ├─ context                    → linked issues + Linear, requirement ledger,
