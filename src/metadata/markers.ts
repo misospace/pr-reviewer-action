@@ -128,8 +128,11 @@ function escapeFence(line: string): string {
  * #1136: an ordinary block still open at end of text — the model's unclosed
  * fence — is dissolved the same way, so the output ALWAYS ends fence-closed
  * and nothing appended after this pass (the validated prescription region)
- * can be swallowed as its content. Text without the token that already ends
- * fence-closed is returned byte-identically. Idempotent. */
+ * can be swallowed as its content. That dissolution is fence-scoped: it only
+ * un-codes the block's own lines (an HTML block, heading, or table inside it
+ * now renders live, which the message field always was) and deletes nothing.
+ * Text without the token that already ends fence-closed is returned
+ * byte-identically. Idempotent. */
 export function reserveSuggestionOpeners(text: string): string {
   const out: string[] = [];
   let open: FenceState | null = null;
@@ -139,10 +142,9 @@ export function reserveSuggestionOpeners(text: string): string {
   let openIndex = -1;
   // A CommonMark line ends at CR, LF, or CRLF — GitHub normalizes a lone CR
   // into a line break, so splitting on LF alone would hide a live opener
-  // inside what this pass treats as one long line. Only token-bearing text
-  // reaches this pass (the early return above keeps token-free text
-  // byte-identical), so rejoining with LF loses nothing the boundary cares
-  // about and makes the output uniform for the passes that follow.
+  // inside what this pass treats as one long line. Text that needs no
+  // rewrite returns byte-identically from the fast path at the bottom, so
+  // rejoining with LF only ever applies to text this pass actually edited.
   for (const line of text.split(/\r\n|\n|\r/)) {
     const reserved = SUGGESTION_OPENER_RE.test(line);
     const opener = reserved ? null : fenceOpener(line);

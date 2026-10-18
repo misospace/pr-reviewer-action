@@ -715,6 +715,15 @@ test("#1136: an unclosed ordinary fence in the message cannot swallow the valida
     diff, 20, { forgejoPositions: false },
   );
   const quotedBody = (blockquoted.comments[0] as Record<string, unknown>).body as string;
+  // assertRenderedPrescription is container-blind (it scans top-level fence
+  // lines only), so on its own it cannot certify the container decision — it
+  // passes under any walk that leaves the region reachable. The invariant the
+  // decision actually rests on is asserted directly: the appended region
+  // begins with a blank line at column 0, which ends the blockquote before
+  // the fence state the renderer carries into it.
+  const openerIndex = quotedBody.split("\n").indexOf("```suggestion");
+  assert.ok(openerIndex > 0, "container case: prescription region present");
+  assert.equal(quotedBody.split("\n")[openerIndex - 1], "", "container case: appended region starts after a column-0 blank line that terminates the container");
   assertRenderedPrescription(quotedBody, "REPL", "container-prefixed unclosed block");
   assert.equal(recoverPublishedSuggestion(quotedBody), "REPL", "container case: recovery still reads what rendered");
 });

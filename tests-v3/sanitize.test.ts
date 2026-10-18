@@ -127,6 +127,22 @@ test("#1136: an ordinary block still open at end of text is dissolved, walk outp
   const closed = "Review.\r\n\r\n```ts\r\nconst x = 1;\r\n```\r\ndone";
   assert.equal(stripReservedMarkers(closed), closed, "benign closed block stays byte-identical, CRLF intact");
   assert.equal(stripReservedMarkers(""), "");
+  // Dissolution must not over-reach: a benign block that closed earlier in
+  // the same text keeps its bytes; only the trailing unclosed block is
+  // rewritten.
+  assert.equal(
+    stripReservedMarkers("```ts\nkeep\n```\nthen\n~~~\nmore"),
+    "```ts\nkeep\n```\nthen\n\\~\\~\\~\nmore",
+    "an earlier closed block is untouched, only the trailing unclosed one dissolves",
+  );
+  // The dissolve path rejoins with LF (a rewrite happened), so a CR/CRLF
+  // message that ends fence-open normalizes — pinned so the change stays a
+  // decision, not an accident.
+  assert.equal(
+    stripReservedMarkers("note\r\n```ts\r\nconst x = 1;"),
+    "note\n\\`\\`\\`ts\nconst x = 1;",
+    "dissolve path normalizes line endings, closed path keeps CRLF bytes",
+  );
   // Idempotent: dissolving twice changes nothing.
   const once = stripReservedMarkers("note\n```ts\nconst x = 1;");
   assert.equal(stripReservedMarkers(once), once);
