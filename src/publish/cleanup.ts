@@ -219,6 +219,90 @@ export async function cleanupManagedReviews(
 }
 
 /**
+ * #1114: presentation-only minimization of superseded, bot-owned advisory
+ * (`COMMENTED`) review bodies, deliberately separated from the destructive/
+ * authoritative effects of `cleanupManagedReviews` (inline-comment deletion,
+ * thread resolution, and dismissal of blocking `CHANGES_REQUESTED` or
+ * approving `APPROVED` reviews).
+ *
+ * An incomplete replacement (partial coverage, a requirement-trace gap, or a
+ * fallback submission) correctly forbids destructive retirement — but the old
+ * advisory bodies it supersedes are still proven stale: a newer managed
+ * review has been published at the verified head. Hiding them (GitHub
+ * `minimizeComment`, classifier OUTDATED) changes presentation only; it
+ * cannot destroy inline evidence or invalidate a merge-gate verdict, so it
+ * runs even when destructive cleanup does not.
+ *
+ * Fail-closed provenance, the same policy retirement follows:
+ * - a `null` trusted owner minimizes nothing (bounded identity-reason WARN);
+ * - candidates are managed-marker reviews OWNED by that proven identity
+ *   whose state is exactly `COMMENTED` — verdict states are authoritative
+ *   and any unknown/absent state means provenance cannot be established,
+ *   so both are excluded; foreign/human reviews never match the owner;
+ * - excluded ids (the replacement this run just published) and already
+ *   minimized reviews are skipped, keeping the operation idempotent;
+ * - a failed minimized-state read leaves everything untouched;
+ * - `mayMinimize` revalidates supersession (current head, the replacement
+ *   checkpoint, no newer competing publication) at the mutation boundary
+ *   before every mutation, so a competing run can never hide the winner.
+ * Forgejo has no GraphQL minimization: explicit no-op with a note and zero
+ * mutation calls. Individual failures log bounded diagnostics and never
+ * throw; review content is never modified.
+ */
+export async function minimizeSupersededAdvisoryReviews(
+  api: PublishPlatformApi,
+  reviews: readonly PublishReviewRef[],
+  marker: string,
+  log: CleanupLog,
+  trustedOwner: Awaited<ReturnType<typeof resolvePublishTrustedOwner>>,
+  excludeReviewIds: readonly string[] = [],
+  mayMinimize: () => Promise<boolean> = async () => true,
+): Promise<void> {
+  const { owner, reason } = trustedOwner;
+  if (owner === null) {
+    log(`  WARN: Could not verify authenticated owner (identity reason: ${reason}); no review bodies minimized`);
+    return;
+  }
+  if (api.platform !== "github") {
+    log(`  NOTE: Skipping advisory review minimization (platform=${api.platform}; no GraphQL API)`);
+    return;
+  }
+  let minimizedIds: string[];
+  try {
+    minimizedIds = await api.minimizedReviewIds();
+  } catch {
+    log("  WARN: Could not read minimized review state; no review bodies minimized");
+    return;
+  }
+  const excluded = new Set(excludeReviewIds.map(String));
+  const minimized = new Set(minimizedIds.map(String));
+  const eligible = reviews.filter((review) => {
+    const id = String(review.id ?? "");
+    if (id === "" || excluded.has(id) || minimized.has(id)) return false;
+    if ((review.state ?? "") !== "COMMENTED") return false;
+    if (!isManagedBody(typeof review.body === "string" ? review.body : "", marker)) return false;
+    if (!ownerMatchesIdentity(review.user, owner)) return false;
+    // Without a GraphQL node id there is nothing to minimize; provenance
+    // unestablished fails closed.
+    return typeof review.node_id === "string" && review.node_id !== "";
+  });
+  if (eligible.length === 0) {
+    log("  NOTE: No superseded owned advisory reviews to minimize");
+    return;
+  }
+  if (eligible.length > 100) log("  WARN: More than 100 eligible advisory reviews; minimizing only the first 100");
+  let minimizedNow = 0, failed = 0;
+  for (const review of eligible.slice(0, 100)) {
+    try {
+      if (!(await mayMinimize())) { log("  WARN: Head or latest review changed; stopping advisory minimization"); break; }
+      if (await api.minimizeReview(String(review.node_id))) minimizedNow++;
+      else failed++;
+    } catch { failed++; break; }
+  }
+  log(`  Advisory reviews: eligible=${Math.min(eligible.length, 100)} minimized=${minimizedNow} failed=${failed}`);
+}
+
+/**
  * Resolve the inline review threads that superseded managed reviews opened
  * (#769): dismissal strikes the verdict and minimization hides the body,
  * but a thread stays open on the Files tab and re-anchors to the new head.
