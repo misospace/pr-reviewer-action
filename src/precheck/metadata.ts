@@ -79,6 +79,14 @@ export interface MetadataOptions {
    * conversation it actually reached. Omitted when no loop ran. */
   context_budget?: number | null;
   context_peak?: number | null;
+  /** #847: the tool loop's own stop reason for the route the marker was
+   * built from (see the stop-reason table in docs/tool-loop.md), recorded on
+   * EVERY harness run — not only budget stops with an observable coverage
+   * gap — so the size-scaled budget's exhaustion rate is measurable from
+   * published reviews (`coverage`/`coverage_stop_reason` stay exactly as
+   * before: they mean a confirmed coverage gap). Omitted when no tool
+   * harness ran or the harness aborted before reporting a stop reason. */
+  tool_stop_reason?: string | null;
   /** #915: build-time action release stamp, appended last under the additive
    * key discipline of #810/#847/#895/#922; unstamped builds preserve pre-#915 bytes. */
   action_version?: string | null;
@@ -154,6 +162,12 @@ export function buildMetadataMarker(options: MetadataOptions = {}): string {
   // existing fields. Persist only true; false and absent preserve old bytes.
   if (options.degradedGateBypass === true) {
     data.degraded_gate_bypass = true;
+  }
+  // #847 (measurement follow-up) additive key: appended last, same discipline
+  // as above — a run whose harness reported no stop reason serializes
+  // byte-identically to the pre-change marker.
+  if (options.tool_stop_reason !== null && options.tool_stop_reason !== undefined && options.tool_stop_reason !== "") {
+    data.tool_stop_reason = options.tool_stop_reason;
   }
   return `<!-- ai-pr-reviewer:${jsonCompact(data)} -->`;
 }

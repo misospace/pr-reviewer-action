@@ -9,7 +9,7 @@ import type { FetchLike } from "../platform/http.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
 import { ciGateBranch } from "../gates/workloads.js";
 
-export { RunReviewError, GATE_CHILD_ENV, ciGateOutputs, computeDeterministicBlock, resolveDegradedGateBypass, resolvePartialCoverage, partialCoverageOf, traceChangedText, traceChangedFilePaths, configuredKnownSecrets } from "../engine/review.js";
+export { RunReviewError, GATE_CHILD_ENV, ciGateOutputs, computeDeterministicBlock, resolveDegradedGateBypass, resolvePartialCoverage, partialCoverageOf, traceChangedText, traceChangedFilePaths, configuredKnownSecrets, toolBudgetTelemetryOf } from "../engine/review.js";
 export type { RunReviewResult } from "../engine/review.js";
 
 /** The Action/`run`-CLI env adapter (#726): its only job is env to

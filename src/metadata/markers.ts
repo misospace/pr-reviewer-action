@@ -254,6 +254,10 @@ export interface RunMarkerContext {
   /** #922: the loop's conversation budget and peak (approx tokens). */
   contextBudget?: number;
   contextPeak?: number;
+  /** #847: the tool loop's stop reason for the route the marker was built
+   * from, recorded on every harness run so budget stops with complete
+   * coverage stay visible (#810 measurement). */
+  toolStopReason?: string;
   /** #915 build-time stamp; ""/unset means unstamped and is omitted. */
   actionVersion?: string;
   /** #978: true when the final verdict is eligible for the gate bypass. */
@@ -304,6 +308,7 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
     max_rounds: context.maxRounds ?? null,
     context_budget: context.contextBudget ?? null,
     context_peak: context.contextPeak ?? null,
+    tool_stop_reason: context.toolStopReason ?? null,
     action_version: av === "" ? null : av,
     degradedGateBypass: context.degradedGateBypass === true ? true : null,
   });

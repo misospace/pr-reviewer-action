@@ -165,6 +165,9 @@ export interface RunReviewResult {
   /** #922: the loop's conversation budget and peak (approx tokens). */
   contextBudget?: number;
   contextPeak?: number;
+  /** #847: measurement follow-up: the tool loop's stop reason for the route
+   * the marker was built from; undefined when no harness reported one. */
+  toolStopReason?: string;
   /** Wall-clock seconds for the whole run. */
   durationSec: number;
 }
@@ -1440,6 +1443,7 @@ secrets: [profiles.primary.apiKey],
     ...(toolBudgetTelemetry.maxRounds !== undefined ? { maxRounds: toolBudgetTelemetry.maxRounds } : {}),
     ...(toolBudgetTelemetry.contextBudget !== undefined ? { contextBudget: toolBudgetTelemetry.contextBudget } : {}),
     ...(toolBudgetTelemetry.contextPeak !== undefined ? { contextPeak: toolBudgetTelemetry.contextPeak } : {}),
+    ...(toolBudgetTelemetry.stopReason !== undefined ? { toolStopReason: toolBudgetTelemetry.stopReason } : {}),
     actionVersion: ACTION_VERSION,
     degradedGateBypass: outputs.degradedGateBypass,
   });
@@ -1466,6 +1470,7 @@ secrets: [profiles.primary.apiKey],
     ...(toolBudgetTelemetry.maxRounds !== undefined ? { toolMaxRounds: toolBudgetTelemetry.maxRounds } : {}),
     ...(toolBudgetTelemetry.contextBudget !== undefined ? { contextBudget: toolBudgetTelemetry.contextBudget } : {}),
     ...(toolBudgetTelemetry.contextPeak !== undefined ? { contextPeak: toolBudgetTelemetry.contextPeak } : {}),
+    ...(toolBudgetTelemetry.stopReason !== undefined ? { toolStopReason: toolBudgetTelemetry.stopReason } : {}),
   };
 }
 
@@ -1550,7 +1555,7 @@ export function partialCoverageOf(harness: Record<string, unknown> | null): Part
  * the marker then omits `tool_budget`/`tool_budget_source`/`tool_calls`
  * exactly as it did before #847.
  */
-function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): {
+export function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): {
   budget?: number;
   source?: string;
   calls?: number;
@@ -1558,12 +1563,31 @@ function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): {
   maxRounds?: number;
   contextBudget?: number;
   contextPeak?: number;
+  stopReason?: string;
 } {
   if (harness === null) return {};
-  const out: { budget?: number; source?: string; calls?: number; rounds?: number; maxRounds?: number; contextBudget?: number; contextPeak?: number } = {};
+  const out: { budget?: number; source?: string; calls?: number; rounds?: number; maxRounds?: number; contextBudget?: number; contextPeak?: number; stopReason?: string } = {};
   if (typeof harness.tool_request_budget === "number") out.budget = harness.tool_request_budget;
   if (typeof harness.tool_budget_source === "string" && harness.tool_budget_source !== "") {
     out.source = harness.tool_budget_source;
+  }
+  // #847 measurement follow-up: the loop's own stop reason (written by
+  // runToolHarness on every path that ran the loop). A pre-loop abort has no
+  // top-level stop_reason; its `harness-abort` lives only in the #702
+  // telemetry object (buildToolLoopTelemetry's `phase: "pre-loop"` shape),
+  // so fall back to it there — the loop-shape nested value is the same
+  // constant, never new information. Recorded regardless of coverage so a
+  // budget stop that left nothing unread is still measurable from published
+  // markers.
+  if (typeof harness.stop_reason === "string" && harness.stop_reason !== "") {
+    out.stopReason = harness.stop_reason;
+  } else if (
+    harness.tool_loop_telemetry !== null
+    && typeof harness.tool_loop_telemetry === "object"
+    && typeof (harness.tool_loop_telemetry as Record<string, unknown>).stop_reason === "string"
+    && (harness.tool_loop_telemetry as Record<string, unknown>).stop_reason !== ""
+  ) {
+    out.stopReason = (harness.tool_loop_telemetry as Record<string, unknown>).stop_reason as string;
   }
   if (typeof harness.executed_request_count === "number") out.calls = harness.executed_request_count;
   // #895: the rounds actually used and the resolved round cap the loop ran
