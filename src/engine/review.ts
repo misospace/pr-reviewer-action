@@ -702,12 +702,12 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     ws.write("linked-sources.md", "");
     return null;
   });
-  const imageDigestPromise = runImageDigestPhase(ws, diffText, env).catch((cause: unknown) => {
+  const imageDigestPromise = runImageDigestPhase(ws, diffText, env, cancellation.scope.signal).catch((cause: unknown) => {
     errorLog(`Image digest analysis failed: ${cause instanceof Error ? cause.message : String(cause)}`);
     ws.write("image-digest-context.md", "Image digest provenance analysis failed for this run.\n");
     return null;
   });
-  const evidencePromise = runEvidencePhase(ws, env, forkFlag, runDir, log).catch((cause: unknown) => {
+  const evidencePromise = runEvidencePhase(ws, env, forkFlag, runDir, log, cancellation.scope.signal).catch((cause: unknown) => {
     errorLog(`Evidence provider execution failed: ${cause instanceof Error ? cause.message : String(cause)}`);
     ws.write("evidence-providers.md", "Evidence providers failed to run in this review.\n");
     ws.write("evidence-providers.json", '{"configured": false, "has_blocker": false, "providers": [], "error": "execution failed"}\n');

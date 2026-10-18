@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { getEventListeners } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -241,10 +241,12 @@ test("a null byte in the CLI request's runDir fails clean without writing outsid
     writeFileSync(file, JSON.stringify(data));
     const code = await engineMain(["--request", file]);
     assert.ok(code === 0 || code === 1, `clean exit code, got ${code}`);
-    // Nothing escaped into the workspace: the untouched real run dir has no
-    // artifacts, and no NUL-named path exists beside it.
+    // The review really ran (platform reads and the model call reached the
+    // mock endpoint) while every disk mirror was refused: the untouched real
+    // run dir holds nothing.
+    assert.ok(server.requests.length > 0, "the pipeline executed against the mocked endpoints");
     assert.ok(!existsSync(join(f.runDir, "review-request.json")), "no artifacts in the real run dir");
-    assert.ok(!existsSync(f.root + "/outside-writes"), "nothing written outside");
+    assert.deepEqual(readdirSync(f.runDir), [], "the real run dir stayed empty");
   } finally { await server.close(); f.cleanup(); }
 });
 

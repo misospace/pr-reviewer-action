@@ -304,19 +304,20 @@ export async function renderLinkedSourcesPhase(env: StageEnv, ws: RunWorkspace, 
 // classification.sh forks: image digests, evidence providers
 // ---------------------------------------------------------------------------
 
-export async function runImageDigestPhase(ws: RunWorkspace, diffText: string, env: StageEnv): Promise<string> {
-  const markdown = await buildImageProvenanceFromNetwork(diffText, env as NodeJS.ProcessEnv);
+export async function runImageDigestPhase(ws: RunWorkspace, diffText: string, env: StageEnv, signal?: AbortSignal): Promise<string> {
+  const markdown = await buildImageProvenanceFromNetwork(diffText, env as NodeJS.ProcessEnv, signal !== undefined ? { signal } : {});
   ws.write("image-digest-context.md", markdown);
   return markdown;
 }
 
-export async function runEvidencePhase(ws: RunWorkspace, env: StageEnv, forkFlag: string, runDir: string, log?: (line: string) => void): Promise<string> {
+export async function runEvidencePhase(ws: RunWorkspace, env: StageEnv, forkFlag: string, runDir: string, log?: (line: string) => void, signal?: AbortSignal): Promise<string> {
   const outcome = await runEvidenceProvidersPhase({
     env: env as NodeJS.ProcessEnv,
     cwd: runDir,
     isForkPr: forkFlag,
     enableForForks: env.EVIDENCE_ENABLE_FOR_FORKS ?? "false",
     ...(log !== undefined ? { log } : {}),
+    ...(signal !== undefined ? { signal } : {}),
   });
   // The phase writes evidence-providers.{md,json} itself (v2 cwd
   // semantics); refresh the bus so the corpus reads this run's values.

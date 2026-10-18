@@ -33,8 +33,11 @@ export async function engineMain(argv: string[], _env: NodeJS.ProcessEnv = proce
   // Ctrl-C / SIGTERM aborts the run through `ReviewRequest.signal` instead
   // of killing the process mid-write.
   const controller = new AbortController();
+  const abortHandlers: Array<[NodeJS.Signals, () => void]> = [];
   for (const signalName of ["SIGINT", "SIGTERM"] as const) {
-    process.on(signalName, () => controller.abort(signalName));
+    const handler = (): void => controller.abort(signalName);
+    process.on(signalName, handler);
+    abortHandlers.push([signalName, handler]);
   }
   const request: ReviewRequest = {
     signal: controller.signal,
@@ -71,5 +74,10 @@ export async function engineMain(argv: string[], _env: NodeJS.ProcessEnv = proce
       return 2;
     }
     throw error;
+  } finally {
+    // A finished local run never keeps the process's signal handlers (and a
+    // stale controller) alive: repeated in-process invocations must not
+    // accumulate listeners or abort each other's controllers.
+    for (const [signalName, handler] of abortHandlers) process.removeListener(signalName, handler);
   }
 }

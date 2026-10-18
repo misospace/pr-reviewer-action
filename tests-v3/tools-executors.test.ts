@@ -589,3 +589,55 @@ test("source-bound tool executors stay forge-agnostic (#1015 / fork privilege se
     assert.ok(!source.includes(token), `executors.ts must not reference fork-specific token: ${token}`);
   }
 });
+
+test("#726: a caller cancellation reaches the tool subprocess and fetch seams", () => fixture(async (root) => {
+  // (a) processOutput carries the context signal into the process options.
+  const controller = new AbortController();
+  let seenSignal: AbortSignal | undefined;
+  const seamCtx = ctx(root, {
+    signal: controller.signal,
+    deps: { env: {}, runProcess: (async (o: any) => { seenSignal = o.signal; return { status: "exited", exitCode: 0, stdout: Buffer.from("ok"), stderr: Buffer.from(""), termination: null }; }) as any },
+  });
+  await runCommand("git_status_short", seamCtx);
+  assert.equal(seenSignal, controller.signal, "the subprocess options carry the caller's cancellation signal");
+
+  // (b) Real seam: a pre-aborted signal refuses the launch (fail-closed) and
+  // degrades to an ordinary tool error, never a hang.
+  const abortedCtx = ctx(root, { signal: AbortSignal.abort(), deps: { env: {} } as any });
+  const res = await runCommand("git_status_short", abortedCtx);
+  assert.equal(typeof res.error, "string");
+  assert.notEqual(res.error, "", "a cancelled tool call surfaces as a tool error");
+
+  // (c) The tool fetch seam receives the signal for web_fetch.
+  let fetchSignal: AbortSignal | undefined;
+  const webCtx = ctx(root, {
+    allowedHosts: ["example.com"],
+    signal: controller.signal,
+    deps: { env: {}, fetch: (async (_url: string, init: any) => { fetchSignal = init.signal; return { status: 200, body: "ok" }; }) as any },
+  });
+  const web = await webFetch("http://example.com/x", webCtx);
+  assert.equal(web.content, "ok");
+  assert.equal(fetchSignal, controller.signal, "the web fetch init carries the caller's signal");
+
+  // (d) defaultFetch composes the caller abort with the per-request timeout.
+  const caller = new AbortController();
+  const originalFetch = globalThis.fetch;
+  let initSignal: AbortSignal | undefined;
+  (globalThis as any).fetch = async (_url: string, init: any) => {
+    initSignal = init.signal;
+    await new Promise<never>((_resolve, reject) => {
+      init.signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })), { once: true });
+    });
+    throw new Error("unreachable");
+  };
+  try {
+    const depsOnly = ctx(root, { allowedHosts: ["example.com"], signal: caller.signal, deps: { env: {} } as any });
+    const pending = webFetch("http://example.com/x", depsOnly);
+    caller.abort();
+    const outcome = await pending;
+    assert.equal(typeof outcome.error, "string", "the aborted default fetch degrades to a tool error");
+    assert.ok(initSignal !== undefined && initSignal.aborted, "the composed signal carried the caller's abort");
+  } finally {
+    (globalThis as any).fetch = originalFetch;
+  }
+}));

@@ -5248,3 +5248,28 @@ test("#1043 review: repository-skills-applied.json resets on reused run dirs", a
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("#726: harnessTransportAdapter binds the run's cancellation signal to every turn", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ id: "c", choices: [{ message: { content: "x" }, finish_reason: "stop" }] }));
+  });
+  try {
+    // Pre-aborted signal: the turn never reaches the endpoint and fails with
+    // the cancellation, exactly as the loop would see it after an abort.
+    const cancelled = harnessTransportAdapter({} as StageEnv, AbortSignal.abort());
+    await assert.rejects(
+      () => cancelled(server.url, "openai", { model: "m", stream: false, messages: [] }, "k", 5),
+      (error: unknown) => error instanceof Error && /cancelled/.test(error.message),
+    );
+    assert.equal(server.requests.length, 0, "a cancelled harness turn never reaches the endpoint");
+    // No signal: unchanged behavior, the request goes out.
+    const live = harnessTransportAdapter({} as StageEnv);
+    const response = await live(server.url, "openai", { model: "m", stream: false, messages: [] }, "k", 5);
+    assert.ok(response !== null && typeof response === "object");
+    assert.equal(server.requests.length, 1);
+  } finally {
+    await server.close();
+  }
+});
