@@ -20,7 +20,11 @@ import {
   prescriptionKeyDigest, recoverPublishedSuggestion, MAX_CARRYOVER_KEYS_PER_RUN, SEVERITY_LABELS,
 } from "./inline-findings.js";
 import { redactText } from "../context/redact.js";
-import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
+import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, parseMetadata, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
+import { FINDING_OUTCOMES_SCHEMA, MAX_LEDGER_EVENTS, normalizeOutcomeEvent, serializeOutcomeLedger, type OutcomeEvent, type OutcomeLedger } from "../outcomes/schema.js";
+import { parseFindingIdentityMarker } from "../outcomes/identity.js";
+import { deriveOutcomeEvents, type PriorFindingObservation } from "../outcomes/reconcile.js";
+import { aggregateOutcomeEvents } from "../outcomes/report.js";
 import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, retireManagedInlineComments, resolvePublishTrustedOwner, selectManagedReviews, type CleanupLog } from "./cleanup.js";
 import { ownerMatchesIdentity } from "../platform/owner-identity.js";
 import { strictReviewResult } from "../enforcement/verdict-policy.js";
@@ -75,6 +79,7 @@ export interface PublishInput {
   conditionalPresence: ConditionalSectionPresence;
   /** When set, removed after publish (the re-review label cleanup). */
   rerunLabel?: string;
+  priorHeadSha?: string;
   /** #812: folded external-CI conclusion at headSha ("success" | "failure"
    * | "pending" | "none"), recorded in the marker so the next diff-unchanged
    * skip can tell a stale carried request_changes from a live one. Omitted
@@ -127,6 +132,7 @@ export interface PublishResult {
   status: "published" | "superseded" | "failed";
   messages: string[];
   error?: string;
+  outcomes?: string;
 }
 
 const VERDICT_PREFIXES: Record<string, string> = {
@@ -439,8 +445,9 @@ export function buildInlineComments(options: {
 
 /** #762: whether any finding can contribute a prescription at all — the cheap
  * pre-check `validateAction` implies (a non-empty, trimmed suggestion string).
- * A false answer means the feedback read (and every request behind it) has
- * nothing it could ever correlate, so it never runs. */
+ * A false answer means the reaction read (and every request behind it) has
+ * nothing it could ever correlate, so it never runs; the #1027 observation
+ * enumeration still runs for thread-state outcomes, but reads no reactions. */
 function hasActionablePrescription(findings: unknown): boolean {
   if (!Array.isArray(findings)) return false;
   return findings.some(
@@ -511,6 +518,33 @@ interface RejectionSnapshot {
   carried: number;
 }
 
+/** #1027: one prior published finding observation harvested by the shared
+ * feedback read — the identity from the action-owned marker, reaction
+ * tallies from the same records the suppression gate already reads, and
+ * thread resolution from the bounded state read. Reactions stay
+ * informational telemetry: they authorize nothing and resolve nothing. */
+interface OutcomeObservation {
+  findingId: string;
+  commentId: string;
+  resolved: boolean | null;
+  reactions: { helpful: number; notHelpful: number };
+}
+
+/** #1027: what the shared read returns — the #762 suppression snapshot and,
+ * opportunistically from the very same enumeration and records, the #1027
+ * observations. `enumerated` distinguishes a completed enumeration (a
+ * provably empty or populated prior) from a read that never got there: the
+ * outcome ledger is only derived from provable prior state, never from an
+ * unprovable one (a failed read would mislabel every repeat as a first
+ * report). `priorHeadSha` is the head the prior published review was made
+ * against, read from its metadata marker. */
+interface FeedbackRead {
+  snapshot: RejectionSnapshot;
+  observations: OutcomeObservation[];
+  enumerated: boolean;
+  priorHeadSha: string | null;
+}
+
 /** #762: read the usefulness feedback for the prescriptions a previous run
  * published, and turn trusted 👎 into the keys of the prescriptions they
  * reject.
@@ -539,12 +573,23 @@ interface RejectionSnapshot {
  * carry line is stripped from every assembled finding body and listed among
  * the reserved publication markers), so a rejection can only ever originate
  * from a trusted 👎 this action itself observed. */
-async function readRejectedPrescriptions(
+async function readFeedbackState(
   api: PublishPlatformApi,
   marker: string,
-): Promise<RejectionSnapshot> {
-  const none: RejectionSnapshot = { keys: new Set<string>(), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: 0 };
-  if (typeof api.reviewCommentFeedback !== "function" || typeof api.collaboratorPermission !== "function") return none;
+  /** #762: false when no current finding could post a prescription — the
+   * reaction read (and its permission requests) is skipped entirely, exactly
+   * as the pre-#1027 gate did; only the outcome enumeration runs. */
+  readReactions: boolean,
+): Promise<FeedbackRead> {
+  const noneSnapshot: RejectionSnapshot = { keys: new Set<string>(), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: 0 };
+  const none: FeedbackRead = { snapshot: noneSnapshot, observations: [], enumerated: false, priorHeadSha: null };
+  // #1027/#762: the enumeration (and therefore the outcome observations) is
+  // forge-agnostic; only the reaction read and its permission verification
+  // need both seams. A forge without the collaborator-permission read still
+  // gets outcome observations — with zeroed tallies, since reactions are
+  // informational telemetry and are never fetched for outcomes alone.
+  const canVerifyReactions = typeof api.reviewCommentFeedback === "function" && typeof api.collaboratorPermission === "function";
+  readReactions = readReactions && canVerifyReactions;
   try {
     const reviews = await api.listReviews();
     // Same managed-review derivation the cleanup path uses (marker-prefixed
@@ -553,7 +598,7 @@ async function readRejectedPrescriptions(
     if (reviewIds.length === 0) return none;
     const listed = await api.listManagedInlineComments(reviewIds);
     if (!listed.supported || !listed.complete) return none;
-    const candidates: Array<{ id: string; key: string }> = [];
+    const candidates: Array<{ id: string; key: string | null; identity: string | null; path: string | null; user: { id?: number | string; login?: string } | null }> = [];
     const carried = new Set<string>();
     // The carry-marker authority is resolved lazily and at most once, and
     // only because some comment actually carries a marker to authenticate.
@@ -568,7 +613,14 @@ async function readRejectedPrescriptions(
       const body = typeof comment.body === "string" ? comment.body : "";
       // Same own-comment shape proof the prescription recovery demands: the
       // disclaimer trailer must be present before any line is read as state.
-      const digests = body.includes(INLINE_DISCLAIMER) ? parseRejectionCarryover(body) : [];
+      const disclaimed = body.includes(INLINE_DISCLAIMER);
+      const digests = disclaimed ? parseRejectionCarryover(body) : [];
+      // #1027: the finding identity marker is action-owned state on the same
+      // comment — but like the carry marker it counts only with PROVENANCE:
+      // a body any repo reader could have authored must not mint outcome
+      // identities, so the observation keeps the same trusted-owner bar the
+      // carry marker applies (resolved once, in collectOutcomeObservations).
+      const identity = disclaimed ? parseFindingIdentityMarker(body) : null;
       if (digests.length > 0) {
         if (carryOwner === undefined) carryOwner = (await resolvePublishTrustedOwner(api)).owner;
         // Provenance, not body text: the marker counts only on a comment
@@ -586,28 +638,66 @@ async function readRejectedPrescriptions(
       // `start_line`: reconstruct the exact range the key describes, and skip
       // the comment rather than guess when any part of it is unusable.
       const end = comment.line;
-      if (typeof path !== "string" || path === "" || typeof end !== "number" || !Number.isInteger(end) || end <= 0) continue;
-      const start = comment.start_line ?? end;
-      if (!Number.isInteger(start) || start <= 0 || start > end) continue;
-      // Only our own previously published suggestion region is parsed; an
-      // unrecoverable one simply carries no prior prescription.
-      const replacement = recoverPublishedSuggestion(body);
-      if (replacement === null) continue;
-      candidates.push({ id, key: prescriptionKeyDigest(prescriptionKey(path, start, end, replacement)) });
+      let key: string | null = null;
+      let keyedPath: string | null = null;
+      if (typeof path === "string" && path !== "" && typeof end === "number" && Number.isInteger(end) && end > 0) {
+        const start = comment.start_line ?? end;
+        if (Number.isInteger(start) && start > 0 && start <= end) {
+          // Only our own previously published suggestion region is parsed; an
+          // unrecoverable one simply carries no prior prescription.
+          const replacement = recoverPublishedSuggestion(body);
+          if (replacement !== null) {
+            key = prescriptionKeyDigest(prescriptionKey(path, start, end, replacement));
+            keyedPath = path;
+          }
+        }
+      }
+      // #1027: an identity-bearing comment is an outcome observation even
+      // when its prescription is unrecoverable (a suppressed replacement, or
+      // a finding published without one).
+      if (key === null && identity === null) continue;
+      candidates.push({ id, key, identity, path: keyedPath, user: comment.user ?? null });
     }
     if (candidates.length === 0) {
       // Carry-only survival: the reacted-to comment was retired and only a
       // replacement comment's marker remains — no reaction request is needed.
-      if (carried.size === 0) return none;
-      return { keys: new Set(carried), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: carried.size };
+      // #1027: a completed enumeration with no candidates is a provably
+      // empty prior, so the outcome ledger may still derive from it.
+      if (carried.size === 0) {
+        return { snapshot: noneSnapshot, observations: [], enumerated: true, priorHeadSha: null };
+      }
+      return { snapshot: { keys: new Set(carried), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: carried.size }, observations: [], enumerated: true, priorHeadSha: null };
     }
-    // Newest first, so the bounded read covers the comments most likely to
+    // Newest first, so the bounded reads cover the comments most likely to
     // still be on screen.
     candidates.sort((a, b) => (a.id === b.id ? 0 : BigInt(a.id) > BigInt(b.id) ? -1 : 1));
-    const bounded = candidates.slice(0, MAX_FEEDBACK_COMMENT_IDS);
-    const feedback = await api.reviewCommentFeedback(bounded.map((candidate) => candidate.id));
+    // #1027: the prescription and observation candidate sets are bounded
+    // INDEPENDENTLY, so a flood of one kind can never displace the other
+    // from its window.
+    const bounded = candidates.filter((candidate) => candidate.identity !== null).slice(0, MAX_FEEDBACK_COMMENT_IDS);
+    const prescriptionCandidates = candidates
+      .filter((candidate) => candidate.key !== null)
+      .slice(0, MAX_FEEDBACK_COMMENT_IDS);
+    // #1027: reactions are read ONLY when the suppression gate needs them —
+    // the outcome tallies are a passive byproduct of the same records, never
+    // an independent request.
+    if (prescriptionCandidates.length === 0 || !readReactions) {
+      const snapshot: RejectionSnapshot = carried.size === 0
+        ? noneSnapshot
+        : { keys: new Set(carried), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: carried.size };
+      const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, new Map());
+      return { snapshot, observations: outcomeRead.observations, enumerated: true, priorHeadSha: outcomeRead.priorHeadSha };
+    }
+    const feedback = await api.reviewCommentFeedback!(prescriptionCandidates.map((candidate) => candidate.id));
     if (!feedback.supported || !feedback.complete) {
-      return carried.size === 0 ? none : { keys: new Set(carried), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: carried.size };
+      const snapshot = carried.size === 0
+        ? noneSnapshot
+        : { keys: new Set(carried), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: carried.size };
+      // #1027: the reaction read failed, but the thread-state read is a
+      // different seam and the observations themselves (identity + resolution)
+      // came from the enumeration above — keep them, with zeroed tallies.
+      const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, new Map());
+      return { snapshot, observations: outcomeRead.observations, enumerated: true, priorHeadSha: outcomeRead.priorHeadSha };
     }
     const rejections = feedback.records.filter((record) => record.content === "-1");
     const distinct = [...new Set(rejections.map((record) => record.login))].filter((login) => login !== "");
@@ -615,7 +705,13 @@ async function readRejectedPrescriptions(
     // cap, verify nobody and trust no rejection (carried digests need no
     // lookup and keep standing).
     if (distinct.length > FEEDBACK_ACTOR_CAP) {
-      return { keys: new Set(carried), inspected: bounded.length, logins: distinct.length, trusted: 0, overCap: distinct.length, carried: carried.size };
+      const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, tallyReactions(feedback.records));
+      return {
+        snapshot: { keys: new Set(carried), inspected: prescriptionCandidates.length, logins: distinct.length, trusted: 0, overCap: distinct.length, carried: carried.size },
+        observations: outcomeRead.observations,
+        enumerated: true,
+        priorHeadSha: outcomeRead.priorHeadSha,
+      };
     }
     const keys = new Set(carried);
     let trusted = 0;
@@ -635,26 +731,130 @@ async function readRejectedPrescriptions(
           self = typeof identity === "string" && identity.trim() !== "" ? identity : null;
         } catch { self = null; }
         if (self === null) {
-          return { keys: new Set(carried), inspected: bounded.length, logins: distinct.length, trusted: 0, overCap: 0, carried: carried.size };
+          const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, tallyReactions(feedback.records));
+          return {
+            snapshot: { keys: new Set(carried), inspected: prescriptionCandidates.length, logins: distinct.length, trusted: 0, overCap: 0, carried: carried.size },
+            observations: outcomeRead.observations,
+            enumerated: true,
+            priorHeadSha: outcomeRead.priorHeadSha,
+          };
         }
       }
       // The bot's own reaction is never a rejection signal — it is the
       // publisher of the prescription, not a reviewer of it.
       if (self !== null && self.trim().toLowerCase() === login.toLowerCase()) continue;
       let reading: CollaboratorPermissionReading | null;
-      try { reading = await api.collaboratorPermission(login); }
+      try { reading = await api.collaboratorPermission!(login); }
       catch { reading = null; }
       if (!feedbackActorAuthorized(reading, login)) continue;
       trusted += 1;
       for (const record of rejections) {
         if (record.login !== login) continue;
-        const prior = bounded.find((candidate) => candidate.id === record.commentId);
-        if (prior !== undefined) keys.add(prior.key);
+        const prior = prescriptionCandidates.find((candidate) => candidate.id === record.commentId);
+        if (prior !== undefined && prior.key !== null) keys.add(prior.key);
       }
     }
-    return { keys, inspected: bounded.length, logins: distinct.length, trusted, overCap: 0, carried: carried.size };
+    const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, tallyReactions(feedback.records));
+    return {
+      snapshot: { keys, inspected: prescriptionCandidates.length, logins: distinct.length, trusted, overCap: 0, carried: carried.size },
+      observations: outcomeRead.observations,
+      enumerated: true,
+      priorHeadSha: outcomeRead.priorHeadSha,
+    };
   } catch {
     return none;
+  }
+}
+
+/** #1027: tally one comment's 👍/👎 counts from the reaction records the
+ * suppression read already fetched. All actors count — drive-by reactions
+ * stay informational telemetry, and no login ever leaves this module. */
+function tallyReactions(records: readonly { commentId: string; content: "+1" | "-1"; login: string }[]): Map<string, { helpful: number; notHelpful: number }> {
+  const tallies = new Map<string, { helpful: number; notHelpful: number }>();
+  for (const record of records) {
+    const tally = tallies.get(record.commentId) ?? { helpful: 0, notHelpful: 0 };
+    if (record.content === "+1") tally.helpful += 1;
+    else tally.notHelpful += 1;
+    tallies.set(record.commentId, tally);
+  }
+  return tallies;
+}
+
+/** #1027: assemble the outcome observations from the enumerated comments and
+ * the bounded thread-state read, plus the prior published head used to
+ * classify a resolved thread.
+ *
+ * Two provenance rules keep a hostile body from minting outcome state:
+ * - An identity marker counts only on a comment whose author matches the
+ *   trusted owner identity the carry-marker path itself proves (resolved
+ *   lazily, at most once) — the same bar the rejection carry marker applies,
+ *   because `selectManagedReviews` matches by body prefix and any repo reader
+ *   can post a marker-shaped comment.
+ * - The prior head comes only from the managed sticky comment's metadata
+ *   marker (action-owned state), never from forge-supplied review metadata.
+ *
+ * The thread-state query and the sticky read are the new requests this
+ * feature adds, both made only when identity-bearing observations survive
+ * the provenance bar, and both degrade to "unprovable" (no resolution claim,
+ * no head-advanced claim) rather than to a failed publish. */
+async function collectOutcomeObservations(
+  api: PublishPlatformApi,
+  reviewIds: readonly string[],
+  marker: string,
+  bounded: readonly { id: string; identity: string | null; path: string | null; user: { id?: number | string; login?: string } | null }[],
+  tallies: ReadonlyMap<string, { helpful: number; notHelpful: number }>,
+): Promise<{ observations: OutcomeObservation[]; priorHeadSha: string | null }> {
+  const observations: OutcomeObservation[] = [];
+  // The trusted-owner authority is resolved lazily and at most once, and
+  // only because some comment actually carries an identity to authenticate.
+  let trustedOwner: Awaited<ReturnType<typeof resolvePublishTrustedOwner>>["owner"] | undefined;
+  for (const candidate of bounded) {
+    if (candidate.identity === null) continue;
+    if (trustedOwner === undefined) trustedOwner = (await resolvePublishTrustedOwner(api)).owner;
+    // Unprovable author, unprovable identity — the comment carries nothing.
+    if (trustedOwner === null || !ownerMatchesIdentity(candidate.user, trustedOwner)) continue;
+    observations.push({
+      findingId: candidate.identity,
+      commentId: candidate.id,
+      resolved: null,
+      reactions: tallies.get(candidate.id) ?? { helpful: 0, notHelpful: 0 },
+    });
+  }
+  if (observations.length === 0) return { observations, priorHeadSha: null };
+  const priorHeadSha = await readPriorPublishedHead(api, marker);
+  if (typeof api.reviewThreadStates !== "function") return { observations, priorHeadSha };
+  try {
+    const states = await api.reviewThreadStates(reviewIds);
+    if (states.supported && states.complete) {
+      const resolvedByComment = new Map(states.threads.map((thread) => [thread.firstCommentId, thread.resolved]));
+      for (const observation of observations) {
+        observation.resolved = resolvedByComment.get(observation.commentId) ?? null;
+      }
+    }
+  } catch {
+    // Thread state unprovable: leave every `resolved` null — the reconcile
+    // layer emits no resolution claim for an unprovable state.
+  }
+  return { observations, priorHeadSha };
+}
+
+/** #1027: the head sha of the prior published review, read from the managed
+ * sticky comment's metadata marker (the same marker the precheck reads). A
+ * missing marker, an unparseable body, or a non-hex value yields null — the
+ * reconcile layer then refuses to claim "resolved after a newer head". */
+async function readPriorPublishedHead(api: PublishPlatformApi, marker: string): Promise<string | null> {
+  try {
+    const comments = await api.listIssueComments();
+    for (const comment of comments) {
+      const body = typeof comment.body === "string" ? comment.body : "";
+      if (!isManagedBody(body, marker)) continue;
+      const metadata = parseMetadata(body);
+      const head = metadata?.head_sha;
+      return typeof head === "string" && /^[0-9a-f]{1,64}$/.test(head) ? head : null;
+    }
+    return null;
+  } catch {
+    return null;
   }
 }
 
@@ -816,6 +1016,7 @@ export async function publishReview(
   options: { diffText: string },
 ): Promise<PublishResult> {
   const messages: string[] = [];
+  let outcomes: string | undefined;
   let nativeReviewId: number | string | undefined;
   // #1093: the sticky summary comment as the replacement checkpoint when
   // review_comment mode publishes no inline findings review (a clean re-review
@@ -958,10 +1159,14 @@ export async function publishReview(
     // Read immediately before the build and fail-open end to end, so the
     // published review is unchanged when the read is unsupported or uncertain.
     // A finding set carrying no usable suggestion can never contain a
-    // prescription, so the read (and every request behind it) is skipped.
-    const feedback = hasActionablePrescription(input.findings)
-      ? await readRejectedPrescriptions(api, input.commentMarker)
-      : { keys: new Set<string>(), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: 0 };
+    // prescription, so the reaction read (and every permission request behind
+    // it) is skipped even when the enumeration below still runs.
+    // #1027: the same bounded enumeration also harvests the prior run's
+    // finding observations (identity markers, thread resolution, and the
+    // reaction tallies it already fetched) for the outcome ledger — no
+    // additional reaction or permission request is ever made for outcomes.
+    const feedbackState = await readFeedbackState(api, input.commentMarker, hasActionablePrescription(input.findings));
+    const feedback = feedbackState.snapshot;
     const built = buildInlineComments({
       findings: input.findings,
       diffText: options.diffText,
@@ -971,6 +1176,63 @@ export async function publishReview(
       rejectedPrescriptions: feedback.keys,
     });
     inlineComments = built.comments;
+    try {
+      const at = new Date().toISOString();
+      // #1027: the identities this run actually PUBLISHES — parsed from the
+      // markers the built comments carry, so a finding the anchor validation
+      // skipped can never produce a `reported` event for a comment that does
+      // not exist.
+      const postedIdentities: string[] = [];
+      for (const comment of inlineComments) {
+        const body = typeof comment.body === "string" ? comment.body : "";
+        const identity = parseFindingIdentityMarker(body);
+        if (identity !== null && !postedIdentities.includes(identity)) postedIdentities.push(identity);
+      }
+      const prior: readonly PriorFindingObservation[] = feedbackState.observations.map((observation) => ({
+        findingId: observation.findingId,
+        commentId: observation.commentId,
+        resolved: observation.resolved,
+        reactions: observation.reactions,
+      }));
+      if (feedbackState.enumerated && (prior.length > 0 || postedIdentities.length > 0)) {
+        // The prior head: the managed sticky comment's metadata marker
+        // (proven action state), falling back to the caller-provided value.
+        const priorHeadSha = feedbackState.priorHeadSha ?? input.priorHeadSha ?? null;
+        const events = deriveOutcomeEvents({
+          postedIdentities,
+          prior,
+          priorHeadSha,
+          currentHeadSha: input.headSha,
+          route: input.reviewRoute || null,
+          model: publicAnalysisEngine(input.analysisEngine) || null,
+          at,
+        });
+        if (events.length > 0) {
+          // The producer runs its own normalizer before serialization, so the
+          // artifact always parses under the same rules a reader applies.
+          const normalized: OutcomeEvent[] = [];
+          for (const event of events) {
+            const safe = normalizeOutcomeEvent(event);
+            if (safe !== null) normalized.push(safe);
+            if (normalized.length >= MAX_LEDGER_EVENTS) break;
+          }
+          if (normalized.length > 0) {
+            const aggregate = aggregateOutcomeEvents(normalized);
+            const ledger: OutcomeLedger = {
+              schema: FINDING_OUTCOMES_SCHEMA,
+              generated_at: at,
+              head_sha: /^[0-9a-f]{1,64}$/.test(input.headSha) ? input.headSha : "",
+              route: input.reviewRoute || null,
+              model: publicAnalysisEngine(input.analysisEngine) || null,
+              events: normalized,
+              aggregate,
+            };
+            outcomes = serializeOutcomeLedger(ledger);
+            messages.push(`Finding outcomes: ${aggregate.unique_findings} finding(s), ${aggregate.open} open, ${aggregate.resolved} resolved, ${aggregate.dismissed} dismissed, ${aggregate.reactions.helpful + aggregate.reactions.not_helpful} reaction(s)`);
+          }
+        }
+      }
+    } catch { outcomes = undefined; }
     if (feedback.inspected > 0 || feedback.carried > 0) {
       messages.push(
         `Inline finding usefulness feedback: inspected ${feedback.inspected} prior comment(s), `
@@ -1065,6 +1327,9 @@ export async function publishReview(
           // replacement, so the sticky checkpoint must not authorize
           // retiring the old owned comments.
           stickyCheckpointUsable = false;
+          // #1027: the inline comments were never published, so their
+          // `reported` events must not reach the outcome ledger.
+          outcomes = undefined;
           messages.push("WARN: inline findings review submission failed; summary comment was still published");
         }
       }
@@ -1145,6 +1410,9 @@ export async function publishReview(
       fallbackSubmission = submitted.fellBack;
       if (submitted.fellBack) {
         messages.push("WARN: commit-bound review submission failed; falling back to plain review");
+        // #1027: the plain fallback carries no inline comments, so nothing
+        // this run derived for them was ever published.
+        outcomes = undefined;
       }
       if (!submitted.ok) {
         if (event === "APPROVE") {
@@ -1297,5 +1565,5 @@ export async function publishReview(
     await api.removeLabel(input.rerunLabel);
   }
 
-  return { status: "published", messages };
+  return { status: "published", messages, ...(outcomes !== undefined ? { outcomes } : {}) };
 }

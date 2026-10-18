@@ -1,0 +1,121 @@
+# Finding outcomes and feedback data contract (#1027)
+
+`src/outcomes/` carries the shared, privacy-aware finding-outcome and
+usefulness-feedback data contract (`finding-outcomes/v1`). Action mode is
+stateless: each publish derives bounded events from forge state it already
+reads plus one new bounded thread-state query, and exports them as a run
+artifact. Operator mode may persist the same events through the controller
+later; `parseOutcomeLedger` is the fail-closed seam for that.
+
+## Finding identity
+
+`findingIdentity({ path, severity, category, message })` is a SHA-256 digest
+over the NUL-joined tuple of the trimmed path, lowercased severity and
+category, and the **redacted**, whitespace-collapsed, 500-codepoint-bounded
+message. The anchor line and range are deliberately **not** part of the
+identity, so line drift and force-push keep the same identity; a rewritten
+message is honestly a NEW identity — the contract records only what it can
+prove deterministically and never fuzzy-matches prose. Accepted consequence:
+a model that paraphrases the same defect across runs mints a new identity,
+so `repeated` events are exact-text matches only; cross-run tracking of
+reworded findings is future work (a similarity key would be exactly the
+non-determinism this contract forbids). The digest also depends on the
+current secret-redaction pattern set: a future redaction change re-keys
+every finding (a one-time ledger discontinuity, not a correctness failure).
+
+The identity travels between runs inside the published inline finding comment
+as a hidden, action-owned marker (`pr-reviewer:finding-id:v1:<64 hex>`), with
+the same discipline as the #762 rejection carry marker:
+
+- strict single-line grammar — a near-miss line is ordinary content;
+- reserved against model-authored markdown (`RESERVED_MARKER_PATTERNS`), so
+  model text can never mint or rewrite a finding identity;
+- stripped from every surface that extracts finding content (the review-thread
+  footer strip and the corpus renderer).
+
+## Event kinds
+
+| Kind | Meaning | Provenance |
+|---|---|---|
+| `reported` | first time this identity is reported | `current-review` |
+| `repeated` | the identity is reported again on a later run | `current-review` |
+| `resolved` | thread resolved while the head **provably** advanced | `forge-thread` |
+| `dismissed` | thread resolved with the head unchanged or unprovable; bounded `reason` (`thread_resolved` / `thread_resolved_head_unverified`) | `forge-thread` |
+| `still_open` | prior finding's thread is still unresolved | `forge-thread` |
+| `unknown` | ledger-tracked identity gone from both findings and observations (lost history) | `prior-ledger` |
+| `feedback` | 👍/👎 reaction tallies from the #762 signal — informational only | `forge-reaction` |
+| `adjudication` | explicit human label (`confirmed_valid_defect`, `confirmed_false_positive`, `valid_but_unhelpful`, `uncertain`) with who/when/provenance | `operator` |
+
+Trust separation is structural: only an `adjudication` event moves the
+adjudicated precision denominator. A resolved thread, a thumbs-down, or a
+vanished comment can change open/resolved/dismissed counts and reaction
+tallies, but never an adjudicated label. Forge-derived feedback is always
+`trusted: false`; reactions never resolve, dismiss, or reclassify anything,
+and never touch severity or verdict.
+
+## Reconciliation rules
+
+`deriveOutcomeEvents` is pure and deterministic. It takes the identities of
+the findings this run is actually about to publish (parsed from the markers
+of the built comments — a finding the anchor validation skipped never
+produces a `reported` event for a comment that does not exist). Within one
+derivation, events are emitted chronologically — prior published state
+first, current review last — and the aggregate reads latest state by event
+timestamp (ties fall back to array order), so a finding re-reported after
+its old thread was resolved is open again. An unprovable thread state
+(`resolved: null`) emits no resolution claim at all, and "resolved after a
+newer head" is claimed only when both heads are known and differ; the prior
+head comes only from the managed sticky comment's metadata marker, never
+from forge-supplied review metadata.
+
+With a prior ledger (operator mode), the run's events are merged after the
+ledger events, exact duplicates collapse, the ledger keeps its latest
+`MAX_LEDGER_EVENTS` (1000), and identities the ledger tracked as live that
+are now absent from both findings and observations become `unknown`.
+
+## Collection (Action mode)
+
+The #762 feedback read (`readFeedbackState` in `src/publish/publish.ts`) is
+the single enumeration: suppression keys (#762), reaction tallies, identity
+markers, and thread states are harvested from the same bounded pass, with
+independent per-kind caps so a flood of one kind cannot displace the other.
+Reaction reads happen **only** when the suppression gate needs them (the
+current findings could post a prescription); outcome tallies are a passive
+byproduct of the same records — outcomes never make an independent reaction
+or permission request. Consequence (accepted v1 limitation): a prior
+finding whose comment carries no recoverable prescription contributes
+identity and thread state but zero reaction tallies. The feature's only new
+requests are one bounded `reviewThreadStates` query and the managed sticky
+comment read for the prior head, both made only when identity-bearing
+observations exist. An unprovable or failed read contributes no observations
+and no outcomes. The enumeration itself is forge-agnostic: a forge without
+the collaborator-permission seam (Forgejo) still derives reported/repeated/
+resolution events, with zeroed tallies and degraded thread state.
+
+Identity provenance: an identity marker counts only on a top-level comment
+of a managed review whose author matches the trusted owner identity the
+carry-marker path itself proves (`resolvePublishTrustedOwner`) — the same
+bar the rejection carry marker applies, because `selectManagedReviews`
+matches by body prefix and any repo reader could post a marker-shaped
+comment. Unprovable authors contribute nothing.
+
+## Export and report
+
+On a successful publish, `publishWith` writes `finding-outcomes.json` (the
+serialized ledger: schema, generation metadata, events, aggregate) into the
+run directory — only when the review actually published (a superseded run
+returns before outcomes exist, a failed publication or a failed
+inline-findings submission never carries outcomes) and only when the
+derivation itself proved prior state. The producer runs its own event
+normalizer before serializing, so the artifact always parses under the same
+rules a reader applies, with the endpoint URL stripped from the model field
+(`publicAnalysisEngine`). `aggregateOutcomeEvents` produces the denominator-aware
+aggregate (unique findings, open/resolved/dismissed/unknown, reaction
+tallies, adjudicated counts and precision — `null` when no adjudication pair
+exists), and `renderOutcomeReportMarkdown` renders a minimal operator report
+(counts only: no paths, no message text, no logins).
+
+Privacy: events carry digests, counts, and bounded metadata only — no
+finding message text, no reaction logins, no review content; free-text
+fields are redacted and bounded; paths appear only in the digest input, not
+in events.

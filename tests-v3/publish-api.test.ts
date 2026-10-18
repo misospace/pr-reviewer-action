@@ -717,3 +717,52 @@ test("#252: a hostile reaction login never reaches the collaborator API or autho
   }
   assert.equal(calls.length, 0, "a login outside the GitHub charset is refused without any request");
 });
+
+/** #1027: the bounded per-thread resolution read behind the outcome ledger. */
+test("#1027: reviewThreadStates maps managed threads, degrades on truncation, and filters unmanaged ones", async () => {
+  const payload = {
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            pageInfo: { hasNextPage: false },
+            nodes: [
+              { id: "T1", isResolved: true, comments: { nodes: [{ databaseId: 77, pullRequestReview: { databaseId: 7 } }] } },
+              { id: "T2", isResolved: false, comments: { nodes: [{ databaseId: 88, pullRequestReview: { databaseId: 7 } }] } },
+              // A thread whose first comment belongs to another review: filtered out.
+              { id: "T3", isResolved: true, comments: { nodes: [{ databaseId: 99, pullRequestReview: { databaseId: 8 } }] } },
+            ],
+          },
+        },
+      },
+    },
+  };
+  const ok = recorder([[`POST ${BASE}/graphql`, 200, payload]]);
+  const result = await github(ok.fetchImpl).reviewThreadStates(["7"]);
+  assert.deepEqual(result, {
+    supported: true,
+    complete: true,
+    threads: [
+      { threadId: "T1", resolved: true, firstCommentId: "77" },
+      { threadId: "T2", resolved: false, firstCommentId: "88" },
+    ],
+  });
+
+  const truncated = recorder([[`POST ${BASE}/graphql`, 200, { data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: true }, nodes: [] } } } } }]]);
+  assert.deepEqual(await github(truncated.fetchImpl).reviewThreadStates(["7"]), { supported: true, complete: false, threads: [] });
+
+  const malformed = recorder([[`POST ${BASE}/graphql`, 200, { data: null }]]);
+  assert.deepEqual(await github(malformed.fetchImpl).reviewThreadStates(["7"]), { supported: true, complete: false, threads: [] });
+
+  // A hostile node shape degrades the WHOLE read rather than guessing.
+  const hostile = recorder([[`POST ${BASE}/graphql`, 200, { data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [{ id: "T4", isResolved: true, comments: { nodes: [] } }] } } } } }]]);
+  assert.deepEqual(await github(hostile.fetchImpl).reviewThreadStates(["7"]), { supported: true, complete: false, threads: [] });
+
+  const threw = recorder([]);
+  assert.deepEqual(await github(threw.fetchImpl).reviewThreadStates(["7"]), { supported: true, complete: false, threads: [] });
+});
+
+test("#1027: Forgejo degrades the thread-state read explicitly", async () => {
+  const api = new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token", baseUrl: "https://forge.example", fetchImpl: async () => { throw new Error("unused"); } });
+  assert.deepEqual(await api.reviewThreadStates(["7"]), { supported: false, complete: false, threads: [] });
+});

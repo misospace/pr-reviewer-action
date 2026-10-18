@@ -3,6 +3,7 @@
  * GitHub and Forgejo publish the same validated findings. */
 import { createHash } from "node:crypto";
 import { redactText } from "../context/redact.js";
+import { findingIdentityFromRecord, renderFindingIdentityMarker, stripFindingIdentityMarkers } from "../outcomes/identity.js";
 import { sanitizeMarkdown } from "./sanitize.js";
 
 const HUNK_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/;
@@ -366,12 +367,14 @@ export function buildComments(
     // line from the assembled body before we append our own marker. (The
     // suggestion region is already marker-free by `validateAction`, so this is
     // a no-op there; it still covers `message` and `agent_prompt`.)
-    body = stripRejectionCarryover(body);
+    body = stripRejectionCarryover(stripFindingIdentityMarkers(body));
     // #762: a suppressed prescription's rejection survives this run as a
     // digest-only carry marker on the replacement comment — the reaction on
     // the original comment is lost when cleanup retires it, so without the
     // carry the next run would re-post the rejected text.
     if (carriedDigest !== null) body += renderRejectionCarryover([carriedDigest]);
+    const identity = findingIdentityFromRecord(value);
+    if (identity !== null) body += renderFindingIdentityMarker(identity) ?? "";
     comment.body = body;
     comments.push(comment);
     if (comments.length >= maxComments) break;

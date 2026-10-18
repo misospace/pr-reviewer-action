@@ -103,6 +103,9 @@ export interface ThreadQueryResult {
   error?: string;
 }
 
+export interface ReviewThreadState { threadId: string; resolved: boolean; firstCommentId: string; }
+export interface ReviewThreadStatesResult { supported: boolean; complete: boolean; threads: ReviewThreadState[]; }
+
 /** #1005: outcome of an additive reviewer request. `supported` distinguishes
  * "this forge cannot request reviewers" from an operational failure. The
  * `alreadyRequested*` sets are the inputs that were already on the PR and were
@@ -213,6 +216,7 @@ export interface PublishPlatformApi {
    * per comment id; an over-cap or malformed id set is rejected WITHOUT any
    * request, and a per-id failure reports `complete: false`. */
   reviewCommentFeedback?(commentIds: readonly string[]): Promise<CommentFeedbackResult>;
+  reviewThreadStates?(managedReviewIds: readonly string[]): Promise<ReviewThreadStatesResult>;
   /** #762: the fail-closed repository-collaborator permission read that gates
    * a 👎 suppression (`repos/{repo}/collaborators/{login}/permission`).
    * Optional: an adapter without it trusts no actor. */
@@ -608,6 +612,28 @@ export class GitHubPublishApi implements PublishPlatformApi {
       threads.push({ id: thread.id });
     }
     return { ok: true, threads, hasNextPage: payload.pageInfo?.hasNextPage === true };
+  }
+
+  async reviewThreadStates(managedReviewIds: readonly string[]): Promise<ReviewThreadStatesResult> {
+    try {
+      const { owner, name } = ownerRepo(this.repo);
+      const data = await graphql(this.url("/graphql"), this.token,
+        "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { id isResolved comments(first: 1) { nodes { databaseId pullRequestReview { databaseId } } } } } } } }",
+        { owner, name, number: Number(this.prNumber) }, this.timeoutMs, this.fetchImpl);
+      const payload = (data as { data?: { repository?: { pullRequest?: { reviewThreads?: { pageInfo?: { hasNextPage?: unknown }; nodes?: unknown } } } } } | null)?.data?.repository?.pullRequest?.reviewThreads;
+      if (!payload || !Array.isArray(payload.nodes) || typeof payload.pageInfo?.hasNextPage !== "boolean") return { supported: true, complete: false, threads: [] };
+      const ids = new Set(managedReviewIds.map(String));
+      const threads = [];
+      for (const node of payload.nodes) {
+        if (node === null || typeof node !== "object") return { supported: true, complete: false, threads: [] };
+        const row = node as { id?: unknown; isResolved?: unknown; comments?: { nodes?: unknown } };
+        if (typeof row.id !== "string" || typeof row.isResolved !== "boolean" || !Array.isArray(row.comments?.nodes) || row.comments.nodes.length !== 1) return { supported: true, complete: false, threads: [] };
+        const first = row.comments.nodes[0] as { databaseId?: unknown; pullRequestReview?: { databaseId?: unknown } } | null;
+        if (!first || !ids.has(String(first.pullRequestReview?.databaseId ?? ""))) continue;
+        threads.push({ threadId: row.id, resolved: row.isResolved, firstCommentId: typeof first.databaseId === "number" ? String(first.databaseId) : "" });
+      }
+      return { supported: true, complete: !payload.pageInfo.hasNextPage, threads };
+    } catch { return { supported: true, complete: false, threads: [] }; }
   }
 
   async resolveThread(threadId: string): Promise<boolean> {
@@ -1016,6 +1042,10 @@ export class ForgejoPublishApi implements PublishPlatformApi {
 
   async unresolvedSupersededThreads(_managedIds: number[]): Promise<ThreadQueryResult> {
     return { ok: false, threads: [], hasNextPage: false, error: "no GraphQL API" };
+  }
+
+  async reviewThreadStates(_managedReviewIds: readonly string[]): Promise<ReviewThreadStatesResult> {
+    return { supported: false, complete: false, threads: [] };
   }
 
   async resolveThread(_threadId: string): Promise<boolean> {

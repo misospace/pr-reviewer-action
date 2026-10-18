@@ -6,6 +6,10 @@ import {
   MAX_CARRYOVER_KEYS_PER_COMMENT,
   FEEDBACK_AFFORDANCE,
 } from "../src/publish/inline-findings.js";
+import { findingIdentityFromRecord } from "../src/outcomes/identity.js";
+
+/** #1027: the identity marker a posted finding comment now carries. */
+const idMarker = (rec: Record<string, unknown>): string => `\n\n<!-- pr-reviewer:finding-id:v1:${findingIdentityFromRecord(rec)} -->`;
 
 const diff = [
   "diff --git a/old b/new", "--- a/old", "+++ b/new", "@@ -1,2 +1,3 @@",
@@ -31,12 +35,12 @@ test("#680: validates paths and integer anchors, deduplicates threads, caps comm
   const result = buildComments(findings, diff, 1, { forgejoPositions: false });
   assert.equal(result.comments.length, 1);
   assert.equal(result.skipped, 8);
-  assert.deepEqual(result.comments[0], { path: "new", body: "**Info:** first\n\n_Automated finding from AI PR review._", line: 1, side: "RIGHT" });
+  assert.deepEqual(result.comments[0], { path: "new", body: `**Info:** first\n\n_Automated finding from AI PR review._${idMarker(findings.at(-2) as Record<string, unknown>)}`, line: 1, side: "RIGHT" });
 });
 
 test("#680: Forgejo uses diff-relative positions and ignores metadata slots", () => {
   const result = buildComments([{ file: "new", line: 2, message: "x" }], diff, 20, { forgejoPositions: true });
-  assert.deepEqual(result.comments[0], { path: "new", body: "**Info:** x\n\n_Automated finding from AI PR review._", new_position: 3 });
+  assert.deepEqual(result.comments[0], { path: "new", body: `**Info:** x\n\n_Automated finding from AI PR review._${idMarker({ file: "new", line: 2, message: "x" })}`, new_position: 3 });
 });
 
 test("#561: labels, categories, backticks, secret redaction and inert upstream links", () => {
@@ -122,9 +126,10 @@ test("#762: Forgejo degrades a suggestion to a plain fenced replacement (no one-
   assert.equal(Object.hasOwn(c, "start_line"), false);
 });
 
-test("#762: findings without actionable fields render byte-identically", () => {
-  const result = buildComments([{ file: "new", line: 1, message: "first" }], diff, 20, { forgejoPositions: false });
-  assert.deepEqual(result.comments[0], { path: "new", body: "**Info:** first\n\n_Automated finding from AI PR review._", line: 1, side: "RIGHT" });
+test("#762/#1027: findings without actionable fields render identically plus the identity marker", () => {
+  const record = { file: "new", line: 1, message: "first" };
+  const result = buildComments([record], diff, 20, { forgejoPositions: false });
+  assert.deepEqual(result.comments[0], { path: "new", body: `**Info:** first\n\n_Automated finding from AI PR review._${idMarker(record)}`, line: 1, side: "RIGHT" });
 });
 
 /** #762: the usefulness-feedback surface — one static affordance on an
@@ -392,7 +397,7 @@ test("#1101: a suggestion that is nothing but a marker line drops the prescripti
     assert.equal(body.includes("```suggestion"), false, "no replacement block");
     assert.equal(body.includes(FEEDBACK_AFFORDANCE), false, "no affordance without a replacement block");
     assert.deepEqual(parseRejectionCarryover(body), [], "the reserved grammar never reaches the comment");
-    assert.equal(body, "**Info:** m\n\n_Automated finding from AI PR review._");
+    assert.equal(body, `**Info:** m\n\n_Automated finding from AI PR review._${idMarker({ file: "new", line: 1, message: "m", suggestion })}`);
   }
   // Same shape as the round-trip test above, but with no surrounding text: the
   // marker line is what a digest would have described, so there is nothing left
