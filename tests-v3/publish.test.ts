@@ -478,6 +478,23 @@ test("#922: the loop's context budget and peak reach the published marker", asyn
   assert.ok(marker.includes('"context_peak":61234'));
 });
 
+test("#847: tool_stop_reason reaches the published marker with complete coverage", async () => {
+  const api = new MockPublishApi();
+  await publishReview(
+    input({ toolBudget: 26, toolBudgetSource: "size-scaled", toolCalls: 26, toolStopReason: "tool-call-budget-exhausted" }),
+    api,
+    { diffText: "" },
+  );
+  const marker = api.sticky[0]!.body.split("\n").find((line) => line.startsWith("<!-- ai-pr-reviewer:"));
+  assert.ok(marker);
+  // A budget stop whose coverage the corpus credit completed: no `coverage`
+  // gap, yet the stop reason is still recorded for the exhaustion-rate
+  // measurement.
+  assert.ok(!marker.includes('"coverage":'));
+  assert.ok(marker.includes('"tool_stop_reason":"tool-call-budget-exhausted"'));
+  assert.ok(marker.indexOf('"tool_stop_reason"') > marker.indexOf('"tool_budget"'));
+});
+
 test("#847: without a tool harness the marker stays byte-identical to the pre-#847 shape", async () => {
   const api = new MockPublishApi();
   await publishReview(input(), api, { diffText: "" });
