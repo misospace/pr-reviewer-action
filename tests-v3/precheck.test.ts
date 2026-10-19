@@ -1599,8 +1599,10 @@ test("#1073: the confidence-scorer family is fingerprint-conditional — disable
   });
   assert.notEqual(computeConfigHash(otherModel), computeConfigHash(enabled));
 
-  // The scorer's API key never influences the hash — the *_API_KEY exclusion
-  // holds for AI_CONFIDENCE_API_KEY in both states.
+  // The scorer's API key influences the answer but is secret, so it
+  // contributes as a one-way digest: the raw key never reaches a config line
+  // (those bytes end up in the public marker comment), and rotating it
+  // invalidates the cached score it produced.
   const withKey = collectConfigLines({
     AI_MODEL: "m",
     AI_BASE_URL: "https://primary",
@@ -1608,9 +1610,38 @@ test("#1073: the confidence-scorer family is fingerprint-conditional — disable
     AI_CONFIDENCE_TIMEOUT_SEC: "120",
     AI_CONFIDENCE_API_KEY: "sk-confidence-secret",
   });
-  assert.deepEqual(withKey, enabled);
-  assert.equal(computeConfigHash(withKey), computeConfigHash(enabled));
   assert.ok(!withKey.some((line) => line.includes("sk-confidence-secret")));
+  const keyLines = withKey.filter((line) => line.startsWith("AI_CONFIDENCE_API_KEY="));
+  assert.equal(keyLines.length, 1);
+  assert.match(keyLines[0]!, /^AI_CONFIDENCE_API_KEY=[0-9a-f]{12}$/);
+  assert.notEqual(computeConfigHash(withKey), computeConfigHash(enabled));
+
+  // Rotating the credential re-scores; re-running the same credential does not.
+  const rotated = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+    AI_CONFIDENCE_API_KEY: "sk-confidence-other",
+  });
+  assert.notEqual(computeConfigHash(rotated), computeConfigHash(withKey));
+  const sameKey = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+    AI_CONFIDENCE_API_KEY: " sk-confidence-secret ",
+  });
+  assert.equal(computeConfigHash(sameKey), computeConfigHash(withKey));
+
+  // A disabled scorer contributes nothing even when a credential is present:
+  // the digest must not become a new line for existing installations.
+  const disabledWithKey = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_API_KEY: "sk-confidence-secret",
+  });
+  assert.deepEqual(disabledWithKey, baseline);
 
   // A scorer-enabled config with default-shaped empties still differs from
   // the baseline (the model line alone carries the change), and a timeout

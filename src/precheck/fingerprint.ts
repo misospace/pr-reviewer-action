@@ -192,8 +192,11 @@ const CONDITIONAL_AI_KEYS: ReadonlySet<string> = new Set([
   // scorer disabled (the default) it contributes NOTHING — the config hash
   // is byte-identical to a build without the feature — and with the scorer
   // enabled its non-empty values contribute. `AI_CONFIDENCE_API_KEY` is
-  // excluded from the sweep by the `*_API_KEY` rule and stays excluded here
-  // (the loop only ever emits non-secret config keys).
+  // excluded from the unconditional sweep by the `*_API_KEY` rule and is
+  // re-admitted below only as a one-way DIGEST, never as its raw value:
+  // rotating the scorer's credential changes which account (and therefore
+  // provider identity, availability, and score) answers, so the cached
+  // review must not survive the rotation — see `credentialDigest`.
   "AI_CONFIDENCE_MODEL",
   "AI_CONFIDENCE_BASE_URL",
   "AI_CONFIDENCE_API_FORMAT",
@@ -238,6 +241,15 @@ const ANTHROPIC_EFFORT_SUPPORT_KEYS: ReadonlySet<string> = new Set([
   "AI_SMART_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT",
   "AI_FALLBACK_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT",
 ]);
+
+/** One-way, domain-separated fingerprint of a SECRET config value:
+ * `<key \0 value>` hashed to the first 12 hex chars — the same shape
+ * `extraHeaderFingerprint` emits for header values, so the fingerprint bytes
+ * (which reach a public marker comment) can never carry the secret, while a
+ * rotation still invalidates the cached review the secret produced. */
+function credentialDigest(key: string, value: string): string {
+  return sha256Hex(`${key}\0${value}`).slice(0, 12);
+}
 
 /** Collect configuration key=value lines from the environment map and
  * config files (port of `_collect_config_lines`). `AI_*` is swept as this
@@ -317,15 +329,26 @@ export function collectConfigLines(env: Record<string, string>): string[] {
     // #1073: the confidence-scorer family contributes only while the scorer
     // is enabled (`AI_CONFIDENCE_MODEL` non-empty). Disabled — the default —
     // emits nothing, so `AI_CONFIDENCE_TIMEOUT_SEC=120` (a non-empty contract
-    // default) never invalidates an existing cached review on upgrade. The
-    // `*_API_KEY` exclusion holds here too: the key is listed in
-    // CONDITIONAL_AI_KEYS only so the sweep can never pick it up, and this
-    // loop must not re-admit it.
+    // default) never invalidates an existing cached review on upgrade.
     if (key.startsWith("AI_CONFIDENCE_")) {
-      if (key.endsWith("_API_KEY")) continue;
       const scorerEnabled = (env.AI_CONFIDENCE_MODEL ?? "").trim() !== "";
       const value = (env[key] ?? "").trim();
-      if (scorerEnabled && value !== "") lines.push(`${key}=${value}`);
+      if (!scorerEnabled || value === "") continue;
+      // The credential is the one model-affecting setting the raw-value rule
+      // cannot cover: it is secret, but a rotation changes the answer, so it
+      // contributes as a domain-separated one-way digest — the same shape
+      // `extraHeaderFingerprint` emits for header values. The gate is
+      // "configured", not "resolves to a different credential than the
+      // primary": a same-endpoint scorer inherits the primary key and ignores
+      // its own, so digesting it there re-scores a run nothing changed. That
+      // is deliberate — mirroring `resolveConfidenceProfile`'s inheritance
+      // rule here would couple the fingerprint to routing semantics, and the
+      // over-eager direction only ever costs a fresh review.
+      if (key.endsWith("_API_KEY")) {
+        lines.push(`${key}=${credentialDigest(key, value)}`);
+        continue;
+      }
+      lines.push(`${key}=${value}`);
       continue;
     }
     const effort = (env[key] ?? "").trim();

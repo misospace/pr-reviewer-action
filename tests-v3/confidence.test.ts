@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { startMockServer } from "./helpers.js";
 import { runConfidenceScorer } from "../src/confidence/scorer.js";
 import {
+  MAX_CONFIDENCE_REASON_CHARS,
   applyConfidenceCeilings,
   confidenceOutputFields,
   extractConfidenceJson,
@@ -158,6 +159,26 @@ test("no ceilings fire on a clean complete review", () => {
   assert.equal(out.score, 4);
   assert.deepEqual(out.caps, []);
   assert.equal(out.reason, "looks fine");
+});
+
+test("the cap note never pushes the reason past the documented bound", () => {
+  const maxed = { ...answer(5), reason: "r".repeat(MAX_CONFIDENCE_REASON_CHARS) };
+  const capped = applyConfidenceCeilings(maxed, { findings: [{ severity: "blocker" }] });
+  assert.equal(capped.reason.length, MAX_CONFIDENCE_REASON_CHARS);
+  assert.match(capped.reason, /\[deterministic cap: blocker_cap_2\]$/);
+
+  // Every cap shape keeps the bound, and a short reason is never truncated.
+  for (const input of [
+    { findings: [{ severity: "major" }] },
+    { findings: [], coverage: { incomplete_reason: "execution" } },
+  ]) {
+    const out = applyConfidenceCeilings(maxed, input);
+    assert.equal(out.reason.length, MAX_CONFIDENCE_REASON_CHARS);
+    assert.match(out.reason, /\[deterministic cap: [a-z0-9_, ]+\]$/);
+  }
+  const short = applyConfidenceCeilings(answer(4), { findings: [{ severity: "major" }] });
+  assert.equal(short.reason, "looks fine [deterministic cap: major_cap_3]");
+  assert.ok(short.reason.length <= MAX_CONFIDENCE_REASON_CHARS);
 });
 
 // ── output mapping ───────────────────────────────────────────────────────

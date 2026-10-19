@@ -256,8 +256,14 @@ export function applyConfidenceCeilings(
   if (caps.length === 0) {
     return { score, risk: answer.risk, reason: answer.reason, caps };
   }
+  // The cap note is appended to the model's own reason, so the model's share
+  // shrinks to whatever the note leaves — the RESULT stays within the same
+  // documented bound either way (slicing to MAX + note.length instead would
+  // publish a reason longer than MAX_CONFIDENCE_REASON_CHARS).
   const note = ` [deterministic cap: ${caps.join(", ")}]`;
-  const reason = `${answer.reason}${note}`.slice(0, MAX_CONFIDENCE_REASON_CHARS + note.length);
+  const room = Math.max(0, MAX_CONFIDENCE_REASON_CHARS - note.length);
+  const head = answer.reason.length > room ? answer.reason.slice(0, room).trimEnd() : answer.reason;
+  const reason = `${head}${note}`.slice(0, MAX_CONFIDENCE_REASON_CHARS);
   return { score, risk: answer.risk, reason, caps };
 }
 
