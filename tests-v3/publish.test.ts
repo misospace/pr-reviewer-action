@@ -644,6 +644,26 @@ test("#1017: a credential echoed in the model markdown is redacted on the publis
   assert.ok(!published.includes("ai-pr-review-sha:forged"), "reserved marker still stripped");
 });
 
+test("#1136: a model-authored unclosed fence is dissolved before the conditional-section backstop sees it", () => {
+  // Pinned composition decision: the walk's end-of-text dissolution makes a
+  // formerly fence-hidden tail visible to stripEmptyConditionalSections, so
+  // a conditional heading inside an unclosed block is now stripped by that
+  // backstop's own policy instead of being trapped in an unterminated code
+  // block that also swallowed everything published after the review body.
+  const presence: ConditionalSectionPresence = {
+    linkedIssue: false, evidenceProvider: true, standards: true,
+    toolHarnessFindings: true, toolHarnessResults: true,
+  };
+  const published = sanitizeForPublication("Summary\n```md\n## Linked Issue Fit\n#123\n", "inert", presence);
+  assert.ok(!published.includes("```md"), "the unclosed block is dissolved, not left open");
+  assert.ok(!published.includes("## Linked Issue Fit"), "the hidden tail is no longer fence-inert, so the backstop's policy strips the section");
+  assert.ok(published.includes("Summary"), "prose before the unclosed block survives");
+  // And with the section marked present, the same tail survives verbatim —
+  // the dissolution itself deletes nothing, the backstop's policy governs.
+  const kept = sanitizeForPublication("Summary\n```md\n## Linked Issue Fit\n#123\n", "inert", { ...presence, linkedIssue: true });
+  assert.equal(kept, "Summary\n\\`\\`\\`md\n## Linked Issue Fit\nPR 123\n", "with the section present, the dissolved tail survives verbatim");
+});
+
 
 for (const platform of ["github", "forgejo"] as const) {
   for (const mode of ["review_comment", "review_verdict"] as const) {
