@@ -197,7 +197,6 @@ DOGFOOD_OVERRIDES = {
     "ai-smart-api-key",
     "ci-timeout-sec",
     "publish-mode",
-    "allow-approve",
 }
 
 
@@ -221,7 +220,7 @@ def _contract_input_ids() -> set[str]:
 
 
 def test_dogfood_overrides_only_what_is_ours() -> None:
-    """Endpoint/models/auth, our CI timeout and approving: everything else is default.
+    """Endpoint/models/auth, our CI timeout and the publish mode: everything else is default.
 
     Two distinct guarantees, both order-independent: every overridden key must
     name a declared contract input (a stale or renamed key fails here instead
@@ -233,7 +232,9 @@ def test_dogfood_overrides_only_what_is_ours() -> None:
     assert not unknown, f"dogfood overrides name unknown action inputs: {unknown}"
     assert set(values) <= DOGFOOD_OVERRIDES, sorted(set(values) - DOGFOOD_OVERRIDES)
     assert values.get("publish-mode") == "review_verdict"
-    assert values.get("allow-approve") == "true"
+    # #1161: `allow-approve` is deprecated and ignored — the dogfood lane
+    # must not pass the inert input at all.
+    assert "allow-approve" not in values
 
 
 def test_public_action_defaults_are_the_recommended_setup() -> None:

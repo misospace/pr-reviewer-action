@@ -123,6 +123,6 @@ gh api "repos/OWNER/REPO/issues/comments?per_page=100" --paginate \
 ```
 
 For native PR reviews (`publish-mode: review_comment` /
-`publish-mode: review_verdict`), use `gh api
+`publish-mode: review_verdict` / `publish-mode: review_blockers`), use `gh api
 repos/OWNER/REPO/pulls/NUMBER/reviews` instead — the marker lives in each
 review's `body` field the same way.

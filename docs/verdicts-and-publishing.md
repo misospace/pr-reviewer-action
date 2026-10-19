@@ -66,7 +66,8 @@ The published review surfaces the same inputs: open findings and any coverage ga
 | --- | --- | --- |
 | `comment` | Sticky PR comment with `<!-- ai-pr-reviewer -->` markers, edited in place. Opt-in. | None — advisory only. |
 | `review_comment` (default) | Non-blocking native PR review via `gh pr review --comment`. | None — review comments don't affect status checks. |
-| `review_verdict` | Native PR review with `approve`/`request_changes`. | Counts as a real review against branch protection. |
+| `review_verdict` | Publishes the final verdict natively: an `approve` verdict becomes a native `APPROVE` review, a `request_changes` verdict a native `REQUEST_CHANGES` review. Cross-repository (fork) PRs additionally need `approve-forks: true`. | Counts as a real review against branch protection. |
+| `review_blockers` | Blocks on the verdict only: a `request_changes` verdict becomes a native `REQUEST_CHANGES` review; an `approve` verdict is published as an advisory native `COMMENT` review; never publishes an approval. | A blocking request holds the merge — but the mode never approves. |
 
 ### Permissions per mode
 
@@ -75,18 +76,24 @@ The published review surfaces the same inputs: open findings and any coverage ga
 | `comment` | `contents: read`, `pull-requests: write` |
 | `review_comment` | `contents: read`, `pull-requests: write` |
 | `review_verdict` | `contents: read`, `pull-requests: write`, plus the repo/org setting **Allow GitHub Actions to create and approve pull requests** for approvals to succeed |
+| `review_blockers` | `contents: read`, `pull-requests: write` — the mode never publishes an approval, so the **Allow GitHub Actions to create and approve pull requests** setting is not needed |
 
 ## Native review verdicts, `allow-approve`, and `approve-forks`
 
-With `publish-mode: review_verdict`:
+With `publish-mode: review_verdict` the final verdict is published natively: an `approve` verdict becomes a native `APPROVE` review and a `request_changes` verdict becomes a native `REQUEST_CHANGES` review. No second opt-in flag is involved.
 
-- `allow-approve` defaults to `false` — a model `approve` is blocked from being submitted as a native approval unless this is explicitly `true`.
-- `approve-forks` defaults to `false` — even with `allow-approve: true`, approvals are still blocked for cross-repository (fork) PRs unless this is also `true`.
+- `allow-approve` is **deprecated and ignored**. It is still accepted — existing workflows keep loading — but it gates nothing: absent, `false` and `true` all produce the same published event. Setting it to anything other than the default logs a deprecation warning pointing at `publish-mode: review_verdict` / `publish-mode: review_blockers`. (The runner merges the contract default into every input, so an input explicitly set to `false` is indistinguishable from an unset one — the same limitation the repository-config narrowing has.) This restores the documented `review_verdict` contract; a workflow that wanted blockers-only behavior (request changes on blockers, never approve) should select `publish-mode: review_blockers` instead.
+- `approve-forks` defaults to `false` — cross-repository (fork) PRs are never approved unless this is explicitly `true`. It is the separate, explicit cross-repository approval opt-in. Fork-ness that cannot be determined is treated as a fork (fail closed). When the scope policy withholds the approval, the review says **"Approval withheld by scope policy"** and publishes as an advisory `COMMENT` review.
 - Evidence-provider or tool-failure enforcement that forced `request_changes` always blocks approval.
-- The review body must be non-empty for an approval to publish.
+- The review body must be non-empty for an approval to publish — an empty model body fails verdict parsing, so there is no approval to publish.
 - **The publish mode is authoritative (#1145): a valid final `approve` publishes a native `APPROVE` and a valid final `request_changes` publishes a native `REQUEST_CHANGES`.** A requirement-trace or coverage shortfall (`requirement_trace` incompleteness, `review-result: partial`, a tool-loop coverage gap, or unconfirmable coverage) never downgrades the verdict to a `COMMENT`. The shortfall stays visible — the marker keeps reporting `review-result: partial` with its `incomplete-reason`, the coverage notice renders in the body, and an approved-but-incomplete review carries an explicit "Approval published with incomplete coverage" note — and the review pipeline is expected to close traceable evidence gaps (bounded evidence-repair continuation of the tool loop) before finalizing rather than after.
 - **Confirmed-unmet requirements escalate to `request_changes` (#1145).** Where the requirement-trace validator positively refutes an in-scope requirement with a deterministic predicate that ran against the checkout at head — the #854 `enforcement-location-copies-without-comparing` and #985 `structural-proof-unconfirmed` cases — the action synthesizes a concrete blocker finding per refuted requirement (capped) and escalates the final verdict to `request_changes` (recorded as `verdict-source: enforcement` under the non-strict policies; under `strict` the mapping derives the same `request_changes` from the synthesized open blockers, so the source reads as findings-derived). This is the only synthesis the trace layer performs: a model-*claimed* `unmet` with no deterministic refutation stays disclosure-only (#1095), an unproven gap goes to the bounded evidence-repair continuation first ([Tool loop](tool-loop.md#evidence-repair-continuation-1145)), and a genuinely unverifiable row never forces a verdict — it just keeps the run from reading as clean.
-- The only remaining reason a valid `approve` publishes as a non-blocking `COMMENT` is an operator guardrail: `allow-approve: false`, a fork PR without `approve-forks: true`, or unknown fork-ness (fails closed). It never turns a withheld approval into a blocking `request_changes`. A run that reaches `review_verdict` publication with **no valid final verdict** fails the action explicitly — `COMMENTED` is not an alternate failure state for verdict mode. A true approval failure (e.g. the 403 from a disabled "Allow GitHub Actions to create and approve pull requests" setting) fails the step loudly.
+- The only remaining reason a valid `approve` publishes as a non-blocking `COMMENT` is an operator guardrail: a fork PR without `approve-forks: true`, or unknown fork-ness (fails closed). (`allow-approve` is deprecated and inert — it no longer gates anything.) It never turns a withheld approval into a blocking `request_changes`.
+- A run that reaches `review_verdict` publication with **no valid final verdict** fails the action explicitly — `COMMENTED` is not an alternate failure state for verdict mode. In the blockers-only mode, where the published output is an advisory comment by design, a missing or invalid verdict publishes neither `APPROVE` nor `REQUEST_CHANGES`: the review says "No review verdict" and publishes as an advisory `COMMENT`.
+
+`publish-mode: review_blockers` is the blockers-only mode: a review whose verdict is `request_changes` publishes a native `REQUEST_CHANGES` review, and a review whose verdict is `approve` publishes an advisory native `COMMENT` review. It never publishes an approval — under any verdict, input, or pull-request scope.
+
+When a clean verdict is withheld by policy, the action submits a non-blocking `COMMENT` review with an explanation — it never turns a withheld approval into a blocking `request_changes`. A genuine `request_changes` from the model is still a real blocking review. A true approval failure (e.g. the 403 from a disabled "Allow GitHub Actions to create and approve pull requests" setting) fails the step loudly.
 
 ```yaml
 - uses: misospace/pr-reviewer-action@v3
@@ -96,16 +103,15 @@ With `publish-mode: review_verdict`:
     ai-model: gpt-4.1
     ai-api-key: ${{ secrets.OPENAI_API_KEY }}
     publish-mode: review_verdict
-    allow-approve: "true"
 ```
 
 ## Non-blocking comments and cleanup of superseded reviews
 
 `publish-mode: review_comment` submits a native `COMMENT` review — visible in the PR conversation, but it never affects branch protection or status checks.
 
-When `publish-mode` is `review_comment` or `review_verdict`, `cleanup-previous-native-reviews` (default `auto`) keeps the timeline readable:
+When `publish-mode` is `review_comment`, `review_verdict` or `review_blockers`, `cleanup-previous-native-reviews` (default `auto`) keeps the timeline readable:
 
-- `auto`: cleanup runs for `review_comment`/`review_verdict` (which each create a new review per run); disabled for `comment` (which already edits one sticky comment in place).
+- `auto`: cleanup runs for `review_comment`/`review_verdict`/`review_blockers` (which each create a new review per run); disabled for `comment` (which already edits one sticky comment in place).
 - `true`: always clean up, regardless of mode.
 - `false`: never clean up.
 
@@ -116,6 +122,7 @@ Cleanup identifies previous managed reviews by the configured marker, dismisses 
 With `inline-findings: "true"` (default) and a native publish mode, findings that anchor to a `file` + `line` in the PR diff are attached as line-anchored review comments, capped by `inline-findings-max` (default `20`):
 
 - `review_verdict` — the verdict review itself carries the inline comments; if GitHub rejects the payload (e.g. the diff moved under it), the action falls back to a plain review rather than failing to publish.
+- `review_blockers` — the verdict review itself carries the inline comments, with the same plain-review fallback.
 - `review_comment` — the sticky summary comment posts as usual, plus a separate `COMMENT` review carrying the inline comments (carrying the managed marker, so cleanup can supersede it next run).
 - `comment` — ignored.
 

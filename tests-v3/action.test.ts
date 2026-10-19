@@ -40,6 +40,23 @@ test("action stage env: only endpoint + model given, everything else derived", (
   }
 });
 
+test("#1161: the stage env carries the effective allow-approve value — the runner merges the contract default", () => {
+  // The runner exports an INPUT_ variable for EVERY declared input, with
+  // the contract default merged in. The action can therefore only tell
+  // "set to a non-default value" from "default" — never "explicitly false"
+  // from "unset" — which is the same limitation the repository-config
+  // narrowing has.
+  const base = {
+    "INPUT_AI-BASE-URL": "https://llm.example.invalid/v1",
+    "INPUT_AI-MODEL": "m",
+    GITHUB_REPOSITORY: "o/r",
+    GITHUB_SERVER_URL: "https://github.com",
+  };
+  assert.equal(actionStageEnv({ ...base }).ALLOW_APPROVE, "false");
+  assert.equal(actionStageEnv({ ...base, "INPUT_ALLOW-APPROVE": "false" }).ALLOW_APPROVE, "false");
+  assert.equal(actionStageEnv({ ...base, "INPUT_ALLOW-APPROVE": "true" }).ALLOW_APPROVE, "true");
+});
+
 test("action stage env: a non-GitHub server URL is the Forgejo API base", () => {
   const stage = actionStageEnv({ "INPUT_AI-BASE-URL": "https://x.invalid", "INPUT_AI-MODEL": "m", GITHUB_SERVER_URL: "https://forge.example.invalid" });
   assert.equal(stage.FORGEJO_API_URL, "https://forge.example.invalid");
