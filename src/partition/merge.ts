@@ -55,8 +55,21 @@ function normalizeFinding(raw: unknown, partition: number): PartitionFinding | n
   return { ...record, partition, file, line, severity, title };
 }
 
+/** #1119: the normalized tuple serialized as a JSON array, not joined by bare
+ * NUL. `file`, `severity`, and `title` are model-authored, and `trim()` /
+ * `toLowerCase()` do not remove NUL, so a bare-NUL join let a model forge a
+ * separator and fold two genuinely distinct findings into one duplicate. JSON
+ * quoting neutralizes the array's own separators and escaping neutralizes
+ * NUL, so the encoding is injective over the normalized tuple whatever the raw
+ * model text was — normalization still folds raw text differing only in
+ * surrounding whitespace or case, as it always did. */
 function dedupKey(finding: PartitionFinding): string {
-  return `${finding.file ?? ""}\u0000${finding.line ?? ""}\u0000${finding.severity.toLowerCase()}\u0000${finding.title.trim().toLowerCase()}`;
+  return JSON.stringify([
+    finding.file ?? "",
+    finding.line ?? "",
+    finding.severity.toLowerCase(),
+    finding.title.trim().toLowerCase(),
+  ]);
 }
 
 /**

@@ -203,6 +203,20 @@ test("merge deduplicates exact findings, preserves provenance, and never caps", 
   assert.equal(all.duplicates, 0);
 });
 
+test("#1119: a NUL-bearing model field cannot forge a dedup separator between distinct findings", () => {
+  // Under the old bare-NUL join both normalized to the same bytes: file
+  // "a.ts", NUL, "1", NUL, "major", NUL, "info", NUL, "c". The NUL the model
+  // put in `severity` was indistinguishable from the NUL it put in `title`'s
+  // position, so the second finding folded into the first as a duplicate and
+  // was never reported.
+  const merged = mergePartitionFindings([
+    { index: 0, findings: [{ file: "a.ts", line: 1, severity: "major\u0000info", title: "c" }] },
+    { index: 1, findings: [{ file: "a.ts", line: 1, severity: "major", title: "info\u0000c" }] },
+  ]);
+  assert.equal(merged.findings.length, 2);
+  assert.equal(merged.duplicates, 0);
+});
+
 test("crossPartitionFindings pairs findings with the referenced file", () => {
   const diff = rawDiff(chunk("a.ts", ['+import "./b.ts"']), chunk("b.ts", ["+export const b = 1"]));
   const manifest = planPartitions({
