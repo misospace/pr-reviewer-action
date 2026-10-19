@@ -30,8 +30,9 @@
  *   maintenance can never invalidate an active workspace.
  */
 
+import { constants } from "node:fs";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readdir, readFile, rm } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { parseRepoRef } from "../platform/repo-ref.js";
 import { pullHeadRefspec } from "../platform/head-ref.js";
@@ -48,6 +49,43 @@ const GIT_TERMINATE_GRACE_MS = 5_000;
  * admin dir is controller-owned, the cap only matches the module's
  * bounding style. */
 const GITDIR_MAX_BYTES = 4096;
+/** `O_NOFOLLOW` is not defined on every platform; there the no-follow
+ * guarantee degrades to the platform default (the read stays bounded and
+ * same-descriptor either way). */
+const NOFOLLOW_FLAG = constants.O_NOFOLLOW ?? 0;
+
+/** Read a small bookkeeping file (git worktree admin `gitdir`) WITHOUT a
+ * check-then-use gap: open once with no-follow semantics (a symlinked file
+ * is refused, never followed), size-check via `fstat` on that descriptor,
+ * and read at most maxBytes+1 from the SAME descriptor — so the bound
+ * cannot be bypassed by swapping the file between a separate stat and
+ * read, and the bytes read are provably the bytes that were size-checked.
+ * `null` on any failure (unreadable, symlinked, not a regular file,
+ * oversized): callers treat that as unproven, fail closed. */
+async function readBoundedRegularFile(path: string, maxBytes: number): Promise<string | null> {
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | NOFOLLOW_FLAG);
+  } catch {
+    return null;
+  }
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > maxBytes) {
+      return null;
+    }
+    const buffer = Buffer.alloc(maxBytes + 1);
+    const { bytesRead } = await handle.read(buffer, 0, maxBytes + 1, 0);
+    if (bytesRead > maxBytes) {
+      return null;
+    }
+    return buffer.subarray(0, bytesRead).toString("utf8").trim();
+  } catch {
+    return null;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
 /** Branch refspec every fetch carries (forced update; tags deliberately NOT
  * fetched — forge/fork tags are attack surface no review path needs). */
 const BRANCH_REFSPEC = "+refs/heads/*:refs/heads/*";
@@ -93,7 +131,9 @@ export function mirrorDirName(platform: string, repoFullName: string): string {
 
 export interface MirrorOptions {
   /** Absolute cache root the controller owns. Created (0700) if missing;
-   * refused when it is a symlink. */
+   * before it is trusted (after any creation) the whole path is walked:
+   * any symlinked or non-directory component, a root writable by
+   * group/other, or a root not owned by the controller uid is refused. */
   readonly rootDir: string;
   readonly platform: "github" | "forgejo";
   readonly repoFullName: string;
@@ -155,18 +195,57 @@ async function runGit(gitBinary: string, opts: GitRunOptions): Promise<GitRunRes
   return { stdout: result.stdout, status: result.status, exitCode: result.exitCode };
 }
 
+/** Walk every component of a resolved absolute path (leaf included) and
+ * prove it is a chain of real directories — no component may be a symlink
+ * (`lstat` sees links, so a symlinked ancestor cannot silently redirect
+ * creation or use below it) — and then prove the LEAF (the cache root
+ * itself) is a private, controller-owned directory: no group/other write,
+ * and owned by the process uid where ownership is inspectable. Fail
+ * closed on any lstat that cannot prove a component. */
+async function assertTrustedDirChain(resolved: string, label: string): Promise<void> {
+  const segments = resolved.split("/").filter((segment) => segment.length > 0);
+  let current = "/";
+  for (const segment of segments) {
+    current = join(current, segment);
+    let info;
+    try {
+      info = await lstat(current);
+    } catch {
+      throw new AcquisitionError("invalid_config", `${label} path component is not inspectable: ${current}`);
+    }
+    if (!info.isDirectory()) {
+      throw new AcquisitionError("invalid_config", `${label} path component is not a real directory: ${current}`);
+    }
+  }
+  const rootInfo = await lstat(resolved);
+  if ((rootInfo.mode & 0o022) !== 0) {
+    throw new AcquisitionError("invalid_config", `${label} is writable by group or other: ${resolved}`);
+  }
+  if (process.getuid !== undefined && rootInfo.uid !== process.getuid()) {
+    throw new AcquisitionError("invalid_config", `${label} is not owned by the controller uid: ${resolved}`);
+  }
+}
+
 async function ensureRealDir(path: string, label: string): Promise<string> {
   const resolved = resolve(path);
-  let info;
   try {
-    info = await lstat(resolved);
-  } catch {
+    await lstat(resolved);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      // An lstat that proves nothing (EACCES, ELOOP, ...) must not be
+      // treated as "absent" and papered over by a mkdir.
+      throw new AcquisitionError("invalid_config", `${label} is not inspectable: ${resolved}`);
+    }
     await mkdir(resolved, { recursive: true, mode: 0o700 });
-    return resolved;
   }
-  if (!info.isDirectory()) {
-    throw new AcquisitionError("invalid_config", `${label} is not a directory: ${resolved}`);
-  }
+  // Revalidate AFTER creation, not just before: recursive `mkdir` reports
+  // success when the leaf is already a symlink to an existing directory
+  // (possibly planted between the ENOENT above and the mkdir) and silently
+  // traverses symlinked ancestors, so the fresh-creation path is only
+  // trusted once the full chain has been re-checked at the filesystem
+  // level. A refusal therefore leaves nothing usable behind, whichever
+  // side of the mkdir the hostile path was planted on.
+  await assertTrustedDirChain(resolved, label);
   return resolved;
 }
 
@@ -382,21 +461,11 @@ export class MirrorCache {
   /** A registration is provably dead when its `gitdir` file names a
    * workspace `.git` entry whose directory no longer exists — exactly what
    * `git worktree prune` would drop. Anything unreadable, malformed,
-   * oversized, or non-ENOENT is unproven and defers the rebuild (fail
-   * closed). */
+   * oversized, symlinked, or non-ENOENT is unproven and defers the rebuild
+   * (fail closed). */
   private async registrationIsProvablyDead(adminDir: string): Promise<boolean> {
-    const gitdirFile = join(adminDir, "gitdir");
-    try {
-      if ((await lstat(gitdirFile)).size > GITDIR_MAX_BYTES) {
-        return false;
-      }
-    } catch {
-      return false;
-    }
-    let raw: string;
-    try {
-      raw = (await readFile(gitdirFile, "utf8")).trim();
-    } catch {
+    const raw = await readBoundedRegularFile(join(adminDir, "gitdir"), GITDIR_MAX_BYTES);
+    if (raw === null) {
       return false;
     }
     if (!raw.startsWith("/") || !raw.endsWith(".git")) {

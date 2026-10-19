@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { access, lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, chown, lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gitEnv } from "../src/acquisition/git-env.js";
@@ -693,6 +693,191 @@ test("ensureMirror: a signalled fsck is not corruption evidence — the mirror i
       });
       assert.equal(await readFile(join(first.mirrorPath, "config"), "utf8"), marker);
       await rm(scratch, { recursive: true, force: true });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("ensureMirror: a cache root writable by group or other is refused", async () => {
+  const root = await tempRoot();
+  try {
+    await chmod(root, 0o770);
+    const cache = new MirrorCache({
+      rootDir: root,
+      platform: "github",
+      repoFullName: "perm/repo",
+      cloneUrl: "https://example.invalid/perm/repo.git",
+    });
+    await assert.rejects(cache.ensureMirror(), (error: unknown) => {
+      assert.ok(error instanceof AcquisitionError);
+      assert.equal(error.code, "invalid_config");
+      assert.match(error.message, /writable by group or other/);
+      return true;
+    });
+    assert.deepEqual(await readdir(root), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("ensureMirror: a cache root owned by another uid is refused", {
+  skip: process.getuid?.() !== 0 ? "requires root to plant a foreign-owned directory" : false,
+}, async () => {
+  const root = await tempRoot();
+  try {
+    await chown(root, 65534, 65534);
+    const cache = new MirrorCache({
+      rootDir: root,
+      platform: "github",
+      repoFullName: "owner/repo",
+      cloneUrl: "https://example.invalid/owner/repo.git",
+    });
+    await assert.rejects(cache.ensureMirror(), (error: unknown) => {
+      assert.ok(error instanceof AcquisitionError);
+      assert.equal(error.code, "invalid_config");
+      assert.match(error.message, /not owned by the controller uid/);
+      return true;
+    });
+    assert.deepEqual(await readdir(root), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("ensureMirror: a cache root under a symlinked ancestor is refused, nothing initialized through the link", async () => {
+  const base = await tempRoot();
+  const outside = await mkdtemp(join(tmpdir(), "acq-ancestor-"));
+  try {
+    const link = join(base, "link");
+    await symlink(outside, link);
+    const cache = new MirrorCache({
+      rootDir: join(link, "cache"),
+      platform: "github",
+      repoFullName: "anc/repo",
+      cloneUrl: "https://example.invalid/anc/repo.git",
+    });
+    await assert.rejects(cache.ensureMirror(), (error: unknown) => {
+      assert.ok(error instanceof AcquisitionError);
+      assert.equal(error.code, "invalid_config");
+      assert.match(error.message, /not a real directory/);
+      return true;
+    });
+    // The refusal happens BEFORE any git invocation: the link target is
+    // untouched (at most an empty created directory, never a mirror, never
+    // fetch writes).
+    const created = await readdir(outside);
+    for (const entry of created) {
+      assert.deepEqual(await readdir(join(outside, entry)), []);
+    }
+  } finally {
+    await rm(base, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("ensureMirror: a fresh nested cache root is created private and works", async () => {
+  const fixture = await startGitHttpFixture();
+  try {
+    const head = await initRepo(fixture, "deepcrea/repo");
+    const base = await tempRoot();
+    const rootDir = join(base, "levels", "deep", "cache");
+    try {
+      const cache = new MirrorCache({
+        rootDir,
+        platform: "github",
+        repoFullName: "deepcrea/repo",
+        cloneUrl: `${fixture.baseUrl}/deepcrea/repo.git`,
+      });
+      const info = await cache.ensureMirror();
+      assert.equal(git(info.mirrorPath, ["rev-parse", "refs/heads/main"]).trim(), head);
+      for (const created of [join(base, "levels"), join(base, "levels", "deep"), rootDir]) {
+        assert.equal((await lstat(created)).mode & 0o022, 0);
+      }
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("ensureMirror: a registration with a symlinked gitdir file is unprovable and defers the rebuild", async () => {
+  const fixture = await startGitHttpFixture();
+  try {
+    const head = await initRepo(fixture, "symgit/repo");
+    const root = await tempRoot();
+    try {
+      const cache = new MirrorCache({
+        rootDir: root,
+        platform: "github",
+        repoFullName: "symgit/repo",
+        cloneUrl: `${fixture.baseUrl}/symgit/repo.git`,
+      });
+      const first = await cache.ensureMirror();
+      const handle = await createReviewWorkspace(cache, { headSha: head });
+      try {
+        const adminRoot = join(first.mirrorPath, "worktrees");
+        const [registration] = await readdir(adminRoot);
+        assert.ok(registration);
+        const gitdirFile = join(adminRoot, registration, "gitdir");
+        await rm(gitdirFile);
+        // The link names a never-existing workspace .git path: the old
+        // stat-then-readFile pair FOLLOWED it and wrongly proved the
+        // registration dead. The no-follow descriptor open refuses the
+        // link, leaving the registration unproven.
+        await symlink("/nonexistent-acq-workspace/.git", gitdirFile);
+        await writeFile(join(first.mirrorPath, "config"), " [core\n this is not config\n");
+        await assert.rejects(cache.ensureMirror(), (error: unknown) => {
+          assert.ok(error instanceof AcquisitionError);
+          assert.equal(error.code, "corrupt_mirror");
+          assert.match(error.message, /rebuild deferred/);
+          return true;
+        });
+        await access(first.mirrorPath);
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("ensureMirror: a registration with an oversized gitdir file defers the rebuild", async () => {
+  const fixture = await startGitHttpFixture();
+  try {
+    const head = await initRepo(fixture, "biggitdir/repo");
+    const root = await tempRoot();
+    try {
+      const cache = new MirrorCache({
+        rootDir: root,
+        platform: "github",
+        repoFullName: "biggitdir/repo",
+        cloneUrl: `${fixture.baseUrl}/biggitdir/repo.git`,
+      });
+      const first = await cache.ensureMirror();
+      const handle = await createReviewWorkspace(cache, { headSha: head });
+      try {
+        const adminRoot = join(first.mirrorPath, "worktrees");
+        const [registration] = await readdir(adminRoot);
+        assert.ok(registration);
+        await writeFile(join(adminRoot, registration, "gitdir"), "x".repeat(5000));
+        await writeFile(join(first.mirrorPath, "config"), " [core\n this is not config\n");
+        await assert.rejects(cache.ensureMirror(), (error: unknown) => {
+          assert.ok(error instanceof AcquisitionError);
+          assert.equal(error.code, "corrupt_mirror");
+          assert.match(error.message, /rebuild deferred/);
+          return true;
+        });
+        await access(first.mirrorPath);
+      } finally {
+        await handle.close();
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
