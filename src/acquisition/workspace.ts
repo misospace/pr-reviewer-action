@@ -30,7 +30,11 @@
  *
  * Crash recovery: `sweepStaleWorkspaces` removes workspaces left behind by
  * workers that died before `close()` (age-based) and prunes their worktree
- * registrations.
+ * registrations. The sweep applies the SAME workspaces-root refusal as
+ * extraction: a symlinked or non-directory root is refused, a missing root
+ * is a no-op, and the root is re-verified inside the mirror lock
+ * immediately before the removals, so a root swapped mid-sweep is refused
+ * rather than swept.
  */
 
 import { randomUUID } from "node:crypto";
@@ -334,10 +338,73 @@ export interface SweepResult {
   readonly failed: number;
 }
 
+/** The identity of the controller-owned workspaces root, captured before
+ * the sweep's removals so a root swapped underneath the sweep is
+ * detected. `dev`/`ino` are compared only when the captured pair is
+ * non-zero (some platforms report 0), so a platform quirk can never turn
+ * into a false refusal. */
+interface WorkspacesRootIdentity {
+  readonly dev: number;
+  readonly ino: number;
+}
+
+/** Fail closed on the workspaces root before the sweep removes anything:
+ * the sweep deletes directories, so a root that is a symlink or not a
+ * directory could redirect that removal at real directories OUTSIDE
+ * controller storage. Returns the root's identity, or null when the root
+ * does not exist — the sweep is then a no-op and never creates it (only
+ * `mkdirWorkspacesRoot` does). An uninspectable root is a refusal, not a
+ * silently empty sweep. */
+async function assertSweepableWorkspacesRoot(workspacesRoot: string): Promise<WorkspacesRootIdentity | null> {
+  let info;
+  try {
+    info = await lstat(workspacesRoot);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return null;
+    }
+    throw new AcquisitionError(
+      "workspace_refusal",
+      `workspaces root is not inspectable (${code ?? "unknown"}): ${workspacesRoot}`,
+    );
+  }
+  if (info.isSymbolicLink()) {
+    throw new AcquisitionError("workspace_refusal", `workspaces root is a symlink: ${workspacesRoot}`);
+  }
+  if (!info.isDirectory()) {
+    throw new AcquisitionError("workspace_refusal", `workspaces root is not a directory: ${workspacesRoot}`);
+  }
+  return { dev: info.dev, ino: info.ino };
+}
+
+/** Same root? The identity is compared only when the captured pair has a
+ * non-zero dev AND a non-zero ino; a zero-vs-zero mismatch is never a
+ * reason to refuse. */
+function isSameWorkspacesRoot(captured: WorkspacesRootIdentity, current: WorkspacesRootIdentity): boolean {
+  if (captured.dev === 0 || captured.ino === 0) {
+    return true;
+  }
+  return captured.dev === current.dev && captured.ino === current.ino;
+}
+
 /** Crash recovery: remove workspace directories older than `maxAgeMs` and
  * prune their mirror worktree registrations. Removals and the prune run
  * under the per-mirror lock so they cannot interleave with extraction or
  * close().
+ *
+ * The sweep REJECTS with `AcquisitionError("workspace_refusal")` when the
+ * workspaces root is hostile (a symlink or not a directory), when it
+ * cannot be inspected, or when its identity changes between the pre-lock
+ * check and the removals: a root swapped mid-sweep must not send the
+ * removals at a path outside controller storage. A missing root is a
+ * no-op that returns `{removed: 0, failed: 0}` — the sweep never creates
+ * it (only `mkdirWorkspacesRoot` does) and removes nothing.
+ *
+ * Limits of the identity guard, stated plainly: the comparison is skipped
+ * when the platform reports a zero `dev`/`ino` (so a swap cannot be
+ * detected there), and the check is NOT atomic with the removals — it
+ * narrows the swap window rather than closing it.
  *
  * The age is a HEURISTIC for workers that died before `close()`: a live
  * review that only reads its tree never bumps the directory mtime, so an
@@ -352,11 +419,25 @@ export async function sweepStaleWorkspaces(
   const gitBinary = options.gitBinary ?? "git";
   let removed = 0;
   let failed = 0;
+  // Pre-lock check: fail fast on a hostile root and capture its identity
+  // so a root swapped before the removals is detected below.
+  const rootIdentity = await assertSweepableWorkspacesRoot(workspacesRoot);
+  if (rootIdentity === null) {
+    return { removed, failed };
+  }
   let entries: string[];
   try {
     entries = await readdir(workspacesRoot);
-  } catch {
-    return { removed, failed };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      // The root vanished between the check and the read: nothing to sweep.
+      return { removed, failed };
+    }
+    throw new AcquisitionError(
+      "workspace_refusal",
+      `workspaces root could not be read (${code ?? "unknown"}): ${workspacesRoot}`,
+    );
   }
   const stale: string[] = [];
   for (const entry of entries) {
@@ -368,13 +449,30 @@ export async function sweepStaleWorkspaces(
       // observed age look fresh.
       if (info.mtimeMs > cutoff) continue;
       stale.push(dir);
-    } catch {
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") {
+        // The entry vanished between the listing and the lstat (e.g. a
+        // concurrent close() removed it): nothing stale is left to remove.
+        continue;
+      }
       failed += 1;
       continue;
     }
   }
   if (stale.length > 0) {
     await mirror.lock(async () => {
+      // Re-verify the root INSIDE the lock, immediately before the
+      // removals: the paths below are built from the root, so a root
+      // swapped since the pre-lock check would point the removals
+      // outside controller storage.
+      const current = await assertSweepableWorkspacesRoot(workspacesRoot);
+      if (current === null) {
+        return; // the root vanished: remove nothing
+      }
+      if (!isSameWorkspacesRoot(rootIdentity, current)) {
+        throw new AcquisitionError("workspace_refusal", `workspaces root changed during the sweep: ${workspacesRoot}`);
+      }
       for (const dir of stale) {
         try {
           await rm(dir, { recursive: true, force: true });

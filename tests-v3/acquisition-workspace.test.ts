@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gitEnv } from "../src/acquisition/git-env.js";
@@ -425,15 +425,154 @@ test("workspace: a symlinked workspaces root is refused and nothing is created",
     const linkInfo = await lstat(workspaces);
     assert.ok(linkInfo.isSymbolicLink());
     assertOnlyMirrorWorktree(env);
+  } finally {
+    await env.close();
+  }
+});
 
-    // A non-directory `workspaces` path is refused the same way.
-    await rm(workspaces);
-    await writeFile(workspaces, "not a directory");
+test("workspace: a non-directory workspaces root is refused and nothing is created", async () => {
+  const env = await ready("rootfile/repo");
+  try {
+    // The workspaces path is created here and NEVER inspected first: the
+    // refusal below is proven against a path this flow has not checked.
+    await writeFile(join(env.root, "workspaces"), "not a directory");
     await assert.rejects(
       createReviewWorkspace(env.cache, { headSha: env.head }),
       (error: unknown) => error instanceof AcquisitionError && error.code === "workspace_refusal",
     );
-    assert.deepEqual(await readdir(outside), []);
+    // The refusal left the hostile path exactly as it was: a regular
+    // file, never turned into a checkout directory.
+    assert.ok((await lstat(join(env.root, "workspaces"))).isFile());
+    assertOnlyMirrorWorktree(env);
+  } finally {
+    await env.close();
+  }
+});
+
+test("workspace: sweepStaleWorkspaces refuses a symlinked workspaces root", async () => {
+  const env = await ready("sweeprefuse/repo");
+  try {
+    // A stale-looking directory OUTSIDE controller storage, behind a
+    // symlinked root: a sweep that followed the link would remove it.
+    const outside = join(env.root, "outside");
+    const stale = join(outside, "stale-workspace");
+    await mkdir(stale, { recursive: true });
+    const old = new Date(Date.now() - 3_600_000);
+    await utimes(stale, old, old);
+    await symlink(outside, join(env.root, "workspaces"));
+    await assert.rejects(
+      sweepStaleWorkspaces(env.cache, { maxAgeMs: 1_800_000 }),
+      (error: unknown) => error instanceof AcquisitionError && error.code === "workspace_refusal",
+    );
+    // Fail closed: nothing outside controller storage was removed, and
+    // the link is left for the operator to see.
+    assert.deepEqual(await readdir(outside), ["stale-workspace"]);
+    const linkInfo = await lstat(join(env.root, "workspaces"));
+    assert.ok(linkInfo.isSymbolicLink());
+    assertOnlyMirrorWorktree(env);
+  } finally {
+    await env.close();
+  }
+});
+
+test("workspace: sweepStaleWorkspaces refuses a non-directory root and never creates a missing one", async () => {
+  const env = await ready("sweepfile/repo");
+  try {
+    const workspaces = join(env.root, "workspaces");
+    // A missing root is a no-op: the sweep removes nothing and never
+    // creates the root (only `mkdirWorkspacesRoot` does).
+    const missing = await sweepStaleWorkspaces(env.cache, { maxAgeMs: 1_800_000 });
+    assert.deepEqual(missing, { removed: 0, failed: 0 });
+    await assert.rejects(
+      readdir(workspaces),
+      (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT",
+    );
+    // A non-directory root is refused the same way: sweeping it would
+    // remove files that are not workspaces.
+    await writeFile(workspaces, "not a directory");
+    await assert.rejects(
+      sweepStaleWorkspaces(env.cache, { maxAgeMs: 1_800_000 }),
+      (error: unknown) => error instanceof AcquisitionError && error.code === "workspace_refusal",
+    );
+    assertOnlyMirrorWorktree(env);
+  } finally {
+    await env.close();
+  }
+});
+
+test("workspace: sweepStaleWorkspaces refuses an unreadable workspaces root", { skip: process.platform === "win32" ? "chmod 000 does not deny access on Windows" : process.getuid?.() === 0 ? "chmod 000 does not deny root" : false }, async () => {
+  const env = await ready("sweepunreadable/repo");
+  try {
+    const workspaces = join(env.root, "workspaces");
+    await mkdir(workspaces, { recursive: true });
+    // An unreadable root is uncertain state: the sweep must refuse it,
+    // never degrade into a sweep that silently removes nothing.
+    await chmod(workspaces, 0o000);
+    try {
+      await assert.rejects(
+        sweepStaleWorkspaces(env.cache, { maxAgeMs: 1_800_000 }),
+        (error: unknown) =>
+          error instanceof AcquisitionError &&
+          error.code === "workspace_refusal" &&
+          // The refusal names the errno, so the operator can tell an
+          // unreadable root from a missing one.
+          /\(EACCES|EPERM\)/.test(error.message),
+      );
+    } finally {
+      // Restore access so cleanup can remove the root.
+      await chmod(workspaces, 0o700);
+    }
+    assertOnlyMirrorWorktree(env);
+  } finally {
+    await env.close();
+  }
+});
+
+test("workspace: sweepStaleWorkspaces refuses a workspaces root that changed during the sweep", { timeout: 30_000 }, async () => {
+  const env = await ready("sweepchanged/repo");
+  try {
+    const workspaces = join(env.root, "workspaces");
+    const stale = join(workspaces, "stale-workspace");
+    await mkdir(stale, { recursive: true });
+    const old = new Date(Date.now() - 3_600_000);
+    await utimes(stale, old, old);
+
+    // Rendezvous: hold the sweep between its pre-lock root check and the
+    // removals, so the root can be swapped underneath it. The patched
+    // lock only signals and waits; the real lock still serializes.
+    type LockFn = (fn: () => Promise<unknown>) => Promise<unknown>;
+    const originalLock = env.cache.lock.bind(env.cache) as unknown as LockFn;
+    let reachedLock!: () => void;
+    const reached = new Promise<void>((resolve) => { reachedLock = resolve; });
+    let releaseLock!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseLock = resolve; });
+    (env.cache as unknown as { lock: LockFn }).lock = async (fn) => {
+      reachedLock();
+      await gate;
+      return originalLock(fn);
+    };
+
+    const sweep = sweepStaleWorkspaces(env.cache, { maxAgeMs: 1_800_000 });
+    // The sweep has captured its pre-lock root identity by the time it
+    // asks for the lock.
+    await reached;
+
+    // Swap the root for a DIFFERENT real directory. The rename keeps the
+    // original inode alive, so the replacement cannot reuse it.
+    const moved = join(env.root, "workspaces-moved");
+    await rename(workspaces, moved);
+    await mkdir(workspaces, { mode: 0o700 });
+    releaseLock();
+
+    await assert.rejects(
+      sweep,
+      (error: unknown) =>
+        error instanceof AcquisitionError &&
+        error.code === "workspace_refusal" &&
+        /changed during the sweep/.test(error.message),
+    );
+    // Nothing was removed: the stale workspace is still where it was.
+    await lstat(join(moved, "stale-workspace"));
     assertOnlyMirrorWorktree(env);
   } finally {
     await env.close();
