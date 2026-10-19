@@ -164,9 +164,27 @@ Stop reading the removed incremental outputs (`effective_review_scope`, `previou
 
 ## 🧪 Development
 
+A clean checkout is one noninteractive command:
+
 ```bash
-npm ci && npm run typecheck && npm test   # the shipped v3 runtime, end-to-end against mock platform and model servers
-pytest tests/ -q                           # Python auxiliary tooling and workflow gates — not the shipped action
+scripts/bootstrap.sh
+```
+
+It verifies (and if needed installs) the pinned [mise](https://mise.jdx.dev) launcher, installs the locked toolchain, and runs `npm ci`. Everything is user-scoped and digest-verified — no privileged installs, no global config or git-hook changes. It runs no tests, formatters or generators, and it is idempotent and convergent: a re-run re-checks the prerequisites and re-runs `npm ci`, so it is safe to repeat. It fails with a clear message if `pgrep`/`pkill` (procps) are missing, because process-tree cleanup and gate preflight refuse to run without them.
+
+The Node version pin lives in [`.mise/config.toml`](.mise/config.toml), where it tracks the shipped `node24` action runtime and CI's `node-version: '24'`; [`.mise/mise.lock`](.mise/mise.lock) pins its download checksums. The launcher is installed into a user-scoped directory that is often not on `PATH`, so bootstrap prints the exact `export PATH=…` line to run (and to add to your shell rc). Reuse that environment with `mise exec -- <command>`, or run:
+
+```bash
+mise run check   # fast static validation (typecheck)
+mise run test    # the shipped v3 runtime, end-to-end against mock platform and model servers
+```
+
+`npm ci && npm run typecheck && npm test` stays authoritative for CI and for anyone without mise (as does `npm run build` for the release bundle — `dist/` is not committed).
+
+The Python suites are auxiliary tooling, not the shipped action, and their interpreter is not part of the bootstrap contract. Run them on the same 3.14 interpreter CI pins — `setup-python` installs `requirements.txt` into the user-scoped mise directory on demand, and `test-python` runs the suites:
+
+```bash
+mise run setup-python && mise run test-python
 ```
 
 Contributor and agent docs (code map, architecture, eval runbooks) start at [`AGENTS.md`](AGENTS.md); evaluation is in [`docs/evals.md`](docs/evals.md).

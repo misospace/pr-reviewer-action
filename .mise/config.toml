@@ -1,0 +1,36 @@
+# mise configuration — reproducible Node development bootstrap (#1108).
+#
+# Deliberately plain TOML: no template interpolation, no hooks, no env
+# block. mise only demands `mise trust` for configs that interpolate or
+# read env, so this config is trusted implicitly and `mise run` just works.
+# There is deliberately no `postinstall`/`lefthook` hook here either:
+# installing git hooks is out of scope for bootstrap.
+#
+# The Node pin below is the single source of truth. It tracks the shipped
+# action runtime (`runs.using: node24` in action.yml) and CI
+# (`node-version: '24'` in .github/workflows/ci.yaml);
+# tests/test_dev_bootstrap_contract.sh fails when the three drift apart.
+min_version = "2026.10.13"
+
+[tools]
+node = "24.22.0"
+
+[tasks.bootstrap]
+description = "Idempotent setup: verify the locked toolchain, then install dependencies (runs no tests, formatters, or generators)"
+run = "scripts/bootstrap.sh setup"
+
+[tasks.check]
+description = "Fast static validation of the v3 TypeScript runtime"
+run = "npm run typecheck"
+
+[tasks.test]
+description = "Authoritative Node suite: builds dist/ and runs node --test"
+run = "npm test"
+
+[tasks.setup-python]
+description = "Optional Python tooling deps (not part of the bootstrap contract): installs the CI-pinned interpreter's requirements.txt into the user-scoped mise directory"
+run = "mise exec python@3.14 -- python3 -m pip install --require-hashes -r requirements.txt"
+
+[tasks.test-python]
+description = "Optional Python tooling suites (not part of the bootstrap contract): runs the CI-pinned interpreter through mise; needs 'mise run setup-python' first"
+run = "mise exec python@3.14 -- python3 -m pytest tests/ -v --tb=short"
