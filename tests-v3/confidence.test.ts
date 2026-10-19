@@ -74,16 +74,15 @@ test("parser rejects non-integer scores instead of defaulting", () => {
   }
 });
 
-test("parser clamps out-of-range integers with a note", () => {
-  const high = parseConfidenceAnswer('{"score": 9, "risk": "low"}');
-  assert.ok(high.ok);
-  if (high.ok) {
-    assert.equal(high.answer.score, 5);
-    assert.ok(high.answer.notes.includes("score_clamped_to_5"));
+test("parser rejects out-of-range integers instead of clamping them (#1140 review)", () => {
+  // #1073 forbids a malformed/out-of-range answer from silently becoming a
+  // top score: 999 must NOT clamp to a qualified 5, and -2 must not clamp
+  // to 0. Both fail closed to unscored(malformed_score).
+  for (const raw of ['{"score": 9, "risk": "low"}', '{"score": 999, "risk": "low"}', '{"score": -2, "risk": "low"}']) {
+    const parsed = parseConfidenceAnswer(raw);
+    assert.ok(!parsed.ok, `out-of-range score must fail closed: ${raw}`);
+    if (!parsed.ok) assert.equal(parsed.cause, "malformed_score");
   }
-  const low = parseConfidenceAnswer('{"score": -2, "risk": "low"}');
-  assert.ok(low.ok);
-  if (low.ok) assert.equal(low.answer.score, 0);
 });
 
 test("parser flags malformed risk as unknown but stays scored", () => {
@@ -394,6 +393,32 @@ test("extractConfidenceJson finds the object inside fenced prose", () => {
   assert.equal(obj.score, 1);
 });
 
+test("prompt masks configured credentials and generic secret shapes out of every section (#1140 review)", async () => {
+  const { buildConfidencePrompt } = await import("../src/confidence/prompt.js");
+  const built = buildConfidencePrompt({
+    headSha: "abc123",
+    baseSha: "def456",
+    // A diff and body echoing a configured lane credential verbatim — the
+    // scorer may be a SEPARATE backend, so it must never see it.
+    diff: "+const k = 'lane-secret-alpha';\n+api_key=supersecret12345",
+    prTitle: "t",
+    prBody: "use lane-secret-beta plus a Bearer abcdefghijklmnopqrstuvwxyz012345 token",
+    findings: [{ severity: "minor", detail: "quoted lane-secret-gamma here" }],
+    reviewSummary: "summary mentions lane-secret-delta",
+    reviewResult: "clean",
+    requiredChecks: "complete",
+    coverage: { tool_loop_ran: false, note: "lane-secret-epsilon" },
+    secrets: ["lane-secret-alpha", "lane-secret-beta", "lane-secret-gamma", "lane-secret-delta", "lane-secret-epsilon"],
+  });
+  for (const secret of ["lane-secret-alpha", "lane-secret-beta", "lane-secret-gamma", "lane-secret-delta", "lane-secret-epsilon"]) {
+    assert.ok(!built.user.includes(secret), `configured credential leaked into the scorer prompt: ${secret}`);
+  }
+  // The generic redactText heuristics also run before the content leaves:
+  // an unknown literal `api_key=<8+ chars>` is masked shape-wise.
+  assert.ok(!built.user.includes("api_key=supersecret12345"), "generic key=value secret leaked into the scorer prompt");
+  assert.ok(!built.user.includes("Bearer abcdefghijklmnopqrstuvwxyz012345"), "generic bearer secret leaked into the scorer prompt");
+});
+
 test("prompt wraps untrusted content in defanged envelopes and flags truncation", async () => {
   const { buildConfidencePrompt, CONFIDENCE_DIFF_MAX_BYTES } = await import("../src/confidence/prompt.js");
   const hugeDiff = "x".repeat(CONFIDENCE_DIFF_MAX_BYTES + 5_000);
@@ -408,6 +433,7 @@ test("prompt wraps untrusted content in defanged envelopes and flags truncation"
     reviewResult: "clean",
     requiredChecks: "complete",
     coverage: { tool_loop_ran: false },
+    secrets: [],
   });
   assert.ok(built.user.includes("[TRUNCATED:"));
   // six sections means six legitimate envelope closers; the hostile one in

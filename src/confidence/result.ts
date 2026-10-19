@@ -10,10 +10,12 @@
  * section, marker, persisted artifact) reads, plus the tolerant parser for
  * the scorer's free-form answer.
  *
- * Parser policy: a malformed value is CLAMPED or flagged `unknown` — it is
- * never silently defaulted to a confident `5`/`low`. A missing or unusable
- * `score` fails the whole answer closed to `unscored`; the answer only ever
- * becomes a number through an explicit integer the model produced.
+ * Parser policy: a malformed value is flagged `unknown` or fails the whole
+ * answer closed — it is never silently defaulted or CLAMPED to a confident
+ * `5`/`low`. A missing, non-integer, or OUT-OF-RANGE `score` fails the answer
+ * to `unscored` (#1140 review: an out-of-range integer like 999 must never
+ * become a qualified top score); the answer only ever becomes a number
+ * through an explicit in-range integer the model produced.
  */
 
 export const CONFIDENCE_RISK_VALUES = ["low", "medium", "high", "critical", "unknown"] as const;
@@ -111,7 +113,7 @@ export interface ParsedConfidenceAnswer {
   risk: ConfidenceRisk;
   reason: string;
   concerns: ConfidenceConcern[];
-  /** Parser notes (clamped score, unknown risk) — action-owned tokens. */
+  /** Parser notes (unknown risk) — action-owned tokens. */
   notes: string[];
 }
 
@@ -165,8 +167,10 @@ function parseConcern(entry: unknown): ConfidenceConcern | null {
 
 /**
  * Tolerant bounded parse of the scorer's answer across OpenAI/Anthropic/
- * self-hosted response shapes. `score` must be an integer (0..5 accepted,
- * out-of-range integers clamped with a note, non-integers rejected); `risk`
+ * self-hosted response shapes. `score` must be an IN-RANGE (0..5) integer:
+ * non-integers AND out-of-range integers are both rejected as
+ * `malformed_score` — clamping `999` to a published `5` would let a
+ * malformed answer qualify as a top-confidence pass (#1140 review). `risk`
  * is validated against the enum with anything malformed flagged `unknown`
  * (the answer stays scored — the integer is the primary signal); `reason`
  * and every concern field are bounded.
@@ -176,19 +180,15 @@ export function parseConfidenceAnswer(raw: string): ConfidenceParseOutcome {
   if (parsed === null) return { ok: false, cause: "malformed_answer" };
   const notes: string[] = [];
   const scoreValue = parsed.score;
-  if (typeof scoreValue !== "number" || !Number.isFinite(scoreValue) || !Number.isInteger(scoreValue)) {
-    // A float, a string, or a missing score is never defaulted — not to 5,
-    // not to 0. The whole answer fails closed to unscored.
+  if (typeof scoreValue !== "number" || !Number.isFinite(scoreValue) || !Number.isInteger(scoreValue)
+    || scoreValue < 0 || scoreValue > 5) {
+    // A float, a string, a missing score, or an out-of-range integer is
+    // never defaulted or clamped — not to 5, not to 0. The whole answer
+    // fails closed to unscored, so a malformed answer can never qualify as
+    // a top-confidence pass.
     return { ok: false, cause: "malformed_score" };
   }
-  let score = scoreValue;
-  if (score < 0) {
-    score = 0;
-    notes.push("score_clamped_to_0");
-  } else if (score > 5) {
-    score = 5;
-    notes.push("score_clamped_to_5");
-  }
+  const score = scoreValue;
   const riskValue = parsed.risk;
   const risk: ConfidenceRisk = typeof riskValue === "string"
     && (CONFIDENCE_RISK_VALUES as readonly string[]).includes(riskValue)

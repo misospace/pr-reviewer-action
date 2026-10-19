@@ -1457,6 +1457,15 @@ secrets: [profiles.primary.apiKey],
       }),
       requiredChecks: outputRequiredChecks,
       coverage: reviewCoverage,
+      // #1140 review: the scorer may be a separate backend, so every
+      // credential configured for this run is masked out of the untrusted
+      // prompt content before the request is ever built.
+      secrets: [
+        confidenceProfile.apiKey,
+        profiles.primary.apiKey,
+        profiles.smart.apiKey,
+        profiles.fallback.apiKey,
+      ],
     });
     let confidenceOutcome: Awaited<ReturnType<typeof runConfidenceScorer>>;
     try {
@@ -1481,26 +1490,45 @@ secrets: [profiles.primary.apiKey],
         rawResponse: null,
         diagnostic: maskKnownSecrets(
           redactText(cause instanceof Error ? cause.message : String(cause)).slice(0, 300),
-          [confidenceProfile.apiKey, profiles.primary.apiKey],
+          [confidenceProfile.apiKey, profiles.primary.apiKey, profiles.smart.apiKey, profiles.fallback.apiKey],
         ),
       };
     }
-    confidenceResult = confidenceOutcome.result;
-    // Persist the sanitized artifacts alongside ai-output.json /
-    // review-coverage.json. Model-authored text and any provider echo are
-    // masked against BOTH lanes' credentials before they reach disk.
-    const confidenceSecrets = [confidenceProfile.apiKey, profiles.primary.apiKey];
+    // #1140 review: model-authored text (reason, concern file/evidence) is
+    // masked against EVERY lane's credential BEFORE the canonical result
+    // exists — every downstream consumer (persisted artifact, step outputs,
+    // step summary, published section, marker, CONFIDENCE_CONCERNS env for
+    // the standalone publish CLI) reads only this sanitized canonical
+    // result. Generic `redactText` at the renderers stays as the second
+    // layer, but the exact configured secrets are nuked here, once.
+    const confidenceSecrets = [
+      confidenceProfile.apiKey,
+      profiles.primary.apiKey,
+      profiles.smart.apiKey,
+      profiles.fallback.apiKey,
+    ];
     const maskConfidenceText = (text: string): string => redactText(maskKnownSecrets(text, confidenceSecrets));
+    confidenceResult = {
+      ...confidenceOutcome.result,
+      reason: maskConfidenceText(confidenceOutcome.result.reason),
+      concerns: confidenceOutcome.result.concerns.map((concern) => ({
+        file: maskConfidenceText(concern.file),
+        line: concern.line,
+        evidence: maskConfidenceText(concern.evidence),
+      })),
+    };
+    // Persist the sanitized artifacts alongside ai-output.json /
+    // review-coverage.json.
     ws.write("confidence-score.json", Buffer.from(`${pyJsonDumps({
       version: 1,
       status: confidenceResult.status,
       score: confidenceResult.score,
       risk: confidenceResult.risk,
-      reason: maskConfidenceText(confidenceResult.reason),
+      reason: confidenceResult.reason,
       concerns: confidenceResult.concerns.map((concern) => ({
-        file: maskConfidenceText(concern.file),
+        file: concern.file,
         line: concern.line,
-        evidence: maskConfidenceText(concern.evidence),
+        evidence: concern.evidence,
       })),
       model: confidenceResult.model,
       cause: confidenceResult.cause,

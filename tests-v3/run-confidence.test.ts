@@ -17,14 +17,14 @@ import { startMockServer, type MockServer } from "./helpers.js";
 
 const SCORER_MODEL = "confidence-m";
 
-function mockPlatform(): PlatformReadAdapter {
+function mockPlatform(prBody = ""): PlatformReadAdapter {
   return {
     platform: "github",
     getPr: () => {
       return Promise.resolve({
         number: 7,
         title: "Update README",
-        body: "",
+        body: prBody,
         head: { sha: "a".repeat(40), ref: "feature" },
         base: { ref: "main" },
         user: { login: "someone" },
@@ -113,6 +113,17 @@ function scorerRequests(server: MockServer): number {
   }).length;
 }
 
+/** Raw bodies of every scorer-lane request the mock server captured. */
+function scorerRequestBodies(server: MockServer): string[] {
+  return server.requests.filter((request) => {
+    try {
+      return (JSON.parse(request.body) as Record<string, unknown>).model === SCORER_MODEL;
+    } catch {
+      return false;
+    }
+  }).map((request) => request.body);
+}
+
 interface RunOutcome {
   result: Awaited<ReturnType<typeof runReview>>;
   runDir: string;
@@ -120,7 +131,7 @@ interface RunOutcome {
   summary: string;
 }
 
-async function runConfidenceRun(server: MockServer, extraInputs: Record<string, string>): Promise<RunOutcome> {
+async function runConfidenceRun(server: MockServer, extraInputs: Record<string, string>, prBody = ""): Promise<RunOutcome> {
   const runDir = mkdtempSync(join(tmpdir(), "v3-run-confidence-"));
   const outputFile = join(runDir, "gh-output.txt");
   const stepSummaryFile = join(runDir, "step-summary.md");
@@ -138,7 +149,7 @@ async function runConfidenceRun(server: MockServer, extraInputs: Record<string, 
     },
     runDir,
     workspace: runDir,
-    platformAdapter: mockPlatform(),
+    platformAdapter: mockPlatform(prBody),
     persistArtifacts: true,
     quiet: true,
   });
@@ -429,6 +440,144 @@ test("#1073: a malformed scorer answer degrades to unscored and the review still
     assert.equal(on.result.outputs.verdict, "approve");
     assert.ok(existsSync(join(on.runDir, "review-body.md")));
     assert.equal(readFileSync(join(on.runDir, "verdict.txt"), "utf8"), "approve\n");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1140 review: the scorer request never carries configured or shaped credentials", async () => {
+  // The PR body itself smuggles a lane credential and a shaped secret: the
+  // scorer prompt is built only from credential-redacted content, so a
+  // separate scorer backend can never receive them.
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 4, risk: "low", reason: "fine", concerns: [] })));
+  }));
+  try {
+    await runConfidenceRun(
+      server,
+      { "ai-confidence-model": SCORER_MODEL, "ai-confidence-base-url": server.url },
+      "deploy with api_key=supersecret1234567890 and the primary token primary-secret-k",
+    );
+    const bodies = scorerRequestBodies(server);
+    assert.equal(bodies.length, 1);
+    for (const body of bodies) {
+      assert.ok(!body.includes("primary-secret-k"), "configured lane credential reached the scorer request");
+      assert.ok(!body.includes("api_key=supersecret1234567890"), "shaped key=value secret reached the scorer request");
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1140 review: a scorer answer echoing lane credentials is masked on EVERY public surface", async () => {
+  // The scorer model echoes BOTH lane credentials in its reason and concern
+  // evidence. Masking must happen on the canonical result, so the published
+  // comment, step outputs, step summary, marker-adjacent env payload, and
+  // every persisted artifact are all clean — not just the JSON artifact.
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({
+      score: 4,
+      risk: "low",
+      reason: "primary key primary-secret-k and scorer key confidence-secret-k look fine",
+      concerns: [{ file: "README.md", line: 2, evidence: "rotate primary-secret-k now" }],
+    })));
+  }));
+  try {
+    const run = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+      "ai-confidence-api-key": "confidence-secret-k",
+    });
+    // The score itself survives — masking is content hygiene, not a veto.
+    assert.equal(run.result.outputs.confidenceStatus, "scored");
+    assert.equal(run.result.outputs.confidenceScore, "4");
+    const reason = run.result.outputs.confidenceReason ?? "";
+    assert.ok(!reason.includes("primary-secret-k"));
+    assert.ok(!reason.includes("confidence-secret-k"));
+    assert.ok(reason.includes("look fine"));
+    assert.ok(!run.output.includes("primary-secret-k"), "credential leaked into step outputs");
+    assert.ok(!run.output.includes("confidence-secret-k"), "scorer credential leaked into step outputs");
+    assert.ok(!run.summary.includes("primary-secret-k"), "credential leaked into step summary");
+    assert.ok(!run.summary.includes("confidence-secret-k"), "scorer credential leaked into step summary");
+    const concerns = run.result.confidenceConcerns ?? [];
+    assert.equal(concerns.length, 1);
+    assert.ok(!concerns[0]!.evidence.includes("primary-secret-k"));
+    for (const path of allFiles(run.runDir)) {
+      const bytes = readFileSync(path, "utf8");
+      assert.ok(!bytes.includes("primary-secret-k"), `primary credential leaked into ${path}`);
+      assert.ok(!bytes.includes("confidence-secret-k"), `scorer credential leaked into ${path}`);
+    }
+
+    // The published comment is the same sanitized canonical result.
+    const api = new StickyCaptureApi("a".repeat(40));
+    await publishReview({
+      mode: "comment",
+      reviewMarkdown: run.result.outputs.reviewMarkdown,
+      verdict: run.result.outputs.verdict,
+      verdictPolicy: run.result.verdictPolicy,
+      analysisEngine: run.result.outputs.analysisEngine,
+      baseSha: "b".repeat(40),
+      headSha: "a".repeat(40),
+      prNumber: "7",
+      commentMarker: "<!-- ai-pr-review -->",
+      requiredChecks: run.result.outputs.requiredChecks,
+      reviewRoute: run.result.outputs.reviewRoute,
+      escalationReason: run.result.outputs.escalationReason,
+      cacheHitRatio: run.result.outputs.cacheHitRatio,
+      inlineFindings: false,
+      inlineFindingsMax: 5,
+      findings: JSON.parse(run.result.outputs.findings),
+      cleanupPreviousNativeReviews: "false",
+      allowApprove: false,
+      approveForks: false,
+      isForkPr: false,
+      upstreamLinkMode: "inert",
+      conditionalPresence: {
+        linkedIssue: false, evidenceProvider: false, standards: false,
+        toolHarnessFindings: false, toolHarnessResults: false,
+      },
+      forgejoPositions: false,
+      confidence: {
+        status: run.result.outputs.confidenceStatus ?? "",
+        score: run.result.outputs.confidenceScore ?? "",
+        risk: run.result.outputs.confidenceRisk ?? "",
+        reason: run.result.outputs.confidenceReason ?? "",
+        model: run.result.outputs.confidenceModel ?? "",
+        ...(run.result.confidenceConcerns !== undefined ? { concerns: run.result.confidenceConcerns } : {}),
+      },
+    }, api, { diffText: "" });
+    assert.equal(api.bodies.length, 1);
+    assert.ok(!api.bodies[0]!.includes("primary-secret-k"), "credential leaked into the published comment");
+    assert.ok(!api.bodies[0]!.includes("confidence-secret-k"), "scorer credential leaked into the published comment");
+    assert.match(api.bodies[0]!, /## Independent Confidence/);
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1140 review: an out-of-range score (999) fails closed to unscored, never a top-score pass", async () => {
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 999, risk: "low", reason: "everything is great" })));
+  }));
+  try {
+    const run = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+    });
+    assert.equal(scorerRequests(server), 1);
+    assert.equal(run.result.outputs.confidenceStatus, "unscored");
+    assert.equal(run.result.outputs.confidenceScore, "");
+    assert.doesNotMatch(run.output, /^confidence-score=[0-9]/m);
+    const scoreArtifact = JSON.parse(readFileSync(join(run.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(scoreArtifact.status, "unscored");
+    assert.equal(scoreArtifact.score, null);
+    assert.equal(scoreArtifact.cause, "malformed_score");
+    assert.ok(!run.summary.includes("Independent confidence: 999"));
+    // The review itself is untouched.
+    assert.equal(run.result.outputs.verdict, "approve");
   } finally {
     await server.close();
   }

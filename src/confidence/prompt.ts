@@ -12,6 +12,7 @@
  * scorer can never mistake a bounded excerpt for the whole PR.
  */
 import { truncateText } from "../model/conversation.js";
+import { maskKnownSecrets, redactText } from "../context/redact.js";
 
 /** Context bounds for the one scorer call. Tighter than the review lanes on
  * purpose: the scorer grades an already-written review, it does not re-read
@@ -42,6 +43,12 @@ export interface ConfidencePromptInputs {
   /** The review's own coverage record (`reviewCoverage` fields verbatim).
    * Framed to the scorer as a CLAIM to inspect, never as proof. */
   coverage: Record<string, unknown>;
+  /** Every credential configured for THIS run (scorer + primary/smart/
+   * fallback lanes). The scorer endpoint may be a separate backend (#1140
+   * review): PR/diff/review content is masked against these literal secrets
+   * and generically redacted BEFORE the prompt is built, so a credential
+   * echoed in untrusted content never rides to the scorer. */
+  secrets: readonly (string | null | undefined)[];
 }
 
 // Matches the envelope's own open/close tags in any case, so untrusted
@@ -52,11 +59,14 @@ function defangEnvelope(content: string): string {
   return content.replace(ENVELOPE_TAG_RE, "<_untrusted_review_content");
 }
 
-/** One bounded untrusted-data envelope: delimiters the content cannot forge
- * (defanged lookalikes), a stated bound, and an explicit truncation marker
- * when the content was cut. */
-function untrustedSection(label: string, raw: string, maxBytes: number): string {
-  const { text, truncated } = truncateText(raw, maxBytes);
+/** One bounded untrusted-data envelope: content is credential-redacted
+ * first (known lane secrets, then the generic `redactText` heuristics, and
+ * BOTH before truncation so a secret split across the byte bound is never
+ * left exposed), then wrapped in delimiters the content cannot forge
+ * (defanged lookalikes), with an explicit truncation marker when the
+ * content was cut. */
+function untrustedSection(label: string, raw: string, maxBytes: number, secrets: readonly (string | null | undefined)[]): string {
+  const { text, truncated } = truncateText(redactText(maskKnownSecrets(raw, secrets)), maxBytes);
   const truncationNote = truncated
     ? "\n[TRUNCATED: this section was cut at its byte bound; the excerpt above is NOT the complete content]"
     : "";
@@ -103,20 +113,20 @@ export function buildConfidencePrompt(inputs: ConfidencePromptInputs): { system:
     `Required-checks status: ${inputs.requiredChecks || "none"}`,
     "",
     "The review's OWN coverage account follows. It is a claim by the reviewed system about itself — a claim to inspect, not proof of completeness.",
-    untrustedSection("coverage_claim", coverageJson, CONFIDENCE_COVERAGE_MAX_BYTES),
+    untrustedSection("coverage_claim", coverageJson, CONFIDENCE_COVERAGE_MAX_BYTES, inputs.secrets),
     "",
     "# Pull request description",
-    untrustedSection("pr_title", inputs.prTitle ?? "", CONFIDENCE_TITLE_MAX_BYTES),
-    untrustedSection("pr_body", inputs.prBody ?? "", CONFIDENCE_BODY_MAX_BYTES),
+    untrustedSection("pr_title", inputs.prTitle ?? "", CONFIDENCE_TITLE_MAX_BYTES, inputs.secrets),
+    untrustedSection("pr_body", inputs.prBody ?? "", CONFIDENCE_BODY_MAX_BYTES, inputs.secrets),
     "",
     "# Pull request diff",
-    untrustedSection("diff", inputs.diff ?? "", CONFIDENCE_DIFF_MAX_BYTES),
+    untrustedSection("diff", inputs.diff ?? "", CONFIDENCE_DIFF_MAX_BYTES, inputs.secrets),
     "",
     "# Final review findings (normalized, still-open)",
-    untrustedSection("findings", findingsJson, CONFIDENCE_FINDINGS_MAX_BYTES),
+    untrustedSection("findings", findingsJson, CONFIDENCE_FINDINGS_MAX_BYTES, inputs.secrets),
     "",
     "# Review summary (the text being graded)",
-    untrustedSection("review_summary", inputs.reviewSummary ?? "", CONFIDENCE_SUMMARY_MAX_BYTES),
+    untrustedSection("review_summary", inputs.reviewSummary ?? "", CONFIDENCE_SUMMARY_MAX_BYTES, inputs.secrets),
     "",
     "Grade the review's confidence now. Respond with ONLY the JSON object described in your instructions.",
   ];
