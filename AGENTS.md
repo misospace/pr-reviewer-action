@@ -117,6 +117,7 @@ Name only paths you are confident about. An issue that names files the diff does
 - [`docs/repository-config.md`](docs/repository-config.md) — v3 repository config file: keys, base-side trust, narrowing precedence
 - [`docs/architecture/operator-config-and-adoption.md`](docs/architecture/operator-config-and-adoption.md) — #727 operator-mode contract: instance schema, repository config extension keys, adoption policy, effective-config fingerprint
 - [`docs/architecture/self-hosted-forgejo-ingress.md`](docs/architecture/self-hosted-forgejo-ingress.md) — #730 self-hosted Forgejo ingress: webhook trust boundary, endpoint/credential model, ledger dedupe, capability degradation
+- [`docs/architecture/self-hosted-github-app-ingress.md`](docs/architecture/self-hosted-github-app-ingress.md) — #729 post-v3 self-hosted GitHub App ingress: App JWT / installation-token lifecycle, cache keying, publication idempotency
 - [`docs/evals.md`](docs/evals.md) — eval harness runbook, merge-safety scoring, semantic judge, deep-review A/B
 - [`docs/release-notes.md`](docs/release-notes.md) — house style and process for turning release-please output into published release notes
 - `README.md` — action inputs/outputs, usage recipes, troubleshooting, versioning policy, security notes
