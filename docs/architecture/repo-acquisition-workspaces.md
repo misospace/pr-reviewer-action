@@ -98,7 +98,14 @@ gc/prune/repack and disables auto-gc on every mirror command.
   whose target resolves (textually — broken hostile `../` pointers are
   caught too) outside the workspace directory is a fail-closed
   `workspace_refusal` with the workspace torn down. In-root symlinks are
-  tolerated.
+  tolerated. The scan never passes vacuously: an unreadable directory,
+  unreadable symlink target, or uninspectable `DT_UNKNOWN` entry is itself
+  a `workspace_refusal`, and the DFS bounds real directory depth (not
+  pending-stack width). The `<cacheRoot>/workspaces` root itself is also
+  fail closed: a pre-existing symlink or non-directory is refused
+  (`mkdirWorkspacesRoot`), and the root is re-verified at the point of use
+  inside the mirror lock, so a hostile pre-created symlink cannot redirect
+  worktree checkouts outside controller storage.
 - **Submodules are never initialized**; `.gitmodules` stays inert data.
   **LFS is never smudged** (no git-lfs invocation; pointer files remain).
 - **Repo-controlled paths cannot escape**: mirror directory names and

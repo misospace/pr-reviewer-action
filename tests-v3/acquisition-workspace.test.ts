@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { lstat, mkdtemp, readdir, rm, utimes } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gitEnv } from "../src/acquisition/git-env.js";
 import { MirrorCache } from "../src/acquisition/mirror.js";
-import { createReviewWorkspace, sweepStaleWorkspaces } from "../src/acquisition/workspace.js";
+import { assertNoEscapingSymlinks, createReviewWorkspace, sweepStaleWorkspaces } from "../src/acquisition/workspace.js";
 import { AcquisitionError } from "../src/acquisition/types.js";
 import { initRepo, startGitHttpFixture } from "./acquisition-fixture.js";
 
@@ -394,5 +394,137 @@ test("workspace: extraction is a controller-owned UUID inside the workspaces roo
     await handle.close();
   } finally {
     await env.close();
+  }
+});
+
+/** The mirror must carry exactly ONE worktree registration: its own bare
+ * self. Any additional entry is a leaked worktree. */
+function assertOnlyMirrorWorktree(env: Ready): void {
+  const registrations = gitIn(env.cache.path, ["worktree", "list", "--porcelain"])
+    .split("\n")
+    .filter((line) => line.startsWith("worktree "));
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0], `worktree ${env.cache.path}`);
+}
+
+test("workspace: a symlinked workspaces root is refused and nothing is created", async () => {
+  const env = await ready("rootsymlink/repo");
+  try {
+    const outside = join(env.root, "outside");
+    await mkdir(outside, { recursive: true });
+    const workspaces = join(env.root, "workspaces");
+    await symlink(outside, workspaces);
+    await assert.rejects(
+      createReviewWorkspace(env.cache, { headSha: env.head }),
+      (error: unknown) => error instanceof AcquisitionError && error.code === "workspace_refusal",
+    );
+    // The refusal is fail-closed: no checkout beneath the attacker-chosen
+    // target, the link itself is left untouched for the operator to see,
+    // and no worktree registration exists.
+    assert.deepEqual(await readdir(outside), []);
+    const linkInfo = await lstat(workspaces);
+    assert.ok(linkInfo.isSymbolicLink());
+    assertOnlyMirrorWorktree(env);
+
+    // A non-directory `workspaces` path is refused the same way.
+    await rm(workspaces);
+    await writeFile(workspaces, "not a directory");
+    await assert.rejects(
+      createReviewWorkspace(env.cache, { headSha: env.head }),
+      (error: unknown) => error instanceof AcquisitionError && error.code === "workspace_refusal",
+    );
+    assert.deepEqual(await readdir(outside), []);
+    assertOnlyMirrorWorktree(env);
+  } finally {
+    await env.close();
+  }
+});
+
+test("workspace: a failed base validation tears down the extracted worktree", async () => {
+  const env = await ready("basefail/repo");
+  try {
+    const neverAcquired = "0123456789abcdef0123456789abcdef01234567";
+    await assert.rejects(
+      createReviewWorkspace(env.cache, { headSha: env.head, baseSha: neverAcquired }),
+      (error: unknown) => error instanceof AcquisitionError && error.code === "base_not_found",
+    );
+    // The checkout after `worktree add` must not leak: no directory, no
+    // registration.
+    assert.deepEqual(await readdir(join(env.root, "workspaces")), []);
+    assertOnlyMirrorWorktree(env);
+  } finally {
+    await env.close();
+  }
+});
+
+test("workspace: an injected merge-base failure tears down the extracted worktree", async () => {
+  const env = await ready("mbfail/repo");
+  try {
+    const shim = join(env.root, "git-shim-fail");
+    await writeFile(shim, '#!/bin/sh\nif [ "$1" = "merge-base" ]; then exit 2; fi\nexec git "$@"\n', { mode: 0o755 });
+    await assert.rejects(
+      createReviewWorkspace(env.cache, { headSha: env.head, baseSha: env.head, gitBinary: shim }),
+      (error: unknown) => error instanceof AcquisitionError && error.code === "fetch_failed",
+    );
+    assert.deepEqual(await readdir(join(env.root, "workspaces")), []);
+    assertOnlyMirrorWorktree(env);
+  } finally {
+    await env.close();
+  }
+});
+
+test("workspace: an injected merge-base hang cancelled by the caller tears down the worktree", async () => {
+  const env = await ready("mbhang/repo");
+  try {
+    const shim = join(env.root, "git-shim-hang");
+    await writeFile(shim, '#!/bin/sh\nif [ "$1" = "merge-base" ]; then sleep 30; fi\nexec git "$@"\n', { mode: 0o755 });
+    await assert.rejects(
+      createReviewWorkspace(env.cache, {
+        headSha: env.head,
+        baseSha: env.head,
+        gitBinary: shim,
+        signal: AbortSignal.timeout(2_000),
+      }),
+      (error: unknown) => error instanceof AcquisitionError && error.code === "fetch_failed",
+    );
+    assert.deepEqual(await readdir(join(env.root, "workspaces")), []);
+    assertOnlyMirrorWorktree(env);
+  } finally {
+    await env.close();
+  }
+});
+
+test("security scan: an uninspectable directory is a refusal, never a pass", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "acq-scan-"));
+  try {
+    const hidden = join(dir, "a", "b");
+    await mkdir(hidden, { recursive: true });
+    await writeFile(join(hidden, "x.txt"), "x");
+    await chmod(join(dir, "a", "b"), 0o000);
+    try {
+      await assert.rejects(
+        assertNoEscapingSymlinks(dir),
+        (error: unknown) => error instanceof AcquisitionError && error.code === "workspace_refusal",
+      );
+    } finally {
+      await chmod(join(dir, "a", "b"), 0o755);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("security scan: a tree deeper than the scan bound is refused", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "acq-scan-"));
+  try {
+    let deep = dir;
+    for (let i = 0; i < 70; i += 1) deep = join(deep, `d${i}`);
+    await mkdir(deep, { recursive: true });
+    await assert.rejects(
+      assertNoEscapingSymlinks(dir),
+      (error: unknown) => error instanceof AcquisitionError && error.code === "workspace_refusal",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });

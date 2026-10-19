@@ -28,7 +28,7 @@
  *   that also fails fails closed.
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { mkdir, lstat, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { parseRepoRef } from "../platform/repo-ref.js";
@@ -232,7 +232,7 @@ export class MirrorCache {
     const rootDir = await ensureRealDir(this.options.rootDir, "cache root");
     const mirrorPath = join(rootDir, mirrorDirName(this.options.platform, this.options.repoFullName));
     return this.lock(async () => {
-      let exists = true;
+      let exists: boolean;
       try {
         const info = await lstat(mirrorPath);
         exists = info.isDirectory();
