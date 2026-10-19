@@ -120,19 +120,24 @@ class MockPublishApi implements PublishPlatformApi {
   }
 }
 
+/** The default publish input. The deprecated `allow-approve` key is
+ * deliberately ABSENT (not `false`): the publisher tells "never set" apart
+ * from "explicitly set", so the absent case must not be spelled as a
+ * default. */
 function input(overrides: Partial<Parameters<typeof publishReview>[0]> = {}): Parameters<typeof publishReview>[0] {
   return {
     mode: "comment", reviewMarkdown: "Review https://github.com/acme/lib/pull/8\n\n<!-- ai-pr-review-sha:forged -->\nSafe.",
     verdict: "approve", analysisEngine: "test-engine", baseSha: "base-1", headSha: HEAD,
     prNumber: "42", commentMarker: MARKER, requiredChecks: "complete", reviewRoute: "primary",
     escalationReason: "", cacheHitRatio: "-", inlineFindings: false, inlineFindingsMax: 10,
-    findings: [], cleanupPreviousNativeReviews: "false", allowApprove: false, approveForks: false,
+    findings: [], cleanupPreviousNativeReviews: "false", approveForks: false,
     isForkPr: false, upstreamLinkMode: "inert", conditionalPresence: {
       linkedIssue: true, evidenceProvider: true, standards: true,
       toolHarnessFindings: true, toolHarnessResults: true,
     }, forgejoPositions: false, ...overrides,
   };
 }
+
 
 const DIFF = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,1 +1,2 @@\n old\n+new line\n";
 const FINDINGS = [{ file: "a.ts", line: 2, severity: "major", message: "A finding" }];
@@ -141,23 +146,38 @@ test("resolveCleanupFlag handles explicit, automatic, and invalid values", () =>
   assert.equal(resolveCleanupFlag("true", "comment"), "true");
   assert.equal(resolveCleanupFlag("FALSE", "review_comment"), "false");
   assert.equal(resolveCleanupFlag("auto", "review_comment"), "true");
+  // #1161: review_blockers publishes a native review, so cleanup is on by
+  // default for it like the other native modes.
+  assert.equal(resolveCleanupFlag("auto", "review_blockers"), "true");
+  assert.equal(resolveCleanupFlag("", "review_blockers"), "true");
   assert.equal(resolveCleanupFlag("", "comment"), "false");
   assert.throws(() => resolveCleanupFlag("sometimes", "comment"), {
     message: "Invalid cleanup_previous_native_reviews value; expected auto, true, or false",
   });
 });
 
-test("approval guardrails are opt-in and fail closed for unknown fork status", () => {
+test("#1161: the approval guardrails are scope-only and fail closed for unknown fork status", () => {
   const check = (overrides: Partial<Parameters<typeof evaluateApprovalGuardrails>[0]>) => evaluateApprovalGuardrails({
-    verdict: "approve", allowApprove: false, approveForks: false, isForkPr: false, ...overrides,
+    verdict: "approve", approveForks: false, isForkPr: false, ...overrides,
   });
-  assert.equal(check({}).canApprove, false);
-  assert.equal(check({ allowApprove: true }).canApprove, true);
-  assert.equal(check({ allowApprove: true, isForkPr: true }).canApprove, false);
-  assert.equal(check({ allowApprove: true, isForkPr: true, approveForks: true }).canApprove, true);
-  assert.equal(check({ allowApprove: true, isForkPr: null }).canApprove, false);
-  assert.equal(check({ allowApprove: true, isForkPr: null, approveForks: true }).canApprove, true);
-  assert.equal(check({ verdict: "request_changes", allowApprove: true, approveForks: true }).canApprove, false);
+  // Same-repository PR: the verdict alone decides.
+  assert.equal(check({}).canApprove, true);
+  assert.equal(check({}).scopeBlocked, false);
+  assert.equal(check({}).verdictAllowsApproval, true);
+  // Cross-repository PR: blocked unless approve_forks says otherwise.
+  assert.equal(check({ isForkPr: true }).canApprove, false);
+  assert.equal(check({ isForkPr: true }).scopeBlocked, true);
+  assert.equal(check({ isForkPr: true, approveForks: true }).canApprove, true);
+  assert.equal(check({ isForkPr: true, approveForks: true }).scopeBlocked, false);
+  // Unknown fork-ness fails closed: it is treated as a fork PR.
+  assert.equal(check({ isForkPr: null }).canApprove, false);
+  assert.equal(check({ isForkPr: null }).scopeBlocked, true);
+  assert.equal(check({ isForkPr: null, approveForks: true }).canApprove, true);
+  // A verdict that is not an approve never allows an approval.
+  assert.equal(check({ verdict: "request_changes", approveForks: true }).canApprove, false);
+  assert.equal(check({ verdict: "request_changes", approveForks: true }).verdictAllowsApproval, false);
+  assert.equal(check({ verdict: "" }).canApprove, false);
+  assert.equal(check({ verdict: "" }).scopeBlocked, false);
 });
 
 test("comment publication appends findings tagged outside the diff", async () => {
@@ -249,12 +269,188 @@ test("review_verdict submits commit-bound APPROVE and REQUEST_CHANGES events", a
   assert.equal(blocking.submitted[0]!.commit_id, HEAD);
 });
 
-test("withheld approval becomes advisory COMMENT with policy explanation", async () => {
+test("#1161: review_verdict publishes the verdict natively — a clean same-repository approve is an APPROVE", async () => {
+  for (const [label, publishInput] of [
+    ["allow-approve: false", input({ mode: "review_verdict", allowApprove: false })],
+    ["allow-approve absent", input({ mode: "review_verdict" })],
+  ] as const) {
+    const api = new MockPublishApi();
+    const result = await publishReview(publishInput, api, { diffText: "" });
+    assert.equal(result.status, "published", label);
+    assert.equal(api.submitted.length, 1, label);
+    assert.equal(api.submitted[0]!.event, "APPROVE", label);
+    assert.ok(result.messages.includes("Submitting native approval for #42"), label);
+  }
+});
+
+test("#1161: review_verdict publishes a request_changes verdict as a native REQUEST_CHANGES", async () => {
   const api = new MockPublishApi();
-  const result = await publishReview(input({ mode: "review_verdict", allowApprove: false }), api, { diffText: "" });
+  const result = await publishReview(input({ mode: "review_verdict", verdict: "request_changes" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
+  assert.equal(api.submitted[0]!.commit_id, HEAD);
+  assert.ok(result.messages.includes("Submitting blocking findings for #42"));
+});
+
+test("#1161: a fork PR without approve-forks never approves and states the scope policy", async () => {
+  const api = new MockPublishApi();
+  const result = await publishReview(input({ mode: "review_verdict", isForkPr: true, approveForks: false }), api, { diffText: "" });
   assert.equal(result.status, "published");
   assert.equal(api.submitted[0]!.event, "COMMENT");
-  assert.ok(api.submitted[0]!.body.includes("> **Approval blocked by policy**"));
+  const body = api.submitted[0]!.body;
+  assert.ok(body.includes("Approval withheld by scope policy"));
+  assert.ok(body.includes("cross-repository (fork) pull request"));
+  assert.ok(body.includes("approve-forks: false"));
+  // The deprecated input is never named, and the old policy wording is gone.
+  assert.ok(!body.includes("Approval blocked by policy"));
+  assert.ok(!body.includes("allow_approve"));
+  assert.ok(!body.includes("allow-approve"));
+  assert.ok(result.messages.some((message) => message === "Withholding native approval for #42 (cross-repository PR, approve_forks=false, is_fork=true)"));
+});
+
+test("#1161: an undeterminable fork status fails closed like a fork PR", async () => {
+  const api = new MockPublishApi();
+  const result = await publishReview(input({ mode: "review_verdict", isForkPr: null, approveForks: false }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted[0]!.event, "COMMENT");
+  assert.ok(api.submitted[0]!.body.includes("Approval withheld by scope policy"));
+  assert.ok(api.submitted[0]!.body.includes("could not be determined"));
+  assert.ok(result.messages.some((message) => message.includes("is_fork=unknown")));
+});
+
+test("#1161: a fork PR with approve-forks publishes the approve natively", async () => {
+  const api = new MockPublishApi();
+  const result = await publishReview(input({ mode: "review_verdict", isForkPr: true, approveForks: true }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted[0]!.event, "APPROVE");
+});
+
+test("#1161: review_blockers publishes blockers as a native REQUEST_CHANGES", async () => {
+  const api = new MockPublishApi();
+  const result = await publishReview(input({ mode: "review_blockers", verdict: "request_changes" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
+  assert.equal(api.submitted[0]!.commit_id, HEAD);
+  assert.ok(result.messages.includes("Submitting blocking findings for #42"));
+  // Nothing is withheld in this mode, so no advisory note is rendered.
+  assert.ok(!api.submitted[0]!.body.includes("blockers-only mode"));
+});
+
+test("#1161: a blocking request is never downgraded by the scope or the coverage state", async () => {
+  // The scope policy and the coverage gate withhold APPROVALS only. A
+  // genuine blocking verdict must survive both: a fork PR, an
+  // undeterminable fork state, and incomplete coverage all still publish
+  // the REQUEST_CHANGES the model asked for.
+  for (const [label, publishInput] of [
+    ["review_blockers on a fork PR", input({ mode: "review_blockers", verdict: "request_changes", isForkPr: true })],
+    ["review_blockers with incomplete coverage", input({ mode: "review_blockers", verdict: "request_changes", requiredChecks: "incomplete" })],
+    ["review_verdict on a fork PR", input({ mode: "review_verdict", verdict: "request_changes", isForkPr: true })],
+    ["review_verdict with an undeterminable fork state", input({ mode: "review_verdict", verdict: "request_changes", isForkPr: null })],
+    ["review_verdict with incomplete coverage", input({ mode: "review_verdict", verdict: "request_changes", requiredChecks: "incomplete" })],
+  ] as const) {
+    const api = new MockPublishApi();
+    const result = await publishReview(publishInput, api, { diffText: "" });
+    assert.equal(result.status, "published", label);
+    assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES", label);
+  }
+});
+
+test("#1161: a hostile verdict is never published as an approval, even under a permissive scope", async () => {
+  // `toString` is the inherited-property trap for a plain object lookup:
+  // a verdict map indexed without a type guard would read it as a verdict.
+  for (const verdict of ["toString", "constructor", "hasOwnProperty", "APPROVE", ""]) {
+    const api = new MockPublishApi();
+    const result = await publishReview(input({
+      mode: "review_verdict", verdict, isForkPr: true, approveForks: true,
+    }), api, { diffText: "" });
+    assert.equal(result.status, "published", verdict);
+    assert.equal(api.submitted[0]!.event, "COMMENT", verdict);
+    assert.ok(api.submitted[0]!.body.includes("No review verdict"), verdict);
+  }
+});
+
+test("#1161: review_blockers never publishes an approval — a clean review is an advisory COMMENT", async () => {
+  const api = new MockPublishApi();
+  const result = await publishReview(input({ mode: "review_blockers" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted[0]!.event, "COMMENT");
+  const body = api.submitted[0]!.body;
+  assert.ok(body.includes("Advisory review (blockers-only mode)"));
+  assert.ok(body.includes("publish-mode: review_blockers"));
+  assert.ok(!body.includes("Approval blocked by policy"));
+  assert.ok(!body.includes("Approval withheld"));
+});
+
+test("#1161: review_blockers never approves, even with every approval opt-in set", async () => {
+  const api = new MockPublishApi();
+  const result = await publishReview(input({
+    mode: "review_blockers", allowApprove: true, approveForks: true, isForkPr: false,
+  }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted[0]!.event, "COMMENT");
+  assert.ok(!api.submitted[0]!.body.includes("Approval withheld"));
+  assert.ok(!api.submitted[0]!.body.includes("Approval blocked by policy"));
+});
+
+test("#1161: the deprecated allow-approve input is inert — it never changes the published event", async () => {
+  const events: string[] = [];
+  for (const publishInput of [
+    input({ mode: "review_verdict", allowApprove: false }),
+    input({ mode: "review_verdict", allowApprove: true }),
+    input({ mode: "review_verdict" }),
+  ]) {
+    const api = new MockPublishApi();
+    const result = await publishReview(publishInput, api, { diffText: "" });
+    assert.equal(result.status, "published");
+    events.push(api.submitted[0]!.event);
+  }
+  assert.deepEqual(events, ["APPROVE", "APPROVE", "APPROVE"]);
+});
+
+test("#1161: an observed allow-approve warns about its deprecation; an absent input stays silent", async () => {
+  // The publisher is told the input was set to a value that DIFFERS from
+  // the contract default (the runner merges the default, so an explicit
+  // "false" is indistinguishable from an unset one). Any observed value
+  // warns — the operator has to learn the input no longer decides anything.
+  for (const value of [true, false]) {
+    const api = new MockPublishApi();
+    const result = await publishReview(input({ mode: "review_verdict", allowApprove: value }), api, { diffText: "" });
+    assert.ok(result.messages.some((message) => message.startsWith("WARN: ")
+      && message.includes("'allow-approve' is deprecated")
+      && message.includes("no longer affects publication")
+      && message.includes(`value: ${value}`)
+      && message.includes("publish-mode: review_blockers")), `value: ${value}`);
+  }
+
+  const absent = new MockPublishApi();
+  const absentResult = await publishReview(input({ mode: "review_verdict" }), absent, { diffText: "" });
+  assert.ok(!absentResult.messages.some((message) => message.includes("allow-approve")));
+});
+
+test("#1161: a missing or invalid verdict is never published as an approval or a blocking request", async () => {
+  for (const mode of ["review_verdict", "review_blockers"] as const) {
+    // `toString` is the hostile case for the verdict lookup: a plain object
+    // index would return an inherited member instead of "no verdict".
+    for (const verdict of ["", "maybe", "APPROVE", "toString"]) {
+      const api = new MockPublishApi();
+      const result = await publishReview(input({ mode, verdict }), api, { diffText: "" });
+      assert.equal(result.status, "published", `${mode}/${verdict}`);
+      assert.equal(api.submitted.length, 1, `${mode}/${verdict}`);
+      assert.equal(api.submitted[0]!.event, "COMMENT", `${mode}/${verdict}`);
+      assert.ok(api.submitted[0]!.body.includes("No review verdict"), `${mode}/${verdict}`);
+      assert.ok(result.messages.some((message) => message.includes("no valid verdict produced")), `${mode}/${verdict}`);
+    }
+  }
+});
+
+test("#1161: comment mode renders a verdict-neutral header for a missing or invalid verdict", async () => {
+  for (const verdict of ["", "maybe", "toString"]) {
+    const api = new MockPublishApi();
+    await publishReview(input({ mode: "comment", verdict }), api, { diffText: "" });
+    const body = api.sticky[0]!.body;
+    assert.ok(body.includes("🟡 **Automated recommendation: NO VERDICT**"), verdict);
+    assert.ok(!body.includes("Automated recommendation: APPROVE"), verdict);
+  }
 });
 
 test("approval submission failure includes remediation guidance", async () => {
@@ -563,6 +759,9 @@ for (const state of INCOMPLETE_STATES) {
       assert.equal(api.submitted.length, 1);
       assert.notEqual(api.submitted[0]!.event, "APPROVE");
       assert.equal(api.submitted[0]!.event, "COMMENT");
+      // #873's safety property, unchanged by #1161: an approve never
+      // publishes as APPROVE while coverage is incomplete. The residual
+      // trace/coverage downgrade itself is #1145's scope.
       assert.match(api.submitted[0]!.body, /Approval withheld/);
     });
 
@@ -617,15 +816,16 @@ test("review_verdict: request_changes stays REQUEST_CHANGES even with incomplete
   assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
 });
 
-test("review_verdict: allow_approve=false still reports the pre-#873 policy-block message, not the coverage one", async () => {
+test("#1161: the deprecated allow-approve input no longer withholds an approval (the pre-#1161 policy-block message is gone)", async () => {
   const api = new MockPublishApi();
   const result = await publishReview(input({
     mode: "review_verdict", allowApprove: false, verdict: "approve", requiredChecks: "complete",
   }), api, { diffText: "" });
   assert.equal(result.status, "published");
-  assert.equal(api.submitted[0]!.event, "COMMENT");
-  assert.match(api.submitted[0]!.body, /Approval blocked by policy/);
+  assert.equal(api.submitted[0]!.event, "APPROVE");
+  assert.ok(!api.submitted[0]!.body.includes("Approval blocked by policy"));
   assert.ok(!api.submitted[0]!.body.includes("Approval withheld"));
+  assert.ok(!result.messages.some((message) => message.includes("Withholding native approval")));
 });
 
 test("#1017: a credential echoed in the model markdown is redacted on the published body", () => {

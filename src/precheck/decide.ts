@@ -14,6 +14,7 @@ import {
 } from "./fingerprint.js";
 import { parseMetadata } from "./metadata.js";
 import { isIncompleteReason } from "../publish/outputs.js";
+import { isNativeVerdictMode } from "../publish/publish.js";
 import { buildSelectionSignature } from "./selection.js";
 import { discoverRepositorySkills } from "../context/repository-skills.js";
 
@@ -254,11 +255,12 @@ export function authorMatchesTrustedOwner(
 }
 
 /** Latest managed comment/review body selection by publish mode: the
- * review_verdict mode reads PR reviews, everything else reads issue comments.
- * Selection is latest-by-timestamp among bodies that BOTH carry the marker
- * AND were authored by the run's trusted owner identity (#970/#1093): a
- * contributor can forge the marker, fingerprint, and metadata — all body
- * content — but cannot forge the author the forge reports. */
+ * native-verdict modes read PR reviews, everything else reads issue
+ * comments. Selection is latest-by-timestamp among bodies that BOTH carry
+ * the marker AND were authored by the run's trusted owner identity
+ * (#970/#1093): a contributor can forge the marker, fingerprint, and
+ * metadata — all body content — but cannot forge the author the forge
+ * reports. */
 export function lastManagedBody(
   comments: readonly ManagedComment[],
   reviews: readonly ManagedReview[],
@@ -268,7 +270,7 @@ export function lastManagedBody(
 ): string {
   const marker = commentMarker || "<!-- ai-pr-reviewer -->";
   const mode = (publishMode ?? "").toLowerCase();
-  if (mode === "review_verdict") {
+  if (isNativeVerdictMode(mode)) {
     const matching = reviews.filter((review) => (review.body ?? "").includes(marker) && authorMatchesTrustedOwner(review.author, review.authorId, trusted));
     matching.sort((a, b) => (a.submitted_at ?? "") < (b.submitted_at ?? "") ? -1 : (a.submitted_at ?? "") > (b.submitted_at ?? "") ? 1 : 0);
     return matching.length ? matching[matching.length - 1]!.body : "";
@@ -300,7 +302,7 @@ async function selectAuthenticatedManagedBody(
 ): Promise<string> {
   const marker = commentMarker || "<!-- ai-pr-reviewer -->";
   const mode = (publishMode ?? "").toLowerCase();
-  const candidates: readonly { body?: string | undefined }[] = mode === "review_verdict" ? reviews : comments;
+  const candidates: readonly { body?: string | undefined }[] = isNativeVerdictMode(mode) ? reviews : comments;
   if (!candidates.some((entry) => (entry.body ?? "").includes(marker))) return "";
   let resolution: IdentityResolution;
   if (typeof adapter.resolveTrustedOwner === "function") {

@@ -108,6 +108,17 @@ test("#1009: per-lane response_format inputs default empty and inherit ai-respon
   assert.equal(onlyPrimary.aiFallbackResponseFormat, "json_schema");
 });
 
+test("#1161: the publish-mode enum accepts the blockers-only mode and still rejects a bogus value", () => {
+  const required = Object.fromEntries(contract.inputs.filter((input) => input.required).map((input) => [input.id, `required-${input.id}`]));
+  const config = loadConfig(contract, { ...required, "publish-mode": "review_blockers" });
+  assert.equal(config.publishMode, "review_blockers");
+  assert.deepEqual(ENUM_INPUTS["publish-mode"], ["comment", "review_comment", "review_verdict", "review_blockers"]);
+  assert.throws(
+    () => loadConfig(contract, { ...required, "publish-mode": "review_approvals" }),
+    /must be one of: comment, review_comment, review_verdict, review_blockers/,
+  );
+});
+
 test("#998: reasoning-effort inputs default empty, inherit per lane, pass values through, and reject malformed values loudly", async () => {
   // Declared, optional, and empty by default: an unset configuration must
   // resolve to no effort anywhere, which is what keeps request bytes
