@@ -443,6 +443,47 @@ test("#1145 (anthropic): the repair round is wire-safe — no adjacent user turn
   );
 });
 
+test("#1145: a repair round that stops on a request error records skipped_refresh_failed, not continued", async () => {
+  const { root, deps } = workspace();
+  seedWorkspace(root);
+  // The first loop completes normally; the repair round's request fails.
+  const scripted: Array<() => unknown> = [
+    () => openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    () => openAiText("evidence gathered"),
+    () => openAiVerdict("original"),
+    () => {
+      throw new Error("provider exploded mid-repair");
+    },
+  ];
+  let calls = 0;
+  const result = freshResult();
+  const handled = await runNativeLoop(
+    loopInput(
+      deps({
+        transport: async () => scripted[calls++]!(),
+        env: { SYSTEM_PROMPT: "You are the reviewer." },
+      }),
+      {
+        result,
+        traceGapProbe: async () => ({
+          instruction: "Verify requirement R1 before the final verdict.",
+          unresolvedIds: ["R1"],
+        }),
+      },
+    ),
+  );
+  assert.equal(handled, true);
+  assert.equal(result.trace_repair_continuation?.outcome, "skipped_refresh_failed");
+  assert.equal(result.trace_repair_continuation?.verdict_refreshed, false);
+  // The standing verdict is untouched.
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  const verdictArtifact = JSON.parse(
+    fs.readFileSync(path.join(root, "ai-response.primary.json"), "utf8"),
+  ) as Record<string, unknown>;
+  const choice = (verdictArtifact.choices as Array<Record<string, unknown>>)[0]!;
+  assert.equal(JSON.parse(String((choice.message as Record<string, unknown>).content)).review_markdown, "## Review\noriginal");
+});
+
 test("#1145 wiring: runToolHarness forwards deps.traceGapProbe to the native loop", async () => {
   // The production path is stages.runToolHarnessPhase → runToolHarness →
   // runNativeLoop. A probe that only reaches runNativeLoop when called

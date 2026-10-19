@@ -705,8 +705,8 @@ export function renderOutsideDiffSection(findings: unknown, linkMode: UpstreamLi
  * separate prose for execution incompleteness and requirement traceability. */
 export function renderCoverageGapNotice(reason: string): string {
   const execution = "\n\n> **Partial coverage**: required-check coverage is incomplete — this review did not resolve every required check and must not be read as a complete pass.\n";
-  const trace = "\n\n> **Requirement traceability gap**: the review itself completed, but one or more in-scope requirements could not be verified against enforcement or test evidence. Approval is withheld until that requirement is covered.\n";
-  const both = "\n\n> **Partial coverage and requirement traceability gap**: required-check coverage is incomplete, and one or more in-scope requirements could not be verified against enforcement or test evidence. Approval is withheld until both gaps are addressed.\n";
+  const trace = "\n\n> **Requirement traceability gap**: the review itself completed, but one or more in-scope requirements could not be verified against enforcement or test evidence. This review must not be read as a clean pass until that requirement is covered.\n";
+  const both = "\n\n> **Partial coverage and requirement traceability gap**: required-check coverage is incomplete, and one or more in-scope requirements could not be verified against enforcement or test evidence. This review must not be read as a clean pass until both gaps are addressed.\n";
   switch (reason === "incomplete" ? "execution" : reason) {
     case "execution": return execution;
     case "requirement_trace": return trace;

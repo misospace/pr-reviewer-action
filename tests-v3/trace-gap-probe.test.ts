@@ -165,9 +165,9 @@ test("#1145: entry cap — beyond MAX_TRACE_REPAIR_CLAIMS the overflow is counte
 test("#1145: byte cap — maxBytes clips the rendered message", () => {
   const message = buildTraceGapContinuationMessage({
     requirements: [{ id: "req-1", text: "y".repeat(5000), reason: "not-traced-by-reviewer" }],
-    maxBytes: 1000,
+    maxBytes: 1600,
   });
-  assert.ok(Buffer.byteLength(message, "utf8") <= 1000);
+  assert.ok(Buffer.byteLength(message, "utf8") <= 1600);
   assert.ok(message.includes("req-1"));
 });
 
@@ -180,11 +180,15 @@ test("#1145: no gaps renders the (none) sentinel", () => {
 // computeTraceGapContinuation — the gate
 // ---------------------------------------------------------------------------
 
-test("#1145: no remaining budget never continues, even with a real gap", () => {
+test("#1145: no remaining budget still reports a real gap — the harness records skipped_no_budget", () => {
   const workspace = makeWorkspace();
   try {
     const ledger = ledgerWith([{ id: "req-1", text: "Context resolution MUST compare source SHA against the resolved pull request.", kind: "acceptance" }]);
-    assert.equal(computeTraceGapContinuation(verdictBody([]), NO_BUDGET, probeContext(workspace, ledger, ["req-1"])), null);
+    // The probe reports gaps; the HARNESS is the budget authority and turns
+    // this continuation into the machine-readable `skipped_no_budget` record
+    // (issue #1145 item 5: budget exhaustion stays distinct from "no gap").
+    const cont = computeTraceGapContinuation(verdictBody([]), NO_BUDGET, probeContext(workspace, ledger, ["req-1"]));
+    assert.deepEqual(cont?.unresolvedIds, ["req-1"]);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -364,7 +368,9 @@ test("#1145: the probe wrapper delegates to the computation (budget and gap case
     const ledger = ledgerWith([{ id: "req-1", text: "Context resolution MUST compare source SHA.", kind: "acceptance" }]);
     const probe = createTraceGapProbe(probeContext(workspace, ledger, ["req-1"]));
     assert.equal(typeof probe, "function");
-    assert.equal(await probe(verdictBody([]), NO_BUDGET), null);
+    // Zero budget still reports the gap (the harness turns it into
+    // `skipped_no_budget`); budget authority lives in the harness, not here.
+    assert.deepEqual((await probe(verdictBody([]), NO_BUDGET))?.unresolvedIds, ["req-1"]);
     const cont = await probe(verdictBody([]), WITH_BUDGET);
     assert.deepEqual(cont?.unresolvedIds, ["req-1"]);
   } finally {

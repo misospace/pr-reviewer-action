@@ -9,8 +9,10 @@
  * `requirement_coverage` with the same deterministic validator the
  * publication path uses (`validateRequirementTrace`), and returns a
  * continuation instruction when (and only when) there is a genuine
- * trace-gap the loop's read-only tools can still investigate AND at least
- * one tool request remains in the loop's budget.
+ * trace-gap the loop's read-only tools can still investigate. Budget is the
+ * harness's call: a gap found with zero remaining budget still returns a
+ * continuation so the harness can record `skipped_no_budget` — keeping
+ * budget exhaustion machine-readable and distinct from "no gap existed".
  *
  * The returned continuation is advisory and bounded: the harness appends the
  * caller-rendered (untrusted-data-fenced) instruction to the SAME
@@ -82,9 +84,11 @@ export function computeTraceGapContinuation(
   loop: TraceGapLoopState,
   context: TraceGapProbeContext,
 ): TraceGapContinuation | null {
-  // No budget left: the harness records `skipped_no_budget` instead of
-  // asking for a round it could not run.
-  if (loop.requestsRemaining < 1) return null;
+  // Budget is NOT short-circuited here: a genuine gap with zero remaining
+  // budget must still reach the harness so it can record `skipped_no_budget`
+  // — the machine-readable distinction between "budget actually ran out"
+  // (execution-side) and "no gap existed" (no record at all). The harness is
+  // the budget authority; the probe only reports gaps.
   const scopeIds = [...new Set(context.traceScopeIds)];
   if (scopeIds.length === 0) return null;
 

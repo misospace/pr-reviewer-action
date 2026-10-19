@@ -2364,9 +2364,13 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
             // Anthropic format rejects.
             const verdictRefreshed =
               repair.executed.length > 0 && (await runVerdictTurn(false)) !== null;
+            // A repair round that itself stopped on a request error did NOT
+            // complete: record it distinctly instead of calling an errored
+            // round "continued" (the stop_reason keeps the precise cause).
+            const repairErrored = repair.stopReason === "request-error" || String(repair.error ?? "") !== "";
             input.result.trace_repair_continuation = {
               attempted: true,
-              outcome: "continued",
+              outcome: repairErrored ? "skipped_refresh_failed" : "continued",
               unresolved_ids: unresolvedIds,
               stop_reason: repair.stopReason,
               rounds: repair.rounds,
