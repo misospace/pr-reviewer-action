@@ -214,8 +214,7 @@ function escapeFence(core: string): string {
  * validate. So the pass walks the original fence structure: while a reserved
  * block is dissolving, its closer and every fence-shaped line inside it are
  * escaped (`\`\`\`` renders as text and opens nothing); fences outside a
- * dissolved block pass through untouched, so benign code blocks are intact and
- * text without the token is returned byte-identically. Idempotent.
+ * dissolved block pass through untouched, so benign code blocks are intact.
  *
  * #1112: the opener is matched on the line's CONTENT, behind any blockquote or
  * list container, and the prefix is preserved on the rewrite — `> ```suggestion`
@@ -223,17 +222,33 @@ function escapeFence(core: string): string {
  * alone was the same hole one container over. Container awareness stops there:
  * only reserved openers and the lines inside a dissolving reserved block are
  * tracked container-aware, so benign container prose (`> ```ts`) stays
- * byte-identical and an ordinary block still closes the way it always did. */
+ * byte-identical and an ordinary block still closes the way it always did.
+ *
+ * #1136: an ordinary block still open at end of text — the model's unclosed
+ * fence — is dissolved the same way, so no top-level fence is left open and
+ * nothing appended after this pass (the validated prescription region) can be
+ * swallowed as its content. (Dissolution matches fence-shaped lines
+ * container-blind, exactly as ordinary-block tracking does: a `> ``` ` inside the
+ * dissolved block stays as written, which is safe because CommonMark ends it with
+ * its enclosing block construct and every appended region is introduced by a
+ * column-0 blank line that closes that construct first.)
+ *
+ * That dissolution is fence-scoped: it only un-codes the unclosed block's own
+ * lines (an HTML block, heading, or table inside it now renders live, which the
+ * message field always was) and deletes nothing. Text without the token that
+ * already ends fence-closed is returned byte-identically. Idempotent. */
 export function reserveSuggestionOpeners(text: string): string {
-  if (!text.toLowerCase().includes("suggestion")) return text;
   const out: string[] = [];
   let open: FenceState | null = null;
+  // #1136: the output index of the line that opened the current ordinary
+  // (non-reserved) block, so a block still open at end of text can be
+  // dissolved from its opener onward.
+  let openIndex = -1;
   // A CommonMark line ends at CR, LF, or CRLF — GitHub normalizes a lone CR
   // into a line break, so splitting on LF alone would hide a live opener
-  // inside what this pass treats as one long line. Only token-bearing text
-  // reaches this pass (the early return above keeps token-free text
-  // byte-identical), so rejoining with LF loses nothing the boundary cares
-  // about and makes the output uniform for the passes that follow.
+  // inside what this pass treats as one long line. Text that needs no
+  // rewrite returns byte-identically from the fast path at the bottom, so
+  // rejoining with LF only ever applies to text this pass actually edited.
   for (const line of text.split(/\r\n|\n|\r/)) {
     const prefix = splitContainer(line);
     const reserved = SUGGESTION_OPENER_RE.exec(prefix.core);
@@ -259,7 +274,12 @@ export function reserveSuggestionOpeners(text: string): string {
       }
       const opener = fenceOpener(line);
       if (opener !== null) {
+        // #1112: an ordinary block is tracked container-blind (blockquotes /
+        // lists / contentColumn are unused for it), exactly as it always was —
+        // `> ```ts` never opened a top-level fence. #1136 records where its
+        // opener landed in the output so an unclosed one can be dissolved.
         open = { ...opener, dissolving: false, blockquotes: 0, lists: 0, contentColumn: 0 };
+        openIndex = out.length;
       }
       out.push(line);
       continue;
@@ -283,6 +303,33 @@ export function reserveSuggestionOpeners(text: string): string {
     if (closesFence(line, open.ch, open.minLength)) open = null;
     out.push(line);
   }
+  // #1136: an ORDINARY block still open at end of text is the model's
+  // unclosed fence, and everything appended after this pass — the action's
+  // validated prescription region in particular — would render as its
+  // content. Policy, pinned: the walk dissolves it the same way a reserved
+  // block is dissolved — its opener and every fence-shaped line inside it are
+  // escaped, so no top-level fence is left open and the validated prescription
+  // stays live. A block that IS closed never reaches this branch and its bytes
+  // pass through untouched. (Container-nested fences inside the dissolved block
+  // are matched container-blind, exactly as ordinary-block tracking is: they stay
+  // as written and self-limit at the column-0 blank line that precedes every
+  // appended region.)
+  //
+  // This must hold regardless of the `suggestion` token: a message whose
+  // unclosed fence carries no token is exactly the shape where a validated
+  // prescription on the same finding would be swallowed silently, so the
+  // token-free fast path below only applies when the walk also ends
+  // fence-closed.
+  if (open !== null && !open.dissolving) {
+    for (let index = openIndex; index < out.length; index += 1) {
+      if (FENCE_SHAPED_RE.test(out[index]!)) out[index] = escapeFence(out[index]!);
+    }
+    return out.join("\n");
+  }
+  // Token-free text that already ends fence-closed is returned byte-identical
+  // (CR/CRLF endings included); the pass would otherwise only normalize line
+  // endings, which benign text must not pay for.
+  if (open === null && !text.toLowerCase().includes("suggestion")) return text;
   // A reserved block still open at end of text left no closer behind: its
   // opener is gone and nothing inside it was left a fence, so the output ends
   // fence-closed by construction.
