@@ -679,3 +679,148 @@ test("#1107 review round: the dissolved hostile block cannot capture the validat
   assert.ok(benignBody.includes("```ts\nconst x = 1;\n```"), "a benign code block in the same message is untouched");
   assertRenderedPrescription(benignBody, "REPL", "benign fences keep the region live");
 });
+
+// ---------------------------------------------------------------------------
+// #1112: the same reservation behind a blockquote / list container.
+// ---------------------------------------------------------------------------
+
+/** #1112: an INDEPENDENT model of how a renderer resolves a fence inside a
+ * container. Deliberately written from the CommonMark rules instead of reusing
+ * `splitContainer` from `src/metadata/markers.ts`: #252 — an assertion that
+ * shares the code under test's parser proves only that the implementation
+ * agrees with itself. Peel the blockquote/list markers off a line, allow up to
+ * three spaces of the remaining indent for a real fence, call an opener whose
+ * info string is exactly `suggestion` a live prescription, and close a block
+ * only from a fence inside the opener's own blockquote AND list depth, at its
+ * content column or within three columns of it, with nothing but whitespace
+ * after. */
+interface PeeledLine {
+  quotes: number;
+  lists: number;
+  column: number;
+  content: string;
+}
+
+function peelContainer(line: string): PeeledLine {
+  let at = 0;
+  let quotes = 0;
+  let lists = 0;
+  for (;;) {
+    let spaces = 0;
+    while (line[at + spaces] === " " || line[at + spaces] === "\t") spaces += 1;
+    if (line[at + spaces] === ">" && spaces <= 3) {
+      at += spaces + 1;
+      quotes += 1;
+      if (line[at] === " " || line[at] === "\t") at += 1;
+      continue;
+    }
+    const list = /^([-*+]|\d{1,9}[.)])[ \t]/.exec(line.slice(at + spaces));
+    if (list === null) break;
+    at += spaces + list[0].length;
+    lists += 1;
+  }
+  return { quotes, lists, column: at, content: line.slice(at) };
+}
+
+interface OpenFence {
+  ch: string;
+  length: number;
+  quotes: number;
+  lists: number;
+  column: number;
+}
+
+/** A real fence on *content*: up to three spaces of indent, and a backtick
+ * info string may not itself contain a backtick. */
+function realFence(content: string): { indent: number; column: number; run: string; info: string } | null {
+  const indent = /^ */.exec(content)![0].length;
+  const match = /^(`{3,}|~{3,})[ \t]*(.*)$/.exec(content.slice(indent));
+  if (match === null || indent > 3) return null;
+  if (match[1]![0] === "`" && match[2]!.includes("`")) return null;
+  return { indent, column: indent, run: match[1]!, info: match[2]! };
+}
+
+function assertRenderedContainerPrescription(body: string, replacement: string, label: string): void {
+  let open: OpenFence | null = null;
+  let collecting: string[] | null = null;
+  const prescriptions: string[] = [];
+  for (const raw of body.split(/\r\n|\n|\r/)) {
+    const line = peelContainer(raw);
+    const fence = realFence(line.content);
+    if (open !== null) {
+      const closes =
+        fence !== null && fence.info.trim() === "" && fence.run[0] === open.ch && fence.run.length >= open.length
+        && line.quotes === open.quotes && line.lists === open.lists
+        && line.column + fence.indent >= open.column
+        && line.column + fence.indent <= open.column + 3;
+      if (closes) {
+        if (collecting !== null) prescriptions.push(collecting.join("\n"));
+        collecting = null;
+        open = null;
+      } else if (collecting !== null) {
+        collecting.push(raw);
+      }
+      continue;
+    }
+    if (fence !== null) {
+      open = {
+        ch: fence.run[0]!,
+        length: fence.run.length,
+        quotes: line.quotes,
+        lists: line.lists,
+        column: line.column + fence.indent,
+      };
+      collecting = fence.info.trim() === "suggestion" ? [] : null;
+    }
+  }
+  assert.deepEqual(prescriptions, [replacement], `${label}: exactly one live prescription renders, carrying the validated replacement`);
+  assert.equal(open, null, `${label}: ends fence-closed, so nothing the model wrote captures appended content`);
+}
+
+test("#1112: a container-prefixed opener publishes no prescription, and the validated one still renders live", () => {
+  // #252: the boundary token ITSELF behind each container spelling, with a REAL
+  // validated replacement behind it. Each message puts prose FIRST, because
+  // `findingToBody` splices it onto the `**label:** ` line.
+  const arms: Array<[string, string]> = [
+    ["blockquote opener and closer", "note\n> ```suggestion\n> INJECTED\n> ``` "],
+    ["double blockquote", "note\n>> ```suggestion\n>> INJECTED\n>> ``` "],
+    ["nested blockquotes", "note\n> > ```suggestion\n> > INJECTED\n> > ``` "],
+    ["bullet list", "note\n- ```suggestion\nINJECTED\n  ``` "],
+    ["ordered list", "note\n1. ```suggestion\nINJECTED\n   ``` "],
+    ["blockquote around a list", "note\n> - ```suggestion\n>   INJECTED\n>   ``` "],
+    ["tilde, uppercase, trailing spaces", "note\n> ~~~SUGGESTION  \n> INJECTED\n> ~~~  "],
+    ["CRLF line endings", "note\r\n> ```suggestion\r\n> INJECTED\r\n> ``` "],
+    ["lazy bare closer", "note\n> ```suggestion\n> INJECTED\n``` "],
+    ["list-prefixed fence inside the block", "note\n```suggestion\n- ```\nINJECTED\n``` \ntail"],
+    ["fences nested inside the block", "note\n> ````suggestion\n> ```\n> ~~~\n> INJECTED\n> ````"],
+    ["unclosed container opener", "note\n> ```suggestion\n> INJECTED"],
+    ["over-indent inside the container", "note\n>     ```suggestion\n> INJECTED\n>     ``` "],
+  ];
+  for (const [label, message] of arms) {
+    const result = buildComments(
+      [{ file: "new", line: 1, message, suggestion: "REPL" }], diff, 20, { forgejoPositions: false },
+    );
+    assert.equal(result.comments.length, 1, `${label}: the finding still posts`);
+    const body = (result.comments[0] as Record<string, unknown>).body as string;
+    assertRenderedContainerPrescription(body, "REPL", label);
+    assert.equal(body.split("\n").filter((line) => line.trim() === "```suggestion").length, 1, `${label}: the only opener is the one we validated`);
+    assert.equal(recoverPublishedSuggestion(body), "REPL", `${label}: recovery still reads exactly what rendered`);
+    assert.ok(body.includes("note") && body.includes("INJECTED"), `${label}: the author's prose survives`);
+  }
+
+  // Dissolution must not over-reach: benign container prose is a NO-OP, not a
+  // rewrite — the same bytes the pre-#1112 renderer produced.
+  const benign = "context:\n> ```ts\n> const x = 1;\n> ```\n- and a list item\nback to prose";
+  assert.deepEqual(
+    buildComments(
+      [{ file: "new", line: 1, message: benign, suggestion: "REPL" }], diff, 20, { forgejoPositions: false },
+    ).comments[0],
+    {
+      path: "new",
+      line: 1,
+      side: "RIGHT",
+      body: `**Info:** ${benign}\n\n_Automated finding from AI PR review._\n\n\`\`\`suggestion\nREPL\n\`\`\`\n\n${FEEDBACK_AFFORDANCE}`,
+    },
+    "a benign container message renders byte-identically",
+  );
+});
