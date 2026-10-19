@@ -272,7 +272,14 @@ function eventKey(event: OutcomeEvent): string {
 
 /** Append this run's events to a prior ledger, dropping exact duplicates
  * and keeping the latest `MAX_LEDGER_EVENTS` (oldest dropped first — the
- * aggregate reads latest state). */
+ * aggregate reads latest state). The cap applies to event RECENCY, not
+ * array position: a delayed older run can be merged after a newer one, so
+ * retaining the last array entries could evict a newer status event while
+ * keeping an older delayed one and lose that identity's latest state. The
+ * same deterministic chronology rule `aggregateOutcomeEvents` applies to
+ * the merged ledger is used here — order by parsed instant, original array
+ * order as the explicit tie-breaker, retain the latest `MAX_LEDGER_EVENTS`
+ * (ties and unprovable instants sort as oldest and are evicted first). */
 function mergeLedger(
   priorLedger: readonly OutcomeEvent[],
   events: OutcomeEvent[],
@@ -286,5 +293,9 @@ function mergeLedger(
     seen.add(key);
     merged.push(event);
   }
-  return merged.length > MAX_LEDGER_EVENTS ? merged.slice(merged.length - MAX_LEDGER_EVENTS) : merged;
+  if (merged.length <= MAX_LEDGER_EVENTS) return merged;
+  const ordered = merged
+    .map((event, index) => ({ event, index, at: outcomeEventInstant(event.at) }))
+    .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.index - b.index));
+  return ordered.slice(ordered.length - MAX_LEDGER_EVENTS).map((entry) => entry.event);
 }

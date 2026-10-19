@@ -81,16 +81,22 @@ test("#1027 identity: malformed records prove nothing", () => {
 });
 
 test("#1027 identity: edge-case paths stay digest inputs and never collide", () => {
-  // Unanchorable paths fail closed before any hashing: empty, absolute, and
-  // any `..` segment (leading, interior, or trailing). These never reach a
-  // filesystem here — paths are only ever fed to the digest — but the same
-  // fail-closed bar the publish link renderer applies must hold here too.
-  for (const file of ["", "/", "/abs/path.ts", "../traversal.ts", "src/../secrets.env", "..", "a/.."]) {
+  // Unanchorable paths fail closed before any hashing: empty, absolute, any
+  // `..` segment (leading, interior, or trailing), and NUL-bearing paths —
+  // NUL is illegal in any POSIX path component, so a NUL path is as
+  // unanchorable as a traversing one and the record gate proves nothing.
+  // These never reach a filesystem here — paths are only ever fed to the
+  // digest — but the same fail-closed bar the publish link renderer applies
+  // must hold here too.
+  for (const file of ["", "/", "/abs/path.ts", "../traversal.ts", "src/../secrets.env", "..", "a/..", "a\u0000.ts", "a\u0000b/x.ts", "\u0000"]) {
     assert.equal(findingIdentityFromRecord(findingRecord({ file })), null, `file: ${JSON.stringify(file)}`);
   }
-  // Symlink-shaped and NUL-bearing paths are ordinary digest inputs: they
-  // hash deterministically and are never touched, resolved, or rejected as
-  // traversal when no `..` segment is present.
+  // Symlink-shaped paths (no `..` segment, relative) are anchorable at the
+  // record gate and stay ordinary digest inputs: they hash deterministically
+  // and are never touched, resolved, or rejected as traversal.
+  const recordSymlinked = findingIdentityFromRecord(findingRecord({ file: "link/real.ts" }))!;
+  assert.match(recordSymlinked, /^[0-9a-f]{64}$/);
+  assert.equal(recordSymlinked, findingIdentity({ path: "link/real.ts", severity: "major", category: "bug", message: "unchecked null deref" }));
   const symlinked = findingIdentity({ path: "link/real.ts", severity: "major", category: "bug", message: "m" });
   assert.match(symlinked, /^[0-9a-f]{64}$/);
   assert.equal(symlinked, findingIdentity({ path: "link/real.ts", severity: "major", category: "bug", message: "m" }));
@@ -369,6 +375,82 @@ test("#1027 reconcile: ledger merge, lost history, dedupe, cap", () => {
   });
   assert.equal(capped.length, MAX_LEDGER_EVENTS);
   assert.equal(capped.at(-1)!.count, MAX_LEDGER_EVENTS + 9);
+});
+
+test("#1027 reconcile: the ledger cap retains events by recency, not array position", () => {
+  // The reviewer's regression: a persisted ledger's array order is NOT
+  // chronology — a delayed older run merges after a newer one. Retaining the
+  // last MAX_LEDGER_EVENTS array entries could evict a newer status-bearing
+  // event that sits at the FRONT of the persisted array while keeping an
+  // older late-arriving event appended by the current merge, losing that
+  // identity's latest state. The cap must apply the same deterministic
+  // chronology rule the aggregate applies: order by parsed instant, original
+  // array order as the explicit tie-breaker, retain the latest.
+  const resolvedIdentity = "e".repeat(64);
+  const bulkIdentity = "f".repeat(64);
+  const resolvedEvent: OutcomeEvent = {
+    finding_id: resolvedIdentity,
+    kind: "resolved",
+    at: "2026-10-03T00:00:00.000Z",
+    head_sha: HEAD_B,
+    route: null,
+    model: null,
+    provenance: "forge-thread",
+  };
+  // NEWEST status-bearing event sits at the FRONT of the persisted array;
+  // the bulk is older; one unprovable instant sorts as the oldest of all.
+  const bulk: OutcomeEvent[] = Array.from({ length: MAX_LEDGER_EVENTS }, (_unused, index) => ({
+    finding_id: bulkIdentity,
+    kind: "feedback" as const,
+    at: "2026-10-01T00:00:00.000Z",
+    head_sha: null,
+    route: null,
+    model: null,
+    provenance: "forge-reaction" as const,
+    signal: "helpful" as const,
+    count: index,
+  }));
+  const unprovable: OutcomeEvent = {
+    finding_id: bulkIdentity,
+    kind: "feedback",
+    at: "not-a-timestamp",
+    head_sha: null,
+    route: null,
+    model: null,
+    provenance: "forge-reaction",
+    signal: "helpful",
+    count: 90_000,
+  };
+  const priorLedger: OutcomeEvent[] = [resolvedEvent, bulk[0]!, unprovable, ...bulk.slice(1)];
+  // The current merge appends an OLDER late-arriving run's event (array-order
+  // last, event-time before the resolved observation): the current run runs
+  // at t1 and re-reports the identity whose thread was resolved at t2.
+  const capped = deriveOutcomeEvents({
+    postedIdentities: [resolvedIdentity],
+    prior: [],
+    priorHeadSha: null,
+    currentHeadSha: HEAD_B,
+    route: "primary",
+    model: "test-model",
+    at: "2026-10-02T00:00:00.000Z",
+    priorLedger,
+  });
+  assert.equal(capped.length, MAX_LEDGER_EVENTS);
+  // The newest status event survived the cap despite being first in the array…
+  assert.ok(capped.includes(resolvedEvent), "newest status event evicted by position cap");
+  // …the late-arriving older event was retained too…
+  assert.ok(capped.some((event) => event.finding_id === resolvedIdentity && event.kind === "reported"));
+  // …and the three oldest-by-instant events were evicted instead: the
+  // unprovable instant and the two earliest tie-ordered bulk events.
+  assert.equal(capped.some((event) => event.count === 90_000), false, "unprovable instant must sort as oldest");
+  assert.equal(capped.some((event) => event.count === 0), false, "array-order tie-break must evict the earliest");
+  assert.equal(capped.some((event) => event.count === 1), false);
+  assert.ok(capped.some((event) => event.count === 2));
+  // The aggregate still reads the identity's LATEST state: resolved wins over
+  // the late-arriving reported, so the finding is not re-declared open.
+  const aggregate = aggregateOutcomeEvents(capped);
+  assert.equal(aggregate.resolved, 1);
+  assert.equal(aggregate.open, 0);
 });
 
 test("#1027 review round: a persisted ledger counts reactions by delta, not per snapshot", () => {

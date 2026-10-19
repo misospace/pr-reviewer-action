@@ -59,8 +59,14 @@ export function findingIdentity(input: FindingIdentityInput): string {
   return createHash("sha256").update(key, "utf8").digest("hex");
 }
 
+/** Non-empty, repository-relative, no `..` segment, and no NUL — a finding's
+ * file must be an anchor a filesystem can place. NUL is illegal in any POSIX
+ * path component, so a NUL-bearing path is as unanchorable as an absolute or
+ * traversing one and proves no stable identity (fail closed). Paths are only
+ * ever digested here, so symlinks need no canonicalization. */
 function safePath(path: unknown): path is string {
-  return typeof path === "string" && path.length > 0 && !path.startsWith("/") && !path.split("/").includes("..");
+  return typeof path === "string" && path.length > 0 && !path.includes("\u0000")
+    && !path.startsWith("/") && !path.split("/").includes("..");
 }
 
 /** The identity for a raw finding record (the shape `buildComments`
