@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gitEnv } from "../src/acquisition/git-env.js";
 import { mirrorDirName, MirrorCache } from "../src/acquisition/mirror.js";
+import { createReviewWorkspace } from "../src/acquisition/workspace.js";
 import { AcquisitionError } from "../src/acquisition/types.js";
 import { initRepo, startGitHttpFixture, type GitHttpFixture } from "./acquisition-fixture.js";
 
@@ -453,6 +454,245 @@ test("ensureMirror: a corrupted mirror is detected and rebuilt exactly once", as
       assert.equal(rebuilt.mirrorPath, first.mirrorPath);
       const again = await cache.ensureMirror();
       assert.equal(again.rebuilt, false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("ensureMirror: a planted symlink at the deterministic mirror path is refused, never initialized through", async () => {
+  const root = await tempRoot();
+  const outside = await mkdtemp(join(tmpdir(), "acq-escape-"));
+  try {
+    const victim = join(outside, "victim");
+    await mkdir(victim, { recursive: true });
+    const mirrorPath = join(root, mirrorDirName("github", "esc/repo"));
+    await symlink(victim, mirrorPath);
+    const cache = new MirrorCache({
+      rootDir: root,
+      platform: "github",
+      repoFullName: "esc/repo",
+      cloneUrl: "https://example.invalid/esc/repo.git",
+    });
+    await assert.rejects(cache.ensureMirror(), (error: unknown) => {
+      assert.ok(error instanceof AcquisitionError);
+      assert.equal(error.code, "invalid_config");
+      return true;
+    });
+    // Nothing was written through the link: the target stays empty and the
+    // link itself is untouched.
+    assert.deepEqual(await readdir(victim), []);
+    assert.ok((await lstat(mirrorPath)).isSymbolicLink());
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("ensureMirror: a non-directory at the deterministic mirror path is refused", async () => {
+  const root = await tempRoot();
+  try {
+    const mirrorPath = join(root, mirrorDirName("github", "file/repo"));
+    await writeFile(mirrorPath, "not a mirror\n");
+    const cache = new MirrorCache({
+      rootDir: root,
+      platform: "github",
+      repoFullName: "file/repo",
+      cloneUrl: "https://example.invalid/file/repo.git",
+    });
+    await assert.rejects(cache.ensureMirror(), (error: unknown) => {
+      assert.ok(error instanceof AcquisitionError);
+      assert.equal(error.code, "invalid_config");
+      assert.match(error.message, /not a directory/);
+      return true;
+    });
+    // The planted file is untouched.
+    assert.equal(await readFile(mirrorPath, "utf8"), "not a mirror\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("ensureMirror: a corruption rebuild is deferred while a workspace is registered against the mirror", async () => {
+  const fixture = await startGitHttpFixture();
+  try {
+    const head = await initRepo(fixture, "rebuild/repo");
+    const root = await tempRoot();
+    try {
+      const cache = new MirrorCache({
+        rootDir: root,
+        platform: "github",
+        repoFullName: "rebuild/repo",
+        cloneUrl: `${fixture.baseUrl}/rebuild/repo.git`,
+      });
+      const first = await cache.ensureMirror();
+      const handle = await createReviewWorkspace(cache, { headSha: head });
+      try {
+        // Sanity: the worktree registration lives in the mirror's admin dir.
+        assert.ok((await readdir(join(cache.path, "worktrees"))).length > 0);
+        // Corrupt the mirror's git config: every git command in the mirror
+        // fails (fetch AND the fsck probe), so the rebuild path is reached.
+        await writeFile(join(first.mirrorPath, "config"), " [core\n this is not config\n");
+        await assert.rejects(cache.ensureMirror(), (error: unknown) => {
+          assert.ok(error instanceof AcquisitionError);
+          assert.equal(error.code, "corrupt_mirror");
+          assert.match(error.message, /rebuild deferred/);
+          return true;
+        });
+        // The mirror and the active workspace are untouched: no rm ran.
+        await access(first.mirrorPath);
+        assert.ok((await readdir(handle.info.rootPath)).includes("README.md"));
+        assert.ok((await readdir(join(cache.path, "worktrees"))).length > 0);
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("ensureMirror: a corruption rebuild proceeds once no worktree registrations remain", async () => {
+  const fixture = await startGitHttpFixture();
+  try {
+    const head = await initRepo(fixture, "rebuildfree/repo");
+    const root = await tempRoot();
+    try {
+      const cache = new MirrorCache({
+        rootDir: root,
+        platform: "github",
+        repoFullName: "rebuildfree/repo",
+        cloneUrl: `${fixture.baseUrl}/rebuildfree/repo.git`,
+      });
+      const first = await cache.ensureMirror();
+      const handle = await createReviewWorkspace(cache, { headSha: head });
+      // Close on the HEALTHY mirror so the registration is really removed;
+      // the deferred rebuild must not be a permanent lockout.
+      await handle.close();
+      await writeFile(join(first.mirrorPath, "config"), " [core\n this is not config\n");
+      const rebuilt = await cache.ensureMirror();
+      assert.equal(rebuilt.rebuilt, true);
+      assert.equal(rebuilt.mirrorPath, first.mirrorPath);
+      const again = await cache.ensureMirror();
+      assert.equal(again.rebuilt, false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("ensureMirror: a stale registration whose workspace dir is gone is provably dead and does not defer", async () => {
+  const fixture = await startGitHttpFixture();
+  try {
+    const head = await initRepo(fixture, "stale/repo");
+    const root = await tempRoot();
+    try {
+      const cache = new MirrorCache({
+        rootDir: root,
+        platform: "github",
+        repoFullName: "stale/repo",
+        cloneUrl: `${fixture.baseUrl}/stale/repo.git`,
+      });
+      const first = await cache.ensureMirror();
+      const handle = await createReviewWorkspace(cache, { headSha: head });
+      // Crashed-worker shape: the checkout is gone but the registration
+      // survived (no close ran). The dangling gitdir is exactly what
+      // `git worktree prune` would drop, so the rebuild must proceed.
+      await rm(handle.info.rootPath, { recursive: true, force: true });
+      await writeFile(join(first.mirrorPath, "config"), " [core\n this is not config\n");
+      const rebuilt = await cache.ensureMirror();
+      assert.equal(rebuilt.rebuilt, true);
+      assert.equal(rebuilt.mirrorPath, first.mirrorPath);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("ensureMirror: an uninspectable worktree listing defers the rebuild (fail closed)", async () => {
+  const fixture = await startGitHttpFixture();
+  try {
+    await initRepo(fixture, "unprobe/repo");
+    const root = await tempRoot();
+    try {
+      const cache = new MirrorCache({
+        rootDir: root,
+        platform: "github",
+        repoFullName: "unprobe/repo",
+        cloneUrl: `${fixture.baseUrl}/unprobe/repo.git`,
+      });
+      const first = await cache.ensureMirror();
+      // A planted file where the worktree admin dir belongs: the listing
+      // cannot prove absence of registrations, so the rebuild defers.
+      await writeFile(join(first.mirrorPath, "worktrees"), "not a directory\n");
+      await writeFile(join(first.mirrorPath, "config"), " [core\n this is not config\n");
+      await assert.rejects(cache.ensureMirror(), (error: unknown) => {
+        assert.ok(error instanceof AcquisitionError);
+        assert.equal(error.code, "corrupt_mirror");
+        assert.match(error.message, /rebuild deferred/);
+        return true;
+      });
+      await access(first.mirrorPath);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("ensureMirror: a signalled fsck is not corruption evidence — the mirror is never deleted", async () => {
+  const fixture = await startGitHttpFixture();
+  try {
+    await initRepo(fixture, "signalled/repo");
+    const root = await tempRoot();
+    try {
+      const cache = new MirrorCache({
+        rootDir: root,
+        platform: "github",
+        repoFullName: "signalled/repo",
+        cloneUrl: `${fixture.baseUrl}/signalled/repo.git`,
+      });
+      const first = await cache.ensureMirror();
+      const marker = " [core\n this is not config\n";
+      await writeFile(join(first.mirrorPath, "config"), marker);
+      // A git that fails every invocation, but kills itself (SIGKILL →
+      // signalled status) when asked to fsck: the probe must NOT count
+      // that as corruption evidence — the fetch error is rethrown and the
+      // mirror (still carrying the corrupt config marker) is untouched.
+      const scratch = await mkdtemp(join(tmpdir(), "acq-siggit-"));
+      const sigGit = join(scratch, "git");
+      await writeFile(
+        sigGit,
+        "#!/bin/sh\n" +
+          `for a in "$@"; do\n` +
+          `  if [ "$a" = "fsck" ]; then kill -9 $$; fi\n` +
+          `done\n` +
+          `exit 1\n`,
+        { mode: 0o755 },
+      );
+      const cache2 = new MirrorCache({
+        rootDir: root,
+        platform: "github",
+        repoFullName: "signalled/repo",
+        cloneUrl: `${fixture.baseUrl}/signalled/repo.git`,
+        gitBinary: sigGit,
+      });
+      await assert.rejects(cache2.ensureMirror(), (error: unknown) => {
+        assert.ok(error instanceof AcquisitionError);
+        assert.equal(error.code, "fetch_failed");
+        return true;
+      });
+      assert.equal(await readFile(join(first.mirrorPath, "config"), "utf8"), marker);
+      await rm(scratch, { recursive: true, force: true });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

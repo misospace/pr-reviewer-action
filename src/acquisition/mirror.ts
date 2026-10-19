@@ -25,11 +25,13 @@
  *   every mirror command).
  * - A corrupted mirror is detected (fetch failure on an existing mirror →
  *   bounded `fsck` probe) and rebuilt exactly once per ensure; a rebuild
- *   that also fails fails closed.
+ *   that also fails fails closed. A rebuild is DEFERRED (fail closed, the
+ *   mirror is left intact) while any registered worktree exists, so
+ *   maintenance can never invalidate an active workspace.
  */
 
 import { createHash } from "node:crypto";
-import { mkdir, lstat, rm } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { parseRepoRef } from "../platform/repo-ref.js";
 import { pullHeadRefspec } from "../platform/head-ref.js";
@@ -42,6 +44,10 @@ const FSCK_TIMEOUT_MS = 120_000;
 const MAX_GIT_OUTPUT_BYTES = 1_048_576;
 /** TERM→KILL grace for a timed-out fetch: generous, git shutdown is slow. */
 const GIT_TERMINATE_GRACE_MS = 5_000;
+/** Bound for reading a worktree admin `gitdir` file (a path line); the
+ * admin dir is controller-owned, the cap only matches the module's
+ * bounding style. */
+const GITDIR_MAX_BYTES = 4096;
 /** Branch refspec every fetch carries (forced update; tags deliberately NOT
  * fetched — forge/fork tags are attack surface no review path needs). */
 const BRANCH_REFSPEC = "+refs/heads/*:refs/heads/*";
@@ -164,6 +170,27 @@ async function ensureRealDir(path: string, label: string): Promise<string> {
   return resolved;
 }
 
+/** Only a genuinely absent path may be initialized. Any existing
+ * non-directory (symlink, file) — or any non-ENOENT lstat error, which
+ * leaves inspectability unproven — is refused: `git init --bare` must
+ * never run through a planted link at the deterministic mirror path and
+ * redirect mirror initialization and fetch writes outside the cache root. */
+async function requireAbsentOrRealDir(mirrorPath: string): Promise<boolean> {
+  let info;
+  try {
+    info = await lstat(mirrorPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return true;
+    }
+    throw new AcquisitionError("invalid_config", "mirror path is not inspectable");
+  }
+  if (!info.isDirectory()) {
+    throw new AcquisitionError("invalid_config", "mirror path exists but is not a directory");
+  }
+  return false;
+}
+
 export class MirrorCache {
   private readonly gitBinary: string;
   private readonly cloneUrl: string;
@@ -232,14 +259,8 @@ export class MirrorCache {
     const rootDir = await ensureRealDir(this.options.rootDir, "cache root");
     const mirrorPath = join(rootDir, mirrorDirName(this.options.platform, this.options.repoFullName));
     return this.lock(async () => {
-      let exists: boolean;
-      try {
-        const info = await lstat(mirrorPath);
-        exists = info.isDirectory();
-      } catch {
-        exists = false;
-      }
-      if (!exists) {
+      const absent = await requireAbsentOrRealDir(mirrorPath);
+      if (absent) {
         await this.initMirror(mirrorPath);
         await this.fetch(mirrorPath);
         return { mirrorPath, rebuilt: false };
@@ -257,9 +278,10 @@ export class MirrorCache {
           throw fetchError;
         }
         const corrupt = await this.probeCorruption(mirrorPath);
-        if (!corrupt) {
+        if (!corrupt || this.signal?.aborted) {
           throw fetchError;
         }
+        await this.assertRebuildSafe(mirrorPath);
         await rm(mirrorPath, { recursive: true, force: true });
         await this.initMirror(mirrorPath);
         await this.fetch(mirrorPath);
@@ -302,23 +324,89 @@ export class MirrorCache {
   }
 
   /** Bounded corruption probe for an existing mirror. Only a git that RAN
-   * and failed (exited nonzero) counts as corruption evidence: a timed-out,
-   * cancelled, or unlaunchable fsck proves nothing about the mirror and
-   * must never trigger a rebuild (the fetch error itself is rethrown by
-   * the caller instead). */
+   * and exited nonzero counts as corruption evidence: a timed-out,
+   * cancelled, signalled, or unlaunchable fsck proves nothing about the
+   * mirror and must never trigger a rebuild (the fetch error itself is
+   * rethrown by the caller instead). Uses `runProcess` directly so the
+   * outcome kind is inspectable — a `corrupt_mirror`-coded throw from
+   * `runGit` would also cover signalled/cancelled/unlaunchable runs. */
   private async probeCorruption(mirrorPath: string): Promise<boolean> {
+    const result = await runProcess({
+      file: this.gitBinary,
+      args: ["-c", "gc.auto=0", "fsck", "--connectivity-only", "--no-progress"],
+      cwd: mirrorPath,
+      env: gitInvocationEnv(process.env, {}),
+      timeoutMs: Math.min(FSCK_TIMEOUT_MS, this.fetchTimeoutMs),
+      ...(this.signal !== undefined ? { signal: this.signal } : {}),
+      maxOutputBytes: MAX_GIT_OUTPUT_BYTES,
+      terminateGraceMs: GIT_TERMINATE_GRACE_MS,
+    }).result;
+    return result.status === "exited" && result.exitCode !== 0;
+  }
+
+  /** A corruption rebuild deletes and re-inits the mirror — which would
+   * sever the worktree registrations and object access of every workspace
+   * still extracted from it. Before the destructive step, prove there are
+   * no LIVE registered worktrees: the git worktree admin directory
+   * (`<mirror>/worktrees/<id>`) is checked at the filesystem level so the
+   * proof does not depend on a mirror config that may itself be the
+   * corruption. Any live registration, or a listing that cannot prove
+   * absence, defers the rebuild and fails closed with the mirror intact —
+   * a closed workspace (or a `sweepStaleWorkspaces` prune of stale
+   * registrations) re-enables it, and a registration whose workspace
+   * directory is already gone is provably dead (prune-equivalent) and does
+   * not defer. */
+  private async assertRebuildSafe(mirrorPath: string): Promise<void> {
+    let registrations: string[];
     try {
-      await runGit(this.gitBinary, {
-        cwd: mirrorPath,
-        args: ["-c", "gc.auto=0", "fsck", "--connectivity-only", "--no-progress"],
-        label: "fsck --connectivity-only",
-        timeoutMs: Math.min(FSCK_TIMEOUT_MS, this.fetchTimeoutMs),
-        signal: this.signal,
-        failureCode: "corrupt_mirror",
-      });
+      registrations = await readdir(join(mirrorPath, "worktrees"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return;
+      }
+      throw new AcquisitionError(
+        "corrupt_mirror",
+        "mirror corruption confirmed but rebuild deferred: registered worktrees cannot be ruled out; mirror left intact",
+      );
+    }
+    for (const name of registrations) {
+      if (!(await this.registrationIsProvablyDead(join(mirrorPath, "worktrees", name)))) {
+        throw new AcquisitionError(
+          "corrupt_mirror",
+          "mirror corruption confirmed but rebuild deferred: registered worktrees present; rebuild after they close (or the sweep prunes stale ones)",
+        );
+      }
+    }
+  }
+
+  /** A registration is provably dead when its `gitdir` file names a
+   * workspace `.git` entry whose directory no longer exists — exactly what
+   * `git worktree prune` would drop. Anything unreadable, malformed,
+   * oversized, or non-ENOENT is unproven and defers the rebuild (fail
+   * closed). */
+  private async registrationIsProvablyDead(adminDir: string): Promise<boolean> {
+    const gitdirFile = join(adminDir, "gitdir");
+    try {
+      if ((await lstat(gitdirFile)).size > GITDIR_MAX_BYTES) {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+    let raw: string;
+    try {
+      raw = (await readFile(gitdirFile, "utf8")).trim();
+    } catch {
+      return false;
+    }
+    if (!raw.startsWith("/") || !raw.endsWith(".git")) {
+      return false;
+    }
+    try {
+      await lstat(dirname(raw));
       return false;
     } catch (error) {
-      return error instanceof AcquisitionError && error.code === "corrupt_mirror";
+      return (error as NodeJS.ErrnoException).code === "ENOENT";
     }
   }
 }
