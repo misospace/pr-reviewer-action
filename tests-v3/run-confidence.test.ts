@@ -481,7 +481,7 @@ test("#1140 review: a scorer answer echoing lane credentials is masked on EVERY 
       score: 4,
       risk: "low",
       reason: "primary key primary-secret-k and scorer key confidence-secret-k look fine",
-      concerns: [{ file: "README.md", line: 2, evidence: "rotate primary-secret-k now" }],
+      concerns: [{ file: "deploy/primary-secret-k.sh", line: 2, evidence: "rotate confidence-secret-k now" }],
     })));
   }));
   try {
@@ -503,7 +503,9 @@ test("#1140 review: a scorer answer echoing lane credentials is masked on EVERY 
     assert.ok(!run.summary.includes("confidence-secret-k"), "scorer credential leaked into step summary");
     const concerns = run.result.confidenceConcerns ?? [];
     assert.equal(concerns.length, 1);
-    assert.ok(!concerns[0]!.evidence.includes("primary-secret-k"));
+    assert.ok(!concerns[0]!.file.includes("primary-secret-k"), "credential leaked into concern file");
+    assert.ok(!concerns[0]!.evidence.includes("confidence-secret-k"), "credential leaked into concern evidence");
+    assert.ok(concerns[0]!.file.includes("deploy/") && concerns[0]!.evidence.includes("rotate"), "concern text survives masking");
     for (const path of allFiles(run.runDir)) {
       const bytes = readFileSync(path, "utf8");
       assert.ok(!bytes.includes("primary-secret-k"), `primary credential leaked into ${path}`);

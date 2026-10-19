@@ -1459,12 +1459,16 @@ secrets: [profiles.primary.apiKey],
       coverage: reviewCoverage,
       // #1140 review: the scorer may be a separate backend, so every
       // credential configured for this run is masked out of the untrusted
-      // prompt content before the request is ever built.
+      // prompt content before the request is ever built. The specialist
+      // lane reads its raw env key here: its resolved profile may have
+      // fallen back to the primary key, and a configured specialist secret
+      // echoed in PR content must not ride to the scorer either.
       secrets: [
         confidenceProfile.apiKey,
         profiles.primary.apiKey,
         profiles.smart.apiKey,
         profiles.fallback.apiKey,
+        env.AI_SPECIALIST_API_KEY ?? "",
       ],
     });
     let confidenceOutcome: Awaited<ReturnType<typeof runConfidenceScorer>>;
@@ -1490,7 +1494,8 @@ secrets: [profiles.primary.apiKey],
         rawResponse: null,
         diagnostic: maskKnownSecrets(
           redactText(cause instanceof Error ? cause.message : String(cause)).slice(0, 300),
-          [confidenceProfile.apiKey, profiles.primary.apiKey, profiles.smart.apiKey, profiles.fallback.apiKey],
+          [confidenceProfile.apiKey, profiles.primary.apiKey, profiles.smart.apiKey,
+            profiles.fallback.apiKey, env.AI_SPECIALIST_API_KEY ?? ""],
         ),
       };
     }
@@ -1506,6 +1511,7 @@ secrets: [profiles.primary.apiKey],
       profiles.primary.apiKey,
       profiles.smart.apiKey,
       profiles.fallback.apiKey,
+      env.AI_SPECIALIST_API_KEY ?? "",
     ];
     const maskConfidenceText = (text: string): string => redactText(maskKnownSecrets(text, confidenceSecrets));
     confidenceResult = {
@@ -1542,7 +1548,11 @@ secrets: [profiles.primary.apiKey],
       ws.write("confidence-response.json", pyJsonDumps(maskKnownSecretsDeep(confidenceOutcome.rawResponse, confidenceSecrets)));
     }
     if (confidenceResult.status === "unscored") {
-      log(`confidence scorer: unscored (${confidenceResult.cause})${confidenceOutcome.diagnostic !== "" ? `: ${confidenceOutcome.diagnostic}` : ""}`);
+      // The log line goes through the same masking as the artifact: a
+      // provider message that echoes a configured credential must not
+      // surface on the runner console either.
+      const diagnosticNote = confidenceOutcome.diagnostic !== "" ? `: ${maskConfidenceText(confidenceOutcome.diagnostic)}` : "";
+      log(`confidence scorer: unscored (${confidenceResult.cause})${diagnosticNote}`);
     } else if (confidenceResult.status === "scored") {
       log(`confidence scorer: scored ${confidenceResult.score}/5 risk=${confidenceResult.risk} (advisory only)`);
     }
