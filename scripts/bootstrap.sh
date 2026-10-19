@@ -15,23 +15,39 @@
 # prerequisites and re-runs `npm ci`, so it is safe to repeat but not free.
 # Neither mode runs tests, formatters or generators, neither mutates global
 # configuration or git hooks, and neither needs secrets.
+#
+# Every long-running phase (launcher download, `mise install --locked`,
+# `npm ci`) is bounded in wall time; an overrun terminates the phase's
+# whole process tree and fails the bootstrap with the phase's output tail,
+# so a stalled network or a hung child cannot hang setup indefinitely.
 # Optional env:
 #   MISE_INSTALL_DIR - user-scoped install dir for the pinned launcher
 #                      (default: $HOME/.local/bin). Never a privileged
 #                      install, never a global mise-settings write.
 #   BOOTSTRAP_MISE   - launcher to use in `setup` mode; exported by the
 #                      default mode so the task runs the digest-verified one.
+#   BOOTSTRAP_DOWNLOAD_TIMEOUT_SECS     - wall-time bound for the launcher
+#                                         download (default: 300)
+#   BOOTSTRAP_MISE_INSTALL_TIMEOUT_SECS - wall-time bound for
+#                                         `mise install --locked` (default: 600)
+#   BOOTSTRAP_NPM_CI_TIMEOUT_SECS       - wall-time bound for `npm ci`
+#                                         (default: 900)
 set -euo pipefail
 
 MISE_VERSION="2026.10.13"
 MISE_ASSET_PREFIX="mise-v${MISE_VERSION}"
 MISE_RELEASE_URL="https://github.com/jdx/mise/releases/download/v${MISE_VERSION}"
 
+BOOTSTRAP_DOWNLOAD_TIMEOUT_SECS="${BOOTSTRAP_DOWNLOAD_TIMEOUT_SECS:-300}"
+BOOTSTRAP_MISE_INSTALL_TIMEOUT_SECS="${BOOTSTRAP_MISE_INSTALL_TIMEOUT_SECS:-600}"
+BOOTSTRAP_NPM_CI_TIMEOUT_SECS="${BOOTSTRAP_NPM_CI_TIMEOUT_SECS:-900}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 MISE_CONFIG="$REPO_ROOT/.mise/config.toml"
 
 CLEANUP_DIR=""
+RUN_BOUNDED_NOTE=""
 
 log() { printf '%s\n' "$*"; }
 
@@ -113,22 +129,109 @@ mise_digest() {
   esac
 }
 
+# Walk pgrep -P from a root pid breadth-first and print the whole tree
+# (root plus every descendant), one pid per line. Deliberately avoids
+# bash 4 features (associative arrays, mapfile): macOS still ships bash
+# 3.2, and this script must run there. A pid has exactly one parent, so
+# no de-duplication is needed. Relies on pgrep from procps -- the same
+# tools require_process_tools enforces in setup mode.
+collect_process_tree() {
+  local root="$1" pid child frontier next kids
+  printf '%s\n' "$root"
+  frontier="$root"
+  while [ -n "$frontier" ]; do
+    next=""
+    for pid in $frontier; do
+      kids="$(pgrep -P "$pid" 2>/dev/null || true)"
+      for child in $kids; do
+        next="$next $child"
+        printf '%s\n' "$child"
+      done
+    done
+    frontier="${next# }"
+  done
+}
+
+# Run a phase under a wall-time bound: `run_bounded LABEL SECONDS LOGFILE
+# -- cmd args...` runs cmd with stdout+stderr redirected to LOGFILE, polls
+# at 1s granularity, and on overrun terminates the whole process tree
+# (TERM, brief grace, then KILL) before failing with a message naming the
+# phase, the exceeded bound and the tail of LOGFILE. Relies on pgrep/pkill
+# from procps for the tree teardown -- the same tools require_process_tools
+# enforces in setup mode. A non-zero exit is also a controlled failure with
+# the output tail. RUN_BOUNDED_NOTE, when set, is appended to the failure
+# message (used for the mise.lock drift hint).
+run_bounded() {
+  local label="$1" limit="$2" logfile="$3"
+  shift 3
+  if [ "${1:-}" = "--" ]; then
+    shift
+  fi
+  local pid deadline rc=0 member tree tail
+  : >"$logfile"
+  "$@" >"$logfile" 2>&1 &
+  pid=$!
+  deadline=$((SECONDS + limit))
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      tree="$(collect_process_tree "$pid")"
+      for member in $tree; do
+        pkill -TERM -P "$member" 2>/dev/null || true
+      done
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 1
+      if kill -0 "$pid" 2>/dev/null; then
+        tree="$(collect_process_tree "$pid")"
+        for member in $tree; do
+          pkill -KILL -P "$member" 2>/dev/null || true
+        done
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+      tail="$(tail -n 20 "$logfile" 2>/dev/null || true)"
+      rm -f "$logfile"
+      fail "phase '$label' exceeded its ${limit}s wall-time bound and was terminated; last output:
+$tail${RUN_BOUNDED_NOTE:+
+
+$RUN_BOUNDED_NOTE}"
+    fi
+    sleep 1
+  done
+  wait "$pid" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    tail="$(tail -n 20 "$logfile" 2>/dev/null || true)"
+    rm -f "$logfile"
+    fail "phase '$label' failed with exit status $rc; last output:
+$tail${RUN_BOUNDED_NOTE:+
+
+$RUN_BOUNDED_NOTE}"
+  fi
+}
+
 download() {
+  # The bounded log lives under CLEANUP_DIR, which run_default creates
+  # immediately before calling this function.
   local url="$1" dest="$2"
   if command -v curl >/dev/null 2>&1; then
-    curl --fail --silent --show-error --location --proto '=https' --output "$dest" "$url"
+    run_bounded "download" "$BOOTSTRAP_DOWNLOAD_TIMEOUT_SECS" "$CLEANUP_DIR/download.log" -- \
+      curl --fail --silent --show-error --location --proto '=https' \
+        --connect-timeout 30 --max-time "$BOOTSTRAP_DOWNLOAD_TIMEOUT_SECS" --output "$dest" "$url"
   elif command -v wget >/dev/null 2>&1; then
-    wget --quiet --output-document="$dest" "$url"
+    run_bounded "download" "$BOOTSTRAP_DOWNLOAD_TIMEOUT_SECS" "$CLEANUP_DIR/download.log" -- \
+      wget --quiet --timeout="$BOOTSTRAP_DOWNLOAD_TIMEOUT_SECS" --tries=3 --output-document="$dest" "$url"
   elif command -v node >/dev/null 2>&1; then
-    node -e '
-      const fs = require("fs");
-      const [url, dest] = process.argv.slice(1);
-      (async () => {
-        const res = await fetch(url, { redirect: "follow" });
-        if (!res.ok) throw new Error("HTTP " + res.status + " for " + url);
-        fs.writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
-      })().catch((err) => { console.error(err.message); process.exit(1); });
-    ' "$url" "$dest"
+    run_bounded "download" "$BOOTSTRAP_DOWNLOAD_TIMEOUT_SECS" "$CLEANUP_DIR/download.log" -- \
+      node -e '
+        const fs = require("fs");
+        const [url, dest, timeoutSecs] = process.argv.slice(1);
+        (async () => {
+          const res = await fetch(url, {
+            redirect: "follow",
+            signal: AbortSignal.timeout(Number(timeoutSecs) * 1000),
+          });
+          if (!res.ok) throw new Error("HTTP " + res.status + " for " + url);
+          fs.writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
+        })().catch((err) => { console.error(err.message); process.exit(1); });
+      ' "$url" "$dest" "$BOOTSTRAP_DOWNLOAD_TIMEOUT_SECS"
   else
     fail "no downloader available: curl, wget and node were all absent. Install one of them, or install mise v${MISE_VERSION} yourself (https://mise.jdx.dev/getting-started.html) and run: mise run bootstrap"
   fi
@@ -232,8 +335,18 @@ run_default() {
         fail "digest mismatch for the downloaded mise launcher (expected $digest, got $actual) -- refusing to install"
       fi
       mkdir -p "$install_dir"
-      staged="$install_dir/.mise.bootstrap.$$"
+      # mktemp creates the staging name exclusively (O_EXCL) with an
+      # unpredictable suffix inside the install dir, so a pre-planted
+      # symlink at a guessable name is never followed and the later rename
+      # stays on one filesystem.
+      staged="$(mktemp "$install_dir/.mise.bootstrap.XXXXXX")"
       trap 'rm -f "$staged"; cleanup' ERR INT TERM
+      # The digest check protects the download source, not the staging
+      # destination: assert the staged path is still a plain regular file
+      # (never a symlink) before any bytes are written to it.
+      if [ ! -f "$staged" ] || [ -L "$staged" ]; then
+        fail "staging path $staged is not a plain regular file; refusing to install"
+      fi
       cp "$CLEANUP_DIR/mise" "$staged"
       chmod 755 "$staged"
       mv -f "$staged" "$install_dir/mise"
@@ -261,7 +374,7 @@ run_default() {
 }
 
 run_setup() {
-  local start out
+  local start mise_log npm_log
   start=$SECONDS
   cd "$REPO_ROOT" || fail "cannot enter the repository root at $REPO_ROOT"
 
@@ -274,18 +387,23 @@ run_setup() {
   fi
 
   log "==> installing the locked toolchain (.mise/mise.lock)"
-  if ! out="$("$MISE_BIN" install --locked 2>&1)"; then
-    fail "mise install --locked failed: $out
-If .mise/config.toml and the committed .mise/mise.lock disagree, run 'mise lock' and commit the regenerated .mise/mise.lock"
+  mise_log="$(mktemp)"
+  RUN_BOUNDED_NOTE="If .mise/config.toml and the committed .mise/mise.lock disagree, run 'mise lock' and commit the regenerated .mise/mise.lock"
+  run_bounded "mise install --locked" "$BOOTSTRAP_MISE_INSTALL_TIMEOUT_SECS" "$mise_log" -- \
+    "$MISE_BIN" install --locked
+  RUN_BOUNDED_NOTE=""
+  if [ -s "$mise_log" ]; then
+    cat "$mise_log"
   fi
-  if [ -n "$out" ]; then
-    printf '%s\n' "$out"
-  fi
+  rm -f "$mise_log"
 
   verify_node_pin
 
   log "==> installing npm dependencies (npm ci)"
-  npm ci
+  npm_log="$(mktemp)"
+  run_bounded "npm ci" "$BOOTSTRAP_NPM_CI_TIMEOUT_SECS" "$npm_log" -- npm ci
+  cat "$npm_log"
+  rm -f "$npm_log"
 
   print_receipt "$start"
 }

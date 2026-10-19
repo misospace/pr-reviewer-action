@@ -81,6 +81,36 @@ for asset in linux-x64 linux-arm64 macos-arm64 macos-x64; do
 done
 
 echo ""
+echo "=== launcher staging is exclusive, not predictable ==="
+# A predictable staging name (PID-derived) lets a local attacker pre-plant
+# a symlink so the digest-verified copy lands on an attacker-chosen target.
+# The staging path must be created by mktemp inside the install dir:
+# unpredictable name, exclusive creation, same filesystem as the rename.
+check_contains "staging created via mktemp inside the install dir" \
+  "$BOOTSTRAP_BODY" 'staged="$(mktemp "$install_dir/.mise.bootstrap.'
+check_not_contains "no PID-predictable staging name" "$BOOTSTRAP_BODY" '.mise.bootstrap.$$'
+check_contains "staging asserted plain regular non-symlink before the copy" \
+  "$BOOTSTRAP_BODY" '[ -L "$staged" ]'
+
+echo ""
+echo "=== every long-running phase is bounded ==="
+check_contains "run_bounded helper is defined" "$BOOTSTRAP_BODY" 'run_bounded() {'
+check_contains "download runs through run_bounded" \
+  "$BOOTSTRAP_BODY" 'run_bounded "download" "$BOOTSTRAP_DOWNLOAD_TIMEOUT_SECS"'
+check_contains "mise install --locked runs through run_bounded" \
+  "$BOOTSTRAP_BODY" 'run_bounded "mise install --locked" "$BOOTSTRAP_MISE_INSTALL_TIMEOUT_SECS"'
+check_contains "npm ci runs through run_bounded" \
+  "$BOOTSTRAP_BODY" 'run_bounded "npm ci" "$BOOTSTRAP_NPM_CI_TIMEOUT_SECS"'
+check_contains "download bound has a fixed default (300s)" \
+  "$BOOTSTRAP_BODY" 'BOOTSTRAP_DOWNLOAD_TIMEOUT_SECS="${BOOTSTRAP_DOWNLOAD_TIMEOUT_SECS:-300}"'
+check_contains "mise install bound has a fixed default (600s)" \
+  "$BOOTSTRAP_BODY" 'BOOTSTRAP_MISE_INSTALL_TIMEOUT_SECS="${BOOTSTRAP_MISE_INSTALL_TIMEOUT_SECS:-600}"'
+check_contains "npm ci bound has a fixed default (900s)" \
+  "$BOOTSTRAP_BODY" 'BOOTSTRAP_NPM_CI_TIMEOUT_SECS="${BOOTSTRAP_NPM_CI_TIMEOUT_SECS:-900}"'
+check_contains "curl defense-in-depth max-time bound" \
+  "$BOOTSTRAP_BODY" '--max-time "$BOOTSTRAP_DOWNLOAD_TIMEOUT_SECS"'
+
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 
 if [[ "$FAIL" -gt 0 ]]; then
