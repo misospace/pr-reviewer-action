@@ -997,33 +997,42 @@ test("#1073: a provider error echoing the scorer credential is masked in the art
   }
 });
 
-test("#1073: a run that will not publish or that reviewed nothing never calls the scorer", async () => {
+test("#1073: comment mode publishes, so the scorer grades it with the legacy publish-review-comment flag unset", async () => {
   const server = await startMockServer(routedHandler((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
     res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 5, risk: "low", reason: "all clear", concerns: [] })));
   }));
   const scorerInputs = { "ai-confidence-model": SCORER_MODEL, "ai-confidence-base-url": server.url };
   try {
-    // (a) Nothing will be published: there is no review for anyone to grade.
-    const notPublished = await runConfidenceRun(server, {
+    // #1140 review: `comment` mode publishes a sticky PR comment at the publish
+    // seam whatever the legacy v2 flag says, so this run must make the promised
+    // scorer call — classifying it as non-publishing published an `unscored`
+    // confidence surface on a review that did publish.
+    const commentMode = await runConfidenceRun(server, {
       ...scorerInputs,
       "publish-mode": "comment",
       "publish-review-comment": "false",
     });
-    assert.equal(scorerRequests(server), 0);
-    assert.equal(notPublished.result.outputs.confidenceStatus, "unscored");
-    assert.equal(notPublished.result.outputs.confidenceScore, "");
-    // Nothing was sent to grade, so no wire artifact was written either.
-    for (const name of ["confidence-request.json", "confidence-response.json"]) {
-      assert.ok(!existsSync(join(notPublished.runDir, name)), `${name} was written for a run that publishes nothing`);
+    assert.ok(scorerRequests(server) > 0, "the scorer skipped a comment-mode publication");
+    assert.equal(commentMode.result.outputs.confidenceStatus, "scored");
+    assert.equal(commentMode.result.outputs.confidenceScore, "5");
+    for (const name of ["confidence-request.json", "confidence-response.json", "confidence-score.json"]) {
+      assert.ok(existsSync(join(commentMode.runDir, name)), `${name} is missing for a scored comment-mode run`);
     }
-    // Unscored with a cause, never a resurrected score: the marker records the
-    // status but no integer, and the outputs agree.
-    assert.match(notPublished.result.marker, /"confidence_status":"unscored"/);
-    assert.doesNotMatch(notPublished.result.marker, /"confidence_score":/);
-    assert.doesNotMatch(notPublished.output, /^confidence-score=[0-9]/m);
+    assert.match(commentMode.result.marker, /"confidence_status":"scored"/);
+    assert.match(commentMode.result.marker, /"confidence_score":5/);
+  } finally {
+    await server.close();
+  }
+});
 
-    // (b) No real model review happened (primary unavailable): the scorer is
+test("#1073: a run that reviewed nothing never calls the scorer", async () => {
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 5, risk: "low", reason: "all clear", concerns: [] })));
+  }));
+  try {
+    // No real model review happened (primary unavailable): the scorer is
     // not asked to grade a failure notice.
     const primaryDown = await startMockServer((_req, _body, res) => {
       res.statusCode = 500;
@@ -1095,58 +1104,35 @@ test("#1073: a disabled run clears stale confidence artifacts and leaves the mar
 });
 
 test("#1073: a run that ends unscored clears stale confidence artifacts too", async () => {
-  const server = await startMockServer((_req, _body, res) => {
-    res.setHeader("Content-Type", "application/json");
-    res.end(verdictBody(baseVerdict()));
-  });
   const STALE = JSON.stringify({ version: 1, status: "scored", score: 5, risk: "low", reason: "from an earlier run", concerns: [], model: SCORER_MODEL, cause: "", caps: [] });
   const names = ["confidence-score.json", "confidence-request.json", "confidence-response.json"];
+  // Enabled and publishing, but the review model itself failed, so there
+  // is no real verdict: `incomplete_review` is the same "no score this run"
+  // case and must not leave an earlier run's score in the run dir either.
+  const failing = await startMockServer((_req, _body, res) => {
+    // A well-formed HTTP answer carrying no verdict, so the review has no
+    // usable result without entering any transport-failure retry path.
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: { message: "no verdict here" } }));
+  });
   try {
-    // Enabled, but this run publishes nothing: `not_published` writes no score,
-    // so a reused run dir must not keep an earlier run's score beside it.
-    const notPublished = await runConfidenceRun(
-      server,
-      { "ai-confidence-model": SCORER_MODEL, "publish-mode": "comment", "publish-review-comment": "false" },
+    const incomplete = await runConfidenceRun(
+      failing,
+      { "ai-confidence-model": SCORER_MODEL },
       "",
       false,
       { seed: Object.fromEntries(names.map((name) => [name, STALE])) },
     );
-    assert.equal(notPublished.result.outputs.confidenceStatus, "unscored");
-    assert.equal(scorerRequests(server), 0);
+    assert.equal(incomplete.result.outputs.confidenceStatus, "unscored");
+    assert.equal(scorerRequests(failing), 0);
     for (const name of names) {
-      assert.ok(!existsSync(join(notPublished.runDir, name)), `${name} survived a not_published run`);
+      assert.ok(!existsSync(join(incomplete.runDir, name)), `${name} survived an incomplete-review run`);
     }
     // `unscored` still records that the scorer ran and produced nothing —
     // status without a score. It is the *disabled* run that has no marker key.
-    assert.match(notPublished.result.marker, /"confidence_status":"unscored"/);
-    assert.doesNotMatch(notPublished.result.marker, /confidence_score/);
-
-    // Enabled and publishing, but the review model itself failed, so there
-    // is no real verdict: `incomplete_review` is the same "no score this run"
-    // case and must not leave an earlier run's score in the run dir either.
-    const failing = await startMockServer((_req, _body, res) => {
-      // A well-formed HTTP answer carrying no verdict, so the review has no
-      // usable result without entering any transport-failure retry path.
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ error: { message: "no verdict here" } }));
-    });
-    try {
-      const incomplete = await runConfidenceRun(
-        failing,
-        { "ai-confidence-model": SCORER_MODEL },
-        "",
-        false,
-        { seed: Object.fromEntries(names.map((name) => [name, STALE])) },
-      );
-      assert.equal(incomplete.result.outputs.confidenceStatus, "unscored");
-      assert.equal(scorerRequests(failing), 0);
-      for (const name of names) {
-        assert.ok(!existsSync(join(incomplete.runDir, name)), `${name} survived an incomplete-review run`);
-      }
-    } finally {
-      await failing.close();
-    }
+    assert.match(incomplete.result.marker, /"confidence_status":"unscored"/);
+    assert.doesNotMatch(incomplete.result.marker, /confidence_score/);
   } finally {
-    await server.close();
+    await failing.close();
   }
 });

@@ -1420,17 +1420,29 @@ secrets: [profiles.primary.apiKey],
   // marker keys; the five confidence-* output assignments stay empty.
   const confidenceResolution = resolveConfidenceProfile(env);
   for (const warning of confidenceResolution.warnings) log(`WARNING: ${warning}`);
-  const publishModeValue = env.PUBLISH_MODE ?? "";
-  const reviewWillPublish = publishModeValue === "review_comment" || publishModeValue === "review_verdict"
-    || (publishModeValue === "comment" && (env.PUBLISH_REVIEW_COMMENT ?? "") === "true");
+  // #1140 review: publication is decided at the publish seam, and there it is
+  // decided by the publish MODE alone — `publishMode` (src/run/entrypoints.ts)
+  // resolves PUBLISH_MODE and `publish.ts` publishes a body for every valid
+  // mode, `comment` upserting the sticky PR comment the contract documents.
+  // The legacy `publish_review_comment` flag is not part of that decision: the
+  // action entry uses it only to skip the publish STEP entirely. Folding it in
+  // here published an `unscored` confidence surface for a review that did
+  // publish (a `comment`-mode run whose flag is unset), without ever making the
+  // promised scorer call.
+  const publishModeValue = (env.PUBLISH_MODE ?? "").toLowerCase();
+  const reviewWillPublish = publishModeValue === "comment"
+    || publishModeValue === "review_comment"
+    || publishModeValue === "review_verdict";
   const confidenceProfile = confidenceResolution.profile;
   let confidenceResult: ConfidenceResult;
-if (!confidenceProfile.enabled) {
+  if (!confidenceProfile.enabled) {
     // Disabled: no request, no artifacts, no outputs.
     confidenceResult = CONFIDENCE_DISABLED;
     clearConfidenceArtifacts(ws);
   } else if (!reviewWillPublish) {
-    // Enabled but this run publishes nothing — there is nothing to grade.
+    // Defensive: no valid publish mode resolved for this run, so no publish
+    // seam can produce a body for a score to sit in. Every configured mode
+    // (`comment`, `review_comment`, `review_verdict`) publishes.
     confidenceResult = unscoredConfidenceResult("not_published");
     clearConfidenceArtifacts(ws);
   } else if (analysisEngine === MODEL_UNAVAILABLE_ENGINE || !(outputVerdict === "approve" || outputVerdict === "request_changes")) {
