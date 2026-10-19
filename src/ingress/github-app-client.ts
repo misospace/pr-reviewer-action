@@ -90,9 +90,14 @@ const CONTROL_RE = /[\u0000-\u001f\u007f]/;
  * `CONTROL_RE`. */
 const BODY_CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 
-/** Commit sha shape used in a URL path: hex only, so a sha can never carry a
- * path separator or query marker. */
-const SHA_RE = /^[0-9a-f]{7,64}$/i;
+/** A FULL git object id: exactly 40 hex (SHA-1) or 64 hex (SHA-256) characters.
+ * Every write this seam pins to a commit is an exact-commit publication pin —
+ * a review verdict, a commit status, a check run — and a 7-character prefix is
+ * not an exact identifier and can be ambiguous. Prefixes are not intentionally
+ * supported anywhere in this seam, so there is deliberately no broader
+ * validator to keep. Hex-only still means a sha can never carry a path
+ * separator or query marker in the URL path. */
+const FULL_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const COMMIT_STATES: ReadonlySet<string> = new Set(["error", "failure", "pending", "success"]);
 const REVIEW_EVENTS: ReadonlySet<string> = new Set(["APPROVE", "REQUEST_CHANGES", "COMMENT"]);
 const CHECK_RUN_STATUSES: ReadonlySet<string> = new Set(["queued", "in_progress", "completed"]);
@@ -307,7 +312,7 @@ export class GitHubAppCapabilityClient {
     state: string,
     context: string,
   ): Promise<WriteResult> {
-    if (!SHA_RE.test(headSha)) return { ok: false, error: "invalid commit sha" };
+    if (!FULL_SHA_RE.test(headSha)) return { ok: false, error: "invalid commit sha" };
     if (!COMMIT_STATES.has(state)) return { ok: false, error: "invalid commit state" };
     if (!isBoundedText(context, MAX_CONTEXT_CHARS)) return { ok: false, error: "invalid status context" };
     return this.#write("create commit status", {
@@ -530,9 +535,9 @@ function encodeReviewPayload(payload: ReviewPayload): string | null {
   if (typeof payload !== "object" || payload === null) return null;
   // `commit_id` pinning is a hard contract, not a default: without it GitHub
   // would attach the review to whatever head the PR has at submission time.
-  // Same shape the URL path uses for shas (hex only, 7-64 chars), so a hostile
-  // or absent SHA is rejected before anything is built.
-  if (typeof payload.commitId !== "string" || !SHA_RE.test(payload.commitId)) return null;
+  // FULL object id only — an abbreviated prefix is not an exact commit — so a
+  // hostile, abbreviated, or absent SHA is rejected before anything is built.
+  if (typeof payload.commitId !== "string" || !FULL_SHA_RE.test(payload.commitId)) return null;
   const event = payload.event ?? "COMMENT";
   if (!REVIEW_EVENTS.has(event)) return null;
   const body: Record<string, unknown> = { event, commit_id: payload.commitId };
@@ -566,7 +571,7 @@ function encodeReviewPayload(payload: ReviewPayload): string | null {
 function encodeCheckRunPayload(payload: CheckRunPayload): string | null {
   if (typeof payload !== "object" || payload === null) return null;
   if (!isBoundedText(payload.name, MAX_CONTEXT_CHARS)) return null;
-  if (typeof payload.headSha !== "string" || !SHA_RE.test(payload.headSha)) return null;
+  if (typeof payload.headSha !== "string" || !FULL_SHA_RE.test(payload.headSha)) return null;
   if (!CHECK_RUN_STATUSES.has(payload.status)) return null;
   if (payload.conclusion !== undefined && !CHECK_RUN_CONCLUSIONS.has(payload.conclusion)) return null;
   if (payload.status === "completed" && payload.conclusion === undefined) return null;

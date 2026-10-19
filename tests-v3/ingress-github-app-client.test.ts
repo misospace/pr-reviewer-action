@@ -401,13 +401,42 @@ test("createReview posts a typed review payload pinned to the reviewed commit", 
 
 test("createReview transmits the EXACT pinned SHA as commit_id", async () => {
   // Not lowercased, not truncated: the body must carry precisely the SHA the
-  // caller pinned, or the pin means something the caller did not say.
+  // caller pinned, or the pin means something the caller did not say. Both
+  // full object-id lengths (SHA-1 and SHA-256) are accepted verbatim.
   const { fetchImpl, apiCalls } = makeForge(() => json({ id: 5 }, 200));
   const pinned = "ABC1234DEF5678ABC1234DEF5678ABC1234DEF56";
   const result = await client(fetchImpl).createReview("owner/repo", 7, { commitId: pinned });
   assert.equal(result.ok, true);
   const body = JSON.parse(apiCalls()[0]!.body!) as { commit_id: string };
   assert.equal(body.commit_id, pinned);
+
+  const { fetchImpl: sha256Impl, apiCalls: sha256Calls } = makeForge(() => json({ id: 5 }, 200));
+  const pinned256 = "c".repeat(64);
+  const result256 = await client(sha256Impl).createReview("owner/repo", 7, { commitId: pinned256 });
+  assert.equal(result256.ok, true);
+  const body256 = JSON.parse(sha256Calls()[0]!.body!) as { commit_id: string };
+  assert.equal(body256.commit_id, pinned256);
+});
+
+test("an abbreviated but syntactically valid sha is refused by every commit-pinned write, with no request", async () => {
+  // A 7-character prefix is not an exact commit identifier, and can be
+  // ambiguous. GitHub PR head SHAs are full 40-hex object ids, and the
+  // exact-head guarantee belongs to the capability seam — not to every future
+  // caller happening to pass a full SHA. 39 and 41 are wrong lengths; 63 is
+  // one short of a SHA-256 id.
+  const { fetchImpl, calls } = makeForge(() => json({ id: 5 }, 200));
+  const api = client(fetchImpl);
+  for (const sha of ["a".repeat(7), "a".repeat(39), "a".repeat(41), "a".repeat(63)]) {
+    const review = await api.createReview("owner/repo", 7, { commitId: sha });
+    assert.equal(review.ok, false, `review refused a ${sha.length}-char sha`);
+    if (!review.ok) assert.equal(review.error, "invalid review payload");
+    const status = await api.createCommitStatus("owner/repo", sha, "success", "ctx");
+    assert.equal(status.ok, false, `commit status refused a ${sha.length}-char sha`);
+    if (!status.ok) assert.equal(status.error, "invalid commit sha");
+    const checkRun = await api.createCheckRun("owner/repo", { name: "x", headSha: sha, status: "queued" });
+    assert.equal(checkRun.ok, false, `check run refused a ${sha.length}-char sha`);
+  }
+  assert.equal(calls.length, 0, "no POST was attempted for any abbreviated sha");
 });
 
 test("createReview refuses an absent pinned SHA with no request", async () => {
@@ -428,7 +457,7 @@ test("createReview refuses an absent pinned SHA with no request", async () => {
 test("createReview refuses a malformed pinned SHA with no request", async () => {
   const { fetchImpl, calls } = makeForge(() => json({ id: 5 }, 200));
   const api = client(fetchImpl);
-  for (const bad of ["", "not-a-sha", "deadbeef; DROP TABLE reviews", "z".repeat(40), `${"a".repeat(65)}`, "main"]) {
+  for (const bad of ["", "not-a-sha", "deadbeef; DROP TABLE reviews", "z".repeat(40), `${"a".repeat(65)}`, "main", "a".repeat(7), "a".repeat(39)]) {
     const result = await api.createReview("owner/repo", 7, { commitId: bad });
     assert.equal(result.ok, false, `expected refusal for ${JSON.stringify(bad)}`);
     if (!result.ok) assert.equal(result.error, "invalid review payload");
@@ -478,25 +507,25 @@ test("createReview refuses an unknown event and an invalid PR number before any 
 
 test("createCommitStatus posts state+context with the sha only in the path", async () => {
   const { fetchImpl, apiCalls } = makeForge(() => json({ id: 1 }, 201));
-  const result = await client(fetchImpl).createCommitStatus("owner/repo", "abc1234", "failure", "pr-reviewer");
+  const result = await client(fetchImpl).createCommitStatus("owner/repo", REVIEW_SHA, "failure", "pr-reviewer");
   assert.equal(result.ok, true);
   const call = apiCalls()[0]!;
-  assert.equal(call.url, `${API_BASE}/repos/owner/repo/statuses/abc1234`);
+  assert.equal(call.url, `${API_BASE}/repos/owner/repo/statuses/${REVIEW_SHA}`);
   assert.deepEqual(JSON.parse(call.body!), { state: "failure", context: "pr-reviewer" });
 });
 
 test("createCommitStatus refuses a non-hex sha, an unknown state, and a control-character context", async () => {
   const { fetchImpl, calls } = makeForge(() => json({ id: 1 }, 201));
   const api = client(fetchImpl);
-  for (const sha of ["", "abc", "../../etc/passwd", "abc1234/../5", "abc 1234"]) {
+  for (const sha of ["", "abc", "../../etc/passwd", "abc1234/../5", "abc 1234", "a".repeat(7), "a".repeat(39)]) {
     const result = await api.createCommitStatus("owner/repo", sha, "success", "ctx");
     assert.equal(result.ok, false, JSON.stringify(sha));
     if (!result.ok) assert.equal(result.error, "invalid commit sha", JSON.stringify(sha));
   }
-  const badState = await api.createCommitStatus("owner/repo", "abc1234", "exploded", "ctx");
+  const badState = await api.createCommitStatus("owner/repo", REVIEW_SHA, "exploded", "ctx");
   assert.equal(badState.ok, false);
   if (!badState.ok) assert.equal(badState.error, "invalid commit state");
-  const badContext = await api.createCommitStatus("owner/repo", "abc1234", "success", "ctx\r\nX: 1");
+  const badContext = await api.createCommitStatus("owner/repo", REVIEW_SHA, "success", "ctx\r\nX: 1");
   assert.equal(badContext.ok, false);
   if (!badContext.ok) assert.equal(badContext.error, "invalid status context");
   assert.equal(calls.length, 0);
@@ -508,7 +537,7 @@ test("createCheckRun is gated by the capability matrix (github declares checkRun
   const { fetchImpl, apiCalls } = makeForge(() => json({ id: 3 }, 201));
   const result = await client(fetchImpl).createCheckRun("owner/repo", {
     name: "pr-reviewer",
-    headSha: "ABC1234",
+    headSha: REVIEW_SHA.toUpperCase(),
     status: "completed",
     conclusion: "success",
   });
@@ -518,7 +547,7 @@ test("createCheckRun is gated by the capability matrix (github declares checkRun
   assert.equal(call.url, `${API_BASE}/repos/owner/repo/check-runs`);
   assert.deepEqual(JSON.parse(call.body!), {
     name: "pr-reviewer",
-    head_sha: "abc1234",
+    head_sha: REVIEW_SHA,
     status: "completed",
     conclusion: "success",
   });
@@ -527,14 +556,14 @@ test("createCheckRun is gated by the capability matrix (github declares checkRun
 test("createCheckRun refuses an out-of-contract payload before any request", async () => {
   const { fetchImpl, calls } = makeForge(() => json({ id: 3 }, 201));
   const api = client(fetchImpl);
-  const noConclusion = await api.createCheckRun("owner/repo", { name: "x", headSha: "abc1234", status: "completed" });
+  const noConclusion = await api.createCheckRun("owner/repo", { name: "x", headSha: REVIEW_SHA, status: "completed" });
   assert.equal(noConclusion.ok, false);
   if (!noConclusion.ok) assert.equal(noConclusion.error, "invalid check run payload");
   const badSha = await api.createCheckRun("owner/repo", { name: "x", headSha: "nope", status: "queued" });
   assert.equal(badSha.ok, false);
   const badDetails = await api.createCheckRun("owner/repo", {
     name: "x",
-    headSha: "abc1234",
+    headSha: REVIEW_SHA,
     status: "queued",
     detailsUrl: "http://insecure.example.com",
   });
@@ -552,8 +581,8 @@ test("no request ever carries a credential in its URL or query string", async ()
   await api.listOpenPullRequests("owner/repo");
   await api.upsertIssueComment("owner/repo", 7, MARKER, managedBody("body"));
   await api.createReview("owner/repo", 7, { commitId: REVIEW_SHA, event: "COMMENT", body: "b" });
-  await api.createCommitStatus("owner/repo", "abc1234", "success", "ctx");
-  await api.createCheckRun("owner/repo", { name: "x", headSha: "abc1234", status: "queued" });
+  await api.createCommitStatus("owner/repo", REVIEW_SHA, "success", "ctx");
+  await api.createCheckRun("owner/repo", { name: "x", headSha: REVIEW_SHA, status: "queued" });
   assert.ok(calls.length >= 5);
   for (const call of calls) {
     const url = new URL(call.url);
@@ -657,7 +686,7 @@ test("a self-hosted GHE base keeps its path prefix for every read and write", as
     fetchImpl,
     now: () => NOW_SECONDS * 1000,
   });
-  await api.createCommitStatus("owner/repo", "abc1234", "success", "ctx");
-  assert.equal(calls.at(-1)!.url, "https://ghe.example.com/api/v3/repos/owner/repo/statuses/abc1234");
+  await api.createCommitStatus("owner/repo", REVIEW_SHA, "success", "ctx");
+  assert.equal(calls.at(-1)!.url, `https://ghe.example.com/api/v3/repos/owner/repo/statuses/${REVIEW_SHA}`);
   for (const call of calls) assert.equal(new URL(call.url).origin, "https://ghe.example.com");
 });
