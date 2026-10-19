@@ -65,7 +65,7 @@ See `src/publish/sanitize.ts` for the implementation and `tests-v3/sanitize.test
 
 ## Operational Guidance
 
-- Enable `allow_approve` only when you understand the implications for your repository's merge policy; native approvals can affect branch protection rules and automerge pipelines
+- Understand the implications of native approvals for your repository's merge policy before enabling them; native approvals can affect branch protection rules and automerge pipelines. `publish-mode: review_verdict` publishes the verdict natively (an `approve` verdict becomes a native approval on same-repository PRs), `publish-mode: review_blockers` requests changes but never approves, and the `allow-approve` input is deprecated and ignored. Upgrading from v2? v2 required `allow-approve: "true"` before an approval was published; in v3 `review_verdict` publishes it with no opt-in, so select `review_blockers` or `review_comment` to keep approvals off
 - Keep GitHub token permissions minimal (`contents: read`, `pull-requests: write`)
 - Use self-hosted runners only when required, and isolate them from sensitive networks
 - Prefer `tool_mode=off` for public repositories unless you need tool planning

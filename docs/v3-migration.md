@@ -307,6 +307,44 @@ One default differs on purpose: v2's `verdict_policy` defaults to `model`;
 v3's `verdict-policy` defaults to `strict` (#811, below). Set
 `verdict-policy: model` to keep the v2 passthrough.
 
+`allow_approve` → `allow-approve` is still a retained input, but it is
+deprecated and ignored — see
+[Publish modes and approvals](#publish-modes-and-approvals) below.
+
+### Publish modes and approvals
+
+`publish-mode: review_verdict` publishes the final verdict natively: an
+`approve` verdict becomes a native approval for same-repository PRs (a
+cross-repository PR additionally needs `approve-forks: true`), and a
+`request_changes` verdict becomes a native blocking request. No
+`allow-approve` opt-in is needed to publish the verdict.
+
+`allow-approve` is **deprecated and ignored**. It is still accepted, so
+existing workflows keep loading, but it gates nothing: absent, `false` and
+`true` all produce the same published event, and setting it to anything
+other than the default logs a deprecation warning. A v2 workflow that set
+`allow-approve: "true"` to publish the verdict can simply drop the input.
+
+> **Upgrading warning — native approvals are no longer opt-in.**
+> Under v2, `publish-mode: review_verdict` published a native `APPROVE`
+> only when `allow-approve: "true"` was set; the default was "no
+> approval". In v3, `review_verdict` publishes the verdict — an `approve`
+> verdict becomes a native approval on every same-repository PR — and no
+> opt-in remains for that. A workflow that relied on the v2 default must
+> select `publish-mode: review_blockers` (request changes on blockers,
+> never approve) or `publish-mode: review_comment` (advisory only) to keep
+> approvals off.
+
+`publish-mode: review_blockers` is the new blockers-only mode: a review whose
+verdict is `request_changes` publishes a native `REQUEST_CHANGES`, a review
+whose verdict is `approve` publishes an advisory native `COMMENT`, and the
+mode never publishes an approval. A workflow that wanted "request changes on
+blockers, never approve" should select it instead of relying on
+`allow-approve`.
+
+`approve-forks` is unchanged: the separate, explicit cross-repository
+approval opt-in, default `false`.
+
 ### Tier-aware tool request budget (#701)
 
 `tool_max_requests` defaults to **empty** on both sides. The empty value is
@@ -581,9 +619,10 @@ that state (#873) can never publish as a native `APPROVE`, under any
 fields above are the deterministic artifact, but `publish-mode:
 review_verdict` downgrades an `approve` with `review_result: partial` to a
 `COMMENT` event (never `REQUEST_CHANGES`, which stays reserved for blocking
-findings or a fail-closed enforcement layer), and `comment` mode swaps its
-"APPROVE" recommendation header for an "INCOMPLETE" one so the rendered body
-can never contradict the actual review outcome.
+findings or a fail-closed enforcement layer), `publish-mode: review_blockers`
+never publishes an approval at all, and `comment` mode swaps its "APPROVE"
+recommendation header for an "INCOMPLETE" one so the rendered body can never
+contradict the actual review outcome.
 
 The `review-result` action output (#873, additive — see "New outputs" above)
 carries this same marker state, since the `verdict` output's value set
