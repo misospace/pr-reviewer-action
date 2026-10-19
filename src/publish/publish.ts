@@ -1188,7 +1188,7 @@ export async function publishReview(
             : incompleteReason === "both"
               ? "execution coverage is incomplete and an in-scope requirement lacks fully verified enforcement or test evidence"
             : input.coverageUnknown
-              ? "this review's tool-loop coverage could not be verified (no run directory was available to confirm it)"
+              ? "this review's tool-loop coverage could not be verified (the run directory or its coverage artifact was unavailable to confirm it)"
               : "required-check coverage or the tool-loop investigation did not finish";
         body += `\n> **Approval published with incomplete coverage**: ${gap}. The verdict above is the review's final verdict; the coverage notes remain informational.\n`;
         messages.push(

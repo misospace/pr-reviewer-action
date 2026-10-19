@@ -484,6 +484,246 @@ test("#1145: a repair round that stops on a request error records skipped_refres
   assert.equal(JSON.parse(String((choice.message as Record<string, unknown>).content)).review_markdown, "## Review\noriginal");
 });
 
+test("#1145: the refreshed verdict does not re-append the corpus", async () => {
+  const { root, deps } = workspace();
+  seedWorkspace(root);
+  // A corpus section that SURVIVES the verdict-corpus dedupe (it is not in
+  // the planning context) and carries a distinctive marker, so the request
+  // payloads can be counted for it.
+  fs.writeFileSync(
+    path.join(root, "review-corpus.truncated.md"),
+    "# PR Diff\n+ change\n\n# Evidence Section\nCORPUS-MARKER-7Q2X\n",
+  );
+  const scripted = baseScripted([
+    openAiCall("c2", "read_file", '{"path":"notes.md"}'),
+    openAiVerdict("refreshed"),
+  ]);
+  let calls = 0;
+  const payloads: Array<Record<string, unknown>> = [];
+  const result = freshResult();
+  const handled = await runNativeLoop(
+    loopInput(
+      deps({
+        transport: async (_baseUrl, _apiFormat, payload) => {
+          payloads.push(structuredClone(payload));
+          return scripted[calls++];
+        },
+        env: { SYSTEM_PROMPT: "You are the reviewer." },
+      }),
+      {
+        result,
+        traceGapProbe: async () => ({
+          instruction: "Verify requirement R1 now.",
+          unresolvedIds: ["R1"],
+        }),
+      },
+    ),
+  );
+  assert.equal(handled, true);
+  assert.equal(calls, 5); // loop(2) + verdict(1) + repair(1) + refreshed verdict(1)
+  assert.equal(result.trace_repair_continuation?.outcome, "continued");
+  assert.equal(result.trace_repair_continuation?.verdict_refreshed, true);
+
+  const marker = "CORPUS-MARKER-7Q2X";
+  const markerCount = (payload: Record<string, unknown>): number =>
+    JSON.stringify(payload).split(marker).length - 1;
+  // The FIRST verdict turn keeps its behavior: the corpus rides the request
+  // exactly once, behind the closing instruction that announces it.
+  const firstVerdict = payloads[2]!;
+  assert.equal(markerCount(firstVerdict), 1, "the first verdict request carries the corpus once");
+  const firstMessages = firstVerdict.messages as Array<Record<string, unknown>>;
+  const firstLast = firstMessages[firstMessages.length - 1]!;
+  assert.equal(firstLast.role, "user");
+  assert.ok(String(firstLast.content).includes("Below is the full review corpus for this PR"));
+  assert.ok(String(firstLast.content).includes(marker));
+
+  // The REFRESHED verdict request must NOT carry the corpus a second time:
+  // the conversation already holds it verbatim from the first verdict turn,
+  // so a re-append would double it (202KB -> 403KB on a 200KB corpus) and
+  // overflow the context window on exactly the large PRs the repair round
+  // targets.
+  const refreshed = payloads[4]!;
+  assert.equal(markerCount(refreshed), 1, "the refreshed request must not re-append the corpus");
+  const refreshedMessages = refreshed.messages as Array<Record<string, unknown>>;
+  const refreshedLast = refreshedMessages[refreshedMessages.length - 1]!;
+  assert.equal(refreshedLast.role, "user");
+  const refreshedText = String(refreshedLast.content);
+  // The refresh's own instruction refers to the corpus ALREADY provided.
+  assert.ok(refreshedText.includes("review corpus already provided above"));
+  assert.ok(!refreshedText.includes("Below is the full review corpus"), "the refresh must not claim a corpus follows");
+  // Exactly one user event: the refresh rides the same conversation, right
+  // after the repair round's tool result — its instruction appears in ONE
+  // user turn, never two.
+  const refreshTurns = refreshedMessages.filter(
+    (m) => m.role === "user" && String(m.content).includes("review corpus already provided above"),
+  );
+  assert.equal(refreshTurns.length, 1, "the refresh adds exactly one user turn");
+
+  // The refresh still yields a verdict: the standing one is replaced by the
+  // refreshed body.
+  const verdictBody = JSON.parse(
+    fs.readFileSync(path.join(root, "ai-response.primary.json"), "utf8"),
+  ) as Record<string, unknown>;
+  const choice = (verdictBody.choices as Array<Record<string, unknown>>)[0]!;
+  assert.equal(JSON.parse(String((choice.message as Record<string, unknown>).content)).review_markdown, "## Review\nrefreshed");
+});
+
+test("#1145: the repair round's wall-clock allowance subtracts the verdict turn's elapsed time", async () => {
+  const { root, deps } = workspace();
+  seedWorkspace(root);
+  // A controllable clock: the scripted transport advances it, so the first
+  // verdict turn can consume the rest of the wall-clock budget.
+  let now = 0;
+  const scripted = baseScripted([
+    openAiCall("c2", "read_file", '{"path":"notes.md"}'),
+    openAiVerdict("refreshed"),
+  ]);
+  let calls = 0;
+  const result = freshResult();
+  const handled = await runNativeLoop(
+    loopInput(
+      deps({
+        transport: async () => {
+          // Two loop rounds (1s each), then the FIRST verdict turn (9s) —
+          // together with the loop's own 2s that exhausts the 10s budget.
+          now += calls === 2 ? 9 : 1;
+          return scripted[calls++];
+        },
+        env: { SYSTEM_PROMPT: "You are the reviewer.", TOOL_LOOP_WALL_CLOCK_SEC: "10" },
+        timeFn: () => now,
+      }),
+      {
+        result,
+        traceGapProbe: async () => ({
+          instruction: "Verify requirement R1 now.",
+          unresolvedIds: ["R1"],
+        }),
+      },
+    ),
+  );
+  assert.equal(handled, true);
+  // The verdict turn ate the remaining budget: no repair round, no refresh.
+  assert.equal(calls, 3);
+  assert.deepEqual(result.trace_repair_continuation, {
+    attempted: true,
+    outcome: "skipped_no_budget",
+    unresolved_ids: ["R1"],
+  });
+  // The standing verdict is untouched.
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  const persisted = JSON.parse(
+    fs.readFileSync(path.join(root, "ai-response.primary.json"), "utf8"),
+  ) as Record<string, unknown>;
+  const choice = (persisted.choices as Array<Record<string, unknown>>)[0]!;
+  assert.equal(JSON.parse(String((choice.message as Record<string, unknown>).content)).review_markdown, "## Review\noriginal");
+});
+
+test("#1145: the coverage record is recomputed after a successful repair round", async () => {
+  const { root, deps } = workspace();
+  seedWorkspace(root);
+  fs.writeFileSync(path.join(root, "helper.ts"), "export const h = 1;\n");
+  fs.writeFileSync(path.join(root, "other.ts"), "export const o = 1;\n");
+  // Three changed files: the original loop reads one, the repair round reads
+  // the second, and the third is never read.
+  fs.writeFileSync(
+    path.join(root, "pr-files.json"),
+    JSON.stringify([{ filename: "src.ts" }, { filename: "notes.md" }, { filename: "other.ts" }]),
+  );
+  // TOOL_MAX_ROUNDS=1 -> two loop rounds -> the loop stops on its ROUND
+  // budget (a budget stop, so a coverage record exists at all).
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiCall("c2", "read_file", '{"path":"helper.ts"}'),
+    openAiVerdict("original"),
+    openAiCall("c3", "read_file", '{"path":"notes.md"}'),
+    openAiVerdict("refreshed"),
+  ];
+  let calls = 0;
+  const result = freshResult();
+  const handled = await runNativeLoop(
+    loopInput(
+      deps({
+        transport: async () => scripted[calls++],
+        env: { SYSTEM_PROMPT: "You are the reviewer.", TOOL_MAX_ROUNDS: "1" },
+      }),
+      {
+        result,
+        traceGapProbe: async () => ({
+          instruction: "Verify requirement R1 now.",
+          unresolvedIds: ["R1"],
+        }),
+      },
+    ),
+  );
+  assert.equal(handled, true);
+  assert.equal(calls, 5);
+  assert.equal(result.stop_reason, "max-rounds");
+  assert.equal(result.trace_repair_continuation?.outcome, "continued");
+  assert.equal(result.trace_repair_continuation?.verdict_refreshed, true);
+
+  // The record is still present, and it no longer lists the file the repair
+  // round actually read.
+  const coverage = result.partial_coverage as {
+    stop_reason: string;
+    changed_files_total: number;
+    unread_files: string[];
+  };
+  assert.notEqual(coverage, undefined, "the coverage record stays");
+  assert.equal(coverage.stop_reason, "max-rounds");
+  assert.equal(coverage.changed_files_total, 3);
+  assert.deepEqual(coverage.unread_files, ["other.ts"]);
+  // The artifact carries the same recomputed record.
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8")) as Record<string, unknown>;
+  const artifactCoverage = artifact.partial_coverage as { unread_files: string[] };
+  assert.deepEqual(artifactCoverage.unread_files, ["other.ts"]);
+});
+
+test("#1145: a repair round that reads every tracked file keeps the coverage record", async () => {
+  const { root, deps } = workspace();
+  seedWorkspace(root);
+  fs.writeFileSync(path.join(root, "helper.ts"), "export const h = 1;\n");
+  // Two changed files: the original loop reads one, the repair round reads
+  // the other — after which nothing the manifest tracked is left unread.
+  fs.writeFileSync(
+    path.join(root, "pr-files.json"),
+    JSON.stringify([{ filename: "src.ts" }, { filename: "notes.md" }]),
+  );
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiCall("c2", "read_file", '{"path":"helper.ts"}'),
+    openAiVerdict("original"),
+    openAiCall("c3", "read_file", '{"path":"notes.md"}'),
+    openAiVerdict("refreshed"),
+  ];
+  let calls = 0;
+  const result = freshResult();
+  const handled = await runNativeLoop(
+    loopInput(
+      deps({
+        transport: async () => scripted[calls++],
+        env: { SYSTEM_PROMPT: "You are the reviewer.", TOOL_MAX_ROUNDS: "1" },
+      }),
+      {
+        result,
+        traceGapProbe: async () => ({
+          instruction: "Verify requirement R1 now.",
+          unresolvedIds: ["R1"],
+        }),
+      },
+    ),
+  );
+  assert.equal(handled, true);
+  assert.equal(calls, 5);
+  // The recomputation comes back empty (nothing left unread), so the ORIGINAL
+  // record stands: the run stopped on a budget stop and must stay partial.
+  // Deleting the record would claim a complete investigation the run never
+  // performed.
+  const coverage = result.partial_coverage as { unread_files: string[] };
+  assert.notEqual(coverage, undefined, "the coverage record is never deleted");
+  assert.deepEqual(coverage.unread_files, ["notes.md"]);
+});
+
 test("#1145 wiring: runToolHarness forwards deps.traceGapProbe to the native loop", async () => {
   // The production path is stages.runToolHarnessPhase → runToolHarness →
   // runNativeLoop. A probe that only reaches runNativeLoop when called

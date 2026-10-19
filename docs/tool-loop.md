@@ -251,6 +251,20 @@ cannot un-prove them; the confirmed-unmet escalation in
 `docs/verdicts-and-publishing.md` owns that outcome. Model-claimed `unmet`
 rows (#1095) are likewise left to the reviewer's own findings.
 
+Two budget facts bound the repair round exactly. Its wall-clock allowance is
+what is LEFT of the run's total wall-clock budget after the original loop
+**and** the first verdict turn, so a verdict turn that consumed the rest of
+the budget leaves nothing for the repair (`skipped_no_budget`) and the
+continuation can never push the run past its own total. The refreshed verdict
+is re-requested from the SAME conversation and does **not** re-append the
+review corpus: the conversation already carries it verbatim from the first
+verdict turn, so a second copy would double the corpus in the request (200KB
+corpus → 403KB request) and overflow the context window on exactly the large
+pull requests the repair round targets. The repair round's own reads also
+count: the `partial_coverage` record is recomputed with them folded in, so a
+file the repair round read is no longer listed as never read — while a run
+that stopped on a budget stop stays partial (the record is never dropped).
+
 The continuation is primary-tier only (the smart tier keeps its pre-#1145
 shape) and never overrides the loop's own stop reason. What happened is
 reported, sanitized, on `tool-harness.json` (`trace_repair_continuation`), on

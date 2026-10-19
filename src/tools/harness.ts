@@ -72,6 +72,7 @@ import {
   loadChangedFilePaths,
   loadRemovedFilePaths,
   loadSpecialistLeadRefs,
+  type CoverageLeadRef,
   type PartialCoverage,
 } from "./coverage.js";
 import { McpToolset, parseServerSpecs, splitNamespaced, resolveMcpToolName } from "./mcp.js";
@@ -149,6 +150,26 @@ export const VERDICT_CLOSING_INSTRUCTION =
   "investigation together with this corpus, produce the final review verdict " +
   "now in the exact output format specified in your instructions. Do not " +
   "issue any further tool calls.\n\n";
+
+/** #1145: closing instruction for the REFRESH verdict turn — the SECOND
+ * verdict, produced after the bounded evidence-repair round.
+ *
+ * The refresh does NOT re-append the review corpus: the conversation already
+ * carries it verbatim from the FIRST verdict turn (that turn's user event
+ * stays in the transcript, and the verdict turn keeps the full history), so
+ * appending the corpus again doubles it in the refreshed request — measured
+ * on a 200KB corpus: 202KB for the first verdict request, 403KB for the
+ * refreshed one. On a PR whose corpus sits near the corpus/context ceiling
+ * the doubled request overflows the context window, the refresh fails, and
+ * the repair round's evidence is wasted: the feature would be inert exactly
+ * on the large PRs it targets. The refresh therefore carries ONLY this
+ * instruction, which refers to the corpus already provided above. */
+export const VERDICT_REFRESH_CLOSING_INSTRUCTION =
+  "You finished gathering evidence (the tool calls and results above, " +
+  "including the bounded evidence-repair round). Using your investigation " +
+  "together with the review corpus already provided above, produce the final " +
+  "review verdict now in the exact output format specified in your " +
+  "instructions. Do not issue any further tool calls.\n\n";
 
 export const SUMMARIZER_SYSTEM =
   "You compress earlier tool-call results from a PR review into a dense " +
@@ -1956,6 +1977,18 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // changed files and specialist leads were never read/resolved. A degraded
   // run issued no calls at all and is reported through its own degraded
   // path, not as a partial tool investigation.
+  // #1145: the coverage inputs — the changed-file manifest, the specialist
+  // leads, and the corpus-diff credit set — are computed ONCE here and
+  // REUSED by the post-repair recomputation below, so a recomputed record
+  // is built from exactly the same manifest the original record was built
+  // from (re-reading them could observe a different workspace state).
+  // Null when the original loop did not stop on a budget: there is no
+  // coverage record to recompute then.
+  let coverageInputs: {
+    changedFiles: string[];
+    leads: CoverageLeadRef[];
+    corpusDiffCoveredFiles: ReadonlySet<string>;
+  } | null = null;
   if (!outcome.degraded && isBudgetStopReason(outcome.stopReason)) {
     // #921/#930: coverage credits files whose complete diff is in the corpus
     // via the assembler-certified diff-section payload (slot-keyed, written
@@ -1976,11 +2009,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     // The audit lives on the result, not inside the gap record: a budget
     // stop the credit completes emits no partial_coverage at all.
     if (corpusCovered.size > 0) input.result.corpus_diff_covered_files = [...corpusCovered].sort();
-    const coverage = computePartialCoverage(outcome, {
-      changedFiles,
-      leads: loadSpecialistLeadRefs(deps.readText),
-      corpusDiffCoveredFiles: corpusCovered,
-    });
+    const leads = loadSpecialistLeadRefs(deps.readText);
+    coverageInputs = { changedFiles, leads, corpusDiffCoveredFiles: corpusCovered };
+    const coverage = computePartialCoverage(outcome, coverageInputs);
     if (coverage !== null) input.result.partial_coverage = coverage;
   }
   // #1043 (review): applied-skill diagnostics are aggregated BEFORE any
@@ -2063,32 +2094,49 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     // distinguishes the FIRST verdict (owns the verdict telemetry, the error
     // artifact, and the fallback fields) from a CONTINUATION verdict: on
     // failure the continuation must leave the standing verdict, its fields,
-    // and its artifact byte-for-byte untouched. Returns the accepted verdict
+    // and its artifact byte-for-byte untouched. `isRefresh` marks the
+    // continuation turn, whose request must NOT re-append the corpus (see
+    // VERDICT_REFRESH_CLOSING_INSTRUCTION). Returns the accepted verdict
     // response, or null when no reusable verdict was produced.
-    const runVerdictTurn = async (recordFailure: boolean): Promise<unknown> => {
+    const runVerdictTurn = async (recordFailure: boolean, isRefresh: boolean): Promise<unknown> => {
       try {
         const corpusName = input.tier === "smart" ? "review-corpus.smart.truncated.md" : "review-corpus.truncated.md";
         let verdictCorpus = deps.readText(corpusName) ?? "";
         if (!verdictCorpus) return null;
-        verdictCorpus = replaceHarnessFindingsSection(verdictCorpus, verdictHarnessFindingsBody(outcome));
-        // #372/#398: drop the byte-duplicate sections the planning context
-        // already carries (section-exact and conservative).
-        const deduped = dedupeVerdictCorpus(verdictCorpus, input.corpusText);
-        const dropped = countOccurrences(deduped, VERDICT_DEDUP_NOTICE);
-        if (dropped > 0) {
-          const saved = Buffer.byteLength(verdictCorpus, "utf8") - Buffer.byteLength(deduped, "utf8");
-          log(
-            `  native_loop: verdict-corpus dedup dropped ${dropped} section(s) already in the planning context (${saved} bytes saved)`,
-          );
-        }
         // #965: the initial pass is always the primary profile; the smart
         // profile belongs to the escalation tier.
         const profile = input.tier === "smart" ? "smart" : (env.REVIEW_CONTEXT_PROFILE ?? "primary");
         const shape = (profile === "smart" ? env.SMART_REQUEST_SHAPE : env.PRIMARY_REQUEST_SHAPE) ?? "default";
-        if (shape === "trailing_task") {
-          conversation.addUser(deduped + "\n\n" + VERDICT_CLOSING_INSTRUCTION);
+        if (isRefresh) {
+          // #1145: the REFRESH turn carries no corpus. The conversation
+          // already holds the corpus verbatim from the FIRST verdict turn
+          // (its user event stays in the transcript), so a second copy would
+          // double the corpus in the refreshed request — 202KB -> 403KB on a
+          // 200KB corpus — and overflow the context window on exactly the
+          // large PRs the repair round targets, failing the refresh and
+          // wasting the repair round's evidence. The refresh therefore adds
+          // EXACTLY ONE user event, carrying only the closing instruction
+          // that refers to the corpus already provided above; on the
+          // Anthropic format that event still merges into the repair round's
+          // trailing tool_result message (no adjacent user turns).
+          conversation.addUser(VERDICT_REFRESH_CLOSING_INSTRUCTION);
         } else {
-          conversation.addUser(VERDICT_CLOSING_INSTRUCTION + deduped);
+          verdictCorpus = replaceHarnessFindingsSection(verdictCorpus, verdictHarnessFindingsBody(outcome));
+          // #372/#398: drop the byte-duplicate sections the planning context
+          // already carries (section-exact and conservative).
+          const deduped = dedupeVerdictCorpus(verdictCorpus, input.corpusText);
+          const dropped = countOccurrences(deduped, VERDICT_DEDUP_NOTICE);
+          if (dropped > 0) {
+            const saved = Buffer.byteLength(verdictCorpus, "utf8") - Buffer.byteLength(deduped, "utf8");
+            log(
+              `  native_loop: verdict-corpus dedup dropped ${dropped} section(s) already in the planning context (${saved} bytes saved)`,
+            );
+          }
+          if (shape === "trailing_task") {
+            conversation.addUser(deduped + "\n\n" + VERDICT_CLOSING_INSTRUCTION);
+          } else {
+            conversation.addUser(VERDICT_CLOSING_INSTRUCTION + deduped);
+          }
         }
         const tempRaw = (env.AI_TEMPERATURE ?? "").trim();
         const temperature = tempRaw ? Number(tempRaw) : null;
@@ -2251,7 +2299,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         return null;
       }
     };
-    const firstVerdictResponse = await runVerdictTurn(true);
+    // #1145: the wall-clock allowance of the repair round is a share of the
+    // ORIGINAL run's total, and the FIRST verdict turn is part of that run —
+    // so the time it consumed is measured here and subtracted from the
+    // allowance below. Without this the continuation could push the run past
+    // its own total wall-clock budget by exactly the verdict turn's duration.
+    const verdictStartedAt = timeFn();
+    const firstVerdictResponse = await runVerdictTurn(true, false);
+    const verdictElapsedSec = Math.max(0, timeFn() - verdictStartedAt);
 
     // ── #1145: bounded evidence-repair continuation ──────────────────────
     // The probe inspects the ACCEPTED verdict against deterministic
@@ -2286,7 +2341,13 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           .filter((id): id is string => typeof id === "string")
           .map((id) => traceGapIdLabel(id));
         const instruction = typeof continuation.instruction === "string" ? continuation.instruction.trim() : "";
-        const wallClockLeft = budgets.wallClockSec - outcome.elapsedSec;
+        // #1145: the allowance covers what is LEFT of the original run's
+        // wall-clock budget: the original loop's own elapsed time AND the
+        // first verdict turn's elapsed time. The continuation never exceeds
+        // the original run's totals, so a verdict turn that consumed the
+        // remaining budget leaves nothing for the repair round
+        // (`skipped_no_budget`).
+        const wallClockLeft = budgets.wallClockSec - outcome.elapsedSec - verdictElapsedSec;
         const deadlineLeft = deadline === null || timeFn() < deadline;
         if (!instruction) {
           // A vacuous instruction is treated as a no-op probe: no loop, no
@@ -2357,13 +2418,37 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
             input.result.executed_request_count =
               Number(input.result.executed_request_count ?? 0) +
               repair.executed.filter((call) => call.result.status === "ok").length;
+            // #1145: the repair round's own reads COUNT. The coverage record
+            // was computed from the original loop's calls alone, so a
+            // changed file the repair round actually read could still be
+            // listed as "never read" in the published coverage notice and in
+            // the review-coverage artifact — the published body would then
+            // contradict the evidence the run gathered. Recompute the record
+            // with the repair's executed calls folded in and REPLACE the
+            // original only when the recomputation returns a record: a null
+            // recomputation means "nothing the manifest tracked is left
+            // unread", and dropping the record then would claim a complete
+            // investigation this run did not perform (the loop stopped on a
+            // budget stop), so the original record stays and the run remains
+            // "partial". The stop reason stays the ORIGINAL loop's: the
+            // budget stop is what made the run partial. A repair round that
+            // itself errored counts too — the calls it completed were read,
+            // and they are already folded into the trace above; a call whose
+            // own result failed is not a read and stays uncovered.
+            if (coverageInputs !== null) {
+              const recomputed = computePartialCoverage(
+                { ...outcome, executed: [...outcome.executed, ...repair.executed] },
+                coverageInputs,
+              );
+              if (recomputed !== null) input.result.partial_coverage = recomputed;
+            }
             // A refresh is justified only by new executed evidence — and it
             // is wire-safe only then: with no fresh tool_result event the
             // second verdict's user turn would sit directly after the
             // (already merged) verdict+repair user message, which the
             // Anthropic format rejects.
             const verdictRefreshed =
-              repair.executed.length > 0 && (await runVerdictTurn(false)) !== null;
+              repair.executed.length > 0 && (await runVerdictTurn(false, true)) !== null;
             // A repair round that itself stopped on a request error did NOT
             // complete: record it distinctly instead of calling an errored
             // round "continued" (the stop_reason keeps the precise cause).

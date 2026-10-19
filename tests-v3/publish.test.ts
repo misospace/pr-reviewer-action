@@ -840,6 +840,28 @@ test("review_verdict: request_changes stays REQUEST_CHANGES even with incomplete
   assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
 });
 
+test("review_verdict: an unknown coverage state names BOTH possible causes in the approval note", async () => {
+  // #1145: coverage can be unknown because the run directory was missing OR
+  // because the run directory's coverage artifact was unreadable or
+  // unrecognized. The note must not claim the run directory was absent —
+  // that would be a fact the publisher cannot know.
+  const api = new MockPublishApi();
+  const result = await publishReview(input({
+    mode: "review_verdict", allowApprove: true, verdict: "approve", requiredChecks: "complete",
+    coverageUnknown: true,
+  }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted[0]!.event, "APPROVE");
+  const body = api.submitted[0]!.body;
+  assert.match(body, /Approval published with incomplete coverage/);
+  assert.ok(body.includes("tool-loop coverage could not be verified"), "the stable phrase is kept");
+  assert.ok(
+    body.includes("(the run directory or its coverage artifact was unavailable to confirm it)"),
+    "the parenthetical names both causes",
+  );
+  assert.ok(!body.includes("no run directory was available"), "the old, narrower claim is gone");
+});
+
 test("#1161: the deprecated allow-approve input no longer withholds an approval (the pre-#1161 policy-block message is gone)", async () => {
   const api = new MockPublishApi();
   const result = await publishReview(input({
