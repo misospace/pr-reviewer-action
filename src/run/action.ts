@@ -278,6 +278,7 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       ...(review.toolMaxRounds !== undefined ? { maxRounds: review.toolMaxRounds } : {}),
       ...(review.contextBudget !== undefined ? { contextBudget: review.contextBudget } : {}),
       ...(review.contextPeak !== undefined ? { contextPeak: review.contextPeak } : {}),
+      ...(review.toolStopReason !== undefined ? { toolStopReason: review.toolStopReason } : {}),
       // #1027: the prior published head reaches publish through the managed
       // sticky comment's metadata marker (read in readFeedbackState); it is
       // NOT the precheck's head_sha, which is the CURRENT head and would

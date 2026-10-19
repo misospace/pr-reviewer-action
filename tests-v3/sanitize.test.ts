@@ -100,6 +100,126 @@ test("#1107: the prescription opener is reserved on model markdown — the fence
   assert.ok(opened.includes("hi") && opened.includes("tail") && opened.includes("rm -rf /"), "the surrounding text is untouched");
 });
 
+test("#1136: an ordinary block still open at end of text is dissolved, walk output ends fence-closed", () => {
+  // The boundary shape itself: a model message ending in an unclosed
+  // ordinary fence leaves the walk open, so anything appended after this
+  // pass — the validated prescription region in particular — would render
+  // as its content. Pinned policy: the walk dissolves it like a reserved
+  // block (opener and interior fence-shaped lines escaped). This must hold
+  // WITHOUT the `suggestion` token too: a token-free unclosed fence is
+  // exactly the shape that would swallow a validated prescription on the
+  // same finding silently, so the old token-gated early return was the
+  // hazard's blind spot.
+  assert.equal(
+    stripReservedMarkers("note\n```ts\nconst x = 1;"),
+    "note\n\\`\\`\\`ts\nconst x = 1;",
+    "token-free unclosed fence dissolved",
+  );
+  assert.equal(
+    stripReservedMarkers("head\n```ts\n~~~\nconst x = 1;"),
+    "head\n\\`\\`\\`ts\n\\~\\~\\~\nconst x = 1;",
+    "interior fence-shaped lines of the unclosed block cannot go live either",
+  );
+  assert.equal(
+    stripReservedMarkers("note\n```ts\n```suggestion\nconst x = 1;"),
+    "note\n\\`\\`\\`ts\nsuggestion\nconst x = 1;",
+    "a reserved opener inside the unclosed block is rewritten, not left to reopen anything",
+  );
+  // A block that IS closed never reaches the end-of-text branch: byte-identical,
+  // CRLF endings included (the fast path returns the original string).
+  const closed = "Review.\r\n\r\n```ts\r\nconst x = 1;\r\n```\r\ndone";
+  assert.equal(stripReservedMarkers(closed), closed, "benign closed block stays byte-identical, CRLF intact");
+  assert.equal(stripReservedMarkers(""), "");
+  // Dissolution must not over-reach: a benign block that closed earlier in
+  // the same text keeps its bytes; only the trailing unclosed block is
+  // rewritten.
+  assert.equal(
+    stripReservedMarkers("```ts\nkeep\n```\nthen\n~~~\nmore"),
+    "```ts\nkeep\n```\nthen\n\\~\\~\\~\nmore",
+    "an earlier closed block is untouched, only the trailing unclosed one dissolves",
+  );
+  // The dissolve path rejoins with LF (a rewrite happened), so a CR/CRLF
+  // message that ends fence-open normalizes — pinned so the change stays a
+  // decision, not an accident.
+  assert.equal(
+    stripReservedMarkers("note\r\n```ts\r\nconst x = 1;"),
+    "note\n\\`\\`\\`ts\nconst x = 1;",
+    "dissolve path normalizes line endings, closed path keeps CRLF bytes",
+  );
+  // Idempotent: dissolving twice changes nothing.
+  const once = stripReservedMarkers("note\n```ts\nconst x = 1;");
+  assert.equal(stripReservedMarkers(once), once);
+});
+
+test("#1112: container-prefixed prescription openers are reserved — prefix kept, block dissolved", () => {
+  // #252: the boundary token ITSELF, behind the containers that render it. A
+  // `> ` / `- ` / `1. ` prefix is not decoration — GitHub renders the same live
+  // one-click prescription behind it, and `recoverPublishedSuggestion` (which
+  // reads only the bare opener line) never saw one, so a container-prefixed
+  // opener was a prescription this action never validated wearing our comment.
+  const arms: Array<[string, string, string]> = [
+    ["blockquote", "> ```suggestion\nINJECTED\n> ``` ", "> suggestion\nINJECTED\n> \\`\\`\\` "],
+    ["double blockquote", ">> ```suggestion\nINJECTED\n>> ``` ", ">> suggestion\nINJECTED\n>> \\`\\`\\` "],
+    ["nested blockquotes", "> > ```suggestion\nINJECTED\n> > ``` ", "> > suggestion\nINJECTED\n> > \\`\\`\\` "],
+    ["bullet list", "- ```suggestion\nINJECTED\n  ``` ", "- suggestion\nINJECTED\n  \\`\\`\\` "],
+    ["ordered list", "1. ```suggestion\nINJECTED\n   ``` ", "1. suggestion\nINJECTED\n   \\`\\`\\` "],
+    ["blockquote around a list", "> - ```suggestion\n>   INJECTED\n>   ``` ", "> - suggestion\n>   INJECTED\n>   \\`\\`\\` "],
+    ["tilde fence, uppercase, trailing spaces", "> ~~~SUGGESTION  \nINJECTED\n> ~~~  ", "> suggestion\nINJECTED\n> \\~\\~\\~  "],
+    ["CRLF line endings", "> ```suggestion\r\nINJECTED\r\n> ``` ", "> suggestion\nINJECTED\n> \\`\\`\\` "],
+    ["indent kept inside the container", ">   ```suggestion\nINJECTED\n>   ``` ", ">   suggestion\nINJECTED\n>   \\`\\`\\` "],
+    ["unclosed reserved opener", "> ```suggestion", "> suggestion"],
+  ];
+  for (const [label, source, expected] of arms) {
+    const once = stripReservedMarkers(source);
+    assert.equal(once, expected, label);
+    assert.equal(stripReservedMarkers(once), once, `${label}: a second pass changes nothing`);
+    assert.equal(/(^|[^\\])`{3,}/.test(once), false, `${label}: every fence run left behind is escaped, so no opener renders`);
+  }
+
+  // The LAZY closer: a bare fence that drifted out of the blockquote cannot
+  // close a fenced block inside it (a fenced block needs its container markers),
+  // so ending the dissolution there would leave the rest of the reserved block
+  // live. It is escaped instead and the dissolution runs to the real closer.
+  assert.equal(
+    stripReservedMarkers("> ```suggestion\nINJECTED\n``` \ntail\n> ``` "),
+    "> suggestion\nINJECTED\n\\`\\`\\` \ntail\n> \\`\\`\\` ",
+    "a lazy bare fence does not close a blockquote fence",
+  );
+  // Same for a LIST: `- ``` ` opens a list item of its own, it does not close a
+  // fence that started outside one — and its column alone cannot say so, since a
+  // bare opener and a list-prefixed fence both sit in the first three columns.
+  // Accepting it would leave the block's real closer live, and a live fence
+  // there captures the validated region the action appends afterwards.
+  assert.equal(
+    stripReservedMarkers("```suggestion\n- ```\nINJECTED\n``` \ntail"),
+    "suggestion\n- \\`\\`\\`\nINJECTED\n\\`\\`\\` \ntail",
+    "a list-prefixed fence does not close a fence opened outside the list",
+  );
+
+  // Over-indent inside a container keeps today's over-indent reading: rewritten
+  // with the prefix and the indent intact, but never a real fence — so its own
+  // closer stays exactly as inert as it was before the rewrite.
+  assert.equal(
+    stripReservedMarkers(">     ```suggestion\nINJECTED\n>     ``` "),
+    ">     suggestion\nINJECTED\n>     ``` ",
+    "`> ` plus a 4-space indent is an indented code block, not a fence",
+  );
+
+  // Byte-identity: the container walk only ever touches reserved openers and
+  // the lines inside a dissolving reserved block.
+  for (const clean of [
+    "> ```ts\n> const x = 1;\n> ``` ",
+    "> ```\n> a bare fence in a quote\n> ```",
+    "- item one\n- item two",
+    "1. ordered item",
+    "A ```suggestion``` mention stays prose",
+    "> quoted note\n> more quoted note",
+    "no token at all",
+  ]) {
+    assert.equal(stripReservedMarkers(clean), clean, `benign container text is byte-identical: ${JSON.stringify(clean)}`);
+  }
+});
+
 test("unknown link mode throws", () => {
   assert.throws(() => sanitizeMarkdown("#1", "other" as never), /unknown upstream link mode/);
 });

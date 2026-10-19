@@ -25,7 +25,7 @@ import { FINDING_OUTCOMES_SCHEMA, MAX_LEDGER_EVENTS, normalizeOutcomeEvent, seri
 import { parseFindingIdentityMarker } from "../outcomes/identity.js";
 import { deriveOutcomeEvents, type PriorFindingObservation } from "../outcomes/reconcile.js";
 import { aggregateOutcomeEvents } from "../outcomes/report.js";
-import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, retireManagedInlineComments, resolvePublishTrustedOwner, selectManagedReviews, type CleanupLog } from "./cleanup.js";
+import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, retireManagedInlineComments, resolvePublishTrustedOwner, selectManagedReviews, minimizeSupersededAdvisoryReviews, type CleanupLog } from "./cleanup.js";
 import { ownerMatchesIdentity, type TrustedOwnerIdentity } from "../platform/owner-identity.js";
 import { strictReviewResult } from "../enforcement/verdict-policy.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
@@ -117,6 +117,10 @@ export interface PublishInput {
   /** #922: the loop's conversation budget and peak (approx tokens). */
   contextBudget?: number;
   contextPeak?: number;
+  /** #847 measurement follow-up: the tool loop's stop reason, recorded on
+   * every harness run so budget stops with complete coverage stay visible in
+   * published markers. Omitted when no harness reported one. */
+  toolStopReason?: string;
   /** #1003: the human-review triage answer, present ONLY when triage ran
    * (`review-triage` enabled) and the review produced one. Absent means
    * "did not run" and renders no section — never a silent "not required". */
@@ -1177,6 +1181,7 @@ export async function publishReview(
     ...(input.maxRounds !== undefined ? { maxRounds: input.maxRounds } : {}),
     ...(input.contextBudget !== undefined ? { contextBudget: input.contextBudget } : {}),
     ...(input.contextPeak !== undefined ? { contextPeak: input.contextPeak } : {}),
+    ...(input.toolStopReason !== undefined && input.toolStopReason !== "" ? { toolStopReason: input.toolStopReason } : {}),
     actionVersion: ACTION_VERSION,
   };
   if (input.partialCoverage) {
@@ -1510,11 +1515,18 @@ export async function publishReview(
           ? { kind: "sticky", commentId: stickyCommentId, updatedAt: stickyUpdatedAt, body: stickyBody }
           : undefined;
     const replacementComplete = completeCoverage && !fallbackSubmission && replacementCheckpoint !== undefined;
-    if (replacementComplete && replacementCheckpoint !== undefined) {
+    // #1114: verification below (head, trusted owner, supersession ordering,
+    // still-current revalidation) is what proves staleness — not coverage
+    // completeness. A published checkpoint therefore authorizes the safe,
+    // presentation-only minimization of superseded advisory bodies even when
+    // the replacement is incomplete; the destructive/authoritative effects
+    // (inline retirement, dismissal, thread resolution) stay behind the
+    // strict complete-replacement gate.
+    if (replacementCheckpoint !== undefined) {
       try {
         const verifiedHead = await api.getHeadSha();
         if (verifiedHead !== input.headSha) {
-          messages.push("  WARN: Missing replacement review id or head changed; leaving previous inline comments unchanged");
+          messages.push("  WARN: Head changed after publication; leaving previous inline comments and review bodies unchanged");
         } else {
           // #1093: ownership decisions run under the shared forge-agnostic
           // owner-identity policy (login proof, or - for Forgejo Authorized
@@ -1594,30 +1606,35 @@ export async function publishReview(
                 });
               };
               if (await stillCurrent()) {
-                // #1099: the identity resolved above is threaded into retirement
-                // (one resolution, one Forgejo reaction probe per publish run).
-                await retireManagedInlineComments(api, olderManaged, input.commentMarker, cleanupLog, { owner, reason }, stillCurrent);
-                if (await stillCurrent()) {
-                  const managedIds = await cleanupManagedReviews(api, input.prNumber, input.commentMarker, cleanupLog, [], olderManaged);
-                  if (api.platform === "github") await resolveSupersededThreads(api, managedIds, cleanupLog);
-                  else messages.push("NOTE: Skipping review-thread resolution (platform=forgejo; no GraphQL API)");
+                if (replacementComplete) {
+                  // #1099: the identity resolved above is threaded into retirement
+                  // (one resolution, one Forgejo reaction probe per publish run).
+                  await retireManagedInlineComments(api, olderManaged, input.commentMarker, cleanupLog, { owner, reason }, stillCurrent);
+                  if (await stillCurrent()) {
+                    const managedIds = await cleanupManagedReviews(api, input.prNumber, input.commentMarker, cleanupLog, [], olderManaged);
+                    if (api.platform === "github") await resolveSupersededThreads(api, managedIds, cleanupLog);
+                    else messages.push("NOTE: Skipping review-thread resolution (platform=forgejo; no GraphQL API)");
+                  }
+                } else {
+                  // #1114: the checkpoint proves a newer managed publication at
+                  // the current head, so proven-stale advisory bodies can be
+                  // hidden presentation-only. Nothing is deleted and no
+                  // APPROVED/CHANGES_REQUESTED verdict is dismissed: a partial
+                  // review must never make a blocking review disappear.
+                  messages.push("NOTE: Replacement is not complete (incomplete coverage or fallback submission); previous inline comments and verdicts left in place, attempting presentation-only minimization of superseded advisory review bodies");
+                  await minimizeSupersededAdvisoryReviews(api, olderManaged, input.commentMarker, cleanupLog, { owner, reason }, [], stillCurrent);
                 }
               } else messages.push("WARN: A newer review superseded this run; cleanup skipped");
             }
           }
         }
       } catch { messages.push("WARN: Cleanup failed safely; replacement review remains published"); }
-    } else if (cleanupEnabled && replacementCheckpoint === undefined) {
+    } else {
       // #1093: distinguish "cleanup never had a checkpoint" from the other
       // skip reasons so operators can tell retirement did not run at all
       // (e.g. a failed inline-findings submission, or a forge response
       // without a usable sticky timestamp).
       messages.push("WARN: No replacement checkpoint (no native review id and no sticky publication timestamp); previous inline comments left in place");
-    } else if (cleanupEnabled) {
-      // #1093: a checkpoint DOES exist here, so the honest cause is an
-      // incomplete replacement — partial inline coverage or a fallback
-      // submission — not a missing checkpoint.
-      messages.push("WARN: Replacement checkpoint is not a complete replacement (incomplete coverage or fallback submission); previous inline comments left in place");
     }
   }
 
