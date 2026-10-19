@@ -146,6 +146,7 @@ private credentials is disabled:
 | Repository map | on | **off** | Same worktree dependency |
 | Evidence providers / SARIF | per config | **off** | Operator commands + private config |
 | Linear context | per config | **off** | Private credentials |
+| Post-review confidence scorer | per config | **off** (`ai-confidence-enable-for-forks: "false"`) | The scorer's prompt is built from privileged review output (final findings, summary, coverage account, `review_result`, required checks) and sent to the scorer endpoint under a privileged credential — on a fork PR that crosses the trust boundary. Skipped with a `WARNING:` line naming the override |
 | Linked-source URL fetching | allowlisted hosts | **off** (`allowed-source-hosts: ""`) | Fork-controlled URLs must not be fetched with review credentials in play |
 | PR thread context | on | on | Read-only API data |
 | Image digest provenance | on | on | Public registry metadata, budgeted |

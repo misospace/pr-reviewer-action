@@ -1425,20 +1425,19 @@ secrets: [profiles.primary.apiKey],
     || (publishModeValue === "comment" && (env.PUBLISH_REVIEW_COMMENT ?? "") === "true");
   const confidenceProfile = confidenceResolution.profile;
   let confidenceResult: ConfidenceResult;
-  if (!confidenceProfile.enabled) {
-    // Disabled: no request, no artifacts, no outputs. Stale artifacts from a
-    // reused run dir are cleared so a later reader can never see one.
+if (!confidenceProfile.enabled) {
+    // Disabled: no request, no artifacts, no outputs.
     confidenceResult = CONFIDENCE_DISABLED;
-    ws.remove("confidence-score.json");
-    ws.remove("confidence-request.json");
-    ws.remove("confidence-response.json");
+    clearConfidenceArtifacts(ws);
   } else if (!reviewWillPublish) {
     // Enabled but this run publishes nothing — there is nothing to grade.
     confidenceResult = unscoredConfidenceResult("not_published");
+    clearConfidenceArtifacts(ws);
   } else if (analysisEngine === MODEL_UNAVAILABLE_ENGINE || !(outputVerdict === "approve" || outputVerdict === "request_changes")) {
-    // No real model review happened (a model-failure notice, or no verdict
-    // at all): fail to unscored WITHOUT calling the model.
+    // No real model review happened (a model-failure notice, or no verdict at
+    // all): fail to unscored WITHOUT calling the model.
     confidenceResult = unscoredConfidenceResult("incomplete_review");
+    clearConfidenceArtifacts(ws);
   } else {
     // #1140 review: every credential configured for this run, in ONE place.
     // The scorer may be a SEPARATE backend, so each of these is a real
@@ -1919,6 +1918,18 @@ function stringList(value: unknown): string[] {
 function isSecurityFlagged(classification: Record<string, unknown>): boolean {
   const flags = stringList(classification.risk_flags);
   return flags.some((flag) => flag.includes("security") || flag.includes("secret"));
+}
+
+/** Every path that ends without a real score must leave the run dir free of
+ * this run's confidence artifacts. A reused `PR_REVIEWER_RUN_DIR` would
+ * otherwise keep a previous run's `confidence-score.json` sitting next to an
+ * `unscored` status, so a later reader could pair a stale score with the
+ * current run. Called from the disabled, not-published, and incomplete-review
+ * branches alike — all three are "no score this run". */
+function clearConfidenceArtifacts(ws: RunWorkspace): void {
+  ws.remove("confidence-score.json");
+  ws.remove("confidence-request.json");
+  ws.remove("confidence-response.json");
 }
 
 /** corpus.sh's gate_feature_for_forks for the tool harness. Null = run. */

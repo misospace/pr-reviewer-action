@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runReview } from "../src/run/review.js";
@@ -138,13 +138,26 @@ async function runConfidenceRun(
   extraInputs: Record<string, string>,
   prBody = "",
   captureLogs = false,
+  extra: { env?: Record<string, string>; seed?: Record<string, string> } = {},
 ): Promise<RunOutcome> {
   const runDir = mkdtempSync(join(tmpdir(), "v3-run-confidence-"));
+  // Stale artifacts a reused run dir would carry in from an earlier run.
+  for (const [name, content] of Object.entries(extra.seed ?? {})) {
+    writeFileSync(join(runDir, name), content);
+  }
   const outputFile = join(runDir, "gh-output.txt");
   const stepSummaryFile = join(runDir, "step-summary.md");
   const logs: string[] = [];
   const result = await runReview({
-    env: { GITHUB_OUTPUT: outputFile, GITHUB_STEP_SUMMARY: stepSummaryFile },
+    env: {
+      GITHUB_OUTPUT: outputFile,
+      GITHUB_STEP_SUMMARY: stepSummaryFile,
+      // The mocked PR carries no head-repo identity, so fork state would
+      // derive as cross-repository (fail-closed) and the fork-gated scorer
+      // would never run. Every test here but the fork one wants a trusted PR.
+      IS_FORK_PR: "false",
+      ...extra.env,
+    },
     inputs: {
       "github-token": "tok",
       repo: "o/r",
@@ -602,10 +615,12 @@ test("#1073: a keyless non-loopback scorer endpoint never dials and never leaks 
     res.end(verdictBody(baseVerdict()));
   });
   try {
-    const run = await runConfidenceRun(server, {
-      "ai-confidence-model": SCORER_MODEL,
-      "ai-confidence-base-url": "http://scorer.unreachable.invalid:9",
-    });
+    const run = await runConfidenceRun(
+      server,
+      { "ai-confidence-model": SCORER_MODEL, "ai-confidence-base-url": "http://scorer.unreachable.invalid:9" },
+      "",
+      true,
+    );
 
     // The resolver refuses before any transport call: the primary lane's
     // requests are the only ones, and the failed lane left no request or
@@ -621,6 +636,15 @@ test("#1073: a keyless non-loopback scorer endpoint never dials and never leaks 
     const scoreArtifact = JSON.parse(readFileSync(join(run.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
     assert.equal(scoreArtifact.status, "unscored");
     assert.equal(scoreArtifact.cause, "missing_credential");
+
+    // The malformed config is loud — a WARNING naming the inheritance rule and
+    // the input to set — and non-fatal: the review itself still published.
+    const warning = run.logs.filter((line) => line.startsWith("WARNING: confidence scorer:"));
+    assert.equal(warning.length, 1, `expected exactly one configuration warning: ${JSON.stringify(run.logs)}`);
+    assert.match(warning[0]!, /never inherits the primary API key/);
+    assert.match(warning[0]!, /ai-confidence-api-key/);
+    assert.equal(run.result.outputs.verdict, "approve");
+    assert.ok(existsSync(join(run.runDir, "review-body.md")));
 
     // The primary lane's credential must not appear anywhere on disk for
     // this run: not in the confidence artifacts, not in the outputs, not in
@@ -792,6 +816,336 @@ test("#1140 review: a lane credential straddling the diagnostic cap never reache
 
     // Fail-soft: the review itself is untouched.
     assert.equal(run.result.outputs.verdict, "approve");
+  } finally {
+    await server.close();
+  }
+});
+
+/** The scorer lane's captured requests, by model name (the mock server keeps
+ * the headers and body; the request target is captured in the handler). */
+function scorerCapturedRequests(server: MockServer): Array<{ body: string; headers: Record<string, string | string[] | undefined> }> {
+  return server.requests
+    .filter((request) => {
+      try {
+        return (JSON.parse(request.body) as Record<string, unknown>).model === SCORER_MODEL;
+      } catch {
+        return false;
+      }
+    })
+    .map((request) => ({ body: request.body, headers: request.headers }));
+}
+
+test("#1073: the scorer is default-off on a fork PR — no request, no artifact, no marker key", async () => {
+  // The scorer's prompt is privileged review-derived output (final findings,
+  // summary, coverage account, review_result, required checks) sent outward
+  // over a privileged credential, so on a fork PR it must not run at all
+  // unless the operator opted in.
+  const SCORER_CREDENTIAL = "scorer-lane-secret-a1b2c3d4e5f6";
+  const FORK_MARKER = "fork-private-review-content-marker-9911";
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 5, risk: "low", reason: "all clear", concerns: [] })));
+  }));
+  const scorerInputs = {
+    "ai-confidence-model": SCORER_MODEL,
+    "ai-confidence-base-url": server.url,
+    "ai-confidence-api-key": SCORER_CREDENTIAL,
+  };
+  try {
+    const gated = await runConfidenceRun(server, scorerInputs, `private notes: ${FORK_MARKER}`, true, { env: { IS_FORK_PR: "true" } });
+
+    // No scorer wire attempt, and nothing crossed outward on the scorer's
+    // behalf: its credential appears on no captured request at all.
+    assert.equal(scorerRequests(server), 0);
+    assert.ok(server.requests.length >= 1, "the primary lane still reviewed the fork PR");
+    for (const request of server.requests) {
+      assert.ok(!JSON.stringify(request.headers).includes(SCORER_CREDENTIAL), "the scorer credential was sent on some lane");
+    }
+
+    // No confidence surface anywhere: outputs empty, no artifacts, no marker
+    // keys, no published section.
+    assert.equal(gated.result.outputs.confidenceStatus, "");
+    assert.equal(gated.result.outputs.confidenceScore, "");
+    assert.equal(gated.result.outputs.confidenceRisk, "");
+    assert.equal(gated.result.outputs.confidenceReason, "");
+    assert.equal(gated.result.outputs.confidenceModel, "");
+    assert.match(gated.output, /^confidence-status=$/m);
+    for (const name of ["confidence-score.json", "confidence-request.json", "confidence-response.json"]) {
+      assert.ok(!existsSync(join(gated.runDir, name)), `${name} was written on a gated fork run`);
+    }
+    assert.doesNotMatch(gated.result.marker, /confidence/);
+    assert.ok(!gated.summary.includes("Independent confidence"));
+    // Loud about the skip, and the reason names the override.
+    const warning = gated.logs.filter((line) => line.includes("ai-confidence-enable-for-forks"));
+    assert.equal(warning.length, 1, `expected one fork-gate warning: ${JSON.stringify(gated.logs)}`);
+    assert.match(warning[0]!, /cross-repository pull request/);
+
+    // The review itself is untouched by the gate.
+    assert.equal(gated.result.outputs.verdict, "approve");
+    assert.ok(existsSync(join(gated.runDir, "review-body.md")));
+
+    // The operator override is the only thing that turns it on.
+    const overridden = await runConfidenceRun(
+      server,
+      { ...scorerInputs, "ai-confidence-enable-for-forks": "true" },
+      `private notes: ${FORK_MARKER}`,
+      true,
+      { env: { IS_FORK_PR: "true" } },
+    );
+    assert.equal(scorerRequests(server), 1);
+    // Positive control: the very same fork-authored content DOES reach the
+    // scorer once the override is set, so the gated run's silence is the gate
+    // and not an inert fixture.
+    assert.ok(
+      scorerRequestBodies(server).some((body) => body.includes(FORK_MARKER)),
+      "the ungated run sends the fork's content outward, so the gated run's silence is the gate",
+    );
+    assert.equal(overridden.result.outputs.confidenceStatus, "scored");
+    assert.equal(overridden.result.outputs.confidenceScore, "5");
+    assert.ok(existsSync(join(overridden.runDir, "confidence-score.json")));
+    assert.match(overridden.result.marker, /"confidence_status":"scored"/);
+    assert.ok(!overridden.logs.some((line) => line.includes("ai-confidence-enable-for-forks")), "the override must not warn");
+
+    // Not a fork: the gate never applies.
+    const trusted = await runConfidenceRun(server, scorerInputs, `private notes: ${FORK_MARKER}`);
+    assert.equal(scorerRequests(server), 2);
+    assert.equal(trusted.result.outputs.confidenceStatus, "scored");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1073: the configured scorer key reaches the wire in the Authorization header and nowhere else", async () => {
+  const SENTINEL = "sk-run-confidence-sentinel-4d2f8b16a7c3";
+  const targets: string[] = [];
+  const server = await startMockServer((req, body, res) => {
+    let model = "";
+    try {
+      model = String((JSON.parse(body) as Record<string, unknown>).model ?? "");
+    } catch {
+      model = "";
+    }
+    if (model !== SCORER_MODEL) {
+      res.setHeader("Content-Type", "application/json");
+      res.end(verdictBody(baseVerdict()));
+      return;
+    }
+    targets.push(req.url ?? "");
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 4, risk: "low", reason: "fine", concerns: [] })));
+  });
+  try {
+    const run = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+      "ai-confidence-api-key": SENTINEL,
+    });
+    assert.equal(run.result.outputs.confidenceStatus, "scored");
+
+    // The wire: exactly one request, the credential in exactly one header.
+    const captured = scorerCapturedRequests(server);
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0]!.headers.authorization, `Bearer ${SENTINEL}`);
+    const nonAuth = { ...captured[0]!.headers };
+    delete nonAuth.authorization;
+    assert.ok(!JSON.stringify(nonAuth).includes(SENTINEL), "the credential rode a second header");
+    assert.equal(targets.length, 1);
+    assert.ok(!targets[0]!.includes(SENTINEL), "the credential rode the request URL");
+    assert.ok(!captured[0]!.body.includes(SENTINEL), "the credential rode the request body");
+    // Not in this process's argv either — the transport is the typed Node
+    // HTTP seam, never a spawned curl.
+    assert.ok(!readFileSync("/proc/self/cmdline", "utf8").includes(SENTINEL), "the credential reached process argv");
+
+    // Nor in any artifact, output, or summary line the run persists.
+    for (const path of allFiles(run.runDir)) {
+      assert.ok(!readFileSync(path, "utf8").includes(SENTINEL), `the credential leaked into ${path}`);
+    }
+    assert.ok(!run.output.includes(SENTINEL));
+    assert.ok(!run.summary.includes(SENTINEL));
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1073: a provider error echoing the scorer credential is masked in the artifact, the log, and on disk", async () => {
+  const SENTINEL = "sk-run-confidence-sentinel-4d2f8b16a7c3";
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.statusCode = 401;
+    res.end(JSON.stringify({ error: { message: `invalid api key: ${SENTINEL}` } }));
+  }));
+  try {
+    const run = await runConfidenceRun(
+      server,
+      { "ai-confidence-model": SCORER_MODEL, "ai-confidence-base-url": server.url, "ai-confidence-api-key": SENTINEL },
+      "",
+      true,
+    );
+    assert.equal(run.result.outputs.confidenceStatus, "unscored");
+    const scoreArtifact = JSON.parse(readFileSync(join(run.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(scoreArtifact.cause, "http_401");
+    assert.ok(String(scoreArtifact.diagnostic ?? "").length > 0, "the failure is still surfaced");
+    for (const path of allFiles(run.runDir)) {
+      assert.ok(!readFileSync(path, "utf8").includes(SENTINEL), `the credential leaked into ${path}`);
+    }
+    assert.ok(!run.output.includes(SENTINEL));
+    assert.ok(!run.summary.includes(SENTINEL));
+    assert.ok(!run.logs.join("\n").includes(SENTINEL), "the credential leaked into the runner log");
+    // Fail-soft: the review itself still published.
+    assert.equal(run.result.outputs.verdict, "approve");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1073: a run that will not publish or that reviewed nothing never calls the scorer", async () => {
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 5, risk: "low", reason: "all clear", concerns: [] })));
+  }));
+  const scorerInputs = { "ai-confidence-model": SCORER_MODEL, "ai-confidence-base-url": server.url };
+  try {
+    // (a) Nothing will be published: there is no review for anyone to grade.
+    const notPublished = await runConfidenceRun(server, {
+      ...scorerInputs,
+      "publish-mode": "comment",
+      "publish-review-comment": "false",
+    });
+    assert.equal(scorerRequests(server), 0);
+    assert.equal(notPublished.result.outputs.confidenceStatus, "unscored");
+    assert.equal(notPublished.result.outputs.confidenceScore, "");
+    // Nothing was sent to grade, so no wire artifact was written either.
+    for (const name of ["confidence-request.json", "confidence-response.json"]) {
+      assert.ok(!existsSync(join(notPublished.runDir, name)), `${name} was written for a run that publishes nothing`);
+    }
+    // Unscored with a cause, never a resurrected score: the marker records the
+    // status but no integer, and the outputs agree.
+    assert.match(notPublished.result.marker, /"confidence_status":"unscored"/);
+    assert.doesNotMatch(notPublished.result.marker, /"confidence_score":/);
+    assert.doesNotMatch(notPublished.output, /^confidence-score=[0-9]/m);
+
+    // (b) No real model review happened (primary unavailable): the scorer is
+    // not asked to grade a failure notice.
+    const primaryDown = await startMockServer((_req, _body, res) => {
+      res.statusCode = 500;
+      res.end("primary unavailable");
+    });
+    try {
+      const incompleteRunDir = mkdtempSync(join(tmpdir(), "v3-run-confidence-"));
+      const incomplete = await runReview({
+        env: {
+          GITHUB_OUTPUT: join(incompleteRunDir, "gh-output.txt"),
+          GITHUB_STEP_SUMMARY: join(incompleteRunDir, "step.md"),
+          IS_FORK_PR: "false",
+        },
+        inputs: {
+          "github-token": "tok", repo: "o/r", "pr-number": "7",
+          "ai-base-url": primaryDown.url, "ai-model": "m", "ai-stream": "false", "ai-api-key": "primary-secret-k",
+          "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
+          "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2", "deep-review": "false",
+          "tool-mode": "off", "review-routing-mode": "off",
+          "ai-confidence-model": SCORER_MODEL, "ai-confidence-base-url": server.url,
+        },
+        runDir: incompleteRunDir,
+        workspace: incompleteRunDir,
+        platformAdapter: mockPlatform(),
+        persistArtifacts: true,
+        quiet: true,
+      });
+      assert.equal(scorerRequests(server), 0, "the scorer graded a run that produced no review");
+      assert.equal(incomplete.outputs.confidenceStatus, "unscored");
+      assert.equal(incomplete.outputs.confidenceScore, "");
+      assert.doesNotMatch(incomplete.marker, /"confidence_score":/);
+      assert.ok(!existsSync(join(incompleteRunDir, "confidence-request.json")), "a wire artifact was written for a review that never happened");
+    } finally {
+      await primaryDown.close();
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1073: a disabled run clears stale confidence artifacts and leaves the marker byte-identical", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const STALE = JSON.stringify({ version: 1, status: "scored", score: 5, risk: "low", reason: "from an earlier run", concerns: [], model: SCORER_MODEL, cause: "", caps: [] });
+  try {
+    const seeded = await runConfidenceRun(server, {}, "", false, {
+      seed: { "confidence-score.json": STALE, "confidence-request.json": STALE, "confidence-response.json": STALE },
+    });
+    const clean = await runConfidenceRun(server, {});
+    for (const name of ["confidence-score.json", "confidence-request.json", "confidence-response.json"]) {
+      assert.ok(!existsSync(join(seeded.runDir, name)), `${name} survived a disabled run`);
+      assert.ok(!existsSync(join(clean.runDir, name)));
+    }
+    // The disabled marker is exactly the pre-#1073 shape, and it is a pure
+    // function of the run: nothing about the stale files reaches it.
+    assert.equal(seeded.result.marker, clean.result.marker);
+    assert.doesNotMatch(seeded.result.marker, /confidence/);
+    for (const [field, value] of Object.entries({
+      confidenceStatus: "", confidenceScore: "", confidenceRisk: "", confidenceReason: "", confidenceModel: "",
+    })) {
+      assert.equal((seeded.result.outputs as unknown as Record<string, unknown>)[field], value, `${field} must stay empty when disabled`);
+    }
+    assert.equal(scorerRequests(server), 0);
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1073: a run that ends unscored clears stale confidence artifacts too", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const STALE = JSON.stringify({ version: 1, status: "scored", score: 5, risk: "low", reason: "from an earlier run", concerns: [], model: SCORER_MODEL, cause: "", caps: [] });
+  const names = ["confidence-score.json", "confidence-request.json", "confidence-response.json"];
+  try {
+    // Enabled, but this run publishes nothing: `not_published` writes no score,
+    // so a reused run dir must not keep an earlier run's score beside it.
+    const notPublished = await runConfidenceRun(
+      server,
+      { "ai-confidence-model": SCORER_MODEL, "publish-mode": "comment", "publish-review-comment": "false" },
+      "",
+      false,
+      { seed: Object.fromEntries(names.map((name) => [name, STALE])) },
+    );
+    assert.equal(notPublished.result.outputs.confidenceStatus, "unscored");
+    assert.equal(scorerRequests(server), 0);
+    for (const name of names) {
+      assert.ok(!existsSync(join(notPublished.runDir, name)), `${name} survived a not_published run`);
+    }
+    // `unscored` still records that the scorer ran and produced nothing —
+    // status without a score. It is the *disabled* run that has no marker key.
+    assert.match(notPublished.result.marker, /"confidence_status":"unscored"/);
+    assert.doesNotMatch(notPublished.result.marker, /confidence_score/);
+
+    // Enabled and publishing, but the review model itself failed, so there
+    // is no real verdict: `incomplete_review` is the same "no score this run"
+    // case and must not leave an earlier run's score in the run dir either.
+    const failing = await startMockServer((_req, _body, res) => {
+      // A well-formed HTTP answer carrying no verdict, so the review has no
+      // usable result without entering any transport-failure retry path.
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: { message: "no verdict here" } }));
+    });
+    try {
+      const incomplete = await runConfidenceRun(
+        failing,
+        { "ai-confidence-model": SCORER_MODEL },
+        "",
+        false,
+        { seed: Object.fromEntries(names.map((name) => [name, STALE])) },
+      );
+      assert.equal(incomplete.result.outputs.confidenceStatus, "unscored");
+      assert.equal(scorerRequests(failing), 0);
+      for (const name of names) {
+        assert.ok(!existsSync(join(incomplete.runDir, name)), `${name} survived an incomplete-review run`);
+      }
+    } finally {
+      await failing.close();
+    }
   } finally {
     await server.close();
   }

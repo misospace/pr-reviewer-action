@@ -197,12 +197,18 @@ const CONDITIONAL_AI_KEYS: ReadonlySet<string> = new Set([
   // rotating the scorer's credential changes which account (and therefore
   // provider identity, availability, and score) answers, so the cached
   // review must not survive the rotation — see `credentialDigest`.
+  // `AI_CONFIDENCE_ENABLE_FOR_FORKS` decides whether the scorer runs at all on
+  // a fork PR, so it changes what is published; it must contribute whenever the
+  // scorer is enabled, or a cached review made with the scorer gated off would
+  // be republished after the operator turns it on. Its contract default
+  // ("false") is non-empty and stable, so it adds no upgrade churn.
   "AI_CONFIDENCE_MODEL",
   "AI_CONFIDENCE_BASE_URL",
   "AI_CONFIDENCE_API_FORMAT",
   "AI_CONFIDENCE_REASONING_EFFORT",
   "AI_CONFIDENCE_TIMEOUT_SEC",
   "AI_CONFIDENCE_API_KEY",
+  "AI_CONFIDENCE_ENABLE_FOR_FORKS",
 ]);
 
 /** #1037: the `ai-extra-headers` surface is hashed by its canonical

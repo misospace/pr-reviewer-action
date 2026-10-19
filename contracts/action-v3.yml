@@ -314,6 +314,17 @@ inputs:
     required: false
     default: "120"
     description: "Wall-clock timeout in seconds for the confidence scorer's model request. Default 120; must be a positive integer. A scorer that times out or fails degrades to confidence-status=unscored and never affects the review itself."
+  # The scorer's prompt carries PRIVILEGED review-derived output (the final
+  # findings, summary, coverage account, review_result, required checks) and
+  # sends it outward over a privileged credential, so on a cross-repository PR
+  # it would carry private review content across the fork trust boundary. Fork
+  # gate, sibling to tool-enable-for-forks / evidence-enable-for-forks /
+  # linear-enable-for-forks; operator-only, so repository config can never
+  # grant itself the scorer on a fork PR.
+  - id: ai-confidence-enable-for-forks
+    required: false
+    default: "false"
+    description: "If true, allow the confidence scorer to run on cross-repository pull requests. Default false: on a fork PR the scorer's prompt would send the review's own privileged output (final findings, summary, coverage account, review_result, required checks) to a separate endpoint under a privileged credential. Off on forks means the run publishes no confidence surface at all (no model call, no artifacts, empty confidence-* outputs), with a WARNING naming this input. Set true only when the scorer endpoint is one that may see that review content."
   - id: ai-stream
     v2_id: ai_stream
     required: false

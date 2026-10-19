@@ -568,6 +568,24 @@ function primaryLane(env: EnvLike): { baseUrl: string; model: string; apiFormat:
   };
 }
 
+/** The disabled profile every early return shares: no endpoint, no
+ * credential, no model — nothing the run could dial. */
+function disabledConfidenceProfile(): ConfidenceProfile {
+  return {
+    enabled: false, baseUrl: "", model: "", apiFormat: "", apiKey: "",
+    requestTimeoutSec: 120, reasoningEffort: "", inheritedTransport: false,
+    credentialSource: "own",
+  };
+}
+
+/** `IS_FORK_PR` as the stages resolved it (exactly "true" = fork), the same
+ * comparison `gateForkForForks` and `evidenceForkGateApplies` make. The stage
+ * env always carries a resolved value — an unresolvable flag is itself
+ * "true" upstream — so this reads state, it does not decide it. */
+function isForkPr(env: EnvLike): boolean {
+  return env.IS_FORK_PR === "true";
+}
+
 export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
   const warnings: string[] = [];
   const primary = primaryLane(env);
@@ -589,14 +607,20 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
     if (orphans.length > 0) {
       warnings.push(`confidence scorer disabled: ${orphans.join("/")} set without ai-confidence-model`);
     }
-    return {
-      profile: {
-    enabled: false, baseUrl: "", model: "", apiFormat: "", apiKey: "",
-    requestTimeoutSec: 120, reasoningEffort: "", inheritedTransport: false,
-    credentialSource: "own",
-      },
-      warnings,
-    };
+    return { profile: disabledConfidenceProfile(), warnings };
+  }
+
+  // Fork gate (#1073): default-off on a cross-repository PR, mirroring
+  // `gateForkForForks`. The scorer's prompt is built from PRIVILEGED
+  // review-derived output — the final findings, summary, coverage account,
+  // review_result, and required checks — and sends it outward over a
+  // privileged credential, so on a fork PR it would carry private review
+  // content across the fork trust boundary. Disabled (the same resolved
+  // "off" the unset model produces), loudly, never fatal; the operator
+  // override is the only way it runs there.
+  if (isForkPr(env) && (env.AI_CONFIDENCE_ENABLE_FOR_FORKS ?? "false").toLowerCase() !== "true") {
+    warnings.push("confidence scorer skipped for a cross-repository pull request; set ai-confidence-enable-for-forks=true to override");
+    return { profile: disabledConfidenceProfile(), warnings };
   }
 
   const distinctEndpoint = baseUrl !== "";

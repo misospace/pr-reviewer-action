@@ -188,3 +188,79 @@ test("#847: an empty nested stop_reason is treated as absent", () => {
   const lifted = toolBudgetTelemetryOf({ tool_loop_telemetry: { phase: "loop", stop_reason: "" } });
   assert.equal(lifted.stopReason, undefined);
 });
+
+// ---------------------------------------------------------------------------
+// #1073 — the confidence scorer's marker keys are strictly additive. A
+// disabled (or skipped) run must serialize byte-identically to the pre-#1073
+// marker: neither `confidence_status` nor `confidence_score` may appear.
+// Direct unit coverage — `tests-v3/run-confidence.test.ts` pins the same
+// invariant end-to-end through a real run.
+// ---------------------------------------------------------------------------
+const CONF_BASE = {
+  headSha: "h",
+  baseSha: "b",
+  reviewResult: "issues",
+  requiredChecks: "build",
+  reviewRoute: "primary",
+  cacheHitRatio: "0.5",
+  coverage: "complete",
+  ciState: "pending",
+  actionVersion: "v3.6.0",
+} as const;
+
+test("#1073: a disabled confidence run omits both marker keys (byte-identical pre-#1073)", () => {
+  const disabled = buildRunMetadataMarker({ ...CONF_BASE });
+  assert.equal(disabled, buildRunMetadataMarker({ ...CONF_BASE, confidenceStatus: "" }));
+  assert.equal(
+    disabled,
+    '<!-- ai-pr-reviewer:{"version":1,"head_sha":"h","base_sha":"b","review_result":"issues","required_checks":"build","review_route":"primary","cache_hit_ratio":0.5,"coverage":"complete","ci_state":"pending","action_version":"v3.6.0"} -->',
+  );
+  assert.ok(!disabled.includes("confidence_status"));
+  assert.ok(!disabled.includes("confidence_score"));
+});
+
+test("#1073: an empty or unrecognized confidence status is omitted, never serialized as \"\"", () => {
+  // The omission must be decided by the call site (null), not by the builder's
+  // empty-string clause — otherwise a tightened builder guard would silently
+  // add `"confidence_status":""` to every disabled run's public marker.
+  for (const confidenceStatus of ["", "  ", "disabled", "unknown", "SCORED"]) {
+    const marker = buildRunMetadataMarker({ ...CONF_BASE, confidenceStatus });
+    assert.ok(!marker.includes("confidence"), `status ${JSON.stringify(confidenceStatus)} leaked into the marker`);
+  }
+});
+
+test("#1073: a score with no scored status is dropped rather than emitted alone", () => {
+  // A stray score must not make it into the marker without its status.
+  const marker = buildRunMetadataMarker({ ...CONF_BASE, confidenceStatus: "unscored", confidenceScore: 5 });
+  assert.ok(marker.includes('"confidence_status":"unscored"'));
+  assert.ok(!marker.includes("confidence_score"));
+});
+
+test("#1073: unscored keeps the status key and adds no score key", () => {
+  const marker = buildRunMetadataMarker({ ...CONF_BASE, confidenceStatus: "unscored" });
+  assert.ok(marker.endsWith('"confidence_status":"unscored"} -->'));
+});
+
+test("#1073: scored appends status then score, last, after every pre-#1073 key", () => {
+  const marker = buildRunMetadataMarker({ ...CONF_BASE, confidenceStatus: "scored", confidenceScore: 4 });
+  assert.ok(
+    marker.endsWith('"action_version":"v3.6.0","confidence_status":"scored","confidence_score":4} -->'),
+  );
+});
+
+test("#1073: an out-of-range or non-integer score fails closed to no score key", () => {
+  for (const confidenceScore of [999, -1, 6, 4.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const marker = buildRunMetadataMarker({ ...CONF_BASE, confidenceStatus: "scored", confidenceScore });
+    assert.ok(
+      marker.includes('"confidence_status":"scored"') && !marker.includes("confidence_score"),
+      `score ${String(confidenceScore)} was not dropped`,
+    );
+  }
+});
+
+test("#1073: enabling the scorer never moves a pre-#1073 key's position", () => {
+  const off = buildRunMetadataMarker({ ...CONF_BASE });
+  const on = buildRunMetadataMarker({ ...CONF_BASE, confidenceStatus: "scored", confidenceScore: 0 });
+  const strip = (m: string) => m.replace(/,"confidence_status":"scored","confidence_score":0/, "");
+  assert.equal(strip(on), off);
+});

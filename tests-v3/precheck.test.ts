@@ -1654,3 +1654,48 @@ test("#1073: the confidence-scorer family is fingerprint-conditional — disable
   });
   assert.notEqual(computeConfigHash(timeoutChanged), computeConfigHash(enabled));
 });
+
+test("#1073: the fork override contributes to the fingerprint only while the scorer is enabled", () => {
+  const baseline = collectConfigLines({ AI_MODEL: "m", AI_BASE_URL: "https://primary" });
+
+  // Disabled (the default): the fork override contributes NOTHING, so an
+  // installation that never configures the scorer keeps pre-#1073 bytes.
+  const disabledWithForkFlag = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_ENABLE_FOR_FORKS: "false",
+  });
+  assert.deepEqual(disabledWithForkFlag, baseline);
+  assert.equal(computeConfigHash(disabledWithForkFlag), computeConfigHash(baseline));
+
+  // Enabled: the contract default ("false") is emitted, and flipping it
+  // changes what is published on a fork PR — so it must invalidate the cache.
+  const gated = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+    AI_CONFIDENCE_ENABLE_FOR_FORKS: "false",
+  });
+  assert.ok(gated.includes("AI_CONFIDENCE_ENABLE_FOR_FORKS=false"));
+
+  const overrideOn = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+    AI_CONFIDENCE_ENABLE_FOR_FORKS: "true",
+  });
+  assert.ok(overrideOn.includes("AI_CONFIDENCE_ENABLE_FOR_FORKS=true"));
+  assert.notEqual(computeConfigHash(overrideOn), computeConfigHash(gated));
+
+  // Re-stating the same override does not re-review.
+  const sameOverride = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+    AI_CONFIDENCE_ENABLE_FOR_FORKS: " true ",
+  });
+  assert.equal(computeConfigHash(sameOverride), computeConfigHash(overrideOn));
+});

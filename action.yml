@@ -265,6 +265,10 @@ inputs:
     description: Wall-clock timeout in seconds for the confidence scorer's model request. Default 120; must be a positive integer. A scorer that times out or fails degrades to confidence-status=unscored and never affects the review itself.
     required: false
     default: "120"
+  ai-confidence-enable-for-forks:
+    description: "If true, allow the confidence scorer to run on cross-repository pull requests. Default false: on a fork PR the scorer's prompt would send the review's own privileged output (final findings, summary, coverage account, review_result, required checks) to a separate endpoint under a privileged credential. Off on forks means the run publishes no confidence surface at all (no model call, no artifacts, empty confidence-* outputs), with a WARNING naming this input. Set true only when the scorer endpoint is one that may see that review content."
+    required: false
+    default: "false"
   ai-stream:
     description: If true, use streaming responses to avoid timeouts behind proxies with short read timeouts (e.g. Cloudflare 100s edge timer)
     required: false
