@@ -272,8 +272,11 @@ jobs:
           deep-review-timeout-sec: "300"
 
           # ── Publication (no native approvals for forks) ───────────────
+          # Blockers-only mode: a review with blockers publishes a native
+          # blocking request, a clean review an advisory comment. The mode
+          # can never publish an approval, and approve-forks stays off as
+          # the second, independent barrier.
           verdict-policy: findings_severity_gated
           inline-findings: "true"
-          publish-mode: review_verdict
-          allow-approve: "false"
+          publish-mode: review_blockers
           approve-forks: "false"
