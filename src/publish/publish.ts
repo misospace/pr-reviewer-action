@@ -30,9 +30,9 @@ import { isIncompleteReason, renderFindingsSummary, severityCountsLabel, MAX_REV
 import { resolveReviewTriageDecision } from "../model/triage.js";
 import type { HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 import { MAX_FEEDBACK_COMMENT_IDS } from "../platform/publish-api.js";
-import type { CollaboratorPermissionReading, NativeReviewComment, NativeReviewRequest, PublishPlatformApi } from "../platform/publish-api.js";
+import type { CollaboratorPermissionReading, NativeReviewComment, NativeReviewRequest, NativeReviewSurface, PublishPlatformApi } from "../platform/publish-api.js";
 
-export type PublishMode = "comment" | "review_comment" | "review_verdict";
+export type PublishMode = "comment" | "review_comment" | "review_verdict" | "review_blockers";
 export type NativeReviewEvent = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
 
 export interface PublishInput {
@@ -64,7 +64,10 @@ export interface PublishInput {
   /** Structured findings (parsed array or raw). */
   findings: unknown;
   cleanupPreviousNativeReviews: string;
-  allowApprove: boolean;
+  /** #1161: DEPRECATED and inert. The input stays accepted for backward
+   * compatibility, but it gates nothing and changes no published event —
+   * it is read only to warn the operator that it no longer has an effect. */
+  allowApprove?: boolean;
   approveForks: boolean;
   /** Fork-ness from the precheck (fail-closed); null derives from the platform. */
   isForkPr: boolean | null;
@@ -145,10 +148,35 @@ export interface PublishResult {
   error?: string;
 }
 
-const VERDICT_PREFIXES: Record<string, string> = {
+const VERDICT_PREFIXES: Record<"approve" | "request_changes", string> = {
   request_changes: "⚠️ **Automated recommendation: REQUEST CHANGES**",
   approve: "✅ **Automated recommendation: APPROVE**",
 };
+
+/** (#1161) The header for a run that produced no valid verdict: neither
+ * `approve` nor `request_changes`. It must never read as an approval
+ * recommendation — a missing or invalid verdict is a failed run, not a
+ * clean review. */
+const NO_VERDICT_PREFIX = "🟡 **Automated recommendation: NO VERDICT**";
+
+/** (#1161) The only two verdicts that can carry a native review event. A
+ * missing or invalid verdict is neither an approval nor a blocking
+ * request. */
+export function isValidPublishVerdict(verdict: string): verdict is "approve" | "request_changes" {
+  return verdict === "approve" || verdict === "request_changes";
+}
+
+/** (#1161) The publish modes whose authoritative published body lives in a
+ * PR review rather than a sticky comment. The precheck reads the previous
+ * run's published body from PR reviews for these modes: a sticky comment
+ * would not carry the verdict, so the mode's own publication would be
+ * invisible to the next run's fingerprint and carry-forward. (`review_comment`
+ * also posts a native review, but only for inline findings — its
+ * authoritative body is the sticky comment.) */
+export function isNativeVerdictMode(mode: string): boolean {
+  const value = (mode ?? "").toLowerCase();
+  return value === "review_verdict" || value === "review_blockers";
+}
 
 /** (#873) The `comment`-mode header for an approve whose coverage is
  * incomplete: never "APPROVE", since the coverage notice right below it
@@ -451,6 +479,19 @@ function escapeCodeSpan(text: string, maxChars: number): string {
   const singleLine = text.replace(/\s+/g, " ").replace(/[`]/g, "'");
   const stripped = [...singleLine].filter((ch) => ch.charCodeAt(0) >= 0x20).join("").trim();
   return stripped.length > maxChars ? stripped.slice(0, maxChars) + "…" : stripped;
+}
+
+/**
+ * #588: the platform's native-review degradation reason, flattened to one
+ * bounded line. It is rendered inside a blockquote notice and inside a step
+ * message, so a reason carrying a newline (or an unbounded length) could
+ * break out of the notice or flood the log. A platform-owned constant today;
+ * this keeps a future one from becoming a rendering hole.
+ */
+function flattenSurfaceReason(reason: string | undefined): string {
+  const flat = (reason ?? "").replace(/\s+/g, " ").trim();
+  if (flat === "") return "this platform has no native pull-review surface";
+  return flat.length > 200 ? `${flat.slice(0, 200)}…` : flat;
 }
 
 /**
@@ -802,24 +843,29 @@ function renderStrictStateBlock(options: {
 }
 
 /**
- * Evaluate the native approval guardrails: approval is opt-in
- * (`allow_approve`) and separately fork-gated (`approve_forks`). A clean
- * verdict withheld by a guardrail stays advisory — a blocking
- * REQUEST_CHANGES would invent an issue the model did not find. Missing
- * fork-ness fails closed (treated as a fork: approval needs approve_forks).
+ * Evaluate the native approval guardrails (#1161): the final verdict
+ * decides whether an approval is possible at all, and the cross-repository
+ * scope policy (`approve_forks`) decides whether it is allowed. The
+ * deprecated `allow_approve` input no longer gates anything. Missing
+ * fork-ness fails closed (treated as a fork: approval needs
+ * approve_forks). A clean verdict withheld by the scope policy stays
+ * advisory — a blocking REQUEST_CHANGES would invent an issue the model
+ * did not find.
  */
 export function evaluateApprovalGuardrails(options: {
   verdict: string;
-  allowApprove: boolean;
   approveForks: boolean;
   isForkPr: boolean | null;
-}): { canApprove: boolean; isForkPr: boolean | null } {
-  if (options.verdict !== "approve" || !options.allowApprove) {
-    return { canApprove: false, isForkPr: options.isForkPr };
-  }
+}): { canApprove: boolean; scopeBlocked: boolean; verdictAllowsApproval: boolean; isForkPr: boolean | null } {
+  const verdictAllowsApproval = options.verdict === "approve";
   const isFork = options.isForkPr ?? true;
-  if (!isFork) return { canApprove: true, isForkPr: options.isForkPr };
-  return { canApprove: options.approveForks, isForkPr: options.isForkPr };
+  const scopeBlocked = verdictAllowsApproval && isFork && !options.approveForks;
+  return {
+    canApprove: verdictAllowsApproval && !scopeBlocked,
+    scopeBlocked,
+    verdictAllowsApproval,
+    isForkPr: options.isForkPr,
+  };
 }
 
 /**
@@ -884,6 +930,31 @@ export async function publishReview(
   options: { diffText: string },
 ): Promise<PublishResult> {
   const messages: string[] = [];
+  // #588: the platform's native pull-review surface, read ONCE for the whole
+  // publication. An ABSENT capability (an untyped caller, an `as unknown as`
+  // cast) keeps the historical behavior — the platform is assumed to have a
+  // native review surface — while a platform that DECLARES no native surface
+  // takes the managed-record path: the review body is published as the
+  // platform's managed top-level record, no native approval, blocking
+  // request, or inline comment is created, and the degradation is stated
+  // explicitly in the body and in the step messages.
+  const nativeSurface: NativeReviewSurface = api.nativeReviewSurface ?? { supported: true };
+  if (api.nativeReviewSurface === undefined) {
+    // #588: an undeclared capability is an untyped caller. The historical
+    // behavior is kept (the platform is assumed to have a native review
+    // surface), but the gap is reported: a platform that FORGOT to declare
+    // the capability must not fail silently.
+    messages.push("WARN: the publish platform did not declare a native review surface; assuming it has one");
+  }
+  // #1161: `allow-approve` is deprecated and inert — it changes no
+  // published event. It is read here only to tell the operator that the
+  // input no longer has an effect. `undefined` means the operator never
+  // set it; an explicit value (true OR false) warns, because an operator
+  // who set it to "false" to suppress approvals has to learn that the
+  // input no longer does that.
+  if (input.allowApprove !== undefined) {
+    messages.push(`WARN: 'allow-approve' is deprecated and no longer affects publication (value: ${input.allowApprove}); use 'publish-mode: review_verdict' to publish the verdict, or 'publish-mode: review_blockers' for blockers-only behavior.`);
+  }
   let nativeReviewId: number | string | undefined;
   // #1093: the sticky summary comment as the replacement checkpoint when
   // review_comment mode publishes no inline findings review (a clean re-review
@@ -908,10 +979,17 @@ export async function publishReview(
   // Publication-boundary head re-check (#451): fail closed.
   const currentHead = await api.getHeadSha();
   if (!currentHead) {
+    // #588: a platform that knows WHY the current head is unavailable (it
+    // has no trustworthy current-head source) says so; a platform whose read
+    // simply failed keeps the generic wording. The native path's wording is
+    // unchanged.
+    const headReason = api.currentHeadUnavailableReason;
     return {
       status: "failed",
       messages,
-      error: `Could not re-fetch the current head of the pull request; refusing to publish a potentially stale review.`,
+      error: headReason === undefined || headReason === ""
+        ? `Could not re-fetch the current head of the pull request; refusing to publish a potentially stale review.`
+        : `Could not determine the current head of the pull request: ${headReason}. Refusing to publish a potentially stale review.`,
     };
   }
   if (currentHead !== input.headSha) {
@@ -975,6 +1053,45 @@ export async function publishReview(
   const incompleteReason = resolveIncompleteReason(input);
   const reviewResult = markerReviewResult(input);
   const coverageNotice = input.partialCoverage ? renderPartialCoverageNotice(input.partialCoverage) : "";
+  // #588: the platform's degradation reason, flattened to ONE bounded line:
+  // it is rendered inside a blockquote notice and inside a step message, so
+  // a reason carrying a newline could otherwise break out of both.
+  const surfaceReason = flattenSurfaceReason(nativeSurface.reason);
+  // #588: the structured findings this run carries. On a platform WITHOUT a
+  // native review surface they have no native channel (no inline review
+  // comments), so the published body is the only place they can reach the
+  // reader — the count drives the explicit degradation note.
+  const findingCount = Array.isArray(input.findings) ? input.findings.length : 0;
+  /** The deterministic state section of the body.
+   *
+   * Under the strict policy (#811) it is the coverage-gap notice plus the
+   * findings table. On a platform WITHOUT a native review surface the
+   * findings table is published even under a non-strict policy — but only
+   * for the modes whose forge counterpart publishes the findings as native
+   * inline review comments (`review_comment`, `review_verdict`,
+   * `review_blockers`). There the body is the only remaining channel, so
+   * the findings are never silently dropped (#588) — within the findings
+   * table's own bounds (at most 50 rows; the overflow is disclosed in the
+   * body, exactly as the strict policy discloses it). The `comment` mode
+   * publishes no findings natively on any platform, so it compensates
+   * nothing and its body is unchanged.
+   * `platformNotice` is the action-owned notice for such a platform; it
+   * precedes the untrusted review text so no model content can swallow it. */
+  const stateSection = (platformNotice = "", compensateFindings = true): string | undefined => {
+    const parts: string[] = [];
+    if (platformNotice !== "") parts.push(platformNotice);
+    if (strict) {
+      parts.push(renderStrictStateBlock({ incompleteReason, findings: input.findings, linkMode: input.upstreamLinkMode }));
+    } else if (!nativeSurface.supported && compensateFindings) {
+      parts.push(renderFindingsSummary(input.findings, input.upstreamLinkMode));
+    }
+    return parts.length === 0 ? undefined : parts.join("");
+  };
+  /** #588: what this publication IS on this platform. A forge with a comment
+   * surface publishes a comment; a platform without a native review surface
+   * publishes a managed review record. Only the non-native wording differs —
+   * the native path's bytes are unchanged. */
+  const advisoryNoun = nativeSurface.supported ? "advisory comment" : "advisory review record";
   // #1003: rendered only when triage ran; the three modes share the one
   // block so a triage answer can never differ by publish mode.
   const triageBlock = input.reviewTriage ? renderReviewTriageBlock(input.reviewTriage, input.upstreamLinkMode) : "";
@@ -1100,7 +1217,7 @@ export async function publishReview(
           ? incompleteReason === "requirement_trace" ? TRACE_INCOMPLETE_PREFIX
             : incompleteReason === "both" ? BOTH_INCOMPLETE_PREFIX
             : INCOMPLETE_COVERAGE_PREFIX
-          : (VERDICT_PREFIXES[input.verdict] ?? "✅ **Automated recommendation: APPROVE**")
+          : (isValidPublishVerdict(input.verdict) ? VERDICT_PREFIXES[input.verdict]! : NO_VERDICT_PREFIX)
       ) + suffix;
       const body = buildPublishedBody({
         markers,
@@ -1108,9 +1225,9 @@ export async function publishReview(
         analysisEngine: input.analysisEngine,
         sanitizedMarkdown: sanitized,
         coverageNotice,
-        stateBlock: strict
-          ? renderStrictStateBlock({ incompleteReason, findings: input.findings, linkMode: input.upstreamLinkMode })
-          : undefined,
+        // #588: the `comment` mode publishes no findings natively on any
+        // platform, so it compensates nothing for a missing native surface.
+        stateBlock: stateSection("", false),
         triageBlock: triageBlock || undefined,
         routingBlock: routingBlock || undefined,
         confidenceBlock: confidenceBlock || undefined,
@@ -1120,15 +1237,19 @@ export async function publishReview(
         return { status: "failed", messages, error: `sticky comment publication failed: ${result.error ?? "unknown error"}` };
       }
     } else if (input.mode === "review_comment") {
+      // #588: on a platform without a native review surface the findings
+      // have no native channel, so the body states the degradation BEFORE
+      // the untrusted review text and publishes the findings table itself.
+      const platformNotice = nativeSurface.supported
+        ? ""
+        : `\n> **Native inline comments are unavailable on this platform**: ${surfaceReason}. The findings are published in this review body instead of as native review comments.\n`;
       const body = buildPublishedBody({
         markers,
         header: "# AI Automated Review",
         analysisEngine: input.analysisEngine,
         sanitizedMarkdown: sanitized,
         coverageNotice,
-        stateBlock: strict
-          ? renderStrictStateBlock({ incompleteReason, findings: input.findings, linkMode: input.upstreamLinkMode })
-          : undefined,
+        stateBlock: stateSection(platformNotice),
         triageBlock: triageBlock || undefined,
         routingBlock: routingBlock || undefined,
         confidenceBlock: confidenceBlock || undefined,
@@ -1144,36 +1265,60 @@ export async function publishReview(
       // findings — a clean re-review must not publish an empty native review
       // just so cleanup has a checkpoint. The sticky comment (with its
       // response timestamp) is the replacement checkpoint instead.
-      if (inlineComments.length > 0) {
-        const inlineBody = `${input.commentMarker}\n_Inline findings from the automated review (summary in the sticky comment)._`;
-        const submitted = await api.createReview({ body: inlineBody, event: "COMMENT", commit_id: input.headSha, comments: inlineComments });
-        if (submitted.ok) {
-          nativeReviewId = submitted.reviewId;
-          messages.push(`Attached ${inlineComments.length} inline finding comment(s)`);
-        } else {
-          // The findings review is this run's replacement for the previous
-          // inline set; without it the sticky summary is NOT a complete
-          // replacement, so the sticky checkpoint must not authorize
-          // retiring the old owned comments.
-          stickyCheckpointUsable = false;
-          messages.push("WARN: inline findings review submission failed; summary comment was still published");
+      if (nativeSurface.supported) {
+        if (inlineComments.length > 0) {
+          const inlineBody = `${input.commentMarker}\n_Inline findings from the automated review (summary in the sticky comment)._`;
+          const submitted = await api.createReview({ body: inlineBody, event: "COMMENT", commit_id: input.headSha, comments: inlineComments });
+          if (submitted.ok) {
+            nativeReviewId = submitted.reviewId;
+            messages.push(`Attached ${inlineComments.length} inline finding comment(s)`);
+          } else {
+            // The findings review is this run's replacement for the previous
+            // inline set; without it the sticky summary is NOT a complete
+            // replacement, so the sticky checkpoint must not authorize
+            // retiring the old owned comments.
+            stickyCheckpointUsable = false;
+            messages.push("WARN: inline findings review submission failed; summary comment was still published");
+          }
         }
+      } else if (findingCount > 0) {
+        // #588: no native review surface — the managed record IS the complete
+        // publication (the findings are in its body), so no native review is
+        // created and the sticky checkpoint stays usable.
+        messages.push(`NOTE: ${findingCount} finding(s) were published in the review body instead of as native review comments (no native review surface: ${surfaceReason})`);
       }
     } else {
-      // review_verdict
+      // #1161: review_verdict and review_blockers both publish a native
+      // review; only review_verdict can ever approve.
       const guardrails = evaluateApprovalGuardrails({
         verdict: input.verdict,
-        allowApprove: input.allowApprove,
         approveForks: input.approveForks,
         isForkPr: input.isForkPr,
       });
       // #873: coverage incompleteness withholds approval independently of
-      // the allow_approve/approve_forks guardrails and of which verdict
-      // policy produced the approve — required-check coverage incomplete,
+      // the approve_forks scope guardrail and of which verdict policy
+      // produced the approve — required-check coverage incomplete,
       // review_result=partial, or a #810 tool-loop coverage gap must never
       // reach a GitHub/Forgejo APPROVE event.
       const coverageIncomplete = reviewCoverageIncomplete(reviewResult);
-      const canApprove = guardrails.canApprove && !coverageIncomplete;
+      // #1161: `review_blockers` publishes blocking findings only — it never
+      // approves, under any verdict, input, or pull-request scope.
+      const canApprove = input.mode === "review_verdict"
+        && guardrails.canApprove
+        && !coverageIncomplete;
+      const validVerdict = isValidPublishVerdict(input.verdict);
+      // #588: on a platform without a native review surface there is no
+      // native event to carry the recommendation, so the body states it —
+      // BEFORE the untrusted review text, so no model content can swallow it
+      // (a model blockquote can still LOOK similar; that exposure is the
+      // pre-existing one of every action-owned notice in this body, and the
+      // action's own marker stays the authoritative one). The verdict itself
+      // never changes: the recommendation is published as advisory text only.
+      const platformNotice = nativeSurface.supported
+        ? ""
+        : validVerdict && (input.verdict === "request_changes" || canApprove)
+          ? `\n> **Automated recommendation: ${input.verdict === "request_changes" ? "REQUEST CHANGES" : "APPROVE"}** — advisory only: ${surfaceReason}. The review is published as a managed top-level review record; no native approval, blocking request, or inline comment was submitted.\n`
+          : `\n> **Native review verdicts are unavailable on this platform**: ${surfaceReason}. The review is published as a managed top-level review record; no native approval, blocking request, or inline comment was submitted.\n`;
       let body = buildPublishedBody({
         markers,
         header: "# AI Automated Review",
@@ -1181,72 +1326,113 @@ export async function publishReview(
         analysisEngine: input.analysisEngine,
         sanitizedMarkdown: sanitized,
         coverageNotice,
-        stateBlock: strict
-          ? renderStrictStateBlock({ incompleteReason, findings: input.findings, linkMode: input.upstreamLinkMode })
-          : undefined,
+        stateBlock: stateSection(platformNotice),
         triageBlock: triageBlock || undefined,
         routingBlock: routingBlock || undefined,
         confidenceBlock: confidenceBlock || undefined,
       });
-      if (input.verdict === "approve" && !canApprove) {
-        if (!guardrails.canApprove) {
+      if (!validVerdict) {
+        // #1161: a missing or invalid verdict is a failed run, not a clean
+        // review — it must never publish as an approval or as a blocking
+        // request, and it must not read as a successful clean review.
+        body += "\n> **No review verdict**: this run produced no valid verdict (model failure or an invalid verdict payload), so neither an approval nor a blocking request is published.\n";
+        messages.push(`Publishing advisory review for #${input.prNumber} (no valid verdict produced)`);
+      } else if (input.mode === "review_verdict" && input.verdict === "approve" && !canApprove) {
+        if (guardrails.scopeBlocked) {
+          // #1161: the cross-repository scope policy is the only thing that
+          // withholds an approval here (the deprecated allow_approve input
+          // no longer gates anything). A withheld approval stays advisory:
+          // a blocking REQUEST_CHANGES would invent an issue the model did
+          // not find.
+          const scope = guardrails.isForkPr === null
+            ? "the fork status of this pull request could not be determined, so it is treated as a cross-repository (fork) pull request"
+            : "this is a cross-repository (fork) pull request";
           // #752: a review with open findings or a coverage gap must not
           // call itself clean, even when its verdict is an approve.
           const advisory = reviewResult === "clean"
             ? "this clean review is advisory"
             : "this review is advisory rather than a clean approval — the findings and coverage notes above are informational";
-          body += `\n> **Approval blocked by policy**: ${advisory}. Native approvals require \`allow_approve: true\` (and \`approve_forks: true\` for cross-repository PRs).\n`;
+          body += `\n> **Approval withheld by scope policy**: ${scope} and native approvals for fork pull requests are disabled (\`approve-forks: ${input.approveForks}\`), so ${advisory}.\n`;
           messages.push(
-            `Withholding native approval for #${input.prNumber} (allow_approve=${input.allowApprove}, approve_forks=${input.approveForks}, is_fork=${guardrails.isForkPr ?? input.isForkPr})`,
+            `Withholding native approval for #${input.prNumber} (cross-repository PR, approve_forks=${input.approveForks}, is_fork=${guardrails.isForkPr ?? "unknown"})`,
           );
         } else if (input.coverageUnknown) {
           // #873/#838: the standalone publish path had no explicit run dir
           // (or an unreadable harness artifact) and so could not confirm
           // whether the tool-loop investigation finished — fail closed
           // rather than guess it was clean.
-          body += `\n> **Approval withheld**: this review's tool-loop coverage could not be verified (no run directory was available to confirm it), so it is publishing as an advisory comment rather than an approval.\n`;
+          body += `\n> **Approval withheld**: this review's tool-loop coverage could not be verified (no run directory was available to confirm it), so it is publishing as an ${advisoryNoun} rather than an approval.\n`;
           messages.push(`Withholding native approval for #${input.prNumber} (review coverage unknown)`);
         } else if (incompleteReason === "requirement_trace") {
-          body += "\n> **Approval withheld**: the review completed, but an in-scope requirement lacks verifiable enforcement or test evidence, so it is publishing as an advisory comment rather than an approval.\n";
+          // #1145 owns the residual requirement-trace/coverage downgrade:
+          // a trace gap still downgrades an approve to an advisory review.
+          body += `\n> **Approval withheld**: the review completed, but an in-scope requirement lacks verifiable enforcement or test evidence, so it is publishing as an ${advisoryNoun} rather than an approval.\n`;
           messages.push(`Withholding native approval for #${input.prNumber} (requirement trace incomplete)`);
         } else if (incompleteReason === "both") {
-          body += "\n> **Approval withheld**: this review has incomplete execution coverage and an in-scope requirement lacks verifiable enforcement or test evidence, so it is publishing as an advisory comment rather than an approval.\n";
+          body += `\n> **Approval withheld**: this review has incomplete execution coverage and an in-scope requirement lacks verifiable enforcement or test evidence, so it is publishing as an ${advisoryNoun} rather than an approval.\n`;
           messages.push(`Withholding native approval for #${input.prNumber} (execution and requirement trace incomplete)`);
         } else {
           // #873: the guardrails would allow it, but the review's own
           // execution-coverage signals say it did not finish — fail closed
           // rather than publish an approval the metadata marker itself disputes.
-          body += `\n> **Approval withheld**: this review's coverage is incomplete — required-check coverage or the tool-loop investigation did not finish, so it is publishing as an advisory comment rather than an approval.\n`;
+          // #1145 owns this residual trace/coverage downgrade: the notices
+          // below stay exactly as they are until that issue lands.
+          body += `\n> **Approval withheld**: this review's coverage is incomplete — required-check coverage or the tool-loop investigation did not finish, so it is publishing as an ${advisoryNoun} rather than an approval.\n`;
           messages.push(`Withholding native approval for #${input.prNumber} (review coverage incomplete)`);
         }
       }
-      const event: NativeReviewEvent = canApprove
-        ? "APPROVE"
-        : input.verdict === "request_changes" ? "REQUEST_CHANGES" : "COMMENT";
-      if (canApprove) {
-        messages.push(`Submitting native approval for #${input.prNumber}`);
-      } else if (event === "REQUEST_CHANGES") {
-        messages.push(`Submitting blocking findings for #${input.prNumber}`);
+      if (input.mode === "review_blockers" && input.verdict === "approve") {
+        // #1161: the mode is blockers-only — a review without blockers is
+        // published as an advisory comment and never as an approval. (A
+        // missing/invalid verdict is covered by the "No review verdict"
+        // notice above: it is a failed run, not a clean review.)
+        body += `\n> **Advisory review (blockers-only mode)**: \`publish-mode: review_blockers\` publishes blocking findings only; a clean review is published as an ${advisoryNoun} and is never published as an approval.\n`;
+        messages.push(`Publishing advisory review for #${input.prNumber} (blockers-only mode; no approval published)`);
       }
-      const submitted = await submitNativeReview(api, {
-        event,
-        body,
-        commitId: input.headSha,
-        comments: inlineComments,
-      });
-      fallbackSubmission = submitted.fellBack;
-      if (submitted.fellBack) {
-        messages.push("WARN: commit-bound review submission failed; falling back to plain review");
-      }
-      if (!submitted.ok) {
-        if (event === "APPROVE") {
-          for (const line of APPROVAL_FAILURE_GUIDANCE) messages.push(line);
-          return { status: "failed", messages, error: `native approval failed for #${input.prNumber}` };
+      if (!nativeSurface.supported) {
+        // #588: the platform has no native pull-review surface, so the
+        // review is published as its managed top-level record. The body's
+        // platform notice (above, before the untrusted text) states the
+        // degradation: no native approval, blocking request, or inline
+        // comment was submitted, and the recommendation is advisory. The
+        // managed record IS the complete publication.
+        const result = await api.upsertStickyComment(input.commentMarker, body);
+        if (!result.ok) {
+          return { status: "failed", messages, error: `managed review record publication failed: ${result.error ?? "unknown error"}` };
         }
-        return { status: "failed", messages, error: `native review submission failed: ${submitted.error ?? "unknown error"}` };
+        stickyCommentId = result.commentId;
+        stickyUpdatedAt = result.updatedAt;
+        stickyBody = body;
+        messages.push(`Published the review as a managed top-level review record (no native review surface: ${surfaceReason}); no native approval or blocking request was submitted`);
+      } else {
+        const event: NativeReviewEvent = input.verdict === "request_changes"
+          ? "REQUEST_CHANGES"
+          : canApprove ? "APPROVE" : "COMMENT";
+        if (canApprove) {
+          messages.push(`Submitting native approval for #${input.prNumber}`);
+        } else if (event === "REQUEST_CHANGES") {
+          messages.push(`Submitting blocking findings for #${input.prNumber}`);
+        }
+        const submitted = await submitNativeReview(api, {
+          event,
+          body,
+          commitId: input.headSha,
+          comments: inlineComments,
+        });
+        fallbackSubmission = submitted.fellBack;
+        if (submitted.fellBack) {
+          messages.push("WARN: commit-bound review submission failed; falling back to plain review");
+        }
+        if (!submitted.ok) {
+          if (event === "APPROVE") {
+            for (const line of APPROVAL_FAILURE_GUIDANCE) messages.push(line);
+            return { status: "failed", messages, error: `native approval failed for #${input.prNumber}` };
+          }
+          return { status: "failed", messages, error: `native review submission failed: ${submitted.error ?? "unknown error"}` };
+        }
+        nativeReviewId = submitted.reviewId;
+        messages.push(`Submitted native review (${event}) with ${submitted.inlineCount} inline comment(s)`);
       }
-      nativeReviewId = submitted.reviewId;
-      messages.push(`Submitted native review (${event}) with ${submitted.inlineCount} inline comment(s)`);
     }
   } catch (error) {
     return {

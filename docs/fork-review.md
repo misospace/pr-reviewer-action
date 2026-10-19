@@ -211,9 +211,13 @@ dogfood workflow. Workflow permissions are minimal: `contents: read` +
 read permissions and never sees any credential.
 
 Fork reviews may publish findings, inline comments, and `request_changes`.
-They must never create a native approval: `allow-approve: false` and
-`approve-forks: false` are pinned (both by the workflow and by the action's
-own fork gate in `src/publish/publish.ts`).
+They must never create a native approval. The fork lane selects
+`publish-mode: review_blockers` — a mode that can never publish an approval
+— and keeps `approve-forks: "false"` as the second, independent barrier, so
+the action's own scope policy would withhold an approval on a fork PR too (an
+undeterminable fork state fails closed). The fork lane therefore publishes a
+blocking request when the review finds blockers, and an advisory review
+otherwise.
 
 Publication is exact-head guarded twice: `fork_review_gate.py verify` before
 model work, and the head re-check inside the publish step (`src/publish/publish.ts`) — a push

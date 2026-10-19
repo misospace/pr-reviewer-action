@@ -631,7 +631,7 @@ test("#872 cross-stage: the selection fingerprint applies the SAME accepted-issu
 
 // ── Managed body selection ───────────────────────────────────────────────
 
-test("last managed body reads reviews in review_verdict mode, comments otherwise", () => {
+test("last managed body reads reviews in the native verdict modes, comments otherwise", () => {
   const comments = [
     { body: "old <!-- ai-pr-reviewer -->", created_at: "2024-01-01T00:00:00Z", updated_at: "2024-01-01T00:00:00Z", author: "pr-reviewer[bot]" },
     { body: "new <!-- ai-pr-reviewer -->", created_at: "2024-01-03T00:00:00Z", updated_at: "2024-01-03T00:00:00Z", author: "pr-reviewer[bot]" },
@@ -639,6 +639,10 @@ test("last managed body reads reviews in review_verdict mode, comments otherwise
   const reviews = [{ body: "review <!-- ai-pr-reviewer -->", submitted_at: "2024-01-02T00:00:00Z", author: "pr-reviewer[bot]" }];
   assert.match(lastManagedBody(comments, reviews, "comment", "<!-- ai-pr-reviewer -->", { kind: "login", login: "pr-reviewer[bot]" }), /^new /);
   assert.match(lastManagedBody(comments, reviews, "review_verdict", "<!-- ai-pr-reviewer -->", { kind: "login", login: "pr-reviewer[bot]" }), /^review /);
+  // #1161: review_blockers publishes a native review too, so the next run
+  // must read PR reviews — a sticky comment would not carry the verdict.
+  assert.match(lastManagedBody(comments, reviews, "review_blockers", "<!-- ai-pr-reviewer -->", { kind: "login", login: "pr-reviewer[bot]" }), /^review /);
+  assert.match(lastManagedBody(comments, reviews, "review_comment", "<!-- ai-pr-reviewer -->", { kind: "login", login: "pr-reviewer[bot]" }), /^new /);
 });
 
 // ── Orchestration through the fixture adapter ────────────────────────────
@@ -1298,6 +1302,31 @@ test("#970: a lone forged managed comment cannot supply the skip fingerprint", a
   });
   assert.equal(output.should_review, "true");
   assert.equal(output.verdict, undefined);
+});
+
+test("#1161: review_blockers reads PR reviews, not issue comments — its own published review is visible to the next run", async () => {
+  const env = provenanceEnv("review_blockers");
+  const fp = provenanceFingerprint(env);
+  // A sticky comment carrying the same marker must not be read in this mode:
+  // the mode publishes a native review, so only a review can carry its state.
+  const comments: ManagedComment[] = [
+    { id: 1, body: provenanceBody(fp, "clean"), created_at: "2024-01-09T00:00:00Z", updated_at: "2024-01-09T00:00:00Z", author: "pr-reviewer[bot]" },
+  ];
+  const commentOnly = await runPrecheck({
+    env,
+    adapter: new FixtureAdapter("github", provenancePlatform({ identity: "pr-reviewer[bot]", comments })),
+  });
+  assert.equal(commentOnly.should_review, "true");
+
+  const reviews: ManagedReview[] = [
+    { body: provenanceBody(fp, "clean"), submitted_at: "2024-01-09T00:00:00Z", author: "pr-reviewer[bot]" },
+  ];
+  const reviewPresent = await runPrecheck({
+    env,
+    adapter: new FixtureAdapter("github", provenancePlatform({ identity: "pr-reviewer[bot]", comments, reviews })),
+  });
+  assert.equal(reviewPresent.should_review, "false");
+  assert.equal(reviewPresent.verdict, "approve");
 });
 
 test("#970: a forged marker in review_verdict mode cannot skip, while a genuine review still does", async () => {

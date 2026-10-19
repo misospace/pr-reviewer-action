@@ -62,7 +62,7 @@ export const ENUM_INPUTS: Readonly<Record<string, readonly string[]>> = Object.f
   "review-triage-routing-mode": ["off", "advisory", "request"],
   "system-prompt-mode": ["replace", "append"],
   "review-verbosity": ["normal", "concise"],
-  "publish-mode": ["comment", "review_comment", "review_verdict"],
+  "publish-mode": ["comment", "review_comment", "review_verdict", "review_blockers"],
   "cleanup-previous-native-reviews": ["auto", "true", "false"],
   "upstream-link-mode": ["inert", "togithub"],
   "context-limit-mode": ["normal", "low", "minimal"],

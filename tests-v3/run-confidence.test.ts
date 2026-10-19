@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { runReview } from "../src/run/review.js";
 import { publishReview } from "../src/publish/publish.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
-import type { NativeReviewRequest, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
+import type { NativeReviewRequest, NativeReviewSurface, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
 import { startMockServer, type MockServer } from "./helpers.js";
 
 /** #1073 end-to-end mocked-run coverage for the independent confidence
@@ -188,6 +188,7 @@ async function runConfidenceRun(
 /** A minimal comment-mode publish API that captures the sticky body. */
 class StickyCaptureApi implements PublishPlatformApi {
   readonly platform = "github" as const;
+  readonly nativeReviewSurface: NativeReviewSurface = { supported: true };
   readonly bodies: string[] = [];
   readonly submitted: NativeReviewRequest[] = [];
   constructor(private readonly head: string) {}

@@ -16,7 +16,7 @@ import { applyReviewThreadEnforcement } from "../src/enforcement/threads.js";
 import { buildRunMetadataMarker } from "../src/metadata/markers.js";
 import { carriedVerdict } from "../src/precheck/decide.js";
 import { publishReview } from "../src/publish/publish.js";
-import type { PublishPlatformApi } from "../src/platform/publish-api.js";
+import type { NativeReviewSurface, PublishPlatformApi } from "../src/platform/publish-api.js";
 
 // ---------------------------------------------------------------------------
 // #811 — the published verdict is a deterministic function of the normalized
@@ -372,6 +372,7 @@ const HEAD = "head-123";
 
 class MockPublishApi implements PublishPlatformApi {
   readonly platform: "github" | "forgejo" = "github";
+  readonly nativeReviewSurface: NativeReviewSurface = { supported: true };
   head: string | null = HEAD;
   sticky: { marker: string; body: string }[] = [];
   submitted: Parameters<PublishPlatformApi["createReview"]>[0][] = [];
@@ -523,15 +524,33 @@ test("the findings table caps at 50 rows with a visible N-more line", async () =
   assert.ok(body.includes("_…and 5 more finding(s) not listed._"));
 });
 
-test("withheld approval on a findings review does not call itself clean", async () => {
+test("#1161: review_verdict withholds an approval only by the scope policy or by incomplete coverage", async () => {
+  // A same-repository PR with complete coverage publishes the verdict
+  // natively — the deprecated allow-approve input no longer withholds it,
+  // and a review that carries findings is not published as a clean
+  // approval either way.
   const api = new MockPublishApi();
   await publishReview(publishInput({ mode: "review_verdict", findings: [finding("minor")] }), api, { diffText: "" });
-  const body = api.submitted[0]!.body;
-  assert.ok(body.includes("this review is advisory rather than a clean approval"));
-  assert.ok(!body.includes("this clean review is advisory"));
-  const clean = new MockPublishApi();
-  await publishReview(publishInput({ mode: "review_verdict" }), clean, { diffText: "" });
-  assert.ok(clean.submitted[0]!.body.includes("this clean review is advisory"));
+  assert.equal(api.submitted[0]!.event, "APPROVE");
+  assert.ok(!api.submitted[0]!.body.includes("Approval blocked by policy"));
+
+  // A fork PR without approve-forks still withholds the approval, and the
+  // published review never calls itself clean (#752: a review with open
+  // findings must not present itself as a clean advisory review).
+  const fork = new MockPublishApi();
+  await publishReview(publishInput({ mode: "review_verdict", isForkPr: true, findings: [finding("minor")] }), fork, { diffText: "" });
+  assert.equal(fork.submitted[0]!.event, "COMMENT");
+  assert.ok(fork.submitted[0]!.body.includes("Approval withheld by scope policy"));
+  assert.ok(fork.submitted[0]!.body.includes("this review is advisory rather than a clean approval"));
+  assert.ok(!fork.submitted[0]!.body.includes("this clean review is advisory"));
+
+  // The same withheld approval on a clean review says the clean review is
+  // advisory — the two cases stay distinguishable.
+  const cleanFork = new MockPublishApi();
+  await publishReview(publishInput({ mode: "review_verdict", isForkPr: true }), cleanFork, { diffText: "" });
+  assert.equal(cleanFork.submitted[0]!.event, "COMMENT");
+  assert.ok(cleanFork.submitted[0]!.body.includes("this clean review is advisory"));
+  assert.ok(!cleanFork.submitted[0]!.body.includes("rather than a clean approval"));
 });
 
 test("non-strict policies keep today's bodies and the binary clean/issues marker", async () => {

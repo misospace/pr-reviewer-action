@@ -757,7 +757,7 @@ test("#1094: maskKnownSecretsDeep masks a canary appearing as an object KEY (raw
   assert.deepEqual(distinct, { [`a${KNOWN_SECRET_REDACTED}`]: 1, [`${KNOWN_SECRET_REDACTED}a`]: 2, plain: 3 });
 });
 
-test("#1140: redactTextDeep masks BOTH the configured exact values AND the generic credential shapes, preserving structure", () => {
+test("#1149: redactTextDeep masks BOTH the configured exact values AND the generic credential shapes, preserving structure", () => {
   // Two disjoint redaction layers over a raw provider body:
   //  - CONFIGURED (maskKnownSecrets): a lane credential the run knows about,
   //    matched with no framing at all;
@@ -808,7 +808,7 @@ test("#1140: redactTextDeep masks BOTH the configured exact values AND the gener
   assert.equal(keyed.keep, 1);
 });
 
-test("#1140: redactTextDeep inherits maskKnownSecretsDeep's depth cutoff (fails closed) and its hostile-`__proto__` safety", () => {
+test("#1149: redactTextDeep inherits maskKnownSecretsDeep's depth cutoff (fails closed) and its hostile-`__proto__` safety", () => {
   // MAX_MASK_DEPTH in src/context/redact.ts. That module keeps its internals
   // private (the constant is not exported), so it is restated here rather than
   // imported — if the cap moves, the two level assertions below are what must
