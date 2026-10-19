@@ -16,7 +16,7 @@
 import type { ChatRequestInput, ChatRequestOutcome } from "../transport/transport.js";
 import { runChatRequestOnce } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
-import { maskKnownSecrets, redactText } from "../context/redact.js";
+import { maskDiagnostic } from "../context/redact.js";
 import { buildModelRequest } from "../model/request.js";
 import type { TokensParam } from "../model/types.js";
 import type { ConfidenceProfile } from "../routing/tiers.js";
@@ -65,6 +65,12 @@ export interface ConfidenceScorerInput {
    * proxies that only accept one field keep working. */
   tokensParam?: TokensParam;
   transport?: (input: ChatRequestInput) => Promise<ChatRequestOutcome>;
+  /** Every credential configured for this run, so thrown-transport and
+   * transport-failure diagnostics mask the FULL lane set, not just the
+   * scorer's own key and the primary's: a provider error body can echo any
+   * lane's secret, and each one is a real credential for this run even when
+   * this lane never carries it. */
+  laneSecrets?: readonly (string | null | undefined)[];
 }
 
 /** The scorer's outcome plus the masked wire diagnostics the run persists
@@ -89,6 +95,15 @@ export interface ConfidenceScorerOutcome {
  */
 export async function runConfidenceScorer(input: ConfidenceScorerInput & ConfidenceCeilingArgs): Promise<ConfidenceScorerOutcome> {
   const { profile } = input;
+  // #1140 review: the diagnostic mask set is EVERY configured credential for
+  // this run, not just the two this lane could plausibly echo. Applied before
+  // truncation (via `maskDiagnostic`) so a secret straddling the cap is never
+  // partially exposed.
+  const diagnosticSecrets: readonly (string | null | undefined)[] = [
+    ...(input.laneSecrets ?? []),
+    profile.apiKey,
+    input.primaryApiKey,
+  ];
   if (!profile.enabled) {
     return { result: disabledResult(), requestPayload: null, rawResponse: null, diagnostic: "" };
   }
@@ -147,15 +162,13 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
     });
   } catch (cause: unknown) {
     // A thrown transport (should not happen — failures are typed) still
-    // degrades to unscored, never fails the review. The detail is masked
-    // against BOTH credentials before it can reach any diagnostic surface.
+    // degrades to unscored, never fails the review. `maskDiagnostic` masks on
+    // the FULL untruncated message before capping it, so a configured secret
+    // straddling the 300-char boundary cannot leave a partial prefix behind.
     return {
       result: unscoredConfidenceResult("transport_error", profile.model),
       requestPayload: null, rawResponse: null,
-      diagnostic: maskKnownSecrets(
-        redactText(cause instanceof Error ? cause.message : String(cause)).slice(0, 300),
-        [profile.apiKey, input.primaryApiKey],
-      ),
+      diagnostic: maskDiagnostic(cause instanceof Error ? cause.message : String(cause), diagnosticSecrets),
     };
   }
   if (outcome.status !== "ok") {
@@ -165,7 +178,7 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
         profile.model,
       ),
       requestPayload: null, rawResponse: null,
-      diagnostic: describeTransportFailure(outcome.failure, { secrets: [profile.apiKey, input.primaryApiKey] }),
+      diagnostic: describeTransportFailure(outcome.failure, { secrets: diagnosticSecrets }),
     };
   }
   const parsed = parseConfidenceAnswer(outcome.response.content);

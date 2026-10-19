@@ -51,7 +51,7 @@ import { renderClaimsSection } from "../claims/render.js";
 import { buildModelRequest } from "../model/request.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
 import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js";
-import { maskKnownSecrets, maskKnownSecretsDeep } from "../context/redact.js";
+import { maskDiagnostic, maskKnownSecrets, maskKnownSecretsDeep, redactTextDeep } from "../context/redact.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
 import type { ReviewTriageDecision } from "../model/types.js";
@@ -1440,6 +1440,21 @@ secrets: [profiles.primary.apiKey],
     // at all): fail to unscored WITHOUT calling the model.
     confidenceResult = unscoredConfidenceResult("incomplete_review");
   } else {
+    // #1140 review: every credential configured for this run, in ONE place.
+    // The scorer may be a SEPARATE backend, so each of these is a real
+    // credential for this run and each must be masked out of every
+    // untrusted surface below — the scorer's prompt content, its transport
+    // diagnostics, and the artifacts it leaves behind. The specialist lane
+    // reads its raw env key here: its resolved profile may have fallen back to
+    // the primary key, and a configured specialist secret echoed in PR content
+    // must not ride to the scorer either.
+    const confidenceSecrets = [
+      confidenceProfile.apiKey,
+      profiles.primary.apiKey,
+      profiles.smart.apiKey,
+      profiles.fallback.apiKey,
+      env.AI_SPECIALIST_API_KEY ?? "",
+    ];
     const confidencePrompt = buildConfidencePrompt({
       headSha: context.headSha || String(pr.headRefOid ?? ""),
       baseSha: identity.baseSha ?? "",
@@ -1457,19 +1472,7 @@ secrets: [profiles.primary.apiKey],
       }),
       requiredChecks: outputRequiredChecks,
       coverage: reviewCoverage,
-      // #1140 review: the scorer may be a separate backend, so every
-      // credential configured for this run is masked out of the untrusted
-      // prompt content before the request is ever built. The specialist
-      // lane reads its raw env key here: its resolved profile may have
-      // fallen back to the primary key, and a configured specialist secret
-      // echoed in PR content must not ride to the scorer either.
-      secrets: [
-        confidenceProfile.apiKey,
-        profiles.primary.apiKey,
-        profiles.smart.apiKey,
-        profiles.fallback.apiKey,
-        env.AI_SPECIALIST_API_KEY ?? "",
-      ],
+      secrets: confidenceSecrets,
     });
     let confidenceOutcome: Awaited<ReturnType<typeof runConfidenceScorer>>;
     try {
@@ -1481,6 +1484,9 @@ secrets: [profiles.primary.apiKey],
         // Defensive credential-isolation input: the scorer re-checks that a
         // distinct endpoint never carries the primary lane's key.
         primaryApiKey: profiles.primary.apiKey,
+        // So the scorer's own thrown-transport/transport-failure diagnostics
+        // mask the whole lane set, not just its own and the primary's key.
+        laneSecrets: confidenceSecrets,
         prompt: confidencePrompt,
         connectTimeoutSec: Number(env.AI_CONNECT_TIMEOUT_SEC ?? "30") || 30,
         tokensParam: (env.AI_TOKENS_PARAM ?? "max_tokens") as "max_tokens" | "max_completion_tokens",
@@ -1492,11 +1498,11 @@ secrets: [profiles.primary.apiKey],
         result: unscoredConfidenceResult("internal_error", confidenceProfile.model),
         requestPayload: null,
         rawResponse: null,
-        diagnostic: maskKnownSecrets(
-          redactText(cause instanceof Error ? cause.message : String(cause)).slice(0, 300),
-          [confidenceProfile.apiKey, profiles.primary.apiKey, profiles.smart.apiKey,
-            profiles.fallback.apiKey, env.AI_SPECIALIST_API_KEY ?? ""],
-        ),
+        // #1140 review: `maskDiagnostic` masks the configured secrets on the
+        // FULL untruncated message and only then caps it, so a secret
+        // straddling the 300-char boundary cannot leave a partial prefix in
+        // the artifact or the log line. Masking AFTER truncation did.
+        diagnostic: maskDiagnostic(cause instanceof Error ? cause.message : String(cause), confidenceSecrets),
       };
     }
     // #1140 review: model-authored text (reason, concern file/evidence) is
@@ -1506,13 +1512,6 @@ secrets: [profiles.primary.apiKey],
     // the standalone publish CLI) reads only this sanitized canonical
     // result. Generic `redactText` at the renderers stays as the second
     // layer, but the exact configured secrets are nuked here, once.
-    const confidenceSecrets = [
-      confidenceProfile.apiKey,
-      profiles.primary.apiKey,
-      profiles.smart.apiKey,
-      profiles.fallback.apiKey,
-      env.AI_SPECIALIST_API_KEY ?? "",
-    ];
     const maskConfidenceText = (text: string): string => redactText(maskKnownSecrets(text, confidenceSecrets));
     confidenceResult = {
       ...confidenceOutcome.result,
@@ -1542,10 +1541,15 @@ secrets: [profiles.primary.apiKey],
       ...(confidenceOutcome.diagnostic !== "" ? { diagnostic: maskConfidenceText(confidenceOutcome.diagnostic) } : {}),
     })}\n`, "utf8"));
     if (confidenceOutcome.requestPayload !== null) {
-      ws.write("confidence-request.json", pyJsonDumps(maskKnownSecretsDeep(confidenceOutcome.requestPayload, confidenceSecrets)));
+      // #1140 review: raw provider/agent JSON goes to disk through
+      // `redactTextDeep`, not `maskKnownSecretsDeep` — configured-value
+      // masking alone left a PROVIDER-authored credential (`api_key=…`,
+      // `Bearer …`, `sk-…`) this run never configured persisted verbatim in
+      // the diagnostic artifacts.
+      ws.write("confidence-request.json", pyJsonDumps(redactTextDeep(confidenceOutcome.requestPayload, confidenceSecrets)));
     }
     if (confidenceOutcome.rawResponse !== null) {
-      ws.write("confidence-response.json", pyJsonDumps(maskKnownSecretsDeep(confidenceOutcome.rawResponse, confidenceSecrets)));
+      ws.write("confidence-response.json", pyJsonDumps(redactTextDeep(confidenceOutcome.rawResponse, confidenceSecrets)));
     }
     if (confidenceResult.status === "unscored") {
       // The log line goes through the same masking as the artifact: a

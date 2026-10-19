@@ -384,6 +384,40 @@ test("disabled profile produces no request and a disabled result", async () => {
   assert.equal(confidenceOutputFields(outcome.result).score, "");
 });
 
+test("#1140 review: a thrown transport masks the FULL lane set, and masks BEFORE the diagnostic cap", async () => {
+  // A provider-side crash message can echo ANY lane's credential, not just the
+  // scorer's own and the primary's. Two properties under test:
+  //  1. FULL LANE SET — `laneSecrets` is masked even though this lane never
+  //     carries it (it is a real credential for the run regardless);
+  //  2. MASK BEFORE CAP — the secret STARTS just before the 300-char cap, so a
+  //     mask-after-truncate pass leaves its first six characters behind.
+  const LANE = "smart-lane-secret-0f9a8b7c6d5e";
+  const straddling = `${"detail ".repeat(42)}${LANE}`; // 42 * 7 = 294 chars, cap at 300
+  assert.ok(straddling.indexOf(LANE) < 300 && straddling.indexOf(LANE) + LANE.length > 300, "the secret must straddle the cap");
+  const cases = [
+    { message: straddling, mustNotAppear: LANE.slice(0, 6) },
+    { message: `scorer blew up while reading ${LANE}`, mustNotAppear: LANE },
+  ];
+  for (const { message, mustNotAppear } of cases) {
+    const outcome = await runConfidenceScorer({
+      profile: profile({ apiKey: "scorer-key" }),
+      primaryApiKey: "primary-key-ABC",
+      laneSecrets: [LANE, "fallback-lane-secret-1122"],
+      prompt: { system: "s", user: "u" },
+      connectTimeoutSec: 5,
+      transport: async () => { throw new Error(message); },
+      findings: [],
+      coverage: {},
+    });
+    assert.equal(outcome.result.status, "unscored");
+    assert.equal(outcome.result.cause, "transport_error");
+    assert.ok(!outcome.diagnostic.includes(LANE), `lane credential survived in the diagnostic: ${outcome.diagnostic}`);
+    assert.ok(!outcome.diagnostic.includes(mustNotAppear), `partial lane credential survived: ${outcome.diagnostic}`);
+    // The cap still holds after masking (300 chars + the truncation marker).
+    assert.ok(outcome.diagnostic.length <= 315, `diagnostic exceeded the cap: ${outcome.diagnostic.length}`);
+  }
+});
+
 // ── prompt envelope hygiene ──────────────────────────────────────────────
 
 test("extractConfidenceJson finds the object inside fenced prose", () => {

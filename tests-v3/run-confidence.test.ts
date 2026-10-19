@@ -129,12 +129,20 @@ interface RunOutcome {
   runDir: string;
   output: string;
   summary: string;
+  /** The runner's own log lines, captured only when `captureLogs` is set. */
+  logs: string[];
 }
 
-async function runConfidenceRun(server: MockServer, extraInputs: Record<string, string>, prBody = ""): Promise<RunOutcome> {
+async function runConfidenceRun(
+  server: MockServer,
+  extraInputs: Record<string, string>,
+  prBody = "",
+  captureLogs = false,
+): Promise<RunOutcome> {
   const runDir = mkdtempSync(join(tmpdir(), "v3-run-confidence-"));
   const outputFile = join(runDir, "gh-output.txt");
   const stepSummaryFile = join(runDir, "step-summary.md");
+  const logs: string[] = [];
   const result = await runReview({
     env: { GITHUB_OUTPUT: outputFile, GITHUB_STEP_SUMMARY: stepSummaryFile },
     inputs: {
@@ -151,13 +159,16 @@ async function runConfidenceRun(server: MockServer, extraInputs: Record<string, 
     workspace: runDir,
     platformAdapter: mockPlatform(prBody),
     persistArtifacts: true,
-    quiet: true,
+    // `quiet` short-circuits before the log sink, so a capture turns it off.
+    quiet: !captureLogs,
+    ...(captureLogs ? { log: (line: string): void => { logs.push(line); } } : {}),
   });
   return {
     result,
     runDir,
     output: readFileSync(outputFile, "utf8"),
     summary: readFileSync(stepSummaryFile, "utf8"),
+    logs,
   };
 }
 
@@ -625,6 +636,162 @@ test("#1073: a keyless non-loopback scorer endpoint never dials and never leaks 
       }
       assert.ok(!bytes.includes("primary-secret-k"), `primary key leaked into ${path}`);
     }
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1140 review: a PROVIDER-authored credential in the raw scorer response never reaches the artifacts or any downstream surface", async () => {
+  // The scorer's raw response body is persisted verbatim-shaped as
+  // `confidence-response.json`. The provider echoes credentials THIS RUN NEVER
+  // CONFIGURED — `maskKnownSecretsDeep` masks configured values only, so these
+  // survived it untouched and had only the (absent) generic layer to catch them.
+  const PROVIDER_API_KEY = "provider-only-secret-123456";
+  const PROVIDER_BEARER = "providerbearerabcdefghijklmnop";
+  const PROVIDER_SK = "sk-providerabcdefghijklmnop";
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    // Fields the scorer ignores: only the artifact path can sanitize these.
+    res.end(JSON.stringify({
+      id: "s1",
+      object: "chat.completion",
+      model: SCORER_MODEL,
+      choices: [{ index: 0, message: { role: "assistant", content: JSON.stringify({ score: 4, risk: "low", reason: "fine", concerns: [] }) }, finish_reason: "stop" }],
+      provider_debug: {
+        credentials: `api_key=${PROVIDER_API_KEY}`,
+        headers: [`Authorization: Bearer ${PROVIDER_BEARER}`],
+        upstream: PROVIDER_SK,
+      },
+    }));
+  }));
+  try {
+    const run = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+    });
+    assert.equal(run.result.outputs.confidenceStatus, "scored");
+
+    // The persisted artifact keeps its shape and its non-credential content,
+    // but no shaped credential — the literal, in whole or in any fragment.
+    const responsePath = join(run.runDir, "confidence-response.json");
+    const responseBytes = readFileSync(responsePath, "utf8");
+    for (const shaped of [PROVIDER_API_KEY, PROVIDER_BEARER, PROVIDER_SK]) {
+      assert.ok(!responseBytes.includes(shaped), `provider-authored credential persisted verbatim in ${responsePath}`);
+      assert.ok(!responseBytes.includes(shaped.slice(0, 12)), `fragment of a provider-authored credential persisted in ${responsePath}`);
+    }
+    const parsed = JSON.parse(responseBytes) as Record<string, unknown>;
+    assert.equal(parsed.model, SCORER_MODEL, "the artifact stays valid JSON with the same shape");
+    const debug = parsed.provider_debug as Record<string, unknown>;
+    assert.equal(debug.credentials, "[REDACTED]");
+    assert.ok(Array.isArray(debug.headers));
+    assert.equal((parsed.choices as unknown[]).length, 1, "array order survives");
+
+    // The request artifact rides the same two layers.
+    const requestBytes = readFileSync(join(run.runDir, "confidence-request.json"), "utf8");
+    assert.ok(!requestBytes.includes(PROVIDER_API_KEY));
+    assert.equal((JSON.parse(requestBytes) as Record<string, unknown>).model, SCORER_MODEL);
+
+    // Every persisted file, the step outputs, the summary and the published
+    // comment are clean too.
+    for (const path of allFiles(run.runDir)) {
+      const bytes = readFileSync(path, "utf8");
+      for (const shaped of [PROVIDER_API_KEY, PROVIDER_BEARER, PROVIDER_SK]) {
+        assert.ok(!bytes.includes(shaped), `provider-authored credential leaked into ${path}`);
+      }
+    }
+    assert.ok(!run.output.includes(PROVIDER_API_KEY), "provider-authored credential leaked into step outputs");
+    assert.ok(!run.summary.includes(PROVIDER_API_KEY), "provider-authored credential leaked into the step summary");
+
+    const api = new StickyCaptureApi("a".repeat(40));
+    await publishReview({
+      mode: "comment",
+      reviewMarkdown: run.result.outputs.reviewMarkdown,
+      verdict: run.result.outputs.verdict,
+      verdictPolicy: run.result.verdictPolicy,
+      analysisEngine: run.result.outputs.analysisEngine,
+      baseSha: "b".repeat(40),
+      headSha: "a".repeat(40),
+      prNumber: "7",
+      commentMarker: "<!-- ai-pr-review -->",
+      requiredChecks: run.result.outputs.requiredChecks,
+      reviewRoute: run.result.outputs.reviewRoute,
+      escalationReason: run.result.outputs.escalationReason,
+      cacheHitRatio: run.result.outputs.cacheHitRatio,
+      inlineFindings: false,
+      inlineFindingsMax: 5,
+      findings: JSON.parse(run.result.outputs.findings),
+      cleanupPreviousNativeReviews: "false",
+      allowApprove: false,
+      approveForks: false,
+      isForkPr: false,
+      upstreamLinkMode: "inert",
+      conditionalPresence: {
+        linkedIssue: false, evidenceProvider: false, standards: false,
+        toolHarnessFindings: false, toolHarnessResults: false,
+      },
+      forgejoPositions: false,
+      confidence: {
+        status: run.result.outputs.confidenceStatus ?? "",
+        score: run.result.outputs.confidenceScore ?? "",
+        risk: run.result.outputs.confidenceRisk ?? "",
+        reason: run.result.outputs.confidenceReason ?? "",
+        model: run.result.outputs.confidenceModel ?? "",
+        ...(run.result.confidenceConcerns !== undefined ? { concerns: run.result.confidenceConcerns } : {}),
+      },
+    }, api, { diffText: "" });
+    assert.equal(api.bodies.length, 1);
+    assert.ok(!api.bodies[0]!.includes(PROVIDER_API_KEY), "provider-authored credential leaked into the published comment");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1140 review: a lane credential straddling the diagnostic cap never reaches the artifact or the log line", async () => {
+  // The scorer lane is a SEPARATE backend with its own credential set, but a
+  // provider error body can echo ANY configured lane's secret. The smart lane's
+  // secret is placed so it STARTS six characters before the 300-char diagnostic
+  // cap: a mask-after-truncate pass leaves those six characters behind, and the
+  // run's later re-masking of an already-truncated string cannot recover them.
+  const SMART_LANE = "smart-lane-secret-0f9a8b7c6d5e";
+  const prefix = "x".repeat(294);
+  assert.ok(prefix.length < 300 && prefix.length + SMART_LANE.length > 300, "the secret must straddle the cap");
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.statusCode = 400;
+    res.end(`${prefix}${SMART_LANE} rejected by the scorer backend`);
+  }));
+  try {
+    const run = await runConfidenceRun(
+      server,
+      { "ai-confidence-model": SCORER_MODEL, "ai-confidence-base-url": server.url, "ai-smart-api-key": SMART_LANE },
+      "",
+      true,
+    );
+    assert.equal(run.result.outputs.confidenceStatus, "unscored");
+
+    const scoreArtifact = JSON.parse(readFileSync(join(run.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(scoreArtifact.cause, "http_400");
+    const diagnostic = String(scoreArtifact.diagnostic ?? "");
+    assert.ok(diagnostic !== "", "the transport diagnostic is persisted");
+    assert.ok(!diagnostic.includes(SMART_LANE), `lane credential survived in the persisted diagnostic: ${diagnostic}`);
+    assert.ok(!diagnostic.includes(SMART_LANE.slice(0, 6)), `partial lane credential survived the diagnostic cap: ${diagnostic}`);
+
+    // The same diagnostic goes to the runner console. (The scorer's
+    // configuration warning also contains "confidence scorer:" — pin the line
+    // this test is about.)
+    const lines = run.logs.filter((line) => line.startsWith("confidence scorer:"));
+    assert.equal(lines.length, 1, `expected exactly one confidence log line: ${JSON.stringify(run.logs)}`);
+    assert.ok(!lines[0]!.includes(SMART_LANE), `lane credential leaked into the runner log: ${lines[0]}`);
+    assert.ok(!lines[0]!.includes(SMART_LANE.slice(0, 6)), `partial lane credential leaked into the runner log: ${lines[0]}`);
+
+    // And nowhere else on disk for this run.
+    for (const path of allFiles(run.runDir)) {
+      const bytes = readFileSync(path, "utf8");
+      assert.ok(!bytes.includes(SMART_LANE), `lane credential leaked into ${path}`);
+      assert.ok(!bytes.includes(SMART_LANE.slice(0, 6)), `partial lane credential leaked into ${path}`);
+    }
+
+    // Fail-soft: the review itself is untouched.
+    assert.equal(run.result.outputs.verdict, "approve");
   } finally {
     await server.close();
   }
