@@ -527,6 +527,14 @@ function isEnvelopeRecord(value: unknown): value is Record<string, unknown> {
  * dropped with its value, and no provider-controlled name ever becomes a
  * property here either.
  */
+/** #1154 review round 2: the verdict projection runs `redactPrTextDeep` with
+ * the key-name rule OFF. The rule exists for PR-authored artifacts, whose keys
+ * are forge field names (`login`, `filename`) that can name a credential
+ * value; a verdict's keys are the verdict SCHEMA, where a secret-named
+ * category carries a label the reviewer must read. Named here rather than
+ * inlined so the call site below reads as a decision, not a `false, false`. */
+const KEY_NAMES_OFF = false;
+
 /**
  * #1094 review round 3: the array-projection rule for the completion CONTENT,
  * shared by both provider shapes of `reusableVerdictEnvelope`. The branch
@@ -564,7 +572,21 @@ function isEnvelopeRecord(value: unknown): value is Record<string, unknown> {
 function redactVerdictContentText(text: string): string {
   try {
     const parsed = JSON.parse(text);
-    if (parsed !== null && typeof parsed === "object") return JSON.stringify(redactPrTextDeep(parsed));
+    if (parsed !== null && typeof parsed === "object") {
+      // #1154 review round 2: `KEY_NAMES_OFF` — the key-name rule is for
+      // PR-authored artifacts, whose keys are forge field names that can name
+      // a credential value. THIS content is the model's own verdict, and its
+      // keys are the verdict schema: `secret_handling_changes` is a real
+      // classification category (src/classification/classify.ts), so a
+      // secret-named key here carries a label or a boolean the reviewer must
+      // read. Masking on key name would persist `[REDACTED]` where the model
+      // wrote the category, and the native-loop reuse re-parses this exact
+      // text — a masked label would corrupt the review instead of protecting
+      // it. Leaves still get the pattern-only pass (and now the
+      // line-preserving one), which is what the configured-credential question
+      // is reserved for: `containsKnownSecret`, above.
+      return JSON.stringify(redactPrTextDeep(parsed, 0, false, KEY_NAMES_OFF));
+    }
   } catch {
     // Not JSON: prose (or a fenced/multi-shape document the verdict parser
     // itself would reject). The flat pass cannot corrupt structure that is

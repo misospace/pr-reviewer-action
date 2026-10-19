@@ -22,7 +22,7 @@ import { closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, o
 import { dirname } from "node:path";
 import { pySplitLines } from "../requirements/ledger.js";
 import { pyJsonDump } from "./py-json.js";
-import { redactDiffText, redactText } from "./redact.js";
+import { createPrTextLineMasker, redactDiffText, redactPrTextLines } from "./redact.js";
 
 export const ARTIFACT_VERSION = 1;
 
@@ -476,6 +476,18 @@ interface FileState {
   addedLines: [number, string][];
   contextLines: [number, string][];
   newSideLines: [number, string][];
+  /** Index-aligned with `newSideLines`: was a RESET fed to the redaction layer
+   * before this line — i.e. did at least one line that never becomes a
+   * new-side line (`@@`, `diff --git`, `--- `/`+++ `, `\ No newline`, a file
+   * mode/index/rename header, or any in-hunk line that is not ` `/`+`/`-`)
+   * appear since the previous new-side line? The change-anchor mirror replays
+   * this flag so its masker's stream is identical to the diff's own (#1154
+   * round 3): `redactDiffText` resets at every such line, and a mirror that
+   * never saw the reset would carry a run across a hunk boundary the diff
+   * closed, masking a line the diff left raw and failing the exact-byte
+   * comparison for the whole file. A removed (`-`) line is NOT a reset: it
+   * advances the removed side only. */
+  newSideResets: boolean[];
   changeRuns: [number, string][];
   removedLines: string[];
   inRun: boolean;
@@ -494,6 +506,7 @@ function newFileState(path: string, oldPath = "", deleted = false): FileState {
     addedLines: [],
     contextLines: [],
     newSideLines: [],
+    newSideResets: [],
     changeRuns: [],
     removedLines: [],
     inRun: false,
@@ -651,6 +664,16 @@ function cleanDiffPath(raw: string): string {
 function parseDiff(diffText: string): FileState[] {
   const files: FileState[] = [];
   let current: FileState | null = null;
+  // #1154 round 3: a line the redaction layer treats as a RESET (anything that
+  // is not a ` `/`+`/`-` content line: `diff --git`, `index`, `--- `/`+++ `,
+  // file-mode/rename/copy metadata, `@@`, `\ No newline`, or a malformed
+  // unprefixed line inside a hunk) is also a line `parseDiff` never records as
+  // a new-side line. The flag carries that fact to the next push so the
+  // change-anchor mirror can replay the identical reset (#1154 N1: without it,
+  // a run left open at a hunk boundary survives in the mirror but is closed in
+  // the diff, and the file loses every head-derived anchor). Cleared on each
+  // push; a `-` line is not a reset — it advances the removed side only.
+  let pendingReset = false;
   for (const line of pySplitLines(diffText)) {
     if (line.startsWith("diff --git ")) {
       const parsed = parseDiffGitLine(line);
@@ -661,27 +684,35 @@ function parseDiff(diffText: string): FileState[] {
       } else {
         current = null;
       }
+      pendingReset = true;
       continue;
     }
     if (current === null) continue;
     if (line.startsWith("Binary files ")) {
       current.binary = true;
       current.inHunk = false;
+      pendingReset = true;
       continue;
     }
     if (line.startsWith("new file mode")) {
       current.added = true;
+      pendingReset = true;
       continue;
     }
     if (line.startsWith("deleted file mode")) {
       current.deleted = true;
       current.inHunk = false;
+      pendingReset = true;
       continue;
     }
-    if (line.startsWith("old mode") || line.startsWith("new mode") || line.startsWith("index ")) continue;
+    if (line.startsWith("old mode") || line.startsWith("new mode") || line.startsWith("index ")) {
+      pendingReset = true;
+      continue;
+    }
     if (line.startsWith("--- ")) {
       const p = cleanDiffPath(line.slice(4).split("\t", 1)[0] as string);
       if (p !== "/dev/null") current.oldPath = p;
+      pendingReset = true;
       continue;
     }
     if (line.startsWith("+++ ")) {
@@ -691,28 +722,44 @@ function parseDiff(diffText: string): FileState[] {
         current.deleted = true;
         current.inHunk = false;
       }
+      pendingReset = true;
       continue;
     }
     if (line.startsWith("rename from ")) {
       const p = parseRenameLine(line, "from");
       if (p !== null) current.oldPath = p;
+      pendingReset = true;
       continue;
     }
     if (line.startsWith("rename to ")) {
       const p = parseRenameLine(line, "to");
       if (p !== null) current.path = p;
+      pendingReset = true;
       continue;
     }
-    if (line.startsWith("copy from ") || line.startsWith("copy to ")) continue;
+    if (line.startsWith("copy from ") || line.startsWith("copy to ")) {
+      pendingReset = true;
+      continue;
+    }
 
     const hunk = HUNK_RE.exec(line);
     if (hunk) {
       current.inHunk = true;
       current.inRun = false;
       current.newLine = pyIntDigits(hunk[3] as string);
+      pendingReset = true;
       continue;
     }
-    if (!current.inHunk) continue;
+    if (!current.inHunk) {
+      // A malformed diff can carry a ` `/`+`-looking line outside any hunk.
+      // `redactDiffText` feeds such a line to the new side; the mirror cannot
+      // replay it (this loop drops it), so the flag is set — the accepted
+      // residual, which costs that malformed file its head-derived anchors and
+      // never a masked byte: every checkout line is masked by the whole-file
+      // pass regardless.
+      pendingReset = true;
+      continue;
+    }
 
     if (line.startsWith("+") || line.startsWith("-")) {
       if (!current.inRun) {
@@ -727,6 +774,8 @@ function parseDiff(diffText: string): FileState[] {
     if (line.startsWith("+")) {
       current.addedLines.push([current.newLine, line.slice(1)]);
       current.newSideLines.push([current.newLine, line.slice(1)]);
+      current.newSideResets.push(pendingReset);
+      pendingReset = false;
       current.newLine += 1;
       continue;
     }
@@ -734,20 +783,29 @@ function parseDiff(diffText: string): FileState[] {
       current.removedLines.push(line.slice(1));
       continue;
     }
-    if (line.startsWith("\\")) continue;
+    if (line.startsWith("\\")) {
+      pendingReset = true;
+      continue;
+    }
     if (line.startsWith(" ")) {
       const content = line.slice(1);
       current.inRun = false;
       current.newSideLines.push([current.newLine, content]);
+      current.newSideResets.push(pendingReset);
+      pendingReset = false;
       const stripped = pyStrip(content);
       const lang = detectLanguage(current.path);
       if (lang === "python") {
         if (PY_FROM_BLOCK_RE.test(content) || stripped.startsWith(")")) current.contextLines.push([current.newLine, content]);
       } else if (lang === "go") {
-        if (GO_IMPORT_BLOCK_RE.test(content) || stripped === ")") current.contextLines.push([current.newLine, content]);
+        if (GO_IMPORT_BLOCK_RE.test(content) || stripped.startsWith(")")) current.contextLines.push([current.newLine, content]);
       }
       current.newLine += 1;
+      continue;
     }
+    // Anything else inside a hunk is malformed content; the redaction layer
+    // resets on it and so must the mirror.
+    pendingReset = true;
   }
   return files;
 }
@@ -1462,26 +1520,54 @@ function extractFileAnchors(
       // line byte-for-byte, and `headMatchesDiff` would fail the WHOLE file —
       // silently dropping `changed_lines`, enclosing symbols, keys and
       // counterparts for a PR whose diff merely contained a masked value.
-      // Redact the checkout side through the same pattern layer first, so
-      // both sides are normalized identically: `headMatchesDiff` stays an
-      // exact byte comparison (no wildcard/marker-tolerant matching that a
-      // hostile literal `[REDACTED]` line could satisfy), and masked lines
-      // keep their anchor enrichment. Line count and ordering are preserved
-      // (`redactText` is per-line and never spans a break), so line-number
-      // indexing into `headLines` is unaffected. Redaction is one-way, so
-      // no credential reaches the anchor artifact either.
-      // Accepted residual, the same over-redaction preference the pattern
-      // layer already documents: two DIFFERENT credential-shaped values on
-      // the same line normalize to the same marker, so a checkout that
-      // differs from the diff inside a masked span still counts as matching.
-      // Every unmasked line is still compared byte-for-byte, and a literal
-      // `[REDACTED]` line in a diff cannot forge agreement (both sides are
-      // normalized, so a genuinely different checkout line still fails).
-      // Symmetric cost: a credential-shaped DECLARATION name is masked on the
-      // checkout side too, so it stops matching a declaration and drops out
-      // of enclosing symbols/changed keys — the same accepted
-      // false-positive class, not a new failure mode.
-      headLines = headLines.map(redactText);
+      // Two steps, in this order:
+      //
+      //  1. `redactPrTextLines` over the WHOLE checkout, so nothing raw can
+      //     reach a derived anchor field (symbols, keys, counterparts are read
+      //     off these lines) even where the diff says nothing.
+      //  2. A MIRROR pass: one `createPrTextLineMasker()` per file, fed the
+      //     compared lines of `state.newSideLines` in order — the same stream
+      //     `redactDiffText`'s NEW side saw — overriding the compared lines.
+      //
+      // Step 2 is what makes the two sides agree. Step 1 alone normalizes the
+      // checkout over ITS whole file, so a bare `password:` line the diff never
+      // contained could open a run and mask a line the diff's new side leaves
+      // raw — the comparison then fails on a line neither side rewrote and the
+      // file silently loses every head-derived anchor (F2). Mirroring drives
+      // both sides from one decision stream: for equal content, equal masks.
+      // `headMatchesDiff` stays an exact byte comparison — no wildcard and no
+      // marker tolerance, which a hostile literal `[REDACTED]` line could
+      // otherwise satisfy. Line count and ordering are preserved (the core
+      // never spans a break), so line-number indexing into `headLines` is
+      // unaffected, and redaction is one-way, so no credential reaches the
+      // anchor artifact either.
+      //
+      // True residuals, all accepted consequences of the redaction preference
+      // rather than gaps in it: two DIFFERENT values inside ONE masked span
+      // normalize to the same marker, so a checkout differing only inside a
+      // masked span still counts as matching; a credential-shaped DECLARATION
+      // name is masked on the checkout side too, so it stops matching a
+      // declaration and drops out of enclosing symbols/changed keys; and the
+      // mirror covers only the compared lines, so a checkout line OUTSIDE the
+      // hunk keeps step 1's judgment, which may differ from what the diff's
+      // new side would have decided for it — it is never compared, so the only
+      // cost is step 1's over-redaction there.
+      const checkoutLines = headLines;
+      headLines = redactPrTextLines(checkoutLines.join("\n")).split("\n");
+      const mirror = createPrTextLineMasker();
+      for (const [index, [lineNo]] of state.newSideLines.entries()) {
+        // Replay the diff's own resets in the diff's own order (#1154 N1):
+        // `redactDiffText` ends a run at every line that is not diff content,
+        // and `parseDiff` never records those as new-side lines, so the flag
+        // is the only way the mirror learns a hunk or file boundary closed.
+        if (state.newSideResets[index] === true) mirror.reset();
+        // Masked from the RAW checkout line, not from step 1's output: the
+        // mirror must make the same decision the diff side made about the same
+        // bytes, and re-masking an already-masked line would only ever return
+        // the mask it was given.
+        const raw = checkoutLines[lineNo - 1];
+        if (raw !== undefined) headLines[lineNo - 1] = mirror.maskLine(raw);
+      }
       if (!headMatchesDiff(state, headLines)) headLines = null;
     }
   }
@@ -1688,6 +1774,11 @@ export function extractChangeAnchors(
         existing.addedLines.push(...state.addedLines);
         existing.contextLines.push(...state.contextLines);
         existing.newSideLines.push(...state.newSideLines);
+        // Index-aligned with `newSideLines`: the repeated-`diff --git` merge
+        // must carry the reset flags too, or the mirror loses the boundary
+        // resets between the two blocks (a lost reset desynchronizes the
+        // mirror exactly where a run would otherwise survive).
+        existing.newSideResets.push(...state.newSideResets);
         existing.changeRuns.push(...state.changeRuns);
         existing.removedLines.push(...state.removedLines);
         existing.binary = state.binary;

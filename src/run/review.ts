@@ -11,7 +11,7 @@ import { truncateClean } from "../corpus/truncate.js";
 import { readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { canonicalChangedFile, normalizeLinkedIssues } from "../context/types.js";
-import { redactDiffText, redactPrTextDeep, redactText } from "../context/redact.js";
+import { redactDiffText, redactPrTextDeep, redactPrTextLines, redactText } from "../context/redact.js";
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { buildHarnessObligations } from "../requirements/obligations.js";
 import { externalChecksConclusion } from "../precheck/decide.js";
@@ -450,8 +450,11 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // (no seam, failed read) keeps the REST body and labels nothing.
   let bodyRevision = await authoritativeBodyRevision(adapter);
   // #1154: the snapshot body is PR-authored content on the same persisted
-  // family as the projection body above.
-  if (bodyRevision !== null) pr.body = redactText(bodyRevision.body);
+  // family as the projection body above. The line-preserving pass, not the
+  // flat one: a body is multi-line text whose line structure the reviewer
+  // reads, and the flat pass's newline-spanning masker would collapse
+  // `password:\n<value>` into a single line here.
+  if (bodyRevision !== null) pr.body = redactPrTextLines(bodyRevision.body);
   let supersededCutoff = bodyRevision === null ? null : bodyRevision.editedAt;
   ws.write("pr.json", pyJsonDumps(pr));
   if (context.isForkPr === "") {
@@ -539,12 +542,13 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // the model input and every persisted artifact carry the same redacted
   // bytes. `redactDiffText` (not the flat pass) keeps every line count and
   // prefix intact, so inline findings still anchor to the same line numbers
-  // the forge's raw diff defines. The generic layer's documented
-  // false-positive class (a fixture value like `sk-test-…`, an
-  // `sk-`-prefixed kebab path in a diff header) is accepted, as is its
-  // split-line residual (a YAML key line and its indented value line are
-  // masked independently): over-redaction is the redaction module's stated
-  // preference over a leaked credential.
+  // the forge's raw diff defines, and it also closes the split-line form (a
+  // `password:` key line with its value on the indented line below). The
+  // generic layer's documented false-positive class (a fixture value like
+  // `sk-test-…`, an `sk-`-prefixed kebab path in a diff header) is accepted,
+  // as is the continuation rule's over-redaction (any indented run after a
+  // bare secret key is masked): over-redaction is the redaction module's
+  // stated preference over a leaked credential.
   const rawDiffText = diffText;
   diffText = redactDiffText(diffText);
   if (diffText !== rawDiffText) log("PR diff redaction: masked credential-shaped value(s) before persistence and corpus assembly");
@@ -943,7 +947,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       // and its `editedAt` is the only cutoff this pass labels with. A
       // failed snapshot read keeps the REST-refreshed body and no cutoff.
       bodyRevision = await authoritativeBodyRevision(adapter);
-      if (bodyRevision !== null) next.body = redactText(bodyRevision.body);
+      if (bodyRevision !== null) next.body = redactPrTextLines(bodyRevision.body);
       supersededCutoff = bodyRevision === null ? null : bodyRevision.editedAt;
       Object.assign(pr, next);
       ws.write("pr-object.json", pyJsonDumps(redactedRefreshed));

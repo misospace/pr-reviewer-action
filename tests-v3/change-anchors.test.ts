@@ -80,6 +80,70 @@ test("#1154: a credential-masked added line keeps its head-derived anchors", () 
   assert.deepEqual(file?.changed_lines, [[2, 2]]);
 });
 
+// #1154 (B1 fix): the split-line credential — a bare `password:` key line with
+// its value on the indented line below — is masked on BOTH sides of the
+// comparison now. This is the regression the anchor seam must not reintroduce:
+// if the two sides were normalized by different rule sets, this file would
+// silently lose `changed_lines` and its enclosing symbol.
+test("#1154: a SPLIT-line masked pair keeps its head-derived anchors", () => {
+  const secret = "hunter2hunter2hunter2";
+  // The changed run sits inside the declaration, so the enclosing-symbol
+  // enrichment (which walks up for a less-indented declaration) is on the
+  // seam under test rather than skipped for a top-level line.
+  const head = `def handle(event):\n    password:\n      ${secret}\n    return event\n`;
+  const root = workspace({ "src/app.py": head });
+  const raw = [
+    "diff --git a/src/app.py b/src/app.py",
+    "--- a/src/app.py",
+    "+++ b/src/app.py",
+    "@@ -1,2 +1,4 @@",
+    " def handle(event):",
+    "+    password:",
+    `+      ${secret}`,
+    "     return event",
+    "",
+  ].join("\n");
+  const redacted = redactDiffText(raw);
+  assert.ok(redacted.includes("+    password:\n+      [REDACTED]") && !redacted.includes(secret), "the split pair really is masked");
+  assert.equal(redacted.split("\n").length, raw.split("\n").length, "the mask costs no line");
+  // Raw and redacted inputs agree: entry normalization is idempotent.
+  assert.deepEqual(
+    extractChangeAnchors(raw, null, { sourceRoot: root }).files[0],
+    extractChangeAnchors(redacted, null, { sourceRoot: root }).files[0],
+  );
+  const file = extractChangeAnchors(redacted, null, { sourceRoot: root }).files[0];
+  assert.deepEqual(file?.changed_lines, [[2, 3]]);
+  assert.deepEqual(file?.symbols, [{ name: "handle", kind: "enclosing", confidence: "high", line: 1 }]);
+  // The artifact itself never carries the raw value.
+  assert.ok(!renderChangeAnchorsJson(extractChangeAnchors(redacted, null, { sourceRoot: root })).includes(secret));
+});
+
+test("#1154: normalization forgives only the masked span — split-line path included", () => {
+  const head = (value: string): string => `def handle(event):\n    password:\n      ${value}\n    return event\n`;
+  const diff = redactDiffText([
+    "diff --git a/src/app.py b/src/app.py",
+    "--- a/src/app.py",
+    "+++ b/src/app.py",
+    "@@ -1,2 +1,4 @@",
+    " def handle(event):",
+    "+    password:",
+    "+      hunter2hunter2hunter2",
+    "     return event",
+    "",
+  ].join("\n"));
+  // Documented residual, now covering the split-line span too: a checkout
+  // differing ONLY inside the masked run normalizes to the same marker.
+  const maskedOnly = extractChangeAnchors(diff, null, { sourceRoot: workspace({ "src/app.py": head("different-value-xyz") }) }).files[0];
+  assert.deepEqual(maskedOnly?.changed_lines, [[2, 3]]);
+  assert.deepEqual(maskedOnly?.symbols, [{ name: "handle", kind: "enclosing", confidence: "high", line: 1 }]);
+  // An unmasked line elsewhere in the file still fails the exact comparison.
+  const drifted = extractChangeAnchors(diff, null, {
+    sourceRoot: workspace({ "src/app.py": head("hunter2hunter2hunter2").replace("def handle(event):", "def handle(other):") }),
+  }).files[0];
+  assert.deepEqual(drifted?.symbols, [], "an unmasked mismatch still fails the whole file");
+  assert.equal(drifted?.changed_lines, undefined);
+});
+
 test("#1154: normalization forgives only the masked span, never the rest of the file", () => {
   const secret = "hunter2hunter2hunter2";
   const head = (second: string, third = "return event"): string => `def handle(event):\n    token = "${second}"\n    ${third}\n`;
@@ -201,4 +265,111 @@ test("the CLI refuses an output that escapes the workspace root", () => {
   } finally {
     process.chdir(previous);
   }
+});
+
+// #1154 review round 2 (F2): the checkout's own `password:` block sits BEFORE
+// the hunk, so the diff's new side never sees that key line. Normalizing the
+// whole checkout over its own stream would mask a compared line the diff
+// leaves raw, fail the exact comparison, and silently drop every head-derived
+// anchor for a file that contains no secret in its change at all.
+test("#1154 r2: a checkout key line OUTSIDE the hunk keeps the file's anchors", () => {
+  const head = [
+    "password:",
+    "  fallback:",
+    "    untouched-value",
+    "  mode:",
+    "    strict",
+    "def handle(event):",
+    "    event = dict(event, strict=True)",
+    "    return event",
+    "",
+  ].join("\n");
+  const root = workspace({ "src/app.py": head });
+  const raw = [
+    "diff --git a/src/app.py b/src/app.py",
+    "--- a/src/app.py",
+    "+++ b/src/app.py",
+    "@@ -3,5 +3,5 @@",
+    "     untouched-value",
+    "   mode:",
+    "     strict",
+    " def handle(event):",
+    "-    event = dict(event)",
+    "+    event = dict(event, strict=True)",
+    "",
+  ].join("\n");
+  const file = extractChangeAnchors(raw, null, { sourceRoot: root }).files[0];
+  assert.deepEqual(file?.changed_lines, [[7, 7]], "the added line still reconciles with the checkout");
+  assert.deepEqual(file?.symbols, [{ name: "handle", kind: "enclosing", confidence: "high", line: 6 }]);
+  // Entry normalization must not change the outcome.
+  assert.deepEqual(extractChangeAnchors(redactDiffText(raw), null, { sourceRoot: root }).files[0], file);
+  // Control: an UNMASKED drift elsewhere in the same hunk still fails the whole
+  // file — the mirroring grants no tolerance.
+  const drifted = extractChangeAnchors(raw, null, {
+    sourceRoot: workspace({ "src/app.py": head.replace("    strict\n", "    loose\n") }),
+  }).files[0];
+  assert.deepEqual(drifted?.symbols, []);
+  assert.equal(drifted?.changed_lines, undefined);
+});
+
+// #1154 round 3 (N1): `redactDiffText` ends a continuation run at EVERY line
+// that is not diff content — `@@`, `diff --git`, `--- `/`+++ `, `\ No
+// newline`, file-mode metadata, malformed junk — and `parseDiff` records none
+// of those as a new-side line. The mirror is fed only new-side lines, so
+// without the reset replay a run left open at the end of a hunk survives in the
+// mirror but is closed in the diff: the mirror then masks a line the diff left
+// raw, the exact-byte comparison fails, and the file silently loses
+// `changed_lines`, enclosing symbols, keys and counterparts. Every fixture
+// before this one was single-hunk, which is exactly why it passed.
+test("#1154 r3: a run open at a hunk boundary still reconciles across the boundary", () => {
+  // Hunk 1 ends on a bare `password:` key line; hunk 2's first compared line
+  // is indented deeper than it. The diff closed the run at the `@@`; the
+  // mirror must too.
+  const head = [
+    "def handle(event):",
+    "    settings = {",
+    "    password:",
+    "    return event",
+    "",
+    "",
+    "def other(arg):",
+    "        key = arg",
+    "    }",
+    "    trailing = 1",
+    "",
+  ].join("\n");
+  const root = workspace({ "src/app.py": head });
+  const header = ["diff --git a/src/app.py b/src/app.py", "--- a/src/app.py", "+++ b/src/app.py"];
+  const hunk1 = ["@@ -1,3 +1,4 @@", " def handle(event):", "     settings = {", "+    password:"];
+  const hunk2 = ["@@ -8,2 +8,3 @@", "         key = arg", "     }", "+    trailing = 1"];
+  const expected = {
+    changed_lines: [[3, 3], [10, 10]],
+    symbols: [
+      { name: "handle", kind: "enclosing", confidence: "high", line: 1 },
+      { name: "other", kind: "enclosing", confidence: "high", line: 7 },
+    ],
+  };
+  const anchors = (lines: string[]) => extractChangeAnchors(lines.join("\n") + "\n", null, { sourceRoot: root }).files[0];
+
+  const twoHunk = anchors([...header, ...hunk1, ...hunk2]);
+  assert.deepEqual(twoHunk?.changed_lines, expected.changed_lines);
+  assert.deepEqual(twoHunk?.symbols, expected.symbols);
+
+  // Same file repeated as two `diff --git` blocks: the merge site must carry
+  // the reset flags too, or the boundary between the blocks desynchronizes.
+  const repeated = anchors([...header, ...hunk1, ...header, ...hunk2]);
+  assert.deepEqual(repeated?.changed_lines, expected.changed_lines);
+  assert.deepEqual(repeated?.symbols, expected.symbols);
+
+  // A `\ No newline` marker between the hunks is a reset too.
+  const noNewline = anchors([...header, ...hunk1, "\\ No newline at end of file", ...hunk2]);
+  assert.deepEqual(noNewline?.changed_lines, expected.changed_lines);
+  assert.deepEqual(noNewline?.symbols, expected.symbols);
+
+  // Control: the second hunk ALONE reconciles identically (no state carried in
+  // from a boundary), so the multi-boundary cases match a single-hunk file.
+  const control = anchors([...header, ...hunk2]);
+  assert.deepEqual(control?.changed_lines, [[10, 10]]);
+  assert.deepEqual(control?.symbols, [{ name: "other", kind: "enclosing", confidence: "high", line: 7 }]);
+  assert.deepEqual(twoHunk?.symbols?.at(-1), control?.symbols?.[0], "the boundary adds no drift");
 });

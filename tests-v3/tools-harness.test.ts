@@ -8,6 +8,7 @@ import { OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
 import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
 import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
+import { redactPrTextDeep } from "../src/context/redact.js";
 import { parseVerdictResponse } from "../src/model/verdict.js";
 import { reassembleSse } from "../src/transport/sse.js";
 import { normalizedToOpenAiChat } from "../src/run/stages.js";
@@ -1058,4 +1059,42 @@ test("#1047 (review): an explicit-empty lane response-format override inherits t
   assert.equal("response_format" in off, false);
   const overridden = await runVerdictTurn({ AI_RESPONSE_FORMAT: "off", AI_PRIMARY_RESPONSE_FORMAT: "json_object" });
   assert.deepEqual(overridden.response_format, { type: "json_object" });
+});
+
+// #1154 review round 2: the key-name rule added to `redactPrTextDeep` is for
+// PR-authored artifacts, whose keys are forge field names that can name a
+// credential value. The verdict projection's keys are the verdict SCHEMA —
+// `secret_handling_changes` is a real classification category
+// (src/classification/classify.ts) — and the native-loop reuse RE-PARSES this
+// exact text, so masking a category value would rewrite the review instead of
+// protecting it.
+test("#1154 r2: the verdict projection keeps secret-named CATEGORY values", () => {
+  const rawToken = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+  const verdictJson = JSON.stringify({
+    verdict: "request_changes",
+    review_markdown: `The diff moves the credential below its key (${rawToken} in the old line).`,
+    findings: [{
+      title: "hardcoded secret in the config helper",
+      secret_handling_changes: "reported",
+      path: "src/app.py",
+      line: 3,
+    }],
+  });
+  const envelope = reusableVerdictEnvelope({ choices: [{ message: { content: verdictJson }, finish_reason: "stop" }] });
+  const content = String(((envelope.choices as Record<string, unknown>[])[0]!.message as Record<string, unknown>).content);
+  const projected = JSON.parse(content) as { review_markdown: string; findings: Array<Record<string, unknown>> };
+  assert.equal(projected.findings[0]!.secret_handling_changes, "reported", "the category value reaches the artifact intact");
+  assert.equal(projected.findings[0]!.title, "hardcoded secret in the config helper");
+  assert.equal(projected.findings[0]!.path, "src/app.py");
+  // The pattern layer still runs on leaves — the projection is not exempt from
+  // redaction, only from the key-name rule.
+  assert.match(projected.review_markdown, /\[REDACTED\]/);
+  assert.ok(!projected.review_markdown.includes(rawToken));
+  // The reuse path still re-parses this as a verdict.
+  const reparsed = parseVerdictResponse(JSON.parse(JSON.stringify(envelope)));
+  assert.equal(reparsed.verdict, "request_changes");
+  // And the PR-artifact default is unchanged: the same key name on a PR object
+  // masks, which is the behavior this projection opted out of.
+  const prObject = redactPrTextDeep({ secret_handling_changes: "reported" }) as Record<string, unknown>;
+  assert.equal(prObject.secret_handling_changes, "[REDACTED]");
 });

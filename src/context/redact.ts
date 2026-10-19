@@ -36,6 +36,27 @@ const MASKERS: readonly RegExp[] = [
   /(password|client-certificate-data|client-key-data|certificate-authority-data|bearer[_-]?token)\s*:\s*\S+/gi,
 ];
 
+// Secret key-name vocabulary: ONE alternation behind every key-name rule in
+// this module — the PR-artifact rules here (#1154) and the source-safe rules
+// further down (#876). A single source of truth is load-bearing: a name one
+// rule protects and another silently forgets is an unmasked credential nobody
+// notices.
+const SECRET_KEY_ALTERNATION = "api[_-]?key|token|password|secret|access[_-]?key|auth[_-]?token";
+
+/** Unanchored, case-insensitive key-NAME test (#1154), over that vocabulary:
+ * the alternative may sit anywhere in the name, so `client_secret`,
+ * `refresh_token`, `dbPassword`, `secretAccessKey` and `apiKey` all match
+ * while a name carrying none of them (`filename`, `login`,
+ * `sk-prod-service-account-1`) does not. Deliberately NOT `\b`-anchored on
+ * either edge: both ends of these names are ordinary identifier characters
+ * (`camelCase`, `snake_case`), and an anchored test would exempt exactly the
+ * compound names most likely to hold a credential. */
+const SECRET_KEY_NAME_RE = new RegExp(SECRET_KEY_ALTERNATION, "i");
+
+function isSecretKeyName(key: string): boolean {
+  return SECRET_KEY_NAME_RE.test(key);
+}
+
 /** Return *text* with credential-like values replaced by `[REDACTED]`.
  * Best-effort heuristic redaction for untrusted prose and logs. */
 export function redactText(text: string | null | undefined): string {
@@ -47,37 +68,238 @@ export function redactText(text: string | null | undefined): string {
   return redacted;
 }
 
-/** Line-wise counterpart to `redactText` for unified diffs (#1154). The
- * flat pass must NEVER run on a diff: several maskers span line breaks
- * (`\s*` matches `\n`), so a multi-line match collapses two diff lines into
- * one and silently shifts every later line number — inline findings then
- * anchor to the wrong line against a forge that re-reads the raw diff. Here
- * each line is masked INDEPENDENTLY: the `+`/`-`/space diff prefix is
- * preserved and only the content after it is redacted, so line count,
- * prefixes, and hunk structure survive byte-for-byte, and no mask can ever
- * span a line break.
+// ---------------------------------------------------------------------------
+// Line-preserving PR-artifact core (#1154)
+// ---------------------------------------------------------------------------
+
+// Identifier characters that may flank a matched alternative inside a key
+// NAME, so the whole-content test below accepts `dbPassword` and
+// `client_secret` as well as `password` and `secret`.
+const KEY_NAME_FLANK = "[A-Za-z0-9_.-]*";
+
+/** A BARE secret key line: the line's whole content is a secret key name,
+ * a `:` or `=` separator, and NOTHING else — no value (`password:`,
+ * `"token":`, `api_key =`, `  client_secret:`) — optionally followed by a YAML
+ * block-scalar indicator (`password: |`, `token: >-`, `api_key: |2`).
  *
- * `diff --git`/`index`/`@@` and the `--- a/…`/`+++ b/…` file headers are
- * left verbatim: paths are not credentials, and header paths must keep
- * matching the platform file list for anchoring. (`--- `/`+++ ` are
- * distinguished from a `-`/`+` content line by their full three-character
- * prefix; a deleted line whose own content begins `-- ` is indistinguishable
- * and accepted as pathologically unlikely.)
+ * The block-scalar form is in the SAME rule rather than left to the patterns
+ * because a PEM key or certificate is embedded in YAML exactly this way, and
+ * the kubeconfig masker does not close it: `password: |` is itself a
+ * `key:\s*\S+` match, so that masker rewrites the KEY LINE to `[REDACTED]` and
+ * the literal key text no longer reaches this predicate — leaving the block
+ * below it verbatim. Bounded deliberately: only a leading indicator character
+ * followed by indicator characters (indentation digits and/or chomping) is
+ * accepted. It is NOT generalized to "any remainder", because
+ * `password = self.password` and `token: opts.token` are code expressions
+ * whose following lines must survive untouched. */
+const BARE_SECRET_KEY_LINE_RE = new RegExp(
+  `^\\s*["'\`]?\\s*${KEY_NAME_FLANK}(?:${SECRET_KEY_ALTERNATION})${KEY_NAME_FLANK}\\s*["'\`]?\\s*[:=]\\s*(?:[|>][-+0-9]*)?\\s*$`,
+  "i",
+);
+
+function isBareSecretKeyLine(content: string): boolean {
+  return BARE_SECRET_KEY_LINE_RE.test(content);
+}
+
+/** Cross-line state for the continuation rule. `keyIndent` is the bare key
+ * line's OWN indentation width: a continuation is the VALUE of that key, so
+ * it is indented strictly deeper than the line that introduced it. Anything at
+ * the key's own indent (or shallower) is a sibling — the next statement, the
+ * next mapping key, the next call argument — and closes the run. */
+interface ContinuationState {
+  open: boolean;
+  keyIndent: number;
+}
+
+function indentOf(content: string): number {
+  return /^\s*/.exec(content)?.[0].length ?? 0;
+}
+
+/** The line-preserving masking core shared by `redactPrTextLines` and
+ * `redactDiffText` (#1154).
  *
- * Accepted residual: a secret whose KEY line and VALUE line are separate
- * (`password:` then an indented value, YAML style) is not masked — the
- * key/value maskers are single-line shapes, and the cross-line match that
- * would catch it is exactly the line-collapsing behavior this function
- * exists to prevent. Bare token shapes (`sk-`, `ghp_`, `AKIA`, `Bearer …`)
- * are still caught per line. Same-line `key: value` forms are masked. */
+ * The flat pass must NEVER run on text whose line structure is load-bearing:
+ * several maskers span line breaks (`\s*` matches `\n`), so a multi-line match
+ * collapses two lines into one and silently shifts every later line number —
+ * inline findings then anchor to the wrong line, and a PR body loses its
+ * formatting on the way into `pr.json`/`pr-body.txt`. Here each line is masked
+ * INDEPENDENTLY and the per-line result is joined back with `\n`, so line
+ * count, order and every line break survive byte-for-byte.
+ *
+ * Split-line secrets (#1154): a same-line `key: value` is caught by the flat
+ * patterns, but a YAML-style credential — a bare key line whose value is a
+ * line below it — is not, because every key/value masker is a single-line
+ * shape and the cross-line match that would catch it is exactly the collapse
+ * this core exists to prevent. So a bare secret key line OPENS a run, and
+ * every following line indented STRICTLY deeper than the key line, with
+ * non-empty content, has its trimmed content replaced with `[REDACTED]`,
+ * keeping its leading indentation. The run terminates at a blank content
+ * line, at a line that is not indented deeper than the key, or at end of
+ * input.
+ *
+ * The indentation bound is what keeps the rule usable on real code. Without
+ * it, a PR that MOVES a hardcoded secret onto the line below its key destroyed
+ * every following statement of the same function — `port=5432,`, the closing
+ * `)`, the next call — in the persisted diff, the corpus, and the recorded
+ * model request. A continuation is the value OF its key; a same-indent line is
+ * a sibling and is not.
+ *
+ * Accepted over-redaction class, documented rather than "fixed": a
+ * DEEPER-indented block after a bare secret key is masked even when it is not
+ * a credential — a nested mapping's other keys, a block scalar's own body, a
+ * multi-line argument list under a `token:` key. The pattern layer's stated
+ * preference applies unchanged: over-redaction beats a leaked credential
+ * (#1154). Narrowing further would mean guessing whether an indented line is
+ * "data" or "structure", the reading a mask must not do on untrusted input.
+ *
+ * No diff-header test belongs here. Every unified-diff header shape starts
+ * with a non-whitespace character, so a header can never satisfy this rule's
+ * deeper-indent requirement, and `redactDiffText` handles its own headers
+ * before a line reaches this function. A header test here was dead code.
+ *
+ * True residuals, all consequences of the preference above rather than gaps in
+ * it: a DEEPER-indented non-credential block is masked; a diff judges each of
+ * its two sides with its OWN state (see `redactDiffText`), so a run opened on
+ * one side never colours the other; and a key name outside the frozen
+ * vocabulary (`client_key`, `private_key` — neither carries an alternative in
+ * `SECRET_KEY_ALTERNATION`) opens no run at all, so a block scalar under one of
+ * those names survives while the same document under `password:` does not.
+ *
+ * The rule's own bound leaves two more shapes unmasked, and the bound is
+ * deliberate (generalizing it to "any remainder" would swallow the code block
+ * under `password = self.password`): a key line carrying a TRAILING TOKEN the
+ * patterns already consume is rewritten to `[REDACTED]` by those patterns, so
+ * the literal key text never reaches this predicate and the indented value
+ * below it survives — `password: # db credential` and `password: "` (an
+ * unterminated quote in a malformed diff) are the two reachable forms. Both
+ * are the same cost as the vocabulary gap above, accepted rather than closed,
+ * because closing them means reading past the separator on untrusted input. */
+function maskContentLine(content: string, state: ContinuationState): string {
+  if (isBareSecretKeyLine(content)) {
+    state.open = true;
+    state.keyIndent = indentOf(content);
+    return redactText(content);
+  }
+  if (state.open) {
+    const indent = indentOf(content);
+    if (indent > state.keyIndent && content.trim() !== "") return `${content.slice(0, indent)}${REDACTED}`;
+    state.open = false;
+  }
+  return redactText(content);
+}
+
+/** Stateful, content-line-at-a-time view of the masking core (#1154).
+ *
+ * Exported so a caller that must normalize ONE side of a comparison using the
+ * other side's decisions can do it without restating the rules: the
+ * change-anchor seam runs one such masker over the diff's new-side stream and
+ * another over the head-checkout lines that stream covers, so the two sides
+ * agree by construction instead of by coincidence. Lines must be fed in the
+ * order they appear — the continuation state carries across calls and is
+ * never reset — so a caller MUST feed every intervening line, not a filtered
+ * subset. */
+export interface PrTextLineMasker {
+  /** Mask one line's content (no diff prefix); state carries across calls. */
+  maskLine(content: string): string;
+  /** End any open continuation run — the same transition `redactDiffText`
+   * performs for a line that is not diff content (a hunk header, a file
+   * header, `\ No newline`, malformed junk). Named so a caller replaying the
+   * diff's decisions — the change-anchor mirror — calls the identical thing
+   * instead of passing an empty line and hoping it reads as one. */
+  reset(): void;
+}
+
+export function createPrTextLineMasker(): PrTextLineMasker {
+  const state: ContinuationState = { open: false, keyIndent: 0 };
+  return {
+    maskLine(content: string): string {
+      return maskContentLine(content, state);
+    },
+    reset(): void {
+      state.open = false;
+      state.keyIndent = 0;
+    },
+  };
+}
+
+/** Line-preserving pass for PR-authored multi-line text (#1154): splits on
+ * `\n`, masks each line through the shared core, and joins with `\n`, so line
+ * count, order and every line break survive. This is the seam for text whose
+ * LINE STRUCTURE is part of its meaning — a PR body, a `patch` leaf, a
+ * head-checkout file — where the flat `redactText` pass would collapse
+ * `password:\n<value>` into one line and destroy the structure. It applies the
+ * same rules as `redactDiffText` (shared core, including the split-line
+ * continuation rule), minus the diff prefix/header handling a unified diff
+ * needs, and it sees ONE stream where a diff sees two.
+ *
+ * Idempotent by construction, and required to stay so (#252): re-persisting an
+ * already-redacted artifact must be a no-op. A literal `[REDACTED]` line with
+ * no bare key line above it is untouched, and `password:` followed by
+ * `  [REDACTED]` converges to itself. */
+export function redactPrTextLines(text: string | null | undefined): string {
+  if (!text) return "";
+  const masker = createPrTextLineMasker();
+  return text.split("\n").map((line) => masker.maskLine(line)).join("\n");
+}
+
+/** Line-wise counterpart to `redactText` for unified diffs (#1154). Delegates
+ * per-line masking to the shared core and owns only what is diff-specific: the
+ * `+`/`-`/space prefix is preserved and masked content follows it, while
+ * `diff --git`/`index`/`@@` and the `--- a/…`/`+++ b/…` file headers are left
+ * verbatim — paths are not credentials, and header paths must keep matching
+ * the platform file list for anchoring. (`--- `/`+++ ` are distinguished from
+ * a `-`/`+` content line by their full three-character prefix; a deleted line
+ * whose own content begins `-- ` is indistinguishable and accepted as
+ * pathologically unlikely.)
+ *
+ * TWO independent continuation states, one per side of the change. Each side
+ * reconstructs its OWN file and is judged only by that file's lines: the NEW
+ * side is driven by context (` `) and added (`+`) lines, the REMOVED side by
+ * context (` `) and removed (`-`) lines. A context line advances both and
+ * emits the NEW-side result; a header or any other line resets both. Without
+ * that split a key line on one side opened a run that swallowed the other
+ * side's ordinary lines: a PR that deletes a secret had its entire replacement
+ * block rewritten to `[REDACTED]`, and a run opened by a removed line masked
+ * added lines that were never its values. A removed line is still masked —
+ * it is PR-authored content that persists in `pr.diff` — just by its own
+ * side's decisions.
+ *
+ * Because the core never lets a mask span a line break, line count, prefixes
+ * and hunk structure survive byte-for-byte: inline findings still anchor to
+ * the same line numbers the forge's raw diff defines. Bare token shapes
+ * (`sk-`, `ghp_`, `AKIA`, `Bearer …`), same-line `key: value` forms, YAML
+ * block scalars, and the split-line `key:`/indented-value form are all masked;
+ * see {@link maskContentLine} for the continuation rule and its documented
+ * over-redaction class. */
 export function redactDiffText(diff: string | null | undefined): string {
   if (!diff) return "";
+  const nextSide = createPrTextLineMasker();
+  const removedSide = createPrTextLineMasker();
   return diff.split("\n").map((line) => {
-    if (line.startsWith("--- ") || line.startsWith("+++ ")) return line;
-    const prefix = line.charAt(0);
-    if (prefix === "+" || prefix === "-" || prefix === " ") {
-      return prefix + redactText(line.slice(1));
+    if (line.startsWith("--- ") || line.startsWith("+++ ")) {
+      // Headers are structure, not content: both runs end at a file boundary.
+      nextSide.reset();
+      removedSide.reset();
+      return line;
     }
+    const prefix = line.charAt(0);
+    if (prefix === " " || prefix === "+") {
+      // An added line belongs to the result file only. A CONTEXT line is fed
+      // to the removed side as well (it is in the pre-image too), but only
+      // the new-side result is emitted, since that is the file the reviewer
+      // reads.
+      if (prefix === " ") removedSide.maskLine(line.slice(1));
+      return prefix + nextSide.maskLine(line.slice(1));
+    }
+    if (prefix === "-") {
+      // Fed to the removed side only. Its own result IS emitted (the line is
+      // still PR-authored content that persists in `pr.diff` and reaches the
+      // corpus), but the side is its own: a run opened here must never colour
+      // a line the change produces.
+      return "-" + removedSide.maskLine(line.slice(1));
+    }
+    nextSide.reset();
+    removedSide.reset();
     return line;
   }).join("\n");
 }
@@ -103,8 +325,10 @@ export const REDACTED_SOURCE = "⟦redacted:credential⟧";
 // literal, or env lookup, e.g. `apiKey: config.apiKey,`, `token: opts.token`,
 // `password=self.password`, `secret = getSecret()` — is never touched:
 // replacing it would destroy code structure the model relies on to judge
-// correctness (#876).
-const SECRET_KEY_ALTERNATION = "api[_-]?key|token|password|secret|access[_-]?key|auth[_-]?token";
+// correctness (#876). The key-name vocabulary itself
+// (`SECRET_KEY_ALTERNATION`) is declared with the PR-artifact core at the top
+// of this module: both rule families match the SAME names, so a name the
+// source-safe masker protects cannot drift out of the PR-artifact rules.
 
 // Recognized CloudFormation-style YAML short-form tags. Deliberately a fixed
 // whitelist, not "anything starting with `!`" (#876 review round 3): a real
@@ -549,13 +773,34 @@ export function containsKnownSecret(text: string, secrets: readonly (string | nu
  * key from JSON.parse cannot invoke the prototype setter), depth capped at
  * `MAX_MASK_DEPTH` with a fail-closed `"[REDACTED]"` replacement.
  *
+ * Leaves are masked by `redactPrTextLines`, not the flat pass (#1154): a PR
+ * body or a `patch` leaf is multi-line text whose line structure is part of
+ * what the reviewer reads, and the flat pass's newline-spanning maskers would
+ * collapse `password:\n<value>` into one line inside `pr-object.json` /
+ * `pr-files.raw.json`. The split-line continuation rule comes with it.
+ *
+ * Key-name-aware leaves (#1154): a secret-named property is masked on the KEY
+ * NAME, because the patterns alone only ever see a leaf in isolation —
+ * `{"password":"opaque-value"}` has no `key=value` shape in either half, so
+ * value-only masking passed both the key and the credential through. When an
+ * object entry's key is secret-named, EVERY string leaf in that subtree (the
+ * direct value and anything nested below it, through objects and arrays) is
+ * replaced with `[REDACTED]`, since a credential-shaped key can hold a
+ * credential under any shape — a string, a list of credentials, a nested
+ * object of them. Only two things survive: a REFERENCE value
+ * (`isReferenceValue` — `${VAR}`, `{{ … }}`, `!Ref …`, `op://…`, `vault:…`,
+ * `ENC[…]`), which is a pointer to a secret rather than the secret, and
+ * every NON-string leaf, so JSON shape and value types survive byte-for-byte
+ * and the artifact stays as parseable as it arrived.
+ *
  * Deliberately VALUES-only, unlike `maskKnownSecretsDeep`'s key masking:
  * PR-authored JSON keys are forge API field names and identity strings
  * (`login`, `filename`, `title`) — structural data downstream consumers
  * match on — not credential echo surfaces; masking keys would corrupt file
  * lists and author identity for an `sk-`-shaped login or path, the same
  * accepted false-positive class the pattern layer already documents for
- * values. The generic layer's documented false-positive class applies
+ * values. The key name is what SELECTS the rule here, never what it rewrites.
+ * The generic layer's documented false-positive class applies
  * unchanged here: a fixture value that happens to be credential-shaped is
  * masked too — over-redaction is the module's stated preference over a
  * leaked credential (#1154).
@@ -565,18 +810,43 @@ export function containsKnownSecret(text: string, secrets: readonly (string | nu
  * masking with the patterns and masks own KEYS too (provider-controlled
  * metadata names are echo surfaces); this one is patterns-only and
  * values-only, because PR-authored keys are forge structural identity
- * (logins, filenames) that downstream consumers match on. */
-export function redactPrTextDeep(value: unknown, depth = 0): unknown {
-  if (typeof value === "string") return redactText(value);
+ * (logins, filenames) that downstream consumers match on.
+ *
+ * `keyNames` (default `true`) is the one knob: set it false for a STRUCTURED
+ * projection whose key names are part of the contract rather than an echo
+ * surface — the model's own verdict content (`src/tools/harness.ts`), where a
+ * secret-named CATEGORY (`secret_handling_changes` is a real classification
+ * category) carries a label or a boolean the reviewer must read, and masking
+ * it would rewrite the verdict. The key-name rule is then off and leaves get
+ * the pattern-only redaction this function always applied. PR artifacts keep
+ * the default: their keys are forge field names, and a credential-shaped key
+ * there really can name a credential value.
+ *
+ * Idempotent, and required to stay so (#252): a re-read of an already-redacted
+ * artifact is a no-op, and `[REDACTED]` under a secret-named key re-masks to
+ * the same marker rather than nesting. */
+export function redactPrTextDeep(
+  value: unknown,
+  depth = 0,
+  secretKey = false,
+  keyNames = true,
+): unknown {
+  if (typeof value === "string") {
+    if (!secretKey || !keyNames) return redactPrTextLines(value);
+    return isReferenceValue(value, false) ? value : REDACTED;
+  }
   if (depth >= MAX_MASK_DEPTH) return REDACTED;
-  if (Array.isArray(value)) return value.map((item) => redactPrTextDeep(item, depth + 1));
+  if (Array.isArray(value)) return value.map((item) => redactPrTextDeep(item, depth + 1, secretKey, keyNames));
   if (typeof value === "object" && value !== null) {
     // `Object.fromEntries`, never `out[key] = ...`: the same prototype-setter
     // rule as `maskKnownSecretsDeep` — a hostile PR body can carry an own
     // `__proto__` key through the forge API's JSON, and a plain assignment
     // would invoke the prototype setter instead of defining the key.
     return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, redactPrTextDeep(item, depth + 1)]),
+      Object.entries(value).map(([key, item]) => [
+        key,
+        redactPrTextDeep(item, depth + 1, secretKey || (keyNames && isSecretKeyName(key)), keyNames),
+      ]),
     );
   }
   return value;
