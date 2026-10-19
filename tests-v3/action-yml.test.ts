@@ -102,6 +102,22 @@ test("repo-configurable inputs never include credentials or hard security policy
   }
 });
 
+// #1161: the publish-mode family is operator-only — a repository config
+// file must never choose the publish mode, the deprecated allow-approve
+// input, or the cross-repository approval opt-in. `allow-approve` stays
+// declared (it is deprecated, not removed) and keeps its default.
+test("the publish-mode family stays operator-only and allow-approve stays declared", () => {
+  const byId = new Map(loadContract().inputs.map((input) => [input.id, input]));
+  for (const id of ["publish-mode", "allow-approve", "approve-forks"]) {
+    const entry = byId.get(id);
+    assert.ok(entry, id);
+    assert.ok(!entry!["repo-configurable"], id);
+  }
+  assert.equal(byId.get("allow-approve")!.default, "false");
+  assert.equal(byId.get("approve-forks")!.default, "false");
+  assert.equal(byId.get("publish-mode")!.default, "review_comment");
+});
+
 // Tier-resolved and specialist transport inputs stay operator-only workflow
 // inputs; repository config must not select model endpoints or credentials.
 const TIER_RESOLVED_NOT_REPO_CONFIGURABLE = ["primary_tool_max_requests", "smart_tool_max_requests"];

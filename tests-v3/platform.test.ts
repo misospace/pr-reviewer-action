@@ -108,11 +108,11 @@ test("a Spindle identity resolves tangled before the Forgejo/GitHub signals (#58
   );
 });
 
-test("the adapter backend union now admits the Tangled read backend while the publish union still rejects it", () => {
-  // "tangled" is a resolved identity (#583) and, as of #585, an implemented
-  // read-side backend: the adapter seam admits it. The publish seam still
-  // rejects it at compile time (PublishPlatformName stays github/forgejo),
-  // which is what keeps publish fail-loud.
+test("the adapter backend union and the publish union both admit the Tangled backends", () => {
+  // "tangled" is a resolved identity (#583), an implemented read-side
+  // backend (#585), and — as of #588 — an implemented publish backend:
+  // both seams admit it and publish routes through the dedicated
+  // Tangled ATProto seam, never the GitHub/Forgejo APIs.
   const identity: ResolvedPlatform = "tangled";
   assert.equal(identity, "tangled");
   type Backend = PlatformAdapter["platform"];
@@ -120,9 +120,9 @@ test("the adapter backend union now admits the Tangled read backend while the pu
   const backend: Backend = "tangled";
   assert.equal(backend, "tangled");
   type PublishName = PublishPlatformName;
-  // @ts-expect-error — Tangled is not a publish backend (#585 is read-side only).
+  // Tangled is now a publish backend (#588): the assignment is valid.
   const publish: PublishName = "tangled";
-  void publish;
+  assert.equal(publish, "tangled");
 });
 
 // ── Endpoint validation (cross-backend security decisions) ──────────────

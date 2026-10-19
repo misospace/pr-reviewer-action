@@ -261,7 +261,6 @@ def test_fork_feature_policy_pinned_off(fork_text) -> None:
         "tool-enable-for-forks": "false",
         "evidence-enable-for-forks": "false",
         "linear-enable-for-forks": "false",
-        "allow-approve": "false",
         "approve-forks": "false",
         "related-code-context": "false",
         "repo-map-context": "false",
@@ -273,10 +272,12 @@ def test_fork_feature_policy_pinned_off(fork_text) -> None:
 
 
 def test_fork_review_publishes_no_native_approval(fork_text) -> None:
+    # #1161: the fork lane selects the blockers-only mode, which can never
+    # publish an approval, and the deprecated `allow-approve` input is gone.
     values = _extract_with_block(REVIEW_STEP, fork_text)
-    assert values.get("publish-mode") == "review_verdict"
-    assert values.get("allow-approve") == "false"
+    assert values.get("publish-mode") == "review_blockers"
     assert values.get("approve-forks") == "false"
+    assert "allow-approve" not in values
 
 
 def test_fork_authorization_label_is_never_the_rereview_label(fork_text) -> None:

@@ -400,12 +400,12 @@ inputs:
     v2_id: publish_mode
     required: false
     default: "review_comment"
-    description: "Publish mode for the review. 'review_comment' (default) submits a non-blocking native PR review, so findings can anchor to diff lines. 'comment' publishes a sticky PR comment instead. 'review_verdict' submits approve/request_changes. review_comment and review_verdict need permissions: pull-requests: write."
+    description: "Publish mode for the review. 'review_comment' (default) submits a non-blocking native PR review, so findings can anchor to diff lines. 'comment' publishes a sticky PR comment instead. 'review_verdict' publishes the final verdict natively: an 'approve' verdict becomes a native approval (same-repository PRs; cross-repository PRs additionally need approve-forks: true) and a 'request_changes' verdict becomes a native blocking request. 'review_blockers' publishes blocking requests only: a 'request_changes' verdict becomes a native blocking request, an 'approve' verdict is published as an advisory comment, and the mode never publishes an approval. review_comment, review_verdict and review_blockers need permissions: pull-requests: write."
   - id: allow-approve
     v2_id: allow_approve
     required: false
     default: "false"
-    description: "If true and publish_mode=review_verdict, the model's approve verdict can be submitted as a native approval. Defaults to false — approval is blocked unless explicitly enabled. WARNING: native approvals can affect branch protection rules and automerge pipelines."
+    description: "DEPRECATED — accepted for backward compatibility but ignored: it no longer affects what is published, and setting it to anything other than the default logs a deprecation warning. Use 'publish-mode: review_verdict' to publish the final verdict (an 'approve' verdict becomes a native approval for same-repository PRs; cross-repository PRs additionally need approve-forks: true), or 'publish-mode: review_blockers' for blockers-only behavior (a native blocking request on blockers, never an approval)."
   - id: allow-repo-policy-overrides
     v2_id: allow_repo_policy_overrides
     required: false
@@ -415,12 +415,12 @@ inputs:
     v2_id: approve_forks
     required: false
     default: "false"
-    description: "If true and publish_mode=review_verdict with allow_approve=true, native approvals are also allowed for cross-repository (fork) PRs. Defaults to false — fork PRs are blocked from approval even when allow_approve is set."
+    description: "If true, native approvals are also allowed for cross-repository (fork) pull requests under 'publish-mode: review_verdict'. Defaults to false — fork PRs are published as advisory reviews. This is the explicit cross-repository approval opt-in; it is independent of the deprecated 'allow-approve' input."
   - id: cleanup-previous-native-reviews
     v2_id: cleanup_previous_native_reviews
     required: false
     default: "auto"
-    description: "Mark previous managed native PR reviews as outdated/superseded before publishing a new native review. Accepted values: `auto` (default, enables cleanup for review_comment and review_verdict modes), `true`, or `false`. Cleanup only targets reviews created by this action and carrying the managed marker. Dismissal of old approval/request-changes reviews is attempted when permissions allow but is secondary to visual cleanup."
+    description: "Mark previous managed native PR reviews as outdated/superseded before publishing a new native review. Accepted values: `auto` (default, enables cleanup for review_comment, review_verdict and review_blockers modes), `true`, or `false`. Cleanup only targets reviews created by this action and carrying the managed marker. Dismissal of old approval/request-changes reviews is attempted when permissions allow but is secondary to visual cleanup."
   - id: upstream-link-mode
     v2_id: upstream_link_mode
     required: false
@@ -754,7 +754,7 @@ inputs:
     v2_id: platform
     required: false
     default: "auto"
-    description: "Target hosting platform for API capability gating and backend selection. 'auto' (default) detects from TANGLED_REPO_DID (the Tangled repository owner DID), GITHUB_SERVER_URL, and FORGEJO_API_URL: a set TANGLED_REPO_DID resolves to 'tangled' (checked before the GitHub/Forgejo signals); otherwise non-github.com hosts or FORGEJO_API_URL set resolves to 'forgejo'; otherwise 'github'. Set 'forgejo', 'github', or 'tangled' explicitly to override auto-detection; explicit 'tangled' requires a non-empty TANGLED_REPO_DID and fails with a descriptive error when it is missing. Tangled is resolution-only for now: Tangled backend operations are not implemented yet and fail loudly until the follow-up work lands. On Forgejo, features requiring GitHub GraphQL (review minimization) degrade gracefully with a log line; the REST backend handles core PR operations. Linked-source enrichment always targets github.com regardless of this setting."
+    description: "Target hosting platform for API capability gating and backend selection. 'auto' (default) detects from TANGLED_REPO_DID (the Tangled repository owner DID), GITHUB_SERVER_URL, and FORGEJO_API_URL: a set TANGLED_REPO_DID resolves to 'tangled' (checked before the GitHub/Forgejo signals); otherwise non-github.com hosts or FORGEJO_API_URL set resolves to 'forgejo'; otherwise 'github'. Set 'forgejo', 'github', or 'tangled' explicitly to override auto-detection; explicit 'tangled' requires a non-empty TANGLED_REPO_DID and fails with a descriptive error when it is missing. Tangled publishes one managed top-level ATProto review record (experimental; requires the ATPROTO_* environment configuration injected by Spindle; end-to-end Tangled pipeline enablement is still landing in follow-up work) and never routes through the GitHub/Forgejo publish APIs; native review verdicts, inline comments, thread operations, and reviewer requests are not supported and degrade without GitHub/Forgejo calls. On Forgejo, features requiring GitHub GraphQL (review minimization) degrade gracefully with a log line; the REST backend handles core PR operations. Linked-source enrichment always targets github.com regardless of this setting."
   - id: forgejo-api-url
     v2_id: forgejo_api_url
     required: false
