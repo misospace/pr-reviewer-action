@@ -100,6 +100,23 @@ test("#1003: publishInputFromEnv carries the triage answer, and omits it when tr
   assert.deepEqual(substantiated.reviewTriage, { decision: "not_required", reason: "no owning team in the escalation policy" });
 });
 
+test("#1161: publishInputFromEnv accepts the review_blockers mode", () => {
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "review_blockers" } as NodeJS.ProcessEnv, "github").mode, "review_blockers");
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "review_verdict" } as NodeJS.ProcessEnv, "github").mode, "review_verdict");
+});
+
+test("#1161: the deprecated allow-approve input is read for the warning only, and an absent input stays absent", () => {
+  // The runner merges the contract default into every input it exports, so
+  // a value matching the default is indistinguishable from an unset input
+  // (the same limitation the repository-config narrowing has). Only a
+  // non-default value is observable — and only that one warns.
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").allowApprove, undefined);
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", ALLOW_APPROVE: "" } as NodeJS.ProcessEnv, "github").allowApprove, undefined);
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", ALLOW_APPROVE: "false" } as NodeJS.ProcessEnv, "github").allowApprove, undefined);
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", ALLOW_APPROVE: "true" } as NodeJS.ProcessEnv, "github").allowApprove, true);
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", ALLOW_APPROVE: " TRUE " } as NodeJS.ProcessEnv, "github").allowApprove, true);
+});
+
 test("publish entrypoint rejects an invalid publish mode fail-closed", async () => {
   await assert.rejects(
     publishMain({
@@ -365,6 +382,8 @@ function publishVerdictEnv(overrides: Partial<Record<string, string>> = {}): Nod
     VERDICT: "approve",
     REQUIRED_CHECKS: "complete",
     PUBLISH_MODE: "review_verdict",
+    // #1161: the deprecated input is still accepted here on purpose — the
+    // coverage gates below must hold whether it is set, unset, or false.
     ALLOW_APPROVE: "true",
     IS_FORK_PR: "false",
     HEAD_SHA: "a".repeat(40),
@@ -374,6 +393,25 @@ function publishVerdictEnv(overrides: Partial<Record<string, string>> = {}): Nod
     ...overrides,
   } as NodeJS.ProcessEnv;
 }
+
+test("#1161: the CLI publish path publishes the verdict natively, whatever the deprecated allow-approve input says", async () => {
+  await withRunDirAsync(async (dir) => {
+    writeCoverageArtifact(dir, { tool_loop_ran: false });
+    const events: string[] = [];
+    for (const allowApprove of [null, "false", "true"]) {
+      const env = publishVerdictEnv({ PR_REVIEWER_RUN_DIR: dir });
+      if (allowApprove === null) delete env.ALLOW_APPROVE;
+      else env.ALLOW_APPROVE = allowApprove;
+      const input = publishInputFromEnv(env, "github");
+      const api = new MinimalPublishApi("a".repeat(40));
+      const result = await publishReview(input, api, { diffText: "" });
+      assert.equal(result.status, "published", String(allowApprove));
+      assert.equal(api.submitted.length, 1, String(allowApprove));
+      events.push(api.submitted[0]!.event);
+    }
+    assert.deepEqual(events, ["APPROVE", "APPROVE", "APPROVE"]);
+  });
+});
 
 test("#873/#838 regression: a partial primary harness is never hidden by an omitted or stale-'off' ambient TOOL_MODE", async () => {
   // The exact maintainer-flagged bug: the artifact itself records the real

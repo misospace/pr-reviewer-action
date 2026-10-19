@@ -196,7 +196,7 @@ function boolInput(raw: string | undefined, fallback = false): boolean {
 
 function publishMode(raw: string | undefined): PublishMode {
   const value = raw ?? "";
-  if (value === "comment" || value === "review_comment" || value === "review_verdict") return value;
+  if (value === "comment" || value === "review_comment" || value === "review_verdict" || value === "review_blockers") return value;
   throw new EntrypointError(`Invalid publish_mode '${value}'`);
 }
 
@@ -429,7 +429,18 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
     inlineFindingsMax: Number(env.INLINE_FINDINGS_MAX ?? "5") || 5,
     findings: parseJsonish(env.FINDINGS ?? ""),
     cleanupPreviousNativeReviews: env.CLEANUP_PREVIOUS_NATIVE_REVIEWS ?? "",
-    allowApprove: boolInput(env.ALLOW_APPROVE),
+    // #1161: the deprecated `allow-approve` input is read only so the
+    // publisher can warn that it no longer affects publication. It gates
+    // nothing. The runner merges the contract default into every input it
+    // exports, so an input explicitly set to "false" is indistinguishable
+    // from an unset one (the same limitation the repository-config
+    // narrowing has): only a value that DIFFERS from the default is
+    // observable, and only that one warns.
+    ...(env.ALLOW_APPROVE !== undefined
+      && env.ALLOW_APPROVE.trim() !== ""
+      && env.ALLOW_APPROVE.trim().toLowerCase() !== "false"
+      ? { allowApprove: boolInput(env.ALLOW_APPROVE) }
+      : {}),
     approveForks: boolInput(env.APPROVE_FORKS),
     isForkPr: env.IS_FORK_PR === undefined || env.IS_FORK_PR === "" ? null : env.IS_FORK_PR === "true",
     upstreamLinkMode: upstreamLinkMode(env.UPSTREAM_LINK_MODE),

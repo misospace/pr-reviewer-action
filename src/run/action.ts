@@ -108,7 +108,9 @@ export function actionStageEnv(env: NodeJS.ProcessEnv): Env {
 
 function shouldPublish(stage: Env): boolean {
   const mode = stage.PUBLISH_MODE ?? "";
-  return mode === "review_comment" || mode === "review_verdict" || (mode === "comment" && stage.PUBLISH_REVIEW_COMMENT === "true");
+  // #1161: `review_blockers` publishes a native review like the other
+  // native modes.
+  return mode === "review_comment" || mode === "review_verdict" || mode === "review_blockers" || (mode === "comment" && stage.PUBLISH_REVIEW_COMMENT === "true");
 }
 
 export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<number> {

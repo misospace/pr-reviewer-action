@@ -118,7 +118,9 @@ export function resolveCleanupFlag(raw: string | undefined, mode: string): "true
   if (value === "true") return "true";
   if (value === "false") return "false";
   if (value === "auto" || value === "") {
-    return mode === "review_comment" || mode === "review_verdict" ? "true" : "false";
+    // #1161: `review_blockers` publishes a native review like the other
+    // native modes, so cleanup is on by default for it too.
+    return mode === "review_comment" || mode === "review_verdict" || mode === "review_blockers" ? "true" : "false";
   }
   throw new Error("Invalid cleanup_previous_native_reviews value; expected auto, true, or false");
 }
