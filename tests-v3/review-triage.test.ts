@@ -11,7 +11,7 @@ import { applyReviewTriageFragment } from "../src/prompt/system-prompt.js";
 import { BUNDLED_PROMPT_ASSETS } from "../src/prompt/assets.js";
 import { startMockServer } from "./helpers.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
-import type { PublishCommentRef, NativeReviewRequest, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
+import type { PublishCommentRef, NativeReviewRequest, NativeReviewSurface, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
 import { resolveReviewTriageDecision } from "../src/model/triage.js";
 
 /**
@@ -359,6 +359,7 @@ const MARKER = "<!-- ai-pr-review -->";
 
 class CapturingPublishApi implements PublishPlatformApi {
   readonly platform = "github" as const;
+  readonly nativeReviewSurface: NativeReviewSurface = { supported: true };
   sticky: { marker: string; body: string }[] = [];
   submitted: NativeReviewRequest[] = [];
   async getHeadSha(): Promise<string | null> { return "a".repeat(40); }
