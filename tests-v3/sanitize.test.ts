@@ -97,6 +97,57 @@ test("#1107: the prescription opener is reserved on model markdown — the fence
   assert.ok(opened.includes("hi") && opened.includes("tail") && opened.includes("rm -rf /"), "the surrounding text is untouched");
 });
 
+test("#1136: an ordinary block still open at end of text is dissolved, walk output ends fence-closed", () => {
+  // The boundary shape itself: a model message ending in an unclosed
+  // ordinary fence leaves the walk open, so anything appended after this
+  // pass — the validated prescription region in particular — would render
+  // as its content. Pinned policy: the walk dissolves it like a reserved
+  // block (opener and interior fence-shaped lines escaped). This must hold
+  // WITHOUT the `suggestion` token too: a token-free unclosed fence is
+  // exactly the shape that would swallow a validated prescription on the
+  // same finding silently, so the old token-gated early return was the
+  // hazard's blind spot.
+  assert.equal(
+    stripReservedMarkers("note\n```ts\nconst x = 1;"),
+    "note\n\\`\\`\\`ts\nconst x = 1;",
+    "token-free unclosed fence dissolved",
+  );
+  assert.equal(
+    stripReservedMarkers("head\n```ts\n~~~\nconst x = 1;"),
+    "head\n\\`\\`\\`ts\n\\~\\~\\~\nconst x = 1;",
+    "interior fence-shaped lines of the unclosed block cannot go live either",
+  );
+  assert.equal(
+    stripReservedMarkers("note\n```ts\n```suggestion\nconst x = 1;"),
+    "note\n\\`\\`\\`ts\nsuggestion\nconst x = 1;",
+    "a reserved opener inside the unclosed block is rewritten, not left to reopen anything",
+  );
+  // A block that IS closed never reaches the end-of-text branch: byte-identical,
+  // CRLF endings included (the fast path returns the original string).
+  const closed = "Review.\r\n\r\n```ts\r\nconst x = 1;\r\n```\r\ndone";
+  assert.equal(stripReservedMarkers(closed), closed, "benign closed block stays byte-identical, CRLF intact");
+  assert.equal(stripReservedMarkers(""), "");
+  // Dissolution must not over-reach: a benign block that closed earlier in
+  // the same text keeps its bytes; only the trailing unclosed block is
+  // rewritten.
+  assert.equal(
+    stripReservedMarkers("```ts\nkeep\n```\nthen\n~~~\nmore"),
+    "```ts\nkeep\n```\nthen\n\\~\\~\\~\nmore",
+    "an earlier closed block is untouched, only the trailing unclosed one dissolves",
+  );
+  // The dissolve path rejoins with LF (a rewrite happened), so a CR/CRLF
+  // message that ends fence-open normalizes — pinned so the change stays a
+  // decision, not an accident.
+  assert.equal(
+    stripReservedMarkers("note\r\n```ts\r\nconst x = 1;"),
+    "note\n\\`\\`\\`ts\nconst x = 1;",
+    "dissolve path normalizes line endings, closed path keeps CRLF bytes",
+  );
+  // Idempotent: dissolving twice changes nothing.
+  const once = stripReservedMarkers("note\n```ts\nconst x = 1;");
+  assert.equal(stripReservedMarkers(once), once);
+});
+
 test("#1112: container-prefixed prescription openers are reserved — prefix kept, block dissolved", () => {
   // #252: the boundary token ITSELF, behind the containers that render it. A
   // `> ` / `- ` / `1. ` prefix is not decoration — GitHub renders the same live
