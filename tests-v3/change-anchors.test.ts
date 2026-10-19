@@ -10,6 +10,7 @@ import {
   renderChangeAnchorsJson,
 } from "../src/context/index.js";
 import { pyLen, pyRe } from "../src/context/change-anchors.js";
+import { redactDiffText } from "../src/context/redact.js";
 
 function workspace(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "change-anchors-test-"));
@@ -55,6 +56,53 @@ test("a head file that does not match the diff contributes nothing head-derived"
   assert.equal(file?.changed_lines, undefined);
 });
 
+// #1154: the persisted diff is credential-redacted at ingestion, so a masked
+// added line must still reconcile with the unredacted head checkout —
+// otherwise the whole file silently loses `changed_lines`, enclosing symbols,
+// keys and counterparts.
+test("#1154: a credential-masked added line keeps its head-derived anchors", () => {
+  const secret = "hunter2hunter2hunter2";
+  const root = workspace({ "src/app.py": `def handle(event):\n    token = "${secret}"\n    return event\n` });
+  const raw = [
+    "diff --git a/src/app.py b/src/app.py",
+    "--- a/src/app.py",
+    "+++ b/src/app.py",
+    "@@ -1,2 +1,3 @@",
+    " def handle(event):",
+    `+    token = "${secret}"`,
+    "     return event",
+    "",
+  ].join("\n");
+  const redacted = redactDiffText(raw);
+  assert.ok(redacted.includes("[REDACTED]") && !redacted.includes(secret), "the added line really is masked");
+  const file = extractChangeAnchors(redacted, null, { sourceRoot: root }).files[0];
+  assert.deepEqual(file?.symbols, [{ name: "handle", kind: "enclosing", confidence: "high", line: 1 }]);
+  assert.deepEqual(file?.changed_lines, [[2, 2]]);
+});
+
+test("#1154: normalization forgives only the masked span, never the rest of the file", () => {
+  const secret = "hunter2hunter2hunter2";
+  const head = (second: string, third = "return event"): string => `def handle(event):\n    token = "${second}"\n    ${third}\n`;
+  const diff = redactDiffText([
+    "diff --git a/src/app.py b/src/app.py",
+    "--- a/src/app.py",
+    "+++ b/src/app.py",
+    "@@ -1,2 +1,3 @@",
+    " def handle(event):",
+    `+    token = "${secret}"`,
+    "     return event",
+    "",
+  ].join("\n"));
+  // Documented residual: a checkout differing ONLY inside the masked span
+  // normalizes to the same marker and still matches.
+  const maskedOnly = extractChangeAnchors(diff, null, { sourceRoot: workspace({ "src/app.py": head("different-value-xyz") }) }).files[0];
+  assert.deepEqual(maskedOnly?.changed_lines, [[2, 2]]);
+  // An unmasked line elsewhere in the file still fails the comparison.
+  const drifted = extractChangeAnchors(diff, null, { sourceRoot: workspace({ "src/app.py": head(secret, "return None") }) }).files[0];
+  assert.deepEqual(drifted?.symbols, [], "an unmasked mismatch still fails the whole file");
+  assert.equal(drifted?.changed_lines, undefined);
+});
+
 test("head reads refuse symlinks, traversal and .git components", () => {
   const root = workspace({ "real.py": "x\n", ".git/config.py": "x\n" });
   symlinkSync("real.py", join(root, "link.py"));
@@ -63,6 +111,54 @@ test("head reads refuse symlinks, traversal and .git components", () => {
   assert.equal(readChangeAnchorHeadLines(root, "../real.py"), null);
   assert.equal(readChangeAnchorHeadLines(root, ".git/config.py"), null);
   assert.equal(readChangeAnchorHeadLines(root, "/etc/hosts"), null);
+});
+
+test("#1154: a literal [REDACTED] diff line cannot forge agreement with the checkout", () => {
+  // #252 boundary rule: feed the boundary token ITSELF, not benign input.
+  const diff = [
+    "diff --git a/src/app.py b/src/app.py",
+    "--- a/src/app.py",
+    "+++ b/src/app.py",
+    "@@ -1,2 +1,3 @@",
+    " def handle(event):",
+    "+    [REDACTED]",
+    "     return None",
+    "",
+  ].join("\n");
+  const root = workspace({ "src/app.py": "def handle(event):\n    [REDACTED]\n    return None\n" });
+  // Same marker on both sides → still a match (the marker is a real, equal
+  // line of content), but the checkout MUST agree everywhere else.
+  const matching = extractChangeAnchors(diff, null, { sourceRoot: root }).files[0];
+  assert.deepEqual(matching?.changed_lines, [[2, 2]]);
+  const drifted = extractChangeAnchors(diff, null, {
+    sourceRoot: workspace({ "src/app.py": "def handle(event):\n    [REDACTED]\n    return event\n" }),
+  }).files[0];
+  assert.deepEqual(drifted?.symbols, [], "a forged marker line cannot carry an otherwise-mismatched file");
+  assert.equal(drifted?.changed_lines, undefined);
+});
+
+test("#1154: a raw (unredacted) diff keeps its anchors — the entry normalizes, the caller need not", () => {
+  const secret = "hunter2hunter2hunter2";
+  const root = workspace({ "src/app.py": `def handle(event):\n    token = "${secret}"\n    return event\n` });
+  const raw = [
+    "diff --git a/src/app.py b/src/app.py",
+    "--- a/src/app.py",
+    "+++ b/src/app.py",
+    "@@ -1,2 +1,3 @@",
+    " def handle(event):",
+    `+    token = "${secret}"`,
+    "     return event",
+    "",
+  ].join("\n");
+  // The pre-#1154 shape (raw diff straight from a forge) must not silently
+  // lose every head-derived anchor, and normalizing twice is a no-op.
+  const once = extractChangeAnchors(raw, null, { sourceRoot: root }).files[0];
+  const twice = extractChangeAnchors(redactDiffText(raw), null, { sourceRoot: root }).files[0];
+  assert.deepEqual(once?.changed_lines, [[2, 2]]);
+  assert.deepEqual(once?.symbols, [{ name: "handle", kind: "enclosing", confidence: "high", line: 1 }]);
+  assert.deepEqual(twice, once, "entry normalization is idempotent on an already-redacted diff");
+  // The artifact never carries the raw value.
+  assert.ok(!renderChangeAnchorsJson(extractChangeAnchors(raw, null, { sourceRoot: root })).includes(secret));
 });
 
 test("lengths and regexes follow Python semantics", () => {

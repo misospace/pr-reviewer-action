@@ -22,6 +22,7 @@ import { closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, o
 import { dirname } from "node:path";
 import { pySplitLines } from "../requirements/ledger.js";
 import { pyJsonDump } from "./py-json.js";
+import { redactDiffText, redactText } from "./redact.js";
 
 export const ARTIFACT_VERSION = 1;
 
@@ -1454,7 +1455,35 @@ function extractFileAnchors(
   let headLines: string[] | null = null;
   if (sourceRoot !== null && state.newSideLines.length > 0) {
     headLines = readHeadLines(sourceRoot, state.path);
-    if (headLines !== null && !headMatchesDiff(state, headLines)) headLines = null;
+    if (headLines !== null) {
+      // #1154: the diff side arrives credential-redacted (`redactDiffText`,
+      // applied once at ingestion), while the head checkout still holds the
+      // raw file. A masked added line therefore never equals its checkout
+      // line byte-for-byte, and `headMatchesDiff` would fail the WHOLE file —
+      // silently dropping `changed_lines`, enclosing symbols, keys and
+      // counterparts for a PR whose diff merely contained a masked value.
+      // Redact the checkout side through the same pattern layer first, so
+      // both sides are normalized identically: `headMatchesDiff` stays an
+      // exact byte comparison (no wildcard/marker-tolerant matching that a
+      // hostile literal `[REDACTED]` line could satisfy), and masked lines
+      // keep their anchor enrichment. Line count and ordering are preserved
+      // (`redactText` is per-line and never spans a break), so line-number
+      // indexing into `headLines` is unaffected. Redaction is one-way, so
+      // no credential reaches the anchor artifact either.
+      // Accepted residual, the same over-redaction preference the pattern
+      // layer already documents: two DIFFERENT credential-shaped values on
+      // the same line normalize to the same marker, so a checkout that
+      // differs from the diff inside a masked span still counts as matching.
+      // Every unmasked line is still compared byte-for-byte, and a literal
+      // `[REDACTED]` line in a diff cannot forge agreement (both sides are
+      // normalized, so a genuinely different checkout line still fails).
+      // Symmetric cost: a credential-shaped DECLARATION name is masked on the
+      // checkout side too, so it stops matching a declaration and drops out
+      // of enclosing symbols/changed keys — the same accepted
+      // false-positive class, not a new failure mode.
+      headLines = headLines.map(redactText);
+      if (!headMatchesDiff(state, headLines)) headLines = null;
+    }
   }
   if (headLines !== null && emitChangedLines) {
     const ranges = changedLineRanges(state);
@@ -1607,7 +1636,16 @@ function listPath(value: unknown): string {
 }
 
 /** Build the versioned change-anchors artifact from a diff and file list
- * (`pr-files.json` entries with `filename`/`previous_filename`/`status`). */
+ * (`pr-files.json` entries with `filename`/`previous_filename`/`status`).
+ *
+ * #1154: the diff is normalized through the same credential-shape redaction
+ * layer the shipped pipeline applies at ingestion, so callers MAY pass a raw
+ * or an already-redacted diff (the pass is idempotent) and the head-checkout
+ * comparison below can never be defeated by masking on one side only. Without
+ * this, a raw diff handed to the CLI would silently lose every head-derived
+ * anchor. Over-redaction of a credential-shaped declaration name is the
+ * pattern layer's accepted false-positive class: the name is masked on both
+ * sides and stops matching a declaration, exactly as if the value were absent. */
 export function extractChangeAnchors(
   diffText: string | null | undefined,
   fileList: readonly unknown[] | null | undefined = null,
@@ -1619,7 +1657,7 @@ export function extractChangeAnchors(
   let truncated = false;
   let diffTruncated = false;
 
-  let text = diffText ?? "";
+  let text = redactDiffText(diffText);
   if (text.length > MAX_DIFF_BYTES && pyLen(text) > MAX_DIFF_BYTES) {
     text = pyHead(text, MAX_DIFF_BYTES);
     truncated = true;

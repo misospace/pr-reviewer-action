@@ -914,7 +914,10 @@ test("#1154: redactPrTextDeep depth cap holds for object nesting and is idempote
   const out = redactPrTextDeep(deep);
   let level: unknown = out;
   let depth = 0;
-  while (level !== null && typeof level === "object" && !Array.isArray(level) && level !== undefined) {
+  // No `!== undefined` clause: `typeof level === "object"` already excludes
+  // undefined, so the extra comparison is unreachable (CodeQL: comparison
+  // between inconvertible types).
+  while (level !== null && typeof level === "object" && !Array.isArray(level)) {
     const next = (level as Record<string, unknown>).nested;
     if (next === undefined) break;
     level = next;
