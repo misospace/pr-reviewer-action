@@ -298,17 +298,54 @@ test("a live token is cached and re-minted only after expires_at minus the safet
   assert.equal(calls.length, 1, "a token far from expiry is reused");
 });
 
-test("a token inside the safety margin is re-minted instead of handed out", async () => {
-  // 30s of life left, 60s of margin: already inside the margin on arrival.
-  // The expiry arrives as GitHub's real ISO-8601 string and is honored —
-  // this is the early-expiry path, not the 3600s fallback.
-  const { fetchImpl, calls } = mintingFetch(() => "a", isoExpiresAt(NOW_SECONDS + 30));
-  const auth = authenticator(fetchImpl);
+test("a cached token that ages into the safety margin is re-minted instead of handed out", async () => {
+  // The token is minted live and cached; the CLOCK then advances into the 60s
+  // margin, so the SECOND call must re-mint. The mock mints relative to the
+  // clock (as GitHub does), and the expiry arrives as GitHub's real ISO-8601
+  // string — this is the aging path, not the 3600s fallback.
+  let nowSeconds = NOW_SECONDS;
+  let mints = 0;
+  const { fetchImpl, calls } = makeFetch(() => tokenOk(`a-token-${++mints}`, isoExpiresAt(nowSeconds + 3600)));
+  const auth = authenticator(fetchImpl, { now: () => nowSeconds * 1000 });
   const first = await auth.installationToken("42");
+  assert.equal(first.ok, true);
+  nowSeconds = NOW_SECONDS + 3541; // 59s of life left on the cached token; margin is 60s.
   const second = await auth.installationToken("42");
-  assert.equal(calls.length, 2, "the near-expiry token was refreshed, not reused");
-  assert.equal(first.ok && second.ok, true);
+  assert.equal(calls.length, 2, "the aged token was refreshed, not reused");
+  assert.equal(second.ok, true, "the fresh mint is itself live and served");
   if (first.ok && second.ok) assert.notEqual(first.data.token, second.data.token);
+});
+
+test("a minted token that is already expired is refused, never handed out or cached", async () => {
+  // First-call liveness: the same rule cache hits are held to applies to a
+  // freshly minted token. A mint response whose expiry is already past is a
+  // contract violation — returning it would hand the first caller a dead
+  // credential the refresh invariant exists to prevent.
+  const { fetchImpl, calls } = makeFetch(() => tokenOk("t", isoExpiresAt(NOW_SECONDS - 10)));
+  const auth = authenticator(fetchImpl);
+  const expired = await auth.installationToken("42");
+  assert.equal(expired.ok, false);
+  if (!expired.ok) {
+    assert.equal(expired.reason, "github app token was not live at mint");
+    assert.equal(expired.classification, "permanent");
+  }
+  assert.equal(calls.length, 1);
+  const next = await auth.installationToken("42");
+  assert.equal(calls.length, 2, "nothing was cached from the refused mint");
+  assert.equal(next.ok, false, "the refusal repeats while the server keeps minting dead tokens");
+});
+
+test("a minted token already inside the refresh margin is refused rather than handed to its first caller", async () => {
+  // 30s of life on arrival, 60s of margin: not live by the cache-hit rule, so
+  // the first caller must not receive it either.
+  const { fetchImpl, calls } = makeFetch(() => tokenOk("t", isoExpiresAt(NOW_SECONDS + 30)));
+  const result = await authenticator(fetchImpl).installationToken("42");
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, "github app token was not live at mint");
+    assert.equal(result.classification, "permanent");
+  }
+  assert.equal(calls.length, 1);
 });
 
 test("a numeric expires_at is not the wire contract and is not honored", async () => {

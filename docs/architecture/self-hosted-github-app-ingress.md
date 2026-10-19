@@ -57,7 +57,10 @@ safety margin), never globally and never pinned to one configured repository. A
 missing or unparseable `expires_at` falls back to a **conservative** 3600 s
 lifetime: an over-short cache entry only costs one extra mint, while an over-long
 one would hand out a token GitHub has already revoked. Inside the margin the
-token is re-minted rather than handed out. The cache is bounded by scope count
+token is re-minted rather than handed out — and the liveness rule applies to a
+freshly minted token too: a mint response whose `expires_at` is already past or
+already inside the margin is refused (permanent, nothing cached), never handed
+to its first caller. The cache is bounded by scope count
 (512 entries); on overflow it is dropped whole rather than evicted selectively —
 tokens are cheap to re-mint and short-lived, so a flush costs one extra mint per
 live scope and can never serve a stale one.

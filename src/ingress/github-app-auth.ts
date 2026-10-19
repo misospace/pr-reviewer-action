@@ -326,6 +326,20 @@ export class GitHubAppAuthenticator {
         classification: "permanent",
       };
     }
+    // FIRST-CALL LIVENESS: the same live-token rule cache hits are held to
+    // (`expires_at` past the refresh margin) applies to a freshly minted token
+    // too. A mint response whose expiry is already past — or already inside the
+    // margin — is a contract violation or a clock-skewed grant: caching and
+    // returning it would hand the first caller exactly the dead/near-dead
+    // credential the refresh invariant exists to prevent. Refused and not
+    // cached, so the next call mints fresh instead of replaying the dead one.
+    if (minted.expiresAt !== null && minted.expiresAt - REFRESH_MARGIN_SECONDS <= this.#nowSeconds()) {
+      return {
+        ok: false,
+        reason: "github app token was not live at mint",
+        classification: "permanent",
+      };
+    }
     const entry: InstallationToken = {
       token: minted.token,
       expiresAt: minted.expiresAt ?? now + DEFAULT_INSTALLATION_TOKEN_LIFETIME_SECONDS,
