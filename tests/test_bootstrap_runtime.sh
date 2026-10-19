@@ -109,6 +109,77 @@ assert_no_survivors() { # assert_no_survivors PGREP_PATTERN
   check "no process matching '$pattern' survives the teardown" "${survivors:-}" ""
 }
 
+# The bootstrap reads each component's owner uid from `ls -ldn`, and a
+# non-root test run cannot chown a directory over to a second uid. This
+# stub reports a foreign uid for exactly one path and delegates every
+# other invocation to the real ls, which reproduces "owned by another
+# user" identically on every machine. The mode it reports is 0755 on
+# purpose: nothing but ownership can decide these cases.
+write_foreign_owner_ls() { # write_foreign_owner_ls PATH UID
+  local target="$1" uid="$2" real_ls
+  real_ls="$(command -v ls)"
+  cat >"$BIN/ls" <<EOF
+#!/usr/bin/env bash
+# The bootstrap calls \`ls -ldn PATH\`: exactly two arguments.
+if [ "\$#" -eq 2 ] && [ "\$1" = "-ldn" ] && [ "\$2" = "$target" ]; then
+  printf 'drwxr-xr-x 2 $uid 0 4096 Jan  1 00:00 %s\n' "\$2"
+  exit 0
+fi
+exec "$real_ls" "\$@"
+EOF
+  chmod 755 "$BIN/ls"
+}
+
+# Precondition, checked once up front. Every sandbox below is created
+# beneath TMPROOT, and the bootstrap validates the WHOLE ancestor chain
+# of the install dir -- so if TMPROOT itself would fail that policy,
+# every test below fails with a confusing per-test message instead of
+# one clear explanation. Same three rules the bootstrap applies: a
+# component is owned by the current user or by root, and is not
+# group/other-writable unless sticky.
+tmp_root_chain_is_usable() {
+  local chain line mode owner bits
+  chain="$(cd "$TMPROOT" 2>/dev/null && pwd -P)" || return 1
+  while :; do
+    line="$(ls -ldn "$chain" 2>/dev/null)" || return 1
+    mode="$(printf '%s\n' "$line" | awk '{print $1}')"
+    owner="$(printf '%s\n' "$line" | awk '{print $3}')"
+    if [ "$owner" != "$(id -u)" ] && [ "$owner" != "0" ]; then
+      return 1
+    fi
+    bits="$(printf '%s\n' "$mode" | awk '{print substr($1, 6, 1) substr($1, 9, 1) substr($1, 10, 1)}')"
+    if [ "${bits:0:1}" = "w" ] || [ "${bits:1:1}" = "w" ]; then
+      case "${bits:2:1}" in
+      t | T) ;;
+      *) return 1 ;;
+      esac
+    fi
+    if [ "$chain" = "/" ]; then
+      break
+    fi
+    chain="${chain%/*}"
+    # A single-component path's parent is / -- the same edge the bootstrap
+    # walks, and the same reason / has to be checked: a writable / could
+    # rename /tmp out from under a validated chain.
+    [ -n "$chain" ] || chain="/"
+  done
+  return 0
+}
+
+if ! tmp_root_chain_is_usable; then
+  {
+    echo "bootstrap-runtime: this environment cannot host the sandbox."
+    echo "  TMPROOT is ${TMPROOT} (from TMPDIR=${TMPDIR:-<unset>}) and every sandbox is"
+    echo "  created beneath it, so the bootstrap validates TMPROOT's whole ancestor"
+    echo "  chain as part of the install dir. Some component there is owned by neither"
+    echo "  the current user nor root, or is writable by group/others without sticky."
+    echo "  Re-run with a TMPDIR the bootstrap itself would accept -- CI leaves TMPDIR"
+    echo "  unset, so /tmp (mode 1777, sticky, root-owned) is used:"
+    echo "    env -u TMPDIR bash tests/test_bootstrap_runtime.sh"
+  } >&2
+  exit 1
+fi
+
 echo "=== bootstrap runtime: staging is symlink-safe (default mode) ==="
 new_sandbox
 SENTINEL="$SANDBOX/sentinel"
@@ -321,6 +392,9 @@ setup_ok_body="$(cat "$setup_ok_out")"
 check_contains "mise install output is shown on success" "$setup_ok_body" "mise: locked toolchain ready"
 check_contains "npm ci output is shown on success" "$setup_ok_body" "added 128 packages in 1s"
 check_contains "setup prints its receipt" "$setup_ok_body" "Setup complete in"
+check_contains "the receipt records the checkout it prepared" "$setup_ok_body" "  repo       $ROOT_DIR"
+check_contains "the receipt records the setup command it ran" "$setup_ok_body" \
+  "  setup      bash scripts/bootstrap.sh setup"
 
 echo ""
 echo "=== bootstrap runtime: teardown kills a TERM-immune grandchild whose parent dies on TERM ==="
@@ -379,10 +453,10 @@ write_stub curl <<EOF
 printf downloaded > "$SANDBOX/curl-ran"
 exit 0
 EOF
-write_stub mise <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
+# Deliberately no mise stub: with the digest stub always reporting the
+# pinned digest, a mise on PATH would short-circuit the install branch
+# and the install dir would never be validated at all. The remaining
+# negative blocks below follow the same rule.
 insecure_out="$SANDBOX/insecure.out"
 run_bootstrap_bg "$insecure_out" "" \
   "MISE_INSTALL_DIR=$OPEN_DIR" \
@@ -415,10 +489,6 @@ EOF
 write_stub curl <<EOF
 #!/usr/bin/env bash
 printf downloaded > "$SANDBOX/curl-ran-707"
-exit 0
-EOF
-write_stub mise <<'EOF'
-#!/usr/bin/env bash
 exit 0
 EOF
 ww_out="$SANDBOX/world-only.out"
@@ -455,10 +525,6 @@ write_stub curl <<EOF
 printf downloaded > "$SANDBOX/curl-ran-link"
 exit 0
 EOF
-write_stub mise <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
 link_out="$SANDBOX/link.out"
 run_bootstrap_bg "$link_out" "" \
   "MISE_INSTALL_DIR=$LINK_DIR" \
@@ -476,6 +542,306 @@ check "no launcher was installed through the symlink" \
   "$(test -e "$REAL_DIR/mise" && printf yes || printf no)" "no"
 check "the downloader never ran (symlink)" \
   "$(test -e "$SANDBOX/curl-ran-link" && printf yes || printf no)" "no"
+
+echo ""
+echo "=== bootstrap runtime: group-writable non-sticky ANCESTOR of the install dir fails closed ==="
+new_sandbox
+ANCESTOR="$SANDBOX/shared-parent"
+mkdir -p "$ANCESTOR/install"
+# The install dir itself is unimpeachable: current-user-owned, 755. The
+# parent is the hole -- group-writable without sticky, so another
+# principal can rename the validated dir and swap a symlink in its
+# place after validation has passed. Validating only the leaf would
+# miss this entirely.
+chmod 755 "$ANCESTOR/install"
+chmod 775 "$ANCESTOR"
+write_stub sha256sum <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '$PINNED_DIGEST'
+EOF
+write_stub curl <<EOF
+#!/usr/bin/env bash
+printf downloaded > "$SANDBOX/curl-ran-ancestor"
+exit 0
+EOF
+ancestor_out="$SANDBOX/ancestor.out"
+run_bootstrap_bg "$ancestor_out" "" \
+  "MISE_INSTALL_DIR=$ANCESTOR/install" \
+  "HOME=$SANDBOX/home" \
+  "PATH=$BIN:/usr/bin:/bin"
+if wait_exited_or_deadline 20; then
+  check_ne "bootstrap exits non-zero when an ancestor is group-writable" "$BOOTSTRAP_RC" "0"
+else
+  check_ne "bootstrap exits non-zero when an ancestor is group-writable" "timed-out" "0"
+fi
+reap_bootstrap
+ancestor_body="$(cat "$ancestor_out")"
+# The trailing space pins the assertion to the PARENT path: a failure that
+# named only the install dir would still contain the parent as a prefix.
+check_contains "failure names the offending ancestor, not the install dir" "$ancestor_body" "component $ANCESTOR "
+check_contains "failure cites the violated trust property (ancestor)" "$ancestor_body" "writable by group or others"
+check "no launcher was installed under the group-writable ancestor" \
+  "$(test -e "$ANCESTOR/install/mise" && printf yes || printf no)" "no"
+check "the downloader never ran (group-writable ancestor)" \
+  "$(test -e "$SANDBOX/curl-ran-ancestor" && printf yes || printf no)" "no"
+
+echo ""
+echo "=== bootstrap runtime: a sticky ancestor is accepted, not blanket-rejected ==="
+new_sandbox
+STICKY_PARENT="$SANDBOX/sticky-parent"
+mkdir -p "$STICKY_PARENT/install"
+# 1777 on the parent is the /tmp shape: writable by everyone, but sticky,
+# so a writer still cannot rename an entry it does not own. The install
+# dir beneath it is ordinary (755, current-user-owned), so the whole
+# download-and-stage path must run to completion.
+chmod 755 "$STICKY_PARENT/install"
+chmod 1777 "$STICKY_PARENT"
+cat >"$SANDBOX/sticky-fake-mise" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "fake-mise \$*" >> "$SANDBOX/sticky-mise-calls.log"
+exit 0
+EOF
+chmod 755 "$SANDBOX/sticky-fake-mise"
+write_stub sha256sum <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '$PINNED_DIGEST'
+EOF
+write_stub curl <<EOF
+#!/usr/bin/env bash
+prev=""
+for arg in "\$@"; do
+  if [ "\$prev" = "--output" ]; then
+    cp "$SANDBOX/sticky-fake-mise" "\$arg"
+  fi
+  prev="\$arg"
+done
+EOF
+sticky_out="$SANDBOX/sticky-ancestor.out"
+run_bootstrap_bg "$sticky_out" "" \
+  "MISE_INSTALL_DIR=$STICKY_PARENT/install" \
+  "HOME=$SANDBOX/home" \
+  "PATH=$BIN:/usr/bin:/bin"
+if wait_exited_or_deadline 20; then
+  check "bootstrap exits 0 with a sticky ancestor" "$BOOTSTRAP_RC" "0"
+else
+  check "bootstrap exits 0 with a sticky ancestor" "timed-out" "0"
+fi
+reap_bootstrap
+check "install dir holds an executable mise launcher under a sticky ancestor" \
+  "$(test -x "$STICKY_PARENT/install/mise" && printf yes || printf no)" "yes"
+check "the staged launcher really ran under a sticky ancestor" \
+  "$(cat "$SANDBOX/sticky-mise-calls.log" 2>/dev/null || true)" "fake-mise run bootstrap"
+
+echo ""
+echo "=== bootstrap runtime: a symlinked ancestor with a safe canonical chain is accepted ==="
+new_sandbox
+LINK_PARENT="$SANDBOX/link-parent"
+REAL_PARENT="$SANDBOX/real-parent"
+mkdir -p "$REAL_PARENT/install"
+chmod 755 "$REAL_PARENT/install"
+ln -s "$REAL_PARENT" "$LINK_PARENT"
+# Only the FINAL component must not be a symlink; ancestors are resolved
+# through `pwd -P` and then validated at their canonical location (this
+# is the macOS /tmp -> /private/tmp shape). Every canonical component
+# here is a private 755/700 dir, so the run must succeed and the
+# launcher must land in the real directory.
+cat >"$SANDBOX/linked-fake-mise" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "fake-mise \$*" >> "$SANDBOX/linked-mise-calls.log"
+exit 0
+EOF
+chmod 755 "$SANDBOX/linked-fake-mise"
+write_stub sha256sum <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '$PINNED_DIGEST'
+EOF
+write_stub curl <<EOF
+#!/usr/bin/env bash
+prev=""
+for arg in "\$@"; do
+  if [ "\$prev" = "--output" ]; then
+    cp "$SANDBOX/linked-fake-mise" "\$arg"
+  fi
+  prev="\$arg"
+done
+EOF
+linked_out="$SANDBOX/symlinked-ancestor.out"
+run_bootstrap_bg "$linked_out" "" \
+  "MISE_INSTALL_DIR=$LINK_PARENT/install" \
+  "HOME=$SANDBOX/home" \
+  "PATH=$BIN:/usr/bin:/bin"
+if wait_exited_or_deadline 20; then
+  check "bootstrap exits 0 with a symlinked ancestor over a safe chain" "$BOOTSTRAP_RC" "0"
+else
+  check "bootstrap exits 0 with a symlinked ancestor over a safe chain" "timed-out" "0"
+fi
+reap_bootstrap
+check "the launcher is installed at the canonical target, not rejected" \
+  "$(test -x "$REAL_PARENT/install/mise" && printf yes || printf no)" "yes"
+check "the staged launcher really ran through the symlinked ancestor" \
+  "$(cat "$SANDBOX/linked-mise-calls.log" 2>/dev/null || true)" "fake-mise run bootstrap"
+
+echo ""
+echo "=== bootstrap runtime: an ANCESTOR owned by another uid fails closed even at 0755 ==="
+new_sandbox
+ATTACKER_PARENT="$SANDBOX/attacker-parent"
+mkdir -p "$ATTACKER_PARENT/install"
+# 0755 on both: no group/other write bit anywhere, so the mode rules
+# pass and ownership is the only thing left that can refuse. The
+# ancestor's owner may rename or unlink anything inside it, which is the
+# swap this validation exists to prevent -- a leaf-only check waved this
+# through and installed.
+chmod 755 "$ATTACKER_PARENT/install"
+chmod 755 "$ATTACKER_PARENT"
+write_stub sha256sum <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '$PINNED_DIGEST'
+EOF
+write_stub curl <<EOF
+#!/usr/bin/env bash
+printf downloaded > "$SANDBOX/curl-ran-foreign-ancestor"
+exit 0
+EOF
+write_foreign_owner_ls "$ATTACKER_PARENT" 12345
+foreign_ancestor_out="$SANDBOX/foreign-ancestor.out"
+run_bootstrap_bg "$foreign_ancestor_out" "" \
+  "MISE_INSTALL_DIR=$ATTACKER_PARENT/install" \
+  "HOME=$SANDBOX/home" \
+  "PATH=$BIN:/usr/bin:/bin"
+if wait_exited_or_deadline 20; then
+  check_ne "bootstrap exits non-zero on an ancestor owned by another uid" "$BOOTSTRAP_RC" "0"
+else
+  check_ne "bootstrap exits non-zero on an ancestor owned by another uid" "timed-out" "0"
+fi
+reap_bootstrap
+foreign_ancestor_body="$(cat "$foreign_ancestor_out")"
+check_contains "failure names the foreign-owned ancestor" "$foreign_ancestor_body" "component $ATTACKER_PARENT "
+check_contains "failure names the offending uid" "$foreign_ancestor_body" "12345"
+check "no launcher was installed under a foreign-owned ancestor" \
+  "$(test -e "$ATTACKER_PARENT/install/mise" && printf yes || printf no)" "no"
+check "the downloader never ran (foreign-owned ancestor)" \
+  "$(test -e "$SANDBOX/curl-ran-foreign-ancestor" && printf yes || printf no)" "no"
+
+echo ""
+echo "=== bootstrap runtime: an install dir owned by another uid fails closed ==="
+new_sandbox
+write_stub sha256sum <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '$PINNED_DIGEST'
+EOF
+write_stub curl <<EOF
+#!/usr/bin/env bash
+printf downloaded > "$SANDBOX/curl-ran-foreign-leaf"
+exit 0
+EOF
+write_foreign_owner_ls "$INSTALL_DIR" 12345
+foreign_leaf_out="$SANDBOX/foreign-leaf.out"
+run_bootstrap_bg "$foreign_leaf_out" "" \
+  "MISE_INSTALL_DIR=$INSTALL_DIR" \
+  "HOME=$SANDBOX/home" \
+  "PATH=$BIN:/usr/bin:/bin"
+if wait_exited_or_deadline 20; then
+  check_ne "bootstrap exits non-zero on an install dir owned by another uid" "$BOOTSTRAP_RC" "0"
+else
+  check_ne "bootstrap exits non-zero on an install dir owned by another uid" "timed-out" "0"
+fi
+reap_bootstrap
+foreign_leaf_body="$(cat "$foreign_leaf_out")"
+check_contains "failure cites leaf ownership (not just ancestors)" "$foreign_leaf_body" "not owned by the current user"
+check_contains "failure names the leaf owner uid" "$foreign_leaf_body" "12345"
+check "no launcher was installed into a foreign-owned install dir" \
+  "$(test -e "$INSTALL_DIR/mise" && printf yes || printf no)" "no"
+check "the downloader never ran (foreign-owned install dir)" \
+  "$(test -e "$SANDBOX/curl-ran-foreign-leaf" && printf yes || printf no)" "no"
+
+echo ""
+echo "=== bootstrap runtime: a 0775 ancestor with a NOT-YET-EXISTENT leaf still fails before the downloader ==="
+new_sandbox
+OPEN_PARENT="$SANDBOX/open-parent"
+mkdir -p "$OPEN_PARENT"
+chmod 775 "$OPEN_PARENT"
+# The leaf does not exist yet. That used to skip the first validation
+# entirely and start the download; mkdir -p now runs first, so the whole
+# chain is refused before any network call. The created leaf is left
+# behind on purpose -- creating it is benign, nothing is written into it.
+write_stub sha256sum <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '$PINNED_DIGEST'
+EOF
+write_stub curl <<EOF
+#!/usr/bin/env bash
+printf downloaded > "$SANDBOX/curl-ran-open-parent"
+exit 0
+EOF
+open_parent_out="$SANDBOX/open-parent.out"
+run_bootstrap_bg "$open_parent_out" "" \
+  "MISE_INSTALL_DIR=$OPEN_PARENT/install" \
+  "HOME=$SANDBOX/home" \
+  "PATH=$BIN:/usr/bin:/bin"
+if wait_exited_or_deadline 20; then
+  check_ne "bootstrap exits non-zero on a 0775 ancestor with a missing leaf" "$BOOTSTRAP_RC" "0"
+else
+  check_ne "bootstrap exits non-zero on a 0775 ancestor with a missing leaf" "timed-out" "0"
+fi
+reap_bootstrap
+open_parent_body="$(cat "$open_parent_out")"
+check_contains "failure cites the violated trust property (missing leaf)" "$open_parent_body" "writable by group or others"
+check_contains "failure names the 0775 ancestor" "$open_parent_body" "component $OPEN_PARENT "
+check "the downloader never ran (0775 ancestor, leaf created first)" \
+  "$(test -e "$SANDBOX/curl-ran-open-parent" && printf yes || printf no)" "no"
+check "the created leaf was left empty, not written into" \
+  "$(cd "$OPEN_PARENT/install" && find . -mindepth 1 | wc -l | tr -d ' ')" "0"
+
+echo ""
+echo "=== bootstrap runtime: a directory at the install destination is refused, not nested into ==="
+new_sandbox
+# Sticky exempts a 1777 final component from the writability rule (the
+# /tmp shape), so a hostile `mise` directory there is reachable. `mv -f`
+# into a directory NESTS the launcher (mise/.mise.bootstrap.XXXX) and
+# still reports success, failing only later at exec with 126 -- and it
+# used to leave the staged file behind as well.
+chmod 1777 "$INSTALL_DIR"
+mkdir -p "$INSTALL_DIR/mise"
+printf 'squatter\n' >"$INSTALL_DIR/mise/squatter"
+cat >"$SANDBOX/squatter-fake-mise" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "fake-mise \$*" >> "$SANDBOX/squatter-mise-calls.log"
+exit 0
+EOF
+chmod 755 "$SANDBOX/squatter-fake-mise"
+write_stub sha256sum <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '$PINNED_DIGEST'
+EOF
+write_stub curl <<EOF
+#!/usr/bin/env bash
+prev=""
+for arg in "\$@"; do
+  if [ "\$prev" = "--output" ]; then
+    cp "$SANDBOX/squatter-fake-mise" "\$arg"
+  fi
+  prev="\$arg"
+done
+EOF
+squatter_out="$SANDBOX/squatter.out"
+run_bootstrap_bg "$squatter_out" "" \
+  "MISE_INSTALL_DIR=$INSTALL_DIR" \
+  "HOME=$SANDBOX/home" \
+  "PATH=$BIN:/usr/bin:/bin"
+if wait_exited_or_deadline 20; then
+  check_ne "bootstrap exits non-zero when the destination is a directory" "$BOOTSTRAP_RC" "0"
+else
+  check_ne "bootstrap exits non-zero when the destination is a directory" "timed-out" "0"
+fi
+reap_bootstrap
+squatter_body="$(cat "$squatter_out")"
+check_contains "failure names the directory destination" "$squatter_body" "$INSTALL_DIR/mise is a directory"
+check "nothing was nested into the destination directory" \
+  "$(cd "$INSTALL_DIR/mise" && find . -mindepth 1 -printf '%f\n' | sort | tr '\n' ',')" "squatter,"
+check "no staged file was left behind in the install dir" \
+  "$(cd "$INSTALL_DIR" && find . -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ',')" "mise,"
+check "the squatter contents are untouched" \
+  "$(cat "$INSTALL_DIR/mise/squatter")" "squatter"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

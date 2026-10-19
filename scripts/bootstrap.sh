@@ -48,6 +48,18 @@ MISE_CONFIG="$REPO_ROOT/.mise/config.toml"
 
 CLEANUP_DIR=""
 RUN_BOUNDED_NOTE=""
+# Published by validate_install_dir: the canonical path that was actually
+# validated. Everything that touches the install dir after that point
+# uses this, never the caller's literal, so the object that was
+# inspected is the object that is written to.
+INSTALL_DIR_CANONICAL=""
+
+# The script's own argv, captured before any function can rebind $*/$@,
+# so the receipt can report how setup was actually invoked. `${*:-}`
+# rather than a bare `$*`: although POSIX exempts $@/$* from `set -u`,
+# the default costs nothing and removes any reliance on that exemption
+# under the bash 3.2 that macOS still ships.
+SCRIPT_ARGS="${*:-}"
 
 log() { printf '%s\n' "$*"; }
 
@@ -280,10 +292,42 @@ require_process_tools() {
   done
 }
 
+# The receipt states what was set up and where. Versions and paths say
+# what is installed; the repo, revision and setup lines say WHICH
+# checkout state was prepared and HOW setup was invoked -- the two facts
+# a clean-environment receipt otherwise cannot recover. All three are
+# read from live state and degrade to `unknown` instead of failing the
+# run: no git, or a REPO_ROOT that is not a checkout, is not an error
+# here -- the setup it reports already succeeded.
 print_receipt() {
   local start="$1" npm_cache launcher_dir
+  local revision="unknown" revision_short="unknown" branch="unknown" invocation
   launcher_dir="$(dirname "$MISE_BIN")"
   npm_cache="$(npm config get cache 2>/dev/null || printf 'unknown')"
+  if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    revision="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')"
+    revision_short="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
+    branch="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'unknown')"
+    # The toolchain and node_modules were built from the working tree,
+    # not from the commit, so a bare sha would misreport a dirty checkout
+    # (including an in-progress change to this script).
+    if [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]; then
+      revision="$revision-dirty"
+    fi
+  fi
+  [ -n "$revision" ] || revision="unknown"
+  [ -n "$revision_short" ] || revision_short="unknown"
+  [ -n "$branch" ] || branch="unknown"
+  # $0 plus the script's own argv, both captured before any function
+  # could rebind them: a checkout-relative path when $0 sits under
+  # REPO_ROOT (the documented `scripts/bootstrap.sh` invocation), the
+  # absolute path otherwise. `bash` is the interpreter this script
+  # requires, so the printed line stays a runnable command.
+  invocation="$0"
+  case "$invocation" in
+  "$REPO_ROOT"/*) invocation="${invocation#"$REPO_ROOT"/}" ;;
+  esac
+  [ -z "$SCRIPT_ARGS" ] || invocation="$invocation $SCRIPT_ARGS"
   printf '\n'
   printf 'Setup complete in %ss. Nothing was tested, formatted or generated.\n' "$((SECONDS - start))"
   printf '\n'
@@ -294,6 +338,9 @@ print_receipt() {
   printf '  pkill      %s\n' "$(command -v pkill)"
   printf '  modules    %s\n' "$REPO_ROOT/node_modules"
   printf '  npm cache  %s\n' "$npm_cache"
+  printf '  repo       %s\n' "$REPO_ROOT"
+  printf '  revision   %s (%s, %s)\n' "$revision" "$revision_short" "$branch"
+  printf '  setup      bash %s\n' "$invocation"
   printf '\n'
   if ! dir_on_path "$launcher_dir"; then
     printf '%s is not on PATH, so a bare mise will not resolve. Run:\n' "$launcher_dir"
@@ -307,32 +354,123 @@ print_receipt() {
   printf '  %s run test            authoritative Node suite (build + node --test)\n' "$MISE_BIN"
 }
 
-# The install dir is the trust boundary for the staged launcher: when it
-# exists, is owned by the current effective uid and is not group- or
-# world-writable, only the invoking user (or root) can create, replace or
-# swap entries in it, so a hostile directory writer is out of scope for
-# the staging checks. Parsed from `ls -ldn` because stat flags differ
-# between GNU and BSD/macOS; field 1 is the mode string and field 3 the
-# numeric owner uid.
+# The install dir is the trust boundary for the staged launcher, and the
+# boundary is the whole chain that reaches it, not just the leaf: a
+# group-writable non-sticky *parent* lets another principal rename the
+# validated dir and swap a symlink into its place after the checks pass,
+# so mktemp/cp/mv would resolve a different object than the one
+# validated. So every component from / down to the install dir is
+# validated, with two properties:
+#
+#   - each is an existing directory, is neither group- nor
+#     other-writable -- unless it carries the sticky bit (sticky forbids
+#     renaming an entry a writer does not own, which is what makes /tmp
+#     safe) -- AND is owned by the current uid or by root. Both halves
+#     are load-bearing: permissions govern what an *unprivileged*
+#     stranger may do inside a directory, but the owner governs
+#     everything that owner may do, including renaming or unlinking an
+#     entry, so a 0755 directory owned by another user is not a trust
+#     boundary however well its mode reads. Root-owned components (/,
+#     /home, /usr, /tmp) and your own ($HOME) both pass. Writable
+#     components are rejected regardless of owner, so a shared
+#     /usr/local/lib fails closed rather than being waved through
+#     because root owns it.
+#   - the final component must be owned by the current uid: that is the
+#     directory the launcher is installed into.
+#
+# POSIX ACL entries are invisible to a mode-bit check, so a component
+# whose ACL grants another user write access passes this validation; no
+# setfacl/getfacl dependency is added for that, and it is a documented
+# residual rather than an oversight. Out of scope: root can rewrite any
+# of this by design, and the post-snapshot process-tree residual in
+# run_bounded is an unrelated concern (see its own comment). Parsed from
+# `ls -ldn` because stat flags differ between GNU and BSD/macOS; field 1
+# is the mode string and field 3 the numeric owner uid.
 validate_install_dir() {
-  local dir="$1" line mode owner
+  local dir="$1" canonical
+  # The literal path the caller asked for: a symlinked final component
+  # is refused even when its target would itself validate.
+  if [ -L "$dir" ]; then
+    fail "install dir $dir is a symlink; refusing to install through it"
+  fi
   if [ ! -d "$dir" ]; then
     fail "install dir $dir does not exist or is not a directory; refusing to install into it"
   fi
-  line="$(ls -ldn "$dir" 2>/dev/null)" || fail "cannot inspect install dir $dir to validate its ownership and permissions"
+  # Canonicalize before walking the chain, so symlinked *ancestors*
+  # (macOS /tmp -> /private/tmp, /var -> /private/var) and any . or ..
+  # are resolved rather than rejected, and the components actually
+  # inspected are the components actually used. A cd we cannot make
+  # means the path cannot be proven at all, so refuse.
+  canonical="$(cd "$dir" 2>/dev/null && pwd -P)" ||
+    fail "cannot resolve install dir $dir to a canonical path; refusing to install into it"
+  [ -n "$canonical" ] ||
+    fail "cannot resolve install dir $dir to a canonical path; refusing to install into it"
+  validate_dir_chain "$canonical" final
+  # Publish the validated object, so the caller installs into the exact
+  # path that was inspected. Re-using the literal instead would mean
+  # validating one path and writing through another whenever an ancestor
+  # was a symlink.
+  INSTALL_DIR_CANONICAL="$canonical"
+}
+
+# Validate a canonical path root-first: every ancestor, then the path
+# itself. Walks up by string-stripping the last component, so it needs
+# no arrays, mapfile or other bash 4 feature -- macOS still ships bash
+# 3.2 and this script has to run there.
+validate_dir_chain() { # validate_dir_chain PATH ROLE   (ROLE: final | ancestor)
+  local path="$1" role="$2" parent
+  if [ "$path" != "/" ]; then
+    case "$path" in
+    /*/?*)
+      parent="${path%/*}"
+      [ -n "$parent" ] || parent="/"
+      validate_dir_chain "$parent" ancestor
+      ;;
+    # A single-component path's parent is /, and / is validated too: a
+    # world-writable / would let any user rename /home out from under a
+    # validated /home/courier/... chain, so skipping it would leave the
+    # very swap this walk exists to stop. Recursing on / is terminal
+    # because the `[ "$path" != "/" ]` guard above stops there.
+    /*) validate_dir_chain "/" ancestor ;;
+    *) fail "install dir $path is not an absolute path; refusing to install into it" ;;
+    esac
+  fi
+  validate_dir_component "$path" "$role"
+}
+
+validate_dir_component() { # validate_dir_component PATH ROLE
+  local path="$1" role="$2"
+  local line mode owner bits group_w other_w sticky
+  if [ ! -d "$path" ]; then
+    fail "install dir path component $path is not an existing directory; refusing to install into it"
+  fi
+  line="$(ls -ldn "$path" 2>/dev/null)" ||
+    fail "cannot inspect install dir path component $path to validate its ownership and permissions"
   mode="$(printf '%s\n' "$line" | awk '{print $1}')"
   owner="$(printf '%s\n' "$line" | awk '{print $3}')"
-  if [ "$owner" != "$(id -u)" ]; then
-    fail "install dir $dir is not owned by the current user (owner uid $owner, current uid $(id -u)); refusing to install into a directory another user controls"
+  # The mode field is a type char, nine permission chars and then the
+  # special char that setuid/setgid/sticky replace on the matching
+  # execute position -- so awk's 1-based positions 6, 9 and 10 are
+  # group-write, other-write and sticky. No GNU-only stat needed.
+  bits="$(printf '%s\n' "$mode" | awk '{print substr($1, 6, 1) "|" substr($1, 9, 1) "|" substr($1, 10, 1)}')"
+  group_w="${bits%%|*}"
+  bits="${bits#*|}"
+  other_w="${bits%%|*}"
+  sticky="${bits#*|}"
+  if [ "$role" = "ancestor" ] && [ "$owner" != "$(id -u)" ] && [ "$owner" != "0" ]; then
+    fail "install dir path component $path is owned by uid $owner, neither the current user nor root; that user can rename or unlink anything inside it. Point MISE_INSTALL_DIR under a directory you own, or one root owns (/, /home, /tmp, ...)"
   fi
-  case "$mode" in
-  l*)
-    fail "install dir $dir is a symlink; refusing to install through it"
-    ;;
-  ?????w* | ????????w*)
-    fail "install dir $dir is writable by group or others (mode $mode); refusing to install into it"
-    ;;
-  esac
+  if [ "$role" = "final" ] && [ "$owner" != "$(id -u)" ]; then
+    fail "install dir $path is not owned by the current user (owner uid $owner, current uid $(id -u)); refusing to install into a directory another user controls"
+  fi
+  if [ "$group_w" = "w" ] || [ "$other_w" = "w" ]; then
+    case "$sticky" in
+    t | T) ;; # sticky: a writer cannot rename an entry it does not own
+    *)
+      fail "install dir path component $path is writable by group or others (mode $mode) without the sticky bit, so another user could rename it and swap a validated path for a symlink. Point MISE_INSTALL_DIR at a private directory you own, under ancestors that are not group/other-writable"
+      ;;
+    esac
+  fi
 }
 
 run_default() {
@@ -358,12 +496,6 @@ run_default() {
     fail "neither MISE_INSTALL_DIR nor HOME is set, so there is nowhere user-scoped to install the mise launcher"
   fi
 
-  # Validate the trust boundary before anything reads from it; a dir that
-  # does not exist yet is validated right after mkdir -p creates it.
-  if [ -d "$install_dir" ]; then
-    validate_install_dir "$install_dir"
-  fi
-
   MISE_BIN=""
   if path_mise="$(command -v mise 2>/dev/null)"; then
     if [ "$(sha256_of "$path_mise" 2>/dev/null || true)" = "$digest" ]; then
@@ -375,6 +507,19 @@ run_default() {
   fi
 
   if [ -z "$MISE_BIN" ]; then
+    # One validation path, and it always runs before the downloader --
+    # previously an install dir that did not exist yet was only validated
+    # AFTER the download had already run. mkdir -p runs first because
+    # there is nothing to canonicalize or validate before the path
+    # exists; creating empty directories is benign because nothing is
+    # written into them until validation has passed.
+    mkdir -p "$install_dir"
+    validate_install_dir "$install_dir"
+    # From here on every touch of the install dir uses the canonical path
+    # that was just validated, not the caller's literal: with a symlinked
+    # ancestor those are different paths into the same object, and the
+    # literal is the one a symlink swap can move.
+    install_dir="$INSTALL_DIR_CANONICAL"
     if [ -f "$install_dir/mise" ] && [ "$(sha256_of "$install_dir/mise" 2>/dev/null || true)" = "$digest" ]; then
       MISE_BIN="$install_dir/mise"
       log "==> pinned mise launcher already at ${MISE_BIN} (digest verified)"
@@ -386,28 +531,42 @@ run_default() {
       if [ "$actual" != "$digest" ]; then
         fail "digest mismatch for the downloaded mise launcher (expected $digest, got $actual) -- refusing to install"
       fi
-      mkdir -p "$install_dir"
-      validate_install_dir "$install_dir"
       # mktemp creates the staging name exclusively (O_EXCL) with an
       # unpredictable suffix inside the validated install dir, so a
       # pre-planted symlink at a guessable name is never followed and
       # the later rename stays on one filesystem.
       staged="$(mktemp "$install_dir/.mise.bootstrap.XXXXXX")"
-      trap 'rm -f "$staged"; cleanup' ERR INT TERM
-      # The validated user-owned install dir is the trust boundary: only
-      # the invoking user (or root) can write there. The digest check
-      # protects the download source, not the staging destination, and
-      # the regular-file re-check below is defense-in-depth hardening,
-      # NOT a race-safe guarantee -- a writer able to mutate the
-      # directory could still swap the staged path between this check
-      # and the copy; such a writer is out of scope by the validation
-      # above, not defeated by this check.
+      # EXIT, not just ERR: every refusal below leaves through `fail`,
+      # which exits normally, and the staged file has to be cleaned up on
+      # that path too -- not only when a command fails.
+      trap 'rm -f "$staged"; cleanup' EXIT INT TERM
+      # The validated chain is the trust boundary: only the invoking user
+      # (or root) can write into the install dir or rename it through a
+      # writable ancestor. The digest check protects the download source,
+      # not the staging destination, and the regular-file re-check below
+      # is defense-in-depth hardening, NOT a race-safe guarantee -- a
+      # writer able to mutate the directory could still swap the staged
+      # path between this check and the copy; such a writer is out of
+      # scope by the validation above, not defeated by this check.
       if [ ! -f "$staged" ] || [ -L "$staged" ]; then
         fail "staging path $staged is not a plain regular file; refusing to install"
+      fi
+      # The destination has to be a file slot. `mv -f` into a directory
+      # NESTS the launcher inside it (mise/.mise.bootstrap.XXXX), which
+      # still exits 0 here and only fails later at exec time -- so refuse
+      # before staging anything. The check runs while the staged-cleanup
+      # trap is installed, so nothing is left behind.
+      if [ -d "$install_dir/mise" ]; then
+        fail "install destination $install_dir/mise is a directory; refusing to install into it (mv would nest the launcher inside instead of replacing it)"
       fi
       cp "$CLEANUP_DIR/mise" "$staged"
       chmod 755 "$staged"
       mv -f "$staged" "$install_dir/mise"
+      # Belt and braces against the nesting case above: whatever the
+      # rename did, the path we are about to exec must be a plain file.
+      if [ ! -f "$install_dir/mise" ]; then
+        fail "installed launcher at $install_dir/mise is not a regular file; refusing to exec it"
+      fi
       trap cleanup EXIT INT TERM
       MISE_BIN="$install_dir/mise"
       log "==> installed pinned mise launcher at ${MISE_BIN} (digest verified)"

@@ -134,10 +134,17 @@ check_contains "tree re-collected after grace to append newly observed pids" \
 echo ""
 echo "=== install dir is a validated user-owned trust boundary ==="
 # The staging check-then-use sequence cannot be race-safe against a writer
-# who can mutate the install dir; instead the directory itself is
-# constrained (owned by the invoking user, not group/world-writable), so
-# such a writer is out of scope and the mktemp staging plus regular-file
-# re-check are defense-in-depth only.
+# who can mutate the install dir; instead the path that reaches it is
+# constrained, so such a writer is out of scope and the mktemp staging
+# plus regular-file re-check are defense-in-depth only. Validating only
+# the final directory would not be enough: a group-writable non-sticky
+# parent lets another principal rename the validated dir and swap a
+# symlink into its place after the checks pass. So the whole canonical
+# ancestor chain is validated -- each component an existing directory,
+# neither group- nor other-writable unless sticky, AND owned by the
+# invoking user or by root (permissions bound an unprivileged stranger;
+# ownership is what bounds the owner, who may rename or unlink any entry).
+# The final one additionally must be the invoking user's own.
 check_contains "install dir ownership/permissions validated" \
   "$BOOTSTRAP_BODY" 'validate_install_dir "$install_dir"'
 check_contains "validation parses ls -ldn (portable across GNU/BSD stat)" \
@@ -146,8 +153,93 @@ check_contains "rejects an install dir not owned by the current user" \
   "$BOOTSTRAP_BODY" 'not owned by the current user'
 check_contains "rejects a group/world-writable install dir" \
   "$BOOTSTRAP_BODY" 'writable by group or others'
+check_contains "a symlinked final component is refused on the literal path" \
+  "$BOOTSTRAP_BODY" '[ -L "$dir" ]'
+check_contains "the path is canonicalized (pwd -P) before the chain walk" \
+  "$BOOTSTRAP_BODY" 'pwd -P'
+check_contains "the chain is walked root-first, not just the final dir" \
+  "$BOOTSTRAP_BODY" 'parent="${path%/*}"'
+check_contains "each ancestor is validated as an ancestor, the leaf as final" \
+  "$BOOTSTRAP_BODY" 'validate_dir_chain "$parent" ancestor'
+check_contains "the install dir itself is validated as the final component" \
+  "$BOOTSTRAP_BODY" 'validate_dir_chain "$canonical" final'
+# A single-component path bottoms the walk out, and the naive fix is to
+# treat / as terminal. It is not: a world-writable / would let any user
+# rename /home out from under a validated /home/<user>/... chain, which
+# is the same swap the walk exists to stop. / is pinned here because it
+# cannot be regression-tested at runtime (no test may chmod /).
+check_contains "the walk reaches / instead of stopping at a single component" \
+  "$BOOTSTRAP_BODY" '/*) validate_dir_chain "/" ancestor ;;'
+check_contains "sticky is the only writability exemption" \
+  "$BOOTSTRAP_BODY" 't | T) ;; # sticky: a writer cannot rename an entry it does not own'
+check_contains "writability bits come from portable awk substr, not GNU stat" \
+  "$BOOTSTRAP_BODY" 'substr($1, 6, 1) "|" substr($1, 9, 1) "|" substr($1, 10, 1)'
+# The assertions above pin HOW the mode bits are parsed; these pin the
+# comparisons that actually decide. Pinning only the message text let
+# `if false; then` in front of the leaf-owner check turn every suite
+# green while the predicate was gone.
+check_contains "the writability decision is the parsed group/other-write comparison" \
+  "$BOOTSTRAP_BODY" 'if [ "$group_w" = "w" ] || [ "$other_w" = "w" ]; then'
+check_contains "an ancestor owned by neither the current user nor root is refused" \
+  "$BOOTSTRAP_BODY" 'if [ "$role" = "ancestor" ] && [ "$owner" != "$(id -u)" ] && [ "$owner" != "0" ]; then'
+check_contains "the final component must be owned by the current user" \
+  "$BOOTSTRAP_BODY" 'if [ "$role" = "final" ] && [ "$owner" != "$(id -u)" ]; then'
+check_contains "a component that is not an existing directory is refused" \
+  "$BOOTSTRAP_BODY" 'if [ ! -d "$path" ]; then'
+check_contains "the validated canonical path is published for the caller" \
+  "$BOOTSTRAP_BODY" 'INSTALL_DIR_CANONICAL="$canonical"'
+check_contains "the caller installs into the validated canonical path" \
+  "$BOOTSTRAP_BODY" 'install_dir="$INSTALL_DIR_CANONICAL"'
+# Ordering is part of the contract, not formatting: validation must run
+# before the download can start, and the canonical path must be bound
+# before anything stages a file in the install dir.
+line_of() { grep -n -m1 -F "$1" "$BOOTSTRAP" | cut -d: -f1; }
+VALIDATE_AT="$(line_of 'validate_install_dir "$install_dir"')"
+DOWNLOAD_AT="$(line_of 'download "$MISE_RELEASE_URL')"
+CANONICAL_AT="$(line_of 'install_dir="$INSTALL_DIR_CANONICAL"')"
+STAGE_AT="$(line_of 'staged="$(mktemp "$install_dir/.mise.bootstrap.')"
+check "validation runs before the download can start" \
+  "$([ -n "$VALIDATE_AT" ] && [ "$VALIDATE_AT" -lt "$DOWNLOAD_AT" ] && echo yes || echo no)" "yes"
+check "the canonical path is bound before the staging file is created" \
+  "$([ -n "$CANONICAL_AT" ] && [ "$CANONICAL_AT" -lt "$STAGE_AT" ] && echo yes || echo no)" "yes"
+check_contains "a directory at the install destination is refused, not nested into" \
+  "$BOOTSTRAP_BODY" 'if [ -d "$install_dir/mise" ]; then'
+check_contains "the installed launcher is verified to be a regular file" \
+  "$BOOTSTRAP_BODY" 'if [ ! -f "$install_dir/mise" ]; then'
+check_contains "the staged file is cleaned up on every exit path, not only on ERR" \
+  "$BOOTSTRAP_BODY" "trap 'rm -f \"\$staged\"; cleanup' EXIT INT TERM"
+check_not_contains "no GNU-only stat call in the install-dir validation" \
+  "$BOOTSTRAP_CODE" 'stat -'
 check_not_contains "staging check is not described as race-safe" \
   "$BOOTSTRAP_BODY" 'race-safe guarantee against'
+
+echo ""
+echo "=== the receipt records what was prepared and how it was invoked ==="
+# A clean-environment receipt reports versions and paths; without these
+# two lines it cannot say WHICH checkout state was prepared or HOW setup
+# was invoked, which is exactly what a later reader needs.
+check_contains "receipt prints the repository root" \
+  "$BOOTSTRAP_BODY" '  repo       %s'
+check_contains "receipt prints the full HEAD sha" \
+  "$BOOTSTRAP_BODY" 'git -C "$REPO_ROOT" rev-parse HEAD'
+check_contains "receipt prints the short sha and the branch" \
+  "$BOOTSTRAP_BODY" 'rev-parse --short HEAD'
+check_contains "receipt prints the branch" \
+  "$BOOTSTRAP_BODY" 'rev-parse --abbrev-ref HEAD'
+check_contains "missing git data degrades to unknown, never fails the run" \
+  "$BOOTSTRAP_BODY" "printf 'unknown'"
+check_contains "the degrade guard, not just the unknown literal, is present" \
+  "$BOOTSTRAP_BODY" '[ -n "$revision" ] || revision="unknown"'
+check_contains "a dirty working tree is reported as such" \
+  "$BOOTSTRAP_BODY" 'git -C "$REPO_ROOT" status --porcelain'
+check_contains "a dirty checkout marks the revision dirty" \
+  "$BOOTSTRAP_BODY" 'revision="$revision-dirty"'
+check_contains "receipt prints how setup was invoked" \
+  "$BOOTSTRAP_BODY" '  setup      bash %s'
+check_contains "the invocation is the script's own argv, captured at the top level" \
+  "$BOOTSTRAP_BODY" 'SCRIPT_ARGS="${*:-}"'
+check_contains "an invocation under the repo root prints repo-relative" \
+  "$BOOTSTRAP_BODY" '${invocation#"$REPO_ROOT"/}'
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
