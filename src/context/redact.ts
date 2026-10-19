@@ -47,6 +47,41 @@ export function redactText(text: string | null | undefined): string {
   return redacted;
 }
 
+/** Line-wise counterpart to `redactText` for unified diffs (#1154). The
+ * flat pass must NEVER run on a diff: several maskers span line breaks
+ * (`\s*` matches `\n`), so a multi-line match collapses two diff lines into
+ * one and silently shifts every later line number — inline findings then
+ * anchor to the wrong line against a forge that re-reads the raw diff. Here
+ * each line is masked INDEPENDENTLY: the `+`/`-`/space diff prefix is
+ * preserved and only the content after it is redacted, so line count,
+ * prefixes, and hunk structure survive byte-for-byte, and no mask can ever
+ * span a line break.
+ *
+ * `diff --git`/`index`/`@@` and the `--- a/…`/`+++ b/…` file headers are
+ * left verbatim: paths are not credentials, and header paths must keep
+ * matching the platform file list for anchoring. (`--- `/`+++ ` are
+ * distinguished from a `-`/`+` content line by their full three-character
+ * prefix; a deleted line whose own content begins `-- ` is indistinguishable
+ * and accepted as pathologically unlikely.)
+ *
+ * Accepted residual: a secret whose KEY line and VALUE line are separate
+ * (`password:` then an indented value, YAML style) is not masked — the
+ * key/value maskers are single-line shapes, and the cross-line match that
+ * would catch it is exactly the line-collapsing behavior this function
+ * exists to prevent. Bare token shapes (`sk-`, `ghp_`, `AKIA`, `Bearer …`)
+ * are still caught per line. Same-line `key: value` forms are masked. */
+export function redactDiffText(diff: string | null | undefined): string {
+  if (!diff) return "";
+  return diff.split("\n").map((line) => {
+    if (line.startsWith("--- ") || line.startsWith("+++ ")) return line;
+    const prefix = line.charAt(0);
+    if (prefix === "+" || prefix === "-" || prefix === " ") {
+      return prefix + redactText(line.slice(1));
+    }
+    return line;
+  }).join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // Source-safe redaction (#876)
 // ---------------------------------------------------------------------------
@@ -501,6 +536,50 @@ export function containsKnownSecret(text: string, secrets: readonly (string | nu
     }
   }
   return false;
+}
+
+/** Structural counterpart to `redactText`, for a JSON-shaped PR-authored
+ * body on its way into a persisted artifact (#1154). `redactText` applied to
+ * serialized JSON misses the quoted-key form (`"api_key": "…"` — the quote
+ * between key and separator blocks the broad `key=value` masker), so
+ * PR-authored JSON artifacts are redacted per string LEAF instead, before
+ * serialization. Recursion mechanics mirror `maskKnownSecretsDeep` (below):
+ * arrays mapped, objects rebuilt with `Object.fromEntries`
+ * (CreateDataPropertyOrThrow, never `out[key] = ...`, so an own `__proto__`
+ * key from JSON.parse cannot invoke the prototype setter), depth capped at
+ * `MAX_MASK_DEPTH` with a fail-closed `"[REDACTED]"` replacement.
+ *
+ * Deliberately VALUES-only, unlike `maskKnownSecretsDeep`'s key masking:
+ * PR-authored JSON keys are forge API field names and identity strings
+ * (`login`, `filename`, `title`) — structural data downstream consumers
+ * match on — not credential echo surfaces; masking keys would corrupt file
+ * lists and author identity for an `sk-`-shaped login or path, the same
+ * accepted false-positive class the pattern layer already documents for
+ * values. The generic layer's documented false-positive class applies
+ * unchanged here: a fixture value that happens to be credential-shaped is
+ * masked too — over-redaction is the module's stated preference over a
+ * leaked credential (#1154).
+ *
+ * Distinct from the `redactTextDeep(value, secrets)` sibling introduced by
+ * the provider-body routing (#1149/#1153): that one composes configured-key
+ * masking with the patterns and masks own KEYS too (provider-controlled
+ * metadata names are echo surfaces); this one is patterns-only and
+ * values-only, because PR-authored keys are forge structural identity
+ * (logins, filenames) that downstream consumers match on. */
+export function redactPrTextDeep(value: unknown, depth = 0): unknown {
+  if (typeof value === "string") return redactText(value);
+  if (depth >= MAX_MASK_DEPTH) return REDACTED;
+  if (Array.isArray(value)) return value.map((item) => redactPrTextDeep(item, depth + 1));
+  if (typeof value === "object" && value !== null) {
+    // `Object.fromEntries`, never `out[key] = ...`: the same prototype-setter
+    // rule as `maskKnownSecretsDeep` — a hostile PR body can carry an own
+    // `__proto__` key through the forge API's JSON, and a plain assignment
+    // would invoke the prototype setter instead of defining the key.
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, redactPrTextDeep(item, depth + 1)]),
+    );
+  }
+  return value;
 }
 
 /** Structural counterpart to `maskKnownSecrets`, for a JSON-shaped provider

@@ -8,9 +8,11 @@ import {
   maskDiagnostic,
   maskKnownSecrets,
   maskKnownSecretsDeep,
+  redactDiffText,
   redactSourceText,
   redactSourceTextDetailed,
   redactText,
+  redactPrTextDeep,
 } from "../src/context/redact.js";
 import { describeTransportFailure, TransportFailure } from "../src/transport/http.js";
 
@@ -796,4 +798,136 @@ test("#252 boundary: containsKnownSecret's content floor and variant set, fed th
   assert.equal(containsKnownSecret("⟦•⟧ residue", ["⟦"]), false, "below the floor");
   assert.equal(containsKnownSecret(`x ${long} y`, [long]), true);
   assert.equal(containsKnownSecret("clean text", ["⟦•⟧"]), false);
+});
+
+// #1154: the structural counterpart of redactText, for JSON-shaped
+// PR-authored bodies (pr-object.json, the raw platform file list) on their
+// way into persisted artifacts. Values masked per string LEAF (serialized-JSON
+// redaction misses the quoted-key form); keys, array order, numbers, and
+// structural tokens survive byte-for-byte.
+test("#1154: redactPrTextDeep masks string leaves and preserves JSON shape", () => {
+  const raw = {
+    title: "add db config",
+    body: "sets api_key = supersecretvalue1 in config",
+    nested: { patch: "Bearer abcdefghijklmnopqrst", keep: 42, list: ["ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456", null, true] },
+  };
+  const out = redactPrTextDeep(raw) as Record<string, unknown>;
+  assert.equal(out.title, "add db config");
+  // The generic layer replaces the whole `key=value` framing, not just the
+  // value (that values-only rule is redactSourceText's).
+  assert.equal(out.body, "sets [REDACTED] in config");
+  const nested = out.nested as Record<string, unknown>;
+  assert.equal(nested.patch, "[REDACTED]");
+  assert.equal(nested.keep, 42);
+  const list = nested.list as unknown[];
+  assert.equal(list[0], "[REDACTED]");
+  assert.equal(list[1], null);
+  assert.equal(list[2], true);
+});
+
+test("#1154: redactPrTextDeep leaves keys untouched — structural identity survives", () => {
+  // A key that itself carries a token shape (an sk- prefixed login, a
+  // filename-like key) is structural data downstream consumers match on;
+  // only VALUES are masked.
+  const raw = { "sk-prod-service-account-1": "token=hunter2hunter2", filename: "docs/sk-proj-notes-file.txt" };
+  const out = redactPrTextDeep(raw) as Record<string, unknown>;
+  assert.ok(Object.prototype.hasOwnProperty.call(out, "sk-prod-service-account-1"), "key survives");
+  assert.equal(out.filename, "docs/sk-proj-notes-file.txt");
+  assert.equal(out["sk-prod-service-account-1"], "[REDACTED]");
+});
+
+test("#1154: redactPrTextDeep defines a hostile own __proto__ key without prototype pollution", () => {
+  const raw = JSON.parse('{"__proto__": {"polluted": "api_key=supersecretvalue1"}, "body": "ok"}') as Record<string, unknown>;
+  const out = redactPrTextDeep(raw) as Record<string, unknown>;
+  assert.equal(({} as Record<string, unknown>).polluted, undefined, "Object prototype unpolluted");
+  const own = Object.getOwnPropertyDescriptor(out, "__proto__");
+  assert.ok(own, "own __proto__ data property defined");
+  const proto = own!.value as Record<string, unknown>;
+  assert.equal(proto.polluted, "[REDACTED]");
+  assert.equal(out.body, "ok");
+});
+
+test("#1154: redactPrTextDeep fails closed at the recursion cap", () => {
+  let deep: unknown = "leaf";
+  for (let i = 0; i < 40; i += 1) deep = [deep];
+  const out = redactPrTextDeep(deep);
+  // The cap replaces the whole subtree beyond MAX_MASK_DEPTH with the
+  // marker; the outer levels remain arrays.
+  let level: unknown = out;
+  let depth = 0;
+  while (Array.isArray(level)) {
+    level = level[0];
+    depth += 1;
+  }
+  assert.ok(depth < 40, "subtree beyond the cap is not walked");
+  assert.equal(level, "[REDACTED]");
+});
+
+// #1154 review round: the flat pass must never run on a diff — multi-line
+// maskers collapse lines and shift inline-finding anchors. redactDiffText
+// masks per line, preserving count, prefixes, and headers.
+test("#1154: redactDiffText preserves line count, prefixes, and headers", () => {
+  const diff = [
+    "diff --git a/app.yml b/app.yml",
+    "index 111..222 100644",
+    "--- a/app.yml",
+    "+++ b/app.yml",
+    "@@ -1,4 +1,5 @@",
+    " existing: line",
+    "+password: hunter2hunter2",
+    "-token: zm9vymfyymf6",
+    "\\ No newline at end of file",
+    "+final",
+  ].join("\n");
+  const out = redactDiffText(diff);
+  const inLines = diff.split("\n");
+  const outLines = out.split("\n");
+  assert.equal(outLines.length, inLines.length, "line count preserved");
+  for (let i = 0; i < inLines.length; i += 1) {
+    assert.equal(outLines[i]!.charAt(0), inLines[i]!.charAt(0), `line ${i} prefix preserved`);
+  }
+  assert.equal(outLines[0], inLines[0], "diff --git header verbatim");
+  assert.equal(outLines[2], inLines[2], "--- header verbatim");
+  assert.equal(outLines[3], inLines[3], "+++ header verbatim");
+  assert.equal(outLines[4], inLines[4], "@@ hunk header verbatim");
+  assert.equal(outLines[8], inLines[8], "\\ No newline marker verbatim");
+  assert.equal(outLines[6], "+[REDACTED]", "same-line key: value on an added line is masked");
+  assert.equal(outLines[7], "-[REDACTED]", "same-line key: value on a removed line is masked");
+});
+
+test("#1154: redactDiffText cannot span a line break — the flat pass's collapse regression", () => {
+  // The flat redactText turns `password:\n  value` into ONE line (the
+  // kubeconfig masker's \\s* eats the newline), shifting every later diff
+  // line. Line-wise masking must keep both lines.
+  const diff = "+password:\n+  hunter2hunter2hunter2\n+def main():\n+    return 1";
+  const out = redactDiffText(diff);
+  assert.equal(out.split("\n").length, 4, "no line collapse");
+  // Documented residual: the key line and the value line are masked
+  // independently, so the split-line opaque value survives (bare token
+  // shapes would not).
+  assert.equal(out, "+password:\n+  hunter2hunter2hunter2\n+def main():\n+    return 1");
+});
+
+test("#1154: redactPrTextDeep depth cap holds for object nesting and is idempotent", () => {
+  let deep: Record<string, unknown> = { leaf: "api_key=supersecretvalue1" };
+  for (let i = 0; i < 40; i += 1) deep = { nested: deep };
+  const out = redactPrTextDeep(deep);
+  let level: unknown = out;
+  let depth = 0;
+  while (level !== null && typeof level === "object" && !Array.isArray(level) && level !== undefined) {
+    const next = (level as Record<string, unknown>).nested;
+    if (next === undefined) break;
+    level = next;
+    depth += 1;
+  }
+  assert.ok(depth < 40, "object subtree beyond the cap is not walked");
+  assert.equal(level, "[REDACTED]");
+  // Idempotence: re-redacting an already-redacted artifact (cache re-read,
+  // publish-boundary second pass) is a no-op on the masked shapes.
+  const once = redactPrTextDeep({ body: "sets api_key=supersecretvalue1 here", keep: 1 }) as Record<string, unknown>;
+  const twice = redactPrTextDeep(once) as Record<string, unknown>;
+  assert.deepEqual(twice, once, "second pass changes nothing");
+  assert.deepEqual(redactPrTextDeep(null), null);
+  assert.deepEqual(redactPrTextDeep(undefined), undefined);
+  assert.equal(redactPrTextDeep(42), 42);
 });

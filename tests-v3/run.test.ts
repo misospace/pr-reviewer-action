@@ -152,6 +152,94 @@ test("runs the full review end to end: artifacts, outputs, marker", async () => 
   }
 });
 
+// #1154: PR-authored content is credential-shape redacted once at ingestion,
+// so the model input and every persisted artifact of the family carry the
+// same redacted bytes — and `ai-request.primary.json` still records exactly
+// what was FIRST sent (redacted bytes included).
+test("#1154: PR-authored diff/body/file-patch artifacts are credential-redacted end to end", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const rawToken = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+  const rawBearer = "Bearer abcdefghijklmnopqrst";
+  const rawSkKey = "sk-live-abcdefghijklmnopqrst";
+  const rawAssignment = 'api_key = "supersecretvalue1"';
+  const rawPassword = "password: hunter2hunter2";
+  const diff = [
+    "diff --git a/src/config.example.yml b/src/config.example.yml",
+    "--- a/src/config.example.yml",
+    "+++ b/src/config.example.yml",
+    "@@ -1,3 +1,7 @@",
+    " existing",
+    `+${rawAssignment}`,
+    `+token = ${rawToken}`,
+    "+```",
+    `+curl -H "Authorization: ${rawBearer}" https://ci.internal/ping`,
+    "+```",
+    `+export OPENAI_KEY=${rawSkKey}`,
+  ].join("\n");
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), GITHUB_STEP_SUMMARY: join(runDir, "step-summary.md") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform({
+        diff,
+        body: `Fixes the config.\n\n${rawPassword}`,
+        files: [
+          { filename: "src/config.example.yml", status: "modified", additions: 5, deletions: 0, changes: 5, patch: `+${rawAssignment}\n+token = ${rawToken}` },
+        ],
+      }),
+      persistArtifacts: true,
+      quiet: true,
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    const rawShapes = [rawToken, rawBearer, rawSkKey, rawAssignment, rawPassword];
+    const redactedArtifacts = ["pr.diff", "pr.diff.truncated", "pr-body.txt", "pr.json", "pr-object.json", "pr-files.raw.json", "review-corpus.truncated.md"];
+    for (const name of redactedArtifacts) {
+      const text = readFileSync(join(runDir, name), "utf8");
+      assert.match(text, /\[REDACTED\]/, `${name} carries the redaction marker`);
+      for (const raw of rawShapes) {
+        assert.ok(!text.includes(raw), `${name} must not carry the raw credential-shaped value`);
+      }
+    }
+    // Line structure is load-bearing: inline findings anchor to diff line
+    // numbers, so the persisted diff must keep the fixture's exact line
+    // count (the flat pass collapses multi-line masker matches).
+    const persistedDiff = readFileSync(join(runDir, "pr.diff"), "utf8");
+    assert.equal(persistedDiff.split("\n").length, diff.split("\n").length, "pr.diff line count preserved");
+    // The request artifact is honest: it records the bytes actually sent,
+    // which are the redacted corpus — valid JSON, marker present, raw absent.
+    const requestArtifact = JSON.parse(readFileSync(join(runDir, "ai-request.primary.json"), "utf8")) as Record<string, unknown>;
+    const requestText = JSON.stringify(requestArtifact);
+    assert.match(requestText, /\[REDACTED\]/);
+    for (const raw of rawShapes) {
+      assert.ok(!requestText.includes(raw), "ai-request.primary.json must not carry the raw credential-shaped value");
+    }
+    // Structural identity survives: the file projection keeps the real
+    // filename (patch fields dropped) while the raw list's patch is redacted.
+    const filesProjection = readFileSync(join(runDir, "pr-files.json"), "utf8");
+    assert.match(filesProjection, /src\/config\.example\.yml/);
+    const rawFiles = JSON.parse(readFileSync(join(runDir, "pr-files.raw.json"), "utf8")) as Array<Record<string, unknown>>;
+    assert.ok(rawFiles.length > 0 && rawFiles[0], "the raw file list survives");
+    assert.match(String(rawFiles[0]!.patch), /\[REDACTED\]/);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
 test("#975: the step summary renders the findings table and counts for a findings verdict", async () => {
   const server = await startMockServer((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");

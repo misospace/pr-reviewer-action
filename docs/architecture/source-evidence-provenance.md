@@ -50,7 +50,7 @@ The provenance module is pure: no I/O, no network, no repository access, and no 
 
 This change carries provenance on the **tool-evidence path** (file reads, grep, blame, repository-contents reads, and decoded API file reads) into the model-visible `untrusted_tool_result` envelope. It deliberately does **not** wire the authority predicates into a verdict-side gate: #1015 owns the provenance and safe verification *inputs*, not final verdict policy. `authorizesLiteralClaim` and `verifySourceSpan` are the boundary primitives a later policy consumer calls.
 
-One source surface is intentionally out of scope: the **PR diff** (`pr.diff`), which is the literal bytes the author committed and is treated as untrusted text, never re-redacted.
+One source surface is intentionally out of scope for the *provenance* machinery: the **PR diff** (`pr.diff`), which is treated as untrusted text rather than trusted source evidence, so it carries no representation attributes. Since #1154 it is no longer byte-identical to the author's submission on disk: the persisted diff and the corpus section built from it are credential-shape redacted line-wise (`redactDiffText`), which preserves line numbering and diff structure so anchors stay valid. That is an artifact-hygiene policy, not a provenance transform — the diff still never feeds the `committed_source`/`sanitized_source` contract below.
 
 ## Related-code corpus snippets
 
