@@ -16,7 +16,7 @@ import { applyReviewThreadEnforcement } from "../src/enforcement/threads.js";
 import { buildRunMetadataMarker } from "../src/metadata/markers.js";
 import { carriedVerdict } from "../src/precheck/decide.js";
 import { publishReview } from "../src/publish/publish.js";
-import type { PublishPlatformApi } from "../src/platform/publish-api.js";
+import type { NativeReviewSurface, PublishPlatformApi } from "../src/platform/publish-api.js";
 
 // ---------------------------------------------------------------------------
 // #811 — the published verdict is a deterministic function of the normalized
@@ -372,6 +372,7 @@ const HEAD = "head-123";
 
 class MockPublishApi implements PublishPlatformApi {
   readonly platform: "github" | "forgejo" = "github";
+  readonly nativeReviewSurface: NativeReviewSurface = { supported: true };
   head: string | null = HEAD;
   sticky: { marker: string; body: string }[] = [];
   submitted: Parameters<PublishPlatformApi["createReview"]>[0][] = [];

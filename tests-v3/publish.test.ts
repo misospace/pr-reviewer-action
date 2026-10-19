@@ -26,6 +26,7 @@ import type {
   CommentFeedbackResult,
   ManagedInlineCommentRef,
   NativeReviewRequest,
+  NativeReviewSurface,
   PublishCommentRef,
   PublishPlatformApi,
   PublishReviewRef,
@@ -37,6 +38,7 @@ const HEAD = "head-123";
 
 class MockPublishApi implements PublishPlatformApi {
   readonly platform: "github" | "forgejo";
+  readonly nativeReviewSurface: NativeReviewSurface = { supported: true };
   head: string | null = HEAD;
   sticky: { marker: string; body: string }[] = [];
   reviews: PublishReviewRef[] = [];
