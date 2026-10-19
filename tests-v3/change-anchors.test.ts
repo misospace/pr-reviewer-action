@@ -103,14 +103,24 @@ test("#1154: normalization forgives only the masked span, never the rest of the 
   assert.equal(drifted?.changed_lines, undefined);
 });
 
-test("head reads refuse symlinks, traversal and .git components", () => {
-  const root = workspace({ "real.py": "x\n", ".git/config.py": "x\n" });
+test("head reads refuse null bytes, symlinks, traversal and .git components", () => {
+  const root = workspace({ "real.py": "x\n", ".git/config.py": "x\n", "bad": "LEAKED\n" });
   symlinkSync("real.py", join(root, "link.py"));
   assert.deepEqual(readChangeAnchorHeadLines(root, "real.py"), ["x", ""]);
   assert.equal(readChangeAnchorHeadLines(root, "link.py"), null);
   assert.equal(readChangeAnchorHeadLines(root, "../real.py"), null);
   assert.equal(readChangeAnchorHeadLines(root, ".git/config.py"), null);
   assert.equal(readChangeAnchorHeadLines(root, "/etc/hosts"), null);
+// A NUL byte in a PR-supplied path is refused before any content is read;
+  // the `bad` fixture exists so a regression that returned file CONTENT would
+  // fail here rather than pass on the path simply not existing. The refusal is
+  // end-to-end, not a unique pin of the explicit `includes("\0")` guard: Node's
+  // own `openSync`/`realpathSync` bindings reject null bytes with
+  // ERR_INVALID_ARG_VALUE, so on current Node either layer refuses. The explicit
+  // guard stays because it makes the refusal a property of this function rather
+  // than of the Node version under it.
+  assert.equal(readChangeAnchorHeadLines(root, "bad\0path.py"), null);
+  assert.equal(readChangeAnchorHeadLines(root, "real.py\0suffix"), null);
 });
 
 test("#1154: a literal [REDACTED] diff line cannot forge agreement with the checkout", () => {

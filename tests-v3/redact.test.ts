@@ -908,6 +908,34 @@ test("#1154: redactDiffText cannot span a line break — the flat pass's collaps
   assert.equal(out, "+password:\n+  hunter2hunter2hunter2\n+def main():\n+    return 1");
 });
 
+test("#1154: redactDiffText treats a literal [REDACTED] as inert and is idempotent", () => {
+  // #252 boundary rule: feed the sanitizer's OWN marker through the sanitizer.
+  // Anchor extraction compares a redacted diff against a redacted checkout
+  // byte-for-byte, so the marker has to be stable: a masker that matched
+  // `[REDACTED]` itself would rewrite it, and a rewritten marker would stop
+  // comparing equal to the same marker on the other side.
+  const diff = [
+    "+[REDACTED]",
+    " [REDACTED]",
+    "-[REDACTED]",
+    "+token: [REDACTED]",
+    "+password: hunter2hunter2",
+  ].join("\n");
+  const out = redactDiffText(diff);
+  assert.equal(out.split("\n")[0], "+[REDACTED]", "a literal marker added line is untouched");
+  assert.equal(out.split("\n")[1], " [REDACTED]", "a literal marker context line is untouched");
+  assert.equal(out.split("\n")[2], "-[REDACTED]", "a literal marker removed line is untouched");
+  // A marker sitting as the VALUE of a secret-named key is re-masked whole
+  // (`token: [REDACTED]` → `[REDACTED]`), losing the key name. That is the
+  // module's documented over-redaction preference, and it is STABLE: the
+  // result is itself an inert marker, so the pass converges rather than
+  // nesting. Pinned here so a future masker that grew the marker would fail
+  // this instead of silently breaking anchor comparison.
+  assert.equal(out.split("\n")[3], "+[REDACTED]", "an already-masked value is not double-wrapped");
+  assert.equal(out.split("\n")[4], "+[REDACTED]", "a real secret beside it still masks (key included)");
+  assert.equal(redactDiffText(out), out, "redactDiffText is idempotent");
+});
+
 test("#1154: redactPrTextDeep depth cap holds for object nesting and is idempotent", () => {
   let deep: Record<string, unknown> = { leaf: "api_key=supersecretvalue1" };
   for (let i = 0; i < 40; i += 1) deep = { nested: deep };
