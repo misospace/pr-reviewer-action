@@ -215,6 +215,13 @@ is not evidence they are safe." The metadata marker's `coverage: "partial"`
 and `coverage_stop_reason` fields record the same gap — see
 [`docs/telemetry.md`](telemetry.md).
 
+The stop reason itself is recorded separately and always: the marker's
+`tool_stop_reason` carries the loop's reason on every harness run, so a
+budget stop that left nothing unread (for example, coverage the corpus-diff
+credit completed) is still visible for the #810/#847 exhaustion-rate
+comparison. `coverage`/`coverage_stop_reason` keep their narrower meaning:
+a confirmed coverage gap.
+
 **Partial coverage never approves.** `review-result: partial` means the
 review's own coverage is incomplete; gate merges on both the verdict and the
 review result, never on the verdict alone.

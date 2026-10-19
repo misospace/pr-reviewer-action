@@ -23,7 +23,7 @@ import { emptyArtifact, extractSpecialistJson, normalizeSpecialistOutput, parseS
 import { buildSpecialistPayload, overrunRetryPayload, payloadBytes, type SpecialistPayload } from "./payload.js";
 import { completionOverran, extractResponseText, extractResponseUsage, mergeUsage, responseStopReason, type SpecialistUsage } from "./wire.js";
 import { renderSpecialistLeadsSection } from "./render.js";
-import { containsKnownSecret, maskDiagnostic, maskKnownSecrets, maskKnownSecretsDeep, redactText } from "../context/redact.js";
+import { containsKnownSecret, maskDiagnostic, maskKnownSecrets, redactText, redactTextDeep } from "../context/redact.js";
 import { callKnownSecrets } from "../transport/headers.js";
 import { pyStr } from "../platform/py.js";
 import type { SpecialistRoleModel, SpecialistModelSource } from "../routing/tiers.js";
@@ -448,7 +448,14 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
     // `severity`/`category`/`file` fields drive the aggregate and the corpus
     // section, and masking them would corrupt published output for any short
     // configured key.
-    response: maskKnownSecretsDeep(response, knownSecrets),
+    // #1149: `redactTextDeep` rather than `maskKnownSecretsDeep`, because the
+    // latter masks only the operator's CONFIGURED values — a credential-SHAPED
+    // value the backend invented (`api_key=<never configured>`, a bare
+    // `Bearer …`, an `sk-…` token) rode verbatim into this shipped artifact.
+    // Safe here for the same reason it is safe in the main review: nothing
+    // re-parses this copy — only `artifact` drives entries, and the gate writes
+    // this field out once (`persistRole`) without reading it back.
+    response: redactTextDeep(response, knownSecrets),
     artifact,
   });
 
@@ -909,7 +916,9 @@ async function runSpecialistScout(
       request: payload,
       // #1037: the shared response body masked on its way into the artifact;
       // the normalized per-role artifacts keep their structural fields.
-      response: maskKnownSecretsDeep(response, knownSecrets),
+      // #1149: `redactTextDeep` adds the generic credential-shape layer for the
+      // provider-authored reason spelled out at the `runSpecialistRole` site.
+      response: redactTextDeep(response, knownSecrets),
       artifacts,
     };
   }

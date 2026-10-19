@@ -51,7 +51,7 @@ import { renderClaimsSection } from "../claims/render.js";
 import { buildModelRequest } from "../model/request.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
 import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js";
-import { maskKnownSecrets, maskKnownSecretsDeep } from "../context/redact.js";
+import { maskKnownSecrets, redactTextDeep } from "../context/redact.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
 import type { ReviewTriageDecision } from "../model/types.js";
@@ -197,6 +197,9 @@ export interface RunReviewResult {
   /** #922: the loop's conversation budget and peak (approx tokens). */
   contextBudget?: number;
   contextPeak?: number;
+  /** #847 measurement follow-up: the tool loop's stop reason for the route
+   * the marker was built from; undefined when no harness reported one. */
+  toolStopReason?: string;
   /** Wall-clock seconds for the whole run. */
   durationSec: number;
 }
@@ -1523,6 +1526,7 @@ secrets: [profiles.primary.apiKey],
     ...(toolBudgetTelemetry.maxRounds !== undefined ? { maxRounds: toolBudgetTelemetry.maxRounds } : {}),
     ...(toolBudgetTelemetry.contextBudget !== undefined ? { contextBudget: toolBudgetTelemetry.contextBudget } : {}),
     ...(toolBudgetTelemetry.contextPeak !== undefined ? { contextPeak: toolBudgetTelemetry.contextPeak } : {}),
+    ...(toolBudgetTelemetry.stopReason !== undefined ? { toolStopReason: toolBudgetTelemetry.stopReason } : {}),
     actionVersion: ACTION_VERSION,
     degradedGateBypass: outputs.degradedGateBypass,
   });
@@ -1549,6 +1553,7 @@ secrets: [profiles.primary.apiKey],
     ...(toolBudgetTelemetry.maxRounds !== undefined ? { toolMaxRounds: toolBudgetTelemetry.maxRounds } : {}),
     ...(toolBudgetTelemetry.contextBudget !== undefined ? { contextBudget: toolBudgetTelemetry.contextBudget } : {}),
     ...(toolBudgetTelemetry.contextPeak !== undefined ? { contextPeak: toolBudgetTelemetry.contextPeak } : {}),
+    ...(toolBudgetTelemetry.stopReason !== undefined ? { toolStopReason: toolBudgetTelemetry.stopReason } : {}),
   };
 }
 
@@ -1633,7 +1638,7 @@ export function partialCoverageOf(harness: Record<string, unknown> | null): Part
  * the marker then omits `tool_budget`/`tool_budget_source`/`tool_calls`
  * exactly as it did before #847.
  */
-function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): {
+export function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): {
   budget?: number;
   source?: string;
   calls?: number;
@@ -1641,12 +1646,31 @@ function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): {
   maxRounds?: number;
   contextBudget?: number;
   contextPeak?: number;
+  stopReason?: string;
 } {
   if (harness === null) return {};
-  const out: { budget?: number; source?: string; calls?: number; rounds?: number; maxRounds?: number; contextBudget?: number; contextPeak?: number } = {};
+  const out: { budget?: number; source?: string; calls?: number; rounds?: number; maxRounds?: number; contextBudget?: number; contextPeak?: number; stopReason?: string } = {};
   if (typeof harness.tool_request_budget === "number") out.budget = harness.tool_request_budget;
   if (typeof harness.tool_budget_source === "string" && harness.tool_budget_source !== "") {
     out.source = harness.tool_budget_source;
+  }
+  // #847 measurement follow-up: the loop's own stop reason (written by
+  // runToolHarness on every path that ran the loop). A pre-loop abort has no
+  // top-level stop_reason; its `harness-abort` lives only in the #702
+  // telemetry object (buildToolLoopTelemetry's `phase: "pre-loop"` shape),
+  // so fall back to it there — the loop-shape nested value is the same
+  // constant, never new information. Recorded regardless of coverage so a
+  // budget stop that left nothing unread is still measurable from published
+  // markers.
+  if (typeof harness.stop_reason === "string" && harness.stop_reason !== "") {
+    out.stopReason = harness.stop_reason;
+  } else if (
+    harness.tool_loop_telemetry !== null
+    && typeof harness.tool_loop_telemetry === "object"
+    && typeof (harness.tool_loop_telemetry as Record<string, unknown>).stop_reason === "string"
+    && (harness.tool_loop_telemetry as Record<string, unknown>).stop_reason !== ""
+  ) {
+    out.stopReason = (harness.tool_loop_telemetry as Record<string, unknown>).stop_reason as string;
   }
   if (typeof harness.executed_request_count === "number") out.calls = harness.executed_request_count;
   // #895: the rounds actually used and the resolved round cap the loop ran
@@ -1911,7 +1935,14 @@ async function callTier(
       // debugging a degraded run. Nothing re-parses this copy AS a verdict
       // (the native-loop reuse reads the harness-written artifact, before this
       // call runs), so a masked leaf cannot break a downstream parse.
-      ws.write(responseArtifact, pyJsonDumps(maskKnownSecretsDeep(result.raw, knownSecrets)));
+      // #1149: `redactTextDeep`, not `maskKnownSecretsDeep`. The latter masks
+      // only the CONFIGURED values, so a credential-SHAPED value the backend
+      // invented — `api_key=<never configured>`, a bare `Bearer …`, an `sk-…`
+      // token — was persisted verbatim into a body this action ships as a job
+      // artifact. `redactText`'s generic layer is exactly the rule that covers
+      // a value the operator never gave us, and it composes (configured values
+      // are still nuked first, the generic pass runs on the remainder).
+      ws.write(responseArtifact, pyJsonDumps(redactTextDeep(result.raw, knownSecrets)));
       return result;
     },
   });
@@ -1969,8 +2000,20 @@ async function callTier(
   }
   if (outcome.status === "empty_completion") {
     errorLog(`${profile.label}: model returned an empty completion; not retrying ${tier}${diagnosticsLine}`);
+    // #1149: routed like the success write above. As written today this is a
+    // BACKSTOP rather than a new guarantee, and the reason is worth recording
+    // precisely: both fields are already generically redacted where they are
+    // built — `outcome.failure.message` through `maskDiagnostic`
+    // (model/verdict.ts) or through `describeTransportFailure`'s `redactText`
+    // (transport/http.ts), and `diagnostics.record`'s one provider-controlled
+    // field through `safeReasonToken`'s `redactText`
+    // (model/response-diagnostics.ts). The routing buys independence from those
+    // three upstream sites staying generically-redacted, which is exactly the
+    // kind of coupling that produced this gap in the first place. It is
+    // structure-preserving and idempotent, so no downstream consumer of this
+    // artifact can tell the difference.
     if (outcome.diagnostics !== undefined) {
-      ws.write(responseArtifact, pyJsonDumps({ error: outcome.failure.message, diagnostics: outcome.diagnostics.record }));
+      ws.write(responseArtifact, pyJsonDumps(redactTextDeep({ error: outcome.failure.message, diagnostics: outcome.diagnostics.record }, knownSecrets)));
     }
   } else if (outcome.status === "parse_exhausted") {
     // #868: the raw response artifact was written before parsing could tell
@@ -1978,10 +2021,12 @@ async function callTier(
     // below, via `parseVerdictResponse`'s `secrets` — see
     // `surfaceStreamError`); replace it so an unmasked provider body never
     // survives on disk, mirroring the transport-exhausted branch below.
+    // #1149: routed through `redactTextDeep` for the provider-authored reason
+    // spelled out in the `empty_completion` branch above.
     errorLog(`${profile.label}: parse/validate failures exhausted (${outcome.failure.message})${diagnosticsLine}`);
-    ws.write(responseArtifact, pyJsonDumps(outcome.diagnostics !== undefined
+    ws.write(responseArtifact, pyJsonDumps(redactTextDeep(outcome.diagnostics !== undefined
       ? { error: outcome.failure.message, diagnostics: outcome.diagnostics.record }
-      : { error: outcome.failure.message }));
+      : { error: outcome.failure.message }, knownSecrets)));
   } else {
     // #846: carry the HTTP status and a redacted, length-capped body excerpt
     // (plus the ai-api-format hint on a 404) instead of the bare "model
@@ -1989,14 +2034,16 @@ async function callTier(
     // configured key unconditionally, on top of `redactText`'s heuristics.
     // #1037: this lane's configured extra-header VALUES join that list (a
     // provider error body can quote them back, and they carry proxy tokens).
+    // #1149: `redactTextDeep` on the persisted body for the provider-authored
+    // reason spelled out in the `empty_completion` branch above.
     const detail = describeTransportFailure(outcome.failure, { secrets: knownSecrets });
     errorLog(`${profile.label}: transport failures exhausted (${detail})${diagnosticsLine}`);
     if (outcome.nonRetryable === true) {
       annotate(`::error::${profile.label}: model endpoint returned a non-retryable HTTP status; failing over without retrying (${annotationSafe(detail)})`);
     }
-    ws.write(responseArtifact, pyJsonDumps(outcome.diagnostics !== undefined
+    ws.write(responseArtifact, pyJsonDumps(redactTextDeep(outcome.diagnostics !== undefined
       ? { error: detail, diagnostics: outcome.diagnostics.record }
-      : { error: detail }));
+      : { error: detail }, knownSecrets)));
   }
   return { ok: false, artifact: null, rawResponse: null };
 }

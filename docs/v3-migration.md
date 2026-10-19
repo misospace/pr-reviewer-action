@@ -397,10 +397,11 @@ relationship can be measured directly from production reviews:
   and `usage.rounds_used`.
 - **The published review's metadata marker** (`<!-- ai-pr-reviewer:{...}
   --> `, no artifacts needed): `tool_budget` (the effective budget),
-  `tool_budget_source`, and `tool_calls` (calls executed), appended
+  `tool_budget_source`, `tool_calls` (calls executed), and `tool_stop_reason`
+  (the loop's own stop reason, recorded on every harness run), appended
   additively at the end of the marker's fixed key order — a run with no tool
   harness (`tool_mode=off`, or an abort before the budget was resolved)
-  omits all three and serializes byte-identically to the pre-#847 marker.
+  omits them and serializes byte-identically to the pre-#847 marker.
 
 To tally recent reviews by budget source without touching artifacts, pull
 the managed comments off recent PRs and grep the marker (`<owner>/<repo>`,
@@ -415,9 +416,14 @@ gh api "repos/<owner>/<repo>/issues/comments?per_page=100" \
 ```
 
 Cross-reference `tool_budget_source":"size-scaled"` runs against
-`coverage":"partial"` / `coverage_stop_reason` on the same marker line to see
-whether the scaled budget actually reduced budget-exhaustion partial
-coverage versus `tier-default` runs, per #847's proposal.
+`tool_stop_reason` on the same marker line to compare budget-exhaustion
+rates versus `tier-default` runs, per #847's proposal. `tool_stop_reason`
+lands on every harness run, so a budget stop whose coverage the #921
+corpus-diff credit completed is counted too — `coverage":"partial"` /
+`coverage_stop_reason` alone miss those (they record only confirmed gaps).
+The observational comparison stays confounded by PR size and lead count
+(the variables that select the budget source), so read it alongside #681's
+treatment/control measurement, not as its replacement.
 
 ## New inputs
 

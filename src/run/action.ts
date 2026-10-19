@@ -278,6 +278,7 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       ...(review.toolMaxRounds !== undefined ? { maxRounds: review.toolMaxRounds } : {}),
       ...(review.contextBudget !== undefined ? { contextBudget: review.contextBudget } : {}),
       ...(review.contextPeak !== undefined ? { contextPeak: review.contextPeak } : {}),
+      ...(review.toolStopReason !== undefined ? { toolStopReason: review.toolStopReason } : {}),
       // #1003: the human-review triage answer reaches the published body
       // only when triage ran (the decision output is "" when the input is
       // off), so a disabled run's published review is byte-identical to
