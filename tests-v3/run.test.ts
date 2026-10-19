@@ -15,7 +15,7 @@ import { startMockServer } from "./helpers.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { publishReview } from "../src/publish/publish.js";
 import { FINDING_TRAILER } from "../src/context/review-threads.js";
-import type { NativeReviewRequest, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
+import type { NativeReviewRequest, NativeReviewSurface, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
 
 /** A minimal in-memory platform adapter: the reads a small PR needs, served
  * without network. Everything else must not be reached by the pipeline with
@@ -1881,6 +1881,7 @@ test("findings_severity_gated policy: CSV non-blocking categories are split, not
  * and the publication-boundary head re-check touch. */
 class MinimalPublishApi implements PublishPlatformApi {
   readonly platform = "github" as const;
+  readonly nativeReviewSurface: NativeReviewSurface = { supported: true };
   submitted: NativeReviewRequest[] = [];
   constructor(private readonly head: string) {}
   async getHeadSha(): Promise<string | null> { return this.head; }

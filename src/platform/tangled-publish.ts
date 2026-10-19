@@ -2,6 +2,7 @@ import type { FetchLike } from "./http.js";
 import type {
   ManagedInlineCommentRef,
   NativeReviewRequest,
+  NativeReviewSurface,
   PublishCommentRef,
   PublishPlatformApi,
   PublishPlatformName,
@@ -77,15 +78,39 @@ export interface TangledPublishApiOptions {
   fetchImpl?: FetchLike | undefined;
   /** Per-request timeout forwarded to the Bobbin pull resolver. */
   timeoutMs?: number | undefined;
+  /** #588: a FRESH read of the pull's current head, for the #451
+   * publication-boundary re-check. Absent → the current head is unknown and
+   * publication is refused (fail closed) until a trustworthy source exists.
+   * The launch-time `TANGLED_PR_SOURCE_SHA` is NEVER used for this: it is
+   * the head THIS run reviewed, not the head the pull has now. */
+  currentHeadSha?: (() => Promise<string | null>) | undefined;
 }
 
 export class TangledPublishApi implements PublishPlatformApi {
   readonly platform = "tangled" as const;
 
+  /** #588: Tangled has no native pull-review surface — the review event
+   * and its inline review comments do not exist there. The publish step
+   * therefore publishes the review body as the managed top-level AT-Proto
+   * record and states the degradation explicitly. */
+  readonly nativeReviewSurface: NativeReviewSurface = {
+    supported: false,
+    reason: "Tangled has no native pull-review surface",
+  };
+
+  /** #588: why the current pull head is unknown on Tangled — the #451
+   * publication-boundary re-check can never be satisfied until a
+   * trustworthy current-head source exists, so the publish step says so
+   * instead of the generic "could not re-fetch" wording. */
+  readonly currentHeadUnavailableReason = "Tangled has no trustworthy current-head source yet: the pull record exposes no head commit, and the round patch's declared head SHA is forgeable advisory metadata";
+
   private readonly context: TangledContext;
   private readonly atproto: TangledAtprotoClient;
   private readonly fetchImpl: FetchLike | undefined;
   private readonly timeoutMs: number | undefined;
+  /** #588: the fresh current-head read; absent → the current head is
+   * unknown and publication fails closed. */
+  private readonly currentHeadSha: (() => Promise<string | null>) | undefined;
   /** Memoized canonical pull resolution: at most one resolution per
    * instance. A rejection is memoized too and is reported deterministically
    * by `upsertStickyComment`, never thrown at construction. */
@@ -96,6 +121,7 @@ export class TangledPublishApi implements PublishPlatformApi {
     this.atproto = options.atproto;
     this.fetchImpl = options.fetchImpl;
     this.timeoutMs = options.timeoutMs;
+    this.currentHeadSha = options.currentHeadSha;
   }
 
   private resolvePull(): Promise<TangledPullIdentity> {
@@ -106,10 +132,39 @@ export class TangledPublishApi implements PublishPlatformApi {
     return this.pullPromise;
   }
 
-  /** The authoritative head the read adapter projects; `null` (unknown)
-   * fails the caller's publication-boundary recheck closed (#451). */
+  /**
+   * #588: the pull's CURRENT head for the #451 publication-boundary
+   * re-check — read fresh, never echoed from the launch-time context.
+   *
+   * The launch-time `TANGLED_PR_SOURCE_SHA` (`context.sourceSha`) is the
+   * head THIS run reviewed, so returning it here would compare two copies
+   * of the same start-time context: a pull that advanced mid-run would
+   * still get a stale publication. It is recorded in the managed record as
+   * reviewed-head metadata (`buildRecord`), which is correct, but it is
+   * never the current head.
+   *
+   * No trustworthy current-head source exists on Tangled yet:
+   * `src/platform/tangled-bobbin.ts` documents that the pull record and the
+   * read XRPC outputs (`getPull`/`listPulls`) expose NO head commit — it
+   * lives only inside a round's gzipped patch blob — and
+   * `src/platform/tangled-diff.ts` marks `declaredHeadSha` as ADVISORY,
+   * forgeable metadata decoded from untrusted patch content that must never
+   * be an authorization or exact-head input. So the head comes only from an
+   * injected fresh reader, and an absent reader (or a failed, empty, or
+   * non-string read) yields `null`: the caller then refuses to publish
+   * (fail closed) rather than publishing a possibly stale review. The
+   * trustworthy current-head read is tracked in #1165.
+   */
   async getHeadSha(): Promise<string | null> {
-    return this.context.sourceSha ?? null;
+    if (this.currentHeadSha === undefined) return null;
+    try {
+      const sha = await this.currentHeadSha();
+      if (typeof sha !== "string") return null;
+      const trimmed = sha.trim();
+      return trimmed === "" ? null : trimmed;
+    } catch {
+      return null;
+    }
   }
 
   /** #588: the CI bot's AT-Proto session DID, once a session exists; null

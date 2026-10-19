@@ -391,6 +391,13 @@ export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformA
   // descriptive error naming the missing variable.
   if (platform === "tangled") {
     const context = tangledContextFromEnv(env);
+    // #588: no `currentHeadSha` provider is wired here on purpose — Tangled
+    // has no trustworthy current-head source yet (the pull record and the
+    // read XRPC expose no head commit, and the patch's `declaredHeadSha` is
+    // forgeable advisory metadata). The #451 head re-check therefore FAILS
+    // CLOSED for Tangled: the publish step refuses to publish until a
+    // trustworthy current-head read exists (#1165). The launch-time
+    // `TANGLED_PR_SOURCE_SHA` is never used for that re-check.
     const api = new TangledPublishApi({
       context,
       atproto: new TangledAtprotoClient(atprotoConfigFromEnv(env)),

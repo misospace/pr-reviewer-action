@@ -14,6 +14,7 @@ import { applyReviewTriageFragment, renderReviewTriageRoutingFragment } from "..
 import { GitHubPublishApi, ForgejoPublishApi } from "../src/platform/publish-api.js";
 import type {
   NativeReviewRequest,
+  NativeReviewSurface,
   PublishCommentRef,
   PublishPlatformApi,
   PublishReviewRef,
@@ -263,6 +264,7 @@ const HEAD = "head-1";
 
 class CapturingPublishApi implements PublishPlatformApi {
   readonly platform = "github" as const;
+  readonly nativeReviewSurface: NativeReviewSurface = { supported: true };
   requests: { users: string[]; teams: string[] }[] = [];
   requestResult: ReviewerRequestResult = { ok: true, supported: true, requestedUsers: ["alice"], requestedTeams: [], alreadyRequestedUsers: [], alreadyRequestedTeams: [] };
   sticky: { marker: string; body: string }[] = [];

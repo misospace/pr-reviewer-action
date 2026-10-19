@@ -7,7 +7,7 @@ import { TangledNotImplementedError } from "../src/platform/tangled.js";
 import { buildAdapter, buildPublishApi, precheckMain, publishInputFromEnv, publishMain, readEvent } from "../src/run/entrypoints.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { publishReview } from "../src/publish/publish.js";
-import type { NativeReviewRequest, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
+import type { NativeReviewRequest, NativeReviewSurface, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
 
 function mockAdapter(): PlatformReadAdapter {
   return {
@@ -210,6 +210,7 @@ test("tangled publish seam fails closed when ATProto configuration is missing (#
 
 class MinimalPublishApi implements PublishPlatformApi {
   readonly platform = "github" as const;
+  readonly nativeReviewSurface: NativeReviewSurface = { supported: true };
   submitted: NativeReviewRequest[] = [];
   constructor(private readonly head: string) {}
   async getHeadSha(): Promise<string | null> { return this.head; }
