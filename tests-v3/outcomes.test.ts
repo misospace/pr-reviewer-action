@@ -379,19 +379,6 @@ test("#1027 review round: a persisted ledger counts reactions by delta, not per 
   // carries only the newly-observed reactions, so the aggregate's additive
   // fold stays correct. (Aggregate of one stateless run is unchanged: the
   // full snapshot is still what a stateless artifact records.)
-  const id = observation().findingId;
-  const fb = (count: number, at: string): OutcomeEvent => ({
-    finding_id: id,
-    kind: "feedback",
-    at,
-    head_sha: null,
-    route: null,
-    model: null,
-    provenance: "forge-reaction",
-    signal: "helpful",
-    count,
-    trusted: false,
-  });
   // Run 1 (stateless) observed the full snapshot: one 👍.
   const run1 = deriveOutcomeEvents({
     postedIdentities: [],
