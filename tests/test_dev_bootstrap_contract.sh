@@ -111,6 +111,45 @@ check_contains "curl defense-in-depth max-time bound" \
   "$BOOTSTRAP_BODY" '--max-time "$BOOTSTRAP_DOWNLOAD_TIMEOUT_SECS"'
 
 echo ""
+echo "=== bounded-phase teardown is leaf-first and unconditional ==="
+# The old shape signalled parents before descendants via `pkill -P` and
+# gated the KILL pass on the root still being alive; an intermediate that
+# exits on TERM could then reparent a grandchild out of the traversal and
+# a TERM-immune descendant could survive the root's death. The current
+# shape snapshots the tree once, TERMs each captured member individually
+# leaf-first, and runs the KILL pass unconditionally over the captured
+# members (re-collecting from the root only to append members that
+# appeared after the first snapshot).
+check_not_contains "no parent-first pkill TERM pass" "$BOOTSTRAP_CODE" 'pkill -TERM -P'
+check_not_contains "no parent-first pkill KILL pass" "$BOOTSTRAP_CODE" 'pkill -KILL -P'
+check_contains "TERM is sent to each captured member individually" \
+  "$BOOTSTRAP_BODY" 'kill -TERM "$member"'
+check_contains "KILL pass guards each member with kill -0" \
+  "$BOOTSTRAP_BODY" 'kill -0 "$member"'
+check_contains "KILL pass kills each surviving member individually" \
+  "$BOOTSTRAP_BODY" 'kill -9 "$member"'
+check_contains "tree re-collected after grace to append newly observed pids" \
+  "$BOOTSTRAP_BODY" 'leaf_first="$leaf_first $(collect_process_tree "$pid")"'
+
+echo ""
+echo "=== install dir is a validated user-owned trust boundary ==="
+# The staging check-then-use sequence cannot be race-safe against a writer
+# who can mutate the install dir; instead the directory itself is
+# constrained (owned by the invoking user, not group/world-writable), so
+# such a writer is out of scope and the mktemp staging plus regular-file
+# re-check are defense-in-depth only.
+check_contains "install dir ownership/permissions validated" \
+  "$BOOTSTRAP_BODY" 'validate_install_dir "$install_dir"'
+check_contains "validation parses ls -ldn (portable across GNU/BSD stat)" \
+  "$BOOTSTRAP_BODY" 'ls -ldn'
+check_contains "rejects an install dir not owned by the current user" \
+  "$BOOTSTRAP_BODY" 'not owned by the current user'
+check_contains "rejects a group/world-writable install dir" \
+  "$BOOTSTRAP_BODY" 'writable by group or others'
+check_not_contains "staging check is not described as race-safe" \
+  "$BOOTSTRAP_BODY" 'race-safe guarantee against'
+
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 
 if [[ "$FAIL" -gt 0 ]]; then

@@ -155,38 +155,56 @@ collect_process_tree() {
 # Run a phase under a wall-time bound: `run_bounded LABEL SECONDS LOGFILE
 # -- cmd args...` runs cmd with stdout+stderr redirected to LOGFILE, polls
 # at 1s granularity, and on overrun terminates the whole process tree
-# (TERM, brief grace, then KILL) before failing with a message naming the
-# phase, the exceeded bound and the tail of LOGFILE. Relies on pgrep/pkill
-# from procps for the tree teardown -- the same tools require_process_tools
-# enforces in setup mode. A non-zero exit is also a controlled failure with
-# the output tail. RUN_BOUNDED_NOTE, when set, is appended to the failure
-# message (used for the mise.lock drift hint).
+# (leaf-first TERM of every captured member, brief grace, then an
+# unconditional KILL pass) before failing with a message naming the
+# phase, the exceeded bound and the tail of LOGFILE. Relies on pgrep
+# from procps for the tree snapshot -- the same tools
+# require_process_tools enforces in setup mode. A non-zero exit is also
+# a controlled failure with the output tail. RUN_BOUNDED_NOTE, when set,
+# is appended to the failure message (used for the mise.lock drift hint).
 run_bounded() {
   local label="$1" limit="$2" logfile="$3"
   shift 3
   if [ "${1:-}" = "--" ]; then
     shift
   fi
-  local pid deadline rc=0 member tree tail
+  local pid deadline rc=0 member tree leaf_first tail
   : >"$logfile"
   "$@" >"$logfile" 2>&1 &
   pid=$!
   deadline=$((SECONDS + limit))
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$SECONDS" -ge "$deadline" ]; then
+      # Snapshot the tree once at TERM time. collect_process_tree lists
+      # root-first, so reverse it and signal leaf-first: children die
+      # before their parents, shrinking the window in which a
+      # TERM-surviving intermediate could reparent a grandchild out of
+      # the captured set. The root is signalled last, not first.
       tree="$(collect_process_tree "$pid")"
+      leaf_first=""
       for member in $tree; do
-        pkill -TERM -P "$member" 2>/dev/null || true
+        leaf_first="$member${leaf_first:+ $leaf_first}"
       done
-      kill -TERM "$pid" 2>/dev/null || true
+      for member in $leaf_first; do
+        kill -TERM "$member" 2>/dev/null || true
+      done
       sleep 1
+      # The KILL pass is unconditional: a descendant that ignored TERM
+      # can outlive the root, so membership in the captured set -- not
+      # the root's survival -- decides who is killed. If the root is
+      # still alive after the grace period, re-collect its tree so
+      # members that appeared after the first snapshot are covered too
+      # (duplicates are harmless: the kill -0 guard makes a repeated
+      # signal a no-op). Residual window: if the root dies on TERM, a
+      # member spawned after the snapshot escapes this sweep -- closing
+      # that fully needs a process-group kill, out of scope here.
       if kill -0 "$pid" 2>/dev/null; then
-        tree="$(collect_process_tree "$pid")"
-        for member in $tree; do
-          pkill -KILL -P "$member" 2>/dev/null || true
-        done
-        kill -9 "$pid" 2>/dev/null || true
+        leaf_first="$leaf_first $(collect_process_tree "$pid")"
       fi
+      for member in $leaf_first; do
+        kill -0 "$member" 2>/dev/null || continue
+        kill -9 "$member" 2>/dev/null || true
+      done
       tail="$(tail -n 20 "$logfile" 2>/dev/null || true)"
       rm -f "$logfile"
       fail "phase '$label' exceeded its ${limit}s wall-time bound and was terminated; last output:
@@ -289,6 +307,34 @@ print_receipt() {
   printf '  %s run test            authoritative Node suite (build + node --test)\n' "$MISE_BIN"
 }
 
+# The install dir is the trust boundary for the staged launcher: when it
+# exists, is owned by the current effective uid and is not group- or
+# world-writable, only the invoking user (or root) can create, replace or
+# swap entries in it, so a hostile directory writer is out of scope for
+# the staging checks. Parsed from `ls -ldn` because stat flags differ
+# between GNU and BSD/macOS; field 1 is the mode string and field 3 the
+# numeric owner uid.
+validate_install_dir() {
+  local dir="$1" line mode owner
+  if [ ! -d "$dir" ]; then
+    fail "install dir $dir does not exist or is not a directory; refusing to install into it"
+  fi
+  line="$(ls -ldn "$dir" 2>/dev/null)" || fail "cannot inspect install dir $dir to validate its ownership and permissions"
+  mode="$(printf '%s\n' "$line" | awk '{print $1}')"
+  owner="$(printf '%s\n' "$line" | awk '{print $3}')"
+  if [ "$owner" != "$(id -u)" ]; then
+    fail "install dir $dir is not owned by the current user (owner uid $owner, current uid $(id -u)); refusing to install into a directory another user controls"
+  fi
+  case "$mode" in
+  l*)
+    fail "install dir $dir is a symlink; refusing to install through it"
+    ;;
+  ?????w* | ????????w*)
+    fail "install dir $dir is writable by group or others (mode $mode); refusing to install into it"
+    ;;
+  esac
+}
+
 run_default() {
   local asset digest install_dir path_mise staged actual resolved launcher_dir
 
@@ -310,6 +356,12 @@ run_default() {
     install_dir="$(abspath "$HOME/.local/bin")"
   else
     fail "neither MISE_INSTALL_DIR nor HOME is set, so there is nowhere user-scoped to install the mise launcher"
+  fi
+
+  # Validate the trust boundary before anything reads from it; a dir that
+  # does not exist yet is validated right after mkdir -p creates it.
+  if [ -d "$install_dir" ]; then
+    validate_install_dir "$install_dir"
   fi
 
   MISE_BIN=""
@@ -335,15 +387,21 @@ run_default() {
         fail "digest mismatch for the downloaded mise launcher (expected $digest, got $actual) -- refusing to install"
       fi
       mkdir -p "$install_dir"
+      validate_install_dir "$install_dir"
       # mktemp creates the staging name exclusively (O_EXCL) with an
-      # unpredictable suffix inside the install dir, so a pre-planted
-      # symlink at a guessable name is never followed and the later rename
-      # stays on one filesystem.
+      # unpredictable suffix inside the validated install dir, so a
+      # pre-planted symlink at a guessable name is never followed and
+      # the later rename stays on one filesystem.
       staged="$(mktemp "$install_dir/.mise.bootstrap.XXXXXX")"
       trap 'rm -f "$staged"; cleanup' ERR INT TERM
-      # The digest check protects the download source, not the staging
-      # destination: assert the staged path is still a plain regular file
-      # (never a symlink) before any bytes are written to it.
+      # The validated user-owned install dir is the trust boundary: only
+      # the invoking user (or root) can write there. The digest check
+      # protects the download source, not the staging destination, and
+      # the regular-file re-check below is defense-in-depth hardening,
+      # NOT a race-safe guarantee -- a writer able to mutate the
+      # directory could still swap the staged path between this check
+      # and the copy; such a writer is out of scope by the validation
+      # above, not defeated by this check.
       if [ ! -f "$staged" ] || [ -L "$staged" ]; then
         fail "staging path $staged is not a plain regular file; refusing to install"
       fi

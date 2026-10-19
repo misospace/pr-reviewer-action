@@ -9,6 +9,10 @@
 #   - the download, `mise install --locked` and `npm ci` phases are bounded
 #     in wall time: an overrun fails the bootstrap with a controlled
 #     message naming the phase and the bound, and no stub process survives
+#   - teardown signals the captured tree leaf-first and kills a TERM-immune
+#     grandchild even when its parent and the phase root die on TERM
+#   - a group/world-writable install dir fails closed before any download
+#     or launcher install proceeds
 #
 # Auto-discovered by the CI validate-bash job. Target runtime: seconds.
 set -euo pipefail
@@ -317,6 +321,161 @@ setup_ok_body="$(cat "$setup_ok_out")"
 check_contains "mise install output is shown on success" "$setup_ok_body" "mise: locked toolchain ready"
 check_contains "npm ci output is shown on success" "$setup_ok_body" "added 128 packages in 1s"
 check_contains "setup prints its receipt" "$setup_ok_body" "Setup complete in"
+
+echo ""
+echo "=== bootstrap runtime: teardown kills a TERM-immune grandchild whose parent dies on TERM ==="
+new_sandbox
+cat >"$SANDBOX/bootstrap-nested-grandchild" <<'EOF'
+#!/usr/bin/env bash
+trap '' TERM
+while :; do
+  sleep 1
+done
+EOF
+chmod 755 "$SANDBOX/bootstrap-nested-grandchild"
+cat >"$SANDBOX/bootstrap-nested-intermediate" <<EOF
+#!/usr/bin/env bash
+"$SANDBOX/bootstrap-nested-grandchild" &
+wait
+EOF
+chmod 755 "$SANDBOX/bootstrap-nested-intermediate"
+write_stub mise <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "install" ] && [ "\$2" = "--locked" ]; then
+  bash "$SANDBOX/bootstrap-nested-intermediate"
+fi
+exit 0
+EOF
+nested_out="$SANDBOX/nested.out"
+run_bootstrap_bg "$nested_out" setup \
+  "BOOTSTRAP_MISE=$BIN/mise" \
+  "BOOTSTRAP_MISE_INSTALL_TIMEOUT_SECS=2" \
+  "HOME=$SANDBOX/home" \
+  "PATH=$BIN:/usr/bin:/bin"
+if wait_exited_or_deadline 25; then
+  check_ne "bootstrap exits non-zero when mise install overruns" "$BOOTSTRAP_RC" "0"
+else
+  check_ne "bootstrap exits non-zero when mise install overruns" "timed-out" "0"
+fi
+reap_bootstrap
+nested_body="$(cat "$nested_out")"
+check_contains "failure names mise install phase" "$nested_body" "phase 'mise install --locked'"
+check_contains "failure names exceeded bound" "$nested_body" "exceeded its 2s wall-time bound"
+assert_no_survivors "$SANDBOX/bootstrap-nested-grandchild"
+assert_no_survivors "$SANDBOX/bootstrap-nested-intermediate"
+
+echo ""
+echo "=== bootstrap runtime: group/world-writable install dir fails closed ==="
+new_sandbox
+OPEN_DIR="$SANDBOX/open-install"
+mkdir -p "$OPEN_DIR"
+chmod 777 "$OPEN_DIR"
+write_stub sha256sum <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '$PINNED_DIGEST'
+EOF
+write_stub curl <<EOF
+#!/usr/bin/env bash
+printf downloaded > "$SANDBOX/curl-ran"
+exit 0
+EOF
+write_stub mise <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+insecure_out="$SANDBOX/insecure.out"
+run_bootstrap_bg "$insecure_out" "" \
+  "MISE_INSTALL_DIR=$OPEN_DIR" \
+  "HOME=$SANDBOX/home" \
+  "PATH=$BIN:/usr/bin:/bin"
+if wait_exited_or_deadline 20; then
+  check_ne "bootstrap exits non-zero on an insecure install dir" "$BOOTSTRAP_RC" "0"
+else
+  check_ne "bootstrap exits non-zero on an insecure install dir" "timed-out" "0"
+fi
+reap_bootstrap
+insecure_body="$(cat "$insecure_out")"
+check_contains "failure names the insecure install dir" "$insecure_body" "$OPEN_DIR"
+check_contains "failure cites the violated trust property" "$insecure_body" "writable by group or others"
+check "no launcher was installed into the insecure dir" \
+  "$(test -e "$OPEN_DIR/mise" && printf yes || printf no)" "no"
+check "the downloader never ran" \
+  "$(test -e "$SANDBOX/curl-ran" && printf yes || printf no)" "no"
+
+echo ""
+echo "=== bootstrap runtime: world-writable-only install dir (707) fails closed ==="
+new_sandbox
+WW_DIR="$SANDBOX/world-only-install"
+mkdir -p "$WW_DIR"
+chmod 707 "$WW_DIR"
+write_stub sha256sum <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '$PINNED_DIGEST'
+EOF
+write_stub curl <<EOF
+#!/usr/bin/env bash
+printf downloaded > "$SANDBOX/curl-ran-707"
+exit 0
+EOF
+write_stub mise <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+ww_out="$SANDBOX/world-only.out"
+run_bootstrap_bg "$ww_out" "" \
+  "MISE_INSTALL_DIR=$WW_DIR" \
+  "HOME=$SANDBOX/home" \
+  "PATH=$BIN:/usr/bin:/bin"
+if wait_exited_or_deadline 20; then
+  check_ne "bootstrap exits non-zero on a world-writable-only install dir" "$BOOTSTRAP_RC" "0"
+else
+  check_ne "bootstrap exits non-zero on a world-writable-only install dir" "timed-out" "0"
+fi
+reap_bootstrap
+ww_body="$(cat "$ww_out")"
+check_contains "failure cites the violated trust property (707)" "$ww_body" "writable by group or others"
+check "no launcher was installed into the 707 dir" \
+  "$(test -e "$WW_DIR/mise" && printf yes || printf no)" "no"
+check "the downloader never ran (707)" \
+  "$(test -e "$SANDBOX/curl-ran-707" && printf yes || printf no)" "no"
+
+echo ""
+echo "=== bootstrap runtime: symlinked install dir fails closed ==="
+new_sandbox
+REAL_DIR="$SANDBOX/real-install"
+mkdir -p "$REAL_DIR"
+LINK_DIR="$SANDBOX/link-install"
+ln -s "$REAL_DIR" "$LINK_DIR"
+write_stub sha256sum <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '$PINNED_DIGEST'
+EOF
+write_stub curl <<EOF
+#!/usr/bin/env bash
+printf downloaded > "$SANDBOX/curl-ran-link"
+exit 0
+EOF
+write_stub mise <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+link_out="$SANDBOX/link.out"
+run_bootstrap_bg "$link_out" "" \
+  "MISE_INSTALL_DIR=$LINK_DIR" \
+  "HOME=$SANDBOX/home" \
+  "PATH=$BIN:/usr/bin:/bin"
+if wait_exited_or_deadline 20; then
+  check_ne "bootstrap exits non-zero on a symlinked install dir" "$BOOTSTRAP_RC" "0"
+else
+  check_ne "bootstrap exits non-zero on a symlinked install dir" "timed-out" "0"
+fi
+reap_bootstrap
+link_body="$(cat "$link_out")"
+check_contains "failure names the symlinked install dir" "$link_body" "is a symlink"
+check "no launcher was installed through the symlink" \
+  "$(test -e "$REAL_DIR/mise" && printf yes || printf no)" "no"
+check "the downloader never ran (symlink)" \
+  "$(test -e "$SANDBOX/curl-ran-link" && printf yes || printf no)" "no"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
