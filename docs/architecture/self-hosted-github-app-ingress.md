@@ -14,15 +14,19 @@ queue, and worker lifecycle. The webhook handler and the reconciliation loop for
 the GitHub App path are **follow-on work** (see Follow-ons) — this phase is the
 auth + capability substrate they will sit on.
 
-Why the App path needs its own client at all: a GitHub App **installation
-token cannot be carried by any forge CLI**. `gh` (or `gj`, or any CLI)
-authenticates with a PAT/OAuth token/device flow — it can hold neither an App
-private key nor a minted installation token. So "route every forge read and
-write through the configured forge capability, not a forge-specific CLI" is not
-achievable by parameterizing the existing CLI path: the App credential path
-needs its own client. It has **no `child_process` import, no `gh`/`gj`/`forge`
-invocation, and no shell-out of any kind**; every request goes through
-`src/platform/http.ts`'s `requestJson`.
+Why the App path needs its own client at all: the App credential **lifecycle is
+not something a forge CLI can own**. `gh` (like any CLI) can *carry* a supplied
+token — `GH_TOKEN`/`GH_ENTERPRISE_TOKEN` accept an arbitrary PAT, OAuth token,
+or even a minted installation token — but nothing in a CLI can **mint** the App
+RS256 JWT from the private key, run the installation-token mint/refresh
+lifecycle against the clock, or keep the credential scoped to exactly the
+repository each call names. So "route every forge read and write through the
+configured forge capability, not a forge-specific CLI" is not achievable by
+parameterizing the existing CLI path: the minting authority has to live in the
+controller process, and the App credential path needs its own client. It has
+**no `child_process` import, no `gh`/`gj`/`forge` invocation, and no shell-out
+of any kind**; every request goes through `src/platform/http.ts`'s
+`requestJson`.
 
 ## Module map
 
@@ -90,9 +94,14 @@ a traversal-shaped repository can never become a token scope.
 - **Credentials travel only in the Authorization header.** `platform/http.ts`
   pins every request to the validated origin and refuses redirects
   (`redirect: "manual"`; a blocked redirect never reports its target). No
-  token, JWT, private key, or repository scope appears in a URL, query string,
-  request body, returned value, or diagnostic. A minted token carrying CR/LF is
-  refused (header injection).
+  token, JWT, or private key ever appears in a URL, query string, request
+  body, returned value, or diagnostic, and a minted token carrying CR/LF is
+  refused (header injection). The one deliberate exception for *scope
+  metadata*: the mint request body carries the repository scope as repository
+  **names** (`{"repositories":["repo"]}` — GitHub's mint endpoint defines
+  `repositories` as names, not owner-qualified full names), scoped to the
+  installation being minted against. Scope is not a credential; the token
+  minted from it travels only in the Authorization header.
 - **Signature verified before parse.** `github-app-signature.ts` computes the
   HMAC over the **raw** bytes, so unauthenticated bytes never reach a JSON
   parser. It is deliberately *not* the same function as `signature.ts`:

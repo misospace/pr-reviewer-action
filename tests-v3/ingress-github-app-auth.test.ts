@@ -30,12 +30,6 @@ interface Call {
   readonly method: string;
 }
 
-interface TokenReply {
-  readonly token: string;
-  readonly expiresAt?: number | undefined;
-  readonly extra?: Record<string, unknown> | undefined;
-}
-
 function makeFetch(
   responder: (call: Call, index: number) => Response | Promise<Response>,
 ): { fetchImpl: FetchLike; calls: Call[] } {
@@ -55,7 +49,16 @@ function makeFetch(
   return { fetchImpl, calls };
 }
 
-function tokenOk(token: string, expiresAt: number | undefined = NOW_SECONDS + 3600, extra?: Record<string, unknown>): Response {
+/** GitHub's documented mint response carries `expires_at` as an ISO-8601 UTC
+ * timestamp STRING, not a number — the mocks speak the wire format the API
+ * defines, so a parser that only understood numbers cannot pass on mocks. */
+const isoExpiresAt = (seconds: number): string => new Date(seconds * 1000).toISOString();
+
+function tokenOk(
+  token: string,
+  expiresAt: string | undefined = isoExpiresAt(NOW_SECONDS + 3600),
+  extra?: Record<string, unknown>,
+): Response {
   const payload: Record<string, unknown> = { token };
   if (expiresAt !== undefined) payload.expires_at = expiresAt;
   return new Response(JSON.stringify({ ...payload, ...(extra ?? {}) }), { status: 201 });
@@ -65,7 +68,7 @@ function tokenOk(token: string, expiresAt: number | undefined = NOW_SECONDS + 36
  * show up as the wrong token rather than as a missing call. */
 function mintingFetch(
   tag: (call: Call) => string,
-  expiresAt: number | undefined = NOW_SECONDS + 3600,
+  expiresAt: string | undefined = isoExpiresAt(NOW_SECONDS + 3600),
 ): { fetchImpl: FetchLike; calls: Call[] } {
   let counter = 0;
   return makeFetch((call) => {
@@ -136,22 +139,40 @@ test("a scoped mint sends the repository scope in the body, never in the URL", a
   const { fetchImpl, calls } = mintingFetch(() => "a");
   const result = await authenticator(fetchImpl).installationToken("42", { repositories: ["owner/app", "owner/other"] });
   assert.equal(result.ok, true);
-  assert.deepEqual(JSON.parse(calls[0]!.body!), { repositories: ["owner/app", "owner/other"] });
+  assert.deepEqual(JSON.parse(calls[0]!.body!), { repositories: ["app", "other"] });
   assert.ok(!calls[0]!.url.includes("owner"), "no repository scope in the URL");
+});
+
+test("the mint body carries repository NAMES, never owner-qualified full names", async () => {
+  // Strict wire contract: GitHub's `POST /app/installations/{id}/access_tokens`
+  // defines `repositories` as repository NAMES (its own example uses
+  // "Hello-World", not "octocat/Hello-World"). A full name in this body names
+  // no repository GitHub recognizes, so the fixture rejects it outright.
+  const { fetchImpl, calls } = mintingFetch(() => "a");
+  const result = await authenticator(fetchImpl).installationToken("42", {
+    repositories: ["owner/repo", "owner/other"],
+  });
+  assert.equal(result.ok, true);
+  const body = JSON.parse(calls[0]!.body!) as { repositories: string[] };
+  assert.deepEqual(body, { repositories: ["other", "repo"] });
+  for (const name of body.repositories) {
+    assert.ok(!name.includes("/"), `a full name leaked into the wire body: ${name}`);
+  }
 });
 
 test("the outbound repository scope is de-duplicated and deterministically ordered", async () => {
   // The cache key and the request body must be derived from the SAME canonical
   // form, or a caller could receive a token minted for a scope it did not ask
   // for. Entries differing only by case/whitespace collapse to ONE entry — the
-  // first spelling seen wins, because GitHub treats full names case-insensitively
-  // and the body is what GitHub reads back.
+  // first spelling seen wins, because GitHub treats repository names
+  // case-insensitively and the body is what GitHub reads back. The cache key
+  // still lowercases the FULL name; the body carries the NAME part.
   const { fetchImpl, calls } = mintingFetch(() => "a");
   await authenticator(fetchImpl).installationToken("42", {
     repositories: ["Owner/App", "owner/app", " owner/other ", "owner/beta"],
   });
   const body = JSON.parse(calls[0]!.body!) as { repositories: string[] };
-  assert.deepEqual(body.repositories, ["Owner/App", "owner/beta", "owner/other"]);
+  assert.deepEqual(body.repositories, ["App", "beta", "other"]);
   assert.equal(new Set(body.repositories.map((r) => r.toLowerCase())).size, body.repositories.length);
 });
 
@@ -163,8 +184,8 @@ test("two scopes of the same installation mint separately, never sharing a token
   assert.equal(wide.ok, true);
   assert.equal(narrow.ok, true);
   assert.equal(calls.length, 2, "a narrower scope is not served from the wider scope's cached token");
-  assert.deepEqual(JSON.parse(calls[0]!.body!), { repositories: ["owner/app", "owner/other"] });
-  assert.deepEqual(JSON.parse(calls[1]!.body!), { repositories: ["owner/app"] });
+  assert.deepEqual(JSON.parse(calls[0]!.body!), { repositories: ["app", "other"] });
+  assert.deepEqual(JSON.parse(calls[1]!.body!), { repositories: ["app"] });
 });
 
 test("an unscoped mint sends an empty JSON object", async () => {
@@ -245,16 +266,32 @@ test("scope isolation: a scoped mint for repo X never returns repo Y's token", a
   const unscoped = await auth.installationToken("11");
   assert.equal(calls.length, 3, "each distinct scope minted separately");
   if (!forX.ok || !forY.ok || !unscoped.ok) return;
-  assert.ok(forX.data.token.startsWith("o/x-token-"), forX.data.token);
-  assert.ok(forY.data.token.startsWith("o/y-token-"), forY.data.token);
+  assert.ok(forX.data.token.startsWith("x-token-"), forX.data.token);
+  assert.ok(forY.data.token.startsWith("y-token-"), forY.data.token);
   assert.ok(unscoped.data.token.startsWith("none-token-"), unscoped.data.token);
   assert.equal(new Set([forX.data.token, forY.data.token, unscoped.data.token]).size, 3);
+});
+
+test("the same repository NAME under two owners stays isolated even though both mint bodies name it identically", async () => {
+  // The cache key is the FULL owner/name; the wire body carries only the NAME.
+  // Two full names that project onto the same wire name must still get
+  // different tokens — isolation is keyed by the full name, not by what the
+  // body happened to say.
+  const { fetchImpl, calls } = mintingFetch(() => "same-tag");
+  const auth = authenticator(fetchImpl);
+  const ownerO = await auth.installationToken("11", { repositories: ["o/x"] });
+  const ownerP = await auth.installationToken("11", { repositories: ["p/x"] });
+  assert.equal(calls.length, 2, "both full names minted separately");
+  const bodyX = JSON.parse(calls[0]!.body!) as { repositories: string[] };
+  assert.deepEqual(bodyX, { repositories: ["x"] });
+  if (!ownerO.ok || !ownerP.ok) return;
+  assert.notEqual(ownerO.data.token, ownerP.data.token);
 });
 
 // ── refresh before expiry ───────────────────────────────────────────────────
 
 test("a live token is cached and re-minted only after expires_at minus the safety margin", async () => {
-  const { fetchImpl, calls } = mintingFetch(() => "a", NOW_SECONDS + 3600);
+  const { fetchImpl, calls } = mintingFetch(() => "a", isoExpiresAt(NOW_SECONDS + 3600));
   const auth = authenticator(fetchImpl);
   await auth.installationToken("42");
   await auth.installationToken("42");
@@ -263,13 +300,30 @@ test("a live token is cached and re-minted only after expires_at minus the safet
 
 test("a token inside the safety margin is re-minted instead of handed out", async () => {
   // 30s of life left, 60s of margin: already inside the margin on arrival.
-  const { fetchImpl, calls } = mintingFetch(() => "a", NOW_SECONDS + 30);
+  // The expiry arrives as GitHub's real ISO-8601 string and is honored —
+  // this is the early-expiry path, not the 3600s fallback.
+  const { fetchImpl, calls } = mintingFetch(() => "a", isoExpiresAt(NOW_SECONDS + 30));
   const auth = authenticator(fetchImpl);
   const first = await auth.installationToken("42");
   const second = await auth.installationToken("42");
   assert.equal(calls.length, 2, "the near-expiry token was refreshed, not reused");
   assert.equal(first.ok && second.ok, true);
   if (first.ok && second.ok) assert.notEqual(first.data.token, second.data.token);
+});
+
+test("a numeric expires_at is not the wire contract and is not honored", async () => {
+  // GitHub's mint response carries `expires_at` as an ISO-8601 STRING. A
+  // mock (or hostile server) answering with a number is speaking a contract
+  // the real API does not define — it must take the conservative fallback,
+  // never a numeric interpretation.
+  const { fetchImpl, calls } = makeFetch(() => tokenOk("t", undefined, { expires_at: NOW_SECONDS + 60 }));
+  const result = await authenticator(fetchImpl).installationToken("42");
+  assert.equal(result.ok, true);
+  // NOW+60 would prove the number was honored; the fallback (now+3600) proves
+  // it was not. These differ, so the assertion actually discriminates.
+  if (result.ok) assert.equal(result.data.expiresAt, NOW_SECONDS + 3600);
+  assert.notEqual(result.ok && result.data.expiresAt, NOW_SECONDS + 60);
+  assert.equal(calls.length, 1);
 });
 
 test("an absent or unparseable expires_at falls back to a conservative lifetime", async () => {

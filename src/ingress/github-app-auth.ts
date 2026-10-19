@@ -2,13 +2,17 @@
 // (#729): an App JWT mint plus a short-lived, repo-scoped installation-token
 // broker.
 //
-// WHY THIS EXISTS SEPARATELY FROM EVERY OTHER FORGE READ/WRITE PATH: no forge
-// CLI can carry a GitHub App private key or mint installation tokens. `gh`
-// authenticates with a PAT/OAuth token/device flow only. So the App path cannot
-// be "the Forgejo seam with a different token header" — it needs its own
-// capability client that issues every read AND write over the repo's typed HTTP
-// transport with a resolved, scoped, short-lived credential. This file owns the
-// credential; `github-app-client.ts` owns the read/write seam.
+// WHY THIS EXISTS SEPARATELY FROM EVERY OTHER FORGE READ/WRITE PATH: the App
+// credential LIFECYCLE is not something a forge CLI can own. `gh` (like any
+// CLI) can *carry* a supplied token — `GH_TOKEN`/`GH_ENTERPRISE_TOKEN` accept
+// an arbitrary PAT, OAuth token, or even a minted installation token — but no
+// CLI can MINT the App RS256 JWT from the private key, run the
+// installation-token mint/refresh lifecycle against the clock, or keep the
+// credential scoped to exactly the repository each call names. The minting
+// authority has to live in the controller process, so the App path gets its
+// own capability client that issues every read AND write over the repo's typed
+// HTTP transport with a resolved, scoped, short-lived credential. This file
+// owns the credential; `github-app-client.ts` owns the read/write seam.
 //
 // Security invariants:
 // - ORIGIN BINDING FIRST: `apiBaseUrl` is validated through
@@ -71,7 +75,13 @@ export interface InstallationTokenOptions {
   /** Optional repository scoping, `owner/name` full names. When present the
    * minted token is bound to exactly these repositories; when absent the token
    * carries the installation's full grant, which callers should prefer not to
-   * do. */
+   * do.
+   *
+   * Full names are the SEAM'S INTERNAL identity — they key the cache — but the
+   * wire body GitHub receives carries repository NAMES only
+   * (`repositories: ["repo"]`, not `["owner/repo"]`): that is what
+   * `POST /app/installations/{id}/access_tokens` defines. See
+   * `normalizeScope`. */
   readonly repositories?: readonly string[] | undefined;
 }
 
@@ -385,24 +395,46 @@ export class GitHubAppAuthenticator {
   }
 }
 
-/** Normalized, de-duplicated, sorted repository scope for the request body. The
- * caller's casing is preserved (GitHub is case-insensitive on full names, and
- * the body is what GitHub sees); only key derivation lowercases. Sorted with a
- * plain `.sort()` so the body order is byte-deterministic and matches
- * `installationScopeKey`'s ordering — `localeCompare` is ICU/locale-dependent,
- * and a key whose ordering depends on the host locale is not a stable key. */
+/** Normalized, de-duplicated, sorted repository scope for the mint request
+ * BODY. Callers speak `owner/name` — that is the seam's internal identity and
+ * the cache-key form — but GitHub's `POST
+ * /app/installations/{id}/access_tokens` defines `repositories` as an array of
+ * repository NAMES (its own example uses `"Hello-World"`, not
+ * `"octocat/Hello-World"`), so the wire body carries the name part only: the
+ * owner qualifier is implied by the installation being minted against.
+ * Serializing the full name instead produces a mint that does not name any
+ * repository GitHub recognizes.
+ *
+ * Each entry must parse as `owner/name` (the same validation the cache key
+ * applies); a bare name with no owner is not a valid ref and is refused. The
+ * name part keeps the first-seen entry's casing (GitHub is case-insensitive on
+ * repository names and the body is what GitHub reads back); only key
+ * derivation lowercases. Sorted with a plain `.sort()` so the body order is
+ * byte-deterministic and matches `installationScopeKey`'s ordering —
+ * `localeCompare` is ICU/locale-dependent, and a key whose ordering depends on
+ * the host locale is not a stable key. */
 function normalizeScope(repositories: readonly string[]): readonly string[] | null {
-  const out: string[] = [];
-  const seen = new Set<string>();
+  const refs: string[] = [];
+  const seenRefs = new Set<string>();
   for (const entry of repositories) {
     const trimmed = entry.trim();
     if (parseRepoRef(trimmed) === null) return null;
     const lower = trimmed.toLowerCase();
-    if (seen.has(lower)) continue;
-    seen.add(lower);
-    out.push(trimmed);
+    if (seenRefs.has(lower)) continue;
+    seenRefs.add(lower);
+    refs.push(trimmed);
   }
-  if (out.length > MAX_SCOPE_ENTRIES) return null;
+  if (refs.length > MAX_SCOPE_ENTRIES) return null;
+  const out: string[] = [];
+  const seenNames = new Set<string>();
+  for (const ref of refs) {
+    // parseRepoRef already succeeded above, so the name part always exists.
+    const name = parseRepoRef(ref)!.name;
+    const lower = name.toLowerCase();
+    if (seenNames.has(lower)) continue;
+    seenNames.add(lower);
+    out.push(name);
+  }
   return [...out].sort();
 }
 
@@ -427,6 +459,21 @@ function classifyStatus(status: number): { readonly reason: string; readonly cla
   return { reason: `github app token request refused (${status})`, classification: "permanent" };
 }
 
+/** GitHub's documented mint response carries `expires_at` as an ISO-8601 UTC
+ * timestamp string (`"2016-07-11T22:14:10Z"`), NOT a number. The wire contract
+ * is parsed strictly here; a numeric value from a hostile or nonconforming
+ * server is simply unparseable and takes the conservative fallback, never a
+ * numeric interpretation the real API never sends. */
+const EXPIRES_AT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+
+/** ISO-8601 UTC `expires_at` string → epoch SECONDS, or null when absent,
+ * malformed, or not a real point in time. */
+function parseExpiresAt(value: unknown): number | null {
+  if (typeof value !== "string" || !EXPIRES_AT_RE.test(value)) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+}
+
 /** Extract `{ token, expires_at }` from a 2xx mint response. Returns null when
  * the payload cannot yield a usable bearer value; the caller supplies the
  * conservative fallback lifetime when `expires_at` is absent or unparseable. */
@@ -437,10 +484,7 @@ function readMintedToken(data: unknown): { readonly token: string; readonly expi
   // Header injection guard: a CR/LF-bearing token would let a hostile server
   // split the outbound request.
   if (payload.token.includes("\r") || payload.token.includes("\n")) return null;
-  if (typeof payload.expires_at !== "number" || !Number.isFinite(payload.expires_at)) {
-    return { token: payload.token, expiresAt: null };
-  }
-  return { token: payload.token, expiresAt: Math.floor(payload.expires_at) };
+  return { token: payload.token, expiresAt: parseExpiresAt(payload.expires_at) };
 }
 
 function base64url(value: string): string {

@@ -2,10 +2,13 @@
 // read AND write seam for one App installation.
 //
 // THE POINT OF THIS MODULE: every forge read and write goes through the
-// configured forge CAPABILITY, not a forge-specific CLI. A GitHub App
-// installation credential cannot be carried by `gh` (or `gj`, or any forge CLI)
-// — a CLI can hold a PAT/OAuth token, never an App private key or a minted
-// installation token. So the App path gets its own client, and there is
+// configured forge CAPABILITY, not a forge-specific CLI. The App credential
+// LIFECYCLE cannot be owned by `gh` (or `gj`, or any forge CLI): a CLI can
+// *carry* a supplied token (`GH_TOKEN` accepts even a minted installation
+// token), but it cannot mint the App RS256 JWT from the private key, run the
+// installation-token mint/refresh lifecycle, or keep the credential scoped to
+// exactly the repository each call names. The minting authority lives in the
+// controller process, so the App path gets its own client, and there is
 // deliberately NO `child_process` import, no `gh`/`gj`/`forge` invocation, and no
 // shell-out of any kind anywhere in this file: every request is issued through
 // `platform/http.ts`'s `requestJson`, pinned to the validated API origin, with a
@@ -104,10 +107,19 @@ const CHECK_RUN_CONCLUSIONS: ReadonlySet<string> = new Set([
   "timed_out",
 ]);
 
-/** A review payload: `event`, an optional `body`, and an optional list of
- * inline `comments`. Kept as an explicit shape (rather than `unknown`) so the
- * written body is built by this module from typed values only. */
+/** A review payload: the pinned `commitId`, an optional `event`, an optional
+ * `body`, and an optional list of inline `comments`. Kept as an explicit shape
+ * (rather than `unknown`) so the written body is built by this module from
+ * typed values only. */
 export interface ReviewPayload {
+  /** The exact head SHA the review was computed against, transmitted as the
+   * endpoint's `commit_id`. REQUIRED, not defaulted: GitHub's create-review
+   * endpoint falls back to the PR's CURRENT head when `commit_id` is absent,
+   * so an unpinned review could publish an APPROVE/REQUEST_CHANGES computed
+   * for one commit onto a newer, never-reviewed head. Pinning is enforced
+   * here; the future publisher must still re-check the exact PR head just
+   * before publication. */
+  readonly commitId: string;
   readonly event?: "APPROVE" | "REQUEST_CHANGES" | "COMMENT" | undefined;
   readonly body?: string | undefined;
   readonly comments?: readonly ReviewCommentPayload[] | undefined;
@@ -267,7 +279,15 @@ export class GitHubAppCapabilityClient {
     });
   }
 
-  /** Publish a native review on a pull request. */
+  /** Publish a native review on a pull request.
+   *
+   * The payload's `commitId` is REQUIRED and transmitted as `commit_id`: the
+   * review is bound to the exact head SHA it was computed for, so a PR that
+   * moved between review computation and submission cannot receive a verdict
+   * computed for an older commit (GitHub otherwise defaults to the CURRENT
+   * head). An omitted, malformed, or hostile SHA fails closed with no POST —
+   * the future publisher must additionally re-check the exact PR head just
+   * before publication. */
   async createReview(repo: string, prNumber: number, payload: ReviewPayload): Promise<WriteResult> {
     if (!isPrNumber(prNumber)) return { ok: false, error: "invalid PR number" };
     const encoded = encodeReviewPayload(payload);
@@ -508,9 +528,14 @@ function isUsableMarker(marker: string): boolean {
  * URL or an unvalidated request body. */
 function encodeReviewPayload(payload: ReviewPayload): string | null {
   if (typeof payload !== "object" || payload === null) return null;
+  // `commit_id` pinning is a hard contract, not a default: without it GitHub
+  // would attach the review to whatever head the PR has at submission time.
+  // Same shape the URL path uses for shas (hex only, 7-64 chars), so a hostile
+  // or absent SHA is rejected before anything is built.
+  if (typeof payload.commitId !== "string" || !SHA_RE.test(payload.commitId)) return null;
   const event = payload.event ?? "COMMENT";
   if (!REVIEW_EVENTS.has(event)) return null;
-  const body: Record<string, unknown> = { event };
+  const body: Record<string, unknown> = { event, commit_id: payload.commitId };
   if (payload.body !== undefined) {
     if (!isBoundedBytes(payload.body, MAX_COMMENT_BYTES)) return null;
     body.body = payload.body;

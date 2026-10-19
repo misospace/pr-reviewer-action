@@ -23,6 +23,13 @@ const MARKER = "<!-- ai-pr-review -->";
 const APP_SLUG = "ai-pr-reviewer";
 const BOT_LOGIN = `${APP_SLUG}[bot]`;
 
+/** GitHub's mint response carries `expires_at` as an ISO-8601 UTC string, not
+ * a number — mocks speak the wire format the API defines. */
+const isoExpiresAt = (seconds: number): string => new Date(seconds * 1000).toISOString();
+
+/** A full-sha pinned head for review payloads. */
+const REVIEW_SHA = "abc1234def5678abc1234def5678abc1234def56";
+
 /** A managed comment authored by this App. */
 function ownedComment(id: number, body: string, updatedAt: string): Record<string, unknown> {
   return { id, body, updated_at: updatedAt, user: { login: BOT_LOGIN } };
@@ -76,7 +83,7 @@ function makeForge(
     call.url.includes("/app/installations/") || call.url === `${API_BASE}/app`;
   const { fetchImpl, calls } = makeFetch((call) => {
     if (call.url.includes("/app/installations/")) {
-      return new Response(JSON.stringify({ token: tokenToken, expires_at: NOW_SECONDS + 3600 }), { status: 201 });
+      return new Response(JSON.stringify({ token: tokenToken, expires_at: isoExpiresAt(NOW_SECONDS + 3600) }), { status: 201 });
     }
     if (call.url === `${API_BASE}/app`) return (appIdentity ?? (() => json({})))();
     return handler(call);
@@ -116,7 +123,7 @@ test("the mint is scoped to exactly the repository the call names", async () => 
   await client(fetchImpl).listOpenPullRequests("owner/repo");
   const mint = calls.find((call) => call.url.includes("/access_tokens"));
   assert.ok(mint !== undefined, "a mint happened");
-  assert.deepEqual(JSON.parse(mint!.body!), { repositories: ["owner/repo"] });
+  assert.deepEqual(JSON.parse(mint!.body!), { repositories: ["repo"] });
 });
 
 test("listOpenPullRequests pages and fails loudly at the bound, never silently truncated", async () => {
@@ -374,9 +381,10 @@ test("a proven login never matches a plain user account that happens to share th
 
 // ── the other writes ────────────────────────────────────────────────────────
 
-test("createReview posts a typed review payload", async () => {
+test("createReview posts a typed review payload pinned to the reviewed commit", async () => {
   const { fetchImpl, apiCalls } = makeForge(() => json({ id: 5 }, 200));
   const result = await client(fetchImpl).createReview("owner/repo", 7, {
+    commitId: REVIEW_SHA,
     event: "REQUEST_CHANGES",
     body: "## Review\nplease fix",
   });
@@ -384,7 +392,48 @@ test("createReview posts a typed review payload", async () => {
   const call = apiCalls()[0]!;
   assert.equal(call.method, "POST");
   assert.equal(call.url, `${API_BASE}/repos/owner/repo/pulls/7/reviews`);
-  assert.deepEqual(JSON.parse(call.body!), { event: "REQUEST_CHANGES", body: "## Review\nplease fix" });
+  assert.deepEqual(JSON.parse(call.body!), {
+    event: "REQUEST_CHANGES",
+    commit_id: REVIEW_SHA,
+    body: "## Review\nplease fix",
+  });
+});
+
+test("createReview transmits the EXACT pinned SHA as commit_id", async () => {
+  // Not lowercased, not truncated: the body must carry precisely the SHA the
+  // caller pinned, or the pin means something the caller did not say.
+  const { fetchImpl, apiCalls } = makeForge(() => json({ id: 5 }, 200));
+  const pinned = "ABC1234DEF5678ABC1234DEF5678ABC1234DEF56";
+  const result = await client(fetchImpl).createReview("owner/repo", 7, { commitId: pinned });
+  assert.equal(result.ok, true);
+  const body = JSON.parse(apiCalls()[0]!.body!) as { commit_id: string };
+  assert.equal(body.commit_id, pinned);
+});
+
+test("createReview refuses an absent pinned SHA with no request", async () => {
+  const { fetchImpl, calls } = makeForge(() => json({ id: 5 }, 200));
+  // GitHub would DEFAULT an absent commit_id to the PR's current head —
+  // publishing a verdict onto a head it was never computed for. Absence is a
+  // payload refusal here, never a silent default.
+  const absent = await client(fetchImpl).createReview(
+    "owner/repo",
+    7,
+    { event: "COMMENT" } as unknown as Parameters<GitHubAppCapabilityClient["createReview"]>[2],
+  );
+  assert.equal(absent.ok, false);
+  if (!absent.ok) assert.equal(absent.error, "invalid review payload");
+  assert.equal(calls.length, 0, "no POST was attempted without a pinned SHA");
+});
+
+test("createReview refuses a malformed pinned SHA with no request", async () => {
+  const { fetchImpl, calls } = makeForge(() => json({ id: 5 }, 200));
+  const api = client(fetchImpl);
+  for (const bad of ["", "not-a-sha", "deadbeef; DROP TABLE reviews", "z".repeat(40), `${"a".repeat(65)}`, "main"]) {
+    const result = await api.createReview("owner/repo", 7, { commitId: bad });
+    assert.equal(result.ok, false, `expected refusal for ${JSON.stringify(bad)}`);
+    if (!result.ok) assert.equal(result.error, "invalid review payload");
+  }
+  assert.equal(calls.length, 0, "no POST was attempted for any malformed SHA");
 });
 
 test("createReview carries multi-line inline comments, and still refuses non-whitespace controls", async () => {
@@ -393,17 +442,20 @@ test("createReview carries multi-line inline comments, and still refuses non-whi
   const { fetchImpl, apiCalls } = makeForge(() => json({ id: 5 }, 200));
   const inlineBody = "**nit**: this is wrong\n\n```ts\nconst a = 1;\n```\n";
   const result = await client(fetchImpl).createReview("owner/repo", 7, {
+    commitId: REVIEW_SHA,
     event: "COMMENT",
     comments: [{ path: "src/a.ts", line: 12, side: "RIGHT", body: inlineBody }],
   });
   assert.equal(result.ok, true);
   assert.deepEqual(JSON.parse(apiCalls()[0]!.body!), {
     event: "COMMENT",
+    commit_id: REVIEW_SHA,
     comments: [{ path: "src/a.ts", body: inlineBody, line: 12, side: "RIGHT" }],
   });
 
   const { fetchImpl: badImpl } = makeForge(() => json({ id: 5 }, 200));
   const bad = await client(badImpl).createReview("owner/repo", 7, {
+    commitId: REVIEW_SHA,
     event: "COMMENT",
     // A NUL byte is not markdown — it stays refused.
     comments: [{ path: "src/a.ts", body: "before\u0000after" }],
@@ -415,10 +467,10 @@ test("createReview carries multi-line inline comments, and still refuses non-whi
 test("createReview refuses an unknown event and an invalid PR number before any request", async () => {
   const { fetchImpl, calls } = makeForge(() => json({ id: 5 }));
   const api = client(fetchImpl);
-  const badEvent = await api.createReview("owner/repo", 7, { event: "YOLO" as "APPROVE" });
+  const badEvent = await api.createReview("owner/repo", 7, { commitId: REVIEW_SHA, event: "YOLO" as "APPROVE" });
   assert.equal(badEvent.ok, false);
   if (!badEvent.ok) assert.equal(badEvent.error, "invalid review payload");
-  const badNumber = await api.createReview("owner/repo", 0, { event: "COMMENT" });
+  const badNumber = await api.createReview("owner/repo", 0, { commitId: REVIEW_SHA, event: "COMMENT" });
   assert.equal(badNumber.ok, false);
   if (!badNumber.ok) assert.equal(badNumber.error, "invalid PR number");
   assert.equal(calls.length, 0);
@@ -499,7 +551,7 @@ test("no request ever carries a credential in its URL or query string", async ()
   const api = client(fetchImpl);
   await api.listOpenPullRequests("owner/repo");
   await api.upsertIssueComment("owner/repo", 7, MARKER, managedBody("body"));
-  await api.createReview("owner/repo", 7, { event: "COMMENT", body: "b" });
+  await api.createReview("owner/repo", 7, { commitId: REVIEW_SHA, event: "COMMENT", body: "b" });
   await api.createCommitStatus("owner/repo", "abc1234", "success", "ctx");
   await api.createCheckRun("owner/repo", { name: "x", headSha: "abc1234", status: "queued" });
   assert.ok(calls.length >= 5);
@@ -550,7 +602,7 @@ test("a hostile 4xx that reflects the credential cannot leak it into a returned 
 test("a transport failure maps to a fixed, credential-free error", async () => {
   const { fetchImpl } = makeFetch((call) => {
     if (call.url.includes("/access_tokens")) {
-      return new Response(JSON.stringify({ token: INSTALLATION_TOKEN, expires_at: NOW_SECONDS + 3600 }), { status: 201 });
+      return new Response(JSON.stringify({ token: INSTALLATION_TOKEN, expires_at: isoExpiresAt(NOW_SECONDS + 3600) }), { status: 201 });
     }
     throw new TypeError("ECONNRESET");
   });
