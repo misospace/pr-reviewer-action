@@ -507,8 +507,11 @@ test("#847: without a tool harness the marker stays byte-identical to the pre-#8
 
 // ---------------------------------------------------------------------------
 // #873 — required-check coverage incomplete (or a #810 tool-loop coverage
-// gap) must never let an approve publish as APPROVE, under every verdict
-// policy and publish mode. Evidence: PR #854 published APPROVE with
+// gap) must never let a run READ as clean: the marker stays `partial` under
+// every verdict policy. #1145 restated the event rule: in `review_verdict`
+// the valid verdict publishes its native event with the gap stated (no
+// COMMENT downgrade); comment-only modes still never header as an approval.
+// Evidence: PR #854 published APPROVE with
 // "review_result":"partial","required_checks":"incomplete" in its marker.
 // ---------------------------------------------------------------------------
 
@@ -551,7 +554,7 @@ const INCOMPLETE_STATES: Array<{ name: string; requiredChecks: string; partialCo
 
 for (const state of INCOMPLETE_STATES) {
   for (const verdictPolicy of VERDICT_POLICIES) {
-    test(`review_verdict: ${state.name} + approve (policy=${verdictPolicy ?? "default"}) never publishes APPROVE`, async () => {
+    test(`review_verdict: ${state.name} + approve (policy=${verdictPolicy ?? "default"}) publishes APPROVE with an explicit gaps note (#1145)`, async () => {
       const api = new MockPublishApi();
       const result = await publishReview(input({
         mode: "review_verdict", allowApprove: true, verdict: "approve",
@@ -561,9 +564,13 @@ for (const state of INCOMPLETE_STATES) {
       }), api, { diffText: "" });
       assert.equal(result.status, "published");
       assert.equal(api.submitted.length, 1);
-      assert.notEqual(api.submitted[0]!.event, "APPROVE");
-      assert.equal(api.submitted[0]!.event, "COMMENT");
-      assert.match(api.submitted[0]!.body, /Approval withheld/);
+      // #1145: the publish mode is authoritative — the verdict's native event
+      // is never downgraded by a coverage/trace shortfall...
+      assert.equal(api.submitted[0]!.event, "APPROVE", `policy=${verdictPolicy}`);
+      // ...but the shortfall stays machine- and human-readable: partial
+      // marker + explicit note on the approved review.
+      assert.match(api.submitted[0]!.body, /Approval published with incomplete coverage/);
+      assert.match(api.submitted[0]!.body, /"review_result":"partial"/);
     });
 
     test(`comment: ${state.name} + approve (policy=${verdictPolicy ?? "default"}) never headers as APPROVE`, async () => {

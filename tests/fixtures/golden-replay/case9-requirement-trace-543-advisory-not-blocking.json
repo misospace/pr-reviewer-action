@@ -78,7 +78,7 @@
   "expect": {
     "verdict": "approve",
     "blocking_finding_ids": [],
-    "native_event": "COMMENT",
+    "native_event": "APPROVE",
     "published_body_excludes": ["requirement not enforced"],
     "published_body_includes": ["unmet", "no regression test asserts"]
   }

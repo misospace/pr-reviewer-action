@@ -1350,6 +1350,18 @@ export type HarnessResult = Record<string, unknown> & {
    * Absent when nothing was credited. Sorted lexicographically. */
   corpus_diff_covered_files?: string[];
   tool_loop_meta?: Record<string, unknown> | null;
+  /** #1145: record of the bounded evidence-repair continuation of the tool
+   * loop (present only when a trace-gap probe was supplied and fired).
+   * snake_case: persisted verbatim in the harness artifact. */
+  trace_repair_continuation?: {
+    attempted: boolean;
+    outcome: "continued" | "skipped_no_budget" | "skipped_probe_error" | "skipped_refresh_failed";
+    unresolved_ids: string[];
+    stop_reason?: string;
+    rounds?: number;
+    tool_calls?: number;
+    verdict_refreshed?: boolean;
+  };
 };
 
 /**
@@ -1466,6 +1478,10 @@ export interface HarnessDeps {
   /** Raw default system prompt for the defensive fallback path; defaults to
    * the bundled `default_system_prompt.txt` (v2 reads that file). */
   defaultSystemPrompt?: string;
+  /** #1145: optional bounded evidence-repair continuation probe, threaded to
+   * `runNativeLoop` (which invokes it at most once after an accepted
+   * verdict). Absent = the pre-#1145 loop, byte-for-byte. */
+  traceGapProbe?: TraceGapProbe;
 }
 
 /**
@@ -1521,6 +1537,45 @@ export function defaultWriteArtifact(cwd: string): (name: string, text: string) 
   };
 }
 
+/**
+ * #1145: bounded evidence-repair continuation of the native tool loop.
+ *
+ * When deterministic requirement-trace validation finds an in-scope
+ * requirement unresolved after the first in-conversation verdict, the caller
+ * (run/review.ts) may supply this probe. The harness invokes it ONCE with the
+ * accepted verdict response and the loop's remaining-budget facts; returning
+ * a continuation asks the harness to append the (caller-rendered, untrusted
+ * data fenced) instruction to the SAME conversation, run one bounded
+ * tool-loop round with the reviewer's normal read-only tools, and re-produce
+ * the verdict from that conversation before the outputs are written. A
+ * returned null (or a thrown probe) leaves the run exactly as before.
+ */
+export interface TraceGapContinuation {
+  /** Full user-message text to append to the existing conversation. The
+   * caller owns untrusted-data fencing; the harness never re-wraps it. */
+  instruction: string;
+  /** Requirement ids the probe found unresolved (telemetry only). */
+  unresolvedIds: string[];
+  /** Deterministic validator reason per unresolved id (telemetry only). */
+  reasons?: Record<string, string>;
+}
+
+/** The loop's budget facts handed to the probe; the harness caps the
+ * continuation round to these remaining budgets, never beyond the original
+ * run's totals. */
+export interface TraceGapLoopState {
+  requestsRemaining: number;
+  elapsedSec: number;
+  wallClockSec: number;
+  maxRounds: number;
+  stopReason: string;
+}
+
+export type TraceGapProbe = (
+  verdictResponse: unknown,
+  loop: TraceGapLoopState,
+) => TraceGapContinuation | null | Promise<TraceGapContinuation | null>;
+
 export interface RunNativeLoopInput {
   repo: string;
   baseUrl: string;
@@ -1542,6 +1597,10 @@ export interface RunNativeLoopInput {
   result: HarnessResult;
   tier: string;
   deps: HarnessDeps;
+  /** #1145: bounded evidence-repair continuation probe over the verdict the
+   * in-conversation verdict turn produced. Optional; unset preserves the
+   * pre-#1145 flow byte-for-byte. */
+  traceGapProbe?: TraceGapProbe;
 }
 
 /**
@@ -1999,10 +2058,18 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // message as the trailing tool_result blocks (adjacent user turns are a
   // 400). Skipped when no reviewer prompt resolved.
   if (reviewSystem) {
-    try {
-      const corpusName = input.tier === "smart" ? "review-corpus.smart.truncated.md" : "review-corpus.truncated.md";
-      let verdictCorpus = deps.readText(corpusName) ?? "";
-      if (verdictCorpus) {
+    // #1145: the verdict-turn body extracted so the bounded evidence-repair
+    // continuation can re-run it over the same conversation. `recordFailure`
+    // distinguishes the FIRST verdict (owns the verdict telemetry, the error
+    // artifact, and the fallback fields) from a CONTINUATION verdict: on
+    // failure the continuation must leave the standing verdict, its fields,
+    // and its artifact byte-for-byte untouched. Returns the accepted verdict
+    // response, or null when no reusable verdict was produced.
+    const runVerdictTurn = async (recordFailure: boolean): Promise<unknown> => {
+      try {
+        const corpusName = input.tier === "smart" ? "review-corpus.smart.truncated.md" : "review-corpus.truncated.md";
+        let verdictCorpus = deps.readText(corpusName) ?? "";
+        if (!verdictCorpus) return null;
         verdictCorpus = replaceHarnessFindingsSection(verdictCorpus, verdictHarnessFindingsBody(outcome));
         // #372/#398: drop the byte-duplicate sections the planning context
         // already carries (section-exact and conservative).
@@ -2088,19 +2155,21 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           timeFn,
           tier: input.tier,
         });
-        input.result.native_loop_verdict_attempts = verdict.attempts;
-        input.result.native_loop_verdict_retried = verdict.retried;
-        if (verdict.retried) {
-          input.result.native_loop_verdict_stream_failure = verdict.streamFailureKind;
+        if (verdict.ok || recordFailure) {
+          input.result.native_loop_verdict_attempts = verdict.attempts;
+          input.result.native_loop_verdict_retried = verdict.retried;
+          if (verdict.retried) {
+            input.result.native_loop_verdict_stream_failure = verdict.streamFailureKind;
+          }
         }
         // #1047: the bounded failure-shape record (and the budget raise, when
         // the single non-streamed retry used one) — content-free counts and
         // reasons only, so the harness artifact can say WHY the verdict turn
         // failed without ever carrying response text.
-        if (!verdict.ok && verdict.diagnostics !== undefined) {
+        if (!verdict.ok && verdict.diagnostics !== undefined && recordFailure) {
           input.result.native_loop_verdict_diagnostics = verdict.diagnostics.record;
         }
-        if (verdict.budgetRaisedTo !== undefined) {
+        if (verdict.budgetRaisedTo !== undefined && (verdict.ok || recordFailure)) {
           input.result.native_loop_verdict_budget_raised_to = verdict.budgetRaisedTo;
         }
         // Keep a diagnostic artifact even when the response is unusable, but
@@ -2127,10 +2196,12 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           // content gate (#1094 review round 3), and the reuse re-parse
           // enforces the same gate.
           deps.writeArtifact(`ai-response.${input.tier}.json`, JSON.stringify(reusableVerdictEnvelope(verdict.response, verdict.knownSecrets)));
-        } else if (!verdict.ok && verdict.response !== null && typeof verdict.response === "object") {
-          deps.writeArtifact(`ai-response.${input.tier}.json`, JSON.stringify({ error: verdict.detail }));
-        } else {
-          deps.deleteArtifact?.(`ai-response.${input.tier}.json`);
+        } else if (recordFailure) {
+          if (verdict.response !== null && typeof verdict.response === "object") {
+            deps.writeArtifact(`ai-response.${input.tier}.json`, JSON.stringify({ error: verdict.detail }));
+          } else {
+            deps.deleteArtifact?.(`ai-response.${input.tier}.json`);
+          }
         }
         if (verdict.ok && (deadline === null || timeFn() < deadline)) {
           input.result.native_loop_verdict_produced = true;
@@ -2140,7 +2211,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
             "  native_loop: in-conversation verdict produced" +
               (verdict.transport === "non-streamed-retry" ? " via non-streamed retry" : ""),
           );
-        } else {
+          return verdict.response;
+        }
+        if (recordFailure) {
           input.result.native_loop_verdict_status = "fallback";
           input.result.native_loop_verdict_reason =
             deadline !== null && timeFn() >= deadline ? "deadline" : verdict.reason;
@@ -2155,13 +2228,158 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           log(
             `  native_loop: no reusable in-conversation verdict [${verdict.reason}] ${verdict.detail}${diagnosticsLine} — the standard review call will synthesize the verdict`,
           );
+        } else {
+          // The repair verdict did not come back usable: reason only, never
+          // the detail text, and the original verdict stands untouched.
+          log(
+            `  native_loop: evidence-repair verdict produced no reusable verdict [${verdict.reason}] — keeping the original verdict`,
+          );
+        }
+        return null;
+      } catch (exc) {
+        const message = exc instanceof Error ? exc.message : String(exc);
+        if (recordFailure) {
+          input.result.native_loop_verdict_error = message;
+          input.result.native_loop_verdict_status = "fallback";
+          input.result.native_loop_verdict_reason = "error";
+          log(`  native_loop: verdict turn failed (${message}) — the standard review call will synthesize the verdict`);
+        } else {
+          log(
+            `  native_loop: evidence-repair verdict turn failed (${maskKnownSecrets(message, harnessSecrets)}) — keeping the original verdict`,
+          );
+        }
+        return null;
+      }
+    };
+    const firstVerdictResponse = await runVerdictTurn(true);
+
+    // ── #1145: bounded evidence-repair continuation ──────────────────────
+    // The probe inspects the ACCEPTED verdict against deterministic
+    // requirement-trace validation and may ask for ONE additional bounded
+    // tool round over the same conversation, then a refreshed verdict. Every
+    // failure path here leaves the accepted verdict standing; nothing in
+    // this block may throw out of `runNativeLoop`.
+    if (firstVerdictResponse !== null && input.traceGapProbe !== undefined) {
+      let continuation: TraceGapContinuation | null = null;
+      try {
+        continuation = await input.traceGapProbe(firstVerdictResponse, {
+          requestsRemaining: outcome.requestsRemaining,
+          elapsedSec: outcome.elapsedSec,
+          wallClockSec: budgets.wallClockSec,
+          maxRounds: budgets.maxRounds,
+          stopReason: outcome.stopReason,
+        });
+      } catch (exc) {
+        const message = exc instanceof Error ? exc.message : String(exc);
+        log(`  native_loop: trace-gap probe failed (${maskKnownSecrets(message, harnessSecrets)}) — keeping the original verdict`);
+        input.result.trace_repair_continuation = {
+          attempted: false,
+          outcome: "skipped_probe_error",
+          unresolved_ids: [],
+        };
+      }
+      if (continuation !== null) {
+        // Telemetry-only projection of the unresolved ids: control chars
+        // stripped and length-capped so a hostile id can never forge
+        // artifact structure or log lines.
+        const unresolvedIds = (Array.isArray(continuation.unresolvedIds) ? continuation.unresolvedIds : [])
+          .filter((id): id is string => typeof id === "string")
+          .map((id) => traceGapIdLabel(id));
+        const instruction = typeof continuation.instruction === "string" ? continuation.instruction.trim() : "";
+        const wallClockLeft = budgets.wallClockSec - outcome.elapsedSec;
+        const deadlineLeft = deadline === null || timeFn() < deadline;
+        if (!instruction) {
+          // A vacuous instruction is treated as a no-op probe: no loop, no
+          // record — the run stays exactly as before.
+        } else if (outcome.requestsRemaining <= 0 || wallClockLeft <= 0 || !deadlineLeft) {
+          input.result.trace_repair_continuation = {
+            attempted: true,
+            outcome: "skipped_no_budget",
+            unresolved_ids: unresolvedIds,
+          };
+          log("  native_loop: trace-gap repair skipped (no loop budget left) — keeping the original verdict");
+        } else {
+          let repair: LoopOutcome | null = null;
+          try {
+            // The instruction rides the SAME conversation (the caller owns
+            // untrusted-data fencing). On the Anthropic format it merges
+            // into the same trailing user message as the verdict turn's
+            // user event — both follow tool_result blocks, so no adjacent
+            // user turns are created.
+            conversation.addUser(continuation.instruction);
+            repair = await driveToolLoop(conversation, postFn, executeFn, {
+              apiFormat: input.apiFormat,
+              model: input.model,
+              budgets: {
+                ...budgets,
+                maxRounds: 1,
+                maxToolCalls: outcome.requestsRemaining,
+                wallClockSec: Math.max(0, wallClockLeft),
+              },
+              maxTokens: input.maxTokensPerTurn,
+              temperature: planningTemp,
+              stream,
+              tokensParam,
+              cachePrefix: true,
+              reasoningEffort,
+              anthropicEffortSupported: anthropicEffort,
+              summarizeFn,
+              timeFn,
+            });
+          } catch (exc) {
+            const message = exc instanceof Error ? exc.message : String(exc);
+            input.result.trace_repair_continuation = {
+              attempted: true,
+              outcome: "skipped_refresh_failed",
+              unresolved_ids: unresolvedIds,
+            };
+            log(`  native_loop: trace-gap repair round failed (${maskKnownSecrets(message, harnessSecrets)}) — keeping the original verdict`);
+          }
+          if (repair !== null) {
+            // Fold the repair's executed calls into the harness trace so the
+            // artifact shows everything the reviewer actually read. The
+            // loop-level fields (`rounds`, `stop_reason`, `budget_exhausted`,
+            // `tool_loop_meta`) describe the ORIGINAL loop and stay untouched;
+            // the continuation's own stop/rounds/call counts live on the
+            // record below.
+            const traceCalls: unknown[] = Array.isArray(input.result.tool_calls) ? (input.result.tool_calls as unknown[]) : [];
+            const traceResults: unknown[] = Array.isArray(input.result.tool_results) ? (input.result.tool_results as unknown[]) : [];
+            for (const call of repair.executed) {
+              traceCalls.push({
+                tool: call.tool,
+                args: maskKnownSecretsDeep(call.args, harnessSecrets),
+                status: (call.result.status as string) ?? "error",
+              });
+              traceResults.push(maskKnownSecretsDeep(call.result, harnessSecrets));
+            }
+            input.result.tool_calls = traceCalls;
+            input.result.tool_results = traceResults;
+            input.result.executed_request_count =
+              Number(input.result.executed_request_count ?? 0) +
+              repair.executed.filter((call) => call.result.status === "ok").length;
+            // A refresh is justified only by new executed evidence — and it
+            // is wire-safe only then: with no fresh tool_result event the
+            // second verdict's user turn would sit directly after the
+            // (already merged) verdict+repair user message, which the
+            // Anthropic format rejects.
+            const verdictRefreshed =
+              repair.executed.length > 0 && (await runVerdictTurn(false)) !== null;
+            input.result.trace_repair_continuation = {
+              attempted: true,
+              outcome: "continued",
+              unresolved_ids: unresolvedIds,
+              stop_reason: repair.stopReason,
+              rounds: repair.rounds,
+              tool_calls: repair.executed.length,
+              verdict_refreshed: verdictRefreshed,
+            };
+            log(
+              `  native_loop: trace-gap repair ran ${repair.executed.length} additional tool call(s) ` +
+                `(${repair.stopReason}); verdict ${verdictRefreshed ? "refreshed" : "kept"}`,
+            );
+          }
         }
       }
-    } catch (exc) {
-      input.result.native_loop_verdict_error = exc instanceof Error ? exc.message : String(exc);
-      input.result.native_loop_verdict_status = "fallback";
-      input.result.native_loop_verdict_reason = "error";
-      log(`  native_loop: verdict turn failed (${exc instanceof Error ? exc.message : String(exc)}) — the standard review call will synthesize the verdict`);
     }
   }
 
@@ -2185,6 +2403,14 @@ function countOccurrences(text: string, needle: string): number {
     pos = text.indexOf(needle, pos + needle.length);
   }
   return count;
+}
+
+/** #1145: bounded display form of an unresolved requirement id for the
+ * `trace_repair_continuation` telemetry record: control characters stripped
+ * and length-capped, so a hostile id can never forge artifact structure. */
+function traceGapIdLabel(id: string): string {
+  // eslint-disable-next-line no-control-regex
+  return id.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 120);
 }
 
 /**
@@ -2445,6 +2671,7 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
     result,
     tier,
     deps,
+    ...(deps.traceGapProbe !== undefined ? { traceGapProbe: deps.traceGapProbe } : {}),
   });
   if (!handled) {
     // The model issued no tool calls (or the loop errored before any): degrade

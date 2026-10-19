@@ -226,6 +226,38 @@ a confirmed coverage gap.
 review's own coverage is incomplete; gate merges on both the verdict and the
 review result, never on the verdict alone.
 
+## Evidence-repair continuation (#1145)
+
+When requirement-trace validation is on and the primary native loop accepts a
+verdict while in-scope requirements are still unproven — no claim, an invalid
+citation, an unmapped distributed seam — and at least one tool request remains
+in the loop's budget, the harness asks the same conversation for one bounded
+repair round before writing outputs. A probe (requirements side:
+`createTraceGapProbe`) re-validates the accepted verdict with the exact
+deterministic validator the publication path uses; on a genuine gap it returns
+a fenced instruction listing the unresolved requirements with their
+deterministic validator reasons. The loop appends it to the same conversation,
+runs one more round under the remaining budgets (no new tools, permissions, or
+rounds beyond the original totals — the instruction explicitly forbids them),
+and re-requests the verdict. Every failure path keeps the original verdict:
+a throwing probe, a budget/deadline stop, or a failed refresh records
+`skipped_probe_error`, `skipped_no_budget`, or `skipped_refresh_failed` on the
+harness's `trace_repair_continuation` instead of continuing.
+
+Rows the validator has already refuted against the checkout
+(`enforcement-location-copies-without-comparing`, #854;
+`structural-proof-unconfirmed`, #985) are never repair targets — reading more
+cannot un-prove them; the confirmed-unmet escalation in
+`docs/verdicts-and-publishing.md` owns that outcome. Model-claimed `unmet`
+rows (#1095) are likewise left to the reviewer's own findings.
+
+The continuation is primary-tier only (the smart tier keeps its pre-#1145
+shape) and never overrides the loop's own stop reason. What happened is
+reported, sanitized, on `tool-harness.json` (`trace_repair_continuation`), on
+`review-coverage.json` (`trace_repair_continuation`), and inside the
+`requirement_trace_repair` summary (`continuation`) — the loop's in-conversation
+attempt and the no-tools #959 repair pass are distinct and both visible.
+
 ## Fork behavior
 
 By default, the tool harness is **skipped** on cross-repository (fork) pull

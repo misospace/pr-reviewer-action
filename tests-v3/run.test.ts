@@ -1921,8 +1921,10 @@ test("#873: required-check coverage incomplete + a model approve never publishes
   assert.match(result.marker, /"review_result":"partial"/);
   assert.match(result.marker, /"required_checks":"incomplete"/);
 
-  // The invariant: piping that exact shape through publish (review_verdict
-  // mode, allow_approve on) must never yield a native APPROVE event.
+  // The invariant (#1145 restated): piping that exact shape through publish
+  // (review_verdict mode, allow_approve on) publishes the verdict's native
+  // event — but the run must NEVER read as clean: the marker keeps the
+  // partial/incomplete state and the published body names the gap.
   const api = new MinimalPublishApi("a".repeat(40));
   const publishResult = await publishReview({
     mode: "review_verdict",
@@ -1955,9 +1957,10 @@ test("#873: required-check coverage incomplete + a model approve never publishes
 
   assert.equal(publishResult.status, "published");
   assert.equal(api.submitted.length, 1);
-  assert.notEqual(api.submitted[0]!.event, "APPROVE");
-  assert.equal(api.submitted[0]!.event, "COMMENT");
-  assert.match(api.submitted[0]!.body, /Approval withheld/);
+  assert.equal(api.submitted[0]!.event, "APPROVE");  // #1145: verdict mode publishes the verdict
+  assert.match(api.submitted[0]!.body, /Approval published with incomplete coverage/);
+  assert.match(api.submitted[0]!.body, /"review_result":"partial"/);
+  assert.match(api.submitted[0]!.body, /"required_checks":"incomplete"/);
 });
 
 /** The native loop only reads tracked files: make the run dir a checkout. */
@@ -3682,7 +3685,7 @@ test("#954: completed investigation with an unverifiable requirement exposes tra
   }
 });
 
-test("#874 #854-reproduction: a 'met' claim citing a real line that only copies the value (never compares it) is downgraded, coverage goes partial", async () => {
+test("#874 #854-reproduction: a 'met' claim citing a real line that only copies the value (never compares it) is downgraded, #1145 escalates to request_changes", async () => {
   const server = await startMockServer((_req, body, res) => {
     const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
     res.setHeader("Content-Type", "application/json");
@@ -3749,7 +3752,31 @@ test("#874 #854-reproduction: a 'met' claim citing a real line that only copies 
 
     assert.equal(result.outputs.requiredChecks, "incomplete");
     assert.match(result.marker, /"required_checks":"incomplete"/);
-    assert.match(result.marker, /"review_result":"partial"/);
+    // #1145: the copies-without-comparing refutation is deterministic proof
+    // against the checkout at head, so the confirmed-unmet escalation
+    // synthesizes a blocker finding and flips the verdict — this is the one
+    // case where a finding is synthesized (#1095 forbids it for ledger-only
+    // claims, and the #1095 sibling test below pins that boundary).
+    assert.equal(result.outputs.verdict, "request_changes");
+    assert.match(result.marker, /"review_result":"issues"/);
+    const findings = JSON.parse(result.outputs.findings) as Array<{
+      severity: string;
+      category: string;
+      file: string | null;
+      line: number | null;
+      message: string;
+    }>;
+    assert.equal(findings.length, 1);
+    assert.equal(findings[0]!.severity, "blocker");
+    assert.equal(findings[0]!.category, "requirements");
+    assert.equal(findings[0]!.file, "src/context-resolution.ts");
+    assert.equal(findings[0]!.line, 5);
+    assert.ok(findings[0]!.message.startsWith("Confirmed-unmet requirement "), findings[0]!.message);
+    assert.ok(findings[0]!.message.includes("copies the value without comparing it"), findings[0]!.message);
+    assert.ok(
+      result.outputs.reviewMarkdown.includes("confirmed unmet by deterministic repository-state proof"),
+      result.outputs.reviewMarkdown,
+    );
   } finally {
     await server.close();
     cleanup();
