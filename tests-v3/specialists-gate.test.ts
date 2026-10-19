@@ -403,6 +403,79 @@ test("#1094: a canary echoed as an object KEY in a specialist response is masked
   }
 });
 
+test("#1149: a provider-AUTHORED credential shape in a specialist response is masked in the persisted raw artifact", async () => {
+  // The specialist counterpart of the main review's #1149 fix, and the same
+  // one-layer-deeper gap: the #1037/#1094 tests above prove CONFIGURED values
+  // are masked here, which is `maskKnownSecretsDeep` — a layer that knows only
+  // what the operator supplied. Nothing is configured below (no extra headers,
+  // no API key in the harness env), so a credential-SHAPED value the backend
+  // INVENTED is matched by nothing and rode verbatim into the shipped
+  // `specialist-<role>.response.json`. `redactTextDeep` adds the generic layer.
+  // Reverting the runner's `response:` field to `maskKnownSecretsDeep` turns
+  // every assertion below red, because the configured layer has an empty list.
+  // The scout's own `specialist-scout.response.json` is the SECOND persisted raw
+  // body in this module and is covered by its own test below.
+  const providerOnly = "provider-only-secret-123456";
+  const requestFn: SpecialistRequestFn = async () => ({
+    ok: true,
+    raw: {
+      ...(leadsResponse([{ severity: "major", category: "correctness", file: "a.py", line: 2, message: "handle leak" }]) as Record<string, unknown>),
+      system_fingerprint: `provider says api_key=${providerOnly} is live`,
+      gateway_audit: { echo: "Bearer providerbearerabcdefghijklmnop", openai_like: "sk-providerabcdefghijklmnop", plain: "nothing here" },
+    },
+  });
+  const result = await run({
+    DEEP_REVIEW: "true",
+    AI_BASE_URL: "http://model.invalid/v1",
+    AI_SPECIALIST_MODEL: "specialist",
+  }, { requestFn });
+  assert.equal(result.code, 0);
+  const artifact = result.read("specialist-correctness.response.json");
+  for (const shaped of [providerOnly, "providerbearerabcdefghijklmnop", "sk-providerabcdefghijklmnop"]) {
+    assert.equal(artifact.includes(shaped), false, `${shaped} survived into specialist-correctness.response.json:\n${artifact}`);
+  }
+  // Still valid JSON, same shape, only the shaped leaves rewritten.
+  const parsed = JSON.parse(artifact) as Record<string, unknown>;
+  const audit = parsed.gateway_audit as Record<string, unknown>;
+  assert.equal(audit.plain, "nothing here", "no blanket over-redaction");
+  assert.equal(audit.echo, "[REDACTED]");
+  assert.equal(audit.openai_like, "[REDACTED]");
+  assert.equal((parsed.usage as Record<string, unknown>).completion_tokens, 5);
+  rmSync(result.root, { recursive: true, force: true });
+});
+
+test("#1149: the scout's persisted raw response body gets the same generic layer", async () => {
+  // The second persisted raw provider body in this module: under
+  // `combined_scout` the gate writes the reviewed role's response out again as
+  // `specialist-scout.response.json` (src/gates/specialists-gate.ts:486), from
+  // the runner's `response` field. A second artifact filename, and therefore a
+  // second place a shaped credential would have landed unmasked, so it needs its
+  // own assertion — the per-role test above cannot see it.
+  const providerOnly = "provider-only-secret-123456";
+  const requestFn: SpecialistRequestFn = async () => ({
+    ok: true,
+    raw: {
+      ...(leadsResponse([{ severity: "major", category: "correctness", file: "a.py", line: 2, message: "handle leak" }]) as Record<string, unknown>),
+      system_fingerprint: `provider says api_key=${providerOnly} is live`,
+      gateway_audit: { echo: "Bearer providerbearerabcdefghijklmnop", openai_like: "sk-providerabcdefghijklmnop", plain: "nothing here" },
+    },
+  });
+  const result = await run({
+    DEEP_REVIEW: "true",
+    DEEP_REVIEW_EXECUTION: "combined_scout",
+    AI_BASE_URL: "http://model.invalid/v1",
+    AI_SPECIALIST_MODEL: "specialist",
+  }, { requestFn });
+  assert.equal(result.code, 0);
+  const scout = result.read("specialist-scout.response.json");
+  for (const shaped of [providerOnly, "providerbearerabcdefghijklmnop", "sk-providerabcdefghijklmnop"]) {
+    assert.equal(scout.includes(shaped), false, `${shaped} survived into specialist-scout.response.json:\n${scout}`);
+  }
+  const parsed = JSON.parse(scout) as Record<string, unknown>;
+  assert.equal(((parsed.gateway_audit as Record<string, unknown>).plain), "nothing here", "no blanket over-redaction");
+  rmSync(result.root, { recursive: true, force: true });
+});
+
 test("#1037: a 200 in-body error carrying a configured header VALUE is masked in the specialist failure surfaces", async () => {
   // The other specialist response-body surface, and one the RUNNER masks
   // itself (not the transport adapter): a 200 whose body carries an error
