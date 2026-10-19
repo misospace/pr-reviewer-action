@@ -56,15 +56,20 @@ export const RESERVED_MARKER_PATTERNS: readonly RegExp[] = [
  * GitHub normalizes a lone CR into a line break, so a spelling that only
  * renders as an opener after that normalization must be caught too. The fence
  * characters are dropped and the word kept, so the author still reads
- * `suggestion`. (The boundary is line-initial, unprefixed openers; a marker
- * prefix like a blockquote `>` around one is tracked as a follow-up.)
+ * `suggestion`. The boundary is the opener's own line, not the page: a
+ * container prefix (`> `, `- `, `1. `, nested mixes) is peeled before this
+ * pattern is applied, so the same rewrite applies behind a blockquote or a list
+ * marker (#1112) — the prefix is preserved on the rewrite, and a reserved block
+ * dissolves only against a closer inside the same blockquote and list depth.
  */
 const SUGGESTION_OPENER_RE = /^([ \t]*)(`{3,}|~{3,})[ \t]*suggestion[ \t]*$/i;
 
 /** Any fence-shaped line: optional whitespace, then a run of 3+ backticks or
  * tildes — an opener (with or without an info string), a closer, or a fence
  * too short to close the block it sits in. Loose on purpose: while a reserved
- * block is dissolving, every fence-shaped line inside it must be caught. */
+ * block is dissolving, every fence-shaped line inside it must be caught —
+ * including behind a container prefix, so it is matched against the line's
+ * CORE (#1112), never against the raw line. */
 const FENCE_SHAPED_RE = /^([ \t]*)(`{3,}|~{3,})/;
 
 /**
@@ -82,11 +87,94 @@ function closesFence(core: string, ch: string, minLength: number): boolean {
  * that began at a RESERVED opener: its fence characters are gone from the
  * output, so the block no longer exists in the rendered text and every other
  * fence-shaped line inside it would otherwise become a live fence in the
- * rewritten prose. */
+ * rewritten prose. `blockquotes` / `lists` / `contentColumn` (#1112) are the
+ * container the opener sat in — only a closer inside the same one can end the
+ * dissolution; they are 0 / 0 / 0 and unused for an ordinary block. */
 interface FenceState {
   ch: string;
   minLength: number;
   dissolving: boolean;
+  blockquotes: number;
+  lists: number;
+  contentColumn: number;
+}
+
+/** #1112: one line split at its container prefix — the leading blockquote and
+ * list markers a renderer strips before it decides whether the rest opens a
+ * fence. `container` is those exact bytes, in the order they appear. */
+interface ContainerPrefix {
+  /** The bytes consumed as a container prefix ("" when there is none). */
+  container: string;
+  /** The line without them — the fence, if any, lives here. */
+  core: string;
+  /** How many `>` markers were consumed. */
+  blockquotes: number;
+  /** How many list markers were consumed. */
+  lists: number;
+  /** Byte index at which a fence would start: `container.length`. */
+  contentColumn: number;
+}
+
+const LIST_MARKER_RE = /^(?:[-+*]|\d{1,9}[.)])[ \t]/;
+const LEADING_SPACE_RE = /^[ \t]*/;
+
+/**
+ * #1112: split a line into its container prefix and its content, consuming a
+ * whitespace run then a blockquote marker (`>` after at most three of those
+ * spaces, plus at most one space/tab) or a list marker (plus its space/tab),
+ * in any order and any nesting, while a marker matches.
+ *
+ * Loose on purpose — fail-closed. A prefix this over-reads rewrites a line that
+ * was never live, which is harmless; a prefix it misses leaves a prescription
+ * the publish boundary never validated. The whitespace after the LAST marker is
+ * left in `core` (only one space/tab of a `>`'s is consumed), so `> ` plus a
+ * 4-space indent keeps today's over-indent reading — rewritten, never a real
+ * fence — and a line with no marker returns `core` = the whole line, byte for
+ * byte.
+ */
+function splitContainer(line: string): ContainerPrefix {
+  let index = 0;
+  let blockquotes = 0;
+  let lists = 0;
+  for (;;) {
+    const rest = line.slice(index);
+    const indent = LEADING_SPACE_RE.exec(rest)![0].length;
+    const head = rest.slice(indent);
+    let width: number;
+    if (head.startsWith(">") && indent <= 3) {
+      width = head[1] === " " || head[1] === "\t" ? 2 : 1;
+      blockquotes += 1;
+    } else {
+      const list = LIST_MARKER_RE.exec(head);
+      if (list === null) break;
+      width = list[0].length;
+      lists += 1;
+    }
+    index += indent + width;
+  }
+  if (index === 0) return { container: "", core: line, blockquotes: 0, lists: 0, contentColumn: 0 };
+  return { container: line.slice(0, index), core: line.slice(index), blockquotes, lists, contentColumn: index };
+}
+
+/**
+ * #1112: the closer of a dissolving reserved block must be the same fence
+ * inside the SAME container, at the opener's content column. A fence that
+ * drifted out of the container does not close a fenced block there — a lazy bare
+ * fence cannot close one inside a blockquote, and a `- ``` ` opens a list item
+ * of its own rather than closing a fence that started outside it — and treating
+ * it as a closer would end the dissolution early and leave the real closer live,
+ * where it captures everything the action appends next. Container depth is
+ * therefore compared in full: a bare opener and a list-prefixed fence both sit
+ * inside the first three columns, so column position alone cannot stand in for
+ * it. Over-strict is the safe direction — any other fence-shaped line in the
+ * region is escaped instead.
+ */
+function closesDissolving(prefix: ContainerPrefix, open: FenceState): boolean {
+  if (prefix.blockquotes !== open.blockquotes) return false;
+  if (prefix.lists !== open.lists) return false;
+  const column = prefix.contentColumn + LEADING_SPACE_RE.exec(prefix.core)![0].length;
+  if (column < open.contentColumn || column > open.contentColumn + 3) return false;
+  return closesFence(prefix.core, open.ch, open.minLength);
 }
 
 /**
@@ -108,9 +196,11 @@ function fenceOpener(core: string): { ch: string; minLength: number } | null {
 /** Backslash-escape the fence characters of a line inside a dissolved block:
  * the line stops being a fence (it no longer starts with a fence character)
  * while still rendering the characters the author wrote. A pure rewrite, so
- * nothing is deleted and a second pass is a no-op. */
-function escapeFence(line: string): string {
-  return line.replace(FENCE_SHAPED_RE, (_match, indent: string, run: string) =>
+ * nothing is deleted and a second pass is a no-op. #1112: it rewrites the
+ * line's CORE; the caller re-prepends the container verbatim, so `> ``` `
+ * becomes `> \`\`\` ` and a bare line is escaped exactly as before. */
+function escapeFence(core: string): string {
+  return core.replace(FENCE_SHAPED_RE, (_match, indent: string, run: string) =>
     indent + [...run].map((ch) => `\\${ch}`).join(""),
   );
 }
@@ -124,7 +214,16 @@ function escapeFence(line: string): string {
  * validate. So the pass walks the original fence structure: while a reserved
  * block is dissolving, its closer and every fence-shaped line inside it are
  * escaped (`\`\`\`` renders as text and opens nothing); fences outside a
- * dissolved block pass through untouched, so benign code blocks are intact.
+* dissolved block pass through untouched, so benign code blocks are intact.
+ *
+ * #1112: the opener is matched on the line's CONTENT, behind any blockquote or
+ * list container, and the prefix is preserved on the rewrite — `> ```suggestion`
+ * renders a live prescription exactly as the bare spelling does, so leaving it
+ * alone was the same hole one container over. Container awareness stops there:
+ * only reserved openers and the lines inside a dissolving reserved block are
+ * tracked container-aware, so benign container prose (`> ```ts`) stays
+ * byte-identical and an ordinary block still closes the way it always did.
+ *
  * #1136: an ordinary block still open at end of text — the model's unclosed
  * fence — is dissolved the same way, so the output ALWAYS ends fence-closed
  * and nothing appended after this pass (the validated prescription region)
@@ -146,40 +245,54 @@ export function reserveSuggestionOpeners(text: string): string {
   // rewrite returns byte-identically from the fast path at the bottom, so
   // rejoining with LF only ever applies to text this pass actually edited.
   for (const line of text.split(/\r\n|\n|\r/)) {
-    const reserved = SUGGESTION_OPENER_RE.test(line);
-    const opener = reserved ? null : fenceOpener(line);
+    const prefix = splitContainer(line);
+    const reserved = SUGGESTION_OPENER_RE.exec(prefix.core);
     if (open === null) {
-      if (reserved) {
-        // The rewrite is loose (any indent) so no spelling of the opener
-        // survives; the dissolution it starts is strict, because only a real
-        // fence (CommonMark indent, no open block) leaves a closer behind
-        // that could capture what the action appends next.
-        const real = fenceOpener(line);
-        out.push(`${line.match(SUGGESTION_OPENER_RE)![1]!}suggestion`);
-        if (real !== null) open = { ch: real.ch, minLength: real.minLength, dissolving: true };
+      if (reserved !== null) {
+        // The rewrite is loose (any indent, any container) so no spelling of
+        // the opener survives; the dissolution it starts is strict, because
+        // only a real fence (CommonMark indent, no open block) leaves a closer
+        // behind that could capture what the action appends next.
+        out.push(`${prefix.container}${reserved[1]!}suggestion`);
+        const real = fenceOpener(prefix.core);
+        if (real !== null) {
+          open = {
+            ch: real.ch,
+            minLength: real.minLength,
+            dissolving: true,
+            blockquotes: prefix.blockquotes,
+            lists: prefix.lists,
+            contentColumn: prefix.contentColumn,
+          };
+        }
         continue;
       }
+      const opener = fenceOpener(line);
       if (opener !== null) {
-        open = { ch: opener.ch, minLength: opener.minLength, dissolving: false };
+        // #1112: an ordinary block is tracked container-blind (blockquotes /
+        // lists / contentColumn are unused for it), exactly as it always was —
+        // `> ```ts` never opened a top-level fence. #1136 records where its
+        // opener landed in the output so an unclosed one can be dissolved.
+        open = { ...opener, dissolving: false, blockquotes: 0, lists: 0, contentColumn: 0 };
         openIndex = out.length;
       }
       out.push(line);
       continue;
     }
-    if (reserved) {
+    if (reserved !== null) {
       // A reserved shape inside an open block is content there — the same
       // fail-closed rewrite the top-level opener gets — and never changes
       // which line closes the block we are already inside.
-      out.push(`${line.match(SUGGESTION_OPENER_RE)![1]!}suggestion`);
+      out.push(`${prefix.container}${reserved[1]!}suggestion`);
       continue;
     }
     if (open.dissolving) {
-      if (closesFence(line, open.ch, open.minLength)) {
-        out.push(escapeFence(line));
+      if (closesDissolving(prefix, open)) {
+        out.push(prefix.container + escapeFence(prefix.core));
         open = null;
         continue;
       }
-      out.push(FENCE_SHAPED_RE.test(line) ? escapeFence(line) : line);
+      out.push(FENCE_SHAPED_RE.test(prefix.core) ? prefix.container + escapeFence(prefix.core) : line);
       continue;
     }
     if (closesFence(line, open.ch, open.minLength)) open = null;
