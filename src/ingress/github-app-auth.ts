@@ -268,10 +268,71 @@ export class GitHubAppAuthenticator {
 
     const now = this.#nowSeconds();
     const cached = this.#cache.get(key);
-    if (cached !== undefined && cached.expiresAt - REFRESH_MARGIN_SECONDS > now) {
+    if (cached !== undefined && isLiveToken(cached.expiresAt, now)) {
       return { ok: true, data: cached };
     }
 
+    const scope = normalizeScope(requested);
+    if (scope === null) {
+      return { ok: false, reason: "invalid repository scope", classification: "permanent" };
+    }
+
+    // FRESH-MINT LIVENESS, validated AFTER each network request completes and
+    // before anything is cached or returned: the same live-token rule cache
+    // hits are held to (`expires_at` past the refresh margin) applies to a
+    // freshly minted token. A dead or inside-margin grant gets ONE bounded
+    // retry — a single bad grant is likelier a blip than a misconfiguration —
+    // and two consecutive unusable responses end in a fixed, credential-free
+    // TRANSIENT failure. Neither rejected token is ever cached or returned:
+    // a live token is the only thing this seam can hand out. Transport,
+    // non-2xx, and malformed-response failures are NOT retried here; they
+    // keep their own established classification.
+    let live: { readonly token: string; readonly expiresAt: number | null } | null = null;
+    for (let attempt = 0; attempt < 2 && live === null; attempt++) {
+      const minted = await this.#requestMint(installationId, scope);
+      if (!minted.ok) return minted;
+      if (isLiveToken(minted.expiresAt, this.#nowSeconds())) live = minted;
+    }
+    if (live === null) {
+      return {
+        ok: false,
+        reason: "github app token mint did not produce a live token",
+        classification: "transient",
+      };
+    }
+    const entry: InstallationToken = {
+      token: live.token,
+      // Clock re-read AFTER the request: a mid-request stall cannot shorten
+      // the conservative fallback window.
+      expiresAt: live.expiresAt ?? this.#nowSeconds() + DEFAULT_INSTALLATION_TOKEN_LIFETIME_SECONDS,
+    };
+    this.#cache.set(key, entry);
+    // Bound the cache by scope count, not by repository: an unbounded map keyed
+    // by (installation, scope) would grow for as long as the process runs. On
+    // overflow the WHOLE cache is dropped rather than evicted one entry at a
+    // time — tokens are cheap to re-mint and short-lived, so a flush costs one
+    // extra mint per live scope and can never hand out a stale token.
+    if (this.#cache.size > MAX_CACHED_SCOPES) this.#cache.clear();
+    return { ok: true, data: entry };
+  }
+
+  /**
+   * ONE mint attempt: App JWT mint + the installation-token POST + response
+   * extraction. Transport, non-2xx, and malformed-response failures resolve
+   * here under the existing fixed-reason contract and are never retried by
+   * the caller. A well-shaped token resolves as `{ ok: true, ... }` and is
+   * validated for LIVENESS BY THE CALLER against the injected clock after
+   * this request completes — this method deliberately returns the minted
+   * expiry untouched so that validation cannot happen on a stale clock read.
+   * Never throws.
+   */
+  async #requestMint(
+    installationId: string,
+    scope: readonly string[],
+  ): Promise<
+    | { readonly ok: true; readonly token: string; readonly expiresAt: number | null }
+    | { readonly ok: false; readonly reason: string; readonly classification: AuthFailureClassification }
+  > {
     let jwt: string;
     try {
       jwt = this.mintAppJwt();
@@ -279,15 +340,11 @@ export class GitHubAppAuthenticator {
       return { ok: false, reason: "GitHub App private key could not sign", classification: "permanent" };
     }
 
-    // The installation id is digits-only (validated above), so it cannot carry a
-    // path separator or a query marker into this URL. No credential appears in
-    // the URL: the JWT travels as the Authorization header.
+    // The installation id is digits-only (validated by the caller), so it
+    // cannot carry a path separator or a query marker into this URL. No
+    // credential appears in the URL: the JWT travels as the Authorization
+    // header.
     const url = `${this.apiBase}/app/installations/${installationId}/access_tokens`;
-    const scope = normalizeScope(requested);
-    if (scope === null) {
-      return { ok: false, reason: "invalid repository scope", classification: "permanent" };
-    }
-
     const requestOptions: RequestOptions = {
       method: "POST",
       token: `Bearer ${jwt}`,
@@ -318,40 +375,15 @@ export class GitHubAppAuthenticator {
 
     const minted = readMintedToken(data);
     if (minted === null) {
-      // A 2xx without a usable token is a server contract violation. Treat it as
-      // permanent: caching nothing and reporting is safer than guessing.
+      // A 2xx without a usable token is a server contract violation. Treat it
+      // as permanent: caching nothing and reporting is safer than guessing.
       return {
         ok: false,
         reason: "github app token response was malformed",
         classification: "permanent",
       };
     }
-    // FIRST-CALL LIVENESS: the same live-token rule cache hits are held to
-    // (`expires_at` past the refresh margin) applies to a freshly minted token
-    // too. A mint response whose expiry is already past — or already inside the
-    // margin — is a contract violation or a clock-skewed grant: caching and
-    // returning it would hand the first caller exactly the dead/near-dead
-    // credential the refresh invariant exists to prevent. Refused and not
-    // cached, so the next call mints fresh instead of replaying the dead one.
-    if (minted.expiresAt !== null && minted.expiresAt - REFRESH_MARGIN_SECONDS <= this.#nowSeconds()) {
-      return {
-        ok: false,
-        reason: "github app token was not live at mint",
-        classification: "permanent",
-      };
-    }
-    const entry: InstallationToken = {
-      token: minted.token,
-      expiresAt: minted.expiresAt ?? now + DEFAULT_INSTALLATION_TOKEN_LIFETIME_SECONDS,
-    };
-    this.#cache.set(key, entry);
-    // Bound the cache by scope count, not by repository: an unbounded map keyed
-    // by (installation, scope) would grow for as long as the process runs. On
-    // overflow the WHOLE cache is dropped rather than evicted one entry at a
-    // time — tokens are cheap to re-mint and short-lived, so a flush costs one
-    // extra mint per live scope and can never hand out a stale token.
-    if (this.#cache.size > MAX_CACHED_SCOPES) this.#cache.clear();
-    return { ok: true, data: entry };
+    return { ok: true, token: minted.token, expiresAt: minted.expiresAt };
   }
 
   /**
@@ -486,6 +518,14 @@ function parseExpiresAt(value: unknown): number | null {
   if (typeof value !== "string" || !EXPIRES_AT_RE.test(value)) return null;
   const ms = Date.parse(value);
   return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+}
+
+/** The ONE liveness rule for an installation token: a known `expires_at` still
+ * past the refresh margin, or an unknown expiry that the conservative fallback
+ * covers. Applied identically to cache hits and to freshly minted tokens —
+ * one rule, two call sites, so the invariant cannot drift between them. */
+function isLiveToken(expiresAt: number | null, nowSeconds: number): boolean {
+  return expiresAt === null || expiresAt - REFRESH_MARGIN_SECONDS > nowSeconds;
 }
 
 /** Extract `{ token, expires_at }` from a 2xx mint response. Returns null when

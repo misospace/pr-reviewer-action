@@ -316,36 +316,54 @@ test("a cached token that ages into the safety margin is re-minted instead of ha
   if (first.ok && second.ok) assert.notEqual(first.data.token, second.data.token);
 });
 
-test("a minted token that is already expired is refused, never handed out or cached", async () => {
-  // First-call liveness: the same rule cache hits are held to applies to a
-  // freshly minted token. A mint response whose expiry is already past is a
-  // contract violation — returning it would hand the first caller a dead
-  // credential the refresh invariant exists to prevent.
+test("two consecutive unusable mint responses fail transiently after exactly two attempts, nothing cached", async () => {
+  // First-call liveness with one bounded retry: a dead-on-arrival grant is
+  // retried once, and two dead grants in a row end in a fixed TRANSIENT
+  // failure. Neither rejected token is cached — the next call mints again.
   const { fetchImpl, calls } = makeFetch(() => tokenOk("t", isoExpiresAt(NOW_SECONDS - 10)));
   const auth = authenticator(fetchImpl);
-  const expired = await auth.installationToken("42");
-  assert.equal(expired.ok, false);
-  if (!expired.ok) {
-    assert.equal(expired.reason, "github app token was not live at mint");
-    assert.equal(expired.classification, "permanent");
+  const result = await auth.installationToken("42");
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, "github app token mint did not produce a live token");
+    assert.equal(result.classification, "transient");
   }
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2, "one bounded retry, then the fixed transient failure");
   const next = await auth.installationToken("42");
-  assert.equal(calls.length, 2, "nothing was cached from the refused mint");
-  assert.equal(next.ok, false, "the refusal repeats while the server keeps minting dead tokens");
+  assert.equal(calls.length, 4, "nothing from the rejected responses entered the cache: the next call retries again");
+  assert.equal(next.ok, false, "the failure repeats while the server keeps minting dead tokens");
 });
 
-test("a minted token already inside the refresh margin is refused rather than handed to its first caller", async () => {
-  // 30s of life on arrival, 60s of margin: not live by the cache-hit rule, so
-  // the first caller must not receive it either.
+test("a minted token already inside the refresh margin is treated like a dead one: retried once, then transient", async () => {
+  // 30s of life on arrival, 60s of margin: not live by the same rule cache
+  // hits are held to, whichever attempt it arrives on.
   const { fetchImpl, calls } = makeFetch(() => tokenOk("t", isoExpiresAt(NOW_SECONDS + 30)));
   const result = await authenticator(fetchImpl).installationToken("42");
   assert.equal(result.ok, false);
   if (!result.ok) {
-    assert.equal(result.reason, "github app token was not live at mint");
-    assert.equal(result.classification, "permanent");
+    assert.equal(result.reason, "github app token mint did not produce a live token");
+    assert.equal(result.classification, "transient");
   }
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
+});
+
+test("a near-expiry mint is retried once and only the healthy token is returned and cached", async () => {
+  // The rejected first token must never reach the caller NOR the cache: the
+  // next call is served from the healthy cached entry with no new mint.
+  const { fetchImpl, calls } = makeFetch((_call, index) =>
+    index === 0
+      ? tokenOk("dead-token", isoExpiresAt(NOW_SECONDS + 30))
+      : tokenOk("healthy-token", isoExpiresAt(NOW_SECONDS + 3600)),
+  );
+  const auth = authenticator(fetchImpl);
+  const result = await auth.installationToken("42");
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.data.token, "healthy-token", "the near-expiry token was never returned");
+  assert.equal(calls.length, 2, "exactly one retry");
+  const again = await auth.installationToken("42");
+  assert.equal(calls.length, 2, "the healthy token is cached and reused");
+  assert.equal(again.ok, true);
+  if (again.ok) assert.equal(again.data.token, "healthy-token");
 });
 
 test("a numeric expires_at is not the wire contract and is not honored", async () => {

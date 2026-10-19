@@ -58,9 +58,11 @@ missing or unparseable `expires_at` falls back to a **conservative** 3600 s
 lifetime: an over-short cache entry only costs one extra mint, while an over-long
 one would hand out a token GitHub has already revoked. Inside the margin the
 token is re-minted rather than handed out — and the liveness rule applies to a
-freshly minted token too: a mint response whose `expires_at` is already past or
-already inside the margin is refused (permanent, nothing cached), never handed
-to its first caller. The cache is bounded by scope count
+freshly minted token too, validated against the injected clock after each
+request completes: a mint whose `expires_at` is already past or already inside
+the margin is retried once, and if the second mint is also not live the broker
+fails with a fixed **transient** reason, with nothing from either rejected
+attempt ever cached or returned. The cache is bounded by scope count
 (512 entries); on overflow it is dropped whole rather than evicted selectively —
 tokens are cheap to re-mint and short-lived, so a flush costs one extra mint per
 live scope and can never serve a stale one.
