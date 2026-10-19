@@ -726,6 +726,31 @@ test("#1136: an unclosed ordinary fence in the message cannot swallow the valida
   assert.equal(quotedBody.split("\n")[openerIndex - 1], "", "container case: appended region starts after a column-0 blank line that terminates the container");
   assertRenderedPrescription(quotedBody, "REPL", "container-prefixed unclosed block");
   assert.equal(recoverPublishedSuggestion(quotedBody), "REPL", "container case: recovery still reads what rendered");
+
+  // The same container-blindness INSIDE a dissolved ordinary block: the walk
+  // escapes the outer block's opener and its bare interior fence-shaped lines,
+  // but a `> ``` ` (or `- ``` `) inside it is not matched by the container-blind
+  // dissolve regex, so it stays as the author wrote it. Pinned safe because the
+  // appended region is always introduced by a column-0 blank line, which ends
+  // the enclosing block construct before the fence state the renderer carries
+  // into it — asserted here at the rendering boundary rather than argued.
+  for (const [label, nested] of [
+    ["blockquote fence inside a dissolved block", "note\n```ts\nconst x = 1;\n> ```js\nmore"],
+    ["list fence inside a dissolved block", "note\n```ts\nconst x = 1;\n- ```js\nmore"],
+  ] as Array<[string, string]>) {
+    const nestedResult = buildComments(
+      [{ file: "new", line: 1, message: nested, suggestion: "REPL" }],
+      diff, 20, { forgejoPositions: false },
+    );
+    assert.equal(nestedResult.comments.length, 1, `${label}: the finding still posts`);
+    const nestedBody = (nestedResult.comments[0] as Record<string, unknown>).body as string;
+    const nestedOpener = nestedBody.split("\n").indexOf("```suggestion");
+    assert.ok(nestedOpener > 0, `${label}: prescription region present`);
+    assert.equal(nestedBody.split("\n")[nestedOpener - 1], "", `${label}: appended region starts after a column-0 blank line that terminates the container`);
+    assertRenderedPrescription(nestedBody, "REPL", label);
+    assert.equal(recoverPublishedSuggestion(nestedBody), "REPL", `${label}: recovery still reads what rendered`);
+    assert.ok(nestedBody.includes("const x = 1;") && nestedBody.includes("more"), `${label}: the author's prose survives`);
+  }
 });
 
 // ---------------------------------------------------------------------------
