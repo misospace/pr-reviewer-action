@@ -93,6 +93,30 @@ array order — the same latest-wins rule the aggregate uses) and it is now
 absent from both findings and observations. A finding already `resolved` or
 `dismissed` before the run is never re-declared unknown.
 
+### Feedback is a delta contract under a prior ledger
+
+Reaction observations are per-comment **snapshots** of the current
+👍/👎 totals. Summing snapshots across runs would let one unchanged reaction
+multiply with every re-review (observed at two timestamps, it would report
+two reactions), so operator mode — the only mode that merges a prior
+ledger — enforces an **observation-vs-delta contract** at derivation time:
+the run computes its per-identity current totals, subtracts the prior
+cumulative total (the sum over the ledger's `feedback` events for that
+identity and signal), and emits only the positive remainder as the new
+event. The ledger therefore always sums to the current observed total:
+one unchanged 👍 at two timestamps aggregates as one, a genuinely added
+reaction increments once, and a stateless run's artifact still records the
+full snapshot. Two consequences are pinned:
+
+- A **removed** reaction (a negative delta) has no representable count in
+  v1 and emits nothing: informational reaction counts may read stale-high
+  after a removal, and are never invented or inflated.
+- The dedupe key includes the head anchor, so a delta event is never
+  collapsed into the prior snapshot it was derived from.
+
+Reactions remain informational throughout: the delta contract changes only
+how counts accumulate, never adjudicated precision, status, or the verdict.
+
 ## Collection (Action mode)
 
 The #762 feedback read (`readFeedbackState` in `src/publish/publish.ts`) is
@@ -174,3 +198,16 @@ Privacy: events carry digests, counts, and bounded metadata only — no
 finding message text, no reaction logins, no review content; free-text
 fields are redacted and bounded; paths appear only in the digest input, not
 in events.
+
+## Operator persistence boundary (scope obligation)
+
+A finding identity digest is stable per finding but carries **no forge or
+repository scope**: the same finding text on the same path in two different
+repositories (or two forges) hashes identically. Within one repository's
+run artifact that is the intended line-drift invariant; across tenants it
+is a collision surface. Operator-mode persistence that merges or groups
+ledgers from more than one repository, forge, or tenant **must partition
+the stored events by that trusted context before merging or grouping** —
+identities, reaction deltas, and adjudication counts from two contexts are
+never combinable, and the contract provides no in-event scope field to
+recover the partition after the fact.

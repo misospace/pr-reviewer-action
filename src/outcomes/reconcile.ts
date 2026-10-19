@@ -84,6 +84,20 @@ export function deriveOutcomeEvents(options: DeriveOutcomeOptions): OutcomeEvent
 function deriveCurrentEvents(options: DeriveOutcomeOptions): OutcomeEvent[] {
   const events: OutcomeEvent[] = [];
   const currentIdentities = new Set<string>();
+  // Reactions are observed as per-comment snapshots, but a persisted ledger
+  // must never count the same snapshot twice: without the prior-informed
+  // delta contract below, one unchanged 👍 observed by two runs would be
+  // aggregated as two reactions. Current per-identity totals are therefore
+  // accumulated here and emitted after the observation loop, either as
+  // stateless per-run snapshots or, under a prior ledger, as the verified
+  // delta against the prior cumulative total.
+  const currentReactions = new Map<string, { helpful: number; notHelpful: number }>();
+  const addReactions = (identity: string, reactions: PriorFindingObservation["reactions"]): void => {
+    const entry = currentReactions.get(identity) ?? { helpful: 0, notHelpful: 0 };
+    entry.helpful += reactions.helpful;
+    entry.notHelpful += reactions.notHelpful;
+    currentReactions.set(identity, entry);
+  };
   // Chronological order inside one derivation: the prior published state is
   // observed first, the current review reports last — so the LATEST
   // status-bearing event per identity is the current truth (a finding whose
@@ -129,33 +143,8 @@ function deriveCurrentEvents(options: DeriveOutcomeOptions): OutcomeEvent[] {
         provenance: "forge-thread",
       });
     }
-    if (observation.reactions.helpful > 0) {
-      events.push({
-        finding_id: observation.findingId,
-        kind: "feedback",
-        at: options.at,
-        head_sha: options.currentHeadSha || null,
-        route: options.route,
-        model: options.model,
-        provenance: "forge-reaction",
-        signal: "helpful",
-        count: observation.reactions.helpful,
-        trusted: false,
-      });
-    }
-    if (observation.reactions.notHelpful > 0) {
-      events.push({
-        finding_id: observation.findingId,
-        kind: "feedback",
-        at: options.at,
-        head_sha: options.currentHeadSha || null,
-        route: options.route,
-        model: options.model,
-        provenance: "forge-reaction",
-        signal: "not_helpful",
-        count: observation.reactions.notHelpful,
-        trusted: false,
-      });
+    if (observation.reactions.helpful > 0 || observation.reactions.notHelpful > 0) {
+      addReactions(observation.findingId, observation.reactions);
     }
   }
 
@@ -173,6 +162,38 @@ function deriveCurrentEvents(options: DeriveOutcomeOptions): OutcomeEvent[] {
       model: options.model,
       provenance: "current-review",
     });
+  }
+  // Feedback emission. Stateless Action mode emits each identity's observed
+  // totals as this run's snapshot; the aggregate of a single-run ledger sums
+  // exactly those. Operator mode (a prior ledger is being merged) emits the
+  // VERIFIED DELTA against the prior cumulative total instead — the prior
+  // runs' counts are already in the ledger, so re-emitting the full snapshot
+  // would make one unchanged reaction multiply with every re-review. A
+  // decrease (a removed reaction) has no representable negative count in v1
+  // and emits nothing: informational counts may read stale-high, never
+  // invented (documented in the contract).
+  const priorTotals = options.priorLedger === undefined ? null : priorFeedbackTotals(options.priorLedger);
+  for (const [identity, current] of currentReactions) {
+    const prior = priorTotals?.get(identity) ?? { helpful: 0, notHelpful: 0 };
+    const arms: ReadonlyArray<["helpful" | "not_helpful", number]> = [
+      ["helpful", current.helpful - prior.helpful],
+      ["not_helpful", current.notHelpful - prior.notHelpful],
+    ];
+    for (const [signal, count] of arms) {
+      if (count <= 0) continue;
+      events.push({
+        finding_id: identity,
+        kind: "feedback",
+        at: options.at,
+        head_sha: options.currentHeadSha || null,
+        route: options.route,
+        model: options.model,
+        provenance: "forge-reaction",
+        signal,
+        count,
+        trusted: false,
+      });
+    }
   }
   if (options.priorLedger === undefined) return events;
   // Ledger-driven lost history: an identity the ledger tracked as live that
@@ -210,6 +231,25 @@ function deriveCurrentEvents(options: DeriveOutcomeOptions): OutcomeEvent[] {
   return events;
 }
 
+/** Prior cumulative feedback totals per (finding_id, signal): the sum over
+ * every feedback event the prior ledger carries. Runs after the first emit
+ * deltas, so this sum IS the prior cumulative observed total; mixing a
+ * stateless first-run snapshot with later deltas keeps that invariant. */
+function priorFeedbackTotals(
+  priorLedger: readonly OutcomeEvent[],
+): Map<string, { helpful: number; notHelpful: number }> {
+  const totals = new Map<string, { helpful: number; notHelpful: number }>();
+  for (const event of priorLedger) {
+    if (event.kind !== "feedback") continue;
+    if (event.signal !== "helpful" && event.signal !== "not_helpful") continue;
+    const entry = totals.get(event.finding_id) ?? { helpful: 0, notHelpful: 0 };
+    if (event.signal === "helpful") entry.helpful += event.count ?? 0;
+    else entry.notHelpful += event.count ?? 0;
+    totals.set(event.finding_id, entry);
+  }
+  return totals;
+}
+
 /** Dedupe identity of one event. JSON-serialized, not NUL-joined: `reason`
  * is bounded free text and `at` is an ISO-shaped parse-validated string that
  * Date.parse accepts with trailing NULs, so a crafted prior-ledger event
@@ -221,6 +261,7 @@ function eventKey(event: OutcomeEvent): string {
     event.finding_id,
     event.kind,
     event.at ?? "",
+    event.head_sha ?? "",
     event.signal ?? "",
     event.reason ?? "",
     event.label ?? "",

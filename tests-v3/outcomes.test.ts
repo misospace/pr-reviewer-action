@@ -371,6 +371,86 @@ test("#1027 reconcile: ledger merge, lost history, dedupe, cap", () => {
   assert.equal(capped.at(-1)!.count, MAX_LEDGER_EVENTS + 9);
 });
 
+test("#1027 review round: a persisted ledger counts reactions by delta, not per snapshot", () => {
+  // The reviewer's regression: feedback events are per-run observations, and
+  // one unchanged 👍 observed by run 1 and again by run 2 must aggregate as
+  // ONE reaction — not multiply with every re-review. Operator mode enforces
+  // the observation-vs-delta contract at derivation time: the merged ledger
+  // carries only the newly-observed reactions, so the aggregate's additive
+  // fold stays correct. (Aggregate of one stateless run is unchanged: the
+  // full snapshot is still what a stateless artifact records.)
+  const id = observation().findingId;
+  const fb = (count: number, at: string): OutcomeEvent => ({
+    finding_id: id,
+    kind: "feedback",
+    at,
+    head_sha: null,
+    route: null,
+    model: null,
+    provenance: "forge-reaction",
+    signal: "helpful",
+    count,
+    trusted: false,
+  });
+  // Run 1 (stateless) observed the full snapshot: one 👍.
+  const run1 = deriveOutcomeEvents({
+    postedIdentities: [],
+    prior: [observation({ reactions: { helpful: 1, notHelpful: 0 } })],
+    priorHeadSha: null,
+    currentHeadSha: HEAD_A,
+    ...META,
+  });
+  assert.deepEqual(run1.filter((event) => event.kind === "feedback").map((event) => event.count), [1]);
+  // Run 2 re-observes the UNCHANGED comment: no new feedback event is
+  // derived — the merged ledger carries only run 1's snapshot, byte-identical.
+  const run2 = deriveOutcomeEvents({
+    postedIdentities: [],
+    prior: [observation({ reactions: { helpful: 1, notHelpful: 0 } })],
+    priorHeadSha: null,
+    currentHeadSha: HEAD_B,
+    ...META,
+    priorLedger: run1,
+  });
+  assert.deepEqual(
+    run2.filter((event) => event.kind === "feedback"),
+    run1.filter((event) => event.kind === "feedback"),
+  );
+  // Run 3 observes a genuinely added reaction: exactly the +1 delta lands
+  // beside the inherited snapshot (a distinct head anchors it, so the merge
+  // keeps both — and they must NEVER be deduped into one).
+  const run3 = deriveOutcomeEvents({
+    postedIdentities: [],
+    prior: [observation({ reactions: { helpful: 2, notHelpful: 0 } })],
+    priorHeadSha: null,
+    currentHeadSha: HEAD_B,
+    ...META,
+    priorLedger: run2,
+  });
+  assert.deepEqual(run3.filter((event) => event.kind === "feedback").map((event) => event.count), [1, 1]);
+  // The merged history aggregates the two timestamps as one reaction, plus
+  // the increment — never the snapshot sum (1 + 1 + 2 = 4 would be the bug).
+  assert.equal(aggregateOutcomeEvents(run3).reactions.helpful, 2);
+  // A removed reaction emits nothing (v1 carries no negative count) and the
+  // aggregate never invents counts; a mixed 👍/👎 delta keeps both signals.
+  const run4 = deriveOutcomeEvents({
+    postedIdentities: [],
+    prior: [observation({ reactions: { helpful: 0, notHelpful: 3 } })],
+    priorHeadSha: null,
+    currentHeadSha: HEAD_B,
+    ...META,
+    priorLedger: run3,
+  });
+  assert.deepEqual(
+    run4.filter((event) => event.kind === "feedback").map((event) => [event.signal, event.count]),
+    [["helpful", 1], ["helpful", 1], ["not_helpful", 3]],
+  );
+  assert.equal(aggregateOutcomeEvents(run4).reactions.helpful, 2);
+  assert.equal(aggregateOutcomeEvents(run4).reactions.not_helpful, 3);
+  // Precision/verdict surface is untouched: reactions are informational and
+  // adjudicated numbers read only explicit adjudication events.
+  assert.equal(aggregateOutcomeEvents(run4).adjudicated.precision, null);
+});
+
 test("#1027 action mode: stateless derivation and bounded export need no ledger store", () => {
   // req-829e88da1b30: Action mode never supplies `priorLedger` — derivation
   // reads only forge state this run already has, and the export re-parses

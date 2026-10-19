@@ -64,7 +64,11 @@ export interface OutcomeEvent {
   actor?: string | null;
   /** `feedback` only. */
   signal?: "helpful" | "not_helpful";
-  /** `feedback` only: how many reactions of `signal` were observed. */
+  /** `feedback` only: how many reactions of `signal` the observation
+   * carries. A stateless run's event is the full per-run snapshot; an
+   * operator-mode event merged onto a prior ledger is the verified DELTA
+   * against the prior cumulative total (the ledger sums to the current
+   * total, so one unchanged reaction is never counted per re-review). */
   count?: number;
   /** `feedback` only: how the reacting actors were proven trusted. v1
    * feedback is always forge-derived, so the normalizer only ever emits
