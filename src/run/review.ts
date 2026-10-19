@@ -2000,13 +2000,18 @@ async function callTier(
   }
   if (outcome.status === "empty_completion") {
     errorLog(`${profile.label}: model returned an empty completion; not retrying ${tier}${diagnosticsLine}`);
-    // #1149: same routing as the success write above, and for the same reason —
-    // every field in this body is provider/transport-derived text (`error`) or
-    // provider-controlled structure (`diagnostics.record`), and the body lands
-    // in the shipped `ai-response.<tier>.json`. `describeTransportFailure` below
-    // already applies `redactText` to the detail it renders, but the double pass
-    // here is harmless and idempotent, and it is the only guarantee that holds
-    // for the raw `failure.message` and for the record.
+    // #1149: routed like the success write above. As written today this is a
+    // BACKSTOP rather than a new guarantee, and the reason is worth recording
+    // precisely: both fields are already generically redacted where they are
+    // built — `outcome.failure.message` through `maskDiagnostic`
+    // (model/verdict.ts) or through `describeTransportFailure`'s `redactText`
+    // (transport/http.ts), and `diagnostics.record`'s one provider-controlled
+    // field through `safeReasonToken`'s `redactText`
+    // (model/response-diagnostics.ts). The routing buys independence from those
+    // three upstream sites staying generically-redacted, which is exactly the
+    // kind of coupling that produced this gap in the first place. It is
+    // structure-preserving and idempotent, so no downstream consumer of this
+    // artifact can tell the difference.
     if (outcome.diagnostics !== undefined) {
       ws.write(responseArtifact, pyJsonDumps(redactTextDeep({ error: outcome.failure.message, diagnostics: outcome.diagnostics.record }, knownSecrets)));
     }

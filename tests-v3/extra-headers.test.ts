@@ -592,9 +592,14 @@ test("#1149: a provider-AUTHORED credential shape this run never configured neve
   const content = String((persisted.choices as { 0: { message: { content: string } } })[0].message.content);
   assert.equal(JSON.parse(content).verdict, "approve");
 
-  assert.equal(run.artifacts.includes("provider-only-secret-123456"), false, run.artifacts);
-  assert.equal(run.summary.includes("provider-only-secret-123456"), false);
-  assert.equal(run.errorLog.join("\n").includes("provider-only-secret-123456"), false);
+  // Every shape, on every downstream surface — not just the one the first
+  // loop checked. A routing that only caught the `api_key=` framing would
+  // otherwise satisfy the assertions above and still leak the other two.
+  for (const [label, surface] of [["artifacts", run.artifacts], ["summary", run.summary], ["errorLog", run.errorLog.join("\n")]] as const) {
+    for (const [, shaped] of PROVIDER_ONLY) {
+      assert.equal(surface.includes(shaped), false, `${shaped} survived into ${label}:\n${surface}`);
+    }
+  }
 });
 
 test("#1037: an unusable streamed response carrying the header VALUE stays clean too", async () => {

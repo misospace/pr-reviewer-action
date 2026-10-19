@@ -580,9 +580,12 @@ export function maskKnownSecretsDeep(value: unknown, secrets: readonly (string |
  * `specialist-<role>.response.json` raw bodies (#1149). Those artifacts are raw
  * provider bodies: exactly the surface where an unknown, provider-invented key
  * is most likely to be echoed back, and exactly the surface that is persisted
- * and shipped as a job artifact. The canonical result and the prompt builders
- * already applied `redactText`; the raw JSON artifacts did not, which left a
- * gap between what the review says it redacts and what it writes.
+ * and shipped as a job artifact. The review's own CONTENT surfaces are not the
+ * counter-example: `ai-output.json` is deliberately left unmasked so a short
+ * configured key cannot corrupt the published verdict, and completion content
+ * REFUSES rather than masks (`containsKnownSecret`) — but the raw JSON bodies
+ * on their way to disk went through the configured-value layer alone, which
+ * left a gap between what the review says it redacts and what it writes.
  *
  * Every safety property of `maskKnownSecretsDeep` is inherited unchanged:
  * masking happens BEFORE any serialization/truncation (so no variant is split
