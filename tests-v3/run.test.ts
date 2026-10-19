@@ -2035,6 +2035,8 @@ test("#810: a budget-exhausted tool loop publishes partial coverage in the run m
     assert.match(result.marker, /review_result.{0,4}partial/);
     assert.match(result.marker, /coverage.{0,4}partial/);
     assert.match(result.marker, /coverage_stop_reason.{0,4}tool-call-budget-exhausted/);
+    // #847: the loop stop reason is now recorded on every harness run.
+    assert.match(result.marker, /"tool_stop_reason":"tool-call-budget-exhausted"/);
   } finally {
     await server.close();
     cleanup();
@@ -2107,6 +2109,11 @@ test("#930: primary review grants corpus-diff credit through the primary artifac
     assert.equal(harness.partial_coverage, undefined, "complete coverage: the corpus credit resolves the only changed file");
     assert.deepEqual(harness.corpus_diff_covered_files, ["src/auth.ts"]);
     assert.equal(result.outputs.verdict, "approve");
+    // #847: a budget stop with no unread files stays out of `coverage` (no
+    // gap) but is now visible in the marker through `tool_stop_reason` — the
+    // case that made budget-exhaustion rates unmeasurable from telemetry.
+    assert.doesNotMatch(result.marker, /"coverage":/);
+    assert.match(result.marker, /"tool_stop_reason":"tool-call-budget-exhausted"/);
   } finally {
     await server.close();
     cleanup();
@@ -2154,6 +2161,9 @@ test("#810: a large PR gets a size-scaled tool budget through the run entry", as
     assert.match(result.marker, /"tool_budget":26/);
     assert.match(result.marker, /"tool_budget_source":"size-scaled"/);
     assert.match(result.marker, /"tool_calls":\d+/);
+    // #847: the loop's stop reason rides along for the size-scaled-vs-tier
+    // exhaustion-rate comparison.
+    assert.match(result.marker, /"tool_stop_reason":"[a-z-]+"/);
   } finally {
     await server.close();
     cleanup();
