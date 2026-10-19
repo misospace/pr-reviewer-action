@@ -51,7 +51,7 @@ import { renderClaimsSection } from "../claims/render.js";
 import { buildModelRequest } from "../model/request.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
 import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js";
-import { maskKnownSecrets, maskKnownSecretsDeep } from "../context/redact.js";
+import { maskKnownSecrets, redactTextDeep } from "../context/redact.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
 import type { ReviewTriageDecision } from "../model/types.js";
@@ -1935,7 +1935,14 @@ async function callTier(
       // debugging a degraded run. Nothing re-parses this copy AS a verdict
       // (the native-loop reuse reads the harness-written artifact, before this
       // call runs), so a masked leaf cannot break a downstream parse.
-      ws.write(responseArtifact, pyJsonDumps(maskKnownSecretsDeep(result.raw, knownSecrets)));
+      // #1149: `redactTextDeep`, not `maskKnownSecretsDeep`. The latter masks
+      // only the CONFIGURED values, so a credential-SHAPED value the backend
+      // invented — `api_key=<never configured>`, a bare `Bearer …`, an `sk-…`
+      // token — was persisted verbatim into a body this action ships as a job
+      // artifact. `redactText`'s generic layer is exactly the rule that covers
+      // a value the operator never gave us, and it composes (configured values
+      // are still nuked first, the generic pass runs on the remainder).
+      ws.write(responseArtifact, pyJsonDumps(redactTextDeep(result.raw, knownSecrets)));
       return result;
     },
   });
@@ -1993,8 +2000,15 @@ async function callTier(
   }
   if (outcome.status === "empty_completion") {
     errorLog(`${profile.label}: model returned an empty completion; not retrying ${tier}${diagnosticsLine}`);
+    // #1149: same routing as the success write above, and for the same reason —
+    // every field in this body is provider/transport-derived text (`error`) or
+    // provider-controlled structure (`diagnostics.record`), and the body lands
+    // in the shipped `ai-response.<tier>.json`. `describeTransportFailure` below
+    // already applies `redactText` to the detail it renders, but the double pass
+    // here is harmless and idempotent, and it is the only guarantee that holds
+    // for the raw `failure.message` and for the record.
     if (outcome.diagnostics !== undefined) {
-      ws.write(responseArtifact, pyJsonDumps({ error: outcome.failure.message, diagnostics: outcome.diagnostics.record }));
+      ws.write(responseArtifact, pyJsonDumps(redactTextDeep({ error: outcome.failure.message, diagnostics: outcome.diagnostics.record }, knownSecrets)));
     }
   } else if (outcome.status === "parse_exhausted") {
     // #868: the raw response artifact was written before parsing could tell
@@ -2002,10 +2016,12 @@ async function callTier(
     // below, via `parseVerdictResponse`'s `secrets` — see
     // `surfaceStreamError`); replace it so an unmasked provider body never
     // survives on disk, mirroring the transport-exhausted branch below.
+    // #1149: routed through `redactTextDeep` for the provider-authored reason
+    // spelled out in the `empty_completion` branch above.
     errorLog(`${profile.label}: parse/validate failures exhausted (${outcome.failure.message})${diagnosticsLine}`);
-    ws.write(responseArtifact, pyJsonDumps(outcome.diagnostics !== undefined
+    ws.write(responseArtifact, pyJsonDumps(redactTextDeep(outcome.diagnostics !== undefined
       ? { error: outcome.failure.message, diagnostics: outcome.diagnostics.record }
-      : { error: outcome.failure.message }));
+      : { error: outcome.failure.message }, knownSecrets)));
   } else {
     // #846: carry the HTTP status and a redacted, length-capped body excerpt
     // (plus the ai-api-format hint on a 404) instead of the bare "model
@@ -2013,14 +2029,16 @@ async function callTier(
     // configured key unconditionally, on top of `redactText`'s heuristics.
     // #1037: this lane's configured extra-header VALUES join that list (a
     // provider error body can quote them back, and they carry proxy tokens).
+    // #1149: `redactTextDeep` on the persisted body for the provider-authored
+    // reason spelled out in the `empty_completion` branch above.
     const detail = describeTransportFailure(outcome.failure, { secrets: knownSecrets });
     errorLog(`${profile.label}: transport failures exhausted (${detail})${diagnosticsLine}`);
     if (outcome.nonRetryable === true) {
       annotate(`::error::${profile.label}: model endpoint returned a non-retryable HTTP status; failing over without retrying (${annotationSafe(detail)})`);
     }
-    ws.write(responseArtifact, pyJsonDumps(outcome.diagnostics !== undefined
+    ws.write(responseArtifact, pyJsonDumps(redactTextDeep(outcome.diagnostics !== undefined
       ? { error: detail, diagnostics: outcome.diagnostics.record }
-      : { error: detail }));
+      : { error: detail }, knownSecrets)));
   }
   return { ok: false, artifact: null, rawResponse: null };
 }
