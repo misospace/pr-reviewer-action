@@ -34,7 +34,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdir, lstat, readlink, readdir, rm } from "node:fs/promises";
+import { chmod, mkdir, lstat, readlink, readdir, rm } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { runProcess } from "../runtime/subprocess.js";
 import { gitInvocationEnv } from "./git-env.js";
@@ -263,6 +263,10 @@ export async function createReviewWorkspace(
       await assertNoEscapingSymlinks(workspaceDir);
     } catch (error) {
       await removeWorktree(gitBinary, mirror.path, workspaceDir).catch(() => undefined);
+      // Best-effort: if the scan refused on an unreadable directory, the
+      // recursive rm needs traversal permission on it — restore owner
+      // access first, then remove; a chmod failure still swallows.
+      await chmod(workspaceDir, 0o700).catch(() => undefined);
       await rm(workspaceDir, { recursive: true, force: true }).catch(() => undefined);
       throw error;
     }
@@ -302,7 +306,15 @@ async function mkdirWorkspacesRoot(mirror: MirrorCache): Promise<string> {
   try {
     info = await lstat(root);
   } catch {
-    await mkdir(root, { recursive: true, mode: 0o700 });
+    await mkdir(root, { recursive: true, mode: 0o700 }).catch((error: unknown) => {
+      // A racing creator (or a hostile symlink-to-file winning an EEXIST
+      // race) must surface as the module's own refusal code, not a raw fs
+      // error outside the error contract.
+      throw new AcquisitionError(
+        "workspace_refusal",
+        `workspaces root could not be created: ${root}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
     info = await lstat(root).catch(() => null);
     if (info === null) {
       throw new AcquisitionError("workspace_refusal", `workspaces root is not inspectable: ${root}`);
