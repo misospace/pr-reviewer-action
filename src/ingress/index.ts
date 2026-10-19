@@ -1,8 +1,12 @@
 // Public surface of the self-hosted Forgejo ingress/publication adapters
-// (#730), layered over the canonical event/job boundary from #728.
+// (#730) and the post-v3 self-hosted GitHub App auth/capability substrate
+// (#729), layered over the canonical event/job boundary from #728.
 //
 // Module map:
 //   signature.ts         - X-Gitea-Signature HMAC-SHA256 verification (fail closed)
+//   github-app-signature.ts - X-Hub-Signature-256 "sha256="+hex verification (fail closed)
+//   github-app-auth.ts   - App JWT mint + short-lived repo-scoped installation-token broker
+//   github-app-client.ts - GitHub App read+write capability client over the typed transport
 //   forgejo-events.ts    - native Gitea/Forgejo event projection onto the #728 envelope
 //   webhook-handler.ts   - Node http webhook ingress (verify before parse, fixed bodies)
 //   endpoints.ts         - REST/web endpoint resolution from a configured platform base URL
@@ -18,7 +22,33 @@ export {
   createForgejoWebhookHandler,
 } from "./webhook-handler.js";
 export { computeForgejoWebhookSignature, verifyForgejoWebhookSignature } from "./signature.js";
+export {
+  computeGitHubWebhookSignature,
+  verifyGitHubWebhookSignature,
+} from "./github-app-signature.js";
 export { projectForgejoWebhookPayload } from "./forgejo-events.js";
+
+export type {
+  AuthFailureClassification,
+  AuthResult,
+  GitHubAppAuthenticatorOptions,
+  InstallationToken,
+  InstallationTokenOptions,
+} from "./github-app-auth.js";
+export {
+  GitHubAppAuthenticator,
+  installationScopeKey,
+  isValidInstallationId,
+} from "./github-app-auth.js";
+
+export type {
+  CheckRunPayload,
+  GitHubAppCapabilityClientOptions,
+  ReviewCommentPayload,
+  ReviewPayload,
+  WriteResult,
+} from "./github-app-client.js";
+export { GitHubAppCapabilityClient } from "./github-app-client.js";
 
 export type { ForgejoEndpoints, RepositoryEndpoints } from "./endpoints.js";
 export { resolveForgejoEndpoints, resolveRepositoryEndpoints } from "./endpoints.js";
