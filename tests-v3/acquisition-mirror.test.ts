@@ -824,11 +824,14 @@ test("ensureMirror: a registration with a symlinked gitdir file is unprovable an
         assert.ok(registration);
         const gitdirFile = join(adminRoot, registration, "gitdir");
         await rm(gitdirFile);
-        // The link names a never-existing workspace .git path: the old
-        // stat-then-readFile pair FOLLOWED it and wrongly proved the
-        // registration dead. The no-follow descriptor open refuses the
-        // link, leaving the registration unproven.
-        await symlink("/nonexistent-acq-workspace/.git", gitdirFile);
+        // The link resolves to an EXISTING file whose content names a gone
+        // workspace .git path: the old stat-then-readFile pair FOLLOWED the
+        // link and wrongly proved the registration dead (the test fails on
+        // the pre-fix code). The no-follow descriptor open refuses the link
+        // itself (ELOOP), leaving the registration unproven.
+        const decoy = join(root, "decoy-gitdir");
+        await writeFile(decoy, "/nonexistent-acq-workspace/.git\n");
+        await symlink(decoy, gitdirFile);
         await writeFile(join(first.mirrorPath, "config"), " [core\n this is not config\n");
         await assert.rejects(cache.ensureMirror(), (error: unknown) => {
           assert.ok(error instanceof AcquisitionError);
@@ -866,6 +869,9 @@ test("ensureMirror: a registration with an oversized gitdir file defers the rebu
         const adminRoot = join(first.mirrorPath, "worktrees");
         const [registration] = await readdir(adminRoot);
         assert.ok(registration);
+        // Pins the fstat size bound of the new same-descriptor read path
+        // (the pre-fix code deferred here too — regression coverage for the
+        // rewrite, not a differentiator).
         await writeFile(join(adminRoot, registration, "gitdir"), "x".repeat(5000));
         await writeFile(join(first.mirrorPath, "config"), " [core\n this is not config\n");
         await assert.rejects(cache.ensureMirror(), (error: unknown) => {

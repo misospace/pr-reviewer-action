@@ -243,8 +243,10 @@ async function ensureRealDir(path: string, label: string): Promise<string> {
   // (possibly planted between the ENOENT above and the mkdir) and silently
   // traverses symlinked ancestors, so the fresh-creation path is only
   // trusted once the full chain has been re-checked at the filesystem
-  // level. A refusal therefore leaves nothing usable behind, whichever
-  // side of the mkdir the hostile path was planted on.
+  // level. Whichever side of the mkdir the hostile link was planted on,
+  // the refusal precedes every git invocation; the only residue is at
+  // most one empty directory (possibly created through a hostile link
+  // that the walk then refuses), never a mirror or fetch writes.
   await assertTrustedDirChain(resolved, label);
   return resolved;
 }
