@@ -619,25 +619,24 @@ test("#1145: the repair round's wall-clock allowance subtracts the verdict turn'
   assert.equal(JSON.parse(String((choice.message as Record<string, unknown>).content)).review_markdown, "## Review\noriginal");
 });
 
-test("#1145: the coverage record is recomputed after a successful repair round", async () => {
+test("#1145: a loop that stopped on max-rounds gets no repair round (skipped_no_budget)", async () => {
   const { root, deps } = workspace();
   seedWorkspace(root);
   fs.writeFileSync(path.join(root, "helper.ts"), "export const h = 1;\n");
   fs.writeFileSync(path.join(root, "other.ts"), "export const o = 1;\n");
-  // Three changed files: the original loop reads one, the repair round reads
-  // the second, and the third is never read.
   fs.writeFileSync(
     path.join(root, "pr-files.json"),
     JSON.stringify([{ filename: "src.ts" }, { filename: "notes.md" }, { filename: "other.ts" }]),
   );
-  // TOOL_MAX_ROUNDS=1 -> two loop rounds -> the loop stops on its ROUND
-  // budget (a budget stop, so a coverage record exists at all).
+  // TOOL_MAX_ROUNDS=1 → the explicit override doubles to a 2-round cap, and
+  // the scripted loop spends BOTH rounds while plenty of request budget and
+  // wall-clock remain. The repair must NOT start: an extra round would exceed
+  // the configured round cap, so exhausted rounds are skipped_no_budget just
+  // like exhausted calls or wall-clock.
   const scripted = [
     openAiCall("c1", "read_file", '{"path":"src.ts"}'),
     openAiCall("c2", "read_file", '{"path":"helper.ts"}'),
     openAiVerdict("original"),
-    openAiCall("c3", "read_file", '{"path":"notes.md"}'),
-    openAiVerdict("refreshed"),
   ];
   let calls = 0;
   const result = freshResult();
@@ -657,71 +656,69 @@ test("#1145: the coverage record is recomputed after a successful repair round",
     ),
   );
   assert.equal(handled, true);
-  assert.equal(calls, 5);
+  assert.equal(calls, 3); // loop(2) + verdict(1); no repair round, no refresh
   assert.equal(result.stop_reason, "max-rounds");
-  assert.equal(result.trace_repair_continuation?.outcome, "continued");
-  assert.equal(result.trace_repair_continuation?.verdict_refreshed, true);
-
-  // The record is still present, and it no longer lists the file the repair
-  // round actually read.
-  const coverage = result.partial_coverage as {
-    stop_reason: string;
-    changed_files_total: number;
-    unread_files: string[];
-  };
+  assert.deepEqual(result.trace_repair_continuation, {
+    attempted: true,
+    outcome: "skipped_no_budget",
+    unresolved_ids: ["R1"],
+  });
+  // The standing verdict is untouched, and the coverage record is exactly the
+  // one the ORIGINAL loop computed — no repair round ran to fold reads in.
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  const coverage = result.partial_coverage as { stop_reason: string; unread_files: string[] };
   assert.notEqual(coverage, undefined, "the coverage record stays");
   assert.equal(coverage.stop_reason, "max-rounds");
-  assert.equal(coverage.changed_files_total, 3);
-  assert.deepEqual(coverage.unread_files, ["other.ts"]);
-  // The artifact carries the same recomputed record.
-  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8")) as Record<string, unknown>;
-  const artifactCoverage = artifact.partial_coverage as { unread_files: string[] };
-  assert.deepEqual(artifactCoverage.unread_files, ["other.ts"]);
+  assert.deepEqual(coverage.unread_files, ["notes.md", "other.ts"]);
+  const persisted = JSON.parse(
+    fs.readFileSync(path.join(root, "ai-response.primary.json"), "utf8"),
+  ) as Record<string, unknown>;
+  const choice = (persisted.choices as Array<Record<string, unknown>>)[0]!;
+  assert.equal(JSON.parse(String((choice.message as Record<string, unknown>).content)).review_markdown, "## Review\noriginal");
 });
 
-test("#1145: a repair round that reads every tracked file keeps the coverage record", async () => {
+test("#1145: a repair round that issues no tool call is skipped_no_evidence, never continued", async () => {
   const { root, deps } = workspace();
   seedWorkspace(root);
-  fs.writeFileSync(path.join(root, "helper.ts"), "export const h = 1;\n");
-  // Two changed files: the original loop reads one, the repair round reads
-  // the other — after which nothing the manifest tracked is left unread.
-  fs.writeFileSync(
-    path.join(root, "pr-files.json"),
-    JSON.stringify([{ filename: "src.ts" }, { filename: "notes.md" }]),
-  );
-  const scripted = [
-    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
-    openAiCall("c2", "read_file", '{"path":"helper.ts"}'),
-    openAiVerdict("original"),
-    openAiCall("c3", "read_file", '{"path":"notes.md"}'),
-    openAiVerdict("refreshed"),
-  ];
+  // Default budgets: the loop stops early (model-stopped, one round of its
+  // round budget spent), so the repair round starts — but the model answers
+  // the repair instruction with plain text and NO tool call. No evidence was
+  // inspected, so no refresh is attempted and the outcome must not read as a
+  // completed evidence repair.
+  const scripted = baseScripted([
+    openAiText("I cannot verify requirement R1 from memory alone."),
+  ]);
   let calls = 0;
   const result = freshResult();
   const handled = await runNativeLoop(
-    loopInput(
-      deps({
-        transport: async () => scripted[calls++],
-        env: { SYSTEM_PROMPT: "You are the reviewer.", TOOL_MAX_ROUNDS: "1" },
+    loopInput(deps({ transport: async () => scripted[calls++] }), {
+      result,
+      traceGapProbe: async () => ({
+        instruction: "Verify requirement R1 now.",
+        unresolvedIds: ["R1"],
       }),
-      {
-        result,
-        traceGapProbe: async () => ({
-          instruction: "Verify requirement R1 now.",
-          unresolvedIds: ["R1"],
-        }),
-      },
-    ),
+    }),
   );
   assert.equal(handled, true);
-  assert.equal(calls, 5);
-  // The recomputation comes back empty (nothing left unread), so the ORIGINAL
-  // record stands: the run stopped on a budget stop and must stay partial.
-  // Deleting the record would claim a complete investigation the run never
-  // performed.
-  const coverage = result.partial_coverage as { unread_files: string[] };
-  assert.notEqual(coverage, undefined, "the coverage record is never deleted");
-  assert.deepEqual(coverage.unread_files, ["notes.md"]);
+  assert.equal(calls, 4); // loop(2) + verdict(1) + repair(1); NO refresh request
+  assert.deepEqual(result.trace_repair_continuation, {
+    attempted: true,
+    outcome: "skipped_no_evidence",
+    unresolved_ids: ["R1"],
+    stop_reason: "no-tool-calls",
+    rounds: 1,
+    tool_calls: 0,
+    verdict_refreshed: false,
+  });
+  // The standing verdict and its artifact are byte-intact.
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  const persisted = JSON.parse(
+    fs.readFileSync(path.join(root, "ai-response.primary.json"), "utf8"),
+  ) as Record<string, unknown>;
+  const choice = (persisted.choices as Array<Record<string, unknown>>)[0]!;
+  assert.equal(JSON.parse(String((choice.message as Record<string, unknown>).content)).review_markdown, "## Review\noriginal");
 });
 
 test("#1145 wiring: runToolHarness forwards deps.traceGapProbe to the native loop", async () => {

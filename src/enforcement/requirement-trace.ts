@@ -1668,7 +1668,7 @@ export const MAX_TRACE_REPAIR_SUMMARY_ERROR_CHARS = 200;
  * direction would cycle. */
 export interface TraceGapContinuationSummary {
   /** `continued` | `skipped_no_budget` | `skipped_probe_error` |
-   * `skipped_refresh_failed` (harness-owned enum). */
+   * `skipped_refresh_failed` | `skipped_no_evidence` (harness-owned enum). */
   outcome: string;
   unresolved_ids: string[];
   verdict_refreshed: boolean;

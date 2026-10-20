@@ -240,8 +240,9 @@ deterministic validator reasons. The loop appends it to the same conversation,
 runs one more round under the remaining budgets (no new tools, permissions, or
 rounds beyond the original totals — the instruction explicitly forbids them),
 and re-requests the verdict. Every failure path keeps the original verdict:
-a throwing probe, a budget/deadline stop, or a failed refresh records
-`skipped_probe_error`, `skipped_no_budget`, or `skipped_refresh_failed` on the
+a throwing probe, a budget/deadline stop, a failed refresh, or a repair round
+that issued no tool call records `skipped_probe_error`, `skipped_no_budget`,
+`skipped_refresh_failed`, or `skipped_no_evidence` on the
 harness's `trace_repair_continuation` instead of continuing.
 
 Rows the validator has already refuted against the checkout
@@ -251,19 +252,25 @@ cannot un-prove them; the confirmed-unmet escalation in
 `docs/verdicts-and-publishing.md` owns that outcome. Model-claimed `unmet`
 rows (#1095) are likewise left to the reviewer's own findings.
 
-Two budget facts bound the repair round exactly. Its wall-clock allowance is
-what is LEFT of the run's total wall-clock budget after the original loop
-**and** the first verdict turn, so a verdict turn that consumed the rest of
-the budget leaves nothing for the repair (`skipped_no_budget`) and the
-continuation can never push the run past its own total. The refreshed verdict
+Three budget facts bound the repair round exactly. It runs only inside what
+is LEFT of the original run's totals: its wall-clock allowance is the run's
+total wall-clock budget minus the original loop's elapsed time **and** the
+first verdict turn's elapsed time; its tool-call allowance is the loop's
+remaining request budget; and it starts only when the loop has a round left
+(`rounds < maxRounds`). A loop that stopped on any budget stop has by
+definition exhausted at least one of the three — a `max-rounds` stop has no
+round left, a call-budget stop has no request left, a wall-clock stop has no
+time left — so the repair is recorded `skipped_no_budget` and the run's
+budgets are never exceeded. The refreshed verdict
 is re-requested from the SAME conversation and does **not** re-append the
 review corpus: the conversation already carries it verbatim from the first
 verdict turn, so a second copy would double the corpus in the request (200KB
 corpus → 403KB request) and overflow the context window on exactly the large
-pull requests the repair round targets. The repair round's own reads also
-count: the `partial_coverage` record is recomputed with them folded in, so a
-file the repair round read is no longer listed as never read — while a run
-that stopped on a budget stop stays partial (the record is never dropped).
+pull requests the repair round targets. The repair round is also honest about
+what it achieved: a round that issued no tool call inspected no evidence and
+is recorded `skipped_no_evidence` (never a completed `continued`), and an
+errored round is `skipped_refresh_failed` — only a round that executed at
+least one read and produced a refreshed verdict is `continued`.
 
 The continuation is primary-tier only (the smart tier keeps its pre-#1145
 shape) and never overrides the loop's own stop reason. What happened is

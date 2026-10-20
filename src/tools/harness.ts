@@ -1376,7 +1376,7 @@ export type HarnessResult = Record<string, unknown> & {
    * snake_case: persisted verbatim in the harness artifact. */
   trace_repair_continuation?: {
     attempted: boolean;
-    outcome: "continued" | "skipped_no_budget" | "skipped_probe_error" | "skipped_refresh_failed";
+    outcome: "continued" | "skipped_no_budget" | "skipped_probe_error" | "skipped_refresh_failed" | "skipped_no_evidence";
     unresolved_ids: string[];
     stop_reason?: string;
     rounds?: number;
@@ -2342,17 +2342,27 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           .map((id) => traceGapIdLabel(id));
         const instruction = typeof continuation.instruction === "string" ? continuation.instruction.trim() : "";
         // #1145: the allowance covers what is LEFT of the original run's
-        // wall-clock budget: the original loop's own elapsed time AND the
-        // first verdict turn's elapsed time. The continuation never exceeds
-        // the original run's totals, so a verdict turn that consumed the
-        // remaining budget leaves nothing for the repair round
-        // (`skipped_no_budget`).
+        // budgets: the original loop's elapsed wall-clock AND the first
+        // verdict turn's elapsed time, the loop's remaining tool requests,
+        // and the loop's remaining rounds. The continuation never exceeds
+        // the original run's totals: a loop that stopped on max-rounds has
+        // no round left (an extra repair round would exceed the configured
+        // round cap), a loop that spent its request budget has no call left,
+        // and a verdict turn that consumed the remaining wall-clock leaves
+        // nothing for the repair round — every one of those is recorded as
+        // `skipped_no_budget`.
         const wallClockLeft = budgets.wallClockSec - outcome.elapsedSec - verdictElapsedSec;
+        const roundsLeft = budgets.maxRounds - outcome.rounds;
         const deadlineLeft = deadline === null || timeFn() < deadline;
         if (!instruction) {
           // A vacuous instruction is treated as a no-op probe: no loop, no
           // record — the run stays exactly as before.
-        } else if (outcome.requestsRemaining <= 0 || wallClockLeft <= 0 || !deadlineLeft) {
+        } else if (
+          outcome.requestsRemaining <= 0 ||
+          roundsLeft <= 0 ||
+          wallClockLeft <= 0 ||
+          !deadlineLeft
+        ) {
           input.result.trace_repair_continuation = {
             attempted: true,
             outcome: "skipped_no_budget",
@@ -2418,30 +2428,6 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
             input.result.executed_request_count =
               Number(input.result.executed_request_count ?? 0) +
               repair.executed.filter((call) => call.result.status === "ok").length;
-            // #1145: the repair round's own reads COUNT. The coverage record
-            // was computed from the original loop's calls alone, so a
-            // changed file the repair round actually read could still be
-            // listed as "never read" in the published coverage notice and in
-            // the review-coverage artifact — the published body would then
-            // contradict the evidence the run gathered. Recompute the record
-            // with the repair's executed calls folded in and REPLACE the
-            // original only when the recomputation returns a record: a null
-            // recomputation means "nothing the manifest tracked is left
-            // unread", and dropping the record then would claim a complete
-            // investigation this run did not perform (the loop stopped on a
-            // budget stop), so the original record stays and the run remains
-            // "partial". The stop reason stays the ORIGINAL loop's: the
-            // budget stop is what made the run partial. A repair round that
-            // itself errored counts too — the calls it completed were read,
-            // and they are already folded into the trace above; a call whose
-            // own result failed is not a read and stays uncovered.
-            if (coverageInputs !== null) {
-              const recomputed = computePartialCoverage(
-                { ...outcome, executed: [...outcome.executed, ...repair.executed] },
-                coverageInputs,
-              );
-              if (recomputed !== null) input.result.partial_coverage = recomputed;
-            }
             // A refresh is justified only by new executed evidence — and it
             // is wire-safe only then: with no fresh tool_result event the
             // second verdict's user turn would sit directly after the
@@ -2453,9 +2439,19 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
             // complete: record it distinctly instead of calling an errored
             // round "continued" (the stop_reason keeps the precise cause).
             const repairErrored = repair.stopReason === "request-error" || String(repair.error ?? "") !== "";
+            // A repair round that issued NO tool call inspected no evidence,
+            // so it cannot justify a refresh (none is attempted) and must
+            // not read as a completed evidence repair: recording it as
+            // "continued" would claim the trace gap was chased when the
+            // model answered the repair instruction with plain text alone.
+            const repairProducedNoEvidence = !repairErrored && repair.executed.length === 0;
             input.result.trace_repair_continuation = {
               attempted: true,
-              outcome: repairErrored ? "skipped_refresh_failed" : "continued",
+              outcome: repairErrored
+                ? "skipped_refresh_failed"
+                : repairProducedNoEvidence
+                  ? "skipped_no_evidence"
+                  : "continued",
               unresolved_ids: unresolvedIds,
               stop_reason: repair.stopReason,
               rounds: repair.rounds,

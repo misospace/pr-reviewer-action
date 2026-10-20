@@ -4166,7 +4166,6 @@ test("#1145: a confirmed-unmet trace escalates an approve to request_changes wit
 test("#1145: the escalation is a no-op when no row is refuted (the #1095 boundary stays intact)", () => {
   const workspace = makeWorkspace();
   try {
-    const ledger = ledgerWith([{ id: "req-1", text: "The pipeline MUST reject malformed ids.", kind: "acceptance" }]);
     // Untraced (coverage gap) and model-claimed unmet (known gap): neither is
     // a refutation, so the escalate pass must not synthesize anything.
     const trace = traceWithRows([
@@ -4264,13 +4263,6 @@ test("#1145: the escalation is stable against the #976/#977 relaxers (they refus
   // `canRelaxForCiOnly` refuses once `requirement_trace_incomplete` is set,
   // and the synthesized blocker is not a relaxable category — neither path
   // may flip the verdict back to approve.
-  const trace = traceWithRows([
-    {
-      requirement_id: "req-1", disposition: "unverifiable", proof: "runtime_behavior",
-      enforcement: [{ file: "src/a.ts", line: 1 }], test: [], reason: "x",
-      notes: ["enforcement-location-copies-without-comparing"],
-    },
-  ]);
   const art = artifact({
     verdict: "request_changes",
     verdict_source: "enforcement",
