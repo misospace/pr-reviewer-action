@@ -64,9 +64,9 @@ export interface ReviewDependencies {
   persistArtifacts?: boolean;
   now?: () => number;
   sleep?: (seconds: number) => Promise<void>;
-  log?: (line: string) => void;
-  error?: (line: string) => void;
-  annotate?: (line: string) => void;
+  log: (line: string) => void;
+  error: (line: string) => void;
+  annotate: (line: string) => void;
   quiet?: boolean;
   /** CI-gate override for tests; explicit null disables the gate. */
   ciGate?: ReturnType<typeof ciGateBranch> | null;

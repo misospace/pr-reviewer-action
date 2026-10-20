@@ -47,15 +47,16 @@ function request(aiBaseUrl: string, runDir: string): ReviewRequest {
 
 /** Engine dependencies over the shared fixture; `overrides` supplies the one
  * seam a cancellation test needs to control (a gate branch, a sink). */
+function noopSink(): void {}
 function engineDeps(root: string, runDir: string, overrides: Partial<ReviewDependencies> = {}): ReviewDependencies {
-  return { workspace: root, runDir, outputsSink: "/dev/null", stepSummaryPath: join(root, "summary.md"), adapter: mockPlatform(), persistArtifacts: true, quiet: true, ...overrides };
+  return { workspace: root, runDir, outputsSink: "/dev/null", stepSummaryPath: join(root, "summary.md"), adapter: mockPlatform(), persistArtifacts: true, quiet: true, log: noopSink, error: noopSink, annotate: noopSink, ...overrides };
 }
 
 test("engine runs a full review without Action-only environment", async () => {
   const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
   const f = fixture();
   try {
-    const result = await runReviewEngine(request(server.url, f.runDir), { workspace: f.root, runDir: f.runDir, outputsSink: "/dev/null", stepSummaryPath: join(f.root, "summary.md"), adapter: mockPlatform(), persistArtifacts: true, quiet: true });
+    const result = await runReviewEngine(request(server.url, f.runDir), { workspace: f.root, runDir: f.runDir, outputsSink: "/dev/null", stepSummaryPath: join(f.root, "summary.md"), adapter: mockPlatform(), persistArtifacts: true, quiet: true, log: noopSink, error: noopSink, annotate: noopSink });
     assert.equal(result.outputs.verdict, "approve");
     assert.equal(result.outputs.reviewRoute, "legacy");
     assert.match(result.marker, new RegExp("a".repeat(40)));
@@ -67,6 +68,35 @@ test("engine runs a full review without Action-only environment", async () => {
   } finally { await server.close(); f.cleanup(); }
 });
 
+test("the engine writes nothing implicitly to process streams when sinks are explicit", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  const seen: string[] = [];
+  const originalStdoutWrite = process.stdout.write;
+  const originalStderrWrite = process.stderr.write;
+  const spy = (stream: "stdout" | "stderr", original: typeof process.stdout.write): typeof process.stdout.write => {
+    const patched = ((chunk: unknown, encoding?: BufferEncoding, cb?: (err?: Error | null) => void): boolean => {
+      const text = typeof chunk === "string" ? chunk : Buffer.from(chunk as Uint8Array).toString("latin1");
+      if (!text.startsWith("\u00FF\u000F")) seen.push(`${stream}:${JSON.stringify(text)}`);
+      return original.call(process[stream], chunk as string, encoding, cb);
+    }) as typeof process.stdout.write;
+    return patched;
+  };
+  try {
+    process.stdout.write = spy("stdout", originalStdoutWrite);
+    process.stderr.write = spy("stderr", originalStderrWrite);
+    const logLines: string[] = [];
+    const result = await runReviewEngine(request(server.url, f.runDir), { ...engineDeps(f.root, f.runDir), quiet: false, log: (line) => logLines.push(line), error: noopSink, annotate: noopSink });
+    assert.equal(result.outputs.verdict, "approve");
+    assert.ok(logLines.length > 0, "log sink received lines");
+  } finally {
+    process.stdout.write = originalStdoutWrite;
+    process.stderr.write = originalStderrWrite;
+    await server.close(); f.cleanup();
+  }
+  assert.deepEqual(seen, [], "no implicit process-stream writes escaped the engine");
+});
+
 test("the env adapter and engine produce identical structured results", async () => {
   const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
   const f = fixture();
@@ -74,7 +104,7 @@ test("the env adapter and engine produce identical structured results", async ()
   mkdirSync(engineRunDir);
   try {
     const adapterResult = await runReview({ env: { GITHUB_OUTPUT: "/dev/null", GITHUB_STEP_SUMMARY: "" }, inputs: { ...inputs, "ai-base-url": server.url }, runDir: f.runDir, workspace: f.root, platformAdapter: mockPlatform(), persistArtifacts: true, quiet: true });
-    const engineResult = await runReviewEngine(request(server.url, engineRunDir), { workspace: f.root, runDir: engineRunDir, outputsSink: "/dev/null", stepSummaryPath: "", adapter: mockPlatform(), persistArtifacts: true, quiet: true });
+    const engineResult = await runReviewEngine(request(server.url, engineRunDir), { workspace: f.root, runDir: engineRunDir, outputsSink: "/dev/null", stepSummaryPath: "", adapter: mockPlatform(), persistArtifacts: true, quiet: true, log: noopSink, error: noopSink, annotate: noopSink });
     for (const key of ["outputs", "route", "routeReason", "analysisEngine", "classification", "verdictPolicy"] as const) assert.deepEqual(engineResult[key], adapterResult[key], key);
     assert.deepEqual([...engineResult.artifacts.keys()].sort(), [...adapterResult.artifacts.keys()].sort());
     for (const name of ["review-body.md", "verdict.txt", "ai-output.json"]) assert.equal(readFileSync(join(engineRunDir, name), "utf8"), readFileSync(join(f.runDir, name), "utf8"), name);
@@ -84,7 +114,7 @@ test("the env adapter and engine produce identical structured results", async ()
 test("pre-aborted engine request refuses to start", async () => {
   const f = fixture();
   try {
-    await assert.rejects(runReviewEngine({ ...request("", f.runDir), signal: AbortSignal.abort() }, { workspace: f.root, runDir: f.runDir, outputsSink: "/dev/null", adapter: mockPlatform() }), (error: unknown) => error instanceof RunReviewError && /cancelled/.test(error.message));
+    await assert.rejects(runReviewEngine({ ...request("", f.runDir), signal: AbortSignal.abort() }, { workspace: f.root, runDir: f.runDir, outputsSink: "/dev/null", adapter: mockPlatform(), log: noopSink, error: noopSink, annotate: noopSink }), (error: unknown) => error instanceof RunReviewError && /cancelled/.test(error.message));
   } finally { f.cleanup(); }
 });
 

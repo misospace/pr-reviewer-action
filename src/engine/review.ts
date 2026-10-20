@@ -339,11 +339,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const started = clock();
   const log = (line: string): void => {
     if (dependencies.quiet) return;
-    (dependencies.log ?? ((text) => process.stderr.write(`[v3] ${text}\n`)))(line);
+    dependencies.log(line);
   };
-  const errorLog = (line: string): void =>
-    (dependencies.error ?? ((text) => process.stderr.write(`[v3] ERROR: ${text}\n`)))(line);
-  const annotate = dependencies.annotate ?? ((line: string): void => { process.stdout.write(`${line}\n`); });
+  const errorLog = (line: string): void => dependencies.error(line);
+  const annotate = dependencies.annotate;
 
   assertSupportedNode(process.versions.node);
   if (request.ambient[GATE_CHILD_ENV] === "1") {
