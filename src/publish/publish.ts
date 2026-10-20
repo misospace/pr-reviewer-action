@@ -25,7 +25,7 @@ import { FINDING_OUTCOMES_SCHEMA, MAX_LEDGER_EVENTS, normalizeOutcomeEvent, seri
 import { parseFindingIdentityMarker } from "../outcomes/identity.js";
 import { deriveOutcomeEvents, type PriorFindingObservation } from "../outcomes/reconcile.js";
 import { aggregateOutcomeEvents } from "../outcomes/report.js";
-import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, retireManagedInlineComments, resolvePublishTrustedOwner, selectManagedReviews, minimizeSupersededAdvisoryReviews, type CleanupLog } from "./cleanup.js";
+import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, retireManagedInlineComments, resolvePublishTrustedOwner, selectManagedReviews, hideSupersededManagedReviews, type CleanupLog } from "./cleanup.js";
 import { ownerMatchesIdentity, type TrustedOwnerIdentity } from "../platform/owner-identity.js";
 import { strictReviewResult } from "../enforcement/verdict-policy.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
@@ -1833,13 +1833,14 @@ export async function publishReview(
           ? { kind: "sticky", commentId: stickyCommentId, updatedAt: stickyUpdatedAt, body: stickyBody }
           : undefined;
     const replacementComplete = completeCoverage && !fallbackSubmission && replacementCheckpoint !== undefined;
-    // #1114: verification below (head, trusted owner, supersession ordering,
-    // still-current revalidation) is what proves staleness — not coverage
-    // completeness. A published checkpoint therefore authorizes the safe,
-    // presentation-only minimization of superseded advisory bodies even when
-    // the replacement is incomplete; the destructive/authoritative effects
-    // (inline retirement, dismissal, thread resolution) stay behind the
-    // strict complete-replacement gate.
+    // #1114/#1144: verification below (head, trusted owner, supersession
+    // ordering, still-current revalidation) is what proves staleness — not
+    // coverage completeness. A published checkpoint therefore authorizes
+    // hiding every proven-superseded managed review (minimization, plus
+    // dismissal of a stale verdict state) even when the replacement is
+    // incomplete: the newest published managed review is the only visible
+    // one. The destructive effects (inline-comment retirement, thread
+    // resolution) stay behind the strict complete-replacement gate.
     if (replacementCheckpoint !== undefined) {
       try {
         const verifiedHead = await api.getHeadSha();
@@ -1934,13 +1935,16 @@ export async function publishReview(
                     else messages.push("NOTE: Skipping review-thread resolution (platform=forgejo; no GraphQL API)");
                   }
                 } else {
-                  // #1114: the checkpoint proves a newer managed publication at
-                  // the current head, so proven-stale advisory bodies can be
-                  // hidden presentation-only. Nothing is deleted and no
-                  // APPROVED/CHANGES_REQUESTED verdict is dismissed: a partial
-                  // review must never make a blocking review disappear.
-                  messages.push("NOTE: Replacement is not complete (incomplete coverage or fallback submission); previous inline comments and verdicts left in place, attempting presentation-only minimization of superseded advisory review bodies");
-                  await minimizeSupersededAdvisoryReviews(api, olderManaged, input.commentMarker, cleanupLog, { owner, reason }, [], stillCurrent);
+                  // #1144: the checkpoint proves a newer managed publication
+                  // at the current head, so every older managed review from
+                  // this identity is proven superseded: its body is hidden
+                  // and its stale APPROVED/CHANGES_REQUESTED verdict
+                  // dismissed even though this run's replacement is partial
+                  // or used the fallback submission path. Only the
+                  // destructive inline-comment retirement and thread
+                  // resolution above stay gated on complete coverage.
+                  messages.push("NOTE: Replacement is not complete (incomplete coverage or fallback submission); previous inline comments left in place, hiding superseded managed review bodies");
+                  await hideSupersededManagedReviews(api, olderManaged, input.commentMarker, cleanupLog, { owner, reason }, [], stillCurrent);
                 }
               } else messages.push("WARN: A newer review superseded this run; cleanup skipped");
             }

@@ -12,7 +12,7 @@ import {
   resolveCleanupFlag,
   sanitizeForPublication,
 } from "../src/publish/publish.js";
-import { cleanupManagedReviews, retireManagedInlineComments, resolveSupersededThreads, minimizeSupersededAdvisoryReviews } from "../src/publish/cleanup.js";
+import { cleanupManagedReviews, retireManagedInlineComments, resolveSupersededThreads, hideSupersededManagedReviews } from "../src/publish/cleanup.js";
 import { buildComments, prescriptionKey, prescriptionKeyDigest, FEEDBACK_AFFORDANCE } from "../src/publish/inline-findings.js";
 import { enforcementView, normalizeThread } from "../src/context/review-threads.js";
 import { applyReviewThreadEnforcement } from "../src/enforcement/threads.js";
@@ -2477,11 +2477,11 @@ test("#1101 lifecycle: a smuggled marker line cannot desync a 👎 from the pres
   assert.ok(b.messages.some((line) => line.includes("1 trusted rejection(s)")), b.messages.join("\n"));
 });
 
-// ---- #1114: presentation-only minimization of superseded advisory reviews ----
+// ---- #1144: only the latest managed review stays visible after any verified replacement ----
 
 const BOT = { owner: { kind: "login", login: "bot" } as const, reason: "user-login" };
 
-test("#1114: minimization selects only owned managed advisory COMMENTED bodies", async () => {
+test("#1144: hiding selects every owned managed review state, dismisses verdicts, and skips the rest", async () => {
   const api = new MockPublishApi();
   api.reviews = [
     { id: 1, node_id: "node-1", state: "COMMENTED", body: `${MARKER}\nalready minimized`, user: { login: "bot" } },
@@ -2493,18 +2493,21 @@ test("#1114: minimization selects only owned managed advisory COMMENTED bodies",
     { id: 7, node_id: "node-7", state: "PENDING", body: `${MARKER}\nunproven state`, user: { login: "bot" } },
     { id: 8, node_id: "node-8", state: "COMMENTED", body: `${MARKER}\nstale advisory`, user: { login: "bot" } },
     { id: 9, node_id: "node-9", state: "COMMENTED", body: `${MARKER}\njust published`, user: { login: "bot" } },
+    { id: 10, node_id: "node-10", state: "DISMISSED", body: `${MARKER}\ndismissed but still visible`, user: { login: "bot" } },
+    { id: 11, node_id: "node-11", state: "CHANGES_REQUESTED", body: `${MARKER}\nhuman marker-forged verdict`, user: { login: "human" } },
   ];
   api.minimizeIds = ["1"];
   const logs: string[] = [];
-  await minimizeSupersededAdvisoryReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT, ["9"]);
-  assert.deepEqual(api.minimized, ["node-8"]);
-  assert.deepEqual(api.dismissed, []);
-  assert.equal(api.inlineListCalls, 0, "presentation-only minimization never enumerates or retires inline comments");
+  await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT, ["9"]);
+  assert.deepEqual(api.minimized, ["node-3", "node-4", "node-8", "node-10"],
+    "verdict bodies are dismissed then hidden; the already-hidden advisory stays skipped");
+  assert.deepEqual(api.dismissed, ["3", "4"], "only bot-owned verdicts are dismissed");
+  assert.equal(api.inlineListCalls, 0, "hiding superseded reviews never enumerates or retires inline comments");
   assert.equal(api.threadQueryCalls, 0, "and never resolves review threads");
-  assert.ok(logs.some((line) => line.includes("Advisory reviews: eligible=1 minimized=1 failed=0")));
+  assert.ok(logs.some((line) => line.includes("Superseded reviews: eligible=4 dismissed=2 minimized=4 failed=0")));
 });
 
-test("#1114: minimization fails closed on unproven owner, unreadable minimized state, lost supersession, and unsupported forge", async () => {
+test("#1144: hiding fails closed on unproven owner, lost supersession; unreadable minimized state blocks only minimization", async () => {
   const stale = [
     { id: 1, node_id: "node-1", state: "COMMENTED", body: `${MARKER}\nstale advisory`, user: { login: "bot" } },
     { id: 2, state: "COMMENTED", body: `${MARKER}\nforeign`, user: { login: "other-bot" } },
@@ -2512,35 +2515,63 @@ test("#1114: minimization fails closed on unproven owner, unreadable minimized s
 
   const noOwner = new MockPublishApi();
   const ownerLogs: string[] = [];
-  await minimizeSupersededAdvisoryReviews(noOwner, stale, MARKER, (line) => ownerLogs.push(line), { owner: null, reason: "unavailable" });
+  await hideSupersededManagedReviews(noOwner, stale, MARKER, (line) => ownerLogs.push(line), { owner: null, reason: "unavailable" });
   assert.deepEqual(noOwner.minimized, []);
+  assert.deepEqual(noOwner.dismissed, [], "an unproven identity dismisses nothing either");
   assert.ok(ownerLogs.some((line) => line.includes("Could not verify authenticated owner") && line.includes("identity reason: unavailable")));
 
   const unreadable = new MockPublishApi();
   unreadable.minimizeIdsError = true;
   const unreadableLogs: string[] = [];
-  await minimizeSupersededAdvisoryReviews(unreadable, stale, MARKER, (line) => unreadableLogs.push(line), BOT);
-  assert.deepEqual(unreadable.minimized, []);
+  await hideSupersededManagedReviews(unreadable, stale, MARKER, (line) => unreadableLogs.push(line), BOT);
+  assert.deepEqual(unreadable.minimized, [], "a failed GraphQL minimized-state read hides no bodies");
   assert.ok(unreadableLogs.some((line) => line.includes("Could not read minimized review state")));
+
+  // The same unreadable GraphQL state does NOT block the REST dismissal of a
+  // stale verdict: dismissal provenance never depended on GraphQL.
+  const unreadableVerdict = new MockPublishApi();
+  unreadableVerdict.minimizeIdsError = true;
+  unreadableVerdict.reviews = [{ id: 5, node_id: "node-5", state: "CHANGES_REQUESTED", body: `${MARKER}\nstale verdict`, user: { login: "bot" } }];
+  await hideSupersededManagedReviews(unreadableVerdict, unreadableVerdict.reviews, MARKER, () => undefined, BOT);
+  assert.deepEqual(unreadableVerdict.dismissed, ["5"]);
+  assert.deepEqual(unreadableVerdict.minimized, []);
 
   const lost = new MockPublishApi();
   const lostLogs: string[] = [];
-  await minimizeSupersededAdvisoryReviews(lost, stale, MARKER, (line) => lostLogs.push(line), BOT, [], async () => false);
+  await hideSupersededManagedReviews(lost, stale, MARKER, (line) => lostLogs.push(line), BOT, [], async () => false);
   assert.deepEqual(lost.minimized, []);
-  assert.ok(lostLogs.some((line) => line.includes("Head or latest review changed; stopping advisory minimization")));
+  assert.ok(lostLogs.some((line) => line.includes("Head or latest review changed; stopping superseded review cleanup")));
+
+  const lostVerdict = new MockPublishApi();
+  lostVerdict.reviews = [{ id: 5, node_id: "node-5", state: "CHANGES_REQUESTED", body: `${MARKER}\nstale verdict`, user: { login: "bot" } }];
+  const lostVerdictLogs: string[] = [];
+  await hideSupersededManagedReviews(lostVerdict, lostVerdict.reviews, MARKER, (line) => lostVerdictLogs.push(line), BOT, [], async () => false);
+  assert.deepEqual(lostVerdict.dismissed, [], "a lost supersession never dismisses");
+  assert.ok(lostVerdictLogs.some((line) => line.includes("stopping superseded review cleanup")));
 
   const forgejo = new MockPublishApi("forgejo");
   const forgejoLogs: string[] = [];
-  await minimizeSupersededAdvisoryReviews(forgejo, stale, MARKER, (line) => forgejoLogs.push(line), BOT);
+  await hideSupersededManagedReviews(forgejo, stale, MARKER, (line) => forgejoLogs.push(line), BOT);
   assert.deepEqual(forgejo.minimized, [], "Forgejo makes zero GraphQL minimization calls");
+  assert.deepEqual(forgejo.dismissed, []);
   assert.ok(forgejoLogs.some((line) => line.includes("no GraphQL API")));
+
+  // Without GraphQL a Forgejo verdict state still loses its stale merge-gate
+  // vote through the REST dismissal path, matching the complete path.
+  const forgejoVerdict = new MockPublishApi("forgejo");
+  forgejoVerdict.reviews = [{ id: 6, state: "CHANGES_REQUESTED", body: `${MARKER}\nstale verdict`, user: { login: "bot" } }];
+  const forgejoVerdictLogs: string[] = [];
+  await hideSupersededManagedReviews(forgejoVerdict, forgejoVerdict.reviews, MARKER, (line) => forgejoVerdictLogs.push(line), BOT);
+  assert.deepEqual(forgejoVerdict.dismissed, ["6"], "dismissal is REST, not GraphQL");
+  assert.deepEqual(forgejoVerdict.minimized, [], "the body hide degrades with an explicit note");
+  assert.ok(forgejoVerdictLogs.some((line) => line.includes("no GraphQL API")));
 });
 
-test("#1114: successive requirement-trace-partial re-runs minimize superseded advisory reviews without destructive cleanup", async () => {
+test("#1144: successive requirement-trace-partial re-runs leave only the newest managed review visible, without destructive cleanup", async () => {
   const api = new MockPublishApi();
   api.reviews = [
-    { id: 400, node_id: "node-verdict", state: "CHANGES_REQUESTED", body: `${MARKER}\nblocking verdict`, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" },
-    { id: 500, node_id: "node-foreign", state: "COMMENTED", body: `${MARKER}\nforeign advisory`, user: { login: "other-bot" }, submitted_at: "2025-01-02T00:00:00Z" },
+    { id: 400, node_id: "node-400", state: "CHANGES_REQUESTED", body: `${MARKER}\nblocking verdict`, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" },
+    { id: 500, node_id: "node-500", state: "COMMENTED", body: `${MARKER}\nforeign advisory`, user: { login: "other-bot" }, submitted_at: "2025-01-02T00:00:00Z" },
   ];
   // The observed Release Please state: review_result=partial with
   // incomplete_reason=requirement_trace, verdict approve (withheld to COMMENT).
@@ -2550,39 +2581,48 @@ test("#1114: successive requirement-trace-partial re-runs minimize superseded ad
   } as const;
   const settle = () => {
     // Mirror the forge: submitted reviews land as COMMENTED with node ids,
-    // and ids minimized by the run are visible to the next run's GraphQL read.
-    api.reviews = api.reviews.map((r) => r.state === undefined ? { ...r, state: "COMMENTED", node_id: `node-${r.id}` } : r);
+    // dismissed reviews change state, and ids minimized by the run are
+    // visible to the next run's GraphQL read.
+    api.reviews = api.reviews.map((r) => {
+      let next = r.state === undefined ? { ...r, state: "COMMENTED", node_id: `node-${r.id}` } : { ...r };
+      if (api.dismissed.includes(String(next.id))) next = { ...next, state: "DISMISSED" };
+      return next;
+    });
     api.minimizeIds = api.minimized
       .map((node) => node.replace(/^node-/, ""))
       .filter((id) => /^[1-9]\d*$/.test(id));
   };
 
-  // Run A: nothing owned and advisory exists yet; the CHANGES_REQUESTED
-  // verdict and the foreign advisory are both out of scope.
+  // Run A: the older bot CHANGES_REQUESTED verdict is proven superseded by
+  // this newer partial publication and is dismissed + hidden; the foreign
+  // advisory is never touched.
   const a = await publishReview(input(partial), api, { diffText: "" });
   assert.equal(a.status, "published");
   settle();
-  assert.deepEqual(api.minimized, []);
+  assert.deepEqual(api.dismissed, ["400"], "a partial replacement dismisses the old blocking verdict");
+  assert.deepEqual(api.minimized, ["node-400"]);
 
   // Run B: A's advisory body is proven stale by this newer managed review.
   const b = await publishReview(input(partial), api, { diffText: "" });
   assert.equal(b.status, "published");
   settle();
-  assert.deepEqual(api.minimized, ["node-1001"]);
-  assert.deepEqual(api.dismissed, [], "a partial replacement never dismisses the prior CHANGES_REQUESTED verdict");
+  assert.deepEqual(api.dismissed, ["400"], "the already-dismissed review is not dismissed again");
+  assert.deepEqual(api.minimized, ["node-400", "node-1001"]);
 
-  // Run C: A is already minimized (idempotent), B becomes the stale one,
-  // and the just-published review always stays visible.
+  // Run C: A and B are already hidden (idempotent), C is the newest and
+  // stays visible — across the mixed CHANGES_REQUESTED/COMMENTED states only
+  // the latest managed review remains.
   const c = await publishReview(input(partial), api, { diffText: "" });
   assert.equal(c.status, "published");
-  assert.deepEqual(api.minimized, ["node-1001", "node-1002"], "minimization is idempotent and the newest review remains visible");
+  assert.deepEqual(api.minimized, ["node-400", "node-1001", "node-1002"], "hiding is idempotent and the newest review remains visible");
+  assert.equal(api.minimized.includes("node-1003"), false, "the just-published review is never hidden");
   assert.equal(api.inlineListCalls, 0, "no inline-comment enumeration or deletion on the partial path");
   assert.equal(api.threadQueryCalls, 0, "no review-thread resolution on the partial path");
-  assert.deepEqual(api.dismissed, []);
-  assert.ok(c.messages.some((line) => line.includes("attempting presentation-only minimization of superseded advisory review bodies")));
+  assert.deepEqual(api.dismissed, ["400"]);
+  assert.ok(c.messages.some((line) => line.includes("hiding superseded managed review bodies")));
 });
 
-test("#1114: a complete replacement keeps the existing dismiss/retire semantics", async () => {
+test("#1144: a complete replacement keeps the existing dismiss/retire semantics", async () => {
   const api = new MockPublishApi();
   api.reviews = [
     { id: 700, node_id: "node-700", state: "COMMENTED", body: `${MARKER}\nold advisory`, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" },
@@ -2596,17 +2636,21 @@ test("#1114: a complete replacement keeps the existing dismiss/retire semantics"
   assert.ok(!result.messages.some((line) => line.includes("Replacement is not complete")));
 });
 
-test("#1114: fail-closed guards block advisory minimization on an incomplete re-run", async () => {
-  const stale = [{ id: 7, node_id: "node-7", state: "COMMENTED", body: `${MARKER}\nold advisory`, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+test("#1144: fail-closed guards block superseded-review hiding on an incomplete re-run", async () => {
+  const stale = [
+    { id: 7, node_id: "node-7", state: "COMMENTED", body: `${MARKER}\nold advisory`, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" },
+    { id: 8, node_id: "node-8", state: "CHANGES_REQUESTED", body: `${MARKER}\nold verdict`, user: { login: "bot" }, submitted_at: "2025-01-02T00:00:00Z" },
+  ];
   const partialVerdict = { mode: "review_verdict", cleanupPreviousNativeReviews: "true", requiredChecks: "incomplete" } as const;
 
-  // Unknown owner: bounded identity WARN, nothing minimized.
+  // Unknown owner: bounded identity WARN, nothing minimized or dismissed.
   const unknownOwner = new MockPublishApi();
   unknownOwner.reviews = stale;
   unknownOwner.identity = null;
   const unknownResult = await publishReview(input(partialVerdict), unknownOwner, { diffText: "" });
   assert.equal(unknownResult.status, "published");
   assert.deepEqual(unknownOwner.minimized, []);
+  assert.deepEqual(unknownOwner.dismissed, []);
   assert.ok(unknownResult.messages.some((line) => line.includes("Could not verify authenticated owner")));
 
   // Head moved after publication: the verified-head guard blocks everything.
@@ -2617,6 +2661,7 @@ test("#1114: fail-closed guards block advisory minimization on an incomplete re-
   const headResult = await publishReview(input(partialVerdict), headMoved, { diffText: "" });
   assert.equal(headResult.status, "published");
   assert.deepEqual(headMoved.minimized, []);
+  assert.deepEqual(headMoved.dismissed, []);
   assert.ok(headResult.messages.some((line) => line.includes("Head changed after publication")));
 
   // Overlapping run: a newer managed review published during this run means
@@ -2632,12 +2677,33 @@ test("#1114: fail-closed guards block advisory minimization on an incomplete re-
   const competingResult = await publishReview(input(partialVerdict), competing, { diffText: "" });
   assert.equal(competingResult.status, "published");
   assert.deepEqual(competing.minimized, [], "a stale run never hides the newer review");
+  assert.deepEqual(competing.dismissed, [], "and never dismisses a verdict it no longer owns the ordering of");
   assert.ok(competingResult.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
 });
 
-test("#1114: a partial review_comment run minimizes through the sticky checkpoint; a competing managed review blocks it", async () => {
+test("#1144: a run with no published replacement checkpoint hides and dismisses nothing", async () => {
+  const api = new MockPublishApi();
+  // Hide-eligible fixtures (known states with GraphQL node ids): without a
+  // checkpoint these must stay untouched, not merely be filtered by state.
+  api.reviews = [
+    { id: 300, node_id: "node-300", state: "CHANGES_REQUESTED", body: `${MARKER}\nold verdict`, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" },
+    { id: 301, node_id: "node-301", state: "COMMENTED", body: `${MARKER}\nold advisory`, user: { login: "bot" }, submitted_at: "2025-01-02T00:00:00Z" },
+  ];
+  // Sticky publication succeeds but reports neither an id nor a publication
+  // timestamp, and no native review is created: no checkpoint, fail closed.
+  api.stickyResult = { ok: true, created: false };
+  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "true", requiredChecks: "incomplete" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("No replacement checkpoint")));
+  assert.deepEqual(api.minimized, [], "an unproven replacement never hides the current latest review");
+  assert.deepEqual(api.dismissed, []);
+  assert.equal(api.inlineListCalls, 0);
+});
+
+test("#1144: a partial review_comment run hides and dismisses through the sticky checkpoint; a competing managed review blocks it", async () => {
   const staleAdvisory = [
-    { id: 7, node_id: "node-7", state: "COMMENTED", body: `${MARKER}\nold advisory`, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" },
+    { id: 6, node_id: "node-6", state: "CHANGES_REQUESTED", body: `${MARKER}\nold blocking verdict`, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" },
+    { id: 7, node_id: "node-7", state: "COMMENTED", body: `${MARKER}\nold advisory`, user: { login: "bot" }, submitted_at: "2025-01-02T00:00:00Z" },
   ];
   const partialSticky = { mode: "review_comment", cleanupPreviousNativeReviews: "auto", requiredChecks: "incomplete" } as const;
 
@@ -2647,9 +2713,9 @@ test("#1114: a partial review_comment run minimizes through the sticky checkpoin
   api.stickyResult = { ok: true, created: false, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
   const result = await publishReview(input(partialSticky), api, { diffText: "" });
   assert.equal(result.status, "published");
-  assert.deepEqual(api.minimized, ["node-7"], "the sticky checkpoint authorizes advisory minimization");
+  assert.deepEqual(api.minimized, ["node-6", "node-7"], "the sticky checkpoint authorizes hiding every older managed review");
+  assert.deepEqual(api.dismissed, ["6"], "and the dismissal of the older verdict state");
   assert.equal(api.inlineListCalls, 0);
-  assert.deepEqual(api.dismissed, []);
 
   // An overlapping managed review submitted after the checkpoint fails the
   // sticky still-current revalidation: the stale run hides nothing.
@@ -2666,27 +2732,57 @@ test("#1114: a partial review_comment run minimizes through the sticky checkpoin
   const competingResult = await publishReview(input(partialSticky), competing, { diffText: "" });
   assert.equal(competingResult.status, "published");
   assert.deepEqual(competing.minimized, [], "a competing managed review newer than the sticky checkpoint blocks minimization");
+  assert.deepEqual(competing.dismissed, [], "and dismissal");
   assert.ok(competingResult.messages.some((line) => line.includes("A newer review superseded this run; cleanup skipped")));
 });
 
-test("#1114: a fallback-submitted review is an incomplete replacement and takes the advisory-only path", async () => {
+test("#1144: a fallback-submitted review is an incomplete replacement and still hides and dismisses old reviews", async () => {
   const api = new MockPublishApi();
-  api.reviews = [{ id: 600, node_id: "node-600", state: "COMMENTED", body: `${MARKER}\nold advisory`, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  api.reviews = [
+    { id: 600, node_id: "node-600", state: "COMMENTED", body: `${MARKER}\nold advisory`, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" },
+    { id: 601, node_id: "node-601", state: "APPROVED", body: `${MARKER}\nold approval`, user: { login: "bot" }, submitted_at: "2025-01-02T00:00:00Z" },
+  ];
   api.reviewResults = [{ ok: false, error: "commit-bound submission rejected" }];
   const result = await publishReview(input({ mode: "review_verdict", cleanupPreviousNativeReviews: "true" }), api, { diffText: "" });
   assert.equal(result.status, "published");
   assert.ok(result.messages.some((line) => line.includes("falling back to plain review")));
-  assert.deepEqual(api.minimized, ["node-600"]);
+  assert.deepEqual(api.minimized, ["node-600", "node-601"]);
+  assert.deepEqual(api.dismissed, ["601"], "the fallback path dismisses the stale approval too");
   assert.equal(api.inlineListCalls, 0, "a fallback submission never retires inline comments");
-  assert.deepEqual(api.dismissed, []);
 });
 
-test("#1114: minimize failures are counted with a bounded diagnostic and never abort the run", async () => {
+test("#1144: an old COMMENTED review is hidden by a newer partial CHANGES_REQUESTED review, which stays visible", async () => {
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 100, node_id: "node-100", state: "COMMENTED", body: `${MARKER}\nold advisory`, user: { login: "bot" }, submitted_at: "2025-01-01T00:00:00Z" }];
+  const result = await publishReview(input({
+    mode: "review_verdict", cleanupPreviousNativeReviews: "true",
+    requiredChecks: "incomplete", verdict: "request_changes",
+  }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted.at(-1)!.event, "REQUEST_CHANGES", "the partial run publishes its blocking verdict");
+  assert.deepEqual(api.minimized, ["node-100"], "the superseded advisory is hidden");
+  assert.deepEqual(api.dismissed, [], "the just-published changes-requested review is never dismissed");
+  assert.equal(api.inlineListCalls, 0);
+  assert.equal(api.threadQueryCalls, 0);
+});
+
+test("#1144: hide failures are counted with a bounded diagnostic and never abort the run", async () => {
   const api = new MockPublishApi();
   api.reviews = [{ id: 1, node_id: "node-1", state: "COMMENTED", body: `${MARKER}\nstale advisory`, user: { login: "bot" } }];
   api.minimizeResult = false;
   const logs: string[] = [];
-  await minimizeSupersededAdvisoryReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
+  await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
   assert.deepEqual(api.minimized, ["node-1"]);
-  assert.ok(logs.some((line) => line.includes("Advisory reviews: eligible=1 minimized=0 failed=1")));
+  assert.ok(logs.some((line) => line.includes("Superseded reviews: eligible=1 dismissed=0 minimized=0 failed=1")));
+
+  // A failed dismissal still hides the body, and both failures are counted.
+  const dismissApi = new MockPublishApi();
+  dismissApi.reviews = [{ id: 2, node_id: "node-2", state: "CHANGES_REQUESTED", body: `${MARKER}\nstale verdict`, user: { login: "bot" } }];
+  dismissApi.dismissResult = false;
+  const dismissLogs: string[] = [];
+  await hideSupersededManagedReviews(dismissApi, dismissApi.reviews, MARKER, (line) => dismissLogs.push(line), BOT);
+  assert.deepEqual(dismissApi.dismissed, ["2"]);
+  assert.deepEqual(dismissApi.minimized, ["node-2"], "a failed dismissal still hides the body");
+  assert.ok(dismissLogs.some((line) => line.includes("Could not dismiss review #2")));
+  assert.ok(dismissLogs.some((line) => line.includes("Superseded reviews: eligible=1 dismissed=0 minimized=1 failed=1")));
 });
