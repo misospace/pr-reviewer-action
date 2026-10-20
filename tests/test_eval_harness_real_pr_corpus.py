@@ -1065,7 +1065,10 @@ class TestRealRuntimeIgnoresCommittedDecoyArtifacts:
     identity admission needs (#726) is served offline through the
     semantic-fixture seam: a crafted .semantic-fixture/pr.json (same-repo,
     not-draft, pinned SHAs) plus SEMANTIC_FIXTURE_*/FORCE_REVIEW, so the
-    engine-owned admission stage passes without a forge."""
+    engine-owned admission stage passes without a forge. The fixture lives
+    OUTSIDE the reviewed checkout, because the harness's own pinned-workspace
+    prepare runs `git clean -ffdx` inside that checkout and would delete an
+    untracked fixture written there."""
 
     def _origin_with_decoy_head(self, tmp_path: Path) -> tuple[Path, str, str]:
         origin = tmp_path / "origin"
@@ -1132,16 +1135,27 @@ class TestRealRuntimeIgnoresCommittedDecoyArtifacts:
             "head_sha": head_sha, "base_sha": base_sha,
         }
         # Engine-owned admission (#726): the runtime's first stage must
-        # prove the PR is reviewable before any context stage runs. This
-        # offline run has no credentials and no fixture interception, so the
+        # prove the PR is reviewable before any context stage runs. Without
+        # fixture interception this offline run has no credentials, so the
         # forge reads soft-fail and the #961 draft gate fails closed
         # ("pr-draft") before pr-files.json / review-corpus.md are written.
         # Serve the pinned same-repo, not-draft PR identity through the same
         # semantic-fixture seam the harness corpus uses, so admission passes
         # offline; the #838 invariant under test (run-dir seeds win over
         # committed forgeries) is untouched.
-        (repo_path / ".semantic-fixture").mkdir()
-        (repo_path / ".semantic-fixture" / "pr.json").write_text(
+        #
+        # The fixture directory is OUTSIDE repo_path on purpose: the harness
+        # resets the clone and seeds the pinned diff with
+        # `_prepare_pinned_workspace`, which runs `git clean -ffdx` IN the
+        # checkout. An untracked .semantic-fixture/ written there would be
+        # wiped before the runtime ever runs, the fixture adapter would then
+        # serve no PR at all, and admission would fail closed again
+        # ("pr-draft") with no context artifacts written. The directory name
+        # must not collide with the harness's repo checkout naming
+        # (`<repo_full_name with "/" replaced by "-">`).
+        fixture_repo = tmp_path / "pr-identity-fixture"
+        (fixture_repo / ".semantic-fixture").mkdir(parents=True)
+        (fixture_repo / ".semantic-fixture" / "pr.json").write_text(
             json.dumps({
                 "number": 1,
                 "draft": False,
@@ -1156,7 +1170,7 @@ class TestRealRuntimeIgnoresCommittedDecoyArtifacts:
             "extra_env": {
                 **REPLAY_ENV,
                 **CONTEXT_ONLY_ENV,
-                "SEMANTIC_FIXTURE_DIR": str(repo_path),
+                "SEMANTIC_FIXTURE_DIR": str(fixture_repo),
                 "SEMANTIC_FIXTURE_MODE": "true",
                 "FORCE_REVIEW": "true",
                 "SKIP_IF_DIFF_UNCHANGED": "false",
@@ -1180,5 +1194,11 @@ class TestRealRuntimeIgnoresCommittedDecoyArtifacts:
         assert "marker.txt" in real_diff
         real_files = (run.run_dir / "pr-files.json").read_text(encoding="utf-8")
         assert "marker.txt" in real_files
+        # The forged manifest names a file the real change never touched, so
+        # a runtime that merged the committed lie into its file list would be
+        # caught here too. (The diff cannot carry the same negative check:
+        # the pinned diff legitimately CONTAINS the committed decoys, because
+        # the PR really did add those files.)
+        assert "hidden-backdoor.py" not in real_files
         corpus = (run.run_dir / "review-corpus.md").read_text(encoding="utf-8")
         assert "marker.txt" in corpus
