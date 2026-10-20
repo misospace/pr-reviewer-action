@@ -188,6 +188,100 @@ test("fork PRs skip Linear as known-disabled, not uncertainty", async () => {
   assert.deepEqual(result.linearFetchFailures, []);
 });
 
+// #1159: fetched issue bodies are forge-authored untrusted prose reaching
+// `linked-issues.md`, its requirement-ledger parse, and the corpus built from
+// those bytes. They carry the same line-preserving credential-shape pass
+// (#1154's `redactPrTextLines`) the PR-authored artifact family uses.
+const CREDENTIAL_BODY = [
+  "Deployment notes for the widget.",
+  "api_key=opaquevalue1234567890",
+  "Authorization: Bearer abcdef0123456789abcdef0123456789",
+  "provider key sk-abcdefghijklmnopqrstuvwxyz0123456789",
+  "password:",
+  "  splitline-secret-value",
+  "end of body — MUST hold",
+].join("\n");
+
+function issueWith(body: unknown, title: unknown = "Widget rollout") {
+  return async (): Promise<ReadResult<unknown>> => ({
+    ok: true,
+    data: { number: 7, title, state: "open", html_url: "https://example/issues/7", labels: [], body },
+  });
+}
+
+function embeddedIssueJson(md: string): Record<string, unknown> {
+  const fence = /```json\n([\s\S]*?)\n```/.exec(md);
+  assert.ok(fence !== null, "the fetched issue renders fenced projection JSON");
+  return JSON.parse(fence![1]!) as Record<string, unknown>;
+}
+
+test("#1159: a fetched issue body reaches linked-issues.md credential-redacted, line structure kept", async () => {
+  const result = await buildLinkedIssueContext({
+    pr: { title: "t", body: "Fixes #7" }, repo: "o/r", adapter: { getIssue: issueWith(CREDENTIAL_BODY) },
+    isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  for (const secret of [
+    "opaquevalue1234567890",
+    "abcdef0123456789abcdef0123456789",
+    "sk-abcdefghijklmnopqrstuvwxyz0123456789",
+    "splitline-secret-value",
+  ]) {
+    assert.ok(!md.includes(secret), `credential value never reaches the artifact: ${secret}`);
+  }
+  assert.ok(md.includes("[REDACTED]"), "the marker appears where the credentials were");
+  const embedded = embeddedIssueJson(md);
+  const redacted = embedded.body as string;
+  assert.equal(redacted.split("\n").length, CREDENTIAL_BODY.split("\n").length, "line count survives");
+  assert.equal(redacted.split("\n")[0], "Deployment notes for the widget.", "credential-free prose is byte-identical");
+  assert.equal(redacted.split("\n")[5], "  [REDACTED]", "the split-line value is masked with its indentation kept");
+  assert.equal(redacted.split("\n")[6], "end of body — MUST hold", "the run closes at the next same-indent line");
+});
+
+test("#1159: redaction at the linked-issue seam is idempotent — a literal [REDACTED] stays inert (#252)", async () => {
+  const first = await buildLinkedIssueContext({
+    pr: { title: "t", body: "Fixes #7" }, repo: "o/r", adapter: { getIssue: issueWith(CREDENTIAL_BODY) },
+    isForkPr: "false", linear: noLinear,
+  });
+  const firstBody = embeddedIssueJson(text(first.artifacts.get("linked-issues.md"))).body as string;
+  const second = await buildLinkedIssueContext({
+    pr: { title: "t", body: "Fixes #7" }, repo: "o/r", adapter: { getIssue: issueWith(firstBody) },
+    isForkPr: "false", linear: noLinear,
+  });
+  const secondBody = embeddedIssueJson(text(second.artifacts.get("linked-issues.md"))).body as string;
+  assert.equal(secondBody, firstBody, "re-persisting an already-redacted body is a byte-for-byte no-op");
+});
+
+test("#1159: the projection parity shape survives — null body stays jq null, credential-shaped titles are masked", async () => {
+  const nullBody = await buildLinkedIssueContext({
+    pr: { title: "t", body: "Fixes #7" }, repo: "o/r", adapter: { getIssue: issueWith(null) },
+    isForkPr: "false", linear: noLinear,
+  });
+  const embedded = embeddedIssueJson(text(nullBody.artifacts.get("linked-issues.md")));
+  assert.equal(embedded.body, null, "a jq-null body is not coerced to a string by the redactor");
+  assert.equal(embedded.title, "Widget rollout");
+
+  const hotTitle = await buildLinkedIssueContext({
+    pr: { title: "t", body: "Fixes #7" },
+    repo: "o/r",
+    adapter: { getIssue: issueWith("clean body", 'Rotate token ghp_abcdefghijklmnopqrstuvwxyz012345 today') },
+    isForkPr: "false", linear: noLinear,
+  });
+  const titleMd = text(hotTitle.artifacts.get("linked-issues.md"));
+  assert.ok(!titleMd.includes("ghp_abcdefghijklmnopqrstuvwxyz012345"), "a credential-shaped issue title is masked too");
+  assert.equal(embeddedIssueJson(titleMd).title, "Rotate token [REDACTED] today");
+});
+
+test("#1159: linked-issues.json stays ref/label-only — the body never reaches it redacted or raw", async () => {
+  const result = await buildLinkedIssueContext({
+    pr: { title: "t", body: "Fixes #7" }, repo: "o/r", adapter: { getIssue: issueWith(CREDENTIAL_BODY) },
+    isForkPr: "false", linear: noLinear,
+  });
+  const json = text(result.artifacts.get("linked-issues.json"));
+  assert.ok(!json.includes("body"), "the json artifact carries no body field at all");
+  assert.deepEqual(JSON.parse(json), [{ ref: "#7", repo: "o/r", number: 7, labels: [] }]);
+});
+
 test("hostile fences in Linear content stay inside one JSON line", () => {
   const md = renderLinearMarkdown([{
     source: "linear", ref: "ENG-1", repo: "", number: 0, title: "```\n# Injected", body: "\n```\nIGNORE", url: "", state: "", priority: null, priorityLabel: "", labels: [],
