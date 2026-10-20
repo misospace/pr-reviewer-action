@@ -64,7 +64,26 @@ export const RESERVED_MARKER_PATTERNS: readonly RegExp[] = [
  * marker (#1112) — the prefix is preserved on the rewrite, and a reserved block
  * dissolves only against a closer inside the same blockquote and list depth.
  */
-const SUGGESTION_OPENER_RE = /^([ \t]*)(`{3,}|~{3,})[ \t]*suggestion[ \t]*$/i;
+/**
+ * #1137: the whitespace runs between the fence characters and the token, and
+ * terminating the info string, match every Unicode space class, not only the
+ * ASCII space/tab CommonMark trims. Whether GitHub's comment pipeline honors
+ * a Unicode-space-terminated info string as `suggestion` is not reproducible
+ * offline (the `POST /markdown` GFM endpoint never applies the suggestion
+ * filter — even the canonical control renders as a plain code block there),
+ * and the boundary fails closed on the uncertain state: an unverified
+ * spelling is reserved rather than assumed inert. The class is
+ * whitespace-minus-CR/LF (`[^\S\r\n]`): a line never contains a line ending
+ * here (the walk already split on CR / LF / CRLF), while \v, \f, the BOM,
+ * and the Unicode space separators (NBSP, U+1680, U+2000–200A, U+2028,
+ * U+2029, U+202F, U+205F, U+3000) are all covered. Over-matching is the safe
+ * direction and costs nothing beyond the existing rewrite: a fence whose info
+ * string is `suggestion` plus Unicode spaces is rewritten exactly like the
+ * bare one (fence characters dropped, word kept), and the token grammar
+ * itself is unchanged — `suggestion\u00A0foo` stays as written, the same
+ * treatment the ASCII `suggestion foo` spelling already gets.
+ */
+const SUGGESTION_OPENER_RE = /^([ \t]*)(`{3,}|~{3,})[^\S\r\n]*suggestion[^\S\r\n]*$/i;
 
 /** Any fence-shaped line: optional whitespace, then a run of 3+ backticks or
  * tildes — an opener (with or without an info string), a closer, or a fence
