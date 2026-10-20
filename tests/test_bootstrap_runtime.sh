@@ -16,6 +16,9 @@
 #   - a sticky world-writable FINAL install dir fails closed (the sticky
 #     exemption is for ancestors only), and a symlink at the install
 #     destination is refused before the launcher is staged
+#   - a symlink planted at the install destination DURING the download --
+#     i.e. after the destination pre-check and before the move -- is
+#     refused too, and nothing is written through it
 #   - with pgrep missing, the default mode fails closed with the
 #     prerequisite error before the downloader ever starts
 #
@@ -944,6 +947,75 @@ check "no staged file was left behind in the install dir (symlink dest)" \
   "$(cd "$INSTALL_DIR" && find . -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ',')" "mise,"
 check "the downloader's output never landed outside the install dir" \
   "$(test -e "$SENTINEL_DIR/mise" && printf yes || printf no)" "no"
+
+echo ""
+echo "=== bootstrap runtime: symlink planted during the download is refused before the move ==="
+new_sandbox
+# The window the destination pre-check cannot cover on its own: the link
+# appears AFTER the pre-check (the destination was not a file yet, so the
+# fast path is not taken) and BEFORE the move. The downloader is the one
+# phase that provably runs inside that window, so the stub plants the
+# link while it delivers the payload. The refusal then has to fire on the
+# link that is there now, and nothing may be written through it.
+RACE_SENTINEL_DIR="$SANDBOX/race-sentinel"
+mkdir -p "$RACE_SENTINEL_DIR"
+printf 'sentinel-content\n' >"$RACE_SENTINEL_DIR/keepme"
+# The bootstrap validates the install dir and then installs into the
+# canonical path, so the link has to be planted where the install lands.
+RACE_INSTALL_DIR="$(cd "$INSTALL_DIR" && pwd -P)"
+cat >"$SANDBOX/race-fake-mise" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "fake-mise \$*" >> "$SANDBOX/race-mise-calls.log"
+exit 0
+EOF
+chmod 755 "$SANDBOX/race-fake-mise"
+write_stub sha256sum <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '$PINNED_DIGEST'
+EOF
+write_stub curl <<EOF
+#!/usr/bin/env bash
+# Plant the symlink here, exactly where a racing writer would, and still
+# deliver the payload so the download phase completes and the script
+# proceeds past the digest check to the destination checks.
+printf 'downloaded\n' > "$SANDBOX/race-download-ran"
+ln -s "$RACE_SENTINEL_DIR" "$RACE_INSTALL_DIR/mise"
+prev=""
+for arg in "\$@"; do
+  if [ "\$prev" = "--output" ]; then
+    cp "$SANDBOX/race-fake-mise" "\$arg"
+  fi
+  prev="\$arg"
+done
+EOF
+race_out="$SANDBOX/race-symlink.out"
+run_bootstrap_bg "$race_out" "" \
+  "MISE_INSTALL_DIR=$INSTALL_DIR" \
+  "HOME=$SANDBOX/home" \
+  "PATH=$BIN:/usr/bin:/bin"
+if wait_exited_or_deadline 20; then
+  check_ne "bootstrap exits non-zero when the symlink appears during the download" "$BOOTSTRAP_RC" "0"
+else
+  check_ne "bootstrap exits non-zero when the symlink appears during the download" "timed-out" "0"
+fi
+reap_bootstrap
+race_body="$(cat "$race_out")"
+check_contains "failure names the symlinked destination (planted during the download)" \
+  "$race_body" "is a symlink"
+check_contains "failure names the destination path (planted during the download)" \
+  "$race_body" "$RACE_INSTALL_DIR/mise"
+check "the destination symlink was not replaced (planted during the download)" \
+  "$(test -L "$INSTALL_DIR/mise" && printf yes || printf no)" "yes"
+check "the sentinel directory behind the link is untouched (planted during the download)" \
+  "$(cd "$RACE_SENTINEL_DIR" && find . -mindepth 1 -printf '%f\n' | sort | tr '\n' ',')" "keepme,"
+check "the sentinel file content is unchanged (planted during the download)" \
+  "$(cat "$RACE_SENTINEL_DIR/keepme")" "sentinel-content"
+check "nothing was written through the link into the sentinel directory" \
+  "$(find "$RACE_SENTINEL_DIR" -mindepth 1 \( -name 'mise' -o -name '.mise.bootstrap.*' \) -printf '%f\n' | sort | tr '\n' ',')" ""
+check "no staged file was left behind in the install dir (symlink planted during the download)" \
+  "$(cd "$INSTALL_DIR" && find . -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ',')" "mise,"
+check "the downloader really ran, so the link was planted inside the window" \
+  "$(test -e "$SANDBOX/race-download-ran" && printf yes || printf no)" "yes"
 
 echo ""
 echo "=== bootstrap runtime: missing pgrep fails closed before the downloader starts ==="
