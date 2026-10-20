@@ -18,6 +18,7 @@ import {
   collectConfigLines,
   computeConfigHash,
   computeDiffFingerprint,
+  CREDENTIAL_AI_KEYS,
   EMPTY_DIFF_FINGERPRINT,
   parseMarkerFingerprints,
 } from "../src/precheck/fingerprint.js";
@@ -65,7 +66,8 @@ test("config hashing sorts lines, drops comments, and honors the verbosity dial"
   const normal = collectConfigLines({ AI_MODEL: "m", REVIEW_VERBOSITY: "normal" });
   assert.ok(!normal.some((line) => line.startsWith("REVIEW_VERBOSITY")));
   // Specialist models affect requests and therefore enter the fingerprint;
-  // specialist API keys are excluded just like every other AI_*_API_KEY.
+  // specialist API keys never enter it as raw text (they contribute only as
+  // one-way digests, #1152 — pinned by that test below).
   const specialistLines = collectConfigLines({ AI_SPECIALIST_MODEL: "specialist", AI_SPECIALIST_CORRECTNESS_MODEL: "correctness" });
   assert.ok(specialistLines.includes("AI_SPECIALIST_MODEL=specialist"));
   assert.ok(specialistLines.includes("AI_SPECIALIST_CORRECTNESS_MODEL=correctness"));
@@ -167,6 +169,137 @@ test("#998: an unset reasoning effort leaves the config hash untouched; a change
 
   // Secrets still never enter the hash.
   assert.ok(!collectConfigLines({ AI_REASONING_EFFORT: "high", AI_API_KEY: "sk-secret" }).some((line) => line.includes("secret")));
+});
+
+test("#1152: configured lane credentials contribute one-way digests; unset config stays byte-identical", () => {
+  const base = { AI_MODEL: "m", AI_BASE_URL: "https://primary" };
+  const credentialKeys = ["AI_API_KEY", "AI_PRIMARY_API_KEY", "AI_SMART_API_KEY", "AI_FALLBACK_API_KEY", "AI_SPECIALIST_API_KEY"] as const;
+
+  // Upgrade safety: every lane key unset or empty (exactly what
+  // stageEnvFromConfig projects for an operator who configured none) leaves
+  // the config lines and the hash byte-identical to a build without the
+  // feature. Whitespace-only is NOT part of this: it is a configured
+  // credential for the lane's `||`, pinned below.
+  const allEmpty = collectConfigLines({
+    ...base,
+    AI_API_KEY: "",
+    AI_PRIMARY_API_KEY: "",
+    AI_SMART_API_KEY: "",
+    AI_FALLBACK_API_KEY: "",
+    AI_SPECIALIST_API_KEY: "",
+  });
+  assert.deepEqual(allEmpty, collectConfigLines(base));
+  assert.equal(computeConfigHash(allEmpty), computeConfigHash(collectConfigLines(base)));
+
+  // A configured lane credential contributes exactly one domain-separated
+  // digest line — the #1037 shape, sha256("<key>\0<value>") first 12 hex —
+  // and the raw value never enters the lines for any lane.
+  for (const key of credentialKeys) {
+    const lines = collectConfigLines({ ...base, [key]: "sk-s3cr3t-value" });
+    const digest = createHash("sha256").update(`${key}\0sk-s3cr3t-value`, "utf8").digest("hex").slice(0, 12);
+    assert.equal(lines.filter((line) => line.startsWith(`${key}=`)).length, 1, `${key} contributes exactly one line`);
+    assert.ok(lines.includes(`${key}=${digest}`), `${key} line carries the domain-separated digest`);
+    assert.equal(/^[A-Z0-9_]+=[0-9a-f]{12}$/.test(`${key}=${digest}`), true);
+    assert.ok(!lines.some((line) => line.includes("sk-s3cr3t-value")), "the raw credential never enters the fingerprint bytes");
+  }
+
+  // Domain separation: the same secret configured on two lanes digests
+  // differently, so moving one key between lanes is itself a change.
+  const onPrimary = collectConfigLines({ ...base, AI_PRIMARY_API_KEY: "shared" }).find((line) => line.startsWith("AI_PRIMARY_API_KEY="))!;
+  const onSmart = collectConfigLines({ ...base, AI_SMART_API_KEY: "shared" }).find((line) => line.startsWith("AI_SMART_API_KEY="))!;
+  assert.notEqual(onPrimary.split("=")[1], onSmart.split("=")[1]);
+
+  // Rotation invalidates per lane: changing only a lane credential changes
+  // the config hash, so the unchanged-diff skip must not fire.
+  for (const key of credentialKeys) {
+    assert.notEqual(
+      computeConfigHash(collectConfigLines({ ...base, [key]: "key-before" })),
+      computeConfigHash(collectConfigLines({ ...base, [key]: "key-after" })),
+      `${key} rotation must invalidate the cached review`,
+    );
+  }
+
+  // Same-endpoint inheritance, as decided in CREDENTIAL_AI_KEYS: an unset
+  // lane key emits no line of its own (the lane resolves AI_API_KEY at call
+  // time), so rotating AI_API_KEY covers every lane that inherits it.
+  const inherits = collectConfigLines({ ...base, AI_API_KEY: "shared-key" });
+  for (const laneKey of ["AI_PRIMARY_API_KEY", "AI_SMART_API_KEY", "AI_FALLBACK_API_KEY", "AI_SPECIALIST_API_KEY"]) {
+    assert.equal(inherits.some((line) => line.startsWith(`${laneKey}=`)), false, `${laneKey} unset contributes nothing`);
+  }
+  assert.notEqual(computeConfigHash(inherits), computeConfigHash(collectConfigLines({ ...base, AI_API_KEY: "rotated-key" })));
+
+  // The digest covers the EXACT configured bytes: the tier lanes resolve
+  // their credential with `value()` (no trim) and the transport writes it
+  // into the auth header verbatim, so what is fingerprinted is what the lane
+  // sends. A whitespace-only value is truthy for the lane's `||`, so it
+  // counts as configured and contributes. Trimmed and untrimmed variants
+  // digest differently — over-invalidation only (the accepted direction); a
+  // trim could only ever LOSE an invalidation.
+  const padded = collectConfigLines({ ...base, AI_SMART_API_KEY: " padded-key " });
+  assert.ok(padded.includes(`AI_SMART_API_KEY=${createHash("sha256").update("AI_SMART_API_KEY\0 padded-key ", "utf8").digest("hex").slice(0, 12)}`));
+  assert.notEqual(computeConfigHash(padded), computeConfigHash(collectConfigLines({ ...base, AI_SMART_API_KEY: "padded-key" })));
+  assert.notEqual(computeConfigHash(collectConfigLines({ ...base, AI_API_KEY: "   " })), computeConfigHash(collectConfigLines(base)));
+
+  // Non-lane secrets keep their existing treatment: LINEAR_API_KEY stays out
+  // of the sweep entirely (its configured-ness already contributes through
+  // the LINEAR_API_KEY_CONFIGURED exact key).
+  const withLinear = collectConfigLines({ ...base, AI_API_KEY: "lane-secret", LINEAR_API_KEY: "linear-secret" });
+  assert.equal(withLinear.some((line) => line.includes("lane-secret") || line.includes("linear-secret")), false);
+  assert.equal(withLinear.some((line) => line.startsWith("LINEAR_API_KEY")), false);
+});
+
+test("#1152: a credential rotation on an unchanged PR re-reviews instead of skipping, for every lane", () => {
+  // Full dataflow, same shape as the #1005 routing test: contract load ->
+  // stage-env projection -> config hash -> precheck decision. The stored
+  // marker was produced with the original credential; the next run presents
+  // the rotated one on the same diff, so the skip must not fire. Pinning this
+  // through the real projection also pins the property the unit-level test
+  // cannot: how UNSET *secret* inputs project into the stage env (an empty
+  // string, contributing nothing) stays byte-identical for every lane.
+  const raw = Object.fromEntries(V3_CONTRACT.inputs.map((input) => [input.id, "default" in input && input.default !== undefined ? String(input.default) : ""]));
+  raw["ai-base-url"] = "https://primary";
+  raw["ai-model"] = "m";
+  const diff = "diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n";
+
+  const defaultsHash = computeConfigHash(collectConfigLines(stageEnvFromConfig(loadConfig(V3_CONTRACT, raw))));
+  assert.equal(collectConfigLines(stageEnvFromConfig(loadConfig(V3_CONTRACT, raw))).some((line) => [...CREDENTIAL_AI_KEYS].some((key) => line.startsWith(`${key}=`))), false, "credential-free contract defaults contribute no credential line");
+
+  for (const inputId of ["ai-api-key", "ai-primary-api-key", "ai-smart-api-key", "ai-fallback-api-key", "ai-specialist-api-key"]) {
+    const beforeHash = computeConfigHash(collectConfigLines(stageEnvFromConfig(loadConfig(V3_CONTRACT, { ...raw, [inputId]: "key-before" }))));
+    const afterHash = computeConfigHash(collectConfigLines(stageEnvFromConfig(loadConfig(V3_CONTRACT, { ...raw, [inputId]: "key-after" }))));
+    assert.notEqual(beforeHash, afterHash, `${inputId} rotation must change the config hash`);
+    assert.notEqual(beforeHash, defaultsHash, `${inputId} configured must differ from credential-free`);
+
+    const marker = buildMarkerFingerprint(computeDiffFingerprint(diff), beforeHash);
+    assert.equal(evaluatePrecheck(diff, [marker], { configHash: beforeHash }).decision, "skip_already_reviewed");
+    assert.equal(evaluatePrecheck(diff, [marker], { configHash: afterHash }).decision, "review_needed", `${inputId} rotation must force a fresh review`);
+  }
+});
+
+test("#1152: every api-key contract input is registered in the credential digest set", () => {
+  // Registration guard: the fingerprint set is an explicit allowlist, so a
+  // new `ai-*-api-key` contract input that is not added to it would rotate
+  // invisibly — the exact bug #1152 fixes. Derive the set from the shipped
+  // contract instead of trusting the comment: every lane api-key input must
+  // be staged under a name the fingerprint covers, and the set must carry no
+  // stale entries the contract no longer defines. `linear-api-key` is
+  // deliberately excluded (not a model lane; it contributes through the
+  // LINEAR_API_KEY_CONFIGURED boolean). `ai-confidence-api-key` is likewise
+  // excluded: it is covered by the conditional #1073 scorer family, which
+  // emits its digest only while the scorer is enabled (`AI_CONFIDENCE_MODEL`
+  // non-empty) — the same rotation coverage, scoped to when the credential is
+  // actually sent.
+  const contractCredentialEnvNames = V3_CONTRACT.inputs
+    .map((input) => input.id)
+    .filter((id) => id.endsWith("-api-key") && id !== "linear-api-key" && id !== "ai-confidence-api-key")
+    .map((id) => id.toUpperCase().replaceAll("-", "_"));
+  assert.ok(contractCredentialEnvNames.length >= 5, "the contract is expected to define the five lane credentials");
+  for (const name of contractCredentialEnvNames) {
+    assert.ok(CREDENTIAL_AI_KEYS.has(name), `${name} must contribute to the fingerprint digest set`);
+  }
+  for (const name of CREDENTIAL_AI_KEYS) {
+    assert.ok(contractCredentialEnvNames.includes(name), `${name} is not a contract credential; drop it from the set`);
+  }
 });
 
 test("#1005/#1003: triage and its routing mode enter the config fingerprint only when effective", () => {
