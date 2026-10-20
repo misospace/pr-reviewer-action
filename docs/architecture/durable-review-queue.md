@@ -93,7 +93,18 @@ the #736 PostgreSQL backend will slot in behind the same interface.
 - **Fail-closed load.** A genuinely missing file is the one well-defined
   "fresh start" (the empty snapshot). Anything else uncertain — corrupt
   bytes, wrong version, unknown top-level key, malformed record — throws:
-  a controller must never start on state it cannot validate.
+  a controller must never start on state it cannot validate. The nested
+  job is validated field by field against the `ReviewJob` contract (the
+  same rules the job builder applies), a record's `prKey` must agree
+  with its job, and duplicate generation ids are rejected. The store's
+  loaded/saved snapshot carries a rebuilt, frozen job — never the
+  caller's own object — so a loaded snapshot's identity cannot be
+  mutated after validation. `reconcileRecoveredSnapshot` keeps its
+  pass-through-by-reference contract for untouched records (the
+  controller feeds it the store's rebuilt records), while a moved record
+  is rebuilt with the validated job. The controller validates a job at
+  intake too, before it mutates the queue, so a contract-violating job
+  is refused instead of failing later at save time.
 - **Recovery.** `recover()` loads the snapshot and runs
   `reconcileRecoveredSnapshot`: each active record whose lease is absent or
   expired goes back to `queued` (if `attempt < maxAttempts`: attempt

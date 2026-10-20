@@ -23,6 +23,7 @@ export {
   InMemoryQueueStore,
   JsonFileQueueStore,
   reconcileRecoveredSnapshot,
+  validateReviewJob,
   leaseIsValid,
   withRenewedLease,
 } from "./store.js";

@@ -21,6 +21,7 @@ import {
   type JobPublisher,
   type JobRecord,
   type QueueSnapshot,
+  type QueueStore,
   type SchedulerOptions,
 } from "../src/queue/index.js";
 import type { ReviewJob } from "../src/jobs/types.js";
@@ -174,6 +175,57 @@ test("enqueue: duplicate webhooks for one jobId create exactly one record", asyn
   assert.deepEqual(controller.enqueue(job), { disposition: "duplicate", jobId: "job-a" });
   assert.equal(controller.snapshot().records.length, 1);
   assert.equal(controller.recordFor("job-a")!.state, "queued");
+});
+
+test("enqueue: a contract-violating job is refused before the queue is mutated", () => {
+  const { controller } = setup();
+  const before = controller.snapshot().records.length;
+  // A `review` job requires a non-empty head SHA: the durable store
+  // refuses such a job, so the controller must refuse it at intake
+  // rather than mutate the queue and fail later at save time.
+  assert.throws(
+    () => controller.enqueue(makeJob("job-bad", { headSha: "" })),
+    RangeError,
+    "a review job without a head SHA is not a valid ReviewJob",
+  );
+  assert.equal(controller.recordFor("job-bad"), null, "no record was created");
+  assert.equal(
+    controller.snapshot().records.length,
+    before,
+    "the queue is exactly as it was",
+  );
+});
+
+test("enqueue: a closed controller refuses intake with 'intake closed' whatever the payload", async () => {
+  const { controller } = setup();
+  await controller.shutdown(0);
+  assert.throws(
+    () => controller.enqueue(makeJob("job-bad", { headSha: "" })),
+    /intake closed/,
+    "the closed check precedes the deep validation",
+  );
+  assert.equal(controller.recordFor("job-bad"), null, "nothing was enqueued");
+});
+
+test("adopt: a snapshot with a duplicate generation id fails closed", () => {
+  // The shipped stores reject a duplicate id, but `adopt` is the seam
+  // where a custom `QueueStore` backend feeds records in: it must not
+  // silently replace the first record with the second.
+  const record = newJobRecord(makeJob("job-dup"), 0, 0);
+  const store: QueueStore = {
+    load: () => makeSnapshot([record, record]),
+    save: () => undefined,
+  };
+  const controller = new ReviewQueueController(
+    store,
+    baseOptions(new ControllableExecutor()),
+    () => 0,
+  );
+  assert.throws(
+    () => controller.recordFor("job-dup"),
+    /duplicate job id/,
+    "a duplicate generation id is refused, not silently replaced",
+  );
 });
 
 test("enqueue: B while A is queued supersedes A; only B dispatches", async () => {
