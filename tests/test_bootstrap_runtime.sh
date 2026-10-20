@@ -949,17 +949,35 @@ check "the downloader's output never landed outside the install dir" \
   "$(test -e "$SENTINEL_DIR/mise" && printf yes || printf no)" "no"
 
 echo ""
-echo "=== bootstrap runtime: symlink planted during the download is refused before the move ==="
+echo "=== bootstrap runtime: a symlink planted during the download is refused at the destination check ==="
 new_sandbox
 # The window the destination pre-check cannot cover on its own: the link
-# appears AFTER the pre-check (the destination was not a file yet, so the
-# fast path is not taken) and BEFORE the move. The downloader is the one
-# phase that provably runs inside that window, so the stub plants the
-# link while it delivers the payload. The refusal then has to fire on the
-# link that is there now, and nothing may be written through it.
+# appears AFTER the early destination pre-check (the destination was not a
+# file yet, so the fast path is not taken) and BEFORE the refusal that
+# guards the move. The downloader is the one phase that provably runs
+# inside that window, so the stub plants the link while it delivers the
+# payload. The refusal then has to fire on the link that is there now,
+# and nothing may be written through it.
+#
+# Scope, stated precisely: this case covers the refusal standing between
+# the pre-check and the move. The residual window between that refusal
+# and the `mv` itself is closed by the install-dir permission requirement
+# (only the invoking user or root can write there), not by this case --
+# see the comment in scripts/bootstrap.sh.
 RACE_SENTINEL_DIR="$SANDBOX/race-sentinel"
 mkdir -p "$RACE_SENTINEL_DIR"
 printf 'sentinel-content\n' >"$RACE_SENTINEL_DIR/keepme"
+# Baseline of the sentinel listing, captured with the same pipeline the
+# assertions use: an empty expectation is only meaningful next to a
+# non-empty baseline, so a broken `find` cannot make the check pass.
+RACE_SENTINEL_BASELINE="$(cd "$RACE_SENTINEL_DIR" && find . -mindepth 1 -printf '%f\n' | sort | tr '\n' ',')"
+# Control directory for the write-through pipeline: it holds a file named
+# `mise`, so the same command has to report it there. Without this control
+# an erroring pipeline would report nothing, and the empty expectation
+# below would pass for the wrong reason.
+RACE_CONTROL_DIR="$SANDBOX/race-control"
+mkdir -p "$RACE_CONTROL_DIR"
+: >"$RACE_CONTROL_DIR/mise"
 # The bootstrap validates the install dir and then installs into the
 # canonical path, so the link has to be planted where the install lands.
 RACE_INSTALL_DIR="$(cd "$INSTALL_DIR" && pwd -P)"
@@ -1000,22 +1018,30 @@ else
 fi
 reap_bootstrap
 race_body="$(cat "$race_out")"
+check "the sentinel listing baseline is non-empty (the find pipeline works)" \
+  "$RACE_SENTINEL_BASELINE" "keepme,"
 check_contains "failure names the symlinked destination (planted during the download)" \
-  "$race_body" "is a symlink"
+  "$race_body" "$RACE_INSTALL_DIR/mise is a symlink"
 check_contains "failure names the destination path (planted during the download)" \
-  "$race_body" "$RACE_INSTALL_DIR/mise"
+  "$race_body" "install destination $RACE_INSTALL_DIR/mise"
+check "the destination symlink still points at the sentinel directory" \
+  "$(readlink "$INSTALL_DIR/mise" 2>/dev/null || printf '')" "$RACE_SENTINEL_DIR"
 check "the destination symlink was not replaced (planted during the download)" \
   "$(test -L "$INSTALL_DIR/mise" && printf yes || printf no)" "yes"
 check "the sentinel directory behind the link is untouched (planted during the download)" \
-  "$(cd "$RACE_SENTINEL_DIR" && find . -mindepth 1 -printf '%f\n' | sort | tr '\n' ',')" "keepme,"
+  "$(cd "$RACE_SENTINEL_DIR" && find . -mindepth 1 -printf '%f\n' | sort | tr '\n' ',')" "$RACE_SENTINEL_BASELINE"
 check "the sentinel file content is unchanged (planted during the download)" \
   "$(cat "$RACE_SENTINEL_DIR/keepme")" "sentinel-content"
+check "the write-through control pipeline reports the control file" \
+  "$(cd "$RACE_CONTROL_DIR" && find . -mindepth 1 \( -name 'mise' -o -name '.mise.bootstrap.*' \) -printf '%f\n' | sort | tr '\n' ',')" "mise,"
 check "nothing was written through the link into the sentinel directory" \
-  "$(find "$RACE_SENTINEL_DIR" -mindepth 1 \( -name 'mise' -o -name '.mise.bootstrap.*' \) -printf '%f\n' | sort | tr '\n' ',')" ""
+  "$(cd "$RACE_SENTINEL_DIR" && find . -mindepth 1 \( -name 'mise' -o -name '.mise.bootstrap.*' \) -printf '%f\n' | sort | tr '\n' ',')" ""
 check "no staged file was left behind in the install dir (symlink planted during the download)" \
   "$(cd "$INSTALL_DIR" && find . -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ',')" "mise,"
 check "the downloader really ran, so the link was planted inside the window" \
   "$(test -e "$SANDBOX/race-download-ran" && printf yes || printf no)" "yes"
+check "the launcher was never executed (the refusal came before the exec)" \
+  "$(test -e "$SANDBOX/race-mise-calls.log" && printf yes || printf no)" "no"
 
 echo ""
 echo "=== bootstrap runtime: missing pgrep fails closed before the downloader starts ==="
