@@ -14,7 +14,7 @@ import { startMockServer } from "./helpers.js";
 function mockPlatform(): PlatformReadAdapter {
   return {
     platform: "github",
-    getPr: async () => ({ number: 7, title: "Update README", body: "", head: { sha: "a".repeat(40), ref: "feature" }, base: { ref: "main" }, user: { login: "someone" }, changed_files: 1, additions: 1, deletions: 0 }),
+    getPr: async () => ({ number: 7, title: "Update README", body: "", draft: false, head: { sha: "a".repeat(40), ref: "feature" }, base: { ref: "main" }, user: { login: "someone" }, changed_files: 1, additions: 1, deletions: 0 }),
     getPrDiff: async () => "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+world\n",
     listPrFiles: async () => ({ ok: true, data: [{ filename: "README.md", status: "modified", additions: 1, deletions: 0, changes: 1 }] }),
     getIssue: async () => ({ ok: false, error: "not served" }),
@@ -34,7 +34,80 @@ function verdictBody(): string {
   return JSON.stringify({ id: "c1", object: "chat.completion", model: "m", choices: [{ index: 0, message: { role: "assistant", content: JSON.stringify({ verdict: "approve", review_markdown: "Looks fine.\n", smart_review_requested: false, smart_review_reason: null, findings: [], requirement_coverage: null, required_check_dispositions: [] }) }, finish_reason: "stop" }], usage: { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 } });
 }
 
+/** Minimal GitHub REST reads for the engine-CLI tests: the engine CLI cannot
+ * inject an adapter, so admission's platform reads (PR object, diff, file
+ * list, managed-comment/review lists) go over the wire. The PR carries an
+ * explicit `draft: false` and same-repo head/base identity, so admission's
+ * deterministic gates (draft, fork) admit the run. */
+function engineCliGithubHandler(): NonNullable<Parameters<typeof startMockServer>[0]> {
+  return (req, _body, res) => {
+    const url = req.url ?? "";
+    res.setHeader("Content-Type", "application/json");
+    if (url.includes("/pulls/7/files")) {
+      res.end(JSON.stringify([{ filename: "README.md", status: "modified", additions: 1, deletions: 0, changes: 1 }]));
+      return;
+    }
+    if (url.includes("/pulls/7")) {
+      if (req.headers.accept === "application/vnd.github.v3.diff") {
+        res.setHeader("Content-Type", "text/plain");
+        res.end("diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+world\n");
+        return;
+      }
+      res.end(JSON.stringify({
+        number: 7, state: "open", draft: false, title: "Update README", body: "",
+        head: { sha: "a".repeat(40), ref: "feature", repo: { full_name: "o/r" } },
+        base: { sha: "b".repeat(40), ref: "main", repo: { full_name: "o/r" } },
+        user: { login: "someone" }, changed_files: 1, additions: 1, deletions: 0,
+        html_url: "https://github.com/o/r/pull/7",
+      }));
+      return;
+    }
+    if (url.includes("/issues/7/comments") || url.includes("/pulls/7/reviews")) {
+      res.end("[]");
+      return;
+    }
+    res.setHeader("Connection", "close");
+    res.end(verdictBody());
+  };
+}
+
+/** An admission-focused platform mock: full read surface with configurable
+ * managed comments, trusted identity, diff and head. Repo identity is
+ * same-repo on both sides so `is_fork_pr` derives "false". */
+function admissionAdapter(options: {
+  headSha?: string;
+  diff?: string;
+  comments?: { body: string; author?: string }[];
+  identity?: string | null;
+  ghApi?: (endpoint: string) => Promise<{ data?: unknown; error?: string }>;
+} = {}): PlatformReadAdapter {
+  const headSha = options.headSha ?? "a".repeat(40);
+  return {
+    platform: "github",
+    getPr: async () => ({
+      number: 7, title: "Update README", body: "", state: "open", draft: false,
+      head: { sha: headSha, ref: "feature", repo: { full_name: "o/r" } },
+      base: { sha: "b".repeat(40), ref: "main", repo: { full_name: "o/r" } },
+      user: { login: "someone" }, changed_files: 1, additions: 1, deletions: 0,
+      html_url: "https://github.com/o/r/pull/7",
+    }),
+    getPrDiff: async () => options.diff ?? "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+world\n",
+    listPrFiles: async () => ({ ok: true, data: [{ filename: "README.md", status: "modified", additions: 1, deletions: 0, changes: 1 }] }),
+    getIssue: async () => ({ ok: false, error: "not served" }),
+    listPrConversationComments: async () => ({ ok: true, data: [] }),
+    listReviewThreads: async () => ({ ok: true, data: [] }),
+    listPrReviewsPaginated: async () => ({ ok: true, data: [] }),
+    listIssueComments: async () => (options.comments ?? []).map((comment, index) => ({ id: index + 1, body: comment.body, created_at: "2026-01-01T00:00:00Z", author: comment.author ?? "ci-bot" })),
+    listPrReviews: async () => [],
+    repoPermission: async () => null,
+    authenticatedIdentity: async () => options.identity ?? null,
+    ghApi: options.ghApi ?? (async () => ({ error: "not served" })),
+    externalChecks: async () => [],
+  } as unknown as PlatformReadAdapter;
+}
+
 const inputs = { "github-token": "tok", repo: "o/r", "pr-number": "7", "ai-base-url": "", "ai-model": "m", "ai-stream": "false", "ai-api-key": "k" };
+
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "v3-engine-test-"));
   const runDir = join(root, "run");
@@ -262,7 +335,7 @@ test("a symlinked artifact name in the run dir cannot escape the engine's write 
 test("a null byte in the CLI request's runDir fails clean without writing outside", async () => {
   // Required-check pin (edge-case paths): the engine CLI boundary never
   // throws an unsurfaced error and never writes through a poisoned path.
-  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.setHeader("Connection", "close"); res.end(verdictBody()); });
+  const server = await startMockServer(engineCliGithubHandler());
   const f = fixture();
   try {
     const poisoned = `${f.runDir}\u0000escape`;
@@ -281,7 +354,7 @@ test("a null byte in the CLI request's runDir fails clean without writing outsid
 });
 
 test("engineMain accepts an explicit request file and reports usage errors", async () => {
-  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const server = await startMockServer(engineCliGithubHandler());
   const f = fixture();
   try {
     const data = { ...request(server.url, f.runDir), workspace: f.root, runDir: f.runDir, outputsSink: "/dev/null", stepSummaryPath: "", persistArtifacts: true, ambient: { GITHUB_API_URL: server.url } };
@@ -290,5 +363,224 @@ test("engineMain accepts an explicit request file and reports usage errors", asy
     assert.equal(await engineMain(["--request", file]), 0);
     assert.ok(existsSync(join(f.runDir, "review-request.json")));
     assert.equal(await engineMain(["--nope"]), 2);
+  } finally { await server.close(); f.cleanup(); }
+});
+
+// ── #726: engine-owned admission (precheck/fingerprint decision) ─────────
+
+/** Admission fixtures pin deterministic fingerprints, so deep_review=auto
+ * (the contract default, whose failed selection injects a per-run unique
+ * sentinel into the config hash) is explicitly off. */
+const admissionInputs = { ...inputs, "deep-review": "false" };
+
+function admissionRequest(
+  aiBaseUrl: string,
+  runDir: string,
+  overrides: Partial<ReviewRequest> & { inputsOverrides?: Record<string, string> } = {},
+): ReviewRequest {
+  const { inputsOverrides, ...rest } = overrides;
+  return {
+    ...request(aiBaseUrl, runDir),
+    inputs: { ...admissionInputs, "ai-base-url": aiBaseUrl, ...inputsOverrides },
+    ...rest,
+  };
+}
+
+test("engine admission: a fresh event is admitted and the review runs", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    const result = await runReviewEngine(
+      admissionRequest(server.url, f.runDir, { event: { name: "pull_request", action: "synchronize" }, eventHeadSha: "a".repeat(40) }),
+      { ...engineDeps(f.root, f.runDir), adapter: admissionAdapter() },
+    );
+    assert.equal(result.shouldReview, true);
+    assert.equal(result.skipReason, "");
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.admission.should_review, "true");
+    assert.equal(result.admission.head_sha, "a".repeat(40));
+    assert.equal(result.admission.base_sha, "b".repeat(40));
+    assert.equal(result.admission.is_fork_pr, "false");
+    assert.equal(result.admissionBaseSha, "b".repeat(40));
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("engine admission: an unchanged diff with a stored fingerprint skips with no model spend", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    const first = await runReviewEngine(admissionRequest(server.url, f.runDir), { ...engineDeps(f.root, f.runDir), adapter: admissionAdapter() });
+    assert.equal(first.shouldReview, true);
+    const fingerprint = first.diffFingerprint;
+    assert.match(fingerprint, /\|cfg:/);
+    const requestsAfterFirst = server.requests.length;
+    assert.ok(requestsAfterFirst > 0, "the first run reached the model");
+    const runDir2 = join(f.root, "run-2");
+    mkdirSync(runDir2);
+    const second = await runReviewEngine(
+      admissionRequest(server.url, runDir2),
+      {
+        ...engineDeps(f.root, runDir2),
+        adapter: admissionAdapter({
+          comments: [{ body: `<!-- ai-pr-reviewer -->
+<!-- ai-pr-review-fingerprint:${fingerprint} -->
+`, author: "ci-bot" }],
+          identity: "ci-bot",
+        }),
+      },
+    );
+    assert.equal(second.shouldReview, false);
+    assert.equal(second.skipReason, "diff-unchanged");
+    assert.equal(second.diffFingerprint, fingerprint);
+    // A plain fingerprint skip carries no resolved SHAs (the precheck skip
+    // surface leaves head/base empty); the review path resolves them.
+    assert.equal(second.admissionBaseSha, "");
+    assert.equal(second.outputs.verdict, "");
+    assert.equal(server.requests.length, requestsAfterFirst, "the skip made no model call");
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("engine admission: a diff-unchanged skip carries the previous verdict on the result", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    const first = await runReviewEngine(admissionRequest(server.url, f.runDir), { ...engineDeps(f.root, f.runDir), adapter: admissionAdapter() });
+    const fingerprint = first.diffFingerprint;
+    const requestsAfterFirst = server.requests.length;
+    const runDir2 = join(f.root, "run-2");
+    mkdirSync(runDir2);
+    const second = await runReviewEngine(
+      admissionRequest(server.url, runDir2),
+      {
+        ...engineDeps(f.root, runDir2),
+        adapter: admissionAdapter({
+          comments: [{
+            body: `<!-- ai-pr-reviewer -->
+<!-- ai-pr-review-fingerprint:${fingerprint} -->
+<!-- ai-pr-reviewer: {"review_result":"clean","head_sha":"${"a".repeat(40)}"} -->
+`,
+            author: "ci-bot",
+          }],
+          identity: "ci-bot",
+        }),
+      },
+    );
+    assert.equal(second.shouldReview, false);
+    assert.equal(second.skipReason, "diff-unchanged");
+    assert.equal(second.admission.verdict, "approve");
+    assert.equal(second.admission.verdict_source, "carry_forward");
+    assert.equal(second.admission.review_result, "clean");
+    assert.equal(second.admission.head_sha, "a".repeat(40));
+    assert.equal(server.requests.length, requestsAfterFirst, "the carried skip made no model call at all");
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("engine admission: a stale gate head sha skips superseded-head with no model spend", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    const result = await runReviewEngine(
+      admissionRequest(server.url, f.runDir, {
+        event: { name: "issue_comment", action: "created", comment: { id: 5, body: "/ai-review", user: "maintainer" } },
+        ambient: { PR_REVIEWER_GATE_HEAD_SHA: "c".repeat(40) },
+        inputsOverrides: { "rereview-command": "/ai-review" },
+      }),
+      {
+        ...engineDeps(f.root, f.runDir),
+        adapter: admissionAdapter({
+          ghApi: async (endpoint) => endpoint.includes("/collaborators/") ? { data: { permission: "write" } } : { error: "not served" },
+        }),
+      },
+    );
+    assert.equal(result.shouldReview, false);
+    assert.equal(result.skipReason, "superseded-head");
+    assert.equal(server.requests.length, 0, "the superseded skip made no model call");
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("engine admission: force rereview intent reviews despite a stored fingerprint", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    const first = await runReviewEngine(admissionRequest(server.url, f.runDir), { ...engineDeps(f.root, f.runDir), adapter: admissionAdapter() });
+    const fingerprint = first.diffFingerprint;
+    const requestsAfterFirst = server.requests.length;
+    const runDir2 = join(f.root, "run-2");
+    mkdirSync(runDir2);
+    const second = await runReviewEngine(
+      admissionRequest(server.url, runDir2, { event: { name: "pull_request", action: "labeled", label: { name: "ai-review" } } }),
+      {
+        ...engineDeps(f.root, runDir2),
+        adapter: admissionAdapter({
+          comments: [{ body: `<!-- ai-pr-reviewer -->
+<!-- ai-pr-review-fingerprint:${fingerprint} -->
+`, author: "ci-bot" }],
+          identity: "ci-bot",
+        }),
+      },
+    );
+    assert.equal(second.shouldReview, true);
+    assert.ok(server.requests.length > requestsAfterFirst, "the forced re-review reached the model");
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("the Action env adapter and the engine produce identical admission decisions", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    // One engine run to learn the deterministic broad fingerprint…
+    const first = await runReviewEngine(admissionRequest(server.url, f.runDir), { ...engineDeps(f.root, f.runDir), adapter: admissionAdapter() });
+    const fingerprint = first.diffFingerprint;
+    // …then the SAME fixture (same inputs, same event, same stored marker)
+    // through both paths, with a fresh adapter per path.
+    const stored = { comments: [{ body: `<!-- ai-pr-reviewer -->
+<!-- ai-pr-review-fingerprint:${fingerprint} -->
+`, author: "ci-bot" }], identity: "ci-bot" };
+    const event = { name: "pull_request", action: "synchronize" } as const;
+    const eventHeadSha = "a".repeat(40);
+    const adapterResult = await runReview({
+      env: { GITHUB_OUTPUT: "/dev/null" },
+      inputs: { ...admissionInputs, "ai-base-url": server.url },
+      runDir: join(f.root, "adapter-run"),
+      workspace: f.root,
+      platformAdapter: admissionAdapter(stored),
+      event,
+      eventHeadSha,
+      quiet: true,
+    });
+    const engineRunDir = join(f.root, "engine-run");
+    mkdirSync(engineRunDir);
+    const engineResult = await runReviewEngine(
+      admissionRequest(server.url, engineRunDir, { event, eventHeadSha }),
+      { ...engineDeps(f.root, engineRunDir), adapter: admissionAdapter(stored) },
+    );
+    assert.equal(engineResult.shouldReview, adapterResult.shouldReview);
+    assert.equal(engineResult.skipReason, adapterResult.skipReason);
+    assert.equal(engineResult.diffFingerprint, adapterResult.diffFingerprint);
+    assert.equal(engineResult.admissionBaseSha, adapterResult.admissionBaseSha);
+    for (const key of ["should_review", "skip_reason", "diff_fingerprint", "head_sha", "base_sha", "is_fork_pr", "resolved_platform", "effective_forgejo_api_url"] as const) {
+      assert.equal(engineResult.admission[key], adapterResult.admission[key], key);
+    }
+    // And a fresh-diff run through both paths must also agree (review case).
+    const adapterFresh = await runReview({
+      env: { GITHUB_OUTPUT: "/dev/null" },
+      inputs: { ...admissionInputs, "ai-base-url": server.url },
+      runDir: join(f.root, "adapter-fresh"),
+      workspace: f.root,
+      platformAdapter: admissionAdapter(),
+      event,
+      eventHeadSha,
+      quiet: true,
+    });
+    const engineFreshRunDir = join(f.root, "engine-fresh");
+    mkdirSync(engineFreshRunDir);
+    const engineFresh = await runReviewEngine(
+      admissionRequest(server.url, engineFreshRunDir, { event, eventHeadSha }),
+      { ...engineDeps(f.root, engineFreshRunDir), adapter: admissionAdapter() },
+    );
+    assert.equal(engineFresh.shouldReview, true);
+    assert.equal(adapterFresh.shouldReview, true);
+    assert.equal(engineFresh.diffFingerprint, adapterFresh.diffFingerprint);
+    assert.equal(engineFresh.admissionBaseSha, adapterFresh.admissionBaseSha);
   } finally { await server.close(); f.cleanup(); }
 });

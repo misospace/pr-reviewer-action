@@ -70,7 +70,11 @@ Design rationale and the composite/Node runtime decision:
 ### v3 review engine and Action adapter (#726, #809)
 
 `src/engine/review.ts` owns the shared review pipeline, independent of Action
-environment bindings. `src/engine/types.ts` defines the request and injected
+environment bindings, and — since #726 — the engine-owned admission stage
+(`src/engine/admission.ts`): the precheck/fingerprint decision runs there
+first, a skip returns the decision with no model spend, and a pass folds the
+resolved platform/head/base/fork state into the review stages. Hosts keep
+event reception and side-effect writes. `src/engine/types.ts` defines the request and injected
 capability contract; `src/engine/cli.ts` provides the local `engine --request`
 entrypoint. The `src/run/review.ts` adapter translates Action/`run` CLI
 environment into that contract. `src/run/env.ts` projects resolved config and
@@ -102,6 +106,9 @@ The shipped runtime is one Node process (`node dist/index.js`, entry
 ```
 node dist/index.js precheck     → should_review + diff_fingerprint (src/precheck/)
 node dist/index.js run          → environment adapter → shared engine (`src/engine/review.ts`):
+  ├─ admission                  → engine-owned precheck/fingerprint decision; skip
+  │                               returns decision fields with no model spend
+  │                               (src/engine/admission.ts)
   ├─ config                     → contract config → stage env (src/run/env.ts, src/config/)
   ├─ platform adapter           → GitHub/Forgejo read seam (src/platform/, src/run/platform.ts)
   ├─ context                    → linked issues + Linear, requirement ledger,

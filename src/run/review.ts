@@ -5,6 +5,7 @@ import { createRunDir, nonEmpty } from "./run-dir.js";
 import { runReviewEngine, GATE_CHILD_ENV } from "../engine/review.js";
 import type { ReviewDependencies, ReviewRequest } from "../engine/types.js";
 import type { RunReviewResult } from "../engine/review.js";
+import type { PrecheckEvent, PrecheckOutput } from "../precheck/decide.js";
 import type { FetchLike } from "../platform/http.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
 import { ciGateBranch } from "../gates/workloads.js";
@@ -31,6 +32,14 @@ export interface RunReviewOptions {
   ciGate?: ReturnType<typeof ciGateBranch> | null;
   ciGateEntry?: string;
   quiet?: boolean;
+  /** #726: the received event summary the engine-owned admission decides
+   * on, plus its head SHA (EVENT_HEAD_SHA). Omitted for manual runs —
+   * admission then runs with no event (manual semantics). */
+  event?: PrecheckEvent;
+  eventHeadSha?: string;
+  /** #726: host side effect after a PASSING admission, before any review
+   * stage (the Action adapter's #914 ack reaction). */
+  onAdmission?: (admission: PrecheckOutput) => void | Promise<void>;
 }
 
 export function runtimeBundleEntry(env: NodeJS.ProcessEnv): string | null {
@@ -73,6 +82,8 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ambient: env,
     triggerReason: "",
     forceRereview: false,
+    ...(options.event !== undefined ? { event: options.event } : {}),
+    ...(options.eventHeadSha !== undefined ? { eventHeadSha: options.eventHeadSha } : {}),
   };
   const dependencies: ReviewDependencies = {
     workspace,
@@ -90,6 +101,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ...(options.quiet !== undefined ? { quiet: options.quiet } : {}),
     ...(options.ciGate !== undefined ? { ciGate: options.ciGate } : {}),
     ciGateEntry: (options.ciGate ? "" : (options.ciGateEntry ?? runtimeBundleEntry(env))) ?? "",
+    ...(options.onAdmission !== undefined ? { onAdmission: options.onAdmission } : {}),
   };
   return runReviewEngine(request, dependencies);
 }

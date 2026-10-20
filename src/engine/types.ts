@@ -2,6 +2,7 @@ import type { RawInputs } from "../config/load-config.js";
 import type { FetchLike } from "../platform/http.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
 import type { ciGateBranch } from "../gates/workloads.js";
+import type { PrecheckEvent, PrecheckOutput } from "../precheck/decide.js";
 import type { RunReviewResult } from "./review.js";
 
 /** #726: canonical review intent/state. Forge-agnostic: no GITHUB_* / INPUT_*
@@ -33,12 +34,19 @@ export interface ReviewRequest {
   triggerReason: string;
   /** Explicit re-review intent (the `ai-review` label semantics). */
   forceRereview: boolean;
+  /** The forge event the host already RECEIVED (#726: event reception stays
+   * host-owned; the request carries the received event summary so the
+   * ENGINE-owned admission stage can decide). The exact `PrecheckEvent`
+   * shape `runPrecheck` consumes — no second event type. */
+  event?: PrecheckEvent;
+  /** The event's head SHA (EVENT_HEAD_SHA), for admission's superseded guard. */
+  eventHeadSha?: string;
   /** Cancellation: when provided and aborted, the engine aborts its internal
    * v3 cancellation scope (src/runtime/signals.ts) and refuses to start when
    * already aborted. An abort at any later point also throws — a cancelled run
    * never resolves with a result. Provenance-only fields: `triggerReason` and
-   * `forceRereview` are recorded, never consulted (rerun admission stays with
-   * the host — see docs/architecture/engine-boundary.md). */
+   * `forceRereview` are recorded, never consulted (rerun admission is the
+   * engine's first stage — see docs/architecture/engine-boundary.md). */
   signal?: AbortSignal;
 }
 
@@ -73,6 +81,11 @@ export interface ReviewDependencies {
   /** Explicit bundle entry the CI subprocess re-enters (adapter computes it
    * from its environment; engine callers without a bundle omit it). */
   ciGateEntry?: string;
+  /** #726: invoked after a PASSING engine admission, before any review
+   * stage, so the host can run between-stage side effects (the Action
+   * adapter supplies the #914 ack-reaction behavior here). Awaited when it
+   * returns a promise. Never invoked on a skipped admission. */
+  onAdmission?: (admission: PrecheckOutput) => void | Promise<void>;
 }
 
 export type { RunReviewResult as EngineRunResult };

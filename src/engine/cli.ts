@@ -39,6 +39,16 @@ export async function engineMain(argv: string[], _env: NodeJS.ProcessEnv = proce
     process.on(signalName, handler);
     abortHandlers.push([signalName, handler]);
   }
+  // #726: a request may carry the received event summary (`event`) and its
+  // head SHA (`eventHeadSha`); the engine's admission stage consumes them.
+  // With neither, admission runs with no event — manual semantics: the
+  // label/comment-command gates are inert and the fingerprint skip logic
+  // still applies, so a repeated manual run skips coherently (use
+  // `forceRereview`-style config or FORCE_REVIEW to override).
+  const event = typeof data.event === "object" && data.event !== null && !Array.isArray(data.event)
+    ? data.event as ReviewRequest["event"]
+    : undefined;
+  const eventHeadSha = stringField("eventHeadSha");
   const request: ReviewRequest = {
     signal: controller.signal,
     repository: stringField("repository"),
@@ -54,6 +64,8 @@ export async function engineMain(argv: string[], _env: NodeJS.ProcessEnv = proce
       ? data.ambient as Record<string, string | undefined> : {},
     triggerReason: stringField("triggerReason"),
     forceRereview: data.forceRereview === true,
+    ...(event !== undefined ? { event } : {}),
+    ...(eventHeadSha !== "" ? { eventHeadSha } : {}),
   };
   const dependencies: ReviewDependencies = {
     workspace: stringField("workspace"),

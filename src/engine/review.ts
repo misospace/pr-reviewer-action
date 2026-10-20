@@ -27,6 +27,8 @@ import { normalizePrIdentity } from "../platform/pr.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
 import { buildPlatformReadAdapter } from "../run/platform.js";
 import type { ReviewDependencies, ReviewRequest } from "./types.js";
+import { runEngineAdmission, admissionStageEnv } from "./admission.js";
+import type { PrecheckOutput } from "../precheck/decide.js";
 import { buildStageEnv, validateStageEnv, type RunContext, type StageEnv } from "../run/env.js";
 import { RunWorkspace } from "../run/workspace.js";
 import { trustFramingOverhead } from "../context/repo-map.js";
@@ -170,6 +172,23 @@ export interface RunReviewResult {
   toolStopReason?: string;
   /** Wall-clock seconds for the whole run. */
   durationSec: number;
+  /** #726: the engine-owned admission decision — present on BOTH the skip
+   * and the review path. `shouldReview` is the authoritative "did any review
+   * stage run" signal; on the skip path the verdict fields on `outputs` are
+   * neutral and the carried decision lives in `admission`. */
+  shouldReview: boolean;
+  /** #726: admission's skip reason ("" on the review path). */
+  skipReason: string;
+  /** #726: admission's BROAD_FINGERPRINT source (the publish env's
+   * `BROAD_FINGERPRINT` value; "" when admission could not fingerprint). */
+  diffFingerprint: string;
+  /** #726: admission's resolved base SHA — the publish env's `BASE_SHA` and
+   * (when the request left `baseRef` empty) the repository-config source. */
+  admissionBaseSha: string;
+  /** #726: the full admission surface (carried verdict/verdict-source/
+   * review-result/incomplete-reason/degraded-gate-bypass on a diff-unchanged
+   * skip, resolved platform, fork flag, carried head SHA). */
+  admission: PrecheckOutput;
 }
 
 const NO_GATE_OUTCOME = (gate: GateName): GateOutcome => ({
@@ -350,9 +369,44 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   }
   const contract = validateContract(V3_CONTRACT);
 
+  // ── Admission stage (#726: engine-owned precheck/fingerprint decision) ─
+  // The platform adapter is constructed ONCE here — from the pre-admission
+  // stage env, exactly where the Action adapter's precheck adapter used to be
+  // built — and shared by every later stage (the duplicate preflight an
+  // idempotent auth exchange collapses to one). It is built before the
+  // config stage because the trusted base ref is unknown until admission
+  // resolves it; adapter-relevant env keys (platform resolution, tokens,
+  // REPO/PR_NUMBER) are identical in the pre- and post-resolution envs.
+  const adapter: PlatformReadAdapter = dependencies.adapter
+    ?? buildPlatformReadAdapter(
+      admissionStageEnv(contract, request, dependencies.workspace) as StageEnv,
+      request.signal !== undefined
+        ? withCancellationSignal(dependencies.fetchImpl, request.signal)
+        : dependencies.fetchImpl,
+    );
+  await adapter.preflightAuthentication?.();
+  checkpoint();
+  const pre = await runEngineAdmission(contract, request, dependencies.workspace, adapter, errorLog);
+  checkpoint();
+  if (pre.should_review !== "true") {
+    // Skip: no model spend, no further stages. The host owns the skip's
+    // side effects (outputs, stderr/summary rendering, fork reply, label
+    // cleanup) from the result's admission fields.
+    log(`precheck: skipped (${pre.skip_reason || "<none>"})`);
+    return admissionSkipResult(pre, Math.max(0, clock() - started), dependencies);
+  }
+  // Host between-stage side effects (the Action adapter's #914 ack
+  // reaction), after a passing admission and before any review stage.
+  await dependencies.onAdmission?.(pre);
+  checkpoint();
+
   // ── Config stage (config.sh) ─────────────────────────────────────────
   const raw: Record<string, string | undefined> = { ...request.inputs };
-  const baseRef = request.baseRef;
+  // The trusted base ref: explicit request state wins (direct callers);
+  // otherwise the admission-resolved base fills it in — the Action path's
+  // "adapter path fills from event" case. Repository config is resolved from
+  // this folded ref only NOW: before admission it was unknowable.
+  const baseRef = request.baseRef !== "" ? request.baseRef : pre.base_sha;
   let effectiveRaw = raw;
   if (baseRef !== "") {
     const resolution = resolveRepositoryConfig(contract, raw, {
@@ -376,16 +430,23 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const repo = config.repo !== "" ? String(config.repo) : request.repository;
   const prNumberRaw = config.prNumber;
   const prNumber = prNumberRaw !== "" && prNumberRaw !== undefined ? String(prNumberRaw) : request.prNumber;
-  const headSha = request.headSha;
+  // #726: fold the admission outputs into the review stage state exactly the
+  // way actionMain did: PLATFORM = resolved (request value as fallback),
+  // FORGEJO_API_URL = admission's effective URL, PR_HEAD_SHA = the event's
+  // head or admission's resolved head, fork flag from admission. Explicit
+  // request fields win only where a direct caller carries them (base ref,
+  // fork flag); the reviewed head is admission-resolved, the same rule the
+  // Action path already applied.
+  const headSha = request.eventHeadSha || pre.head_sha;
   const context: RunContext = {
     workspace,
     runDir,
     repo,
     prNumber,
     headSha,
-    isForkPr: request.isForkPr,
-    platform: request.platform,
-    forgejoApiUrl: request.forgejoApiUrl,
+    isForkPr: request.isForkPr !== "" ? request.isForkPr : pre.is_fork_pr,
+    platform: pre.resolved_platform || request.platform,
+    forgejoApiUrl: pre.effective_forgejo_api_url,
     ciChecksFile: request.ciChecksFile,
     outputFilePath: dependencies.outputsSink,
     stepSummaryPath: dependencies.stepSummaryPath ?? "",
@@ -433,16 +494,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // sanitizer, the corpus fences, and the never-execute rule.
   const ws = new RunWorkspace(runDir, dependencies.persistArtifacts ?? true);
   ws.write("review-request.json", Buffer.from(JSON.stringify({ schema_version: "1", repository: request.repository, pr_number: prNumber, head_sha: request.headSha, base_ref: request.baseRef, is_fork_pr: request.isForkPr, platform: request.platform, forgejo_api_url: request.forgejoApiUrl, trigger_reason: request.triggerReason, force_rereview: request.forceRereview }, null, 2) + "\n", "utf8"));
-  // #726: platform reads are cancellable too. The default adapter's fetch is
-  // wrapped with the run's cancellation scope (timeout semantics preserved);
-  // a host that injects its own adapter binds the request signal at
+  // #726: platform reads are cancellable too. The adapter was constructed and
+  // preflighted by the admission stage above and is shared with every later
+  // stage; a host that injects its own adapter binds the request signal at
   // construction — see docs/architecture/engine-boundary.md.
-  const adapter: PlatformReadAdapter = dependencies.adapter
-    ?? buildPlatformReadAdapter(env, request.signal !== undefined
-      ? withCancellationSignal(dependencies.fetchImpl, request.signal)
-      : dependencies.fetchImpl);
-  await adapter.preflightAuthentication?.();
-  checkpoint();
   const profiles: TierProfiles = resolveTierProfiles(env);
   const streamBool = (env.AI_STREAM ?? "true").toLowerCase() === "true";
 
@@ -1621,12 +1676,69 @@ secrets: [profiles.primary.apiKey],
     ...(toolBudgetTelemetry.contextBudget !== undefined ? { contextBudget: toolBudgetTelemetry.contextBudget } : {}),
     ...(toolBudgetTelemetry.contextPeak !== undefined ? { contextPeak: toolBudgetTelemetry.contextPeak } : {}),
     ...(toolBudgetTelemetry.stopReason !== undefined ? { toolStopReason: toolBudgetTelemetry.stopReason } : {}),
+    // #726: the admission decision this run was admitted on. The verdict
+    // fields above remain authoritative on the review path.
+    shouldReview: true,
+    skipReason: pre.skip_reason,
+    diffFingerprint: pre.diff_fingerprint,
+    admissionBaseSha: pre.base_sha,
+    admission: pre,
   };
 }
 
 // ---------------------------------------------------------------------------
 // Stage helpers bound to the pipeline
 // ---------------------------------------------------------------------------
+
+/** #726: the result an admission SKIP returns — the decision fields are the
+ * point; no review stage ran, so the verdict surfaces stay neutral and the
+ * carried decision (a diff-unchanged skip's verdict/verdict-source/review-
+ * result/incomplete-reason/degraded-gate-bypass) lives in `admission` for
+ * the host's gate and outputs. No artifacts were written: the bus is empty. */
+function admissionSkipResult(
+  pre: PrecheckOutput,
+  durationSec: number,
+  dependencies: ReviewDependencies,
+): RunReviewResult {
+  const outputs: ReviewStepOutputs = {
+    verdict: "",
+    degradedGateBypass: false,
+    verdictSource: "",
+    requiredChecks: "none",
+    reviewResult: "",
+    incompleteReason: "none",
+    reviewRoute: "legacy",
+    escalationReason: "",
+    reviewTriageDecision: "",
+    reviewTriageReason: "",
+    reviewTriageRouting: "",
+    reviewMarkdown: "",
+    findings: "[]",
+    analysisEngine: "",
+    toolCalls: "",
+    cacheHitRatio: "-",
+  };
+  return {
+    outputs,
+    runDir: dependencies.runDir,
+    marker: "",
+    artifacts: new Map<string, Uint8Array>(),
+    reviewArtifact: {},
+    route: "legacy",
+    routeReason: "",
+    analysisEngine: "",
+    classification: {},
+    ciGate: NO_GATE_OUTCOME("ci"),
+    specialistGate: NO_GATE_OUTCOME("specialists"),
+    verdictPolicy: "",
+    durationSec,
+    shouldReview: false,
+    skipReason: pre.skip_reason,
+    diffFingerprint: pre.diff_fingerprint,
+    admissionBaseSha: pre.base_sha,
+    admission: pre,
+  };
+}
 
 function cachedProjectNumber(bytes: Uint8Array): number | null {
   const value = safeJson(bytes);
