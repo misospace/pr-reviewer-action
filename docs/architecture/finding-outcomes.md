@@ -179,11 +179,19 @@ run directory — only when the review actually published (a superseded run
 returns before outcomes exist, a failed publication or a failed
 inline-findings submission never carries outcomes), only when the
 enumeration was proven — either a provably empty prior review list or at
-least one prior observation — and never on a #588 managed-record path: a
+least one prior observation — never on a #588 managed-record path: a
 platform that declares no native review surface never creates the inline
 finding comments the ledger's `reported` events describe (the findings live
 in the managed record's body), so the ledger and its tally line are both
-dropped there. The producer runs its own event
+dropped there — and only when the run can prove a hex head SHA
+for the envelope under `isProvenHeadSha`, the ONE shared proof rule the
+reader's envelope check applies (#1128: an unprovable head withholds the
+artifact with a visible message instead of shipping a ledger whose blanked
+head makes the reader null the whole file). The lifecycle is explicit in
+BOTH directions: a reused run dir that yields no valid artifact this run
+(withheld head, failed publication, failed write) has the previous run's
+`finding-outcomes.json` REMOVED — never left to read as the current run's —
+with a bounded warning if even the removal fails. The producer runs its own event
 normalizer before serializing, so the artifact always parses under the same
 rules a reader applies, with the endpoint URL stripped from the model field
 (`publicAnalysisEngine`). Past the 1000-event cap the producer drops the
