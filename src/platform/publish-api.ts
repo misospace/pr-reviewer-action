@@ -870,7 +870,16 @@ export class ForgejoPublishApi implements PublishPlatformApi {
   readonly nativeReviewSurface: NativeReviewSurface = { supported: true };
   /** #1176: Forgejo offers author-side deletion of a submitted review
    * (`DELETE /repos/{owner}/{repo}/pulls/{index}/reviews/{id}`), which the
-   * cleanup layer may substitute for the GraphQL hide Forgejo cannot do. */
+   * cleanup layer may substitute for the GraphQL hide Forgejo cannot do.
+   * Upstream `models/issues.DeleteReview` refuses ONLY `ReviewTypeRequest` —
+   * the review-request pseudo-entry, distinct from a REQUEST_CHANGES verdict
+   * (the API maps event `CHANGES_REQUESTED` to `ReviewTypeReject`, a deletable
+   * type). Managed reviews are always submitted authored reviews — the adapter
+   * never creates review requests (`requestReviewers` is unsupported, #1005),
+   * and a bodyless review-request entry fails the eligibility filter anyway
+   * (no managed marker in body; `REQUEST_REVIEW` reads `PENDING`, which the
+   * cleanup layer fails closed on) — so the upstream refusal never applies to
+   * a cleanup target. */
   readonly supersededReviewDeletion: NativeReviewSurface = { supported: true };
   private readonly base: string;
   private readonly origin: string;
