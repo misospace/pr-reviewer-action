@@ -730,6 +730,108 @@ test("failed-outcome backoff is capped by retryMaxMs", async () => {
   );
 });
 
+// ── superseded attempt failure never resurrects the cancelled generation ─
+
+const ABORT_FAILED: ExecutionOutcome = Object.freeze({
+  status: "failed",
+  resultHeadSha: "",
+  failureCategory: "abort",
+});
+
+/** Issue #1141 (#731 queue): same-millisecond replacement with a
+ * lexicographically reversed jobId must not lose the dispatch race to
+ * a failed/rejected superseded attempt. Both orderings are exercised:
+ * `a-old`/`z-new` (replacement sorts later) and `z-old`/`a-new`
+ * (replacement sorts earlier). */
+for (const [oldId, newId] of [["a-old", "z-new"], ["z-old", "a-new"]] as const) {
+  test(`failed superseded attempt is retired, not requeued: ${oldId} superseded by ${newId} dispatches next (#1141)`, async () => {
+    const { executor, controller } = setup();
+    controller.enqueue(makeJob(oldId));
+    await controller.tick();
+    assert.equal(executor.invocations.length, 1);
+    assert.equal(executor.invocations[0]!.record.job.jobId, oldId);
+
+    // Same millisecond (fixed clock): the replacement supersedes the
+    // running generation and stamps the supersession attribution.
+    assert.equal(
+      controller.enqueue(makeJob(newId)).disposition,
+      "superseded-running",
+    );
+
+    // The aborted executor settles with a failure outcome.
+    executor.invocations[0]!.settle(ABORT_FAILED);
+    await flush();
+
+    const old = controller.recordFor(oldId)!;
+    assert.equal(old.state, "superseded", "cancelled generation is retired");
+    assert.equal(old.failureReason, "superseded-by-newer-head");
+    assert.equal(old.supersededByJobId, newId);
+
+    // The next tick starts the replacement, never the cancelled
+    // generation.
+    await controller.tick();
+    assert.equal(executor.invocations.length, 2);
+    assert.equal(executor.invocations[1]!.record.job.jobId, newId);
+    assert.equal(controller.recordFor(oldId)!.state, "superseded");
+  });
+
+  test(`rejected superseded attempt is retired, not requeued: ${oldId} superseded by ${newId} dispatches next (#1141)`, async () => {
+    const { executor, controller } = setup();
+    controller.enqueue(makeJob(oldId));
+    await controller.tick();
+    assert.equal(executor.invocations.length, 1);
+
+    assert.equal(
+      controller.enqueue(makeJob(newId)).disposition,
+      "superseded-running",
+    );
+
+    // The aborted executor rejects instead of settling.
+    executor.invocations[0]!.fail(new Error("abort"));
+    await flush();
+
+    const old = controller.recordFor(oldId)!;
+    assert.equal(old.state, "superseded", "cancelled generation is retired");
+    assert.equal(old.failureReason, "superseded-by-newer-head");
+    assert.equal(old.supersededByJobId, newId);
+
+    await controller.tick();
+    assert.equal(executor.invocations.length, 2);
+    assert.equal(executor.invocations[1]!.record.job.jobId, newId);
+    assert.equal(controller.recordFor(oldId)!.state, "superseded");
+  });
+}
+
+// Pre-fix (issue #1141), with no backoff the failed zombie re-enters the
+// candidate list in the same tick; because jobIds are hashes, the lexical
+// tie-break in `findSupersedingSibling` then makes the lexically smaller
+// replacement look like the stale generation, and the obsolete
+// `z-old` dispatch wins. With retryBaseMs 100 the zombie is not yet a
+// candidate, so the tests above catch the regression on state alone —
+// this variant observes the dispatch race directly.
+test("failed superseded attempt with no backoff: replacement dispatches, never the cancelled generation (#1141)", async () => {
+  const { executor, controller } = setup({ retryBaseMs: 0, retryMaxMs: 0 });
+  controller.enqueue(makeJob("z-old"));
+  await controller.tick();
+  assert.equal(executor.invocations.length, 1);
+
+  assert.equal(
+    controller.enqueue(makeJob("a-new")).disposition,
+    "superseded-running",
+  );
+
+  executor.invocations[0]!.settle(ABORT_FAILED);
+  await flush();
+  const old = controller.recordFor("z-old")!;
+  assert.equal(old.state, "superseded");
+  assert.equal(old.supersededByJobId, "a-new");
+
+  await controller.tick();
+  assert.equal(executor.invocations.length, 2);
+  assert.equal(executor.invocations[1]!.record.job.jobId, "a-new");
+  assert.equal(controller.recordFor("z-old")!.state, "superseded");
+});
+
 // ── heartbeat ────────────────────────────────────────────────────────────
 
 test("heartbeat renews for the lease owner only, and only while the lease is live", async () => {

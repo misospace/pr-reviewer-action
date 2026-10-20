@@ -11,7 +11,9 @@
  * mutation batch persists through `store.save`; records are frozen and
  * never mutated in place; every dispatch takes a UNIQUE lease-owner
  * token, and a late executor resolution whose token no longer matches is
- * revoked (no-op), never resurrecting a requeued generation; the
+ * revoked (no-op), never resurrecting a requeued generation; a failed or
+ * rejected executor settle for a supersession-aborted generation is
+ * retired as `superseded`, never requeued; the
  * supersession gate is checked before EVERY publish attempt AND again
  * after a publish resolves (a late publish resolution from a generation
  * that was superseded mid-flight is retired, not allowed to overwrite
@@ -649,7 +651,30 @@ export class ReviewQueueController {
     if (outcome.status === "completed") {
       await this.settleCompleted(jobId, token, record, outcome, now);
     } else if (outcome.status === "failed") {
-      if (record.attempt >= this.options.maxAttempts) {
+      // Never resurrect a superseded generation: a supersession-aborted
+      // executor that fails (or rejects) is retired with its
+      // supersession attribution, not requeued. Requeuing it would let
+      // the obsolete generation win the next dispatch against its
+      // replacement when both carry the same enqueue timestamp and the
+      // replacement's jobId is lexicographically smaller (jobIds are
+      // hashes — lexical order is not arrival order). The
+      // `cancelRequested` stamp from `enqueue` is authoritative; the
+      // live-sibling lookup is the defensive fallback.
+      if (record.cancelRequested || this.findSupersedingSibling(record) !== null) {
+        const superseder = record.supersededByJobId !== ""
+          ? record.supersededByJobId
+          : this.findSupersedingSibling(record) ?? "";
+        this.records.set(
+          jobId,
+          Object.freeze({
+            ...withState(record, "superseded", now),
+            failureReason: "superseded-by-newer-head",
+            supersededByJobId: superseder,
+            leaseOwner: "",
+            leaseExpiresAtMs: 0,
+          }),
+        );
+      } else if (record.attempt >= this.options.maxAttempts) {
         this.records.set(
           jobId,
           Object.freeze({
