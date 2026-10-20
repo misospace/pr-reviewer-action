@@ -7,7 +7,7 @@ import { ciAttemptTimeoutMs } from "../src/platform/bounded.js";
 import { ForgejoEnrichClient, GitHubEnrichClient, validEnrichEndpoint } from "../src/platform/enrich.js";
 import { ForgejoAdapter } from "../src/platform/forgejo.js";
 import { GitHubAdapter, nextLink } from "../src/platform/github.js";
-import type { FetchLike } from "../src/platform/http.js";
+import { PlatformRequestError, type FetchLike } from "../src/platform/http.js";
 import { compareCodePoints, jqCompact } from "../src/platform/jq.js";
 import { forgejoJobStatusPathsMatch, forgejoSelfStatusMatches, forgejoSelfRunOrigin, GITHUB_CONVERSATION_COMMENTS_QUERY, GITHUB_PR_BODY_REVISION_QUERY, GITHUB_REVIEW_THREADS_QUERY, normalizeExternalChecks, normalizeForgejoRunJobs, projectPrFiles } from "../src/platform/normalize.js";
 import { pyQuote, pyStr } from "../src/platform/py.js";
@@ -719,6 +719,60 @@ test("forgejo reads make ZERO requests for a dot-segment repo ref", async () => 
     await assert.rejects(adapter.repoPermission(), /Invalid repo full name/);
   }
   assert.equal(seen.length, 0);
+});
+
+// ── #1131: a capped diff read must fail visibly, never degrade to "" ──────
+
+test("getPrDiff rethrows a too-large capped read instead of returning an empty diff", async () => {
+  // An oversized diff degrading to "" would fingerprint as empty-diff and
+  // silently skip every later push on the PR, so the transport's too-large
+  // error must propagate out of the adapters' lenient catch. One 8 MiB
+  // buffer enqueued five times shares its memory while totalling 40 MiB —
+  // past the 32 MiB default cap.
+  const chunk = new Uint8Array(8 * 1024 * 1024).fill(0x21);
+  const oversized = () =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (let i = 0; i < 5; i++) controller.enqueue(chunk);
+          controller.close();
+        },
+      }),
+      { status: 200 },
+    );
+
+  const gh = new GitHubAdapter({
+    repo: "o/r",
+    prNumber: "7",
+    token: "Bearer t",
+    fetchImpl: async () => oversized(),
+  });
+  await assert.rejects(
+    gh.getPrDiff(),
+    (e: unknown) => e instanceof PlatformRequestError && e.kind === "too-large",
+  );
+
+  const forgejo = new ForgejoAdapter({
+    repo: "o/r",
+    prNumber: "7",
+    baseUrl: "https://git.example/",
+    token: "t",
+    fetchImpl: async () => oversized(),
+  });
+  await assert.rejects(
+    forgejo.getPrDiff(),
+    (e: unknown) => e instanceof PlatformRequestError && e.kind === "too-large",
+  );
+
+  // Other request failures keep the pre-existing lenient "" behavior.
+  const transient = new GitHubAdapter({
+    repo: "o/r",
+    prNumber: "7",
+    fetchImpl: () => {
+      throw new TypeError("ECONNRESET");
+    },
+  });
+  assert.equal(await transient.getPrDiff(), "");
 });
 
 // ── #970: forge-authenticated provenance ─────────────────────────────────

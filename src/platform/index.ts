@@ -1,6 +1,12 @@
 export { ForgejoAdapter, type ForgejoAdapterOptions } from "./forgejo.js";
 export { GitHubAdapter, nextLink, type GitHubAdapterOptions } from "./github.js";
-export { PlatformRequestError, requestJson, requestText, type FetchLike } from "./http.js";
+export {
+  DEFAULT_TEXT_RESPONSE_MAX_BYTES,
+  PlatformRequestError,
+  requestJson,
+  requestText,
+  type FetchLike,
+} from "./http.js";
 export { deriveIsFork, normalizePrIdentity, type PrIdentity } from "./pr.js";
 export { resolvePlatform, type ResolvedPlatform } from "./resolve.js";
 export {
