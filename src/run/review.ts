@@ -1439,13 +1439,19 @@ secrets: [profiles.primary.apiKey],
     // Defensive: the entry's publish step is skipped for this run, so no
     // publish seam can produce a body for a score to sit in — and no
     // privileged scorer call may fire for a review that never publishes.
+    // The cause still lands in the artifact and the log, so an operator can
+    // tell "the publish step was skipped" from "the scorer call failed".
     confidenceResult = unscoredConfidenceResult("not_published");
-    clearConfidenceArtifacts(ws);
+    removeConfidenceWireArtifacts(ws);
+    writeConfidenceScoreArtifact(ws, confidenceResult);
+    log(`confidence scorer: unscored (${confidenceResult.cause})`);
   } else if (analysisEngine === MODEL_UNAVAILABLE_ENGINE || !(outputVerdict === "approve" || outputVerdict === "request_changes")) {
     // No real model review happened (a model-failure notice, or no verdict at
     // all): fail to unscored WITHOUT calling the model.
     confidenceResult = unscoredConfidenceResult("incomplete_review");
-    clearConfidenceArtifacts(ws);
+    removeConfidenceWireArtifacts(ws);
+    writeConfidenceScoreArtifact(ws, confidenceResult);
+    log(`confidence scorer: unscored (${confidenceResult.cause})`);
   } else {
     // #1140 review: every credential configured for this run, in ONE place.
     // The scorer may be a SEPARATE backend, so each of these is a real
@@ -1531,22 +1537,7 @@ secrets: [profiles.primary.apiKey],
     };
     // Persist the sanitized artifacts alongside ai-output.json /
     // review-coverage.json.
-    ws.write("confidence-score.json", Buffer.from(`${pyJsonDumps({
-      version: 1,
-      status: confidenceResult.status,
-      score: confidenceResult.score,
-      risk: confidenceResult.risk,
-      reason: confidenceResult.reason,
-      concerns: confidenceResult.concerns.map((concern) => ({
-        file: concern.file,
-        line: concern.line,
-        evidence: concern.evidence,
-      })),
-      model: confidenceResult.model,
-      cause: confidenceResult.cause,
-      caps: confidenceResult.caps,
-      ...(confidenceOutcome.diagnostic !== "" ? { diagnostic: maskConfidenceText(confidenceOutcome.diagnostic) } : {}),
-    })}\n`, "utf8"));
+    writeConfidenceScoreArtifact(ws, confidenceResult, maskConfidenceText(confidenceOutcome.diagnostic));
     if (confidenceOutcome.requestPayload !== null) {
       // #1140 review: raw provider/agent JSON goes to disk through
       // `redactTextDeep`, not `maskKnownSecretsDeep` — configured-value
@@ -1939,12 +1930,44 @@ function isSecurityFlagged(classification: Record<string, unknown>): boolean {
  * this run's confidence artifacts. A reused `PR_REVIEWER_RUN_DIR` would
  * otherwise keep a previous run's `confidence-score.json` sitting next to an
  * `unscored` status, so a later reader could pair a stale score with the
- * current run. Called from the disabled, not-published, and incomplete-review
- * branches alike — all three are "no score this run". */
+ * current run. Used by the disabled branch, where NO confidence surface
+ * exists at all. */
 function clearConfidenceArtifacts(ws: RunWorkspace): void {
   ws.remove("confidence-score.json");
+  removeConfidenceWireArtifacts(ws);
+}
+
+/** The wire artifacts belong to a model call. A run that never called the
+ * model (disabled, publish step skipped, incomplete review) must not leave
+ * an earlier run's request/response behind. */
+function removeConfidenceWireArtifacts(ws: RunWorkspace): void {
   ws.remove("confidence-request.json");
   ws.remove("confidence-response.json");
+}
+
+/** Persist the canonical confidence result. The artifact is the only surface
+ * that carries the machine-token cause, so EVERY path that ends without a
+ * score writes one — including the enabled-but-skipped ones
+ * (`not_published`, `incomplete_review`) that never reach the model call.
+ * Without it, `confidence-status: unscored` is unexplainable: the operator
+ * could not tell "the publish step was skipped" from "the call failed". */
+function writeConfidenceScoreArtifact(ws: RunWorkspace, result: ConfidenceResult, diagnostic?: string): void {
+  ws.write("confidence-score.json", Buffer.from(`${pyJsonDumps({
+    version: 1,
+    status: result.status,
+    score: result.score,
+    risk: result.risk,
+    reason: result.reason,
+    concerns: result.concerns.map((concern) => ({
+      file: concern.file,
+      line: concern.line,
+      evidence: concern.evidence,
+    })),
+    model: result.model,
+    cause: result.cause,
+    caps: result.caps,
+    ...(diagnostic !== undefined && diagnostic !== "" ? { diagnostic } : {}),
+  })}\n`, "utf8"));
 }
 
 /** corpus.sh's gate_feature_for_forks for the tool harness. Null = run. */

@@ -115,15 +115,19 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
   // Provenance-based, not value-based: an operator may deliberately reuse
   // the same secret on a distinct endpoint; only a resolver wiring bug
   // (primary credential on a distinct URL) trips this boundary.
+  // Both refusals below happen BEFORE any transport call, so the scorer never
+  // ran: the model identity stays empty (the contract reserves a non-empty
+  // `confidence-model` for a call that was actually attempted). Reporting the
+  // configured model here would claim that model graded the review.
   if (profile.apiKey === "" && !profile.inheritedTransport && !isLoopbackUrl(profile.baseUrl)) {
     return {
-      result: unscoredConfidenceResult("missing_credential", profile.model),
+      result: unscoredConfidenceResult("missing_credential"),
       requestPayload: null, rawResponse: null, diagnostic: "",
     };
   }
   if (!profile.inheritedTransport && profile.credentialSource === "primary") {
     return {
-      result: unscoredConfidenceResult("credential_isolation", profile.model),
+      result: unscoredConfidenceResult("credential_isolation"),
       requestPayload: null, rawResponse: null, diagnostic: "",
     };
   }

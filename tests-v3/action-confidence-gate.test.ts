@@ -118,6 +118,8 @@ interface CaseResult {
   commentPosts: string[];
   /** Confidence artifacts present in the action's real run dir. */
   confidenceArtifacts: string[];
+  /** The persisted score artifact, when the run wrote one. */
+  confidenceScoreArtifact: Record<string, unknown> | null;
   cleanup: () => Promise<void>;
 }
 
@@ -187,6 +189,9 @@ async function runCase(options: { publishReviewComment: string }): Promise<CaseR
   assert.equal(runDirs.length, 1, "expected exactly one action run dir");
   const confidenceArtifacts = ["confidence-request.json", "confidence-response.json", "confidence-score.json"]
     .filter((name) => existsSync(join(runDirs[0]!, name)));
+  const confidenceScoreArtifact = confidenceArtifacts.includes("confidence-score.json")
+    ? JSON.parse(readFileSync(join(runDirs[0]!, "confidence-score.json"), "utf8")) as Record<string, unknown>
+    : null;
   const outputs: Record<string, string> = {};
   for (const line of readFileSync(env.GITHUB_OUTPUT!, "utf8").split("\n")) {
     const eq = line.indexOf("=");
@@ -198,6 +203,7 @@ async function runCase(options: { publishReviewComment: string }): Promise<CaseR
     scorerRequests: scorer.requests.length,
     commentPosts: github.commentPosts,
     confidenceArtifacts,
+    confidenceScoreArtifact,
     cleanup,
   };
 }
@@ -215,8 +221,12 @@ test("#1073 action: comment mode with publish-review-comment unset skips the pub
     // stays "" (no scorer transport call was ever attempted).
     assert.equal(result.outputs["confidence-risk"], "unknown");
     assert.equal(result.outputs["confidence-model"], "");
-    // No confidence artifacts were written for the unscored run.
-    assert.deepEqual(result.confidenceArtifacts, []);
+    // No wire artifacts (the model was never called), but the score artifact
+    // records WHY there is no score, so `unscored` is never unexplained.
+    assert.deepEqual(result.confidenceArtifacts, ["confidence-score.json"]);
+    assert.equal(result.confidenceScoreArtifact?.status, "unscored");
+    assert.equal(result.confidenceScoreArtifact?.cause, "not_published");
+    assert.equal(result.confidenceScoreArtifact?.score, null);
     // The publish step itself was skipped: no sticky comment POST at all.
     assert.equal(result.commentPosts.length, 0, "the publish step ran despite the legacy flag being unset");
   } finally {

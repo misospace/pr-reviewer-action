@@ -90,10 +90,11 @@ Set `ai-confidence-model` and the review runs one extra, bounded model call that
 | `ai-confidence-api-key` | Scorer endpoint key. A distinct endpoint never inherits the primary key. |
 | `ai-confidence-timeout-sec` | Wall-clock budget for the scorer call, default 120. |
 | `ai-confidence-reasoning-effort` | Optional effort token; blank omits the field entirely. |
+| `ai-confidence-enable-for-forks` | Operator-only; default `false` keeps the scorer off cross-repository (fork) PRs, because the prompt carries the review's own privileged output to a separate endpoint under a privileged credential. |
 
 **Local models:** point `ai-confidence-base-url` at your server's OpenAI-compatible URL (e.g. `http://localhost:11434/v1` for ollama) with `ai-confidence-api-format: openai`; Anthropic-compatible local proxies take `ai-confidence-api-format: anthropic`. A keyless scorer endpoint may only be loopback (`localhost`, `127.0.0.1`, `::1`) — any other distinct endpoint must set `ai-confidence-api-key`, because the primary lane's key never rides a different URL.
 
-**Cost ceilings:** exactly one extra model call per published review — bounded (1,024 completion tokens, no tools, no corpus), one wire attempt, no retries. The call is capped by `ai-confidence-timeout-sec` (default 120s). Any failure — timeout, HTTP 429/5xx, malformed answer — degrades to `confidence-status: unscored`; the review still publishes byte-for-byte unchanged.
+**Cost ceilings:** exactly one extra model call per published review — bounded (1,024 completion tokens, no tools, no corpus), one wire attempt, no retries. The call is capped by `ai-confidence-timeout-sec` (default 120s). Any failure — timeout, HTTP 429/5xx, malformed answer — degrades to `confidence-status: unscored`. The review itself is unchanged — same verdict, findings, required checks, and approval — but the published body gains the additive advisory `Independent confidence` section and the review marker gains the confidence keys.
 
 **What a score means:** advisory confidence in *this review* (how well it covered and supported its own conclusions) — not a probability the code is correct, and no verdict or approval authority. The score never changes the verdict, findings, or required checks. Deterministic caps outrank the model: a blocker finding caps the score at 2, a major finding or partial review coverage at 3.
 

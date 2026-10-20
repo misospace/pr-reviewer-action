@@ -643,6 +643,10 @@ test("#1073: a keyless non-loopback scorer endpoint never dials and never leaks 
     const scoreArtifact = JSON.parse(readFileSync(join(run.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
     assert.equal(scoreArtifact.status, "unscored");
     assert.equal(scoreArtifact.cause, "missing_credential");
+    // The scorer never ran, so no model identity is reported: naming the
+    // configured model would claim that model graded the review.
+    assert.equal(run.result.outputs.confidenceModel, "");
+    assert.equal(scoreArtifact.model, "");
 
     // The malformed config is loud — a WARNING naming the inheritance rule and
     // the input to set — and non-fatal: the review itself still published.
@@ -1019,16 +1023,53 @@ test("#1073: comment mode with the legacy publish-review-comment flag unset does
       ...scorerInputs,
       "publish-mode": "comment",
       "publish-review-comment": "false",
-    });
+    }, "", true);
     assert.equal(scorerRequests(server), 0, "the scorer fired for a run whose publish step is skipped");
     assert.equal(commentMode.result.outputs.confidenceStatus, "unscored");
-    for (const name of ["confidence-request.json", "confidence-response.json", "confidence-score.json"]) {
-      assert.ok(!existsSync(join(commentMode.runDir, name)), `${name} was written for an unscored run`);
+    // No wire artifacts: the model was never called.
+    for (const name of ["confidence-request.json", "confidence-response.json"]) {
+      assert.ok(!existsSync(join(commentMode.runDir, name)), `${name} was written for a run that never called the scorer`);
     }
+    // The cause is observable: the score artifact records WHY there is no
+    // score, so `unscored` is never an unexplained status.
+    const skippedArtifact = JSON.parse(readFileSync(join(commentMode.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(skippedArtifact.status, "unscored");
+    assert.equal(skippedArtifact.cause, "not_published");
+    assert.equal(skippedArtifact.score, null);
+    assert.equal(skippedArtifact.model, "");
+    // The cause reaches the log too, not only the persisted artifact.
+    assert.ok(
+      commentMode.logs.some((line) => line.includes("confidence scorer: unscored (not_published)")),
+      `expected the not_published cause in the log: ${JSON.stringify(commentMode.logs)}`,
+    );
     // The review itself still completed; only the entry-level publish step
     // (and with it the scorer) is skipped.
     assert.equal(commentMode.result.outputs.verdict, "approve");
     assert.ok(commentMode.result.outputs.reviewMarkdown.length > 0);
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1073: the risk band is the scorer's own, not a function of the score", async () => {
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 5, risk: "critical", reason: "wide blast radius", concerns: [] })));
+  }));
+  try {
+    // The band is the model's own assessment and travels through untouched:
+    // `critical` next to a 5/5 score is a legal answer, not a contradiction
+    // for the action to silently rewrite into a score-derived band.
+    const run = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+    });
+    assert.equal(run.result.outputs.confidenceStatus, "scored");
+    assert.equal(run.result.outputs.confidenceScore, "5");
+    assert.equal(run.result.outputs.confidenceRisk, "critical");
+    const scoreArtifact = JSON.parse(readFileSync(join(run.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(scoreArtifact.risk, "critical");
+    assert.deepEqual(scoreArtifact.caps, []);
   } finally {
     await server.close();
   }
@@ -1186,9 +1227,16 @@ test("#1073: a run that ends unscored clears stale confidence artifacts too", as
     );
     assert.equal(incomplete.result.outputs.confidenceStatus, "unscored");
     assert.equal(scorerRequests(failing), 0);
-    for (const name of names) {
+    // The stale wire artifacts are gone, and the stale score is replaced by
+    // THIS run's own unscored score, which carries the cause.
+    for (const name of ["confidence-request.json", "confidence-response.json"]) {
       assert.ok(!existsSync(join(incomplete.runDir, name)), `${name} survived an incomplete-review run`);
     }
+    const incompleteArtifact = JSON.parse(readFileSync(join(incomplete.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(incompleteArtifact.status, "unscored");
+    assert.equal(incompleteArtifact.cause, "incomplete_review");
+    assert.equal(incompleteArtifact.score, null);
+    assert.notEqual(incompleteArtifact.reason, "from an earlier run");
     // `unscored` still records that the scorer ran and produced nothing —
     // status without a score. It is the *disabled* run that has no marker key.
     assert.match(incomplete.result.marker, /"confidence_status":"unscored"/);
