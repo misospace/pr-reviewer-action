@@ -25,7 +25,7 @@ The action reviews each pull request with the model you point it at. It collects
 - 🧭 **Deterministic classification**: rule-based risk flags and required checks keep smaller models focused; specialist passes run only when the change warrants them.
 - ⚖️ **Verdicts you can audit**: request changes only for open blocker/major findings, and a review that couldn't read everything says so and never approves.
 - 💸 **Token-saving**: an unchanged diff skips the model entirely and carries the prior verdict forward.
-- 🛡️ **Safe by default**: standards and prompts read from the base branch, read-only tools, secret redaction, approvals off, fork PRs isolated.
+- 🛡️ **Safe by default**: standards and prompts read from the base branch, read-only tools, secret redaction, approvals off unless you select `publish-mode: review_verdict`, cross-repository approvals off unless `approve-forks: true`, fork PRs isolated.
 
 ## 🚀 Quick start
 
@@ -101,6 +101,7 @@ The action works on **GitHub** and **Forgejo** (1.4.x), with **Tangled** resolva
 | Managed sticky comment | ✅ Full | ✅ Full |
 | Native review comments (`review_comment`) | ✅ Full | ⚠️ Degraded — REST-based; no inline line anchors |
 | Native review verdicts (`review_verdict`) | ✅ Full | ⚠️ Degraded — approve/request_changes via REST |
+| Native blocking reviews (`review_blockers`) | ✅ Full | ⚠️ Degraded — request_changes/comment via REST |
 | Cleanup: dismiss stale reviews | ✅ Full | ✅ Full (REST) |
 | Cleanup: minimizeComment (hide outdated) | ✅ Full | ❌ Skipped (no GraphQL) |
 | CI status check polling | ✅ Full | ✅ Commit-status polling (Forgejo REST; own single-job status auto-discovered by run-jobs API) |

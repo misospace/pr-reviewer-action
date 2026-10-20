@@ -37,10 +37,20 @@ export const FEEDBACK_AFFORDANCE =
  * published range". The range — not a single line — is part of the key because
  * a multi-line prescription is published anchored at its END line: keying on
  * one line would let a rejection of a 1-2 range silently drop a different,
- * single-line-at-2 prescription with the same text. NUL-separated, so no
- * path, line, or replacement text can be arranged to collide with another key. */
+ * single-line-at-2 prescription with the same text. Serialized as a JSON
+ * array: quoting neutralizes the array's own separators and escaping
+ * neutralizes NUL, so the encoding is injective over these four fields and no
+ * path, line, or replacement text can be arranged to collide with another key.
+ *
+ * #1119: the previous bare-NUL join was forgeable — `replacement` is model
+ * text and `redactText` does not filter NUL, so a NUL-bearing value could
+ * shift a field boundary and land on another key. Re-keying changes every
+ * `prescriptionKeyDigest`, so rejection-carry markers published by earlier
+ * versions no longer match and previously-👎-rejected prescriptions may be
+ * re-suggested once after upgrade; the new digests re-establish from that run
+ * on. Accepted one-time self-healing reset — no legacy-digest path. */
 export function prescriptionKey(path: string, rangeStart: number, rangeEnd: number, replacement: string): string {
-  return `${path}\u0000${rangeStart}\u0000${rangeEnd}\u0000${replacement}`;
+  return JSON.stringify([path, rangeStart, rangeEnd, replacement]);
 }
 
 /** #762 (review round: durable suppression): the rejection memory must outlive

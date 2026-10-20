@@ -7,7 +7,7 @@ import { TangledNotImplementedError } from "../src/platform/tangled.js";
 import { buildAdapter, buildPublishApi, precheckMain, publishInputFromEnv, publishMain, readEvent } from "../src/run/entrypoints.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { publishReview } from "../src/publish/publish.js";
-import type { NativeReviewRequest, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
+import type { NativeReviewRequest, NativeReviewSurface, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
 
 function mockAdapter(): PlatformReadAdapter {
   return {
@@ -100,6 +100,23 @@ test("#1003: publishInputFromEnv carries the triage answer, and omits it when tr
   assert.deepEqual(substantiated.reviewTriage, { decision: "not_required", reason: "no owning team in the escalation policy" });
 });
 
+test("#1161: publishInputFromEnv accepts the review_blockers mode", () => {
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "review_blockers" } as NodeJS.ProcessEnv, "github").mode, "review_blockers");
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "review_verdict" } as NodeJS.ProcessEnv, "github").mode, "review_verdict");
+});
+
+test("#1161: the deprecated allow-approve input is read for the warning only, and an absent input stays absent", () => {
+  // The runner merges the contract default into every input it exports, so
+  // a value matching the default is indistinguishable from an unset input
+  // (the same limitation the repository-config narrowing has). Only a
+  // non-default value is observable — and only that one warns.
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").allowApprove, undefined);
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", ALLOW_APPROVE: "" } as NodeJS.ProcessEnv, "github").allowApprove, undefined);
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", ALLOW_APPROVE: "false" } as NodeJS.ProcessEnv, "github").allowApprove, undefined);
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", ALLOW_APPROVE: "true" } as NodeJS.ProcessEnv, "github").allowApprove, true);
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", ALLOW_APPROVE: " TRUE " } as NodeJS.ProcessEnv, "github").allowApprove, true);
+});
+
 test("publish entrypoint rejects an invalid publish mode fail-closed", async () => {
   await assert.rejects(
     publishMain({
@@ -135,15 +152,29 @@ test("precheck entrypoint output file receives the v2-compatible keys", async ()
   }
 });
 
-// ── Tangled fail-loud boundaries (#583) ──────────────────────────────────
+// ── Tangled seam boundaries (#583/#588) ──────────────────────────────────
 
-test("a resolved tangled platform fails loudly at every adapter boundary", () => {
+test("a resolved tangled platform uses the Tangled publish seam and never the GitHub/Forgejo APIs", () => {
+  // Precheck-side adapter seam: `buildAdapter` in this entrypoint still
+  // fails loudly — Tangled read routing goes through
+  // `buildPlatformReadAdapter` (#585), and lifting this guard is later
+  // series work (#589/#590).
   const env = { REPO: "o/r", PR_NUMBER: "9", PLATFORM: "tangled", TANGLED_REPO_DID: "did:plc:repo" } as NodeJS.ProcessEnv;
-  // Precheck adapter: the guard throws before either adapter branch runs.
   assert.throws(() => buildAdapter(env), TangledNotImplementedError);
-  // Publish seam: GitHubPublishApi is never constructed, so no GitHub API
-  // request can be assembled as a fallback.
-  assert.throws(() => buildPublishApi(env), TangledNotImplementedError);
+  // Publish seam (#588): the dedicated Tangled ATProto API is constructed —
+  // GitHubPublishApi/ForgejoPublishApi are never built for Tangled, so no
+  // GitHub/Forgejo API request can be assembled as a fallback, and no
+  // Python subprocess is involved anywhere in the path.
+  const seam = buildPublishApi({
+    ...env,
+    TANGLED_PR_SOURCE_BRANCH: "feature",
+    TANGLED_PR_TARGET_BRANCH: "main",
+    ATPROTO_HOST: "http://127.0.0.1:9999",
+    ATPROTO_HANDLE: "bot.test",
+    ATPROTO_APP_PASSWORD: "secret-app-password",
+  });
+  assert.equal(seam.platform, "tangled");
+  assert.equal(seam.api.platform, "tangled");
 });
 
 test("explicit tangled without its identity fails with the resolver diagnostic", () => {
@@ -151,6 +182,21 @@ test("explicit tangled without its identity fails with the resolver diagnostic",
   assert.throws(
     () => buildAdapter(env),
     (e: unknown) => e instanceof Error && /TANGLED_REPO_DID/.test(e.message),
+  );
+});
+
+test("tangled publish seam fails closed when ATProto configuration is missing (#588)", () => {
+  const env = {
+    REPO: "o/r",
+    PR_NUMBER: "9",
+    PLATFORM: "tangled",
+    TANGLED_REPO_DID: "did:plc:repo",
+    TANGLED_PR_SOURCE_BRANCH: "feature",
+    TANGLED_PR_TARGET_BRANCH: "main",
+  } as NodeJS.ProcessEnv;
+  assert.throws(
+    () => buildPublishApi(env),
+    (e: unknown) => e instanceof Error && /ATPROTO_(HANDLE|APP_PASSWORD)/.test(e.message),
   );
 });
 
@@ -164,6 +210,7 @@ test("explicit tangled without its identity fails with the resolver diagnostic",
 
 class MinimalPublishApi implements PublishPlatformApi {
   readonly platform = "github" as const;
+  readonly nativeReviewSurface: NativeReviewSurface = { supported: true };
   submitted: NativeReviewRequest[] = [];
   constructor(private readonly head: string) {}
   async getHeadSha(): Promise<string | null> { return this.head; }
@@ -365,6 +412,8 @@ function publishVerdictEnv(overrides: Partial<Record<string, string>> = {}): Nod
     VERDICT: "approve",
     REQUIRED_CHECKS: "complete",
     PUBLISH_MODE: "review_verdict",
+    // #1161: the deprecated input is still accepted here on purpose — the
+    // coverage gates below must hold whether it is set, unset, or false.
     ALLOW_APPROVE: "true",
     IS_FORK_PR: "false",
     HEAD_SHA: "a".repeat(40),
@@ -374,6 +423,25 @@ function publishVerdictEnv(overrides: Partial<Record<string, string>> = {}): Nod
     ...overrides,
   } as NodeJS.ProcessEnv;
 }
+
+test("#1161: the CLI publish path publishes the verdict natively, whatever the deprecated allow-approve input says", async () => {
+  await withRunDirAsync(async (dir) => {
+    writeCoverageArtifact(dir, { tool_loop_ran: false });
+    const events: string[] = [];
+    for (const allowApprove of [null, "false", "true"]) {
+      const env = publishVerdictEnv({ PR_REVIEWER_RUN_DIR: dir });
+      if (allowApprove === null) delete env.ALLOW_APPROVE;
+      else env.ALLOW_APPROVE = allowApprove;
+      const input = publishInputFromEnv(env, "github");
+      const api = new MinimalPublishApi("a".repeat(40));
+      const result = await publishReview(input, api, { diffText: "" });
+      assert.equal(result.status, "published", String(allowApprove));
+      assert.equal(api.submitted.length, 1, String(allowApprove));
+      events.push(api.submitted[0]!.event);
+    }
+    assert.deepEqual(events, ["APPROVE", "APPROVE", "APPROVE"]);
+  });
+});
 
 test("#873/#838 regression: a partial primary harness is never hidden by an omitted or stale-'off' ambient TOOL_MODE", async () => {
   // The exact maintainer-flagged bug: the artifact itself records the real

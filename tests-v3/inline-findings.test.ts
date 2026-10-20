@@ -282,6 +282,26 @@ test("#1101: prescriptionKeyDigest is stable, key-sensitive, and 64-char lowerca
   assert.notEqual(digest, prescriptionKeyDigest(prescriptionKey("a.ts", 1, 2, "R1\nR3")));
 });
 
+test("#1119: a NUL-shifted tuple no longer collides, and a NUL-bearing replacement round-trips un-suppressed", () => {
+// Both serialized to the same bytes under the old bare-NUL join: path "a.ts",
+// NUL, "1", NUL, "1", NUL, "2", NUL, "y". The NUL inside `replacement` was
+// indistinguishable from the join, and `redactText` does not filter NUL, so
+// one key could name two prescriptions and a 👎 on one suppressed the other.
+const forged = prescriptionKey("a.ts", 1, 1, "2\u0000y");
+const shifted = prescriptionKey("a.ts\u00001", 1, 2, "y");
+assert.notEqual(prescriptionKeyDigest(forged), prescriptionKeyDigest(shifted));
+// The model's NUL survives publication intact, and rejecting the shifted key
+// leaves the distinct prescription it used to alias untouched.
+const rejected = new Set([prescriptionKeyDigest(prescriptionKey("new\u00001", 1, 2, "y"))]);
+const result = buildComments(
+[{ file: "new", line: 1, message: "m", suggestion: "2\u0000y" }], diff, 20,
+{ forgejoPositions: false, rejectedPrescriptions: rejected },
+);
+assert.equal(result.suppressed, 0);
+const body = (result.comments[0] as Record<string, unknown>).body as string;
+assert.equal(recoverPublishedSuggestion(body), "2\u0000y");
+});
+
 test("#1101: a suppressed comment carries exactly its own digest marker, a published one never does", () => {
   const rejected = new Set([prescriptionKeyDigest(prescriptionKey("new", 1, 1, "REPL"))]);
   const suppressed = buildComments(

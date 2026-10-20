@@ -918,6 +918,72 @@ export function maskKnownSecretsDeep(value: unknown, secrets: readonly (string |
   return value;
 }
 
+/**
+ * #1140 review, applied by #1149: `maskKnownSecretsDeep` plus `redactText`'s
+ * generic pattern rules, per string leaf AND per own object key.
+ * `maskKnownSecretsDeep` masks only the operator's CONFIGURED credential
+ * values, so a provider-authored credential the run never configured —
+ * `api_key=provider-only-secret-…`, a bare `Bearer …`, an `sk-…` token — rode
+ * verbatim into the confidence diagnostic request/response artifacts (#1140)
+ * and into the main review's persisted `ai-response.<tier>.json` and
+ * `specialist-<role>.response.json` raw bodies (#1149). Those artifacts are raw
+ * provider bodies: exactly the surface where an unknown, provider-invented key
+ * is most likely to be echoed back, and exactly the surface that is persisted
+ * and shipped as a job artifact. The review's own CONTENT surfaces are not the
+ * counter-example: `ai-output.json` is deliberately left unmasked so a short
+ * configured key cannot corrupt the published verdict, and completion content
+ * REFUSES rather than masks (`containsKnownSecret`) — but the raw JSON bodies
+ * on their way to disk went through the configured-value layer alone, which
+ * left a gap between what the review says it redacts and what it writes.
+ *
+ * Every safety property of `maskKnownSecretsDeep` is inherited unchanged:
+ * masking happens BEFORE any serialization/truncation (so no variant is split
+ * across a boundary), the same `MAX_MASK_DEPTH` cutoff FAILS CLOSED to
+ * `KNOWN_SECRET_REDACTED`, arrays map element-wise, non-string/non-object
+ * leaves (numbers, booleans, null) pass through untouched, and the rebuild
+ * goes through `Object.fromEntries` so a hostile own `__proto__` key is
+ * defined as a data property rather than invoking the prototype setter —
+ * masking a KEY only rewrites the string that `fromEntries` defines, so it can
+ * never become a setter invocation. The only difference is the leaf
+ * function: `redactText(maskKnownSecrets(leaf, secrets))`, so a configured
+ * value is still nuked unconditionally first and the generic heuristics run on
+ * what is left.
+ *
+ * The `redactText` half is deliberately a superset of "never leaks": it can
+ * redact a shaped value that is genuinely not a secret (a config-ish
+ * `apiKey: config.apiKey`), which is why this is for diagnostic artifacts and
+ * not for completion content (see `containsKnownSecret` for that surface).
+ *
+ * That half also rewrites the KEY with the same generic rules, so any two
+ * credential-shaped keys collapse onto the one `[REDACTED]` literal
+ * (`{"api_key=aaa…":1,"api_key=bbb…":2}` becomes a single entry) — the same
+ * accepted-collision class `maskKnownSecretsDeep` documents above for its
+ * configured keys, and more reachable here because the generic rules fire on
+ * shape alone. The cost is bounded to losing diagnostic shape in these
+ * artifacts, never a leak: masking only ever rewrites a key toward the marker,
+ * so a collapsed pair hides an already-redacted name rather than exposing
+ * anything, and `fromEntries` keeping the last entry cannot resurrect one.
+ */
+export function redactTextDeep(value: unknown, secrets: readonly (string | null | undefined)[] = [], depth = 0): unknown {
+  if (typeof value === "string") return redactText(maskKnownSecrets(value, secrets));
+  if (depth >= MAX_MASK_DEPTH) return KNOWN_SECRET_REDACTED;
+  if (Array.isArray(value)) return value.map((item) => redactTextDeep(item, secrets, depth + 1));
+  if (typeof value === "object" && value !== null) {
+    // Same construction, and the same reason, as `maskKnownSecretsDeep`
+    // above: `Object.fromEntries` (CreateDataPropertyOrThrow), NOT
+    // `out[key] = ...`, so a hostile own `__proto__` key cannot invoke the
+    // prototype setter. Masking the key does not change that mechanism —
+    // what reaches `fromEntries` is just a (possibly rewritten) string.
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        redactText(maskKnownSecrets(key, secrets)),
+        redactTextDeep(item, secrets, depth + 1),
+      ]),
+    );
+  }
+  return value;
+}
+
 /** Default length cap for `maskDiagnostic`, matching #862's
  * `describeTransportFailure` (300 chars). */
 export const DIAGNOSTIC_MAX_CHARS = 300;

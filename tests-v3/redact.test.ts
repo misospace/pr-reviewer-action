@@ -15,6 +15,7 @@ import {
   createPrTextLineMasker,
   redactPrTextDeep,
   redactPrTextLines,
+  redactTextDeep,
 } from "../src/context/redact.js";
 import { describeTransportFailure, TransportFailure } from "../src/transport/http.js";
 
@@ -758,6 +759,110 @@ test("#1094: maskKnownSecretsDeep masks a canary appearing as an object KEY (raw
   ) as Record<string, unknown>;
   assert.deepEqual(Object.keys(distinct).sort(), [`a${KNOWN_SECRET_REDACTED}`, KNOWN_SECRET_REDACTED + "a", "plain"].sort());
   assert.deepEqual(distinct, { [`a${KNOWN_SECRET_REDACTED}`]: 1, [`${KNOWN_SECRET_REDACTED}a`]: 2, plain: 3 });
+});
+
+test("#1149: redactTextDeep masks BOTH the configured exact values AND the generic credential shapes, preserving structure", () => {
+  // Two disjoint redaction layers over a raw provider body:
+  //  - CONFIGURED (maskKnownSecrets): a lane credential the run knows about,
+  //    matched with no framing at all;
+  //  - PROVIDER-AUTHORED (redactText): a credential the run never configured,
+  //    caught only by SHAPE (`api_key=…`, `Bearer …`, `sk-…`).
+  // `maskKnownSecretsDeep` alone covered only the first, which is how an
+  // unknown `api_key=<value>` reached the persisted artifacts.
+  const CONFIGURED = "gw-8f2a1c9d3b7e4a10";
+  const PROVIDER = "provider-only-secret-123456";
+  const body = JSON.parse(`{
+    "model": "scorer-model",
+    "choices": [{ "message": { "content": "api_key=${PROVIDER}", "role": "assistant" } }],
+    "debug": { "echo": "Bearer providerbearerabcdefghijklmnop", "openai_like": "sk-providerabcdefghijklmnop", "plain": "nothing here" },
+    "n": 7, "f": 1.5, "t": true, "nil": null
+  }`) as Record<string, unknown>;
+  const masked = redactTextDeep(body, [CONFIGURED]) as Record<string, unknown>;
+
+  const serialized = JSON.stringify(masked);
+  for (const shaped of [PROVIDER, "providerbearerabcdefghijklmnop", "sk-providerabcdefghijklmnop"]) {
+    assert.equal(serialized.includes(shaped), false, `generic-shaped credential survived: ${shaped}`);
+  }
+  assert.ok(serialized.includes("[REDACTED]"), "the generic layer's own marker must be present");
+
+  // Structure survives byte-for-byte apart from the masked leaves: same keys,
+  // same array order, same numbers/booleans/null, still valid JSON.
+  assert.equal(masked.model, "scorer-model");
+  const choices = masked.choices as Array<Record<string, unknown>>;
+  const message = choices[0]!.message as Record<string, unknown>;
+  assert.equal(message.role, "assistant");
+  assert.equal(message.content, "[REDACTED]");
+  assert.deepEqual(masked.n, 7);
+  assert.equal(masked.f, 1.5);
+  assert.equal(masked.t, true);
+  assert.equal(masked.nil, null);
+  assert.deepEqual(JSON.parse(serialized), masked);
+  // A leaf with nothing to mask is untouched — no blanket over-redaction.
+  assert.equal((masked.debug as Record<string, unknown>).plain, "nothing here");
+
+  // The CONFIGURED half still fires unconditionally, without any framing.
+  const configuredOnly = redactTextDeep({ echo: `credential ${CONFIGURED} rejected` }, [CONFIGURED]) as Record<string, unknown>;
+  assert.equal(configuredOnly.echo, `credential ${KNOWN_SECRET_REDACTED} rejected`);
+
+  // Keys are leaves too: a secret in the provider-controlled property NAME is
+  // masked in the key AND in the value, and the entry stays an own property.
+  const keyed = redactTextDeep(JSON.parse(`{"api_key=${PROVIDER}": "rejected", "keep": 1}`), []) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(keyed).sort(), ["[REDACTED]", "keep"]);
+  assert.equal(keyed["[REDACTED]"], "rejected");
+  assert.equal(keyed.keep, 1);
+});
+
+test("#1149: redactTextDeep inherits maskKnownSecretsDeep's depth cutoff (fails closed) and its hostile-`__proto__` safety", () => {
+  // MAX_MASK_DEPTH in src/context/redact.ts. That module keeps its internals
+  // private (the constant is not exported), so it is restated here rather than
+  // imported — if the cap moves, the two level assertions below are what must
+  // move with it.
+  const CAP = 32;
+
+  // The cutoff itself, NOT leaf masking. The deepest leaf here is a NUMBER,
+  // which `redactTextDeep` passes through untouched at every depth below the
+  // cap, so a marker here can only have come from the cutoff. A string-leaf
+  // stand-in cannot discriminate: leaf masking turns it into the marker
+  // anyway, which is why this half used to pass with the cap raised to 1000.
+  let overDeep: Record<string, unknown> = { deepLeaf: 7 };
+  for (let i = 0; i < CAP + 8; i++) overDeep = { nested: overDeep };
+  const capped = redactTextDeep(overDeep, []) as Record<string, unknown>;
+  const cappedJson = JSON.stringify(capped);
+  assert.ok(cappedJson.includes(KNOWN_SECRET_REDACTED), `expected the fail-closed marker: ${cappedJson}`);
+  assert.equal(cappedJson.includes("deepLeaf"), false, "the over-deep subtree must be replaced, not walked — its number leaf would have survived the walk untouched");
+  // It bottoms out AT the cutoff, not somewhere above or below it.
+  let cursor: unknown = capped;
+  let levels = 0;
+  while (cursor !== null && typeof cursor === "object") {
+    cursor = (cursor as Record<string, unknown>).nested;
+    levels += 1;
+  }
+  assert.equal(levels, CAP, "the walk must descend exactly MAX_MASK_DEPTH levels before the cutoff fires");
+  assert.equal(cursor, KNOWN_SECRET_REDACTED, "the over-deep subtree must be replaced by the marker itself");
+
+  // Control: the same non-string leaf, comfortably under the cap, is walked
+  // through and survives byte-for-byte while a shaped string beside it is still
+  // masked leaf-wise.
+  let underCap: Record<string, unknown> = { deepLeaf: 7, shaped: "api_key=provider-only-secret-123456" };
+  for (let i = 0; i < CAP - 8; i++) underCap = { nested: underCap };
+  const walked = redactTextDeep(underCap, []) as Record<string, unknown>;
+  const deepest = (() => { let node: Record<string, unknown> = walked; while (node.nested !== undefined) node = node.nested as Record<string, unknown>; return node; })();
+  assert.deepEqual(deepest, { deepLeaf: 7, shaped: "[REDACTED]" }, "a subtree under the cap must be walked through, with leaves masked in place");
+  assert.equal(JSON.stringify(walked).includes(KNOWN_SECRET_REDACTED), false, "the cutoff must not fire below the cap");
+
+  // The hostile key ITSELF, not a benign stand-in: an own `__proto__` data
+  // property stays an own data property and never reaches a prototype setter.
+  const CANARY = "gw-8f2a1c9d3b7e4a10";
+  const hostile = JSON.parse(`{"__proto__":{"leak":"credential ${CANARY} rejected","shaped":"api_key=provider-only-secret-123456","keep":1},"safe":"value"}`);
+  const out = redactTextDeep(hostile, [CANARY]) as Record<string, unknown>;
+  assert.equal(Object.prototype.hasOwnProperty.call(out, "__proto__"), true, "the own key must survive the rebuild");
+  assert.equal(Object.getPrototypeOf(out), Object.prototype, "the prototype must stay the plain-object one");
+  const protoEntry = out["__proto__"] as Record<string, unknown>;
+  assert.equal(protoEntry.leak, `credential ${KNOWN_SECRET_REDACTED} rejected`);
+  assert.equal(protoEntry.shaped, "[REDACTED]");
+  assert.equal(protoEntry.keep, 1);
+  assert.equal(out.safe, "value");
+  assert.equal(Object.prototype.hasOwnProperty.call(Object.prototype, "leak"), false, "no pollution escaped");
 });
 
 test("#1094: containsKnownSecret detects raw, URL-encoded, and base64 variants — the same set maskKnownSecrets replaces", () => {

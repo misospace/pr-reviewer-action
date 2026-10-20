@@ -12,6 +12,7 @@ import { isAlwaysNonBlockingCategory } from "../src/enforcement/verdict-policy.j
 import { KNOWN_SECRET_REDACTED, REDACTED_SOURCE } from "../src/context/redact.js";
 import type {
   NativeReviewRequest,
+  NativeReviewSurface,
   PublishPlatformApi,
 } from "../src/platform/publish-api.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
@@ -194,6 +195,7 @@ function mockPlatform(pr: Record<string, unknown>): PlatformReadAdapter {
 // (marker, body) in the real interface, so captured comments are bodies.
 class MinimalPublishApi implements PublishPlatformApi {
   readonly platform = "github" as const;
+  readonly nativeReviewSurface: NativeReviewSurface = { supported: true };
   submitted: NativeReviewRequest[] = [];
   comments: string[] = [];
   constructor(private readonly head: string) {}
