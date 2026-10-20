@@ -1124,6 +1124,17 @@ function outcomesFake(options: {
    * fail-closed assertion here is about the `complete` field being unreadable
    * as `true`, never about the list happening to be empty. */
   malformedEnumeration?: Record<string, unknown>;
+  /** #1116: a caller-supplied counter of how many times the run asked the
+   * adapter to prove its trusted-owner identity. One publish run must ask at
+   * most once, however many reads need the proof. */
+  trustedOwnerCalls?: { n: number };
+  /** #1116: an unprovable identity (`identity: null`) models a run that can
+   * prove nothing about who it is — every provenance read must fail closed. */
+  unprovableTrustedOwner?: boolean;
+  /** #588: the platform's native pull-review surface. Absent → the historical
+   * "assumed supported" fallback; `{ supported: false }` routes publication
+   * through the managed top-level record, where no inline comment exists. */
+  nativeSurface?: { supported: boolean; reason?: string };
 }): Record<string, unknown> {
   const MARKER = "<!-- ai-pr-review -->";
   const sticky = options.stickyComments !== undefined
@@ -1136,6 +1147,7 @@ function outcomesFake(options: {
     : options.stickyBody === undefined ? [] : [{ id: 1, body: options.stickyBody, user: { login: "bot" } }];
   return {
     platform: options.platform ?? "github",
+    nativeReviewSurface: options.nativeSurface ?? { supported: true },
     getHeadSha: async () => options.head ?? "b".repeat(40),
     listIssueComments: async () => sticky,
     ...(options.omitCommentEnumeration === true ? {} : {
@@ -1162,7 +1174,12 @@ function outcomesFake(options: {
     removeLabel: async () => true,
     requestReviewers: async () => ({ supported: true, ok: true, requestedUsers: [], requestedTeams: [] }),
     collaboratorPermission: async () => null,
-    resolveTrustedOwner: async () => ({ identity: { kind: "login", login: "bot" }, reason: "user-login" }),
+    resolveTrustedOwner: async () => {
+      if (options.trustedOwnerCalls !== undefined) options.trustedOwnerCalls.n++;
+      return options.unprovableTrustedOwner === true
+        ? { identity: null, reason: "unavailable" }
+        : { identity: { kind: "login" as const, login: "bot" }, reason: "user-login" };
+    },
     authenticatedIdentity: async () => "bot",
     ...(options.threadStates === undefined ? {} : { reviewThreadStates: async () => options.threadStates }),
     ...(options.feedbackRecords === undefined ? {} : {
@@ -1418,6 +1435,113 @@ test("#1027: a foreign-authored managed comment mints no outcome identity", asyn
   // would produce a resolved event; the bar must keep the ledger empty of
   // prior-state events entirely.
   assert.ok(result.outcomes === undefined, "no provable prior, no outcomes");
+});
+
+/** #1116: a prior managed comment carrying BOTH the #762 carry marker and the
+ * #1027 finding-identity marker, authored by the trusted owner — the fixture
+ * that makes every ownership consumer in one run fire at once. */
+function sharedOwnershipCommentBody(): string {
+  const digest = findingIdentityFromRecord(findingRecord())!;
+  return [
+    "**Major (bug):** unchecked null deref",
+    "",
+    INLINE_DISCLAIMER,
+    `<!-- pr-reviewer:rejected-prescriptions:v1:${"c".repeat(64)} -->`,
+    `<!-- pr-reviewer:finding-id:v1:${digest} -->`,
+  ].join("\n");
+}
+function sharedOwnershipScenario(calls: { n: number }, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return outcomesFake({
+    comments: [{ id: 77, body: sharedOwnershipCommentBody() }],
+    stickyBody: STICKY_WITH_HEAD("a".repeat(40)),
+    threadStates: { supported: true, complete: true, threads: [{ threadId: "t1", resolved: true, firstCommentId: "77" }] },
+    trustedOwnerCalls: calls,
+    ...extra,
+  });
+}
+
+test("#1116: the carry-marker read, the outcome-identity read and the prior-head read share ONE trusted-owner resolution", async () => {
+  const { publishReview } = await import("../src/publish/publish.js");
+  const calls = { n: 0 };
+  const result = await publishReview(publishInputFor({}) as never, sharedOwnershipScenario(calls) as never, { diffText: "" });
+  // The run needs the identity proof three times over — carry marker,
+  // finding-identity marker, and the prior-head read the marker feeds. It
+  // must ask the adapter ONCE: on Forgejo every ask ends in a reaction
+  // self-write probe, so three asks meant three 👀 notification cycles (and
+  // three chances to leave one behind) per publish run.
+  assert.equal(calls.n, 1, "one trusted-owner resolution serves the whole publish run");
+  // Sharing must not weaken any consumer of the proof: all three still mint
+  // off it.
+  assert.ok(
+    result.messages.some((line) => line.includes("1 carried rejection key(s) inherited")),
+    "the carry marker still authorizes its digest",
+  );
+  const ledger = parseOutcomeLedger(result.outcomes!)!;
+  assert.equal(ledger.aggregate.resolved, 1, "the identity marker still mints an observation and the prior head still proves the head advanced");
+});
+
+test("#1116: an unprovable run identity mints no carry digest, no outcome identity and no prior head — and still asked only once", async () => {
+  const { publishReview } = await import("../src/publish/publish.js");
+  const calls = { n: 0 };
+  // Byte-identical fixture to the run above, except the adapter proves
+  // nothing about who it is. Everything the shared proof authorized in the
+  // provable run must be withheld here, and the failed proof must still be
+  // SHARED (memoized null), never re-asked per consumer.
+  const result = await publishReview(publishInputFor({}) as never, sharedOwnershipScenario(calls, { unprovableTrustedOwner: true }) as never, { diffText: "" });
+  assert.equal(calls.n, 1, "the unprovable resolution is still shared, not re-asked per consumer");
+  assert.ok(
+    !result.messages.some((line) => line.includes("carried rejection key")),
+    "an identity that cannot be proven carries nothing",
+  );
+  // No outcome identity, and the prior-head read is structurally unreachable
+  // (`collectOutcomeObservations` returns before it whenever zero observations
+  // survive the provenance bar) — so "no prior head" is enforced twice over:
+  // by the ordering here and by `readPriorPublishedHead`'s own `owner === null`
+  // guard as defense in depth. The observable consequence is the same: an
+  // unprovable run reports no ledger at all, so it can claim neither an
+  // identity nor that any prior publication's head advanced. The provable
+  // contrast is pinned by the run immediately above, where the byte-identical
+  // fixture DOES resolve and DOES emit `resolved: 1`.
+  assert.ok(result.outcomes === undefined, "no outcome identity and no prior head, so there is no provable prior to report");
+});
+
+test("#1027/#588: a platform with no native review surface publishes no outcome ledger", async () => {
+  const { publishReview } = await import("../src/publish/publish.js");
+  const currentRecord = findingRecord({ file: "a.ts", line: 2 });
+  const diff = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,1 +1,2 @@\n old\n+new line\n";
+  const noSurface = { supported: false, reason: "no native pull review surface" };
+  // Non-vacuity control: the SAME run on a platform WITH the surface builds
+  // and exports the ledger (and says so once, at export).
+  const supported = await publishReview(
+    publishInputFor({ findings: [currentRecord] }) as never,
+    outcomesFake({ comments: [] }) as never,
+    { diffText: diff },
+  );
+  assert.equal(supported.status, "published");
+  const controlLedger = parseOutcomeLedger(supported.outcomes!)!;
+  assert.deepEqual(controlLedger.events.map((event) => event.kind), ["reported"]);
+  assert.ok(supported.messages.some((message) => message.startsWith("Finding outcomes:")));
+  // review_comment mode: with no native surface the managed record carries
+  // the findings in its body and NO inline comment is ever created, so the
+  // `reported` events derived from the built comments' markers must be
+  // dropped — and the tally line must not claim the ledger either.
+  const reviewComment = await publishReview(
+    publishInputFor({ findings: [currentRecord] }) as never,
+    outcomesFake({ comments: [], nativeSurface: noSurface }) as never,
+    { diffText: diff },
+  );
+  assert.equal(reviewComment.status, "published");
+  assert.equal(reviewComment.outcomes, undefined);
+  assert.equal(reviewComment.messages.some((message) => message.startsWith("Finding outcomes:")), false);
+  // Verdict modes take the same managed-record path: same drop, same silence.
+  const verdict = await publishReview(
+    publishInputFor({ mode: "review_verdict", findings: [currentRecord] }) as never,
+    outcomesFake({ comments: [], nativeSurface: noSurface }) as never,
+    { diffText: diff },
+  );
+  assert.equal(verdict.status, "published");
+  assert.equal(verdict.outcomes, undefined);
+  assert.equal(verdict.messages.some((message) => message.startsWith("Finding outcomes:")), false);
 });
 
 test("#1027: a Forgejo-shaped run still derives reported/repeated without reaction or thread seams", async () => {

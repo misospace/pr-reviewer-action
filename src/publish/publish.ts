@@ -672,6 +672,40 @@ interface FeedbackRead {
   priorHeadSha: string | null;
 }
 
+/** #1116: one trusted-owner resolution per publish run, shared by every
+ * consumer that needs to prove an ownership identity in it.
+ *
+ * Three reads in a single publish run each need that proof — the #762
+ * carry-marker read, the #1027 finding-identity read (and the prior-head read
+ * it feeds), and the #1093 cleanup retirement path. Resolving per read meant
+ * up to three identity proofs per run, and on a Forgejo deployment whose
+ * token has no `/user` scope — the exact configuration #1093 exists to serve
+ * — every proof ends in `reactionSelfAttestation()`, which POSTs an `eyes`
+ * reaction on the PR issue and best-effort DELETEs it: three probes per run
+ * is three notification/webhook cycles on a watched PR, and a probe that
+ * fails on its way out leaves a visible 👀 behind.
+ *
+ * The memo caches the in-flight PROMISE, not the settled value, so consumers
+ * single-flight onto one proof (`resolvePublishTrustedOwner` never rejects,
+ * but caching the promise keeps the property if that ever changes).
+ * Resolution stays LAZY — no consumer calls the resolver until it has
+ * something to authorize, so sharing must not add a probe where there was
+ * none — and fail-closed: a `null` owner authorizes nothing at any consumer,
+ * each consumer still emits its own bounded `identity reason:` WARN, and the
+ * per-item ownership re-checks still run independently (only the identity
+ * PROOF is shared). Scope is one publish run in one process; nothing is
+ * cached across the precheck/publish boundary — those are separate processes
+ * holding independent proofs. */
+type RunTrustedOwnerResolver = () => Promise<Awaited<ReturnType<typeof resolvePublishTrustedOwner>>>;
+
+function createRunTrustedOwnerResolver(api: PublishPlatformApi): RunTrustedOwnerResolver {
+  let pending: Promise<Awaited<ReturnType<typeof resolvePublishTrustedOwner>>> | undefined;
+  return () => {
+    pending ??= resolvePublishTrustedOwner(api);
+    return pending;
+  };
+}
+
 /** #762: read the usefulness feedback for the prescriptions a previous run
  * published, and turn trusted 👎 into the keys of the prescriptions they
  * reject.
@@ -707,6 +741,9 @@ async function readFeedbackState(
    * reaction read (and its permission requests) is skipped entirely, exactly
    * as the pre-#1027 gate did; only the outcome enumeration runs. */
   readReactions: boolean,
+  /** #1116: the run's single shared trusted-owner resolution — this read must
+   * not re-prove what an earlier consumer (or cleanup) already proved. */
+  trustedOwnerForRun: RunTrustedOwnerResolver,
 ): Promise<FeedbackRead> {
   const noneSnapshot: RejectionSnapshot = { keys: new Set<string>(), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: 0 };
   const none: FeedbackRead = { snapshot: noneSnapshot, observations: [], enumerated: false, priorHeadSha: null };
@@ -735,8 +772,9 @@ async function readFeedbackState(
     if (!listed.supported || !listed.complete) return none;
     const candidates: Array<{ id: string; key: string | null; identity: string | null; path: string | null; user: { id?: number | string; login?: string } | null }> = [];
     const carried = new Set<string>();
-    // The carry-marker authority is resolved lazily and at most once, and
-    // only because some comment actually carries a marker to authenticate.
+    // The carry-marker authority is the run's single shared trusted-owner
+    // resolution (#1116), asked lazily and only because some comment actually
+    // carries a marker to authenticate.
     let carryOwner: Awaited<ReturnType<typeof resolvePublishTrustedOwner>>["owner"] | undefined;
     for (const comment of listed.comments) {
       const id = String(comment.id ?? "");
@@ -754,10 +792,11 @@ async function readFeedbackState(
       // comment — but like the carry marker it counts only with PROVENANCE:
       // a body any repo reader could have authored must not mint outcome
       // identities, so the observation keeps the same trusted-owner bar the
-      // carry marker applies (resolved once, in collectOutcomeObservations).
+      // carry marker applies (#1116: one resolution shared by the whole
+      // publish run, however many consumers need it).
       const identity = disclaimed ? parseFindingIdentityMarker(body) : null;
       if (digests.length > 0) {
-        if (carryOwner === undefined) carryOwner = (await resolvePublishTrustedOwner(api)).owner;
+        if (carryOwner === undefined) carryOwner = (await trustedOwnerForRun()).owner;
         // Provenance, not body text: the marker counts only on a comment
         // this run can prove its own identity published. Unprovable author,
         // unprovable identity — the marker carries nothing.
@@ -820,7 +859,7 @@ async function readFeedbackState(
       const snapshot: RejectionSnapshot = carried.size === 0
         ? noneSnapshot
         : { keys: new Set(carried), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: carried.size };
-      const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, new Map());
+      const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, new Map(), trustedOwnerForRun);
       return { snapshot, observations: outcomeRead.observations, enumerated: true, priorHeadSha: outcomeRead.priorHeadSha };
     }
     const feedback = await api.reviewCommentFeedback!(prescriptionCandidates.map((candidate) => candidate.id));
@@ -831,7 +870,7 @@ async function readFeedbackState(
       // #1027: the reaction read failed, but the thread-state read is a
       // different seam and the observations themselves (identity + resolution)
       // came from the enumeration above — keep them, with zeroed tallies.
-      const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, new Map());
+      const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, new Map(), trustedOwnerForRun);
       return { snapshot, observations: outcomeRead.observations, enumerated: true, priorHeadSha: outcomeRead.priorHeadSha };
     }
     const rejections = feedback.records.filter((record) => record.content === "-1");
@@ -840,7 +879,7 @@ async function readFeedbackState(
     // cap, verify nobody and trust no rejection (carried digests need no
     // lookup and keep standing).
     if (distinct.length > FEEDBACK_ACTOR_CAP) {
-      const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, tallyReactions(feedback.records));
+      const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, tallyReactions(feedback.records), trustedOwnerForRun);
       return {
         snapshot: { keys: new Set(carried), inspected: prescriptionCandidates.length, logins: distinct.length, trusted: 0, overCap: distinct.length, carried: carried.size },
         observations: outcomeRead.observations,
@@ -866,7 +905,7 @@ async function readFeedbackState(
           self = typeof identity === "string" && identity.trim() !== "" ? identity : null;
         } catch { self = null; }
         if (self === null) {
-          const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, tallyReactions(feedback.records));
+          const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, tallyReactions(feedback.records), trustedOwnerForRun);
           return {
             snapshot: { keys: new Set(carried), inspected: prescriptionCandidates.length, logins: distinct.length, trusted: 0, overCap: 0, carried: carried.size },
             observations: outcomeRead.observations,
@@ -889,7 +928,7 @@ async function readFeedbackState(
         if (prior !== undefined && prior.key !== null) keys.add(prior.key);
       }
     }
-    const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, tallyReactions(feedback.records));
+    const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, tallyReactions(feedback.records), trustedOwnerForRun);
     return {
       snapshot: { keys, inspected: prescriptionCandidates.length, logins: distinct.length, trusted, overCap: 0, carried: carried.size },
       observations: outcomeRead.observations,
@@ -921,10 +960,12 @@ function tallyReactions(records: readonly { commentId: string; content: "+1" | "
  *
  * Two provenance rules keep a hostile body from minting outcome state:
  * - An identity marker counts only on a comment whose author matches the
- *   trusted owner identity the carry-marker path itself proves (resolved
- *   lazily, at most once) — the same bar the rejection carry marker applies,
- *   because `selectManagedReviews` matches by body prefix and any repo reader
- *   can post a marker-shaped comment.
+ *   trusted owner identity the run proved (#1116: the run's single shared
+ *   resolution, asked lazily through `trustedOwnerForRun` and only because
+ *   some comment actually carries an identity to authenticate) — the same
+ *   bar the rejection carry marker applies, because `selectManagedReviews`
+ *   matches by body prefix and any repo reader can post a marker-shaped
+ *   comment.
  * - The prior head comes only from an OWNED managed sticky comment's metadata
  *   marker (action-owned state, proven by the same trusted owner), never from
  *   forge-supplied review metadata.
@@ -939,14 +980,17 @@ async function collectOutcomeObservations(
   marker: string,
   bounded: readonly { id: string; identity: string | null; path: string | null; user: { id?: number | string; login?: string } | null }[],
   tallies: ReadonlyMap<string, { helpful: number; notHelpful: number }>,
+  /** #1116: the run's single shared trusted-owner resolution. */
+  trustedOwnerForRun: RunTrustedOwnerResolver,
 ): Promise<{ observations: OutcomeObservation[]; priorHeadSha: string | null }> {
   const observations: OutcomeObservation[] = [];
-  // The trusted-owner authority is resolved lazily and at most once, and
-  // only because some comment actually carries an identity to authenticate.
+  // The trusted-owner authority is the run's shared resolution (#1116), asked
+  // lazily and only because some comment actually carries an identity to
+  // authenticate.
   let trustedOwner: Awaited<ReturnType<typeof resolvePublishTrustedOwner>>["owner"] | undefined;
   for (const candidate of bounded) {
     if (candidate.identity === null) continue;
-    if (trustedOwner === undefined) trustedOwner = (await resolvePublishTrustedOwner(api)).owner;
+    if (trustedOwner === undefined) trustedOwner = (await trustedOwnerForRun()).owner;
     // Unprovable author, unprovable identity — the comment carries nothing.
     if (trustedOwner === null || !ownerMatchesIdentity(candidate.user, trustedOwner)) continue;
     observations.push({
@@ -1234,6 +1278,14 @@ export async function publishReview(
     messages.push(`WARN: 'allow-approve' is deprecated and no longer affects publication (value: ${input.allowApprove}); use 'publish-mode: review_verdict' to publish the verdict, or 'publish-mode: review_blockers' for blockers-only behavior.`);
   }
   let outcomes: string | undefined;
+  // #1116: the tally line is emitted only with the artifact it describes —
+  // a later drop (failed submission, #588 managed record) must not leave the
+  // run claiming counts it no longer exports.
+  let outcomesSummary: string | undefined;
+  // #1116: one trusted-owner proof for the whole publish run, shared lazily
+  // by the carry-marker read, the outcome-identity/prior-head read, and the
+  // cleanup retirement path below.
+  const trustedOwnerForRun = createRunTrustedOwnerResolver(api);
   let nativeReviewId: number | string | undefined;
   // #1093: the sticky summary comment as the replacement checkpoint when
   // review_comment mode publishes no inline findings review (a clean re-review
@@ -1449,7 +1501,7 @@ export async function publishReview(
     // finding observations (identity markers, thread resolution, and the
     // reaction tallies it already fetched) for the outcome ledger — no
     // additional reaction or permission request is ever made for outcomes.
-    const feedbackState = await readFeedbackState(api, input.commentMarker, hasPublishablePrescription(input.findings, options.diffText));
+    const feedbackState = await readFeedbackState(api, input.commentMarker, hasPublishablePrescription(input.findings, options.diffText), trustedOwnerForRun);
     const feedback = feedbackState.snapshot;
     const built = buildInlineComments({
       findings: input.findings,
@@ -1524,7 +1576,7 @@ export async function publishReview(
               aggregate,
             };
             outcomes = serializeOutcomeLedger(ledger);
-            messages.push(`Finding outcomes: ${aggregate.unique_findings} finding(s), ${aggregate.open} open, ${aggregate.resolved} resolved, ${aggregate.dismissed} dismissed, ${aggregate.reactions.helpful + aggregate.reactions.not_helpful} reaction(s)`);
+            outcomesSummary = `Finding outcomes: ${aggregate.unique_findings} finding(s), ${aggregate.open} open, ${aggregate.resolved} resolved, ${aggregate.dismissed} dismissed, ${aggregate.reactions.helpful + aggregate.reactions.not_helpful} reaction(s)`;
           }
         }
       }
@@ -1636,11 +1688,17 @@ export async function publishReview(
             messages.push("WARN: inline findings review submission failed; summary comment was still published");
           }
         }
-      } else if (findingCount > 0) {
-        // #588: no native review surface — the managed record IS the complete
-        // publication (the findings are in its body), so no native review is
-        // created and the sticky checkpoint stays usable.
-        messages.push(`NOTE: ${findingCount} finding(s) were published in the review body instead of as native review comments (no native review surface: ${surfaceReason})`);
+      } else {
+        // #1027/#588: with no native review surface this run's inline comments
+        // are never published, so nothing derived from their identity markers
+        // may reach the outcome ledger.
+        outcomes = undefined;
+        if (findingCount > 0) {
+          // #588: no native review surface — the managed record IS the complete
+          // publication (the findings are in its body), so no native review is
+          // created and the sticky checkpoint stays usable.
+          messages.push(`NOTE: ${findingCount} finding(s) were published in the review body instead of as native review comments (no native review surface: ${surfaceReason})`);
+        }
       }
     } else {
       // #1161: `review_verdict` and `review_blockers` both publish a native
@@ -1766,6 +1824,10 @@ export async function publishReview(
         if (!result.ok) {
           return { status: "failed", messages, error: `managed review record publication failed: ${result.error ?? "unknown error"}` };
         }
+        // #1027/#588: the inline comments are never published on this path,
+        // so nothing derived from their identity markers may reach the
+        // outcome ledger.
+        outcomes = undefined;
         stickyCommentId = result.commentId;
         stickyUpdatedAt = result.updatedAt;
         stickyBody = body;
@@ -1851,7 +1913,11 @@ export async function publishReview(
           // owner-identity policy (login proof, or - for Forgejo Authorized
           // Integration - the audience-derived user id). Unproven identity
           // fails closed: nothing is deleted.
-          const { owner, reason } = await resolvePublishTrustedOwner(api);
+          // #1116: the run's single shared resolution — the same proof the
+          // carry-marker and outcome-identity reads already used (or that
+          // this path proves first for everyone), so the Forgejo reaction
+          // self-write probe fires once per run, not once per read.
+          const { owner, reason } = await trustedOwnerForRun();
           if (owner === null) {
             // #1144: an unproven identity hides no previous managed review
             // body and retires no inline comment — both effects are skipped.
@@ -1974,5 +2040,9 @@ export async function publishReview(
     await api.removeLabel(input.rerunLabel);
   }
 
+  // #1116: the tally line ships only with the ledger it counts — every drop
+  // path above (failed submission, #588 managed record) removed the artifact,
+  // and the summary must not survive its export.
+  if (outcomes !== undefined && outcomesSummary !== undefined) messages.push(outcomesSummary);
   return { status: "published", messages, ...(outcomes !== undefined ? { outcomes } : {}) };
 }
