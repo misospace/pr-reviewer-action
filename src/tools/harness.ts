@@ -32,7 +32,7 @@ import {
   pyDumps,
   pyDumpsAscii,
 } from "../model/conversation.js";
-import { redactText } from "../context/redact.js";
+import { redactPrTextDeep, redactPrTextLines, redactText } from "../context/redact.js";
 import { fenceSafeLength } from "../context/related-context.js";
 import { KNOWN_SECRET_REDACTED, maskAndTruncate, maskDiagnostic, maskKnownSecrets, maskKnownSecretsDeep, MIN_KNOWN_SECRET_CONTENT_LEN } from "../context/redact.js";
 import { callKnownSecrets, extraHeadersForEnv } from "../transport/headers.js";
@@ -488,17 +488,20 @@ function isEnvelopeRecord(value: unknown): value is Record<string, unknown> {
  *
  * Two deliberate asymmetries:
  * - The completion CONTENT follows `extractContent`, not a blanket rule.
- *   STRING content is carried VERBATIM: it becomes the published verdict, so
- *   masking it would corrupt verdict fields for a short-but-legal configured
- *   key (`review_mar⟦•⟧down` → unparseable) — the same reason `ai-output.json`
- *   and `specialist-*.json` stay unmasked. It is NOT a free pass, though:
+ *   STRING content is carried with the verdict-text treatment described on
+ *   `projectedVerdictContent` below (#1154): the #1094 acceptance gate owns
+ *   the configured-secret question (masking the content with the
+ *   any-length key masker would corrupt verdict fields for a short-but-legal
+ *   configured key — `review_mar⟦•⟧down` → unparseable), and the pattern
+ *   layer closes the PR-borne credential-shape echo. It is NOT a free pass,
+ *   though:
  *   this function only runs on the ACCEPTED path, and acceptance goes through
  *   `parseVerdictResponse` (via `evaluateNativeVerdict`), whose #1094
  *   fail-closed gate REFUSES a completion content that embeds a configured
  *   credential — and for a string the extracted text IS the string, so a
  *   string that reaches this projection is already known to be secret-free.
  *   ARRAY content (#1094 review round 3) is PROJECTED to only the text
- *   `extractContent` consumes — verbatim text, non-text parts and ignored
+ *   `extractContent` consumes — redacted text, non-text parts and ignored
  *   metadata dropped by construction. Value-only masking cannot work here (a
  *   part like `{type:'audit', credential: <value>}` is not text, so the gate
  *   never sees the credential, yet the old verbatim carry persisted it), and
@@ -545,22 +548,84 @@ function isEnvelopeRecord(value: unknown): value is Record<string, unknown> {
  * dropped with its value, and no provider-controlled name ever becomes a
  * property here either.
  */
+/** #1154 review round 2: the verdict projection runs `redactPrTextDeep` with
+ * the key-name rule OFF. The rule exists for PR-authored artifacts, whose keys
+ * are forge field names (`login`, `filename`) that can name a credential
+ * value; a verdict's keys are the verdict SCHEMA, where a secret-named
+ * category carries a label the reviewer must read. Named here rather than
+ * inlined so the call site below reads as a decision, not a `false, false`. */
+const KEY_NAMES_OFF = false;
+
 /**
  * #1094 review round 3: the array-projection rule for the completion CONTENT,
  * shared by both provider shapes of `reusableVerdictEnvelope`. The branch
  * semantics mirrored here are `extractContent`'s (src/model/verdict.ts) —
  * OpenAI (`choices[0].message.content`): bare strings, plus the `text` of
  * parts typed undefined/null/"text"; Anthropic (top-level `content`): only
- * `{type:'text', text}` records. The returned value re-parses to the SAME
- * joined text through those branches; see the envelope's doc comment for the
+ * `{type:'text', text}` records. The returned value re-parses to the same
+ * joined text through those branches (modulo the #1154 redaction below); see
+ * the envelope's doc comment for the
  * per-shape rationale and the exotic-content fail-closed choice.
+ *
+ * #1154: every consumed text is redacted with the PATTERN layer only, never
+ * `maskKnownSecrets`. The content is the model's verdict, whose
+ * configured-secret question is the `containsKnownSecret` acceptance gate's
+ * business (masking here would corrupt the verdict for any short configured
+ * key — precisely why the near-verbatim projection exists); what the gate
+ * cannot see is a PR-borne credential SHAPE the model echoed into its prose
+ * while quoting the diff it reviewed. The persisted envelope must meet the
+ * same bar as the other PR-authored family artifacts, and the pattern layer
+ * is idempotent with the publish boundary's pass (src/publish/publish.ts),
+ * so published output is unchanged — only the artifact closes its gap.
+ *
+ * The redaction is STRUCTURE-PRESERVING by construction, not by pattern
+ * luck: a content string that parses as a JSON object/array (the verdict's
+ * normal shape) is redacted per LEAF through `redactPrTextDeep` and
+ * re-serialized, so no masker can ever touch a structural token — the flat
+ * pass on serialized JSON demonstrably corrupts it (the kubeconfig masker's
+ * unbounded `\S+` eats a closing quote after a quoted secret value,
+ * `password: "…"` → unterminated string, and the native-loop reuse re-parse
+ * fails closed into an unnecessary fresh review call). Content that does
+ * not parse as JSON is prose by definition — nothing re-parses it as
+ * structure, but its line breaks still carry meaning for the reviewer, so it
+ * takes the line-preserving core (`redactPrTextLines`). That core also
+ * carries the quoted-key assignment rule, which the flat `MASKERS` list
+ * cannot hold without corrupting serialized JSON on other surfaces.
  */
+function redactVerdictContentText(text: string): string {
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed !== null && typeof parsed === "object") {
+      // #1154 review round 2: `KEY_NAMES_OFF` — the key-name rule is for
+      // PR-authored artifacts, whose keys are forge field names that can name
+      // a credential value. THIS content is the model's own verdict, and its
+      // keys are the verdict schema: `secret_handling_changes` is a real
+      // classification category (src/classification/classify.ts), so a
+      // secret-named key here carries a label or a boolean the reviewer must
+      // read. Masking on key name would persist `[REDACTED]` where the model
+      // wrote the category, and the native-loop reuse re-parses this exact
+      // text — a masked label would corrupt the review instead of protecting
+      // it. Leaves still get the pattern-only pass (and now the
+      // line-preserving one), which is what the configured-credential question
+      // is reserved for: `containsKnownSecret`, above.
+      return JSON.stringify(redactPrTextDeep(parsed, 0, false, KEY_NAMES_OFF));
+    }
+  } catch {
+    // Not JSON: prose (or a fenced/multi-shape document the verdict parser
+    // itself would reject). Nothing re-parses it as structure, so only the
+    // LINE structure is load-bearing here — the flat pass would collapse it,
+    // so prose takes the line-preserving core (which carries the same rules
+    // plus the quoted-key assignment form).
+  }
+  return redactPrTextLines(text);
+}
+
 function projectedVerdictContent(
   content: unknown,
   secrets: readonly (string | null | undefined)[],
   anthropicShape: boolean,
 ): unknown {
-  if (typeof content === "string") return content;
+  if (typeof content === "string") return redactVerdictContentText(content);
   if (Array.isArray(content)) {
     const consumed: string[] = [];
     for (const item of content) {
@@ -581,12 +646,12 @@ function projectedVerdictContent(
       // loop consumes typed text records only), so the consumed texts go back
       // as the exact record shape that branch accepts — `type`/`text` only,
       // both our own literals, every ignored field dropped.
-      return consumed.map((text) => ({ type: "text", text }));
+      return consumed.map((text) => ({ type: "text", text: redactVerdictContentText(text) }));
     }
     // OpenAI: an array of plain strings re-parses through the bare-string
     // push path; an empty consumed set stays an empty array, exactly like the
     // `parts` the branch returns today.
-    return consumed;
+    return consumed.map((text) => redactVerdictContentText(text));
   }
   // Exotic content (object/number/...): out of contract on the accepted path
   // (the parse always fails it), but never carried raw — masked deep so keys
@@ -660,7 +725,8 @@ export function reusableVerdictEnvelope(
 
   const entries: Array<[string, unknown]> = [];
   // Top-level `content` follows the same rule as the OpenAI branch above:
-  // string verbatim (gate-checked), array projected to the consumed text
+  // string redacted with the verdict-text treatment (#1154), array projected
+  // to the consumed text
   // records (the Anthropic branch of `extractContent`), anything else masked
   // deep and fail-closed.
   if ("content" in body) entries.push(["content", projectedVerdictContent(body.content, secrets, true)]);

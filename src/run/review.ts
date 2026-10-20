@@ -11,7 +11,7 @@ import { truncateClean } from "../corpus/truncate.js";
 import { readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { canonicalChangedFile, normalizeLinkedIssues } from "../context/types.js";
-import { redactText } from "../context/redact.js";
+import { redactDiffText, redactPrTextDeep, redactPrTextLines, redactText } from "../context/redact.js";
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { buildHarnessObligations } from "../requirements/obligations.js";
 import { externalChecksConclusion } from "../precheck/decide.js";
@@ -434,10 +434,24 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   const cachedObject = ws.read("pr-object.json");
   if (cachedObject !== null && cachedProjectNumber(cachedObject) === Number(prNumber)) {
     log("Reusing PR object fetched by precheck");
-    prObject = JSON.parse(Buffer.from(cachedObject).toString("utf8")) as unknown;
+    // #1154: idempotent on an already-redacted cache copy, and covers a copy
+    // persisted by an older build. #1154 review round 6: the sanitized object
+    // is written BACK to disk too — an older build's raw copy must not stay
+    // in a reused run directory, where it would ship with the run and be
+    // served by any later artifact read. The only other rewrite (the #812
+    // same-head metadata refresh) is gated on the CI gate running, so it does
+    // not close this path generally.
+    prObject = redactPrTextDeep(JSON.parse(Buffer.from(cachedObject).toString("utf8")));
+    ws.write("pr-object.json", pyJsonDumps(prObject));
   } else {
     prObject = await adapter.getPr();
-    if (prObject !== null && prObject !== undefined) ws.write("pr-object.json", pyJsonDumps(prObject));
+    if (prObject !== null && prObject !== undefined) {
+      // #1154: redact the object itself, not just the persisted copy — the
+      // projection below (title/body into pr.json, pr-body.txt, the corpus
+      // metadata line) must inherit the redacted authored fields.
+      prObject = redactPrTextDeep(prObject);
+      ws.write("pr-object.json", pyJsonDumps(prObject));
+    }
   }
   const pr = projectPr(prObject, prNumber);
   // #812 review: the authoritative body and its edit instant are ONE atomic
@@ -447,7 +461,12 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // soften discussion against a description the corpus never showed. Null
   // (no seam, failed read) keeps the REST body and labels nothing.
   let bodyRevision = await authoritativeBodyRevision(adapter);
-  if (bodyRevision !== null) pr.body = bodyRevision.body;
+  // #1154: the snapshot body is PR-authored content on the same persisted
+  // family as the projection body above. The line-preserving pass, not the
+  // flat one: a body is multi-line text whose line structure the reviewer
+  // reads, and the flat pass's newline-spanning masker would collapse
+  // `password:\n<value>` into a single line here.
+  if (bodyRevision !== null) pr.body = redactPrTextLines(bodyRevision.body);
   let supersededCutoff = bodyRevision === null ? null : bodyRevision.editedAt;
   ws.write("pr.json", pyJsonDumps(pr));
   if (context.isForkPr === "") {
@@ -527,8 +546,28 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     diffText = cachedDiff;
   } else {
     diffText = await adapter.getPrDiff();
-    ws.write("pr.diff", diffText);
   }
+  // #1154: the diff is PR-authored untrusted content, and every artifact it
+  // feeds (`pr.diff`, `pr.diff.truncated`, the corpus sections built from it,
+  // and `ai-request.<tier>.json`, which must keep recording exactly what was
+  // FIRST sent) persists it. Redacting here — once, before any write — makes
+  // the model input and every persisted artifact carry the same redacted
+  // bytes. `redactDiffText` (not the flat pass) keeps every line count and
+  // prefix intact, so inline findings still anchor to the same line numbers
+  // the forge's raw diff defines, and it also closes the split-line form (a
+  // `password:` key line with its value on the indented line below). Path
+  // headers are masked too (#1154 review round 3): a credential-shaped token
+  // in a diff-header path is PR-authored content, and `rawDiffText` below
+  // keeps the raw spelling in memory so the change-anchor checkout lookups
+  // still resolve. The generic layer's documented false-positive class (a
+  // fixture value like `sk-test-…`) is accepted, as is the continuation
+  // rule's over-redaction (any indented run after a bare secret key is
+  // masked): over-redaction is the redaction module's stated preference over
+  // a leaked credential.
+  const rawDiffText = diffText;
+  diffText = redactDiffText(diffText);
+  if (diffText !== rawDiffText) log("PR diff redaction: masked credential-shaped value(s) before persistence and corpus assembly");
+  ws.write("pr.diff", diffText);
   const identity = normalizePrIdentity(prObject);
   const generatedPaths = await generatedAttributePaths(workspace, diffText, budgets.primary.maxDiff);
   ws.write("pr.diff.truncated", prioritizeDiff(Buffer.from(diffText, "utf8"), budgets.primary.maxDiff, { generated: generatedPaths }));
@@ -549,7 +588,9 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     );
     if (!seedValid) throw new RunReviewError("pr-files.seed.json is present but malformed (expected a JSON array of file objects with a string filename)");
     log("Reusing PR file list derived from the pinned diff");
-    rawFilesList = seededFiles;
+    // #1154: the pinned seed is PR-authored content too; redact before the
+    // artifact write so the persisted copy matches the live branch's policy.
+    rawFilesList = redactPrTextDeep(seededFiles) as unknown[];
     const totals = seededFileTotals(rawFilesList);
     totalChangedFiles = totals.changedFiles;
     pr.changedFiles = totals.changedFiles;
@@ -560,10 +601,16 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   } else {
     const filesResult = await adapter.listPrFiles();
     if (!filesResult.ok) throw new RunReviewError(`platform_pr_files failed: ${filesResult.error}`);
-    const prFilesRaw = filesResult.data;
+    // #1154: the raw platform file entries carry per-file `patch` fields —
+    // PR-authored hunks on the same persisted family as the diff itself.
+    // A credential-shaped `filename` VALUE is masked too (the accepted
+    // false-positive class); the consequence is not cosmetic — the model
+    // cannot read_file such a path, so coverage records it as unread —
+    // which is preferred to persisting a credential-shaped string.
+    const prFilesRaw = redactPrTextDeep(filesResult.data);
     ws.write("pr-files.raw.json", pyJsonDumps(prFilesRaw));
     totalChangedFiles = typeof pr.changedFiles === "number" ? pr.changedFiles : 0;
-    rawFilesList = Array.isArray(prFilesRaw) ? prFilesRaw : [];
+    rawFilesList = Array.isArray(prFilesRaw) ? prFilesRaw as unknown[] : [];
   }
   ws.write("pr-files.json", filesProjection(rawFilesList, totalChangedFiles));
   ws.write("pr-files.truncated.json", truncateClean(Buffer.from(filesProjection(rawFilesList, totalChangedFiles)), budgets.primary.maxFiles, "…[file list truncated]"));
@@ -605,7 +652,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // Related-code context (corpus.sh). Built before the requirement ledger:
   // its anchors and related context are the #796 obligation inputs. It
   // reads only the diff, the file list and the checkout.
-  const relatedInputs = await buildRelatedCodeSection(ws, env, workspace);
+  const relatedInputs = await buildRelatedCodeSection(ws, env, workspace, rawDiffText);
   const obligationsOn = (env.HARNESS_OBLIGATIONS ?? "false").toLowerCase() === "true";
   const harnessObligations = relatedInputs === null || !obligationsOn ? [] : buildHarnessObligations(relatedInputs);
 
@@ -905,17 +952,20 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // unchanged: a moved head supersedes this review anyway.
   if (env.CI_GATE_ACTIVE === "true") {
     const refreshed = await adapter.getPr().catch(() => null);
-    const next = refreshed === null || refreshed === undefined ? null : projectPr(refreshed, prNumber);
+    // #1154: same ingestion policy as the initial fetch — the refreshed
+    // object's authored fields must not persist raw.
+    const redactedRefreshed = refreshed === null || refreshed === undefined ? refreshed : redactPrTextDeep(refreshed);
+    const next = refreshed === null || refreshed === undefined ? null : projectPr(redactedRefreshed, prNumber);
     if (next !== null && String(next.headRefOid ?? "") === String(pr.headRefOid ?? "")) {
       log("Refreshing PR metadata context after the CI wait");
       // A fresh atomic snapshot for the rebuilt pass: its body is presented
       // and its `editedAt` is the only cutoff this pass labels with. A
       // failed snapshot read keeps the REST-refreshed body and no cutoff.
       bodyRevision = await authoritativeBodyRevision(adapter);
-      if (bodyRevision !== null) next.body = bodyRevision.body;
+      if (bodyRevision !== null) next.body = redactPrTextLines(bodyRevision.body);
       supersededCutoff = bodyRevision === null ? null : bodyRevision.editedAt;
       Object.assign(pr, next);
-      ws.write("pr-object.json", pyJsonDumps(refreshed));
+      ws.write("pr-object.json", pyJsonDumps(redactedRefreshed));
       ws.write("pr.json", pyJsonDumps(pr));
       ws.write("pr-body.txt", String(pr.body ?? ""));
       await buildMetadataContext(pr, supersededCutoff);

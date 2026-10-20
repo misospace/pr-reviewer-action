@@ -52,6 +52,9 @@ test("bodies are redacted, control-cleaned, and fence-safe", () => {
         "```",
         "token ghp_0123456789abcdefghij0123456789abcd",
         "password: hunter2hunter2",
+        // #1154 review round 6: the quoted-key JSON shape a comment quotes
+        // verbatim — the discussion corpus is the same PR-authored family.
+        '{"api_key": "commentsecretvalue"}',
         "ctrl\x07char",
       ].join("\n"),
     },
@@ -59,6 +62,7 @@ test("bodies are redacted, control-cleaned, and fence-safe", () => {
   assert.ok(rendered.startsWith(HEADER));
   assert.ok(rendered.includes("## Comment by mallory — 2026-01-01T00:00:00Z"));
   assert.ok(!rendered.includes("ghp_0123456789"));
+  assert.ok(!rendered.includes("hunter2hunter2") && !rendered.includes("commentsecretvalue"), "no credential shape survives");
   assert.ok(rendered.includes("[REDACTED]"));
   // The body's ``` runs force a longer fence; a hostile body cannot close it.
   assert.ok(rendered.includes("````\n"));

@@ -8,6 +8,7 @@ import { OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
 import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
 import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
+import { redactPrTextDeep } from "../src/context/redact.js";
 import { parseVerdictResponse } from "../src/model/verdict.js";
 import { reassembleSse } from "../src/transport/sse.js";
 import { normalizedToOpenAiChat } from "../src/run/stages.js";
@@ -446,6 +447,98 @@ test("#1094: reusableVerdictEnvelope keeps the finish reason where the parser re
   assert.deepEqual(keyEcho.usage, { prompt_tokens: 11, completion_tokens: 5 });
   const shortKey = reusableVerdictEnvelope({ usage: { prompt_tokens: 11 }, choices: [{ message: { content: "x" } }] }, ["k"]);
   assert.equal("usage" in shortKey, false, JSON.stringify(shortKey));
+});
+
+// #1154: the envelope's projected completion content goes through the
+// `redactText` pattern layer (never maskKnownSecrets — the configured-secret
+// question is the containsKnownSecret acceptance gate's business), so a
+// PR-borne credential shape the model echoed while quoting the diff cannot
+// persist verbatim into `ai-response.<tier>.json`, and the envelope still
+// re-parses as the verdict on the native-loop reuse path.
+test("#1154: reusableVerdictEnvelope redacts credential shapes from projected verdict content", () => {
+  const rawToken = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+  const rawBearer = "Bearer abcdefghijklmnopqrst";
+  const verdictJson = JSON.stringify({
+    verdict: "approve",
+    review_markdown: `Looks fine, but the diff embeds ${rawToken} and an ${rawBearer} header.`,
+    findings: [],
+  });
+  // OpenAI shape (string content).
+  const openAi = reusableVerdictEnvelope({ choices: [{ message: { content: verdictJson }, finish_reason: "stop" }] });
+  const openAiContent = String(((openAi.choices as Record<string, unknown>[])[0]!.message as Record<string, unknown>).content);
+  assert.match(openAiContent, /\[REDACTED\]/);
+  assert.ok(!openAiContent.includes(rawToken) && !openAiContent.includes(rawBearer));
+  // The redaction must not corrupt the verdict structure: the reuse path
+  // re-parses this envelope as the verdict.
+  const reparsed = parseVerdictResponse(JSON.parse(JSON.stringify(openAi)));
+  assert.equal(reparsed.verdict, "approve");
+  assert.match(reparsed.reviewMarkdown, /\[REDACTED\]/);
+  // OpenAI array parts: every consumed text is redacted.
+  const parts = reusableVerdictEnvelope({ choices: [{ message: { content: [`part one ${rawToken}`, "clean"] }, finish_reason: "stop" }] });
+  const partsContent = ((parts.choices as Record<string, unknown>[])[0]!.message as Record<string, unknown>).content;
+  assert.deepEqual(partsContent, ["part one [REDACTED]", "clean"]);
+  // Anthropic shape: projected text records are redacted too.
+  const anthropic = reusableVerdictEnvelope({ content: [{ type: "text", text: `token ${rawBearer} echoed` }] });
+  const anthropicContent = anthropic.content as Array<{ type: string; text: string }>;
+  assert.equal(anthropicContent[0]!.type, "text");
+  assert.match(anthropicContent[0]!.text, /\[REDACTED\]/);
+  assert.ok(!anthropicContent[0]!.text.includes(rawBearer));
+});
+
+// #1154 review round: the flat pass on a SERIALIZED verdict corrupts its JSON
+// (the kubeconfig masker's unbounded \S+ eats the closing quote after a
+// quoted secret value → unterminated string → the native-loop reuse re-parse
+// fails closed into an unnecessary fresh review call). JSON-parseable
+// content is redacted per leaf instead, so the envelope always re-parses.
+test("#1154: quoted secret value inside the verdict JSON survives re-parse", () => {
+  const verdictJson = JSON.stringify({
+    verdict: "approve",
+    review_markdown: 'The diff adds password: "hunter2hunter2" to app.yml.',
+    findings: [],
+  });
+  const envelope = reusableVerdictEnvelope({ choices: [{ message: { content: verdictJson }, finish_reason: "stop" }] });
+  const content = String(((envelope.choices as Record<string, unknown>[])[0]!.message as Record<string, unknown>).content);
+  // The leaf is masked (the key=value rule consumes the opening quote and
+  // value; the closing quote survives INSIDE the leaf) but the JSON
+  // structure around it survives — the point of the per-leaf pass.
+  const contentObj = JSON.parse(content) as Record<string, unknown>;
+  assert.equal(contentObj.review_markdown, 'The diff adds [REDACTED]" to app.yml.');
+  const reparsed = parseVerdictResponse(JSON.parse(JSON.stringify(envelope)));
+  assert.equal(reparsed.verdict, "approve");
+  assert.match(reparsed.reviewMarkdown, /\[REDACTED\]/);
+  // Prose (non-JSON) content still takes the flat pass.
+  const prose = reusableVerdictEnvelope({ choices: [{ message: { content: `sets password: hunter2hunter2 on line 3` }, finish_reason: "stop" }] });
+  const proseContent = String(((prose.choices as Record<string, unknown>[])[0]!.message as Record<string, unknown>).content);
+  assert.equal(proseContent, "sets [REDACTED] on line 3");
+});
+
+// #1154 review round 6: the completion projection shares the pattern layer,
+// so the same-line QUOTED-key JSON form (`{"password": "…"}`) that the
+// generic key=value masker could not see must not persist either — in prose
+// content (flat pass) and in a leaf that embeds a quoted-JSON snippet
+// (per-leaf pass). The opaque value under a secret-named key of the VERDICT
+// schema itself stays the documented KEY_NAMES_OFF residual (masking verdict
+// labels/fields would corrupt the reuse re-parse).
+test("#1154: quoted JSON credential shapes are masked in the completion projection", () => {
+  const quoted = '{"password": "echoedsecretvalue"}';
+  // Prose content quoting a diff line that is one-line JSON.
+  const prose = reusableVerdictEnvelope({ choices: [{ message: { content: `the diff adds ${quoted} to config.json` }, finish_reason: "stop" }] });
+  const proseContent = String(((prose.choices as Record<string, unknown>[])[0]!.message as Record<string, unknown>).content);
+  assert.match(proseContent, /\[REDACTED\]/);
+  assert.ok(!proseContent.includes("echoedsecretvalue"), "the quoted value must not persist in the envelope");
+  // Verdict JSON whose review_markdown leaf embeds the quoted shape: the
+  // per-leaf pass masks inside the leaf and the envelope still re-parses.
+  const verdictJson = JSON.stringify({
+    verdict: "approve",
+    review_markdown: `The diff embeds ${quoted} verbatim.`,
+    findings: [],
+  });
+  const envelope = reusableVerdictEnvelope({ choices: [{ message: { content: verdictJson }, finish_reason: "stop" }] });
+  const content = String(((envelope.choices as Record<string, unknown>[])[0]!.message as Record<string, unknown>).content);
+  assert.ok(!content.includes("echoedsecretvalue"), "no quoted value survives in the projected leaf");
+  const reparsed = parseVerdictResponse(JSON.parse(JSON.stringify(envelope)));
+  assert.equal(reparsed.verdict, "approve");
+  assert.match(reparsed.reviewMarkdown, /\[REDACTED\]/);
 });
 });
 
@@ -995,4 +1088,42 @@ test("#1047 (review): an explicit-empty lane response-format override inherits t
   assert.equal("response_format" in off, false);
   const overridden = await runVerdictTurn({ AI_RESPONSE_FORMAT: "off", AI_PRIMARY_RESPONSE_FORMAT: "json_object" });
   assert.deepEqual(overridden.response_format, { type: "json_object" });
+});
+
+// #1154 review round 2: the key-name rule added to `redactPrTextDeep` is for
+// PR-authored artifacts, whose keys are forge field names that can name a
+// credential value. The verdict projection's keys are the verdict SCHEMA —
+// `secret_handling_changes` is a real classification category
+// (src/classification/classify.ts) — and the native-loop reuse RE-PARSES this
+// exact text, so masking a category value would rewrite the review instead of
+// protecting it.
+test("#1154 r2: the verdict projection keeps secret-named CATEGORY values", () => {
+  const rawToken = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+  const verdictJson = JSON.stringify({
+    verdict: "request_changes",
+    review_markdown: `The diff moves the credential below its key (${rawToken} in the old line).`,
+    findings: [{
+      title: "hardcoded secret in the config helper",
+      secret_handling_changes: "reported",
+      path: "src/app.py",
+      line: 3,
+    }],
+  });
+  const envelope = reusableVerdictEnvelope({ choices: [{ message: { content: verdictJson }, finish_reason: "stop" }] });
+  const content = String(((envelope.choices as Record<string, unknown>[])[0]!.message as Record<string, unknown>).content);
+  const projected = JSON.parse(content) as { review_markdown: string; findings: Array<Record<string, unknown>> };
+  assert.equal(projected.findings[0]!.secret_handling_changes, "reported", "the category value reaches the artifact intact");
+  assert.equal(projected.findings[0]!.title, "hardcoded secret in the config helper");
+  assert.equal(projected.findings[0]!.path, "src/app.py");
+  // The pattern layer still runs on leaves — the projection is not exempt from
+  // redaction, only from the key-name rule.
+  assert.match(projected.review_markdown, /\[REDACTED\]/);
+  assert.ok(!projected.review_markdown.includes(rawToken));
+  // The reuse path still re-parses this as a verdict.
+  const reparsed = parseVerdictResponse(JSON.parse(JSON.stringify(envelope)));
+  assert.equal(reparsed.verdict, "request_changes");
+  // And the PR-artifact default is unchanged: the same key name on a PR object
+  // masks, which is the behavior this projection opted out of.
+  const prObject = redactPrTextDeep({ secret_handling_changes: "reported" }) as Record<string, unknown>;
+  assert.equal(prObject.secret_handling_changes, "[REDACTED]");
 });
