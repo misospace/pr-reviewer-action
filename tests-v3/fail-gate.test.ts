@@ -118,4 +118,17 @@ test("#1140: the confidence scorer's internal-crash diagnostic masks BEFORE capp
     assert.ok(write.includes("redactTextDeep("), `${artifact} must be written through redactTextDeep`);
     assert.equal(write.includes("maskKnownSecretsDeep("), false, `${artifact} must not fall back to configured-value masking alone`);
   }
+
+  // #1140 review round 9: masking has to stay TERMINAL on the confidence reason.
+  // The deterministic-cap note is rebuilt AFTER the masking pass so a long masked
+  // reason cannot lose it, which means the call site — not `boundConfidenceReason`
+  // — owns masking that note: a configured credential may be any length, including
+  // one character occurring inside the note template (`blocker_cap_2`). The
+  // parameter is a plain string, so the contract is otherwise prose plus the
+  // run-level behavior test; pin the composition here as well.
+  const rebindAt = source.indexOf("reason: boundConfidenceReason(");
+  assert.ok(rebindAt !== -1, "review.ts must re-bind the masked confidence reason");
+  const rebind = source.slice(rebindAt, rebindAt + 400);
+  assert.ok(rebind.includes("maskConfidenceText(confidenceOutcome.result.reason)"), "the reason must reach the re-bound already masked");
+  assert.ok(rebind.includes("maskConfidenceText(confidenceCapNote("), "the rebuilt cap note must be masked before it is re-appended");
 });
