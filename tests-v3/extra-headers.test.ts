@@ -15,7 +15,7 @@ import {
 } from "../src/transport/headers.js";
 import { configuredKnownSecrets, runReview } from "../src/run/review.js";
 import { parseVerdictResponse } from "../src/model/verdict.js";
-import { KNOWN_SECRET_REDACTED } from "../src/context/redact.js";
+import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { startMockServer } from "./helpers.js";
 
@@ -527,6 +527,79 @@ test("#1037: the SUCCESS path persists a masked response body — a reflected VA
   assert.equal(run.artifacts.includes(CANARY), false);
   assert.equal(run.errorLog.join("\n").includes(CANARY), false);
   assert.equal(run.summary.includes(CANARY), false);
+});
+
+test("#1149: a provider-AUTHORED credential shape this run never configured never reaches ai-response.<tier>.json", async () => {
+  // The sibling class of #1037, one layer further out. #1037 proved a CONFIGURED
+  // value (an `ai-extra-headers` VALUE) is masked on its way into the persisted
+  // raw body — that layer is `maskKnownSecretsDeep`, which only knows values the
+  // operator gave us. A backend that echoes a credential-SHAPED value it
+  // INVENTED (`api_key=…`, a bare `Bearer …`, an `sk-…` token) is configured
+  // nowhere, so that layer passed it through untouched and the shape rode
+  // verbatim into a body this action ships as a job artifact. `redactTextDeep`
+  // adds the generic pattern layer on top of the configured one.
+  //
+  // Each shape is asserted by its VALUE, not by a mask string, so no future
+  // marker rename can make this pass, and NONE of them is a configured lane key
+  // (`ai-api-key` is `sk-not-a-real-key-0000` in this harness) — which is the
+  // load-bearing property: with the routing reverted to `maskKnownSecretsDeep`
+  // the configured layer has nothing to match and every shape survives.
+  // Each entry is [the exact literal the provider body carries, the VALUE that
+  // must not survive]. Both halves matter: the value is what the assertions
+  // hunt for (so no future marker rename can make this pass), and the framing
+  // is what makes the control below meaningful — a bare value is unframed
+  // prose that no heuristic touches, which is exactly why these shapes had to
+  // be checked where they are actually written.
+  const PROVIDER_ONLY: [string, string][] = [
+    ["api_key=provider-only-secret-123456", "provider-only-secret-123456"],
+    ["Bearer providerbearerabcdefghijklmnop", "providerbearerabcdefghijklmnop"],
+    ["sk-providerabcdefghijklmnop", "sk-providerabcdefghijklmnop"],
+  ];
+  const run = await runAndCollect((res) => {
+    res.setHeader("Content-Type", "application/json");
+    // A USABLE body, so the raw provider response is the thing persisted rather
+    // than replaced by the failure-path error record.
+    res.end(verdictBody({
+      system_fingerprint: "provider says api_key=provider-only-secret-123456 is live",
+      debug: { echo: "Bearer providerbearerabcdefghijklmnop", openai_like: "sk-providerabcdefghijklmnop", plain: "nothing here" },
+    }));
+  }, {});
+
+  for (const [, shaped] of PROVIDER_ONLY) {
+    assert.equal(run.response.includes(shaped), false, `provider-authored credential shape survived into ai-response.primary.json: ${shaped}\n${run.response}`);
+  }
+  // The control: the generic layer IS what removes these — each literal the
+  // provider body carries is redacted by `redactText` on its own. Without it
+  // the assertions above could pass because something else in the run scrubbed
+  // them. The first two values are UNFRAMED prose on their own (the framing in
+  // the body is what triggers them), so the contrast below is exact; the `sk-`
+  // rule is self-framing by design, so only the first two are checked for it.
+  for (const [framing, shaped] of PROVIDER_ONLY) {
+    assert.equal(redactText(framing).includes(shaped), false, `control framing no longer redacts: ${framing}`);
+  }
+  for (const [, shaped] of PROVIDER_ONLY.slice(0, 2)) {
+    assert.equal(redactText(shaped), shaped, `control value is no longer unframed prose: ${shaped}`);
+  }
+
+  // Structure and the verdict itself are untouched — masking must not corrupt
+  // the artifact that later phases (the step summary reads `usage`) parse.
+  const persisted = JSON.parse(run.response) as Record<string, unknown>;
+  assert.equal(persisted.model, "m");
+  assert.equal((persisted.usage as Record<string, unknown>).completion_tokens, 5);
+  const debug = persisted.debug as Record<string, unknown>;
+  assert.equal(debug.plain, "nothing here", "no blanket over-redaction");
+  assert.equal(String(debug.echo), "[REDACTED]");
+  const content = String((persisted.choices as { 0: { message: { content: string } } })[0].message.content);
+  assert.equal(JSON.parse(content).verdict, "approve");
+
+  // Every shape, on every downstream surface — not just the one the first
+  // loop checked. A routing that only caught the `api_key=` framing would
+  // otherwise satisfy the assertions above and still leak the other two.
+  for (const [label, surface] of [["artifacts", run.artifacts], ["summary", run.summary], ["errorLog", run.errorLog.join("\n")]] as const) {
+    for (const [, shaped] of PROVIDER_ONLY) {
+      assert.equal(surface.includes(shaped), false, `${shaped} survived into ${label}:\n${surface}`);
+    }
+  }
 });
 
 test("#1037: an unusable streamed response carrying the header VALUE stays clean too", async () => {

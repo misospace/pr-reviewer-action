@@ -18,7 +18,7 @@ import { ForgejoAdapter } from "./forgejo.js";
 import { canonicalUserId, hasUsableOwner, integrationOwnerIdFromAudience, ownerMatchesIdentity, type IdentityResolution, type TrustedOwnerIdentity } from "./owner-identity.js";
 import { parsePlatformBaseUrl, GITHUB_API_BASE } from "./urls.js";
 
-export type PublishPlatformName = "github" | "forgejo";
+export type PublishPlatformName = "github" | "forgejo" | "tangled";
 
 export interface PublishCommentRef {
   id: number | string;
@@ -171,8 +171,27 @@ export interface CollaboratorPermissionReading {
   subjectLogin?: string;
 }
 
+/** #588: whether a platform can host a native pull review — the review
+ * event itself and its inline review comments. A platform without that
+ * surface publishes the review body as its managed top-level record and
+ * states the degradation explicitly; it never pretends a native
+ * approval, blocking request, or inline comment was created. */
+export interface NativeReviewSurface {
+  /** True when the platform can host a native pull review event. */
+  supported: boolean;
+  /** Operator- and body-facing reason; used when `supported` is false. */
+  reason?: string;
+}
+
 export interface PublishPlatformApi {
   readonly platform: PublishPlatformName;
+  /** #588: the platform's native pull-review surface. */
+  readonly nativeReviewSurface: NativeReviewSurface;
+  /** #588: why the current pull head could not be determined, when the
+   * platform knows — e.g. it has no trustworthy current-head source yet, so
+   * the #451 publication-boundary re-check can never be satisfied. Absent →
+   * the generic "could not re-fetch" wording (a read that failed). */
+  readonly currentHeadUnavailableReason?: string | undefined;
   /** Current PR head sha, for the publication-boundary re-check (#451). */
   getHeadSha(): Promise<string | null>;
   authenticatedIdentity?(): Promise<string | null>;
@@ -252,6 +271,9 @@ async function graphql(
 
 export class GitHubPublishApi implements PublishPlatformApi {
   readonly platform = "github" as const;
+  /** #588: GitHub hosts native pull reviews (the review event and its
+   * inline review comments), so the publish step takes the native path. */
+  readonly nativeReviewSurface: NativeReviewSurface = { supported: true };
   private readonly base: string;
   private readonly origin: string;
   private readonly repo: string;
@@ -719,6 +741,9 @@ export function forgejoReviewEvent(event: string): string {
 
 export class ForgejoPublishApi implements PublishPlatformApi {
   readonly platform = "forgejo" as const;
+  /** #588: Forgejo hosts native pull reviews (the review event and its
+   * inline review comments), so the publish step takes the native path. */
+  readonly nativeReviewSurface: NativeReviewSurface = { supported: true };
   private readonly base: string;
   private readonly origin: string;
   private readonly repo: string;

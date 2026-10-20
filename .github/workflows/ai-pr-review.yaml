@@ -213,7 +213,6 @@ jobs:
           ai-smart-base-url: ${{ vars.LITELLM_URL }}
           ai-smart-model: ${{ vars.SMART_MODEL }}
           ai-smart-reasoning-effort: ${{ vars.SMART_REASONING_EFFORT }}
-          allow-approve: "true"
           ci-timeout-sec: "600"
           claim-falsification: "true"
           equivalent-paths: "true"

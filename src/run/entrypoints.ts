@@ -8,11 +8,15 @@ import { forgejoTokenFromEnv } from "../platform/forgejo-auth.js";
 import type { PlatformAdapter } from "../platform/types.js";
 import { GitHubPublishApi } from "../platform/publish-api.js";
 import { ForgejoPublishApi } from "../platform/publish-api.js";
+import { TangledPublishApi } from "../platform/tangled-publish.js";
+import { TangledAtprotoClient, atprotoConfigFromEnv } from "../platform/tangled-atproto.js";
+import { tangledContextFromEnv } from "../platform/tangled.js";
 import { eventLabelName, runPrecheck } from "../precheck/decide.js";
 import { publishReview, type PublishInput, type PublishResult, type PublishMode } from "../publish/publish.js";
 import type { PublishPlatformApi } from "../platform/publish-api.js";
 import type { UpstreamLinkMode } from "../publish/sanitize.js";
 import { nonEmpty } from "./run-dir.js";
+import { buildPlatformReadAdapter } from "./platform.js";
 import { partialCoverageOf } from "./review.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { isIncompleteReason, type IncompleteReason } from "../publish/outputs.js";
@@ -196,7 +200,7 @@ function boolInput(raw: string | undefined, fallback = false): boolean {
 
 function publishMode(raw: string | undefined): PublishMode {
   const value = raw ?? "";
-  if (value === "comment" || value === "review_comment" || value === "review_verdict") return value;
+  if (value === "comment" || value === "review_comment" || value === "review_verdict" || value === "review_blockers") return value;
   throw new EntrypointError(`Invalid publish_mode '${value}'`);
 }
 
@@ -374,11 +378,33 @@ function reviewRoutingFromRunDir(env: NodeJS.ProcessEnv): HumanReviewRoutingPlan
   };
 }
 
-/** The platform publish seam (GitHub REST/GraphQL or Forgejo /api/v1). */
+/** The platform publish seam (GitHub REST/GraphQL, Forgejo /api/v1, or the
+ * Tangled ATProto record client). */
 export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformApi; platform: string; diffProvider: () => Promise<string> } {
   const repo = env.REPO ?? "";
   const prNumber = env.PR_NUMBER ?? "";
   const platform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "", env.TANGLED_REPO_DID ?? "");
+  // #588: Tangled publishes through its own ATProto record seam — it is
+  // never routed through the GitHub/Forgejo publish APIs below. The
+  // canonical pull identity comes from the Bobbin resolver (#584) inside
+  // the adapter; missing ATProto configuration fails closed here with a
+  // descriptive error naming the missing variable.
+  if (platform === "tangled") {
+    const context = tangledContextFromEnv(env);
+    // #588: no `currentHeadSha` provider is wired here on purpose — Tangled
+    // has no trustworthy current-head source yet (the pull record and the
+    // read XRPC expose no head commit, and the patch's `declaredHeadSha` is
+    // forgeable advisory metadata). The #451 head re-check therefore FAILS
+    // CLOSED for Tangled: the publish step refuses to publish until a
+    // trustworthy current-head read exists (#1165). The launch-time
+    // `TANGLED_PR_SOURCE_SHA` is never used for that re-check.
+    const api = new TangledPublishApi({
+      context,
+      atproto: new TangledAtprotoClient(atprotoConfigFromEnv(env)),
+    });
+    const diffProvider = async (): Promise<string> => buildPlatformReadAdapter(env).getPrDiff();
+    return { api, platform, diffProvider };
+  }
   requireImplementedBackend(platform);
   const token = platform === "forgejo" ? forgejoTokenFromEnv(env) : ghToken(env);
   const apiOptions = {
@@ -429,7 +455,18 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
     inlineFindingsMax: Number(env.INLINE_FINDINGS_MAX ?? "5") || 5,
     findings: parseJsonish(env.FINDINGS ?? ""),
     cleanupPreviousNativeReviews: env.CLEANUP_PREVIOUS_NATIVE_REVIEWS ?? "",
-    allowApprove: boolInput(env.ALLOW_APPROVE),
+    // #1161: the deprecated `allow-approve` input is read only so the
+    // publisher can warn that it no longer affects publication. It gates
+    // nothing. The runner merges the contract default into every input it
+    // exports, so an input explicitly set to "false" is indistinguishable
+    // from an unset one (the same limitation the repository-config
+    // narrowing has): only a value that DIFFERS from the default is
+    // observable, and only that one warns.
+    ...(env.ALLOW_APPROVE !== undefined
+      && env.ALLOW_APPROVE.trim() !== ""
+      && env.ALLOW_APPROVE.trim().toLowerCase() !== "false"
+      ? { allowApprove: boolInput(env.ALLOW_APPROVE) }
+      : {}),
     approveForks: boolInput(env.APPROVE_FORKS),
     isForkPr: env.IS_FORK_PR === undefined || env.IS_FORK_PR === "" ? null : env.IS_FORK_PR === "true",
     upstreamLinkMode: upstreamLinkMode(env.UPSTREAM_LINK_MODE),
