@@ -272,6 +272,50 @@ test("#1159: the projection parity shape survives — null body stays jq null, c
   assert.equal(embeddedIssueJson(titleMd).title, "Rotate token [REDACTED] today");
 });
 
+test("#1159: non-string body/title values pass through untouched, preserving the parity shape", async () => {
+  const result = await buildLinkedIssueContext({
+    pr: { title: "t", body: "Fixes #7" }, repo: "o/r", adapter: { getIssue: issueWith(7, 42) },
+    isForkPr: "false", linear: noLinear,
+  });
+  const embedded = embeddedIssueJson(text(result.artifacts.get("linked-issues.md")));
+  assert.equal(embedded.body, 7, "a non-string body is not coerced by the redactor");
+  assert.equal(embedded.title, 42);
+});
+
+test("#1159: masking precedes the 12000-byte embed cut — a credential at the cut boundary is never raw", async () => {
+  // Padding places the split-line credential right at the LINKED_ISSUE_EMBED_BYTES
+  // cut of the serialized projection. Redaction runs BEFORE the cut, so no
+  // secret byte can survive inside or past the boundary; the cut's existing
+  // mid-JSON degradation (ledger fail-soft skip) is unchanged.
+  const pad = "x".repeat(11800);
+  const result = await buildLinkedIssueContext({
+    pr: { title: "t", body: "Fixes #7" },
+    repo: "o/r",
+    adapter: { getIssue: issueWith(`prefix ${pad}\npassword:\n  boundary-secret-value-9000\n tail`) },
+    isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.ok(!md.includes("boundary-secret-value-9000"), "no secret survives at or past the byte cut");
+});
+
+test("#1159: credential-shaped label names are masked; ordinary trigger labels stay byte-identical", async () => {
+  const getIssue = async (): Promise<ReadResult<unknown>> => ({
+    ok: true,
+    data: {
+      number: 7, title: "t", state: "open", html_url: "https://example/issues/7", body: "b",
+      labels: [{ name: "security" }, { name: "api_key=opaquevalue1234567890" }],
+    },
+  });
+  const result = await buildLinkedIssueContext({
+    pr: { title: "t", body: "Fixes #7" }, repo: "o/r", adapter: { getIssue }, isForkPr: "false", linear: noLinear,
+  });
+  const md = text(result.artifacts.get("linked-issues.md"));
+  assert.ok(!md.includes("opaquevalue1234567890"), "a credential-shaped label name is masked");
+  assert.ok(md.includes('"security"'), "an ordinary trigger label is untouched");
+  const json = JSON.parse(text(result.artifacts.get("linked-issues.json"))) as Array<{ labels: { name: string }[] }>;
+  assert.deepEqual(json[0]!.labels, [{ name: "security" }, { name: "[REDACTED]" }]);
+});
+
 test("#1159: linked-issues.json stays ref/label-only — the body never reaches it redacted or raw", async () => {
   const result = await buildLinkedIssueContext({
     pr: { title: "t", body: "Fixes #7" }, repo: "o/r", adapter: { getIssue: issueWith(CREDENTIAL_BODY) },

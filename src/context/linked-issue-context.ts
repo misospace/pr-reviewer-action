@@ -13,11 +13,11 @@
  * - each fetched issue embeds the pretty jq projection
  *   `{number,title,state,html_url,labels:[.labels[]?.name],body}` cut by
  *   `head -c 12000` — a byte cut that may split a UTF-8 sequence. The
- *   projection's prose fields (`title`, `body`) carry one deliberate
- *   divergence from v2 (#1159): they pass through the line-preserving
- *   credential-shape redaction (`redactPrTextLines`, #1154) before
- *   serialization, so a credential-shaped value in a forge-authored issue
- *   never reaches the persisted artifacts or the model request;
+ *   projection's forge-authored strings (`title`, label names, `body`)
+ *   carry one deliberate divergence from v2 (#1159): they pass through the
+ *   line-preserving credential-shape redaction (`redactPrTextLines`, #1154)
+ *   before serialization, so a credential-shaped value in a forge-authored
+ *   issue never reaches the persisted artifacts or the model request;
  * - a projection error (a non-object issue, a label that is not an object)
  *   aborts the v2 review under `set -euo pipefail`; here it throws
  *   `LinkedIssueProjectionError`;
@@ -55,25 +55,30 @@ const enc = (text: string): Buffer => Buffer.from(text, "utf8");
 // import cycle.
 export { isPullRequestPayload };
 
-/** #1159: the projection's forge-authored prose fields go through the
+/** #1159: every forge-authored string in the projection goes through the
  * line-preserving credential-shape pass (#1154) before serialization, so a
  * credential in a fetched issue body — same-line (`api_key=…`, `Bearer …`,
  * `sk-…`) or split-line (`password:` + indented value) — never reaches the
  * persisted `linked-issues.md`, the requirement-ledger parse of it, or the
- * corpus/`ai-request.<tier>.json` built from those bytes. Line structure is
- * kept byte-for-byte (the flat `redactText` pass would collapse a split-line
- * credential into one line), and the pass is idempotent, so re-persisting an
- * already-redacted artifact is a no-op. Non-string values (a jq `null` body)
- * pass through untouched to preserve the projection's parity shape. */
+ * corpus/`ai-request.<tier>.json` built from those bytes. Label names share
+ * the same forge-authored trust class (they persist into
+ * `linked-issues.json` too), and the pass is inert on ordinary names, so the
+ * classification trigger-label matching over them is unaffected. Line
+ * structure is kept byte-for-byte (the flat `redactText` pass would collapse
+ * a split-line credential into one line), and the pass is idempotent, so
+ * re-persisting an already-redacted artifact is a no-op. Non-string values
+ * (a jq `null` body) pass through untouched to preserve the projection's
+ * parity shape. */
 function redactForgeProse(value: unknown): unknown {
   return typeof value === "string" ? redactPrTextLines(value) : value;
 }
 
 /** `jq '{number,title,state,html_url,labels:[.labels[]?.name],body}'`, with
- * the prose fields (`title`, `body`) credential-redacted (#1159). */
+ * the forge-authored string fields (`title`, label names, `body`)
+ * credential-redacted (#1159). */
 export function projectLinkedIssue(issue: unknown): Record<string, unknown> {
   try {
-    const labels = jqEachOpt(jqField(issue, "labels")).map((label) => jqField(label, "name"));
+    const labels = jqEachOpt(jqField(issue, "labels")).map((label) => redactForgeProse(jqField(label, "name")));
     return {
       number: jqField(issue, "number"),
       title: redactForgeProse(jqField(issue, "title")),
