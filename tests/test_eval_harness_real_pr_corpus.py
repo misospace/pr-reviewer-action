@@ -1061,8 +1061,11 @@ class TestRealRuntimeIgnoresCommittedDecoyArtifacts:
     seam) in --context-only style: a closed local model port, no network, no
     credentials — the run fails at the model call, but the context-assembly
     artifacts (pr.diff, pr-files.json, review-corpus.md) are written to
-    PR_REVIEWER_RUN_DIR before that, which is all this test needs.
-    """
+    PR_REVIEWER_RUN_DIR before that, which is all this test needs. The PR
+    identity admission needs (#726) is served offline through the
+    semantic-fixture seam: a crafted .semantic-fixture/pr.json (same-repo,
+    not-draft, pinned SHAs) plus SEMANTIC_FIXTURE_*/FORCE_REVIEW, so the
+    engine-owned admission stage passes without a forge."""
 
     def _origin_with_decoy_head(self, tmp_path: Path) -> tuple[Path, str, str]:
         origin = tmp_path / "origin"
@@ -1128,10 +1131,36 @@ class TestRealRuntimeIgnoresCommittedDecoyArtifacts:
             "number": 1, "repo_full_name": repo_full_name,
             "head_sha": head_sha, "base_sha": base_sha,
         }
+        # Engine-owned admission (#726): the runtime's first stage must
+        # prove the PR is reviewable before any context stage runs. This
+        # offline run has no credentials and no fixture interception, so the
+        # forge reads soft-fail and the #961 draft gate fails closed
+        # ("pr-draft") before pr-files.json / review-corpus.md are written.
+        # Serve the pinned same-repo, not-draft PR identity through the same
+        # semantic-fixture seam the harness corpus uses, so admission passes
+        # offline; the #838 invariant under test (run-dir seeds win over
+        # committed forgeries) is untouched.
+        (repo_path / ".semantic-fixture").mkdir()
+        (repo_path / ".semantic-fixture" / "pr.json").write_text(
+            json.dumps({
+                "number": 1,
+                "draft": False,
+                "head": {"sha": head_sha, "repo": {"full_name": repo_full_name}},
+                "base": {"sha": base_sha, "repo": {"full_name": repo_full_name}},
+            }),
+            encoding="utf-8",
+        )
         model_config = {
             "model": "context-only", "base_url": "http://127.0.0.1:9/v1",
             "api_key": "none", "github_token": "dummy-token",
-            "extra_env": {**REPLAY_ENV, **CONTEXT_ONLY_ENV},
+            "extra_env": {
+                **REPLAY_ENV,
+                **CONTEXT_ONLY_ENV,
+                "SEMANTIC_FIXTURE_DIR": str(repo_path),
+                "SEMANTIC_FIXTURE_MODE": "true",
+                "FORCE_REVIEW": "true",
+                "SKIP_IF_DIFF_UNCHANGED": "false",
+            },
         }
 
         run = run_review_for_pr(pr_entry, "tools_off", tmp_path, model_config)
