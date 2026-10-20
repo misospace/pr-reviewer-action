@@ -257,12 +257,15 @@ export function formatOutputAssignment(
   return `${key}<<${delimiter}\n${value}\n${delimiter}\n`;
 }
 
-const CONFIDENCE_RISK_OUTPUT_VALUES = ["low", "medium", "high", "critical"] as const;
+const CONFIDENCE_RISK_OUTPUT_VALUES = ["low", "medium", "high", "critical", "unknown"] as const;
 
 /** #1073: the five `confidence-*` output assignments, fail-closed at the
  * output boundary: only the exact literals `scored`/`unscored` are written,
- * the integer only for a scored answer, the risk only from the closed enum,
- * and the model-authored reason always redacted. Disabled/absent → all "". */
+ * the integer only for a scored answer, the risk only from the closed enum
+ * (including its documented `unknown` member — a scored answer whose risk
+ * band was not recognized still reports `unknown`, never the empty value
+ * reserved for a disabled scorer), and the model-authored reason always
+ * redacted. Disabled/absent → all "". */
 function confidenceAssignments(outputs: Omit<ReviewStepOutputs, "degradedGateBypass">): Array<[string, string]> {
   const status = outputs.confidenceStatus === "scored" || outputs.confidenceStatus === "unscored"
     ? outputs.confidenceStatus

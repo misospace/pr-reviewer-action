@@ -552,6 +552,21 @@ test("#1073: confidence profile inherits the primary lane when ai-confidence-bas
   assert.deepEqual(resolved.warnings, []);
 });
 
+test("#1073: an explicit ai-confidence-api-key is used even when ai-confidence-base-url is empty", () => {
+  // The operator named the credential they want the scorer to answer with:
+  // it is used as-is even on the SAME endpoint (where only the transport is
+  // inherited), and the primary lane's key is never sent instead.
+  const resolved = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_CONFIDENCE_MODEL: "scorer-model", AI_CONFIDENCE_API_KEY: "scorer-key",
+  });
+  assert.equal(resolved.profile.apiKey, "scorer-key");
+  assert.equal(resolved.profile.credentialSource, "own");
+  assert.equal(resolved.profile.inheritedTransport, true);
+  assert.equal(resolved.profile.baseUrl, "https://primary");
+  assert.deepEqual(resolved.warnings, []);
+});
+
 test("#1073: a distinct confidence base URL never inherits the primary credential", () => {
   const resolved = resolveConfidenceProfile({
     AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: " primary-key ",

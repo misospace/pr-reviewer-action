@@ -305,7 +305,7 @@ inputs:
   - id: ai-confidence-api-key
     required: false
     default: ""
-    description: "API key for the confidence scorer's endpoint. Empty inherits the primary API key ONLY when ai-confidence-base-url is also empty (scorer on the same endpoint); with a distinct ai-confidence-base-url the scorer uses only its own key and never reuses the primary credential."
+    description: "API key for the confidence scorer's endpoint. Empty inherits the primary API key ONLY when ai-confidence-base-url is also empty (scorer on the same endpoint); with a distinct ai-confidence-base-url the scorer uses only its own key and never reuses the primary credential. An explicitly configured key is always used as-is."
   - id: ai-confidence-reasoning-effort
     required: false
     default: ""
@@ -911,7 +911,7 @@ outputs:
     description: "Integer 0-5 confidence score from the scorer; empty when the scorer is disabled or did not produce a usable score (never a spurious 0). Advisory telemetry only — never affects the verdict, findings, or approval."
   - id: confidence-risk
     v2_id: confidence_risk
-    description: "Risk band derived from the confidence score ('low', 'medium', 'high', or 'critical'); 'unknown' when the scorer ran but produced no usable score; empty when the scorer is disabled."
+    description: "Risk band derived from the confidence score ('low', 'medium', 'high', or 'critical'); 'unknown' when the scorer ran but produced no usable score, or returned a risk band outside the closed enum; empty when the scorer is disabled."
   - id: confidence-reason
     v2_id: confidence_reason
     description: "Bounded text explanation from the scorer; possibly empty when the model gave none; empty when the scorer is disabled. Model-authored text, redacted before publication."

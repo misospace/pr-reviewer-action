@@ -224,14 +224,14 @@ function allFiles(dir: string): string[] {
 }
 
 test("#1073: scoring ON publishes an unchanged review and surfaces every confidence surface", async () => {
-  // The concern evidence is hostile on purpose: the published section must
-  // carry it sanitized (no live link, no raw markup) while everything else
-  // stays byte-identical to the scoring-off baseline.
+  // The concern evidence AND its file are hostile on purpose: the published
+  // section must carry both sanitized (no live link, no raw markup) while
+  // everything else stays byte-identical to the scoring-off baseline.
   const scorerAnswer = JSON.stringify({
     score: 4,
     risk: "low",
     reason: "diff is small and fully covered",
-    concerns: [{ file: "README.md", line: 2, evidence: "see [x](https://github.com/o/r/pull/1) and <script>alert(1)</script>" }],
+    concerns: [{ file: "<script>alert(1)</script>", line: 2, evidence: "see [x](https://github.com/o/r/pull/1) and <script>alert(1)</script>" }],
   });
   const server = await startMockServer(routedHandler((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
@@ -360,6 +360,12 @@ test("#1073: scoring ON publishes an unchanged review and surfaces every confide
     assert.ok(!body.includes("](https://github.com/"), "published section must not carry a live upstream link from concern evidence");
     assert.ok(!body.includes("<script"), "published section must not carry raw markup from concern evidence");
     assert.match(body, /upstream o\/r/);
+    // The concern's FILE is model-authored too and takes the same
+    // sanitization as the evidence: the raw markup never reaches the
+    // published surface, and the concern itself still renders.
+    assert.match(body, /&lt;script&gt;/, "the hostile concern file is published HTML-escaped");
+    assert.match(body, /Advisory concern at /, "the concern bullet still renders");
+    assert.match(body, /alert\(1\)/, "the concern content still renders");
   } finally {
     await server.close();
   }
@@ -1189,5 +1195,46 @@ test("#1073: a run that ends unscored clears stale confidence artifacts too", as
     assert.doesNotMatch(incomplete.result.marker, /confidence_score/);
   } finally {
     await failing.close();
+  }
+});
+
+test("#1073: a failed scorer call leaves no wire artifacts beside the fresh unscored score", async () => {
+  // A reused run dir (`PR_REVIEWER_RUN_DIR`) carries the previous run's wire
+  // artifacts. A transport failure produces NO request/response payload, so
+  // the stale files must be REMOVED — never left sitting next to the fresh
+  // `unscored` score, where a later reader could pair an earlier run's wire
+  // artifact with this run's result.
+  const STALE = JSON.stringify({ version: 1, status: "scored", score: 5, risk: "low", reason: "from an earlier run", concerns: [], model: SCORER_MODEL, cause: "", caps: [] });
+  // The scorer lane answers 429; the primary lane still gets its verdict, so
+  // the review itself completes and the run reaches the artifact-write block.
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.statusCode = 429;
+    res.end("rate limited");
+  }));
+  try {
+    const run = await runConfidenceRun(
+      server,
+      { "ai-confidence-model": SCORER_MODEL, "ai-confidence-base-url": server.url },
+      "",
+      false,
+      { seed: { "confidence-request.json": STALE, "confidence-response.json": STALE } },
+    );
+
+    // The scorer call was really attempted, and really failed.
+    assert.equal(scorerRequests(server), 1);
+    assert.equal(run.result.outputs.confidenceStatus, "unscored");
+
+    // The fresh score is written; the stale wire artifacts are gone.
+    assert.ok(existsSync(join(run.runDir, "confidence-score.json")), "the fresh score artifact is missing");
+    assert.ok(!existsSync(join(run.runDir, "confidence-request.json")), "a stale request artifact survived a failed scorer call");
+    assert.ok(!existsSync(join(run.runDir, "confidence-response.json")), "a stale response artifact survived a failed scorer call");
+    const scoreArtifact = JSON.parse(readFileSync(join(run.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(scoreArtifact.status, "unscored");
+    assert.equal(scoreArtifact.cause, "http_429");
+
+    // The review itself is untouched by the failed scorer call.
+    assert.equal(run.result.outputs.verdict, "approve");
+  } finally {
+    await server.close();
   }
 });

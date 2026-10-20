@@ -345,12 +345,11 @@ export function collectConfigLines(env: Record<string, string>): string[] {
       // cannot cover: it is secret, but a rotation changes the answer, so it
       // contributes as a domain-separated one-way digest — the same shape
       // `extraHeaderFingerprint` emits for header values. The gate is
-      // "configured", not "resolves to a different credential than the
-      // primary": a same-endpoint scorer inherits the primary key and ignores
-      // its own, so digesting it there re-scores a run nothing changed. That
-      // is deliberate — mirroring `resolveConfidenceProfile`'s inheritance
-      // rule here would couple the fingerprint to routing semantics, and the
-      // over-eager direction only ever costs a fresh review.
+      // "configured", and digesting it is REQUIRED for correctness: a
+      // configured scorer key IS used (including on the same endpoint, where
+      // the transport is the primary's but the credential is the scorer's
+      // own), so a rotation changes WHICH credential answers and must
+      // invalidate the cached score. The digest is never the raw secret.
       if (key.endsWith("_API_KEY")) {
         lines.push(`${key}=${credentialDigest(key, value)}`);
         continue;

@@ -96,6 +96,29 @@ test("#1003: formatReviewStepOutputs fails an unsubstantiated not_required close
   assert.ok(didNotRun.includes("review-triage-decision=\n"), didNotRun);
 });
 
+// #1073: the confidence risk band is a closed enum, and `unknown` is one of
+// its documented members — a SCORED answer whose risk band was not
+// recognized reports `unknown`, never the empty value (which is reserved for
+// a disabled scorer). A scored status with no risk at all still writes the
+// empty value.
+test("#1073: a scored confidence risk outside the closed enum writes unknown; an empty risk stays empty", () => {
+  const base = {
+    verdict: "approve", verdictSource: "model", requiredChecks: "complete", reviewResult: "clean", incompleteReason: "none", reviewRoute: "primary",
+    escalationReason: "", reviewTriageDecision: "", reviewTriageReason: "", reviewTriageRouting: "",
+    confidenceStatus: "scored", confidenceScore: "4", confidenceReason: "looks fine", confidenceModel: "scorer-model",
+    findings: "[]", reviewMarkdown: "a", analysisEngine: "engine", toolCalls: "[]", cacheHitRatio: "-",
+  };
+  const bytes = (): Uint8Array => new Uint8Array(16).fill(0xab);
+
+  const unknownRisk = formatReviewStepOutputs({ ...base, confidenceRisk: "unknown" }, bytes);
+  assert.ok(unknownRisk.includes("confidence-status=scored\n"), unknownRisk);
+  assert.ok(unknownRisk.includes("confidence-risk=unknown\n"), unknownRisk);
+
+  const emptyRisk = formatReviewStepOutputs({ ...base, confidenceRisk: "" }, bytes);
+  assert.ok(emptyRisk.includes("confidence-status=scored\n"), emptyRisk);
+  assert.ok(emptyRisk.includes("confidence-risk=\n"), emptyRisk);
+});
+
 test("tool calls compact primary and smart harness traces; missing traces are empty", () => {
   assert.equal(buildToolCallsOutput(
     { tool_calls: [{ tool: "git_status_short", status: "ok", args: "omit" }, { tool: "git_diff_stat", status: "error" }, { status: "ignored" }] },

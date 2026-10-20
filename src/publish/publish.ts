@@ -468,7 +468,9 @@ export function renderIndependentConfidenceBlock(
   // Advisory concern bullets: explicitly NOT findings — bounded, sanitized,
   // locations rendered as inert code spans, and the bullet text says so.
   for (const concern of (confidence.concerns ?? []).slice(0, 8)) {
-    const file = escapeCodeSpan(String(concern.file ?? "").slice(0, 300), 300);
+    const file = escapeTableCell(
+      sanitizeMarkdown(redactText(escapeCodeSpan(String(concern.file ?? ""), 300)), linkMode),
+    );
     const line = typeof concern.line === "number" && Number.isInteger(concern.line) && concern.line >= 0
       ? `:${concern.line}`
       : "";

@@ -633,14 +633,16 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
     ? (configuredFormat === "openai" || configuredFormat === "anthropic" ? configuredFormat : primary.apiFormat)
     : primary.apiFormat;
 
-  // Credential rule (#1073): same-endpoint scoring inherits the primary
-  // credential (it is the same backend, so there is nothing to separate);
-  // a DISTINCT base URL never does — the scorer uses only its own key, and
-  // a distinct URL without an explicit key is warned about rather than
-  // silently degrading.
+  // Credential rule (#1073): an explicitly configured scorer key is ALWAYS
+  // used as-is — including on the same endpoint, where the operator named the
+  // credential they want to answer with. Only an EMPTY key inherits, and only
+  // when the endpoint is the primary's own (it is the same backend, so there
+  // is nothing to separate); a DISTINCT base URL never inherits — the scorer
+  // uses only its own key, and a distinct URL without an explicit key is
+  // warned about rather than silently degrading.
   const inheritedTransport = !distinctEndpoint;
   const resolvedBaseUrl = distinctEndpoint ? baseUrl : primary.baseUrl;
-  const apiKeyResolved = distinctEndpoint ? apiKey : primary.apiKey;
+  const apiKeyResolved = apiKey !== "" ? apiKey : (distinctEndpoint ? "" : primary.apiKey);
   if (distinctEndpoint && apiKey === "") {
     warnings.push(
       "confidence scorer: ai-confidence-base-url is set but ai-confidence-api-key is empty — a distinct endpoint never inherits the primary API key; set ai-confidence-api-key explicitly",
@@ -670,7 +672,7 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
       requestTimeoutSec: numberValue(env, "AI_CONFIDENCE_TIMEOUT_SEC", 120),
       reasoningEffort: effort.value,
       inheritedTransport,
-      credentialSource: distinctEndpoint ? "own" : "primary",
+      credentialSource: apiKey !== "" || distinctEndpoint ? "own" : "primary",
     },
     warnings,
   };

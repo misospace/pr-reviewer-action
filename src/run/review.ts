@@ -1554,9 +1554,16 @@ secrets: [profiles.primary.apiKey],
       // `Bearer …`, `sk-…`) this run never configured persisted verbatim in
       // the diagnostic artifacts.
       ws.write("confidence-request.json", pyJsonDumps(redactTextDeep(confidenceOutcome.requestPayload, confidenceSecrets)));
+    } else {
+      // A failed scorer call must not leave an earlier run's wire artifact
+      // sitting next to the fresh `unscored` score.
+      ws.remove("confidence-request.json");
     }
     if (confidenceOutcome.rawResponse !== null) {
       ws.write("confidence-response.json", pyJsonDumps(redactTextDeep(confidenceOutcome.rawResponse, confidenceSecrets)));
+    } else {
+      // Same rule as the request artifact above.
+      ws.remove("confidence-response.json");
     }
     if (confidenceResult.status === "unscored") {
       // The log line goes through the same masking as the artifact: a
