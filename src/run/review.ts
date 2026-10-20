@@ -71,7 +71,8 @@ import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
-import { applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope, type RequirementTraceRepairOutcome } from "../enforcement/requirement-trace.js";
+import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
+import { createTraceGapProbe, traceGapContinuationSummary } from "../requirements/trace-gap-probe.js";
 import { runRequirementTraceRepairPass, traceRepairOutcomeSummary } from "../requirements/trace-repair.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
@@ -968,6 +969,11 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   const traceScopeIds = requirementTraceEnabled
     ? requirementTraceScope(ledgerValue, traceChanged, { ownership: traceOwnership.rules, paths: tracePaths }).inScope.map((entry) => entry.id)
     : [];
+  // #1145: ledger texts for the in-scope ids, for the confirmed-unmet
+  // escalation's bounded finding messages (untrusted text — sanitized there).
+  const traceRequirementTexts = new Map(
+    ledgerRequirementsById(ledgerValue, traceScopeIds).map((entry) => [entry.id, entry.text] as const),
+  );
   const distributedHints = distributedRequirementHints(ledgerValue, traceOwnership.rules, traceScopeIds);
   for (const warning of distributedRequirementWarnings(ledgerValue, traceOwnership.rules, traceScopeIds)) {
     errorLog(`requirement owners: ${warning}`);
@@ -997,6 +1003,10 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
 
   // ── Native tool harness (corpus.sh tail) ─────────────────────────────
   const toolMode = (env.TOOL_MODE ?? "off").toLowerCase();
+  // #1145: the harness-owned evidence-repair continuation record (present
+  // only when the probe fired or was skipped) — surfaced on the
+  // requirement-trace repair summary and the review-coverage record.
+  let traceGapContinuation: TraceGapContinuationSummary | null = null;
   if (toolMode === "native_loop") {
     const toolGate = gateForkForForks(env, forkFlag);
     if (toolGate !== null) {
@@ -1007,7 +1017,31 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
       // The tier names the first-pass artifact slot; the loop limits follow
       // the tier (loopLimitsProfile).
       env.TOOL_HARNESS_TIER = "primary";
-      await runToolHarnessPhase(ws, env, workspace, log);
+      // #1145: bounded evidence-repair continuation probe — wired into the
+      // PRIMARY loop only (the smart tier keeps its pre-#1145 shape). The
+      // gate mirrors the #959 no-tools repair pass: the probe re-validates
+      // with the same deterministic validator the publication path uses, so
+      // with an operator replace-mode prompt there is no trace contract to
+      // repair against, and the primary profile must be resolvable for the
+      // loop to re-request a verdict on the same route.
+      const traceGapProbe = requirementTraceEnabled
+        && traceScopeIds.length > 0
+        && promptState.isDefault
+        && profiles.primary.baseUrl !== ""
+        && profiles.primary.model !== ""
+        ? createTraceGapProbe({
+          ledger: ledgerValue,
+          traceScopeIds,
+          workspace,
+          changed: traceChanged,
+          ownership: traceOwnership.rules,
+          paths: tracePaths,
+          prBody: tracePrBody,
+          ciState: traceCiState,
+        })
+        : undefined;
+      await runToolHarnessPhase(ws, env, workspace, log, traceGapProbe);
+      traceGapContinuation = traceGapContinuationSummary(safeJson(ws.read("tool-harness.json")));
     }
     corpusResult = assembleCorpus(ws, env, budgets, profileKey, "primary", generatedPaths, standards);
     if (corpusResult.overBudget) errorLog(`ERROR: assembled corpus exceeds its context budget`);
@@ -1087,10 +1121,10 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     const missingTraceIds = missingTraceRequirementIds(repairTarget.requirement_coverage, traceScopeIds);
     const repairRequirements = missingTraceIds.length > 0 ? ledgerRequirementsById(ledgerValue, missingTraceIds) : [];
     if (missingTraceIds.length === 0) {
-      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "no_missing_ids", missingIds: missingTraceIds, secrets: [profiles.primary.apiKey] });
+      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "no_missing_ids", missingIds: missingTraceIds, secrets: [profiles.primary.apiKey], ...(traceGapContinuation !== null ? { continuation: traceGapContinuation } : {}) });
     } else if (!promptState.isDefault || analysisEngine === MODEL_UNAVAILABLE_ENGINE || !profiles.primary.baseUrl || !profiles.primary.model || repairRequirements.length === 0) {
       // The pass exists but its own gates kept it from running at all.
-      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "skipped_by_gate", missingIds: missingTraceIds, secrets: [profiles.primary.apiKey] });
+      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "skipped_by_gate", missingIds: missingTraceIds, secrets: [profiles.primary.apiKey], ...(traceGapContinuation !== null ? { continuation: traceGapContinuation } : {}) });
     } else {
       const rawTemp = (env.AI_TEMPERATURE ?? "").trim();
       const temperature = rawTemp === "" || Number.isNaN(Number(rawTemp)) ? null : Number(rawTemp);
@@ -1166,6 +1200,11 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
           missing_ids: missingTraceIds,
           claims: repaired.claims.length,
           diff_clipped: repaired.diffClipped,
+          // #1145: the loop's own in-conversation continuation (if the probe
+          // fired or was skipped in this run) — the no-tools pass above and
+          // the loop's continuation are distinct attempts and both are
+          // reported.
+          ...(traceGapContinuation !== null ? { trace_gap_continuation: traceGapContinuation } : {}),
         })}\n`, "utf8"));
         if (repaired.claims.length > 0) {
           repairTarget.requirement_coverage = mergeTraceClaims(repairTarget.requirement_coverage, repaired.claims);
@@ -1187,6 +1226,7 @@ missingIds: missingTraceRequirementIds(repairTarget.requirement_coverage, traceS
 result: repaired,
 thrownError: repaired === null ? repairThrow : undefined,
 secrets: [profiles.primary.apiKey],
+...(traceGapContinuation !== null ? { continuation: traceGapContinuation } : {}),
 });
     }
     if (traceRepairOutcome !== null) {
@@ -1266,6 +1306,15 @@ secrets: [profiles.primary.apiKey],
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
     requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState, traceRepair: traceRepairOutcome ?? undefined });
+    // #1145: confirmed-unmet escalation — the one case where a synthesized
+    // finding is allowed (#1095's no-synthesis rule covers ledger-only
+    // claims, not a row the validator refuted by re-deriving the
+    // requirement's truth from the repository state at head — #985's
+    // structural proof). Runs before the overlays and the strict mapping so
+    // the synthesized blockers count toward the open-findings set.
+    if (requirementTraceResult.applied) {
+      applyConfirmedUnmetEscalation(reviewRecord as never, requirementTraceResult.trace, traceRequirementTexts);
+    }
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
@@ -1286,6 +1335,16 @@ secrets: [profiles.primary.apiKey],
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
     requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState, traceRepair: traceRepairOutcome ?? undefined });
+    // #1145: confirmed-unmet escalation (same rationale as the strict
+    // branch above: only a row the validator refuted against the repository
+    // state at head — #985's structural proof — is escalated; a
+    // copies-without-comparing row stays a repairable coverage gap). The
+    // relaxers below all refuse to re-approve once
+    // `requirement_trace_incomplete` is set or an open non-verification
+    // blocker exists, so the flip is stable.
+    if (requirementTraceResult.applied) {
+      applyConfirmedUnmetEscalation(reviewRecord as never, requirementTraceResult.trace, traceRequirementTexts);
+    }
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     // #977: the model's own request_changes is relaxed only when every
     // still-open finding is a verification ask and no independent
@@ -1404,6 +1463,10 @@ secrets: [profiles.primary.apiKey],
     partial_coverage: partialCoverage ?? null,
     required_checks: outputRequiredChecks,
     ...(incompleteReason !== "none" ? { incomplete_reason: incompleteReason } : {}),
+    // #1145: the native loop's own bounded evidence-repair continuation
+    // record (its outcome enum distinguishes a run continuation from
+    // skipped_no_budget), when the probe fired or was skipped.
+    ...(traceGapContinuation !== null ? { trace_repair_continuation: traceGapContinuation } : {}),
   };
   ws.write("review-coverage.json", Buffer.from(`${pyJsonDumps(reviewCoverage)}\n`, "utf8"));
 

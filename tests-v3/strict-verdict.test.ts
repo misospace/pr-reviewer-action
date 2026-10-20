@@ -458,8 +458,11 @@ test("#954: trace-only incompleteness renders trace-appropriate prose and preser
     mode: "review_verdict", allowApprove: true,
     requiredChecks: "incomplete", incompleteReason: "requirement_trace",
   }), native, { diffText: "" });
+  // #1145: the native event follows the verdict; the trace gap is a note on
+  // the approved review, never a COMMENT downgrade.
+  assert.equal(native.submitted[0]!.event, "APPROVE");
   const nativeBody = native.submitted[0]!.body;
-  assert.ok(nativeBody.includes("**Approval withheld**: the review completed, but an in-scope requirement lacks verifiable enforcement or test evidence"));
+  assert.ok(nativeBody.includes("**Approval published with incomplete coverage**: an in-scope requirement lacks fully verified enforcement or test evidence"));
   assert.ok(!nativeBody.includes("required-check coverage or the tool-loop investigation did not finish"));
 });
 
@@ -473,7 +476,8 @@ test("#954: execution plus trace incompleteness gets combined prose", async () =
 
   const native = new MockPublishApi();
   await publishReview(publishInput({ mode: "review_verdict", allowApprove: true, requiredChecks: "incomplete", incompleteReason: "both" }), native, { diffText: "" });
-  assert.ok(native.submitted[0]!.body.includes("execution coverage and an in-scope requirement lacks verifiable enforcement or test evidence"));
+  assert.equal(native.submitted[0]!.event, "APPROVE");  // #1145: no COMMENT downgrade
+  assert.ok(native.submitted[0]!.body.includes("execution coverage is incomplete and an in-scope requirement lacks fully verified enforcement or test evidence"));
 });
 
 test("#954: execution and legacy incomplete publish callers keep the generic coverage notice", async () => {

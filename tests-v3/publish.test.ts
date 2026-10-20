@@ -357,17 +357,30 @@ test("#1161: a blocking request is never downgraded by the scope or the coverage
   }
 });
 
-test("#1161: a hostile verdict is never published as an approval, even under a permissive scope", async () => {
+test("#1161/#1145: a hostile verdict is never published as an approval, even under a permissive scope", async () => {
   // `toString` is the inherited-property trap for a plain object lookup:
   // a verdict map indexed without a type guard would read it as a verdict.
   for (const verdict of ["toString", "constructor", "hasOwnProperty", "APPROVE", ""]) {
+    // #1145: in `review_verdict` a run without a valid final verdict is an
+    // explicit action failure — nothing is published, so a hostile verdict
+    // can never reach the forge at all.
     const api = new MockPublishApi();
     const result = await publishReview(input({
       mode: "review_verdict", verdict, isForkPr: true, approveForks: true,
     }), api, { diffText: "" });
-    assert.equal(result.status, "published", verdict);
-    assert.equal(api.submitted[0]!.event, "COMMENT", verdict);
-    assert.ok(api.submitted[0]!.body.includes("No review verdict"), verdict);
+    assert.equal(result.status, "failed", verdict);
+    assert.equal(api.submitted.length, 0, verdict);
+    assert.match(result.error ?? "", /#1145/, verdict);
+
+    // #1161: the blockers-only mode publishes an advisory comment, so the
+    // hostile verdict still has to be neutralized there.
+    const blockersApi = new MockPublishApi();
+    const blockersResult = await publishReview(input({
+      mode: "review_blockers", verdict, isForkPr: true, approveForks: true,
+    }), blockersApi, { diffText: "" });
+    assert.equal(blockersResult.status, "published", verdict);
+    assert.equal(blockersApi.submitted[0]!.event, "COMMENT", verdict);
+    assert.ok(blockersApi.submitted[0]!.body.includes("No review verdict"), verdict);
   }
 });
 
@@ -429,19 +442,26 @@ test("#1161: an observed allow-approve warns about its deprecation; an absent in
   assert.ok(!absentResult.messages.some((message) => message.includes("allow-approve")));
 });
 
-test("#1161: a missing or invalid verdict is never published as an approval or a blocking request", async () => {
-  for (const mode of ["review_verdict", "review_blockers"] as const) {
-    // `toString` is the hostile case for the verdict lookup: a plain object
-    // index would return an inherited member instead of "no verdict".
-    for (const verdict of ["", "maybe", "APPROVE", "toString"]) {
-      const api = new MockPublishApi();
-      const result = await publishReview(input({ mode, verdict }), api, { diffText: "" });
-      assert.equal(result.status, "published", `${mode}/${verdict}`);
-      assert.equal(api.submitted.length, 1, `${mode}/${verdict}`);
-      assert.equal(api.submitted[0]!.event, "COMMENT", `${mode}/${verdict}`);
-      assert.ok(api.submitted[0]!.body.includes("No review verdict"), `${mode}/${verdict}`);
-      assert.ok(result.messages.some((message) => message.includes("no valid verdict produced")), `${mode}/${verdict}`);
-    }
+test("#1161/#1145: a missing or invalid verdict is never published as an approval or a blocking request", async () => {
+  // `toString` is the hostile case for the verdict lookup: a plain object
+  // index would return an inherited member instead of "no verdict".
+  for (const verdict of ["", "maybe", "APPROVE", "toString"]) {
+    // #1145: verdict mode fails the action — `COMMENTED` is not an
+    // alternate failure state for a run that never produced a verdict.
+    const api = new MockPublishApi();
+    const result = await publishReview(input({ mode: "review_verdict", verdict }), api, { diffText: "" });
+    assert.equal(result.status, "failed", `review_verdict/${verdict}`);
+    assert.equal(api.submitted.length, 0, `review_verdict/${verdict}`);
+    assert.match(result.error ?? "", /review_verdict mode requires a final verdict/, `review_verdict/${verdict}`);
+
+    // #1161: the blockers-only mode publishes an advisory comment instead.
+    const blockersApi = new MockPublishApi();
+    const blockersResult = await publishReview(input({ mode: "review_blockers", verdict }), blockersApi, { diffText: "" });
+    assert.equal(blockersResult.status, "published", `review_blockers/${verdict}`);
+    assert.equal(blockersApi.submitted.length, 1, `review_blockers/${verdict}`);
+    assert.equal(blockersApi.submitted[0]!.event, "COMMENT", `review_blockers/${verdict}`);
+    assert.ok(blockersApi.submitted[0]!.body.includes("No review verdict"), `review_blockers/${verdict}`);
+    assert.ok(blockersResult.messages.some((message) => message.includes("no valid verdict produced")), `review_blockers/${verdict}`);
   }
 });
 
@@ -705,8 +725,11 @@ test("#847: without a tool harness the marker stays byte-identical to the pre-#8
 
 // ---------------------------------------------------------------------------
 // #873 — required-check coverage incomplete (or a #810 tool-loop coverage
-// gap) must never let an approve publish as APPROVE, under every verdict
-// policy and publish mode. Evidence: PR #854 published APPROVE with
+// gap) must never let a run READ as clean: the marker stays `partial` under
+// every verdict policy. #1145 restated the event rule: in `review_verdict`
+// the valid verdict publishes its native event with the gap stated (no
+// COMMENT downgrade); comment-only modes still never header as an approval.
+// Evidence: PR #854 published APPROVE with
 // "review_result":"partial","required_checks":"incomplete" in its marker.
 // ---------------------------------------------------------------------------
 
@@ -749,7 +772,7 @@ const INCOMPLETE_STATES: Array<{ name: string; requiredChecks: string; partialCo
 
 for (const state of INCOMPLETE_STATES) {
   for (const verdictPolicy of VERDICT_POLICIES) {
-    test(`review_verdict: ${state.name} + approve (policy=${verdictPolicy ?? "default"}) never publishes APPROVE`, async () => {
+    test(`review_verdict: ${state.name} + approve (policy=${verdictPolicy ?? "default"}) publishes APPROVE with an explicit gaps note (#1145)`, async () => {
       const api = new MockPublishApi();
       const result = await publishReview(input({
         mode: "review_verdict", allowApprove: true, verdict: "approve",
@@ -759,12 +782,13 @@ for (const state of INCOMPLETE_STATES) {
       }), api, { diffText: "" });
       assert.equal(result.status, "published");
       assert.equal(api.submitted.length, 1);
-      assert.notEqual(api.submitted[0]!.event, "APPROVE");
-      assert.equal(api.submitted[0]!.event, "COMMENT");
-      // #873's safety property, unchanged by #1161: an approve never
-      // publishes as APPROVE while coverage is incomplete. The residual
-      // trace/coverage downgrade itself is #1145's scope.
-      assert.match(api.submitted[0]!.body, /Approval withheld/);
+      // #1145: the publish mode is authoritative — the verdict's native event
+      // is never downgraded by a coverage/trace shortfall...
+      assert.equal(api.submitted[0]!.event, "APPROVE", `policy=${verdictPolicy}`);
+      // ...but the shortfall stays machine- and human-readable: partial
+      // marker + explicit note on the approved review.
+      assert.match(api.submitted[0]!.body, /Approval published with incomplete coverage/);
+      assert.match(api.submitted[0]!.body, /"review_result":"partial"/);
     });
 
     test(`comment: ${state.name} + approve (policy=${verdictPolicy ?? "default"}) never headers as APPROVE`, async () => {
@@ -816,6 +840,28 @@ test("review_verdict: request_changes stays REQUEST_CHANGES even with incomplete
   }), api, { diffText: "" });
   assert.equal(result.status, "published");
   assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
+});
+
+test("review_verdict: an unknown coverage state names BOTH possible causes in the approval note", async () => {
+  // #1145: coverage can be unknown because the run directory was missing OR
+  // because the run directory's coverage artifact was unreadable or
+  // unrecognized. The note must not claim the run directory was absent —
+  // that would be a fact the publisher cannot know.
+  const api = new MockPublishApi();
+  const result = await publishReview(input({
+    mode: "review_verdict", allowApprove: true, verdict: "approve", requiredChecks: "complete",
+    coverageUnknown: true,
+  }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted[0]!.event, "APPROVE");
+  const body = api.submitted[0]!.body;
+  assert.match(body, /Approval published with incomplete coverage/);
+  assert.ok(body.includes("tool-loop coverage could not be verified"), "the stable phrase is kept");
+  assert.ok(
+    body.includes("(the run directory or its coverage artifact was unavailable to confirm it)"),
+    "the parenthetical names both causes",
+  );
+  assert.ok(!body.includes("no run directory was available"), "the old, narrower claim is gone");
 });
 
 test("#1161: the deprecated allow-approve input no longer withholds an approval (the pre-#1161 policy-block message is gone)", async () => {

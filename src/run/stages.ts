@@ -42,7 +42,7 @@ import { enforcementView as humanEnforcementView, prepareReviews, renderOutstand
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { runEvidenceProvidersPhase } from "../evidence/index.js";
-import { runToolHarness, type HarnessTransport } from "../tools/harness.js";
+import { runToolHarness, type HarnessDeps, type HarnessTransport, type TraceGapProbe } from "../tools/harness.js";
 import { runChatRequest } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
 import { extraHeadersForEnv } from "../transport/headers.js";
@@ -611,8 +611,12 @@ export function normalizedToOpenAiChat(response: NormalizedModelResponse): Recor
   return shaped;
 }
 
-export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDir: string, log: (line: string) => void): Promise<void> {
-  await runToolHarness({
+/** #1145: the probe is threaded through `HarnessDeps` as an additive
+ * optional field (the harness's `RunNativeLoopInput` carries it; the native
+ * loop invokes it at most once after an accepted verdict). Omitting it
+ * keeps the loop byte-for-byte pre-#1145. */
+export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDir: string, log: (line: string) => void, traceGapProbe?: TraceGapProbe): Promise<void> {
+  const deps: HarnessDeps & { traceGapProbe?: TraceGapProbe } = {
     env,
     cwd: runDir,
     readText: (name) => ws.readText(name),
@@ -623,7 +627,9 @@ export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDi
     deleteArtifact: (name) => ws.remove(name),
     transport: harnessTransportAdapter(env),
     log,
-  });
+    ...(traceGapProbe !== undefined ? { traceGapProbe } : {}),
+  };
+  await runToolHarness(deps);
 }
 
 // ---------------------------------------------------------------------------
