@@ -328,6 +328,9 @@ test("#1016 synthesized thread re-emissions added after the boundary are not dem
 test("#1016 native review is not REQUEST_CHANGES once marker claims are refuted", async () => {
   class RecordingApi {
     readonly head = "head-123";
+    // #588: the native review surface is declared explicitly, so the publish
+    // step's untyped-caller fallback is never taken in this suite.
+    readonly nativeReviewSurface = { supported: true };
     readonly submitted: NativeReviewRequest[] = [];
     async getHeadSha(): Promise<string | null> { return this.head; }
     async createReview(request: NativeReviewRequest): Promise<{ ok: boolean }> {
@@ -378,6 +381,9 @@ test("#1016 native review stays REQUEST_CHANGES once marker claims are unverifie
   // control call (un-demoted artifact) emits.
   class RecordingApi {
     readonly head = "head-123";
+    // #588: the native review surface is declared explicitly, so the publish
+    // step's untyped-caller fallback is never taken in this suite.
+    readonly nativeReviewSurface = { supported: true };
     readonly submitted: NativeReviewRequest[] = [];
     async getHeadSha(): Promise<string | null> { return this.head; }
     async createReview(request: NativeReviewRequest): Promise<{ ok: boolean }> {
