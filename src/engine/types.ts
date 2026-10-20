@@ -32,7 +32,10 @@ export interface ReviewRequest {
   ambient: Record<string, string | undefined>;
   /** Why this review runs ("push", "label", "comment-command", "manual", ...). */
   triggerReason: string;
-  /** Explicit re-review intent (the `ai-review` label semantics). */
+  /** Explicit re-review intent (the `ai-review` label semantics): projected
+   * to precheck's FORCE_REVIEW gate, which overrides only the diff-unchanged
+   * fingerprint skip — the draft, fork, stale-head and label/comment gates
+   * are untouched. */
   forceRereview: boolean;
   /** The forge event the host already RECEIVED (#726: event reception stays
    * host-owned; the request carries the received event summary so the
@@ -44,9 +47,10 @@ export interface ReviewRequest {
   /** Cancellation: when provided and aborted, the engine aborts its internal
    * v3 cancellation scope (src/runtime/signals.ts) and refuses to start when
    * already aborted. An abort at any later point also throws — a cancelled run
-   * never resolves with a result. Provenance-only fields: `triggerReason` and
-   * `forceRereview` are recorded, never consulted (rerun admission is the
-   * engine's first stage — see docs/architecture/engine-boundary.md). */
+   * never resolves with a result. Provenance-only field: `triggerReason` is
+   * recorded, never consulted; `forceRereview` is projected to precheck's
+   * FORCE_REVIEW gate (rerun admission is the engine's first stage — see
+   * docs/architecture/engine-boundary.md). */
   signal?: AbortSignal;
 }
 

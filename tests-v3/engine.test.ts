@@ -529,6 +529,85 @@ test("engine admission: force rereview intent reviews despite a stored fingerpri
   } finally { await server.close(); f.cleanup(); }
 });
 
+test("engine admission: forceRereview projects to precheck's FORCE_REVIEW gate", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    const first = await runReviewEngine(admissionRequest(server.url, f.runDir), { ...engineDeps(f.root, f.runDir), adapter: admissionAdapter() });
+    const fingerprint = first.diffFingerprint;
+    const requestsAfterFirst = server.requests.length;
+    const stored = {
+      comments: [{ body: `<!-- ai-pr-reviewer -->
+<!-- ai-pr-review-fingerprint:${fingerprint} -->
+`, author: "ci-bot" }],
+      identity: "ci-bot",
+    };
+    // Without the intent the stored fingerprint still skips…
+    const runDir2 = join(f.root, "run-2");
+    mkdirSync(runDir2);
+    const skipped = await runReviewEngine(
+      admissionRequest(server.url, runDir2, { forceRereview: false }),
+      { ...engineDeps(f.root, runDir2), adapter: admissionAdapter(stored) },
+    );
+    assert.equal(skipped.shouldReview, false);
+    assert.equal(skipped.skipReason, "diff-unchanged");
+    const requestsAfterSkip = server.requests.length;
+    // …and with it the same request reviews afresh.
+    const runDir3 = join(f.root, "run-3");
+    mkdirSync(runDir3);
+    const forced = await runReviewEngine(
+      admissionRequest(server.url, runDir3, { forceRereview: true }),
+      { ...engineDeps(f.root, runDir3), adapter: admissionAdapter(stored) },
+    );
+    assert.equal(forced.shouldReview, true);
+    assert.ok(server.requests.length > requestsAfterSkip, "the forced re-review reached the model");
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("engine admission: an explicit head pin that no longer matches skips superseded-head with no model spend", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    const result = await runReviewEngine(
+      admissionRequest(server.url, f.runDir, { headSha: "c".repeat(40) }),
+      { ...engineDeps(f.root, f.runDir), adapter: admissionAdapter() },
+    );
+    assert.equal(result.shouldReview, false);
+    assert.equal(result.skipReason, "superseded-head");
+    assert.equal(result.reviewedHeadSha, "a".repeat(40), "the skip carries admission's resolved head");
+    assert.equal(server.requests.length, 0, "the superseded skip made no model call");
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("engine admission: a matching head pin is the verified reviewed head on the result", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    const result = await runReviewEngine(
+      admissionRequest(server.url, f.runDir, { headSha: "a".repeat(40) }),
+      { ...engineDeps(f.root, f.runDir), adapter: admissionAdapter() },
+    );
+    assert.equal(result.shouldReview, true);
+    assert.equal(result.reviewedHeadSha, "a".repeat(40));
+    assert.equal(result.isForkPr, "false");
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("engine admission: contradictory event and head pins reject before any adapter or model call", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    await assert.rejects(
+      runReviewEngine(
+        admissionRequest(server.url, f.runDir, { headSha: "c".repeat(40), eventHeadSha: "a".repeat(40) }),
+        engineDeps(f.root, f.runDir),
+      ),
+      (error: unknown) => error instanceof RunReviewError && /contradictory request: eventHeadSha/.test(error.message),
+    );
+    assert.equal(server.requests.length, 0, "nothing reached the model");
+  } finally { await server.close(); f.cleanup(); }
+});
+
 test("the Action env adapter and the engine produce identical admission decisions", async () => {
   const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
   const f = fixture();

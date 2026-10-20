@@ -194,6 +194,12 @@ export interface RunReviewResult {
   /** #726: admission's resolved base SHA — the publish env's `BASE_SHA` and
    * (when the request left `baseRef` empty) the repository-config source. */
   admissionBaseSha: string;
+  /** #726: the verified reviewed head — the explicit pin when present, else
+   * the event head or admission's resolved head; publish env's HEAD_SHA. */
+  reviewedHeadSha: string;
+  /** #726: the final resolved cross-repository PR flag ('true'/'false'/'' unknown)
+   * the review stages ran with; publish env's IS_FORK_PR. */
+  isForkPr: string;
   /** #726: the full admission surface (carried verdict/verdict-source/
    * review-result/incomplete-reason/degraded-gate-bypass on a diff-unchanged
    * skip, resolved platform, fork flag, carried head SHA). */
@@ -377,6 +383,15 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     throw new RunReviewError("refusing to start a review inside a gate child process");
   }
   const contract = validateContract(V3_CONTRACT);
+  // A request that pins BOTH the event head and an explicit head to different
+  // commits is contradictory: fail closed loudly instead of silently preferring
+  // one (#726 review). Both values are caller-supplied commit SHAs.
+  if (
+    request.eventHeadSha !== undefined && request.eventHeadSha !== ""
+    && request.headSha !== "" && request.eventHeadSha !== request.headSha
+  ) {
+    throw new RunReviewError(`contradictory request: eventHeadSha ${request.eventHeadSha} and headSha ${request.headSha} name different commits`);
+  }
 
   // ── Admission stage (#726: engine-owned precheck/fingerprint decision) ─
   // The platform adapter is constructed ONCE here — from the pre-admission
@@ -441,12 +456,12 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const prNumber = prNumberRaw !== "" && prNumberRaw !== undefined ? String(prNumberRaw) : request.prNumber;
   // #726: fold the admission outputs into the review stage state exactly the
   // way actionMain did: PLATFORM = resolved (request value as fallback),
-  // FORGEJO_API_URL = admission's effective URL, PR_HEAD_SHA = the event's
-  // head or admission's resolved head, fork flag from admission. Explicit
-  // request fields win only where a direct caller carries them (base ref,
-  // fork flag); the reviewed head is admission-resolved, the same rule the
-  // Action path already applied.
-  const headSha = request.eventHeadSha || pre.head_sha;
+  // FORGEJO_API_URL = admission's effective URL, fork flag from admission.
+  // The reviewed head is the explicit pin when present, else the event's
+  // head, else admission's resolved head — the pin was verified against
+  // admission's supersession check, so pin === pre.head_sha whenever
+  // admission passed with a pin.
+  const headSha = request.headSha !== "" ? request.headSha : (request.eventHeadSha || pre.head_sha);
   const context: RunContext = {
     workspace,
     runDir,
@@ -1993,6 +2008,8 @@ secrets: [profiles.primary.apiKey],
     skipReason: pre.skip_reason,
     diffFingerprint: pre.diff_fingerprint,
     admissionBaseSha: pre.base_sha,
+    reviewedHeadSha: headSha,
+    isForkPr: context.isForkPr,
     admission: pre,
     // #1073: advisory concerns for the published section, scored answers only.
     ...(confidenceResult.status === "scored" ? { confidenceConcerns: confidenceResult.concerns } : {}),
@@ -2049,6 +2066,8 @@ function admissionSkipResult(
     skipReason: pre.skip_reason,
     diffFingerprint: pre.diff_fingerprint,
     admissionBaseSha: pre.base_sha,
+    reviewedHeadSha: pre.head_sha,
+    isForkPr: pre.is_fork_pr,
     admission: pre,
   };
 }

@@ -72,7 +72,12 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   const request: ReviewRequest = {
     repository: env.GITHUB_REPOSITORY ?? "",
     prNumber: env.PR_NUMBER ?? "",
-    headSha: env.PR_HEAD_SHA ?? env.GITHUB_SHA ?? "",
+    // #726 review: the caller's explicit pin only. GITHUB_SHA is the PR
+    // merge-ref commit on synchronize events and the default-branch tip on
+    // comment events — never the reviewed head on any event this action
+    // consumes, and folding it here would newly activate the head pin with a
+    // wrong value. "" = unset; admission resolves from the event.
+    headSha: env.PR_HEAD_SHA ?? "",
     baseRef: env.PR_REVIEWER_BASE_REF ?? "",
     isForkPr: env.IS_FORK_PR ?? "",
     platform: env.PLATFORM ?? "",

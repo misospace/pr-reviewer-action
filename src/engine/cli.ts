@@ -43,8 +43,9 @@ export async function engineMain(argv: string[], _env: NodeJS.ProcessEnv = proce
   // head SHA (`eventHeadSha`); the engine's admission stage consumes them.
   // With neither, admission runs with no event — manual semantics: the
   // label/comment-command gates are inert and the fingerprint skip logic
-  // still applies, so a repeated manual run skips coherently (use
-  // `forceRereview`-style config or FORCE_REVIEW to override).
+  // still applies, so a repeated manual run skips coherently (set
+  // `forceRereview: true` in the request, or FORCE_REVIEW in the ambient
+  // env, to override).
   const event = typeof data.event === "object" && data.event !== null && !Array.isArray(data.event)
     ? data.event as ReviewRequest["event"]
     : undefined;

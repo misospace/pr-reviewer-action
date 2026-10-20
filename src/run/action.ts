@@ -238,11 +238,15 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
   if (shouldPublish(stage)) {
     const publishEnv: Env = {
       ...stage,
-      // #726: the folded engine values — the reviewed head is the event's
-      // head or admission's resolved head, and BASE_SHA/BROAD_FINGERPRINT
-      // are admission's, exactly as the pre-#726 fold produced them.
-      HEAD_SHA: eventHeadSha || pre.head_sha,
+      // #726: the folded engine values — the reviewed head is the explicit
+      // pin (reviewedHeadSha, else the event's head or admission's resolved
+      // head), BASE_SHA/BROAD_FINGERPRINT are admission's, and IS_FORK_PR is
+      // the final fork flag the review stages ran with (publish's approval
+      // guardrail fails closed on an unknown fork state), exactly as the
+      // pre-#726 fold produced them.
+      HEAD_SHA: review.reviewedHeadSha || eventHeadSha || pre.head_sha,
       BASE_SHA: pre.base_sha,
+      IS_FORK_PR: review.isForkPr,
       BROAD_FINGERPRINT: pre.diff_fingerprint,
       VERDICT: review.outputs.verdict,
       REQUIRED_CHECKS: review.outputs.requiredChecks,

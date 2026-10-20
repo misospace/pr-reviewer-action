@@ -55,6 +55,11 @@ export function admissionStageEnv(
   env.ACTION_REF = ambient.GITHUB_ACTION_REF ?? "";
   env.LINEAR_API_KEY_CONFIGURED = env.LINEAR_API_KEY ? "true" : "false";
   env.EVENT_HEAD_SHA = request.eventHeadSha ?? "";
+  // #726 review: the request's explicit re-review intent projects to precheck's
+  // FORCE_REVIEW gate. FORCE_REVIEW is outside the fingerprint config sweep
+  // (`collectConfigLines` reads only `AI_*` and the exact config keys), so this
+  // cannot shift the diff-unchanged fingerprint.
+  if (request.forceRereview) env.FORCE_REVIEW = "true";
   // Precheck's repository-skills discovery reads the reviewed checkout.
   env.GITHUB_WORKSPACE = workspace;
   // v2 binding: empty means "unset" everywhere down the stages.
@@ -78,11 +83,18 @@ export async function runEngineAdmission(
   adapter: PlatformAdapter,
   error: (line: string) => void,
 ): Promise<PrecheckOutput> {
+  // #726 review: the caller's explicit head pin binds to the SAME supersession
+  // check the event head uses — a pin that no longer matches the PR's actual
+  // head skips fail-closed (`superseded-head`) instead of being silently
+  // ignored. The event head, when present, still wins the projection.
+  const eventHeadSha = request.eventHeadSha !== undefined && request.eventHeadSha !== ""
+    ? request.eventHeadSha
+    : (request.headSha !== "" ? request.headSha : undefined);
   return await runPrecheck({
     env: admissionStageEnv(contract, request, workspace),
     adapter,
     diagnostics: error,
     ...(request.event !== undefined ? { event: request.event } : {}),
-    ...(request.eventHeadSha !== undefined ? { eventHeadSha: request.eventHeadSha } : {}),
+    ...(eventHeadSha !== undefined ? { eventHeadSha } : {}),
   });
 }
