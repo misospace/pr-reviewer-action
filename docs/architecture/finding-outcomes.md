@@ -145,9 +145,12 @@ enumeration.
 
 Identity provenance: an identity marker counts only on a top-level comment
 of a managed review whose author matches the trusted owner identity the
-carry-marker path itself proves (`resolvePublishTrustedOwner` — resolved once
-per read and threaded from there into the prior-head read, not once per publish
-run) — the same bar the rejection
+carry-marker path itself proves (`resolvePublishTrustedOwner` — resolved
+**once per publish run** and threaded from there into the carry-marker read,
+the prior-head read, and cleanup, so a run proves ownership once instead of
+once per read; the resolution stays lazy — no consumer asks until it has
+something to authorize — and is scoped to one publish run in one process,
+nothing is cached across the precheck/publish boundary) — the same bar the rejection
 carry marker applies, because `selectManagedReviews` matches by body prefix
 and any repo reader could post a marker-shaped comment. Unprovable authors
 contribute nothing. The prior published head obeys the same bar: only an
@@ -174,9 +177,13 @@ On a successful publish, `publishWith` writes `finding-outcomes.json` (the
 serialized ledger: schema, generation metadata, events, aggregate) into the
 run directory — only when the review actually published (a superseded run
 returns before outcomes exist, a failed publication or a failed
-inline-findings submission never carries outcomes) and only when the
+inline-findings submission never carries outcomes), only when the
 enumeration was proven — either a provably empty prior review list or at
-least one prior observation. The producer runs its own event
+least one prior observation — and never on a #588 managed-record path: a
+platform that declares no native review surface never creates the inline
+finding comments the ledger's `reported` events describe (the findings live
+in the managed record's body), so the ledger and its tally line are both
+dropped there. The producer runs its own event
 normalizer before serializing, so the artifact always parses under the same
 rules a reader applies, with the endpoint URL stripped from the model field
 (`publicAnalysisEngine`). Past the 1000-event cap the producer drops the
