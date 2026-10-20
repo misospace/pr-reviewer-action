@@ -287,7 +287,7 @@ test("#1159: masking precedes the 12000-byte embed cut — a credential at the c
   // cut of the serialized projection. Redaction runs BEFORE the cut, so no
   // secret byte can survive inside or past the boundary; the cut's existing
   // mid-JSON degradation (ledger fail-soft skip) is unchanged.
-  const pad = "x".repeat(11800);
+  const pad = "x".repeat(11959);
   const result = await buildLinkedIssueContext({
     pr: { title: "t", body: "Fixes #7" },
     repo: "o/r",
@@ -296,6 +296,10 @@ test("#1159: masking precedes the 12000-byte embed cut — a credential at the c
   });
   const md = text(result.artifacts.get("linked-issues.md"));
   assert.ok(!md.includes("boundary-secret-value-9000"), "no secret survives at or past the byte cut");
+  const fence = /```json\n([\s\S]*?)\n```/.exec(md);
+  assert.ok(fence !== null);
+  assert.equal(Buffer.byteLength(fence![1]!, "utf8"), 12000, "the cut fired mid-projection");
+  assert.throws(() => JSON.parse(fence![1]!), "a mid-JSON cut degrades to the pre-existing ledger fail-soft, not a raw secret");
 });
 
 test("#1159: credential-shaped label names are masked; ordinary trigger labels stay byte-identical", async () => {
