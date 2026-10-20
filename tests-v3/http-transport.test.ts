@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  DEFAULT_TEXT_RESPONSE_MAX_BYTES,
   PlatformRequestError,
   requestBytes,
+  requestJson,
   requestText,
   type BytesRequestOptions,
   type FetchLike,
@@ -299,4 +301,198 @@ test("requestBytes: an explicit timeoutMs still carries an abort signal", async 
     fetchImpl,
   });
   assert.ok(calls[0]!.signal instanceof AbortSignal, "a custom timeout still passes an AbortSignal");
+});
+
+// ── the text/JSON response cap (#1131) ─────────────────────────────────────
+
+const textBase = (over?: Partial<RequestOptions>): RequestOptions => ({
+  allowedOrigin: "https://pds.example.com",
+  ...over,
+});
+
+test("requestText: exactly maxBytes is accepted, one byte more is too-large", async () => {
+  // eight 2-byte characters — 16 UTF-8 bytes — so the cap is provably
+  // enforced on bytes, not on JavaScript string length.
+  const body = "á".repeat(8);
+  const ok = makeFetch(() => new Response(body));
+  const exact = await requestText("https://pds.example.com/issue", {
+    ...textBase({ maxBytes: 16 }),
+    fetchImpl: ok.fetchImpl,
+  });
+  assert.equal(exact.status, 200);
+  assert.equal(exact.text, body, "a body of exactly maxBytes decodes intact");
+
+  const over = makeFetch(() => new Response(body));
+  await assert.rejects(
+    requestText("https://pds.example.com/issue", { ...textBase({ maxBytes: 15 }), fetchImpl: over.fetchImpl }),
+    (e: unknown) => e instanceof PlatformRequestError && e.kind === "too-large",
+    "one byte over the cap must be refused",
+  );
+});
+
+test("requestText: a mid-stream overflow cancels the stream and throws a credential-free too-large", async () => {
+  let cancelled = false;
+  // 3 chunks of 4 bytes (12 total); a 10-byte cap trips on the third chunk
+  // while two unread chunks still sit in the queue. The source is never
+  // closed, so a successful cancel is observable on the underlying source.
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array([0, 1, 2, 3]));
+      controller.enqueue(new Uint8Array([4, 5, 6, 7]));
+      controller.enqueue(new Uint8Array([8, 9, 10, 11]));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const { fetchImpl, calls } = makeFetch(() => new Response(stream, { status: 200 }));
+  await assert.rejects(
+    requestText("https://pds.example.com/issue", {
+      ...textBase({ maxBytes: 10, token: CRED_AUTH }),
+      fetchImpl,
+    }),
+    (e: unknown) =>
+      e instanceof PlatformRequestError &&
+      e.kind === "too-large" &&
+      e.message.includes("10-byte cap") &&
+      !e.message.includes(CRED) &&
+      !e.message.includes("0, 1, 2"),
+    "the error must carry the cap size but neither the credential nor any body content",
+  );
+  assert.equal(cancelled, true, "an overflowing stream must be cancelled, not drained");
+  assert.equal(calls.length, 1);
+});
+
+test("requestText: a chunked body with no Content-Length is read exactly up to the cap", async () => {
+  // A ReadableStream-backed response has no Content-Length header at all —
+  // the cap must come from the streaming read, not any length metadata.
+  const chunks = [new TextEncoder().encode("áá"), new TextEncoder().encode("áá")]; // 8 bytes total
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+      controller.close();
+    },
+  });
+  const { fetchImpl } = makeFetch(() => new Response(stream, { status: 200 }));
+  const exact = await requestText("https://pds.example.com/issue", {
+    ...textBase({ maxBytes: 8 }),
+    fetchImpl,
+  });
+  assert.equal(exact.text, "áááá");
+
+  const oneOver = makeFetch(() => {
+    const second = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(chunk);
+        controller.close();
+      },
+    });
+    return new Response(second, { status: 200 });
+  });
+  await assert.rejects(
+    requestText("https://pds.example.com/issue", { ...textBase({ maxBytes: 7 }), fetchImpl: oneOver.fetchImpl }),
+    (e: unknown) => e instanceof PlatformRequestError && e.kind === "too-large",
+  );
+});
+
+test("requestText: an oversized non-2xx error body throws too-large as well", async () => {
+  const { fetchImpl } = makeFetch(() => new Response("0123456789", { status: 500 }));
+  await assert.rejects(
+    requestText("https://pds.example.com/issue", { ...textBase({ maxBytes: 4 }), fetchImpl }),
+    (e: unknown) =>
+      e instanceof PlatformRequestError && e.kind === "too-large" && e.status === 500,
+    "the cap applies to error responses too",
+  );
+});
+
+test("requestText: a multi-byte UTF-8 sequence split across chunks decodes correctly", async () => {
+  // The 3-byte '€' is split across two chunks; byte-wise accumulation must
+  // reassemble it (no replacement characters from per-chunk decoding).
+  const bytes = new TextEncoder().encode("a€b"); // [0x61, 0xe2, 0x82, 0xac, 0x62]
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes.subarray(0, 2));
+      controller.enqueue(bytes.subarray(2));
+      controller.close();
+    },
+  });
+  const { fetchImpl } = makeFetch(() => new Response(stream, { status: 200 }));
+  const { text } = await requestText("https://pds.example.com/issue", {
+    ...textBase({ maxBytes: 16 }),
+    fetchImpl,
+  });
+  assert.equal(text, "a€b");
+  assert.ok(!text.includes("\uFFFD"), "chunk boundaries must not corrupt multi-byte sequences");
+});
+
+test("requestText: the default cap is enforced when maxBytes is omitted", async () => {
+  assert.equal(DEFAULT_TEXT_RESPONSE_MAX_BYTES, 32 * 1024 * 1024);
+  // A lazily-pulled stream of 8 MiB chunks; the default 32 MiB cap must trip
+  // on the fifth chunk (40 MiB total) without ever buffering the whole thing.
+  const chunk = 8 * 1024 * 1024;
+  let served = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (served >= 5 * chunk) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(new Uint8Array(chunk).fill(0x21));
+      served += chunk;
+    },
+  });
+  const { fetchImpl } = makeFetch(() => new Response(stream, { status: 200 }));
+  await assert.rejects(
+    requestText("https://pds.example.com/diff", { ...textBase(), fetchImpl }),
+    (e: unknown) =>
+      e instanceof PlatformRequestError &&
+      e.kind === "too-large" &&
+      e.status === 200 &&
+      e.message.includes(`${DEFAULT_TEXT_RESPONSE_MAX_BYTES}-byte cap`),
+  );
+});
+
+test("requestText: a UTF-8 BOM is stripped the same way response.text() would strip it", async () => {
+  // Pins the TextDecoder-decode parity claim: response.text() strips a
+  // leading BOM, and so must the capped read path.
+  const bytes = new TextEncoder().encode("\uFEFF{\"ok\":true}");
+  const { fetchImpl } = makeFetch(() => new Response(bytes));
+  const { text } = await requestText("https://pds.example.com/api", { ...textBase(), fetchImpl });
+  assert.equal(text, '{"ok":true}');
+});
+
+test("requestText: an explicit bounded override admits a larger body than a tighter cap", async () => {
+  const body = "d".repeat(12);
+  const tight = makeFetch(() => new Response(body));
+  await assert.rejects(
+    requestText("https://pds.example.com/diff", { ...textBase({ maxBytes: 8 }), fetchImpl: tight.fetchImpl }),
+    (e: unknown) => e instanceof PlatformRequestError && e.kind === "too-large",
+  );
+
+  const widened = makeFetch(() => new Response(body));
+  const result = await requestText("https://pds.example.com/diff", {
+    ...textBase({ maxBytes: 16 }),
+    fetchImpl: widened.fetchImpl,
+  });
+  assert.equal(result.text, body);
+});
+
+test("requestJson: a normal JSON body parses, an oversized one is too-large (not invalid-json)", async () => {
+  const good = makeFetch(() => new Response('{"ok":true}'));
+  const parsed = await requestJson("https://pds.example.com/api", { ...textBase(), fetchImpl: good.fetchImpl });
+  assert.deepEqual(parsed, { status: 200, data: { ok: true } });
+
+  const huge = makeFetch(() => new Response('{"pad":"aaaaaaaaaa"}', { status: 200 }));
+  await assert.rejects(
+    requestJson("https://pds.example.com/api", { ...textBase({ maxBytes: 8 }), fetchImpl: huge.fetchImpl }),
+    (e: unknown) => e instanceof PlatformRequestError && e.kind === "too-large",
+    "an oversized JSON body must surface as too-large, never as invalid-json",
+  );
+
+  const broken = makeFetch(() => new Response("not json"));
+  await assert.rejects(
+    requestJson("https://pds.example.com/api", { ...textBase(), fetchImpl: broken.fetchImpl }),
+    (e: unknown) => e instanceof PlatformRequestError && e.kind === "invalid-json",
+    "the invalid-json path is unchanged for bodies within the cap",
+  );
 });
