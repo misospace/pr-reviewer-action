@@ -8,6 +8,11 @@ import { publishReview } from "../src/publish/publish.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import type { NativeReviewRequest, NativeReviewSurface, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
 import { startMockServer, type MockServer } from "./helpers.js";
+import {
+  MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS,
+  MAX_CONFIDENCE_CONCERN_FILE_CHARS,
+  MAX_CONFIDENCE_REASON_CHARS,
+} from "../src/confidence/result.js";
 
 /** #1073 end-to-end mocked-run coverage for the independent confidence
  * scorer. The run phase is exercised through the same startMockServer rig as
@@ -585,6 +590,61 @@ test("#1140 review: a scorer answer echoing lane credentials is masked on EVERY 
     assert.ok(!api.bodies[0]!.includes("primary-secret-k"), "credential leaked into the published comment");
     assert.ok(!api.bodies[0]!.includes("confidence-secret-k"), "scorer credential leaked into the published comment");
     assert.match(api.bodies[0]!, /## Independent Confidence/);
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1140 review round 9: masking a max-length answer never leaves a field past its bound (one-character secret)", async () => {
+  // Masking is NOT length-preserving: a one-character configured credential
+  // becomes the three-character `⟦•⟧` marker, and the generic heuristics widen
+  // a match to `⟦redacted:credential⟧`. Every field below arrives at EXACTLY
+  // its documented parser bound and carries the secret, so before the bounds
+  // were re-applied after masking the canonical result left the parser
+  // OVERSHooting: `reason` > 600, `file` > 300, `evidence` > 400 in the
+  // persisted artifact, the step outputs, and the published section.
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({
+      score: 4,
+      risk: "low",
+      reason: "q".repeat(MAX_CONFIDENCE_REASON_CHARS - 1) + "k",
+      concerns: [{
+        file: "a".repeat(MAX_CONFIDENCE_CONCERN_FILE_CHARS - 1) + "k",
+        line: 3,
+        evidence: "e".repeat(MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS - 1) + "k",
+      }],
+    })));
+  }));
+  try {
+    const run = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+      "ai-confidence-api-key": "k",
+    });
+    assert.equal(run.result.outputs.confidenceStatus, "scored");
+    const reason = run.result.outputs.confidenceReason ?? "";
+    assert.ok(!reason.includes("k"), "configured credential survived masking");
+    assert.ok(reason.includes("q"), "benign text must survive masking");
+    assert.ok(reason.length <= MAX_CONFIDENCE_REASON_CHARS, `reason ${reason.length} exceeds ${MAX_CONFIDENCE_REASON_CHARS}`);
+    const concerns = run.result.confidenceConcerns ?? [];
+    assert.equal(concerns.length, 1);
+    assert.ok(!concerns[0]!.file.includes("k") && !concerns[0]!.evidence.includes("k"), "credential survived concern masking");
+    assert.ok(concerns[0]!.file.length <= MAX_CONFIDENCE_CONCERN_FILE_CHARS, `concern file ${concerns[0]!.file.length} exceeds ${MAX_CONFIDENCE_CONCERN_FILE_CHARS}`);
+    assert.ok(concerns[0]!.evidence.length <= MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS, `concern evidence ${concerns[0]!.evidence.length} exceeds ${MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS}`);
+
+    // The persisted canonical artifact carries the same bounded, masked fields.
+    const artifact = JSON.parse(readFileSync(join(run.runDir, "confidence-score.json"), "utf8")) as {
+      reason?: string;
+      concerns?: { file?: string; evidence?: string }[];
+    };
+    const artifactReason = artifact.reason ?? "";
+    assert.ok(artifactReason.length <= MAX_CONFIDENCE_REASON_CHARS, "artifact reason exceeds its bound");
+    assert.ok(!artifactReason.includes("k"), "artifact reason carries the credential");
+    const artifactConcerns = artifact.concerns ?? [];
+    assert.equal(artifactConcerns.length, 1);
+    assert.ok((artifactConcerns[0]!.file ?? "").length <= MAX_CONFIDENCE_CONCERN_FILE_CHARS, "artifact concern file exceeds its bound");
+    assert.ok((artifactConcerns[0]!.evidence ?? "").length <= MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS, "artifact concern evidence exceeds its bound");
   } finally {
     await server.close();
   }

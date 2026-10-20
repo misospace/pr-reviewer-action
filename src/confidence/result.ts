@@ -107,6 +107,22 @@ export const MAX_CONFIDENCE_CONCERNS = 8;
 export const MAX_CONFIDENCE_CONCERN_FILE_CHARS = 300;
 export const MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS = 400;
 
+/**
+ * Re-apply a documented field bound AFTER credential masking/redaction
+ * (#1140 review round 9). Masking is not length-preserving: `maskKnownSecrets`
+ * replaces every occurrence of a non-empty configured secret — including a
+ * one-character one — with the three-character `⟦•⟧` marker, and the generic
+ * `redactText` heuristics widen a match to the `⟦redacted:credential⟧` marker
+ * too. A field the parser bounded to exactly its limit can therefore leave
+ * masking OVER its limit, and the oversized value would flow into
+ * `confidence-score.json`, the step outputs, and the published section.
+ * Slicing after masking is the safe direction: truncation can never re-expose
+ * what masking already removed.
+ */
+export function boundConfidenceField(text: string, maxChars: number): string {
+  return text.slice(0, maxChars);
+}
+
 /** A successfully parsed, pre-ceiling scorer answer. */
 export interface ParsedConfidenceAnswer {
   score: number;

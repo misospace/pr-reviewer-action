@@ -183,6 +183,20 @@ test("the cap note never pushes the reason past the documented bound", () => {
   assert.ok(short.reason.length <= MAX_CONFIDENCE_REASON_CHARS);
 });
 
+test("#1140 review round 9: a deterministic cap clamps the score, never the risk band", () => {
+  // `confidence-risk` is published as the scorer's OWN band and explicitly
+  // "not a value derived from the score" (`docs/inputs.md`, `action.yml`), and
+  // the scorer prompt now states that contract. Deriving risk from a capped
+  // score would contradict it, so the ceilings touch `score` only.
+  const out = applyConfidenceCeilings(
+    { ...answer(5), risk: "critical" as const },
+    { findings: [{ severity: "blocker" }], coverage: { incomplete_reason: "execution" } },
+  );
+  assert.equal(out.score, 2);
+  assert.deepEqual(out.caps, ["blocker_cap_2"]);
+  assert.equal(out.risk, "critical");
+});
+
 // ── output mapping ───────────────────────────────────────────────────────
 
 test("disabled maps to all empty strings, never a spurious 0", () => {
@@ -622,6 +636,28 @@ test("#1073: every required input is pinned in the prompt, and an absent one is 
   // All six sections are still present with their envelopes — an empty input
   // is a gap the scorer can see, never a silently missing section.
   assert.equal(envelopeBodies(unpinned.user).length, 6);
+});
+
+test("#1140 review round 9: the prompt defines `risk` as the scorer's own separate assessment", async () => {
+  // The published contract says `confidence-risk` is the scorer's own band and
+  // NOT derived from the score. That only holds if the model is told so: the
+  // answer schema alone (a bare enum next to `score`) left the scorer free to
+  // mechanically map its confidence onto the band. Pin both directions of the
+  // independence the contract promises.
+  const { buildConfidencePrompt } = await import("../src/confidence/prompt.js");
+  const built = buildConfidencePrompt({
+    headSha: "head-sha-111", baseSha: "base-sha-222",
+    diff: "+const a = 1;", prTitle: "title", prBody: "body",
+    findings: [], reviewSummary: "Looks fine.", reviewResult: "clean",
+    requiredChecks: "complete", coverage: {}, secrets: [],
+  });
+  assert.match(built.system, /`risk` is your OWN separate assessment/i);
+  assert.match(built.system, /Assess `risk` INDEPENDENTLY of `score`/);
+  assert.match(built.system, /never derive it mechanically from the confidence score/i);
+  assert.match(built.system, /score 0\) can describe a low-risk change/i);
+  assert.match(built.system, /score 5\) can sit on a critical-risk change/i);
+  // The answer schema still names exactly the documented four-value band.
+  assert.match(built.system, /"risk": "<low\|medium\|high\|critical>"/);
 });
 
 test("#1073: every bounded section hits its cap and says it was cut", async () => {
