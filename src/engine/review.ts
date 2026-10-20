@@ -1758,6 +1758,10 @@ secrets: [profiles.primary.apiKey],
         tokensParam: (env.AI_TOKENS_PARAM ?? "max_tokens") as "max_tokens" | "max_completion_tokens",
         findings: reviewRecord.findings,
         coverage: reviewCoverage,
+        // Cancellation rides the scorer call too: an aborted run tears the
+        // scorer's in-flight provider request down instead of letting it run
+        // on after the review it grades is already abandoned.
+        signal: cancellation.scope.signal,
       });
     } catch (cause: unknown) {
       confidenceOutcome = {

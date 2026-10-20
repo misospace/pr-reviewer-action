@@ -442,7 +442,11 @@ test("source reads bind to the committed tree, never the working tree (#1015 reg
   // calls. The wrapper is byte-exact in args/cwd, so the bytes the masker
   // sees are the literal bytes of the committed tree.
   const directRunProcess = async (options: any): Promise<any> => {
-    const r = cp.spawnSync(options.file, options.args ?? [], { cwd: options.cwd, env: options.env, encoding: "buffer" });
+    // The caller's env is the tool env (empty in these fixtures), not the
+    // process environment. Production never merges process.env at spawn —
+    // PATH arrives via the buildChildEnv allowlist — so this fixture merge
+    // stands in for "the allowlisted env would have contained PATH".
+    const r = cp.spawnSync(options.file, options.args ?? [], { cwd: options.cwd, env: { ...process.env, ...options.env }, encoding: "buffer" });
     return {
       status: r.error ? "spawn_error" : "exited",
       exitCode: r.status ?? null,

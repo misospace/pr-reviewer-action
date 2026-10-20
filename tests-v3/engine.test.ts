@@ -535,7 +535,6 @@ test("engine admission: forceRereview projects to precheck's FORCE_REVIEW gate",
   try {
     const first = await runReviewEngine(admissionRequest(server.url, f.runDir), { ...engineDeps(f.root, f.runDir), adapter: admissionAdapter() });
     const fingerprint = first.diffFingerprint;
-    const requestsAfterFirst = server.requests.length;
     const stored = {
       comments: [{ body: `<!-- ai-pr-reviewer -->
 <!-- ai-pr-review-fingerprint:${fingerprint} -->
