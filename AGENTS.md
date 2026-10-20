@@ -52,9 +52,13 @@ Full per-module detail, the pipeline architecture, corpus section order, and des
 ## Build, test, validate
 
 ```bash
-npm ci && npm run typecheck && npm test     # v3 TypeScript (node --test)
+scripts/bootstrap.sh                         # setup: pinned mise + locked toolchain + npm ci (idempotent)
+mise run check                               # v3 TypeScript typecheck
+mise run test                                # v3 TypeScript authoritative suite (build + node --test)
+mise run setup-python && mise run test-python  # Python tests: eval tooling, retained gates (CI's 3.14 via mise)
+
+npm ci && npm run typecheck && npm test      # mise-free equivalent (this is what CI runs)
 npm run build                                # dist/ is not committed
-pytest tests/ -v --tb=short                 # Python tests: eval tooling, retained gates
 ```
 
 ## Development conventions (normative)
