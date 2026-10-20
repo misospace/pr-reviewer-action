@@ -12,7 +12,12 @@
  *   even when Linear found nothing);
  * - each fetched issue embeds the pretty jq projection
  *   `{number,title,state,html_url,labels:[.labels[]?.name],body}` cut by
- *   `head -c 12000` — a byte cut that may split a UTF-8 sequence;
+ *   `head -c 12000` — a byte cut that may split a UTF-8 sequence. The
+ *   projection's forge-authored strings (`title`, label names, `body`)
+ *   carry one deliberate divergence from v2 (#1159): they pass through the
+ *   line-preserving credential-shape redaction (`redactPrTextLines`, #1154)
+ *   before serialization, so a credential-shaped value in a forge-authored
+ *   issue never reaches the persisted artifacts or the model request;
  * - a projection error (a non-object issue, a label that is not an object)
  *   aborts the v2 review under `set -euo pipefail`; here it throws
  *   `LinkedIssueProjectionError`;
@@ -35,6 +40,7 @@ import type { PlatformReadAdapter } from "../platform/types.js";
 import { collectFromPr, linearIssueToV2, parsePrefixes, pyStrip, renderLinearMarkdown, type CollectResult } from "../precheck/linear.js";
 import { acceptedLinkedIssues, extractLinkedIssueRefs, isPullRequestPayload } from "../precheck/linked-issues.js";
 import { pyJsonDump, pyJsonDumpsLine } from "./py-json.js";
+import { redactPrTextLines } from "./redact.js";
 
 export const LINKED_ISSUE_EMBED_BYTES = 12000;
 export const LINEAR_ADAPTER_FAILED = "linear-adapter-failed";
@@ -49,17 +55,37 @@ const enc = (text: string): Buffer => Buffer.from(text, "utf8");
 // import cycle.
 export { isPullRequestPayload };
 
-/** `jq '{number,title,state,html_url,labels:[.labels[]?.name],body}'`. */
+/** #1159: every forge-authored string in the projection goes through the
+ * line-preserving credential-shape pass (#1154) before serialization, so a
+ * credential in a fetched issue body — same-line (`api_key=…`, `Bearer …`,
+ * `sk-…`) or split-line (`password:` + indented value) — never reaches the
+ * persisted `linked-issues.md`, the requirement-ledger parse of it, or the
+ * corpus/`ai-request.<tier>.json` built from those bytes. Label names share
+ * the same forge-authored trust class (they persist into
+ * `linked-issues.json` too), and the pass is inert on ordinary names, so the
+ * classification trigger-label matching over them is unaffected. Line
+ * structure is kept byte-for-byte (the flat `redactText` pass would collapse
+ * a split-line credential into one line), and the pass is idempotent, so
+ * re-persisting an already-redacted artifact is a no-op. Non-string values
+ * (a jq `null` body) pass through untouched to preserve the projection's
+ * parity shape. */
+function redactForgeProse(value: unknown): unknown {
+  return typeof value === "string" ? redactPrTextLines(value) : value;
+}
+
+/** `jq '{number,title,state,html_url,labels:[.labels[]?.name],body}'`, with
+ * the forge-authored string fields (`title`, label names, `body`)
+ * credential-redacted (#1159). */
 export function projectLinkedIssue(issue: unknown): Record<string, unknown> {
   try {
-    const labels = jqEachOpt(jqField(issue, "labels")).map((label) => jqField(label, "name"));
+    const labels = jqEachOpt(jqField(issue, "labels")).map((label) => redactForgeProse(jqField(label, "name")));
     return {
       number: jqField(issue, "number"),
-      title: jqField(issue, "title"),
+      title: redactForgeProse(jqField(issue, "title")),
       state: jqField(issue, "state"),
       html_url: jqField(issue, "html_url"),
       labels,
-      body: jqField(issue, "body"),
+      body: redactForgeProse(jqField(issue, "body")),
     };
   } catch (error) {
     if (error instanceof JqError) throw new LinkedIssueProjectionError(`jq: projection failed: ${error.message}`);
