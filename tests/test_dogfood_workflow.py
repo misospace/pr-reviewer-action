@@ -183,6 +183,10 @@ DOGFOOD_OVERRIDES = {
     "ai-reasoning-effort",
     "ai-primary-reasoning-effort",
     "ai-smart-reasoning-effort",
+    "ai-confidence-model",
+    "ai-confidence-api-format",
+    "ai-confidence-reasoning-effort",
+    "ai-confidence-timeout-sec",
     "ai-fallback-base-url",
     "ai-fallback-api-format",
     "ai-fallback-model",
@@ -235,6 +239,25 @@ def test_dogfood_overrides_only_what_is_ours() -> None:
     # #1161: `allow-approve` is deprecated and ignored — the dogfood lane
     # must not pass the inert input at all.
     assert "allow-approve" not in values
+
+
+def test_dogfood_enables_bounded_advisory_confidence_scoring() -> None:
+    """Score with a usable configured model, without weakening review authority.
+
+    The optional dedicated model/format may be unset in repository variables:
+    falling back to the smart lane keeps dogfood scoring enabled rather than
+    silently turning it off. Credential and endpoint inheritance uses the
+    action's same-origin policy, and forks stay disabled by default.
+    """
+    values = _review_step_with(WORKFLOW.read_text(encoding="utf-8"))
+    assert values["ai-confidence-model"] == "${{ vars.CONFIDENCE_MODEL || vars.SMART_MODEL }}"
+    assert values["ai-confidence-api-format"] == "${{ vars.CONFIDENCE_FORMAT || vars.SMART_FORMAT }}"
+    assert values["ai-confidence-reasoning-effort"] == "${{ vars.CONFIDENCE_REASONING_EFFORT }}"
+    assert str(values["ai-confidence-timeout-sec"]) == "120"
+    assert "ai-confidence-base-url" not in values
+    assert "ai-confidence-api-key" not in values
+    assert "ai-confidence-enable-for-forks" not in values
+    assert values["publish-mode"] == "review_verdict"
 
 
 def test_public_action_defaults_are_the_recommended_setup() -> None:
