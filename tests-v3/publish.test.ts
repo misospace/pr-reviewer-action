@@ -13,7 +13,7 @@ import {
   sanitizeForPublication,
 } from "../src/publish/publish.js";
 import { cleanupManagedReviews, retireManagedInlineComments, resolveSupersededThreads, hideSupersededManagedReviews } from "../src/publish/cleanup.js";
-import { buildComments, prescriptionKey, prescriptionKeyDigest, FEEDBACK_AFFORDANCE } from "../src/publish/inline-findings.js";
+import { buildComments, prescriptionKey, prescriptionKeyDigest, FEEDBACK_AFFORDANCE, INLINE_DISCLAIMER } from "../src/publish/inline-findings.js";
 import { enforcementView, normalizeThread } from "../src/context/review-threads.js";
 import { applyReviewThreadEnforcement } from "../src/enforcement/threads.js";
 import type { ReviewArtifact } from "../src/enforcement/artifact.js";
@@ -1307,6 +1307,10 @@ interface ForgejoTokenCleanupScenario {
   reactionDeleteStatus?: number;
   /** What the comments listing serves after the upsert; defaults to the exact body this run published. */
   stickyBodyOverride?: string;
+  /** #1116: publish in inline-findings mode, so the run also enumerates prior
+   * managed comments for the #762 carry marker and the #1027 finding-identity
+   * marker — the two ownership consumers that share cleanup's proof. */
+  inlineFindings?: boolean;
 }
 
 async function runTokenCleanupScenario(scenario: ForgejoTokenCleanupScenario): Promise<{
@@ -1364,7 +1368,11 @@ async function runTokenCleanupScenario(scenario: ForgejoTokenCleanupScenario): P
   const api = new ForgejoPublishApi({
     repo: "o/r", prNumber: "42", baseUrl: FORGEJO_BASE, token: REPO_PAT, fetchImpl,
   });
-  const result = await publishReview(input({ mode: "review_comment", cleanupPreviousNativeReviews: "auto" }), api, { diffText: "" });
+  const result = await publishReview(input({
+    mode: "review_comment",
+    inlineFindings: scenario.inlineFindings ?? false,
+    cleanupPreviousNativeReviews: "auto",
+  }), api, { diffText: "" });
   return { result, requests };
 }
 
@@ -1415,6 +1423,94 @@ test("#1093: Forgejo repo-scoped PAT — a refused reaction probe fails closed a
     requests.filter((r) => r.method === "DELETE" && r.url !== REACTIONS_URL).length,
     0,
     "no inline comments are retired when the probe is refused",
+  );
+});
+
+/** #1116: a prior managed comment carrying BOTH the #762 carry marker and the
+ * #1027 finding-identity marker, authored by the trusted owner — the fixture
+ * that makes every ownership consumer in one run fire at once. */
+const SHARED_OWNERSHIP_PRIOR_BODY = [
+  "**Major (bug):** unchecked null deref",
+  "",
+  INLINE_DISCLAIMER,
+  `<!-- pr-reviewer:rejected-prescriptions:v1:${"c".repeat(64)} -->`,
+  `<!-- pr-reviewer:finding-id:v1:${"d".repeat(64)} -->`,
+].join("\n");
+
+test("#1116: Forgejo repo-scoped PAT — a run that ALSO carries prior managed comments still probes exactly once", async () => {
+  // #1116: the probe-count pin above covers a run whose only ownership
+  // consumer is cleanup. This run additionally carries a prior managed comment
+  // bearing the #762 carry marker and the #1027 finding-identity marker, so
+  // the carry-marker read and the outcome-identity read both need the same
+  // proof cleanup already used. Three consumers, ONE probe: on a watched PR
+  // each extra probe is another 👀 notification cycle, and a probe that fails
+  // on its way out leaves a visible reaction behind.
+  const { result, requests } = await runTokenCleanupScenario({
+    reviews: [
+      { id: 5, body: MARKER, user: { id: 7 }, state: "COMMENTED", submitted_at: "2025-01-01T00:00:00Z" },
+      { id: 6, body: MARKER, user: { id: 9, login: "foreign-bot" }, state: "COMMENTED", submitted_at: "2025-06-01T00:00:00Z" },
+    ],
+    review5Comments: [{ id: 11, pull_request_review_id: 5, user: { id: 7 }, body: SHARED_OWNERSHIP_PRIOR_BODY }],
+    review6Comments: [{ id: 12, pull_request_review_id: 6, user: { id: 9, login: "foreign-bot" } }],
+    inlineFindings: true,
+  });
+  assert.equal(result.status, "published");
+  assert.deepEqual(
+    requests.filter((r) => r.method === "POST" && r.url === REACTIONS_URL).map((r) => r.body),
+    ['{"content":"eyes"}'],
+    "the carry-marker read, the outcome-identity read and cleanup share one probe",
+  );
+  assert.equal(
+    requests.filter((r) => r.method === "DELETE" && r.url === REACTIONS_URL).length,
+    1,
+    "the probe is best-effort cleaned up exactly once",
+  );
+  // The shared proof still authorizes: the owned carry marker is trusted and
+  // the owned inline comment is still retired.
+  assert.ok(
+    result.messages.some((line) => line.includes("1 carried rejection key(s) inherited")),
+    "the reaction-proven identity still authorizes the carry marker",
+  );
+  assert.ok(result.messages.some((line) => line.includes("Inline comments: eligible=1 retired=1")));
+  // Enumeration reads the foreign review's comments (a bounded read of prior
+  // managed comments); what must never happen is any WRITE to them.
+  assert.ok(
+    !requests.some((r) => r.method === "DELETE" && r.url.includes("/reviews/6/")),
+    "the foreign-bot review is never written to",
+  );
+});
+
+test("#1116: a refused probe on the FIRST consumer fails cleanup closed — one probe, bounded WARN, nothing retired", async () => {
+  // #1116 adversarial boundary: the shared resolution is poisoned by whichever
+  // consumer asks FIRST. Here the carry-marker read asks first and its probe
+  // is refused, so cleanup later receives a `null` identity it never proved
+  // itself. Feeds the fence the hostile case: cleanup must fail closed on a
+  // null it did not resolve, emit its bounded identity-reason WARN, and retire
+  // nothing — while still proving ownership only once.
+  const { result, requests } = await runTokenCleanupScenario({
+    reviews: [{ id: 5, body: MARKER, user: { id: 7 }, state: "COMMENTED", submitted_at: "2025-01-01T00:00:00Z" }],
+    review5Comments: [{ id: 11, pull_request_review_id: 5, user: { id: 7 }, body: SHARED_OWNERSHIP_PRIOR_BODY }],
+    reactionPost: { status: 403, payload: {} },
+    inlineFindings: true,
+  });
+  assert.equal(result.status, "published");
+  assert.deepEqual(
+    requests.filter((r) => r.method === "POST" && r.url === REACTIONS_URL).map((r) => r.body),
+    ['{"content":"eyes"}'],
+    "the refused probe is made once and reused, never re-attempted per consumer",
+  );
+  assert.ok(
+    result.messages.some((line) => line.includes("Could not verify authenticated owner") && line.includes("identity reason:") && line.includes("no inline comments retired")),
+    "cleanup fails closed on the shared null and still emits its bounded identity-reason WARN",
+  );
+  assert.ok(
+    !result.messages.some((line) => line.includes("carried rejection key")),
+    "the refused identity authorizes no carry digest either",
+  );
+  assert.equal(
+    requests.filter((r) => r.method === "DELETE" && r.url !== REACTIONS_URL).length,
+    0,
+    "nothing is retired when the shared identity is unprovable",
   );
 });
 
