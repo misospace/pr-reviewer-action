@@ -11,6 +11,7 @@ import { repoScopedUrl } from "../platform/repo-ref.js";
 import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { stageEnvFromConfig } from "./env.js";
 import { buildAdapter, buildPublishApi, publishInputFromEnv, publishWith, readEvent, type StepEvent } from "./entrypoints.js";
+import { publishStepRuns } from "../publish/publish.js";
 import { rawInputsFromEnv, runReview } from "./review.js";
 import { createRunDir } from "./run-dir.js";
 import { blockingGateSummary, escapeWorkflowData, renderBlockingAnnotations } from "./blocking-findings.js";
@@ -107,10 +108,13 @@ export function actionStageEnv(env: NodeJS.ProcessEnv): Env {
 }
 
 function shouldPublish(stage: Env): boolean {
-  const mode = stage.PUBLISH_MODE ?? "";
-  // #1161: `review_blockers` publishes a native review like the other
-  // native modes.
-  return mode === "review_comment" || mode === "review_verdict" || mode === "review_blockers" || (mode === "comment" && stage.PUBLISH_REVIEW_COMMENT === "true");
+  // The scorer's eligibility gate (src/run/review.ts) mirrors THIS decision
+  // through the shared `publishStepRuns` predicate. Both sites read
+  // PUBLISH_MODE/PUBLISH_REVIEW_COMMENT from their own config resolution;
+  // that stays equivalent only while publish-* inputs stay out of
+  // repository-config narrowing (they do today — make them repo-configurable
+  // and the two sites can silently diverge).
+  return publishStepRuns(stage.PUBLISH_MODE, stage.PUBLISH_REVIEW_COMMENT === "true");
 }
 
 export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<number> {

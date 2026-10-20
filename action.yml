@@ -695,7 +695,7 @@ outputs:
   review-triage-routing:
     description: "Deterministic reviewer-routing status (#1005) when review-triage-routing-mode ran: 'not_required', 'no_targets', 'invalid', 'advisory', 'request', or 'fork_blocked'. Empty when review-triage or review-triage-routing-mode is off. The model selects only configured logical target ids; concrete GitHub users/teams come only from trusted base-ref configuration, and an invalid or uncertain state never mutates the forge. This review-step output reports the routing intent; the published review additionally reports the publish-time outcome ('requested' or 'request_failed')."
   confidence-status:
-    description: "Confidence scorer outcome (#1073): 'scored' when the scorer ran and produced a usable score, 'unscored' when it was enabled but the call failed, timed out, or produced no usable score, and empty when the scorer is disabled (ai-confidence-model unset)."
+    description: "Confidence scorer outcome (#1073): 'scored' when the scorer ran and produced a usable score, 'unscored' when it was enabled but the call failed, timed out, produced no usable score, or this run's publish step is skipped (publish-mode comment with publish-review-comment unset — the scorer never calls the model for a review that will not publish), and empty when the scorer is disabled (ai-confidence-model unset)."
   confidence-score:
     description: Integer 0-5 confidence score from the scorer; empty when the scorer is disabled or did not produce a usable score (never a spurious 0). Advisory telemetry only — never affects the verdict, findings, or approval.
   confidence-risk:

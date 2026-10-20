@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync } from "node:fs";
 import { extraHeaderFingerprint } from "../transport/headers.js";
+import { ACTION_VERSION } from "../version.js";
 
 /** Precheck fingerprinting (#674) — the faithful TS port of
  * `pr_reviewer/precheck.py`. The marker form `<diff_fp>|cfg:<config_hash>`
@@ -353,6 +354,15 @@ export function collectConfigLines(env: Record<string, string>): string[] {
       if (key.endsWith("_API_KEY")) {
         lines.push(`${key}=${credentialDigest(key, value)}`);
         continue;
+      }
+      // #1073: the scorer's prompt/code ride action releases, so while the
+      // scorer is enabled a version change must invalidate the cached review
+      // and force the score to be recomputed. Emitted once per family block,
+      // keyed on the enabled gate above; the over-eager direction only ever
+      // costs a fresh review. Disabled (the default) emits nothing,
+      // preserving baseline fingerprints.
+      if (key === "AI_CONFIDENCE_MODEL") {
+        lines.push(`SCORER_ACTION_VERSION=${ACTION_VERSION}`);
       }
       lines.push(`${key}=${value}`);
       continue;

@@ -66,7 +66,7 @@ import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxCiOnlyVerdict, relax
 import { applyBlockerVerification } from "../enforcement/blocker-verification.js";
 import { createHeadSourceReader } from "../enforcement/source-verifier.js";
 import { capCiEvidenceFindings } from "../enforcement/ci-evidence.js";
-import { markerReviewResult } from "../publish/publish.js";
+import { markerReviewResult, publishStepRuns } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
@@ -1420,19 +1420,15 @@ secrets: [profiles.primary.apiKey],
   // marker keys; the five confidence-* output assignments stay empty.
   const confidenceResolution = resolveConfidenceProfile(env);
   for (const warning of confidenceResolution.warnings) log(`WARNING: ${warning}`);
-  // #1140 review: publication is decided at the publish seam, and there it is
-  // decided by the publish MODE alone — `publishMode` (src/run/entrypoints.ts)
-  // resolves PUBLISH_MODE and `publish.ts` publishes a body for every valid
-  // mode, `comment` upserting the sticky PR comment the contract documents.
-  // The legacy `publish_review_comment` flag is not part of that decision: the
-  // action entry uses it only to skip the publish STEP entirely. Folding it in
-  // here published an `unscored` confidence surface for a review that did
-  // publish (a `comment`-mode run whose flag is unset), without ever making the
-  // promised scorer call.
-  const publishModeValue = (env.PUBLISH_MODE ?? "").toLowerCase();
-  const reviewWillPublish = publishModeValue === "comment"
-    || publishModeValue === "review_comment"
-    || publishModeValue === "review_verdict";
+  // The scorer's eligibility gate is now EXACTLY the `shouldPublish` decision
+  // the action entry applies at the publish seam: `comment` mode counts as
+  // publishing only when the legacy `publish-review-comment` flag is set,
+  // and `review_blockers` counts as publishing like the other native modes
+  // (shared `publishStepRuns` predicate, so the two sites cannot diverge).
+  // The previous round-5 gate overshot: it scored `comment`-mode runs whose
+  // publish step is skipped — a privileged outbound scorer call for a review
+  // that will not publish.
+  const reviewWillPublish = publishStepRuns(env.PUBLISH_MODE, env.PUBLISH_REVIEW_COMMENT === "true");
   const confidenceProfile = confidenceResolution.profile;
   let confidenceResult: ConfidenceResult;
   if (!confidenceProfile.enabled) {
@@ -1440,9 +1436,9 @@ secrets: [profiles.primary.apiKey],
     confidenceResult = CONFIDENCE_DISABLED;
     clearConfidenceArtifacts(ws);
   } else if (!reviewWillPublish) {
-    // Defensive: no valid publish mode resolved for this run, so no publish
-    // seam can produce a body for a score to sit in. Every configured mode
-    // (`comment`, `review_comment`, `review_verdict`) publishes.
+    // Defensive: the entry's publish step is skipped for this run, so no
+    // publish seam can produce a body for a score to sit in — and no
+    // privileged scorer call may fire for a review that never publishes.
     confidenceResult = unscoredConfidenceResult("not_published");
     clearConfidenceArtifacts(ws);
   } else if (analysisEngine === MODEL_UNAVAILABLE_ENGINE || !(outputVerdict === "approve" || outputVerdict === "request_changes")) {

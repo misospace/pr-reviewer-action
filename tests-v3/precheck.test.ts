@@ -1619,6 +1619,22 @@ test("#1073: the confidence-scorer family is fingerprint-conditional — disable
   assert.ok(enabled.includes("AI_CONFIDENCE_TIMEOUT_SEC=120"));
   assert.notEqual(computeConfigHash(enabled), computeConfigHash(baseline));
 
+  // While the scorer is enabled, the config lines carry the action version
+  // that the scorer's prompt/code ride on: a new action release must
+  // invalidate the cached review so the score is recomputed.
+  assert.ok(enabled.some((line) => line.startsWith("SCORER_ACTION_VERSION=")), "the enabled config omits SCORER_ACTION_VERSION");
+  // Disabled (the default) emits no version line — baseline fingerprints
+  // stay byte-identical across action releases.
+  assert.ok(!withDefaults.some((line) => line.startsWith("SCORER_ACTION_VERSION=")));
+  assert.ok(!baseline.some((line) => line.startsWith("SCORER_ACTION_VERSION=")));
+
+  // A version change (different SCORER_ACTION_VERSION value over otherwise
+  // identical lines) yields a different hash — version-change invalidation
+  // positively established without varying the constant itself.
+  const versionA = enabled.map((line) => (line.startsWith("SCORER_ACTION_VERSION=") ? "SCORER_ACTION_VERSION=v1.2.3" : line));
+  const versionB = enabled.map((line) => (line.startsWith("SCORER_ACTION_VERSION=") ? "SCORER_ACTION_VERSION=v1.2.4" : line));
+  assert.notEqual(computeConfigHash(versionA), computeConfigHash(versionB));
+
   // Changing the scorer's model changes the hash again.
   const otherModel = collectConfigLines({
     AI_MODEL: "m",

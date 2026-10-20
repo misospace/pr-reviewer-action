@@ -33,6 +33,21 @@ import { MAX_FEEDBACK_COMMENT_IDS } from "../platform/publish-api.js";
 import type { CollaboratorPermissionReading, NativeReviewComment, NativeReviewRequest, NativeReviewSurface, PublishPlatformApi } from "../platform/publish-api.js";
 
 export type PublishMode = "comment" | "review_comment" | "review_verdict" | "review_blockers";
+
+/**
+ * Whether the action entry's publish step runs for this mode: the single
+ * decision shared by the entry's publish gate and the confidence scorer's
+ * eligibility gate, so a privileged scorer call can only happen when the
+ * review body will actually be published. `comment` still requires the
+ * legacy `publish-review-comment` flag; #1161: `review_blockers` publishes
+ * a native review like the other native modes.
+ */
+export function publishStepRuns(mode: string | undefined, legacyCommentFlag: boolean): boolean {
+  const value = mode ?? "";
+  return value === "review_comment" || value === "review_verdict" || value === "review_blockers"
+    || (value === "comment" && legacyCommentFlag);
+}
+
 export type NativeReviewEvent = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
 
 export interface PublishInput {
