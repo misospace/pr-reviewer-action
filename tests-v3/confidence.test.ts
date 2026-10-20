@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { startMockServer } from "./helpers.js";
+import { maskKnownSecrets } from "../src/context/redact.js";
 import { runConfidenceScorer } from "../src/confidence/scorer.js";
 import { TransportFailure } from "../src/transport/http.js";
 import {
@@ -201,22 +202,36 @@ test("#1140 review round 9: a deterministic cap clamps the score, never the risk
 
 test("#1140 review round 9: re-binding a masked reason keeps the cap note, drops only model text", () => {
   // No cap fired → a plain slice is right, and the note must never be invented.
-  const uncapped = "q".repeat(MAX_CONFIDENCE_REASON_CHARS + 2);
-  const plain = boundConfidenceReason(uncapped, []);
-  assert.equal(plain.length, MAX_CONFIDENCE_REASON_CHARS);
-  assert.ok(!plain.includes("deterministic cap"));
+  const uncapped = boundConfidenceReason("q".repeat(MAX_CONFIDENCE_REASON_CHARS + 2), "");
+  assert.equal(uncapped.length, MAX_CONFIDENCE_REASON_CHARS);
+  assert.ok(!uncapped.includes("deterministic cap"));
+
+  // A reason already inside the bound is returned untouched.
+  assert.equal(boundConfidenceReason("short reason", confidenceCapNote(["blocker_cap_2"])), "short reason");
 
   // A cap fired → the model's share shrinks to whatever the note leaves and the
-  // note (rebuilt from `caps`, not recovered from masked text) ends the field.
+  // caller-supplied note ends the field.
   const note = confidenceCapNote(["blocker_cap_2"]);
-  const capped = boundConfidenceReason("q".repeat(MAX_CONFIDENCE_REASON_CHARS + 40), ["blocker_cap_2"]);
+  const capped = boundConfidenceReason("q".repeat(MAX_CONFIDENCE_REASON_CHARS + 40), note);
   assert.equal(capped.length, MAX_CONFIDENCE_REASON_CHARS);
   assert.ok(capped.endsWith(note));
   assert.equal(capped.slice(0, -note.length).length, MAX_CONFIDENCE_REASON_CHARS - note.length);
 
-  // An oversized reason with a note longer than the bound is still bounded.
-  const many = boundConfidenceReason("q".repeat(MAX_CONFIDENCE_REASON_CHARS * 3), ["a", "b", "c"]);
-  assert.equal(many.length, MAX_CONFIDENCE_REASON_CHARS);
+  // A note so long it leaves no room for the model's share at all: still exactly
+  // bounded, and what survives is note text, not model text.
+  const crowded = boundConfidenceReason("q".repeat(MAX_CONFIDENCE_REASON_CHARS * 3), confidenceCapNote(["cap-".repeat(200)]));
+  assert.equal(crowded.length, MAX_CONFIDENCE_REASON_CHARS);
+  assert.ok(crowded.startsWith(" [deterministic cap: cap-"));
+  assert.ok(!crowded.includes("q"));
+
+  // The note the caller supplies is the MASKED one: a one-character configured
+  // credential that also occurs in the note template must not reach the field
+  // through the re-append path.
+  const maskedNote = maskKnownSecrets(confidenceCapNote(["blocker_cap_2"]), ["b"]);
+  const masked = boundConfidenceReason("q".repeat(MAX_CONFIDENCE_REASON_CHARS + 40), maskedNote);
+  assert.ok(!masked.includes("b"), "the re-appended note bypassed masking");
+  assert.ok(masked.endsWith(" [deterministic cap: ⟦•⟧locker_cap_2]"));
+  assert.equal(masked.length, MAX_CONFIDENCE_REASON_CHARS);
 });
 
 // ── output mapping ───────────────────────────────────────────────────────

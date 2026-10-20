@@ -114,12 +114,14 @@ export const MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS = 400;
  * secret — including a one-character one — with the three-character `⟦•⟧`
  * marker, so a field the parser bounded to exactly its limit can leave masking
  * OVER its limit, and the oversized value would flow into
- * `confidence-score.json`, the step outputs, and the published section. (The
- * generic `redactText` heuristics emit the ten-character `[REDACTED]` and every
- * rule matches at least that many characters, so they can substitute but never
- * widen — the widening to pin here is the exact-value mask.) Slicing after
- * masking is the safe direction: truncation can never re-expose what masking
- * already removed, even when it cuts a marker in half.
+ * `confidence-score.json` and the step outputs. (The `src/publish/` renderers
+ * apply their own tighter slice on the way to the comment, so the comment was
+ * never the oversized surface — the artifact and outputs were.) The generic
+ * `redactText` heuristics emit the ten-character `[REDACTED]` and every rule
+ * matches at least that many characters, so they can substitute but never widen
+ * — the widening to pin here is the exact-value mask. Slicing after masking is
+ * the safe direction: truncation can never re-expose what masking already
+ * removed, even when it cuts a marker in half.
  */
 export function boundConfidenceField(text: string, maxChars: number): string {
   return text.slice(0, maxChars);
@@ -139,15 +141,22 @@ export function confidenceCapNote(caps: readonly string[]): string {
  * in the published reason: when masking expanded a note-length reason past the
  * bound, a plain slice would clip exactly that action-owned tail and publish a
  * capped score with no in-reason explanation. So the model's share is trimmed
- * to whatever the note leaves and the note — rebuilt from `caps`, never
- * recovered from masked model text — is re-appended.
+ * to whatever the note leaves and the note is re-appended.
+ *
+ * `capNote` MUST be the note already run through the caller's masking (build it
+ * as `mask(confidenceCapNote(caps))`): masking has to stay TERMINAL on this
+ * surface, and a configured credential is allowed to be any length — including
+ * one character occurring inside the note template (`blocker_cap_2`), so an
+ * unmasked rebuilt note would put the run's own credential back on the surface
+ * that was just masked. Over-redacting the note is the accepted cost, and the
+ * exact caps are still recorded verbatim in the result's structured `caps`
+ * field. The room below is reserved from the note's MASKED length.
  */
-export function boundConfidenceReason(maskedReason: string, caps: readonly string[]): string {
+export function boundConfidenceReason(maskedReason: string, capNote: string): string {
   if (maskedReason.length <= MAX_CONFIDENCE_REASON_CHARS) return maskedReason;
-  const note = confidenceCapNote(caps);
-  if (note === "") return maskedReason.slice(0, MAX_CONFIDENCE_REASON_CHARS);
-  const room = Math.max(0, MAX_CONFIDENCE_REASON_CHARS - note.length);
-  return `${maskedReason.slice(0, room).trimEnd()}${note}`.slice(0, MAX_CONFIDENCE_REASON_CHARS);
+  if (capNote === "") return maskedReason.slice(0, MAX_CONFIDENCE_REASON_CHARS);
+  const room = Math.max(0, MAX_CONFIDENCE_REASON_CHARS - capNote.length);
+  return `${maskedReason.slice(0, room).trimEnd()}${capNote}`.slice(0, MAX_CONFIDENCE_REASON_CHARS);
 }
 
 /** A successfully parsed, pre-ceiling scorer answer. */

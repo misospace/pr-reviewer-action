@@ -668,12 +668,21 @@ test("#1140 review round 9: masking a max-length answer never leaves a field pas
   }
 });
 
-test("#1140 review round 9: the deterministic cap note survives the post-masking re-bound", async () => {
-  // The cap note is the ONLY place a capped score is explained in the published
-  // reason, and it is action-owned text appended AFTER the model's reason. A
-  // masked reason that expanded past the bound must therefore keep the note:
-  // trimming the model's share to whatever the note leaves, rather than slicing
-  // the note off the end.
+test("#1140 review round 9: the cap note survives the post-masking re-bound, masked like everything else", async () => {
+  // Two contracts on the same line of output.
+  //
+  // (1) The cap note is the ONLY place a capped score is explained in the
+  // published reason and it is action-owned text appended AFTER the model's
+  // reason, so a reason that masks UP past the bound must keep the note (trim the
+  // model's share to what the note leaves) instead of slicing the note away.
+  // (2) Masking must stay TERMINAL on this surface. The configured credential is
+  // deliberately a single character that also occurs inside the note template
+  // (`blocker_cap_2`), so re-appending a freshly BUILT, unmasked note would put
+  // the run's own credential back onto the published surface it just masked; the
+  // note is masked before being re-appended, which is what the exact tail below
+  // pins. The structured `caps` ARRAY keeps its exact enum literal — it is
+  // action-owned machine-readable data in the artifact, never a published text
+  // surface, and redacting it would corrupt its consumers.
   const server = await startMockServer(routedVerdictHandler(
     {
       ...baseVerdict(),
@@ -685,10 +694,9 @@ test("#1140 review round 9: the deterministic cap note survives the post-masking
       res.end(chatBody(SCORER_MODEL, JSON.stringify({
         score: 5,
         risk: "low",
-        // Max-length reason carrying the one-character scorer credential, so
-        // masking expands it past the documented bound. (`z` is not a letter of
-        // the action-owned cap note, so the leak assertion below is exact.)
-        reason: "q".repeat(MAX_CONFIDENCE_REASON_CHARS - 1) + "z",
+        // Every other character is the one-character scorer credential, so the
+        // masked reason is far past the documented bound and the re-bind runs.
+        reason: "qk".repeat(MAX_CONFIDENCE_REASON_CHARS / 2),
         concerns: [],
       })));
     },
@@ -703,11 +711,14 @@ test("#1140 review round 9: the deterministic cap note survives the post-masking
     assert.equal(run.result.outputs.confidenceScore, "2", "the blocker cap must still fire");
     const reason = run.result.outputs.confidenceReason ?? "";
     assert.ok(reason.length <= MAX_CONFIDENCE_REASON_CHARS, `reason ${reason.length} exceeds ${MAX_CONFIDENCE_REASON_CHARS}`);
-    assert.ok(!reason.includes("z"), "configured credential survived masking");
-    assert.match(reason, /\[deterministic cap: blocker_cap_2\]$/, "the cap note must survive the re-bound");
+    assert.ok(reason.includes("⟦•⟧"), "the re-bound must not discard what masking did");
+    assert.ok(!reason.includes("k"), "configured credential survived masking on the published reason");
+    assert.ok(reason.endsWith(" [deterministic cap: bloc⟦•⟧er_cap_2]"), "the masked cap note must survive the re-bound");
     const artifact = JSON.parse(readFileSync(join(run.runDir, "confidence-score.json"), "utf8")) as { reason?: string; caps?: string[] };
     assert.deepEqual(artifact.caps, ["blocker_cap_2"]);
-    assert.match(String(artifact.reason ?? ""), /\[deterministic cap: blocker_cap_2\]$/);
+    assert.ok(String(artifact.reason ?? "").length <= MAX_CONFIDENCE_REASON_CHARS, "artifact reason exceeds its bound");
+    assert.ok(!String(artifact.reason ?? "").includes("k"), "configured credential survived into the artifact reason");
+    assert.ok(String(artifact.reason ?? "").endsWith(" [deterministic cap: bloc⟦•⟧er_cap_2]"));
   } finally {
     await server.close();
   }
