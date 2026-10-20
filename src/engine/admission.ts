@@ -68,8 +68,9 @@ export function admissionStageEnv(
  * stage. Returns the `PrecheckOutput` surface (should_review, skip_reason,
  * fingerprints, resolved SHAs) verbatim; `should_review !== "true"` means the
  * engine stops before any review stage — no model spend. Precheck's legacy
- * stderr diagnostics are captured and routed to the engine's error sink, so
- * admission does not bypass explicit output sinks. */
+ * stderr diagnostics flow through the precheck spec's injected `diagnostics`
+ * sink (no process-stream patching): they are routed to the engine's error
+ * sink, so admission does not bypass explicit output sinks. */
 export async function runEngineAdmission(
   contract: EngineContract,
   request: ReviewRequest,
@@ -77,28 +78,11 @@ export async function runEngineAdmission(
   adapter: PlatformAdapter,
   error: (line: string) => void,
 ): Promise<PrecheckOutput> {
-  const captured: string[] = [];
-  const originalWrite = process.stderr.write.bind(process.stderr);
-  const patchedWrite = ((chunk: unknown, encoding?: BufferEncoding, callback?: (error?: Error | null) => void): boolean => {
-    const text = typeof chunk === "string"
-      ? chunk
-      : Buffer.from(chunk as Uint8Array).toString(encoding ?? "utf8");
-    captured.push(text);
-    if (callback) callback(null);
-    return true;
-  }) as typeof process.stderr.write;
-  process.stderr.write = patchedWrite;
-  try {
-    return await runPrecheck({
-      env: admissionStageEnv(contract, request, workspace),
-      adapter,
-      ...(request.event !== undefined ? { event: request.event } : {}),
-      ...(request.eventHeadSha !== undefined ? { eventHeadSha: request.eventHeadSha } : {}),
-    });
-  } finally {
-    process.stderr.write = originalWrite;
-    for (const text of captured.join("").split("\n")) {
-      if (text !== "") error(text);
-    }
-  }
+  return await runPrecheck({
+    env: admissionStageEnv(contract, request, workspace),
+    adapter,
+    diagnostics: error,
+    ...(request.event !== undefined ? { event: request.event } : {}),
+    ...(request.eventHeadSha !== undefined ? { eventHeadSha: request.eventHeadSha } : {}),
+  });
 }

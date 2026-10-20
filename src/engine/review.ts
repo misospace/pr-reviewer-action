@@ -493,7 +493,12 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // js/http-to-file-access); the trust boundaries are the publication
   // sanitizer, the corpus fences, and the never-execute rule.
   const ws = new RunWorkspace(runDir, dependencies.persistArtifacts ?? true);
-  ws.write("review-request.json", Buffer.from(JSON.stringify({ schema_version: "1", repository: request.repository, pr_number: prNumber, head_sha: request.headSha, base_ref: request.baseRef, is_fork_pr: request.isForkPr, platform: request.platform, forgejo_api_url: request.forgejoApiUrl, trigger_reason: request.triggerReason, force_rereview: request.forceRereview }, null, 2) + "\n", "utf8"));
+  // The provenance artifact records the FOLDED values the pipeline actually
+  // used (the folded head/base/fork/platform of #726, and admission's
+  // effective Forgejo URL) — on the Action path the raw request fields for
+  // head/base/fork arrive empty and admission resolves them, so recording
+  // the request verbatim would persist unset/stale values.
+  ws.write("review-request.json", Buffer.from(JSON.stringify({ schema_version: "1", repository: request.repository, pr_number: prNumber, head_sha: headSha, base_ref: baseRef, is_fork_pr: context.isForkPr, platform: context.platform, forgejo_api_url: pre.effective_forgejo_api_url, trigger_reason: request.triggerReason, force_rereview: request.forceRereview }, null, 2) + "\n", "utf8"));
   // #726: platform reads are cancellable too. The adapter was constructed and
   // preflighted by the admission stage above and is shared with every later
   // stage; a host that injects its own adapter binds the request signal at

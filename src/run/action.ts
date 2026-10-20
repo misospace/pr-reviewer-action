@@ -161,7 +161,19 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
     workspace: env.GITHUB_WORKSPACE ?? process.cwd(),
     ...(event !== undefined ? { event: event as PrecheckEvent } : {}),
     ...(eventHeadSha !== undefined ? { eventHeadSha } : {}),
-    onAdmission: () => postAdmissionAckReaction(stage, event),
+    // #726 review: the three precheck outputs are written the moment
+    // admission passes — the old flow wrote them right after precheck, and a
+    // mid-review engine crash must still leave should-review behind for the
+    // gate consumers. The ack reaction follows; the skip path is unchanged
+    // (the host writes all outputs after the early return).
+    onAdmission: (admission) => {
+      writeOutputs(env, [
+        ["should-review", "true"],
+        ["skip-reason", ""],
+        ["diff-fingerprint", admission.diff_fingerprint],
+      ]);
+      return postAdmissionAckReaction(stage, event);
+    },
   });
   // #726: the admission decision arrives on the result (both paths).
   const pre = review.admission;

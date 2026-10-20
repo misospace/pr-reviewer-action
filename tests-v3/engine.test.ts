@@ -4,9 +4,14 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { getEventListeners } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runReview, RunReviewError } from "../src/run/review.js";
+import { runReview, rawInputsFromEnv, RunReviewError } from "../src/run/review.js";
 import { runReviewEngine } from "../src/engine/review.js";
+import { runEngineAdmission, admissionStageEnv } from "../src/engine/admission.js";
 import type { ReviewDependencies, ReviewRequest } from "../src/engine/types.js";
+import { actionStageEnv } from "../src/run/action.js";
+import { collectConfigLines } from "../src/precheck/fingerprint.js";
+import { validateContract } from "../src/config/contract.js";
+import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 import { engineMain } from "../src/engine/cli.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { startMockServer } from "./helpers.js";
@@ -583,4 +588,164 @@ test("the Action env adapter and the engine produce identical admission decision
     assert.equal(engineFresh.diffFingerprint, adapterFresh.diffFingerprint);
     assert.equal(engineFresh.admissionBaseSha, adapterFresh.admissionBaseSha);
   } finally { await server.close(); f.cleanup(); }
+});
+
+// ── #726 review: admission seams pinned ──────────────────────────────────
+
+test("engine admission: onAdmission is not invoked when admission skips", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    const first = await runReviewEngine(admissionRequest(server.url, f.runDir), { ...engineDeps(f.root, f.runDir), adapter: admissionAdapter() });
+    const fingerprint = first.diffFingerprint;
+    const runDir2 = join(f.root, "run-2");
+    mkdirSync(runDir2);
+    let calls = 0;
+        const second = await runReviewEngine(
+          admissionRequest(server.url, runDir2),
+      {
+        ...engineDeps(f.root, runDir2),
+        adapter: admissionAdapter({
+          comments: [{ body: `<!-- ai-pr-reviewer -->
+<!-- ai-pr-review-fingerprint:${fingerprint} -->
+`, author: "ci-bot" }],
+          identity: "ci-bot",
+        }),
+        onAdmission: () => { calls += 1; },
+      },
+    );
+    assert.equal(second.shouldReview, false);
+    assert.equal(second.skipReason, "diff-unchanged");
+    assert.equal(calls, 0, "onAdmission never fired on a skipped admission");
+    assert.ok(!existsSync(join(runDir2, "verdict.txt")), "no review ran past the skip");
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("engine admission: a throwing onAdmission fails the run before any review stage", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    await assert.rejects(
+      runReviewEngine(
+        admissionRequest(server.url, f.runDir),
+        {
+          ...engineDeps(f.root, f.runDir),
+          adapter: admissionAdapter(),
+          onAdmission: () => { throw new Error("ack reaction exploded"); },
+        },
+      ),
+      /ack reaction exploded/,
+    );
+    assert.ok(!existsSync(join(f.runDir, "verdict.txt")), "no verdict was produced");
+    assert.equal(server.requests.length, 0, "the model was never reached");
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("admission stage env keeps the Action fingerprint config byte-identical", () => {
+  const contract = validateContract(V3_CONTRACT);
+  const workspace = "/checkouts/pr";
+  // A representative fully-populated Action env: contract inputs as the
+  // runner exports them (INPUT_<ID>), runner ambient context, and the
+  // derived bindings actionMain computes. Everything is a defined string —
+  // collectConfigLines skips nothing on either side.
+  const env: NodeJS.ProcessEnv = {
+    "INPUT_GITHUB-TOKEN": "tok",
+    "INPUT_REPO": "o/r",
+    "INPUT_PR-NUMBER": "7",
+    "INPUT_AI-BASE-URL": "https://model.invalid",
+    "INPUT_AI-MODEL": "m",
+    "INPUT_AI-STREAM": "false",
+    "INPUT_AI-API-KEY": "k",
+    "INPUT_DEEP-REVIEW": "false",
+    "INPUT_TOOL-MODE": "off",
+    "INPUT_COMMENT-MARKER": "<!-- ai-pr-reviewer -->",
+    "INPUT_PUBLISH-MODE": "comment",
+    GITHUB_REPOSITORY: "o/r",
+    GITHUB_SERVER_URL: "https://github.com",
+    GITHUB_ACTION_REF: "v3",
+    GITHUB_WORKSPACE: workspace,
+    GITHUB_API_URL: "https://api.github.com",
+    PLATFORM: "github",
+    PR_NUMBER: "7",
+    EVENT_HEAD_SHA: "a".repeat(40),
+  };
+  const request: ReviewRequest = {
+    repository: env.GITHUB_REPOSITORY ?? "",
+    prNumber: env.PR_NUMBER ?? "",
+    headSha: "",
+    baseRef: "",
+    isForkPr: "",
+    platform: env.PLATFORM ?? "",
+    forgejoApiUrl: env.FORGEJO_API_URL ?? "",
+    ciChecksFile: "",
+    inputs: rawInputsFromEnv(contract, env),
+    ambient: env,
+    triggerReason: "push",
+    forceRereview: false,
+    ...(env.EVENT_HEAD_SHA !== undefined ? { eventHeadSha: env.EVENT_HEAD_SHA } : {}),
+  };
+  const admissionLines = collectConfigLines(admissionStageEnv(contract, request, workspace));
+  const actionLines = collectConfigLines(actionStageEnv(env) as Record<string, string>);
+  assert.deepEqual(admissionLines, actionLines, "the fingerprint config hash inputs are byte-identical");
+});
+
+test("review-request.json records the folded admission identity on an Action-path request", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    // Action-path shape: the raw request carries no head/base/fork/platform
+    // (the adapter path fills them from the event); admission resolves them.
+    const result = await runReviewEngine(
+      {
+        ...admissionRequest(server.url, f.runDir, { eventHeadSha: "a".repeat(40) }),
+        headSha: "",
+        baseRef: "",
+        isForkPr: "",
+        platform: "",
+      },
+      { ...engineDeps(f.root, f.runDir), adapter: admissionAdapter() },
+    );
+    assert.equal(result.shouldReview, true);
+    const provenance = JSON.parse(readFileSync(join(f.runDir, "review-request.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(provenance.head_sha, "a".repeat(40), "the reviewed head is the folded event/admission head, not the empty request value");
+    assert.equal(provenance.base_ref, "b".repeat(40), "the base ref is the admission-resolved base, not the empty request value");
+    assert.equal(provenance.is_fork_pr, "false", "the fork flag is the admission-derived one, not the empty request value");
+    assert.equal(provenance.platform, "github", "the platform is the admission-resolved one, not the empty request value");
+    assert.equal(provenance.forgejo_api_url, "", "the Forgejo URL is admission's effective value");
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("engine admission routes precheck diagnostics to the injected error sink only", async () => {
+  const f = fixture();
+  const stderrChunks: string[] = [];
+  const errorLines: string[] = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = ((chunk: unknown, encoding?: BufferEncoding, cb?: (err?: Error | null) => void): boolean => {
+    stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk as Uint8Array).toString(encoding ?? "utf8"));
+    if (cb) cb(null);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const output = await runEngineAdmission(
+      validateContract(V3_CONTRACT),
+      admissionRequest("https://model.invalid", f.runDir),
+      f.root,
+      // A marker-bearing managed comment with an unproven identity fires
+      // precheck's fail-closed diagnostic (no skip, no carry).
+      admissionAdapter({
+        comments: [{ body: "<!-- ai-pr-reviewer -->\n<!-- ai-pr-review-fingerprint:stale -->\n", author: "someone" }],
+        identity: null,
+      }),
+      (line) => errorLines.push(line),
+    );
+    assert.equal(output.should_review, "true", "the unproven identity forced a fresh review instead of a skip");
+  } finally {
+    process.stderr.write = originalWrite;
+    f.cleanup();
+  }
+  assert.ok(
+    errorLines.some((line) => line.includes("could not authenticate the action's own forge identity")),
+    "the precheck diagnostic reached the injected error sink",
+  );
+  assert.deepEqual(stderrChunks, [], "nothing reached process.stderr during admission");
 });
