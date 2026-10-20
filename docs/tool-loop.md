@@ -245,12 +245,23 @@ that issued no tool call records `skipped_probe_error`, `skipped_no_budget`,
 `skipped_refresh_failed`, or `skipped_no_evidence` on the
 harness's `trace_repair_continuation` instead of continuing.
 
-Rows the validator has already refuted against the checkout
-(`enforcement-location-copies-without-comparing`, #854;
-`structural-proof-unconfirmed`, #985) are never repair targets — reading more
-cannot un-prove them; the confirmed-unmet escalation in
+A row the validator has already refuted against the checkout
+(`structural-proof-unconfirmed`, #985) is never a repair target — reading more
+cannot un-prove it; the confirmed-unmet escalation in
 `docs/verdicts-and-publishing.md` owns that outcome. Model-claimed `unmet`
 rows (#1095) are likewise left to the reviewer's own findings.
+
+The #854 `enforcement-location-copies-without-comparing` row IS a repair
+target. That predicate searched only the locations the reviewer cited, so it
+proves that *those* locations contain no comparison — it cannot prove the
+requirement is unenforced elsewhere in the implementation. The row is
+therefore a repairable coverage gap, and this bounded continuation is the
+mechanism that can go find the real enforcement location — when it runs at
+all: the native tool loop, the primary tier, the default prompt, a
+requirement-trace with a non-empty scope, and budget left over. Without it
+(tools off, the smart tier, or an exhausted budget) the row stays
+`unverifiable`, the run keeps reporting partial coverage, and it never reads
+as clean.
 
 Three budget facts bound the repair round exactly. It runs only inside what
 is LEFT of the original run's totals: its wall-clock allowance is the run's

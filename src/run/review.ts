@@ -1301,8 +1301,9 @@ secrets: [profiles.primary.apiKey],
     requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState, traceRepair: traceRepairOutcome ?? undefined });
     // #1145: confirmed-unmet escalation — the one case where a synthesized
     // finding is allowed (#1095's no-synthesis rule covers ledger-only
-    // claims, not rows a deterministic proof predicate refuted against the
-    // checkout at head). Runs before the overlays and the strict mapping so
+    // claims, not a row the validator refuted by re-deriving the
+    // requirement's truth from the repository state at head — #985's
+    // structural proof). Runs before the overlays and the strict mapping so
     // the synthesized blockers count toward the open-findings set.
     if (requirementTraceResult.applied) {
       applyConfirmedUnmetEscalation(reviewRecord as never, requirementTraceResult.trace, traceRequirementTexts);
@@ -1328,7 +1329,10 @@ secrets: [profiles.primary.apiKey],
     completenessStatus = completenessResult.status;
     requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState, traceRepair: traceRepairOutcome ?? undefined });
     // #1145: confirmed-unmet escalation (same rationale as the strict
-    // branch above). The relaxers below all refuse to re-approve once
+    // branch above: only a row the validator refuted against the repository
+    // state at head — #985's structural proof — is escalated; a
+    // copies-without-comparing row stays a repairable coverage gap). The
+    // relaxers below all refuse to re-approve once
     // `requirement_trace_incomplete` is set or an open non-verification
     // blocker exists, so the flip is stable.
     if (requirementTraceResult.applied) {

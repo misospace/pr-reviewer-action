@@ -2230,15 +2230,12 @@ export function applyRequirementTraceEnforcement(
 
 /**
  * #1145: the exact note set that marks a confirmed-unmet row. A note lands
- * here only when a DETERMINISTIC PROOF PREDICATE RAN AGAINST THE CHECKOUT AT
- * HEAD AND FAILED — the validator itself refutes the requirement, so reading
- * more code cannot change the outcome (contrast with the coverage-gap notes,
- * where the reviewer can still re-cite a valid location):
+ * here only when a DETERMINISTIC PROOF PREDICATE RE-DERIVED THE REQUIREMENT'S
+ * TRUTH FROM THE CHECKOUT AT HEAD AND FOUND IT ABSENT — the validator itself
+ * refutes the requirement, so reading more code cannot change the outcome
+ * (contrast with the coverage-gap notes, where the reviewer can still
+ * re-cite a valid location):
  *
- * - `enforcement-location-copies-without-comparing` (#854): the cited
- *   enforcement location exists at head and was read; it contains no
- *   comparison against any of the requirement's derived terms. Copying a
- *   value into a field is not enforcing the requirement.
  * - `structural-proof-unconfirmed` (#985): the requirement's structural-state
  *   claim was re-derived from the cited file at head and the predicate did
  *   not hold (the state the requirement demands is not the state at head).
@@ -2252,6 +2249,20 @@ export function applyRequirementTraceEnforcement(
  * `distributed-enforcement-group-uncovered:*` /
  * `distributed-test-group-uncovered:*` / `distributed-test-location-uncovered`
  * (a seam went unmapped), `distributed-topology-overflow` (config shape).
+ *
+ * `enforcement-location-copies-without-comparing` (#854) is EXCLUDED too, and
+ * deliberately: that predicate searches ONLY the locations the reviewer
+ * cited, so it proves that THOSE locations contain no comparison — it does
+ * NOT prove that the implementation lacks one anywhere else. A reviewer who
+ * cited the copy/assignment while the real comparison lives in a different
+ * implementation location would be blocked on a false premise. The note
+ * therefore stays a repairable coverage gap: the bounded evidence-repair
+ * continuation is precisely the mechanism that can go find the real
+ * enforcement location. We do not attempt a deterministic "search the whole
+ * scope for the predicate" here — the validator cannot prove absence across
+ * the implementation scope, so the row remains a gap to repair rather than a
+ * refutation to escalate.
+ *
  * Rows outside `unverifiable` are excluded by the disposition filter:
  * `met`/`not_applicable` are settled, `pending` is the non-code advisory
  * (#1062), and a model-claimed `unmet` is a known gap the reviewer must
@@ -2259,9 +2270,17 @@ export function applyRequirementTraceEnforcement(
  * ledger text alone, even though the validator could not refute it.
  */
 export const CONFIRMED_UNMET_REFUTATION_NOTES: readonly string[] = [
-  "enforcement-location-copies-without-comparing",
   "structural-proof-unconfirmed",
 ];
+
+/** #1145: the deterministic refutation phrase per confirmed-unmet note. The
+ * phrase states WHAT the validator proved, so a row's wording can never
+ * borrow another note's claim; a note added to
+ * `CONFIRMED_UNMET_REFUTATION_NOTES` without a phrase here falls back to the
+ * generic wording below rather than asserting another note's proof. */
+const CONFIRMED_UNMET_REFUTATION_TEXT: Readonly<Record<string, string>> = {
+  "structural-proof-unconfirmed": "the cited repository state at head does not satisfy it",
+};
 
 export function confirmedUnmetRows(trace: RequirementTraceArtifact): RequirementTraceRow[] {
   return trace.rows.filter((row) =>
@@ -2282,10 +2301,16 @@ export const MAX_CONFIRMED_UNMET_FINDINGS = 5;
  * (required_checks=incomplete) WITHOUT synthesizing findings (#1095), this
  * pass escalates the one case the validator has positively refuted: a row
  * whose disposition is `unverifiable` and whose notes carry a
- * confirmed-unmet refutation note. It is allowed to synthesize findings
- * because the refutation is deterministic proof, not a model claim — the
- * #1095 prohibition (never fabricate a blocker from the ledger text alone)
- * is what this boundary enforces by construction.
+ * confirmed-unmet refutation note (#985's structural-state proof, re-derived
+ * from the checkout at head). It is allowed to synthesize findings because
+ * the refutation is deterministic proof, not a model claim — the #1095
+ * prohibition (never fabricate a blocker from the ledger text alone) is what
+ * this boundary enforces by construction.
+ *
+ * The #854 copies-without-comparing note is NOT a refutation (the predicate
+ * only searched the cited locations, so it cannot prove the requirement is
+ * unenforced anywhere else): such a row is a repairable coverage gap and
+ * never reaches this pass.
  *
  * Effects on the artifact (in place):
  * - up to `MAX_CONFIRMED_UNMET_FINDINGS` new `blocker` findings
@@ -2322,9 +2347,12 @@ export function applyConfirmedUnmetEscalation(
       .replace(/[\x00-\x1f\x7f]/g, " ").trim()
       .slice(0, 200);
     const location = row.enforcement[0];
-    const refutation = row.notes.includes("structural-proof-unconfirmed")
-      ? "the cited repository state at head does not satisfy it"
-      : "the cited enforcement location copies the value without comparing it — nothing in the change enforces it";
+    // The phrase is keyed by the note that actually refuted this row, so it
+    // can never assert a proof the validator did not run.
+    const refutationNote = row.notes.find((note) => CONFIRMED_UNMET_REFUTATION_TEXT[note] !== undefined);
+    const refutation = refutationNote !== undefined
+      ? CONFIRMED_UNMET_REFUTATION_TEXT[refutationNote]!
+      : "the requirement is refuted by deterministic proof against the checkout at head";
     const message = `Confirmed-unmet requirement ${id}: ${refutation}`
       + (text !== "" ? ` — “${text}”` : "")
       + ".";

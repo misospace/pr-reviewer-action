@@ -23,14 +23,20 @@
  * tools or permissions, or ask for anything but the verdict the loop already
  * knows how to re-request.
  *
- * Confirmed-unmet exclusion: a row the validator has already REFUTED with a
- * predicate that ran against the checkout (the #854
- * `enforcement-location-copies-without-comparing` and #985
- * `structural-proof-unconfirmed` notes) is deterministically settled —
- * nothing the reviewer reads can un-prove it, so it is never offered as a
- * repair target (the T2 escalation owns that outcome instead). Only rows
- * whose `unverifiable` disposition is a coverage gap — no claim, an invalid
+ * Confirmed-unmet exclusion: a row the validator has already REFUTED by
+ * re-deriving the requirement's truth from the checkout — the #985
+ * `structural-proof-unconfirmed` note — is deterministically settled: nothing
+ * the reviewer reads can un-prove it, so it is never offered as a repair
+ * target (the T2 escalation owns that outcome instead). Only rows whose
+ * `unverifiable` disposition is a coverage gap — no claim, an invalid
  * citation, an unmapped seam — are repairable.
+ *
+ * The #854 `enforcement-location-copies-without-comparing` row is NOT
+ * settled and IS offered as a repair target: that predicate searched only the
+ * locations the reviewer cited, so it cannot prove the requirement is
+ * unenforced anywhere else in the implementation. The row stays a repairable
+ * coverage gap — and this bounded continuation is exactly the mechanism that
+ * can go find the real enforcement location.
  */
 
 import { parseVerdictResponse } from "../model/verdict.js";
@@ -120,9 +126,13 @@ export function computeTraceGapContinuation(
     // substantiate with its own finding (#1095 — never synthesized), and
     // `pending` is a non-code advisory the loop cannot confirm.
     if (row.disposition !== "unverifiable") continue;
-    // Confirmed-unmet rows were refuted by a predicate that ran against the
-    // checkout — reading more cannot change the outcome, and the T2
-    // escalation owns that result.
+    // Confirmed-unmet rows were refuted by a predicate that re-derived the
+    // requirement's truth from the checkout — reading more cannot change the
+    // outcome, and the T2 escalation owns that result. The #854
+    // copies-without-comparing row is deliberately NOT in that set: its
+    // predicate only searched the cited locations, so it stays a repairable
+    // coverage gap and the continuation below is what can go find the real
+    // enforcement location.
     if (CONFIRMED_UNMET_REFUTATION_NOTES.some((note) => row.notes.includes(note))) continue;
     const id = row.requirement_id;
     unresolved.push({ id, text: textsById.get(id) ?? "", reason: deterministicRowReason(row.notes, missing.has(id)) });

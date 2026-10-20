@@ -3686,7 +3686,7 @@ test("#954: completed investigation with an unverifiable requirement exposes tra
   }
 });
 
-test("#874 #854-reproduction: a 'met' claim citing a real line that only copies the value (never compares it) is downgraded, #1145 escalates to request_changes", async () => {
+test("#874 #854-reproduction: a 'met' claim citing a real line that only copies the value (never compares it) is downgraded to a repairable coverage gap — no confirmed-unmet escalation", async () => {
   const server = await startMockServer((_req, body, res) => {
     const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
     res.setHeader("Content-Type", "application/json");
@@ -3722,6 +3722,21 @@ test("#874 #854-reproduction: a 'met' claim citing a real line that only copies 
       ].join("\n"),
     );
     writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
+    // The REAL enforcement predicate lives in another implementation location:
+    // the deterministic predicate searches only the cited locations, so it
+    // cannot prove the requirement is unenforced anywhere else — the row is a
+    // repairable coverage gap, never a confirmed-unmet refutation.
+    writeFileSync(
+      join(runDir, "src", "other-implementation.ts"),
+      [
+        "export function assertResolvedPull(ctx, record) {",
+        "  if (record.head !== ctx.sourceSha) {",
+        "    throw new Error('source SHA mismatch');",
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+    );
     const result = await runReview({
       env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
       inputs: {
@@ -3751,15 +3766,18 @@ test("#874 #854-reproduction: a 'met' claim citing a real line that only copies 
     assert.ok(trace.rows[0]!.notes.includes("enforcement-location-copies-without-comparing"), JSON.stringify(trace.rows[0]));
     assert.equal(trace.incomplete, true);
 
+    // #854 protection intact: the row still stops coverage, so the run is
+    // NOT a clean approval — but the copies-without-comparing note is not a
+    // confirmed-unmet refutation, so nothing is synthesized and the verdict
+    // is not flipped.
     assert.equal(result.outputs.requiredChecks, "incomplete");
+    assert.equal(result.outputs.incompleteReason, "requirement_trace");
     assert.match(result.marker, /"required_checks":"incomplete"/);
-    // #1145: the copies-without-comparing refutation is deterministic proof
-    // against the checkout at head, so the confirmed-unmet escalation
-    // synthesizes a blocker finding and flips the verdict — this is the one
-    // case where a finding is synthesized (#1095 forbids it for ledger-only
-    // claims, and the #1095 sibling test below pins that boundary).
-    assert.equal(result.outputs.verdict, "request_changes");
-    assert.match(result.marker, /"review_result":"issues"/);
+    assert.match(result.marker, /"incomplete_reason":"requirement_trace"/);
+    assert.match(result.marker, /"review_result":"partial"/);
+    assert.ok(!result.marker.includes('"review_result":"clean"'));
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.outputs.verdictSource, "model");
     const findings = JSON.parse(result.outputs.findings) as Array<{
       severity: string;
       category: string;
@@ -3767,17 +3785,15 @@ test("#874 #854-reproduction: a 'met' claim citing a real line that only copies 
       line: number | null;
       message: string;
     }>;
-    assert.equal(findings.length, 1);
-    assert.equal(findings[0]!.severity, "blocker");
-    assert.equal(findings[0]!.category, "requirements");
-    assert.equal(findings[0]!.file, "src/context-resolution.ts");
-    assert.equal(findings[0]!.line, 5);
-    assert.ok(findings[0]!.message.startsWith("Confirmed-unmet requirement "), findings[0]!.message);
-    assert.ok(findings[0]!.message.includes("copies the value without comparing it"), findings[0]!.message);
+    assert.deepEqual(findings, [], "no synthesized confirmed-unmet blocker");
     assert.ok(
-      result.outputs.reviewMarkdown.includes("confirmed unmet by deterministic repository-state proof"),
+      !result.outputs.reviewMarkdown.includes("confirmed unmet by deterministic repository-state proof"),
       result.outputs.reviewMarkdown,
     );
+    // The row stays an unresolved coverage gap, visibly disclosed in the
+    // review body (not silently dropped).
+    assert.match(result.outputs.reviewMarkdown, /### Requirement trace/);
+    assert.match(result.outputs.reviewMarkdown, /\*\*unverifiable\*\*/);
   } finally {
     await server.close();
     cleanup();

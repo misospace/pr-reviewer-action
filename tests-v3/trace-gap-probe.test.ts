@@ -247,18 +247,29 @@ test("#1145: a complete trace (every in-scope id met) never continues", () => {
 test("#1145: an untraced in-scope requirement yields a continuation naming it with its deterministic reason", () => {
   const workspace = makeWorkspace();
   try {
+    // req-2 is met — it cites a real predicate (a guard on the branch) — and
+    // req-1 was never traced.
+    writeFile(workspace, "src/cache-key.ts", [
+      "export function cacheKey(ctx) {",
+      "  if (!ctx.branch) {",
+      "    throw new Error('branch required');",
+      "  }",
+      "  return `${ctx.repo}:${ctx.branch}`;",
+      "}",
+    ]);
     const ledger = ledgerWith([
       { id: "req-1", text: "Context resolution MUST compare source SHA against the resolved pull request.", kind: "acceptance" },
       { id: "req-2", text: "The cache key MUST include the branch name.", kind: "acceptance" },
     ]);
-    // req-2 is met; req-1 was never traced.
     const claims = [{
       requirement_id: "req-2",
       disposition: "met",
-      enforcement: [{ file: "src/real.ts", line: 1 }],
+      enforcement: [{ file: "src/cache-key.ts", line: 2 }],
       test: [VALID_TEST],
       reason: "key includes branch",
     }];
+    const trace = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(trace.rows[1]?.disposition, "met", JSON.stringify(trace.rows));
     const cont = computeTraceGapContinuation(verdictBody(claims), WITH_BUDGET, probeContext(workspace, ledger, ["req-1", "req-2"]));
     assert.notEqual(cont, null);
     assert.deepEqual(cont?.unresolvedIds, ["req-1"]);
@@ -271,17 +282,23 @@ test("#1145: an untraced in-scope requirement yields a continuation naming it wi
   }
 });
 
-test("#1145: a confirmed-unmet (#854 copies-without-comparing) row is NOT a repair target", () => {
+test("#1145: a #854 copies-without-comparing row IS a repair target (the predicate only searched the cited locations)", () => {
   const workspace = makeWorkspace();
   try {
     seedCopiesOnly(workspace);
     const ledger = ledgerWith([{ id: "req-1", text: "Context resolution MUST compare source SHA against the resolved pull.", kind: "acceptance" }]);
     const trace = validateRequirementTrace([COPIES_ONLY_CLAIM], ledger, workspace);
     assert.ok(trace.rows[0]?.notes.includes("enforcement-location-copies-without-comparing"), JSON.stringify(trace.rows));
-    // Refuted against the checkout: reading more cannot change it, and the
-    // T2 escalation owns the outcome — the probe returns null, never a
-    // repair round for a settled row.
-    assert.equal(computeTraceGapContinuation(verdictBody([COPIES_ONLY_CLAIM]), WITH_BUDGET, probeContext(workspace, ledger, ["req-1"])), null);
+    // The predicate searched ONLY the cited location, so it cannot prove the
+    // requirement is unenforced elsewhere in the implementation — the row is a
+    // repairable coverage gap, not a refutation. The bounded continuation is
+    // precisely the mechanism that can go find the real enforcement location.
+    const cont = computeTraceGapContinuation(verdictBody([COPIES_ONLY_CLAIM]), WITH_BUDGET, probeContext(workspace, ledger, ["req-1"]));
+    assert.notEqual(cont, null);
+    assert.deepEqual(cont?.unresolvedIds, ["req-1"]);
+    assert.equal(cont?.reasons?.["req-1"], "enforcement-location-copies-without-comparing");
+    assert.ok(cont?.instruction.includes("- req-1:"));
+    assert.ok(cont?.instruction.includes("enforcement-location-copies-without-comparing"));
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -307,7 +324,7 @@ test("#1145: a confirmed-unmet (#985 structural-proof-unconfirmed) row is NOT a 
   }
 });
 
-test("#1145: mixed rows — confirmed-unmet is excluded, the coverage gap is offered", () => {
+test("#1145: mixed rows — the copies-without-comparing coverage gap and the untraced row are both offered", () => {
   const workspace = makeWorkspace();
   try {
     seedCopiesOnly(workspace);
@@ -318,8 +335,11 @@ test("#1145: mixed rows — confirmed-unmet is excluded, the coverage gap is off
     const claims = [{ ...COPIES_ONLY_CLAIM, requirement_id: "req-refuted" }];
     const cont = computeTraceGapContinuation(verdictBody(claims), WITH_BUDGET, probeContext(workspace, ledger, ["req-refuted", "req-untraced"]));
     assert.notEqual(cont, null);
-    assert.deepEqual(cont?.unresolvedIds, ["req-untraced"]);
-    assert.ok(!cont?.instruction.includes("- req-refuted:"));
+    // The copies-without-comparing row is a repairable coverage gap and the
+    // untraced row is one too — both are offered.
+    assert.deepEqual(cont?.unresolvedIds, ["req-refuted", "req-untraced"]);
+    assert.ok(cont?.instruction.includes("- req-refuted:"));
+    assert.ok(cont?.instruction.includes("- req-untraced:"));
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
