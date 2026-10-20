@@ -1638,6 +1638,13 @@ secrets: [profiles.primary.apiKey],
   };
   ws.write("review-coverage.json", Buffer.from(`${pyJsonDumps(reviewCoverage)}\n`, "utf8"));
 
+  // #726: the scorer is an outbound model call, so it sits behind the same
+  // stage-boundary checkpoint as every other spend — a run cancelled during
+  // enforcement must not dial the scorer. The scorer's own deps carry no
+  // signal (pre-#1073 shape inherited from main), so this boundary is the
+  // cancellation coverage for the stage.
+  checkpoint();
+
   // ── #1073: the independent post-review confidence scorer ─────────────
   // Advisory telemetry only. Runs once, after enforcement and the coverage
   // record are final and only when this run will actually publish a review:
