@@ -1217,6 +1217,68 @@ test("#1154: redactPrTextDeep masks a secret-named key's subtree — the quoted-
   assert.equal(arr[0]!.token, "[REDACTED]", "a secret-named key inside an array element is masked too");
 });
 
+// #1154 review round 6: the key-name rule above only fires when the text
+// PARSES as JSON. A diff line or PR body carrying one-line JSON is a STRING,
+// and the pattern layer missed it: the generic `key: value` masker requires
+// the separator right after the key name, and the closing quote between key
+// and colon blocks it, so `{"password": "opaque-value"}` persisted raw while
+// its parsed-JSON sibling was already masked. The pattern layer now has a
+// quoted-key masker; these pin it on every surface that shares it.
+test("#1154: same-line quoted JSON key/value is masked by the line-preserving text path", () => {
+  const body = [
+    'Config now reads `{"password": "opaque-value"}` from env.',
+    '{"api_key": "anothersecret"}',
+    "{'client_secret': 'thirdsecretvalue'}",
+    "{`token`: \"fourthsecretvalue\"}",
+    '{"dbPassword": "fifthsecretvalue", "username": "octocat"}',
+  ].join("\n");
+  const out = redactPrTextLines(body);
+  const outLines = out.split("\n");
+  assert.equal(outLines.length, 5, "no line collapse");
+  for (const value of ["opaque-value", "anothersecret", "thirdsecretvalue", "fourthsecretvalue", "fifthsecretvalue"]) {
+    assert.ok(!out.includes(value), `the quoted value ${value} must not survive`);
+  }
+  assert.ok(out.includes("[REDACTED]"));
+  const fifthLine = outLines[4]!;
+  assert.ok(fifthLine.includes('"username"'), "a non-credential key on the same line survives");
+  assert.ok(!fifthLine.includes("fifthsecretvalue"), "the credential on that line is still masked");
+  // The documented floors and exemptions of the generic rule carry over:
+  // a below-floor value survives (same 8-character bar as `key: value`),
+  // a bare quoted key line keeps its run-opening role, and an ordinary
+  // quoted key never fires the rule.
+  assert.equal(redactPrTextLines('{"token": "short"}'), '{"token": "short"}', "the shared 8-char value floor");
+  assert.equal(redactPrTextLines('{"password":'), '{"password":', "a bare quoted key line carries no value");
+  assert.equal(redactPrTextLines('{"filename": "src/app.ts", "login": "octocat"}'), '{"filename": "src/app.ts", "login": "octocat"}', "ordinary JSON keys untouched");
+  // #252: the boundary token fed to itself. The literal marker in the value
+  // position is masked like any ≥8-char value (the existing kubeconfig
+  // masker already re-masks `password: [REDACTED]` on a key line); what must
+  // hold is that it never NESTS and the output converges on a re-persist.
+  const hostile = '{"password": "[REDACTED]"}';
+  const hostileOnce = redactPrTextLines(hostile);
+  assert.ok(!hostileOnce.includes("[REDACTED][REDACTED]"), "the marker never nests");
+  assert.equal(redactPrTextLines(hostileOnce), hostileOnce, "the masked form is a fixed point");
+  const masked = redactPrTextLines('{"password": "opaque-value"}');
+  assert.equal(redactPrTextLines(masked), masked, "idempotent");
+});
+
+test("#1154: quoted JSON credentials inside diff content lines are masked", () => {
+  const diff = [
+    "diff --git a/config.json b/config.json",
+    "--- a/config.json",
+    "+++ b/config.json",
+    "@@ -1,2 +1,3 @@",
+    " {\"username\": \"octocat\"}",
+    '+ {"api_key": "leakedsecretvalue"}',
+    '-{"password":"removedsecret"}',
+  ].join("\n");
+  const out = redactDiffText(diff);
+  assert.equal(out.split("\n").length, 7, "line count preserved");
+  assert.ok(!out.includes("leakedsecretvalue") && !out.includes("removedsecret"), "no quoted value survives on either side");
+  assert.ok(out.includes('+ {[REDACTED]"'), "the added line keeps its diff prefix and surrounding punctuation");
+  assert.ok(out.includes('-{[REDACTED]"'), "the removed line is masked by its own side");
+  assert.ok(out.includes(" {\"username\": \"octocat\"}"), "an ordinary context line is byte-for-byte");
+});
+
 test("#1154: the key-name rule is the shared unanchored vocabulary, and only the name selects it", () => {
   const out = redactPrTextDeep({
     client_secret: "opaque-value",

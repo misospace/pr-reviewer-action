@@ -77,6 +77,36 @@ export function redactText(text: string | null | undefined): string {
 // `client_secret` as well as `password` and `secret`.
 const KEY_NAME_FLANK = "[A-Za-z0-9_.-]*";
 
+/** A quoted-key assignment on one line (`"password": "…"`, `'api_key': '…'`,
+ * `` `token`: "…" ``) — the JSON spelling the generic `key=value` masker in
+ * `MASKERS` cannot see: its separator must follow the key name immediately,
+ * and the closing quote between key and colon blocks it, so a same-line JSON
+ * credential survived in `pr.diff`, `pr-body.txt`, the corpus,
+ * `ai-request.<tier>.json` and the projection content while its PARSED-JSON
+ * sibling was already masked by `redactPrTextDeep`'s key-name rule (#1154
+ * review round 6: a PR body or diff line embedding one-line JSON is a
+ * STRING, never parsed).
+ *
+ * Deliberately NOT an entry of `MASKERS`: the flat pass also runs over
+ * SERIALIZED JSON that must re-parse afterwards (evidence-provider stdout
+ * is masked with it before `JSON.parse`), and every generic masker is
+ * structurally immune to serialized JSON exactly because the quote before
+ * the separator blocks it — a quote-aware masker added there demonstrably
+ * corrupts the document (the `evidence.test.ts` env-dump tests caught it).
+ * This rule therefore lives in the line-preserving core, which is the seam
+ * for text whose bytes are never re-parsed as structure, and the completion
+ * projection's prose branch reaches it through the same core.
+ *
+ * Same replacement shape as the generic rule (the whole `key: value` span
+ * becomes the marker, the 8-character value floor is shared, surrounding
+ * punctuation like `{`/`,` survives); the flank and quote class mirror
+ * `BARE_SECRET_KEY_LINE_RE`, and it is single-line by construction: the
+ * separators around `[:=]` are `[ \t]`, never `\s`. */
+const QUOTED_SECRET_ASSIGN_RE = new RegExp(
+  `["'\`]${KEY_NAME_FLANK}(?:${SECRET_KEY_ALTERNATION})${KEY_NAME_FLANK}["'\`][ \\t]*[:=][ \\t]*['"\`]?[^\\s'"\`]{8,}`,
+  "gi",
+);
+
 /** A BARE secret key line: the line's whole content is a secret key name,
  * a `:` or `=` separator, and NOTHING else — no value (`password:`,
  * `"token":`, `api_key =`, `  client_secret:`) — optionally followed by a YAML
@@ -185,7 +215,11 @@ function maskContentLine(content: string, state: ContinuationState): string {
     if (indent > state.keyIndent && content.trim() !== "") return `${content.slice(0, indent)}${REDACTED}`;
     state.open = false;
   }
-  return redactText(content);
+  // The quoted-key form runs BEFORE the flat maskers so a value they would
+  // half-consume (a bare-token shape inside the quotes) still presents the
+  // whole span to this rule's documented replacement shape; both orders
+  // converge, and the result is inert to a second pass.
+  return redactText(content.replace(QUOTED_SECRET_ASSIGN_RE, REDACTED));
 }
 
 /** Stateful, content-line-at-a-time view of the masking core (#1154).

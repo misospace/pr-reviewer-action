@@ -511,6 +511,35 @@ test("#1154: quoted secret value inside the verdict JSON survives re-parse", () 
   const proseContent = String(((prose.choices as Record<string, unknown>[])[0]!.message as Record<string, unknown>).content);
   assert.equal(proseContent, "sets [REDACTED] on line 3");
 });
+
+// #1154 review round 6: the completion projection shares the pattern layer,
+// so the same-line QUOTED-key JSON form (`{"password": "…"}`) that the
+// generic key=value masker could not see must not persist either — in prose
+// content (flat pass) and in a leaf that embeds a quoted-JSON snippet
+// (per-leaf pass). The opaque value under a secret-named key of the VERDICT
+// schema itself stays the documented KEY_NAMES_OFF residual (masking verdict
+// labels/fields would corrupt the reuse re-parse).
+test("#1154: quoted JSON credential shapes are masked in the completion projection", () => {
+  const quoted = '{"password": "echoedsecretvalue"}';
+  // Prose content quoting a diff line that is one-line JSON.
+  const prose = reusableVerdictEnvelope({ choices: [{ message: { content: `the diff adds ${quoted} to config.json` }, finish_reason: "stop" }] });
+  const proseContent = String(((prose.choices as Record<string, unknown>[])[0]!.message as Record<string, unknown>).content);
+  assert.match(proseContent, /\[REDACTED\]/);
+  assert.ok(!proseContent.includes("echoedsecretvalue"), "the quoted value must not persist in the envelope");
+  // Verdict JSON whose review_markdown leaf embeds the quoted shape: the
+  // per-leaf pass masks inside the leaf and the envelope still re-parses.
+  const verdictJson = JSON.stringify({
+    verdict: "approve",
+    review_markdown: `The diff embeds ${quoted} verbatim.`,
+    findings: [],
+  });
+  const envelope = reusableVerdictEnvelope({ choices: [{ message: { content: verdictJson }, finish_reason: "stop" }] });
+  const content = String(((envelope.choices as Record<string, unknown>[])[0]!.message as Record<string, unknown>).content);
+  assert.ok(!content.includes("echoedsecretvalue"), "no quoted value survives in the projected leaf");
+  const reparsed = parseVerdictResponse(JSON.parse(JSON.stringify(envelope)));
+  assert.equal(reparsed.verdict, "approve");
+  assert.match(reparsed.reviewMarkdown, /\[REDACTED\]/);
+});
 });
 
 test("planner leads with PR metadata and linked issues and lists what it already holds", () => {

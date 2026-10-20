@@ -252,6 +252,64 @@ test("#1154: PR-authored diff/body/file-patch artifacts are credential-redacted 
   }
 });
 
+// #1154 review round 6: a reused run dir can contain a `pr-object.json`
+// persisted raw by an older build. The in-memory sanitize must be written
+// BACK to disk — otherwise the raw artifact ships with the run and every
+// later artifact read serves it. The only other rewrite (the #812 same-head
+// refresh) requires the CI gate, so a run with CI gating disabled is the
+// exact case that used to leave the raw copy on disk.
+test("#1154: a reused run dir's raw cached pr-object.json is rewritten redacted", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const rawPassword = "password: hunter2hunter2";
+  const rawQuoted = '{"api_key": "cachedsecretvalue"}';
+  writeFileSync(join(runDir, "pr-object.json"), JSON.stringify({
+    number: 7,
+    title: "Update README",
+    body: `Context.\n\n${rawPassword}\n${rawQuoted}`,
+    head: { sha: "a".repeat(40), ref: "feature" },
+    base: { ref: "main" },
+    user: { login: "someone" },
+    changed_files: 1,
+    additions: 4,
+    deletions: 1,
+    html_url: "https://github.com/o/r/pull/7",
+  }));
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), GITHUB_STEP_SUMMARY: join(runDir, "step-summary.md") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform({ body: "freshly fetched body marker" }),
+      persistArtifacts: true,
+      quiet: true,
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    const diskObject = readFileSync(join(runDir, "pr-object.json"), "utf8");
+    assert.match(diskObject, /\[REDACTED\]/, "the on-disk cache is rewritten with the sanitized object");
+    assert.ok(!diskObject.includes("hunter2hunter2") && !diskObject.includes("cachedsecretvalue"), "no raw credential survives in the artifact");
+    assert.ok(!diskObject.includes("freshly fetched body marker"), "the cached object (not a fresh fetch) is what persisted");
+    const bodyTxt = readFileSync(join(runDir, "pr-body.txt"), "utf8");
+    assert.match(bodyTxt, /\[REDACTED\]/);
+    assert.ok(!bodyTxt.includes("hunter2hunter2") && !bodyTxt.includes("cachedsecretvalue"));
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
 test("#975: the step summary renders the findings table and counts for a findings verdict", async () => {
   const server = await startMockServer((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");

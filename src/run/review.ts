@@ -427,10 +427,14 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   if (cachedObject !== null && cachedProjectNumber(cachedObject) === Number(prNumber)) {
     log("Reusing PR object fetched by precheck");
     // #1154: idempotent on an already-redacted cache copy, and covers a copy
-    // persisted by an older build. (The stale on-disk copy is not rewritten
-    // here — every read re-redacts, and all downstream writes persist the
-    // redacted form.)
+    // persisted by an older build. #1154 review round 6: the sanitized object
+    // is written BACK to disk too — an older build's raw copy must not stay
+    // in a reused run directory, where it would ship with the run and be
+    // served by any later artifact read. The only other rewrite (the #812
+    // same-head metadata refresh) is gated on the CI gate running, so it does
+    // not close this path generally.
     prObject = redactPrTextDeep(JSON.parse(Buffer.from(cachedObject).toString("utf8")));
+    ws.write("pr-object.json", pyJsonDumps(prObject));
   } else {
     prObject = await adapter.getPr();
     if (prObject !== null && prObject !== undefined) {

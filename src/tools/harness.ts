@@ -32,7 +32,7 @@ import {
   pyDumps,
   pyDumpsAscii,
 } from "../model/conversation.js";
-import { redactPrTextDeep, redactText } from "../context/redact.js";
+import { redactPrTextDeep, redactPrTextLines, redactText } from "../context/redact.js";
 import { fenceSafeLength } from "../context/related-context.js";
 import { KNOWN_SECRET_REDACTED, maskAndTruncate, maskDiagnostic, maskKnownSecrets, maskKnownSecretsDeep, MIN_KNOWN_SECRET_CONTENT_LEN } from "../context/redact.js";
 import { callKnownSecrets, extraHeadersForEnv } from "../transport/headers.js";
@@ -564,10 +564,12 @@ const KEY_NAMES_OFF = false;
  * pass on serialized JSON demonstrably corrupts it (the kubeconfig masker's
  * unbounded `\S+` eats a closing quote after a quoted secret value,
  * `password: "…"` → unterminated string, and the native-loop reuse re-parse
- * fails closed into an unnecessary fresh review call). Content that does
+  * fails closed into an unnecessary fresh review call). Content that does
  * not parse as JSON is prose by definition — nothing re-parses it as
- * structure, so the flat pass is safe there (its multi-line masking is a
- * presentation change in prose, never a parse corruption).
+ * structure, but its line breaks still carry meaning for the reviewer, so it
+ * takes the line-preserving core (`redactPrTextLines`). That core also
+ * carries the quoted-key assignment rule, which the flat `MASKERS` list
+ * cannot hold without corrupting serialized JSON on other surfaces.
  */
 function redactVerdictContentText(text: string): string {
   try {
@@ -589,10 +591,12 @@ function redactVerdictContentText(text: string): string {
     }
   } catch {
     // Not JSON: prose (or a fenced/multi-shape document the verdict parser
-    // itself would reject). The flat pass cannot corrupt structure that is
-    // not there.
+    // itself would reject). Nothing re-parses it as structure, so only the
+    // LINE structure is load-bearing here — the flat pass would collapse it,
+    // so prose takes the line-preserving core (which carries the same rules
+    // plus the quoted-key assignment form).
   }
-  return redactText(text);
+  return redactPrTextLines(text);
 }
 
 function projectedVerdictContent(
