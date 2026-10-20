@@ -1257,6 +1257,11 @@ test("#1154: same-line quoted JSON key/value is masked by the line-preserving te
   const hostileOnce = redactPrTextLines(hostile);
   assert.ok(!hostileOnce.includes("[REDACTED][REDACTED]"), "the marker never nests");
   assert.equal(redactPrTextLines(hostileOnce), hostileOnce, "the masked form is a fixed point");
+  // #252, hostile NESTING: a non-secret assignment whose VALUE token is
+  // itself a quoted secret key cannot swallow the real credential — the
+  // failed candidate must resume inside its own span, not past it.
+  assert.equal(redactPrTextLines('"foo":"password":"hunter2hunter2"'), '"foo":[REDACTED]"');
+  assert.ok(!redactPrTextLines('{"a":"x","dbPassword":"deepsecretvalue"}').includes("deepsecretvalue"));
   const masked = redactPrTextLines('{"password": "opaque-value"}');
   assert.equal(redactPrTextLines(masked), masked, "idempotent");
 });

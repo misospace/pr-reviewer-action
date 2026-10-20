@@ -76,8 +76,10 @@ export function redactText(text: string | null | undefined): string {
 // flank a matched alternative inside a NAME, so the functional key-name test
 // accepts `dbPassword` and `client_secret` as well as `password` and
 // `secret`. One class behind both quoted/bare key rules in this core, so the
-// name boundary they match on cannot drift apart.
-const KEY_NAME_RUN = "[A-Za-z0-9_.+-]+";
+// name boundary they match on cannot drift apart. The class is the exact
+// alphabet of the FLANK alternation it replaced — a wider class would make
+// the functional test a strict superset of the old regex's selection.
+const KEY_NAME_RUN = "[A-Za-z0-9_.-]+";
 
 /** A quoted-key assignment on one line (`"password": "…"`, `'api_key': '…'`,
  * `` `token`: "…" ``) — the JSON spelling the generic `key=value` masker in
@@ -104,25 +106,59 @@ const KEY_NAME_RUN = "[A-Za-z0-9_.+-]+";
  * punctuation like `{`/`,` survives), and it is single-line by construction:
  * the separators around `[:=]` are `[ \t]`, never `\s`.
  *
- * The name test is FUNCTIONAL, not regex-embedded: a quoted identifier RUN
- * is matched by one lazy quantifier over a single character class and then
- * checked with `isSecretKeyName` — the same unanchored `SECRET_KEY_ALTERNATION`
- * test the deep key-name rule uses, so the shared vocabulary still selects.
- * Embedding `FLANK(?:ALT)FLANK` instead is the SAME language but quadratic
- * backtracking on adversarial one-line content (measured ~3.6s for a 240 KB
- * line of `"passwordpassword…` with no closing quote; the diff path masks
- * each line several times per run), the #999 cost class this module has
- * already bounded once. A single class-bounded quantifier is linear here:
- * it stops at the first out-of-class character, so every start position
- * costs at most the length of its own run. */
-const QUOTED_SECRET_ASSIGN_RE = new RegExp(
-  `["'\`](${KEY_NAME_RUN})["'\`][ \\t]*[:=][ \\t]*['"\`]?[^\\s'"\`]{8,}`,
-  "gi",
+ * The name test is FUNCTIONAL, not regex-embedded: the quoted identifier
+ * RUN is matched by one class-bounded quantifier and then checked with
+ * `isSecretKeyName` — the same unanchored `SECRET_KEY_ALTERNATION` test the
+ * deep key-name rule uses, so the shared vocabulary still selects.
+ * Embedding `FLANK(?:ALT)FLANK` instead accepts the same language but
+ * backtracks quadratically on adversarial one-line content (measured ~3.6s
+ * for a 240 KB line of `"passwordpassword…` with no closing quote; the diff
+ * path masks each line several times per run), the #999 cost class this
+ * module has already bounded once.
+ *
+ * The functional gate changes how a CANDIDATE can be skipped, so the rule
+ * scans with a sticky regex instead of `replace`: when a candidate's name
+ * fails the gate, `replace` would still consume its whole span, and hostile
+ * content like `"foo":"password":"hunter2…"` hides the real credential that
+ * way (the failed `"foo"` candidate swallows the `"password` key opening).
+ * A failed candidate instead backs up ONE character and the scan resumes,
+ * so the embedded `"password":` assignment anchors on its own. Linearity
+ * holds: every character is emitted once, and each quote's run scan stops
+ * at the next out-of-class character, so total work per line is O(line). */
+const QUOTED_ASSIGN_CANDIDATE_RE = new RegExp(
+  `["'\`](${KEY_NAME_RUN})["'\`][ \\t]*[:=][ \\t]*['"\`]?([^\\s'"\`]*)`,
+  "y",
 );
 
+/** The 8-character value floor of the generic `key=value` masker, restated
+ * as a length check because the candidate regex captures the whole maximal
+ * value token (greedy `*`) and the floor is then applied to the capture —
+ * byte-for-byte the span the old `{8,}` form consumed. */
+const MIN_QUOTED_VALUE_LEN = 8;
+
 function maskQuotedSecretAssignments(content: string): string {
-  return content.replace(QUOTED_SECRET_ASSIGN_RE, (match, key: string) =>
-    isSecretKeyName(key) ? REDACTED : match);
+  let out = "";
+  let i = 0;
+  while (i < content.length) {
+    const ch = content[i]!;
+    if (ch !== '"' && ch !== "'" && ch !== "`") {
+      out += ch;
+      i += 1;
+      continue;
+    }
+    QUOTED_ASSIGN_CANDIDATE_RE.lastIndex = i;
+    const candidate = QUOTED_ASSIGN_CANDIDATE_RE.exec(content);
+    if (candidate !== null && isSecretKeyName(candidate[1]!) && (candidate[2] ?? "").length >= MIN_QUOTED_VALUE_LEN) {
+      out += REDACTED;
+      i += candidate[0].length;
+      continue;
+    }
+    // Failed gate or below-floor value: consume only the opening quote so a
+    // secret assignment nested inside this candidate's span still anchors.
+    out += ch;
+    i += 1;
+  }
+  return out;
 }
 
 /** A BARE secret key line: the line's whole content is a secret key name,
@@ -147,7 +183,7 @@ function maskQuotedSecretAssignments(content: string): string {
  * the shared unanchored `isSecretKeyName` — the same language, without the
  * quadratic backtracking `FLANK(?:ALT)FLANK` shows on a long identifier run
  * with no `:` (measured ~17.6s at 240k `"password…` repetitions, the #999
- * cost class; it is the same restructuring `QUOTED_SECRET_ASSIGN_RE`
+ * cost class; it is the same restructuring `maskQuotedSecretAssignments`
  * received). */
 const BARE_SECRET_KEY_LINE_RE = new RegExp(
   `^\\s*["'\`]?\\s*(${KEY_NAME_RUN})\\s*["'\`]?\\s*[:=]\\s*(?:[|>][-+0-9]*)?\\s*$`,
