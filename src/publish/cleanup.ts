@@ -181,8 +181,11 @@ export async function cleanupManagedReviews(
   }
 
   // Minimized state lives only in GraphQL (the REST list does not expose
-  // it). On failure the map is empty and minimization is simply retried
-  // (idempotent). On Forgejo there is no GraphQL API: the query is skipped.
+  // it). The read is an IDEMPOTENCY guard, not a safety gate: the GitHub
+  // adapter answers an unreadable minimized state with an EMPTY SET (it
+  // never throws), so the only thing an empty set changes is that a body
+  // which is already hidden may be hidden again (idempotent). On Forgejo
+  // there is no GraphQL API: the query is skipped.
   let minimizedIds: string[] = [];
   if (api.platform === "github") {
     minimizedIds = await api.minimizedReviewIds();
@@ -198,6 +201,11 @@ export async function cleanupManagedReviews(
   }
 
   for (const review of managed) {
+    // #1144: the review id is the review's identity for the whole cleanup
+    // decision, and the dismissal interpolates it into a REST path
+    // (`/reviews/{id}/dismissals`). A malformed id is not targetable at
+    // all: such a review is neither dismissed nor hidden.
+    if (!/^[1-9]\d*$/.test(review.id)) continue;
     if (review.state === "APPROVED" || review.state === "CHANGES_REQUESTED") {
       const dismissed = await api.dismissReview(review.id, DISMISSAL_MESSAGE);
       if (dismissed) {
@@ -251,8 +259,12 @@ const HIDEABLE_STATES: ReadonlySet<string> = new Set(["COMMENTED", "APPROVED", "
  *   foreign/human reviews never match the owner, and any unknown/absent
  *   state or pending review is excluded;
  * - excluded ids (the replacement this run just published) are skipped;
- * - on GitHub a failed minimized-state read hides no bodies (dismissal has
- *   no GraphQL dependency and still runs);
+ * - the minimized-state read is an IDEMPOTENCY guard, not a safety gate: it
+ *   only prevents re-hiding an already-hidden body. The GitHub adapter
+ *   answers an unreadable minimized state with an empty set (it never
+ *   throws), so in production the hide still runs; only an adapter that
+ *   actually throws (the defensive catch) hides no bodies — and even then
+ *   the dismissals still run, because dismissal has no GraphQL dependency;
  * - `mayHide` revalidates supersession (current head, the replacement
  *   checkpoint, no newer competing publication) at the mutation boundary
  *   before every review's mutations, so a competing run can never hide the
@@ -278,7 +290,11 @@ export async function hideSupersededManagedReviews(
     return;
   }
   // Minimized state and `minimizeComment` are GraphQL-only capabilities.
-  // The REST dismissal path does not depend on them.
+  // The REST dismissal path does not depend on them. The minimized-state
+  // read is an idempotency guard only: an empty set means "nothing is known
+  // to be minimized", not "the read failed" — the GitHub adapter answers an
+  // unreadable state with an empty set and never throws, so the hide still
+  // runs (only a re-hide of an already-hidden body is possible).
   let canMinimize = false;
   const minimized = new Set<string>();
   if (api.platform === "github") {
@@ -294,7 +310,9 @@ export async function hideSupersededManagedReviews(
   const excluded = new Set(excludeReviewIds.map(String));
   const eligible = reviews.filter((review) => {
     const id = String(review.id ?? "");
-    if (id === "" || excluded.has(id)) return false;
+    // #1144: the dismissal interpolates the review id into a REST path
+    // (`/reviews/{id}/dismissals`), so a malformed id is never targetable.
+    if (!/^[1-9]\d*$/.test(id) || excluded.has(id)) return false;
     const state = review.state ?? "";
     if (!HIDEABLE_STATES.has(state)) return false;
     if (!isManagedBody(typeof review.body === "string" ? review.body : "", marker)) return false;

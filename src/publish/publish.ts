@@ -1853,7 +1853,9 @@ export async function publishReview(
           // fails closed: nothing is deleted.
           const { owner, reason } = await resolvePublishTrustedOwner(api);
           if (owner === null) {
-            messages.push("WARN: Could not verify authenticated owner (identity reason: " + reason + "); no inline comments retired");
+            // #1144: an unproven identity hides no previous managed review
+            // body and retires no inline comment — both effects are skipped.
+            messages.push("WARN: Could not verify authenticated owner (identity reason: " + reason + "); no previous managed review bodies hidden and no inline comments retired");
           } else {
             const previous = previousReviews.filter((r) => ownerMatchesIdentity(r.user, owner));
             const reviewInstant = (r: { submitted_at?: string; updated_at?: string }): string => {
@@ -1944,7 +1946,14 @@ export async function publishReview(
                   // destructive inline-comment retirement and thread
                   // resolution above stay gated on complete coverage.
                   messages.push("NOTE: Replacement is not complete (incomplete coverage or fallback submission); previous inline comments left in place, hiding superseded managed review bodies");
-                  await hideSupersededManagedReviews(api, olderManaged, input.commentMarker, cleanupLog, { owner, reason }, [], stillCurrent);
+                  // #1144: the replacement this run published is never a
+                  // cleanup target, even if a future call site would offer
+                  // it: the ordering already excludes it, this makes it
+                  // explicit.
+                  const excluded = replacementCheckpoint.kind === "review"
+                    ? [String(replacementCheckpoint.reviewId)]
+                    : [];
+                  await hideSupersededManagedReviews(api, olderManaged, input.commentMarker, cleanupLog, { owner, reason }, excluded, stillCurrent);
                 }
               } else messages.push("WARN: A newer review superseded this run; cleanup skipped");
             }

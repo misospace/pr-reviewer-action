@@ -586,6 +586,10 @@ export class GitHubPublishApi implements PublishPlatformApi {
   }
 
   async dismissReview(reviewId: number | string, message: string): Promise<boolean> {
+    // #1144: the review id is interpolated into a REST path segment
+    // (`/reviews/{id}/dismissals`), so a malformed id is refused BEFORE any
+    // request is issued — the seam never sends an unusable id to the forge.
+    if (!/^[1-9]\d*$/.test(String(reviewId))) return false;
     try {
       const { status } = await requestJson(
         this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews/${reviewId}/dismissals`),
@@ -788,6 +792,42 @@ export function forgejoReviewEvent(event: string): string {
   return "COMMENT";
 }
 
+/**
+ * #1144: map a raw Forgejo review row to the GitHub-shaped review-state
+ * vocabulary the forge-agnostic publish cleanup layer speaks.
+ *
+ * The two Forgejo seams deliberately differ. `normalize.ts`
+ * (`normalizeForgejoReview`) is a byte-exact v2-parity port of the READ
+ * seam's projection and stays untouched; this seam serves the GitHub-shaped
+ * `PublishReviewRef` contract, so a Forgejo row is translated here instead
+ * of leaking `ReviewStateType` tokens into the cleanup layer (where a
+ * `REQUEST_CHANGES` verdict would never match the hide/dismiss state set
+ * and would keep blocking merges).
+ *
+ * - a dismissed review is `DISMISSED` — Forgejo keeps the original state
+ *   token and flags the dismissal separately;
+ * - `REQUEST_REVIEW` is an unsubmitted review-request placeholder, not a
+ *   verdict, so it reads as `PENDING` and the cleanup layer fails closed
+ *   on it;
+ * - an unknown, missing, or non-string state is `""`, which the cleanup
+ *   layer also fails closed on.
+ */
+export function forgejoReviewState(raw: unknown): string {
+  if (raw === null || typeof raw !== "object") return "";
+  const row = raw as { state?: unknown; event?: unknown; dismissed?: unknown };
+  if (row.dismissed === true) return "DISMISSED";
+  const rawState = typeof row.state === "string" && row.state.trim() !== ""
+    ? row.state
+    : typeof row.event === "string" ? row.event : "";
+  const state = rawState.trim().toUpperCase();
+  if (state === "APPROVED" || state === "APPROVE") return "APPROVED";
+  if (state === "REQUEST_CHANGES") return "CHANGES_REQUESTED";
+  if (state === "COMMENT") return "COMMENTED";
+  if (state === "PENDING") return "PENDING";
+  if (state === "REQUEST_REVIEW") return "PENDING";
+  return "";
+}
+
 /** Forgejo generates integration audiences as `u:<owner ID>:<UUID>`;
  * parsing lives in the shared owner-identity policy (#1093). */
 
@@ -987,7 +1027,12 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     for (let page = 1; page <= 10; page++) {
       const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews?limit=100&page=${page}`), await this.opts("GET"));
       if (status !== 200 || !Array.isArray(data)) throw new Error("Incomplete review listing");
-      reviews.push(...data as PublishReviewRef[]);
+      // #1144: the cleanup layer is forge-agnostic and decides on GitHub's
+      // review-state vocabulary, while Forgejo reports its own
+      // `ReviewStateType` tokens — every row is normalized here, so a stale
+      // `REQUEST_CHANGES` verdict is still recognised (and dismissed) and a
+      // `COMMENT` body is still recognised (and hidden).
+      reviews.push(...(data as PublishReviewRef[]).map((row) => ({ ...row, state: forgejoReviewState(row) })));
       if (data.length < 100) return reviews;
     }
     throw new Error("Review listing exceeded pagination cap");
@@ -1081,6 +1126,10 @@ export class ForgejoPublishApi implements PublishPlatformApi {
   }
 
   async dismissReview(reviewId: number | string, message: string): Promise<boolean> {
+    // #1144: the review id is interpolated into a REST path segment
+    // (`/reviews/{id}/dismissals`), so a malformed id is refused BEFORE any
+    // request is issued — the seam never sends an unusable id to the forge.
+    if (!/^[1-9]\d*$/.test(String(reviewId))) return false;
     try {
       const { status } = await requestJson(
         this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews/${reviewId}/dismissals`),
