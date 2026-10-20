@@ -13,6 +13,11 @@
 #     grandchild even when its parent and the phase root die on TERM
 #   - a group/world-writable install dir fails closed before any download
 #     or launcher install proceeds
+#   - a sticky world-writable FINAL install dir fails closed (the sticky
+#     exemption is for ancestors only), and a symlink at the install
+#     destination is refused before the launcher is staged
+#   - with pgrep missing, the default mode fails closed with the
+#     prerequisite error before the downloader ever starts
 #
 # Auto-discovered by the CI validate-bash job. Target runtime: seconds.
 set -euo pipefail
@@ -66,10 +71,13 @@ write_stub() { # write_stub NAME <<heredoc body>>
 run_bootstrap_bg() { # run_bootstrap_bg OUTFILE MODE ENV_ASSIGNMENTS...
   local outfile="$1" mode="$2"
   shift 2
+  # "${BASH:-bash}", not a bare `bash`: a test that restricts the child
+  # PATH (the missing-pgrep case below) would otherwise leave `env` with
+  # no way to resolve the interpreter itself.
   if [ -n "$mode" ]; then
-    env "$@" bash "$BOOTSTRAP" "$mode" >"$outfile" 2>&1 &
+    env "$@" "${BASH:-bash}" "$BOOTSTRAP" "$mode" >"$outfile" 2>&1 &
   else
-    env "$@" bash "$BOOTSTRAP" >"$outfile" 2>&1 &
+    env "$@" "${BASH:-bash}" "$BOOTSTRAP" >"$outfile" 2>&1 &
   fi
   BOOTSTRAP_PID=$!
 }
@@ -795,12 +803,13 @@ check "the created leaf was left empty, not written into" \
 echo ""
 echo "=== bootstrap runtime: a directory at the install destination is refused, not nested into ==="
 new_sandbox
-# Sticky exempts a 1777 final component from the writability rule (the
-# /tmp shape), so a hostile `mise` directory there is reachable. `mv -f`
-# into a directory NESTS the launcher (mise/.mise.bootstrap.XXXX) and
-# still reports success, failing only later at exec with 126 -- and it
-# used to leave the staged file behind as well.
-chmod 1777 "$INSTALL_DIR"
+# The final component must validate on its own: the sticky exemption is
+# ancestors-only now, so a hostile `mise` directory needs a clean (755,
+# current-user-owned) leaf to be reachable. `mv -f` into a directory
+# NESTS the launcher (mise/.mise.bootstrap.XXXX) and still reports
+# success, failing only later at exec with 126 -- and it used to leave
+# the staged file behind as well.
+chmod 755 "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR/mise"
 printf 'squatter\n' >"$INSTALL_DIR/mise/squatter"
 cat >"$SANDBOX/squatter-fake-mise" <<EOF
@@ -842,6 +851,142 @@ check "no staged file was left behind in the install dir" \
   "$(cd "$INSTALL_DIR" && find . -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ',')" "mise,"
 check "the squatter contents are untouched" \
   "$(cat "$INSTALL_DIR/mise/squatter")" "squatter"
+
+echo ""
+echo "=== bootstrap runtime: sticky world-writable FINAL install dir fails closed ==="
+new_sandbox
+# 1777 on the FINAL component: the ancestor /tmp shape must not exempt
+# the install dir itself, because the launcher is created inside it.
+chmod 1777 "$INSTALL_DIR"
+write_stub sha256sum <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '$PINNED_DIGEST'
+EOF
+write_stub curl <<EOF
+#!/usr/bin/env bash
+printf downloaded > "$SANDBOX/curl-ran-sticky-final"
+exit 0
+EOF
+# Deliberately no mise stub, as in the negative blocks above.
+sticky_final_out="$SANDBOX/sticky-final.out"
+run_bootstrap_bg "$sticky_final_out" "" \
+  "MISE_INSTALL_DIR=$INSTALL_DIR" \
+  "HOME=$SANDBOX/home" \
+  "PATH=$BIN:/usr/bin:/bin"
+if wait_exited_or_deadline 20; then
+  check_ne "bootstrap exits non-zero on a sticky 1777 final install dir" "$BOOTSTRAP_RC" "0"
+else
+  check_ne "bootstrap exits non-zero on a sticky 1777 final install dir" "timed-out" "0"
+fi
+reap_bootstrap
+sticky_final_body="$(cat "$sticky_final_out")"
+check_contains "failure cites the violated trust property (sticky final)" \
+  "$sticky_final_body" "writable by group or others"
+check_contains "failure names that sticky does not exempt the final dir" \
+  "$sticky_final_body" "sticky bit does not exempt the final install directory"
+check "no launcher installed into the sticky final dir" \
+  "$(test -e "$INSTALL_DIR/mise" && printf yes || printf no)" "no"
+check "the downloader never ran (sticky final)" \
+  "$(test -e "$SANDBOX/curl-ran-sticky-final" && printf yes || printf no)" "no"
+
+echo ""
+echo "=== bootstrap runtime: symlinked install destination refused before staging ==="
+new_sandbox
+# The destination `mise` is a symlink to a directory OUTSIDE the install
+# dir, planted before the run: the refusal must fire on the literal path
+# while the staged-cleanup trap is active, so the sentinel is never
+# written through and no staged file survives.
+SENTINEL_DIR="$SANDBOX/sentinel-dir"
+mkdir -p "$SENTINEL_DIR"
+printf 'sentinel-content\n' >"$SENTINEL_DIR/keepme"
+ln -s "$SENTINEL_DIR" "$INSTALL_DIR/mise"
+cat >"$SANDBOX/symlink-fake-mise" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "fake-mise \$*" >> "$SANDBOX/symlink-mise-calls.log"
+exit 0
+EOF
+chmod 755 "$SANDBOX/symlink-fake-mise"
+write_stub sha256sum <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '$PINNED_DIGEST'
+EOF
+write_stub curl <<EOF
+#!/usr/bin/env bash
+prev=""
+for arg in "\$@"; do
+  if [ "\$prev" = "--output" ]; then
+    cp "$SANDBOX/symlink-fake-mise" "\$arg"
+  fi
+  prev="\$arg"
+done
+EOF
+symlink_dest_out="$SANDBOX/symlink-dest.out"
+run_bootstrap_bg "$symlink_dest_out" "" \
+  "MISE_INSTALL_DIR=$INSTALL_DIR" \
+  "HOME=$SANDBOX/home" \
+  "PATH=$BIN:/usr/bin:/bin"
+if wait_exited_or_deadline 20; then
+  check_ne "bootstrap exits non-zero when the destination is a symlink" "$BOOTSTRAP_RC" "0"
+else
+  check_ne "bootstrap exits non-zero when the destination is a symlink" "timed-out" "0"
+fi
+reap_bootstrap
+symlink_dest_body="$(cat "$symlink_dest_out")"
+check_contains "failure names the symlinked destination" \
+  "$symlink_dest_body" "$INSTALL_DIR/mise is a symlink"
+check "the destination symlink was not replaced" \
+  "$(test -L "$INSTALL_DIR/mise" && printf yes || printf no)" "yes"
+check "the sentinel directory behind the link is untouched" \
+  "$(cd "$SENTINEL_DIR" && find . -mindepth 1 -printf '%f\n' | sort | tr '\n' ',')" "keepme,"
+check "the sentinel file content is unchanged" \
+  "$(cat "$SENTINEL_DIR/keepme")" "sentinel-content"
+check "no staged file was left behind in the install dir (symlink dest)" \
+  "$(cd "$INSTALL_DIR" && find . -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ',')" "mise,"
+check "the downloader's output never landed outside the install dir" \
+  "$(test -e "$SENTINEL_DIR/mise" && printf yes || printf no)" "no"
+
+echo ""
+echo "=== bootstrap runtime: missing pgrep fails closed before the downloader starts ==="
+new_sandbox
+# A PATH that contains the stub tools but no pgrep at all: the default
+# mode must refuse with the prerequisite error before any bounded phase,
+# not silently degrade the timeout cleanup to killing only the root.
+NOPGREP_BIN="$SANDBOX/bin-nopgrep"
+mkdir -p "$NOPGREP_BIN"
+real_dirname="$(command -v dirname)"
+cat >"$NOPGREP_BIN/dirname" <<EOF
+#!/usr/bin/env bash
+exec "$real_dirname" "\$@"
+EOF
+chmod 755 "$NOPGREP_BIN/dirname"
+cat >"$NOPGREP_BIN/sha256sum" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '$PINNED_DIGEST'
+EOF
+cat >"$NOPGREP_BIN/curl" <<EOF
+#!/usr/bin/env bash
+printf downloaded > "$SANDBOX/curl-ran-nopgrep"
+exit 0
+EOF
+nopgrep_out="$SANDBOX/nopgrep.out"
+run_bootstrap_bg "$nopgrep_out" "" \
+  "MISE_INSTALL_DIR=$INSTALL_DIR" \
+  "HOME=$SANDBOX/home" \
+  "PATH=$NOPGREP_BIN"
+if wait_exited_or_deadline 20; then
+  check_ne "bootstrap exits non-zero when pgrep is missing" "$BOOTSTRAP_RC" "0"
+else
+  check_ne "bootstrap exits non-zero when pgrep is missing" "timed-out" "0"
+fi
+reap_bootstrap
+nopgrep_body="$(cat "$nopgrep_out")"
+check_contains "failure names the missing process tool" "$nopgrep_body" "pgrep"
+check_contains "failure names the prerequisite, not a degraded timeout" \
+  "$nopgrep_body" "procps"
+check "the downloader never ran without pgrep" \
+  "$(test -e "$SANDBOX/curl-ran-nopgrep" && printf yes || printf no)" "no"
+check "no launcher was installed without pgrep" \
+  "$(test -e "$INSTALL_DIR/mise" && printf yes || printf no)" "no"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

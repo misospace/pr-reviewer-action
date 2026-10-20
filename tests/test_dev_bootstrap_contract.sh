@@ -132,6 +132,22 @@ check_contains "tree re-collected after grace to append newly observed pids" \
   "$BOOTSTRAP_BODY" 'leaf_first="$leaf_first $(collect_process_tree "$pid")"'
 
 echo ""
+echo "=== bounded phases fail closed without the process tools ==="
+# run_bounded enumerates the phase's descendants with `pgrep -P`; without
+# it a timeout would kill only the root process and silently leave the
+# phase's children running. The failure must be closed on both layers:
+# each entry mode preflights the tools before any bounded phase, and
+# run_bounded itself refuses to start a phase it could not clean up.
+check "both entry modes preflight the process tools" \
+  "$(grep -cE '^[[:space:]]*require_process_tools$' "$BOOTSTRAP")" "2"
+check_contains "run_bounded refuses to start a phase it cannot clean up" \
+  "$BOOTSTRAP_BODY" 'requires pgrep for process-tree cleanup'
+PGREP_GUARD_AT="$(grep -n -m1 -F 'requires pgrep for process-tree cleanup' "$BOOTSTRAP" | cut -d: -f1)"
+PHASE_START_AT="$(grep -n -m1 -F '"$@" >"$logfile" 2>&1 &' "$BOOTSTRAP" | cut -d: -f1)"
+check "the run_bounded pgrep guard precedes the phase command" \
+  "$([ -n "$PGREP_GUARD_AT" ] && [ -n "$PHASE_START_AT" ] && [ "$PGREP_GUARD_AT" -lt "$PHASE_START_AT" ] && echo yes || echo no)" "yes"
+
+echo ""
 echo "=== install dir is a validated user-owned trust boundary ==="
 # The staging check-then-use sequence cannot be race-safe against a writer
 # who can mutate the install dir; instead the path that reaches it is
@@ -170,8 +186,12 @@ check_contains "the install dir itself is validated as the final component" \
 # cannot be regression-tested at runtime (no test may chmod /).
 check_contains "the walk reaches / instead of stopping at a single component" \
   "$BOOTSTRAP_BODY" '/*) validate_dir_chain "/" ancestor ;;'
-check_contains "sticky is the only writability exemption" \
-  "$BOOTSTRAP_BODY" 't | T) ;; # sticky: a writer cannot rename an entry it does not own'
+check_contains "sticky exempts only ancestors, never the final component" \
+  "$BOOTSTRAP_BODY" 't | T) ;; # ancestor only: sticky forbids renaming an entry the writer does not own'
+check_contains "the final component rejects group/other-write regardless of sticky" \
+  "$BOOTSTRAP_BODY" 'if [ "$role" = "final" ]; then'
+check_contains "the final-component refusal names that sticky does not save it" \
+  "$BOOTSTRAP_BODY" 'sticky bit does not exempt the final install directory'
 check_contains "writability bits come from portable awk substr, not GNU stat" \
   "$BOOTSTRAP_BODY" 'substr($1, 6, 1) "|" substr($1, 9, 1) "|" substr($1, 10, 1)'
 # The assertions above pin HOW the mode bits are parsed; these pin the
@@ -204,6 +224,15 @@ check "the canonical path is bound before the staging file is created" \
   "$([ -n "$CANONICAL_AT" ] && [ "$CANONICAL_AT" -lt "$STAGE_AT" ] && echo yes || echo no)" "yes"
 check_contains "a directory at the install destination is refused, not nested into" \
   "$BOOTSTRAP_BODY" 'if [ -d "$install_dir/mise" ]; then'
+check_contains "a symlink at the install destination is refused on the literal path" \
+  "$BOOTSTRAP_BODY" 'if [ -L "$install_dir/mise" ]; then'
+SYMLINK_DEST_AT="$(line_of 'if [ -L "$install_dir/mise" ]; then')"
+TRAP_AT="$(line_of 'rm -f "$staged"; cleanup')"
+MV_AT="$(line_of 'mv -f "$staged" "$install_dir/mise"')"
+check "the destination-symlink refusal runs while the staged-cleanup trap is active" \
+  "$([ -n "$TRAP_AT" ] && [ -n "$SYMLINK_DEST_AT" ] && [ "$TRAP_AT" -lt "$SYMLINK_DEST_AT" ] && echo yes || echo no)" "yes"
+check "the destination-symlink refusal runs before the launcher is moved in" \
+  "$([ -n "$SYMLINK_DEST_AT" ] && [ -n "$MV_AT" ] && [ "$SYMLINK_DEST_AT" -lt "$MV_AT" ] && echo yes || echo no)" "yes"
 check_contains "the installed launcher is verified to be a regular file" \
   "$BOOTSTRAP_BODY" 'if [ ! -f "$install_dir/mise" ]; then'
 check_contains "the staged file is cleaned up on every exit path, not only on ERR" \

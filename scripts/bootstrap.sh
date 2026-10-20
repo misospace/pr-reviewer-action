@@ -181,6 +181,12 @@ run_bounded() {
     shift
   fi
   local pid deadline rc=0 member tree leaf_first tail
+  # Fail closed before the phase starts: the tree snapshot on overrun
+  # needs pgrep; without it a timeout would kill only the root process
+  # and silently leave the phase's children running.
+  if ! command -v pgrep >/dev/null 2>&1; then
+    fail "phase '$label' requires pgrep for process-tree cleanup, but pgrep is not on PATH -- install procps (Debian/Ubuntu: apt-get install procps, macOS: brew install procps) and re-run"
+  fi
   : >"$logfile"
   "$@" >"$logfile" 2>&1 &
   pid=$!
@@ -362,7 +368,7 @@ print_receipt() {
 # validated. So every component from / down to the install dir is
 # validated, with two properties:
 #
-#   - each is an existing directory, is neither group- nor
+#   - each ancestor is an existing directory, is neither group- nor
 #     other-writable -- unless it carries the sticky bit (sticky forbids
 #     renaming an entry a writer does not own, which is what makes /tmp
 #     safe) -- AND is owned by the current uid or by root. Both halves
@@ -375,8 +381,9 @@ print_receipt() {
 #     components are rejected regardless of owner, so a shared
 #     /usr/local/lib fails closed rather than being waved through
 #     because root owns it.
-#   - the final component must be owned by the current uid: that is the
-#     directory the launcher is installed into.
+#   - the final component gets no sticky exemption, because the launcher
+#     is created inside it: it must be an existing directory owned by
+#     the current uid and neither group- nor other-writable at all.
 #
 # POSIX ACL entries are invisible to a mode-bit check, so a component
 # whose ACL grants another user write access passes this validation; no
@@ -464,8 +471,15 @@ validate_dir_component() { # validate_dir_component PATH ROLE
     fail "install dir $path is not owned by the current user (owner uid $owner, current uid $(id -u)); refusing to install into a directory another user controls"
   fi
   if [ "$group_w" = "w" ] || [ "$other_w" = "w" ]; then
+    if [ "$role" = "final" ]; then
+      # The launcher itself is created inside the final component, so a
+      # group/other-writable leaf lets another principal plant or tamper
+      # with that file however the mode reads otherwise -- sticky does
+      # not save it.
+      fail "install dir $path is writable by group or others (mode $mode); the sticky bit does not exempt the final install directory. Point MISE_INSTALL_DIR at a private directory you own"
+    fi
     case "$sticky" in
-    t | T) ;; # sticky: a writer cannot rename an entry it does not own
+    t | T) ;; # ancestor only: sticky forbids renaming an entry the writer does not own
     *)
       fail "install dir path component $path is writable by group or others (mode $mode) without the sticky bit, so another user could rename it and swap a validated path for a symlink. Point MISE_INSTALL_DIR at a private directory you own, under ancestors that are not group/other-writable"
       ;;
@@ -477,6 +491,11 @@ run_default() {
   local asset digest install_dir path_mise staged actual resolved launcher_dir
 
   cd "$REPO_ROOT" || fail "cannot enter the repository root at $REPO_ROOT"
+
+  # Same cheapest-prerequisite rule as setup mode: the download below is
+  # a bounded phase whose overrun cleanup needs pgrep, so a host without
+  # procps fails here, before the downloader ever starts.
+  require_process_tools
 
   # Verify-then-install only: nothing else can run without a digest tool.
   if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
@@ -551,7 +570,15 @@ run_default() {
       if [ ! -f "$staged" ] || [ -L "$staged" ]; then
         fail "staging path $staged is not a plain regular file; refusing to install"
       fi
-      # The destination has to be a file slot. `mv -f` into a directory
+      # The destination has to be a file slot. A symlink there is
+      # refused first, on the literal path, before the writable check:
+      # the link could point anywhere, and naming it a symlink is the
+      # only controlled failure that says so. Both checks run while the
+      # staged-cleanup trap is installed, so nothing is left behind.
+      if [ -L "$install_dir/mise" ]; then
+        fail "install destination $install_dir/mise is a symlink; refusing to install through it"
+      fi
+      # `mv -f` into a directory
       # NESTS the launcher inside it (mise/.mise.bootstrap.XXXX), which
       # still exits 0 here and only fails later at exec time -- so refuse
       # before staging anything. The check runs while the staged-cleanup
