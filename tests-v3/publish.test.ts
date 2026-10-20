@@ -79,6 +79,17 @@ class MockPublishApi implements PublishPlatformApi {
    * leaves them undefined models a forge without the capability. */
   reviewCommentFeedback?: (commentIds: readonly string[]) => Promise<CommentFeedbackResult>;
   collaboratorPermission?: (login: string) => Promise<CollaboratorPermissionReading | null>;
+  /** #1176: the superseded-review deletion seams, assigned per test — an
+   * instance that leaves them undefined models a forge without the
+   * capability (and must see zero inline enumeration from the hide path). */
+  supersededReviewDeletion?: NativeReviewSurface;
+  deleteSupersededReview?: (id: number | string) => Promise<{ ok: boolean; error?: string }>;
+  /** #1176: per-review inline enumeration the deletion gate reads, keyed by
+   * the single review id string; `null` keeps the default complete/empty
+   * answer. */
+  inlineCommentsByReview: Map<string, { supported: boolean; complete: boolean; comments: ManagedInlineCommentRef[] }> | null = null;
+  deletedReviews: string[] = [];
+  inlineListIds: string[][] = [];
   constructor(platform: "github" | "forgejo" = "github") { this.platform = platform; }
   async getHeadSha(): Promise<string | null> { return this.head; }
   async listIssueComments(): Promise<PublishCommentRef[]> { return this.comments; }
@@ -102,7 +113,13 @@ class MockPublishApi implements PublishPlatformApi {
     if (this.identity === null) return { identity: null, reason: "unavailable" };
     return { identity: { kind: "login", login: this.identity }, reason: "user-login" };
   }
-  async listManagedInlineComments(_ids: readonly string[]): ReturnType<PublishPlatformApi["listManagedInlineComments"]> { this.inlineListCalls += 1; return { supported: true, complete: true, comments: [] }; }
+  async listManagedInlineComments(ids: readonly string[]): ReturnType<PublishPlatformApi["listManagedInlineComments"]> {
+    this.inlineListCalls += 1;
+    this.inlineListIds.push(ids.map(String));
+    const mapped = this.inlineCommentsByReview?.get(String(ids[0]));
+    if (mapped) return mapped;
+    return { supported: true, complete: true, comments: [] };
+  }
   async retireInlineComment(_review: string, _comment: string) { return true; }
   async createReview(request: NativeReviewRequest) {
     this.submitted.push(request);
@@ -2584,6 +2601,10 @@ test("#1144: hiding fails closed on unproven owner, lost supersession; unreadabl
   assert.deepEqual(forgejo.minimized, [], "Forgejo makes zero GraphQL minimization calls");
   assert.deepEqual(forgejo.dismissed, []);
   assert.ok(forgejoLogs.some((line) => line.includes("no GraphQL API")));
+  // #1176: without the deletion surface the hide path makes zero inline
+  // enumeration calls — the #1144 invariant is unchanged.
+  assert.equal(forgejo.inlineListCalls, 0);
+  assert.deepEqual(forgejo.deletedReviews, []);
 
   // Without GraphQL a Forgejo verdict state still loses its stale merge-gate
   // vote through the REST dismissal path, matching the complete path.
@@ -2594,6 +2615,188 @@ test("#1144: hiding fails closed on unproven owner, lost supersession; unreadabl
   assert.deepEqual(forgejoVerdict.dismissed, ["6"], "dismissal is REST, not GraphQL");
   assert.deepEqual(forgejoVerdict.minimized, [], "the body hide degrades with an explicit note");
   assert.ok(forgejoVerdictLogs.some((line) => line.includes("no GraphQL API")));
+});
+
+// ---- #1176: on a forge with author-side review deletion, a superseded managed
+// review that provably carries no inline comments is deleted instead of left
+// visible; anything unproven is refused fail-closed and falls back to the
+// #1144 behavior. ----
+
+/** Assign the deletion capability and record every delete attempt. */
+function enableDeletion(api: MockPublishApi, result: { ok: boolean; error?: string } = { ok: true }): void {
+  api.supersededReviewDeletion = { supported: true };
+  api.deleteSupersededReview = async (id) => {
+    api.deletedReviews.push(String(id));
+    return result;
+  };
+}
+
+test("#1176: a deletion-capable forge deletes a superseded managed review that carries no inline findings", async () => {
+  const api = new MockPublishApi("forgejo");
+  api.reviews = [{ id: 44, state: "COMMENTED", body: `${MARKER}\nstale advisory`, user: { login: "bot" } }];
+  enableDeletion(api);
+  const logs: string[] = [];
+  await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
+  assert.deepEqual(api.deletedReviews, ["44"], "the empty-handed review is deleted");
+  assert.deepEqual(api.dismissed, [], "deletion replaces the dismissal, it does not stack on it");
+  assert.deepEqual(api.minimized, []);
+  assert.deepEqual(api.inlineListIds, [["44"]], "the enumeration proves emptiness for exactly that review");
+  assert.ok(logs.some((line) => line.includes("Deleted superseded managed review #44")));
+  assert.ok(logs.some((line) => line.includes("Superseded reviews: eligible=1 dismissed=0 minimized=0 failed=0 deleted=1")));
+});
+
+test("#1176: a superseded review carrying inline findings is never deleted; its stale verdict is still dismissed", async () => {
+  const advisory = new MockPublishApi("forgejo");
+  advisory.reviews = [{ id: 44, state: "COMMENTED", body: `${MARKER}\nstale advisory`, user: { login: "bot" } }];
+  enableDeletion(advisory);
+  advisory.inlineCommentsByReview = new Map([["44", { supported: true, complete: true, comments: [{ id: 7, reviewId: "44", user: { login: "bot" }, hasReplies: false }] }]]);
+  const advisoryLogs: string[] = [];
+  await hideSupersededManagedReviews(advisory, advisory.reviews, MARKER, (line) => advisoryLogs.push(line), BOT);
+  assert.deepEqual(advisory.deletedReviews, [], "findings survive an incomplete run per #1144");
+  assert.ok(advisoryLogs.some((line) => line.includes("carries inline findings") && line.includes("deletion refused")));
+  assert.ok(advisoryLogs.some((line) => line.includes("deleted=0")));
+
+  // The verdict case degrades the same way, but the stale merge-gate vote is
+  // still struck through the existing dismissal path.
+  const verdict = new MockPublishApi("forgejo");
+  verdict.reviews = [{ id: 45, state: "CHANGES_REQUESTED", body: `${MARKER}\nstale verdict`, user: { login: "bot" } }];
+  enableDeletion(verdict);
+  verdict.inlineCommentsByReview = new Map([["45", { supported: true, complete: true, comments: [{ id: 8, reviewId: "45", user: { login: "bot" }, hasReplies: false }] }]]);
+  const verdictLogs: string[] = [];
+  await hideSupersededManagedReviews(verdict, verdict.reviews, MARKER, (line) => verdictLogs.push(line), BOT);
+  assert.deepEqual(verdict.deletedReviews, []);
+  assert.deepEqual(verdict.dismissed, ["45"], "the stale verdict is still dismissed");
+  assert.ok(verdictLogs.some((line) => line.includes("carries inline findings")));
+});
+
+test("#1176: an incomplete or unsupported inline enumeration refuses deletion fail-closed and still dismisses", async () => {
+  const cases: Array<{ enumeration: { supported: boolean; complete: boolean; comments: never[] }; expectedFragment: string }> = [
+    { enumeration: { supported: true, complete: false, comments: [] }, expectedFragment: "incomplete" },
+    { enumeration: { supported: false, complete: false, comments: [] }, expectedFragment: "unsupported" },
+  ];
+  for (const { enumeration, expectedFragment } of cases) {
+    const api = new MockPublishApi("forgejo");
+    api.reviews = [{ id: 46, state: "CHANGES_REQUESTED", body: `${MARKER}\nstale verdict`, user: { login: "bot" } }];
+    enableDeletion(api);
+    api.inlineCommentsByReview = new Map([["46", enumeration]]);
+    const logs: string[] = [];
+    await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
+    assert.deepEqual(api.deletedReviews, [], "an uncertain enumeration never licenses a destructive mutation");
+    assert.deepEqual(api.dismissed, ["46"], "the stale verdict still loses its merge-gate vote");
+    assert.ok(logs.some((line) => line.includes("enumeration") && line.includes(expectedFragment) && line.includes("stays visible")),
+      `the refusal is logged with its own degradation kind: ${JSON.stringify(enumeration)}`);
+    assert.ok(logs.some((line) => line.includes("deleted=0")));
+  }
+});
+// A 404 is NOT an idempotent success: a route-level 404 (a forge version
+// without the endpoint) is indistinguishable from "already gone". Reading it
+// as success would log a deletion that never happened and skip the dismissal
+// fallback, letting a stale merge-gate vote survive behind a "deleted" log.
+test("#1176: a 404 deletion answer falls back to dismissal instead of faking success", async () => {
+  const api = new MockPublishApi("forgejo");
+  api.reviews = [{ id: 49, state: "CHANGES_REQUESTED", body: `${MARKER}\nstale verdict`, user: { login: "bot" } }];
+  enableDeletion(api, { ok: false, error: "status 404" });
+  const logs: string[] = [];
+  await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
+  assert.deepEqual(api.deletedReviews, ["49"], "the DELETE was sent; only its answer is disputed");
+  assert.ok(logs.some((line) => line.includes("Could not delete superseded review #49") && line.includes("status 404")));
+  assert.deepEqual(api.dismissed, ["49"], "the stale verdict is still struck over REST");
+  assert.ok(!logs.some((line) => line.includes("Deleted superseded managed review")), "no success is logged for a 404");
+});
+
+test("#1176: a failed deletion falls back to dismissal and is counted as failed, not deleted", async () => {
+  const api = new MockPublishApi("forgejo");
+  api.reviews = [{ id: 47, state: "CHANGES_REQUESTED", body: `${MARKER}\nstale verdict`, user: { login: "bot" } }];
+  enableDeletion(api, { ok: false, error: "status 403" });
+  const logs: string[] = [];
+  await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
+  assert.ok(logs.some((line) => line.includes("Could not delete superseded review #47") && line.includes("status 403") && line.includes("falling back to dismissal")));
+  assert.ok(!logs.some((line) => line.includes("Deleted superseded managed review")));
+  assert.ok(logs.some((line) => line.includes("failed=1 deleted=0")));
+  assert.deepEqual(api.dismissed, ["47"], "the existing dismissal fallback still runs");
+});
+
+// The DELETE is bounded to its own review like the enumeration is: a
+// throwing adapter refuses only this review's deletion, and the stale
+// verdict still loses its merge-gate vote through the dismissal fallback.
+test("#1176: a throwing DELETE refuses only its own review; the dismissal fallback still runs", async () => {
+  const api = new MockPublishApi("forgejo");
+  api.reviews = [{ id: 53, state: "CHANGES_REQUESTED", body: `${MARKER}\nstale verdict`, user: { login: "bot" } }];
+  enableDeletion(api);
+  api.deleteSupersededReview = async () => { throw new Error("transport exploded"); };
+  const logs: string[] = [];
+  await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
+  assert.deepEqual(api.dismissed, ["53"], "the stale verdict is still struck over REST");
+  assert.ok(logs.some((line) => line.includes("Could not delete superseded review #53") && line.includes("transport exploded")));
+  assert.ok(logs.some((line) => line.includes("failed=1 deleted=0")));
+});
+
+test("#1176: GitHub never attempts deletion, even when a capability is assigned — minimization stays the mechanism", async () => {
+  const api = new MockPublishApi();
+  api.reviews = [
+    { id: 5, node_id: "node-5", state: "CHANGES_REQUESTED", body: `${MARKER}\nstale verdict`, user: { login: "bot" } },
+    { id: 6, node_id: "node-6", state: "COMMENTED", body: `${MARKER}\nstale advisory`, user: { login: "bot" } },
+  ];
+  enableDeletion(api);
+  const logs: string[] = [];
+  await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
+  assert.deepEqual(api.deletedReviews, [], "GitHub keeps GraphQL minimization; no DELETE is ever sent");
+  assert.equal(api.inlineListCalls, 0, "the #1144 invariant holds: hiding never enumerates inline comments");
+  assert.deepEqual(api.dismissed, ["5"]);
+  assert.deepEqual(api.minimized, ["node-5", "node-6"]);
+});
+
+test("#1176: the mayHide gate fires before enumeration and before the DELETE", async () => {
+  const api = new MockPublishApi("forgejo");
+  api.reviews = [{ id: 48, state: "COMMENTED", body: `${MARKER}\nstale advisory`, user: { login: "bot" } }];
+  enableDeletion(api);
+  const logs: string[] = [];
+  await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT, [], async () => false);
+  assert.deepEqual(api.deletedReviews, []);
+  assert.equal(api.inlineListCalls, 0, "the publication-boundary re-check precedes any enumeration");
+  assert.ok(logs.some((line) => line.includes("stopping superseded review cleanup")));
+});
+
+// The destructive mutation gets its own boundary re-check: the enumeration
+// read takes time, so supersession is proven again between the emptiness
+// proof and the DELETE — a competing run that publishes in that window must
+// never see its winner deleted.
+test("#1176: the mayHide re-check between enumeration and DELETE stops the destructive mutation", async () => {
+  const api = new MockPublishApi("forgejo");
+  api.reviews = [{ id: 50, state: "COMMENTED", body: `${MARKER}\nstale advisory`, user: { login: "bot" } }];
+  enableDeletion(api);
+  let gate = 0;
+  const logs: string[] = [];
+  await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT, [], async () => gate++ === 0);
+  assert.deepEqual(api.deletedReviews, [], "a supersession lost inside the enumerate→delete window deletes nothing");
+  assert.equal(api.inlineListCalls, 1, "the enumeration ran before the re-check refused");
+  assert.deepEqual(api.dismissed, []);
+  assert.ok(logs.some((line) => line.includes("stopping superseded review cleanup")));
+});
+
+// The enumeration is bounded to its own review: an adapter that throws while
+// reading one review's comments refuses only that review's deletion and lets
+// the rest of the pass continue — a stale verdict must not keep its
+// merge-gate vote because a neighbour's enumeration broke.
+test("#1176: a throwing enumeration refuses only its own review; the rest of the pass continues", async () => {
+  const api = new MockPublishApi("forgejo");
+  api.reviews = [
+    { id: 51, state: "COMMENTED", body: `${MARKER}\nstale advisory`, user: { login: "bot" } },
+    { id: 52, state: "CHANGES_REQUESTED", body: `${MARKER}\nstale verdict`, user: { login: "bot" } },
+  ];
+  enableDeletion(api);
+  api.inlineCommentsByReview = new Map([["51", { supported: true, complete: true, comments: [] }]]);
+  const realList = api.listManagedInlineComments.bind(api);
+  api.listManagedInlineComments = async (ids: readonly string[]) => {
+    if (String(ids[0]) === "52") throw new Error("transport exploded");
+    return realList(ids);
+  };
+  const logs: string[] = [];
+  await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
+  assert.deepEqual(api.deletedReviews, ["51"], "the healthy review is still deleted");
+  assert.deepEqual(api.dismissed, ["52"], "the neighbour's stale verdict is still dismissed");
+  assert.ok(logs.some((line) => line.includes("Deleted superseded managed review #51")));
+  assert.ok(logs.some((line) => line.includes("Superseded reviews: eligible=2 dismissed=1 minimized=0 failed=0 deleted=1")));
 });
 
 // #1144: the review id is the review's identity for the whole cleanup
@@ -2903,48 +3106,85 @@ test("#1144: hide failures are counted with a bounded diagnostic and never abort
   assert.ok(dismissLogs.some((line) => line.includes("Superseded reviews: eligible=1 dismissed=0 minimized=1 failed=1")));
 });
 
-// #1144: end-to-end against the REAL Forgejo adapter — the publish seam's
-// normalized review states and the REST dismissal path, driven through the
-// publisher itself (no mock adapter in between).
-test("#1144: a Forgejo publish run dismisses a stale REQUEST_CHANGES verdict and hides no body", async () => {
+// #1144 + #1176: end-to-end against the REAL Forgejo adapter — the publish
+// seam's normalized review states, the author-side deletion that substitutes
+// for the GraphQL hide Forgejo cannot do, and the REST dismissal fallback for
+// reviews that carry inline findings, driven through the publisher itself
+// (no mock adapter in between).
+test("#1176: a Forgejo publish run deletes superseded managed reviews that carry no inline findings", async () => {
   const FORGE = "https://forge.example";
-  const reviews: Array<Record<string, unknown>> = [
+  const run = async (
+    reviews: Array<Record<string, unknown>>,
+    commentsByReview: Record<string, unknown[]> = {},
+  ) => {
+    const calls: { method: string; url: string }[] = [];
+    const json = (status: number, data: unknown): Response =>
+      new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
+    const fetchImpl: FetchLike = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      calls.push({ method, url });
+      if (method === "GET" && url === `${FORGE}/api/v1/repos/o/r/pulls/42`) return json(200, { head: { sha: HEAD } });
+      if (method === "GET" && url === `${FORGE}/api/v1/repos/o/r/pulls/42/reviews?limit=100&page=1`) return json(200, reviews);
+      if (method === "GET" && url === `${FORGE}/api/v1/user`) return json(200, { login: "bot" });
+      const comments = /\/pulls\/42\/reviews\/(\d+)\/comments$/.exec(url);
+      if (method === "GET" && comments) return json(200, commentsByReview[comments[1]!] ?? []);
+      if (method === "POST" && url === `${FORGE}/api/v1/repos/o/r/pulls/42/reviews`) {
+        const body = JSON.parse(String(init?.body)) as { body: string };
+        reviews.push({ id: 12, state: "COMMENT", body: body.body, user: { login: "bot" } });
+        return json(201, { id: 12 });
+      }
+      if (method === "POST" && url.endsWith("/dismissals")) return json(200, {});
+      if (method === "DELETE" && /\/pulls\/42\/reviews\/\d+$/.test(url)) return new Response(null, { status: 204 });
+      return json(404, {});
+    };
+    const api = new ForgejoPublishApi({ repo: "o/r", prNumber: "42", token: "pat", baseUrl: FORGE, fetchImpl });
+    const result = await publishReview(
+      input({ mode: "review_verdict", cleanupPreviousNativeReviews: "true", requiredChecks: "incomplete" }),
+      api,
+      { diffText: "" },
+    );
+    return { result, calls };
+  };
+
+  const stale = [
     { id: 10, state: "REQUEST_CHANGES", body: `${MARKER}\nstale blocking verdict`, user: { login: "bot" } },
     { id: 11, state: "COMMENT", body: `${MARKER}\nstale advisory`, user: { login: "bot" } },
   ];
-  const calls: { method: string; url: string }[] = [];
-  const json = (status: number, data: unknown): Response =>
-    new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
-  const fetchImpl: FetchLike = async (input, init) => {
-    const url = String(input);
-    const method = (init?.method ?? "GET").toUpperCase();
-    calls.push({ method, url });
-    if (method === "GET" && url === `${FORGE}/api/v1/repos/o/r/pulls/42`) return json(200, { head: { sha: HEAD } });
-    if (method === "GET" && url === `${FORGE}/api/v1/repos/o/r/pulls/42/reviews?limit=100&page=1`) return json(200, reviews);
-    if (method === "GET" && url === `${FORGE}/api/v1/user`) return json(200, { login: "bot" });
-    if (method === "POST" && url === `${FORGE}/api/v1/repos/o/r/pulls/42/reviews`) {
-      const body = JSON.parse(String(init?.body)) as { body: string };
-      reviews.push({ id: 12, state: "COMMENT", body: body.body, user: { login: "bot" } });
-      return json(201, { id: 12 });
-    }
-    if (method === "POST" && url.endsWith("/dismissals")) return json(200, {});
-    return json(404, {});
-  };
-  const api = new ForgejoPublishApi({ repo: "o/r", prNumber: "42", token: "pat", baseUrl: FORGE, fetchImpl });
-  const result = await publishReview(
-    input({ mode: "review_verdict", cleanupPreviousNativeReviews: "true", requiredChecks: "incomplete" }),
-    api,
-    { diffText: "" },
-  );
-  assert.equal(result.status, "published");
+
+  const empty = await run(stale.map((r) => ({ ...r })));
+  assert.equal(empty.result.status, "published");
   assert.deepEqual(
-    calls.filter((c) => c.method === "POST" && c.url.includes("/dismissals")).map((c) => c.url),
-    [`${FORGE}/api/v1/repos/o/r/pulls/42/reviews/10/dismissals`],
-    "the stale REQUEST_CHANGES verdict is dismissed over REST",
+    empty.calls.filter((c) => c.method === "DELETE" && /\/reviews\/\d+$/.test(c.url)).map((c) => c.url).sort(),
+    [`${FORGE}/api/v1/repos/o/r/pulls/42/reviews/10`, `${FORGE}/api/v1/repos/o/r/pulls/42/reviews/11`],
+    "both superseded managed reviews are deleted author-side (they carry no inline findings)",
   );
-  assert.equal(calls.some((c) => c.url.includes("/reviews/11/dismissals")), false, "an advisory body is never dismissed");
-  assert.equal(calls.some((c) => c.url.includes("/reviews/12/dismissals")), false, "the just-published review is never dismissed");
-  assert.equal(calls.some((c) => c.url.includes("/graphql")), false, "Forgejo makes zero GraphQL calls");
-  assert.ok(result.messages.some((line) => line.includes("no GraphQL API")), "the body-hide degradation is stated");
-  assert.ok(result.messages.some((line) => line.includes("Superseded reviews: eligible=1 dismissed=1")), result.messages.join("\n"));
+  assert.equal(empty.calls.some((c) => c.url.includes("/dismissals")), false,
+    "a deleted review needs no dismissal — the DELETE removes the verdict with the body");
+  assert.equal(empty.calls.some((c) => c.url.includes("/graphql")), false, "Forgejo makes zero GraphQL calls");
+  assert.ok(empty.result.messages.some((line) => line.includes("no GraphQL API")), "the body-hide degradation is stated");
+  assert.ok(empty.result.messages.some((line) => line.includes("Deleted superseded managed review")), empty.result.messages.join("\n"));
+  assert.ok(empty.result.messages.some((line) => line.includes("Superseded reviews: eligible=2 dismissed=0 minimized=0 failed=0 deleted=2")), empty.result.messages.join("\n"));
+
+  // A superseded review that DOES carry inline findings is refused fail-closed
+  // (#1176): the findings must survive an incomplete run per #1144, so the
+  // stale verdict still loses its merge-gate vote through the REST dismissal.
+  const withFindings = await run(stale.map((r) => ({ ...r })), {
+    "10": [{ id: 21, pull_request_review_id: 10, body: "stale finding", user: { login: "bot" } }],
+  });
+  assert.equal(withFindings.result.status, "published");
+  assert.deepEqual(
+    withFindings.calls.filter((c) => c.method === "DELETE" && /\/reviews\/\d+$/.test(c.url)).map((c) => c.url),
+    [`${FORGE}/api/v1/repos/o/r/pulls/42/reviews/11`],
+    "the empty-handed advisory is still deleted; the review carrying findings is not",
+  );
+  assert.deepEqual(
+    withFindings.calls.filter((c) => c.method === "POST" && c.url.includes("/dismissals")).map((c) => c.url),
+    [`${FORGE}/api/v1/repos/o/r/pulls/42/reviews/10/dismissals`],
+    "the stale REQUEST_CHANGES verdict is dismissed over REST as the fallback",
+  );
+  assert.equal(withFindings.calls.some((c) => c.url.includes("/reviews/11/dismissals")), false, "an advisory body is never dismissed");
+  assert.equal(withFindings.calls.some((c) => c.url.includes("/reviews/12/dismissals")), false, "the just-published review is never dismissed");
+  assert.ok(withFindings.result.messages.some((line) => line.includes("carries inline findings") && line.includes("deletion refused")), withFindings.result.messages.join("\n"));
+  assert.ok(withFindings.result.messages.some((line) => line.includes("Superseded reviews: eligible=2 dismissed=1 minimized=0 failed=0 deleted=1")), withFindings.result.messages.join("\n"));
 });

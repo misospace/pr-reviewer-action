@@ -127,7 +127,7 @@ The action works on **GitHub** and **Forgejo** (1.4.x), with **Tangled** resolva
 | Native review verdicts (`review_verdict`) | ✅ Full | ⚠️ Degraded — approve/request_changes via REST |
 | Native blocking reviews (`review_blockers`) | ✅ Full | ⚠️ Degraded — request_changes/comment via REST |
 | Cleanup: dismiss stale reviews | ✅ Full | ✅ Full (REST) |
-| Cleanup: minimizeComment (hide outdated) | ✅ Full | ❌ Skipped (no GraphQL) |
+| Cleanup: minimizeComment (hide outdated) | ✅ Full | ⚠️ Incomplete-replacement path: author-side deletion of superseded reviews that carry no inline findings (REST); findings-bearing reviews stay visible (no GraphQL) |
 | CI status check polling | ✅ Full | ✅ Commit-status polling (Forgejo REST; own single-job status auto-discovered by run-jobs API) |
 | Evidence providers | ✅ Full | ✅ Full |
 | Tool harness | ✅ Full | ✅ Full |

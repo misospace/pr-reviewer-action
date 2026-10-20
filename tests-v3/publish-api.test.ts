@@ -82,6 +82,64 @@ test("#1144: the Forgejo dismissal seam refuses a malformed review id without a 
   assert.equal(calls[0]!.url, "https://forge.example/api/v1/repos/o/r/pulls/9/reviews/44/dismissals");
 });
 
+// #1176: Forgejo has no GraphQL minimization, so the seam exposes author-side
+// deletion of a submitted review (`DELETE .../reviews/{id}`) for the cleanup
+// layer to substitute for the hide. The DELETE removes the review AND all of
+// its code comments — the cleanup layer must prove the review carries none
+// before calling; these tests pin the seam itself.
+test("#1176: the Forgejo deletion seam DELETEs the review as its own author", async () => {
+  const { fetchImpl, calls } = recorder([["DELETE https://forge.example/api/v1/repos/o/r/pulls/9/reviews/44", 204, null]]);
+  const api = new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token", baseUrl: "https://forge.example", fetchImpl });
+  assert.deepEqual(await api.deleteSupersededReview(44), { ok: true });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.method, "DELETE");
+  assert.equal(calls[0]!.url, "https://forge.example/api/v1/repos/o/r/pulls/9/reviews/44");
+  assert.ok(calls[0]!.auth !== null, "the deletion travels with the adapter's authorization");
+});
+
+// A 404 is NOT an idempotent success: a route-level 404 (a forge version
+// without the endpoint) is indistinguishable from "already gone", and reading
+// it as success would let the cleanup layer log a deletion that never
+// happened and skip the dismissal fallback for a stale verdict.
+test("#1176: a 404 on the Forgejo deletion is a bounded failure, never a faked success", async () => {
+  const { fetchImpl, calls } = recorder([["DELETE https://forge.example/api/v1/repos/o/r/pulls/9/reviews/44", 404, { message: "not found" }]]);
+  const api = new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token", baseUrl: "https://forge.example", fetchImpl });
+  assert.deepEqual(await api.deleteSupersededReview(44), { ok: false, error: "status 404" });
+  assert.equal(calls.length, 1);
+});
+
+// #1176: the id is interpolated into a REST path segment, so a malformed id
+// is refused WITHOUT any request — an unusable id never reaches the forge.
+test("#1176: the Forgejo deletion seam refuses a malformed review id without a request", async () => {
+  const { fetchImpl, calls } = recorder([["DELETE https://forge.example/api/v1/repos/o/r/pulls/9/reviews/44", 204, null]]);
+  const api = new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token", baseUrl: "https://forge.example", fetchImpl });
+  for (const id of ["../x", "0", "abc"]) {
+    const result = await api.deleteSupersededReview(id);
+    assert.equal(result.ok, false, `a malformed id must be refused: ${JSON.stringify(id)}`);
+    assert.ok(typeof result.error === "string" && result.error !== "");
+  }
+  assert.equal(calls.length, 0, "a malformed review id is refused before any request");
+});
+
+test("#1176: a non-204 deletion status is a bounded failure", async () => {
+  const { fetchImpl } = recorder([["DELETE https://forge.example/api/v1/repos/o/r/pulls/9/reviews/44", 403, { message: "forbidden" }]]);
+  const api = new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token", baseUrl: "https://forge.example", fetchImpl });
+  assert.deepEqual(await api.deleteSupersededReview(44), { ok: false, error: "status 403" });
+});
+
+test("#1176: GitHub declares no deletion surface and implements no delete operation", () => {
+  const api = github(async () => { throw new Error("unused"); });
+  assert.equal(api.supersededReviewDeletion.supported, false);
+  assert.ok((api.supersededReviewDeletion.reason ?? "").length > 0, "the degradation carries a reason");
+  assert.equal(typeof (api as PublishPlatformApi).deleteSupersededReview !== "function", true,
+    "GitHub keeps GraphQL minimization; deletion would destroy inline findings");
+});
+
+test("#1176: Forgejo declares the author-side deletion surface", () => {
+  const api = new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token", baseUrl: "https://forge.example", fetchImpl: async () => { throw new Error("unused"); } });
+  assert.equal(api.supersededReviewDeletion.supported, true);
+});
+
 // #1144: the minimized-state read is an idempotency guard, not a safety
 // gate. The GitHub adapter answers an unreadable minimized state with an
 // EMPTY SET and never throws — so the production behavior is "nothing is

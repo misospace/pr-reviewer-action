@@ -128,6 +128,12 @@ export interface ReviewerRequestResult {
   error?: string;
 }
 
+/** #1176: outcome of an author-side superseded-review deletion. */
+export interface ReviewDeletionResult {
+  ok: boolean;
+  error?: string;
+}
+
 /** A GitHub user login, bounded and charset-restricted so a config value can
  * never be turned into a URL path or injection. */
 const REQUESTER_USER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
@@ -257,6 +263,24 @@ export interface PublishPlatformApi {
    * a 👎 suppression (`repos/{repo}/collaborators/{login}/permission`).
    * Optional: an adapter without it trusts no actor. */
   collaboratorPermission?(login: string): Promise<CollaboratorPermissionReading | null>;
+  /** #1176: the static capability surface for author-side deletion of a
+   * submitted review — the only way a forge without GraphQL minimization can
+   * stop a superseded managed advisory body from staying visible. Optional:
+   * an adapter without it is a forge (or a cleanup mode) where the surface
+   * does not exist, and callers degrade exactly like they do for
+   * `reviewCommentFeedback?`/`collaboratorPermission?`. Deletion removes the
+   * review AND all of its inline code comments, so a caller must first prove
+   * the review carries none (the cleanup layer enumerates via
+   * `listManagedInlineComments` and refuses otherwise); the capability exists
+   * only where the forge offers author-side deletion of a submitted review. */
+  readonly supersededReviewDeletion?: NativeReviewSurface;
+  /** #1176: delete one superseded managed review as its own author. A
+   * malformed id is refused WITHOUT any request; a 404 is NOT an idempotent
+   * success — a route-level 404 (unsupported forge version) is
+   * indistinguishable from "already gone", so callers fall back instead of
+   * reading the review as deleted. Callers must prove the review carries no
+   * inline comments first — deletion destroys them with the review body. */
+  deleteSupersededReview?(reviewId: number | string): Promise<ReviewDeletionResult>;
 }
 
 function ownerRepo(repo: string): { owner: string; name: string } {
@@ -295,6 +319,14 @@ export class GitHubPublishApi implements PublishPlatformApi {
   /** #588: GitHub hosts native pull reviews (the review event and its
    * inline review comments), so the publish step takes the native path. */
   readonly nativeReviewSurface: NativeReviewSurface = { supported: true };
+  /** #1176: GitHub needs no deletion surface — GraphQL minimization (#1144)
+   * hides a superseded review's body without destroying anything, while
+   * deletion would also destroy the review's inline findings. The cleanup
+   * layer therefore never attempts deletion here. */
+  readonly supersededReviewDeletion: NativeReviewSurface = {
+    supported: false,
+    reason: "GitHub hides superseded review bodies with GraphQL minimization; deletion would also destroy their inline findings",
+  };
   private readonly base: string;
   private readonly origin: string;
   private readonly repo: string;
@@ -836,6 +868,10 @@ export class ForgejoPublishApi implements PublishPlatformApi {
   /** #588: Forgejo hosts native pull reviews (the review event and its
    * inline review comments), so the publish step takes the native path. */
   readonly nativeReviewSurface: NativeReviewSurface = { supported: true };
+  /** #1176: Forgejo offers author-side deletion of a submitted review
+   * (`DELETE /repos/{owner}/{repo}/pulls/{index}/reviews/{id}`), which the
+   * cleanup layer may substitute for the GraphQL hide Forgejo cannot do. */
+  readonly supersededReviewDeletion: NativeReviewSurface = { supported: true };
   private readonly base: string;
   private readonly origin: string;
   private readonly repo: string;
@@ -1138,6 +1174,37 @@ export class ForgejoPublishApi implements PublishPlatformApi {
       return status === 200 || status === 201 || status === 204;
     } catch {
       return false;
+    }
+  }
+
+  /** #1176: author-side deletion of a submitted Forgejo review
+   * (`DELETE /repos/{owner}/{repo}/pulls/{index}/reviews/{id}` — allowed to
+   * the review's own author, `ctx.Doer().ID == review.ReviewerID`, without
+   * repo admin; Forgejo has no GraphQL minimization, so this is the only way
+   * a superseded managed advisory body stops staying visible). The endpoint
+   * deletes the review AND all of its code comments, so the cleanup layer
+   * proves a review carries no inline comments before ever calling this. The
+   * id is interpolated into a REST path segment, so a malformed id is refused
+   * WITHOUT any request — an unusable id never reaches the forge. A 404 is
+   * deliberately NOT an idempotent success: a route-level 404 (unsupported
+   * forge version) is indistinguishable from "already gone", and reading it
+   * as success would skip the caller's dismissal fallback for a stale
+   * verdict — the caller falls back and no-ops harmlessly on a truly gone
+   * review instead. */
+  async deleteSupersededReview(reviewId: number | string): Promise<ReviewDeletionResult> {
+    if (!/^[1-9]\d*$/.test(String(reviewId))) {
+      return { ok: false, error: "refusing a malformed review id" };
+    }
+    try {
+      const { status } = await requestText(
+        this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews/${reviewId}`),
+        await this.opts("DELETE"),
+      );
+      return status === 204
+        ? { ok: true }
+        : { ok: false, error: `status ${status}` };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   }
 

@@ -269,6 +269,21 @@ const HIDEABLE_STATES: ReadonlySet<string> = new Set(["COMMENTED", "APPROVED", "
  *   checkpoint, no newer competing publication) at the mutation boundary
  *   before every review's mutations, so a competing run can never hide the
  *   winner.
+ * #1176: a forge with no GraphQL hide but an author-side review deletion
+ * (`DELETE /repos/{owner}/{repo}/pulls/{index}/reviews/{id}` on Forgejo)
+ * substitutes deletion for minimization — the superseded body otherwise
+ * stays visible forever. Deletion is attempted only for reviews PROVEN to
+ * carry no inline comments (a complete enumeration over the review's
+ * comments): the DELETE destroys the review and all of its code comments in
+ * one stroke, so a review carrying inline findings is refused fail-closed
+ * (those findings must survive an incomplete run per #1144), and so is an
+ * enumeration that is incomplete or unsupported — an uncertain picture never
+ * licenses a destructive mutation. The publication-boundary re-check
+ * (`mayHide`) applies again immediately before the DELETE, exactly like it
+ * gates every other mutation. The complete-coverage path
+ * (`cleanupManagedReviews`) deliberately NEVER deletes whole reviews:
+ * deletion there would destroy reply threads and foreign-authored comments
+ * that per-comment retirement preserves.
  * GraphQL minimization is GitHub-only: other forges log an explicit note,
  * make zero GraphQL calls, and still dismiss verdict states where the
  * adapter supports it (a failed dismissal is a bounded WARN, matching the
@@ -307,6 +322,12 @@ export async function hideSupersededManagedReviews(
   } else {
     log(`  NOTE: Skipping GraphQL review minimization (platform=${api.platform}; no GraphQL API)`);
   }
+  // #1176: deletion substitutes for minimization only where no GraphQL hide
+  // exists (the per-review attempt below gates on `canDelete && !canMinimize`,
+  // so GitHub keeps minimization and the #1144 invariant that hiding never
+  // enumerates inline comments).
+  const canDelete = api.supersededReviewDeletion?.supported === true
+    && typeof api.deleteSupersededReview === "function";
   const excluded = new Set(excludeReviewIds.map(String));
   const eligible = reviews.filter((review) => {
     const id = String(review.id ?? "");
@@ -321,19 +342,73 @@ export async function hideSupersededManagedReviews(
     // the body but failed the dismissal.
     if (state === "APPROVED" || state === "CHANGES_REQUESTED") return true;
     // Non-verdict bodies hide once, and only with a GraphQL node to aim at;
-    // without one, provenance for the mutation is unestablished.
-    return canMinimize && !minimized.has(id) && typeof review.node_id === "string" && review.node_id !== "";
+    // without one, provenance for the mutation is unestablished. #1176: on a
+    // forge with author-side review deletion there is a second, node-free
+    // mechanism — the per-review gate below still proves the review carries
+    // no inline comments before the DELETE runs. Both eligibility and the
+    // mutation gate derive from the same combined predicate, so a forge that
+    // somehow carries both capabilities never counts a review it will not
+    // actually process.
+    return (canMinimize && !minimized.has(id) && typeof review.node_id === "string" && review.node_id !== "")
+      || (canDelete && !canMinimize);
   });
   if (eligible.length === 0) {
     log("  NOTE: No superseded owned managed reviews to hide");
     return;
   }
   if (eligible.length > 100) log("  WARN: More than 100 eligible superseded reviews; processing only the first 100");
-  let dismissed = 0, minimizedNow = 0, failed = 0;
+  let dismissed = 0, minimizedNow = 0, failed = 0, deleted = 0;
   for (const review of eligible.slice(0, 100)) {
     const id = String(review.id);
     try {
       if (!(await mayHide())) { log("  WARN: Head or latest review changed; stopping superseded review cleanup"); break; }
+      // #1176: where no GraphQL hide exists, deletion substitutes for it —
+      // but only after the review is proven to carry no inline comments
+      // (complete enumeration), because the DELETE destroys the review and
+      // all of its code comments. Findings survive an incomplete run per
+      // #1144, so a review carrying them, or an enumeration that cannot
+      // prove emptiness, is refused fail-closed and the body stays visible.
+      if (canDelete && !canMinimize) {
+        // The enumeration itself is bounded to this review: an adapter that
+        // throws here refuses only THIS review's deletion (falling back to
+        // the state-specific behavior below) instead of aborting the whole
+        // cleanup pass — a verdict state would otherwise keep its stale
+        // merge-gate vote because a neighbour's enumeration broke.
+        let listed: Awaited<ReturnType<PublishPlatformApi["listManagedInlineComments"]>>;
+        try {
+          listed = await api.listManagedInlineComments([id]);
+        } catch {
+          listed = { supported: true, complete: false, comments: [] };
+        }
+        if (listed.supported && listed.complete && listed.comments.length === 0) {
+          // The publication-boundary re-check applies per mutation: prove
+          // supersession again immediately before the DELETE.
+          if (!(await mayHide())) { log("  WARN: Head or latest review changed; stopping superseded review cleanup"); break; }
+          // The DELETE is bounded to this review too: a throwing adapter
+          // (the seam is public and swallows its own transport errors, but a
+          // mock need not) refuses only this review's deletion instead of
+          // aborting the pass and skipping a stale verdict's dismissal.
+          let deletion: { ok: boolean; error?: string };
+          try {
+            deletion = await api.deleteSupersededReview!(id);
+          } catch (error) {
+            deletion = { ok: false, error: error instanceof Error ? error.message : String(error) };
+          }
+          if (deletion.ok) {
+            deleted++;
+            log(`  Deleted superseded managed review #${id} (carried no inline findings)`);
+            continue;
+          }
+          failed++;
+          log(`  WARN: Could not delete superseded review #${id} (${deletion.error ?? "unknown reason"}); falling back to dismissal where applicable`);
+        } else if (listed.supported && listed.complete) {
+          log(`  NOTE: Superseded review #${id} carries inline findings; deletion refused, its body stays visible`);
+        } else if (listed.supported) {
+          log(`  WARN: Inline-comment enumeration for review #${id} is incomplete; deletion refused, its body stays visible`);
+        } else {
+          log(`  NOTE: Inline-comment enumeration is unsupported by this forge; deletion refused, review #${id} stays visible`);
+        }
+      }
       if (review.state === "APPROVED" || review.state === "CHANGES_REQUESTED") {
         if (await api.dismissReview(id, DISMISSAL_MESSAGE)) {
           dismissed++;
@@ -349,7 +424,7 @@ export async function hideSupersededManagedReviews(
       }
     } catch { failed++; break; }
   }
-  log(`  Superseded reviews: eligible=${Math.min(eligible.length, 100)} dismissed=${dismissed} minimized=${minimizedNow} failed=${failed}`);
+  log(`  Superseded reviews: eligible=${Math.min(eligible.length, 100)} dismissed=${dismissed} minimized=${minimizedNow} failed=${failed} deleted=${deleted}`);
 }
 
 /**
