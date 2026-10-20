@@ -15,6 +15,7 @@ export {
 export { TangledAdapter, type TangledAdapterOptions } from "./tangled-adapter.js";
 export { resolveTangledPull, TangledResolverError, type ResolveTangledPullOptions, type TangledPullIdentity, type TangledResolverFailure } from "./tangled-bobbin.js";
 export { USER_AGENT } from "./user-agent.js";
+export { pullRequestHeadRef, pullHeadRefspec, type AcquisitionPlatform } from "./head-ref.js";
 export { GITHUB_API_BASE, LINKED_SOURCE_GITHUB_BASE, parsePlatformBaseUrl, PlatformUrlError } from "./urls.js";
 export { validateEndpoint } from "./endpoint.js";
 export { ciAttemptTimeoutMs, isTransientCiRead } from "./bounded.js";
