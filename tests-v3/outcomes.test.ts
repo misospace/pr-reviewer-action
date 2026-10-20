@@ -18,6 +18,7 @@ import {
 } from "../src/outcomes/report.js";
 import {
   FINDING_OUTCOMES_SCHEMA,
+  isProvenHeadSha,
   MAX_LEDGER_EVENTS,
   normalizeOutcomeEvent,
   parseOutcomeLedger,
@@ -1734,4 +1735,104 @@ test("#1027: lenient timestamps and empty head shas fail closed", () => {
   assert.equal(normalizeOutcomeEvent({ ...base, at: "2026-13-45T00:00:00Z" })!.at, null);
   assert.equal(normalizeOutcomeEvent({ ...base, head_sha: "" })!.head_sha, null);
   assert.equal(normalizeOutcomeEvent({ ...base, head_sha: "ZZZ" })!.head_sha, null);
+});
+
+test("#1128 review: a reused run dir never keeps a stale ledger when the current one is withheld or the publication fails", async () => {
+  const { mkdtempSync, existsSync, readFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { publishWith } = await import("../src/run/entrypoints.js");
+  const currentRecord = findingRecord({ file: "a.ts", line: 2 });
+  const diff = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,1 +1,2 @@\n old\n+new line\n";
+  const artifact = (dir: string): string => join(dir, "finding-outcomes.json");
+  const provenApi = { ...outcomesFake({ platform: "forgejo", comments: [] }), listReviews: async () => [] };
+  const provenSeam = { api: provenApi, platform: "forgejo", diffProvider: async () => diff };
+  const runDir = mkdtempSync(join(tmpdir(), "outcomes-stale-lifecycle-"));
+  try {
+    // Run 1: a proven head writes the ledger into the directory.
+    const first = await publishWith(publishInputFor({ findings: [currentRecord] }) as never, provenSeam as never, runDir);
+    assert.equal(first, 0);
+    assert.equal(existsSync(artifact(runDir)), true);
+    assert.ok(parseOutcomeLedger(readFileSync(artifact(runDir), "utf8")) !== null);
+    // Run 2: the SAME reused directory, an unproven head. Withholding means
+    // "this run has no provable ledger" — the previous run's file must not
+    // survive to be mistaken for this run's artifact.
+    const unprovenApi = { ...outcomesFake({ platform: "forgejo", comments: [], head: "zzz" }), listReviews: async () => [] };
+    const unprovenSeam = { api: unprovenApi, platform: "forgejo", diffProvider: async () => diff };
+    const second = await publishWith(publishInputFor({ findings: [currentRecord], headSha: "zzz" }) as never, unprovenSeam as never, runDir);
+    assert.equal(second, 0, "withholding is advisory-artifact-only; the review still publishes");
+    assert.equal(existsSync(artifact(runDir)), false, "the stale prior ledger must be removed with the artifact withheld");
+    // Run 3: a later proven run repopulates the artifact — the lifecycle
+    // removes stale state without disabling future valid exports.
+    const third = await publishWith(publishInputFor({ findings: [currentRecord] }) as never, provenSeam as never, runDir);
+    assert.equal(third, 0);
+    assert.equal(existsSync(artifact(runDir)), true);
+    // Run 4: a FAILED publication removes the ledger even though this run
+    // derived one — a failed run never published its findings, so neither a
+    // fresh nor a leftover ledger may read as its outcomes.
+    const failedSeam = { api: { ...provenApi, upsertStickyComment: async () => ({ ok: false, error: "boom" }) }, platform: "forgejo", diffProvider: async () => diff };
+    const fourth = await publishWith(publishInputFor({ findings: [currentRecord] }) as never, failedSeam as never, runDir);
+    assert.equal(fourth, 1);
+    assert.equal(existsSync(artifact(runDir)), false, "a failed publication must not leave a ledger claiming its outcomes");
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});
+
+test("#1128: the head-SHA proof is one shared rule", () => {
+  assert.equal(isProvenHeadSha(HEAD_A), true);
+  assert.equal(isProvenHeadSha("a"), true);
+  assert.equal(isProvenHeadSha(""), false);
+  assert.equal(isProvenHeadSha("zzz"), false);
+  assert.equal(isProvenHeadSha("A".repeat(40)), false);
+  assert.equal(isProvenHeadSha("a".repeat(65)), false);
+  assert.equal(isProvenHeadSha(null), false);
+  assert.equal(isProvenHeadSha(42), false);
+  // The predicate is EXACTLY the reader's envelope rule: what it rejects is
+  // precisely what nulls a serialized ledger. One rule, producer and reader
+  // both bound to it — a producer-side copy that drifts is how the action
+  // exports an artifact its own reader throws away.
+  for (const head of [HEAD_A, "zzz", "", "A".repeat(40), "a".repeat(65)]) {
+    const ledger = serializeOutcomeLedger({
+      schema: FINDING_OUTCOMES_SCHEMA,
+      generated_at: AT,
+      head_sha: head,
+      route: null,
+      model: null,
+      events: [{ finding_id: "a".repeat(64), kind: "reported", at: AT, head_sha: HEAD_A, route: null, model: null, provenance: "current-review" }],
+      aggregate: aggregateOutcomeEvents([]),
+    });
+    assert.equal(parseOutcomeLedger(ledger) !== null, isProvenHeadSha(head), JSON.stringify(head));
+  }
+});
+
+test("#1128: an unproven envelope head withholds the artifact rather than exporting one its own reader rejects", async () => {
+  const { publishReview } = await import("../src/publish/publish.js");
+  const currentRecord = findingRecord({ file: "a.ts", line: 2 });
+  const diff = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,1 +1,2 @@\n old\n+new line\n";
+  const emptyPrior = (head?: string): never =>
+    ({ ...outcomesFake({ platform: "forgejo", comments: [], ...(head === undefined ? {} : { head }) }), listReviews: async () => [] }) as never;
+  // Non-vacuity control: the SAME run shape with a provable head exports a
+  // ledger the reader parses, headed by this run's own head — never a blanked
+  // or substituted stand-in — and says so once.
+  const proven = await publishReview(publishInputFor({ findings: [currentRecord] }) as never, emptyPrior(), { diffText: diff });
+  assert.equal(proven.status, "published");
+  const controlLedger = parseOutcomeLedger(proven.outcomes!);
+  assert.ok(controlLedger !== null, "a proven head must still export");
+  assert.equal(controlLedger.head_sha, "b".repeat(40));
+  assert.deepEqual(controlLedger.events.map((event) => event.kind), ["reported"]);
+  assert.ok(proven.messages.some((message) => message.startsWith("Finding outcomes: ") && message.includes("finding(s)")));
+  // The same run with a head the reader cannot prove: fail CLOSED. A blank
+  // `head_sha: ""` "passed" the producer's old inline regex but nulls the
+  // whole ledger in the reader, so the old export was an artifact the action
+  // itself could not parse. Withholding is advisory-artifact-only: the review
+  // still publishes and the tally line never claims counts the run dropped.
+  for (const head of ["zzz", "not-a-sha"]) {
+    const withheld = await publishReview(publishInputFor({ findings: [currentRecord], headSha: head }) as never, emptyPrior(head), { diffText: diff });
+    const label = `head ${JSON.stringify(head)}`;
+    assert.equal(withheld.status, "published", `${label}: withholding must not fail the review`);
+    assert.equal(withheld.outcomes, undefined, label);
+    assert.ok(withheld.messages.some((message) => message.includes("Finding outcomes: artifact withheld")), label);
+    assert.equal(withheld.messages.some((message) => message.startsWith("Finding outcomes: ") && message.includes("finding(s)")), false, label);
+  }
 });

@@ -82,8 +82,27 @@ export const RESERVED_MARKER_PATTERNS: readonly RegExp[] = [
  * bare one (fence characters dropped, word kept), and the token grammar
  * itself is unchanged — `suggestion\u00A0foo` stays as written, the same
  * treatment the ASCII `suggestion foo` spelling already gets.
+ *
+ * #1178: the token grammar itself is widened to the multi-line suggestion
+ * spellings — GitHub renders ```` ```suggestion-0+0 ```` (the `-X+Y` range
+ * grammar, `-0+0` its simplest instance, two pairs the range-with-count
+ * form) and the `:`-prefixed `suggestion:-0+0` spelling seen in the wild as
+ * live one-click prescriptions exactly like the bare opener, one spelling
+ * over from the #1107/#1112/#1137 hazard. The `-0+0` attaches to the token
+ * with no whitespace, so the #1137 whitespace-class widening never covered
+ * it. As there, the live rendering is not reproducible offline (the `POST
+ * /markdown` GFM endpoint never applies the suggestion filter), and the
+ * boundary fails closed on the uncertain state: the range grammar is
+ * reserved rather than assumed inert — one or more
+ * `-<digits>+<digits>` pairs, with an optional `:` before a pair. Spellings
+ * outside the documented grammar stay as written — `suggestion-foo`, a bare
+ * `suggestion:`, and a whitespace-separated `suggestion -0+0` are different
+ * info strings the same way `suggestion foo` is (#1137). The rewrite keeps
+ * the bare word: the range suffix is dropped with the fence characters, so
+ * the author still reads `suggestion` and no live multi-line range can
+ * survive in any form.
  */
-const SUGGESTION_OPENER_RE = /^([ \t]*)(`{3,}|~{3,})[^\S\r\n]*suggestion[^\S\r\n]*$/i;
+const SUGGESTION_OPENER_RE = /^([ \t]*)(`{3,}|~{3,})[^\S\r\n]*suggestion(?::?-\d+\+\d+)*[^\S\r\n]*$/i;
 
 /** Any fence-shaped line: optional whitespace, then a run of 3+ backticks or
  * tildes — an opener (with or without an info string), a closer, or a fence
