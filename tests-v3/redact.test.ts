@@ -1279,6 +1279,22 @@ test("#1154: quoted JSON credentials inside diff content lines are masked", () =
   assert.ok(out.includes(" {\"username\": \"octocat\"}"), "an ordinary context line is byte-for-byte");
 });
 
+// #999 cost class, re-tested against the quoted-key rule: embedded
+// `FLANK(?:ALT)FLANK` backtracks quadratically on a one-line adversarial body
+// (measured ~3.6s at 240k `"password…` repetitions with no closing quote), and
+// a diff line is masked several times per run — both sides of the diff plus
+// the change-anchor mirror. The rule must therefore stay linear-ish.
+test("#1154 adversarial: quoted-key masking stays bounded on adversarial one-line content", () => {
+  const started = process.hrtime.bigint();
+  const unclosedQuote = `"${"password".repeat(30_000)}`;
+  const manyQuotes = `"{${"token:".repeat(30_000)}`;
+  const out1 = redactPrTextLines(unclosedQuote);
+  const out2 = redactPrTextLines(manyQuotes);
+  assert.ok(out1.length > 0 && out2.length > 0, "clean misses, no marker required");
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1_000_000;
+  assert.ok(elapsedMs < 1_000, `quoted-key adversarial cases took ${elapsedMs.toFixed(0)}ms`);
+});
+
 test("#1154: the key-name rule is the shared unanchored vocabulary, and only the name selects it", () => {
   const out = redactPrTextDeep({
     client_secret: "opaque-value",

@@ -72,10 +72,12 @@ export function redactText(text: string | null | undefined): string {
 // Line-preserving PR-artifact core (#1154)
 // ---------------------------------------------------------------------------
 
-// Identifier characters that may flank a matched alternative inside a key
-// NAME, so the whole-content test below accepts `dbPassword` and
-// `client_secret` as well as `password` and `secret`.
-const KEY_NAME_FLANK = "[A-Za-z0-9_.-]*";
+// The identifier RUN a key name is matched as: every character that may
+// flank a matched alternative inside a NAME, so the functional key-name test
+// accepts `dbPassword` and `client_secret` as well as `password` and
+// `secret`. One class behind both quoted/bare key rules in this core, so the
+// name boundary they match on cannot drift apart.
+const KEY_NAME_RUN = "[A-Za-z0-9_.+-]+";
 
 /** A quoted-key assignment on one line (`"password": "…"`, `'api_key': '…'`,
  * `` `token`: "…" ``) — the JSON spelling the generic `key=value` masker in
@@ -99,13 +101,29 @@ const KEY_NAME_FLANK = "[A-Za-z0-9_.-]*";
  *
  * Same replacement shape as the generic rule (the whole `key: value` span
  * becomes the marker, the 8-character value floor is shared, surrounding
- * punctuation like `{`/`,` survives); the flank and quote class mirror
- * `BARE_SECRET_KEY_LINE_RE`, and it is single-line by construction: the
- * separators around `[:=]` are `[ \t]`, never `\s`. */
+ * punctuation like `{`/`,` survives), and it is single-line by construction:
+ * the separators around `[:=]` are `[ \t]`, never `\s`.
+ *
+ * The name test is FUNCTIONAL, not regex-embedded: a quoted identifier RUN
+ * is matched by one lazy quantifier over a single character class and then
+ * checked with `isSecretKeyName` — the same unanchored `SECRET_KEY_ALTERNATION`
+ * test the deep key-name rule uses, so the shared vocabulary still selects.
+ * Embedding `FLANK(?:ALT)FLANK` instead is the SAME language but quadratic
+ * backtracking on adversarial one-line content (measured ~3.6s for a 240 KB
+ * line of `"passwordpassword…` with no closing quote; the diff path masks
+ * each line several times per run), the #999 cost class this module has
+ * already bounded once. A single class-bounded quantifier is linear here:
+ * it stops at the first out-of-class character, so every start position
+ * costs at most the length of its own run. */
 const QUOTED_SECRET_ASSIGN_RE = new RegExp(
-  `["'\`]${KEY_NAME_FLANK}(?:${SECRET_KEY_ALTERNATION})${KEY_NAME_FLANK}["'\`][ \\t]*[:=][ \\t]*['"\`]?[^\\s'"\`]{8,}`,
+  `["'\`](${KEY_NAME_RUN})["'\`][ \\t]*[:=][ \\t]*['"\`]?[^\\s'"\`]{8,}`,
   "gi",
 );
+
+function maskQuotedSecretAssignments(content: string): string {
+  return content.replace(QUOTED_SECRET_ASSIGN_RE, (match, key: string) =>
+    isSecretKeyName(key) ? REDACTED : match);
+}
 
 /** A BARE secret key line: the line's whole content is a secret key name,
  * a `:` or `=` separator, and NOTHING else — no value (`password:`,
@@ -121,14 +139,24 @@ const QUOTED_SECRET_ASSIGN_RE = new RegExp(
  * followed by indicator characters (indentation digits and/or chomping) is
  * accepted. It is NOT generalized to "any remainder", because
  * `password = self.password` and `token: opts.token` are code expressions
- * whose following lines must survive untouched. */
+ * whose following lines must survive untouched.
+ *
+ * Like `maskQuotedSecretAssignments`, the key-name test is FUNCTIONAL, not
+ * regex-embedded: the line is matched as an optional-quoted identifier RUN
+ * (one greedy class quantifier, linear per line) and only then tested with
+ * the shared unanchored `isSecretKeyName` — the same language, without the
+ * quadratic backtracking `FLANK(?:ALT)FLANK` shows on a long identifier run
+ * with no `:` (measured ~17.6s at 240k `"password…` repetitions, the #999
+ * cost class; it is the same restructuring `QUOTED_SECRET_ASSIGN_RE`
+ * received). */
 const BARE_SECRET_KEY_LINE_RE = new RegExp(
-  `^\\s*["'\`]?\\s*${KEY_NAME_FLANK}(?:${SECRET_KEY_ALTERNATION})${KEY_NAME_FLANK}\\s*["'\`]?\\s*[:=]\\s*(?:[|>][-+0-9]*)?\\s*$`,
+  `^\\s*["'\`]?\\s*(${KEY_NAME_RUN})\\s*["'\`]?\\s*[:=]\\s*(?:[|>][-+0-9]*)?\\s*$`,
   "i",
 );
 
 function isBareSecretKeyLine(content: string): boolean {
-  return BARE_SECRET_KEY_LINE_RE.test(content);
+  const match = BARE_SECRET_KEY_LINE_RE.exec(content);
+  return match !== null && isSecretKeyName(match[1]!);
 }
 
 /** Cross-line state for the continuation rule. `keyIndent` is the bare key
@@ -219,7 +247,7 @@ function maskContentLine(content: string, state: ContinuationState): string {
   // half-consume (a bare-token shape inside the quotes) still presents the
   // whole span to this rule's documented replacement shape; both orders
   // converge, and the result is inert to a second pass.
-  return redactText(content.replace(QUOTED_SECRET_ASSIGN_RE, REDACTED));
+  return redactText(maskQuotedSecretAssignments(content));
 }
 
 /** Stateful, content-line-at-a-time view of the masking core (#1154).

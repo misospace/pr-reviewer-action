@@ -564,7 +564,7 @@ const KEY_NAMES_OFF = false;
  * pass on serialized JSON demonstrably corrupts it (the kubeconfig masker's
  * unbounded `\S+` eats a closing quote after a quoted secret value,
  * `password: "…"` → unterminated string, and the native-loop reuse re-parse
-  * fails closed into an unnecessary fresh review call). Content that does
+ * fails closed into an unnecessary fresh review call). Content that does
  * not parse as JSON is prose by definition — nothing re-parses it as
  * structure, but its line breaks still carry meaning for the reviewer, so it
  * takes the line-preserving core (`redactPrTextLines`). That core also
