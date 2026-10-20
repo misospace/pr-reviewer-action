@@ -181,8 +181,11 @@ export async function cleanupManagedReviews(
   }
 
   // Minimized state lives only in GraphQL (the REST list does not expose
-  // it). On failure the map is empty and minimization is simply retried
-  // (idempotent). On Forgejo there is no GraphQL API: the query is skipped.
+  // it). The read is an IDEMPOTENCY guard, not a safety gate: the GitHub
+  // adapter answers an unreadable minimized state with an EMPTY SET (it
+  // never throws), so the only thing an empty set changes is that a body
+  // which is already hidden may be hidden again (idempotent). On Forgejo
+  // there is no GraphQL API: the query is skipped.
   let minimizedIds: string[] = [];
   if (api.platform === "github") {
     minimizedIds = await api.minimizedReviewIds();
@@ -198,6 +201,11 @@ export async function cleanupManagedReviews(
   }
 
   for (const review of managed) {
+    // #1144: the review id is the review's identity for the whole cleanup
+    // decision, and the dismissal interpolates it into a REST path
+    // (`/reviews/{id}/dismissals`). A malformed id is not targetable at
+    // all: such a review is neither dismissed nor hidden.
+    if (!/^[1-9]\d*$/.test(review.id)) continue;
     if (review.state === "APPROVED" || review.state === "CHANGES_REQUESTED") {
       const dismissed = await api.dismissReview(review.id, DISMISSAL_MESSAGE);
       if (dismissed) {
@@ -220,88 +228,128 @@ export async function cleanupManagedReviews(
   return managed.map((review) => review.id);
 }
 
+/** The submitted states whose reviews #1144 hiding may target. An unknown,
+ * absent, or pending state proves nothing a mutation may be aimed at: it
+ * fails closed. */
+const HIDEABLE_STATES: ReadonlySet<string> = new Set(["COMMENTED", "APPROVED", "CHANGES_REQUESTED", "DISMISSED"]);
+
 /**
- * #1114: presentation-only minimization of superseded, bot-owned advisory
- * (`COMMENTED`) review bodies, deliberately separated from the destructive/
- * authoritative effects of `cleanupManagedReviews` (inline-comment deletion,
- * thread resolution, and dismissal of blocking `CHANGES_REQUESTED` or
- * approving `APPROVED` reviews).
+ * #1144: after a verified newer-publication checkpoint at the current PR
+ * head, every older managed review from the trusted publishing identity is
+ * proven superseded and must stop being visible — even when this run's
+ * replacement is partial/incomplete or used the fallback submission path.
+ * The newest published managed review is the only visible managed review,
+ * period; this supersedes the #1114 carve-out that kept an older
+ * `CHANGES_REQUESTED`/`APPROVED` body visible on an incomplete replacement.
  *
- * An incomplete replacement (partial coverage, a requirement-trace gap, or a
- * fallback submission) correctly forbids destructive retirement — but the old
- * advisory bodies it supersedes are still proven stale: a newer managed
- * review has been published at the verified head. Hiding them (GitHub
- * `minimizeComment`, classifier OUTDATED) changes presentation only; it
- * cannot destroy inline evidence or invalidate a merge-gate verdict, so it
- * runs even when destructive cleanup does not.
+ * The state-specific operation mirrors `cleanupManagedReviews`, minus the
+ * destructive/authoritative effects that stay behind the strict
+ * complete-coverage gate (inline-comment deletion, thread resolution):
+ * - `APPROVED`/`CHANGES_REQUESTED`: dismissal through the existing
+ *   dismissal behavior (strikes the stale merge-gate verdict), then
+ *   minimization hides the body when a GraphQL node id is present and the
+ *   body is not already hidden (a previous run may have minimized but
+ *   failed the dismissal);
+ * - `COMMENTED`/`DISMISSED`: minimization only (GitHub `minimizeComment`,
+ *   classifier OUTDATED) — presentation only, never review content.
  *
  * Fail-closed provenance, the same policy retirement follows:
- * - a `null` trusted owner minimizes nothing (bounded identity-reason WARN);
- * - candidates are managed-marker reviews OWNED by that proven identity
- *   whose state is exactly `COMMENTED` — verdict states are authoritative
- *   and any unknown/absent state means provenance cannot be established,
- *   so both are excluded; foreign/human reviews never match the owner;
- * - excluded ids (the replacement this run just published) and already
- *   minimized reviews are skipped, keeping the operation idempotent;
- * - a failed minimized-state read leaves everything untouched;
- * - `mayMinimize` revalidates supersession (current head, the replacement
+ * - a `null` trusted owner hides nothing (bounded identity-reason WARN);
+ * - candidates are managed-marker reviews OWNED by that proven identity;
+ *   foreign/human reviews never match the owner, and any unknown/absent
+ *   state or pending review is excluded;
+ * - excluded ids (the replacement this run just published) are skipped;
+ * - the minimized-state read is an IDEMPOTENCY guard, not a safety gate: it
+ *   only prevents re-hiding an already-hidden body. The GitHub adapter
+ *   answers an unreadable minimized state with an empty set (it never
+ *   throws), so in production the hide still runs; only an adapter that
+ *   actually throws (the defensive catch) hides no bodies — and even then
+ *   the dismissals still run, because dismissal has no GraphQL dependency;
+ * - `mayHide` revalidates supersession (current head, the replacement
  *   checkpoint, no newer competing publication) at the mutation boundary
- *   before every mutation, so a competing run can never hide the winner.
- * Forgejo has no GraphQL minimization: explicit no-op with a note and zero
- * mutation calls. Individual failures log bounded diagnostics and never
- * throw; review content is never modified.
+ *   before every review's mutations, so a competing run can never hide the
+ *   winner.
+ * GraphQL minimization is GitHub-only: other forges log an explicit note,
+ * make zero GraphQL calls, and still dismiss verdict states where the
+ * adapter supports it (a failed dismissal is a bounded WARN, matching the
+ * complete-path behavior). Individual failures log bounded diagnostics and
+ * never throw; review content is never modified.
  */
-export async function minimizeSupersededAdvisoryReviews(
+export async function hideSupersededManagedReviews(
   api: PublishPlatformApi,
   reviews: readonly PublishReviewRef[],
   marker: string,
   log: CleanupLog,
   trustedOwner: Awaited<ReturnType<typeof resolvePublishTrustedOwner>>,
   excludeReviewIds: readonly string[] = [],
-  mayMinimize: () => Promise<boolean> = async () => true,
+  mayHide: () => Promise<boolean> = async () => true,
 ): Promise<void> {
   const { owner, reason } = trustedOwner;
   if (owner === null) {
-    log(`  WARN: Could not verify authenticated owner (identity reason: ${reason}); no review bodies minimized`);
+    log(`  WARN: Could not verify authenticated owner (identity reason: ${reason}); no superseded reviews hidden`);
     return;
   }
-  if (api.platform !== "github") {
-    log(`  NOTE: Skipping advisory review minimization (platform=${api.platform}; no GraphQL API)`);
-    return;
-  }
-  let minimizedIds: string[];
-  try {
-    minimizedIds = await api.minimizedReviewIds();
-  } catch {
-    log("  WARN: Could not read minimized review state; no review bodies minimized");
-    return;
+  // Minimized state and `minimizeComment` are GraphQL-only capabilities.
+  // The REST dismissal path does not depend on them. The minimized-state
+  // read is an idempotency guard only: an empty set means "nothing is known
+  // to be minimized", not "the read failed" — the GitHub adapter answers an
+  // unreadable state with an empty set and never throws, so the hide still
+  // runs (only a re-hide of an already-hidden body is possible).
+  let canMinimize = false;
+  const minimized = new Set<string>();
+  if (api.platform === "github") {
+    try {
+      for (const id of await api.minimizedReviewIds()) minimized.add(String(id));
+      canMinimize = true;
+    } catch {
+      log("  WARN: Could not read minimized review state; no review bodies minimized");
+    }
+  } else {
+    log(`  NOTE: Skipping GraphQL review minimization (platform=${api.platform}; no GraphQL API)`);
   }
   const excluded = new Set(excludeReviewIds.map(String));
-  const minimized = new Set(minimizedIds.map(String));
   const eligible = reviews.filter((review) => {
     const id = String(review.id ?? "");
-    if (id === "" || excluded.has(id) || minimized.has(id)) return false;
-    if ((review.state ?? "") !== "COMMENTED") return false;
+    // #1144: the dismissal interpolates the review id into a REST path
+    // (`/reviews/{id}/dismissals`), so a malformed id is never targetable.
+    if (!/^[1-9]\d*$/.test(id) || excluded.has(id)) return false;
+    const state = review.state ?? "";
+    if (!HIDEABLE_STATES.has(state)) return false;
     if (!isManagedBody(typeof review.body === "string" ? review.body : "", marker)) return false;
     if (!ownerMatchesIdentity(review.user, owner)) return false;
-    // Without a GraphQL node id there is nothing to minimize; provenance
-    // unestablished fails closed.
-    return typeof review.node_id === "string" && review.node_id !== "";
+    // A live verdict must be dismissed even if a previous run already hid
+    // the body but failed the dismissal.
+    if (state === "APPROVED" || state === "CHANGES_REQUESTED") return true;
+    // Non-verdict bodies hide once, and only with a GraphQL node to aim at;
+    // without one, provenance for the mutation is unestablished.
+    return canMinimize && !minimized.has(id) && typeof review.node_id === "string" && review.node_id !== "";
   });
   if (eligible.length === 0) {
-    log("  NOTE: No superseded owned advisory reviews to minimize");
+    log("  NOTE: No superseded owned managed reviews to hide");
     return;
   }
-  if (eligible.length > 100) log("  WARN: More than 100 eligible advisory reviews; minimizing only the first 100");
-  let minimizedNow = 0, failed = 0;
+  if (eligible.length > 100) log("  WARN: More than 100 eligible superseded reviews; processing only the first 100");
+  let dismissed = 0, minimizedNow = 0, failed = 0;
   for (const review of eligible.slice(0, 100)) {
+    const id = String(review.id);
     try {
-      if (!(await mayMinimize())) { log("  WARN: Head or latest review changed; stopping advisory minimization"); break; }
-      if (await api.minimizeReview(String(review.node_id))) minimizedNow++;
-      else failed++;
+      if (!(await mayHide())) { log("  WARN: Head or latest review changed; stopping superseded review cleanup"); break; }
+      if (review.state === "APPROVED" || review.state === "CHANGES_REQUESTED") {
+        if (await api.dismissReview(id, DISMISSAL_MESSAGE)) {
+          dismissed++;
+          log(`  Dismissed superseded managed review #${id} (${review.state})`);
+        } else {
+          failed++;
+          log(`  WARN: Could not dismiss review #${id} (may require additional permissions)`);
+        }
+      }
+      if (canMinimize && !minimized.has(id) && typeof review.node_id === "string" && review.node_id !== "") {
+        if (await api.minimizeReview(String(review.node_id))) minimizedNow++;
+        else failed++;
+      }
     } catch { failed++; break; }
   }
-  log(`  Advisory reviews: eligible=${Math.min(eligible.length, 100)} minimized=${minimizedNow} failed=${failed}`);
+  log(`  Superseded reviews: eligible=${Math.min(eligible.length, 100)} dismissed=${dismissed} minimized=${minimizedNow} failed=${failed}`);
 }
 
 /**

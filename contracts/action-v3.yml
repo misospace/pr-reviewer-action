@@ -459,7 +459,7 @@ inputs:
     v2_id: cleanup_previous_native_reviews
     required: false
     default: "auto"
-    description: "Mark previous managed native PR reviews as outdated/superseded before publishing a new native review. Accepted values: `auto` (default, enables cleanup for review_comment, review_verdict and review_blockers modes), `true`, or `false`. Cleanup only targets reviews created by this action and carrying the managed marker. Dismissal of old approval/request-changes reviews is attempted when permissions allow but is secondary to visual cleanup."
+    description: "Keep the pull request timeline readable by superseding previous managed native PR reviews. Accepted values: `auto` (default, enables cleanup for review_comment, review_verdict and review_blockers modes), `true`, or `false`. Cleanup only targets reviews created by this action and carrying the managed marker. After a newer review is published and verified at the current head, every older managed review from the same publishing identity stops being visible: stale `APPROVED`/`CHANGES_REQUESTED` verdicts are dismissed where permissions allow, and advisory review bodies are hidden where the forge supports it. This happens even when the new review is partial, its requirement trace is incomplete, or it was submitted through the fallback path."
   - id: upstream-link-mode
     v2_id: upstream_link_mode
     required: false
