@@ -104,6 +104,15 @@ const KIND_PROVENANCE: Readonly<Record<OutcomeEventKind, OutcomeProvenance>> = {
 };
 const FINDING_ID_RE = /^[0-9a-f]{64}$/;
 const HEAD_SHA_RE = /^[0-9a-f]{1,64}$/;
+
+/** THE head-SHA proof rule (#1128), in one place. Every surface that decides
+ * whether a head is provable applies this predicate — the reader's envelope
+ * check, event normalization, and the producer's export decision — because a
+ * producer-side inline copy that drifts from the reader is exactly how the
+ * action ends up exporting an artifact its own reader rejects. */
+export function isProvenHeadSha(value: unknown): value is string {
+  return typeof value === "string" && HEAD_SHA_RE.test(value);
+}
 const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T/;
 
 function boundedText(value: unknown, max: number): string | null {
@@ -137,7 +146,7 @@ export function normalizeOutcomeEvent(raw: unknown): OutcomeEvent | null {
   const kind = rec.kind as OutcomeEventKind;
   if (typeof rec.provenance !== "string" || !PROVENANCES.has(rec.provenance as OutcomeProvenance)) return null;
   if (KIND_PROVENANCE[kind] !== rec.provenance) return null;
-  const headSha = typeof rec.head_sha === "string" && HEAD_SHA_RE.test(rec.head_sha) ? rec.head_sha : null;
+  const headSha = isProvenHeadSha(rec.head_sha) ? rec.head_sha : null;
   const event: OutcomeEvent = {
     finding_id: rec.finding_id,
     kind,
@@ -223,7 +232,7 @@ export function parseOutcomeLedger(raw: string): OutcomeLedger | null {
   if (rec.schema !== FINDING_OUTCOMES_SCHEMA) return null;
   const generatedAt = isoTimestamp(rec.generated_at);
   if (generatedAt === null) return null;
-  if (typeof rec.head_sha !== "string" || !HEAD_SHA_RE.test(rec.head_sha)) return null;
+  if (!isProvenHeadSha(rec.head_sha)) return null;
   if (!Array.isArray(rec.events)) return null;
   const events: OutcomeEvent[] = [];
   for (const candidate of rec.events) {
