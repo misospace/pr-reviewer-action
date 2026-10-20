@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync } from "node:fs";
 import { extraHeaderFingerprint } from "../transport/headers.js";
+import { ACTION_VERSION } from "../version.js";
 
 /** Precheck fingerprinting (#674) — the faithful TS port of
  * `pr_reviewer/precheck.py`. The marker form `<diff_fp>|cfg:<config_hash>`
@@ -184,6 +185,31 @@ const CONDITIONAL_AI_KEYS: ReadonlySet<string> = new Set([
   // #1037: excluded from the unconditional sweep and re-emitted through the
   // canonical extra-header fingerprint below (see CANONICALIZED_AI_KEYS).
   "AI_EXTRA_HEADERS",
+  // #1073: the confidence-scorer family. `stageEnvFromConfig` projects every
+  // contract input even when empty, and `AI_CONFIDENCE_TIMEOUT_SEC` has a
+  // NON-empty contract default (120), so the unconditional sweep would add a
+  // new line for every existing installation and invalidate every cached
+  // review on upgrade. The whole family is conditional below: with the
+  // scorer disabled (the default) it contributes NOTHING — the config hash
+  // is byte-identical to a build without the feature — and with the scorer
+  // enabled its non-empty values contribute. `AI_CONFIDENCE_API_KEY` is
+  // excluded from the unconditional sweep by the `*_API_KEY` rule and is
+  // re-admitted below only as a one-way DIGEST, never as its raw value:
+  // rotating the scorer's credential changes which account (and therefore
+  // provider identity, availability, and score) answers, so the cached
+  // review must not survive the rotation — see `credentialDigest`.
+  // `AI_CONFIDENCE_ENABLE_FOR_FORKS` decides whether the scorer runs at all on
+  // a fork PR, so it changes what is published; it must contribute whenever the
+  // scorer is enabled, or a cached review made with the scorer gated off would
+  // be republished after the operator turns it on. Its contract default
+  // ("false") is non-empty and stable, so it adds no upgrade churn.
+  "AI_CONFIDENCE_MODEL",
+  "AI_CONFIDENCE_BASE_URL",
+  "AI_CONFIDENCE_API_FORMAT",
+  "AI_CONFIDENCE_REASONING_EFFORT",
+  "AI_CONFIDENCE_TIMEOUT_SEC",
+  "AI_CONFIDENCE_API_KEY",
+  "AI_CONFIDENCE_ENABLE_FOR_FORKS",
 ]);
 
 /** #1037: the `ai-extra-headers` surface is hashed by its canonical
@@ -223,9 +249,76 @@ const ANTHROPIC_EFFORT_SUPPORT_KEYS: ReadonlySet<string> = new Set([
   "AI_FALLBACK_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT",
 ]);
 
+/**
+ * #1152: rotating a provider credential must invalidate the cached review
+ * that credential produced, so a configured lane credential re-enters the
+ * config lines as a one-way digest instead of being dropped by the
+ * `*_API_KEY` sweep rule outright (the pattern #1073 settled for the
+ * confidence scorer's credential). The raw value is never emitted for ANY
+ * key — only the digest enters the lines, and only the SHA256 over the lines
+ * ever reaches the public marker comment.
+ *
+ * The digest covers the EXACT configured bytes, with no trim: the tier lanes
+ * resolve their credential with `value()` (no trim, src/routing/tiers.ts) and
+ * the transport writes it into the auth header verbatim
+ * (`src/transport/http.ts`), so trimming here would fingerprint something
+ * other than what the lane sends — the same "what was SENT, never what the
+ * config named" rule #998 states for the effort family. The consequence is
+ * deliberate: whitespace around a key is part of its identity, and on the
+ * primary/smart/fallback lanes a whitespace-only value is truthy for the
+ * `||` resolution, so it is a configured credential and must contribute.
+ * (The specialist lane trims before its `||` and falls back to the base key,
+ * so there the raw digest is FINER than what that lane sends — again
+ * over-invalidation only.) Trimmed and untrimmed variants of the same secret
+ * therefore digest differently; a trim here could only ever LOSE an
+ * invalidation, which is the direction this fingerprint never takes.
+ *
+ * The same-endpoint inheritance case, decided explicitly per lane: the
+ * fingerprint covers each lane's OWN configured value, never a resolved one.
+ * A lane whose key is unset resolves its credential at CALL time in
+ * `routing/tiers.ts`: primary = `AI_PRIMARY_API_KEY` else `AI_API_KEY`;
+ * smart = `AI_SMART_API_KEY` else `AI_API_KEY`; fallback =
+ * `AI_FALLBACK_API_KEY` else `AI_API_KEY`; specialist =
+ * `AI_SPECIALIST_API_KEY` else the BASE `AI_API_KEY` (the profile it falls
+ * back to is built from the base keys, not from `AI_PRIMARY_API_KEY`). Every
+ * credential a lane can actually send is therefore either its own configured
+ * key or `AI_API_KEY`, and both contribute whenever non-empty: rotating
+ * `AI_API_KEY` invalidates every lane that inherits it, while an unset lane
+ * key emits no line, so a credential-free (contract-default) configuration
+ * stays byte-identical to the pre-#1152 hash. Re-implementing the per-lane
+ * resolution inside precheck was rejected: it would duplicate `tiers.ts`
+ * (drift risk) and digest the same secret once per inheriting lane.
+ * Over-invalidation is the accepted direction throughout — a
+ * configured-but-unused lane key (e.g. a smart key with no smart model) still
+ * contributes, and its rotation then costs at most a fresh review; the
+ * fingerprint fails toward re-review, never toward a stale skip.
+ *
+ * A new `ai-*-api-key` contract input must be added to this set in the same
+ * release, exactly like `EXACT_CONFIG_KEYS`, or its rotation goes unnoticed
+ * (pinned by the contract-driven registration test in
+ * `tests-v3/precheck.test.ts`). `LINEAR_API_KEY` is not a model lane: its
+ * contribution stays the `LINEAR_API_KEY_CONFIGURED` boolean in
+ * `EXACT_CONFIG_KEYS`. */
+export const CREDENTIAL_AI_KEYS: ReadonlySet<string> = new Set([
+  "AI_API_KEY",
+  "AI_PRIMARY_API_KEY",
+  "AI_SMART_API_KEY",
+  "AI_FALLBACK_API_KEY",
+  "AI_SPECIALIST_API_KEY",
+]);
+
+/** One-way, domain-separated credential digest — the same shape
+ * `extraHeaderFingerprint` (#1037) emits for header values: SHA256 over
+ * `<key>\0<value>`, first 12 hex chars. The key name in the preimage keeps
+ * one secret under two different lanes distinguishable. */
+function credentialDigest(key: string, value: string): string {
+  return sha256Hex(`${key}\0${value}`).slice(0, 12);
+}
+
 /** Collect configuration key=value lines from the environment map and
  * config files (port of `_collect_config_lines`). `AI_*` is swept as this
- * action's own namespace except `*_API_KEY` secrets; every other key is
+ * action's own namespace except `*_API_KEY` secrets, which re-enter only as
+ * one-way digests (#1152, see `CREDENTIAL_AI_KEYS`); every other key is
  * matched by exact name so runner-preset provider vars cannot skew the
  * hash across runner images. */
 export function collectConfigLines(env: Record<string, string>): string[] {
@@ -298,8 +391,50 @@ export function collectConfigLines(env: Record<string, string>): string[] {
       if ((env[key] ?? "").trim().toLowerCase() === "true") lines.push(`${key}=true`);
       continue;
     }
+    // #1073: the confidence-scorer family contributes only while the scorer
+    // is enabled (`AI_CONFIDENCE_MODEL` non-empty). Disabled — the default —
+    // emits nothing, so `AI_CONFIDENCE_TIMEOUT_SEC=120` (a non-empty contract
+    // default) never invalidates an existing cached review on upgrade.
+    if (key.startsWith("AI_CONFIDENCE_")) {
+      const scorerEnabled = (env.AI_CONFIDENCE_MODEL ?? "").trim() !== "";
+      const value = (env[key] ?? "").trim();
+      if (!scorerEnabled || value === "") continue;
+      // The credential is the one model-affecting setting the raw-value rule
+      // cannot cover: it is secret, but a rotation changes the answer, so it
+      // contributes as a domain-separated one-way digest — the same shape
+      // `extraHeaderFingerprint` emits for header values. The gate is
+      // "configured", and digesting it is REQUIRED for correctness: a
+      // configured scorer key IS used (including on the same endpoint, where
+      // the transport is the primary's but the credential is the scorer's
+      // own), so a rotation changes WHICH credential answers and must
+      // invalidate the cached score. The digest is never the raw secret.
+      if (key.endsWith("_API_KEY")) {
+        lines.push(`${key}=${credentialDigest(key, value)}`);
+        continue;
+      }
+      // #1073: the scorer's prompt/code ride action releases, so while the
+      // scorer is enabled a version change must invalidate the cached review
+      // and force the score to be recomputed. Emitted once per family block,
+      // keyed on the enabled gate above; the over-eager direction only ever
+      // costs a fresh review. Disabled (the default) emits nothing,
+      // preserving baseline fingerprints.
+      if (key === "AI_CONFIDENCE_MODEL") {
+        lines.push(`SCORER_ACTION_VERSION=${ACTION_VERSION}`);
+      }
+      lines.push(`${key}=${value}`);
+      continue;
+    }
     const effort = (env[key] ?? "").trim();
     if (effort !== "") lines.push(`${key}=${effort}`);
+  }
+
+  // #1152: configured lane credentials contribute as one-way digests over
+  // their exact configured bytes (see CREDENTIAL_AI_KEYS for the inheritance
+  // decision and why there is no trim). An unset/empty key emits nothing, so
+  // a credential-free configuration keeps its byte-identical baseline hash.
+  for (const key of CREDENTIAL_AI_KEYS) {
+    const value = env[key] ?? "";
+    if (value !== "") lines.push(`${key}=${credentialDigest(key, value)}`);
   }
 
   const filePaths = CONFIG_FILE_VARS

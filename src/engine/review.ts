@@ -11,7 +11,7 @@ import { truncateClean } from "../corpus/truncate.js";
 import { readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { canonicalChangedFile, normalizeLinkedIssues } from "../context/types.js";
-import { redactText } from "../context/redact.js";
+import { redactDiffText, redactPrTextDeep, redactPrTextLines, redactText } from "../context/redact.js";
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { buildHarnessObligations } from "../requirements/obligations.js";
 import { externalChecksConclusion } from "../precheck/decide.js";
@@ -22,6 +22,7 @@ import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js"
 import { runChatRequest } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
 import { callKnownSecrets, extraHeadersForEnv } from "../transport/headers.js";
+import type { TerminalProviderReason } from "../transport/terminal.js";
 import { withCancellationSignal, type FetchLike } from "../platform/http.js";
 import { normalizePrIdentity } from "../platform/pr.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
@@ -41,7 +42,7 @@ import {
 import { extractRequirementLedger, ledgerToArtifact, renderRequirementLedgerMarkdown } from "../requirements/ledger.js";
 import { requirementLedgerPresence } from "../requirements/presence.js";
 import { classifyPr, classificationToArtifact } from "../classification/classify.js";
-import { resolveReviewRoute, resolveTierProfiles, tierRequestShape, anthropicEffortInactiveWarning, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, effectiveWireEffort, effectiveWireResponseFormat, type TierProfiles } from "../routing/tiers.js";
+import { resolveReviewRoute, resolveTierProfiles, resolveConfidenceProfile, tierRequestShape, anthropicEffortInactiveWarning, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, effectiveWireEffort, effectiveWireResponseFormat, type TierProfiles } from "../routing/tiers.js";
 import { reviewerRequestedEscalation } from "../routing/escalation.js";
 import { buildSpecialistCorpus } from "../specialists/corpus.js";
 import { forkGate, type ForkedGate, type GateName, type GateOutcome } from "../gates/gates.js";
@@ -53,24 +54,28 @@ import { renderClaimsSection } from "../claims/render.js";
 import { buildModelRequest } from "../model/request.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
 import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js";
-import { maskKnownSecrets, redactTextDeep } from "../context/redact.js";
+import { maskDiagnostic, maskKnownSecrets, redactTextDeep } from "../context/redact.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
 import type { ReviewTriageDecision } from "../model/types.js";
 import { resolveReviewerRouting } from "../config/reviewer-routing.js";
 import { resolveHumanReviewRouting, type HumanReviewRoutingMode, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
+import { buildConfidencePrompt } from "../confidence/prompt.js";
+import { runConfidenceScorer } from "../confidence/scorer.js";
+import { boundConfidenceField, boundConfidenceReason, CONFIDENCE_DISABLED, confidenceCapNote, confidenceOutputFields, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS, MAX_CONFIDENCE_CONCERN_FILE_CHARS, unscoredConfidenceResult, type ConfidenceResult } from "../confidence/result.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, applyReviewTriageFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
 import { reviewArtifactFromParsed, type ArtifactFinding } from "../enforcement/artifact.js";
 import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
 import { applyBlockerVerification } from "../enforcement/blocker-verification.js";
 import { createHeadSourceReader } from "../enforcement/source-verifier.js";
 import { capCiEvidenceFindings } from "../enforcement/ci-evidence.js";
-import { markerReviewResult } from "../publish/publish.js";
+import { markerReviewResult, publishStepRuns } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
-import { applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope, type RequirementTraceRepairOutcome } from "../enforcement/requirement-trace.js";
+import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
+import { createTraceGapProbe, traceGapContinuationSummary } from "../requirements/trace-gap-probe.js";
 import { runRequirementTraceRepairPass, traceRepairOutcomeSummary } from "../requirements/trace-repair.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
@@ -170,6 +175,10 @@ export interface RunReviewResult {
   /** #847: measurement follow-up: the tool loop's stop reason for the route
    * the marker was built from; undefined when no harness reported one. */
   toolStopReason?: string;
+  /** #1073: the scorer's bounded advisory concerns, present only when the
+   * scorer produced a scored answer; the publish step renders them as
+   * advisory bullets. */
+  confidenceConcerns?: Array<{ file: string; line: number | null; evidence: string }>;
   /** Wall-clock seconds for the whole run. */
   durationSec: number;
   /** #726: the engine-owned admission decision — present on BOTH the skip
@@ -523,10 +532,24 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const cachedObject = ws.read("pr-object.json");
   if (cachedObject !== null && cachedProjectNumber(cachedObject) === Number(prNumber)) {
     log("Reusing PR object fetched by precheck");
-    prObject = JSON.parse(Buffer.from(cachedObject).toString("utf8")) as unknown;
+    // #1154: idempotent on an already-redacted cache copy, and covers a copy
+    // persisted by an older build. #1154 review round 6: the sanitized object
+    // is written BACK to disk too — an older build's raw copy must not stay
+    // in a reused run directory, where it would ship with the run and be
+    // served by any later artifact read. The only other rewrite (the #812
+    // same-head metadata refresh) is gated on the CI gate running, so it does
+    // not close this path generally.
+    prObject = redactPrTextDeep(JSON.parse(Buffer.from(cachedObject).toString("utf8")));
+    ws.write("pr-object.json", pyJsonDumps(prObject));
   } else {
     prObject = await adapter.getPr();
-    if (prObject !== null && prObject !== undefined) ws.write("pr-object.json", pyJsonDumps(prObject));
+    if (prObject !== null && prObject !== undefined) {
+      // #1154: redact the object itself, not just the persisted copy — the
+      // projection below (title/body into pr.json, pr-body.txt, the corpus
+      // metadata line) must inherit the redacted authored fields.
+      prObject = redactPrTextDeep(prObject);
+      ws.write("pr-object.json", pyJsonDumps(prObject));
+    }
   }
   const pr = projectPr(prObject, prNumber);
   // #812 review: the authoritative body and its edit instant are ONE atomic
@@ -537,7 +560,12 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // (no seam, failed read) keeps the REST body and labels nothing.
   let bodyRevision = await authoritativeBodyRevision(adapter);
   checkpoint();
-  if (bodyRevision !== null) pr.body = bodyRevision.body;
+  // #1154: the snapshot body is PR-authored content on the same persisted
+  // family as the projection body above. The line-preserving pass, not the
+  // flat one: a body is multi-line text whose line structure the reviewer
+  // reads, and the flat pass's newline-spanning masker would collapse
+  // `password:\n<value>` into a single line here.
+  if (bodyRevision !== null) pr.body = redactPrTextLines(bodyRevision.body);
   let supersededCutoff = bodyRevision === null ? null : bodyRevision.editedAt;
   ws.write("pr.json", pyJsonDumps(pr));
   if (context.isForkPr === "") {
@@ -618,8 +646,28 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   } else {
     diffText = await adapter.getPrDiff();
     checkpoint();
-    ws.write("pr.diff", diffText);
   }
+  // #1154: the diff is PR-authored untrusted content, and every artifact it
+  // feeds (`pr.diff`, `pr.diff.truncated`, the corpus sections built from it,
+  // and `ai-request.<tier>.json`, which must keep recording exactly what was
+  // FIRST sent) persists it. Redacting here — once, before any write — makes
+  // the model input and every persisted artifact carry the same redacted
+  // bytes. `redactDiffText` (not the flat pass) keeps every line count and
+  // prefix intact, so inline findings still anchor to the same line numbers
+  // the forge's raw diff defines, and it also closes the split-line form (a
+  // `password:` key line with its value on the indented line below). Path
+  // headers are masked too (#1154 review round 3): a credential-shaped token
+  // in a diff-header path is PR-authored content, and `rawDiffText` below
+  // keeps the raw spelling in memory so the change-anchor checkout lookups
+  // still resolve. The generic layer's documented false-positive class (a
+  // fixture value like `sk-test-…`) is accepted, as is the continuation
+  // rule's over-redaction (any indented run after a bare secret key is
+  // masked): over-redaction is the redaction module's stated preference over
+  // a leaked credential.
+  const rawDiffText = diffText;
+  diffText = redactDiffText(diffText);
+  if (diffText !== rawDiffText) log("PR diff redaction: masked credential-shaped value(s) before persistence and corpus assembly");
+  ws.write("pr.diff", diffText);
   const identity = normalizePrIdentity(prObject);
   const generatedPaths = await generatedAttributePaths(workspace, diffText, budgets.primary.maxDiff);
   ws.write("pr.diff.truncated", prioritizeDiff(Buffer.from(diffText, "utf8"), budgets.primary.maxDiff, { generated: generatedPaths }));
@@ -640,7 +688,9 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     );
     if (!seedValid) throw new RunReviewError("pr-files.seed.json is present but malformed (expected a JSON array of file objects with a string filename)");
     log("Reusing PR file list derived from the pinned diff");
-    rawFilesList = seededFiles;
+    // #1154: the pinned seed is PR-authored content too; redact before the
+    // artifact write so the persisted copy matches the live branch's policy.
+    rawFilesList = redactPrTextDeep(seededFiles) as unknown[];
     const totals = seededFileTotals(rawFilesList);
     totalChangedFiles = totals.changedFiles;
     pr.changedFiles = totals.changedFiles;
@@ -652,10 +702,16 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     const filesResult = await adapter.listPrFiles();
     checkpoint();
     if (!filesResult.ok) throw new RunReviewError(`platform_pr_files failed: ${filesResult.error}`);
-    const prFilesRaw = filesResult.data;
+    // #1154: the raw platform file entries carry per-file `patch` fields —
+    // PR-authored hunks on the same persisted family as the diff itself.
+    // A credential-shaped `filename` VALUE is masked too (the accepted
+    // false-positive class); the consequence is not cosmetic — the model
+    // cannot read_file such a path, so coverage records it as unread —
+    // which is preferred to persisting a credential-shaped string.
+    const prFilesRaw = redactPrTextDeep(filesResult.data);
     ws.write("pr-files.raw.json", pyJsonDumps(prFilesRaw));
     totalChangedFiles = typeof pr.changedFiles === "number" ? pr.changedFiles : 0;
-    rawFilesList = Array.isArray(prFilesRaw) ? prFilesRaw : [];
+    rawFilesList = Array.isArray(prFilesRaw) ? prFilesRaw as unknown[] : [];
   }
   ws.write("pr-files.json", filesProjection(rawFilesList, totalChangedFiles));
   ws.write("pr-files.truncated.json", truncateClean(Buffer.from(filesProjection(rawFilesList, totalChangedFiles)), budgets.primary.maxFiles, "…[file list truncated]"));
@@ -697,7 +753,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // Related-code context (corpus.sh). Built before the requirement ledger:
   // its anchors and related context are the #796 obligation inputs. It
   // reads only the diff, the file list and the checkout.
-  const relatedInputs = await buildRelatedCodeSection(ws, env, workspace);
+  const relatedInputs = await buildRelatedCodeSection(ws, env, workspace, rawDiffText);
   checkpoint();
   const obligationsOn = (env.HARNESS_OBLIGATIONS ?? "false").toLowerCase() === "true";
   const harnessObligations = relatedInputs === null || !obligationsOn ? [] : buildHarnessObligations(relatedInputs);
@@ -1013,17 +1069,20 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // unchanged: a moved head supersedes this review anyway.
   if (env.CI_GATE_ACTIVE === "true") {
     const refreshed = await adapter.getPr().catch(() => null);
-    const next = refreshed === null || refreshed === undefined ? null : projectPr(refreshed, prNumber);
+    // #1154: same ingestion policy as the initial fetch — the refreshed
+    // object's authored fields must not persist raw.
+    const redactedRefreshed = refreshed === null || refreshed === undefined ? refreshed : redactPrTextDeep(refreshed);
+    const next = refreshed === null || refreshed === undefined ? null : projectPr(redactedRefreshed, prNumber);
     if (next !== null && String(next.headRefOid ?? "") === String(pr.headRefOid ?? "")) {
       log("Refreshing PR metadata context after the CI wait");
       // A fresh atomic snapshot for the rebuilt pass: its body is presented
       // and its `editedAt` is the only cutoff this pass labels with. A
       // failed snapshot read keeps the REST-refreshed body and no cutoff.
       bodyRevision = await authoritativeBodyRevision(adapter);
-      if (bodyRevision !== null) next.body = bodyRevision.body;
+      if (bodyRevision !== null) next.body = redactPrTextLines(bodyRevision.body);
       supersededCutoff = bodyRevision === null ? null : bodyRevision.editedAt;
       Object.assign(pr, next);
-      ws.write("pr-object.json", pyJsonDumps(refreshed));
+      ws.write("pr-object.json", pyJsonDumps(redactedRefreshed));
       ws.write("pr.json", pyJsonDumps(pr));
       ws.write("pr-body.txt", String(pr.body ?? ""));
       await buildMetadataContext(pr, supersededCutoff);
@@ -1077,6 +1136,11 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const traceScopeIds = requirementTraceEnabled
     ? requirementTraceScope(ledgerValue, traceChanged, { ownership: traceOwnership.rules, paths: tracePaths }).inScope.map((entry) => entry.id)
     : [];
+  // #1145: ledger texts for the in-scope ids, for the confirmed-unmet
+  // escalation's bounded finding messages (untrusted text — sanitized there).
+  const traceRequirementTexts = new Map(
+    ledgerRequirementsById(ledgerValue, traceScopeIds).map((entry) => [entry.id, entry.text] as const),
+  );
   const distributedHints = distributedRequirementHints(ledgerValue, traceOwnership.rules, traceScopeIds);
   for (const warning of distributedRequirementWarnings(ledgerValue, traceOwnership.rules, traceScopeIds)) {
     errorLog(`requirement owners: ${warning}`);
@@ -1106,6 +1170,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
 
   // ── Native tool harness (corpus.sh tail) ─────────────────────────────
   const toolMode = (env.TOOL_MODE ?? "off").toLowerCase();
+  // #1145: the harness-owned evidence-repair continuation record (present
+  // only when the probe fired or was skipped) — surfaced on the
+  // requirement-trace repair summary and the review-coverage record.
+  let traceGapContinuation: TraceGapContinuationSummary | null = null;
   if (toolMode === "native_loop") {
     const toolGate = gateForkForForks(env, forkFlag);
     if (toolGate !== null) {
@@ -1116,8 +1184,25 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       // The tier names the first-pass artifact slot; the loop limits follow
       // the tier (loopLimitsProfile).
       env.TOOL_HARNESS_TIER = "primary";
-      await runToolHarnessPhase(ws, env, workspace, log, cancellation.scope.signal);
+      const traceGapProbe = requirementTraceEnabled
+        && traceScopeIds.length > 0
+        && promptState.isDefault
+        && profiles.primary.baseUrl !== ""
+        && profiles.primary.model !== ""
+        ? createTraceGapProbe({
+          ledger: ledgerValue,
+          traceScopeIds,
+          workspace,
+          changed: traceChanged,
+          ownership: traceOwnership.rules,
+          paths: tracePaths,
+          prBody: tracePrBody,
+          ciState: traceCiState,
+        })
+        : undefined;
+      await runToolHarnessPhase(ws, env, workspace, log, cancellation.scope.signal, traceGapProbe);
       checkpoint();
+      traceGapContinuation = traceGapContinuationSummary(safeJson(ws.read("tool-harness.json")));
     }
     corpusResult = assembleCorpus(ws, env, budgets, profileKey, "primary", generatedPaths, standards);
     if (corpusResult.overBudget) errorLog(`ERROR: assembled corpus exceeds its context budget`);
@@ -1204,10 +1289,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     const missingTraceIds = missingTraceRequirementIds(repairTarget.requirement_coverage, traceScopeIds);
     const repairRequirements = missingTraceIds.length > 0 ? ledgerRequirementsById(ledgerValue, missingTraceIds) : [];
     if (missingTraceIds.length === 0) {
-      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "no_missing_ids", missingIds: missingTraceIds, secrets: [profiles.primary.apiKey] });
+      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "no_missing_ids", missingIds: missingTraceIds, secrets: [profiles.primary.apiKey], ...(traceGapContinuation !== null ? { continuation: traceGapContinuation } : {}) });
     } else if (!promptState.isDefault || analysisEngine === MODEL_UNAVAILABLE_ENGINE || !profiles.primary.baseUrl || !profiles.primary.model || repairRequirements.length === 0) {
       // The pass exists but its own gates kept it from running at all.
-      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "skipped_by_gate", missingIds: missingTraceIds, secrets: [profiles.primary.apiKey] });
+      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "skipped_by_gate", missingIds: missingTraceIds, secrets: [profiles.primary.apiKey], ...(traceGapContinuation !== null ? { continuation: traceGapContinuation } : {}) });
     } else {
       const rawTemp = (env.AI_TEMPERATURE ?? "").trim();
       const temperature = rawTemp === "" || Number.isNaN(Number(rawTemp)) ? null : Number(rawTemp);
@@ -1283,6 +1368,11 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
           missing_ids: missingTraceIds,
           claims: repaired.claims.length,
           diff_clipped: repaired.diffClipped,
+          // #1145: the loop's own in-conversation continuation (if the probe
+          // fired or was skipped in this run) — the no-tools pass above and
+          // the loop's continuation are distinct attempts and both are
+          // reported.
+          ...(traceGapContinuation !== null ? { trace_gap_continuation: traceGapContinuation } : {}),
         })}\n`, "utf8"));
         if (repaired.claims.length > 0) {
           repairTarget.requirement_coverage = mergeTraceClaims(repairTarget.requirement_coverage, repaired.claims);
@@ -1304,6 +1394,7 @@ missingIds: missingTraceRequirementIds(repairTarget.requirement_coverage, traceS
 result: repaired,
 thrownError: repaired === null ? repairThrow : undefined,
 secrets: [profiles.primary.apiKey],
+...(traceGapContinuation !== null ? { continuation: traceGapContinuation } : {}),
 });
     }
     if (traceRepairOutcome !== null) {
@@ -1383,6 +1474,15 @@ secrets: [profiles.primary.apiKey],
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
     requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState, traceRepair: traceRepairOutcome ?? undefined });
+    // #1145: confirmed-unmet escalation — the one case where a synthesized
+    // finding is allowed (#1095's no-synthesis rule covers ledger-only
+    // claims, not a row the validator refuted by re-deriving the
+    // requirement's truth from the repository state at head — #985's
+    // structural proof). Runs before the overlays and the strict mapping so
+    // the synthesized blockers count toward the open-findings set.
+    if (requirementTraceResult.applied) {
+      applyConfirmedUnmetEscalation(reviewRecord as never, requirementTraceResult.trace, traceRequirementTexts);
+    }
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
@@ -1403,6 +1503,16 @@ secrets: [profiles.primary.apiKey],
     completenessResult = applyRequiredCheckValidation(reviewRecord as never, completenessOptions);
     completenessStatus = completenessResult.status;
     requirementTraceResult = applyRequirementTraceEnforcement(reviewRecord as never, { enabled: requirementTraceEnabled, ledger: ledgerValue, workspace, changed: traceChanged, ownership: traceOwnership.rules, paths: tracePaths, prBody: tracePrBody, ciState: traceCiState, traceRepair: traceRepairOutcome ?? undefined });
+    // #1145: confirmed-unmet escalation (same rationale as the strict
+    // branch above: only a row the validator refuted against the repository
+    // state at head — #985's structural proof — is escalated; a
+    // copies-without-comparing row stays a repairable coverage gap). The
+    // relaxers below all refuse to re-approve once
+    // `requirement_trace_incomplete` is set or an open non-verification
+    // blocker exists, so the flip is stable.
+    if (requirementTraceResult.applied) {
+      applyConfirmedUnmetEscalation(reviewRecord as never, requirementTraceResult.trace, traceRequirementTexts);
+    }
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
     // #977: the model's own request_changes is relaxed only when every
     // still-open finding is a verification ask and no independent
@@ -1521,8 +1631,187 @@ secrets: [profiles.primary.apiKey],
     partial_coverage: partialCoverage ?? null,
     required_checks: outputRequiredChecks,
     ...(incompleteReason !== "none" ? { incomplete_reason: incompleteReason } : {}),
+    // #1145: the native loop's own bounded evidence-repair continuation
+    // record (its outcome enum distinguishes a run continuation from
+    // skipped_no_budget), when the probe fired or was skipped.
+    ...(traceGapContinuation !== null ? { trace_repair_continuation: traceGapContinuation } : {}),
   };
   ws.write("review-coverage.json", Buffer.from(`${pyJsonDumps(reviewCoverage)}\n`, "utf8"));
+
+  // ── #1073: the independent post-review confidence scorer ─────────────
+  // Advisory telemetry only. Runs once, after enforcement and the coverage
+  // record are final and only when this run will actually publish a review:
+  // one bounded, tool-free model call grades how confident the finished
+  // review is. The result never alters the verdict, review_result, required
+  // checks, escalation reason, native review events, or approvals, and it
+  // never writes into any reviewRecord field the enforcement/marker
+  // pipeline reads — it flows only into its own outputs, step-summary row,
+  // published section, marker keys, and artifact. Disabled (the default)
+  // means none of that exists: no request, no artifacts, no section, no
+  // marker keys; the five confidence-* output assignments stay empty.
+  const confidenceResolution = resolveConfidenceProfile(env);
+  for (const warning of confidenceResolution.warnings) log(`WARNING: ${warning}`);
+  // The scorer's eligibility gate is now EXACTLY the `shouldPublish` decision
+  // the action entry applies at the publish seam: `comment` mode counts as
+  // publishing only when the legacy `publish-review-comment` flag is set,
+  // and `review_blockers` counts as publishing like the other native modes
+  // (shared `publishStepRuns` predicate, so the two sites cannot diverge).
+  // The previous round-5 gate overshot: it scored `comment`-mode runs whose
+  // publish step is skipped — a privileged outbound scorer call for a review
+  // that will not publish.
+  const reviewWillPublish = publishStepRuns(env.PUBLISH_MODE, env.PUBLISH_REVIEW_COMMENT === "true");
+  const confidenceProfile = confidenceResolution.profile;
+  let confidenceResult: ConfidenceResult;
+  if (!confidenceProfile.enabled) {
+    // Disabled: no request, no artifacts, no outputs.
+    confidenceResult = CONFIDENCE_DISABLED;
+    clearConfidenceArtifacts(ws);
+  } else if (!reviewWillPublish) {
+    // Defensive: the entry's publish step is skipped for this run, so no
+    // publish seam can produce a body for a score to sit in — and no
+    // privileged scorer call may fire for a review that never publishes.
+    // The cause still lands in the artifact and the log, so an operator can
+    // tell "the publish step was skipped" from "the scorer call failed".
+    confidenceResult = unscoredConfidenceResult("not_published");
+    removeConfidenceWireArtifacts(ws);
+    writeConfidenceScoreArtifact(ws, confidenceResult);
+    log(`confidence scorer: unscored (${confidenceResult.cause})`);
+  } else if (analysisEngine === MODEL_UNAVAILABLE_ENGINE || !(outputVerdict === "approve" || outputVerdict === "request_changes")) {
+    // No real model review happened (a model-failure notice, or no verdict at
+    // all): fail to unscored WITHOUT calling the model.
+    confidenceResult = unscoredConfidenceResult("incomplete_review");
+    removeConfidenceWireArtifacts(ws);
+    writeConfidenceScoreArtifact(ws, confidenceResult);
+    log(`confidence scorer: unscored (${confidenceResult.cause})`);
+  } else {
+    // #1140 review: every credential configured for this run, in ONE place.
+    // The scorer may be a SEPARATE backend, so each of these is a real
+    // credential for this run and each must be masked out of every
+    // untrusted surface below — the scorer's prompt content, its transport
+    // diagnostics, and the artifacts it leaves behind. The specialist lane
+    // reads its raw env key here: its resolved profile may have fallen back to
+    // the primary key, and a configured specialist secret echoed in PR content
+    // must not ride to the scorer either.
+    const confidenceSecrets = [
+      confidenceProfile.apiKey,
+      profiles.primary.apiKey,
+      profiles.smart.apiKey,
+      profiles.fallback.apiKey,
+      env.AI_SPECIALIST_API_KEY ?? "",
+    ];
+    const confidencePrompt = buildConfidencePrompt({
+      headSha: context.headSha || String(pr.headRefOid ?? ""),
+      baseSha: identity.baseSha ?? "",
+      diff: ws.readText("pr.diff.truncated") ?? "",
+      prTitle: String(pr.title ?? ""),
+      prBody: String(pr.body ?? ""),
+      findings: reviewRecord.findings,
+      reviewSummary: String(reviewRecord.review_markdown ?? ""),
+      reviewResult: markerReviewResult({
+        verdictPolicy,
+        verdict: outputVerdict,
+        findings: reviewRecord.findings,
+        requiredChecks: outputRequiredChecks,
+        partialCoverage,
+      }),
+      requiredChecks: outputRequiredChecks,
+      coverage: reviewCoverage,
+      secrets: confidenceSecrets,
+    });
+    let confidenceOutcome: Awaited<ReturnType<typeof runConfidenceScorer>>;
+    try {
+      // Fail-soft boundary: a scorer crash (a bug, not a transport failure)
+      // degrades to unscored exactly like a failed call — never aborts the
+      // review that already finished.
+      confidenceOutcome = await runConfidenceScorer({
+        profile: confidenceProfile,
+        // Defensive credential-isolation input: the scorer re-checks that a
+        // distinct endpoint never carries the primary lane's key.
+        primaryApiKey: profiles.primary.apiKey,
+        // So the scorer's own thrown-transport/transport-failure diagnostics
+        // mask the whole lane set, not just its own and the primary's key.
+        laneSecrets: confidenceSecrets,
+        prompt: confidencePrompt,
+        connectTimeoutSec: Number(env.AI_CONNECT_TIMEOUT_SEC ?? "30") || 30,
+        tokensParam: (env.AI_TOKENS_PARAM ?? "max_tokens") as "max_tokens" | "max_completion_tokens",
+        findings: reviewRecord.findings,
+        coverage: reviewCoverage,
+      });
+    } catch (cause: unknown) {
+      confidenceOutcome = {
+        result: unscoredConfidenceResult("internal_error", confidenceProfile.model),
+        requestPayload: null,
+        rawResponse: null,
+        // #1140 review: `maskDiagnostic` masks the configured secrets on the
+        // FULL untruncated message and only then caps it, so a secret
+        // straddling the 300-char boundary cannot leave a partial prefix in
+        // the artifact or the log line. Masking AFTER truncation did.
+        diagnostic: maskDiagnostic(cause instanceof Error ? cause.message : String(cause), confidenceSecrets),
+      };
+    }
+    // #1140 review: model-authored text (reason, concern file/evidence) is
+    // masked against EVERY lane's credential BEFORE the canonical result
+    // exists — every downstream consumer (persisted artifact, step outputs,
+    // step summary, published section, marker, CONFIDENCE_CONCERNS env for
+    // the standalone publish CLI) reads only this sanitized canonical
+    // result. Generic `redactText` at the renderers stays as the second
+    // layer, but the exact configured secrets are nuked here, once.
+    const maskConfidenceText = (text: string): string => redactText(maskKnownSecrets(text, confidenceSecrets));
+    // #1140 review round 9: exact-value masking is not length-preserving — a
+    // one-character configured secret becomes the three-character `⟦•⟧` marker
+    // — so a field the parser bounded to exactly its limit can leave masking
+    // OVER that limit. Every published canonical field is re-bounded AFTER
+    // masking, at the same documented limits the parser applies; the reason
+    // keeps its deterministic-cap note through the re-bound, and that note is
+    // masked TOO before being re-appended, because a configured credential may
+    // be a single character occurring inside the note template.
+    const maskConfidenceField = (text: string, maxChars: number): string =>
+      boundConfidenceField(maskConfidenceText(text), maxChars);
+    confidenceResult = {
+      ...confidenceOutcome.result,
+      reason: boundConfidenceReason(
+        maskConfidenceText(confidenceOutcome.result.reason),
+        maskConfidenceText(confidenceCapNote(confidenceOutcome.result.caps)),
+      ),
+      concerns: confidenceOutcome.result.concerns.map((concern) => ({
+        file: maskConfidenceField(concern.file, MAX_CONFIDENCE_CONCERN_FILE_CHARS),
+        line: concern.line,
+        evidence: maskConfidenceField(concern.evidence, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS),
+      })),
+    };
+    // Persist the sanitized artifacts alongside ai-output.json /
+    // review-coverage.json.
+    writeConfidenceScoreArtifact(ws, confidenceResult, maskConfidenceText(confidenceOutcome.diagnostic));
+    if (confidenceOutcome.requestPayload !== null) {
+      // #1140 review: raw provider/agent JSON goes to disk through
+      // `redactTextDeep`, not `maskKnownSecretsDeep` — configured-value
+      // masking alone left a PROVIDER-authored credential (`api_key=…`,
+      // `Bearer …`, `sk-…`) this run never configured persisted verbatim in
+      // the diagnostic artifacts.
+      ws.write("confidence-request.json", pyJsonDumps(redactTextDeep(confidenceOutcome.requestPayload, confidenceSecrets)));
+    } else {
+      // A failed scorer call must not leave an earlier run's wire artifact
+      // sitting next to the fresh `unscored` score.
+      ws.remove("confidence-request.json");
+    }
+    if (confidenceOutcome.rawResponse !== null) {
+      ws.write("confidence-response.json", pyJsonDumps(redactTextDeep(confidenceOutcome.rawResponse, confidenceSecrets)));
+    } else {
+      // Same rule as the request artifact above.
+      ws.remove("confidence-response.json");
+    }
+    if (confidenceResult.status === "unscored") {
+      // The log line goes through the same masking as the artifact: a
+      // provider message that echoes a configured credential must not
+      // surface on the runner console either.
+      const diagnosticNote = confidenceOutcome.diagnostic !== "" ? `: ${maskConfidenceText(confidenceOutcome.diagnostic)}` : "";
+      log(`confidence scorer: unscored (${confidenceResult.cause})${diagnosticNote}`);
+    } else if (confidenceResult.status === "scored") {
+      log(`confidence scorer: scored ${confidenceResult.score}/5 risk=${confidenceResult.risk} (advisory only)`);
+    }
+  }
+  const confidenceOutputs = confidenceOutputFields(confidenceResult);
+
   // #1003: the triage outputs. Disabled means "" for BOTH — "did not run",
   // deliberately distinct from the fail-closed `unknown` answer, so a
   // consumer can tell "not asked" from "could not tell". Enabled, the
@@ -1587,6 +1876,12 @@ secrets: [profiles.primary.apiKey],
     reviewTriageDecision: triageDecision,
     reviewTriageReason: triageReason,
     reviewTriageRouting: routingOutput,
+    // #1073: all five empty when the scorer is disabled — never a spurious 0.
+    confidenceStatus: confidenceOutputs.status,
+    confidenceScore: confidenceOutputs.score,
+    confidenceRisk: confidenceOutputs.risk,
+    confidenceReason: confidenceOutputs.reason,
+    confidenceModel: confidenceOutputs.model,
     reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     findings: pyJsonDumps(Array.isArray(reviewRecord.findings) ? reviewRecord.findings : []),
     toolCalls,
@@ -1646,6 +1941,10 @@ secrets: [profiles.primary.apiKey],
     cacheHitRatio: outputs.cacheHitRatio,
     ...(partialCoverage ? { coverage: "partial", coverageStopReason: partialCoverage.stop_reason } : {}),
     ...(ciState !== undefined ? { ciState } : {}),
+    // #1073: the scorer's marker keys, only when the scorer ran — disabled
+    // and never-attempted runs keep the pre-#1073 marker bytes exactly.
+    ...(outputs.confidenceStatus !== "" ? { confidenceStatus: outputs.confidenceStatus } : {}),
+    ...(outputs.confidenceScore !== "" ? { confidenceScore: Number(outputs.confidenceScore) } : {}),
     ...(toolBudgetTelemetry.budget !== undefined ? { toolBudget: toolBudgetTelemetry.budget } : {}),
     ...(toolBudgetTelemetry.source !== undefined ? { toolBudgetSource: toolBudgetTelemetry.source } : {}),
     ...(toolBudgetTelemetry.calls !== undefined ? { toolCalls: toolBudgetTelemetry.calls } : {}),
@@ -1688,6 +1987,8 @@ secrets: [profiles.primary.apiKey],
     diffFingerprint: pre.diff_fingerprint,
     admissionBaseSha: pre.base_sha,
     admission: pre,
+    // #1073: advisory concerns for the published section, scored answers only.
+    ...(confidenceResult.status === "scored" ? { confidenceConcerns: confidenceResult.concerns } : {}),
   };
 }
 
@@ -1929,6 +2230,50 @@ function isSecurityFlagged(classification: Record<string, unknown>): boolean {
   return flags.some((flag) => flag.includes("security") || flag.includes("secret"));
 }
 
+/** Every path that ends without a real score must leave the run dir free of
+ * this run's confidence artifacts. A reused `PR_REVIEWER_RUN_DIR` would
+ * otherwise keep a previous run's `confidence-score.json` sitting next to an
+ * `unscored` status, so a later reader could pair a stale score with the
+ * current run. Used by the disabled branch, where NO confidence surface
+ * exists at all. */
+function clearConfidenceArtifacts(ws: RunWorkspace): void {
+  ws.remove("confidence-score.json");
+  removeConfidenceWireArtifacts(ws);
+}
+
+/** The wire artifacts belong to a model call. A run that never called the
+ * model (disabled, publish step skipped, incomplete review) must not leave
+ * an earlier run's request/response behind. */
+function removeConfidenceWireArtifacts(ws: RunWorkspace): void {
+  ws.remove("confidence-request.json");
+  ws.remove("confidence-response.json");
+}
+
+/** Persist the canonical confidence result. The artifact is the only surface
+ * that carries the machine-token cause, so EVERY path that ends without a
+ * score writes one — including the enabled-but-skipped ones
+ * (`not_published`, `incomplete_review`) that never reach the model call.
+ * Without it, `confidence-status: unscored` is unexplainable: the operator
+ * could not tell "the publish step was skipped" from "the call failed". */
+function writeConfidenceScoreArtifact(ws: RunWorkspace, result: ConfidenceResult, diagnostic?: string): void {
+  ws.write("confidence-score.json", Buffer.from(`${pyJsonDumps({
+    version: 1,
+    status: result.status,
+    score: result.score,
+    risk: result.risk,
+    reason: result.reason,
+    concerns: result.concerns.map((concern) => ({
+      file: concern.file,
+      line: concern.line,
+      evidence: concern.evidence,
+    })),
+    model: result.model,
+    cause: result.cause,
+    caps: result.caps,
+    ...(diagnostic !== undefined && diagnostic !== "" ? { diagnostic } : {}),
+  })}\n`, "utf8"));
+}
+
 /** corpus.sh's gate_feature_for_forks for the tool harness. Null = run. */
 function gateForkForForks(env: StageEnv, forkFlag: string): { md: string; json: string } | null {
   if (forkFlag === "true" && (env.TOOL_ENABLE_FOR_FORKS ?? "false").toLowerCase() !== "true") {
@@ -2055,7 +2400,7 @@ async function callTier(
   corpusName: string,
   requestArtifact: string,
   responseArtifact: string,
-): Promise<{ ok: boolean; artifact: Record<string, unknown> | null; rawResponse: unknown }> {
+): Promise<{ ok: boolean; artifact: Record<string, unknown> | null; rawResponse: unknown; terminal?: TerminalProviderReason }> {
   const { env, ws, log, errorLog, annotate } = input;
   const corpusText = ws.readText(corpusName) ?? "";
   // #998 (#1049 review): an Anthropic effort the operator configured but the
@@ -2230,15 +2575,36 @@ async function callTier(
     // #1149: `redactTextDeep` on the persisted body for the provider-authored
     // reason spelled out in the `empty_completion` branch above.
     const detail = describeTransportFailure(outcome.failure, { secrets: knownSecrets });
-    errorLog(`${profile.label}: transport failures exhausted (${detail})${diagnosticsLine}`);
+    // #1080: ONE line for a terminal provider stop — the lane label, the
+    // normalized reason, the HTTP status, and the fact that retries were
+    // bypassed. Built from enums and an allowlisted signature (never provider
+    // prose) and masked against the lane's known secrets like every other line
+    // here, because the static text can collide with a very short configured
+    // key. Non-terminal failures keep the byte-identical line.
+    const terminalNote = outcome.terminal !== undefined
+      ? maskKnownSecrets(
+        ` [terminal ${outcome.terminal.reason} (${outcome.terminal.signature}) HTTP ${outcome.terminal.httpStatus ?? "?"}; bypassing retries]`,
+        knownSecrets,
+      )
+      : "";
+    errorLog(`${profile.label}: transport failures exhausted (${detail})${diagnosticsLine}${terminalNote}`);
     if (outcome.nonRetryable === true) {
-      annotate(`::error::${profile.label}: model endpoint returned a non-retryable HTTP status; failing over without retrying (${annotationSafe(detail)})`);
+      // The SAME annotation carries the terminal reason — never a second one.
+      const terminalReason = outcome.terminal !== undefined ? ` [terminal=${outcome.terminal.reason}]` : "";
+      annotate(`::error::${profile.label}: model endpoint returned a non-retryable HTTP status${terminalReason}; failing over without retrying (${annotationSafe(detail)})`);
     }
     ws.write(responseArtifact, pyJsonDumps(redactTextDeep(outcome.diagnostics !== undefined
       ? { error: detail, diagnostics: outcome.diagnostics.record }
       : { error: detail }, knownSecrets)));
   }
-  return { ok: false, artifact: null, rawResponse: null };
+  // #1080: the normalized terminal reason rides the result so the fallback
+  // line below can be truthful about WHY the lane is being left.
+  return {
+    ok: false,
+    artifact: null,
+    rawResponse: null,
+    ...(outcome.status === "transport_exhausted" && outcome.terminal !== undefined ? { terminal: outcome.terminal.reason } : {}),
+  };
 }
 
 /** Every API key the run could have sent, longest first so a key that
@@ -2356,7 +2722,13 @@ async function producePrimaryReview(input: ReviewCallInput & {
     return noticeResult(ws, outcome);
   }
 
-  errorLog(`${firstProfile.label} model unavailable after retries; trying fallback: ${profiles.fallback.model} @ ${profiles.fallback.baseUrl} (${profiles.fallback.apiFormat})`);
+  // #1080: after a TERMINAL provider failure the historical wording ("after
+  // retries") is false — no retry ran. Say so, in the same single line, with
+  // the normalized reason; otherwise this line stays byte-identical. The
+  // fallback keeps its own independent profile and credentials either way.
+  errorLog(primary.terminal !== undefined
+    ? `${firstProfile.label}: terminal=${primary.terminal}; bypassing retries; trying fallback: ${profiles.fallback.model} @ ${profiles.fallback.baseUrl} (${profiles.fallback.apiFormat})`
+    : `${firstProfile.label} model unavailable after retries; trying fallback: ${profiles.fallback.model} @ ${profiles.fallback.baseUrl} (${profiles.fallback.apiFormat})`);
   // #368: the fallback re-truncates the initial corpus. #940: the bound is
   // the declared fallback capacity — the fallback window can be smaller
   // than the primary tier's — never above the historical 120000-byte

@@ -231,7 +231,10 @@ export class GitHubAdapter implements PlatformReadAdapter {
         this.options("application/vnd.github.v3.diff"),
       );
       return status === 200 ? text : "";
-    } catch {
+    } catch (error) {
+      // #1131: a capped read must not degrade into an empty diff — an
+      // empty-diff fingerprint would silently skip every later push.
+      if (error instanceof PlatformRequestError && error.kind === "too-large") throw error;
       return "";
     }
   }

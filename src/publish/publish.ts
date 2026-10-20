@@ -20,9 +20,13 @@ import {
   prescriptionKeyDigest, recoverPublishedSuggestion, MAX_CARRYOVER_KEYS_PER_RUN, SEVERITY_LABELS,
 } from "./inline-findings.js";
 import { redactText } from "../context/redact.js";
-import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
-import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, retireManagedInlineComments, resolvePublishTrustedOwner, selectManagedReviews, minimizeSupersededAdvisoryReviews, type CleanupLog } from "./cleanup.js";
-import { ownerMatchesIdentity } from "../platform/owner-identity.js";
+import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, parseMetadata, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
+import { FINDING_OUTCOMES_SCHEMA, MAX_LEDGER_EVENTS, normalizeOutcomeEvent, serializeOutcomeLedger, type OutcomeEvent, type OutcomeLedger } from "../outcomes/schema.js";
+import { parseFindingIdentityMarker } from "../outcomes/identity.js";
+import { deriveOutcomeEvents, type PriorFindingObservation } from "../outcomes/reconcile.js";
+import { aggregateOutcomeEvents } from "../outcomes/report.js";
+import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, retireManagedInlineComments, resolvePublishTrustedOwner, selectManagedReviews, hideSupersededManagedReviews, type CleanupLog } from "./cleanup.js";
+import { ownerMatchesIdentity, type TrustedOwnerIdentity } from "../platform/owner-identity.js";
 import { strictReviewResult } from "../enforcement/verdict-policy.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
 import { COVERAGE_NOTICE_MAX_ITEMS, type PartialCoverage } from "../tools/coverage.js";
@@ -33,6 +37,21 @@ import { MAX_FEEDBACK_COMMENT_IDS } from "../platform/publish-api.js";
 import type { CollaboratorPermissionReading, NativeReviewComment, NativeReviewRequest, NativeReviewSurface, PublishPlatformApi } from "../platform/publish-api.js";
 
 export type PublishMode = "comment" | "review_comment" | "review_verdict" | "review_blockers";
+
+/**
+ * Whether the action entry's publish step runs for this mode: the single
+ * decision shared by the entry's publish gate and the confidence scorer's
+ * eligibility gate, so a privileged scorer call can only happen when the
+ * review body will actually be published. `comment` still requires the
+ * legacy `publish-review-comment` flag; #1161: `review_blockers` publishes
+ * a native review like the other native modes.
+ */
+export function publishStepRuns(mode: string | undefined, legacyCommentFlag: boolean): boolean {
+  const value = mode ?? "";
+  return value === "review_comment" || value === "review_verdict" || value === "review_blockers"
+    || (value === "comment" && legacyCommentFlag);
+}
+
 export type NativeReviewEvent = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
 
 export interface PublishInput {
@@ -78,6 +97,7 @@ export interface PublishInput {
   conditionalPresence: ConditionalSectionPresence;
   /** When set, removed after publish (the re-review label cleanup). */
   rerunLabel?: string;
+  priorHeadSha?: string;
   /** #812: folded external-CI conclusion at headSha ("success" | "failure"
    * | "pending" | "none"), recorded in the marker so the next diff-unchanged
    * skip can tell a stale carried request_changes from a live one. Omitted
@@ -128,12 +148,25 @@ export interface PublishInput {
    * trusted base-ref configuration. The publish step performs the reviewer
    * request only for `status: "request"`. */
   reviewRouting?: HumanReviewRoutingPlan;
+  /** #1073: the independent confidence scorer's result, present ONLY when
+   * the scorer ran (`ai-confidence-model` set). Purely advisory — it renders
+   * a section and marker keys and changes nothing else. */
+  confidence?: {
+    status: string;
+    score: string;
+    risk: string;
+    reason: string;
+    model: string;
+    /** Bounded advisory concerns (scored answers only); never findings. */
+    concerns?: Array<{ file: string; line: number | null; evidence: string }>;
+  };
 }
 
 export interface PublishResult {
   status: "published" | "superseded" | "failed";
   messages: string[];
   error?: string;
+  outcomes?: string;
 }
 
 const VERDICT_PREFIXES: Record<"approve" | "request_changes", string> = {
@@ -231,10 +264,12 @@ export function markerReviewResult(input: {
 
 /** (#873) True when the review's own coverage signals say it did not
  * finish: `review_result` (the marker state computed by
- * `markerReviewResult`, above) is `partial`. This is the one gate every
- * publish mode and every verdict policy shares — an approve can never
- * publish as an approval while this is true, regardless of which policy
- * or layer produced the approve. */
+ * `markerReviewResult`, above) is `partial`. #1145 changed what this gates:
+ * in `review_verdict` it no longer downgrades a valid verdict's native event
+ * — the publish mode is authoritative. It still drives the comment-mode
+ * header (an approve recommendation never headers as APPROVE over an
+ * unfinished review) and the #1145 approval-with-gaps body note, and it keeps
+ * marking the marker/telemetry `partial` for every consumer. */
 export function reviewCoverageIncomplete(reviewResult: string): boolean {
   return reviewResult === "partial";
 }
@@ -278,6 +313,9 @@ export function buildPublishedBody(options: {
   /** #1005: rendered reviewer-routing section (only when routing ran and the
    * status carries a decision). */
   routingBlock?: string | undefined;
+  /** #1073: rendered independent-confidence section (only when the scorer
+   * ran). */
+  confidenceBlock?: string | undefined;
   /** #915: defaults to the build-time stamp; explicit "" forces unstamped. */
   actionVersion?: string;
 }): string {
@@ -302,6 +340,9 @@ export function buildPublishedBody(options: {
   }
   if (options.routingBlock) {
     lines.push(options.routingBlock, "");
+  }
+  if (options.confidenceBlock) {
+    lines.push(options.confidenceBlock, "");
   }
   lines.push(options.sanitizedMarkdown);
   return `${lines.join("\n")}\n`;
@@ -388,6 +429,67 @@ export function renderReviewRoutingBlock(routing: HumanReviewRoutingPlan): strin
     lines.push(">", `> Reviewer(s): ${reviewers.join(", ")}`);
   }
   lines.push(">", "_Advisory: reviewer routing never changes the review's verdict or findings, and concrete reviewers come only from trusted repository configuration._");
+  return lines.join("\n");
+}
+
+/** #1073: labels for the confidence scorer's outcome. `disabled` never
+ * reaches this renderer (absent input = disabled = no section). */
+const CONFIDENCE_STATUS_LABELS: Record<string, string> = {
+  scored: "scored",
+  unscored: "unscored — the scorer did not produce a usable score",
+};
+
+/**
+ * #1073: the compact independent-confidence section. Rendered only when the
+ * scorer ran. The score/risk/status values are closed-vocabulary or
+ * validated integers; the reason and the concern bullets carry
+ * model-authored text, so every one takes the full untrusted-text
+ * discipline (redaction, link neutralization, whitespace flattening, a
+ * length cap, fence-safe code spans for locations). Purely advisory: the
+ * section states so itself, and nothing downstream reads it as a finding.
+ */
+export function renderIndependentConfidenceBlock(
+  confidence: {
+    status: string;
+    score: string;
+    risk: string;
+    reason: string;
+    model: string;
+    concerns?: Array<{ file: string; line: number | null; evidence: string }>;
+  },
+  linkMode: UpstreamLinkMode,
+): string {
+  const status = CONFIDENCE_STATUS_LABELS[confidence.status];
+  if (status === undefined) return "";
+  const scored = confidence.status === "scored" && /^[0-5]$/.test(confidence.score);
+  const head = scored
+    ? `**Independent confidence: ${confidence.score}/5, risk: ${escapeCodeSpan(confidence.risk || "unknown", 40)}**`
+    : `**Independent confidence: ${status}**`;
+  const modelNote = confidence.model !== "" ? ` (model: ${escapeCodeSpan(confidence.model, 120)})` : "";
+  const lines = ["## Independent Confidence", "", `> ${head}${modelNote}`];
+  const reason = escapeTableCell(
+    sanitizeMarkdown(redactText(String(confidence.reason ?? "")), linkMode).replace(/\s+/g, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS),
+  );
+  if (reason !== "") {
+    lines.push(">", `> ${reason}`);
+  }
+  // Advisory concern bullets: explicitly NOT findings — bounded, sanitized,
+  // locations rendered as inert code spans, and the bullet text says so.
+  for (const concern of (confidence.concerns ?? []).slice(0, 8)) {
+    const file = escapeTableCell(
+      sanitizeMarkdown(redactText(escapeCodeSpan(String(concern.file ?? ""), 300)), linkMode),
+    );
+    const line = typeof concern.line === "number" && Number.isInteger(concern.line) && concern.line >= 0
+      ? `:${concern.line}`
+      : "";
+    const evidence = escapeTableCell(
+      sanitizeMarkdown(redactText(String(concern.evidence ?? "")), linkMode).replace(/\s+/g, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS),
+    );
+    const location = file !== "" || line !== "" ? `${file}${line}` : "";
+    const body = evidence !== "" ? ` — ${evidence}` : "";
+    lines.push(">", `> - Advisory concern${location !== "" ? ` at ${location}` : ""}${body}`);
+  }
+  lines.push(">", "_Advisory only: this independent confidence grade is telemetry from a second model call — it does not change the review's verdict, findings, or approval, and its concerns are not findings._");
   return lines.join("\n");
 }
 
@@ -543,6 +645,33 @@ interface RejectionSnapshot {
   carried: number;
 }
 
+/** #1027: one prior published finding observation harvested by the shared
+ * feedback read — the identity from the action-owned marker, reaction
+ * tallies from the same records the suppression gate already reads, and
+ * thread resolution from the bounded state read. Reactions stay
+ * informational telemetry: they authorize nothing and resolve nothing. */
+interface OutcomeObservation {
+  findingId: string;
+  commentId: string;
+  resolved: boolean | null;
+  reactions: { helpful: number; notHelpful: number };
+}
+
+/** #1027: what the shared read returns — the #762 suppression snapshot and,
+ * opportunistically from the very same enumeration and records, the #1027
+ * observations. `enumerated` distinguishes a completed enumeration (a
+ * provably empty or populated prior) from a read that never got there: the
+ * outcome ledger is only derived from provable prior state, never from an
+ * unprovable one (a failed read would mislabel every repeat as a first
+ * report). `priorHeadSha` is the head the prior published review was made
+ * against, read from its metadata marker. */
+interface FeedbackRead {
+  snapshot: RejectionSnapshot;
+  observations: OutcomeObservation[];
+  enumerated: boolean;
+  priorHeadSha: string | null;
+}
+
 /** #762: read the usefulness feedback for the prescriptions a previous run
  * published, and turn trusted 👎 into the keys of the prescriptions they
  * reject.
@@ -571,21 +700,40 @@ interface RejectionSnapshot {
  * carry line is stripped from every assembled finding body and listed among
  * the reserved publication markers), so a rejection can only ever originate
  * from a trusted 👎 this action itself observed. */
-async function readRejectedPrescriptions(
+async function readFeedbackState(
   api: PublishPlatformApi,
   marker: string,
-): Promise<RejectionSnapshot> {
-  const none: RejectionSnapshot = { keys: new Set<string>(), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: 0 };
-  if (typeof api.reviewCommentFeedback !== "function" || typeof api.collaboratorPermission !== "function") return none;
+  /** #762: false when no current finding could post a prescription — the
+   * reaction read (and its permission requests) is skipped entirely, exactly
+   * as the pre-#1027 gate did; only the outcome enumeration runs. */
+  readReactions: boolean,
+): Promise<FeedbackRead> {
+  const noneSnapshot: RejectionSnapshot = { keys: new Set<string>(), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: 0 };
+  const none: FeedbackRead = { snapshot: noneSnapshot, observations: [], enumerated: false, priorHeadSha: null };
+  // #1027/#762: the enumeration (and therefore the outcome observations) is
+  // forge-agnostic; only the reaction read and its permission verification
+  // need both seams. A forge without the collaborator-permission read still
+  // gets outcome observations — with zeroed tallies, since reactions are
+  // informational telemetry and are never fetched for outcomes alone.
+  const canVerifyReactions = typeof api.reviewCommentFeedback === "function" && typeof api.collaboratorPermission === "function";
+  readReactions = readReactions && canVerifyReactions;
   try {
     const reviews = await api.listReviews();
     // Same managed-review derivation the cleanup path uses (marker-prefixed
     // bodies, never author matching).
     const reviewIds = selectManagedReviews(reviews, marker, []).map((review) => review.id);
-    if (reviewIds.length === 0) return none;
+    // #1027: an enumeration that COMPLETED and proves no managed review of
+    // ours exists is a positive reading of the prior set — provably empty —
+    // not an uncertain one. Only a thrown read or an
+    // unsupported/incomplete inline-comment enumeration is
+    // `enumerated: false`. The first-ever publication on a repository must
+    // still derive its `reported` events and write the artifact; treating
+    // "no prior" as "no proof" made the whole contract invisible exactly
+    // where it has the least prior state to reason about.
+    if (reviewIds.length === 0) return { snapshot: noneSnapshot, observations: [], enumerated: true, priorHeadSha: null };
     const listed = await api.listManagedInlineComments(reviewIds);
     if (!listed.supported || !listed.complete) return none;
-    const candidates: Array<{ id: string; key: string }> = [];
+    const candidates: Array<{ id: string; key: string | null; identity: string | null; path: string | null; user: { id?: number | string; login?: string } | null }> = [];
     const carried = new Set<string>();
     // The carry-marker authority is resolved lazily and at most once, and
     // only because some comment actually carries a marker to authenticate.
@@ -600,7 +748,14 @@ async function readRejectedPrescriptions(
       const body = typeof comment.body === "string" ? comment.body : "";
       // Same own-comment shape proof the prescription recovery demands: the
       // disclaimer trailer must be present before any line is read as state.
-      const digests = body.includes(INLINE_DISCLAIMER) ? parseRejectionCarryover(body) : [];
+      const disclaimed = body.includes(INLINE_DISCLAIMER);
+      const digests = disclaimed ? parseRejectionCarryover(body) : [];
+      // #1027: the finding identity marker is action-owned state on the same
+      // comment — but like the carry marker it counts only with PROVENANCE:
+      // a body any repo reader could have authored must not mint outcome
+      // identities, so the observation keeps the same trusted-owner bar the
+      // carry marker applies (resolved once, in collectOutcomeObservations).
+      const identity = disclaimed ? parseFindingIdentityMarker(body) : null;
       if (digests.length > 0) {
         if (carryOwner === undefined) carryOwner = (await resolvePublishTrustedOwner(api)).owner;
         // Provenance, not body text: the marker counts only on a comment
@@ -618,28 +773,66 @@ async function readRejectedPrescriptions(
       // `start_line`: reconstruct the exact range the key describes, and skip
       // the comment rather than guess when any part of it is unusable.
       const end = comment.line;
-      if (typeof path !== "string" || path === "" || typeof end !== "number" || !Number.isInteger(end) || end <= 0) continue;
-      const start = comment.start_line ?? end;
-      if (!Number.isInteger(start) || start <= 0 || start > end) continue;
-      // Only our own previously published suggestion region is parsed; an
-      // unrecoverable one simply carries no prior prescription.
-      const replacement = recoverPublishedSuggestion(body);
-      if (replacement === null) continue;
-      candidates.push({ id, key: prescriptionKeyDigest(prescriptionKey(path, start, end, replacement)) });
+      let key: string | null = null;
+      let keyedPath: string | null = null;
+      if (typeof path === "string" && path !== "" && typeof end === "number" && Number.isInteger(end) && end > 0) {
+        const start = comment.start_line ?? end;
+        if (Number.isInteger(start) && start > 0 && start <= end) {
+          // Only our own previously published suggestion region is parsed; an
+          // unrecoverable one simply carries no prior prescription.
+          const replacement = recoverPublishedSuggestion(body);
+          if (replacement !== null) {
+            key = prescriptionKeyDigest(prescriptionKey(path, start, end, replacement));
+            keyedPath = path;
+          }
+        }
+      }
+      // #1027: an identity-bearing comment is an outcome observation even
+      // when its prescription is unrecoverable (a suppressed replacement, or
+      // a finding published without one).
+      if (key === null && identity === null) continue;
+      candidates.push({ id, key, identity, path: keyedPath, user: comment.user ?? null });
     }
     if (candidates.length === 0) {
       // Carry-only survival: the reacted-to comment was retired and only a
       // replacement comment's marker remains — no reaction request is needed.
-      if (carried.size === 0) return none;
-      return { keys: new Set(carried), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: carried.size };
+      // #1027: a completed enumeration with no candidates is a provably
+      // empty prior, so the outcome ledger may still derive from it.
+      if (carried.size === 0) {
+        return { snapshot: noneSnapshot, observations: [], enumerated: true, priorHeadSha: null };
+      }
+      return { snapshot: { keys: new Set(carried), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: carried.size }, observations: [], enumerated: true, priorHeadSha: null };
     }
-    // Newest first, so the bounded read covers the comments most likely to
+    // Newest first, so the bounded reads cover the comments most likely to
     // still be on screen.
     candidates.sort((a, b) => (a.id === b.id ? 0 : BigInt(a.id) > BigInt(b.id) ? -1 : 1));
-    const bounded = candidates.slice(0, MAX_FEEDBACK_COMMENT_IDS);
-    const feedback = await api.reviewCommentFeedback(bounded.map((candidate) => candidate.id));
+    // #1027: the prescription and observation candidate sets are bounded
+    // INDEPENDENTLY, so a flood of one kind can never displace the other
+    // from its window.
+    const bounded = candidates.filter((candidate) => candidate.identity !== null).slice(0, MAX_FEEDBACK_COMMENT_IDS);
+    const prescriptionCandidates = candidates
+      .filter((candidate) => candidate.key !== null)
+      .slice(0, MAX_FEEDBACK_COMMENT_IDS);
+    // #1027: reactions are read ONLY when the suppression gate needs them —
+    // the outcome tallies are a passive byproduct of the same records, never
+    // an independent request.
+    if (prescriptionCandidates.length === 0 || !readReactions) {
+      const snapshot: RejectionSnapshot = carried.size === 0
+        ? noneSnapshot
+        : { keys: new Set(carried), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: carried.size };
+      const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, new Map());
+      return { snapshot, observations: outcomeRead.observations, enumerated: true, priorHeadSha: outcomeRead.priorHeadSha };
+    }
+    const feedback = await api.reviewCommentFeedback!(prescriptionCandidates.map((candidate) => candidate.id));
     if (!feedback.supported || !feedback.complete) {
-      return carried.size === 0 ? none : { keys: new Set(carried), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: carried.size };
+      const snapshot = carried.size === 0
+        ? noneSnapshot
+        : { keys: new Set(carried), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: carried.size };
+      // #1027: the reaction read failed, but the thread-state read is a
+      // different seam and the observations themselves (identity + resolution)
+      // came from the enumeration above — keep them, with zeroed tallies.
+      const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, new Map());
+      return { snapshot, observations: outcomeRead.observations, enumerated: true, priorHeadSha: outcomeRead.priorHeadSha };
     }
     const rejections = feedback.records.filter((record) => record.content === "-1");
     const distinct = [...new Set(rejections.map((record) => record.login))].filter((login) => login !== "");
@@ -647,7 +840,13 @@ async function readRejectedPrescriptions(
     // cap, verify nobody and trust no rejection (carried digests need no
     // lookup and keep standing).
     if (distinct.length > FEEDBACK_ACTOR_CAP) {
-      return { keys: new Set(carried), inspected: bounded.length, logins: distinct.length, trusted: 0, overCap: distinct.length, carried: carried.size };
+      const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, tallyReactions(feedback.records));
+      return {
+        snapshot: { keys: new Set(carried), inspected: prescriptionCandidates.length, logins: distinct.length, trusted: 0, overCap: distinct.length, carried: carried.size },
+        observations: outcomeRead.observations,
+        enumerated: true,
+        priorHeadSha: outcomeRead.priorHeadSha,
+      };
     }
     const keys = new Set(carried);
     let trusted = 0;
@@ -667,27 +866,183 @@ async function readRejectedPrescriptions(
           self = typeof identity === "string" && identity.trim() !== "" ? identity : null;
         } catch { self = null; }
         if (self === null) {
-          return { keys: new Set(carried), inspected: bounded.length, logins: distinct.length, trusted: 0, overCap: 0, carried: carried.size };
+          const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, tallyReactions(feedback.records));
+          return {
+            snapshot: { keys: new Set(carried), inspected: prescriptionCandidates.length, logins: distinct.length, trusted: 0, overCap: 0, carried: carried.size },
+            observations: outcomeRead.observations,
+            enumerated: true,
+            priorHeadSha: outcomeRead.priorHeadSha,
+          };
         }
       }
       // The bot's own reaction is never a rejection signal — it is the
       // publisher of the prescription, not a reviewer of it.
       if (self !== null && self.trim().toLowerCase() === login.toLowerCase()) continue;
       let reading: CollaboratorPermissionReading | null;
-      try { reading = await api.collaboratorPermission(login); }
+      try { reading = await api.collaboratorPermission!(login); }
       catch { reading = null; }
       if (!feedbackActorAuthorized(reading, login)) continue;
       trusted += 1;
       for (const record of rejections) {
         if (record.login !== login) continue;
-        const prior = bounded.find((candidate) => candidate.id === record.commentId);
-        if (prior !== undefined) keys.add(prior.key);
+        const prior = prescriptionCandidates.find((candidate) => candidate.id === record.commentId);
+        if (prior !== undefined && prior.key !== null) keys.add(prior.key);
       }
     }
-    return { keys, inspected: bounded.length, logins: distinct.length, trusted, overCap: 0, carried: carried.size };
+    const outcomeRead = await collectOutcomeObservations(api, reviewIds, marker, bounded, tallyReactions(feedback.records));
+    return {
+      snapshot: { keys, inspected: prescriptionCandidates.length, logins: distinct.length, trusted, overCap: 0, carried: carried.size },
+      observations: outcomeRead.observations,
+      enumerated: true,
+      priorHeadSha: outcomeRead.priorHeadSha,
+    };
   } catch {
     return none;
   }
+}
+
+/** #1027: tally one comment's 👍/👎 counts from the reaction records the
+ * suppression read already fetched. All actors count — drive-by reactions
+ * stay informational telemetry, and no login ever leaves this module. */
+function tallyReactions(records: readonly { commentId: string; content: "+1" | "-1"; login: string }[]): Map<string, { helpful: number; notHelpful: number }> {
+  const tallies = new Map<string, { helpful: number; notHelpful: number }>();
+  for (const record of records) {
+    const tally = tallies.get(record.commentId) ?? { helpful: 0, notHelpful: 0 };
+    if (record.content === "+1") tally.helpful += 1;
+    else tally.notHelpful += 1;
+    tallies.set(record.commentId, tally);
+  }
+  return tallies;
+}
+
+/** #1027: assemble the outcome observations from the enumerated comments and
+ * the bounded thread-state read, plus the prior published head used to
+ * classify a resolved thread.
+ *
+ * Two provenance rules keep a hostile body from minting outcome state:
+ * - An identity marker counts only on a comment whose author matches the
+ *   trusted owner identity the carry-marker path itself proves (resolved
+ *   lazily, at most once) — the same bar the rejection carry marker applies,
+ *   because `selectManagedReviews` matches by body prefix and any repo reader
+ *   can post a marker-shaped comment.
+ * - The prior head comes only from an OWNED managed sticky comment's metadata
+ *   marker (action-owned state, proven by the same trusted owner), never from
+ *   forge-supplied review metadata.
+ *
+ * The thread-state query and the sticky read are the new requests this
+ * feature adds, both made only when identity-bearing observations survive
+ * the provenance bar, and both degrade to "unprovable" (no resolution claim,
+ * no head-advanced claim) rather than to a failed publish. */
+async function collectOutcomeObservations(
+  api: PublishPlatformApi,
+  reviewIds: readonly string[],
+  marker: string,
+  bounded: readonly { id: string; identity: string | null; path: string | null; user: { id?: number | string; login?: string } | null }[],
+  tallies: ReadonlyMap<string, { helpful: number; notHelpful: number }>,
+): Promise<{ observations: OutcomeObservation[]; priorHeadSha: string | null }> {
+  const observations: OutcomeObservation[] = [];
+  // The trusted-owner authority is resolved lazily and at most once, and
+  // only because some comment actually carries an identity to authenticate.
+  let trustedOwner: Awaited<ReturnType<typeof resolvePublishTrustedOwner>>["owner"] | undefined;
+  for (const candidate of bounded) {
+    if (candidate.identity === null) continue;
+    if (trustedOwner === undefined) trustedOwner = (await resolvePublishTrustedOwner(api)).owner;
+    // Unprovable author, unprovable identity — the comment carries nothing.
+    if (trustedOwner === null || !ownerMatchesIdentity(candidate.user, trustedOwner)) continue;
+    observations.push({
+      findingId: candidate.identity,
+      commentId: candidate.id,
+      resolved: null,
+      reactions: tallies.get(candidate.id) ?? { helpful: 0, notHelpful: 0 },
+    });
+  }
+  if (observations.length === 0) return { observations, priorHeadSha: null };
+  const priorHeadSha = await readPriorPublishedHead(api, marker, trustedOwner ?? null);
+  if (typeof api.reviewThreadStates !== "function") return { observations, priorHeadSha };
+  try {
+    const states = await api.reviewThreadStates(reviewIds);
+    if (states.supported && states.complete) {
+      const resolvedByComment = new Map(states.threads.map((thread) => [thread.firstCommentId, thread.resolved]));
+      for (const observation of observations) {
+        observation.resolved = resolvedByComment.get(observation.commentId) ?? null;
+      }
+    }
+  } catch {
+    // Thread state unprovable: leave every `resolved` null — the reconcile
+    // layer emits no resolution claim for an unprovable state.
+  }
+  return { observations, priorHeadSha };
+}
+
+/** #1027: the head sha of the prior published review, read from the managed
+ * sticky comment's metadata marker (the same marker the precheck reads).
+ *
+ * Provenance, not body text: a marker-shaped sticky comment is visible to
+ * every reader of the repository, so the head counts ONLY on a comment the
+ * trusted owner identity (already resolved once by the caller) proves this
+ * action authored. Without that bar a foreign contributor could forge a
+ * `head_sha` and turn a head-unverified `dismissed` into a `resolved`.
+ *
+ * Selection is the same policy the sticky upsert uses to find the live
+ * publication (`upsertStickyComment` in `src/platform/publish-api.ts`): among
+ * comments this owner proved it authored, the NEWEST one is the authoritative
+ * publication and an older one — a legacy-marker comment, or one left behind
+ * by a marker change — is history, not a competing candidate. (Requiring
+ * global agreement instead would silently degrade every resolved thread to
+ * `thread_resolved_head_unverified` on any repository that still carries an
+ * older owned sticky.) A missing marker, an unparseable body, a non-hex value,
+ * an unprovable owner, or a thrown read all yield null, and an unusable head on
+ * the newest owned candidate never falls back to an older one.
+ *
+ * #1027: the enumeration must be PROVEN complete. "Newest owned sticky" is a
+ * claim about absence — it says no newer publication exists — so a page that
+ * failed or truncated silently is indistinguishable from a complete list and
+ * would let the reader select an OLDER owned sticky and claim a `resolved`
+ * "the head advanced" for a finding never re-reviewed on a newer head. A read
+ * through `listIssueCommentsResult` that is absent, throws, is incomplete, or
+ * is malformed therefore yields no head at all (never a fallback to the
+ * untyped `listIssueComments`). */
+async function readPriorPublishedHead(
+  api: PublishPlatformApi,
+  marker: string,
+  owner: TrustedOwnerIdentity | null,
+): Promise<string | null> {
+  if (owner === null) return null;
+  try {
+    if (typeof api.listIssueCommentsResult !== "function") return null;
+    const enumeration = await api.listIssueCommentsResult();
+    if (enumeration === null || typeof enumeration !== "object" || enumeration.complete !== true) return null;
+    const comments = enumeration.comments;
+    if (!Array.isArray(comments)) return null;
+    let newest: { updatedAt: string; id: string; body: string } | null = null;
+    for (const comment of comments) {
+      if (!ownerMatchesIdentity(comment.user, owner)) continue;
+      const body = typeof comment.body === "string" ? comment.body : "";
+      if (!isManagedBody(body, marker)) continue;
+      const updatedAt = typeof comment.updated_at === "string" ? comment.updated_at : "";
+      const id = String(comment.id ?? "");
+      if (newest === null || newerPublishedComment(updatedAt, id, newest.updatedAt, newest.id)) {
+        newest = { updatedAt, id, body };
+      }
+    }
+    if (newest === null) return null;
+    const head = parseMetadata(newest.body)?.head_sha;
+    return typeof head === "string" && /^[0-9a-f]{1,64}$/.test(head) ? head : null;
+  } catch { return null; }
+}
+
+/** Order two managed sticky candidates newest-first: `updated_at` decides,
+ * and a numeric comment id breaks the tie deterministically (ids only compare
+ * when both are decimal, so an unusable id never decides anything). */
+function newerPublishedComment(
+  updatedAt: string,
+  id: string,
+  bestUpdatedAt: string,
+  bestId: string,
+): boolean {
+  if (updatedAt !== bestUpdatedAt) return updatedAt > bestUpdatedAt;
+  const numeric = /^[1-9]\d*$/;
+  return numeric.test(id) && numeric.test(bestId) ? BigInt(id) > BigInt(bestId) : false;
 }
 
 /** Resolve the cleanup flag exactly like `resolve_cleanup_flag`. */
@@ -744,8 +1099,8 @@ export function renderOutsideDiffSection(findings: unknown, linkMode: UpstreamLi
  * separate prose for execution incompleteness and requirement traceability. */
 export function renderCoverageGapNotice(reason: string): string {
   const execution = "\n\n> **Partial coverage**: required-check coverage is incomplete — this review did not resolve every required check and must not be read as a complete pass.\n";
-  const trace = "\n\n> **Requirement traceability gap**: the review itself completed, but one or more in-scope requirements could not be verified against enforcement or test evidence. Approval is withheld until that requirement is covered.\n";
-  const both = "\n\n> **Partial coverage and requirement traceability gap**: required-check coverage is incomplete, and one or more in-scope requirements could not be verified against enforcement or test evidence. Approval is withheld until both gaps are addressed.\n";
+  const trace = "\n\n> **Requirement traceability gap**: the review itself completed, but one or more in-scope requirements could not be verified against enforcement or test evidence. This review must not be read as a clean pass until that requirement is covered.\n";
+  const both = "\n\n> **Partial coverage and requirement traceability gap**: required-check coverage is incomplete, and one or more in-scope requirements could not be verified against enforcement or test evidence. This review must not be read as a clean pass until both gaps are addressed.\n";
   switch (reason === "incomplete" ? "execution" : reason) {
     case "execution": return execution;
     case "requirement_trace": return trace;
@@ -878,6 +1233,7 @@ export async function publishReview(
   if (input.allowApprove !== undefined) {
     messages.push(`WARN: 'allow-approve' is deprecated and no longer affects publication (value: ${input.allowApprove}); use 'publish-mode: review_verdict' to publish the verdict, or 'publish-mode: review_blockers' for blockers-only behavior.`);
   }
+  let outcomes: string | undefined;
   let nativeReviewId: number | string | undefined;
   // #1093: the sticky summary comment as the replacement checkpoint when
   // review_comment mode publishes no inline findings review (a clean re-review
@@ -1020,6 +1376,15 @@ export async function publishReview(
   const triageBlock = input.reviewTriage ? renderReviewTriageBlock(input.reviewTriage, input.upstreamLinkMode) : "";
   // #1005: rendered only when routing ran and the status carries a decision.
   const routingBlock = reviewRouting ? renderReviewRoutingBlock(reviewRouting) : "";
+  // #1073: rendered only when the scorer ran; the whole block passes
+  // sanitizeForPublication before it can touch the body.
+  const confidenceBlock = input.confidence
+    ? sanitizeForPublication(
+      renderIndependentConfidenceBlock(input.confidence, input.upstreamLinkMode),
+      input.upstreamLinkMode,
+      input.conditionalPresence,
+    )
+    : "";
   const markerContext: RunMarkerContext = {
     headSha: input.headSha,
     baseSha: input.baseSha,
@@ -1039,6 +1404,14 @@ export async function publishReview(
     ...(input.contextBudget !== undefined ? { contextBudget: input.contextBudget } : {}),
     ...(input.contextPeak !== undefined ? { contextPeak: input.contextPeak } : {}),
     ...(input.toolStopReason !== undefined && input.toolStopReason !== "" ? { toolStopReason: input.toolStopReason } : {}),
+    // #1073: the scorer's marker keys, only when the scorer ran — disabled
+    // and skipped runs keep the pre-#1073 marker bytes exactly.
+    ...(input.confidence && input.confidence.status !== ""
+      ? { confidenceStatus: input.confidence.status === "scored" || input.confidence.status === "unscored" ? input.confidence.status : "" }
+      : {}),
+    ...(input.confidence && input.confidence.status === "scored" && /^[0-5]$/.test(input.confidence.score)
+      ? { confidenceScore: Number(input.confidence.score) }
+      : {}),
     actionVersion: ACTION_VERSION,
   };
   if (input.partialCoverage) {
@@ -1068,12 +1441,16 @@ export async function publishReview(
     // end, so the published review is unchanged when the read is unsupported or
     // uncertain. A finding set that can carry no prescription — blank,
     // fence-hostile, out-of-range, or marker-stripped-to-nothing — can never
-    // contain one, so the read (and every request behind it) is skipped;
+    // contain one, so the reaction read (and every permission request behind
+    // it) is skipped even when the enumeration below still runs;
     // `hasPublishablePrescription` is the same predicate publication renders
     // through, over the same diff, so the pre-check cannot be weaker.
-    const feedback = hasPublishablePrescription(input.findings, options.diffText)
-      ? await readRejectedPrescriptions(api, input.commentMarker)
-      : { keys: new Set<string>(), inspected: 0, logins: 0, trusted: 0, overCap: 0, carried: 0 };
+    // #1027: the same bounded enumeration also harvests the prior run's
+    // finding observations (identity markers, thread resolution, and the
+    // reaction tallies it already fetched) for the outcome ledger — no
+    // additional reaction or permission request is ever made for outcomes.
+    const feedbackState = await readFeedbackState(api, input.commentMarker, hasPublishablePrescription(input.findings, options.diffText));
+    const feedback = feedbackState.snapshot;
     const built = buildInlineComments({
       findings: input.findings,
       diffText: options.diffText,
@@ -1083,6 +1460,75 @@ export async function publishReview(
       rejectedPrescriptions: feedback.keys,
     });
     inlineComments = built.comments;
+    try {
+      const at = new Date().toISOString();
+      // #1027: the identities this run actually PUBLISHES — parsed from the
+      // markers the built comments carry, so a finding the anchor validation
+      // skipped can never produce a `reported` event for a comment that does
+      // not exist.
+      const postedIdentities: string[] = [];
+      for (const comment of inlineComments) {
+        const body = typeof comment.body === "string" ? comment.body : "";
+        const identity = parseFindingIdentityMarker(body);
+        if (identity !== null && !postedIdentities.includes(identity)) postedIdentities.push(identity);
+      }
+      const prior: readonly PriorFindingObservation[] = feedbackState.observations.map((observation) => ({
+        findingId: observation.findingId,
+        commentId: observation.commentId,
+        resolved: observation.resolved,
+        reactions: observation.reactions,
+      }));
+      if (feedbackState.enumerated && (prior.length > 0 || postedIdentities.length > 0)) {
+        // The prior head: the OWNED managed sticky comment's metadata marker
+        // (proven action state). The caller-provided fallback is accepted only
+        // under the SAME proof rule — an unvalidated value would turn "head
+        // unprovable" into the strong "the code was fixed" claim, which is
+        // exactly the outcome the fail-closed read exists to withhold.
+        const fallback = typeof input.priorHeadSha === "string" && /^[0-9a-f]{1,64}$/.test(input.priorHeadSha)
+          ? input.priorHeadSha
+          : null;
+        const priorHeadSha = feedbackState.priorHeadSha ?? fallback;
+        const events = deriveOutcomeEvents({
+          postedIdentities,
+          prior,
+          priorHeadSha,
+          currentHeadSha: input.headSha,
+          route: input.reviewRoute || null,
+          model: publicAnalysisEngine(input.analysisEngine) || null,
+          at,
+        });
+        if (events.length > 0) {
+          // The producer runs its own normalizer before serialization, so the
+          // artifact always parses under the same rules a reader applies.
+          // Past the cap the OLDEST events are dropped (the newest state is
+          // what readers aggregate), matching `MAX_LEDGER_EVENTS` and the
+          // reader-side cap — a run that overflowed would otherwise export
+          // the opposite end of its history than a reader keeps.
+          const normalized: OutcomeEvent[] = [];
+          for (const event of events) {
+            const safe = normalizeOutcomeEvent(event);
+            if (safe !== null) normalized.push(safe);
+          }
+          const capped = normalized.length > MAX_LEDGER_EVENTS
+            ? normalized.slice(normalized.length - MAX_LEDGER_EVENTS)
+            : normalized;
+          if (capped.length > 0) {
+            const aggregate = aggregateOutcomeEvents(capped);
+            const ledger: OutcomeLedger = {
+              schema: FINDING_OUTCOMES_SCHEMA,
+              generated_at: at,
+              head_sha: /^[0-9a-f]{1,64}$/.test(input.headSha) ? input.headSha : "",
+              route: input.reviewRoute || null,
+              model: publicAnalysisEngine(input.analysisEngine) || null,
+              events: capped,
+              aggregate,
+            };
+            outcomes = serializeOutcomeLedger(ledger);
+            messages.push(`Finding outcomes: ${aggregate.unique_findings} finding(s), ${aggregate.open} open, ${aggregate.resolved} resolved, ${aggregate.dismissed} dismissed, ${aggregate.reactions.helpful + aggregate.reactions.not_helpful} reaction(s)`);
+          }
+        }
+      }
+    } catch { outcomes = undefined; }
     if (feedback.inspected > 0 || feedback.carried > 0) {
       messages.push(
         `Inline finding usefulness feedback: inspected ${feedback.inspected} prior comment(s), `
@@ -1136,6 +1582,7 @@ export async function publishReview(
         stateBlock: stateSection("", false),
         triageBlock: triageBlock || undefined,
         routingBlock: routingBlock || undefined,
+        confidenceBlock: confidenceBlock || undefined,
       });
       const result = await api.upsertStickyComment(input.commentMarker, body);
       if (!result.ok) {
@@ -1157,6 +1604,7 @@ export async function publishReview(
         stateBlock: stateSection(platformNotice),
         triageBlock: triageBlock || undefined,
         routingBlock: routingBlock || undefined,
+        confidenceBlock: confidenceBlock || undefined,
       });
       const result = await api.upsertStickyComment(input.commentMarker, body);
       if (!result.ok) {
@@ -1182,6 +1630,9 @@ export async function publishReview(
             // replacement, so the sticky checkpoint must not authorize
             // retiring the old owned comments.
             stickyCheckpointUsable = false;
+            // #1027: the inline comments were never published, so their
+            // `reported` events must not reach the outcome ledger.
+            outcomes = undefined;
             messages.push("WARN: inline findings review submission failed; summary comment was still published");
           }
         }
@@ -1192,25 +1643,37 @@ export async function publishReview(
         messages.push(`NOTE: ${findingCount} finding(s) were published in the review body instead of as native review comments (no native review surface: ${surfaceReason})`);
       }
     } else {
-      // #1161: review_verdict and review_blockers both publish a native
-      // review; only review_verdict can ever approve.
+      // #1161: `review_verdict` and `review_blockers` both publish a native
+      // review; only `review_verdict` can ever approve.
+      const validVerdict = isValidPublishVerdict(input.verdict);
+      if (input.mode === "review_verdict" && !validVerdict) {
+        // #1145: verdict mode must publish a verdict. A run that reaches this
+        // point without a valid final verdict is an explicit action failure —
+        // never a COMMENT disguised as a completed advisory review. The
+        // blockers-only mode keeps #1161's advisory "No review verdict"
+        // comment: that mode's published output IS a comment.
+        return {
+          status: "failed",
+          messages,
+          error: `review_verdict mode requires a final verdict of approve or request_changes, got "${input.verdict}" — refusing to publish a COMMENT substitute (#1145)`,
+        };
+      }
       const guardrails = evaluateApprovalGuardrails({
         verdict: input.verdict,
         approveForks: input.approveForks,
         isForkPr: input.isForkPr,
       });
-      // #873: coverage incompleteness withholds approval independently of
-      // the approve_forks scope guardrail and of which verdict policy
-      // produced the approve — required-check coverage incomplete,
-      // review_result=partial, or a #810 tool-loop coverage gap must never
-      // reach a GitHub/Forgejo APPROVE event.
-      const coverageIncomplete = reviewCoverageIncomplete(reviewResult);
+      // #1145: the publish mode is authoritative — a valid final verdict maps
+      // to its native event. Coverage/requirement-trace incompleteness does
+      // NOT gate the approval: the shortfall stays visible in the marker
+      // (`review_result: partial`), the #810 coverage notice, and the
+      // explicit body note below, never by downgrading the verdict. Only the
+      // operator's own guardrails (approve_forks / fork-ness fail-closed)
+      // still withhold.
       // #1161: `review_blockers` publishes blocking findings only — it never
       // approves, under any verdict, input, or pull-request scope.
-      const canApprove = input.mode === "review_verdict"
-        && guardrails.canApprove
-        && !coverageIncomplete;
-      const validVerdict = isValidPublishVerdict(input.verdict);
+      const coverageIncomplete = reviewCoverageIncomplete(reviewResult);
+      const canApprove = input.mode === "review_verdict" && guardrails.canApprove;
       // #588: on a platform without a native review surface there is no
       // native event to carry the recommendation, so the body states it —
       // BEFORE the untrusted review text, so no model content can swallow it
@@ -1233,56 +1696,56 @@ export async function publishReview(
         stateBlock: stateSection(platformNotice),
         triageBlock: triageBlock || undefined,
         routingBlock: routingBlock || undefined,
+        confidenceBlock: confidenceBlock || undefined,
       });
       if (!validVerdict) {
         // #1161: a missing or invalid verdict is a failed run, not a clean
         // review — it must never publish as an approval or as a blocking
         // request, and it must not read as a successful clean review.
+        // (#1145: in `review_verdict` this run already failed above — the
+        // branch is reachable only in the blockers-only mode, whose published
+        // output is an advisory comment.)
         body += "\n> **No review verdict**: this run produced no valid verdict (model failure or an invalid verdict payload), so neither an approval nor a blocking request is published.\n";
         messages.push(`Publishing advisory review for #${input.prNumber} (no valid verdict produced)`);
-      } else if (input.mode === "review_verdict" && input.verdict === "approve" && !canApprove) {
-        if (guardrails.scopeBlocked) {
-          // #1161: the cross-repository scope policy is the only thing that
-          // withholds an approval here (the deprecated allow_approve input
-          // no longer gates anything). A withheld approval stays advisory:
-          // a blocking REQUEST_CHANGES would invent an issue the model did
-          // not find.
-          const scope = guardrails.isForkPr === null
-            ? "the fork status of this pull request could not be determined, so it is treated as a cross-repository (fork) pull request"
-            : "this is a cross-repository (fork) pull request";
-          // #752: a review with open findings or a coverage gap must not
-          // call itself clean, even when its verdict is an approve.
-          const advisory = reviewResult === "clean"
-            ? "this clean review is advisory"
-            : "this review is advisory rather than a clean approval — the findings and coverage notes above are informational";
-          body += `\n> **Approval withheld by scope policy**: ${scope} and native approvals for fork pull requests are disabled (\`approve-forks: ${input.approveForks}\`), so ${advisory}.\n`;
-          messages.push(
-            `Withholding native approval for #${input.prNumber} (cross-repository PR, approve_forks=${input.approveForks}, is_fork=${guardrails.isForkPr ?? "unknown"})`,
-          );
-        } else if (input.coverageUnknown) {
-          // #873/#838: the standalone publish path had no explicit run dir
-          // (or an unreadable harness artifact) and so could not confirm
-          // whether the tool-loop investigation finished — fail closed
-          // rather than guess it was clean.
-          body += `\n> **Approval withheld**: this review's tool-loop coverage could not be verified (no run directory was available to confirm it), so it is publishing as an ${advisoryNoun} rather than an approval.\n`;
-          messages.push(`Withholding native approval for #${input.prNumber} (review coverage unknown)`);
-        } else if (incompleteReason === "requirement_trace") {
-          // #1145 owns the residual requirement-trace/coverage downgrade:
-          // a trace gap still downgrades an approve to an advisory review.
-          body += `\n> **Approval withheld**: the review completed, but an in-scope requirement lacks verifiable enforcement or test evidence, so it is publishing as an ${advisoryNoun} rather than an approval.\n`;
-          messages.push(`Withholding native approval for #${input.prNumber} (requirement trace incomplete)`);
-        } else if (incompleteReason === "both") {
-          body += `\n> **Approval withheld**: this review has incomplete execution coverage and an in-scope requirement lacks verifiable enforcement or test evidence, so it is publishing as an ${advisoryNoun} rather than an approval.\n`;
-          messages.push(`Withholding native approval for #${input.prNumber} (execution and requirement trace incomplete)`);
-        } else {
-          // #873: the guardrails would allow it, but the review's own
-          // execution-coverage signals say it did not finish — fail closed
-          // rather than publish an approval the metadata marker itself disputes.
-          // #1145 owns this residual trace/coverage downgrade: the notices
-          // below stay exactly as they are until that issue lands.
-          body += `\n> **Approval withheld**: this review's coverage is incomplete — required-check coverage or the tool-loop investigation did not finish, so it is publishing as an ${advisoryNoun} rather than an approval.\n`;
-          messages.push(`Withholding native approval for #${input.prNumber} (review coverage incomplete)`);
-        }
+      } else if (input.mode === "review_verdict" && input.verdict === "approve" && guardrails.scopeBlocked) {
+        // #1161: the cross-repository scope policy is the only thing that
+        // withholds an approval here (the deprecated allow_approve input
+        // no longer gates anything). A withheld approval stays advisory:
+        // a blocking REQUEST_CHANGES would invent an issue the model did
+        // not find.
+        const scope = guardrails.isForkPr === null
+          ? "the fork status of this pull request could not be determined, so it is treated as a cross-repository (fork) pull request"
+          : "this is a cross-repository (fork) pull request";
+        // #752: a review with open findings or a coverage gap must not
+        // call itself clean, even when its verdict is an approve.
+        const advisory = reviewResult === "clean"
+          ? "this clean review is advisory"
+          : "this review is advisory rather than a clean approval — the findings and coverage notes above are informational";
+        body += `\n> **Approval withheld by scope policy**: ${scope} and native approvals for fork pull requests are disabled (\`approve-forks: ${input.approveForks}\`), so ${advisory}.\n`;
+        messages.push(
+          `Withholding native approval for #${input.prNumber} (cross-repository PR, approve_forks=${input.approveForks}, is_fork=${guardrails.isForkPr ?? "unknown"})`,
+        );
+      } else if (input.mode === "review_verdict" && input.verdict === "approve" && coverageIncomplete && nativeSurface.supported) {
+        // #1145: the verdict still publishes as a native approval, but never
+        // silently — the marker keeps reading `review_result: partial`,
+        // the #810 notice (when present) names the tool-loop gap, and this
+        // line names the trace/coverage shortfall on the approved review.
+        // #588: on a platform WITHOUT a native review surface no approval is
+        // published at all — the platform notice above already states that
+        // degradation, so a note about a PUBLISHED approval is not rendered
+        // there (the coverage gap is still disclosed by the #810 notice and
+        // the marker).
+        const gap = incompleteReason === "requirement_trace"
+          ? "an in-scope requirement lacks fully verified enforcement or test evidence"
+            : incompleteReason === "both"
+              ? "execution coverage is incomplete and an in-scope requirement lacks fully verified enforcement or test evidence"
+            : input.coverageUnknown
+              ? "this review's tool-loop coverage could not be verified (the run directory or its coverage artifact was unavailable to confirm it)"
+              : "required-check coverage or the tool-loop investigation did not finish";
+        body += `\n> **Approval published with incomplete coverage**: ${gap}. The verdict above is the review's final verdict; the coverage notes remain informational.\n`;
+        messages.push(
+          `Publishing native approval for #${input.prNumber} with incomplete coverage (#1145; reason=${incompleteReason})`,
+        );
       }
       if (input.mode === "review_blockers" && input.verdict === "approve") {
         // #1161: the mode is blockers-only — a review without blockers is
@@ -1308,6 +1771,11 @@ export async function publishReview(
         stickyBody = body;
         messages.push(`Published the review as a managed top-level review record (no native review surface: ${surfaceReason}); no native approval or blocking request was submitted`);
       } else {
+        // #1145: every valid final verdict maps to its native event. COMMENT
+        // is reachable here only when an operator guardrail (approve_forks /
+        // fork fail-closed) blocks an approve, or when the blockers-only mode
+        // publishes its advisory output — never from a requirement-trace or
+        // coverage downgrade branch.
         const event: NativeReviewEvent = input.verdict === "request_changes"
           ? "REQUEST_CHANGES"
           : canApprove ? "APPROVE" : "COMMENT";
@@ -1325,6 +1793,9 @@ export async function publishReview(
         fallbackSubmission = submitted.fellBack;
         if (submitted.fellBack) {
           messages.push("WARN: commit-bound review submission failed; falling back to plain review");
+          // #1027: the plain fallback carries no inline comments, so nothing
+          // this run derived for them was ever published.
+          outcomes = undefined;
         }
         if (!submitted.ok) {
           if (event === "APPROVE") {
@@ -1362,13 +1833,14 @@ export async function publishReview(
           ? { kind: "sticky", commentId: stickyCommentId, updatedAt: stickyUpdatedAt, body: stickyBody }
           : undefined;
     const replacementComplete = completeCoverage && !fallbackSubmission && replacementCheckpoint !== undefined;
-    // #1114: verification below (head, trusted owner, supersession ordering,
-    // still-current revalidation) is what proves staleness — not coverage
-    // completeness. A published checkpoint therefore authorizes the safe,
-    // presentation-only minimization of superseded advisory bodies even when
-    // the replacement is incomplete; the destructive/authoritative effects
-    // (inline retirement, dismissal, thread resolution) stay behind the
-    // strict complete-replacement gate.
+    // #1114/#1144: verification below (head, trusted owner, supersession
+    // ordering, still-current revalidation) is what proves staleness — not
+    // coverage completeness. A published checkpoint therefore authorizes
+    // hiding every proven-superseded managed review (minimization, plus
+    // dismissal of a stale verdict state) even when the replacement is
+    // incomplete: the newest published managed review is the only visible
+    // one. The destructive effects (inline-comment retirement, thread
+    // resolution) stay behind the strict complete-replacement gate.
     if (replacementCheckpoint !== undefined) {
       try {
         const verifiedHead = await api.getHeadSha();
@@ -1381,7 +1853,9 @@ export async function publishReview(
           // fails closed: nothing is deleted.
           const { owner, reason } = await resolvePublishTrustedOwner(api);
           if (owner === null) {
-            messages.push("WARN: Could not verify authenticated owner (identity reason: " + reason + "); no inline comments retired");
+            // #1144: an unproven identity hides no previous managed review
+            // body and retires no inline comment — both effects are skipped.
+            messages.push("WARN: Could not verify authenticated owner (identity reason: " + reason + "); no previous managed review bodies hidden and no inline comments retired");
           } else {
             const previous = previousReviews.filter((r) => ownerMatchesIdentity(r.user, owner));
             const reviewInstant = (r: { submitted_at?: string; updated_at?: string }): string => {
@@ -1463,13 +1937,23 @@ export async function publishReview(
                     else messages.push("NOTE: Skipping review-thread resolution (platform=forgejo; no GraphQL API)");
                   }
                 } else {
-                  // #1114: the checkpoint proves a newer managed publication at
-                  // the current head, so proven-stale advisory bodies can be
-                  // hidden presentation-only. Nothing is deleted and no
-                  // APPROVED/CHANGES_REQUESTED verdict is dismissed: a partial
-                  // review must never make a blocking review disappear.
-                  messages.push("NOTE: Replacement is not complete (incomplete coverage or fallback submission); previous inline comments and verdicts left in place, attempting presentation-only minimization of superseded advisory review bodies");
-                  await minimizeSupersededAdvisoryReviews(api, olderManaged, input.commentMarker, cleanupLog, { owner, reason }, [], stillCurrent);
+                  // #1144: the checkpoint proves a newer managed publication
+                  // at the current head, so every older managed review from
+                  // this identity is proven superseded: its body is hidden
+                  // and its stale APPROVED/CHANGES_REQUESTED verdict
+                  // dismissed even though this run's replacement is partial
+                  // or used the fallback submission path. Only the
+                  // destructive inline-comment retirement and thread
+                  // resolution above stay gated on complete coverage.
+                  messages.push("NOTE: Replacement is not complete (incomplete coverage or fallback submission); previous inline comments left in place, hiding superseded managed review bodies");
+                  // #1144: the replacement this run published is never a
+                  // cleanup target, even if a future call site would offer
+                  // it: the ordering already excludes it, this makes it
+                  // explicit.
+                  const excluded = replacementCheckpoint.kind === "review"
+                    ? [String(replacementCheckpoint.reviewId)]
+                    : [];
+                  await hideSupersededManagedReviews(api, olderManaged, input.commentMarker, cleanupLog, { owner, reason }, excluded, stillCurrent);
                 }
               } else messages.push("WARN: A newer review superseded this run; cleanup skipped");
             }
@@ -1490,5 +1974,5 @@ export async function publishReview(
     await api.removeLabel(input.rerunLabel);
   }
 
-  return { status: "published", messages };
+  return { status: "published", messages, ...(outcomes !== undefined ? { outcomes } : {}) };
 }

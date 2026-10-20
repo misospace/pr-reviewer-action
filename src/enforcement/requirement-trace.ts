@@ -1659,6 +1659,21 @@ export const MAX_TRACE_REPAIR_SUMMARY_IDS = 48;
 export const MAX_TRACE_REPAIR_SUMMARY_ID_CHARS = 80;
 export const MAX_TRACE_REPAIR_SUMMARY_ERROR_CHARS = 200;
 
+/** #1145: bounded summary of the native loop's in-conversation
+ * evidence-repair continuation (the harness's own
+ * `trace_repair_continuation` record), folded into the #1044 repair summary
+ * so the persisted artifact shows whether the loop itself attempted the
+ * gap-repair round. Defined here (not in `requirements/trace-gap-probe.ts`)
+ * because that module imports from this one — an import in the other
+ * direction would cycle. */
+export interface TraceGapContinuationSummary {
+  /** `continued` | `skipped_no_budget` | `skipped_probe_error` |
+   * `skipped_refresh_failed` | `skipped_no_evidence` (harness-owned enum). */
+  outcome: string;
+  unresolved_ids: string[];
+  verdict_refreshed: boolean;
+}
+
 /** #1044: bounded, sanitized summary of the #959 trace-repair pass, attached
  * to the persisted artifact as `requirement_trace_repair` and handed to
  * `validateRequirementTrace` so the published section can distinguish "the
@@ -1679,6 +1694,9 @@ export interface RequirementTraceRepairOutcome {
   error_kind?: string | null;
   error?: string | null;
   diff_clipped?: boolean;
+  /** #1145: present when the native loop's own continuation ran or was
+   * skipped (absent for runs where no probe fired at all). */
+  continuation?: TraceGapContinuationSummary;
 }
 
 /** #1044: the summary's `missing_ids` are sanitized (control characters and
@@ -2208,4 +2226,150 @@ export function applyRequirementTraceEnforcement(
     artifact.review_markdown = `${String(artifact.review_markdown ?? "")}${rendered}`;
   }
   return { applied: true, trace };
+}
+
+/**
+ * #1145: the exact note set that marks a confirmed-unmet row. A note lands
+ * here only when a DETERMINISTIC PROOF PREDICATE RE-DERIVED THE REQUIREMENT'S
+ * TRUTH FROM THE CHECKOUT AT HEAD AND FOUND IT ABSENT — the validator itself
+ * refutes the requirement, so reading more code cannot change the outcome
+ * (contrast with the coverage-gap notes, where the reviewer can still
+ * re-cite a valid location):
+ *
+ * - `structural-proof-unconfirmed` (#985): the requirement's structural-state
+ *   claim was re-derived from the cited file at head and the predicate did
+ *   not hold (the state the requirement demands is not the state at head).
+ *
+ * Deliberately EXCLUDED (repair-territory coverage gaps, never refutations):
+ * `not-traced-by-reviewer` / `trace-repair-ran-no-claims` (no claim at all),
+ * `disposition-invalid` / `missing-reason` (malformed claim),
+ * `downgraded-no-valid-enforcement-location` /
+ * `downgraded-no-valid-test-location` / `structural-citation-line-out-of-range`
+ * (the citation itself failed validation — a different location may be valid),
+ * `distributed-enforcement-group-uncovered:*` /
+ * `distributed-test-group-uncovered:*` / `distributed-test-location-uncovered`
+ * (a seam went unmapped), `distributed-topology-overflow` (config shape).
+ *
+ * `enforcement-location-copies-without-comparing` (#854) is EXCLUDED too, and
+ * deliberately: that predicate searches ONLY the locations the reviewer
+ * cited, so it proves that THOSE locations contain no comparison — it does
+ * NOT prove that the implementation lacks one anywhere else. A reviewer who
+ * cited the copy/assignment while the real comparison lives in a different
+ * implementation location would be blocked on a false premise. The note
+ * therefore stays a repairable coverage gap: the bounded evidence-repair
+ * continuation is precisely the mechanism that can go find the real
+ * enforcement location. We do not attempt a deterministic "search the whole
+ * scope for the predicate" here — the validator cannot prove absence across
+ * the implementation scope, so the row remains a gap to repair rather than a
+ * refutation to escalate.
+ *
+ * Rows outside `unverifiable` are excluded by the disposition filter:
+ * `met`/`not_applicable` are settled, `pending` is the non-code advisory
+ * (#1062), and a model-claimed `unmet` is a known gap the reviewer must
+ * substantiate with its own finding (#1095) — it is never escalated from the
+ * ledger text alone, even though the validator could not refute it.
+ */
+export const CONFIRMED_UNMET_REFUTATION_NOTES: readonly string[] = [
+  "structural-proof-unconfirmed",
+];
+
+/** #1145: the deterministic refutation phrase per confirmed-unmet note. The
+ * phrase states WHAT the validator proved, so a row's wording can never
+ * borrow another note's claim; a note added to
+ * `CONFIRMED_UNMET_REFUTATION_NOTES` without a phrase here falls back to the
+ * generic wording below rather than asserting another note's proof. */
+const CONFIRMED_UNMET_REFUTATION_TEXT: Readonly<Record<string, string>> = {
+  "structural-proof-unconfirmed": "the cited repository state at head does not satisfy it",
+};
+
+export function confirmedUnmetRows(trace: RequirementTraceArtifact): RequirementTraceRow[] {
+  return trace.rows.filter((row) =>
+    row.disposition === "unverifiable"
+    && row.notes.some((note) => CONFIRMED_UNMET_REFUTATION_NOTES.includes(note)),
+  );
+}
+
+/** #1145: cap on the synthesized confirmed-unmet findings (one per refuted
+ * requirement, up to this many — beyond that the markdown note carries the
+ * total count). */
+export const MAX_CONFIRMED_UNMET_FINDINGS = 5;
+
+/**
+ * #1145: confirmed-unmet → request_changes escalation.
+ *
+ * Where `applyRequirementTraceEnforcement` records the traceability gap
+ * (required_checks=incomplete) WITHOUT synthesizing findings (#1095), this
+ * pass escalates the one case the validator has positively refuted: a row
+ * whose disposition is `unverifiable` and whose notes carry a
+ * confirmed-unmet refutation note (#985's structural-state proof, re-derived
+ * from the checkout at head). It is allowed to synthesize findings because
+ * the refutation is deterministic proof, not a model claim — the #1095
+ * prohibition (never fabricate a blocker from the ledger text alone) is what
+ * this boundary enforces by construction.
+ *
+ * The #854 copies-without-comparing note is NOT a refutation (the predicate
+ * only searched the cited locations, so it cannot prove the requirement is
+ * unenforced anywhere else): such a row is a repairable coverage gap and
+ * never reaches this pass.
+ *
+ * Effects on the artifact (in place):
+ * - up to `MAX_CONFIRMED_UNMET_FINDINGS` new `blocker` findings
+ *   (category `requirements`), each at the row's first (valid) enforcement
+ *   location, whose message never borrows the model-claim wording
+ *   "requirement not enforced: " — it states the deterministic refutation;
+ * - a single italic one-line disclosure appended to `review_markdown`
+ *   (the published body), naming the escalated count;
+ * - `verdict` flipped `approve` → `request_changes` with
+ *   `verdict_source: "enforcement"` (the deterministic provenance label the
+ *   #811/#978 degrade gate reads; a model that already returned
+ *   request_changes is left untouched).
+ *
+ * Ordering contract: run AFTER `applyRequirementTraceEnforcement` and
+ * BEFORE the verdict mapping/relaxers and `applyAllEnforcement`. The
+ * relaxers all refuse to re-approve once a trace gap exists
+ * (`requirement_trace_incomplete` is true by construction here) or an open
+ * non-verification blocker exists, so the flip is stable; the strict
+ * mapping (#811) independently reaches request_changes through the
+ * synthesized blockers, so the same call site works in both policy branches.
+ * Returns the number of confirmed-unmet rows (0 = no-op).
+ */
+export function applyConfirmedUnmetEscalation(
+  artifact: ReviewArtifact,
+  trace: RequirementTraceArtifact,
+  requirementTexts: ReadonlyMap<string, string>,
+): number {
+  const rows = confirmedUnmetRows(trace);
+  if (rows.length === 0) return 0;
+  const findings = Array.isArray(artifact.findings) ? artifact.findings : [];
+  for (const row of rows.slice(0, MAX_CONFIRMED_UNMET_FINDINGS)) {
+    const id = row.requirement_id.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_RENDERED_ID_CHARS);
+    const text = (requirementTexts.get(row.requirement_id) ?? "")
+      .replace(/[\x00-\x1f\x7f]/g, " ").trim()
+      .slice(0, 200);
+    const location = row.enforcement[0];
+    // The phrase is keyed by the note that actually refuted this row, so it
+    // can never assert a proof the validator did not run.
+    const refutationNote = row.notes.find((note) => CONFIRMED_UNMET_REFUTATION_TEXT[note] !== undefined);
+    const refutation = refutationNote !== undefined
+      ? CONFIRMED_UNMET_REFUTATION_TEXT[refutationNote]!
+      : "the requirement is refuted by deterministic proof against the checkout at head";
+    const message = `Confirmed-unmet requirement ${id}: ${refutation}`
+      + (text !== "" ? ` — “${text}”` : "")
+      + ".";
+    findings.push({
+      severity: "blocker",
+      category: "requirements",
+      file: location !== undefined ? location.file : null,
+      line: location !== undefined ? location.line : null,
+      message,
+    });
+  }
+  artifact.findings = findings;
+  artifact.review_markdown = `${String(artifact.review_markdown ?? "")}`
+    + `\n\n_${rows.length} in-scope requirement(s) are confirmed unmet by deterministic repository-state proof; the verdict is escalated to request changes._`;
+  if (artifact.verdict === "approve") {
+    artifact.verdict = "request_changes";
+    artifact.verdict_source = "enforcement";
+  }
+  return rows.length;
 }

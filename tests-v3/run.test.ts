@@ -153,6 +153,164 @@ test("runs the full review end to end: artifacts, outputs, marker", async () => 
   }
 });
 
+// #1154: PR-authored content is credential-shape redacted once at ingestion,
+// so the model input and every persisted artifact of the family carry the
+// same redacted bytes — and `ai-request.primary.json` still records exactly
+// what was FIRST sent (redacted bytes included).
+test("#1154: PR-authored diff/body/file-patch artifacts are credential-redacted end to end", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const rawToken = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+  const rawBearer = "Bearer abcdefghijklmnopqrst";
+  const rawSkKey = "sk-live-abcdefghijklmnopqrst";
+  const rawAssignment = 'api_key = "supersecretvalue1"';
+  const rawPassword = "password: hunter2hunter2";
+  const diff = [
+    "diff --git a/src/config.example.yml b/src/config.example.yml",
+    "--- a/src/config.example.yml",
+    "+++ b/src/config.example.yml",
+    "@@ -1,3 +1,7 @@",
+    " existing",
+    `+${rawAssignment}`,
+    `+token = ${rawToken}`,
+    "+```",
+    `+curl -H "Authorization: ${rawBearer}" https://ci.internal/ping`,
+    "+```",
+    `+export OPENAI_KEY=${rawSkKey}`,
+    // #1154 review round 3: a credential-shaped PATH is PR-authored content
+    // too — the header must be masked, not only the content lines.
+    `diff --git a/secrets/${rawSkKey}.yml b/secrets/${rawSkKey}.yml`,
+    "--- /dev/null",
+    `+++ b/secrets/${rawSkKey}.yml`,
+    "@@ -0,0 +1,1 @@",
+    "+placeholder",
+  ].join("\n");
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), GITHUB_STEP_SUMMARY: join(runDir, "step-summary.md") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform({
+        diff,
+        body: `Fixes the config.\n\n${rawPassword}`,
+        files: [
+          { filename: "src/config.example.yml", status: "modified", additions: 5, deletions: 0, changes: 5, patch: `+${rawAssignment}\n+token = ${rawToken}` },
+        ],
+      }),
+      persistArtifacts: true,
+      quiet: true,
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    const rawShapes = [rawToken, rawBearer, rawSkKey, rawAssignment, rawPassword];
+    const redactedArtifacts = ["pr.diff", "pr.diff.truncated", "pr-body.txt", "pr.json", "pr-object.json", "pr-files.raw.json", "review-corpus.truncated.md"];
+    for (const name of redactedArtifacts) {
+      const text = readFileSync(join(runDir, name), "utf8");
+      assert.match(text, /\[REDACTED\]/, `${name} carries the redaction marker`);
+      for (const raw of rawShapes) {
+        assert.ok(!text.includes(raw), `${name} must not carry the raw credential-shaped value`);
+      }
+    }
+    // Line structure is load-bearing: inline findings anchor to diff line
+    // numbers, so the persisted diff must keep the fixture's exact line
+    // count (the flat pass collapses multi-line masker matches).
+    const persistedDiff = readFileSync(join(runDir, "pr.diff"), "utf8");
+    assert.equal(persistedDiff.split("\n").length, diff.split("\n").length, "pr.diff line count preserved");
+    assert.match(
+      persistedDiff,
+      /diff --git a\/secrets\/\[REDACTED\]\.yml b\/secrets\/\[REDACTED\]\.yml/,
+      "the credential-shaped header path is masked in the persisted diff",
+    );
+    // The request artifact is honest: it records the bytes actually sent,
+    // which are the redacted corpus — valid JSON, marker present, raw absent.
+    const requestArtifact = JSON.parse(readFileSync(join(runDir, "ai-request.primary.json"), "utf8")) as Record<string, unknown>;
+    const requestText = JSON.stringify(requestArtifact);
+    assert.match(requestText, /\[REDACTED\]/);
+    for (const raw of rawShapes) {
+      assert.ok(!requestText.includes(raw), "ai-request.primary.json must not carry the raw credential-shaped value");
+    }
+    // Structural identity survives: the file projection keeps the real
+    // filename (patch fields dropped) while the raw list's patch is redacted.
+    const filesProjection = readFileSync(join(runDir, "pr-files.json"), "utf8");
+    assert.match(filesProjection, /src\/config\.example\.yml/);
+    const rawFiles = JSON.parse(readFileSync(join(runDir, "pr-files.raw.json"), "utf8")) as Array<Record<string, unknown>>;
+    assert.ok(rawFiles.length > 0 && rawFiles[0], "the raw file list survives");
+    assert.match(String(rawFiles[0]!.patch), /\[REDACTED\]/);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+// #1154 review round 6: a reused run dir can contain a `pr-object.json`
+// persisted raw by an older build. The in-memory sanitize must be written
+// BACK to disk — otherwise the raw artifact ships with the run and every
+// later artifact read serves it. The only other rewrite (the #812 same-head
+// refresh) requires the CI gate, so a run with CI gating disabled is the
+// exact case that used to leave the raw copy on disk.
+test("#1154: a reused run dir's raw cached pr-object.json is rewritten redacted", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const rawPassword = "password: hunter2hunter2";
+  const rawQuoted = '{"api_key": "cachedsecretvalue"}';
+  writeFileSync(join(runDir, "pr-object.json"), JSON.stringify({
+    number: 7,
+    title: "Update README",
+    body: `Context.\n\n${rawPassword}\n${rawQuoted}`,
+    head: { sha: "a".repeat(40), ref: "feature" },
+    base: { ref: "main" },
+    user: { login: "someone" },
+    changed_files: 1,
+    additions: 4,
+    deletions: 1,
+    html_url: "https://github.com/o/r/pull/7",
+  }));
+  try {
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), GITHUB_STEP_SUMMARY: join(runDir, "step-summary.md") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform({ body: "freshly fetched body marker" }),
+      persistArtifacts: true,
+      quiet: true,
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    const diskObject = readFileSync(join(runDir, "pr-object.json"), "utf8");
+    assert.match(diskObject, /\[REDACTED\]/, "the on-disk cache is rewritten with the sanitized object");
+    assert.ok(!diskObject.includes("hunter2hunter2") && !diskObject.includes("cachedsecretvalue"), "no raw credential survives in the artifact");
+    assert.ok(!diskObject.includes("freshly fetched body marker"), "the cached object (not a fresh fetch) is what persisted");
+    const bodyTxt = readFileSync(join(runDir, "pr-body.txt"), "utf8");
+    assert.match(bodyTxt, /\[REDACTED\]/);
+    assert.ok(!bodyTxt.includes("hunter2hunter2") && !bodyTxt.includes("cachedsecretvalue"));
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
 test("#975: the step summary renders the findings table and counts for a findings verdict", async () => {
   const server = await startMockServer((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
@@ -1923,8 +2081,10 @@ test("#873: required-check coverage incomplete + a model approve never publishes
   assert.match(result.marker, /"review_result":"partial"/);
   assert.match(result.marker, /"required_checks":"incomplete"/);
 
-  // The invariant: piping that exact shape through publish (review_verdict
-  // mode, allow_approve on) must never yield a native APPROVE event.
+  // The invariant (#1145 restated): piping that exact shape through publish
+  // (review_verdict mode, allow_approve on) publishes the verdict's native
+  // event — but the run must NEVER read as clean: the marker keeps the
+  // partial/incomplete state and the published body names the gap.
   const api = new MinimalPublishApi("a".repeat(40));
   const publishResult = await publishReview({
     mode: "review_verdict",
@@ -1957,9 +2117,10 @@ test("#873: required-check coverage incomplete + a model approve never publishes
 
   assert.equal(publishResult.status, "published");
   assert.equal(api.submitted.length, 1);
-  assert.notEqual(api.submitted[0]!.event, "APPROVE");
-  assert.equal(api.submitted[0]!.event, "COMMENT");
-  assert.match(api.submitted[0]!.body, /Approval withheld/);
+  assert.equal(api.submitted[0]!.event, "APPROVE");  // #1145: verdict mode publishes the verdict
+  assert.match(api.submitted[0]!.body, /Approval published with incomplete coverage/);
+  assert.match(api.submitted[0]!.body, /"review_result":"partial"/);
+  assert.match(api.submitted[0]!.body, /"required_checks":"incomplete"/);
 });
 
 /** The native loop only reads tracked files: make the run dir a checkout. */
@@ -3687,7 +3848,7 @@ test("#954: completed investigation with an unverifiable requirement exposes tra
   }
 });
 
-test("#874 #854-reproduction: a 'met' claim citing a real line that only copies the value (never compares it) is downgraded, coverage goes partial", async () => {
+test("#874 #854-reproduction: a 'met' claim citing a real line that only copies the value (never compares it) is downgraded to a repairable coverage gap — no confirmed-unmet escalation", async () => {
   const server = await startMockServer((_req, body, res) => {
     const reqId = ledgerRequirementId(body, REQUIREMENT_TRACE_MARKER);
     res.setHeader("Content-Type", "application/json");
@@ -3723,6 +3884,21 @@ test("#874 #854-reproduction: a 'met' claim citing a real line that only copies 
       ].join("\n"),
     );
     writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
+    // The REAL enforcement predicate lives in another implementation location:
+    // the deterministic predicate searches only the cited locations, so it
+    // cannot prove the requirement is unenforced anywhere else — the row is a
+    // repairable coverage gap, never a confirmed-unmet refutation.
+    writeFileSync(
+      join(runDir, "src", "other-implementation.ts"),
+      [
+        "export function assertResolvedPull(ctx, record) {",
+        "  if (record.head !== ctx.sourceSha) {",
+        "    throw new Error('source SHA mismatch');",
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+    );
     const result = await runReview({
       env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
       inputs: {
@@ -3752,9 +3928,34 @@ test("#874 #854-reproduction: a 'met' claim citing a real line that only copies 
     assert.ok(trace.rows[0]!.notes.includes("enforcement-location-copies-without-comparing"), JSON.stringify(trace.rows[0]));
     assert.equal(trace.incomplete, true);
 
+    // #854 protection intact: the row still stops coverage, so the run is
+    // NOT a clean approval — but the copies-without-comparing note is not a
+    // confirmed-unmet refutation, so nothing is synthesized and the verdict
+    // is not flipped.
     assert.equal(result.outputs.requiredChecks, "incomplete");
+    assert.equal(result.outputs.incompleteReason, "requirement_trace");
     assert.match(result.marker, /"required_checks":"incomplete"/);
+    assert.match(result.marker, /"incomplete_reason":"requirement_trace"/);
     assert.match(result.marker, /"review_result":"partial"/);
+    assert.ok(!result.marker.includes('"review_result":"clean"'));
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.outputs.verdictSource, "model");
+    const findings = JSON.parse(result.outputs.findings) as Array<{
+      severity: string;
+      category: string;
+      file: string | null;
+      line: number | null;
+      message: string;
+    }>;
+    assert.deepEqual(findings, [], "no synthesized confirmed-unmet blocker");
+    assert.ok(
+      !result.outputs.reviewMarkdown.includes("confirmed unmet by deterministic repository-state proof"),
+      result.outputs.reviewMarkdown,
+    );
+    // The row stays an unresolved coverage gap, visibly disclosed in the
+    // review body (not silently dropped).
+    assert.match(result.outputs.reviewMarkdown, /### Requirement trace/);
+    assert.match(result.outputs.reviewMarkdown, /\*\*unverifiable\*\*/);
   } finally {
     await server.close();
     cleanup();

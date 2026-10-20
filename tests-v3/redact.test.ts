@@ -8,9 +8,13 @@ import {
   maskDiagnostic,
   maskKnownSecrets,
   maskKnownSecretsDeep,
+  redactDiffText,
   redactSourceText,
   redactSourceTextDetailed,
   redactText,
+  createPrTextLineMasker,
+  redactPrTextDeep,
+  redactPrTextLines,
   redactTextDeep,
 } from "../src/context/redact.js";
 import { describeTransportFailure, TransportFailure } from "../src/transport/http.js";
@@ -901,4 +905,693 @@ test("#252 boundary: containsKnownSecret's content floor and variant set, fed th
   assert.equal(containsKnownSecret("⟦•⟧ residue", ["⟦"]), false, "below the floor");
   assert.equal(containsKnownSecret(`x ${long} y`, [long]), true);
   assert.equal(containsKnownSecret("clean text", ["⟦•⟧"]), false);
+});
+
+// #1154: the structural counterpart of redactText, for JSON-shaped
+// PR-authored bodies (pr-object.json, the raw platform file list) on their
+// way into persisted artifacts. Values masked per string LEAF (serialized-JSON
+// redaction misses the quoted-key form); keys, array order, numbers, and
+// structural tokens survive byte-for-byte.
+test("#1154: redactPrTextDeep masks string leaves and preserves JSON shape", () => {
+  const raw = {
+    title: "add db config",
+    body: "sets api_key = supersecretvalue1 in config",
+    nested: { patch: "Bearer abcdefghijklmnopqrst", keep: 42, list: ["ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456", null, true] },
+  };
+  const out = redactPrTextDeep(raw) as Record<string, unknown>;
+  assert.equal(out.title, "add db config");
+  // The generic layer replaces the whole `key=value` framing, not just the
+  // value (that values-only rule is redactSourceText's).
+  assert.equal(out.body, "sets [REDACTED] in config");
+  const nested = out.nested as Record<string, unknown>;
+  assert.equal(nested.patch, "[REDACTED]");
+  assert.equal(nested.keep, 42);
+  const list = nested.list as unknown[];
+  assert.equal(list[0], "[REDACTED]");
+  assert.equal(list[1], null);
+  assert.equal(list[2], true);
+});
+
+test("#1154: redactPrTextDeep leaves keys untouched — structural identity survives", () => {
+  // A key that itself carries a token shape (an sk- prefixed login, a
+  // filename-like key) is structural data downstream consumers match on;
+  // only VALUES are masked.
+  const raw = { "sk-prod-service-account-1": "token=hunter2hunter2", filename: "docs/sk-proj-notes-file.txt" };
+  const out = redactPrTextDeep(raw) as Record<string, unknown>;
+  assert.ok(Object.prototype.hasOwnProperty.call(out, "sk-prod-service-account-1"), "key survives");
+  assert.equal(out.filename, "docs/sk-proj-notes-file.txt");
+  assert.equal(out["sk-prod-service-account-1"], "[REDACTED]");
+});
+
+test("#1154: redactPrTextDeep defines a hostile own __proto__ key without prototype pollution", () => {
+  const raw = JSON.parse('{"__proto__": {"polluted": "api_key=supersecretvalue1"}, "body": "ok"}') as Record<string, unknown>;
+  const out = redactPrTextDeep(raw) as Record<string, unknown>;
+  assert.equal(({} as Record<string, unknown>).polluted, undefined, "Object prototype unpolluted");
+  const own = Object.getOwnPropertyDescriptor(out, "__proto__");
+  assert.ok(own, "own __proto__ data property defined");
+  const proto = own!.value as Record<string, unknown>;
+  assert.equal(proto.polluted, "[REDACTED]");
+  assert.equal(out.body, "ok");
+});
+
+test("#1154: redactPrTextDeep fails closed at the recursion cap", () => {
+  let deep: unknown = "leaf";
+  for (let i = 0; i < 40; i += 1) deep = [deep];
+  const out = redactPrTextDeep(deep);
+  // The cap replaces the whole subtree beyond MAX_MASK_DEPTH with the
+  // marker; the outer levels remain arrays.
+  let level: unknown = out;
+  let depth = 0;
+  while (Array.isArray(level)) {
+    level = level[0];
+    depth += 1;
+  }
+  assert.ok(depth < 40, "subtree beyond the cap is not walked");
+  assert.equal(level, "[REDACTED]");
+});
+
+// #1154 review round: the flat pass must never run on a diff — multi-line
+// maskers collapse lines and shift inline-finding anchors. redactDiffText
+// masks per line, preserving count, prefixes, and headers.
+test("#1154: redactDiffText preserves line count, prefixes, and headers", () => {
+  const diff = [
+    "diff --git a/app.yml b/app.yml",
+    "index 111..222 100644",
+    "--- a/app.yml",
+    "+++ b/app.yml",
+    "@@ -1,4 +1,5 @@",
+    " existing: line",
+    "+password: hunter2hunter2",
+    "-token: zm9vymfyymf6",
+    "\\ No newline at end of file",
+    "+final",
+  ].join("\n");
+  const out = redactDiffText(diff);
+  const inLines = diff.split("\n");
+  const outLines = out.split("\n");
+  assert.equal(outLines.length, inLines.length, "line count preserved");
+  for (let i = 0; i < inLines.length; i += 1) {
+    assert.equal(outLines[i]!.charAt(0), inLines[i]!.charAt(0), `line ${i} prefix preserved`);
+  }
+  assert.equal(outLines[0], inLines[0], "diff --git header verbatim");
+  assert.equal(outLines[2], inLines[2], "--- header verbatim");
+  assert.equal(outLines[3], inLines[3], "+++ header verbatim");
+  assert.equal(outLines[4], inLines[4], "@@ hunk header verbatim");
+  assert.equal(outLines[8], inLines[8], "\\ No newline marker verbatim");
+  assert.equal(outLines[6], "+[REDACTED]", "same-line key: value on an added line is masked");
+  assert.equal(outLines[7], "-[REDACTED]", "same-line key: value on a removed line is masked");
+});
+
+// #1154 review round 3: the verbatim-header exception was a leak. A
+// credential-shaped token inside a path header is PR-authored content that
+// persists in `pr.diff` and propagates to `pr.diff.truncated`, the corpus
+// sections and `ai-request.<tier>.json`, while the structured filename
+// fields (`pr-files.raw.json`) were already redacted — the family diverged
+// exactly where a secret could hide. Ordinary paths stay byte-for-byte, so
+// `parseDiff` and the inline-finding anchoring keep reading every header.
+test("#1154: credential-shaped values in path-bearing diff headers are masked", () => {
+  const token = "sk-liveABCDEFGHIJKLMNOPQRSTUVWXYZ1234";
+  const diff = [
+    `diff --git a/${token}.txt b/${token}.txt`,
+    "index e69de29..abc1234 100644",
+    `--- a/${token}.txt`,
+    `+++ b/${token}.txt`,
+    "@@ -1 +1 @@",
+    "+ordinary content line",
+    `diff --git "a/${token}.txt" "b/${token}.txt"`,
+    `rename from ${token}.yaml`,
+    `rename to ${token}.yaml`,
+    "copy from AKIAIOSFODNN7EXAMPLE.pem",
+    "copy to AKIAIOSFODNN7EXAMPLE.pem",
+    `Binary files a/${token} and b/${token} differ`,
+    "--- /dev/null",
+    "+++ /dev/null",
+    "diff --git a/normal/path.yml b/normal/path.yml",
+    "--- a/normal/path.yml",
+    "+++ b/normal/path.yml",
+    "@@ -1 +1 @@",
+    "+ordinary stays",
+  ].join("\n");
+  const out = redactDiffText(diff);
+  const inLines = diff.split("\n");
+  const outLines = out.split("\n");
+  assert.equal(outLines.length, inLines.length, "masking costs no line");
+  assert.ok(out.includes(`diff --git a/[REDACTED].txt b/[REDACTED].txt`), "the diff --git header paths are masked");
+  assert.ok(out.includes("--- a/[REDACTED].txt") && out.includes("+++ b/[REDACTED].txt"), "the ---/+++ header paths are masked");
+  assert.ok(out.includes(`"a/[REDACTED].txt"`), "a quoted header path is masked inside its quotes");
+  assert.ok(out.includes("rename from [REDACTED].yaml") && out.includes("rename to [REDACTED].yaml"));
+  assert.ok(out.includes("copy from [REDACTED].pem") && out.includes("copy to [REDACTED].pem"));
+  assert.ok(out.includes(`Binary files a/[REDACTED] and b/[REDACTED] differ`));
+  assert.ok(!out.includes(token), "no credential-shaped path token survives anywhere");
+  // Ordinary paths and structure-only metadata are untouched.
+  assert.ok(out.includes("diff --git a/normal/path.yml b/normal/path.yml"));
+  assert.ok(out.includes("--- a/normal/path.yml") && out.includes("+++ b/normal/path.yml"));
+  assert.ok(out.includes("--- /dev/null") && out.includes("+++ /dev/null"));
+  assert.ok(out.includes("index e69de29..abc1234 100644"), "index line verbatim");
+  assert.ok(out.includes("+ordinary stays") && out.includes("+ordinary content line"));
+});
+
+test("#1154: a path header never opens a continuation run into content", () => {
+  // A credential-named path is masked through its OWN masker, sharing no
+  // state with either content side: a header that looks like a bare secret
+  // key line (`diff --git a/password: …`) cannot mask the added lines below
+  // it, and the content runs still reset at the header.
+  const diff = [
+    "diff --git a/password: b/password:",
+    "+ordinary line below the header",
+    "diff --git a/app.yml b/app.yml",
+    "+another ordinary line",
+  ].join("\n");
+  const out = redactDiffText(diff);
+  const outLines = out.split("\n");
+  assert.equal(outLines.length, 4, "no line collapse");
+  assert.ok(!out.includes("password"), "the credential-shaped header path is masked");
+  assert.equal(outLines[1], "+ordinary line below the header", "the header mask opens no run");
+  assert.equal(outLines[3], "+another ordinary line", "the content run reset at the second header");
+});
+
+test("#1154: redactDiffText masks a SPLIT-line secret and still cannot span a line break", () => {
+  // The flat redactText turns `password:\n  value` into ONE line (the
+  // kubeconfig masker's \\s* eats the newline), shifting every later diff
+  // line. The line-wise pass must keep every line AND close the split-line
+  // form the per-line maskers cannot see: a bare key line opens a run, and
+  // every indented continuation after it is masked.
+  const diff = [
+    "+password:",
+    "+  hunter2hunter2hunter2",
+    "+  ordinary indented prose, not a credential",
+    "+plain unindented line",
+    "+def main():",
+    "+    return 1",
+  ].join("\n");
+  const out = redactDiffText(diff);
+  const outLines = out.split("\n");
+  assert.equal(outLines.length, 6, "no line collapse");
+  assert.equal(outLines[0], "+password:", "the key name survives; a bare key line carries no value to mask");
+  assert.equal(outLines[1], "+  [REDACTED]", "the split-line value is masked, diff prefix and indentation kept");
+  // Accepted over-redaction class: an indented run after a bare secret key is
+  // masked even when it is not a credential. Distinguishing "data" from
+  // "structure" is a reading this module must not do on untrusted input, and
+  // over-redaction is its stated preference over a leaked credential (#1154).
+  assert.equal(outLines[2], "+  [REDACTED]", "an indented non-credential continuation is masked too");
+  assert.equal(outLines[3], "+plain unindented line", "a line that does not start with whitespace terminates the run");
+  assert.equal(outLines[4], "+def main():");
+  assert.equal(outLines[5], "+    return 1", "lines after the run are untouched");
+});
+
+test("#1154: a bare secret key line on a CONTEXT line opens the same run", () => {
+  const diff = [
+    "diff --git a/app.yml b/app.yml",
+    "index 111..222 100644",
+    "@@ -1,2 +1,4 @@",
+    " password:",
+    "   hunter2hunter2hunter2",
+    " plain",
+  ].join("\n");
+  assert.equal(
+    redactDiffText(diff),
+    [
+      "diff --git a/app.yml b/app.yml",
+      "index 111..222 100644",
+      "@@ -1,2 +1,4 @@",
+      " password:",
+      "   [REDACTED]",
+      " plain",
+    ].join("\n"),
+    "the run opens from a context line; headers stay verbatim and the unindented tail ends the run",
+  );
+});
+
+test("#1154: redactPrTextLines preserves line count and line breaks the flat pass destroys", () => {
+  const body = "Deployment notes:\npassword:\n  hunter2hunter2hunter2\nend";
+  // The premise of the seam, pinned: the flat pass collapses the pair into one
+  // line, because its key/value maskers span the break.
+  assert.equal(redactText(body).split("\n").length, 3, "the flat pass collapses the split-line credential");
+  const out = redactPrTextLines(body);
+  assert.equal(out.split("\n").length, 4, "line count survives");
+  assert.equal(out, "Deployment notes:\npassword:\n  [REDACTED]\nend");
+  // Multi-line prose with no credential is byte-identical, breaks included.
+  const prose = "first line\n\n  indented second line\nthird: line\n";
+  assert.equal(redactPrTextLines(prose), prose);
+  assert.equal(redactPrTextLines(prose).split("\n").length, prose.split("\n").length);
+  // Idempotent, and the shared core keeps the diff pass idempotent too (#252).
+  assert.equal(redactPrTextLines(out), out);
+  assert.equal(redactPrTextLines(redactPrTextLines(body)), out);
+  assert.equal(redactPrTextLines(null), "");
+  assert.equal(redactPrTextLines(undefined), "");
+  assert.equal(redactPrTextLines(""), "");
+});
+
+test("#1154: a multi-line PR body leaf keeps its structure inside redactPrTextDeep", () => {
+  const raw = { body: "notes\npassword:\n  hunter2hunter2hunter2\nend", keep: 1 };
+  const out = redactPrTextDeep(raw) as Record<string, unknown>;
+  assert.equal(out.body, "notes\npassword:\n  [REDACTED]\nend", "line structure survives the structural pass");
+  assert.equal(out.keep, 1);
+});
+
+test("#1154: redactDiffText treats a literal [REDACTED] as inert and is idempotent", () => {
+  // #252 boundary rule: feed the sanitizer's OWN marker through the sanitizer.
+  // Anchor extraction compares a redacted diff against a redacted checkout
+  // byte-for-byte, so the marker has to be stable: a masker that matched
+  // `[REDACTED]` itself would rewrite it, and a rewritten marker would stop
+  // comparing equal to the same marker on the other side.
+  const diff = [
+    "+[REDACTED]",
+    " [REDACTED]",
+    "-[REDACTED]",
+    "+token: [REDACTED]",
+    "+password: hunter2hunter2",
+  ].join("\n");
+  const out = redactDiffText(diff);
+  assert.equal(out.split("\n")[0], "+[REDACTED]", "a literal marker added line is untouched");
+  assert.equal(out.split("\n")[1], " [REDACTED]", "a literal marker context line is untouched");
+  assert.equal(out.split("\n")[2], "-[REDACTED]", "a literal marker removed line is untouched");
+  // A marker sitting as the VALUE of a secret-named key is re-masked whole
+  // (`token: [REDACTED]` → `[REDACTED]`), losing the key name. That is the
+  // module's documented over-redaction preference, and it is STABLE: the
+  // result is itself an inert marker, so the pass converges rather than
+  // nesting. Pinned here so a future masker that grew the marker would fail
+  // this instead of silently breaking anchor comparison.
+  assert.equal(out.split("\n")[3], "+[REDACTED]", "an already-masked value is not double-wrapped");
+  assert.equal(out.split("\n")[4], "+[REDACTED]", "a real secret beside it still masks (key included)");
+  assert.equal(redactDiffText(out), out, "redactDiffText is idempotent");
+});
+
+test("#1154 review: the continuation path is marker-inert and convergent", () => {
+  // #252 boundary rule applied to the NEW rule: feed the sanitizer's own
+  // marker through the continuation path. A bare key line followed by an
+  // already-masked value must converge to itself (never nest, never grow) —
+  // the change-anchor seam compares both sides of an exact-byte match, so a
+  // marker that changed shape on the second pass would break every anchor
+  // for an artifact persisted twice.
+  const once = redactDiffText("+password:\n+  [REDACTED]");
+  assert.equal(once, "+password:\n+  [REDACTED]", "an already-masked continuation is untouched");
+  assert.equal(redactDiffText(once), once, "the continuation path converges");
+  assert.equal(redactPrTextLines(redactPrTextLines("password:\n  [REDACTED]")), "password:\n  [REDACTED]");
+  // A literal marker with NO bare key line above it is inert on every prefix.
+  for (const line of ["+[REDACTED]", " [REDACTED]", "-[REDACTED]", "[REDACTED]"]) {
+    assert.equal(redactPrTextLines(line), line, `a bare marker line is inert: ${line}`);
+  }
+  // And a masked value under a secret-named JSON key converges too.
+  assert.deepEqual(redactPrTextDeep({ password: "[REDACTED]" }), { password: "[REDACTED]" });
+});
+
+test("#1154: redactPrTextDeep masks a secret-named key's subtree — the quoted-key hole is closed", () => {
+  // Per-leaf pattern masking never sees the key and the value together, so
+  // `{"password":"opaque-value"}` leaked both. A secret-named key now masks
+  // every string leaf under it, in every shape.
+  const raw = {
+    password: "opaque-value",
+    username: "opaque-value",
+    nested: { apiKey: { list: ["first-value", "second-value"], count: 2 } },
+    arr: [{ token: "inside-array" }],
+  };
+  const out = redactPrTextDeep(raw) as Record<string, unknown>;
+  assert.equal(out.password, "[REDACTED]", "the opaque value under a credential-named key is masked");
+  assert.ok(Object.prototype.hasOwnProperty.call(out, "password"), "the key survives — keys are structural identity");
+  assert.equal(out.username, "opaque-value", "a non-credential key's value is untouched");
+  const nested = out.nested as { apiKey: { list: string[]; count: number } };
+  assert.deepEqual(nested.apiKey.list, ["[REDACTED]", "[REDACTED]"], "array leaves under a secret key are masked");
+  assert.equal(nested.apiKey.count, 2, "number leaves are never masked — JSON types survive");
+  const arr = out.arr as Array<{ token: string }>;
+  assert.equal(arr[0]!.token, "[REDACTED]", "a secret-named key inside an array element is masked too");
+});
+
+// #1154 review round 6: the key-name rule above only fires when the text
+// PARSES as JSON. A diff line or PR body carrying one-line JSON is a STRING,
+// and the pattern layer missed it: the generic `key: value` masker requires
+// the separator right after the key name, and the closing quote between key
+// and colon blocks it, so `{"password": "opaque-value"}` persisted raw while
+// its parsed-JSON sibling was already masked. The pattern layer now has a
+// quoted-key masker; these pin it on every surface that shares it.
+test("#1154: same-line quoted JSON key/value is masked by the line-preserving text path", () => {
+  const body = [
+    'Config now reads `{"password": "opaque-value"}` from env.',
+    '{"api_key": "anothersecret"}',
+    "{'client_secret': 'thirdsecretvalue'}",
+    "{`token`: \"fourthsecretvalue\"}",
+    '{"dbPassword": "fifthsecretvalue", "username": "octocat"}',
+  ].join("\n");
+  const out = redactPrTextLines(body);
+  const outLines = out.split("\n");
+  assert.equal(outLines.length, 5, "no line collapse");
+  for (const value of ["opaque-value", "anothersecret", "thirdsecretvalue", "fourthsecretvalue", "fifthsecretvalue"]) {
+    assert.ok(!out.includes(value), `the quoted value ${value} must not survive`);
+  }
+  assert.ok(out.includes("[REDACTED]"));
+  const fifthLine = outLines[4]!;
+  assert.ok(fifthLine.includes('"username"'), "a non-credential key on the same line survives");
+  assert.ok(!fifthLine.includes("fifthsecretvalue"), "the credential on that line is still masked");
+  // The documented floors and exemptions of the generic rule carry over:
+  // a below-floor value survives (same 8-character bar as `key: value`),
+  // a bare quoted key line keeps its run-opening role, and an ordinary
+  // quoted key never fires the rule.
+  assert.equal(redactPrTextLines('{"token": "short"}'), '{"token": "short"}', "the shared 8-char value floor");
+  assert.equal(redactPrTextLines('{"password":'), '{"password":', "a bare quoted key line carries no value");
+  assert.equal(redactPrTextLines('{"filename": "src/app.ts", "login": "octocat"}'), '{"filename": "src/app.ts", "login": "octocat"}', "ordinary JSON keys untouched");
+  // #252: the boundary token fed to itself. The literal marker in the value
+  // position is masked like any ≥8-char value (the existing kubeconfig
+  // masker already re-masks `password: [REDACTED]` on a key line); what must
+  // hold is that it never NESTS and the output converges on a re-persist.
+  const hostile = '{"password": "[REDACTED]"}';
+  const hostileOnce = redactPrTextLines(hostile);
+  assert.ok(!hostileOnce.includes("[REDACTED][REDACTED]"), "the marker never nests");
+  assert.equal(redactPrTextLines(hostileOnce), hostileOnce, "the masked form is a fixed point");
+  // #252, hostile NESTING: a non-secret assignment whose VALUE token is
+  // itself a quoted secret key cannot swallow the real credential — the
+  // failed candidate must resume inside its own span, not past it.
+  assert.equal(redactPrTextLines('"foo":"password":"hunter2hunter2"'), '"foo":[REDACTED]"');
+  assert.ok(!redactPrTextLines('{"a":"x","dbPassword":"deepsecretvalue"}').includes("deepsecretvalue"));
+  const masked = redactPrTextLines('{"password": "opaque-value"}');
+  assert.equal(redactPrTextLines(masked), masked, "idempotent");
+});
+
+test("#1154: quoted JSON credentials inside diff content lines are masked", () => {
+  const diff = [
+    "diff --git a/config.json b/config.json",
+    "--- a/config.json",
+    "+++ b/config.json",
+    "@@ -1,2 +1,3 @@",
+    " {\"username\": \"octocat\"}",
+    '+ {"api_key": "leakedsecretvalue"}',
+    '-{"password":"removedsecret"}',
+  ].join("\n");
+  const out = redactDiffText(diff);
+  assert.equal(out.split("\n").length, 7, "line count preserved");
+  assert.ok(!out.includes("leakedsecretvalue") && !out.includes("removedsecret"), "no quoted value survives on either side");
+  assert.ok(out.includes('+ {[REDACTED]"'), "the added line keeps its diff prefix and surrounding punctuation");
+  assert.ok(out.includes('-{[REDACTED]"'), "the removed line is masked by its own side");
+  assert.ok(out.includes(" {\"username\": \"octocat\"}"), "an ordinary context line is byte-for-byte");
+});
+
+// #999 cost class, re-tested against the quoted-key rule: embedded
+// `FLANK(?:ALT)FLANK` backtracks quadratically on a one-line adversarial body
+// (measured ~3.6s at 240k `"password…` repetitions with no closing quote), and
+// a diff line is masked several times per run — both sides of the diff plus
+// the change-anchor mirror. The rule must therefore stay linear-ish.
+test("#1154 adversarial: quoted-key masking stays bounded on adversarial one-line content", () => {
+  const started = process.hrtime.bigint();
+  const unclosedQuote = `"${"password".repeat(30_000)}`;
+  const manyQuotes = `"{${"token:".repeat(30_000)}`;
+  const out1 = redactPrTextLines(unclosedQuote);
+  const out2 = redactPrTextLines(manyQuotes);
+  assert.ok(out1.length > 0 && out2.length > 0, "clean misses, no marker required");
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1_000_000;
+  assert.ok(elapsedMs < 1_000, `quoted-key adversarial cases took ${elapsedMs.toFixed(0)}ms`);
+});
+
+test("#1154: the key-name rule is the shared unanchored vocabulary, and only the name selects it", () => {
+  const out = redactPrTextDeep({
+    client_secret: "opaque-value",
+    refresh_token: "opaque-value",
+    dbPassword: "opaque-value",
+    secretAccessKey: "opaque-value",
+    apiKey: "opaque-value",
+    filename: "src/app.py",
+    login: "octocat",
+  }) as Record<string, unknown>;
+  for (const key of ["client_secret", "refresh_token", "dbPassword", "secretAccessKey", "apiKey"]) {
+    assert.equal(out[key], "[REDACTED]", `${key} is secret-named`);
+  }
+  assert.equal(out.filename, "src/app.py", "an ordinary key is not swept in");
+  assert.equal(out.login, "octocat");
+  assert.deepEqual(Object.keys(out), [
+    "client_secret",
+    "refresh_token",
+    "dbPassword",
+    "secretAccessKey",
+    "apiKey",
+    "filename",
+    "login",
+  ], "key order and names survive");
+});
+
+test("#1154: reference values under a secret-named key are exempt, non-strings never masked", () => {
+  const raw = {
+    password: "${API_KEY}",
+    token: "{{ secret }}",
+    apiKey: "!Ref MySecret",
+    auth_token: "op://vault/item",
+    access_key: "ENC[hunter2hunter2]",
+    client_secret: "opaque-literal-value",
+    numbers: { password: 42, token: true, apiKey: null },
+  };
+  const out = redactPrTextDeep(raw) as Record<string, unknown>;
+  // A reference POINTS at a credential; masking it would destroy the config
+  // without removing a secret (`isReferenceValue`, the #876 rule).
+  assert.equal(out.password, "${API_KEY}");
+  assert.equal(out.token, "{{ secret }}");
+  assert.equal(out.apiKey, "!Ref MySecret");
+  assert.equal(out.auth_token, "op://vault/item");
+  assert.equal(out.access_key, "ENC[hunter2hunter2]");
+  // The same key name with a literal value still masks.
+  assert.equal(out.client_secret, "[REDACTED]");
+  // Types survive: a number/boolean/null leaf is never a credential.
+  assert.deepEqual(out.numbers, { password: 42, token: true, apiKey: null });
+});
+
+test("#1154: the key-name rule is idempotent and still fails closed at the depth cap", () => {
+  const raw = { password: "opaque-value", body: "sets api_key=supersecretvalue1 here", nested: { token: ["a", 1] } };
+  const once = redactPrTextDeep(raw) as Record<string, unknown>;
+  assert.deepEqual(redactPrTextDeep(once), once, "a second pass changes nothing");
+  // Depth cap is unchanged for the key-name path: a deep subtree under a
+  // secret-named key is replaced by the marker, never serialized back.
+  let deep: unknown = "opaque-leaf-value";
+  for (let i = 0; i < 40; i += 1) deep = { password: deep };
+  let level: unknown = redactPrTextDeep(deep);
+  let walked = 0;
+  while (level !== null && typeof level === "object" && !Array.isArray(level)) {
+    const next = (level as Record<string, unknown>).password;
+    if (next === undefined) break;
+    level = next;
+    walked += 1;
+  }
+  assert.ok(walked < 40, "the subtree beyond the cap is not walked");
+  assert.equal(level, "[REDACTED]");
+});
+
+test("#1154: redactPrTextDeep depth cap holds for object nesting and is idempotent", () => {
+  let deep: Record<string, unknown> = { leaf: "api_key=supersecretvalue1" };
+  for (let i = 0; i < 40; i += 1) deep = { nested: deep };
+  const out = redactPrTextDeep(deep);
+  let level: unknown = out;
+  let depth = 0;
+  // No `!== undefined` clause: `typeof level === "object"` already excludes
+  // undefined, so the extra comparison is unreachable (CodeQL: comparison
+  // between inconvertible types).
+  while (level !== null && typeof level === "object" && !Array.isArray(level)) {
+    const next = (level as Record<string, unknown>).nested;
+    if (next === undefined) break;
+    level = next;
+    depth += 1;
+  }
+  assert.ok(depth < 40, "object subtree beyond the cap is not walked");
+  assert.equal(level, "[REDACTED]");
+  // Idempotence: re-redacting an already-redacted artifact (cache re-read,
+  // publish-boundary second pass) is a no-op on the masked shapes.
+  const once = redactPrTextDeep({ body: "sets api_key=supersecretvalue1 here", keep: 1 }) as Record<string, unknown>;
+  const twice = redactPrTextDeep(once) as Record<string, unknown>;
+  assert.deepEqual(twice, once, "second pass changes nothing");
+  assert.deepEqual(redactPrTextDeep(null), null);
+  assert.deepEqual(redactPrTextDeep(undefined), undefined);
+  assert.equal(redactPrTextDeep(42), 42);
+});
+
+// ---------------------------------------------------------------------------
+// #1154 review round 2
+// ---------------------------------------------------------------------------
+
+test("#1154 r2: a secret moved onto the line below its key masks the VALUE, not the function", () => {
+  // The regression the greedy rule shipped: a PR that moves a hardcoded secret
+  // onto the line below its key had every following statement of the same
+  // function rewritten to [REDACTED] in pr.diff, the corpus and the recorded
+  // model request. A continuation is the value OF its key; a same-indent line
+  // is a sibling.
+  const diff = [
+    " def connect(self):",
+    "-            password: hunter2hunter2",
+    "+            password:",
+    "+                hunter2hunter2hunter2",
+    "+            port=5432,",
+    "+        )",
+    "+        result = db.query(q)",
+  ].join("\n");
+  const out = redactDiffText(diff);
+  assert.equal(out.split("\n").length, diff.split("\n").length, "no line costs");
+  const lines = out.split("\n");
+  assert.equal(lines[1], "-            [REDACTED]", "the removed credential still masks (own side)");
+  assert.equal(lines[2], "+            password:");
+  assert.equal(lines[3], "+                [REDACTED]", "the moved value is masked");
+  assert.equal(lines[4], "+            port=5432,", "a sibling at the key's own indent survives");
+  assert.equal(lines[5], "+        )");
+  assert.equal(lines[6], "+        result = db.query(q)", "the rest of the block survives");
+});
+
+test("#1154 r2: the run is bounded by the key's own indentation", () => {
+  // A deeper-indented sibling that is not a credential is still masked — the
+  // over-redaction that SURVIVES the bound, and stays documented rather than
+  // "fixed" (narrowing it means reading untrusted input as data vs structure).
+  assert.equal(
+    redactPrTextLines("password:\n  not-a-credential\nend"),
+    "password:\n  [REDACTED]\nend",
+  );
+  // A blank content line closes the run.
+  assert.equal(
+    redactPrTextLines("password:\n  secret-value\n\n  after the break"),
+    "password:\n  [REDACTED]\n\n  after the break",
+  );
+  // Shallower indentation closes it too.
+  assert.equal(
+    redactPrTextLines("    password:\n        secret-value\n  after"),
+    "    password:\n        [REDACTED]\n  after",
+  );
+  // The bound is measured from the key line's own indent, not from zero.
+  assert.equal(
+    redactDiffText("+        password:\n+            secret-value\n+        next: 1"),
+    "+        password:\n+            [REDACTED]\n+        next: 1",
+  );
+});
+
+test("#1154 r2: the two sides of a diff keep independent runs", () => {
+  // A key line on the removed side must not colour the lines the change
+  // produces, and vice versa.
+  assert.equal(
+    redactDiffText([
+      "-password:",
+      "-  hunter2hunter2hunter2",
+      "+  ordinary added line",
+      "+    deeper added line",
+      " context line",
+    ].join("\n")),
+    [
+      "-password:",
+      "-  [REDACTED]",
+      "+  ordinary added line",
+      "+    deeper added line",
+      " context line",
+    ].join("\n"),
+  );
+  assert.equal(
+    redactDiffText([
+      "+password:",
+      "+  hunter2hunter2hunter2",
+      "-  removed line at the same indent",
+    ].join("\n")),
+    [
+      "+password:",
+      "+  [REDACTED]",
+      "-  removed line at the same indent",
+    ].join("\n"),
+  );
+  // A header closes both runs at the file boundary.
+  assert.equal(
+    redactDiffText([
+      "-password:",
+      "--- a/app.yml",
+      "+++ b/app.yml",
+      "+  value that is not a continuation",
+    ].join("\n")),
+    [
+      "-password:",
+      "--- a/app.yml",
+      "+++ b/app.yml",
+      "+  value that is not a continuation",
+    ].join("\n"),
+  );
+});
+
+test("#1154 r2: a YAML block scalar opens the run; a code expression does not", () => {
+  // A PEM key is embedded in YAML this way, and the same-line masker cannot
+  // help: it rewrites `password: |` itself, so the key text no longer reaches
+  // the predicate and the block below it used to persist verbatim.
+  assert.equal(
+    redactPrTextLines([
+      "password: |",
+      "  -----BEGIN RSA PRIVATE KEY-----",
+      "  MIIEowIBAAKCAQEA0000",
+      "  -----END RSA PRIVATE KEY-----",
+      "port: 5432",
+    ].join("\n")),
+    [
+      "[REDACTED]",
+      "  [REDACTED]",
+      "  [REDACTED]",
+      "  [REDACTED]",
+      "port: 5432",
+    ].join("\n"),
+  );
+  // Folded scalars, indentation indicators and chomping are the same rule.
+  assert.equal(
+    redactPrTextLines([
+      "secret: >-",
+      "  folded body",
+      "token: |2-",
+      "  deep body",
+      "api_key: |+",
+      "  kept body",
+      "port: 1",
+    ].join("\n")),
+    [
+      "secret: >-",
+      "  [REDACTED]",
+      "token: |2-",
+      "  [REDACTED]",
+      "api_key: |+",
+      "  [REDACTED]",
+      "port: 1",
+    ].join("\n"),
+  );
+  // The other direction: a secret-named key assigned a CODE EXPRESSION is not
+  // a block scalar and must not open a run, or every following indented line
+  // of the function would be masked.
+  assert.equal(
+    redactPrTextLines([
+      "def f():",
+      "    password = self.password",
+      "        self.uses(password)",
+      "    return 1",
+    ].join("\n")),
+    [
+      "def f():",
+      // The flat pass still rewrites the assignment itself (long-standing
+      // `redactText` behavior on prose); what matters here is that it did NOT
+      // open a run.
+      "    [REDACTED]",
+      "        self.uses(password)",
+      "    return 1",
+    ].join("\n"),
+  );
+  // Pinned boundary, not an endorsement: `client_key` carries no vocabulary
+  // alternative (the key-name list is frozen), so it opens no run. Recorded
+  // here so a future vocabulary change is a visible decision, not a drift.
+  assert.equal(
+    redactPrTextLines("client_key: |\n  -----BEGIN CERTIFICATE-----\n  MIIB"),
+    "client_key: |\n  -----BEGIN CERTIFICATE-----\n  MIIB",
+  );
+});
+
+test("#1154 r2: the two-state diff masker is marker-inert, convergent and idempotent", () => {
+  // #252 boundary rule for the split state: feed the sanitizer's OWN marker
+  // through both sides. The change-anchor seam compares the two sides byte
+  // for byte, so neither may reshape a marker on a second pass.
+  const diff = [
+    "-password:",
+    "-  [REDACTED]",
+    "+password:",
+    "+  [REDACTED]",
+    "+    [REDACTED]",
+    " context: [REDACTED]",
+  ].join("\n");
+  const once = redactDiffText(diff);
+  assert.equal(once, diff, "already-masked continuations are inert on both sides");
+  assert.equal(redactDiffText(once), once, "the two-state masker converges");
+  // The per-side masker agrees with the whole-text pass on a one-sided input,
+  // which is what the checkout mirroring relies on.
+  const body = "def f():\n    password:\n        secret-value\n    return 1";
+  const masker = createPrTextLineMasker();
+  assert.equal(
+    body.split("\n").map((line) => masker.maskLine(line)).join("\n"),
+    redactPrTextLines(body),
+  );
+  assert.equal(redactPrTextLines(redactPrTextLines(body)), redactPrTextLines(body));
 });

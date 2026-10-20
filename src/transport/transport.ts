@@ -1,6 +1,8 @@
 import type { ApiFormat, NormalizedModelResponse, OpenAiWireBody, TokensParam, TransportWirePayload } from "../model/types.js";
 import { reassembleSse } from "./sse.js";
 import { runHttpRequest, TransportFailure } from "./http.js";
+import { callKnownSecrets } from "./headers.js";
+import { classifyTerminalProviderFailure, terminalProviderFailureLine } from "./terminal.js";
 
 /**
  * The transport seam between request building and the wire (#677): serializes
@@ -80,7 +82,14 @@ export async function runChatRequest(input: ChatRequestInput): Promise<ChatReque
  * review otherwise. When the 400 body names the parameter AND this payload
  * carries it, the same request is retried once with the parameter removed —
  * the review degrades to prompted-JSON instead of dying. `stripRemaining`
- * makes it strictly once-per-request, exactly like the clamp. */
+ * makes it strictly once-per-request, exactly like the clamp.
+ *
+ * #1080 adds the terminal-provider decision FIRST, before both of those: a
+ * body the shared classifier recognizes as permanently unusable (quota
+ * exhausted, model retired) is returned to the caller on the first attempt,
+ * with one bounded redacted stderr line, instead of burning the same-request
+ * retry budget. Nothing else about this loop's budgets, backoff, or statuses
+ * changes. */
 async function runChatRequestLoop(input: ChatRequestInput, clampRemaining: boolean, stripRemaining = true): Promise<ChatRequestOutcome> {
   const sleep = input.sleep ?? defaultSleep;
   for (let attempt = 1; ; attempt++) {
@@ -92,6 +101,20 @@ async function runChatRequestLoop(input: ChatRequestInput, clampRemaining: boole
     }
     const outcome = await runChatRequestOnce(input);
     if (outcome.status === "failure") {
+      // #1080: a TERMINAL provider failure (quota exhausted, model retired)
+      // spends no attempt and no sleep here — the original failure is returned
+      // unchanged so the tier seam sees the same instance and can fail over
+      // immediately. Checked BEFORE the clamp/strip retries, deliberately: a
+      // permanently-failed lane must not spend an extra wire attempt proving
+      // it, and both of those decisions only fire on a 400 whose body states a
+      // token cap or names a structured-output parameter, neither of which is
+      // terminal evidence. The retry budgets and backoff constants below are
+      // unchanged for every non-terminal failure.
+      const terminal = classifyTerminalProviderFailure(outcome.failure);
+      if (terminal !== null) {
+        process.stderr.write(`${terminalProviderFailureLine(terminal, callKnownSecrets(input.apiKey, input.extraHeaders))}; bypassing same-request retries\n`);
+        return outcome;
+      }
       const clamp = clampRemaining
         ? tokenClampRetry(input, outcome.failure)
         : null;
@@ -287,7 +310,14 @@ function structuredOutputStripRetry(input: ChatRequestInput, failure: TransportF
   return null;
 }
 
-async function runChatRequestOnce(input: ChatRequestInput): Promise<ChatRequestOutcome> {
+/**
+ * The single-shot transport path: exactly one wire attempt, no 429/5xx
+ * backoff loop and no clamp/strip retries. #1073's confidence scorer uses
+ * this — its contract is one bounded attempt that degrades to `unscored`
+ * on any failure, never a retry — while every review lane keeps
+ * `runChatRequest`.
+ */
+export async function runChatRequestOnce(input: ChatRequestInput): Promise<ChatRequestOutcome> {
   const streaming = input.payload.body.stream === true;
   try {
     const result = await runHttpRequest({

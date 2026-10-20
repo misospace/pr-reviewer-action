@@ -31,6 +31,7 @@ import {
 // stripped from the deterministic message extraction below exactly as the
 // finding trailer is.
 import { FEEDBACK_AFFORDANCE, stripRejectionCarryover } from "../publish/inline-findings.js";
+import { stripFindingIdentityMarkers } from "../outcomes/identity.js";
 
 export const SCHEMA_VERSION = 1;
 export const MAX_THREADS_DEFAULT = 20;
@@ -102,7 +103,7 @@ function collapseWhitespace(text: string): string {
  * before the message text is extracted (the rendered body is unchanged:
  * humans still see them). */
 function stripFindingFooter(body: string): string {
-  return stripRejectionCarryover(body.replaceAll(FINDING_TRAILER, "").replaceAll(FEEDBACK_AFFORDANCE, ""));
+  return stripFindingIdentityMarkers(stripRejectionCarryover(body.replaceAll(FINDING_TRAILER, "").replaceAll(FEEDBACK_AFFORDANCE, "")));
 }
 
 function findingFields(body: string): [string, string, string | null] {
@@ -187,7 +188,7 @@ function truncateBody(body: string): string {
 }
 
 function renderComment(comment: ReviewThreadComment, supersededBefore?: string | null): string {
-  let body = truncateBody(cleanBody(comment.body.replaceAll(FINDING_TRAILER, "")));
+  let body = truncateBody(cleanBody(stripFindingIdentityMarkers(comment.body.replaceAll(FINDING_TRAILER, ""))));
   if (body === "") body = "(empty after redaction)";
   const stamp = comment.createdAt || "unknown time";
   const superseded = predatesCutoff(comment.createdAt, supersededBefore)

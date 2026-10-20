@@ -364,6 +364,340 @@ test("file store: record shape violations throw on load", () => {
   }
 });
 
+// ── fail-closed nested-job validation (#1130) ───────────────────────────
+
+/** A plain job object carrying every contract field, so a case can drop
+ * or corrupt exactly one of them. */
+function rawJob(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    jobId: "job-raw",
+    kind: "review",
+    trigger: "webhook",
+    reason: "synchronize",
+    platform: "github",
+    installationId: "12345",
+    repoFullName: "owner/repo",
+    prNumber: 7,
+    prId: 4242,
+    headSha: "aa11bb22cc33dd44ee55ff667788990001122334",
+    baseSha: "dd44ee55ff66aa77bb88cc99001122334455667788",
+    configFingerprint: "",
+    nonce: "",
+    adoptionEpoch: "",
+    eventReference: "",
+    fork: false,
+    deadlineAtMs: 0,
+    runId: "",
+    ...overrides,
+  };
+}
+
+/** The same job object without one field (a missing field is
+ * malformed). */
+function rawJobWithout(field: string): Record<string, unknown> {
+  const job = rawJob();
+  delete job[field];
+  return job;
+}
+
+/** The prKey a job implies — the same shape `prIdentityKey` builds. */
+function rawPrKey(job: Record<string, unknown>): string {
+  return `${String(job["platform"])}/${String(job["installationId"])}/${String(job["repoFullName"])}#${String(job["prNumber"])}/${String(job["kind"])}`;
+}
+
+/** A raw record around a raw job; the prKey agrees with the job unless
+ * a case overrides it. */
+function rawJobRecord(
+  job: Record<string, unknown>,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    job,
+    prKey: rawPrKey(job),
+    state: "queued",
+    enqueuedAtMs: 0,
+    readyAtMs: 0,
+    attempt: 0,
+    nextRetryAtMs: 0,
+    leaseOwner: "",
+    leaseExpiresAtMs: 0,
+    cancelRequested: false,
+    resultHeadSha: "",
+    failureReason: "",
+    supersededByJobId: "",
+    updatedAtMs: 0,
+    ...overrides,
+  };
+}
+
+/** A snapshot of raw (not yet validated) records. */
+function rawSnapshot(
+  records: readonly Record<string, unknown>[],
+): QueueSnapshot {
+  return Object.freeze({
+    version: 1,
+    records: Object.freeze(records as unknown as readonly JobRecord[]),
+  });
+}
+
+test("file store: a malformed nested job fails the load closed", () => {
+  const dir = makeDir("nested-job");
+  try {
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ["incomplete nested job", { job: { jobId: "broken" } }],
+      ["nested job missing a field", { job: rawJobWithout("baseSha") }],
+      ["nested job missing runId", { job: rawJobWithout("runId") }],
+      ["invalid kind", { job: rawJob({ kind: "reviewer" }) }],
+      ["invalid trigger", { job: rawJob({ trigger: "schedule" }) }],
+      ["invalid platform", { job: rawJob({ platform: "gitlab" }) }],
+      ["non-integer prNumber", { job: rawJob({ prNumber: 7.5 }) }],
+      ["non-positive prNumber", { job: rawJob({ prNumber: 0 }) }],
+      ["negative prId", { job: rawJob({ prId: -1 }) }],
+      ["non-boolean fork", { job: rawJob({ fork: "yes" }) }],
+      ["empty repoFullName", { job: rawJob({ repoFullName: "" }) }],
+      ["empty headSha on a review job", { job: rawJob({ headSha: "" }) }],
+      ["malformed configFingerprint", { job: rawJob({ configFingerprint: "not-hex" }) }],
+      ["malformed nonce", { job: rawJob({ nonce: "not a nonce" }) }],
+      ["malformed adoptionEpoch", { job: rawJob({ adoptionEpoch: "not an epoch" }) }],
+      ["non-empty eventReference on a review job", { job: rawJob({ eventReference: "17" }) }],
+      [
+        "follow_up without an eventReference",
+        { job: rawJob({ kind: "follow_up", headSha: "", eventReference: "" }) },
+      ],
+      [
+        "follow_up carrying a nonce",
+        {
+          job: rawJob({
+            kind: "follow_up",
+            headSha: "",
+            eventReference: "17",
+            nonce: "n1",
+          }),
+        },
+      ],
+      // Adversarial-boundary cases (#252 convention): feed the boundary
+      // token ITSELF — a control character, a padded value, an
+      // over-long value, an out-of-range id — not just benign input.
+      ["job id with a newline", { job: rawJob({ jobId: "job\nid" }) }],
+      ["job id with a DEL character", { job: rawJob({ jobId: "job\u007fid" }) }],
+      ["reason with a control character", { job: rawJob({ reason: "syn\u0007chronize" }) }],
+      ["repoFullName with a control character", { job: rawJob({ repoFullName: "owner/\u0007repo" }) }],
+      ["runId with surrounding whitespace", { job: rawJob({ runId: " padded " }) }],
+      ["runId longer than 128 characters", { job: rawJob({ runId: "r".repeat(129) }) }],
+      ["runId with a control character", { job: rawJob({ runId: "run\u0007id" }) }],
+      ["uppercase-hex headSha", { job: rawJob({ headSha: "AA11BB22CC33DD44EE55FF667788990001122334" }) }],
+      ["headSha of 65 hex characters", { job: rawJob({ headSha: "a".repeat(65) }) }],
+      ["negative deadlineAtMs", { job: rawJob({ deadlineAtMs: -1 }) }],
+      ["non-integer deadlineAtMs", { job: rawJob({ deadlineAtMs: 1.5 }) }],
+      ["installationId with a leading zero", { job: rawJob({ installationId: "012345" }) }],
+      [
+        "follow_up eventReference with a leading zero",
+        { job: rawJob({ kind: "follow_up", headSha: "", eventReference: "017" }) },
+      ],
+      [
+        "follow_up eventReference with 20 digits",
+        {
+          job: rawJob({
+            kind: "follow_up",
+            headSha: "",
+            eventReference: "12345678901234567890",
+          }),
+        },
+      ],
+      ["nonce of 65 characters", { job: rawJob({ nonce: "n".repeat(65) }) }],
+      ["adoptionEpoch of 65 characters", { job: rawJob({ adoptionEpoch: "e".repeat(65) }) }],
+      ["configFingerprint that is too short", { job: rawJob({ configFingerprint: "abc" }) }],
+      [
+        "prNumber that is not a safe integer",
+        { job: rawJob({ prNumber: Number.MAX_SAFE_INTEGER + 1 }) },
+      ],
+    ];
+    for (const [name, overrides] of cases) {
+      const file = writeRawFile(
+        dir,
+        `${name.replace(/\W+/g, "-")}.json`,
+        JSON.stringify({
+          version: 1,
+          records: [rawJobRecord(rawJob(), overrides)],
+        }),
+      );
+      assert.throws(
+        () => new JsonFileQueueStore(file).load(),
+        /malformed job record/,
+        name,
+      );
+    }
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("file store: a record whose prKey disagrees with its job fails the load closed", () => {
+  const dir = makeDir("prkey");
+  try {
+    const file = writeRawFile(
+      dir,
+      "queue.json",
+      JSON.stringify({
+        version: 1,
+        records: [
+          rawJobRecord(rawJob(), {
+            prKey: "github/12345/owner/repo#9/review",
+          }),
+        ],
+      }),
+    );
+    assert.throws(
+      () => new JsonFileQueueStore(file).load(),
+      /prKey/,
+      "prKey inconsistent with its job",
+    );
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("file store: two records with the same job id fail the load closed", () => {
+  const dir = makeDir("duplicate");
+  try {
+    const job = rawJob({ jobId: "job-dup" });
+    const file = writeRawFile(
+      dir,
+      "queue.json",
+      JSON.stringify({
+        version: 1,
+        records: [rawJobRecord(job), rawJobRecord(job)],
+      }),
+    );
+    assert.throws(
+      () => new JsonFileQueueStore(file).load(),
+      /duplicate/,
+      "duplicate generation id",
+    );
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("in-memory store: save fails closed on a malformed job, an inconsistent prKey, and duplicate ids", () => {
+  const store = new InMemoryQueueStore();
+  assert.throws(
+    () => store.save(rawSnapshot([rawJobRecord({ jobId: "broken" })])),
+    /malformed job record/,
+    "incomplete nested job",
+  );
+  assert.throws(
+    () =>
+      store.save(
+        rawSnapshot([
+          rawJobRecord(rawJob(), {
+            prKey: "github/12345/owner/repo#9/review",
+          }),
+        ]),
+      ),
+    /prKey/,
+    "prKey inconsistent with its job",
+  );
+  const duplicate = rawJob({ jobId: "job-dup" });
+  assert.throws(
+    () =>
+      store.save(
+        rawSnapshot([rawJobRecord(duplicate), rawJobRecord(duplicate)]),
+      ),
+    /duplicate/,
+    "duplicate generation id",
+  );
+});
+
+test("file store: sentinel-valued jobs and a follow_up job round-trip unchanged", () => {
+  const dir = makeDir("sentinels");
+  try {
+    const file = path.join(dir, "queue.json");
+    const sentinel = makeJob("job-sentinel", {
+      configFingerprint: "",
+      nonce: "",
+      adoptionEpoch: "",
+      eventReference: "",
+      baseSha: "",
+      deadlineAtMs: 0,
+      runId: "",
+      fork: false,
+      installationId: "",
+    });
+    const followUp = makeJob("job-followup", {
+      kind: "follow_up",
+      headSha: "",
+      eventReference: "17",
+    });
+    const original = makeSnapshot([
+      makeRecord("job-sentinel", { job: sentinel, prKey: prIdentityKey(sentinel) }),
+      makeRecord("job-followup", { job: followUp, prKey: prIdentityKey(followUp) }),
+    ]);
+
+    new JsonFileQueueStore(file).save(original);
+    const loaded = new JsonFileQueueStore(file).load();
+
+    assert.equal(loaded.records.length, 2);
+    assert.deepEqual(loaded.records[0], original.records[0]);
+    assert.deepEqual(loaded.records[1], original.records[1]);
+    assert.equal(loaded.records[0]!.job.installationId, "");
+    assert.equal(loaded.records[0]!.job.baseSha, "");
+    assert.equal(loaded.records[0]!.job.headSha, sentinel.headSha);
+    assert.equal(loaded.records[1]!.job.kind, "follow_up");
+    assert.equal(loaded.records[1]!.job.eventReference, "17");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("the empty snapshot's records array is frozen", () => {
+  const snapshot = emptyQueueSnapshot();
+  assert.ok(Object.isFrozen(snapshot));
+  assert.ok(
+    Object.isFrozen(snapshot.records),
+    "the shared empty snapshot's records array is frozen",
+  );
+  assert.throws(
+    () => {
+      (snapshot.records as JobRecord[]).push(makeRecord("job-x"));
+    },
+    TypeError,
+    "a frozen records array cannot be pushed into",
+  );
+  assert.equal(snapshot.records.length, 0, "the empty snapshot stays empty");
+});
+
+test("the loaded nested job is rebuilt and frozen", () => {
+  const store = new InMemoryQueueStore();
+  const job = Object.freeze({
+    ...makeJob("job-frozen"),
+    extraField: "dropped",
+  });
+  const record = makeRecord("job-frozen", {
+    job,
+    prKey: prIdentityKey(job),
+  });
+  store.save(makeSnapshot([record]));
+
+  const loaded = store.load();
+  const loadedJob = loaded.records[0]!.job;
+  assert.notEqual(loadedJob, job, "the nested job is rebuilt, not carried by reference");
+  assert.ok(Object.isFrozen(loadedJob), "the rebuilt job is frozen");
+  assert.throws(
+    () => {
+      (loadedJob as { jobId: string }).jobId = "mutated";
+    },
+    TypeError,
+    "a frozen job cannot be mutated",
+  );
+  assert.equal(loadedJob.jobId, "job-frozen", "the value is unchanged");
+  assert.equal(
+    "extraField" in loadedJob,
+    false,
+    "unknown extra job fields are dropped",
+  );
+});
+
 // ── reconcileRecoveredSnapshot ─────────────────────────────────────────
 
 const NOW = 1_000_000;
@@ -577,6 +911,39 @@ test("reconcile: an empty snapshot reconciles to an empty snapshot", () => {
   assert.deepEqual(result.snapshot, emptyQueueSnapshot());
   assert.deepEqual(result.requeued, []);
   assert.deepEqual(result.failed, []);
+});
+
+test("reconcile: a moved record carries a rebuilt, frozen job", () => {
+  const job = makeJob("j-moved");
+  const record = makeRecord("j-moved", { state: "running", job });
+  const result = reconcileRecoveredSnapshot(makeSnapshot([record]), NOW, 3);
+
+  const moved = result.snapshot.records[0]!;
+  assert.equal(moved.state, "queued", "the abandoned record is requeued");
+  assert.notEqual(moved.job, job, "the moved record carries a rebuilt job");
+  assert.ok(Object.isFrozen(moved.job), "the rebuilt job is frozen");
+  assert.deepEqual(moved.job, job, "the rebuilt job has the same content");
+});
+
+test("reconcile: a malformed or duplicate-laden snapshot is not adopted", () => {
+  const malformed = rawSnapshot([
+    rawJobRecord({ jobId: "broken" }),
+  ]) as QueueSnapshot;
+  assert.throws(
+    () => reconcileRecoveredSnapshot(malformed, NOW, 3),
+    /malformed job record/,
+    "malformed nested job",
+  );
+  const duplicate = rawJob({ jobId: "job-dup" });
+  const duplicated = rawSnapshot([
+    rawJobRecord(duplicate),
+    rawJobRecord(duplicate),
+  ]) as QueueSnapshot;
+  assert.throws(
+    () => reconcileRecoveredSnapshot(duplicated, NOW, 3),
+    /duplicate/,
+    "duplicate generation id",
+  );
 });
 
 // ── lease helpers ──────────────────────────────────────────────────────

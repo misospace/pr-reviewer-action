@@ -21,6 +21,7 @@ import {
   type JobPublisher,
   type JobRecord,
   type QueueSnapshot,
+  type QueueStore,
   type SchedulerOptions,
 } from "../src/queue/index.js";
 import type { ReviewJob } from "../src/jobs/types.js";
@@ -174,6 +175,57 @@ test("enqueue: duplicate webhooks for one jobId create exactly one record", asyn
   assert.deepEqual(controller.enqueue(job), { disposition: "duplicate", jobId: "job-a" });
   assert.equal(controller.snapshot().records.length, 1);
   assert.equal(controller.recordFor("job-a")!.state, "queued");
+});
+
+test("enqueue: a contract-violating job is refused before the queue is mutated", () => {
+  const { controller } = setup();
+  const before = controller.snapshot().records.length;
+  // A `review` job requires a non-empty head SHA: the durable store
+  // refuses such a job, so the controller must refuse it at intake
+  // rather than mutate the queue and fail later at save time.
+  assert.throws(
+    () => controller.enqueue(makeJob("job-bad", { headSha: "" })),
+    RangeError,
+    "a review job without a head SHA is not a valid ReviewJob",
+  );
+  assert.equal(controller.recordFor("job-bad"), null, "no record was created");
+  assert.equal(
+    controller.snapshot().records.length,
+    before,
+    "the queue is exactly as it was",
+  );
+});
+
+test("enqueue: a closed controller refuses intake with 'intake closed' whatever the payload", async () => {
+  const { controller } = setup();
+  await controller.shutdown(0);
+  assert.throws(
+    () => controller.enqueue(makeJob("job-bad", { headSha: "" })),
+    /intake closed/,
+    "the closed check precedes the deep validation",
+  );
+  assert.equal(controller.recordFor("job-bad"), null, "nothing was enqueued");
+});
+
+test("adopt: a snapshot with a duplicate generation id fails closed", () => {
+  // The shipped stores reject a duplicate id, but `adopt` is the seam
+  // where a custom `QueueStore` backend feeds records in: it must not
+  // silently replace the first record with the second.
+  const record = newJobRecord(makeJob("job-dup"), 0, 0);
+  const store: QueueStore = {
+    load: () => makeSnapshot([record, record]),
+    save: () => undefined,
+  };
+  const controller = new ReviewQueueController(
+    store,
+    baseOptions(new ControllableExecutor()),
+    () => 0,
+  );
+  assert.throws(
+    () => controller.recordFor("job-dup"),
+    /duplicate job id/,
+    "a duplicate generation id is refused, not silently replaced",
+  );
 });
 
 test("enqueue: B while A is queued supersedes A; only B dispatches", async () => {
@@ -728,6 +780,108 @@ test("failed-outcome backoff is capped by retryMaxMs", async () => {
     150,
     "200 capped to retryMaxMs",
   );
+});
+
+// ── superseded attempt failure never resurrects the cancelled generation ─
+
+const ABORT_FAILED: ExecutionOutcome = Object.freeze({
+  status: "failed",
+  resultHeadSha: "",
+  failureCategory: "abort",
+});
+
+/** Issue #1141 (#731 queue): same-millisecond replacement with a
+ * lexicographically reversed jobId must not lose the dispatch race to
+ * a failed/rejected superseded attempt. Both orderings are exercised:
+ * `a-old`/`z-new` (replacement sorts later) and `z-old`/`a-new`
+ * (replacement sorts earlier). */
+for (const [oldId, newId] of [["a-old", "z-new"], ["z-old", "a-new"]] as const) {
+  test(`failed superseded attempt is retired, not requeued: ${oldId} superseded by ${newId} dispatches next (#1141)`, async () => {
+    const { executor, controller } = setup();
+    controller.enqueue(makeJob(oldId));
+    await controller.tick();
+    assert.equal(executor.invocations.length, 1);
+    assert.equal(executor.invocations[0]!.record.job.jobId, oldId);
+
+    // Same millisecond (fixed clock): the replacement supersedes the
+    // running generation and stamps the supersession attribution.
+    assert.equal(
+      controller.enqueue(makeJob(newId)).disposition,
+      "superseded-running",
+    );
+
+    // The aborted executor settles with a failure outcome.
+    executor.invocations[0]!.settle(ABORT_FAILED);
+    await flush();
+
+    const old = controller.recordFor(oldId)!;
+    assert.equal(old.state, "superseded", "cancelled generation is retired");
+    assert.equal(old.failureReason, "superseded-by-newer-head");
+    assert.equal(old.supersededByJobId, newId);
+
+    // The next tick starts the replacement, never the cancelled
+    // generation.
+    await controller.tick();
+    assert.equal(executor.invocations.length, 2);
+    assert.equal(executor.invocations[1]!.record.job.jobId, newId);
+    assert.equal(controller.recordFor(oldId)!.state, "superseded");
+  });
+
+  test(`rejected superseded attempt is retired, not requeued: ${oldId} superseded by ${newId} dispatches next (#1141)`, async () => {
+    const { executor, controller } = setup();
+    controller.enqueue(makeJob(oldId));
+    await controller.tick();
+    assert.equal(executor.invocations.length, 1);
+
+    assert.equal(
+      controller.enqueue(makeJob(newId)).disposition,
+      "superseded-running",
+    );
+
+    // The aborted executor rejects instead of settling.
+    executor.invocations[0]!.fail(new Error("abort"));
+    await flush();
+
+    const old = controller.recordFor(oldId)!;
+    assert.equal(old.state, "superseded", "cancelled generation is retired");
+    assert.equal(old.failureReason, "superseded-by-newer-head");
+    assert.equal(old.supersededByJobId, newId);
+
+    await controller.tick();
+    assert.equal(executor.invocations.length, 2);
+    assert.equal(executor.invocations[1]!.record.job.jobId, newId);
+    assert.equal(controller.recordFor(oldId)!.state, "superseded");
+  });
+}
+
+// Pre-fix (issue #1141), with no backoff the failed zombie re-enters the
+// candidate list in the same tick; because jobIds are hashes, the lexical
+// tie-break in `findSupersedingSibling` then makes the lexically smaller
+// replacement look like the stale generation, and the obsolete
+// `z-old` dispatch wins. With retryBaseMs 100 the zombie is not yet a
+// candidate, so the tests above catch the regression on state alone —
+// this variant observes the dispatch race directly.
+test("failed superseded attempt with no backoff: replacement dispatches, never the cancelled generation (#1141)", async () => {
+  const { executor, controller } = setup({ retryBaseMs: 0, retryMaxMs: 0 });
+  controller.enqueue(makeJob("z-old"));
+  await controller.tick();
+  assert.equal(executor.invocations.length, 1);
+
+  assert.equal(
+    controller.enqueue(makeJob("a-new")).disposition,
+    "superseded-running",
+  );
+
+  executor.invocations[0]!.settle(ABORT_FAILED);
+  await flush();
+  const old = controller.recordFor("z-old")!;
+  assert.equal(old.state, "superseded");
+  assert.equal(old.supersededByJobId, "a-new");
+
+  await controller.tick();
+  assert.equal(executor.invocations.length, 2);
+  assert.equal(executor.invocations[1]!.record.job.jobId, "a-new");
+  assert.equal(controller.recordFor("z-old")!.state, "superseded");
 });
 
 // ── heartbeat ────────────────────────────────────────────────────────────

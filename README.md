@@ -78,6 +78,30 @@ Role overrides share the profile transport and are ignored with a warning for `D
 
 **Requirements:** it is a JavaScript action (`runs.using: node24`), so GitHub-hosted runners need nothing installed; the runner provides Node. The repository under review must be checked out (`fetch-depth: 0` gives the history context). `checks: read` lets the review wait for CI; without it the CI evidence is skipped. On Forgejo, use runner 9 or newer with a job image that has Node 22+ and `git`.
 
+### Independent confidence scorer (opt-in)
+
+Set `ai-confidence-model` and the review runs one extra, bounded model call that grades the finished review 0–5 with a risk band. Default off: without the model the scorer costs nothing and nothing confidence-related appears anywhere.
+
+| Input | Purpose |
+|---|---|
+| `ai-confidence-model` | Enable the scorer; blank (default) keeps every confidence surface off. |
+| `ai-confidence-base-url` | Optional scorer endpoint; blank inherits the primary endpoint. |
+| `ai-confidence-api-format` | `openai` (default) or `anthropic`; blank inherits the primary format. |
+| `ai-confidence-api-key` | Scorer endpoint key. A distinct endpoint never inherits the primary key. |
+| `ai-confidence-timeout-sec` | Wall-clock budget for the scorer call, default 120. |
+| `ai-confidence-reasoning-effort` | Optional effort token; blank omits the field entirely. |
+| `ai-confidence-enable-for-forks` | Operator-only; default `false` keeps the scorer off cross-repository (fork) PRs, because the prompt carries the review's own privileged output to a separate endpoint under a privileged credential. |
+
+**Local models:** point `ai-confidence-base-url` at your server's OpenAI-compatible URL (e.g. `http://localhost:11434/v1` for ollama) with `ai-confidence-api-format: openai`; Anthropic-compatible local proxies take `ai-confidence-api-format: anthropic`. A keyless scorer endpoint may only be loopback (`localhost`, `127.0.0.1`, `::1`) — any other distinct endpoint must set `ai-confidence-api-key`, because the primary lane's key never rides a different URL.
+
+**Cost ceilings:** exactly one extra model call per published review — bounded (1,024 completion tokens, no tools, no corpus), one wire attempt, no retries. The call is capped by `ai-confidence-timeout-sec` (default 120s). Any failure — timeout, HTTP 429/5xx, malformed answer — degrades to `confidence-status: unscored`. The review itself is unchanged — same verdict, findings, required checks, and approval — but the published body gains the additive advisory `Independent confidence` section and the review marker gains the confidence keys.
+
+**What a score means:** advisory confidence in *this review* (how well it covered and supported its own conclusions) — not a probability the code is correct, and no verdict or approval authority. The score never changes the verdict, findings, or required checks. Deterministic caps outrank the model: a blocker finding caps the score at 2, a major finding or partial review coverage at 3.
+
+**Independence:** the scorer resolving to the same endpoint and model that wrote the review is correlated self-grading, not independent evidence — the action warns about it. Point `ai-confidence-base-url` at a different backend for a genuine second opinion.
+
+**Where results appear:** the five `confidence-*` step outputs, an `Independent confidence` row in the step summary, an advisory section in the published review, the additive confidence keys in the review marker, and the `confidence-score.json` / `confidence-request.json` / `confidence-response.json` run artifacts. Disabled runs keep all of it absent.
+
 ## ⚙️ How it works
 
 ```mermaid
@@ -112,6 +136,35 @@ The action works on **GitHub** and **Forgejo** (1.4.x), with **Tangled** resolva
 Forgejo Authorized Integrations can reuse managed sticky comments with repository and issue permissions; `read:user` is not required. The action matches the integration owner's ID from its Forgejo-generated audience against comment author IDs. If a prior managed comment has no usable author ID and ownership cannot be established, publication fails closed.
 
 > **Note:** On Forgejo, features requiring GitHub's GraphQL API (review minimization) are skipped with a clear log line. CI auto-discovery requires Forgejo v16.0+ (the first release with the run-jobs API) and excludes a pending status only when that API proves this is a single-job run. If the job has an `html_url`, its path must exactly match the status `target_url` path on the runner's origin. Forgejo v16 jobs omit `html_url`; in that case the job's `run_id` must match the queried run, and the status must target a job page for the runner's repository and run number. `FORGEJO_RUN_NUMBER`/`GITHUB_RUN_NUMBER` identify candidate status URLs; `FORGEJO_RUN_ID` (or `GITHUB_RUN_ID` fallback) is used only to query the jobs API. Multi-job, mismatched, and unavailable cases leave statuses visible; older Forgejo instances warn immediately and fall back to bounded waiting, so set `CI_STATUS_CONTEXT` to avoid self-deadlock; a whitespace-only value is treated as unset and enables auto-discovery. Multi-job reviewer workflows also need `CI_STATUS_CONTEXT`. The core review pipeline and all REST-based features work fully.
+
+### 🛑 Terminal provider failures (quota exhausted, retired model)
+
+A provider error body can state a **permanent** condition: the account's quota is spent, billing is hard-limited, or the model is retired/deprecated/removed. No later attempt fixes any of them, so both retry layers consult one shared classifier and stop immediately, letting the run reach the configured fallback (`ai-fallback-model`) in seconds instead of after minutes of silent retries.
+
+Allowlisted as terminal — nothing else is:
+
+| Reason | Recognized evidence |
+|---|---|
+| `quota_exhausted` | Structured codes `insufficient_quota`, `quota_exceeded`, `usage_limit_reached`, `billing_hard_limit_reached`, `billing_not_active`, `credit_exhausted`, `plan_exhausted`, `token_plan_usage_limit_reached`; prose such as `insufficient quota`, `insufficient balance`, `insufficient credit`, `you exceeded your current quota`, `billing hard limit has been reached`, `token plan usage limit reached`, `upgrade your token plan or purchase credits`. LiteLLM/MiniMax code `2056` is never decisive on its own — a bare `2056` in any body is just an unrelated number — so the token-plan sentences beside it are what count. |
+| `model_unavailable` | Structured codes `model_not_found`, `model_deprecated`, `model_retired`, `model_unavailable`, `model_removed`, `deprecated_model`, `unknown_model`, `DeploymentNotFound`; prose such as `has been retired`, `has been deprecated`, `is deprecated and will be removed`, `model not found`, `does not exist or you do not have access`, `no access to this model`, `unknown model`. |
+
+Deliberately **not** terminal (these keep the configured retry budget): `rate limit`, `too many requests`, `resource_exhausted`, RPM/TPM phrasing, `try again later`, `retry after/later/in`, `model is loading`, `model is busy`, `model is temporarily unavailable`, `server overloaded`, unknown provider bodies, and any phrase whose own text says the condition is temporary.
+
+Two deliberate boundaries worth knowing:
+
+- **Prose evidence is 4xx-only.** A 5xx body is server-composed text that routinely echoes request content back, so allowing prose to end a 5xx retry budget would let request content decide it. Structured codes still count at any status — a provider has to *construct* `insufficient_quota` to send it.
+- **A 4xx body that quotes the review corpus and happens to contain an allowlisted phrase is accepted** as the provider's own claim. Rejecting an echo structurally would mean a leading-sentence or delimiter heuristic, which cannot be told apart from a real provider message without risking the false negative this feature exists to prevent. The consequence is bounded: an immediate, truthfully-logged fallback (availability recovery) — never a verdict change, a gate bypass, or a fabricated outcome.
+
+Telling the two apart in the log — a terminal stop is named; a transient retry is just slow:
+
+```text
+terminal provider failure: quota_exhausted (litellm_minimax_token_plan) HTTP 429; bypassing same-request retries
+Primary: transport failures exhausted (HTTP 429: …) [terminal quota_exhausted (litellm_minimax_token_plan) HTTP 429; bypassing retries]
+::error::Primary: model endpoint returned a non-retryable HTTP status [terminal=quota_exhausted]; failing over without retrying (…)
+Primary: terminal=quota_exhausted; bypassing retries; trying fallback: <model> @ <base-url> (openai)
+```
+
+No Action input controls this: the signatures are a fixed allowlist, and the retry budgets (`ai-primary-retries`, `ai-primary-retry-delay-sec`, …) still govern every failure the classifier leaves alone. Specialist lanes latch too — once an endpoint/model/format/credential lane answers terminally, later calls on that same lane short-circuit without a wire request (`lane terminally unavailable (<reason>)`). The credential is part of the lane key (as a truncated digest, never the key), because quota exhaustion is an account condition: a differently keyed lane against the same endpoint has its own budget and is not latched.
 
 ## 📚 Documentation
 
@@ -165,9 +218,27 @@ Stop reading the removed incremental outputs (`effective_review_scope`, `previou
 
 ## 🧪 Development
 
+A clean checkout is one noninteractive command:
+
 ```bash
-npm ci && npm run typecheck && npm test   # the shipped v3 runtime, end-to-end against mock platform and model servers
-pytest tests/ -q                           # Python auxiliary tooling and workflow gates — not the shipped action
+scripts/bootstrap.sh
+```
+
+It verifies (and if needed installs) the pinned [mise](https://mise.jdx.dev) launcher, installs the locked toolchain, and runs `npm ci`. Everything is user-scoped and digest-verified — no privileged installs, no global config or git-hook changes. It runs no tests, formatters or generators, and it is idempotent and convergent: a re-run re-checks the prerequisites and re-runs `npm ci`, so it is safe to repeat. It fails with a clear message if `pgrep`/`pkill` (procps) are missing, because process-tree cleanup and gate preflight refuse to run without them.
+
+The Node version pin lives in [`.mise/config.toml`](.mise/config.toml), where it tracks the shipped `node24` action runtime and CI's `node-version: '24'`; [`.mise/mise.lock`](.mise/mise.lock) pins its download checksums. The launcher is installed into a user-scoped directory that is often not on `PATH`, so bootstrap prints the exact `export PATH=…` line to run (and to add to your shell rc). Reuse that environment with `mise exec -- <command>`, or run:
+
+```bash
+mise run check   # fast static validation (typecheck)
+mise run test    # the shipped v3 runtime, end-to-end against mock platform and model servers
+```
+
+`npm ci && npm run typecheck && npm test` stays authoritative for CI and for anyone without mise (as does `npm run build` for the release bundle — `dist/` is not committed).
+
+The Python suites are auxiliary tooling, not the shipped action, and their interpreter is not part of the bootstrap contract. Run them on the same 3.14 interpreter CI pins — `setup-python` installs `requirements.txt` into the user-scoped mise directory on demand, and `test-python` runs the suites:
+
+```bash
+mise run setup-python && mise run test-python
 ```
 
 Contributor and agent docs (code map, architecture, eval runbooks) start at [`AGENTS.md`](AGENTS.md); evaluation is in [`docs/evals.md`](docs/evals.md).

@@ -37,6 +37,8 @@ export const RESERVED_MARKER_PATTERNS: readonly RegExp[] = [
   // can never carry it into a published body (digest forgery is
   // withhold-only, but reserved is reserved).
   /<!--\s*pr-reviewer:rejected-prescriptions\s*:[^>]*-->/gi,
+  // #1027: finding identity is action-owned state and model markdown cannot forge it.
+  /<!--\s*pr-reviewer:finding-id\s*:[^>]*-->/gi,
 ];
 
 /**
@@ -419,6 +421,12 @@ export interface RunMarkerContext {
   actionVersion?: string;
   /** #978: true when the final verdict is eligible for the gate bypass. */
   degradedGateBypass?: boolean;
+  /** #1073: the confidence scorer's status ("scored" | "unscored"), only
+   * when the scorer ran; omitted (empty) for disabled/skipped runs so the
+   * pre-#1073 marker bytes are preserved. */
+  confidenceStatus?: string;
+  /** #1073: the scorer's integer 0..5, only when status is "scored". */
+  confidenceScore?: number;
 }
 
 /**
@@ -438,6 +446,21 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
   const covStop = context.coverageStopReason ?? "";
   const incompleteReason = context.incompleteReason ?? "";
   const av = context.actionVersion ?? "";
+  // #1073: null — never "" — when the scorer did not run. `??` would leave an
+  // empty string in place, which made the disabled-mode byte-identity depend on
+  // buildMetadataMarker's empty-string clause rather than on this call site.
+  // Deciding "omitted" here keeps the guarantee local to the confidence code:
+  // a disabled run serializes byte-identically to the pre-#1073 marker.
+  const confidenceStatus = context.confidenceStatus === "scored" || context.confidenceStatus === "unscored"
+    ? context.confidenceStatus
+    : null;
+  const confidenceScore = confidenceStatus === "scored"
+    && typeof context.confidenceScore === "number"
+    && Number.isInteger(context.confidenceScore)
+    && context.confidenceScore >= 0
+    && context.confidenceScore <= 5
+    ? context.confidenceScore
+    : null;
   let cacheHitRatio: number | null = null;
   if (chr !== "" && chr !== "-") {
     const parsed = Number(chr);
@@ -468,6 +491,11 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
     tool_stop_reason: context.toolStopReason ?? null,
     action_version: av === "" ? null : av,
     degradedGateBypass: context.degradedGateBypass === true ? true : null,
+    // #1073: the scorer's keys, appended last under the additive-key
+    // discipline — present only when the scorer ran, so disabled/skipped
+    // runs serialize byte-identically to the pre-#1073 marker.
+confidence_status: confidenceStatus,
+confidence_score: confidenceScore,
   });
 }
 

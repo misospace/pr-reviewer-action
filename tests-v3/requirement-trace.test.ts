@@ -8,10 +8,14 @@ import type { ReviewArtifact } from "../src/enforcement/artifact.js";
 import { applyRequirementTraceFragment, workspaceAt } from "../src/prompt/index.js";
 import { traceChangedText } from "../src/run/review.js";
 import { RunWorkspace } from "../src/run/workspace.js";
-import { applyStrictVerdictPolicy } from "../src/enforcement/verdict-policy.js";
+import { applyStrictVerdictPolicy, relaxCiOnlyVerdict, relaxVerificationOnlyVerdict } from "../src/enforcement/verdict-policy.js";
 import { isValidOwnerPattern, parseRequirementOwners, resolveRequirementOwners } from "../src/config/requirement-owners.js";
 import {
+  applyConfirmedUnmetEscalation,
   applyRequirementTraceEnforcement,
+  confirmedUnmetRows,
+  MAX_CONFIRMED_UNMET_FINDINGS,
+  MAX_RENDERED_ID_CHARS,
   MAX_DECLARED_GROUPS_PER_RULE,
   MAX_DISTRIBUTED_HINTS,
   MAX_TRACE_REPAIR_SUMMARY_ERROR_CHARS,
@@ -4043,4 +4047,312 @@ test("#1095: the #543 ledger shape yields no synthesized majors and cannot force
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
+});
+
+// ── #1145: confirmed-unmet → request_changes escalation ───────────────────
+
+function traceWithRows(rows: RequirementTraceArtifact["rows"], incomplete = true): RequirementTraceArtifact {
+  return { version: 1, rows, incomplete, errors: [] };
+}
+
+test("#1145: confirmedUnmetRows selects exactly the refutable-unverifiable rows", () => {
+  const rows = [
+    {
+      requirement_id: "req-854", disposition: "unverifiable", proof: "runtime_behavior",
+      enforcement: [{ file: "src/a.ts", line: 1 }], test: [], reason: "x",
+      notes: ["enforcement-location-copies-without-comparing"],
+    },
+    {
+      requirement_id: "req-985", disposition: "unverifiable", proof: "structural_state",
+      enforcement: [{ file: ".dockerignore", line: 1 }], test: [], reason: "x",
+      notes: ["structural-proof-unconfirmed"],
+    },
+    // Citation-gap rows: the citation failed validation — a different
+    // location may still prove it, so they stay repairable, never escalated.
+    {
+      requirement_id: "req-citation", disposition: "unverifiable", proof: "runtime_behavior",
+      enforcement: [], test: [], reason: "x",
+      notes: ["downgraded-no-valid-enforcement-location"],
+    },
+    {
+      requirement_id: "req-missing", disposition: "unverifiable", proof: "runtime_behavior",
+      enforcement: [], test: [], reason: "x",
+      notes: ["not-traced-by-reviewer"],
+    },
+    // Settled rows never escalate, even if a refutation note were attached.
+    {
+      requirement_id: "req-met", disposition: "met", proof: "runtime_behavior",
+      enforcement: [{ file: "src/a.ts", line: 1 }], test: [], reason: "x",
+      notes: ["enforcement-location-copies-without-comparing"],
+    },
+    // A model-claimed unmet is a known gap the reviewer substantiates
+    // (#1095) — the validator cannot confirm or refute it.
+    {
+      requirement_id: "req-unmet", disposition: "unmet", proof: "runtime_behavior",
+      enforcement: [], test: [], reason: "x",
+      notes: ["structural-proof-unconfirmed"],
+    },
+    {
+      requirement_id: "req-pending", disposition: "pending", proof: "external_state",
+      enforcement: [], test: [], reason: "x",
+      notes: ["external-state-ci-pending"],
+    },
+  ];
+  const selected = confirmedUnmetRows(traceWithRows(rows));
+  // Only the #985 structural refutation is a confirmed-unmet row: the
+  // validator re-derived the requirement's truth from the repository state
+  // at head, so nothing the reviewer reads can un-prove it.
+  assert.deepEqual(selected.map((row) => row.requirement_id), ["req-985"]);
+  // The #854 copies-without-comparing row is NOT selected: its predicate
+  // searched only the cited locations, so it cannot prove the requirement is
+  // unenforced elsewhere — it stays a repairable coverage gap.
+  assert.ok(!selected.some((row) => row.requirement_id === "req-854"), "the copies-only row is repairable, not a refutation");
+});
+
+test("#1145: a copies-without-comparing trace (the real predicate lives elsewhere) does NOT escalate — no blocker, no verdict flip", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The reviewer's regression shape: the REAL enforcement predicate exists
+    // in another implementation location (a genuine comparison of the source
+    // SHA against the resolved pull), but the reviewer's claim cites ONLY the
+    // copy/assignment line. The deterministic predicate searches the cited
+    // locations, so it cannot prove the requirement is unenforced anywhere
+    // else — the row is a repairable coverage gap, never a refutation.
+    writeFile(workspace, "src/context-resolution.ts", [
+      "export function resolveContext(ctx) {",
+      "  const record = lookupPull(ctx);",
+      "  return {",
+      "    repo: record.repo,",
+      "    sourceSha: ctx.sourceSha,",
+      "    targetBranch: ctx.targetBranch,",
+      "  };",
+      "}",
+    ]);
+    writeFile(workspace, "src/other-implementation.ts", [
+      "export function assertResolvedPull(ctx, record) {",
+      "  if (record.head !== ctx.sourceSha) {",
+      "    throw new Error('source SHA mismatch');",
+      "  }",
+      "}",
+    ]);
+    const ledger = ledgerWith([{ id: "req-1", text: "Context resolution MUST compare source SHA against the resolved pull.", kind: "acceptance" }]);
+    // The "elsewhere" fixture is load-bearing: citing the real predicate
+    // location satisfies the requirement, so the downgrade below is a
+    // citation-scope artifact (the predicate only searched the cited
+    // locations) and not a real gap. Without this assertion the fixture
+    // would be inert — the test would pass with the file deleted.
+    const citedElsewhere = validateRequirementTrace([{
+      requirement_id: "req-1",
+      disposition: "met",
+      enforcement: [{ file: "src/other-implementation.ts", line: 2 }],
+      test: [{ file: "tests/real.test.ts", line: 1 }],
+      reason: "the comparison lives in the other implementation location",
+    }], ledger, workspace);
+    assert.equal(citedElsewhere.rows[0]?.disposition, "met", JSON.stringify(citedElsewhere.rows));
+    assert.ok(!(citedElsewhere.rows[0]?.notes ?? []).includes("enforcement-location-copies-without-comparing"), JSON.stringify(citedElsewhere.rows));
+    const art = artifact({
+      verdict: "approve",
+      verdict_source: "model",
+      requirement_coverage: [{
+        requirement_id: "req-1",
+        disposition: "met",
+        enforcement: [{ file: "src/context-resolution.ts", line: 5 }],
+        test: [{ file: "tests/real.test.ts", line: 1 }],
+        reason: "sourceSha is present on the resolved context object",
+      }],
+    });
+    const traceResult = applyRequirementTraceEnforcement(art, { enabled: true, ledger, workspace });
+    assert.equal(traceResult.applied, true);
+    // The row is still downgraded and the trace is still incomplete — the
+    // #854 protection is untouched.
+    assert.equal(traceResult.trace.rows[0]?.disposition, "unverifiable");
+    assert.ok(traceResult.trace.rows[0]?.notes.includes("enforcement-location-copies-without-comparing"), JSON.stringify(traceResult.trace.rows));
+    assert.equal(traceResult.trace.incomplete, true);
+    assert.equal(art.required_checks, "incomplete");
+    // ...but the copies-without-comparing note is NOT a confirmed-unmet
+    // refutation, so nothing is synthesized and the verdict stands.
+    const escalated = applyConfirmedUnmetEscalation(art, traceResult.trace, new Map(ledgerRequirementsById(ledger, ["req-1"]).map((e) => [e.id, e.text] as const)));
+    assert.equal(escalated, 0);
+    assert.deepEqual(art.findings, []);
+    assert.equal(art.verdict, "approve");
+    assert.equal(art.verdict_source, "model");
+    assert.ok(!art.review_markdown.includes("confirmed unmet by deterministic repository-state proof"), art.review_markdown);
+    // #811 strict mapping sees no synthesized blocker and no open blocker:
+    // the run is not a clean approval (coverage is partial), but the model's
+    // approve is not flipped into a blocking request_changes.
+    const outcome = applyStrictVerdictPolicy(art as unknown as Parameters<typeof applyStrictVerdictPolicy>[0], { modelVerdict: "approve", forced: false });
+    assert.equal(outcome.verdict, "approve");
+    assert.equal(outcome.reviewResult, "partial");
+    assert.equal(outcome.overridden, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1145: the surviving #985 structural refutation still escalates an approve to request_changes with a synthesized blocker finding", () => {
+  const workspace = makeWorkspace();
+  try {
+    // #985: the requirement's truth is a property of the checkout, so the
+    // validator re-derives it from the cited file at head — the state the
+    // requirement demands is NOT the state at head. That IS deterministic
+    // proof of absence, so the row escalates.
+    writeFile(workspace, ".dockerignore", ["node_modules/", "assets/"]);
+    const ledger = ledgerWith([{ id: "req-985", text: "`.dockerignore` must not exclude `assets/`", kind: "acceptance" }]);
+    const art = artifact({
+      verdict: "approve",
+      verdict_source: "model",
+      requirement_coverage: [{
+        requirement_id: "req-985",
+        disposition: "met",
+        enforcement: [{ file: ".dockerignore", line: 1 }],
+        test: [],
+        reason: "assets/ should not be excluded",
+      }],
+    });
+    const traceResult = applyRequirementTraceEnforcement(art, { enabled: true, ledger, workspace });
+    assert.equal(traceResult.applied, true);
+    assert.equal(traceResult.trace.rows[0]?.disposition, "unverifiable");
+    assert.ok(traceResult.trace.rows[0]?.notes.includes("structural-proof-unconfirmed"), JSON.stringify(traceResult.trace.rows));
+    const escalated = applyConfirmedUnmetEscalation(art, traceResult.trace, new Map(ledgerRequirementsById(ledger, ["req-985"]).map((e) => [e.id, e.text] as const)));
+    assert.equal(escalated, 1);
+    // The synthesized finding: blocker, requirements category, at the cited
+    // location, stating the deterministic refutation — never the model-claim
+    // wording "requirement not enforced: ".
+    assert.equal(art.findings.length, 1);
+    const finding = art.findings[0]!;
+    assert.equal(finding.severity, "blocker");
+    assert.equal(finding.category, "requirements");
+    assert.equal(finding.file, ".dockerignore");
+    assert.equal(finding.line, 1);
+    assert.ok(finding.message.startsWith("Confirmed-unmet requirement req-985:"), finding.message);
+    assert.ok(finding.message.includes("the cited repository state at head does not satisfy it"), finding.message);
+    assert.ok(!finding.message.includes("copies the value without comparing it"), finding.message);
+    assert.ok(!finding.message.includes("requirement not enforced:"), "must not borrow the model-claim wording");
+    assert.ok(finding.message.includes("`.dockerignore` must not exclude `assets/`"), finding.message);
+    // The verdict flip with deterministic provenance, plus the one-line
+    // markdown disclosure.
+    assert.equal(art.verdict, "request_changes");
+    assert.equal(art.verdict_source, "enforcement");
+    assert.ok(art.review_markdown.includes("_1 in-scope requirement(s) are confirmed unmet by deterministic repository-state proof; the verdict is escalated to request changes._"));
+    // #811 strict mapping agrees through the same synthesized finding.
+    const outcome = applyStrictVerdictPolicy(art as unknown as Parameters<typeof applyStrictVerdictPolicy>[0], { modelVerdict: "approve", forced: false });
+    assert.equal(outcome.verdict, "request_changes");
+    assert.equal(outcome.reviewResult, "issues");
+    assert.equal(outcome.overridden, true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1145: the escalation is a no-op when no row is refuted (the #1095 boundary stays intact)", () => {
+  const workspace = makeWorkspace();
+  try {
+    // Untraced (coverage gap) and model-claimed unmet (known gap): neither is
+    // a refutation, so the escalate pass must not synthesize anything.
+    const trace = traceWithRows([
+      {
+        requirement_id: "req-1", disposition: "unverifiable", proof: "runtime_behavior",
+        enforcement: [], test: [], reason: "x",
+        notes: ["not-traced-by-reviewer"],
+      },
+      {
+        requirement_id: "req-2", disposition: "unmet", proof: "runtime_behavior",
+        enforcement: [], test: [], reason: "no enforcement found",
+        notes: [],
+      },
+    ]);
+    const art = artifact({ verdict: "approve", verdict_source: "model" });
+    const escalated = applyConfirmedUnmetEscalation(art, trace, new Map([["req-1", "text"], ["req-2", "text"]]));
+    assert.equal(escalated, 0);
+    assert.deepEqual(art.findings, []);
+    assert.equal(art.verdict, "approve");
+    assert.equal(art.verdict_source, "model");
+    assert.equal(art.review_markdown, "review");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1145: a model that already returned request_changes is not re-labeled, but still gains the finding and disclosure", () => {
+  const trace = traceWithRows([
+    {
+      requirement_id: "req-1", disposition: "unverifiable", proof: "structural_state",
+      enforcement: [{ file: ".dockerignore", line: 1 }], test: [], reason: "x",
+      notes: ["structural-proof-unconfirmed"],
+    },
+  ]);
+  const art = artifact({ verdict: "request_changes", verdict_source: "findings" });
+  const escalated = applyConfirmedUnmetEscalation(art, trace, new Map([["req-1", "`.dockerignore` must not exclude `assets/`"]]));
+  assert.equal(escalated, 1);
+  assert.equal(art.verdict, "request_changes");
+  assert.equal(art.verdict_source, "findings", "the existing provenance label stands");
+  assert.equal(art.findings.length, 1);
+  assert.ok(art.findings[0]!.message.includes("the cited repository state at head does not satisfy it"));
+  assert.ok(art.review_markdown.includes("confirmed unmet by deterministic repository-state proof"));
+});
+
+test("#1145: beyond MAX_CONFIRMED_UNMET_FINDINGS refuted rows the note carries the total", () => {
+  const rows = Array.from({ length: MAX_CONFIRMED_UNMET_FINDINGS + 2 }, (_, i) => ({
+    requirement_id: `req-${i}`,
+    disposition: "unverifiable",
+    proof: "runtime_behavior",
+    enforcement: [{ file: "src/a.ts", line: i + 1 }],
+    test: [],
+    reason: "x",
+    notes: ["structural-proof-unconfirmed"],
+  }));
+  const trace = traceWithRows(rows);
+  const texts = new Map(rows.map((row) => [row.requirement_id, `Requirement ${row.requirement_id} must hold.`] as const));
+  const art = artifact({ verdict: "approve", verdict_source: "model" });
+  const escalated = applyConfirmedUnmetEscalation(art, trace, texts);
+  assert.equal(escalated, MAX_CONFIRMED_UNMET_FINDINGS + 2);
+  assert.equal(art.findings.length, MAX_CONFIRMED_UNMET_FINDINGS);
+  assert.equal(art.verdict, "request_changes");
+  assert.ok(art.review_markdown.includes(`${MAX_CONFIRMED_UNMET_FINDINGS + 2} in-scope requirement(s) are confirmed unmet`));
+});
+
+test("#1145: hostile id/text cannot forge artifact structure through the synthesized finding", () => {
+  // The adversarial-boundary case (#252): ids and ledger texts are
+  // untrusted — control chars stripped, ids backtick-stripped and capped,
+  // texts capped — before they reach the finding message.
+  const maliciousId = "req\x00evil\n`forged`\n".repeat(10);
+  const rows = [{
+    requirement_id: maliciousId,
+    disposition: "unverifiable",
+    proof: "structural_state",
+    enforcement: [],
+    test: [],
+    reason: "x",
+    notes: ["structural-proof-unconfirmed"],
+  }];
+  const trace = traceWithRows(rows);
+  const art = artifact({ verdict: "approve", verdict_source: "model" });
+  applyConfirmedUnmetEscalation(art, trace, new Map([[maliciousId, "y".repeat(500)]]));
+  assert.equal(art.findings.length, 1);
+  const message = art.findings[0]!.message;
+  assert.ok(!/[\x00-\x1f\x7f]/.test(message), "no raw control characters");
+  assert.ok(!message.includes("`"), "backticks stripped from the id");
+  const sanitizedId = maliciousId.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_RENDERED_ID_CHARS);
+  assert.ok(message.startsWith(`Confirmed-unmet requirement ${sanitizedId}: `), message);
+  assert.ok(message.length < 500, "ledger text is length-capped");
+  assert.equal(art.findings[0]!.file, null, "no enforcement location → no location");
+  assert.equal(art.findings[0]!.line, null);
+});
+
+test("#1145: the escalation is stable against the #976/#977 relaxers (they refuse to re-approve)", () => {
+  // The non-strict branch order: the escalation runs, then the relaxers.
+  // `canRelaxForCiOnly` refuses once `requirement_trace_incomplete` is set,
+  // and the synthesized blocker is not a relaxable category — neither path
+  // may flip the verdict back to approve.
+  const art = artifact({
+    verdict: "request_changes",
+    verdict_source: "enforcement",
+    requirement_trace_incomplete: true,
+    findings: [
+      { severity: "info", category: "ci", message: "ci only", ci_capped: true },
+    ],
+  });
+  assert.equal(relaxCiOnlyVerdict(art, { forced: false }), false);
+  assert.equal(relaxVerificationOnlyVerdict(art, { forced: false }), false);
+  assert.equal(art.verdict, "request_changes");
 });

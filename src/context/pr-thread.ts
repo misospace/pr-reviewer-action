@@ -7,7 +7,7 @@
  * renderer output is the persisted artifact and must stay byte-for-byte
  * identical to the Python original. */
 
-import { redactText } from "./redact.js";
+import { redactPrTextLines } from "./redact.js";
 
 export const SCHEMA_VERSION = 1;
 export const MAX_COMMENTS_DEFAULT = 50;
@@ -141,7 +141,13 @@ export function cleanBody(body: string): string {
   let cleaned = body.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
   cleaned = cleaned.replace(MARKER_LINE_RE, "");
   cleaned = cleaned.replace(CONTROL_RE, "");
-  return redactText(cleaned).trim();
+  // The line-preserving core, not the flat pass (#1154 review round 6): a
+  // comment body is PR-authored fenced prose the corpus renders and nothing
+  // re-parses, so it is exactly the surface that must carry the quoted-key
+  // assignment rule — a comment quoting `{"password": "…"}` persisted raw
+  // into the discussion corpus section and `ai-request.<tier>.json` while
+  // the diff and PR body sides were already closed.
+  return redactPrTextLines(cleaned).trim();
 }
 
 function truncateBody(body: string): string {

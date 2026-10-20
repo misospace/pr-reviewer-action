@@ -25,6 +25,7 @@ import { completionOverran, extractResponseText, extractResponseUsage, mergeUsag
 import { renderSpecialistLeadsSection } from "./render.js";
 import { containsKnownSecret, maskDiagnostic, maskKnownSecrets, redactText, redactTextDeep } from "../context/redact.js";
 import { callKnownSecrets } from "../transport/headers.js";
+import type { TerminalProviderReason } from "../transport/terminal.js";
 import { pyStr } from "../platform/py.js";
 import type { SpecialistRoleModel, SpecialistModelSource } from "../routing/tiers.js";
 
@@ -74,6 +75,13 @@ export interface SpecialistTransportOutcome {
    * the role's log line and telemetry (separate from `errorMessage`, which
    * keeps its own v2-parity phrasing). */
   statusDetail?: string;
+  /** #1080: the normalized terminal-provider reason when the attempt failed
+   * for a permanent provider reason (quota exhausted, model retired), or the
+   * lane was already latched terminally and never reached the wire. Present
+   * only when that classification happened; a transient failure never sets it,
+   * and its presence means the runner must not spend another attempt or sleep
+   * on this lane. */
+  terminal?: TerminalProviderReason;
 }
 
 /** `(payload, apiFormat, timeoutSec) => outcome`. Never throws — transport
@@ -269,6 +277,10 @@ function roleEntry(
     corpusSource?: "standard" | "adversarial";
     errorStatus?: number | undefined;
     errorDetail?: string | undefined;
+    /** #1080: normalized terminal-provider reason, folded into the EXISTING
+     * `reason` field so the persisted role entry keeps its established shape
+     * (a new key would change a v2-shaped artifact for every role). */
+    terminalReason?: TerminalProviderReason;
     roleModel?: SpecialistRoleModel;
     stopReason?: string | null;
     outputChars?: number | null;
@@ -290,6 +302,7 @@ function roleEntry(
     ...(options.corpusSource !== undefined ? { corpus_source: options.corpusSource } : {}),
     ...(options.errorStatus !== undefined ? { error_status: options.errorStatus } : {}),
     ...(options.errorDetail !== undefined ? { error_detail: options.errorDetail } : {}),
+    ...(options.terminalReason !== undefined ? { reason: `terminal provider failure: ${options.terminalReason}` } : {}),
     ...(options.roleModel !== undefined ? { model: options.roleModel.model, model_source: options.roleModel.source } : {}),
     ...(options.stopReason !== undefined ? { stop_reason: options.stopReason } : {}),
     ...(options.outputChars !== undefined ? { output_chars: options.outputChars } : {}),
@@ -424,6 +437,8 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
       outputChars?: number | null;
       overrunDetected?: boolean;
       overrunRetryResult?: "recovered" | "failed" | "skipped" | null;
+      /** #1080: recorded on the entry's existing `reason` field. */
+      terminalReason?: TerminalProviderReason;
     } = {},
   ): RoleRunOutcome => ({
     entry: roleEntry(role, artifact, status, errorKind, now() - started, {
@@ -434,6 +449,7 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
       corpusSource,
       errorStatus,
       errorDetail,
+      ...(diagnostics.terminalReason !== undefined ? { terminalReason: diagnostics.terminalReason } : {}),
       ...(options.roleModel !== undefined ? { roleModel: options.roleModel } : {}),
       ...(diagnostics.stopReason !== undefined && diagnostics.stopReason !== null ? { stopReason: diagnostics.stopReason } : {}),
       ...(diagnostics.outputChars !== undefined && diagnostics.outputChars !== null ? { outputChars: diagnostics.outputChars } : {}),
@@ -516,6 +532,17 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
       lastFailure = new RoleFailure("transport", outcome.errorMessage ?? "transport failure", outcome.status, outcome.statusDetail);
       errorStatus = outcome.status;
       errorDetail = outcome.statusDetail;
+      // #1080: a terminal provider failure (quota exhausted, model retired)
+      // is permanent, so the retry — and its sleep — are skipped entirely and
+      // the SAME failure shape is returned immediately, keeping the persisted
+      // artifact's v2 field set identical to a retried-then-failed role. The
+      // normalized reason rides the entry's existing `reason` field.
+      if (outcome.terminal !== undefined) {
+        const terminalArtifact = emptyArtifact(role);
+        const terminalMessage = `${lastFailure.kind}: ${lastFailure.message}`;
+        terminalArtifact.errors.push(terminalMessage);
+        return finish(terminalArtifact, "error", lastFailure.kind, null, payload, { error: terminalMessage }, { terminalReason: outcome.terminal });
+      }
       if (attempt < MAX_ATTEMPTS) {
         const delay = Math.min(RETRY_DELAY_SEC, Math.max(0, deadline - now()));
         if (delay > 0) await sleep(delay);
@@ -596,6 +623,10 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
           // response in place, so it is a failure, never a recovery.
           overrunRetryResult = adopted && !completionOverran(retried.raw) ? "recovered" : "failed";
         } else {
+          // The retry either failed, produced an in-body error, or (when the
+          // lane was latched terminally, #1080) never reached the wire at all.
+          // None of those recover the truncated response in place, so this is a
+          // failure, never a recovery.
           overrunRetryResult = "failed";
         }
       } else {
@@ -802,6 +833,10 @@ async function runSpecialistScout(
       lastError = `transport: ${outcome.errorMessage ?? "transport failure"}`;
       errorStatus = outcome.status;
       errorDetail = outcome.statusDetail;
+      // #1080: terminal provider failure — no retry, no sleep, same failure
+      // text. The latch on the adapter also short-circuits every LATER role
+      // on this lane with zero wire attempts.
+      if (outcome.terminal !== undefined) break;
       if (attempt < MAX_ATTEMPTS) {
         const delay = Math.min(RETRY_DELAY_SEC, Math.max(0, deadline - now()));
         if (delay > 0) await sleep(delay);

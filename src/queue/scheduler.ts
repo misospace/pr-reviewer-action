@@ -11,7 +11,9 @@
  * mutation batch persists through `store.save`; records are frozen and
  * never mutated in place; every dispatch takes a UNIQUE lease-owner
  * token, and a late executor resolution whose token no longer matches is
- * revoked (no-op), never resurrecting a requeued generation; the
+ * revoked (no-op), never resurrecting a requeued generation; a failed or
+ * rejected executor settle for a supersession-aborted generation is
+ * retired as `superseded`, never requeued; the
  * supersession gate is checked before EVERY publish attempt AND again
  * after a publish resolves (a late publish resolution from a generation
  * that was superseded mid-flight is retired, not allowed to overwrite
@@ -36,6 +38,7 @@ import type { QueueSnapshot, QueueStore } from "./store.js";
 import {
   leaseIsValid,
   reconcileRecoveredSnapshot,
+  validateReviewJob,
   withRenewedLease,
 } from "./store.js";
 import type { JobRecord } from "./types.js";
@@ -211,7 +214,10 @@ export class ReviewQueueController {
   }
 
   /** Enqueue a job as a new generation. Throws `Error("intake closed")`
-   * after shutdown. A jobId already present is a `duplicate` (no state
+   * after shutdown. Throws `RangeError` when the job violates the
+   * `ReviewJob` contract (the same rules the durable store enforces) —
+   * BEFORE any mutation, so a refused enqueue leaves the queue exactly
+   * as it found it. A jobId already present is a `duplicate` (no state
    * change); older queued records for the same prKey become
    * `superseded`, active records get `cancelRequested` + executor abort,
    * and the new record always enters `queued` with the settle window. */
@@ -229,13 +235,27 @@ export class ReviewQueueController {
     if (this.closed) {
       throw new Error("intake closed");
     }
+    // Validate the WHOLE job before ANY mutation: a job that violates
+    // the `ReviewJob` contract would be rejected by the durable store
+    // at save time — after this.records was already mutated — so the
+    // queue would keep a record the store refused. Refuse it here, at
+    // intake, and carry the store's rebuilt (frozen) job so the
+    // caller's own object can never reach the queue.
+    const validatedJob = validateReviewJob(job);
+    if (validatedJob === null) {
+      throw new RangeError("enqueue: job is not a valid ReviewJob");
+    }
     this.ensureLoaded();
     const now = this.nowMsFn();
-    const jobId = job.jobId;
+    // Read the identity from the VALIDATED job, never from the caller's
+    // object: a job with getters can return different values on
+    // successive reads, and the scope key the supersession sweep
+    // compares against must be the one the record actually carries.
+    const jobId = validatedJob.jobId;
     if (this.records.has(jobId)) {
       return { disposition: "duplicate", jobId };
     }
-    const prKey = prIdentityKey(job);
+    const prKey = prIdentityKey(validatedJob);
     let supersededQueued = false;
     let supersededRunning = false;
     for (const existing of [...this.records.values()]) {
@@ -271,7 +291,10 @@ export class ReviewQueueController {
         supersededRunning = true;
       }
     }
-    this.records.set(jobId, newJobRecord(job, now, this.options.settleWindowMs));
+    this.records.set(
+      jobId,
+      newJobRecord(validatedJob, now, this.options.settleWindowMs),
+    );
     this.save();
     const disposition: EnqueueDisposition = supersededRunning
       ? "superseded-running"
@@ -393,7 +416,15 @@ export class ReviewQueueController {
     this.records.clear();
     this.controllers.clear();
     for (const record of snapshot.records) {
-      this.records.set(record.job.jobId, record);
+      const jobId = record.job.jobId;
+      // Fail closed on a duplicate generation id: the shipped stores
+      // reject one, but `adopt` is the seam where a custom `QueueStore`
+      // backend feeds records in, and silently replacing the first
+      // record would lose a generation.
+      if (this.records.has(jobId)) {
+        throw new Error("queue snapshot: duplicate job id in snapshot");
+      }
+      this.records.set(jobId, record);
     }
     this.loaded = true;
   }
@@ -649,7 +680,30 @@ export class ReviewQueueController {
     if (outcome.status === "completed") {
       await this.settleCompleted(jobId, token, record, outcome, now);
     } else if (outcome.status === "failed") {
-      if (record.attempt >= this.options.maxAttempts) {
+      // Never resurrect a superseded generation: a supersession-aborted
+      // executor that fails (or rejects) is retired with its
+      // supersession attribution, not requeued. Requeuing it would let
+      // the obsolete generation win the next dispatch against its
+      // replacement when both carry the same enqueue timestamp and the
+      // replacement's jobId is lexicographically smaller (jobIds are
+      // hashes — lexical order is not arrival order). The
+      // `cancelRequested` stamp from `enqueue` is authoritative; the
+      // live-sibling lookup is the defensive fallback.
+      if (record.cancelRequested || this.findSupersedingSibling(record) !== null) {
+        const superseder = record.supersededByJobId !== ""
+          ? record.supersededByJobId
+          : this.findSupersedingSibling(record) ?? "";
+        this.records.set(
+          jobId,
+          Object.freeze({
+            ...withState(record, "superseded", now),
+            failureReason: "superseded-by-newer-head",
+            supersededByJobId: superseder,
+            leaseOwner: "",
+            leaseExpiresAtMs: 0,
+          }),
+        );
+      } else if (record.attempt >= this.options.maxAttempts) {
         this.records.set(
           jobId,
           Object.freeze({

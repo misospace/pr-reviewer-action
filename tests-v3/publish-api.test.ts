@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ForgejoPublishApi, GitHubPublishApi } from "../src/platform/publish-api.js";
+import { ForgejoPublishApi, GitHubPublishApi, forgejoReviewState } from "../src/platform/publish-api.js";
 import { forgejoTokenFromEnv } from "../src/platform/forgejo-auth.js";
 import type { FetchLike } from "../src/platform/http.js";
 import type { PublishPlatformApi } from "../src/platform/publish-api.js";
@@ -51,6 +51,54 @@ test("github dismissReview puts the dismissal message", async () => {
   assert.deepEqual(calls.map((c) => [c.method, c.url, c.body]), [
     ["PUT", `${BASE}/repos/o/r/pulls/9/reviews/44/dismissals`, { message: "Superseded." }],
   ]);
+});
+
+// #1144: the review id is interpolated into a REST path segment, so the seam
+// itself refuses a malformed id WITHOUT issuing any request. The caller-side
+// guard in the cleanup layer is defense in depth, not the only guard.
+test("#1144: a malformed review id never reaches the forge — the dismissal is refused without a request", async () => {
+  const { fetchImpl, calls } = recorder([[`PUT ${BASE}/repos/o/r/pulls/9/reviews/44/dismissals`, 200, { id: 44 }]]);
+  for (const id of ["abc", "../x", "0", "-1", "1;DROP", "", " 44", "44/../1", 0, -1]) {
+    assert.equal(await github(fetchImpl).dismissReview(id, "Superseded."), false,
+      `a malformed id must be refused: ${JSON.stringify(id)}`);
+  }
+  assert.equal(calls.length, 0, "a malformed review id is refused before any request");
+  // A well-formed id still dismisses.
+  assert.equal(await github(fetchImpl).dismissReview(44, "Superseded."), true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.url, `${BASE}/repos/o/r/pulls/9/reviews/44/dismissals`);
+});
+
+test("#1144: the Forgejo dismissal seam refuses a malformed review id without a request", async () => {
+  const { fetchImpl, calls } = recorder([["POST https://forge.example/api/v1/repos/o/r/pulls/9/reviews/44/dismissals", 200, {}]]);
+  const api = new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token", baseUrl: "https://forge.example", fetchImpl });
+  for (const id of ["abc", "../x", "0", "-1", "", " 44"]) {
+    assert.equal(await api.dismissReview(id, "Superseded."), false,
+      `a malformed id must be refused: ${JSON.stringify(id)}`);
+  }
+  assert.equal(calls.length, 0, "a malformed review id is refused before any request");
+  assert.equal(await api.dismissReview(44, "Superseded."), true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.url, "https://forge.example/api/v1/repos/o/r/pulls/9/reviews/44/dismissals");
+});
+
+// #1144: the minimized-state read is an idempotency guard, not a safety
+// gate. The GitHub adapter answers an unreadable minimized state with an
+// EMPTY SET and never throws — so the production behavior is "nothing is
+// known to be minimized", not "the hide must not run".
+test("#1144: an unreadable GitHub minimized state answers with an empty set, never a throw", async () => {
+  const failed = recorder([[`POST ${BASE}/graphql`, 500, { message: "boom" }]]);
+  assert.deepEqual(await github(failed.fetchImpl).minimizedReviewIds(), [],
+    "a failed GraphQL read is an empty set, not an exception");
+  assert.equal(failed.calls.length, 1);
+
+  const thrown: FetchLike = async () => { throw new Error("transport down"); };
+  assert.deepEqual(await github(thrown).minimizedReviewIds(), [],
+    "a transport failure is an empty set too");
+
+  const malformed = recorder([[`POST ${BASE}/graphql`, 200, { data: { repository: { pullRequest: { reviews: { nodes: "nope" } } } } }]]);
+  assert.deepEqual(await github(malformed.fetchImpl).minimizedReviewIds(), [],
+    "a payload that is not a node list is an empty set");
 });
 
 test("github upsertStickyComment patches the marked comment and creates one when absent", async () => {
@@ -269,6 +317,62 @@ test("Forgejo review listing paginates and fails closed on later-page errors and
   await assert.rejects(new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token", baseUrl: "https://forge.example", fetchImpl: failed.fetchImpl }).listReviews());
   const capped = recorder(Array.from({ length: 10 }, (_, i) => [`GET ${base}?limit=100&page=${i + 1}`, 200, first] as [string, number, unknown]));
   await assert.rejects(new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token", baseUrl: "https://forge.example", fetchImpl: capped.fetchImpl }).listReviews(), /pagination cap/);
+});
+
+test("#1144: the Forgejo review listing normalizes Forgejo review states into the GitHub-shaped vocabulary", async () => {
+  const base = "https://forge.example/api/v1/repos/o/r/pulls/9/reviews";
+  const rows = [
+    { id: 11, state: "REQUEST_CHANGES", body: "<!-- m -->\nblocking", user: { login: "bot" } },
+    { id: 12, state: "COMMENT", body: "<!-- m -->\nadvisory", user: { login: "bot" } },
+    { id: 13, state: "APPROVED", body: "<!-- m -->\napproved", user: { login: "bot" } },
+    { id: 14, state: "REQUEST_REVIEW", body: "<!-- m -->\nreview-request placeholder", user: { login: "bot" } },
+    { id: 15, state: "APPROVED", dismissed: true, body: "<!-- m -->\ndismissed", user: { login: "bot" } },
+    { id: 16, state: "SOMETHING_ELSE", body: "<!-- m -->\nunknown state", user: { login: "bot" } },
+    { id: 17, body: "<!-- m -->\nno state at all", user: { login: "bot" } },
+    { id: 18, event: "REQUEST_CHANGES", body: "<!-- m -->\nevent only", user: { login: "bot" } },
+  ];
+  const { fetchImpl } = recorder([[`GET ${base}?limit=100&page=1`, 200, rows]]);
+  const api = new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token", baseUrl: "https://forge.example", fetchImpl });
+  const reviews = await api.listReviews();
+  assert.deepEqual(reviews.map((r) => [r.id, r.state]), [
+    [11, "CHANGES_REQUESTED"],
+    [12, "COMMENTED"],
+    [13, "APPROVED"],
+    [14, "PENDING"],
+    [15, "DISMISSED"],
+    [16, ""],
+    [17, ""],
+    [18, "CHANGES_REQUESTED"],
+  ]);
+  // The rest of the row survives the normalization untouched.
+  assert.deepEqual(reviews.map((r) => [r.id, r.body, r.user]), rows.map((row) => [row.id, row.body, row.user]));
+});
+
+// #1144: the state mapping is the publish seam's forge-agnostic contract —
+// it must refuse hostile row shapes instead of guessing.
+test("#1144: the Forgejo state mapping refuses hostile row shapes", () => {
+  // A row that is not an object proves nothing.
+  for (const raw of [null, undefined, "REQUEST_CHANGES", 42, true]) {
+    assert.equal(forgejoReviewState(raw), "", `a non-object row must not map: ${String(raw)}`);
+  }
+  // An array is not a review row either.
+  assert.equal(forgejoReviewState([{ state: "REQUEST_CHANGES" }]), "");
+  assert.equal(forgejoReviewState([]), "");
+  // A non-string state is unusable; only a usable `event` may carry it.
+  assert.equal(forgejoReviewState({ state: 123 }), "");
+  assert.equal(forgejoReviewState({ state: 123, event: "APPROVE" }), "APPROVED");
+  // A stringly-typed dismissal flag is NOT a dismissal: only the boolean
+  // proves it, and the row falls back to the state mapping.
+  assert.equal(forgejoReviewState({ state: "APPROVED", dismissed: "true" }), "APPROVED");
+  assert.equal(forgejoReviewState({ state: "COMMENT", dismissed: "true" }), "COMMENTED");
+  assert.equal(forgejoReviewState({ state: "APPROVED", dismissed: true }), "DISMISSED");
+  // Case and padding are normalized.
+  assert.equal(forgejoReviewState({ state: "request_changes" }), "CHANGES_REQUESTED");
+  assert.equal(forgejoReviewState({ state: "  COMMENT  " }), "COMMENTED");
+  // An event-only row maps through the same vocabulary.
+  assert.equal(forgejoReviewState({ event: "APPROVE" }), "APPROVED");
+  assert.equal(forgejoReviewState({ event: "REQUEST_CHANGES" }), "CHANGES_REQUESTED");
+  assert.equal(forgejoReviewState({ event: "REQUEST_REVIEW" }), "PENDING");
 });
 
 test("Forgejo review comments require matching ownership pair and DELETE is scoped to review", async () => {
@@ -716,4 +820,53 @@ test("#252: a hostile reaction login never reaches the collaborator API or autho
     assert.equal(await github(fetchImpl).collaboratorPermission!(login), null, `login must be refused: ${JSON.stringify(login)}`);
   }
   assert.equal(calls.length, 0, "a login outside the GitHub charset is refused without any request");
+});
+
+/** #1027: the bounded per-thread resolution read behind the outcome ledger. */
+test("#1027: reviewThreadStates maps managed threads, degrades on truncation, and filters unmanaged ones", async () => {
+  const payload = {
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            pageInfo: { hasNextPage: false },
+            nodes: [
+              { id: "T1", isResolved: true, comments: { nodes: [{ databaseId: 77, pullRequestReview: { databaseId: 7 } }] } },
+              { id: "T2", isResolved: false, comments: { nodes: [{ databaseId: 88, pullRequestReview: { databaseId: 7 } }] } },
+              // A thread whose first comment belongs to another review: filtered out.
+              { id: "T3", isResolved: true, comments: { nodes: [{ databaseId: 99, pullRequestReview: { databaseId: 8 } }] } },
+            ],
+          },
+        },
+      },
+    },
+  };
+  const ok = recorder([[`POST ${BASE}/graphql`, 200, payload]]);
+  const result = await github(ok.fetchImpl).reviewThreadStates(["7"]);
+  assert.deepEqual(result, {
+    supported: true,
+    complete: true,
+    threads: [
+      { threadId: "T1", resolved: true, firstCommentId: "77" },
+      { threadId: "T2", resolved: false, firstCommentId: "88" },
+    ],
+  });
+
+  const truncated = recorder([[`POST ${BASE}/graphql`, 200, { data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: true }, nodes: [] } } } } }]]);
+  assert.deepEqual(await github(truncated.fetchImpl).reviewThreadStates(["7"]), { supported: true, complete: false, threads: [] });
+
+  const malformed = recorder([[`POST ${BASE}/graphql`, 200, { data: null }]]);
+  assert.deepEqual(await github(malformed.fetchImpl).reviewThreadStates(["7"]), { supported: true, complete: false, threads: [] });
+
+  // A hostile node shape degrades the WHOLE read rather than guessing.
+  const hostile = recorder([[`POST ${BASE}/graphql`, 200, { data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [{ id: "T4", isResolved: true, comments: { nodes: [] } }] } } } } }]]);
+  assert.deepEqual(await github(hostile.fetchImpl).reviewThreadStates(["7"]), { supported: true, complete: false, threads: [] });
+
+  const threw = recorder([]);
+  assert.deepEqual(await github(threw.fetchImpl).reviewThreadStates(["7"]), { supported: true, complete: false, threads: [] });
+});
+
+test("#1027: Forgejo degrades the thread-state read explicitly", async () => {
+  const api = new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "token", baseUrl: "https://forge.example", fetchImpl: async () => { throw new Error("unused"); } });
+  assert.deepEqual(await api.reviewThreadStates(["7"]), { supported: false, complete: false, threads: [] });
 });

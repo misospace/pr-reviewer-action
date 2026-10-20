@@ -1,6 +1,12 @@
 export { ForgejoAdapter, type ForgejoAdapterOptions } from "./forgejo.js";
 export { GitHubAdapter, nextLink, type GitHubAdapterOptions } from "./github.js";
-export { PlatformRequestError, requestJson, requestText, type FetchLike } from "./http.js";
+export {
+  DEFAULT_TEXT_RESPONSE_MAX_BYTES,
+  PlatformRequestError,
+  requestJson,
+  requestText,
+  type FetchLike,
+} from "./http.js";
 export { deriveIsFork, normalizePrIdentity, type PrIdentity } from "./pr.js";
 export { resolvePlatform, type ResolvedPlatform } from "./resolve.js";
 export {
@@ -15,6 +21,7 @@ export {
 export { TangledAdapter, type TangledAdapterOptions } from "./tangled-adapter.js";
 export { resolveTangledPull, TangledResolverError, type ResolveTangledPullOptions, type TangledPullIdentity, type TangledResolverFailure } from "./tangled-bobbin.js";
 export { USER_AGENT } from "./user-agent.js";
+export { pullRequestHeadRef, pullHeadRefspec, type AcquisitionPlatform } from "./head-ref.js";
 export { GITHUB_API_BASE, LINKED_SOURCE_GITHUB_BASE, parsePlatformBaseUrl, PlatformUrlError } from "./urls.js";
 export { validateEndpoint } from "./endpoint.js";
 export { ciAttemptTimeoutMs, isTransientCiRead } from "./bounded.js";

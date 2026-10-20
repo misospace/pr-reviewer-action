@@ -11,6 +11,7 @@ import { repoScopedUrl } from "../platform/repo-ref.js";
 import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { stageEnvFromConfig } from "./env.js";
 import { buildPublishApi, publishInputFromEnv, publishWith, readEvent, type StepEvent } from "./entrypoints.js";
+import { publishStepRuns } from "../publish/publish.js";
 import { rawInputsFromEnv, runReview } from "./review.js";
 import { createRunDir } from "./run-dir.js";
 import { blockingGateSummary, escapeWorkflowData, renderBlockingAnnotations } from "./blocking-findings.js";
@@ -107,10 +108,13 @@ export function actionStageEnv(env: NodeJS.ProcessEnv): Env {
 }
 
 function shouldPublish(stage: Env): boolean {
-  const mode = stage.PUBLISH_MODE ?? "";
-  // #1161: `review_blockers` publishes a native review like the other
-  // native modes.
-  return mode === "review_comment" || mode === "review_verdict" || mode === "review_blockers" || (mode === "comment" && stage.PUBLISH_REVIEW_COMMENT === "true");
+  // The scorer's eligibility gate (src/run/review.ts) mirrors THIS decision
+  // through the shared `publishStepRuns` predicate. Both sites read
+  // PUBLISH_MODE/PUBLISH_REVIEW_COMMENT from their own config resolution;
+  // that stays equivalent only while publish-* inputs stay out of
+  // repository-config narrowing (they do today — make them repo-configurable
+  // and the two sites can silently diverge).
+  return publishStepRuns(stage.PUBLISH_MODE, stage.PUBLISH_REVIEW_COMMENT === "true");
 }
 
 export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<number> {
@@ -254,6 +258,15 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       CACHE_HIT_RATIO: review.outputs.cacheHitRatio,
       DEGRADED_GATE_BYPASS: review.outputs.degradedGateBypass ? "true" : "false",
       VERDICT_POLICY: review.verdictPolicy,
+      // #1073: the confidence scorer's results, all empty when disabled.
+      CONFIDENCE_STATUS: review.outputs.confidenceStatus ?? "",
+      CONFIDENCE_SCORE: review.outputs.confidenceScore ?? "",
+      CONFIDENCE_RISK: review.outputs.confidenceRisk ?? "",
+      CONFIDENCE_REASON: review.outputs.confidenceReason ?? "",
+      CONFIDENCE_MODEL: review.outputs.confidenceModel ?? "",
+      ...(review.confidenceConcerns !== undefined
+        ? { CONFIDENCE_CONCERNS: JSON.stringify(review.confidenceConcerns) }
+        : {}),
     };
     const seam = buildPublishApi(publishEnv as NodeJS.ProcessEnv);
     // The event-gated maybeClearRereviewLabel below owns label cleanup here;
@@ -276,6 +289,10 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       ...(review.contextBudget !== undefined ? { contextBudget: review.contextBudget } : {}),
       ...(review.contextPeak !== undefined ? { contextPeak: review.contextPeak } : {}),
       ...(review.toolStopReason !== undefined ? { toolStopReason: review.toolStopReason } : {}),
+      // #1027: the prior published head reaches publish through the managed
+      // sticky comment's metadata marker (read in readFeedbackState); it is
+      // NOT the precheck's head_sha, which is the CURRENT head and would
+      // make every thread resolution read as a same-head dismissal.
       // #1003: the human-review triage answer reaches the published body
       // only when triage ran (the decision output is "" when the input is
       // off), so a disabled run's published review is byte-identical to
@@ -290,7 +307,7 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
         }
         : {}),
     };
-    publishFailed = (await publishWith(input, seam)) !== 0;
+    publishFailed = (await publishWith(input, seam, runDir)) !== 0;
   }
 
   // ── Re-review label ───────────────────────────────────────────────────

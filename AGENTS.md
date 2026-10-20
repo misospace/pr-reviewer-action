@@ -52,9 +52,13 @@ Full per-module detail, the pipeline architecture, corpus section order, and des
 ## Build, test, validate
 
 ```bash
-npm ci && npm run typecheck && npm test     # v3 TypeScript (node --test)
+scripts/bootstrap.sh                         # setup: pinned mise + locked toolchain + npm ci (idempotent)
+mise run check                               # v3 TypeScript typecheck
+mise run test                                # v3 TypeScript authoritative suite (build + node --test)
+mise run setup-python && mise run test-python  # Python tests: eval tooling, retained gates (CI's 3.14 via mise)
+
+npm ci && npm run typecheck && npm test      # mise-free equivalent (this is what CI runs)
 npm run build                                # dist/ is not committed
-pytest tests/ -v --tb=short                 # Python tests: eval tooling, retained gates
 ```
 
 ## Development conventions (normative)
@@ -113,6 +117,7 @@ Name only paths you are confident about. An issue that names files the diff does
 - [`docs/repository-config.md`](docs/repository-config.md) — v3 repository config file: keys, base-side trust, narrowing precedence
 - [`docs/architecture/operator-config-and-adoption.md`](docs/architecture/operator-config-and-adoption.md) — #727 operator-mode contract: instance schema, repository config extension keys, adoption policy, effective-config fingerprint
 - [`docs/architecture/self-hosted-forgejo-ingress.md`](docs/architecture/self-hosted-forgejo-ingress.md) — #730 self-hosted Forgejo ingress: webhook trust boundary, endpoint/credential model, ledger dedupe, capability degradation
+- [`docs/architecture/repo-acquisition-workspaces.md`](docs/architecture/repo-acquisition-workspaces.md) — #732 repository acquisition: bare mirror cache, incremental bounded fetch over canonical PR head refs, isolated exact-head workspaces, credential/hook/symlink boundaries
 - [`docs/architecture/self-hosted-github-app-ingress.md`](docs/architecture/self-hosted-github-app-ingress.md) — #729 post-v3 self-hosted GitHub App ingress: App JWT / installation-token lifecycle, cache keying, publication idempotency
 - [`docs/evals.md`](docs/evals.md) — eval harness runbook, merge-safety scoring, semantic judge, deep-review A/B
 - [`docs/release-notes.md`](docs/release-notes.md) — house style and process for turning release-please output into published release notes

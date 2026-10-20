@@ -27,6 +27,13 @@ export interface PublishCommentRef {
   user?: { id?: number | string; login?: string } | null;
 }
 
+export interface IssueCommentEnumeration {
+  /** False when the forge read failed or truncated mid-pagination, so
+   * `comments` is NOT the complete set (a newer comment may exist). */
+  complete: boolean;
+  comments: PublishCommentRef[];
+}
+
 export interface PublishReviewRef {
   id: number | string;
   node_id?: string;
@@ -102,6 +109,9 @@ export interface ThreadQueryResult {
   hasNextPage: boolean;
   error?: string;
 }
+
+export interface ReviewThreadState { threadId: string; resolved: boolean; firstCommentId: string; }
+export interface ReviewThreadStatesResult { supported: boolean; complete: boolean; threads: ReviewThreadState[]; }
 
 /** #1005: outcome of an additive reviewer request. `supported` distinguishes
  * "this forge cannot request reviewers" from an operational failure. The
@@ -200,8 +210,18 @@ export interface PublishPlatformApi {
    * Authorized Integration mode. Absent → callers fall back to
    * `authenticatedIdentity()` (login-kind). */
   resolveTrustedOwner?(): Promise<IdentityResolution>;
-  /** Issue comments (paginated), oldest-first as returned by the API. */
+  /** Issue comments (paginated), oldest-first as returned by the API.
+   * Untyped as to completeness: a partial list is indistinguishable from a
+   * complete one, so a reader that must reason about ABSENCE (no newer
+   * publication exists) uses `listIssueCommentsResult` instead. */
   listIssueComments(): Promise<PublishCommentRef[]>;
+  /** #1027: the same issue-comment read plus an explicit completeness
+   * signal. Optional, matching how this seam already expresses read-capability
+   * degradations (`listManagedInlineComments`, `reviewCommentFeedback`,
+   * `reviewThreadStates`): an adapter without it CANNOT prove its list is
+   * complete, which is the fail-closed answer — never an assumption that the
+   * array holds every comment. */
+  listIssueCommentsResult?(): Promise<IssueCommentEnumeration>;
   /** Create or update the sticky managed comment (marker semantics shared). */
   upsertStickyComment(marker: string, body: string): Promise<StickyResult>;
   listReviews(): Promise<PublishReviewRef[]>;
@@ -232,6 +252,7 @@ export interface PublishPlatformApi {
    * per comment id; an over-cap or malformed id set is rejected WITHOUT any
    * request, and a per-id failure reports `complete: false`. */
   reviewCommentFeedback?(commentIds: readonly string[]): Promise<CommentFeedbackResult>;
+  reviewThreadStates?(managedReviewIds: readonly string[]): Promise<ReviewThreadStatesResult>;
   /** #762: the fail-closed repository-collaborator permission read that gates
    * a 👎 suppression (`repos/{repo}/collaborators/{login}/permission`).
    * Optional: an adapter without it trusts no actor. */
@@ -338,6 +359,15 @@ export class GitHubPublishApi implements PublishPlatformApi {
   }
 
   async listIssueComments(): Promise<PublishCommentRef[]> {
+    return (await this.listIssueCommentsResult()).comments;
+  }
+
+  /** #1027: only a short page PROVES the enumeration finished. Every exit
+   * that used to be a bare `break` — a non-200 or non-array page, a thrown
+   * request, and exhausting the page cap while the last page was still full —
+   * returns `complete: false` with whatever was accumulated, so a truncated
+   * read can never be read as "this is the whole set". */
+  async listIssueCommentsResult(): Promise<IssueCommentEnumeration> {
     const comments: PublishCommentRef[] = [];
     for (let page = 1; page <= 10; page += 1) {
       try {
@@ -345,14 +375,14 @@ export class GitHubPublishApi implements PublishPlatformApi {
           this.url(`/repos/${this.repo}/issues/${this.prNumber}/comments?per_page=100&page=${page}`),
           this.opts("GET"),
         );
-        if (status !== 200 || !Array.isArray(data)) break;
+        if (status !== 200 || !Array.isArray(data)) return { complete: false, comments };
         comments.push(...(data as PublishCommentRef[]));
-        if ((data as unknown[]).length < 100) break;
+        if ((data as unknown[]).length < 100) return { complete: true, comments };
       } catch {
-        break;
+        return { complete: false, comments };
       }
     }
-    return comments;
+    return { complete: false, comments };
   }
 
   async upsertStickyComment(marker: string, body: string): Promise<StickyResult> {
@@ -556,6 +586,10 @@ export class GitHubPublishApi implements PublishPlatformApi {
   }
 
   async dismissReview(reviewId: number | string, message: string): Promise<boolean> {
+    // #1144: the review id is interpolated into a REST path segment
+    // (`/reviews/{id}/dismissals`), so a malformed id is refused BEFORE any
+    // request is issued — the seam never sends an unusable id to the forge.
+    if (!/^[1-9]\d*$/.test(String(reviewId))) return false;
     try {
       const { status } = await requestJson(
         this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews/${reviewId}/dismissals`),
@@ -630,6 +664,28 @@ export class GitHubPublishApi implements PublishPlatformApi {
       threads.push({ id: thread.id });
     }
     return { ok: true, threads, hasNextPage: payload.pageInfo?.hasNextPage === true };
+  }
+
+  async reviewThreadStates(managedReviewIds: readonly string[]): Promise<ReviewThreadStatesResult> {
+    try {
+      const { owner, name } = ownerRepo(this.repo);
+      const data = await graphql(this.url("/graphql"), this.token,
+        "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { id isResolved comments(first: 1) { nodes { databaseId pullRequestReview { databaseId } } } } } } } }",
+        { owner, name, number: Number(this.prNumber) }, this.timeoutMs, this.fetchImpl);
+      const payload = (data as { data?: { repository?: { pullRequest?: { reviewThreads?: { pageInfo?: { hasNextPage?: unknown }; nodes?: unknown } } } } } | null)?.data?.repository?.pullRequest?.reviewThreads;
+      if (!payload || !Array.isArray(payload.nodes) || typeof payload.pageInfo?.hasNextPage !== "boolean") return { supported: true, complete: false, threads: [] };
+      const ids = new Set(managedReviewIds.map(String));
+      const threads = [];
+      for (const node of payload.nodes) {
+        if (node === null || typeof node !== "object") return { supported: true, complete: false, threads: [] };
+        const row = node as { id?: unknown; isResolved?: unknown; comments?: { nodes?: unknown } };
+        if (typeof row.id !== "string" || typeof row.isResolved !== "boolean" || !Array.isArray(row.comments?.nodes) || row.comments.nodes.length !== 1) return { supported: true, complete: false, threads: [] };
+        const first = row.comments.nodes[0] as { databaseId?: unknown; pullRequestReview?: { databaseId?: unknown } } | null;
+        if (!first || !ids.has(String(first.pullRequestReview?.databaseId ?? ""))) continue;
+        threads.push({ threadId: row.id, resolved: row.isResolved, firstCommentId: typeof first.databaseId === "number" ? String(first.databaseId) : "" });
+      }
+      return { supported: true, complete: !payload.pageInfo.hasNextPage, threads };
+    } catch { return { supported: true, complete: false, threads: [] }; }
   }
 
   async resolveThread(threadId: string): Promise<boolean> {
@@ -736,6 +792,42 @@ export function forgejoReviewEvent(event: string): string {
   return "COMMENT";
 }
 
+/**
+ * #1144: map a raw Forgejo review row to the GitHub-shaped review-state
+ * vocabulary the forge-agnostic publish cleanup layer speaks.
+ *
+ * The two Forgejo seams deliberately differ. `normalize.ts`
+ * (`normalizeForgejoReview`) is a byte-exact v2-parity port of the READ
+ * seam's projection and stays untouched; this seam serves the GitHub-shaped
+ * `PublishReviewRef` contract, so a Forgejo row is translated here instead
+ * of leaking `ReviewStateType` tokens into the cleanup layer (where a
+ * `REQUEST_CHANGES` verdict would never match the hide/dismiss state set
+ * and would keep blocking merges).
+ *
+ * - a dismissed review is `DISMISSED` — Forgejo keeps the original state
+ *   token and flags the dismissal separately;
+ * - `REQUEST_REVIEW` is an unsubmitted review-request placeholder, not a
+ *   verdict, so it reads as `PENDING` and the cleanup layer fails closed
+ *   on it;
+ * - an unknown, missing, or non-string state is `""`, which the cleanup
+ *   layer also fails closed on.
+ */
+export function forgejoReviewState(raw: unknown): string {
+  if (raw === null || typeof raw !== "object") return "";
+  const row = raw as { state?: unknown; event?: unknown; dismissed?: unknown };
+  if (row.dismissed === true) return "DISMISSED";
+  const rawState = typeof row.state === "string" && row.state.trim() !== ""
+    ? row.state
+    : typeof row.event === "string" ? row.event : "";
+  const state = rawState.trim().toUpperCase();
+  if (state === "APPROVED" || state === "APPROVE") return "APPROVED";
+  if (state === "REQUEST_CHANGES") return "CHANGES_REQUESTED";
+  if (state === "COMMENT") return "COMMENTED";
+  if (state === "PENDING") return "PENDING";
+  if (state === "REQUEST_REVIEW") return "PENDING";
+  return "";
+}
+
 /** Forgejo generates integration audiences as `u:<owner ID>:<UUID>`;
  * parsing lives in the shared owner-identity policy (#1093). */
 
@@ -832,6 +924,16 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     }
   }
 
+  /** #1027: the strict read either enumerates to a proven end or throws, so
+   * completeness is exactly "it did not throw". */
+  async listIssueCommentsResult(): Promise<IssueCommentEnumeration> {
+    try {
+      return { complete: true, comments: await this.listIssueCommentsStrict() };
+    } catch {
+      return { complete: false, comments: [] };
+    }
+  }
+
   async listIssueComments(): Promise<PublishCommentRef[]> {
     try {
       return await this.listIssueCommentsStrict();
@@ -925,7 +1027,12 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     for (let page = 1; page <= 10; page++) {
       const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews?limit=100&page=${page}`), await this.opts("GET"));
       if (status !== 200 || !Array.isArray(data)) throw new Error("Incomplete review listing");
-      reviews.push(...data as PublishReviewRef[]);
+      // #1144: the cleanup layer is forge-agnostic and decides on GitHub's
+      // review-state vocabulary, while Forgejo reports its own
+      // `ReviewStateType` tokens — every row is normalized here, so a stale
+      // `REQUEST_CHANGES` verdict is still recognised (and dismissed) and a
+      // `COMMENT` body is still recognised (and hidden).
+      reviews.push(...(data as PublishReviewRef[]).map((row) => ({ ...row, state: forgejoReviewState(row) })));
       if (data.length < 100) return reviews;
     }
     throw new Error("Review listing exceeded pagination cap");
@@ -1019,6 +1126,10 @@ export class ForgejoPublishApi implements PublishPlatformApi {
   }
 
   async dismissReview(reviewId: number | string, message: string): Promise<boolean> {
+    // #1144: the review id is interpolated into a REST path segment
+    // (`/reviews/{id}/dismissals`), so a malformed id is refused BEFORE any
+    // request is issued — the seam never sends an unusable id to the forge.
+    if (!/^[1-9]\d*$/.test(String(reviewId))) return false;
     try {
       const { status } = await requestJson(
         this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews/${reviewId}/dismissals`),
@@ -1041,6 +1152,10 @@ export class ForgejoPublishApi implements PublishPlatformApi {
 
   async unresolvedSupersededThreads(_managedIds: number[]): Promise<ThreadQueryResult> {
     return { ok: false, threads: [], hasNextPage: false, error: "no GraphQL API" };
+  }
+
+  async reviewThreadStates(_managedReviewIds: readonly string[]): Promise<ReviewThreadStatesResult> {
+    return { supported: false, complete: false, threads: [] };
   }
 
   async resolveThread(_threadId: string): Promise<boolean> {

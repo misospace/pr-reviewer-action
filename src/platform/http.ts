@@ -33,6 +33,17 @@ export function withCancellationSignal(fetchImpl: FetchLike | undefined, signal:
   });
 }
 
+/**
+ * Default hard cap for text/JSON response bodies (#1131): enforced while the
+ * body streams in (see `readCappedBody`), independent of Content-Length, so a
+ * large response from a configured instance cannot exhaust runner memory
+ * before the bounded review pipeline gets to handle it. The magnitude follows
+ * the existing platform precedent for API response bodies
+ * (`MAX_ENRICH_API_BYTES` in `src/platform/safe-fetch.ts`). Callers with a
+ * legitimately larger bounded need pass an explicit `maxBytes` override.
+ */
+export const DEFAULT_TEXT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
+
 export interface RequestOptions {
   method?: string | undefined;
   /** Pre-formatted Authorization header value (e.g. "Bearer x" / "token x"). */
@@ -41,6 +52,14 @@ export interface RequestOptions {
   body?: string | undefined;
   contentType?: string | undefined;
   timeoutMs?: number | undefined;
+  /**
+   * Hard cap on the response body size in bytes (#1131), enforced while the
+   * body streams in, for 2xx and non-2xx alike; on overflow the stream is
+   * cancelled and a credential-free `PlatformRequestError` of kind
+   * "too-large" is thrown. Defaults to `DEFAULT_TEXT_RESPONSE_MAX_BYTES`;
+   * only an explicitly bounded larger value should override it.
+   */
+  maxBytes?: number | undefined;
   fetchImpl?: FetchLike | undefined;
   /** The only origin that may receive the Authorization header. */
   allowedOrigin: string;
@@ -76,6 +95,11 @@ export interface BytesRequestOptions extends Omit<RequestOptions, "body" | "meth
  * - redirects are never followed (`redirect: "manual"`). A 3xx is an error:
  *   tokens cannot cross origins, and the v2 curl transport also refuses to
  *   follow redirects, so this is fail-closed parity.
+ * - the response body — 2xx and non-2xx alike — is read through a hard byte
+ *   cap enforced while streaming (`readCappedBody`), defaulting to
+ *   `DEFAULT_TEXT_RESPONSE_MAX_BYTES` (#1131); an oversized response is
+ *   cancelled mid-stream and surfaces as a credential-free "too-large" error
+ *   instead of a partial document.
  */
 export async function requestText(url: string, opts: RequestOptions): Promise<{ status: number; text: string; headers: Headers }> {
   const target = new URL(url);
@@ -113,7 +137,18 @@ export async function requestText(url: string, opts: RequestOptions): Promise<{ 
       "redirect-blocked",
     );
   }
-  return { status: response.status, text: await response.text(), headers: response.headers };
+  let bytes: Uint8Array;
+  try {
+    bytes = await readCappedBody(response, opts.maxBytes ?? DEFAULT_TEXT_RESPONSE_MAX_BYTES);
+  } catch (error) {
+    if (error instanceof PlatformRequestError) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new PlatformRequestError(`Platform request body read failed: ${message}`, response.status, "transport");
+  }
+  // TextDecoder with the default UTF-8 non-fatal decoder matches what
+  // `response.text()` would have produced (including BOM handling), while the
+  // byte cap has already been enforced on the wire.
+  return { status: response.status, text: new TextDecoder().decode(bytes), headers: response.headers };
 }
 
 /**

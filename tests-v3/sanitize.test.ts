@@ -38,11 +38,14 @@ test("inline code spans remain verbatim while fenced code is sanitized", () => {
 });
 
 test("reserved markers are removed case-insensitively", () => {
-  assert.equal(RESERVED_MARKER_PATTERNS.length, 3);
+  assert.equal(RESERVED_MARKER_PATTERNS.length, 4);
   assert.equal(stripReservedMarkers("x<!-- ai-pr-review-sha:deadbeef -->y<!-- AI-PR-REVIEW-FINGERPRINT: x -->z"), "xyz");
   // #762: the rejection carry marker is reserved too — model markdown can
   // never smuggle a suppression claim into a published body.
   assert.equal(stripReservedMarkers(`y<!-- PR-Reviewer:Rejected-Prescriptions:v1:${"a".repeat(64)} -->z`), "yz");
+  // #1027: the finding-identity marker is reserved as well — model markdown
+  // can never mint or rewrite a finding identity into a published body.
+  assert.equal(stripReservedMarkers(`w<!-- PR-Reviewer:Finding-Id:v1:${"b".repeat(64)} -->z`), "wz");
 });
 
 test("#1107: the prescription opener is reserved on model markdown — the fence is dropped, the word kept, the block dissolved", () => {

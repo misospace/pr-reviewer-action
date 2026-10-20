@@ -92,6 +92,11 @@ export interface MetadataOptions {
   action_version?: string | null;
   /** #978: gate-bypass eligibility; false/absent is omitted. */
   degradedGateBypass?: boolean | null;
+  /** #1073: the confidence scorer's status ("scored" | "unscored"), only
+   * when the scorer ran; omitted otherwise so pre-#1073 bytes are preserved. */
+  confidence_status?: string | null;
+  /** #1073: the scorer's integer 0..5, only when status is "scored". */
+  confidence_score?: number | null;
 }
 
 /** Build a metadata marker string for insertion into managed comments
@@ -168,6 +173,15 @@ export function buildMetadataMarker(options: MetadataOptions = {}): string {
   // byte-identically to the pre-change marker.
   if (options.tool_stop_reason !== null && options.tool_stop_reason !== undefined && options.tool_stop_reason !== "") {
     data.tool_stop_reason = options.tool_stop_reason;
+  }
+  // #1073 additive keys: appended last, same discipline as every key above —
+  // a disabled or skipped scorer serializes byte-identically to the
+  // pre-#1073 marker, and older parsers ignore keys they do not know.
+  if (options.confidence_status !== null && options.confidence_status !== undefined && options.confidence_status !== "") {
+    data.confidence_status = options.confidence_status;
+  }
+  if (options.confidence_score !== null && options.confidence_score !== undefined) {
+    data.confidence_score = options.confidence_score;
   }
   return `<!-- ai-pr-reviewer:${jsonCompact(data)} -->`;
 }
