@@ -1,5 +1,39 @@
 # Changelog
 
+## [3.7.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.6.0...source-v3.7.0) (2026-10-20)
+
+
+### Features
+
+* **#1073:** independent post-review confidence scorer (advisory, opt-in) ([#1140](https://github.com/misospace/pr-reviewer-action/issues/1140)) ([a6a51a2](https://github.com/misospace/pr-reviewer-action/commit/a6a51a293037b5426d041490724c3d29e168380d))
+* **#588:** publish and update the managed top-level Tangled review record ([#1118](https://github.com/misospace/pr-reviewer-action/issues/1118)) ([3699401](https://github.com/misospace/pr-reviewer-action/commit/3699401721f88f20c883003a0ff31ed0c1b1fd38))
+* **acquisition:** repository mirror cache and isolated per-review workspaces ([#732](https://github.com/misospace/pr-reviewer-action/issues/732)) ([#1125](https://github.com/misospace/pr-reviewer-action/issues/1125)) ([f14a977](https://github.com/misospace/pr-reviewer-action/commit/f14a9773780b7387c3fe1594994aab364c92a6b9))
+* **ingress:** GitHub App auth + capability seam — every forge read/write through the capability, not a CLI ([#729](https://github.com/misospace/pr-reviewer-action/issues/729)) ([#1120](https://github.com/misospace/pr-reviewer-action/issues/1120)) ([a44ea97](https://github.com/misospace/pr-reviewer-action/commit/a44ea977256d779d6bfa6bcdb00d55ee33ba5ce8))
+* **outcomes:** finding-outcome and feedback data contract ([#1027](https://github.com/misospace/pr-reviewer-action/issues/1027)) ([#1115](https://github.com/misospace/pr-reviewer-action/issues/1115)) ([bdeab8a](https://github.com/misospace/pr-reviewer-action/commit/bdeab8aa7b715f60f68d0af41db6a06ab411c0e8))
+* **review:** enable trusted repository skills ([#1134](https://github.com/misospace/pr-reviewer-action/issues/1134)) ([0d26862](https://github.com/misospace/pr-reviewer-action/commit/0d2686224707192b4ac7def8213c1d9cbc12c143))
+
+
+### Bug Fixes
+
+* **#1112:** reserve container-prefixed suggestion openers behind blockquote/list prefixes ([#1135](https://github.com/misospace/pr-reviewer-action/issues/1135)) ([2d0d39f](https://github.com/misospace/pr-reviewer-action/commit/2d0d39f73b0c6a9691545add3a2192d1d2c3ad9d))
+* **#1119:** make merge and prescription keys injective against NUL forgery ([#1150](https://github.com/misospace/pr-reviewer-action/issues/1150)) ([6fade46](https://github.com/misospace/pr-reviewer-action/commit/6fade46a579fe1ea238e882300d84663cb1ece41))
+* **#1130:** validate persisted job identities and reject duplicate queue ids ([#1171](https://github.com/misospace/pr-reviewer-action/issues/1171)) ([c8b77a9](https://github.com/misospace/pr-reviewer-action/commit/c8b77a967283d0b4e6e6e05485c53439079bb20f))
+* **#1131:** bound platform text/JSON response bodies while streaming ([#1169](https://github.com/misospace/pr-reviewer-action/issues/1169)) ([1855642](https://github.com/misospace/pr-reviewer-action/commit/18556429227e3ad144b61c4122ce580b8d599b64))
+* **#1136:** dissolve an unclosed ordinary fence that would swallow the validated prescription ([#1139](https://github.com/misospace/pr-reviewer-action/issues/1139)) ([bac85a1](https://github.com/misospace/pr-reviewer-action/commit/bac85a1e825c5da6d5aaf93b73f6fef4065c0022))
+* **#1141:** retire supersession-aborted generations on failed executor settle ([#1168](https://github.com/misospace/pr-reviewer-action/issues/1168)) ([31342a1](https://github.com/misospace/pr-reviewer-action/commit/31342a16e0e6e5dc2a1b6401e27a147395b4e885)), closes [#1141](https://github.com/misospace/pr-reviewer-action/issues/1141)
+* **#1145:** review_verdict publishes the verdict; bounded tool-loop evidence-repair continuation; confirmed-unmet escalation ([#1164](https://github.com/misospace/pr-reviewer-action/issues/1164)) ([716adb1](https://github.com/misospace/pr-reviewer-action/commit/716adb1a2f4455c6b02cf6f2611d2e38d9e41247))
+* **#1149:** route persisted raw provider bodies through redactTextDeep ([#1153](https://github.com/misospace/pr-reviewer-action/issues/1153)) ([04e5bd1](https://github.com/misospace/pr-reviewer-action/commit/04e5bd11c695344a0c6e3553ea15ddc04e69387f))
+* **#1154:** credential-shape redact the PR-authored artifact family (incl. diff path headers) ([#1157](https://github.com/misospace/pr-reviewer-action/issues/1157)) ([f5f8f74](https://github.com/misospace/pr-reviewer-action/commit/f5f8f74e0e3359230bb14193a29aed2156051f11))
+* **#1159:** redact fetched linked-issue bodies at the projection seam ([#1174](https://github.com/misospace/pr-reviewer-action/issues/1174)) ([a66b9e9](https://github.com/misospace/pr-reviewer-action/commit/a66b9e96fe005a6ad793d2da93bc9a85ba8be870))
+* **#1161:** publish the review_verdict verdict; add review_blockers mode ([#1162](https://github.com/misospace/pr-reviewer-action/issues/1162)) ([1ceebd8](https://github.com/misospace/pr-reviewer-action/commit/1ceebd8e9684d1e0a4159d53b16b1459dfbd86b1)), closes [#1161](https://github.com/misospace/pr-reviewer-action/issues/1161)
+* **deps:** update dependency astro (7.4.0 → 7.4.1) ([#1160](https://github.com/misospace/pr-reviewer-action/issues/1160)) ([cf8d3f1](https://github.com/misospace/pr-reviewer-action/commit/cf8d3f1c2cdd16ea992b5d0c860a7388d37bfe29))
+
+
+### Chores
+
+* **deps:** lock file maintenance ([#1148](https://github.com/misospace/pr-reviewer-action/issues/1148)) ([c3f04c5](https://github.com/misospace/pr-reviewer-action/commit/c3f04c5bca14dc899de0b74094b5fa7e00fa915e))
+* **dev:** add reproducible Node development bootstrap ([#1142](https://github.com/misospace/pr-reviewer-action/issues/1142)) ([57947fc](https://github.com/misospace/pr-reviewer-action/commit/57947fcf50bceda5235c2fad7a9fe41b4eb5778f))
+
 ## [3.6.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.5.0...source-v3.6.0) (2026-10-18)
 
 
