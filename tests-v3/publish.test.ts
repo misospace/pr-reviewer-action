@@ -2729,7 +2729,7 @@ function enableDeletion(api: MockPublishApi, result: { ok: boolean; error?: stri
 
 test("#1176: a deletion-capable forge deletes a superseded managed review that carries no inline findings", async () => {
   const api = new MockPublishApi("forgejo");
-  api.reviews = [{ id: 44, state: "COMMENTED", body: `${MARKER}\nstale advisory`, user: { login: "bot" } }];
+  api.reviews = [{ id: 44, state: "COMMENTED", official: false, body: `${MARKER}\nstale advisory`, user: { login: "bot" } }];
   enableDeletion(api);
   const logs: string[] = [];
   await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
@@ -2741,9 +2741,9 @@ test("#1176: a deletion-capable forge deletes a superseded managed review that c
   assert.ok(logs.some((line) => line.includes("Superseded reviews: eligible=1 dismissed=0 minimized=0 failed=0 deleted=1")));
 });
 
-test("#1176: a superseded review carrying inline findings is never deleted; its stale verdict is still dismissed", async () => {
+test("#1176: a superseded review carrying inline findings is never deleted; verdict rows are never deletion targets at all", async () => {
   const advisory = new MockPublishApi("forgejo");
-  advisory.reviews = [{ id: 44, state: "COMMENTED", body: `${MARKER}\nstale advisory`, user: { login: "bot" } }];
+  advisory.reviews = [{ id: 44, state: "COMMENTED", official: false, body: `${MARKER}\nstale advisory`, user: { login: "bot" } }];
   enableDeletion(advisory);
   advisory.inlineCommentsByReview = new Map([["44", { supported: true, complete: true, comments: [{ id: 7, reviewId: "44", user: { login: "bot" }, hasReplies: false }] }]]);
   const advisoryLogs: string[] = [];
@@ -2752,33 +2752,34 @@ test("#1176: a superseded review carrying inline findings is never deleted; its 
   assert.ok(advisoryLogs.some((line) => line.includes("carries inline findings") && line.includes("deletion refused")));
   assert.ok(advisoryLogs.some((line) => line.includes("deleted=0")));
 
-  // The verdict case degrades the same way, but the stale merge-gate vote is
-  // still struck through the existing dismissal path.
+  // #1181: a verdict row is NEVER a deletion target — no enumeration is even
+  // aimed at it; the stale merge-gate vote is struck through the existing
+  // dismissal path.
   const verdict = new MockPublishApi("forgejo");
-  verdict.reviews = [{ id: 45, state: "CHANGES_REQUESTED", body: `${MARKER}\nstale verdict`, user: { login: "bot" } }];
+  verdict.reviews = [{ id: 45, state: "CHANGES_REQUESTED", official: true, body: `${MARKER}\nstale verdict`, user: { login: "bot" } }];
   enableDeletion(verdict);
-  verdict.inlineCommentsByReview = new Map([["45", { supported: true, complete: true, comments: [{ id: 8, reviewId: "45", user: { login: "bot" }, hasReplies: false }] }]]);
   const verdictLogs: string[] = [];
   await hideSupersededManagedReviews(verdict, verdict.reviews, MARKER, (line) => verdictLogs.push(line), BOT);
-  assert.deepEqual(verdict.deletedReviews, []);
+  assert.deepEqual(verdict.deletedReviews, [], "a verdict row is never deleted");
+  assert.equal(verdict.inlineListCalls, 0, "no enumeration is aimed at a verdict row");
   assert.deepEqual(verdict.dismissed, ["45"], "the stale verdict is still dismissed");
-  assert.ok(verdictLogs.some((line) => line.includes("carries inline findings")));
+  assert.ok(verdictLogs.some((line) => line.includes("deleted=0")));
 });
 
-test("#1176: an incomplete or unsupported inline enumeration refuses deletion fail-closed and still dismisses", async () => {
+test("#1176: an incomplete or unsupported inline enumeration refuses deletion fail-closed and the body stays visible", async () => {
   const cases: Array<{ enumeration: { supported: boolean; complete: boolean; comments: never[] }; expectedFragment: string }> = [
     { enumeration: { supported: true, complete: false, comments: [] }, expectedFragment: "incomplete" },
     { enumeration: { supported: false, complete: false, comments: [] }, expectedFragment: "unsupported" },
   ];
   for (const { enumeration, expectedFragment } of cases) {
     const api = new MockPublishApi("forgejo");
-    api.reviews = [{ id: 46, state: "CHANGES_REQUESTED", body: `${MARKER}\nstale verdict`, user: { login: "bot" } }];
+    api.reviews = [{ id: 46, state: "COMMENTED", official: false, body: `${MARKER}\nstale advisory`, user: { login: "bot" } }];
     enableDeletion(api);
     api.inlineCommentsByReview = new Map([["46", enumeration]]);
     const logs: string[] = [];
     await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
     assert.deepEqual(api.deletedReviews, [], "an uncertain enumeration never licenses a destructive mutation");
-    assert.deepEqual(api.dismissed, ["46"], "the stale verdict still loses its merge-gate vote");
+    assert.deepEqual(api.dismissed, [], "no dismissal fallback applies to non-verdict rows");
     assert.ok(logs.some((line) => line.includes("enumeration") && line.includes(expectedFragment) && line.includes("stays visible")),
       `the refusal is logged with its own degradation kind: ${JSON.stringify(enumeration)}`);
     assert.ok(logs.some((line) => line.includes("deleted=0")));
@@ -2786,45 +2787,56 @@ test("#1176: an incomplete or unsupported inline enumeration refuses deletion fa
 });
 // A 404 is NOT an idempotent success: a route-level 404 (a forge version
 // without the endpoint) is indistinguishable from "already gone". Reading it
-// as success would log a deletion that never happened and skip the dismissal
-// fallback, letting a stale merge-gate vote survive behind a "deleted" log.
-test("#1176: a 404 deletion answer falls back to dismissal instead of faking success", async () => {
+// as success would log a deletion that never happened. #1181: DELETE only
+// fires on non-verdict rows, so there is no dismissal fallback behind it —
+// the failure is bounded (WARN) and the body stays visible.
+test("#1176: a 404 deletion answer on a non-verdict row is a bounded failure, never a faked success", async () => {
   const api = new MockPublishApi("forgejo");
-  api.reviews = [{ id: 49, state: "CHANGES_REQUESTED", body: `${MARKER}\nstale verdict`, user: { login: "bot" } }];
+  api.reviews = [{ id: 49, state: "DISMISSED", official: false, body: `${MARKER}\ndismissed but still visible`, user: { login: "bot" } }];
   enableDeletion(api, { ok: false, error: "status 404" });
   const logs: string[] = [];
   await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
   assert.deepEqual(api.deletedReviews, ["49"], "the DELETE was sent; only its answer is disputed");
   assert.ok(logs.some((line) => line.includes("Could not delete superseded review #49") && line.includes("status 404")));
-  assert.deepEqual(api.dismissed, ["49"], "the stale verdict is still struck over REST");
+  assert.deepEqual(api.dismissed, [], "no dismissal fallback applies to non-verdict rows");
   assert.ok(!logs.some((line) => line.includes("Deleted superseded managed review")), "no success is logged for a 404");
+  assert.ok(logs.some((line) => line.includes("failed=1 deleted=0")));
 });
 
-test("#1176: a failed deletion falls back to dismissal and is counted as failed, not deleted", async () => {
+test("#1176: a failed deletion on a non-verdict row is a bounded failure, not a dismissal", async () => {
   const api = new MockPublishApi("forgejo");
-  api.reviews = [{ id: 47, state: "CHANGES_REQUESTED", body: `${MARKER}\nstale verdict`, user: { login: "bot" } }];
+  api.reviews = [{ id: 47, state: "DISMISSED", official: false, body: `${MARKER}\ndismissed but still visible`, user: { login: "bot" } }];
   enableDeletion(api, { ok: false, error: "status 403" });
   const logs: string[] = [];
   await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
-  assert.ok(logs.some((line) => line.includes("Could not delete superseded review #47") && line.includes("status 403") && line.includes("falling back to dismissal")));
+  assert.ok(logs.some((line) => line.includes("Could not delete superseded review #47") && line.includes("status 403")));
   assert.ok(!logs.some((line) => line.includes("Deleted superseded managed review")));
   assert.ok(logs.some((line) => line.includes("failed=1 deleted=0")));
-  assert.deepEqual(api.dismissed, ["47"], "the existing dismissal fallback still runs");
+  assert.deepEqual(api.dismissed, [], "no dismissal fallback applies to non-verdict rows");
 });
 
 // The DELETE is bounded to its own review like the enumeration is: a
-// throwing adapter refuses only this review's deletion, and the stale
-// verdict still loses its merge-gate vote through the dismissal fallback.
-test("#1176: a throwing DELETE refuses only its own review; the dismissal fallback still runs", async () => {
+// throwing adapter refuses only this review's deletion, and the rest of the
+// pass continues (#1181: no dismissal fallback applies to the non-verdict
+// row whose DELETE threw).
+test("#1176: a throwing DELETE refuses only its own review; the rest of the pass continues", async () => {
   const api = new MockPublishApi("forgejo");
-  api.reviews = [{ id: 53, state: "CHANGES_REQUESTED", body: `${MARKER}\nstale verdict`, user: { login: "bot" } }];
+  api.reviews = [
+    { id: 53, state: "DISMISSED", official: false, body: `${MARKER}\ndismissed but still visible`, user: { login: "bot" } },
+    { id: 54, state: "COMMENTED", official: false, body: `${MARKER}\nstale advisory`, user: { login: "bot" } },
+  ];
   enableDeletion(api);
-  api.deleteSupersededReview = async () => { throw new Error("transport exploded"); };
+  api.deleteSupersededReview = async (id) => {
+    if (String(id) === "53") throw new Error("transport exploded");
+    api.deletedReviews.push(String(id));
+    return { ok: true };
+  };
   const logs: string[] = [];
   await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
-  assert.deepEqual(api.dismissed, ["53"], "the stale verdict is still struck over REST");
+  assert.deepEqual(api.deletedReviews, ["54"], "the healthy neighbour is still deleted");
+  assert.deepEqual(api.dismissed, [], "no dismissal fallback applies to the non-verdict row whose DELETE threw");
   assert.ok(logs.some((line) => line.includes("Could not delete superseded review #53") && line.includes("transport exploded")));
-  assert.ok(logs.some((line) => line.includes("failed=1 deleted=0")));
+  assert.ok(logs.some((line) => line.includes("failed=1 deleted=1")));
 });
 
 test("#1176: GitHub never attempts deletion, even when a capability is assigned — minimization stays the mechanism", async () => {
@@ -2844,7 +2856,7 @@ test("#1176: GitHub never attempts deletion, even when a capability is assigned 
 
 test("#1176: the mayHide gate fires before enumeration and before the DELETE", async () => {
   const api = new MockPublishApi("forgejo");
-  api.reviews = [{ id: 48, state: "COMMENTED", body: `${MARKER}\nstale advisory`, user: { login: "bot" } }];
+  api.reviews = [{ id: 48, state: "COMMENTED", official: false, body: `${MARKER}\nstale advisory`, user: { login: "bot" } }];
   enableDeletion(api);
   const logs: string[] = [];
   await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT, [], async () => false);
@@ -2859,7 +2871,7 @@ test("#1176: the mayHide gate fires before enumeration and before the DELETE", a
 // never see its winner deleted.
 test("#1176: the mayHide re-check between enumeration and DELETE stops the destructive mutation", async () => {
   const api = new MockPublishApi("forgejo");
-  api.reviews = [{ id: 50, state: "COMMENTED", body: `${MARKER}\nstale advisory`, user: { login: "bot" } }];
+  api.reviews = [{ id: 50, state: "COMMENTED", official: false, body: `${MARKER}\nstale advisory`, user: { login: "bot" } }];
   enableDeletion(api);
   let gate = 0;
   const logs: string[] = [];
@@ -2872,27 +2884,101 @@ test("#1176: the mayHide re-check between enumeration and DELETE stops the destr
 
 // The enumeration is bounded to its own review: an adapter that throws while
 // reading one review's comments refuses only that review's deletion and lets
-// the rest of the pass continue — a stale verdict must not keep its
-// merge-gate vote because a neighbour's enumeration broke.
+// the rest of the pass continue — a neighbour's deletion and a stale
+// verdict's dismissal must not be lost because one enumeration broke.
 test("#1176: a throwing enumeration refuses only its own review; the rest of the pass continues", async () => {
   const api = new MockPublishApi("forgejo");
   api.reviews = [
-    { id: 51, state: "COMMENTED", body: `${MARKER}\nstale advisory`, user: { login: "bot" } },
-    { id: 52, state: "CHANGES_REQUESTED", body: `${MARKER}\nstale verdict`, user: { login: "bot" } },
+    { id: 51, state: "COMMENTED", official: false, body: `${MARKER}\nstale advisory`, user: { login: "bot" } },
+    { id: 52, state: "DISMISSED", official: false, body: `${MARKER}\ndismissed but still visible`, user: { login: "bot" } },
+    { id: 55, state: "CHANGES_REQUESTED", official: true, body: `${MARKER}\nstale verdict`, user: { login: "bot" } },
   ];
   enableDeletion(api);
-  api.inlineCommentsByReview = new Map([["51", { supported: true, complete: true, comments: [] }]]);
+  api.inlineCommentsByReview = new Map([["52", { supported: true, complete: true, comments: [] }]]);
   const realList = api.listManagedInlineComments.bind(api);
   api.listManagedInlineComments = async (ids: readonly string[]) => {
-    if (String(ids[0]) === "52") throw new Error("transport exploded");
+    if (String(ids[0]) === "51") throw new Error("transport exploded");
     return realList(ids);
   };
   const logs: string[] = [];
   await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
-  assert.deepEqual(api.deletedReviews, ["51"], "the healthy review is still deleted");
-  assert.deepEqual(api.dismissed, ["52"], "the neighbour's stale verdict is still dismissed");
-  assert.ok(logs.some((line) => line.includes("Deleted superseded managed review #51")));
-  assert.ok(logs.some((line) => line.includes("Superseded reviews: eligible=2 dismissed=1 minimized=0 failed=0 deleted=1")));
+  assert.deepEqual(api.deletedReviews, ["52"], "the healthy review is still deleted");
+  assert.deepEqual(api.dismissed, ["55"], "the neighbour's stale verdict is still dismissed");
+  assert.deepEqual(api.inlineListIds, [["52"]], "only the healthy non-verdict row is enumerated; the verdict row never is");
+  assert.ok(logs.some((line) => line.includes("Deleted superseded managed review #52")));
+  assert.ok(logs.some((line) => line.includes("Superseded reviews: eligible=3 dismissed=1 minimized=0 failed=0 deleted=1")));
+});
+
+// #1181 regression (the reviewer's explicit demand): on a deletion-capable
+// Forgejo, verdict rows must NEVER be deleted. Upstream `DeleteReview` ends
+// with `if r.Official { restoreLatestOfficialReview(...) }`, which re-officials
+// the latest remaining Approve/Reject/Request review by the same reviewer —
+// so a cleanup DELETE aimed at a stale verdict could reactivate an older
+// stale verdict from the same bot. Deletion is therefore unreachable for
+// verdict states: zero DELETE requests, dismissal attempts only.
+test("#1181: a deletion-capable forge NEVER deletes verdict rows — zero DELETEs even with dismissal forbidden", async () => {
+  const api = new MockPublishApi("forgejo");
+  api.reviews = [
+    { id: 60, state: "CHANGES_REQUESTED", official: true, body: `${MARKER}\nstale blocking verdict`, user: { login: "bot" } },
+    { id: 61, state: "APPROVED", official: true, body: `${MARKER}\nstale approval`, user: { login: "bot" } },
+  ];
+  enableDeletion(api);
+  api.dismissResult = false; // dismissal forbidden: the forge refuses it
+  const logs: string[] = [];
+  await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
+  assert.deepEqual(api.deletedReviews, [], "cleanup can never trigger the upstream restore side effect via DELETE");
+  assert.deepEqual(api.inlineListCalls, 0, "no enumeration is ever aimed at a verdict row");
+  assert.deepEqual(api.dismissed, ["60", "61"], "dismissal is attempted for both verdict rows");
+  assert.ok(logs.some((line) => line.includes("Could not dismiss review #60")));
+  assert.ok(logs.some((line) => line.includes("Could not dismiss review #61")));
+  assert.ok(!logs.some((line) => line.includes("Deleted superseded managed review")), "the stale CHANGES_REQUESTED verdict stays visible (fail-closed blocking), never deleted");
+  assert.ok(logs.some((line) => line.includes("Superseded reviews: eligible=2 dismissed=0 minimized=0 failed=2 deleted=0")));
+});
+
+// #1181: a DISMISSED row can carry an official Approve/Reject underneath (the
+// state token survives dismissal, the flags are separate upstream), so its
+// `official` flag must be PROVEN false before any DELETE — a proven-empty
+// enumeration does not matter when the flag is true.
+test("#1181: a DISMISSED row with official:true is never deleted, even with a proven-empty enumeration", async () => {
+  const api = new MockPublishApi("forgejo");
+  api.reviews = [{ id: 62, state: "DISMISSED", official: true, body: `${MARKER}\ndismissed but still visible`, user: { login: "bot" } }];
+  enableDeletion(api);
+  const logs: string[] = [];
+  await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
+  assert.deepEqual(api.deletedReviews, [], "zero DELETE calls: deletion could re-official an older verdict");
+  assert.equal(api.inlineListCalls, 0, "the official gate precedes the enumeration");
+  assert.deepEqual(api.dismissed, [], "no dismissal fallback applies to non-verdict rows");
+  assert.ok(logs.some((line) => line.includes("Deletion refused for review #62") && line.includes("official-count flag not proven false") && line.includes("its body stays visible")),
+    "the refusal is an explicit bounded NOTE, not a silent drop");
+  assert.ok(logs.some((line) => line.includes("failed=0 deleted=0")));
+});
+
+test("#1181: a DISMISSED row with official proven false and no inline findings is deleted", async () => {
+  const api = new MockPublishApi("forgejo");
+  api.reviews = [{ id: 63, state: "DISMISSED", official: false, body: `${MARKER}\ndismissed but still visible`, user: { login: "bot" } }];
+  enableDeletion(api);
+  const logs: string[] = [];
+  await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
+  assert.deepEqual(api.deletedReviews, ["63"]);
+  assert.ok(logs.some((line) => line.includes("Deleted superseded managed review #63")));
+  assert.ok(logs.some((line) => line.includes("Superseded reviews: eligible=1 dismissed=0 minimized=0 failed=0 deleted=1")));
+});
+
+// The official flag fails closed on absence and on any non-false value, for
+// COMMENTED rows too: an unknown official count is a reactivation risk.
+test("#1181: a COMMENTED row whose official flag is absent or true is never deleted", async () => {
+  for (const official of [undefined, true]) {
+    const api = new MockPublishApi("forgejo");
+    api.reviews = [{ id: 64, state: "COMMENTED", ...(official === undefined ? {} : { official }), body: `${MARKER}\nstale advisory`, user: { login: "bot" } }];
+    enableDeletion(api);
+    const logs: string[] = [];
+    await hideSupersededManagedReviews(api, api.reviews, MARKER, (line) => logs.push(line), BOT);
+    assert.deepEqual(api.deletedReviews, [], `zero DELETE calls when official is ${String(official)}`);
+    assert.equal(api.inlineListCalls, 0, "the official gate precedes the enumeration");
+    assert.ok(logs.some((line) => line.includes("Deletion refused for review #64") && line.includes("its body stays visible")),
+      `the refusal is stated when official is ${String(official)}`);
+    assert.ok(logs.some((line) => line.includes("failed=0 deleted=0")));
+  }
 });
 
 // #1144: the review id is the review's identity for the whole cleanup
@@ -3202,11 +3288,11 @@ test("#1144: hide failures are counted with a bounded diagnostic and never abort
   assert.ok(dismissLogs.some((line) => line.includes("Superseded reviews: eligible=1 dismissed=0 minimized=1 failed=1")));
 });
 
-// #1144 + #1176: end-to-end against the REAL Forgejo adapter — the publish
-// seam's normalized review states, the author-side deletion that substitutes
-// for the GraphQL hide Forgejo cannot do, and the REST dismissal fallback for
-// reviews that carry inline findings, driven through the publisher itself
-// (no mock adapter in between).
+// #1144 + #1176 + #1181: end-to-end against the REAL Forgejo adapter — the
+// publish seam's normalized review states, the author-side deletion that
+// substitutes for the GraphQL hide Forgejo cannot do (non-verdict,
+// official-false rows only), and the REST dismissal of verdict rows, driven
+// through the publisher itself (no mock adapter in between).
 test("#1176: a Forgejo publish run deletes superseded managed reviews that carry no inline findings", async () => {
   const FORGE = "https://forge.example";
   const run = async (
@@ -3244,43 +3330,46 @@ test("#1176: a Forgejo publish run deletes superseded managed reviews that carry
   };
 
   const stale = [
-    { id: 10, state: "REQUEST_CHANGES", body: `${MARKER}\nstale blocking verdict`, user: { login: "bot" } },
-    { id: 11, state: "COMMENT", body: `${MARKER}\nstale advisory`, user: { login: "bot" } },
+    { id: 10, state: "REQUEST_CHANGES", official: true, body: `${MARKER}\nstale blocking verdict`, user: { login: "bot" } },
+    { id: 11, state: "COMMENT", official: false, body: `${MARKER}\nstale advisory`, user: { login: "bot" } },
   ];
 
   const empty = await run(stale.map((r) => ({ ...r })));
   assert.equal(empty.result.status, "published");
   assert.deepEqual(
     empty.calls.filter((c) => c.method === "DELETE" && /\/reviews\/\d+$/.test(c.url)).map((c) => c.url).sort(),
-    [`${FORGE}/api/v1/repos/o/r/pulls/42/reviews/10`, `${FORGE}/api/v1/repos/o/r/pulls/42/reviews/11`],
-    "both superseded managed reviews are deleted author-side (they carry no inline findings)",
+    [`${FORGE}/api/v1/repos/o/r/pulls/42/reviews/11`],
+    "#1181: only the non-verdict row is deleted author-side; verdict rows are never deletion targets",
   );
-  assert.equal(empty.calls.some((c) => c.url.includes("/dismissals")), false,
-    "a deleted review needs no dismissal — the DELETE removes the verdict with the body");
+  assert.deepEqual(
+    empty.calls.filter((c) => c.method === "POST" && c.url.includes("/dismissals")).map((c) => c.url),
+    [`${FORGE}/api/v1/repos/o/r/pulls/42/reviews/10/dismissals`],
+    "the stale REQUEST_CHANGES verdict is dismissed over REST — deleting it could reactivate an older stale verdict upstream",
+  );
   assert.equal(empty.calls.some((c) => c.url.includes("/graphql")), false, "Forgejo makes zero GraphQL calls");
   assert.ok(empty.result.messages.some((line) => line.includes("no GraphQL API")), "the body-hide degradation is stated");
   assert.ok(empty.result.messages.some((line) => line.includes("Deleted superseded managed review")), empty.result.messages.join("\n"));
-  assert.ok(empty.result.messages.some((line) => line.includes("Superseded reviews: eligible=2 dismissed=0 minimized=0 failed=0 deleted=2")), empty.result.messages.join("\n"));
+  assert.ok(empty.result.messages.some((line) => line.includes("Superseded reviews: eligible=2 dismissed=1 minimized=0 failed=0 deleted=1")), empty.result.messages.join("\n"));
 
   // A superseded review that DOES carry inline findings is refused fail-closed
   // (#1176): the findings must survive an incomplete run per #1144, so the
-  // stale verdict still loses its merge-gate vote through the REST dismissal.
+  // body stays visible; the stale verdict is still dismissed over REST.
   const withFindings = await run(stale.map((r) => ({ ...r })), {
-    "10": [{ id: 21, pull_request_review_id: 10, body: "stale finding", user: { login: "bot" } }],
+    "11": [{ id: 21, pull_request_review_id: 11, body: "stale finding", user: { login: "bot" } }],
   });
   assert.equal(withFindings.result.status, "published");
   assert.deepEqual(
     withFindings.calls.filter((c) => c.method === "DELETE" && /\/reviews\/\d+$/.test(c.url)).map((c) => c.url),
-    [`${FORGE}/api/v1/repos/o/r/pulls/42/reviews/11`],
-    "the empty-handed advisory is still deleted; the review carrying findings is not",
+    [],
+    "the findings-bearing review is not deleted, and the verdict row never is either",
   );
   assert.deepEqual(
     withFindings.calls.filter((c) => c.method === "POST" && c.url.includes("/dismissals")).map((c) => c.url),
     [`${FORGE}/api/v1/repos/o/r/pulls/42/reviews/10/dismissals`],
-    "the stale REQUEST_CHANGES verdict is dismissed over REST as the fallback",
+    "the stale REQUEST_CHANGES verdict is dismissed over REST",
   );
   assert.equal(withFindings.calls.some((c) => c.url.includes("/reviews/11/dismissals")), false, "an advisory body is never dismissed");
   assert.equal(withFindings.calls.some((c) => c.url.includes("/reviews/12/dismissals")), false, "the just-published review is never dismissed");
   assert.ok(withFindings.result.messages.some((line) => line.includes("carries inline findings") && line.includes("deletion refused")), withFindings.result.messages.join("\n"));
-  assert.ok(withFindings.result.messages.some((line) => line.includes("Superseded reviews: eligible=2 dismissed=1 minimized=0 failed=0 deleted=1")), withFindings.result.messages.join("\n"));
+  assert.ok(withFindings.result.messages.some((line) => line.includes("Superseded reviews: eligible=2 dismissed=1 minimized=0 failed=0 deleted=0")), withFindings.result.messages.join("\n"));
 });

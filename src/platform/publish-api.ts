@@ -45,6 +45,14 @@ export interface PublishReviewRef {
    * superseded the run; a review without a usable timestamp fails closed. */
   submitted_at?: string;
   updated_at?: string;
+  /** #1181: forge-reported official-review-count flag. Used by the #1176
+   * deletion gate to fail closed on the upstream verdict-reactivation risk:
+   * Forgejo's `DeleteReview` re-officials the latest remaining
+   * Approve/Reject/Request review by the same reviewer, so a row whose
+   * `official` flag is true, absent, or unknown is never deleted. GitHub rows
+   * do not carry it (GitHub never deletes; minimization is the hide
+   * mechanism). */
+  official?: boolean;
 }
 
 export interface ManagedInlineCommentRef {
@@ -879,7 +887,16 @@ export class ForgejoPublishApi implements PublishPlatformApi {
    * and a bodyless review-request entry fails the eligibility filter anyway
    * (no managed marker in body; `REQUEST_REVIEW` reads `PENDING`, which the
    * cleanup layer fails closed on) — so the upstream refusal never applies to
-   * a cleanup target. */
+   * a cleanup target.
+   * #1181: deletion is additionally a NON-VERDICT-state operation — the
+   * upstream restore side effect (`DeleteReview` →
+   * `restoreLatestOfficialReview`) can re-official an older
+   * Approve/Reject/Request review by the same reviewer, so whole-review
+   * deletion must never be reachable from a verdict row. The cleanup layer
+   * never calls `deleteSupersededReview` for `APPROVED`/`CHANGES_REQUESTED`
+   * rows (they keep the dismissal path) and refuses rows whose `official`
+   * flag is not proven `false`; a failed DELETE on a non-verdict row is a
+   * bounded failure — no dismissal fallback applies to non-verdict rows. */
   readonly supersededReviewDeletion: NativeReviewSurface = { supported: true };
   private readonly base: string;
   private readonly origin: string;
@@ -1192,14 +1209,20 @@ export class ForgejoPublishApi implements PublishPlatformApi {
    * repo admin; Forgejo has no GraphQL minimization, so this is the only way
    * a superseded managed advisory body stops staying visible). The endpoint
    * deletes the review AND all of its code comments, so the cleanup layer
-   * proves a review carries no inline comments before ever calling this. The
-   * id is interpolated into a REST path segment, so a malformed id is refused
-   * WITHOUT any request — an unusable id never reaches the forge. A 404 is
-   * deliberately NOT an idempotent success: a route-level 404 (unsupported
-   * forge version) is indistinguishable from "already gone", and reading it
-   * as success would skip the caller's dismissal fallback for a stale
-   * verdict — the caller falls back and no-ops harmlessly on a truly gone
-   * review instead. */
+   * proves a review carries no inline comments before ever calling this.
+   * The id is interpolated into a REST path segment, so a malformed id is
+   * refused WITHOUT any request — an unusable id never reaches the forge. A
+   * 404 is deliberately NOT an idempotent success: a route-level 404
+   * (unsupported forge version) is indistinguishable from "already gone",
+   * and reading it as success would log a deletion that never happened.
+   * #1181: this seam is a non-verdict-state operation — the caller (cleanup)
+   * never invokes it for a verdict row, because deleting also triggers the
+   * upstream `restoreLatestOfficialReview` side effect (the latest remaining
+   * Approve/Reject/Request review by the same reviewer is re-officialed
+   * without a Dismissed filter), which could reactivate a stale verdict.
+   * A failed DELETE on a non-verdict row is a bounded failure; no dismissal
+   * fallback applies to non-verdict rows (dismissal is the verdict-state
+   * path). */
   async deleteSupersededReview(reviewId: number | string): Promise<ReviewDeletionResult> {
     if (!/^[1-9]\d*$/.test(String(reviewId))) {
       return { ok: false, error: "refusing a malformed review id" };

@@ -380,8 +380,8 @@ test("Forgejo review listing paginates and fails closed on later-page errors and
 test("#1144: the Forgejo review listing normalizes Forgejo review states into the GitHub-shaped vocabulary", async () => {
   const base = "https://forge.example/api/v1/repos/o/r/pulls/9/reviews";
   const rows = [
-    { id: 11, state: "REQUEST_CHANGES", body: "<!-- m -->\nblocking", user: { login: "bot" } },
-    { id: 12, state: "COMMENT", body: "<!-- m -->\nadvisory", user: { login: "bot" } },
+    { id: 11, state: "REQUEST_CHANGES", official: true, body: "<!-- m -->\nblocking", user: { login: "bot" } },
+    { id: 12, state: "COMMENT", official: false, body: "<!-- m -->\nadvisory", user: { login: "bot" } },
     { id: 13, state: "APPROVED", body: "<!-- m -->\napproved", user: { login: "bot" } },
     { id: 14, state: "REQUEST_REVIEW", body: "<!-- m -->\nreview-request placeholder", user: { login: "bot" } },
     { id: 15, state: "APPROVED", dismissed: true, body: "<!-- m -->\ndismissed", user: { login: "bot" } },
@@ -402,8 +402,10 @@ test("#1144: the Forgejo review listing normalizes Forgejo review states into th
     [17, ""],
     [18, "CHANGES_REQUESTED"],
   ]);
-  // The rest of the row survives the normalization untouched.
+  // The rest of the row survives the normalization untouched — including the
+  // #1181 `official` flag the cleanup deletion gate reads.
   assert.deepEqual(reviews.map((r) => [r.id, r.body, r.user]), rows.map((row) => [row.id, row.body, row.user]));
+  assert.deepEqual(reviews.map((r) => [r.id, r.official]), [[11, true], [12, false], [13, undefined], [14, undefined], [15, undefined], [16, undefined], [17, undefined], [18, undefined]]);
 });
 
 // #1144: the state mapping is the publish seam's forge-agnostic contract —

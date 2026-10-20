@@ -234,6 +234,33 @@ export async function cleanupManagedReviews(
 const HIDEABLE_STATES: ReadonlySet<string> = new Set(["COMMENTED", "APPROVED", "CHANGES_REQUESTED", "DISMISSED"]);
 
 /**
+ * #1181: the whole-review deletion predicate — the single source both the
+ * eligibility filter and the per-mutation gate derive from. Deletion is
+ * attempted ONLY when ALL of:
+ * - the review's state is a non-verdict state (`COMMENTED` or `DISMISSED`):
+ *   verdict states (`APPROVED`/`CHANGES_REQUESTED`) are NEVER deleted — they
+ *   keep the existing dismissal path, which strikes the stale merge-gate
+ *   vote without destroying the review; AND
+ * - the forge-reported `official` flag is PROVEN `false` on the row (true,
+ *   absent, and unknown all fail closed).
+ *
+ * Rationale (upstream Forgejo, `models/issues/review.go`): `DeleteReview`
+ * ends with `if r.Official { restoreLatestOfficialReview(ctx, r.IssueID,
+ * r.ReviewerID) }`, and `restoreLatestOfficialReview` re-officials the
+ * LATEST remaining review of types {Approve, Reject, Request} by the same
+ * reviewer (`Desc("id")`) WITHOUT filtering on `Dismissed`. Because a
+ * dismissed review keeps its original state token (the API flags `dismissed`
+ * separately), a `DISMISSED` row's underlying type can be an official
+ * Approve/Reject — deleting it would re-official an older `APPROVED` review
+ * from the same reviewer, silently reactivating a stale merge-gate verdict.
+ * Whole-review deletion must never be able to exploit that side effect.
+ */
+function deletionEligible(review: PublishReviewRef): boolean {
+  return (review.state === "COMMENTED" || review.state === "DISMISSED")
+    && review.official === false;
+}
+
+/**
  * #1144: after a verified newer-publication checkpoint at the current PR
  * head, every older managed review from the trusted publishing identity is
  * proven superseded and must stop being visible — even when this run's
@@ -278,7 +305,19 @@ const HIDEABLE_STATES: ReadonlySet<string> = new Set(["COMMENTED", "APPROVED", "
  * one stroke, so a review carrying inline findings is refused fail-closed
  * (those findings must survive an incomplete run per #1144), and so is an
  * enumeration that is incomplete or unsupported — an uncertain picture never
- * licenses a destructive mutation. The publication-boundary re-check
+ * licenses a destructive mutation.
+ * #1181: deletion is further narrowed to NON-VERDICT rows that PROVABLY
+ * cannot reactivate a stale verdict (`deletionEligible`, above): the state
+ * must be `COMMENTED`/`DISMISSED` and the forge-reported `official` flag
+ * must be proven `false`. Upstream, `DeleteReview` restores the latest
+ * remaining official Approve/Reject/Request review by the same reviewer
+ * (`restoreLatestOfficialReview`, no Dismissed filter), so deleting a
+ * verdict row — or a `DISMISSED` row whose underlying type is an official
+ * Approve/Reject — would re-official a stale merge-gate vote. Verdict states
+ * therefore keep the dismissal path and are never deletion targets, and a
+ * non-verdict row whose `official` flag is true, absent, or unknown is
+ * refused with an explicit bounded NOTE (deletion refused, body stays
+ * visible) rather than silently dropped. The publication-boundary re-check
  * (`mayHide`) applies again immediately before the DELETE, exactly like it
  * gates every other mutation. The complete-coverage path
  * (`cleanupManagedReviews`) deliberately NEVER deletes whole reviews:
@@ -344,11 +383,12 @@ export async function hideSupersededManagedReviews(
     // Non-verdict bodies hide once, and only with a GraphQL node to aim at;
     // without one, provenance for the mutation is unestablished. #1176: on a
     // forge with author-side review deletion there is a second, node-free
-    // mechanism — the per-review gate below still proves the review carries
-    // no inline comments before the DELETE runs. Both eligibility and the
-    // mutation gate derive from the same combined predicate, so a forge that
-    // somehow carries both capabilities never counts a review it will not
-    // actually process.
+    // mechanism. #1181: the eligibility filter admits non-verdict rows whose
+    // `official` flag is NOT proven false only so the per-review pass can
+    // emit the bounded deletion-refusal NOTE — the DELETE itself is gated by
+    // `deletionEligible` at the mutation boundary below, and filter and gate
+    // derive from that same predicate, so a forge that somehow carries both
+    // capabilities never counts a review it will not actually process.
     return (canMinimize && !minimized.has(id) && typeof review.node_id === "string" && review.node_id !== "")
       || (canDelete && !canMinimize);
   });
@@ -368,12 +408,17 @@ export async function hideSupersededManagedReviews(
       // all of its code comments. Findings survive an incomplete run per
       // #1144, so a review carrying them, or an enumeration that cannot
       // prove emptiness, is refused fail-closed and the body stays visible.
-      if (canDelete && !canMinimize) {
+      // #1181: the DELETE also fires the upstream `restoreLatestOfficialReview`
+      // side effect (the latest remaining Approve/Reject/Request review by
+      // the same reviewer is re-officialed without a Dismissed filter), so
+      // the mutation is gated by `deletionEligible`: non-verdict state AND a
+      // proven-false `official` flag. Verdict states are never deletion
+      // targets — the dismissal path below strikes their stale vote instead.
+      if (canDelete && !canMinimize && deletionEligible(review)) {
         // The enumeration itself is bounded to this review: an adapter that
         // throws here refuses only THIS review's deletion (falling back to
         // the state-specific behavior below) instead of aborting the whole
-        // cleanup pass — a verdict state would otherwise keep its stale
-        // merge-gate vote because a neighbour's enumeration broke.
+        // cleanup pass.
         let listed: Awaited<ReturnType<PublishPlatformApi["listManagedInlineComments"]>>;
         try {
           listed = await api.listManagedInlineComments([id]);
@@ -387,7 +432,7 @@ export async function hideSupersededManagedReviews(
           // The DELETE is bounded to this review too: a throwing adapter
           // (the seam is public and swallows its own transport errors, but a
           // mock need not) refuses only this review's deletion instead of
-          // aborting the pass and skipping a stale verdict's dismissal.
+          // aborting the pass.
           let deletion: { ok: boolean; error?: string };
           try {
             deletion = await api.deleteSupersededReview!(id);
@@ -400,7 +445,10 @@ export async function hideSupersededManagedReviews(
             continue;
           }
           failed++;
-          log(`  WARN: Could not delete superseded review #${id} (${deletion.error ?? "unknown reason"}); falling back to dismissal where applicable`);
+          // #1181: a failed DELETE on a non-verdict row is a bounded failure —
+          // no dismissal fallback applies to non-verdict rows (dismissal is
+          // the verdict-state path), so the body simply stays visible.
+          log(`  WARN: Could not delete superseded review #${id} (${deletion.error ?? "unknown reason"}); its body stays visible`);
         } else if (listed.supported && listed.complete) {
           log(`  NOTE: Superseded review #${id} carries inline findings; deletion refused, its body stays visible`);
         } else if (listed.supported) {
@@ -408,6 +456,14 @@ export async function hideSupersededManagedReviews(
         } else {
           log(`  NOTE: Inline-comment enumeration is unsupported by this forge; deletion refused, review #${id} stays visible`);
         }
+      } else if (canDelete && !canMinimize && review.state !== "APPROVED" && review.state !== "CHANGES_REQUESTED") {
+        // #1181: a non-verdict row whose `official` flag is not proven false
+        // never reaches the DELETE (the upstream restore side effect could
+        // reactivate a stale verdict); the refusal is an explicit bounded
+        // NOTE, not a silent drop. Verdict states are absent here on purpose:
+        // they are never deletion targets, and their stale vote is struck by
+        // the dismissal path below.
+        log(`  NOTE: Deletion refused for review #${id} (official-count flag not proven false; deleting could reactivate a stale verdict); its body stays visible`);
       }
       if (review.state === "APPROVED" || review.state === "CHANGES_REQUESTED") {
         if (await api.dismissReview(id, DISMISSAL_MESSAGE)) {
