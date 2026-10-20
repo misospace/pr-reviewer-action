@@ -205,6 +205,20 @@ jobs:
           ai-fallback-base-url: ${{ vars.LITELLM_URL }}
           ai-fallback-model: ${{ vars.FALLBACK_MODEL }}
           ai-model: ${{ vars.PRIMARY_MODEL }}
+          # #1073: dogfood the advisory post-review confidence scorer. A
+          # dedicated CONFIDENCE_MODEL/FORMAT takes precedence when configured;
+          # otherwise reuse the already-configured SMART_MODEL/FORMAT so the
+          # scorer is actually enabled without new repo variables or secrets.
+          # This is a separate bounded model call after the final verdict,
+          # not a second approval or a merge gate. When the smart reviewer
+          # produced the final review, its model may also be the scorer:
+          # this is useful dogfood telemetry, not model-diverse assurance.
+          # Empty scorer URL/key safely inherit the primary LiteLLM transport;
+          # forks remain disabled by the action's default policy.
+          ai-confidence-model: ${{ vars.CONFIDENCE_MODEL || vars.SMART_MODEL }}
+          ai-confidence-api-format: ${{ vars.CONFIDENCE_FORMAT || vars.SMART_FORMAT }}
+          ai-confidence-reasoning-effort: ${{ vars.CONFIDENCE_REASONING_EFFORT }}
+          ai-confidence-timeout-sec: "120"
           ai-primary-reasoning-effort: ${{ vars.PRIMARY_REASONING_EFFORT }}
           ai-reasoning-effort: ${{ vars.REASONING_EFFORT }}
           ai-response-format: json_object
