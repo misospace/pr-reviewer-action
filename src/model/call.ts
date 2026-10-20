@@ -17,6 +17,7 @@ import {
 import { runChatRequest, type ChatRequestOutcome, type StructuredOutputSurface } from "../transport/transport.js";
 import { describeTransportFailure, TransportFailure } from "../transport/http.js";
 import { callKnownSecrets } from "../transport/headers.js";
+import { classifyTerminalProviderFailure, type TerminalProviderFailure } from "../transport/terminal.js";
 
 /**
  * Port of the v2 `call_model_tier` retry loop (scripts/model_call.sh): one
@@ -38,7 +39,15 @@ import { callKnownSecrets } from "../transport/headers.js";
  * - every tier always makes at least one attempt (#867), regardless of a
  *   configured `retries` of 0: `retries` is the total-attempt budget, and
  *   skipping the call entirely for a degenerate 0 would misreport a real
- *   transport outage as the loop's synthetic default parse failure below.
+ *   transport outage as the loop's synthetic default parse failure below;
+ * - #1080 adds a SECOND, provider-error-aware permanence rule on top of the
+ *   status-based one: a body the shared terminal classifier recognizes
+ *   (quota exhausted, model retired) ends the tier immediately with no further
+ *   attempt and no sleep, whatever the status. This is a property of the
+ *   EVIDENCE, not of the status — the same 429 that stays retryable for one
+ *   provider is terminal for another — and it is the tier-level counterpart of
+ *   the transport's own bypass, so a terminal primary reaches the configured
+ *   fallback in seconds instead of after 13 minutes of silent retries.
  */
 
 export const EMPTY_COMPLETION_EXIT = 3;
@@ -121,7 +130,13 @@ export type ModelCallOutcome =
       strippedStructuredOutput?: StructuredOutputSurface | undefined }
   | { status: "empty_completion"; attempts: number; failure: VerdictParseFailure; diagnostics?: ResponseDiagnostics | undefined }
   | { status: "parse_exhausted"; attempts: number; failure: VerdictParseFailure; diagnostics?: ResponseDiagnostics | undefined }
-  | { status: "transport_exhausted"; attempts: number; failure: TransportFailure; nonRetryable?: boolean; diagnostics?: ResponseDiagnostics | undefined };
+  | { status: "transport_exhausted"; attempts: number; failure: TransportFailure; nonRetryable?: boolean; diagnostics?: ResponseDiagnostics | undefined;
+      /** #1080: set on the early non-retryable return path when the shared
+       * terminal classifier recognized the failure as permanent (quota
+       * exhausted, model retired). `nonRetryable` keeps its #1006 status-based
+       * semantics unchanged; both are set for a terminal failure, and this one
+       * carries the normalized REASON the fallback routing reports. */
+      terminal?: TerminalProviderFailure | undefined };
 
 function requestConfig(profile: TierProfile, context: ModelCallContext, stream: boolean, maxTokensOverride?: number): ModelRequestConfig {
   return {
@@ -170,8 +185,17 @@ async function defaultSleep(seconds: number): Promise<void> {
 }
 
 /** #1006: Only the tier-level permanent set skips the retry budget. The
- * transport's same-request retry policy is independent. */
-function isRetryableTransportFailure(failure: TransportFailure): boolean {
+ * transport's same-request retry policy is independent.
+ *
+ * #1080 adds the terminal-provider boundary beside it: `classifyTerminalProviderFailure`
+ * is the same authority the transport consults, so the two layers can never
+ * disagree about a body that states a permanent condition (quota exhausted,
+ * model retired/deprecated). A non-null classification is permanent whatever
+ * the HTTP status — 429, 410, or anything else — and burns no attempt.
+ * `terminal` is the already-computed classification for this failure (the
+ * caller passes it so a retryable failure's body is not parsed twice). */
+function isRetryableTransportFailure(failure: TransportFailure, terminal: TerminalProviderFailure | null): boolean {
+  if (terminal !== null) return false;
   if (failure.kind !== "http_status") return true;
   if (failure.status === undefined) return true;
   return !TIER_PERMANENT_HTTP_STATUSES.has(failure.status);
@@ -220,13 +244,20 @@ export async function callModelTier(
     });
 
     if (outcome.status === "failure") {
-      if (!isRetryableTransportFailure(outcome.failure)) {
+      // #1080: the terminal classification is what the reason-bearing return
+      // needs; `isRetryableTransportFailure` consumes that same computation
+      // (plus the #1006 status set) for the boundary itself, so the two layers
+      // cannot disagree about what is permanent, and a retryable failure's
+      // body is classified once.
+      const terminal = classifyTerminalProviderFailure(outcome.failure);
+      if (!isRetryableTransportFailure(outcome.failure, terminal)) {
         return {
           status: "transport_exhausted",
           attempts: attempt,
           failure: outcome.failure,
           nonRetryable: true,
           diagnostics: tierDiagnostics(profile, null, outcome.failure),
+          ...(terminal !== null ? { terminal } : {}),
         };
       }
       // Transport or HTTP error: consume the retry budget with doubling

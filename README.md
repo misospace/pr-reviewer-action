@@ -137,6 +137,35 @@ Forgejo Authorized Integrations can reuse managed sticky comments with repositor
 
 > **Note:** On Forgejo, features requiring GitHub's GraphQL API (review minimization) are skipped with a clear log line. CI auto-discovery requires Forgejo v16.0+ (the first release with the run-jobs API) and excludes a pending status only when that API proves this is a single-job run. If the job has an `html_url`, its path must exactly match the status `target_url` path on the runner's origin. Forgejo v16 jobs omit `html_url`; in that case the job's `run_id` must match the queried run, and the status must target a job page for the runner's repository and run number. `FORGEJO_RUN_NUMBER`/`GITHUB_RUN_NUMBER` identify candidate status URLs; `FORGEJO_RUN_ID` (or `GITHUB_RUN_ID` fallback) is used only to query the jobs API. Multi-job, mismatched, and unavailable cases leave statuses visible; older Forgejo instances warn immediately and fall back to bounded waiting, so set `CI_STATUS_CONTEXT` to avoid self-deadlock; a whitespace-only value is treated as unset and enables auto-discovery. Multi-job reviewer workflows also need `CI_STATUS_CONTEXT`. The core review pipeline and all REST-based features work fully.
 
+### 🛑 Terminal provider failures (quota exhausted, retired model)
+
+A provider error body can state a **permanent** condition: the account's quota is spent, billing is hard-limited, or the model is retired/deprecated/removed. No later attempt fixes any of them, so both retry layers consult one shared classifier and stop immediately, letting the run reach the configured fallback (`ai-fallback-model`) in seconds instead of after minutes of silent retries.
+
+Allowlisted as terminal — nothing else is:
+
+| Reason | Recognized evidence |
+|---|---|
+| `quota_exhausted` | Structured codes `insufficient_quota`, `quota_exceeded`, `usage_limit_reached`, `billing_hard_limit_reached`, `billing_not_active`, `credit_exhausted`, `plan_exhausted`, `token_plan_usage_limit_reached`; prose such as `insufficient quota`, `insufficient balance`, `insufficient credit`, `you exceeded your current quota`, `billing hard limit has been reached`, `token plan usage limit reached`, `upgrade your token plan or purchase credits`. LiteLLM/MiniMax code `2056` is never decisive on its own — a bare `2056` in any body is just an unrelated number — so the token-plan sentences beside it are what count. |
+| `model_unavailable` | Structured codes `model_not_found`, `model_deprecated`, `model_retired`, `model_unavailable`, `model_removed`, `deprecated_model`, `unknown_model`, `DeploymentNotFound`; prose such as `has been retired`, `has been deprecated`, `is deprecated and will be removed`, `model not found`, `does not exist or you do not have access`, `no access to this model`, `unknown model`. |
+
+Deliberately **not** terminal (these keep the configured retry budget): `rate limit`, `too many requests`, `resource_exhausted`, RPM/TPM phrasing, `try again later`, `retry after/later/in`, `model is loading`, `model is busy`, `model is temporarily unavailable`, `server overloaded`, unknown provider bodies, and any phrase whose own text says the condition is temporary.
+
+Two deliberate boundaries worth knowing:
+
+- **Prose evidence is 4xx-only.** A 5xx body is server-composed text that routinely echoes request content back, so allowing prose to end a 5xx retry budget would let request content decide it. Structured codes still count at any status — a provider has to *construct* `insufficient_quota` to send it.
+- **A 4xx body that quotes the review corpus and happens to contain an allowlisted phrase is accepted** as the provider's own claim. Rejecting an echo structurally would mean a leading-sentence or delimiter heuristic, which cannot be told apart from a real provider message without risking the false negative this feature exists to prevent. The consequence is bounded: an immediate, truthfully-logged fallback (availability recovery) — never a verdict change, a gate bypass, or a fabricated outcome.
+
+Telling the two apart in the log — a terminal stop is named; a transient retry is just slow:
+
+```text
+terminal provider failure: quota_exhausted (litellm_minimax_token_plan) HTTP 429; bypassing same-request retries
+Primary: transport failures exhausted (HTTP 429: …) [terminal quota_exhausted (litellm_minimax_token_plan) HTTP 429; bypassing retries]
+::error::Primary: model endpoint returned a non-retryable HTTP status [terminal=quota_exhausted]; failing over without retrying (…)
+Primary: terminal=quota_exhausted; bypassing retries; trying fallback: <model> @ <base-url> (openai)
+```
+
+No Action input controls this: the signatures are a fixed allowlist, and the retry budgets (`ai-primary-retries`, `ai-primary-retry-delay-sec`, …) still govern every failure the classifier leaves alone. Specialist lanes latch too — once an endpoint/model/format/credential lane answers terminally, later calls on that same lane short-circuit without a wire request (`lane terminally unavailable (<reason>)`). The credential is part of the lane key (as a truncated digest, never the key), because quota exhaustion is an account condition: a differently keyed lane against the same endpoint has its own budget and is not latched.
+
 ## 📚 Documentation
 
 | Topic | Page |

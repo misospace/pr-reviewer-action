@@ -22,6 +22,7 @@ import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js"
 import { runChatRequest } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
 import { callKnownSecrets, extraHeadersForEnv } from "../transport/headers.js";
+import type { TerminalProviderReason } from "../transport/terminal.js";
 import type { FetchLike } from "../platform/http.js";
 import { normalizePrIdentity } from "../platform/pr.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
@@ -2218,7 +2219,7 @@ async function callTier(
   corpusName: string,
   requestArtifact: string,
   responseArtifact: string,
-): Promise<{ ok: boolean; artifact: Record<string, unknown> | null; rawResponse: unknown }> {
+): Promise<{ ok: boolean; artifact: Record<string, unknown> | null; rawResponse: unknown; terminal?: TerminalProviderReason }> {
   const { env, ws, log, errorLog, annotate } = input;
   const corpusText = ws.readText(corpusName) ?? "";
   // #998 (#1049 review): an Anthropic effort the operator configured but the
@@ -2388,15 +2389,36 @@ async function callTier(
     // #1149: `redactTextDeep` on the persisted body for the provider-authored
     // reason spelled out in the `empty_completion` branch above.
     const detail = describeTransportFailure(outcome.failure, { secrets: knownSecrets });
-    errorLog(`${profile.label}: transport failures exhausted (${detail})${diagnosticsLine}`);
+    // #1080: ONE line for a terminal provider stop — the lane label, the
+    // normalized reason, the HTTP status, and the fact that retries were
+    // bypassed. Built from enums and an allowlisted signature (never provider
+    // prose) and masked against the lane's known secrets like every other line
+    // here, because the static text can collide with a very short configured
+    // key. Non-terminal failures keep the byte-identical line.
+    const terminalNote = outcome.terminal !== undefined
+      ? maskKnownSecrets(
+        ` [terminal ${outcome.terminal.reason} (${outcome.terminal.signature}) HTTP ${outcome.terminal.httpStatus ?? "?"}; bypassing retries]`,
+        knownSecrets,
+      )
+      : "";
+    errorLog(`${profile.label}: transport failures exhausted (${detail})${diagnosticsLine}${terminalNote}`);
     if (outcome.nonRetryable === true) {
-      annotate(`::error::${profile.label}: model endpoint returned a non-retryable HTTP status; failing over without retrying (${annotationSafe(detail)})`);
+      // The SAME annotation carries the terminal reason — never a second one.
+      const terminalReason = outcome.terminal !== undefined ? ` [terminal=${outcome.terminal.reason}]` : "";
+      annotate(`::error::${profile.label}: model endpoint returned a non-retryable HTTP status${terminalReason}; failing over without retrying (${annotationSafe(detail)})`);
     }
     ws.write(responseArtifact, pyJsonDumps(redactTextDeep(outcome.diagnostics !== undefined
       ? { error: detail, diagnostics: outcome.diagnostics.record }
       : { error: detail }, knownSecrets)));
   }
-  return { ok: false, artifact: null, rawResponse: null };
+  // #1080: the normalized terminal reason rides the result so the fallback
+  // line below can be truthful about WHY the lane is being left.
+  return {
+    ok: false,
+    artifact: null,
+    rawResponse: null,
+    ...(outcome.status === "transport_exhausted" && outcome.terminal !== undefined ? { terminal: outcome.terminal.reason } : {}),
+  };
 }
 
 /** Every API key the run could have sent, longest first so a key that
@@ -2514,7 +2536,13 @@ async function producePrimaryReview(input: ReviewCallInput & {
     return noticeResult(ws, outcome);
   }
 
-  errorLog(`${firstProfile.label} model unavailable after retries; trying fallback: ${profiles.fallback.model} @ ${profiles.fallback.baseUrl} (${profiles.fallback.apiFormat})`);
+  // #1080: after a TERMINAL provider failure the historical wording ("after
+  // retries") is false — no retry ran. Say so, in the same single line, with
+  // the normalized reason; otherwise this line stays byte-identical. The
+  // fallback keeps its own independent profile and credentials either way.
+  errorLog(primary.terminal !== undefined
+    ? `${firstProfile.label}: terminal=${primary.terminal}; bypassing retries; trying fallback: ${profiles.fallback.model} @ ${profiles.fallback.baseUrl} (${profiles.fallback.apiFormat})`
+    : `${firstProfile.label} model unavailable after retries; trying fallback: ${profiles.fallback.model} @ ${profiles.fallback.baseUrl} (${profiles.fallback.apiFormat})`);
   // #368: the fallback re-truncates the initial corpus. #940: the bound is
   // the declared fallback capacity — the fallback window can be smaller
   // than the primary tier's — never above the historical 120000-byte
