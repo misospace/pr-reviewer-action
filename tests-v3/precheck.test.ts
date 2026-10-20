@@ -284,10 +284,14 @@ test("#1152: every api-key contract input is registered in the credential digest
   // be staged under a name the fingerprint covers, and the set must carry no
   // stale entries the contract no longer defines. `linear-api-key` is
   // deliberately excluded (not a model lane; it contributes through the
-  // LINEAR_API_KEY_CONFIGURED boolean).
+  // LINEAR_API_KEY_CONFIGURED boolean). `ai-confidence-api-key` is likewise
+  // excluded: it is covered by the conditional #1073 scorer family, which
+  // emits its digest only while the scorer is enabled (`AI_CONFIDENCE_MODEL`
+  // non-empty) — the same rotation coverage, scoped to when the credential is
+  // actually sent.
   const contractCredentialEnvNames = V3_CONTRACT.inputs
     .map((input) => input.id)
-    .filter((id) => id.endsWith("-api-key") && id !== "linear-api-key")
+    .filter((id) => id.endsWith("-api-key") && id !== "linear-api-key" && id !== "ai-confidence-api-key")
     .map((id) => id.toUpperCase().replaceAll("-", "_"));
   assert.ok(contractCredentialEnvNames.length >= 5, "the contract is expected to define the five lane credentials");
   for (const name of contractCredentialEnvNames) {
