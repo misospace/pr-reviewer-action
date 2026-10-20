@@ -19,6 +19,7 @@ import { redactText } from "../context/redact.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { aggregateOutcomeEvents } from "./report.js";
 import type { OutcomeAggregate } from "./report.js";
+import { outcomeEventInstant } from "./reconcile.js";
 
 export const FINDING_OUTCOMES_SCHEMA = "finding-outcomes/v1";
 
@@ -232,7 +233,19 @@ export function parseOutcomeLedger(raw: string): OutcomeLedger | null {
     if (event === null) return null;
     events.push(event);
   }
-  const capped = events.length > MAX_LEDGER_EVENTS ? events.slice(events.length - MAX_LEDGER_EVENTS) : events;
+  // Cap applies event RECENCY, not array position — same chronology rule
+  // `mergeLedger` applies to the merged ledger: a delayed older run merged
+  // after a newer one must not let the newest status event be evicted while
+  // an older delayed event is retained. Order by parsed instant with the
+  // original array order as the explicit tie-breaker, then keep the latest
+  // MAX_LEDGER_EVENTS.
+  const capped = events.length > MAX_LEDGER_EVENTS
+    ? events
+        .map((event, index) => ({ event, index, at: outcomeEventInstant(event.at) }))
+        .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.index - b.index))
+        .slice(-MAX_LEDGER_EVENTS)
+        .map((entry) => entry.event)
+    : events;
   return {
     schema: FINDING_OUTCOMES_SCHEMA,
     generated_at: generatedAt,

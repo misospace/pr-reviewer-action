@@ -679,6 +679,74 @@ test("#1027 ledger: fail-closed parse and stable round-trip", () => {
   assert.deepEqual(parseOutcomeLedger(JSON.stringify({ ...ledger, aggregate: { unique_findings: "nope" } }))!.aggregate, aggregateOutcomeEvents(events));
 });
 
+test("#1027 ledger: parser cap retains events by recency, not array position", () => {
+  // Reader-side twin of the mergeLedger regression: the persisted array
+  // order is NOT chronology, so the parser boundary must apply the same
+  // deterministic cap rule — order by parsed instant with the original
+  // array order as tie-breaker, retain the latest MAX_LEDGER_EVENTS.
+  // An array-position slice could evict the newest status event at the
+  // FRONT while keeping an older delayed event, regressing a `resolved`
+  // finding back to open in the recomputed aggregate.
+  const resolvedIdentity = "c".repeat(64);
+  const bulkIdentity = "d".repeat(64);
+  const resolvedEvent: OutcomeEvent = {
+    finding_id: resolvedIdentity,
+    kind: "resolved",
+    at: "2026-10-03T00:00:00.000Z",
+    head_sha: HEAD_B,
+    route: null,
+    model: null,
+    provenance: "forge-thread" as const,
+  };
+  const bulk: OutcomeEvent[] = Array.from({ length: MAX_LEDGER_EVENTS }, (_unused, index) => ({
+    finding_id: bulkIdentity,
+    kind: "feedback" as const,
+    at: "2026-10-01T00:00:00.000Z",
+    head_sha: null,
+    route: null,
+    model: null,
+    provenance: "forge-reaction" as const,
+    signal: "helpful" as const,
+    count: index,
+  }));
+  const lateOlder: OutcomeEvent = {
+    finding_id: bulkIdentity,
+    kind: "feedback" as const,
+    at: "2026-10-02T00:00:00.000Z",
+    head_sha: null,
+    route: null,
+    model: null,
+    provenance: "forge-reaction" as const,
+    signal: "helpful" as const,
+    count: 50_000,
+  };
+  // Newest status-bearing event sits at the FRONT of the persisted array,
+  // bulk is older, one late-arriving older event is appended last.
+  const events = [resolvedEvent, ...bulk, lateOlder];
+  const ledger = {
+    schema: FINDING_OUTCOMES_SCHEMA,
+    generated_at: AT,
+    head_sha: HEAD_A,
+    route: "primary",
+    model: "m",
+    events,
+    aggregate: aggregateOutcomeEvents(events),
+  };
+  const parsed = parseOutcomeLedger(JSON.stringify(ledger))!;
+  assert.equal(parsed.events.length, MAX_LEDGER_EVENTS);
+  // Newest status event survived the cap despite being first in the array…
+  assert.ok(parsed.events.some((event) => event.finding_id === resolvedIdentity && event.kind === "resolved"));
+  // …and the earliest array-order entries were the ones evicted.
+  assert.equal(parsed.events.some((event) => event.count === 0), false, "array-order tie-break must evict earliest");
+  assert.equal(parsed.events.some((event) => event.count === 1), false);
+  assert.ok(parsed.events.some((event) => event.count === 2));
+  assert.ok(parsed.events.some((event) => event.count === 50_000));
+  // The recomputed aggregate reads the identity's LATEST state: the
+  // resolved event is retained, so the finding is not re-declared open.
+  assert.equal(parsed.aggregate.resolved, 1);
+  assert.equal(parsed.aggregate.open, 0);
+});
+
 test("#1027 buildComments: identity marker appended exactly once per posted comment", async () => {
   const { buildComments } = await import("../src/publish/inline-findings.js");
   const diff = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,1 +1,2 @@\n old\n+new line\n";
