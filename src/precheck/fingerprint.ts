@@ -249,18 +249,76 @@ const ANTHROPIC_EFFORT_SUPPORT_KEYS: ReadonlySet<string> = new Set([
   "AI_FALLBACK_ANTHROPIC_STRUCTURED_OUTPUT_SUPPORT",
 ]);
 
-/** One-way, domain-separated fingerprint of a SECRET config value:
- * `<key \0 value>` hashed to the first 12 hex chars — the same shape
- * `extraHeaderFingerprint` emits for header values, so the fingerprint bytes
- * (which reach a public marker comment) can never carry the secret, while a
- * rotation still invalidates the cached review the secret produced. */
+/**
+ * #1152: rotating a provider credential must invalidate the cached review
+ * that credential produced, so a configured lane credential re-enters the
+ * config lines as a one-way digest instead of being dropped by the
+ * `*_API_KEY` sweep rule outright (the pattern #1073 settled for the
+ * confidence scorer's credential). The raw value is never emitted for ANY
+ * key — only the digest enters the lines, and only the SHA256 over the lines
+ * ever reaches the public marker comment.
+ *
+ * The digest covers the EXACT configured bytes, with no trim: the tier lanes
+ * resolve their credential with `value()` (no trim, src/routing/tiers.ts) and
+ * the transport writes it into the auth header verbatim
+ * (`src/transport/http.ts`), so trimming here would fingerprint something
+ * other than what the lane sends — the same "what was SENT, never what the
+ * config named" rule #998 states for the effort family. The consequence is
+ * deliberate: whitespace around a key is part of its identity, and on the
+ * primary/smart/fallback lanes a whitespace-only value is truthy for the
+ * `||` resolution, so it is a configured credential and must contribute.
+ * (The specialist lane trims before its `||` and falls back to the base key,
+ * so there the raw digest is FINER than what that lane sends — again
+ * over-invalidation only.) Trimmed and untrimmed variants of the same secret
+ * therefore digest differently; a trim here could only ever LOSE an
+ * invalidation, which is the direction this fingerprint never takes.
+ *
+ * The same-endpoint inheritance case, decided explicitly per lane: the
+ * fingerprint covers each lane's OWN configured value, never a resolved one.
+ * A lane whose key is unset resolves its credential at CALL time in
+ * `routing/tiers.ts`: primary = `AI_PRIMARY_API_KEY` else `AI_API_KEY`;
+ * smart = `AI_SMART_API_KEY` else `AI_API_KEY`; fallback =
+ * `AI_FALLBACK_API_KEY` else `AI_API_KEY`; specialist =
+ * `AI_SPECIALIST_API_KEY` else the BASE `AI_API_KEY` (the profile it falls
+ * back to is built from the base keys, not from `AI_PRIMARY_API_KEY`). Every
+ * credential a lane can actually send is therefore either its own configured
+ * key or `AI_API_KEY`, and both contribute whenever non-empty: rotating
+ * `AI_API_KEY` invalidates every lane that inherits it, while an unset lane
+ * key emits no line, so a credential-free (contract-default) configuration
+ * stays byte-identical to the pre-#1152 hash. Re-implementing the per-lane
+ * resolution inside precheck was rejected: it would duplicate `tiers.ts`
+ * (drift risk) and digest the same secret once per inheriting lane.
+ * Over-invalidation is the accepted direction throughout — a
+ * configured-but-unused lane key (e.g. a smart key with no smart model) still
+ * contributes, and its rotation then costs at most a fresh review; the
+ * fingerprint fails toward re-review, never toward a stale skip.
+ *
+ * A new `ai-*-api-key` contract input must be added to this set in the same
+ * release, exactly like `EXACT_CONFIG_KEYS`, or its rotation goes unnoticed
+ * (pinned by the contract-driven registration test in
+ * `tests-v3/precheck.test.ts`). `LINEAR_API_KEY` is not a model lane: its
+ * contribution stays the `LINEAR_API_KEY_CONFIGURED` boolean in
+ * `EXACT_CONFIG_KEYS`. */
+export const CREDENTIAL_AI_KEYS: ReadonlySet<string> = new Set([
+  "AI_API_KEY",
+  "AI_PRIMARY_API_KEY",
+  "AI_SMART_API_KEY",
+  "AI_FALLBACK_API_KEY",
+  "AI_SPECIALIST_API_KEY",
+]);
+
+/** One-way, domain-separated credential digest — the same shape
+ * `extraHeaderFingerprint` (#1037) emits for header values: SHA256 over
+ * `<key>\0<value>`, first 12 hex chars. The key name in the preimage keeps
+ * one secret under two different lanes distinguishable. */
 function credentialDigest(key: string, value: string): string {
   return sha256Hex(`${key}\0${value}`).slice(0, 12);
 }
 
 /** Collect configuration key=value lines from the environment map and
  * config files (port of `_collect_config_lines`). `AI_*` is swept as this
- * action's own namespace except `*_API_KEY` secrets; every other key is
+ * action's own namespace except `*_API_KEY` secrets, which re-enter only as
+ * one-way digests (#1152, see `CREDENTIAL_AI_KEYS`); every other key is
  * matched by exact name so runner-preset provider vars cannot skew the
  * hash across runner images. */
 export function collectConfigLines(env: Record<string, string>): string[] {
@@ -368,6 +426,15 @@ export function collectConfigLines(env: Record<string, string>): string[] {
     }
     const effort = (env[key] ?? "").trim();
     if (effort !== "") lines.push(`${key}=${effort}`);
+  }
+
+  // #1152: configured lane credentials contribute as one-way digests over
+  // their exact configured bytes (see CREDENTIAL_AI_KEYS for the inheritance
+  // decision and why there is no trim). An unset/empty key emits nothing, so
+  // a credential-free configuration keeps its byte-identical baseline hash.
+  for (const key of CREDENTIAL_AI_KEYS) {
+    const value = env[key] ?? "";
+    if (value !== "") lines.push(`${key}=${credentialDigest(key, value)}`);
   }
 
   const filePaths = CONFIG_FILE_VARS
