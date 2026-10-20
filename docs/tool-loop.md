@@ -268,9 +268,10 @@ verdict turn, so a second copy would double the corpus in the request (200KB
 corpus → 403KB request) and overflow the context window on exactly the large
 pull requests the repair round targets. The repair round is also honest about
 what it achieved: a round that issued no tool call inspected no evidence and
-is recorded `skipped_no_evidence` (never a completed `continued`), and an
-errored round is `skipped_refresh_failed` — only a round that executed at
-least one read and produced a refreshed verdict is `continued`.
+is recorded `skipped_no_evidence` (never a completed `continued`), an
+errored round is `skipped_refresh_failed`, and a round that executed at least
+one read is `continued` — with `verdict_refreshed` recording whether the
+refreshed verdict turn actually succeeded.
 
 The continuation is primary-tier only (the smart tier keeps its pre-#1145
 shape) and never overrides the loop's own stop reason. What happened is

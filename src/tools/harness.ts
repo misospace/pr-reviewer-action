@@ -1978,10 +1978,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // run issued no calls at all and is reported through its own degraded
   // path, not as a partial tool investigation.
   // #1145: the coverage inputs — the changed-file manifest, the specialist
-  // leads, and the corpus-diff credit set — are computed ONCE here and
-  // REUSED by the post-repair recomputation below, so a recomputed record
-  // is built from exactly the same manifest the original record was built
-  // from (re-reading them could observe a different workspace state).
+  // leads, and the corpus-diff credit set — are computed ONCE here so the
+  // original record is built from exactly one manifest snapshot (re-reading
+  // them could observe a different workspace state).
   // Null when the original loop did not stop on a budget: there is no
   // coverage record to recompute then.
   let coverageInputs: {
