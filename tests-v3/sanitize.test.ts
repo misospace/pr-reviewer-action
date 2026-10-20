@@ -220,6 +220,59 @@ test("#1112: container-prefixed prescription openers are reserved — prefix kep
   }
 });
 
+test("#1137: Unicode-space-terminated suggestion info strings are reserved — the unverified tail fails closed", () => {
+  // The boundary token ITSELF, terminated by each Unicode space class the
+  // comment pipeline could honor. GitHub's own parsing is not reproducible
+  // offline — the POST /markdown GFM endpoint never renders a suggestion
+  // block (not even for the canonical control spelling), so it cannot
+  // discriminate — and an unverified spelling must not be assumed inert.
+  // Each widening is the same rewrite as the bare opener: fence characters
+  // dropped, the word kept, and the block dissolved so no live fence is left
+  // behind.
+  const dissolved = "suggestion\nINJECTED\n\\`\\`\\`";
+  const arms: Array<[string, string, string]> = [
+    ["NBSP U+00A0 tail", "```suggestion\u00A0\nINJECTED\n```", dissolved],
+    ["em space U+2003 tail", "```suggestion\u2003\nINJECTED\n```", dissolved],
+    ["ideographic space U+3000 tail", "```suggestion\u3000\nINJECTED\n```", dissolved],
+    ["BOM U+FEFF tail", "```suggestion\ufeff\nINJECTED\n```", dissolved],
+    ["mixed ASCII + NBSP tail run", "```suggestion \u00A0\nINJECTED\n```", dissolved],
+    ["vertical tab U+000B tail", "```suggestion\u000B\nINJECTED\n```", dissolved],
+    ["line separator U+2028 tail", "```suggestion\u2028\nINJECTED\n```", dissolved],
+    ["paragraph separator U+2029 tail", "```suggestion\u2029\nINJECTED\n```", dissolved],
+    ["narrow no-break space U+202F tail", "```suggestion\u202F\nINJECTED\n```", dissolved],
+    ["NBSP between fence and token", "```\u00A0suggestion\nINJECTED\n```", dissolved],
+    ["container-prefixed NBSP tail", "> ```suggestion\u00A0\nINJECTED\n> ``` ", "> suggestion\nINJECTED\n> \\`\\`\\` "],
+  ];
+  for (const [label, source, expected] of arms) {
+    const once = stripReservedMarkers(source);
+    assert.equal(once, expected, label);
+    assert.equal(stripReservedMarkers(once), once, `${label}: a second pass changes nothing`);
+    assert.equal(/(^|[^\\])`{3,}/.test(once), false, `${label}: every fence run left behind is escaped, so no opener renders`);
+  }
+  // The token grammar itself is unchanged: a Unicode space that terminates a
+  // LONGER info string is not a terminator of `suggestion` — the same
+  // treatment the ASCII `suggestion foo` spelling already gets.
+  assert.equal(
+    stripReservedMarkers("```suggestion\u00A0foo\nINJECTED\n```"),
+    "```suggestion\u00A0foo\nINJECTED\n```",
+    "a Unicode space before MORE info-string content does not widen the token",
+  );
+  // A character that is NOT a Unicode space class changes nothing either:
+  // ZWSP (U+200B, category Cf) stays part of the info string, and an NBSP
+  // inside the container prefix is not indentation, so the line is a
+  // paragraph, not a fence — both byte-identical, the documented assumption.
+  assert.equal(
+    stripReservedMarkers("```suggestion\u200B\nINJECTED\n```"),
+    "```suggestion\u200B\nINJECTED\n```",
+    "ZWSP is not a Unicode space class and stays as written",
+  );
+  assert.equal(
+    stripReservedMarkers("> \u00A0```suggestion\nINJECTED\n> \u00A0```"),
+    "> \u00A0```suggestion\nINJECTED\n> \u00A0```",
+    "an NBSP the container walk does not read as indent makes the line a paragraph, not a fence",
+  );
+});
+
 test("unknown link mode throws", () => {
   assert.throws(() => sanitizeMarkdown("#1", "other" as never), /unknown upstream link mode/);
 });
