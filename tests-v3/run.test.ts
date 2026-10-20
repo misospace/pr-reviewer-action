@@ -179,6 +179,13 @@ test("#1154: PR-authored diff/body/file-patch artifacts are credential-redacted 
     `+curl -H "Authorization: ${rawBearer}" https://ci.internal/ping`,
     "+```",
     `+export OPENAI_KEY=${rawSkKey}`,
+    // #1154 review round 3: a credential-shaped PATH is PR-authored content
+    // too — the header must be masked, not only the content lines.
+    `diff --git a/secrets/${rawSkKey}.yml b/secrets/${rawSkKey}.yml`,
+    "--- /dev/null",
+    `+++ b/secrets/${rawSkKey}.yml`,
+    "@@ -0,0 +1,1 @@",
+    "+placeholder",
   ].join("\n");
   try {
     const result = await runReview({
@@ -219,6 +226,11 @@ test("#1154: PR-authored diff/body/file-patch artifacts are credential-redacted 
     // count (the flat pass collapses multi-line masker matches).
     const persistedDiff = readFileSync(join(runDir, "pr.diff"), "utf8");
     assert.equal(persistedDiff.split("\n").length, diff.split("\n").length, "pr.diff line count preserved");
+    assert.match(
+      persistedDiff,
+      /diff --git a\/secrets\/\[REDACTED\]\.yml b\/secrets\/\[REDACTED\]\.yml/,
+      "the credential-shaped header path is masked in the persisted diff",
+    );
     // The request artifact is honest: it records the bytes actually sent,
     // which are the redacted corpus — valid JSON, marker present, raw absent.
     const requestArtifact = JSON.parse(readFileSync(join(runDir, "ai-request.primary.json"), "utf8")) as Record<string, unknown>;

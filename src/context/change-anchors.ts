@@ -501,9 +501,9 @@ rawPath: string;
 }
 
 function newFileState(path: string, oldPath = "", deleted = false): FileState {
-return {
-path,
-rawPath: path,
+  return {
+    path,
+    rawPath: path,
     oldPath,
     deleted,
     added: false,
