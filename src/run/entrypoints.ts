@@ -1,4 +1,4 @@
-import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
@@ -534,9 +534,28 @@ export async function publishWith(input: PublishInput, seam: ReturnType<typeof b
   // #1027: the artifact is written only for a review that was actually
   // published (or superseded): a failed publication never published the
   // current findings, so their `reported` events must not reach the ledger.
-  if (runDir && result.status !== "failed" && result.outcomes !== undefined) {
-    try { writeFileSync(join(runDir, "finding-outcomes.json"), result.outcomes, "utf8"); }
-    catch { process.stderr.write("WARN: Could not write finding outcomes artifact\n"); }
+  // #1128: the lifecycle is explicit in BOTH directions. A reused run
+  // directory (`PR_REVIEWER_RUN_DIR`) can still hold the PREVIOUS run's
+  // ledger, so an invocation that withholds the artifact (unproven head) or
+  // fails publication must REMOVE the stale file instead of leaving it: a
+  // withheld artifact means "this run has no provable ledger", and a stale
+  // prior ledger left in place would read to downstream consumers as if it
+  // were the current run's. A removal failure is never silent.
+  if (runDir) {
+    const artifactPath = join(runDir, "finding-outcomes.json");
+    const ledger = result.status !== "failed" ? result.outcomes : undefined;
+    let persisted = false;
+    if (ledger !== undefined) {
+      try { writeFileSync(artifactPath, ledger, "utf8"); persisted = true; }
+      catch { process.stderr.write("WARN: Could not write finding outcomes artifact\n"); }
+    }
+    if (!persisted) {
+      // Withheld (unproven head), failed publication, or a failed write: a
+      // prior (or half-written) ledger must never stay readable as this
+      // run's artifact.
+      try { rmSync(artifactPath, { force: true }); }
+      catch { process.stderr.write("WARN: Could not remove stale finding outcomes artifact\n"); }
+    }
   }
   for (const message of result.messages) process.stdout.write(`${message}\n`);
   if (result.error) process.stderr.write(`${result.error}\n`);

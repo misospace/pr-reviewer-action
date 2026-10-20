@@ -21,7 +21,7 @@ import {
 } from "./inline-findings.js";
 import { redactText } from "../context/redact.js";
 import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, parseMetadata, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
-import { FINDING_OUTCOMES_SCHEMA, MAX_LEDGER_EVENTS, normalizeOutcomeEvent, serializeOutcomeLedger, type OutcomeEvent, type OutcomeLedger } from "../outcomes/schema.js";
+import { FINDING_OUTCOMES_SCHEMA, isProvenHeadSha, MAX_LEDGER_EVENTS, normalizeOutcomeEvent, serializeOutcomeLedger, type OutcomeEvent, type OutcomeLedger } from "../outcomes/schema.js";
 import { parseFindingIdentityMarker } from "../outcomes/identity.js";
 import { deriveOutcomeEvents, type PriorFindingObservation } from "../outcomes/reconcile.js";
 import { aggregateOutcomeEvents } from "../outcomes/report.js";
@@ -1071,7 +1071,7 @@ async function readPriorPublishedHead(
     }
     if (newest === null) return null;
     const head = parseMetadata(newest.body)?.head_sha;
-    return typeof head === "string" && /^[0-9a-f]{1,64}$/.test(head) ? head : null;
+    return isProvenHeadSha(head) ? head : null;
   } catch { return null; }
 }
 
@@ -1536,7 +1536,7 @@ export async function publishReview(
         // under the SAME proof rule — an unvalidated value would turn "head
         // unprovable" into the strong "the code was fixed" claim, which is
         // exactly the outcome the fail-closed read exists to withhold.
-        const fallback = typeof input.priorHeadSha === "string" && /^[0-9a-f]{1,64}$/.test(input.priorHeadSha)
+        const fallback = isProvenHeadSha(input.priorHeadSha)
           ? input.priorHeadSha
           : null;
         const priorHeadSha = feedbackState.priorHeadSha ?? fallback;
@@ -1565,18 +1565,29 @@ export async function publishReview(
             ? normalized.slice(normalized.length - MAX_LEDGER_EVENTS)
             : normalized;
           if (capped.length > 0) {
-            const aggregate = aggregateOutcomeEvents(capped);
-            const ledger: OutcomeLedger = {
-              schema: FINDING_OUTCOMES_SCHEMA,
-              generated_at: at,
-              head_sha: /^[0-9a-f]{1,64}$/.test(input.headSha) ? input.headSha : "",
-              route: input.reviewRoute || null,
-              model: publicAnalysisEngine(input.analysisEngine) || null,
-              events: capped,
-              aggregate,
-            };
-            outcomes = serializeOutcomeLedger(ledger);
-            outcomesSummary = `Finding outcomes: ${aggregate.unique_findings} finding(s), ${aggregate.open} open, ${aggregate.resolved} resolved, ${aggregate.dismissed} dismissed, ${aggregate.reactions.helpful + aggregate.reactions.not_helpful} reaction(s)`;
+            // #1128: the ENVELOPE head obeys the same proof rule as every
+            // event head, under the one shared predicate. Blanking it to ""
+            // looked like a safe degradation but is the opposite: the reader
+            // nulls the WHOLE ledger on an unproven envelope head, so the
+            // export was an artifact its own reader throws away. An
+            // unprovable head withholds the advisory artifact instead; the
+            // review itself still publishes, unchanged.
+            if (!isProvenHeadSha(input.headSha)) {
+              messages.push("Finding outcomes: artifact withheld — the run could not prove a hex head SHA, and the ledger must always parse under the same rules a reader applies");
+            } else {
+              const aggregate = aggregateOutcomeEvents(capped);
+              const ledger: OutcomeLedger = {
+                schema: FINDING_OUTCOMES_SCHEMA,
+                generated_at: at,
+                head_sha: input.headSha,
+                route: input.reviewRoute || null,
+                model: publicAnalysisEngine(input.analysisEngine) || null,
+                events: capped,
+                aggregate,
+              };
+              outcomes = serializeOutcomeLedger(ledger);
+              outcomesSummary = `Finding outcomes: ${aggregate.unique_findings} finding(s), ${aggregate.open} open, ${aggregate.resolved} resolved, ${aggregate.dismissed} dismissed, ${aggregate.reactions.helpful + aggregate.reactions.not_helpful} reaction(s)`;
+            }
           }
         }
       }

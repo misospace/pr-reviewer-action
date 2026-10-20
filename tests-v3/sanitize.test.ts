@@ -273,6 +273,63 @@ test("#1137: Unicode-space-terminated suggestion info strings are reserved — t
   );
 });
 
+test("#1178: the documented multi-line suggestion opener spellings are reserved — the range token grammar fails closed", () => {
+  // The boundary spellings THEMSELVES, in the bytes a model emits. GitHub
+  // renders `suggestion-0+0` (the documented `-X+Y` multi-line range grammar)
+  // and the `:`-prefixed `suggestion:-0+0` form seen in the wild as live
+  // one-click prescriptions exactly like the bare opener; the `-0+0` attaches
+  // to the token with no whitespace, so the #1137 whitespace-class widening
+  // never covered it. GitHub's own rendering is not reproducible offline —
+  // the POST /markdown GFM endpoint never applies the suggestion filter — so
+  // the documented grammar is reserved rather than assumed inert. Each
+  // widening is the same rewrite as the bare opener: fence characters AND the
+  // range suffix dropped, the word kept, and the block dissolved so no live
+  // fence is left behind.
+  const dissolved = "suggestion\nINJECTED\n\\`\\`\\`";
+  const arms: Array<[string, string, string]> = [
+    ["backtick range spelling", "```suggestion-0+0\nINJECTED\n```", dissolved],
+    ["colon-prefixed range spelling", "```suggestion:-0+0\nINJECTED\n```", dissolved],
+    ["range with count pair", "```suggestion-0+0-2+2\nINJECTED\n```", dissolved],
+    ["nonzero range", "```suggestion-1+2\nINJECTED\n```", dissolved],
+    ["tilde fence, case-insensitive, trailing space", "~~~SUGGESTION:-0+0 \nINJECTED\n~~~", "suggestion\nINJECTED\n\\~\\~\\~"],
+    ["colon before a later pair", "```suggestion-0+0:-1+1\nINJECTED\n```", dissolved],
+    ["any fence length", "````suggestion-0+0\nINJECTED\n````", "suggestion\nINJECTED\n\\`\\`\\`\\`"],
+    ["container-prefixed range opener", "> ```suggestion-0+0\nINJECTED\n> ```", "> suggestion\nINJECTED\n> \\`\\`\\`"],
+    ["CRLF-terminated range opener", "```suggestion-0+0\r\nINJECTED", "suggestion\nINJECTED"],
+  ];
+  for (const [label, source, expected] of arms) {
+    const once = stripReservedMarkers(source);
+    assert.equal(once, expected, label);
+    assert.equal(stripReservedMarkers(once), once, `${label}: a second pass changes nothing`);
+    assert.equal(/(^|[^\\])`{3,}/.test(once), false, `${label}: every fence run left behind is escaped, so no opener renders`);
+  }
+  // A reserved shape inside an open ORDINARY block is content there — the
+  // same rewrite the top-level opener gets — and never closes the block it
+  // sits in, so the benign block survives intact (its fences stay live).
+  assert.equal(
+    stripReservedMarkers("```ts\n```suggestion-0+0\nINJECTED\n```"),
+    "```ts\nsuggestion\nINJECTED\n```",
+    "reserved range opener inside an ordinary block is rewritten as content",
+  );
+  // A lone CR is a line ending to a Markdown renderer (GitHub normalizes it),
+  // so an opener it hides must be reserved too.
+  assert.equal(stripReservedMarkers("```suggestion-0+0\rEVIL\r```"), "suggestion\nEVIL\n\\`\\`\\`");
+  // The token grammar widens ONLY over the documented range spellings: other
+  // info strings starting with `suggestion` are different info strings the
+  // same way `suggestion foo` is (#1137) and stay as written.
+  const inert: Array<[string, string]> = [
+    ["a bare colon is not a documented spelling", "```suggestion:\nINJECTED\n```"],
+    ["a non-range suffix stays as written", "```suggestion-foo\nINJECTED\n```"],
+    ["a whitespace-separated range is a different info string", "```suggestion -0+0\nINJECTED\n```"],
+    ["a Unicode space before the range is not the documented spelling", "```suggestion\u00A0-0+0\nINJECTED\n```"],
+    ["trailing content after the range stays as written", "```suggestion-0+0x\nINJECTED\n```"],
+    ["a colon-suffixed non-range stays as written", "```suggestion:foo\nINJECTED\n```"],
+  ];
+  for (const [label, source] of inert) {
+    assert.equal(stripReservedMarkers(source), source, label);
+  }
+});
+
 test("unknown link mode throws", () => {
   assert.throws(() => sanitizeMarkdown("#1", "other" as never), /unknown upstream link mode/);
 });
