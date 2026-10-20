@@ -277,7 +277,14 @@ function structuredOutputStripRetry(input: ChatRequestInput, failure: TransportF
   return null;
 }
 
-async function runChatRequestOnce(input: ChatRequestInput): Promise<ChatRequestOutcome> {
+/**
+ * The single-shot transport path: exactly one wire attempt, no 429/5xx
+ * backoff loop and no clamp/strip retries. #1073's confidence scorer uses
+ * this — its contract is one bounded attempt that degrades to `unscored`
+ * on any failure, never a retry — while every review lane keeps
+ * `runChatRequest`.
+ */
+export async function runChatRequestOnce(input: ChatRequestInput): Promise<ChatRequestOutcome> {
   const streaming = input.payload.body.stream === true;
   try {
     const result = await runHttpRequest({

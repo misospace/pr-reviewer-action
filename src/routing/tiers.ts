@@ -511,3 +511,169 @@ export function tierRequestShape(profile: "primary" | "smart" | "fallback", env:
   const shape = env[key];
   return shape === "trailing_task" ? "trailing_task" : "default";
 }
+
+// ── #1073: the independent post-review confidence scorer ─────────────────
+// An opt-in lane that grades the completed review's confidence (0-5 plus a
+// risk band and a short reason). Purely advisory telemetry: it never affects
+// the verdict, findings, or approval, and it is disabled entirely when
+// `ai-confidence-model` is empty. Resolution mirrors `resolveSpecialistProfiles`
+// with one stricter credential rule: a DISTINCT configured base URL never
+// implicitly inherits the primary API key — the whole point of pointing the
+// scorer at another backend is independence, and silently reusing the primary
+// credential there would couple the two lanes anyway (enforcement of the
+// transport boundary itself happens in the runtime phase; this resolver only
+// carries configuration).
+
+export interface ConfidenceProfile {
+  /** False when `ai-confidence-model` is empty: the scorer costs no model
+   * call and every confidence-* output stays empty. */
+  enabled: boolean;
+  baseUrl: string;
+  model: string;
+  apiFormat: string;
+  apiKey: string;
+  requestTimeoutSec: number;
+  /** #998-style free-form effort, "" = omit the field. Unlike the review
+   * lanes it never inherits `ai-reasoning-effort`: the scorer is an
+   * independent lane and an empty value omits the field entirely. */
+  reasoningEffort: string;
+  /** True when the endpoint+credential came from the primary lane rather
+   * than the scorer's own configuration — the same-endpoint caveat. */
+  inheritedTransport: boolean;
+  /** Where the resolved credential came from: the scorer's own
+   * configuration ("own") or inherited from the primary lane ("primary").
+   * Provenance, not value equality — an operator may deliberately reuse
+   * the same secret on a distinct endpoint, and that must stay allowed. */
+  credentialSource: "own" | "primary";
+}
+
+export interface ConfidenceResolution {
+  profile: ConfidenceProfile;
+  /** Operator-facing config warnings (the specialist phase prints these as
+   * WARNING lines); never contains a secret. */
+  warnings: string[];
+}
+
+/** The primary lane's resolved transport, read the way resolveSpecialistProfiles
+ * reads it (trimmed, lowercased format) so the confidence lane's inherited
+ * values are consistent with the specialist lane's. Kept local so the
+ * confidence resolver stays a pure function over env with no dependency on
+ * the tier profile shape. */
+function primaryLane(env: EnvLike): { baseUrl: string; model: string; apiFormat: string; apiKey: string } {
+  return {
+    baseUrl: trimmed(env, "AI_PRIMARY_BASE_URL") || trimmed(env, "AI_BASE_URL"),
+    model: trimmed(env, "AI_PRIMARY_MODEL") || trimmed(env, "AI_MODEL"),
+    apiFormat: (trimmed(env, "AI_PRIMARY_API_FORMAT") || trimmed(env, "AI_API_FORMAT") || "openai").toLowerCase(),
+    apiKey: trimmed(env, "AI_PRIMARY_API_KEY") || trimmed(env, "AI_API_KEY"),
+  };
+}
+
+/** The disabled profile every early return shares: no endpoint, no
+ * credential, no model — nothing the run could dial. */
+function disabledConfidenceProfile(): ConfidenceProfile {
+  return {
+    enabled: false, baseUrl: "", model: "", apiFormat: "", apiKey: "",
+    requestTimeoutSec: 120, reasoningEffort: "", inheritedTransport: false,
+    credentialSource: "own",
+  };
+}
+
+/** `IS_FORK_PR` as the stages resolved it (exactly "true" = fork), the same
+ * comparison `gateForkForForks` and `evidenceForkGateApplies` make. The stage
+ * env always carries a resolved value — an unresolvable flag is itself
+ * "true" upstream — so this reads state, it does not decide it. */
+function isForkPr(env: EnvLike): boolean {
+  return env.IS_FORK_PR === "true";
+}
+
+export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
+  const warnings: string[] = [];
+  const primary = primaryLane(env);
+  const model = trimmed(env, "AI_CONFIDENCE_MODEL");
+  const enabled = model !== "";
+  const baseUrl = trimmed(env, "AI_CONFIDENCE_BASE_URL");
+  const apiFormatRaw = trimmed(env, "AI_CONFIDENCE_API_FORMAT");
+  const apiKey = trimmed(env, "AI_CONFIDENCE_API_KEY");
+
+  if (!enabled) {
+    // Disabled is the default: a transport configured without a model is a
+    // likely typo, reported the same way the specialist lane reports orphan
+    // transport fields — loudly, but never fatal.
+    const orphans = [
+      baseUrl !== "" ? "ai-confidence-base-url" : "",
+      apiFormatRaw !== "" ? "ai-confidence-api-format" : "",
+      apiKey !== "" ? "ai-confidence-api-key" : "",
+    ].filter(Boolean);
+    if (orphans.length > 0) {
+      warnings.push(`confidence scorer disabled: ${orphans.join("/")} set without ai-confidence-model`);
+    }
+    return { profile: disabledConfidenceProfile(), warnings };
+  }
+
+  // Fork gate (#1073): default-off on a cross-repository PR, mirroring
+  // `gateForkForForks`. The scorer's prompt is built from PRIVILEGED
+  // review-derived output — the final findings, summary, coverage account,
+  // review_result, and required checks — and sends it outward over a
+  // privileged credential, so on a fork PR it would carry private review
+  // content across the fork trust boundary. Disabled (the same resolved
+  // "off" the unset model produces), loudly, never fatal; the operator
+  // override is the only way it runs there.
+  if (isForkPr(env) && (env.AI_CONFIDENCE_ENABLE_FOR_FORKS ?? "false").toLowerCase() !== "true") {
+    warnings.push("confidence scorer skipped for a cross-repository pull request; set ai-confidence-enable-for-forks=true to override");
+    return { profile: disabledConfidenceProfile(), warnings };
+  }
+
+  const distinctEndpoint = baseUrl !== "";
+  // An explicitly configured api-format wins; empty inherits the primary
+  // lane's resolved format (the contract validates the enum, but ambient
+  // overrides or test rigs may not — an unknown value falls back to the
+  // primary format rather than crashing the run).
+  const configuredFormat = apiFormatRaw.toLowerCase();
+  const apiFormat = apiFormatRaw !== ""
+    ? (configuredFormat === "openai" || configuredFormat === "anthropic" ? configuredFormat : primary.apiFormat)
+    : primary.apiFormat;
+
+  // Credential rule (#1073): an explicitly configured scorer key is ALWAYS
+  // used as-is — including on the same endpoint, where the operator named the
+  // credential they want to answer with. Only an EMPTY key inherits, and only
+  // when the endpoint is the primary's own (it is the same backend, so there
+  // is nothing to separate); a DISTINCT base URL never inherits — the scorer
+  // uses only its own key, and a distinct URL without an explicit key is
+  // warned about rather than silently degrading.
+  const inheritedTransport = !distinctEndpoint;
+  const resolvedBaseUrl = distinctEndpoint ? baseUrl : primary.baseUrl;
+  const apiKeyResolved = apiKey !== "" ? apiKey : (distinctEndpoint ? "" : primary.apiKey);
+  if (distinctEndpoint && apiKey === "") {
+    warnings.push(
+      "confidence scorer: ai-confidence-base-url is set but ai-confidence-api-key is empty — a distinct endpoint never inherits the primary API key; set ai-confidence-api-key explicitly",
+    );
+  }
+
+  // Same-endpoint AND same-model scoring is less independent: the model that
+  // produced the review would grade its own work, so correlated errors go
+  // unnoticed. Reported, never fatal — a deliberate same-lane scorer is a
+  // legitimate cheap default.
+  if (!distinctEndpoint && model === primary.model) {
+    warnings.push(
+      "confidence scorer: the resolved endpoint and model are identical to the primary review lane — same-model scoring is less independent; point ai-confidence-base-url at a different backend for a genuinely independent second opinion",
+    );
+  }
+
+  const effort = effortFrom(env, "AI_CONFIDENCE_REASONING_EFFORT");
+  if (effort.warning !== null) warnings.push(effort.warning);
+
+  return {
+    profile: {
+      enabled: true,
+      baseUrl: resolvedBaseUrl,
+      model,
+      apiFormat,
+      apiKey: apiKeyResolved,
+      requestTimeoutSec: numberValue(env, "AI_CONFIDENCE_TIMEOUT_SEC", 120),
+      reasoningEffort: effort.value,
+      inheritedTransport,
+      credentialSource: apiKey !== "" || distinctEndpoint ? "own" : "primary",
+    },
+    warnings,
+  };
+}

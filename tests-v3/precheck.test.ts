@@ -1588,3 +1588,159 @@ test("#1037: ai-extra-headers hashes ephemeral correlation headers by NAME and e
   const blank = collectConfigLines({ AI_MODEL: "m", AI_EXTRA_HEADERS: "  \n " });
   assert.ok(!blank.some((line) => line.startsWith("AI_EXTRA_HEADERS")));
 });
+
+test("#1073: the confidence-scorer family is fingerprint-conditional — disabled contributes nothing", () => {
+  const baseline = collectConfigLines({ AI_MODEL: "m", AI_BASE_URL: "https://primary" });
+  // Upgrade safety: the contract's DEFAULT resolved config (empty model,
+  // empty strings, and a NON-empty AI_CONFIDENCE_TIMEOUT_SEC=120 default
+  // projected by stageEnvFromConfig) must leave the config hash byte-identical
+  // to a build without the feature.
+  const withDefaults = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "",
+    AI_CONFIDENCE_BASE_URL: "",
+    AI_CONFIDENCE_API_FORMAT: "",
+    AI_CONFIDENCE_REASONING_EFFORT: "",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+    AI_CONFIDENCE_API_KEY: "",
+  });
+  assert.deepEqual(withDefaults, baseline);
+  assert.equal(computeConfigHash(withDefaults), computeConfigHash(baseline));
+
+  // Enabling the scorer changes the hash.
+  const enabled = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+  });
+  assert.ok(enabled.includes("AI_CONFIDENCE_MODEL=scorer-model"));
+  assert.ok(enabled.includes("AI_CONFIDENCE_TIMEOUT_SEC=120"));
+  assert.notEqual(computeConfigHash(enabled), computeConfigHash(baseline));
+
+  // While the scorer is enabled, the config lines carry the action version
+  // that the scorer's prompt/code ride on: a new action release must
+  // invalidate the cached review so the score is recomputed.
+  assert.ok(enabled.some((line) => line.startsWith("SCORER_ACTION_VERSION=")), "the enabled config omits SCORER_ACTION_VERSION");
+  // Disabled (the default) emits no version line — baseline fingerprints
+  // stay byte-identical across action releases.
+  assert.ok(!withDefaults.some((line) => line.startsWith("SCORER_ACTION_VERSION=")));
+  assert.ok(!baseline.some((line) => line.startsWith("SCORER_ACTION_VERSION=")));
+
+  // A version change (different SCORER_ACTION_VERSION value over otherwise
+  // identical lines) yields a different hash — version-change invalidation
+  // positively established without varying the constant itself.
+  const versionA = enabled.map((line) => (line.startsWith("SCORER_ACTION_VERSION=") ? "SCORER_ACTION_VERSION=v1.2.3" : line));
+  const versionB = enabled.map((line) => (line.startsWith("SCORER_ACTION_VERSION=") ? "SCORER_ACTION_VERSION=v1.2.4" : line));
+  assert.notEqual(computeConfigHash(versionA), computeConfigHash(versionB));
+
+  // Changing the scorer's model changes the hash again.
+  const otherModel = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "other-scorer",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+  });
+  assert.notEqual(computeConfigHash(otherModel), computeConfigHash(enabled));
+
+  // The scorer's API key influences the answer but is secret, so it
+  // contributes as a one-way digest: the raw key never reaches a config line
+  // (those bytes end up in the public marker comment), and rotating it
+  // invalidates the cached score it produced.
+  const withKey = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+    AI_CONFIDENCE_API_KEY: "sk-confidence-secret",
+  });
+  assert.ok(!withKey.some((line) => line.includes("sk-confidence-secret")));
+  const keyLines = withKey.filter((line) => line.startsWith("AI_CONFIDENCE_API_KEY="));
+  assert.equal(keyLines.length, 1);
+  assert.match(keyLines[0]!, /^AI_CONFIDENCE_API_KEY=[0-9a-f]{12}$/);
+  assert.notEqual(computeConfigHash(withKey), computeConfigHash(enabled));
+
+  // Rotating the credential re-scores; re-running the same credential does not.
+  const rotated = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+    AI_CONFIDENCE_API_KEY: "sk-confidence-other",
+  });
+  assert.notEqual(computeConfigHash(rotated), computeConfigHash(withKey));
+  const sameKey = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+    AI_CONFIDENCE_API_KEY: " sk-confidence-secret ",
+  });
+  assert.equal(computeConfigHash(sameKey), computeConfigHash(withKey));
+
+  // A disabled scorer contributes nothing even when a credential is present:
+  // the digest must not become a new line for existing installations.
+  const disabledWithKey = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_API_KEY: "sk-confidence-secret",
+  });
+  assert.deepEqual(disabledWithKey, baseline);
+
+  // A scorer-enabled config with default-shaped empties still differs from
+  // the baseline (the model line alone carries the change), and a timeout
+  // change matters too.
+  const timeoutChanged = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TIMEOUT_SEC: "45",
+  });
+  assert.notEqual(computeConfigHash(timeoutChanged), computeConfigHash(enabled));
+});
+
+test("#1073: the fork override contributes to the fingerprint only while the scorer is enabled", () => {
+  const baseline = collectConfigLines({ AI_MODEL: "m", AI_BASE_URL: "https://primary" });
+
+  // Disabled (the default): the fork override contributes NOTHING, so an
+  // installation that never configures the scorer keeps pre-#1073 bytes.
+  const disabledWithForkFlag = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_ENABLE_FOR_FORKS: "false",
+  });
+  assert.deepEqual(disabledWithForkFlag, baseline);
+  assert.equal(computeConfigHash(disabledWithForkFlag), computeConfigHash(baseline));
+
+  // Enabled: the contract default ("false") is emitted, and flipping it
+  // changes what is published on a fork PR — so it must invalidate the cache.
+  const gated = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+    AI_CONFIDENCE_ENABLE_FOR_FORKS: "false",
+  });
+  assert.ok(gated.includes("AI_CONFIDENCE_ENABLE_FOR_FORKS=false"));
+
+  const overrideOn = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+    AI_CONFIDENCE_ENABLE_FOR_FORKS: "true",
+  });
+  assert.ok(overrideOn.includes("AI_CONFIDENCE_ENABLE_FOR_FORKS=true"));
+  assert.notEqual(computeConfigHash(overrideOn), computeConfigHash(gated));
+
+  // Re-stating the same override does not re-review.
+  const sameOverride = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TIMEOUT_SEC: "120",
+    AI_CONFIDENCE_ENABLE_FOR_FORKS: " true ",
+  });
+  assert.equal(computeConfigHash(sameOverride), computeConfigHash(overrideOn));
+});

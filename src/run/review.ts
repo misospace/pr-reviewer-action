@@ -39,7 +39,7 @@ import {
 import { extractRequirementLedger, ledgerToArtifact, renderRequirementLedgerMarkdown } from "../requirements/ledger.js";
 import { requirementLedgerPresence } from "../requirements/presence.js";
 import { classifyPr, classificationToArtifact } from "../classification/classify.js";
-import { resolveReviewRoute, resolveTierProfiles, tierRequestShape, anthropicEffortInactiveWarning, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, effectiveWireEffort, effectiveWireResponseFormat, type TierProfiles } from "../routing/tiers.js";
+import { resolveReviewRoute, resolveTierProfiles, resolveConfidenceProfile, tierRequestShape, anthropicEffortInactiveWarning, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, effectiveWireEffort, effectiveWireResponseFormat, type TierProfiles } from "../routing/tiers.js";
 import { reviewerRequestedEscalation } from "../routing/escalation.js";
 import { buildSpecialistCorpus } from "../specialists/corpus.js";
 import { forkGate, type ForkedGate, type GateName, type GateOutcome } from "../gates/gates.js";
@@ -51,19 +51,22 @@ import { renderClaimsSection } from "../claims/render.js";
 import { buildModelRequest } from "../model/request.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
 import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js";
-import { maskKnownSecrets, redactTextDeep } from "../context/redact.js";
+import { maskDiagnostic, maskKnownSecrets, redactTextDeep } from "../context/redact.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
 import type { ReviewTriageDecision } from "../model/types.js";
 import { resolveReviewerRouting } from "../config/reviewer-routing.js";
 import { resolveHumanReviewRouting, type HumanReviewRoutingMode, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
+import { buildConfidencePrompt } from "../confidence/prompt.js";
+import { runConfidenceScorer } from "../confidence/scorer.js";
+import { boundConfidenceField, boundConfidenceReason, CONFIDENCE_DISABLED, confidenceCapNote, confidenceOutputFields, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS, MAX_CONFIDENCE_CONCERN_FILE_CHARS, unscoredConfidenceResult, type ConfidenceResult } from "../confidence/result.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, applyReviewTriageFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
 import { reviewArtifactFromParsed, type ArtifactFinding } from "../enforcement/artifact.js";
 import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
 import { applyBlockerVerification } from "../enforcement/blocker-verification.js";
 import { createHeadSourceReader } from "../enforcement/source-verifier.js";
 import { capCiEvidenceFindings } from "../enforcement/ci-evidence.js";
-import { markerReviewResult } from "../publish/publish.js";
+import { markerReviewResult, publishStepRuns } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
@@ -200,6 +203,10 @@ export interface RunReviewResult {
   /** #847 measurement follow-up: the tool loop's stop reason for the route
    * the marker was built from; undefined when no harness reported one. */
   toolStopReason?: string;
+  /** #1073: the scorer's bounded advisory concerns, present only when the
+   * scorer produced a scored answer; the publish step renders them as
+   * advisory bullets. */
+  confidenceConcerns?: Array<{ file: string; line: number | null; evidence: string }>;
   /** Wall-clock seconds for the whole run. */
   durationSec: number;
 }
@@ -1399,6 +1406,181 @@ secrets: [profiles.primary.apiKey],
     ...(incompleteReason !== "none" ? { incomplete_reason: incompleteReason } : {}),
   };
   ws.write("review-coverage.json", Buffer.from(`${pyJsonDumps(reviewCoverage)}\n`, "utf8"));
+
+  // ── #1073: the independent post-review confidence scorer ─────────────
+  // Advisory telemetry only. Runs once, after enforcement and the coverage
+  // record are final and only when this run will actually publish a review:
+  // one bounded, tool-free model call grades how confident the finished
+  // review is. The result never alters the verdict, review_result, required
+  // checks, escalation reason, native review events, or approvals, and it
+  // never writes into any reviewRecord field the enforcement/marker
+  // pipeline reads — it flows only into its own outputs, step-summary row,
+  // published section, marker keys, and artifact. Disabled (the default)
+  // means none of that exists: no request, no artifacts, no section, no
+  // marker keys; the five confidence-* output assignments stay empty.
+  const confidenceResolution = resolveConfidenceProfile(env);
+  for (const warning of confidenceResolution.warnings) log(`WARNING: ${warning}`);
+  // The scorer's eligibility gate is now EXACTLY the `shouldPublish` decision
+  // the action entry applies at the publish seam: `comment` mode counts as
+  // publishing only when the legacy `publish-review-comment` flag is set,
+  // and `review_blockers` counts as publishing like the other native modes
+  // (shared `publishStepRuns` predicate, so the two sites cannot diverge).
+  // The previous round-5 gate overshot: it scored `comment`-mode runs whose
+  // publish step is skipped — a privileged outbound scorer call for a review
+  // that will not publish.
+  const reviewWillPublish = publishStepRuns(env.PUBLISH_MODE, env.PUBLISH_REVIEW_COMMENT === "true");
+  const confidenceProfile = confidenceResolution.profile;
+  let confidenceResult: ConfidenceResult;
+  if (!confidenceProfile.enabled) {
+    // Disabled: no request, no artifacts, no outputs.
+    confidenceResult = CONFIDENCE_DISABLED;
+    clearConfidenceArtifacts(ws);
+  } else if (!reviewWillPublish) {
+    // Defensive: the entry's publish step is skipped for this run, so no
+    // publish seam can produce a body for a score to sit in — and no
+    // privileged scorer call may fire for a review that never publishes.
+    // The cause still lands in the artifact and the log, so an operator can
+    // tell "the publish step was skipped" from "the scorer call failed".
+    confidenceResult = unscoredConfidenceResult("not_published");
+    removeConfidenceWireArtifacts(ws);
+    writeConfidenceScoreArtifact(ws, confidenceResult);
+    log(`confidence scorer: unscored (${confidenceResult.cause})`);
+  } else if (analysisEngine === MODEL_UNAVAILABLE_ENGINE || !(outputVerdict === "approve" || outputVerdict === "request_changes")) {
+    // No real model review happened (a model-failure notice, or no verdict at
+    // all): fail to unscored WITHOUT calling the model.
+    confidenceResult = unscoredConfidenceResult("incomplete_review");
+    removeConfidenceWireArtifacts(ws);
+    writeConfidenceScoreArtifact(ws, confidenceResult);
+    log(`confidence scorer: unscored (${confidenceResult.cause})`);
+  } else {
+    // #1140 review: every credential configured for this run, in ONE place.
+    // The scorer may be a SEPARATE backend, so each of these is a real
+    // credential for this run and each must be masked out of every
+    // untrusted surface below — the scorer's prompt content, its transport
+    // diagnostics, and the artifacts it leaves behind. The specialist lane
+    // reads its raw env key here: its resolved profile may have fallen back to
+    // the primary key, and a configured specialist secret echoed in PR content
+    // must not ride to the scorer either.
+    const confidenceSecrets = [
+      confidenceProfile.apiKey,
+      profiles.primary.apiKey,
+      profiles.smart.apiKey,
+      profiles.fallback.apiKey,
+      env.AI_SPECIALIST_API_KEY ?? "",
+    ];
+    const confidencePrompt = buildConfidencePrompt({
+      headSha: context.headSha || String(pr.headRefOid ?? ""),
+      baseSha: identity.baseSha ?? "",
+      diff: ws.readText("pr.diff.truncated") ?? "",
+      prTitle: String(pr.title ?? ""),
+      prBody: String(pr.body ?? ""),
+      findings: reviewRecord.findings,
+      reviewSummary: String(reviewRecord.review_markdown ?? ""),
+      reviewResult: markerReviewResult({
+        verdictPolicy,
+        verdict: outputVerdict,
+        findings: reviewRecord.findings,
+        requiredChecks: outputRequiredChecks,
+        partialCoverage,
+      }),
+      requiredChecks: outputRequiredChecks,
+      coverage: reviewCoverage,
+      secrets: confidenceSecrets,
+    });
+    let confidenceOutcome: Awaited<ReturnType<typeof runConfidenceScorer>>;
+    try {
+      // Fail-soft boundary: a scorer crash (a bug, not a transport failure)
+      // degrades to unscored exactly like a failed call — never aborts the
+      // review that already finished.
+      confidenceOutcome = await runConfidenceScorer({
+        profile: confidenceProfile,
+        // Defensive credential-isolation input: the scorer re-checks that a
+        // distinct endpoint never carries the primary lane's key.
+        primaryApiKey: profiles.primary.apiKey,
+        // So the scorer's own thrown-transport/transport-failure diagnostics
+        // mask the whole lane set, not just its own and the primary's key.
+        laneSecrets: confidenceSecrets,
+        prompt: confidencePrompt,
+        connectTimeoutSec: Number(env.AI_CONNECT_TIMEOUT_SEC ?? "30") || 30,
+        tokensParam: (env.AI_TOKENS_PARAM ?? "max_tokens") as "max_tokens" | "max_completion_tokens",
+        findings: reviewRecord.findings,
+        coverage: reviewCoverage,
+      });
+    } catch (cause: unknown) {
+      confidenceOutcome = {
+        result: unscoredConfidenceResult("internal_error", confidenceProfile.model),
+        requestPayload: null,
+        rawResponse: null,
+        // #1140 review: `maskDiagnostic` masks the configured secrets on the
+        // FULL untruncated message and only then caps it, so a secret
+        // straddling the 300-char boundary cannot leave a partial prefix in
+        // the artifact or the log line. Masking AFTER truncation did.
+        diagnostic: maskDiagnostic(cause instanceof Error ? cause.message : String(cause), confidenceSecrets),
+      };
+    }
+    // #1140 review: model-authored text (reason, concern file/evidence) is
+    // masked against EVERY lane's credential BEFORE the canonical result
+    // exists — every downstream consumer (persisted artifact, step outputs,
+    // step summary, published section, marker, CONFIDENCE_CONCERNS env for
+    // the standalone publish CLI) reads only this sanitized canonical
+    // result. Generic `redactText` at the renderers stays as the second
+    // layer, but the exact configured secrets are nuked here, once.
+    const maskConfidenceText = (text: string): string => redactText(maskKnownSecrets(text, confidenceSecrets));
+    // #1140 review round 9: exact-value masking is not length-preserving — a
+    // one-character configured secret becomes the three-character `⟦•⟧` marker
+    // — so a field the parser bounded to exactly its limit can leave masking
+    // OVER that limit. Every published canonical field is re-bounded AFTER
+    // masking, at the same documented limits the parser applies; the reason
+    // keeps its deterministic-cap note through the re-bound, and that note is
+    // masked TOO before being re-appended, because a configured credential may
+    // be a single character occurring inside the note template.
+    const maskConfidenceField = (text: string, maxChars: number): string =>
+      boundConfidenceField(maskConfidenceText(text), maxChars);
+    confidenceResult = {
+      ...confidenceOutcome.result,
+      reason: boundConfidenceReason(
+        maskConfidenceText(confidenceOutcome.result.reason),
+        maskConfidenceText(confidenceCapNote(confidenceOutcome.result.caps)),
+      ),
+      concerns: confidenceOutcome.result.concerns.map((concern) => ({
+        file: maskConfidenceField(concern.file, MAX_CONFIDENCE_CONCERN_FILE_CHARS),
+        line: concern.line,
+        evidence: maskConfidenceField(concern.evidence, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS),
+      })),
+    };
+    // Persist the sanitized artifacts alongside ai-output.json /
+    // review-coverage.json.
+    writeConfidenceScoreArtifact(ws, confidenceResult, maskConfidenceText(confidenceOutcome.diagnostic));
+    if (confidenceOutcome.requestPayload !== null) {
+      // #1140 review: raw provider/agent JSON goes to disk through
+      // `redactTextDeep`, not `maskKnownSecretsDeep` — configured-value
+      // masking alone left a PROVIDER-authored credential (`api_key=…`,
+      // `Bearer …`, `sk-…`) this run never configured persisted verbatim in
+      // the diagnostic artifacts.
+      ws.write("confidence-request.json", pyJsonDumps(redactTextDeep(confidenceOutcome.requestPayload, confidenceSecrets)));
+    } else {
+      // A failed scorer call must not leave an earlier run's wire artifact
+      // sitting next to the fresh `unscored` score.
+      ws.remove("confidence-request.json");
+    }
+    if (confidenceOutcome.rawResponse !== null) {
+      ws.write("confidence-response.json", pyJsonDumps(redactTextDeep(confidenceOutcome.rawResponse, confidenceSecrets)));
+    } else {
+      // Same rule as the request artifact above.
+      ws.remove("confidence-response.json");
+    }
+    if (confidenceResult.status === "unscored") {
+      // The log line goes through the same masking as the artifact: a
+      // provider message that echoes a configured credential must not
+      // surface on the runner console either.
+      const diagnosticNote = confidenceOutcome.diagnostic !== "" ? `: ${maskConfidenceText(confidenceOutcome.diagnostic)}` : "";
+      log(`confidence scorer: unscored (${confidenceResult.cause})${diagnosticNote}`);
+    } else if (confidenceResult.status === "scored") {
+      log(`confidence scorer: scored ${confidenceResult.score}/5 risk=${confidenceResult.risk} (advisory only)`);
+    }
+  }
+  const confidenceOutputs = confidenceOutputFields(confidenceResult);
+
   // #1003: the triage outputs. Disabled means "" for BOTH — "did not run",
   // deliberately distinct from the fail-closed `unknown` answer, so a
   // consumer can tell "not asked" from "could not tell". Enabled, the
@@ -1463,6 +1645,12 @@ secrets: [profiles.primary.apiKey],
     reviewTriageDecision: triageDecision,
     reviewTriageReason: triageReason,
     reviewTriageRouting: routingOutput,
+    // #1073: all five empty when the scorer is disabled — never a spurious 0.
+    confidenceStatus: confidenceOutputs.status,
+    confidenceScore: confidenceOutputs.score,
+    confidenceRisk: confidenceOutputs.risk,
+    confidenceReason: confidenceOutputs.reason,
+    confidenceModel: confidenceOutputs.model,
     reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     findings: pyJsonDumps(Array.isArray(reviewRecord.findings) ? reviewRecord.findings : []),
     toolCalls,
@@ -1519,6 +1707,10 @@ secrets: [profiles.primary.apiKey],
     cacheHitRatio: outputs.cacheHitRatio,
     ...(partialCoverage ? { coverage: "partial", coverageStopReason: partialCoverage.stop_reason } : {}),
     ...(ciState !== undefined ? { ciState } : {}),
+    // #1073: the scorer's marker keys, only when the scorer ran — disabled
+    // and never-attempted runs keep the pre-#1073 marker bytes exactly.
+    ...(outputs.confidenceStatus !== "" ? { confidenceStatus: outputs.confidenceStatus } : {}),
+    ...(outputs.confidenceScore !== "" ? { confidenceScore: Number(outputs.confidenceScore) } : {}),
     ...(toolBudgetTelemetry.budget !== undefined ? { toolBudget: toolBudgetTelemetry.budget } : {}),
     ...(toolBudgetTelemetry.source !== undefined ? { toolBudgetSource: toolBudgetTelemetry.source } : {}),
     ...(toolBudgetTelemetry.calls !== undefined ? { toolCalls: toolBudgetTelemetry.calls } : {}),
@@ -1554,6 +1746,8 @@ secrets: [profiles.primary.apiKey],
     ...(toolBudgetTelemetry.contextBudget !== undefined ? { contextBudget: toolBudgetTelemetry.contextBudget } : {}),
     ...(toolBudgetTelemetry.contextPeak !== undefined ? { contextPeak: toolBudgetTelemetry.contextPeak } : {}),
     ...(toolBudgetTelemetry.stopReason !== undefined ? { toolStopReason: toolBudgetTelemetry.stopReason } : {}),
+    // #1073: advisory concerns for the published section, scored answers only.
+    ...(confidenceResult.status === "scored" ? { confidenceConcerns: confidenceResult.concerns } : {}),
   };
 }
 
@@ -1743,6 +1937,50 @@ function stringList(value: unknown): string[] {
 function isSecurityFlagged(classification: Record<string, unknown>): boolean {
   const flags = stringList(classification.risk_flags);
   return flags.some((flag) => flag.includes("security") || flag.includes("secret"));
+}
+
+/** Every path that ends without a real score must leave the run dir free of
+ * this run's confidence artifacts. A reused `PR_REVIEWER_RUN_DIR` would
+ * otherwise keep a previous run's `confidence-score.json` sitting next to an
+ * `unscored` status, so a later reader could pair a stale score with the
+ * current run. Used by the disabled branch, where NO confidence surface
+ * exists at all. */
+function clearConfidenceArtifacts(ws: RunWorkspace): void {
+  ws.remove("confidence-score.json");
+  removeConfidenceWireArtifacts(ws);
+}
+
+/** The wire artifacts belong to a model call. A run that never called the
+ * model (disabled, publish step skipped, incomplete review) must not leave
+ * an earlier run's request/response behind. */
+function removeConfidenceWireArtifacts(ws: RunWorkspace): void {
+  ws.remove("confidence-request.json");
+  ws.remove("confidence-response.json");
+}
+
+/** Persist the canonical confidence result. The artifact is the only surface
+ * that carries the machine-token cause, so EVERY path that ends without a
+ * score writes one — including the enabled-but-skipped ones
+ * (`not_published`, `incomplete_review`) that never reach the model call.
+ * Without it, `confidence-status: unscored` is unexplainable: the operator
+ * could not tell "the publish step was skipped" from "the call failed". */
+function writeConfidenceScoreArtifact(ws: RunWorkspace, result: ConfidenceResult, diagnostic?: string): void {
+  ws.write("confidence-score.json", Buffer.from(`${pyJsonDumps({
+    version: 1,
+    status: result.status,
+    score: result.score,
+    risk: result.risk,
+    reason: result.reason,
+    concerns: result.concerns.map((concern) => ({
+      file: concern.file,
+      line: concern.line,
+      evidence: concern.evidence,
+    })),
+    model: result.model,
+    cause: result.cause,
+    caps: result.caps,
+    ...(diagnostic !== undefined && diagnostic !== "" ? { diagnostic } : {}),
+  })}\n`, "utf8"));
 }
 
 /** corpus.sh's gate_feature_for_forks for the tool harness. Null = run. */

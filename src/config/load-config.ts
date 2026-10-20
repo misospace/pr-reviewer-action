@@ -40,6 +40,10 @@ export const EMPTY_DISABLING_INPUTS: ReadonlySet<string> = new Set([
 // check; the drift guard in tests-v3/config.test.ts catches that omission.
 export const REASONING_EFFORT_INPUTS: ReadonlySet<string> = new Set([
   "ai-reasoning-effort", "ai-primary-reasoning-effort", "ai-smart-reasoning-effort", "ai-fallback-reasoning-effort", "ai-specialist-reasoning-effort",
+  // #1073: the confidence scorer's effort — same free-form shape check; the
+  // lane itself resolves inheritance (empty omits the field, unlike the
+  // review lanes), so it is deliberately absent from resolveInherited.
+  "ai-confidence-reasoning-effort",
 ]);
 
 /** #998: the bounded, free-form shape every reasoning-effort value must have

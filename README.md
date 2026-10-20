@@ -78,6 +78,30 @@ Role overrides share the profile transport and are ignored with a warning for `D
 
 **Requirements:** it is a JavaScript action (`runs.using: node24`), so GitHub-hosted runners need nothing installed; the runner provides Node. The repository under review must be checked out (`fetch-depth: 0` gives the history context). `checks: read` lets the review wait for CI; without it the CI evidence is skipped. On Forgejo, use runner 9 or newer with a job image that has Node 22+ and `git`.
 
+### Independent confidence scorer (opt-in)
+
+Set `ai-confidence-model` and the review runs one extra, bounded model call that grades the finished review 0–5 with a risk band. Default off: without the model the scorer costs nothing and nothing confidence-related appears anywhere.
+
+| Input | Purpose |
+|---|---|
+| `ai-confidence-model` | Enable the scorer; blank (default) keeps every confidence surface off. |
+| `ai-confidence-base-url` | Optional scorer endpoint; blank inherits the primary endpoint. |
+| `ai-confidence-api-format` | `openai` (default) or `anthropic`; blank inherits the primary format. |
+| `ai-confidence-api-key` | Scorer endpoint key. A distinct endpoint never inherits the primary key. |
+| `ai-confidence-timeout-sec` | Wall-clock budget for the scorer call, default 120. |
+| `ai-confidence-reasoning-effort` | Optional effort token; blank omits the field entirely. |
+| `ai-confidence-enable-for-forks` | Operator-only; default `false` keeps the scorer off cross-repository (fork) PRs, because the prompt carries the review's own privileged output to a separate endpoint under a privileged credential. |
+
+**Local models:** point `ai-confidence-base-url` at your server's OpenAI-compatible URL (e.g. `http://localhost:11434/v1` for ollama) with `ai-confidence-api-format: openai`; Anthropic-compatible local proxies take `ai-confidence-api-format: anthropic`. A keyless scorer endpoint may only be loopback (`localhost`, `127.0.0.1`, `::1`) — any other distinct endpoint must set `ai-confidence-api-key`, because the primary lane's key never rides a different URL.
+
+**Cost ceilings:** exactly one extra model call per published review — bounded (1,024 completion tokens, no tools, no corpus), one wire attempt, no retries. The call is capped by `ai-confidence-timeout-sec` (default 120s). Any failure — timeout, HTTP 429/5xx, malformed answer — degrades to `confidence-status: unscored`. The review itself is unchanged — same verdict, findings, required checks, and approval — but the published body gains the additive advisory `Independent confidence` section and the review marker gains the confidence keys.
+
+**What a score means:** advisory confidence in *this review* (how well it covered and supported its own conclusions) — not a probability the code is correct, and no verdict or approval authority. The score never changes the verdict, findings, or required checks. Deterministic caps outrank the model: a blocker finding caps the score at 2, a major finding or partial review coverage at 3.
+
+**Independence:** the scorer resolving to the same endpoint and model that wrote the review is correlated self-grading, not independent evidence — the action warns about it. Point `ai-confidence-base-url` at a different backend for a genuine second opinion.
+
+**Where results appear:** the five `confidence-*` step outputs, an `Independent confidence` row in the step summary, an advisory section in the published review, the additive confidence keys in the review marker, and the `confidence-score.json` / `confidence-request.json` / `confidence-response.json` run artifacts. Disabled runs keep all of it absent.
+
 ## ⚙️ How it works
 
 ```mermaid

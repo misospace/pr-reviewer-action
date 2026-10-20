@@ -37,6 +37,8 @@ export const INTEGER_INPUTS = new Set([
   "tool-max-response-bytes", "tool-request-timeout-sec", "tool-max-search-results", "tool-min-successful-requests",
   "ai-request-timeout-sec", "ai-connect-timeout-sec", "ai-fallback-request-timeout-sec",
   "ai-fallback-connect-timeout-sec", "ci-timeout-sec", "ci-interval-sec",
+  // #1073: the confidence scorer's request timeout is a positive integer.
+  "ai-confidence-timeout-sec",
 ]);
 
 export const ENUM_INPUTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
@@ -44,6 +46,9 @@ export const ENUM_INPUTS: Readonly<Record<string, readonly string[]>> = Object.f
   "ai-fallback-api-format": ["openai", "anthropic"],
   "ai-primary-api-format": ["openai", "anthropic"],
   "ai-smart-api-format": ["openai", "anthropic"],
+  // #1073: the confidence scorer is its own lane; empty (the default) inherits
+  // the primary lane's format rather than defaulting to openai.
+  "ai-confidence-api-format": ["openai", "anthropic"],
   "ai-response-format": ["off", "json_object", "json_schema"],
   "ai-primary-response-format": ["off", "json_object", "json_schema"],
   "ai-smart-response-format": ["off", "json_object", "json_schema"],
@@ -74,6 +79,9 @@ export const FLOAT_INPUTS = new Set(["ai-temperature"]);
 export const SECRET_INPUTS = new Set([
   "github-token", "ai-api-key", "ai-fallback-api-key", "ai-primary-api-key", "ai-smart-api-key", "ai-specialist-api-key",
   "linear-api-key", "tool-mcp-token", "forgejo-token",
+  // #1073: the confidence scorer's credential is a secret like every other
+  // lane key — redacted at every config serialization boundary.
+  "ai-confidence-api-key",
   // #1037: header VALUES routinely carry proxy/gateway tokens, so the whole
   // input is secret at the typed config boundary. The runtime stage env
   // reveals it (`stageEnvFromConfig`) because the transport parser needs the
@@ -92,6 +100,7 @@ export const POSITIVE_INTEGER_INPUTS = new Set([
   "tool-max-response-bytes", "tool-request-timeout-sec", "tool-max-search-results", "ai-request-timeout-sec",
   "ai-connect-timeout-sec", "ai-fallback-request-timeout-sec", "ai-fallback-connect-timeout-sec", "ci-timeout-sec",
   "ci-interval-sec",
+  "ai-confidence-timeout-sec",
 ]);
 
 for (const id of ["repo-map-max-bytes", "pr-thread-max-bytes", "deep-review-corpus-max-bytes"]) {
