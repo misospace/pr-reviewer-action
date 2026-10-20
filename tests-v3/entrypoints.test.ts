@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TangledNotImplementedError } from "../src/platform/tangled.js";
-import { buildAdapter, buildPublishApi, precheckMain, publishInputFromEnv, publishMain, readEvent } from "../src/run/entrypoints.js";
+import { buildAdapter, buildPublishApi, publishInputFromEnv, publishMain, readEvent } from "../src/run/entrypoints.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { publishReview } from "../src/publish/publish.js";
 import type { NativeReviewRequest, NativeReviewSurface, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
@@ -39,26 +39,6 @@ function mockAdapter(): PlatformReadAdapter {
     externalChecks: () => Promise.resolve([]),
   } as unknown as PlatformReadAdapter;
 }
-
-test("precheck entrypoint writes the precheck ABI outputs", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "v3-precheck-entry-"));
-  const outputFile = join(dir, "gh-output.txt");
-  try {
-    writeFileSync(join(dir, "event.json"), JSON.stringify({ number: 7 }));
-    const code = await precheckMain({
-      REPO: "o/r",
-      PR_NUMBER: "7",
-      GITHUB_OUTPUT: outputFile,
-      GITHUB_EVENT_PATH: join(dir, "event.json"),
-      GITHUB_SERVER_URL: "https://github.com",
-      PR_REVIEWER_ADAPTER: "",
-    } as unknown as NodeJS.ProcessEnv & Record<string, string>);
-    // The entrypoint builds its own real adapter from the environment.
-    assert.equal(code, 0);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
 
 test("publishInputFromEnv reads internal degraded gate-bypass eligibility", () => {
   assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", DEGRADED_GATE_BYPASS: "true" } as NodeJS.ProcessEnv, "github").degradedGateBypass, true);

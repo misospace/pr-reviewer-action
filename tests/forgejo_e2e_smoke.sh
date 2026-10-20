@@ -190,17 +190,52 @@ git clone -q "$FORGEJO_API_URL/reviewer/sample.git" "$WORK"
   export REPO=reviewer/sample
   export PR_NUMBER
   export COMMENT_MARKER='<!-- ai-pr-reviewer -->'
-  export GITHUB_OUTPUT="$TMPDIR/precheck.out"
   export SKIP_IF_DIFF_UNCHANGED=true
   export FORCE_REVIEW=false
   export PUBLISH_MODE=comment
-  node "$ROOT_DIR/dist/index.js" precheck
 
-  grep -q '^should_review=true$' "$TMPDIR/precheck.out"
-  # The PR metadata really came from the Forgejo REST seam: the resolved
-  # head matches the PR created above, on the forgejo backend.
-  grep -q "^head_sha=${HEAD_SHA}$" "$TMPDIR/precheck.out"
-  grep -q '^resolved_platform=forgejo$' "$TMPDIR/precheck.out"
+  # #726: the precheck decision is engine-owned — there is no standalone
+  # `precheck` subcommand. Drive admission through the engine CLI with a
+  # synchronize event naming an all-zero head: the engine must read the real
+  # PR head through the Forgejo REST seam and skip the run fail-closed as
+  # superseded-head, with no model spend (the placeholder AI inputs below
+  # are never reached on the skip path). The resolved-head equality with
+  # HEAD_SHA stays proven by the publish boundary's exact-head guard below.
+  mkdir -p "$TMPDIR/engine-run"
+  jq -n \
+    --arg repo "reviewer/sample" \
+    --arg pr "$PR_NUMBER" \
+    --arg api "$FORGEJO_API_URL" \
+    --arg token "$FORGEJO_TOKEN" \
+    --arg marker "$COMMENT_MARKER" \
+    --arg runDir "$TMPDIR/engine-run" \
+    '{
+      repository: $repo,
+      prNumber: $pr,
+      workspace: ".",
+      runDir: $runDir,
+      outputsSink: "/dev/null",
+      stepSummaryPath: "",
+      platform: "forgejo",
+      forgejoApiUrl: $api,
+      inputs: {"ai-base-url": "http://127.0.0.1:1/v1", "ai-model": "smoke-unused"},
+      event: {name: "pull_request", action: "synchronize"},
+      eventHeadSha: "0000000000000000000000000000000000000000",
+      ambient: {
+        PLATFORM: "forgejo",
+        FORGEJO_API_URL: $api,
+        FORGEJO_TOKEN: $token,
+        GH_TOKEN: $token,
+        REPO: $repo,
+        PR_NUMBER: $pr,
+        COMMENT_MARKER: $marker,
+        SKIP_IF_DIFF_UNCHANGED: "true",
+        FORCE_REVIEW: "false",
+        PUBLISH_MODE: "comment"
+      }
+    }' > "$TMPDIR/engine-request.json"
+  ADMISSION_LOG="$(node "$ROOT_DIR/dist/index.js" engine --request "$TMPDIR/engine-request.json" 2>&1)"
+  grep -q 'precheck: skipped (superseded-head)' <<<"$ADMISSION_LOG"
 
   export PR_HEAD_SHA="$HEAD_SHA"
   export GITHUB_OUTPUT="$TMPDIR/ci.out"

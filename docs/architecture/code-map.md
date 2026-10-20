@@ -106,7 +106,6 @@ The shipped runtime is one Node process (`node dist/index.js`, entry
 `src/run/review.ts` adapts the Action/`run` CLI environment:
 
 ```
-node dist/index.js precheck     → should_review + diff_fingerprint (src/precheck/)
 node dist/index.js run          → environment adapter → shared engine (`src/engine/review.ts`):
   ├─ admission                  → engine-owned precheck/fingerprint decision; skip
   │                               returns decision fields with no model spend

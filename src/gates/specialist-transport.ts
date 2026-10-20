@@ -103,6 +103,13 @@ function failureMessage(
  * `unauthenticated` marker so a keyless lane still keys consistently.
  */
 function credentialIdentity(apiKey: string): string {
+  // This SHA-256 is NOT a password verifier: it derives an in-memory lane
+  // cache key (endpoint+model+credential) that never leaves this module and
+  // is never compared against a stored secret, so the stored-password
+  // computational-effort property the query protects does not apply here —
+  // a slow KDF would only add per-request latency without protecting
+  // anything this digest cannot already leak (lane identity).
+  // codeql[js/sha-password] -- lane cache key, not a stored/verified password hash
   return apiKey === "" ? "unauthenticated" : createHash("sha256").update(apiKey).digest("hex").slice(0, 16);
 }
 

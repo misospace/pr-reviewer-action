@@ -2,7 +2,7 @@ import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { validateContract } from "../config/contract.js";
 import type { RawInputs } from "../config/load-config.js";
 import { createRunDir, nonEmpty } from "./run-dir.js";
-import { runReviewEngine, GATE_CHILD_ENV } from "../engine/review.js";
+import { runReviewEngine } from "../engine/review.js";
 import type { ReviewDependencies, ReviewRequest } from "../engine/types.js";
 import type { RunReviewResult } from "../engine/review.js";
 import type { PrecheckEvent, PrecheckOutput } from "../precheck/decide.js";
