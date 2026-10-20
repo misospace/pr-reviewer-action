@@ -108,6 +108,22 @@ function routedHandler(scorer: MockHandler): MockHandler {
   };
 }
 
+/** Route by model name with a scripted PRIMARY verdict (the confidence scorer
+ * still gets the scenario's answer). */
+function routedVerdictHandler(verdict: Record<string, unknown>, scorer: MockHandler): MockHandler {
+  return (req, body, res) => {
+    let model = "";
+    try {
+      model = String((JSON.parse(body) as Record<string, unknown>).model ?? "");
+    } catch {
+      model = "";
+    }
+    res.setHeader("Content-Type", "application/json");
+    if (model === SCORER_MODEL) return scorer(req, body, res);
+    res.end(verdictBody(verdict));
+  };
+}
+
 function scorerRequests(server: MockServer): number {
   return server.requests.filter((request) => {
     try {
@@ -596,13 +612,15 @@ test("#1140 review: a scorer answer echoing lane credentials is masked on EVERY 
 });
 
 test("#1140 review round 9: masking a max-length answer never leaves a field past its bound (one-character secret)", async () => {
-  // Masking is NOT length-preserving: a one-character configured credential
-  // becomes the three-character `⟦•⟧` marker, and the generic heuristics widen
-  // a match to `⟦redacted:credential⟧`. Every field below arrives at EXACTLY
-  // its documented parser bound and carries the secret, so before the bounds
-  // were re-applied after masking the canonical result left the parser
-  // OVERSHooting: `reason` > 600, `file` > 300, `evidence` > 400 in the
-  // persisted artifact, the step outputs, and the published section.
+  // Exact-value masking is NOT length-preserving: a one-character configured
+  // credential becomes the three-character `⟦•⟧` marker. (The generic
+  // `redactText` heuristics substitute a ten-character `[REDACTED]` for matches
+  // at least that long, so they never widen — the widening to pin here is the
+  // exact-value mask.) Every field below arrives at EXACTLY its documented
+  // parser bound and carries the secret, so before the bounds were re-applied
+  // after masking the canonical result left the parser OVERSHooting: `reason` >
+  // 600, `file` > 300, `evidence` > 400 in the persisted artifact, the step
+  // outputs, and the published section.
   const server = await startMockServer(routedHandler((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
     res.end(chatBody(SCORER_MODEL, JSON.stringify({
@@ -645,6 +663,51 @@ test("#1140 review round 9: masking a max-length answer never leaves a field pas
     assert.equal(artifactConcerns.length, 1);
     assert.ok((artifactConcerns[0]!.file ?? "").length <= MAX_CONFIDENCE_CONCERN_FILE_CHARS, "artifact concern file exceeds its bound");
     assert.ok((artifactConcerns[0]!.evidence ?? "").length <= MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS, "artifact concern evidence exceeds its bound");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1140 review round 9: the deterministic cap note survives the post-masking re-bound", async () => {
+  // The cap note is the ONLY place a capped score is explained in the published
+  // reason, and it is action-owned text appended AFTER the model's reason. A
+  // masked reason that expanded past the bound must therefore keep the note:
+  // trimming the model's share to whatever the note leaves, rather than slicing
+  // the note off the end.
+  const server = await startMockServer(routedVerdictHandler(
+    {
+      ...baseVerdict(),
+      verdict: "request_changes",
+      findings: [{ id: "f1", severity: "blocker", file: "src/a.ts", line: 1, message: "unsafe join" }],
+    },
+    (_req, _body, res) => {
+      res.setHeader("Content-Type", "application/json");
+      res.end(chatBody(SCORER_MODEL, JSON.stringify({
+        score: 5,
+        risk: "low",
+        // Max-length reason carrying the one-character scorer credential, so
+        // masking expands it past the documented bound. (`z` is not a letter of
+        // the action-owned cap note, so the leak assertion below is exact.)
+        reason: "q".repeat(MAX_CONFIDENCE_REASON_CHARS - 1) + "z",
+        concerns: [],
+      })));
+    },
+  ));
+  try {
+    const run = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+      "ai-confidence-api-key": "k",
+    });
+    assert.equal(run.result.outputs.confidenceStatus, "scored");
+    assert.equal(run.result.outputs.confidenceScore, "2", "the blocker cap must still fire");
+    const reason = run.result.outputs.confidenceReason ?? "";
+    assert.ok(reason.length <= MAX_CONFIDENCE_REASON_CHARS, `reason ${reason.length} exceeds ${MAX_CONFIDENCE_REASON_CHARS}`);
+    assert.ok(!reason.includes("z"), "configured credential survived masking");
+    assert.match(reason, /\[deterministic cap: blocker_cap_2\]$/, "the cap note must survive the re-bound");
+    const artifact = JSON.parse(readFileSync(join(run.runDir, "confidence-score.json"), "utf8")) as { reason?: string; caps?: string[] };
+    assert.deepEqual(artifact.caps, ["blocker_cap_2"]);
+    assert.match(String(artifact.reason ?? ""), /\[deterministic cap: blocker_cap_2\]$/);
   } finally {
     await server.close();
   }

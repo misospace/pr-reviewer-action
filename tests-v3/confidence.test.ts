@@ -4,6 +4,8 @@ import { startMockServer } from "./helpers.js";
 import { runConfidenceScorer } from "../src/confidence/scorer.js";
 import { TransportFailure } from "../src/transport/http.js";
 import {
+  boundConfidenceReason,
+  confidenceCapNote,
   MAX_CONFIDENCE_REASON_CHARS,
   applyConfidenceCeilings,
   confidenceOutputFields,
@@ -195,6 +197,26 @@ test("#1140 review round 9: a deterministic cap clamps the score, never the risk
   assert.equal(out.score, 2);
   assert.deepEqual(out.caps, ["blocker_cap_2"]);
   assert.equal(out.risk, "critical");
+});
+
+test("#1140 review round 9: re-binding a masked reason keeps the cap note, drops only model text", () => {
+  // No cap fired → a plain slice is right, and the note must never be invented.
+  const uncapped = "q".repeat(MAX_CONFIDENCE_REASON_CHARS + 2);
+  const plain = boundConfidenceReason(uncapped, []);
+  assert.equal(plain.length, MAX_CONFIDENCE_REASON_CHARS);
+  assert.ok(!plain.includes("deterministic cap"));
+
+  // A cap fired → the model's share shrinks to whatever the note leaves and the
+  // note (rebuilt from `caps`, not recovered from masked text) ends the field.
+  const note = confidenceCapNote(["blocker_cap_2"]);
+  const capped = boundConfidenceReason("q".repeat(MAX_CONFIDENCE_REASON_CHARS + 40), ["blocker_cap_2"]);
+  assert.equal(capped.length, MAX_CONFIDENCE_REASON_CHARS);
+  assert.ok(capped.endsWith(note));
+  assert.equal(capped.slice(0, -note.length).length, MAX_CONFIDENCE_REASON_CHARS - note.length);
+
+  // An oversized reason with a note longer than the bound is still bounded.
+  const many = boundConfidenceReason("q".repeat(MAX_CONFIDENCE_REASON_CHARS * 3), ["a", "b", "c"]);
+  assert.equal(many.length, MAX_CONFIDENCE_REASON_CHARS);
 });
 
 // ── output mapping ───────────────────────────────────────────────────────

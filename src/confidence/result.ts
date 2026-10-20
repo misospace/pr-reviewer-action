@@ -109,18 +109,45 @@ export const MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS = 400;
 
 /**
  * Re-apply a documented field bound AFTER credential masking/redaction
- * (#1140 review round 9). Masking is not length-preserving: `maskKnownSecrets`
- * replaces every occurrence of a non-empty configured secret — including a
- * one-character one — with the three-character `⟦•⟧` marker, and the generic
- * `redactText` heuristics widen a match to the `⟦redacted:credential⟧` marker
- * too. A field the parser bounded to exactly its limit can therefore leave
- * masking OVER its limit, and the oversized value would flow into
- * `confidence-score.json`, the step outputs, and the published section.
- * Slicing after masking is the safe direction: truncation can never re-expose
- * what masking already removed.
+ * (#1140 review round 9). Exact-value masking is not length-preserving:
+ * `maskKnownSecrets` replaces every occurrence of a non-empty configured
+ * secret — including a one-character one — with the three-character `⟦•⟧`
+ * marker, so a field the parser bounded to exactly its limit can leave masking
+ * OVER its limit, and the oversized value would flow into
+ * `confidence-score.json`, the step outputs, and the published section. (The
+ * generic `redactText` heuristics emit the ten-character `[REDACTED]` and every
+ * rule matches at least that many characters, so they can substitute but never
+ * widen — the widening to pin here is the exact-value mask.) Slicing after
+ * masking is the safe direction: truncation can never re-expose what masking
+ * already removed, even when it cuts a marker in half.
  */
 export function boundConfidenceField(text: string, maxChars: number): string {
   return text.slice(0, maxChars);
+}
+
+/** The action-owned note `applyConfidenceCeilings` appends to the reason,
+ * rebuilt from `caps` so a caller can recognize/reserve it without parsing
+ * model-authored text. "" when no cap fired. */
+export function confidenceCapNote(caps: readonly string[]): string {
+  return caps.length === 0 ? "" : ` [deterministic cap: ${caps.join(", ")}]`;
+}
+
+/**
+ * Re-bound a MASKED reason to `MAX_CONFIDENCE_REASON_CHARS` while keeping the
+ * deterministic cap note (#1140 review round 9). A plain slice is right for
+ * every other field, but the note is the only place a capped score is explained
+ * in the published reason: when masking expanded a note-length reason past the
+ * bound, a plain slice would clip exactly that action-owned tail and publish a
+ * capped score with no in-reason explanation. So the model's share is trimmed
+ * to whatever the note leaves and the note — rebuilt from `caps`, never
+ * recovered from masked model text — is re-appended.
+ */
+export function boundConfidenceReason(maskedReason: string, caps: readonly string[]): string {
+  if (maskedReason.length <= MAX_CONFIDENCE_REASON_CHARS) return maskedReason;
+  const note = confidenceCapNote(caps);
+  if (note === "") return maskedReason.slice(0, MAX_CONFIDENCE_REASON_CHARS);
+  const room = Math.max(0, MAX_CONFIDENCE_REASON_CHARS - note.length);
+  return `${maskedReason.slice(0, room).trimEnd()}${note}`.slice(0, MAX_CONFIDENCE_REASON_CHARS);
 }
 
 /** A successfully parsed, pre-ceiling scorer answer. */
@@ -276,7 +303,7 @@ export function applyConfidenceCeilings(
   // shrinks to whatever the note leaves — the RESULT stays within the same
   // documented bound either way (slicing to MAX + note.length instead would
   // publish a reason longer than MAX_CONFIDENCE_REASON_CHARS).
-  const note = ` [deterministic cap: ${caps.join(", ")}]`;
+  const note = confidenceCapNote(caps);
   const room = Math.max(0, MAX_CONFIDENCE_REASON_CHARS - note.length);
   const head = answer.reason.length > room ? answer.reason.slice(0, room).trimEnd() : answer.reason;
   const reason = `${head}${note}`.slice(0, MAX_CONFIDENCE_REASON_CHARS);

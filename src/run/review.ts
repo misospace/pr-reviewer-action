@@ -59,7 +59,7 @@ import { resolveReviewerRouting } from "../config/reviewer-routing.js";
 import { resolveHumanReviewRouting, type HumanReviewRoutingMode, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 import { buildConfidencePrompt } from "../confidence/prompt.js";
 import { runConfidenceScorer } from "../confidence/scorer.js";
-import { boundConfidenceField, CONFIDENCE_DISABLED, confidenceOutputFields, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS, MAX_CONFIDENCE_CONCERN_FILE_CHARS, MAX_CONFIDENCE_REASON_CHARS, unscoredConfidenceResult, type ConfidenceResult } from "../confidence/result.js";
+import { boundConfidenceField, boundConfidenceReason, CONFIDENCE_DISABLED, confidenceOutputFields, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS, MAX_CONFIDENCE_CONCERN_FILE_CHARS, unscoredConfidenceResult, type ConfidenceResult } from "../confidence/result.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, applyReviewTriageFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
 import { reviewArtifactFromParsed, type ArtifactFinding } from "../enforcement/artifact.js";
 import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
@@ -1526,17 +1526,17 @@ secrets: [profiles.primary.apiKey],
     // result. Generic `redactText` at the renderers stays as the second
     // layer, but the exact configured secrets are nuked here, once.
     const maskConfidenceText = (text: string): string => redactText(maskKnownSecrets(text, confidenceSecrets));
-    // #1140 review round 9: masking is not length-preserving — a one-character
-    // configured secret becomes the three-character `⟦•⟧` marker and the
-    // generic heuristics widen to `⟦redacted:credential⟧` — so a field the
-    // parser bounded to exactly its limit can leave masking OVER that limit.
-    // Every published canonical field is re-bounded AFTER masking, at the same
-    // documented limits the parser applies.
+    // #1140 review round 9: exact-value masking is not length-preserving — a
+    // one-character configured secret becomes the three-character `⟦•⟧` marker
+    // — so a field the parser bounded to exactly its limit can leave masking
+    // OVER that limit. Every published canonical field is re-bounded AFTER
+    // masking, at the same documented limits the parser applies; the reason
+    // keeps its action-owned deterministic-cap note through the re-bound.
     const maskConfidenceField = (text: string, maxChars: number): string =>
       boundConfidenceField(maskConfidenceText(text), maxChars);
     confidenceResult = {
       ...confidenceOutcome.result,
-      reason: maskConfidenceField(confidenceOutcome.result.reason, MAX_CONFIDENCE_REASON_CHARS),
+      reason: boundConfidenceReason(maskConfidenceText(confidenceOutcome.result.reason), confidenceOutcome.result.caps),
       concerns: confidenceOutcome.result.concerns.map((concern) => ({
         file: maskConfidenceField(concern.file, MAX_CONFIDENCE_CONCERN_FILE_CHARS),
         line: concern.line,
