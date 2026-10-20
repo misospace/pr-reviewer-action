@@ -37,6 +37,8 @@ export const RESERVED_MARKER_PATTERNS: readonly RegExp[] = [
   // can never carry it into a published body (digest forgery is
   // withhold-only, but reserved is reserved).
   /<!--\s*pr-reviewer:rejected-prescriptions\s*:[^>]*-->/gi,
+  // #1027: finding identity is action-owned state and model markdown cannot forge it.
+  /<!--\s*pr-reviewer:finding-id\s*:[^>]*-->/gi,
 ];
 
 /**

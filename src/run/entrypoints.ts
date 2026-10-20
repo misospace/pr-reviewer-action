@@ -1,4 +1,4 @@
-import { appendFileSync, readFileSync, statSync } from "node:fs";
+import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
@@ -443,6 +443,7 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
     analysisEngine: env.ANALYSIS_ENGINE ?? "",
     baseSha: env.BASE_SHA ?? "",
     headSha: env.HEAD_SHA ?? "",
+    ...(typeof env.PRIOR_HEAD_SHA === "string" && env.PRIOR_HEAD_SHA !== "" ? { priorHeadSha: env.PRIOR_HEAD_SHA.slice(0, 64) } : {}),
     prNumber: env.PR_NUMBER ?? "",
     commentMarker: env.COMMENT_MARKER ?? "",
     ...(env.BROAD_FINGERPRINT !== undefined ? { broadFingerprint: env.BROAD_FINGERPRINT } : {}),
@@ -512,10 +513,17 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
 }
 
 /** Publish and relay messages; fail-soft (1 only on a failed publication). */
-export async function publishWith(input: PublishInput, seam: ReturnType<typeof buildPublishApi>): Promise<number> {
+export async function publishWith(input: PublishInput, seam: ReturnType<typeof buildPublishApi>, runDir?: string): Promise<number> {
   const result: PublishResult = await publishReview(input, seam.api, {
     diffText: seam.platform === "forgejo" ? await seam.diffProvider() : "",
   });
+  // #1027: the artifact is written only for a review that was actually
+  // published (or superseded): a failed publication never published the
+  // current findings, so their `reported` events must not reach the ledger.
+  if (runDir && result.status !== "failed" && result.outcomes !== undefined) {
+    try { writeFileSync(join(runDir, "finding-outcomes.json"), result.outcomes, "utf8"); }
+    catch { process.stderr.write("WARN: Could not write finding outcomes artifact\n"); }
+  }
   for (const message of result.messages) process.stdout.write(`${message}\n`);
   if (result.error) process.stderr.write(`${result.error}\n`);
   return result.status === "failed" ? 1 : 0;
@@ -526,7 +534,7 @@ export async function publishWith(input: PublishInput, seam: ReturnType<typeof b
  * failed, matching the v2 dispatcher's semantics. */
 export async function publishMain(env: NodeJS.ProcessEnv): Promise<number> {
   const seam = buildPublishApi(env);
-  return publishWith(publishInputFromEnv(env, seam.platform), seam);
+  return publishWith(publishInputFromEnv(env, seam.platform), seam, nonEmpty(env.PR_REVIEWER_RUN_DIR));
 }
 
 function parseJsonish(raw: string): unknown {

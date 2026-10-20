@@ -281,6 +281,10 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       ...(review.contextBudget !== undefined ? { contextBudget: review.contextBudget } : {}),
       ...(review.contextPeak !== undefined ? { contextPeak: review.contextPeak } : {}),
       ...(review.toolStopReason !== undefined ? { toolStopReason: review.toolStopReason } : {}),
+      // #1027: the prior published head reaches publish through the managed
+      // sticky comment's metadata marker (read in readFeedbackState); it is
+      // NOT the precheck's head_sha, which is the CURRENT head and would
+      // make every thread resolution read as a same-head dismissal.
       // #1003: the human-review triage answer reaches the published body
       // only when triage ran (the decision output is "" when the input is
       // off), so a disabled run's published review is byte-identical to
@@ -295,7 +299,7 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
         }
         : {}),
     };
-    publishFailed = (await publishWith(input, seam)) !== 0;
+    publishFailed = (await publishWith(input, seam, runDir)) !== 0;
   }
 
   // ── Re-review label ───────────────────────────────────────────────────

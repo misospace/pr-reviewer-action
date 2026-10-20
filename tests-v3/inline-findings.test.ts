@@ -6,6 +6,10 @@ import {
   MAX_CARRYOVER_KEYS_PER_COMMENT,
   FEEDBACK_AFFORDANCE,
 } from "../src/publish/inline-findings.js";
+import { findingIdentityFromRecord } from "../src/outcomes/identity.js";
+
+/** #1027: the identity marker a posted finding comment now carries. */
+const idMarker = (rec: Record<string, unknown>): string => `\n\n<!-- pr-reviewer:finding-id:v1:${findingIdentityFromRecord(rec)} -->`;
 
 const diff = [
   "diff --git a/old b/new", "--- a/old", "+++ b/new", "@@ -1,2 +1,3 @@",
@@ -31,12 +35,12 @@ test("#680: validates paths and integer anchors, deduplicates threads, caps comm
   const result = buildComments(findings, diff, 1, { forgejoPositions: false });
   assert.equal(result.comments.length, 1);
   assert.equal(result.skipped, 8);
-  assert.deepEqual(result.comments[0], { path: "new", body: "**Info:** first\n\n_Automated finding from AI PR review._", line: 1, side: "RIGHT" });
+  assert.deepEqual(result.comments[0], { path: "new", body: `**Info:** first\n\n_Automated finding from AI PR review._${idMarker(findings.at(-2) as Record<string, unknown>)}`, line: 1, side: "RIGHT" });
 });
 
 test("#680: Forgejo uses diff-relative positions and ignores metadata slots", () => {
   const result = buildComments([{ file: "new", line: 2, message: "x" }], diff, 20, { forgejoPositions: true });
-  assert.deepEqual(result.comments[0], { path: "new", body: "**Info:** x\n\n_Automated finding from AI PR review._", new_position: 3 });
+  assert.deepEqual(result.comments[0], { path: "new", body: `**Info:** x\n\n_Automated finding from AI PR review._${idMarker({ file: "new", line: 2, message: "x" })}`, new_position: 3 });
 });
 
 test("#561: labels, categories, backticks, secret redaction and inert upstream links", () => {
@@ -128,9 +132,10 @@ test("#762: Forgejo degrades a suggestion to a plain fenced replacement (no one-
   assert.equal(Object.hasOwn(c, "start_line"), false);
 });
 
-test("#762: findings without actionable fields render byte-identically", () => {
-  const result = buildComments([{ file: "new", line: 1, message: "first" }], diff, 20, { forgejoPositions: false });
-  assert.deepEqual(result.comments[0], { path: "new", body: "**Info:** first\n\n_Automated finding from AI PR review._", line: 1, side: "RIGHT" });
+test("#762/#1027: findings without actionable fields render identically plus the identity marker", () => {
+  const record = { file: "new", line: 1, message: "first" };
+  const result = buildComments([record], diff, 20, { forgejoPositions: false });
+  assert.deepEqual(result.comments[0], { path: "new", body: `**Info:** first\n\n_Automated finding from AI PR review._${idMarker(record)}`, line: 1, side: "RIGHT" });
 });
 
 /** #762: the usefulness-feedback surface — one static affordance on an
@@ -418,7 +423,7 @@ test("#1101: a suggestion that is nothing but a marker line drops the prescripti
     assert.equal(body.includes("```suggestion"), false, "no replacement block");
     assert.equal(body.includes(FEEDBACK_AFFORDANCE), false, "no affordance without a replacement block");
     assert.deepEqual(parseRejectionCarryover(body), [], "the reserved grammar never reaches the comment");
-    assert.equal(body, "**Info:** m\n\n_Automated finding from AI PR review._");
+    assert.equal(body, `**Info:** m\n\n_Automated finding from AI PR review._${idMarker({ file: "new", line: 1, message: "m", suggestion })}`);
   }
   // Same shape as the round-trip test above, but with no surrounding text: the
   // marker line is what a digest would have described, so there is nothing left
@@ -553,10 +558,11 @@ test("#1107: #252 discipline — a message carrying the opener itself publishes 
   assert.equal(recoverPublishedSuggestion(body), null, "a body with no validated prescription recovers nothing");
 
   // Paired control 1: a message with no token renders byte-identically to the
-  // pre-#1107 renderer — the reservation is a no-op, not a rewrite.
+  // pre-#1107 renderer — the reservation is a no-op, not a rewrite. (#1027:
+  // the only addition is the appended hidden finding-identity marker.)
   assert.deepEqual(
     buildComments([{ file: "new", line: 1, message: "first" }], diff, 20, { forgejoPositions: false }).comments[0],
-    { path: "new", body: "**Info:** first\n\n_Automated finding from AI PR review._", line: 1, side: "RIGHT" },
+    { path: "new", body: `**Info:** first\n\n_Automated finding from AI PR review._${idMarker({ file: "new", line: 1, message: "first" })}`, line: 1, side: "RIGHT" },
   );
 
   // Paired control 2: a benign message on a finding that DOES carry a valid
@@ -825,7 +831,7 @@ test("#1113: an unclosed ordinary fence cannot swallow the Forgejo degraded repl
     ).comments[0],
     {
       path: "new",
-      body: "**Info:** note\n```ts\nconst x = 1;\n```\n\n_Automated finding from AI PR review._\n\nReplacement for lines 1-1 (this forge cannot apply a one-click suggestion):\n\n```\nREPL\n```\n\n" + FEEDBACK_AFFORDANCE,
+      body: "**Info:** note\n```ts\nconst x = 1;\n```\n\n_Automated finding from AI PR review._\n\nReplacement for lines 1-1 (this forge cannot apply a one-click suggestion):\n\n```\nREPL\n```\n\n" + FEEDBACK_AFFORDANCE + idMarker({ file: "new", line: 1, message: "note\n```ts\nconst x = 1;\n```", suggestion: "REPL" }),
       new_position: 1,
     },
     "a benign closed-block message renders the degraded region byte-identically",
@@ -853,7 +859,11 @@ test("#1113: an unclosed fence in the message or the agent prompt cannot capture
     // region would show up as extra content inside a region or an open walk.
     assert.deepEqual(fences.regions, ["REPL", promptRegion], `${label}: prescription and wrapped prompt render live, capturing nothing`);
     assert.equal(fences.openAtEnd, false, `${label}: the body ends fence-closed`);
-    assert.ok(body.endsWith("</details>"), `${label}: the details close renders outside every fence`);
+    assert.ok(body.includes("</details>"), `${label}: the details close renders outside every fence`);
+    assert.ok(
+      body.endsWith(idMarker({ file: "new", line: 1, message, suggestion: "REPL", agent_prompt: prompt })),
+      `${label}: the appended finding-identity marker closes the body after the details wrap`,
+    );
     assert.equal(recoverPublishedSuggestion(body), "REPL", `${label}: recovery still reads exactly what rendered`);
     assert.ok(body.includes("const x = 1;") || !message.includes("const x = 1;"), `${label}: the message prose survives`);
     assert.ok(body.includes(prompt.split("\n")[0]!), `${label}: the prompt prose survives`);
@@ -868,7 +878,7 @@ test("#1113: an unclosed fence in the message or the agent prompt cannot capture
     ).comments[0],
     {
       path: "new",
-      body: "**Info:** note\n```ts\nconst x = 1;\n```\n\n_Automated finding from AI PR review._\n\n```suggestion\nREPL\n```\n\n" + FEEDBACK_AFFORDANCE + "\n\n<details><summary>Suggested agent prompt</summary>\n\n```\ndo it\n```\n\n</details>",
+      body: "**Info:** note\n```ts\nconst x = 1;\n```\n\n_Automated finding from AI PR review._\n\n```suggestion\nREPL\n```\n\n" + FEEDBACK_AFFORDANCE + "\n\n<details><summary>Suggested agent prompt</summary>\n\n```\ndo it\n```\n\n</details>" + idMarker({ file: "new", line: 1, message: "note\n```ts\nconst x = 1;\n```", suggestion: "REPL", agent_prompt: "do it" }),
       line: 1,
       side: "RIGHT",
     },
@@ -1015,7 +1025,7 @@ test("#1112: a container-prefixed opener publishes no prescription, and the vali
       path: "new",
       line: 1,
       side: "RIGHT",
-      body: `**Info:** ${benign}\n\n_Automated finding from AI PR review._\n\n\`\`\`suggestion\nREPL\n\`\`\`\n\n${FEEDBACK_AFFORDANCE}`,
+      body: `**Info:** ${benign}\n\n_Automated finding from AI PR review._\n\n\`\`\`suggestion\nREPL\n\`\`\`\n\n${FEEDBACK_AFFORDANCE}${idMarker({ file: "new", line: 1, message: benign, suggestion: "REPL" })}`,
     },
     "a benign container message renders byte-identically",
   );
