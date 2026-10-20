@@ -466,7 +466,13 @@ function extractImportsGo(line: string, inImportBlock: boolean): [string[], bool
 const HUNK_RE = pyRe(String.raw`^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@`);
 
 interface FileState {
-  path: string;
+path: string;
+/** The checkout path this file's HEAD reads resolve through: the path as the
+ * RAW diff header spelled it (#1154 review round 3). Once `redactDiffText`
+ * masks credential-shaped tokens inside header paths, the persisted `path`
+ * no longer names a checkout file, so every `sourceRoot` read goes through
+ * `rawPath` instead. In-memory only — it never reaches an artifact. */
+rawPath: string;
   oldPath: string;
   deleted: boolean;
   added: boolean;
@@ -495,8 +501,9 @@ interface FileState {
 }
 
 function newFileState(path: string, oldPath = "", deleted = false): FileState {
-  return {
-    path,
+return {
+path,
+rawPath: path,
     oldPath,
     deleted,
     added: false,
@@ -660,10 +667,40 @@ function cleanDiffPath(raw: string): string {
   return p;
 }
 
-/** Parse a unified diff into per-file states with added-line tracking. */
-function parseDiff(diffText: string): FileState[] {
+/** Per-`diff --git`-line RAW header paths, in ordinal order (#1154 review
+ * round 3): entry k holds the cleaned `[oldPath, newPath]` of the k-th
+ * `diff --git` line, or `[null, null]` when that raw header does not parse.
+ * Used to keep the checkout spelling of a header path whose credential shapes
+ * the persisted diff masks; the raw values stay in memory only. */
+function extractRawDiffGitPaths(diffText: string | null | undefined): [string | null, string | null][] {
+  if (!diffText) return [];
+  const out: [string | null, string | null][] = [];
+  for (const line of pySplitLines(diffText)) {
+    if (!line.startsWith("diff --git ")) continue;
+    const parsed = parseDiffGitLine(line);
+    out.push(parsed ? [cleanDiffPath(parsed[0]), cleanDiffPath(parsed[1])] : [null, null]);
+  }
+  return out;
+}
+
+/** Parse a unified diff into per-file states with added-line tracking.
+ *
+ * `rawHeaderPaths` (#1154 review round 3), when provided, is indexed by
+ * `diff --git` line ordinal: for the k-th such line it holds the RAW header
+ * paths as `[oldPath, newPath]` (already `cleanDiffPath`-ed), or nulls when
+ * the raw header does not parse. `redactDiffText` masks credential-shaped
+ * tokens inside header paths, so the parsed `path` no longer names a checkout
+ * file; the raw spelling is carried on `FileState.rawPath` for the
+ * `sourceRoot` reads only and never persisted. Ordinal alignment is exact:
+ * redaction preserves line count, so the k-th `diff --git` line in the
+ * redacted text is the k-th in the raw text. */
+function parseDiff(
+  diffText: string,
+  rawHeaderPaths?: ReadonlyArray<readonly [string | null, string | null]>,
+): FileState[] {
   const files: FileState[] = [];
   let current: FileState | null = null;
+  let headerOrdinal = -1;
   // #1154 round 3: a line the redaction layer treats as a RESET (anything that
   // is not a ` `/`+`/`-` content line: `diff --git`, `index`, `--- `/`+++ `,
   // file-mode/rename/copy metadata, `@@`, `\ No newline`, or a malformed
@@ -676,10 +713,13 @@ function parseDiff(diffText: string): FileState[] {
   let pendingReset = false;
   for (const line of pySplitLines(diffText)) {
     if (line.startsWith("diff --git ")) {
+      headerOrdinal += 1;
       const parsed = parseDiffGitLine(line);
       if (parsed) {
         current = newFileState(cleanDiffPath(parsed[1]));
         if (cleanDiffPath(parsed[0]) !== current.path) current.oldPath = cleanDiffPath(parsed[0]);
+        const raw = rawHeaderPaths?.[headerOrdinal];
+        if (raw && raw[1] !== null) current.rawPath = raw[1];
         files.push(current);
       } else {
         current = null;
@@ -1277,7 +1317,7 @@ interface ChangedKey {
 }
 
 function changedKeys(state: FileState, language: string, headLines: string[]): ChangedKey[] {
-  const fmt = dataFormat(state.path);
+  const fmt = dataFormat(state.rawPath || state.path);
   const removed = fmt ? new Set<string>() : removedLiterals(state);
   const keys: ChangedKey[] = [];
   const seen = new Set<string>();
@@ -1458,7 +1498,7 @@ function extractFileAnchors(
 ): FileAnchors {
   const fa: FileAnchors = {
     path: state.path,
-    language: detectLanguage(state.path),
+    language: detectLanguage(state.rawPath || state.path),
     deleted: state.deleted,
     symbols: [],
     imports: [],
@@ -1512,7 +1552,7 @@ function extractFileAnchors(
 
   let headLines: string[] | null = null;
   if (sourceRoot !== null && state.newSideLines.length > 0) {
-    headLines = readHeadLines(sourceRoot, state.path);
+    headLines = readHeadLines(sourceRoot, state.rawPath || state.path);
     if (headLines !== null) {
       // #1154: the diff side arrives credential-redacted (`redactDiffText`,
       // applied once at ingestion), while the head checkout still holds the
@@ -1582,7 +1622,7 @@ function extractFileAnchors(
     if (enclosing.length > limit) fa.symbolsTruncated = true;
     for (const [name, confidence, lineNo] of enclosing.slice(0, limit)) addSymbol(name, "enclosing", confidence, lineNo);
   }
-  if (headLines !== null && scansKeys(state.path, fa.language)) {
+  if (headLines !== null && scansKeys(state.rawPath || state.path, fa.language)) {
     const keys = changedKeys(state, fa.language, headLines);
     const limit = Math.max(0, Math.min(MAX_KEYS_PER_FILE, keyBudget));
     fa.keys = keys.slice(0, limit);
@@ -1668,6 +1708,14 @@ export interface ExtractChangeAnchorsOptions {
   maxAnchors?: number;
   /** The reviewed head checkout; null disables every head-derived field. */
   sourceRoot?: string | null;
+  /** The diff as it existed BEFORE `redactDiffText` ran (#1154 review round
+   * 3). Header paths in the persisted artifact are credential-redacted, so
+   * they no longer name checkout files; the raw spelling is read from here —
+   * in-memory only — and carried on `FileState.rawPath` for the `sourceRoot`
+   * reads. Defaults to `diffText` itself, which is exact whenever the caller
+   * hands in an unredacted diff and degrades to the redacted spelling (the
+   * pre-#1154 lookup behavior) otherwise. */
+  rawDiffText?: string | undefined;
 }
 
 function counterpartToArtifact(entry: CounterpartEntry): ChangeAnchorCounterpart {
@@ -1750,7 +1798,7 @@ export function extractChangeAnchors(
     diffTruncated = true;
   }
 
-  const diffFiles = parseDiff(text);
+  const diffFiles = parseDiff(text, extractRawDiffGitPaths(options.rawDiffText ?? diffText));
 
   const merged: FileState[] = [];
   const seenPaths = new Set<string>();
@@ -1763,30 +1811,49 @@ export function extractChangeAnchors(
       if (path === "" || seenPaths.has(path)) continue;
       seenPaths.add(path);
       const oldPath = typeof entry.previous_filename === "string" ? entry.previous_filename : "";
-      merged.push(newFileState(path, oldPath, entry.status === "removed"));
+      const entryState = newFileState(path, oldPath, entry.status === "removed");
+      // The file list's filename is already the redacted artifact form; it
+      // carries no raw spelling, so the entry reads the checkout through its
+      // own (redacted) path and only gains one when a diff state merges in.
+      entryState.rawPath = "";
+      merged.push(entryState);
     }
   }
 
   for (const state of diffFiles) {
-    if (seenPaths.has(state.path)) {
-      const existing = merged.find((item) => item.path === state.path);
-      if (existing) {
-        existing.addedLines.push(...state.addedLines);
-        existing.contextLines.push(...state.contextLines);
-        existing.newSideLines.push(...state.newSideLines);
-        // Index-aligned with `newSideLines`: the repeated-`diff --git` merge
-        // must carry the reset flags too, or the mirror loses the boundary
-        // resets between the two blocks (a lost reset desynchronizes the
-        // mirror exactly where a run would otherwise survive).
-        existing.newSideResets.push(...state.newSideResets);
-        existing.changeRuns.push(...state.changeRuns);
-        existing.removedLines.push(...state.removedLines);
-        existing.binary = state.binary;
-        existing.deleted = state.deleted || existing.deleted;
-        existing.oldPath = state.oldPath || existing.oldPath;
-      }
+    const existing = seenPaths.has(state.path) ? merged.find((item) => item.path === state.path) : undefined;
+    if (existing && (existing.rawPath === "" || existing.rawPath === state.rawPath)) {
+      existing.addedLines.push(...state.addedLines);
+      existing.contextLines.push(...state.contextLines);
+      existing.newSideLines.push(...state.newSideLines);
+      // Index-aligned with `newSideLines`: the repeated-`diff --git` merge
+      // must carry the reset flags too, or the mirror loses the boundary
+      // resets between the two blocks (a lost reset desynchronizes the
+      // mirror exactly where a run would otherwise survive).
+      existing.newSideResets.push(...state.newSideResets);
+      existing.changeRuns.push(...state.changeRuns);
+      existing.removedLines.push(...state.removedLines);
+      existing.binary = state.binary;
+      existing.deleted = state.deleted || existing.deleted;
+      existing.oldPath = state.oldPath || existing.oldPath;
+      // The raw spelling comes with the diff side; a fileList-only entry has
+      // none and adopts it here.
+      existing.rawPath = state.rawPath || existing.rawPath;
     } else {
-      seenPaths.add(state.path);
+      // Two DISTINCT credential-named files can redact to the same persisted
+      // path (#1154 review round 3): without this, their states would merge
+      // and confuse every per-file field. Distinct raw spellings stay
+      // separate; the later one's artifact path is disambiguated with a
+      // synthesized `#<n>` marker placed so the file extension survives
+      // language detection — the raw spelling never resurfaces.
+      let path = state.path;
+      for (let n = 2; seenPaths.has(path); n += 1) {
+        const dot = path.lastIndexOf(".");
+        const slash = path.lastIndexOf("/");
+        path = dot > slash ? `${state.path.slice(0, dot)}#${n}${state.path.slice(dot)}` : `${state.path}#${n}`;
+      }
+      state.path = path;
+      seenPaths.add(path);
       merged.push(state);
     }
   }

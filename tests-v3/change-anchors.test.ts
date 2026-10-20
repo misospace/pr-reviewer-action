@@ -373,3 +373,86 @@ test("#1154 r3: a run open at a hunk boundary still reconciles across the bounda
   assert.deepEqual(control?.symbols, [{ name: "other", kind: "enclosing", confidence: "high", line: 7 }]);
   assert.deepEqual(twoHunk?.symbols?.at(-1), control?.symbols?.[0], "the boundary adds no drift");
 });
+
+// #1154 review round 3: `redactDiffText` now masks credential-shaped tokens
+// inside path headers, so the persisted diff's header path no longer names a
+// checkout file. The raw spelling must survive in memory only: head-derived
+// anchors keep resolving through it, the artifact records the REDACTED path,
+// and the raw value never reaches the persisted document.
+test("#1154: a credential-named file keeps its head anchors via the raw header path", () => {
+  const token = "sk-liveABCDEFGHIJKLMNOPQRSTUVWXYZ1234";
+  const rawPath = `src/${token}.py`;
+  const root = workspace({ [rawPath]: "def handle(event):\n    event = dict(event)\n    return event\n" });
+  const raw = [
+    `diff --git a/${rawPath} b/${rawPath}`,
+    `--- a/${rawPath}`,
+    `+++ b/${rawPath}`,
+    "@@ -1,2 +1,3 @@",
+    " def handle(event):",
+    "+    event = dict(event)",
+    "     return event",
+    "",
+  ].join("\n");
+  const redacted = redactDiffText(raw);
+  assert.ok(redacted.includes("diff --git a/src/[REDACTED].py b/src/[REDACTED].py"), "the header path really is masked");
+  assert.ok(!redacted.includes(token), "no raw token survives the diff");
+  const file = extractChangeAnchors(redacted, null, { sourceRoot: root, rawDiffText: raw }).files[0];
+  assert.equal(file?.path, "src/[REDACTED].py", "the artifact path is the redacted spelling");
+  assert.deepEqual(file?.changed_lines, [[2, 2]], "the checkout lookup resolved through the raw path");
+  assert.deepEqual(file?.symbols, [{ name: "handle", kind: "enclosing", confidence: "high", line: 1 }]);
+  const rendered = renderChangeAnchorsJson(extractChangeAnchors(redacted, null, { sourceRoot: root, rawDiffText: raw }));
+  assert.ok(!rendered.includes(token), "the raw path never reaches the artifact");
+});
+
+test("#1154: without the raw diff the redacted header degrades, never mis-anchors", () => {
+  const token = "sk-liveABCDEFGHIJKLMNOPQRSTUVWXYZ1234";
+  const rawPath = `src/${token}.py`;
+  const root = workspace({ [rawPath]: "def handle(event):\n    event = dict(event)\n    return event\n" });
+  const raw = [
+    `diff --git a/${rawPath} b/${rawPath}`,
+    `--- a/${rawPath}`,
+    `+++ b/${rawPath}`,
+    "@@ -1,2 +1,3 @@",
+    " def handle(event):",
+    "+    event = dict(event)",
+    "    return event",
+    "",
+  ].join("\n");
+  const redacted = redactDiffText(raw);
+  const file = extractChangeAnchors(redacted, null, { sourceRoot: root }).files[0];
+  assert.equal(file?.path, "src/[REDACTED].py");
+  assert.equal(file?.changed_lines, undefined, "no checkout file answers the redacted path; no head-derived fields");
+  assert.ok(!renderChangeAnchorsJson(extractChangeAnchors(redacted, null, { sourceRoot: root })).includes(token));
+});
+
+test("#1154: two distinct credential-named files redacting alike stay separate", () => {
+  const a = "sk-aaaaaaaaaaaaaaaaaaaaaaaa1234";
+  const b = "sk-bbbbbbbbbbbbbbbbbbbbbbbb1234";
+  const root = workspace({
+    [`src/${a}.py`]: "def alpha():\n    return 1\n",
+    [`src/${b}.py`]: "def beta():\n    return 2\n",
+  });
+  const raw = [
+    `diff --git a/src/${a}.py b/src/${a}.py`,
+    "--- /dev/null",
+    "@@ -0,0 +1,2 @@",
+    "+def alpha():",
+    "+    return 1",
+    `diff --git a/src/${b}.py b/src/${b}.py`,
+    "--- /dev/null",
+    "@@ -0,0 +1,2 @@",
+    "+def beta():",
+    "+    return 2",
+    "",
+  ].join("\n");
+  const redacted = redactDiffText(raw);
+  const files = extractChangeAnchors(redacted, null, { sourceRoot: root, rawDiffText: raw }).files;
+  assert.equal(files.length, 2, "both files survive the shared redacted path");
+  const names = files.map((file) => file.symbols.map((sym) => sym.name).sort().join(","));
+  assert.ok(names.includes("alpha") && names.includes("beta"), "each file keeps its own symbols");
+  for (const file of files) {
+    assert.match(file.path, /^src\/\[REDACTED\](#\d+)?\.py$/, `the artifact path stays redacted: ${file.path}`);
+  }
+  assert.ok(!renderChangeAnchorsJson(extractChangeAnchors(redacted, null, { sourceRoot: root, rawDiffText: raw })).includes(a));
+  assert.ok(!renderChangeAnchorsJson(extractChangeAnchors(redacted, null, { sourceRoot: root, rawDiffText: raw })).includes(b));
+});

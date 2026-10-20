@@ -1002,6 +1002,74 @@ test("#1154: redactDiffText preserves line count, prefixes, and headers", () => 
   assert.equal(outLines[7], "-[REDACTED]", "same-line key: value on a removed line is masked");
 });
 
+// #1154 review round 3: the verbatim-header exception was a leak. A
+// credential-shaped token inside a path header is PR-authored content that
+// persists in `pr.diff` and propagates to `pr.diff.truncated`, the corpus
+// sections and `ai-request.<tier>.json`, while the structured filename
+// fields (`pr-files.raw.json`) were already redacted — the family diverged
+// exactly where a secret could hide. Ordinary paths stay byte-for-byte, so
+// `parseDiff` and the inline-finding anchoring keep reading every header.
+test("#1154: credential-shaped values in path-bearing diff headers are masked", () => {
+  const token = "sk-liveABCDEFGHIJKLMNOPQRSTUVWXYZ1234";
+  const diff = [
+    `diff --git a/${token}.txt b/${token}.txt`,
+    "index e69de29..abc1234 100644",
+    `--- a/${token}.txt`,
+    `+++ b/${token}.txt`,
+    "@@ -1 +1 @@",
+    "+ordinary content line",
+    `diff --git "a/${token}.txt" "b/${token}.txt"`,
+    `rename from ${token}.yaml`,
+    `rename to ${token}.yaml`,
+    "copy from AKIAIOSFODNN7EXAMPLE.pem",
+    "copy to AKIAIOSFODNN7EXAMPLE.pem",
+    `Binary files a/${token} and b/${token} differ`,
+    "--- /dev/null",
+    "+++ /dev/null",
+    "diff --git a/normal/path.yml b/normal/path.yml",
+    "--- a/normal/path.yml",
+    "+++ b/normal/path.yml",
+    "@@ -1 +1 @@",
+    "+ordinary stays",
+  ].join("\n");
+  const out = redactDiffText(diff);
+  const inLines = diff.split("\n");
+  const outLines = out.split("\n");
+  assert.equal(outLines.length, inLines.length, "masking costs no line");
+  assert.ok(out.includes(`diff --git a/[REDACTED].txt b/[REDACTED].txt`), "the diff --git header paths are masked");
+  assert.ok(out.includes("--- a/[REDACTED].txt") && out.includes("+++ b/[REDACTED].txt"), "the ---/+++ header paths are masked");
+  assert.ok(out.includes(`"a/[REDACTED].txt"`), "a quoted header path is masked inside its quotes");
+  assert.ok(out.includes("rename from [REDACTED].yaml") && out.includes("rename to [REDACTED].yaml"));
+  assert.ok(out.includes("copy from [REDACTED].pem") && out.includes("copy to [REDACTED].pem"));
+  assert.ok(out.includes(`Binary files a/[REDACTED] and b/[REDACTED] differ`));
+  assert.ok(!out.includes(token), "no credential-shaped path token survives anywhere");
+  // Ordinary paths and structure-only metadata are untouched.
+  assert.ok(out.includes("diff --git a/normal/path.yml b/normal/path.yml"));
+  assert.ok(out.includes("--- a/normal/path.yml") && out.includes("+++ b/normal/path.yml"));
+  assert.ok(out.includes("--- /dev/null") && out.includes("+++ /dev/null"));
+  assert.ok(out.includes("index e69de29..abc1234 100644"), "index line verbatim");
+  assert.ok(out.includes("+ordinary stays") && out.includes("+ordinary content line"));
+});
+
+test("#1154: a path header never opens a continuation run into content", () => {
+  // A credential-named path is masked through its OWN masker, sharing no
+  // state with either content side: a header that looks like a bare secret
+  // key line (`diff --git a/password: …`) cannot mask the added lines below
+  // it, and the content runs still reset at the header.
+  const diff = [
+    "diff --git a/password: b/password:",
+    "+ordinary line below the header",
+    "diff --git a/app.yml b/app.yml",
+    "+another ordinary line",
+  ].join("\n");
+  const out = redactDiffText(diff);
+  const outLines = out.split("\n");
+  assert.equal(outLines.length, 4, "no line collapse");
+  assert.ok(!out.includes("password"), "the credential-shaped header path is masked");
+  assert.equal(outLines[1], "+ordinary line below the header", "the header mask opens no run");
+  assert.equal(outLines[3], "+another ordinary line", "the content run reset at the second header");
+});
+
 test("#1154: redactDiffText masks a SPLIT-line secret and still cannot span a line break", () => {
   // The flat redactText turns `password:\n  value` into ONE line (the
   // kubeconfig masker's \\s* eats the newline), shifting every later diff

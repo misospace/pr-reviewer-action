@@ -244,13 +244,27 @@ export function redactPrTextLines(text: string | null | undefined): string {
 
 /** Line-wise counterpart to `redactText` for unified diffs (#1154). Delegates
  * per-line masking to the shared core and owns only what is diff-specific: the
- * `+`/`-`/space prefix is preserved and masked content follows it, while
- * `diff --git`/`index`/`@@` and the `--- a/…`/`+++ b/…` file headers are left
- * verbatim — paths are not credentials, and header paths must keep matching
- * the platform file list for anchoring. (`--- `/`+++ ` are distinguished from
- * a `-`/`+` content line by their full three-character prefix; a deleted line
- * whose own content begins `-- ` is indistinguishable and accepted as
- * pathologically unlikely.)
+ * `+`/`-`/space prefix is preserved and masked content follows it. Non-content
+ * lines that carry PATHS — `diff --git`, `--- a/…`/`+++ b/…`, `rename from/to`,
+ * `copy from/to`, and `Binary files … differ` — are masked through a fresh
+ * line masker: a credential-shaped token in a path segment is a credential the
+ * PR authored into the diff, and the review round on this PR established that
+ * leaving those headers verbatim diverges the artifact family (structured
+ * filename fields are already redacted by `redactPrTextDeep`). Ordinary paths
+ * are untouched — the masker rewrites only credential shapes — and line count,
+ * prefixes, `a/`/`b/` structure and quotes all survive, so `parseDiff` still
+ * reads every header. The checkout/anchor seam keeps the RAW path for its
+ * disk reads (`FileState.rawPath`, extracted from the unredacted diff and
+ * never persisted); the sanitized path is what the artifacts record.
+ * (`--- `/`+++ ` are distinguished from a `-`/`+` content line by their full
+ * three-character prefix; a deleted line whose own content begins `-- ` is
+ * indistinguishable and accepted as pathologically unlikely — it is masked by
+ * the header rule instead of the content rule, which differs only in which
+ * side's continuation state is skipped.)
+ *
+ * Structure-only metadata (`index`, `@@`, file-mode lines, `\ No newline`,
+ * similarity indices, `GIT binary patch`) stays verbatim and still RESETS both
+ * continuation runs.
  *
  * TWO independent continuation states, one per side of the change. Each side
  * reconstructs its OWN file and is judged only by that file's lines: the NEW
@@ -262,7 +276,9 @@ export function redactPrTextLines(text: string | null | undefined): string {
  * block rewritten to `[REDACTED]`, and a run opened by a removed line masked
  * added lines that were never its values. A removed line is still masked —
  * it is PR-authored content that persists in `pr.diff` — just by its own
- * side's decisions.
+ * side's decisions. Header masking shares NONE of that state: each path
+ * header gets its own masker, so a credential-named path cannot open a run
+ * that reaches the file's content lines.
  *
  * Because the core never lets a mask span a line break, line count, prefixes
  * and hunk structure survive byte-for-byte: inline findings still anchor to
@@ -271,16 +287,35 @@ export function redactPrTextLines(text: string | null | undefined): string {
  * block scalars, and the split-line `key:`/indented-value form are all masked;
  * see {@link maskContentLine} for the continuation rule and its documented
  * over-redaction class. */
+/** Unified-diff metadata lines that carry a PATH segment (#1154). These are
+ * masked for credential shapes rather than returned verbatim; every other
+ * non-content line stays verbatim and only resets the continuation runs. */
+function isPathBearingDiffHeader(line: string): boolean {
+  return (
+    line.startsWith("diff --git ") ||
+    line.startsWith("--- ") ||
+    line.startsWith("+++ ") ||
+    line.startsWith("rename from ") ||
+    line.startsWith("rename to ") ||
+    line.startsWith("copy from ") ||
+    line.startsWith("copy to ") ||
+    line.startsWith("Binary files ")
+  );
+}
+
 export function redactDiffText(diff: string | null | undefined): string {
   if (!diff) return "";
   const nextSide = createPrTextLineMasker();
   const removedSide = createPrTextLineMasker();
   return diff.split("\n").map((line) => {
-    if (line.startsWith("--- ") || line.startsWith("+++ ")) {
+    if (isPathBearingDiffHeader(line)) {
       // Headers are structure, not content: both runs end at a file boundary.
+      // The path segments themselves are still PR-authored, so their
+      // credential shapes are masked through a masker that shares no state
+      // with either content side.
       nextSide.reset();
       removedSide.reset();
-      return line;
+      return redactPrTextLines(line);
     }
     const prefix = line.charAt(0);
     if (prefix === " " || prefix === "+") {

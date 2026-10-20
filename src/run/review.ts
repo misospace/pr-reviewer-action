@@ -543,12 +543,15 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // bytes. `redactDiffText` (not the flat pass) keeps every line count and
   // prefix intact, so inline findings still anchor to the same line numbers
   // the forge's raw diff defines, and it also closes the split-line form (a
-  // `password:` key line with its value on the indented line below). The
-  // generic layer's documented false-positive class (a fixture value like
-  // `sk-test-…`, an `sk-`-prefixed kebab path in a diff header) is accepted,
-  // as is the continuation rule's over-redaction (any indented run after a
-  // bare secret key is masked): over-redaction is the redaction module's
-  // stated preference over a leaked credential.
+  // `password:` key line with its value on the indented line below). Path
+  // headers are masked too (#1154 review round 3): a credential-shaped token
+  // in a diff-header path is PR-authored content, and `rawDiffText` below
+  // keeps the raw spelling in memory so the change-anchor checkout lookups
+  // still resolve. The generic layer's documented false-positive class (a
+  // fixture value like `sk-test-…`) is accepted, as is the continuation
+  // rule's over-redaction (any indented run after a bare secret key is
+  // masked): over-redaction is the redaction module's stated preference over
+  // a leaked credential.
   const rawDiffText = diffText;
   diffText = redactDiffText(diffText);
   if (diffText !== rawDiffText) log("PR diff redaction: masked credential-shaped value(s) before persistence and corpus assembly");
@@ -637,7 +640,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
   // Related-code context (corpus.sh). Built before the requirement ledger:
   // its anchors and related context are the #796 obligation inputs. It
   // reads only the diff, the file list and the checkout.
-  const relatedInputs = await buildRelatedCodeSection(ws, env, workspace);
+  const relatedInputs = await buildRelatedCodeSection(ws, env, workspace, rawDiffText);
   const obligationsOn = (env.HARNESS_OBLIGATIONS ?? "false").toLowerCase() === "true";
   const harnessObligations = relatedInputs === null || !obligationsOn ? [] : buildHarnessObligations(relatedInputs);
 

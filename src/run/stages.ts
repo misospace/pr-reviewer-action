@@ -332,8 +332,11 @@ const RELATED_ARTIFACTS = ["change-anchors.json", "related-code.json", "related-
 
 /** Builds the related-code artifacts and returns the anchors + related
  * context they came from (the #796 obligation inputs), or null when the
- * section is disabled, errored or empty. */
-export async function buildRelatedCodeSection(ws: RunWorkspace, env: StageEnv, workspace: string): Promise<{ anchors: ChangeAnchorsArtifact; related: RelatedContext } | null> {
+ * section is disabled, errored or empty. `rawDiffText` (#1154 review round 3)
+ * is the diff as it existed before the ingestion redaction, so the
+ * change-anchor checkout lookups keep the raw header path spelling; it stays
+ * in memory and never reaches an artifact. */
+export async function buildRelatedCodeSection(ws: RunWorkspace, env: StageEnv, workspace: string, rawDiffText?: string): Promise<{ anchors: ChangeAnchorsArtifact; related: RelatedContext } | null> {
   for (const name of RELATED_ARTIFACTS) ws.write(name, "");
   if ((env.RELATED_CODE_CONTEXT ?? "true").toLowerCase() !== "true") return null;
   const reset = (): void => {
@@ -342,7 +345,7 @@ export async function buildRelatedCodeSection(ws: RunWorkspace, env: StageEnv, w
   try {
     const filesBytes = ws.read("pr-files.json");
     const fileList: readonly unknown[] | null = filesBytes === null ? null : (JSON.parse(Buffer.from(filesBytes).toString("utf8")) as unknown[]);
-    const anchors = extractChangeAnchors(ws.readText("pr.diff"), fileList, { sourceRoot: workspace });
+    const anchors = extractChangeAnchors(ws.readText("pr.diff"), fileList, { sourceRoot: workspace, rawDiffText });
     ws.write("change-anchors.json", renderChangeAnchorsJson(anchors));
     const anchorData: unknown = JSON.parse(Buffer.from(renderChangeAnchorsJson(anchors)).toString("utf8"));
     const related = await buildRelatedContext(anchorData, workspace, fileList);
