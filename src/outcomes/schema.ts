@@ -69,7 +69,9 @@ export interface OutcomeEvent {
    * carries. A stateless run's event is the full per-run snapshot; an
    * operator-mode event merged onto a prior ledger is the verified DELTA
    * against the prior cumulative total (the ledger sums to the current
-   * total, so one unchanged reaction is never counted per re-review). */
+   * total, so one unchanged reaction is never counted per re-review).
+   * Bounded by `MAX_FEEDBACK_COUNT` (#1127); an event claiming more is
+   * rejected outright. */
   count?: number;
   /** `feedback` only: how the reacting actors were proven trusted. v1
    * feedback is always forge-derived, so the normalizer only ever emits
@@ -196,6 +198,11 @@ export function normalizeOutcomeEvent(raw: unknown): OutcomeEvent | null {
     if (typeof rec.signal !== "string" || !FEEDBACK_SIGNALS.has(rec.signal as "helpful" | "not_helpful")) return null;
     event.signal = rec.signal as "helpful" | "not_helpful";
     if (typeof rec.count === "number" && Number.isSafeInteger(rec.count) && rec.count >= 0) {
+      // #1127: a count past the fixed ceiling is a claim no legitimate seam
+      // can make (the reaction read itself is page-capped), so the EVENT is
+      // rejected instead of the field being dropped — an unbounded tally
+      // must never survive normalization merely unlabeled.
+      if (rec.count > MAX_FEEDBACK_COUNT) return null;
       event.count = rec.count;
     }
     // The pairing check forces `forge-reaction` provenance, and forge-derived
@@ -206,6 +213,20 @@ export function normalizeOutcomeEvent(raw: unknown): OutcomeEvent | null {
   }
   return event;
 }
+
+/** #1127: hard ceiling on the reaction count one `feedback` event may claim.
+ * Without it, one persisted ledger event with `count: 2**53-1` inflates the
+ * `aggregateOutcomeEvents` reaction tallies without bound (the publish
+ * summary prints the total). The ceiling sits far above anything the
+ * producer seam can legitimately observe — the reaction read is page-capped
+ * (100 rows × 3 pages per comment, `reviewCommentFeedback`), and one
+ * finding identity maps to one published comment — so a count past the
+ * ceiling is a crafted value no legitimate seam emits: the EVENT fails
+ * closed rather than surviving with the field dropped or clamped, matching
+ * the #1151 hostile-value rule. Combined with `MAX_LEDGER_EVENTS` this
+ * bounds the total reaction tally a ledger can assert at
+ * `MAX_LEDGER_EVENTS × MAX_FEEDBACK_COUNT`. */
+export const MAX_FEEDBACK_COUNT = 1000;
 
 /** Hard cap on events in one ledger: past it, the OLDEST events are dropped
  * (the latest state is what aggregates read), so an unbounded history can
