@@ -118,7 +118,10 @@ const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T/;
 // trailing control characters (NUL is not JS whitespace, so `trim` leaves it),
 // so without this guard "…T00:00:00Z\u0000" persists verbatim and two events
 // for the SAME instant persist as distinct strings. Reject any control
-// character outright — the persisted field must be canonical.
+// character outright — the persisted field must be canonical. A string that
+// PARSES despite carrying a control character is not an unprovable instant
+// (which normalizes to `at: null`); it is a crafted observation no legitimate
+// seam ever emits, so the whole event fails closed, not just the field.
 const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f]/;
 
 function boundedText(value: unknown, max: number): string | null {
@@ -152,6 +155,14 @@ export function normalizeOutcomeEvent(raw: unknown): OutcomeEvent | null {
   const kind = rec.kind as OutcomeEventKind;
   if (typeof rec.provenance !== "string" || !PROVENANCES.has(rec.provenance as OutcomeProvenance)) return null;
   if (KIND_PROVENANCE[kind] !== rec.provenance) return null;
+  // #1151 acceptance: a control character riding an otherwise well-formed,
+  // Date.parse-ACCEPTED timestamp is a crafted value no legitimate seam
+  // emits, so the EVENT fails closed — nulling the field would keep the
+  // hostile observation in the ledger. This is distinct from an ordinary
+  // unparseable `at` (no control characters), which is an unprovable instant
+  // and normalizes to null while the event survives. Tested on the TRIMMED
+  // value so real JS whitespace padding (itself C0) stays canonical.
+  if (typeof rec.at === "string" && CONTROL_CHARS_RE.test(rec.at.trim())) return null;
   const headSha = isProvenHeadSha(rec.head_sha) ? rec.head_sha : null;
   const event: OutcomeEvent = {
     finding_id: rec.finding_id,
