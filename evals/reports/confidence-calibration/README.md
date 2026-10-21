@@ -171,7 +171,10 @@ retries; quota exhaustion is recorded `unscored`, never swept.
 ## Limits and unknowns
 
 - No live inference yet: every quality number above is pending. The
-  recommendation is explicitly provisional on that run.
+  recommendation is explicitly provisional on that run. The required
+  live same-model vs heterogeneous quality-and-cost comparison is the
+  acceptance criterion still open on #1074 — this pilot does not close
+  the issue; the live run under the predeclared ceilings does.
 - false-green@t is measured on the POST-ceiling score: rows where the
   primary itself reported blocker/major findings are bounded by the
   deterministic ceilings, so the metric is only fully live on rows where

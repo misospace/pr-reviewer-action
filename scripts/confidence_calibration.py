@@ -214,7 +214,6 @@ def validate_plan(plan: dict[str, Any], corpora: dict[str, dict[str, dict[str, A
     if not (isinstance(sample, dict) and isinstance(sample.get("vulnerable"), list)
             and isinstance(sample.get("clean"), list)):
         errors.append("sample.vulnerable and sample.clean must be lists")
-        sample = {}
     else:
         known: set[str] = set()
         for corpus in corpora.values():
@@ -229,7 +228,6 @@ def validate_plan(plan: dict[str, Any], corpora: dict[str, dict[str, dict[str, A
     ceilings = plan.get("ceilings")
     if not isinstance(ceilings, dict):
         errors.append("ceilings missing")
-        ceilings = {}
     else:
         for field in ("max_primary_reviews", "max_scorer_calls", "max_scorer_output_tokens"):
             value = ceilings.get(field)
@@ -899,6 +897,24 @@ def cmd_score(args: argparse.Namespace) -> int:
     # writes results-so-far with budget_exhausted=true (a normal, recorded
     # outcome, exit 0) while unattempted rows are recorded explicitly as
     # unscored/budget_exhausted — never silently dropped.
+    # Cumulative-call accounting: wire attempts already recorded in a merged
+    # results file were real provider calls, so they count against the plan's
+    # ceilings on every subsequent --merge invocation. Re-running a condition
+    # also carries its previously spent calls — no call is free.
+    out_path = Path(args.out).resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_results: dict[str, Any] | None = None
+    carried_calls = 0
+    if args.merge and out_path.is_file():
+        candidate_results = _read_json_soft(out_path)
+        if isinstance(candidate_results, dict) and isinstance(candidate_results.get("rows"), list):
+            existing_results = candidate_results
+            carried_calls = sum(
+                int(row.get("wire_attempts") or 0)
+                for row in existing_results["rows"]
+                if isinstance(row, dict)
+            )
+
     planned_calls = sum(
         1
         for pr_id in run_entries
@@ -907,19 +923,21 @@ def cmd_score(args: argparse.Namespace) -> int:
         if all_conditions[cid]["backend"] == "live"
         and primary_evidence_state(run_entries[pr_id], _resolve_run_dir(runs_dir, run_entries[pr_id])) == "primary_ok"
     )
-    calls_made = 0
-    if planned_calls > ceilings["max_scorer_calls"]:
+    calls_made = carried_calls
+    if carried_calls + planned_calls > ceilings["max_scorer_calls"]:
         print(
-            f"score aborted: {planned_calls} planned live calls exceed "
+            f"score aborted: {carried_calls} wire attempts already recorded in the merged "
+            f"results file plus {planned_calls} planned live calls exceed "
             f"ceilings.max_scorer_calls={ceilings['max_scorer_calls']}; "
             "no call was made and no budget was spent "
             "(reduce --repeat or select fewer conditions with --condition)",
             file=sys.stderr,
         )
         return EXIT_BUDGET_ABORT
-    if planned_calls * SCORER_MAX_TOKENS > ceilings["max_scorer_output_tokens"]:
+    if (carried_calls + planned_calls) * SCORER_MAX_TOKENS > ceilings["max_scorer_output_tokens"]:
         print(
-            f"score aborted: {planned_calls} planned live calls at {SCORER_MAX_TOKENS} "
+            f"score aborted: {carried_calls} wire attempts already recorded plus {planned_calls} "
+            f"planned live calls at {SCORER_MAX_TOKENS} "
             f"completion tokens exceed ceilings.max_scorer_output_tokens="
             f"{ceilings['max_scorer_output_tokens']}; no call was made",
             file=sys.stderr,
@@ -1210,14 +1228,13 @@ def cmd_score(args: argparse.Namespace) -> int:
         "rows": rows,
         "budget_exhausted": budget_exhausted,
         "budget_note": abort_note,
+        "carried_wire_calls": carried_calls,
         "wall_time_sec_by_condition": {cid: round(sec, 3) for cid, sec in wall_by_condition.items()},
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    out_path = Path(args.out).resolve()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    if args.merge and out_path.is_file():
-        existing = _read_json_soft(out_path)
-        if isinstance(existing, dict) and isinstance(existing.get("rows"), list):
+    if args.merge and existing_results is not None:
+        existing = existing_results
+        if isinstance(existing.get("rows"), list):
             # Merge scope: rows of conditions re-selected in this invocation
             # are replaced wholesale (a re-run owns its condition); rows of
             # other conditions are kept so two live conditions can share one
@@ -1258,8 +1275,16 @@ def _resolve_run_dir(runs_dir: Path, run_info: dict[str, Any]) -> Path | None:
     raw = run_info.get("run_dir")
     if not isinstance(raw, str) or not raw:
         return None
-    path = Path(raw)
-    return path if path.is_absolute() else runs_dir / path
+    try:
+        candidate = Path(raw)
+        path = candidate if candidate.is_absolute() else runs_dir / candidate
+        resolved = path.resolve()
+    except ValueError:
+        return None
+    runs_root = runs_dir.resolve()
+    if resolved != runs_root and runs_root not in resolved.parents:
+        return None
+    return path
 
 
 def unscored_row(cause: str, model: str) -> dict[str, Any]:

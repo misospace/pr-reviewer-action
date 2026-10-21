@@ -1204,7 +1204,6 @@ def test_budget_ceiling_that_fits_completes_all_calls(tmp_path: Path, monkeypatc
 def test_bridge_review_result_failure_fails_row_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # A bridge failure while deriving review_result must not silently
     # degrade the prompt input and still publish a scored row.
-    work = Path(tempfile.mkdtemp())
     calls = {"n": 0}
 
     def broken_run_bridge(subcommand, request, work_dir):
@@ -1229,3 +1228,91 @@ def test_bridge_review_result_failure_fails_row_closed(tmp_path: Path, monkeypat
     failed = [row for row in results["rows"] if row["scorer"].get("cause") == "bridge_review_result_failed"]
     assert failed, "a failed review_result derivation must fail its rows closed"
     assert all(row["scorer"]["status"] == "unscored" for row in failed)
+
+
+# Run-dir containment (fail closed) ────────────────────────────────────
+
+
+def test_resolve_run_dir_rejects_escape_paths(tmp_path: Path) -> None:
+    # run_dir originates from runs.json (a run artifact, not operator
+    # config), so containment is fail-closed: traversal, absolute escape,
+    # and symlink escape resolve to None (primary_artifacts_missing), and
+    # a null byte is rejected, never raised past the caller.
+    runs_dir = tmp_path / "runs"
+    (runs_dir / "run-ok").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (runs_dir / "run-link-out").symlink_to(outside, target_is_directory=True)
+    (runs_dir / "run-link-in").symlink_to(runs_dir / "run-ok", target_is_directory=True)
+    assert confidence_calibration._resolve_run_dir(runs_dir, {"run_dir": "run-ok"}) == runs_dir / "run-ok"
+    assert confidence_calibration._resolve_run_dir(runs_dir, {"run_dir": "run-link-in"}) is not None
+    assert confidence_calibration._resolve_run_dir(runs_dir, {"run_dir": "../outside"}) is None
+    assert confidence_calibration._resolve_run_dir(runs_dir, {"run_dir": str(outside)}) is None
+    assert confidence_calibration._resolve_run_dir(runs_dir, {"run_dir": "run-link-out"}) is None
+    assert confidence_calibration._resolve_run_dir(runs_dir, {"run_dir": "run-ok\0"}) is None
+    assert confidence_calibration._resolve_run_dir(runs_dir, {"run_dir": ""}) is None
+    assert confidence_calibration._resolve_run_dir(runs_dir, {}) is None
+
+
+def test_score_merge_refuses_cumulative_calls_over_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Wire attempts already recorded in a merged results file were real
+    # provider calls: a follow-up --merge must count them against the
+    # plan's ceilings and refuse to start (exit 3, zero new requests)
+    # when the cumulative total would exceed max_scorer_calls.
+    pilot = LoopbackProvider(lambda _handler: (200, OPENAI_OK))
+    server, base_url = serve(pilot)
+    for name, value in live_env(base_url).items():
+        monkeypatch.setenv(name, value)
+    try:
+        results_path = tmp_path / "results.json"
+        argv = [
+            "--plan", str(live_plan(tmp_path, max_calls=5)),
+            "--runs-dir", str(fixture_runs_dir_copy(tmp_path)),
+            "--out", str(results_path),
+            "--condition", "same-model",
+            "--repeat", "1",
+            "--allow-missing-corpus-entry",
+        ]
+        assert run_cmd("score", argv) == 0
+        assert len([row for row in json.loads(results_path.read_text(encoding="utf-8"))["rows"]
+                    if row["scorer"]["status"] == "scored"]) == 5
+        assert len(pilot.requests) == 5
+        before = results_path.read_text(encoding="utf-8")
+        # 5 spent + 5 planned > max_scorer_calls=5: refuse before any call.
+        assert run_cmd("score", [*argv, "--merge"]) == 3
+        assert len(pilot.requests) == 5
+        assert results_path.read_text(encoding="utf-8") == before
+    finally:
+        server.shutdown()
+
+
+def test_score_merge_within_ceiling_records_carried_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A merge that fits the cumulative ceiling succeeds, spends exactly the
+    # planned new calls, and records the carried wire-attempt count.
+    pilot = LoopbackProvider(lambda _handler: (200, OPENAI_OK))
+    server, base_url = serve(pilot)
+    for name, value in live_env(base_url).items():
+        monkeypatch.setenv(name, value)
+    try:
+        results_path = tmp_path / "results.json"
+        argv = [
+            "--plan", str(live_plan(tmp_path, max_calls=10)),
+            "--runs-dir", str(fixture_runs_dir_copy(tmp_path)),
+            "--out", str(results_path),
+            "--condition", "same-model",
+            "--repeat", "1",
+            "--allow-missing-corpus-entry",
+        ]
+        assert run_cmd("score", argv) == 0
+        assert len(pilot.requests) == 5
+        assert run_cmd("score", [*argv, "--merge"]) == 0
+        merged = json.loads(results_path.read_text(encoding="utf-8"))
+        assert merged["carried_wire_calls"] == 5
+        assert len([row for row in merged["rows"] if row["scorer"]["status"] == "scored"]) == 5
+        assert len(pilot.requests) == 10
+    finally:
+        server.shutdown()
