@@ -19,6 +19,7 @@ import {
 import {
   FINDING_OUTCOMES_SCHEMA,
   isProvenHeadSha,
+  MAX_FEEDBACK_COUNT,
   MAX_LEDGER_EVENTS,
   normalizeOutcomeEvent,
   parseOutcomeLedger,
@@ -272,6 +273,57 @@ test("#1027 event normalization: hostile kind/provenance combinations fail close
       { ...base, kind: "resolved", provenance: "current-review" },
     ],
   })), null);
+});
+
+test("#1127 feedback count is bounded: an over-ceiling event fails closed", () => {
+  const base = { finding_id: "a".repeat(64), at: AT, head_sha: HEAD_A, route: null, model: null };
+  const feedback = (count: unknown): Record<string, unknown> => ({
+    ...base, kind: "feedback", provenance: "forge-reaction", signal: "helpful", count,
+  });
+  // The boundary itself normalizes with the count preserved.
+  const atCap = normalizeOutcomeEvent(feedback(MAX_FEEDBACK_COUNT))!;
+  assert.equal(atCap.count, MAX_FEEDBACK_COUNT);
+  // Everything past the ceiling — including the #1127 inflation value —
+  // rejects the EVENT, not merely the field: a crafted tally claim no
+  // legitimate seam can make must never survive normalization unlabeled.
+  for (const hostile of [MAX_FEEDBACK_COUNT + 1, 2 ** 53 - 1, Number.MAX_SAFE_INTEGER]) {
+    assert.equal(normalizeOutcomeEvent(feedback(hostile)), null, String(hostile));
+  }
+  // Unchanged leniency below the ceiling: a malformed count (negative,
+  // non-integer, wrong type) still drops the FIELD, not the event — #1127
+  // bounds the magnitude of a well-shaped count, it does not widen the
+  // #1119 hostile/unprovable split.
+  assert.equal(normalizeOutcomeEvent(feedback(-1))!.count, undefined);
+  assert.equal(normalizeOutcomeEvent(feedback(1.5))!.count, undefined);
+  assert.equal(normalizeOutcomeEvent(feedback("many"))!.count, undefined);
+  // Hostile-ledger regression: one over-ceiling count poisons the whole
+  // persisted ledger (fail-closed parse), so no reader aggregates it.
+  assert.equal(parseOutcomeLedger(JSON.stringify({
+    schema: FINDING_OUTCOMES_SCHEMA,
+    generated_at: AT,
+    head_sha: HEAD_A,
+    route: null,
+    model: null,
+    events: [
+      { ...base, kind: "reported", provenance: "current-review" },
+      feedback(2 ** 53 - 1),
+    ],
+  })), null);
+  // The bound, proven end to end: even a ledger packed with the maximum
+  // number of events, each claiming the maximum count, can assert at most
+  // MAX_LEDGER_EVENTS × MAX_FEEDBACK_COUNT reactions — never an unbounded
+  // total on the publish summary line.
+  const packed: OutcomeEvent[] = Array.from({ length: MAX_LEDGER_EVENTS }, () =>
+    normalizeOutcomeEvent(feedback(MAX_FEEDBACK_COUNT))!);
+  const ceilingLedger = parseOutcomeLedger(JSON.stringify({
+    schema: FINDING_OUTCOMES_SCHEMA,
+    generated_at: AT,
+    head_sha: HEAD_A,
+    route: null,
+    model: null,
+    events: packed,
+  }))!;
+  assert.equal(ceilingLedger.aggregate.reactions.helpful, MAX_LEDGER_EVENTS * MAX_FEEDBACK_COUNT);
 });
 
 test("#1027 reconcile: reported vs repeated, line drift keeps identity", () => {
@@ -753,7 +805,11 @@ test("#1027 ledger: parser cap retains events by recency, not array position", (
     model: null,
     provenance: "forge-reaction" as const,
     signal: "helpful" as const,
-    count: 50_000,
+    // #1127: at-cap count — representable (the bound includes the ceiling)
+    // yet outside the bulk fixtures' 0..MAX_LEDGER_EVENTS-1 range, so the
+    // late-arriving event stays distinguishable from the bulk it must
+    // outrank in the recency cap.
+    count: MAX_FEEDBACK_COUNT,
   };
   // Newest status-bearing event sits at the FRONT of the persisted array,
   // bulk is older, one late-arriving older event is appended last.
@@ -775,7 +831,7 @@ test("#1027 ledger: parser cap retains events by recency, not array position", (
   assert.equal(parsed.events.some((event) => event.count === 0), false, "array-order tie-break must evict earliest");
   assert.equal(parsed.events.some((event) => event.count === 1), false);
   assert.ok(parsed.events.some((event) => event.count === 2));
-  assert.ok(parsed.events.some((event) => event.count === 50_000));
+  assert.ok(parsed.events.some((event) => event.count === MAX_FEEDBACK_COUNT));
   // The recomputed aggregate reads the identity's LATEST state: the
   // resolved event is retained, so the finding is not re-declared open.
   assert.equal(parsed.aggregate.resolved, 1);
