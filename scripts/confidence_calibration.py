@@ -897,22 +897,27 @@ def cmd_score(args: argparse.Namespace) -> int:
     # writes results-so-far with budget_exhausted=true (a normal, recorded
     # outcome, exit 0) while unattempted rows are recorded explicitly as
     # unscored/budget_exhausted — never silently dropped.
-    # Cumulative-call accounting: wire attempts already recorded in a merged
-    # results file were real provider calls, so they count against the plan's
-    # ceilings on every subsequent --merge invocation. Re-running a condition
-    # also carries its previously spent calls — no call is free.
+    # Cumulative-call accounting: wire attempts already recorded against
+    # this output file were real provider calls, so they count against the
+    # plan's ceilings on every subsequent --merge invocation. The seed is
+    # the larger of the file's row-level wire-attempt sum and the persisted
+    # lifetime counter: a merge replaces re-selected conditions' rows
+    # wholesale, so the row sum alone would let repeated same-condition
+    # re-runs exceed the lifetime ceiling — no call is ever free.
     out_path = Path(args.out).resolve()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     existing_results: dict[str, Any] | None = None
     carried_calls = 0
     if args.merge and out_path.is_file():
         candidate_results = _read_json_soft(out_path)
         if isinstance(candidate_results, dict) and isinstance(candidate_results.get("rows"), list):
             existing_results = candidate_results
-            carried_calls = sum(
-                int(row.get("wire_attempts") or 0)
-                for row in existing_results["rows"]
-                if isinstance(row, dict)
+            carried_calls = max(
+                sum(
+                    int(row.get("wire_attempts") or 0)
+                    for row in existing_results["rows"]
+                    if isinstance(row, dict)
+                ),
+                int(existing_results.get("lifetime_wire_calls") or 0),
             )
 
     planned_calls = sum(
@@ -926,8 +931,8 @@ def cmd_score(args: argparse.Namespace) -> int:
     calls_made = carried_calls
     if carried_calls + planned_calls > ceilings["max_scorer_calls"]:
         print(
-            f"score aborted: {carried_calls} wire attempts already recorded in the merged "
-            f"results file plus {planned_calls} planned live calls exceed "
+            f"score aborted: {carried_calls} already-spent wire attempts plus {planned_calls} "
+            f"planned live calls exceed "
             f"ceilings.max_scorer_calls={ceilings['max_scorer_calls']}; "
             "no call was made and no budget was spent "
             "(reduce --repeat or select fewer conditions with --condition)",
@@ -936,7 +941,7 @@ def cmd_score(args: argparse.Namespace) -> int:
         return EXIT_BUDGET_ABORT
     if (carried_calls + planned_calls) * SCORER_MAX_TOKENS > ceilings["max_scorer_output_tokens"]:
         print(
-            f"score aborted: {carried_calls} wire attempts already recorded plus {planned_calls} "
+            f"score aborted: {carried_calls} already-spent wire attempts plus {planned_calls} "
             f"planned live calls at {SCORER_MAX_TOKENS} "
             f"completion tokens exceed ceilings.max_scorer_output_tokens="
             f"{ceilings['max_scorer_output_tokens']}; no call was made",
@@ -1031,12 +1036,15 @@ def cmd_score(args: argparse.Namespace) -> int:
                 }
                 # Budget enforcement BEFORE each scored call: an exhausted
                 # budget is a normal, recorded outcome — write results-so-far
-                # and stop (exit 0), never an error, never a retry.
-                exhaustion = budget_exhaustion()
-                if exhaustion is not None:
-                    budget_exhausted = True
-                    abort_note = exhaustion
-                    break
+                # and stop (exit 0), never an error, never a retry. Only live
+                # backends spend budget, so zero-cost mock rows are never
+                # gated by carried spend.
+                if all_conditions[cid]["backend"] == "live":
+                    exhaustion = budget_exhaustion()
+                    if exhaustion is not None:
+                        budget_exhausted = True
+                        abort_note = exhaustion
+                        break
                 try:
                     diff_text = (run_dir / "pr.diff.truncated").read_text(encoding="utf-8", errors="replace")
                 except OSError:
@@ -1229,6 +1237,7 @@ def cmd_score(args: argparse.Namespace) -> int:
         "budget_exhausted": budget_exhausted,
         "budget_note": abort_note,
         "carried_wire_calls": carried_calls,
+        "lifetime_wire_calls": calls_made,
         "wall_time_sec_by_condition": {cid: round(sec, 3) for cid, sec in wall_by_condition.items()},
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -1263,6 +1272,7 @@ def cmd_score(args: argparse.Namespace) -> int:
                         wall_by_condition.get(row["condition"], 0.0) + row["latency_ms"] / 1000.0
                     )
             results["wall_time_sec_by_condition"] = {cid: round(sec, 3) for cid, sec in wall_by_condition.items()}
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
     print(
         f"score complete: {len(rows)} rows -> {_repo_rel(str(out_path))}"

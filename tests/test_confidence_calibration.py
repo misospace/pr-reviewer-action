@@ -1312,7 +1312,77 @@ def test_score_merge_within_ceiling_records_carried_calls(
         assert run_cmd("score", [*argv, "--merge"]) == 0
         merged = json.loads(results_path.read_text(encoding="utf-8"))
         assert merged["carried_wire_calls"] == 5
+        assert merged["lifetime_wire_calls"] == 10
         assert len([row for row in merged["rows"] if row["scorer"]["status"] == "scored"]) == 5
         assert len(pilot.requests) == 10
     finally:
         server.shutdown()
+
+
+def test_score_merge_lifetime_ceiling_refuses_third_re_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Lifetime accounting: a merge replaces its re-selected condition's rows
+    # wholesale, so the row-level wire-attempt sum alone would forget earlier
+    # spend. The persisted lifetime counter makes a repeated same-condition
+    # re-run refuse (exit 3, zero new requests) instead of exceeding the
+    # plan's cumulative ceiling.
+    pilot = LoopbackProvider(lambda _handler: (200, OPENAI_OK))
+    server, base_url = serve(pilot)
+    for name, value in live_env(base_url).items():
+        monkeypatch.setenv(name, value)
+    try:
+        results_path = tmp_path / "results.json"
+        argv = [
+            "--plan", str(live_plan(tmp_path, max_calls=10)),
+            "--runs-dir", str(fixture_runs_dir_copy(tmp_path)),
+            "--out", str(results_path),
+            "--condition", "same-model",
+            "--repeat", "1",
+            "--allow-missing-corpus-entry",
+        ]
+        assert run_cmd("score", argv) == 0
+        assert run_cmd("score", [*argv, "--merge"]) == 0
+        assert len(pilot.requests) == 10
+        merged = json.loads(results_path.read_text(encoding="utf-8"))
+        assert merged["lifetime_wire_calls"] == 10
+        before = results_path.read_text(encoding="utf-8")
+        # 10 spent + 5 planned > max_scorer_calls=10: refuse before any call.
+        assert run_cmd("score", [*argv, "--merge"]) == 3
+        assert len(pilot.requests) == 10
+        assert results_path.read_text(encoding="utf-8") == before
+    finally:
+        server.shutdown()
+
+
+def test_score_merge_mock_rows_not_gated_by_carried_spend(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    # Zero-cost mock rows must never be marked budget_exhausted by carried
+    # live spend: the progressive budget gate applies to live backends only.
+    ceiling = load_plan()["ceilings"]["max_scorer_calls"]
+    runs_dir = fixture_runs_dir_copy(tmp_path)
+    results_path = tmp_path / "results.json"
+    assert run_cmd("score", [
+        "--plan", str(SAMPLE_PLAN), "--runs-dir", str(runs_dir),
+        "--out", str(results_path), "--condition", "mock",
+        "--allow-missing-corpus-entry",
+    ]) == 0
+    seeded = json.loads(results_path.read_text(encoding="utf-8"))
+    # Simulate a file whose lifetime live spend has exactly reached the
+    # plan's call ceiling (equality is where the closure previously fired).
+    seeded["lifetime_wire_calls"] = ceiling
+    results_path.write_text(json.dumps(seeded), encoding="utf-8")
+    assert run_cmd("score", [
+        "--plan", str(SAMPLE_PLAN), "--runs-dir", str(runs_dir),
+        "--out", str(results_path), "--condition", "mock",
+        "--allow-missing-corpus-entry", "--merge",
+    ]) == 0
+    merged = json.loads(results_path.read_text(encoding="utf-8"))
+    assert merged["budget_exhausted"] is False
+    mock_rows = [row for row in merged["rows"]
+                 if row["condition"] == "mock" and row["evidence_state"] == "primary_ok"]
+    assert mock_rows
+    causes = {row["scorer"].get("cause") for row in mock_rows if row["scorer"]["status"] == "unscored"}
+    # The fixture's canned answers include deliberate failure causes, but a
+    # carried-spend budget exhaustion must never appear on zero-cost rows.
+    assert "budget_exhausted" not in causes
+    assert any(row["scorer"]["status"] == "scored" for row in mock_rows)
