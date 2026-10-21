@@ -199,6 +199,11 @@ test("#1027 event normalization: fail-closed per kind", () => {
   ]) {
     assert.equal(normalizeOutcomeEvent({ ...base, at: hostile }), null, JSON.stringify(hostile));
   }
+  // Event rejection also wins over the ordinary unprovable-instant null for
+  // an UNPARSEABLE string that additionally carries a control character: the
+  // control character is the signal, so the crafted event fails closed even
+  // though dropping it would only have yielded `at: null`.
+  assert.equal(normalizeOutcomeEvent({ ...base, at: "not-a-date\u0000" }), null);
   // Whitespace padding (real JS whitespace, stripped by trim) stays canonical.
   assert.equal(normalizeOutcomeEvent({ ...base, at: ` \t${AT}\n` })!.at, AT);
   // Reason text is redacted and bounded.
@@ -589,10 +594,10 @@ test("#1027 ledger dedupe: separator-bearing fields cannot collapse two distinct
     finding_id: fid, kind: "dismissed", at: `${T}\u0000\u0000forged-reason`,
     reason: "x", provenance: "forge-thread",
   }), null);
-  // The field that still persists NUL is `reason` (bounded free text; trim
-  // does not strip it). Two events whose reasons differ ONLY in where the
-  // NULs sit — the shape a NUL-stripping key sanitizer would collapse — must
-  // stay distinct through the merge.
+  // The field that still persists NUL into `eventKey` is `reason` (bounded
+  // free text; trim does not strip it). Two events whose reasons differ ONLY
+  // in where the NULs sit — the shape a NUL-stripping key sanitizer would
+  // collapse — must stay distinct through the merge.
   const shifted = normalizeOutcomeEvent({
     finding_id: fid, kind: "dismissed", at: T,
     reason: "forged-reason\u0000\u0000x", provenance: "forge-thread",
