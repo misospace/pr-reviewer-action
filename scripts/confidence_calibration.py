@@ -18,9 +18,12 @@ Pipeline (each stage is a separate CLI subcommand on this module):
    network.
 2. ``review`` -- run the real review pipeline once per sample entry through
    ``scripts/eval_harness.py``'s ``run_review_for_pr`` (the corpus replay
-   path). Budget-capped by ``ceilings.max_primary_reviews`` BEFORE any work;
-   requires provider credentials in the environment and fails fast without
-   them. Per-entry failures are recorded in ``runs.json`` and never retried.
+    path). Budget-capped by ``ceilings.max_primary_reviews`` BEFORE any work,
+    counting prior spend recorded in the work dir's ``runs.json`` (lifetime
+    counter ``lifetime_primary_reviews``; a re-run that would exceed the
+    ceiling refuses with exit 3 and zero new harness calls). Requires
+    provider credentials in the environment and fails fast without them.
+    Per-entry failures are recorded in ``runs.json`` and never retried.
 3. ``score``  -- for each entry and selected condition, build the scorer
    prompt from the run's own artifacts via the bridge, obtain a raw answer
    (mock answers file, or EXACTLY ONE live HTTP call per row), and turn it
@@ -575,6 +578,43 @@ def cmd_review(args: argparse.Namespace) -> int:
         "github_token": os.environ["GITHUB_TOKEN"],
     }
 
+    # Lifetime primary-spend carry (same rule as the scorer phase's
+    # lifetime_wire_calls): every record in an existing runs.json was one
+    # harness attempt against a real provider, so a re-run pointed at a work
+    # dir that already holds a prior sweep must refuse BEFORE any provider
+    # call once carried spend plus this sweep would exceed
+    # max_primary_reviews. The carried count is the persisted monotone
+    # lifetime counter when present (a rewrite replaces entries; the counter
+    # never shrinks), falling back to the entry count for pre-counter files.
+    # An unreadable existing runs.json fails closed, never treated as zero.
+    work_dir = Path(args.work_dir).resolve()
+    runs_path = work_dir / "runs.json"
+    carried_primary_reviews = 0
+    if runs_path.is_file():
+        prior = _read_json_soft(runs_path)
+        if not isinstance(prior, dict) or not isinstance(prior.get("entries"), list):
+            print(
+                f"review aborted: {runs_path} exists but is unreadable or malformed; "
+                "prior primary spend cannot be accounted, so no review was "
+                "started and no budget was spent",
+                file=sys.stderr,
+            )
+            return EXIT_BUDGET_ABORT
+        carried_primary_reviews = max(
+            len(prior["entries"]),
+            int(prior.get("lifetime_primary_reviews") or 0),
+        )
+    if carried_primary_reviews + len(samples) > ceilings["max_primary_reviews"]:
+        print(
+            f"review aborted: {carried_primary_reviews} already-spent primary reviews "
+            f"plus {len(samples)} planned exceed "
+            f"ceilings.max_primary_reviews={ceilings['max_primary_reviews']}; "
+            "no review was started and no budget was spent "
+            "(a work dir's lifetime ceiling is shared across invocations)",
+            file=sys.stderr,
+        )
+        return EXIT_BUDGET_ABORT
+
     # Lazy, path-isolated import: eval_harness is 3.5k lines of replay
     # machinery the plan/report stages never need.
     scripts_dir = Path(__file__).resolve().parent
@@ -582,18 +622,22 @@ def cmd_review(args: argparse.Namespace) -> int:
         sys.path.insert(0, str(scripts_dir))
     import eval_harness  # noqa: PLC0415  (lazy by design; see comment above)
 
-    work_dir = Path(args.work_dir).resolve()
+    # Only create the work dir once every pre-flight refusal has passed.
     work_dir.mkdir(parents=True, exist_ok=True)
     records: list[dict[str, Any]] = []
-    runs_path = work_dir / "runs.json"
     review_started = time.monotonic()
     wall_budget = float(ceilings["wall_time_budget_sec"]["review"])
     budget_exhausted = False
 
     def persist() -> None:
+        attempted = sum(
+            1 for record in records
+            if not str(record.get("error") or "").startswith("not_run")
+        )
         payload = {
             "mode": args.mode,
             "work_dir": str(work_dir),
+            "lifetime_primary_reviews": carried_primary_reviews + attempted,
             "entries": records,
             **({"budget_exhausted": True, "budget_note": budget_note}
                if budget_exhausted else {}),

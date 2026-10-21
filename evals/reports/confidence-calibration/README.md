@@ -71,8 +71,8 @@ fixtures (`evals/confidence-calibration/fixtures/`, clearly marked synthetic
   before any call with exit 3; progressive exhaustion stops with
   `budget_exhausted: true` and explicit unscored rows for everything
   unattempted.
-- Full suite: 62 pytest tests in `tests/test_confidence_calibration.py`,
-  zero external inference (mock backend + loopback servers only);
+- Full suite: `tests/test_confidence_calibration.py` (pytest), zero external
+  inference (mock backend + loopback servers only);
   `scripts/confidence_calibration.py` coverage 85%.
 
 The generated table for that run (all numbers are about the synthetic
@@ -150,6 +150,11 @@ export CONFIDENCE_PILOT_HETERO_BASE_URL=... CONFIDENCE_PILOT_HETERO_MODEL=... \
        CONFIDENCE_PILOT_HETERO_API_KEY=... CONFIDENCE_PILOT_HETERO_API_FORMAT=...
 python scripts/confidence_calibration.py plan --plan evals/confidence-calibration/sample-plan.json
 python scripts/confidence_calibration.py review --plan evals/confidence-calibration/sample-plan.json --work-dir /tmp/pilot-runs
+# `max_primary_reviews` is a lifetime bound for the work dir: a second `review`
+# invocation over a work dir that already holds a recorded runs.json refuses with
+# exit 3 and zero new harness calls once carried spend + a new sweep would exceed
+# the ceiling (same no-repeated-sweep rule the scorer enforces via
+# `lifetime_wire_calls`). Start a fresh pilot in a fresh --work-dir.
 # one live condition per sweep (the 48-call ceiling fits one condition with
 # repeats; see the note above about running both)
 python scripts/confidence_calibration.py score --plan evals/confidence-calibration/sample-plan.json \

@@ -229,6 +229,36 @@ def test_bridge_binary_rejects_unparseable_input_without_echoing_it(tmp_path: Pa
     bad.unlink(missing_ok=True)
 
 
+def test_bridge_launcher_cache_key_covers_imported_dependencies(tmp_path: Path) -> None:
+    """Regression pin: the bundle cache key must cover the full transitive
+    import graph, so a change to an IMPORTED module (not just the launcher's
+    own source) forces a rebuild. Uses a self-contained fake tree (launcher
+    copy + fake bridge + fake dependency) so no production file is touched
+    and no real provider code runs."""
+    bin_dir = tmp_path / "launcher"
+    bin_dir.mkdir()
+    shutil.copy(BRIDGE, bin_dir / "confidence_bridge.mjs")
+    (bin_dir / "node_modules").symlink_to(REPO_ROOT / "node_modules")
+    (bin_dir / "dep.ts").write_text('export const VALUE = "first";\n', encoding="utf-8")
+    (bin_dir / "confidence_bridge.ts").write_text(
+        'import { VALUE } from "./dep.js";\nconsole.log(JSON.stringify({ value: VALUE }));\n',
+        encoding="utf-8",
+    )
+
+    def run() -> str:
+        result = subprocess.run(
+            ["node", str(bin_dir / "confidence_bridge.mjs"), "noop", "ignored.json"],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)["value"]
+
+    assert run() == "first"
+    assert run() == "first"  # cached bundle reused, same behavior
+    (bin_dir / "dep.ts").write_text('export const VALUE = "second";\n', encoding="utf-8")
+    assert run() == "second"  # dependency change must NOT reuse the old bundle
+
+
 def apply_score(answer: str, findings: list | None = None, coverage: dict | None = None, model: str = "pilot-model", tmp_path: Path | None = None) -> dict:
     return apply_score_via_bridge(answer, findings or [], coverage or {}, model, tmp_path or Path("/tmp"))
 
@@ -895,6 +925,101 @@ def test_review_bad_plan_fails_before_any_work(tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as excinfo:
         run_cmd("review", ["--plan", str(write_plan(tmp_path, plan)), "--work-dir", str(tmp_path / "w")])
     assert excinfo.value.code == 2
+
+
+def _install_fake_harness(monkeypatch: pytest.MonkeyPatch) -> FakeEvalHarness:
+    for name, value in REVIEW_ENV.items():
+        monkeypatch.setenv(name, value)
+    harness = FakeEvalHarness()
+    fake_module = types.ModuleType("eval_harness")
+    fake_module.run_review_for_pr = harness.run_review_for_pr
+    monkeypatch.setitem(sys.modules, "eval_harness", fake_module)
+    return harness
+
+
+def test_review_rerun_same_work_dir_refuses_at_lifetime_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    # Regression pin (#1182 review): the max_primary_reviews ceiling is a
+    # LIFETIME bound for the work dir. A second invocation over the same
+    # work dir must refuse with zero new harness/model calls.
+    harness = _install_fake_harness(monkeypatch)
+    work_dir = tmp_path / "w"
+    plan = review_plan(tmp_path)
+    assert run_cmd("review", ["--plan", str(plan), "--work-dir", str(work_dir)]) == 0
+    assert len(harness.calls) == 16
+    payload = json.loads((work_dir / "runs.json").read_text(encoding="utf-8"))
+    assert payload["lifetime_primary_reviews"] == 16
+    before = (work_dir / "runs.json").read_text(encoding="utf-8")
+
+    capsys.readouterr()
+    rc = run_cmd("review", ["--plan", str(plan), "--work-dir", str(work_dir)])
+    assert rc == 3
+    assert len(harness.calls) == 16  # zero new harness/model calls
+    captured = capsys.readouterr()
+    assert "16 already-spent primary reviews plus 16 planned" in captured.err
+    assert "no review was started and no budget was spent" in captured.err
+    assert (work_dir / "runs.json").read_text(encoding="utf-8") == before
+
+
+def test_review_carries_prior_spend_from_runs_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A prior sweep's recorded spend counts against every later invocation:
+    # refuse when carried + planned exceeds the ceiling, and keep the
+    # persisted counter monotone when a re-run fits.
+    harness = _install_fake_harness(monkeypatch)
+    work_dir = tmp_path / "w"
+    work_dir.mkdir()
+    prior = {
+        "mode": "tools_off",
+        "work_dir": str(work_dir),
+        "lifetime_primary_reviews": 12,
+        "entries": [
+            {"pr_id": f"prior-{i}", "kind": "clean", "run_dir": None, "ok": True, "error": None}
+            for i in range(3)
+        ],
+    }
+    (work_dir / "runs.json").write_text(json.dumps(prior), encoding="utf-8")
+    # carried 12 + planned 16 > 20: refuse before any harness call.
+    assert run_cmd("review", [
+        "--plan", str(review_plan(tmp_path, max_primary_reviews=20)), "--work-dir", str(work_dir),
+    ]) == 3
+    assert len(harness.calls) == 0
+    # carried 12 + planned 16 <= 28: allowed, and the counter carries forward.
+    assert run_cmd("review", [
+        "--plan", str(review_plan(tmp_path, max_primary_reviews=28)), "--work-dir", str(work_dir),
+    ]) == 0
+    assert len(harness.calls) == 16
+    payload = json.loads((work_dir / "runs.json").read_text(encoding="utf-8"))
+    assert payload["lifetime_primary_reviews"] == 28
+
+
+def test_review_prior_runs_json_accounting_edge_cases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Pre-counter runs.json falls back to the entry count; a malformed
+    # existing runs.json fails closed and is never overwritten.
+    harness = _install_fake_harness(monkeypatch)
+    work_dir = tmp_path / "w"
+    work_dir.mkdir()
+    legacy = {
+        "mode": "tools_off",
+        "work_dir": str(work_dir),
+        "entries": [
+            {"pr_id": f"legacy-{i}", "kind": "clean", "run_dir": None, "ok": True, "error": None}
+            for i in range(16)
+        ],
+    }
+    (work_dir / "runs.json").write_text(json.dumps(legacy), encoding="utf-8")
+    assert run_cmd("review", ["--plan", str(review_plan(tmp_path)), "--work-dir", str(work_dir)]) == 3
+    assert len(harness.calls) == 0
+
+    broken = "{not json at all"
+    (work_dir / "runs.json").write_text(broken, encoding="utf-8")
+    assert run_cmd("review", ["--plan", str(review_plan(tmp_path)), "--work-dir", str(work_dir)]) == 3
+    assert len(harness.calls) == 0
+    assert (work_dir / "runs.json").read_text(encoding="utf-8") == broken
 
 
 # ── Subprocess-level CLI tests (kept minimal: wiring + exit codes) ───────

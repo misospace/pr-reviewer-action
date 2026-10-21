@@ -7,8 +7,10 @@
  *
  * Bundles `scripts/confidence_bridge.ts` with esbuild's JS API into a cache
  * file under os.tmpdir()/confidence-bridge-cache/ whose name embeds a sha256
- * of the bridge source bytes plus the esbuild version, so a stale bundle can
- * never be loaded after the source changes. Then loads the CJS bundle and
+ * over the FULL transitive local import graph (every resolved module's bytes,
+ * plus unresolved relative specifiers as text) and the esbuild version, so a
+ * stale bundle can never be loaded after the bridge source OR any imported
+ * production module changes. Then loads the CJS bundle and
  * invokes its CLI with the caller's argv. Quiet by design: no output of its
  * own beyond what the bridge itself prints (result JSON on stdout, a
  * redacted failure line on stderr).
@@ -16,7 +18,7 @@
  * Deliberately kept small: it is pilot tooling, not part of the action.
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -25,9 +27,53 @@ import esbuild from "esbuild";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const bridgeSource = path.join(here, "confidence_bridge.ts");
-const sourceBytes = readFileSync(bridgeSource);
+
+// Resolve a relative ESM specifier the way esbuild does for this repo's
+// NodeNext-style sources ("./x.js" specs pointing at ".ts" files).
+function resolveLocalModule(fromFile, specifier) {
+  const base = path.resolve(path.dirname(fromFile), specifier);
+  const candidates = /\.(js|mjs|cjs)$/.test(specifier)
+    ? [base.replace(/\.(js|cjs|mjs)$/, ".ts"), base.replace(/\.(js|cjs|mjs)$/, ".tsx"), base]
+    : [`${base}.ts`, `${base}.tsx`, base, path.join(base, "index.ts")];
+  for (const candidate of candidates) {
+    try {
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      /* not a readable file; try the next candidate */
+    }
+  }
+  return null;
+}
+
+// Collect the transitive closure of local imports and hash every file's
+// bytes, in sorted order. Unresolvable relative specifiers (esbuild would
+// fail on them too) still enter the digest as text so a specifier that
+// later gains a target cannot silently reuse an old bundle.
+function bundleDigestOf(entry) {
+  const seen = new Set();
+  const pending = [entry];
+  const unresolved = [];
+  const importRe = /(?:^|[\s;])(?:import|export)\b[^;]*?\bfrom\s*["'](\.{1,2}\/[^"'\s]+)["']|(?:^|[\s;])import\s*["'](\.{1,2}\/[^"'\s]+)["']/g;
+  while (pending.length > 0) {
+    const file = pending.pop();
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const text = readFileSync(file, "utf8");
+    for (const match of text.matchAll(importRe)) {
+      const specifier = match[1] ?? match[2];
+      const target = resolveLocalModule(file, specifier);
+      if (target === null) unresolved.push(`${file} -> ${specifier}`);
+      else if (!seen.has(target)) pending.push(target);
+    }
+  }
+  const hash = createHash("sha256");
+  for (const file of [...seen].sort()) hash.update(file).update(readFileSync(file));
+  for (const miss of unresolved.sort()) hash.update(`unresolved:${miss}`);
+  return hash;
+}
+
 const esbuildVersion = typeof esbuild.version === "string" ? esbuild.version : "unknown";
-const digest = createHash("sha256").update(sourceBytes).update(esbuildVersion).digest("hex").slice(0, 16);
+const digest = bundleDigestOf(bridgeSource).update(esbuildVersion).digest("hex").slice(0, 16);
 const cacheDir = path.join(os.tmpdir(), "confidence-bridge-cache");
 const bundlePath = path.join(cacheDir, `confidence-bridge-${digest}.cjs`);
 
