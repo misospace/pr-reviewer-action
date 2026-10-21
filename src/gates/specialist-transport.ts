@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHmac } from "node:crypto";
 import { maskKnownSecrets, redactText } from "../context/redact.js";
 import type { ApiFormat, NormalizedModelResponse, TransportWirePayload } from "../model/types.js";
 import type { SpecialistRequestFn, SpecialistTransportOutcome } from "../specialists/runner.js";
@@ -103,14 +103,19 @@ function failureMessage(
  * `unauthenticated` marker so a keyless lane still keys consistently.
  */
 function credentialIdentity(apiKey: string): string {
-  // This SHA-256 is NOT a password verifier: it derives an in-memory lane
+  // This HMAC-SHA256 is NOT a password verifier: it derives an in-memory lane
   // cache key (endpoint+model+credential) that never leaves this module and
   // is never compared against a stored secret, so the stored-password
-  // computational-effort property the query protects does not apply here —
-  // a slow KDF would only add per-request latency without protecting
-  // anything this digest cannot already leak (lane identity).
-  // codeql[js/insufficient-password-hash] -- lane cache key, not a stored/verified password hash
-  return apiKey === "" ? "unauthenticated" : createHash("sha256").update(apiKey).digest("hex").slice(0, 16);
+  // computational-effort property the password-hash queries protect does not
+  // apply here — a slow KDF would only add per-request latency without
+  // protecting anything this digest cannot already leak (lane identity). The
+  // fixed domain-separation key makes it a keyed digest of the credential
+  // rather than a plain hash, so offline reversal against low-entropy keys
+  // gets no foothold either.
+  const LANE_IDENTITY_DOMAIN = "pr-reviewer-action/lane-credential-identity/v1";
+  return apiKey === ""
+    ? "unauthenticated"
+    : createHmac("sha256", LANE_IDENTITY_DOMAIN).update(apiKey).digest("hex").slice(0, 16);
 }
 
 export function specialistRequestFn(config: SpecialistTransportConfig): SpecialistRequestFn {
