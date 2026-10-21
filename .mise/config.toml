@@ -13,7 +13,7 @@
 min_version = "2026.10.13"
 
 [tools]
-node = "24.22.0"
+node = "24.22.1"
 
 [tasks.bootstrap]
 description = "Idempotent setup: verify the locked toolchain, then install dependencies (runs no tests, formatters, or generators)"
