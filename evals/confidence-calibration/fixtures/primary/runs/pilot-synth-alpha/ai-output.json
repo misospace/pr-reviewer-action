@@ -1,0 +1,6 @@
+{
+  "verdict": "approve",
+  "review_markdown": "## Review\n\nSYNTHETIC fixture review. The new config helper is small and additive; defaults are sane and the interface is exported intentionally. No concerns.",
+  "findings": [],
+  "required_checks": "complete"
+}

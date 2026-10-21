@@ -1,0 +1,13 @@
+diff --git a/src/widget/beta.ts b/src/widget/beta.ts
+index 4444444..5555555 100644
+--- a/src/widget/beta.ts
++++ b/src/widget/beta.ts
+@@ -1,6 +1,10 @@
+ // SYNTHETIC pilot fixture diff — not a real change.
+ export function drainQueue(queue: Queue): void {
+-  while (queue.size() > 0) {
++  while (true) {
+     queue.pop();
++    // SYNTHETIC: broker loss is reported as size() == 0 transiently.
+   }
+ }

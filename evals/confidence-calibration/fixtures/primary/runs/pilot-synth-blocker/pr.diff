@@ -1,0 +1,16 @@
+diff --git a/src/auth/token_cache.ts b/src/auth/token_cache.ts
+index 2222222..3333333 100644
+--- a/src/auth/token_cache.ts
++++ b/src/auth/token_cache.ts
+@@ -40,7 +40,13 @@
+ // SYNTHETIC pilot fixture diff — not a real change.
+ export function persistCache(entry: CacheEntry): void {
+-  const path = os.tmpdir() + "/token-cache.json";
++  const path = os.tmpdir() + "/token-cache-" + process.pid + ".json";
++  fs.writeFileSync(path, JSON.stringify(entry), { mode: 0o666 });
++  entry.lastPersisted = Date.now();
++}
++
++export function evictStale(maxAgeMs: number): void {
++  // SYNTHETIC: evicts nothing yet.
+ }

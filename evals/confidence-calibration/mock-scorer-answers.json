@@ -1,0 +1,15 @@
+{
+  "_readme": "Canned raw scorer answers for the `mock` condition of the confidence-scorer calibration pilot (#1074). Keys are `<condition_id>::<pr_id>::<repeat_index>`. The pr_ids are SYNTHETIC pilot fixture ids (see evals/confidence-calibration/fixtures/) — they deliberately do NOT match any corpus id, so a mock row can never masquerade as a real corpus entry. Values are realistic raw model output (fenced ```json blocks or prose+JSON), because the production parser tolerates exactly those shapes. The {\"__cause__\": ...} entries simulate a transport-level failure with no model text at all.",
+  "mock::pilot-synth-alpha::0": "```json\n{\"score\": 5, \"risk\": \"low\", \"reason\": \"The review cites concrete file/line evidence for every claim and the summary matches the findings; I would sign it off.\", \"concerns\": []}\n```",
+  "mock::pilot-synth-alpha::1": "I looked at the diff, the findings list, and the coverage account. The review is well-evidenced and internally consistent.\n\n```json\n{\"score\": 5, \"risk\": \"low\", \"reason\": \"Consistent, evidence-backed review of a small additive change.\", \"concerns\": []}\n```",
+  "mock::pilot-synth-blocker::0": "```json\n{\"score\": 5, \"risk\": \"critical\", \"reason\": \"Findings look thorough and the summary is honest about residual gaps.\", \"concerns\": []}\n```",
+  "mock::pilot-synth-blocker::1": "```json\n{\"score\": 5, \"risk\": \"critical\", \"reason\": \"The blocker finding is specific and the review owns it explicitly.\", \"concerns\": []}\n```",
+  "mock::pilot-synth-partial-novel::0": "```json\n{\"score\": 5, \"risk\": \"high\", \"reason\": \"The review is careful, but I want to flag one spot the findings list does not mention.\", \"concerns\": [{\"file\": \"src/widget/qux.ts\", \"line\": 41, \"evidence\": \"the retry counter is incremented before the await, so a throw skips it\"}]}\n```",
+  "mock::pilot-synth-partial-novel::1": "```json\n{\"score\": 4, \"risk\": \"high\", \"reason\": \"Good findings, though the coverage account admits an unreviewed file.\", \"concerns\": []}\n```",
+  "mock::pilot-synth-flip::0": "```json\n{\"score\": 4, \"risk\": \"medium\", \"reason\": \"Solid review; one minor claim lacks a cited line.\", \"concerns\": []}\n```",
+  "mock::pilot-synth-flip::1": "```json\n{\"score\": 3, \"risk\": \"medium\", \"reason\": \"The summary overstates what the diff-level skim could establish.\", \"concerns\": []}\n```",
+  "mock::pilot-synth-unscored::0": {
+    "__cause__": "http_429"
+  },
+  "mock::pilot-synth-unscored::1": "Here is my assessment of the review under audit:\n\n```json\n{\"score\": 999, \"risk\": \"low\", \"reason\": \"Very confident.\", \"concerns\": []}\n```"
+}

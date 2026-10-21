@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "tool_loop_ran": true,
+  "enforcement_harness": "harness",
+  "route": "primary",
+  "partial_coverage": null,
+  "required_checks": "complete"
+}

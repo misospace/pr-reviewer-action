@@ -698,3 +698,43 @@ python scripts/eval_harness.py --corpus evals/corpus-human-findings.json \
   directions between arms. That's single-run noise. Prompt and ordering tweaks
   need repeated runs to measure. Deterministic context changes can be checked
   with `--context-only` instead.
+
+## Confidence-scorer calibration pilot (#1074)
+
+Bounded, offline-first pilot measuring how the production confidence scorer
+(`src/confidence/`) ranks real review outcomes. It never reimplements the
+scorer: a Node bridge (`scripts/confidence_bridge.ts` + `.mjs`) bundles the
+production prompt builder, tolerant parser, and deterministic ceilings, and
+`scripts/confidence_calibration.py` (`plan`/`review`/`score`/`report`)
+drives it — mock answers offline, or exactly one live HTTP call per row
+(no retries) against two conditions: `same-model` (anchoring/variance
+control, NOT independent evidence) and `heterogeneous` (operator must
+configure a distinct model family; unverifiable by the driver). The plan is
+predeclared and blinded (`evals/confidence-calibration/sample-plan.json`,
+rubric `confidence-rubric-v1`), with hard ceilings: 16 primary reviews,
+48 scorer calls, 60k completion tokens, 6h review-phase / 2h score-phase
+wall time, no temperature field on the wire (matching the production scorer
+request), retries none. The owning report lives in
+`evals/reports/confidence-calibration/README.md`; the hard invariant —
+unscored/disabled/missing-evidence rows never enter green or clean-pass
+denominators — is enforced in code and test.
+
+Offline validation (mock backend, synthetic fixtures, no network; copy the
+fixtures to scratch first — `score` writes `audit/` beside the run dirs):
+
+```bash
+cp -r evals/confidence-calibration/fixtures/primary /tmp/pilot-primary
+python scripts/confidence_calibration.py plan --plan evals/confidence-calibration/sample-plan.json
+python scripts/confidence_calibration.py score --plan evals/confidence-calibration/sample-plan.json \
+  --runs-dir /tmp/pilot-primary --out /tmp/pilot-results.json \
+  --condition mock --allow-missing-corpus-entry
+python scripts/confidence_calibration.py report --results /tmp/pilot-results.json
+```
+
+Live run (operator sets `CONFIDENCE_PILOT_SAME_*` /
+`CONFIDENCE_PILOT_HETERO_*` env vars first; values never printed):
+`review --plan ... --work-dir <dir>` then `score ... --condition same-model`
+then `score ... --condition heterogeneous --merge` (one live condition per
+sweep fits the 48-call ceiling with repeats) then `report`. Quality metrics
+render per condition, never pooled. Full runbook and the current dated
+result table: `evals/reports/confidence-calibration/README.md`.
