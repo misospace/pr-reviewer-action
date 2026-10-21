@@ -166,7 +166,8 @@ so an unproven value can never stand in for the missing marker. "Newest" is a
 claim about absence — no newer publication exists — so the read must be a
 PROVEN enumeration: an issue-comment read that is absent, thrown, truncated
 mid-pagination, or malformed (`listIssueCommentsResult`, whose `complete` flag
-the GitHub adapter sets only on a short page) yields no READ-DERIVED prior
+the GitHub adapter sets only when Link-header pagination proves its end (#1121),
+with the page cap failing closed) yields no READ-DERIVED prior
 head, never a head selected from a partial comment list; the operator-supplied
 `priorHeadSha` fallback (`PRIOR_HEAD_SHA`) stays available under its own hex
 proof rule.
