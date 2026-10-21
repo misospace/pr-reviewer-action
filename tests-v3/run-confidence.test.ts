@@ -22,7 +22,10 @@ import {
 
 const SCORER_MODEL = "confidence-m";
 
-function mockPlatform(prBody = ""): PlatformReadAdapter {
+/** `baseSha: null` omits the base SHA from the PR payload entirely — the
+ * #1155 unresolved-proof-context gate drives that shape. A real GitHub PR
+ * payload always carries `base.sha`, so the default mirrors production. */
+function mockPlatform(prBody = "", baseSha: string | null = "b".repeat(40)): PlatformReadAdapter {
   return {
     platform: "github",
     getPr: () => {
@@ -31,7 +34,7 @@ function mockPlatform(prBody = ""): PlatformReadAdapter {
         title: "Update README",
         body: prBody,
         head: { sha: "a".repeat(40), ref: "feature" },
-        base: { ref: "main" },
+        base: { ...(baseSha === null ? {} : { sha: baseSha }), ref: "main" },
         user: { login: "someone" },
         changed_files: 1,
         additions: 4,
@@ -159,7 +162,7 @@ async function runConfidenceRun(
   extraInputs: Record<string, string>,
   prBody = "",
   captureLogs = false,
-  extra: { env?: Record<string, string>; seed?: Record<string, string> } = {},
+  extra: { env?: Record<string, string>; seed?: Record<string, string>; omitBaseSha?: boolean } = {},
 ): Promise<RunOutcome> {
   const runDir = mkdtempSync(join(tmpdir(), "v3-run-confidence-"));
   // Stale artifacts a reused run dir would carry in from an earlier run.
@@ -191,7 +194,7 @@ async function runConfidenceRun(
     },
     runDir,
     workspace: runDir,
-    platformAdapter: mockPlatform(prBody),
+    platformAdapter: mockPlatform(prBody, extra.omitBaseSha ? null : undefined),
     persistArtifacts: true,
     // `quiet` short-circuits before the log sink, so a capture turns it off.
     quiet: !captureLogs,
@@ -1377,6 +1380,51 @@ test("#1073: a run that ends unscored clears stale confidence artifacts too", as
     assert.doesNotMatch(incomplete.result.marker, /confidence_score/);
   } finally {
     await failing.close();
+  }
+});
+
+test("#1155: an unresolved proof-context pin fails to unscored without calling the scorer", async () => {
+  // The PR payload carries no base SHA: the prompt would render `Base SHA:
+  // unknown` and the model would grade content this run cannot identify.
+  // No deterministic ceiling inspects the pins, so this gate is the only
+  // rail — the scorer must not be called at all.
+  const STALE = JSON.stringify({ version: 1, status: "scored", score: 5, risk: "low", reason: "from an earlier run", concerns: [], model: SCORER_MODEL, cause: "", caps: [] });
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 5, risk: "low", reason: "all clear", concerns: [] })));
+  }));
+  try {
+    const run = await runConfidenceRun(
+      server,
+      { "ai-confidence-model": SCORER_MODEL, "ai-confidence-base-url": server.url },
+      "",
+      true,
+      { omitBaseSha: true, seed: { "confidence-score.json": STALE, "confidence-request.json": STALE, "confidence-response.json": STALE } },
+    );
+    assert.equal(scorerRequests(server), 0, "the scorer graded a prompt whose revision pins never resolved");
+    assert.equal(run.result.outputs.confidenceStatus, "unscored");
+    assert.equal(run.result.outputs.confidenceScore, "");
+    assert.equal(run.result.outputs.confidenceRisk, "unknown");
+    assert.equal(run.result.outputs.confidenceModel, "", "no scorer transport call was attempted");
+    // No wire artifacts — and the stale score is replaced by THIS run's
+    // own unscored artifact, whose diagnostic names the missing pin.
+    for (const name of ["confidence-request.json", "confidence-response.json"]) {
+      assert.ok(!existsSync(join(run.runDir, name)), `${name} was written for a run that never called the scorer`);
+    }
+    const artifact = JSON.parse(readFileSync(join(run.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(artifact.status, "unscored");
+    assert.equal(artifact.cause, "incomplete_proof_context");
+    assert.equal(artifact.score, null);
+    assert.match(String(artifact.diagnostic), /base_sha/);
+    assert.ok(
+      run.logs.some((line) => line.includes("confidence scorer: unscored (incomplete_proof_context)")),
+      `expected the incomplete_proof_context cause in the log: ${JSON.stringify(run.logs)}`,
+    );
+    // The review itself is untouched: only the score is withheld.
+    assert.equal(run.result.outputs.verdict, "approve");
+    assert.ok(run.result.outputs.reviewMarkdown.length > 0);
+  } finally {
+    await server.close();
   }
 });
 
