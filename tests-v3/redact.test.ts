@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
+  SECRET_KEY_ALTERNATION,
   KNOWN_SECRET_REDACTED,
   REDACTED_SOURCE,
   containsKnownSecret,
@@ -1561,12 +1564,153 @@ test("#1154 r2: a YAML block scalar opens the run; a code expression does not", 
       "    return 1",
     ].join("\n"),
   );
-  // Pinned boundary, not an endorsement: `client_key` carries no vocabulary
-  // alternative (the key-name list is frozen), so it opens no run. Recorded
-  // here so a future vocabulary change is a visible decision, not a drift.
+  // The boundary pinned here by #1154 r2 was FLIPPED by a visible decision,
+  // exactly as this comment demanded: #1170 gave `client_key`/`private_key`
+  // vocabulary alternatives, so a PEM-bearing block scalar under either name
+  // opens a run like `password:` does.
   assert.equal(
     redactPrTextLines("client_key: |\n  -----BEGIN CERTIFICATE-----\n  MIIB"),
-    "client_key: |\n  -----BEGIN CERTIFICATE-----\n  MIIB",
+    "client_key: |\n  [REDACTED]\n  [REDACTED]",
+  );
+  assert.equal(
+    redactPrTextLines("private_key: >-\n  -----BEGIN RSA PRIVATE KEY-----\n  MIIEow"),
+    "private_key: >-\n  [REDACTED]\n  [REDACTED]",
+  );
+});
+
+// #1170: `private[_-]?key` / `client[_-]?key` joined SECRET_KEY_ALTERNATION —
+// neither carried any alternative before (unlike `client_secret`, which
+// matches through `secret`), so a `private_key: |` block scalar opened no run
+// and a PEM key persisted verbatim into `pr.diff`, `pr-body.txt`, the corpus
+// and `ai-request.<tier>.json`. Every key-name surface in the module shares
+// the constant, so each one is pinned here for the new names.
+test("#1170: private_key / client_key are selected on every key-name surface", () => {
+  // The line-preserving core: camel and hyphen spellings open runs too (the
+  // optional separator is how every other alternative matches compounds).
+  assert.equal(
+    redactPrTextLines("privateKey: |\n  MIIEowIBAAKCAQEA0000"),
+    "privateKey: |\n  [REDACTED]",
+  );
+  assert.equal(
+    redactPrTextLines("client-key: |2-\n  AAAAB3NzaC1yc2EaaaAA"),
+    "client-key: |2-\n  [REDACTED]",
+  );
+  // Same-line forms through the flat pass: env dumps, assignments, quotes.
+  assert.equal(redactText("PRIVATE_KEY=MIIEowIBAAKCAQEA0000"), "[REDACTED]");
+  assert.equal(redactText("client-key: SUPERSECRETVALUE"), "[REDACTED]");
+  assert.equal(redactText('privateKey = "hunter2hunter2"'), '[REDACTED]"');
+  // The shared 8-character value floor holds for the new names: an ordinary
+  // short value under them is untouched.
+  assert.equal(redactText("private_key: short"), "private_key: short");
+  // The one-line quoted form (the core's quoted-key rule).
+  assert.equal(
+    redactPrTextLines('{"client_key": "MIIEowIBAAKCAQEA0000", "filename": "ok"}'),
+    '{[REDACTED]", "filename": "ok"}',
+  );
+  // Parsed JSON (the deep key-name rule).
+  assert.deepEqual(
+    redactPrTextDeep({ client_key: "MIIEowIBAAKCAQEA0000", privateKey: "a".repeat(40), filename: "ok" }),
+    { client_key: "[REDACTED]", privateKey: "[REDACTED]", filename: "ok" },
+  );
+  // The diff surface, per side.
+  assert.equal(
+    redactDiffText("+private_key:\n+  -----BEGIN OPENSSH PRIVATE KEY-----\n+  AAAAB3NzaC1yc2E\n-private_key:\n-  AAAAB3NzaC1yc2E"),
+    "+private_key:\n+  [REDACTED]\n+  [REDACTED]\n-private_key:\n-  [REDACTED]",
+  );
+  // #252 boundary rule: the masked forms are fixed points.
+  const once = redactPrTextLines("client_key: |\n  -----BEGIN CERTIFICATE-----\n  MIIB");
+  assert.equal(redactPrTextLines(once), once);
+  assert.equal(redactText("[REDACTED]"), "[REDACTED]");
+  assert.deepEqual(redactPrTextDeep({ client_key: "[REDACTED]" }), { client_key: "[REDACTED]" });
+  // Weighed over-redaction (#1170), pinned as a decision rather than drift:
+  // an ordinary PATH value under a compound name in unquoted prose keeps its
+  // name boundary and survives (the flat masker matches the alternative only
+  // where a separator follows it, so `private_key_path` is not a match); the
+  // quoted spelling masks, exactly like `"password_path"` did before #1170 —
+  // the functional name test's accepted cost, over-redaction beats a leak.
+  assert.equal(
+    redactPrTextLines("private_key_path: ~/.ssh/id_rsa"),
+    "private_key_path: ~/.ssh/id_rsa",
+  );
+  assert.equal(
+    redactPrTextLines('"private_key_path": "/home/u/.ssh/id_rsa"'),
+    '[REDACTED]"',
+  );
+});
+
+test("#1170: source-safe masking of the new names keeps the value-only contract", () => {
+  // Quoted literal: key, separator and value quotes survive; only the value
+  // becomes the source marker — the #876 contract, unchanged shape.
+  assert.equal(
+    redactSourceText('private_key: "supersecretvalue"', "deploy.yaml"),
+    `private_key: "${REDACTED_SOURCE}"`,
+  );
+  assert.equal(
+    redactSourceText('{"client_key": "MIIEowIBAAKCAQEA0000"}', "x.json"),
+    `{"client_key": "${REDACTED_SOURCE}"}`,
+  );
+  // References are not credentials: a vault/env interpolation under a new
+  // name must survive untouched.
+  assert.equal(
+    redactSourceText("client_key: ${VAULT_SECRET_PATH}", "deploy.yaml"),
+    "client_key: ${VAULT_SECRET_PATH}",
+  );
+  // A code file is not config: an unquoted expression under a new name stays
+  // intact so the model can still read the structure.
+  assert.equal(
+    redactSourceText("privateKey = loadPrivateKey(signer)", "app.js"),
+    "privateKey = loadPrivateKey(signer)",
+  );
+  // The kubeconfig masker keeps its own names: the generic rule's name
+  // boundary must not half-match `client-key-data` (the value ends at `-data`
+  // for the generic rule, so only the dedicated masker fires).
+  assert.equal(
+    redactSourceText("client-key-data: YWJjZGVmZ2hpamtsbW5vcA==", "kubeconfig"),
+    `client-key-data: ${REDACTED_SOURCE}`,
+  );
+});
+
+// #999 cost class for the new vocabulary entries: the flat alternation and
+// the functional name test must stay linear-ish on adversarial one-line
+// content built from the new names, the same shape the quoted-key rule was
+// re-tested in.
+test("#1170 adversarial: new-name content masks in bounded time", () => {
+  const started = process.hrtime.bigint();
+  const unclosedQuote = `"${"private_key".repeat(30_000)}`;
+  const manySeps = `"${"client_key: ".repeat(30_000)}`;
+  const flat = "private_key".repeat(30_000);
+  const out1 = redactPrTextLines(unclosedQuote);
+  const out2 = redactPrTextLines(manySeps);
+  const out3 = redactText(flat);
+  // Outcomes pinned so the timing canary measures a real scan: `manySeps`
+  // carries 30k masked `client_key: <10-char>` assignments, while the two
+  // separator-free lines must survive whole (a name alone is not a match).
+  assert.ok(out2.includes("[REDACTED]"), "the separator-bearing line must actually mask");
+  assert.equal(out1, unclosedQuote, "no separator, no match");
+  assert.equal(out3, flat, "no separator, no match");
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1_000_000;
+  assert.ok(elapsedMs < 1_000, `#1170 adversarial masking took ${elapsedMs.toFixed(0)}ms`);
+});
+
+// #1170 lockstep pin: the flat generic `key=value` masker used to carry a
+// hardcoded copy of the vocabulary (predating the constant, from #675), which
+// is exactly the drift its comment calls an unmasked credential nobody
+// notices. The pre-#1170 vocabulary CORE may now appear in this module ONCE —
+// inside the constant's own declaration; counting the CORE rather than the
+// full current value also catches a reintroduced OLDER copy, which would
+// still match the whole-value count at zero.
+test("#1170: the flat generic masker cannot regrow a hardcoded vocabulary copy", () => {
+  const vocabularyCore = "api[_-]?key|token|password|secret|access[_-]?key|auth[_-]?token";
+  assert.ok(
+    SECRET_KEY_ALTERNATION.startsWith(vocabularyCore),
+    "the shared vocabulary must keep the pre-#1170 core as its prefix",
+  );
+  const source = readFileSync(resolve(__dirname, "..", "..", "src/context/redact.ts"), "utf8");
+  const occurrences = source.split(vocabularyCore).length - 1;
+  assert.equal(
+    occurrences,
+    1,
+    "the shared vocabulary may appear in src/context/redact.ts exactly once (its declaration); a second occurrence is a duplicated literal",
   );
 });
 
