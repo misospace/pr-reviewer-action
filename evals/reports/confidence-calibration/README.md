@@ -154,7 +154,9 @@ python scripts/confidence_calibration.py review --plan evals/confidence-calibrat
 # invocation over a work dir that already holds a recorded runs.json refuses with
 # exit 3 and zero new harness calls once carried spend + a new sweep would exceed
 # the ceiling (same no-repeated-sweep rule the scorer enforces via
-# `lifetime_wire_calls`). Start a fresh pilot in a fresh --work-dir.
+# `lifetime_wire_calls`). Start a fresh pilot in a fresh --work-dir. The bound
+# is a sequential re-run pre-flight, not a lock: concurrent invocations over one
+# work dir are outside the pilot's single-operator scope (same as the scorer's).
 # one live condition per sweep (the 48-call ceiling fits one condition with
 # repeats; see the note above about running both)
 python scripts/confidence_calibration.py score --plan evals/confidence-calibration/sample-plan.json \

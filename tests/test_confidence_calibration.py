@@ -240,23 +240,31 @@ def test_bridge_launcher_cache_key_covers_imported_dependencies(tmp_path: Path) 
     shutil.copy(BRIDGE, bin_dir / "confidence_bridge.mjs")
     (bin_dir / "node_modules").symlink_to(REPO_ROOT / "node_modules")
     (bin_dir / "dep.ts").write_text('export const VALUE = "first";\n', encoding="utf-8")
+    (bin_dir / "dyn.ts").write_text('export const NAME = "dyn-one";\n', encoding="utf-8")
     (bin_dir / "confidence_bridge.ts").write_text(
-        'import { VALUE } from "./dep.js";\nconsole.log(JSON.stringify({ value: VALUE }));\n',
+        'import { VALUE } from "./dep.js";\n'
+        "const payload: Record<string, string> = { value: VALUE };\n"
+        'import("./dyn.js").then((dyn) => {\n'
+        "    payload.dyn = dyn.NAME;\n"
+        "    console.log(JSON.stringify(payload));\n"
+        "});\n",
         encoding="utf-8",
     )
 
-    def run() -> str:
+    def run() -> dict:
         result = subprocess.run(
             ["node", str(bin_dir / "confidence_bridge.mjs"), "noop", "ignored.json"],
             capture_output=True, text=True, timeout=120, check=False,
         )
         assert result.returncode == 0, result.stderr
-        return json.loads(result.stdout)["value"]
+        return json.loads(result.stdout)
 
-    assert run() == "first"
-    assert run() == "first"  # cached bundle reused, same behavior
+    assert run() == {"value": "first", "dyn": "dyn-one"}
+    assert run() == {"value": "first", "dyn": "dyn-one"}  # cached bundle reused
     (bin_dir / "dep.ts").write_text('export const VALUE = "second";\n', encoding="utf-8")
-    assert run() == "second"  # dependency change must NOT reuse the old bundle
+    assert run() == {"value": "second", "dyn": "dyn-one"}  # static dep change: no stale bundle
+    (bin_dir / "dyn.ts").write_text('export const NAME = "dyn-two";\n', encoding="utf-8")
+    assert run() == {"value": "second", "dyn": "dyn-two"}  # dynamic-import dep: same
 
 
 def apply_score(answer: str, findings: list | None = None, coverage: dict | None = None, model: str = "pilot-model", tmp_path: Path | None = None) -> dict:
@@ -1020,6 +1028,14 @@ def test_review_prior_runs_json_accounting_edge_cases(
     assert run_cmd("review", ["--plan", str(review_plan(tmp_path)), "--work-dir", str(work_dir)]) == 3
     assert len(harness.calls) == 0
     assert (work_dir / "runs.json").read_text(encoding="utf-8") == broken
+
+    # Valid JSON but a structurally broken prior: refuse, never overwrite.
+    for unusable in ({"mode": "tools_off", "entries": "not-a-list"}, [],
+                     {"entries": [], "lifetime_primary_reviews": "lots"}):
+        (work_dir / "runs.json").write_text(json.dumps(unusable), encoding="utf-8")
+        assert run_cmd("review", ["--plan", str(review_plan(tmp_path)), "--work-dir", str(work_dir)]) == 3
+        assert len(harness.calls) == 0
+        assert (work_dir / "runs.json").read_text(encoding="utf-8") == json.dumps(unusable)
 
 
 # ── Subprocess-level CLI tests (kept minimal: wiring + exit codes) ───────

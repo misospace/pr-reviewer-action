@@ -600,10 +600,16 @@ def cmd_review(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return EXIT_BUDGET_ABORT
-        carried_primary_reviews = max(
-            len(prior["entries"]),
-            int(prior.get("lifetime_primary_reviews") or 0),
-        )
+        prior_counter = prior.get("lifetime_primary_reviews") or 0
+        if not isinstance(prior_counter, int) or isinstance(prior_counter, bool) or prior_counter < 0:
+            print(
+                f"review aborted: {runs_path} carries a non-integer lifetime_primary_reviews "
+                "value; prior primary spend cannot be trusted, so no review was "
+                "started and no budget was spent",
+                file=sys.stderr,
+            )
+            return EXIT_BUDGET_ABORT
+        carried_primary_reviews = max(len(prior["entries"]), prior_counter)
     if carried_primary_reviews + len(samples) > ceilings["max_primary_reviews"]:
         print(
             f"review aborted: {carried_primary_reviews} already-spent primary reviews "

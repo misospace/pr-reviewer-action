@@ -32,9 +32,12 @@ const bridgeSource = path.join(here, "confidence_bridge.ts");
 // NodeNext-style sources ("./x.js" specs pointing at ".ts" files).
 function resolveLocalModule(fromFile, specifier) {
   const base = path.resolve(path.dirname(fromFile), specifier);
+  // Candidate order mirrors esbuild: a "./x.js" specifier bundles the literal
+  // x.js when it exists and only then falls back to the NodeNext x.ts/x.tsx
+  // rewrite; extensionless specifiers try .tsx before .ts.
   const candidates = /\.(js|mjs|cjs)$/.test(specifier)
-    ? [base.replace(/\.(js|cjs|mjs)$/, ".ts"), base.replace(/\.(js|cjs|mjs)$/, ".tsx"), base]
-    : [`${base}.ts`, `${base}.tsx`, base, path.join(base, "index.ts")];
+    ? [base, base.replace(/\.(js|cjs|mjs)$/, ".ts"), base.replace(/\.(js|cjs|mjs)$/, ".tsx")]
+    : [`${base}.tsx`, `${base}.ts`, base, path.join(base, "index.ts")];
   for (const candidate of candidates) {
     try {
       if (statSync(candidate).isFile()) return candidate;
@@ -53,14 +56,22 @@ function bundleDigestOf(entry) {
   const seen = new Set();
   const pending = [entry];
   const unresolved = [];
-  const importRe = /(?:^|[\s;])(?:import|export)\b[^;]*?\bfrom\s*["'](\.{1,2}\/[^"'\s]+)["']|(?:^|[\s;])import\s*["'](\.{1,2}\/[^"'\s]+)["']/g;
+  // Static re-export/import forms plus the runtime forms esbuild also
+  // bundles: dynamic import("./x.js") and require("./x.js").
+  const specifier = String.raw`\.{1,2}\/[^"'\s]+`;
+  const importRe = new RegExp(
+    `(?:^|[\\s;])(?:import|export)\\b[^;]*?\\bfrom\\s*["'](${specifier})["']`
+    + `|(?:^|[\\s;])import\\s*["'](${specifier})["']`
+    + `|\\b(?:import|require)\\s*\\(\\s*["'](${specifier})["']`,
+    "g",
+  );
   while (pending.length > 0) {
     const file = pending.pop();
     if (seen.has(file)) continue;
     seen.add(file);
     const text = readFileSync(file, "utf8");
     for (const match of text.matchAll(importRe)) {
-      const specifier = match[1] ?? match[2];
+      const specifier = match[1] ?? match[2] ?? match[3];
       const target = resolveLocalModule(file, specifier);
       if (target === null) unresolved.push(`${file} -> ${specifier}`);
       else if (!seen.has(target)) pending.push(target);
@@ -73,7 +84,13 @@ function bundleDigestOf(entry) {
 }
 
 const esbuildVersion = typeof esbuild.version === "string" ? esbuild.version : "unknown";
-const digest = bundleDigestOf(bridgeSource).update(esbuildVersion).digest("hex").slice(0, 16);
+// The launcher's own bytes enter the digest too, so editing the esbuild
+// build options below invalidates the cache alongside graph and toolchain.
+const digest = bundleDigestOf(bridgeSource)
+  .update(readFileSync(fileURLToPath(import.meta.url)))
+  .update(esbuildVersion)
+  .digest("hex")
+  .slice(0, 16);
 const cacheDir = path.join(os.tmpdir(), "confidence-bridge-cache");
 const bundlePath = path.join(cacheDir, `confidence-bridge-${digest}.cjs`);
 
