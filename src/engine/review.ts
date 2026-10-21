@@ -336,7 +336,13 @@ function createRunCancellation(request: ReviewRequest): RunCancellation {
       // Drain until a full pass finds nothing: a fork whose launch was still
       // in flight when the cancellation landed can register while an earlier
       // drain is awaiting, and the rejection becomes observable only once
-      // every owned child is actually gone.
+      // every owned child is actually gone. Known residual, stated: a fork
+      // whose PROCESS launch suspends past finalize's final empty pass (the
+      // preflight/launch probes inside forkGate) calls own() only after the
+      // rejection is already observable, so its cut cannot be awaited from
+      // here — the scope signal wired into forkGate bounds that child instead
+      // (runProcess refuses a pre-aborted launch and terminates an in-flight
+      // tree), so nothing outlives the run un-terminated, only un-awaited.
       for (;;) {
         const gates = [...forks];
         const cuts = [...cuttings];

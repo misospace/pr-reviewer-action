@@ -105,6 +105,10 @@ function failureMessage(
  */
 const credentialSlots = new Map<string, string>();
 let nextCredentialSlot = 0;
+// Deliberately never cleared: a cleared registry would re-intern the same
+// key to a NEW slot while a live latch still remembers the old one, silently
+// re-opening a terminally-latched lane. Growth is bounded by the distinct
+// keys a run configures (a handful), so a lifetime hold costs nothing.
 
 function credentialIdentity(apiKey: string): string {
   // Deliberately NOT a hash or HMAC: the latch is per-process, so a
