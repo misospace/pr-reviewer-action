@@ -342,7 +342,8 @@ function createRunCancellation(request: ReviewRequest): RunCancellation {
       // rejection is already observable, so its cut cannot be awaited from
       // here — the scope signal wired into forkGate bounds that child instead
       // (runProcess refuses a pre-aborted launch and terminates an in-flight
-      // tree), so nothing outlives the run un-terminated, only un-awaited.
+      // tree), so nothing outlives the run un-terminated, only un-awaited
+      // (follow-up: #1183).
       for (;;) {
         const gates = [...forks];
         const cuts = [...cuttings];
