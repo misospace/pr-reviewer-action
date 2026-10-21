@@ -251,11 +251,11 @@ function priorFeedbackTotals(
 }
 
 /** Dedupe identity of one event. JSON-serialized, not NUL-joined: `reason`
- * is bounded free text and `at` is an ISO-shaped parse-validated string that
- * Date.parse accepts with trailing NULs, so a crafted prior-ledger event
- * could embed the bare-NUL separators and collide two DISTINCT events into
- * one key (one then silently dropped by `mergeLedger`). The JSON encoding is
- * injective over exactly these field values. */
+ * is bounded free text, and although `at` is normalized control-character-free
+ * (#1151), `reason` can still carry any non-control text, so a crafted
+ * prior-ledger event could embed the bare-NUL separators and collide two
+ * DISTINCT events into one key (one then silently dropped by `mergeLedger`).
+ * The JSON encoding is injective over exactly these field values. */
 function eventKey(event: OutcomeEvent): string {
   return JSON.stringify([
     event.finding_id,

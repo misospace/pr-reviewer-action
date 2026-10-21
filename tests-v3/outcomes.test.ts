@@ -183,6 +183,22 @@ test("#1027 event normalization: fail-closed per kind", () => {
   assert.equal(normalizeOutcomeEvent({ ...base, provenance: "operator", kind: "adjudication", label: "confirmed_false_positive" }), null);
   // Unparseable timestamps become null, never fabricated.
   assert.equal(normalizeOutcomeEvent({ ...base, at: "not-a-date" })!.at, null);
+  // #1151 adversarial-boundary (#252): feed the control character ITSELF, not
+  // a benign timestamp. NUL is not JS whitespace (trim leaves it) and
+  // Date.parse accepts it, so without the explicit guard "…Z\u0000" is
+  // accepted VERBATIM and two events for the same instant persist as distinct
+  // non-canonical strings. Expect rejection, not sanitization.
+  for (const hostile of [
+    "2026-10-19T00:00:00Z\u0000",
+    "\u00002026-10-19T00:00:00Z",
+    "2026-10-19T00\u0000:00:00Z",
+    "2026-10-19T00:00:00Z\u001f",
+    "2026-10-19T00:00:00Z\u007f",
+  ]) {
+    assert.equal(normalizeOutcomeEvent({ ...base, at: hostile })!.at, null, JSON.stringify(hostile));
+  }
+  // Whitespace padding (real JS whitespace, stripped by trim) stays canonical.
+  assert.equal(normalizeOutcomeEvent({ ...base, at: ` \t${AT}\n` })!.at, AT);
   // Reason text is redacted and bounded.
   const dismissed = normalizeOutcomeEvent({
     ...base, kind: "dismissed", provenance: "forge-thread",

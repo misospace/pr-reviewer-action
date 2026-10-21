@@ -114,6 +114,12 @@ export function isProvenHeadSha(value: unknown): value is string {
   return typeof value === "string" && HEAD_SHA_RE.test(value);
 }
 const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T/;
+// #1151: `ISO_TIMESTAMP_RE` is an unanchored prefix and `Date.parse` tolerates
+// trailing control characters (NUL is not JS whitespace, so `trim` leaves it),
+// so without this guard "…T00:00:00Z\u0000" persists verbatim and two events
+// for the SAME instant persist as distinct strings. Reject any control
+// character outright — the persisted field must be canonical.
+const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f]/;
 
 function boundedText(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;
@@ -128,7 +134,7 @@ function isoTimestamp(value: unknown): string | null {
   // Date.parse alone accepts far too much ("0" parses as 2000-01-01); an
   // event's instant must look like an ISO-8601 timestamp before the parse
   // result is trusted.
-  if (text === "" || !ISO_TIMESTAMP_RE.test(text) || Number.isNaN(Date.parse(text))) return null;
+  if (text === "" || CONTROL_CHARS_RE.test(text) || !ISO_TIMESTAMP_RE.test(text) || Number.isNaN(Date.parse(text))) return null;
   return text;
 }
 
