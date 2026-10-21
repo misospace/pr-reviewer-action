@@ -1,4 +1,4 @@
-import { appendFileSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
@@ -11,7 +11,7 @@ import { ForgejoPublishApi } from "../platform/publish-api.js";
 import { TangledPublishApi } from "../platform/tangled-publish.js";
 import { TangledAtprotoClient, atprotoConfigFromEnv } from "../platform/tangled-atproto.js";
 import { tangledContextFromEnv } from "../platform/tangled.js";
-import { eventLabelName, runPrecheck } from "../precheck/decide.js";
+import { eventLabelName } from "../precheck/decide.js";
 import { publishReview, type PublishInput, type PublishResult, type PublishMode } from "../publish/publish.js";
 import type { PublishPlatformApi } from "../platform/publish-api.js";
 import type { UpstreamLinkMode } from "../publish/sanitize.js";
@@ -158,39 +158,6 @@ export function readEvent(env: NodeJS.ProcessEnv): { event?: StepEvent; headSha?
   } catch {
     return {};
   }
-}
-
-function persistOutputs(filePath: string, assignments: ReadonlyArray<[string, string]>): void {
-  if (filePath === "" || filePath === "/dev/null") return;
-  const text = assignments
-    .filter(([, value]) => value !== undefined && value !== null)
-    .map(([key, value]) => `${key}=${value}\n`)
-    .join("");
-  if (text === "") return;
-  appendFileSync(filePath, text);
-}
-
-/** `node dist/index.js precheck` — the typed successor of
- * `scripts/check_review_needed.sh` in the composite. */
-export async function precheckMain(env: NodeJS.ProcessEnv): Promise<number> {
-  const { event, headSha: eventHeadSha, prNumber } = readEvent(env);
-  // #914: an `issue_comment` payload's only PR-number source is
-  // `issue.number` — the action entry merges it via actionStageEnv; this
-  // CLI subcommand must apply the same fallback or a comment-triggered
-  // precheck would fail on a missing PR_NUMBER.
-  const stage = prNumber !== undefined && (env.PR_NUMBER ?? "") === ""
-    ? { ...env, PR_NUMBER: prNumber }
-    : env;
-  const adapter = buildAdapter(stage);
-  await adapter.preflightAuthentication?.();
-  const output = await runPrecheck({
-    env: stage as Record<string, string>,
-    adapter,
-    ...(event !== undefined ? { event: event as never } : {}),
-    ...(eventHeadSha !== undefined ? { eventHeadSha } : {}),
-  });
-  persistOutputs(env.GITHUB_OUTPUT ?? "", Object.entries(output));
-  return 0;
 }
 
 function boolInput(raw: string | undefined, fallback = false): boolean {

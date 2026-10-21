@@ -18,6 +18,7 @@ function mockPlatform(options: { diff?: string; files?: unknown[] } = {}): Platf
       number: 7,
       title: "Loosen the rules",
       body: "",
+      draft: false,
       head: { sha: "a".repeat(40), ref: "feature" },
       base: { ref: "main" },
       user: { login: "someone" },

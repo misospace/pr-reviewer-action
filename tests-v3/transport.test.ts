@@ -1700,3 +1700,89 @@ test("#252 boundary: hostile extra-header pairs fail closed at the wire before A
     await server.close();
   }
 });
+
+// ── #726: engine cancellation propagates into the active request ─────────
+
+test("#726: an in-flight abort tears the provider request down and fails cancelled", async () => {
+  const controller = new AbortController();
+  let tornDown!: () => void;
+  const closed = new Promise<void>((resolve) => { tornDown = resolve; });
+  const live: { res: { destroy(): void } | null } = { res: null };
+  const server = await startMockServer((_req, _body, res) => {
+    live.res = res;
+    res.on("close", () => tornDown());
+    // Cancellation lands while the request is in flight; the server never
+    // answers, so only the client-side teardown can close this socket.
+    controller.abort();
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 30,
+      connectTimeoutSec: 5,
+      signal: controller.signal,
+    });
+    assert.equal(outcome.status, "failure");
+    if (outcome.status === "failure") assert.equal(outcome.failure.kind, "cancelled");
+    // Hang guard: a regression that abandons the request fails here instead
+    // of leaving the socket (and the suite) hanging.
+    const torn = await Promise.race([closed.then(() => true), new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 2000))]);
+    assert.equal(torn, true, "the in-flight provider socket was physically torn down");
+  } finally {
+    try { live.res?.destroy(); } catch { /* already closed */ }
+    await server.close();
+  }
+});
+
+test("#726: an already-aborted signal never opens a socket", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.statusCode = 200; res.end("{}"); });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+      signal: AbortSignal.abort(),
+    });
+    assert.equal(outcome.status, "failure");
+    if (outcome.status === "failure") assert.equal(outcome.failure.kind, "cancelled");
+    assert.equal(server.requests.length, 0, "a cancelled request never reaches the endpoint");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#726: an abort during retry backoff ends the loop instead of firing again", async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    attempts += 1;
+    res.statusCode = 429;
+    res.end("{}");
+  });
+  try {
+    const outcome = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload: payload({ model: "m", stream: false }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+      signal: controller.signal,
+      sleep: async () => { controller.abort(); },
+    });
+    assert.equal(outcome.status, "failure");
+    if (outcome.status === "failure") assert.equal(outcome.failure.kind, "cancelled");
+    assert.equal(attempts, 1, "the aborted backoff never schedules another attempt");
+  } finally {
+    await server.close();
+  }
+});

@@ -304,19 +304,20 @@ export async function renderLinkedSourcesPhase(env: StageEnv, ws: RunWorkspace, 
 // classification.sh forks: image digests, evidence providers
 // ---------------------------------------------------------------------------
 
-export async function runImageDigestPhase(ws: RunWorkspace, diffText: string, env: StageEnv): Promise<string> {
-  const markdown = await buildImageProvenanceFromNetwork(diffText, env as NodeJS.ProcessEnv);
+export async function runImageDigestPhase(ws: RunWorkspace, diffText: string, env: StageEnv, signal?: AbortSignal): Promise<string> {
+  const markdown = await buildImageProvenanceFromNetwork(diffText, env as NodeJS.ProcessEnv, signal !== undefined ? { signal } : {});
   ws.write("image-digest-context.md", markdown);
   return markdown;
 }
 
-export async function runEvidencePhase(ws: RunWorkspace, env: StageEnv, forkFlag: string, runDir: string, log?: (line: string) => void): Promise<string> {
+export async function runEvidencePhase(ws: RunWorkspace, env: StageEnv, forkFlag: string, runDir: string, log?: (line: string) => void, signal?: AbortSignal): Promise<string> {
   const outcome = await runEvidenceProvidersPhase({
     env: env as NodeJS.ProcessEnv,
     cwd: runDir,
     isForkPr: forkFlag,
     enableForForks: env.EVIDENCE_ENABLE_FOR_FORKS ?? "false",
     ...(log !== undefined ? { log } : {}),
+    ...(signal !== undefined ? { signal } : {}),
   });
   // The phase writes evidence-providers.{md,json} itself (v2 cwd
   // semantics); refresh the bus so the corpus reads this run's values.
@@ -546,7 +547,7 @@ function ciChecksBytes(env: StageEnv): Uint8Array | null {
 // corpus.sh tail: the native tool harness
 // ---------------------------------------------------------------------------
 
-export function harnessTransportAdapter(env: StageEnv): HarnessTransport {
+export function harnessTransportAdapter(env: StageEnv, signal?: AbortSignal): HarnessTransport {
   return async (baseUrl, apiFormat, payload, apiKey, timeoutSec) => {
     // #1037: the tool-harness transport is a provider call like any other.
     // Parsed per request INSIDE the closure (as pre-fix) so a malformed set
@@ -567,6 +568,9 @@ export function harnessTransportAdapter(env: StageEnv): HarnessTransport {
       // #1037: unset config omits the key entirely (byte-identical request,
       // nothing to merge).
       ...(extra !== undefined ? { extraHeaders: extra } : {}),
+      // #726 (engine cancellation): the harness's model turns bind to the
+      // run's cancellation scope; unset signal keeps the request unchanged.
+      ...(signal !== undefined ? { signal } : {}),
     });
     // #846: carry the HTTP status and a redacted body excerpt (plus the
     // ai-api-format hint on a 404) instead of the bare "model endpoint
@@ -618,8 +622,8 @@ export function normalizedToOpenAiChat(response: NormalizedModelResponse): Recor
  * optional field (the harness's `RunNativeLoopInput` carries it; the native
  * loop invokes it at most once after an accepted verdict). Omitting it
  * keeps the loop byte-for-byte pre-#1145. */
-export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDir: string, log: (line: string) => void, traceGapProbe?: TraceGapProbe): Promise<void> {
-  const deps: HarnessDeps & { traceGapProbe?: TraceGapProbe } = {
+export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDir: string, log: (line: string) => void, signal?: AbortSignal, traceGapProbe?: TraceGapProbe): Promise<void> {
+  const deps: HarnessDeps & { signal?: AbortSignal, traceGapProbe?: TraceGapProbe } = {
     env,
     cwd: runDir,
     readText: (name) => ws.readText(name),
@@ -628,7 +632,8 @@ export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDi
       ws.write(name, text);
     },
     deleteArtifact: (name) => ws.remove(name),
-    transport: harnessTransportAdapter(env),
+    transport: harnessTransportAdapter(env, signal),
+    ...(signal !== undefined ? { signal } : {}),
     log,
     ...(traceGapProbe !== undefined ? { traceGapProbe } : {}),
   };

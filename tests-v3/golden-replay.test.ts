@@ -169,6 +169,7 @@ function mockPlatform(pr: Record<string, unknown>): PlatformReadAdapter {
     platform: "github",
     getPr: () => Promise.resolve({
       number: 1, title: String(pr.title ?? "t"), body: String(pr.body ?? ""),
+      draft: false,
       head: { sha: headSha, ref: "feature" }, base: { ref: "main" },
       user: { login: "someone" }, changed_files: files.length || 1,
       additions: 0, deletions: 0, html_url: "https://github.com/o/r/pull/1",
