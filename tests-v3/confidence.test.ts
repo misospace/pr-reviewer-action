@@ -678,9 +678,14 @@ test("#1073: every required input is pinned in the prompt, and an absent one is 
     assert.ok(built.user.includes(pin), `required input is not pinned in the prompt: ${pin}`);
   }
   assert.ok(built.system.includes("JSON object"), "the answer contract is stated in the system prompt");
+  // Every pin resolved: the build reports no unresolved pins (#1155).
+  assert.deepEqual(built.unresolvedPins, []);
 
-  // The head/base pins fail visibly: an absent pin renders as the literal
-  // `unknown` marker rather than leaving the model to infer it.
+  // The head/base/review_result pins fail visibly: an absent pin renders as
+  // the literal `unknown` marker rather than leaving the model to infer it —
+  // AND #1155 makes the same distinction visible to the CALLER: every empty
+  // pin is named in `unresolvedPins`, in pin order, so the caller can refuse
+  // the scorer call instead of scoring an unanchored prompt.
   const unpinned = buildConfidencePrompt({
     headSha: "", baseSha: "",
     diff: "", prTitle: "", prBody: "",
@@ -691,9 +696,40 @@ test("#1073: every required input is pinned in the prompt, and an absent one is 
   assert.match(unpinned.user, /Base SHA: unknown/);
   assert.match(unpinned.user, /Deterministic review_result: unknown/);
   assert.match(unpinned.user, /Required-checks status: none/);
+  assert.deepEqual(unpinned.unresolvedPins, ["head_sha", "base_sha", "review_result"]);
   // All six sections are still present with their envelopes — an empty input
   // is a gap the scorer can see, never a silently missing section.
   assert.equal(envelopeBodies(unpinned.user).length, 6);
+});
+
+test("#1155: unresolved proof-context pins are reported per pin, not all-or-nothing", async () => {
+  const { buildConfidencePrompt, unresolvedConfidencePins } = await import("../src/confidence/prompt.js");
+  const base = {
+    diff: "", prTitle: "", prBody: "",
+    findings: [] as unknown[], reviewSummary: "", requiredChecks: "",
+    coverage: {}, secrets: [],
+  };
+  // Each single missing pin is named exactly, and only that pin renders
+  // `unknown` — the resolved siblings keep their values.
+  const cases: Array<[string, { headSha: string; baseSha: string; reviewResult: string }, string[]]> = [
+    ["head", { headSha: "", baseSha: "base-sha-222", reviewResult: "clean" }, ["head_sha"]],
+    ["base", { headSha: "head-sha-111", baseSha: "", reviewResult: "clean" }, ["base_sha"]],
+    ["result", { headSha: "head-sha-111", baseSha: "base-sha-222", reviewResult: "" }, ["review_result"]],
+  ];
+  for (const [name, pins, expected] of cases) {
+    const built = buildConfidencePrompt({ ...base, ...pins });
+    assert.deepEqual(built.unresolvedPins, expected, `${name} pin missing`);
+    const unknownLines = [
+      /Head SHA under review: unknown/.test(built.user),
+      /Base SHA: unknown/.test(built.user),
+      /Deterministic review_result: unknown/.test(built.user),
+    ].filter(Boolean).length;
+    assert.equal(unknownLines, expected.length, `${name}: exactly the missing pins render unknown`);
+  }
+  // The exported predicate agrees with the build report on the same inputs
+  // (ONE predicate, no divergence between gate and prompt).
+  assert.deepEqual(unresolvedConfidencePins({ headSha: "", baseSha: "b", reviewResult: "clean" }), ["head_sha"]);
+  assert.deepEqual(unresolvedConfidencePins({ headSha: "h", baseSha: "b", reviewResult: "clean" }), []);
 });
 
 test("#1140 review round 9: the prompt defines `risk` as the scorer's own separate assessment", async () => {

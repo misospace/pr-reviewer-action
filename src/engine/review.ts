@@ -60,7 +60,7 @@ import { resolveReviewTriageDecision } from "../model/triage.js";
 import type { ReviewTriageDecision } from "../model/types.js";
 import { resolveReviewerRouting } from "../config/reviewer-routing.js";
 import { resolveHumanReviewRouting, type HumanReviewRoutingMode, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
-import { buildConfidencePrompt } from "../confidence/prompt.js";
+import { buildConfidencePrompt, unresolvedConfidencePins } from "../confidence/prompt.js";
 import { runConfidenceScorer } from "../confidence/scorer.js";
 import { boundConfidenceField, boundConfidenceReason, CONFIDENCE_DISABLED, confidenceCapNote, confidenceOutputFields, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS, MAX_CONFIDENCE_CONCERN_FILE_CHARS, unscoredConfidenceResult, type ConfidenceResult } from "../confidence/result.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, applyReviewTriageFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
@@ -1707,6 +1707,25 @@ secrets: [profiles.primary.apiKey],
   // that will not publish.
   const reviewWillPublish = publishStepRuns(env.PUBLISH_MODE, env.PUBLISH_REVIEW_COMMENT === "true");
   const confidenceProfile = confidenceResolution.profile;
+  // #1155: the proof-context pins the scorer call is anchored to. An empty
+  // one means the score would grade content (or an outcome) this run could
+  // not identify — strictly worse than a low-confidence score, an unanchored
+  // one — so the run fails to `unscored` WITHOUT calling the model,
+  // alongside the existing `not_published` / `incomplete_review` shapes.
+  // `unresolvedConfidencePins` is the ONE predicate, shared with the
+  // prompt's own `unknown` rendering, so gate and prompt cannot diverge.
+  const confidenceProofPins = {
+    headSha: context.headSha || String(pr.headRefOid ?? ""),
+    baseSha: identity.baseSha ?? "",
+    reviewResult: markerReviewResult({
+      verdictPolicy,
+      verdict: outputVerdict,
+      findings: reviewRecord.findings,
+      requiredChecks: outputRequiredChecks,
+      partialCoverage,
+    }),
+  };
+  const unresolvedProofPins = unresolvedConfidencePins(confidenceProofPins);
   let confidenceResult: ConfidenceResult;
   if (!confidenceProfile.enabled) {
     // Disabled: no request, no artifacts, no outputs.
@@ -1729,6 +1748,17 @@ secrets: [profiles.primary.apiKey],
     removeConfidenceWireArtifacts(ws);
     writeConfidenceScoreArtifact(ws, confidenceResult);
     log(`confidence scorer: unscored (${confidenceResult.cause})`);
+  } else if (unresolvedProofPins.length > 0) {
+    // #1155: a required proof-context pin did not resolve. The prompt would
+    // render it as the literal `unknown` and the model would grade content
+    // this run cannot identify — no deterministic ceiling looks at the pins,
+    // so this is the only rail keeping an unanchored score off the wire.
+    // No scorer call; the missing pins are recorded in the artifact's
+    // diagnostic (the cause's own machine tokens, no untrusted content).
+    confidenceResult = unscoredConfidenceResult("incomplete_proof_context");
+    removeConfidenceWireArtifacts(ws);
+    writeConfidenceScoreArtifact(ws, confidenceResult, `unresolved proof-context pins: ${unresolvedProofPins.join(",")}`);
+    log(`confidence scorer: unscored (${confidenceResult.cause})`);
   } else {
     // #1140 review: every credential configured for this run, in ONE place.
     // The scorer may be a SEPARATE backend, so each of these is a real
@@ -1746,20 +1776,12 @@ secrets: [profiles.primary.apiKey],
       env.AI_SPECIALIST_API_KEY ?? "",
     ];
     const confidencePrompt = buildConfidencePrompt({
-      headSha: context.headSha || String(pr.headRefOid ?? ""),
-      baseSha: identity.baseSha ?? "",
+      ...confidenceProofPins,
       diff: ws.readText("pr.diff.truncated") ?? "",
       prTitle: String(pr.title ?? ""),
       prBody: String(pr.body ?? ""),
       findings: reviewRecord.findings,
       reviewSummary: String(reviewRecord.review_markdown ?? ""),
-      reviewResult: markerReviewResult({
-        verdictPolicy,
-        verdict: outputVerdict,
-        findings: reviewRecord.findings,
-        requiredChecks: outputRequiredChecks,
-        partialCoverage,
-      }),
       requiredChecks: outputRequiredChecks,
       coverage: reviewCoverage,
       secrets: confidenceSecrets,
@@ -2296,8 +2318,8 @@ function clearConfidenceArtifacts(ws: RunWorkspace): void {
 }
 
 /** The wire artifacts belong to a model call. A run that never called the
- * model (disabled, publish step skipped, incomplete review) must not leave
- * an earlier run's request/response behind. */
+ * model (disabled, publish step skipped, incomplete review, incomplete
+ * proof context) must not leave an earlier run's request/response behind. */
 function removeConfidenceWireArtifacts(ws: RunWorkspace): void {
   ws.remove("confidence-request.json");
   ws.remove("confidence-response.json");
@@ -2306,7 +2328,8 @@ function removeConfidenceWireArtifacts(ws: RunWorkspace): void {
 /** Persist the canonical confidence result. The artifact is the only surface
  * that carries the machine-token cause, so EVERY path that ends without a
  * score writes one — including the enabled-but-skipped ones
- * (`not_published`, `incomplete_review`) that never reach the model call.
+ * (`not_published`, `incomplete_review`, `incomplete_proof_context`) that
+ * never reach the model call.
  * Without it, `confidence-status: unscored` is unexplainable: the operator
  * could not tell "the publish step was skipped" from "the call failed". */
 function writeConfidenceScoreArtifact(ws: RunWorkspace, result: ConfidenceResult, diagnostic?: string): void {
