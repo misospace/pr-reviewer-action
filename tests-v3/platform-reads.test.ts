@@ -1103,6 +1103,26 @@ test("github publish issue-comment enumeration reports completeness (#1027)", as
   assert.equal(bad.complete, false);
   assert.deepEqual(bad.comments, []);
 
+  // #1121/#252: on THIS consumer the Link target is itself untrusted input
+  // (the precheck adapter pins its own version of these boundary tokens).
+  // A cross-origin next target never receives the token — the origin-bound
+  // transport refuses before fetching — and degrades the read to incomplete
+  // without ever requesting the hostile URL.
+  const crossOrigin = recorder((url) => (url.hostname === "evil.example"
+    ? json([])
+    : json(page(0, 100), 200, { link: `<https://evil.example/next>; rel="next"` })));
+  const poisoned = await publish(crossOrigin.fetchImpl).listIssueCommentsResult();
+  assert.equal(poisoned.complete, false);
+  assert.equal(poisoned.comments.length, 100);
+  assert.equal(crossOrigin.seen.length, 1, "the cross-origin Link target is never fetched");
+
+  // A syntactically unusable next target is the same failure shape: an
+  // unverifiable continuation proves no end.
+  const badTarget = recorder(() => json(page(0, 100), 200, { link: `<https://api.github.com:bad/x>; rel="next"` }));
+  const unresolved = await publish(badTarget.fetchImpl).listIssueCommentsResult();
+  assert.equal(unresolved.complete, false);
+  assert.equal(badTarget.seen.length, 1, "an unparseable target is rejected, not fetched");
+
   // Every page full WITH a next target means the enumeration never PROVED
   // an end: the page cap is an incomplete read, so it fails closed rather
   // than claiming the accumulated set is the whole set.
