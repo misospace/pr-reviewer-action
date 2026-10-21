@@ -96,7 +96,7 @@ test("#1140: the confidence scorer's internal-crash diagnostic masks BEFORE capp
   // ordering guard above). Every slice below is bounded by two anchors inside
   // this one confidence region, so an unrelated edit elsewhere in this ~2100-line
   // file cannot trip it.
-  const source = readFileSync("src/run/review.ts", "utf8");
+  const source = readFileSync("src/engine/review.ts", "utf8");
   const callStart = source.indexOf("confidenceOutcome = await runConfidenceScorer({");
   const callEnd = source.indexOf("const maskConfidenceText =");
   assert.ok(callStart !== -1, "review.ts must await runConfidenceScorer");

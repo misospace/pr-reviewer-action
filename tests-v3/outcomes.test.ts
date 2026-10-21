@@ -183,6 +183,29 @@ test("#1027 event normalization: fail-closed per kind", () => {
   assert.equal(normalizeOutcomeEvent({ ...base, provenance: "operator", kind: "adjudication", label: "confirmed_false_positive" }), null);
   // Unparseable timestamps become null, never fabricated.
   assert.equal(normalizeOutcomeEvent({ ...base, at: "not-a-date" })!.at, null);
+  // #1151 adversarial-boundary (#252): feed the control character ITSELF, not
+  // a benign timestamp. NUL is not JS whitespace (trim leaves it) and
+  // Date.parse accepts it, so without the explicit guard "…Z\u0000" is
+  // accepted VERBATIM and two events for the same instant persist as distinct
+  // non-canonical strings. The EVENT is rejected, not merely sanitized to
+  // `at: null` — keeping the hostile observation in the ledger with a blanked
+  // instant would still let it claim a lifecycle state.
+  for (const hostile of [
+    "2026-10-19T00:00:00Z\u0000",
+    "\u00002026-10-19T00:00:00Z",
+    "2026-10-19T00\u0000:00:00Z",
+    "2026-10-19T00:00:00Z\u001f",
+    "2026-10-19T00:00:00Z\u007f",
+  ]) {
+    assert.equal(normalizeOutcomeEvent({ ...base, at: hostile }), null, JSON.stringify(hostile));
+  }
+  // Event rejection also wins over the ordinary unprovable-instant null for
+  // an UNPARSEABLE string that additionally carries a control character: the
+  // control character is the signal, so the crafted event fails closed even
+  // though dropping it would only have yielded `at: null`.
+  assert.equal(normalizeOutcomeEvent({ ...base, at: "not-a-date\u0000" }), null);
+  // Whitespace padding (real JS whitespace, stripped by trim) stays canonical.
+  assert.equal(normalizeOutcomeEvent({ ...base, at: ` \t${AT}\n` })!.at, AT);
   // Reason text is redacted and bounded.
   const dismissed = normalizeOutcomeEvent({
     ...base, kind: "dismissed", provenance: "forge-thread",
@@ -565,34 +588,40 @@ test("#1027 action mode: stateless derivation and bounded export need no ledger 
 test("#1027 ledger dedupe: separator-bearing fields cannot collapse two distinct events", () => {
   const fid = observation().findingId;
   const T = "2026-01-01T00:00:00.000Z";
-  // Both events pass the fail-closed normalizer: the odd `at` keeps the ISO
-  // prefix and Date.parse accepts its trailing NULs, and `reason` is bounded
-  // free text that never strips NUL.
-  const forgedAt = normalizeOutcomeEvent({
+  // #1151 closed the old shift attack's `at` half outright: the crafted
+  // `…T\0\0forged-reason` value no longer normalizes at all.
+  assert.equal(normalizeOutcomeEvent({
     finding_id: fid, kind: "dismissed", at: `${T}\u0000\u0000forged-reason`,
     reason: "x", provenance: "forge-thread",
-  });
-  const plain = normalizeOutcomeEvent({
+  }), null);
+  // The field that still persists NUL into `eventKey` is `reason` (bounded
+  // free text; trim does not strip it). Two events whose reasons differ ONLY
+  // in where the NULs sit — the shape a NUL-stripping key sanitizer would
+  // collapse — must stay distinct through the merge.
+  const shifted = normalizeOutcomeEvent({
     finding_id: fid, kind: "dismissed", at: T,
     reason: "forged-reason\u0000\u0000x", provenance: "forge-thread",
   });
-  assert.notEqual(forgedAt, null);
-  assert.notEqual(plain, null);
-  assert.notEqual(forgedAt!.at, plain!.at);
-  assert.notEqual(forgedAt!.reason, plain!.reason);
-  // Under the old bare-NUL join these two DISTINCT events produced ONE key
-  // ("…T\0\0forged-reason\0\0x\0…"), so the merge silently dropped the
-  // second dismissal; the JSON-encoded key keeps them distinct.
+  const collapsed = normalizeOutcomeEvent({
+    finding_id: fid, kind: "dismissed", at: T,
+    reason: "forged-reasonx", provenance: "forge-thread",
+  });
+  assert.notEqual(shifted, null);
+  assert.notEqual(collapsed, null);
+  assert.notEqual(shifted!.reason, collapsed!.reason);
+  // Under a sanitizer that dropped the separators these two DISTINCT events
+  // would share one key and the merge would silently drop the second
+  // dismissal; the JSON-encoded `eventKey` keeps them distinct.
   const merged = deriveOutcomeEvents({
     postedIdentities: [],
     prior: [],
     priorHeadSha: null,
     currentHeadSha: HEAD_B,
     ...META,
-    priorLedger: [forgedAt!, plain!],
+    priorLedger: [shifted!, collapsed!],
   });
   assert.equal(merged.length, 2);
-  assert.deepEqual(merged.map((event) => event.reason), ["x", "forged-reason\u0000\u0000x"]);
+  assert.deepEqual(merged.map((event) => event.reason), ["forged-reason\u0000\u0000x", "forged-reasonx"]);
 });
 
 test("#1027 ACCEPTANCE FIXTURE: resolution and dislike never inflate adjudicated precision", () => {
@@ -665,6 +694,11 @@ test("#1027 ledger: fail-closed parse and stable round-trip", () => {
   assert.equal(parseOutcomeLedger(JSON.stringify({ ...ledger, schema: "finding-outcomes/v2" })), null);
   assert.equal(parseOutcomeLedger(JSON.stringify({ ...ledger, events: [{ finding_id: "nope" }] })), null);
   assert.equal(parseOutcomeLedger(JSON.stringify({ ...ledger, generated_at: "nope" })), null);
+  assert.equal(parseOutcomeLedger(JSON.stringify({ ...ledger, generated_at: `${AT}\u0000` })), null);
+  // #1151: a control-character `at` is a crafted, not merely unprovable,
+  // instant — the event is rejected, so it poisons the whole ledger here
+  // rather than persisting with a blanked instant.
+  assert.equal(parseOutcomeLedger(JSON.stringify({ ...ledger, events: [{ ...events[0], at: `${AT}\u0000` }] })), null);
   assert.equal(parseOutcomeLedger(""), null);
   // #1027: the serialized aggregate is never trusted. A tampered or stale one
   // is recomputed from the events the reader will actually see.

@@ -1486,8 +1486,12 @@ export async function publishReview(
   })());
 
   // Structured findings → inline comments (both review modes, when enabled).
+  // #589: on a platform WITHOUT a native review surface the built comments
+  // can never be published (there is no inline-comment API to carry them),
+  // so the whole build — and every read behind it — is skipped: the body
+  // compensation below is the only findings channel there.
   let inlineComments: NativeReviewComment[] = [];
-  if (input.mode !== "comment" && input.inlineFindings && input.findings !== undefined && input.findings !== null) {
+  if (nativeSurface.supported && input.mode !== "comment" && input.inlineFindings && input.findings !== undefined && input.findings !== null) {
     // #762/#1107: usefulness feedback from the prior run's published
     // prescriptions. Read immediately before the build and fail-open end to
     // end, so the published review is unchanged when the read is unsupported or
@@ -1607,8 +1611,20 @@ export async function publishReview(
     }
   }
 
-  const cleanupEnabled = input.mode !== "comment"
+  const cleanupRequested = input.mode !== "comment"
     && resolveCleanupFlag(input.cleanupPreviousNativeReviews, input.mode) === "true";
+  // #589: a platform that declares no native pull-review surface has no
+  // native reviews to dismiss, minimize, resolve threads for, or retire
+  // inline comments from — the managed top-level record's in-place update IS
+  // the replacement. Running the cleanup sweep there would only read empty
+  // native listings and emit misleading "superseded"/"no checkpoint"
+  // diagnostics, so the whole pass is skipped with ONE deterministic
+  // degradation note per publish run. The flag is still resolved above so an
+  // invalid value fails the same way on every platform.
+  const cleanupEnabled = cleanupRequested && nativeSurface.supported;
+  if (cleanupRequested && !nativeSurface.supported) {
+    messages.push(`NOTE: Skipping native review cleanup (dismissal, minimization, inline-comment retirement, review-thread resolution): ${surfaceReason}; the managed review record is updated in place`);
+  }
   const cleanupLog: CleanupLog = (line) => messages.push(line);
   let previousReviews: Awaited<ReturnType<PublishPlatformApi["listReviews"]>> = [];
   if (cleanupEnabled) {
@@ -2011,7 +2027,7 @@ export async function publishReview(
                   if (await stillCurrent()) {
                     const managedIds = await cleanupManagedReviews(api, input.prNumber, input.commentMarker, cleanupLog, [], olderManaged);
                     if (api.platform === "github") await resolveSupersededThreads(api, managedIds, cleanupLog);
-                    else messages.push("NOTE: Skipping review-thread resolution (platform=forgejo; no GraphQL API)");
+                    else messages.push(`NOTE: Skipping review-thread resolution (platform=${api.platform}; no GraphQL API)`);
                   }
                 } else {
                   // #1144: the checkpoint proves a newer managed publication

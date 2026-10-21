@@ -3,14 +3,14 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { validateContract } from "../config/contract.js";
 import { loadConfig } from "../config/load-config.js";
-import { commentBodyTriggersCommentCommand, eventLabelName, runPrecheck, type PrecheckOutput } from "../precheck/decide.js";
+import { commentBodyTriggersCommentCommand, eventLabelName, type PrecheckEvent } from "../precheck/decide.js";
 import { resolvePlatform } from "../platform/resolve.js";
 import { forgejoAncillaryWrite, forgejoApiBase } from "../platform/forgejo-ancillary.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
 import { repoScopedUrl } from "../platform/repo-ref.js";
 import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { stageEnvFromConfig } from "./env.js";
-import { buildAdapter, buildPublishApi, publishInputFromEnv, publishWith, readEvent, type StepEvent } from "./entrypoints.js";
+import { buildPublishApi, publishInputFromEnv, publishWith, readEvent, type StepEvent } from "./entrypoints.js";
 import { publishStepRuns } from "../publish/publish.js";
 import { rawInputsFromEnv, runReview } from "./review.js";
 import { createRunDir } from "./run-dir.js";
@@ -148,21 +148,46 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
     return 0;
   }
 
-  // ── Precheck ──────────────────────────────────────────────────────────
-  const precheckAdapter = buildAdapter(stage);
-  await precheckAdapter.preflightAuthentication?.();
-  const pre: PrecheckOutput = await runPrecheck({
-    env: stage as Record<string, string>,
-    adapter: precheckAdapter,
-    ...(event !== undefined ? { event: event as never } : {}),
+  // ── Review ────────────────────────────────────────────────────────────
+  // #726: the precheck/fingerprint DECISION now runs inside the engine as
+  // its admission stage — this adapter passes the received event through and
+  // supplies the between-stage side effect (the #914 ack reaction) via
+  // `onAdmission`, invoked after a passing admission and before any review
+  // stage. Event reception (and the comment-not-on-pr no-op above) stays
+  // host-owned.
+  const temp = env.RUNNER_TEMP || env.TMPDIR || "/tmp";
+  stage.CI_CHECKS_FILE = join(temp, "ci-checks-context.md");
+  const runDir = createRunDir(temp);
+  stage.PR_REVIEWER_RUN_DIR = runDir;
+  const review = await runReview({
+    env: stage as NodeJS.ProcessEnv,
+    runDir,
+    workspace: env.GITHUB_WORKSPACE ?? process.cwd(),
+    ...(event !== undefined ? { event: event as PrecheckEvent } : {}),
     ...(eventHeadSha !== undefined ? { eventHeadSha } : {}),
+    // #726 review: the three precheck outputs are written the moment
+    // admission passes — the old flow wrote them right after precheck, and a
+    // mid-review engine crash must still leave should-review behind for the
+    // gate consumers. The ack reaction follows; the skip path is unchanged
+    // (the host writes all outputs after the early return).
+    onAdmission: (admission) => {
+      writeOutputs(env, [
+        ["should-review", "true"],
+        ["skip-reason", ""],
+        ["diff-fingerprint", admission.diff_fingerprint],
+      ]);
+      return postAdmissionAckReaction(stage, event);
+    },
   });
+  // #726: the admission decision arrives on the result (both paths).
+  const pre = review.admission;
+
   writeOutputs(env, [
-    ["should-review", pre.should_review],
-    ["skip-reason", pre.skip_reason],
-    ["diff-fingerprint", pre.diff_fingerprint],
+    ["should-review", review.shouldReview ? "true" : "false"],
+    ["skip-reason", review.skipReason],
+    ["diff-fingerprint", review.diffFingerprint],
   ]);
-  if (pre.should_review !== "true") {
+  if (!review.shouldReview) {
     writeOutputs(env, [["verdict", pre.verdict], ["verdict-source", pre.verdict_source], ["review-result", pre.review_result], ["incomplete-reason", pre.incomplete_reason]]);
     // #903: this branch used to exit silently — outputs written, no log
     // line, no step summary — so a labeler-triggered skip showed the same
@@ -208,46 +233,20 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
     return failOnRequestChanges(stage, pre.verdict ?? "", pre.degradedGateBypass === true, (stage.FAIL_ON_DEGRADED_REVIEW ?? "false").toLowerCase() === "true", "", carriedPointer);
   }
 
-  // #914: an accepted comment-command re-review gets an immediate 👀 ack
-  // reaction on the triggering comment, BEFORE the (slow) review stage, so
-  // the commenter knows the run picked the command up. Best-effort: a
-  // failed reaction degrades to a log line, never a failed run.
-  if (pre.should_review === "true" && acceptedViaCommentCommand(stage, event)) {
-    const commentId = event?.comment?.id;
-    if (isUsableCommentId(commentId)) {
-      process.stderr.write(`[v3] posting re-review ack reaction on comment ${JSON.stringify(commentId)}\n`);
-      await postCommentAckReaction(stage, commentId).catch(() => undefined);
-    } else {
-      process.stderr.write(`[v3] re-review ack skipped: comment id ${JSON.stringify(commentId) ?? "null"}\n`);
-    }
-  }
-
-  // ── Review ────────────────────────────────────────────────────────────
-  stage.PLATFORM = pre.resolved_platform || stage.PLATFORM;
-  stage.FORGEJO_API_URL = pre.effective_forgejo_api_url;
-  stage.PR_HEAD_SHA = eventHeadSha || pre.head_sha;
-  // #885: the trusted base ref the review stage reads both repository config
-  // and the standards file from (never the PR head) — the same `pre.base_sha`
-  // precheck already resolved and that the publish stage below sends as
-  // `BASE_SHA`. Without this, the action path always ran `runReview` with an
-  // empty `PR_REVIEWER_BASE_REF`, silently dropping repository config and
-  // standards on every real run (only explicit-env callers like the `run`
-  // CLI subcommand or tests, which set it themselves, exercised either).
-  stage.PR_REVIEWER_BASE_REF = stage.PR_REVIEWER_BASE_REF || pre.base_sha || "";
-  stage.IS_FORK_PR = pre.is_fork_pr;
-  const temp = env.RUNNER_TEMP || env.TMPDIR || "/tmp";
-  stage.CI_CHECKS_FILE = join(temp, "ci-checks-context.md");
-  const runDir = createRunDir(temp);
-  stage.PR_REVIEWER_RUN_DIR = runDir;
-  const review = await runReview({ env: stage as NodeJS.ProcessEnv, runDir, workspace: env.GITHUB_WORKSPACE ?? process.cwd() });
-
   // ── Publish ───────────────────────────────────────────────────────────
   let publishFailed = false;
   if (shouldPublish(stage)) {
     const publishEnv: Env = {
       ...stage,
-      HEAD_SHA: stage.PR_HEAD_SHA,
+      // #726: the folded engine values — the reviewed head is the explicit
+      // pin (reviewedHeadSha, else the event's head or admission's resolved
+      // head), BASE_SHA/BROAD_FINGERPRINT are admission's, and IS_FORK_PR is
+      // the final fork flag the review stages ran with (publish's approval
+      // guardrail fails closed on an unknown fork state), exactly as the
+      // pre-#726 fold produced them.
+      HEAD_SHA: review.reviewedHeadSha || eventHeadSha || pre.head_sha,
       BASE_SHA: pre.base_sha,
+      IS_FORK_PR: review.isForkPr,
       BROAD_FINGERPRINT: pre.diff_fingerprint,
       VERDICT: review.outputs.verdict,
       REQUIRED_CHECKS: review.outputs.requiredChecks,
@@ -444,6 +443,23 @@ function acceptedViaCommentCommand(stage: Env, event: StepEvent | undefined): bo
     && typeof event.comment?.body === "string"
     && commentBodyTriggersCommentCommand(event.comment.body, (stage.REREVIEW_COMMAND ?? "").trim())
   );
+}
+
+/** #914: an accepted comment-command re-review gets an immediate 👀 ack
+ * reaction on the triggering comment, BEFORE the (slow) review stage, so the
+ * commenter knows the run picked the command up. Supplied to the engine as
+ * `onAdmission` (#726): invoked after a passing admission, before any review
+ * stage — the same ordering the in-process precheck path had. Best-effort: a
+ * failed reaction degrades to a log line, never a failed run. */
+async function postAdmissionAckReaction(stage: Env, event: StepEvent | undefined): Promise<void> {
+  if (!acceptedViaCommentCommand(stage, event)) return;
+  const commentId = event?.comment?.id;
+  if (isUsableCommentId(commentId)) {
+    process.stderr.write(`[v3] posting re-review ack reaction on comment ${JSON.stringify(commentId)}\n`);
+    await postCommentAckReaction(stage, commentId).catch(() => undefined);
+  } else {
+    process.stderr.write(`[v3] re-review ack skipped: comment id ${JSON.stringify(commentId) ?? "null"}\n`);
+  }
 }
 
 /** #914: a comment id that may safely appear in a URL path: a finite number

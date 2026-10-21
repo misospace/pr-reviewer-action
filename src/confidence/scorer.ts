@@ -65,6 +65,11 @@ export interface ConfidenceScorerInput {
    * proxies that only accept one field keep working. */
   tokensParam?: TokensParam;
   transport?: (input: ChatRequestInput) => Promise<ChatRequestOutcome>;
+  /** #726 (engine cancellation): caller-owned abort, propagated into the
+   * transport so an aborted run tears the scorer's in-flight provider
+   * request down instead of letting it run on. A `cancelled` transport
+   * failure degrades to unscored exactly like any other transport failure. */
+  signal?: AbortSignal;
   /** Every credential configured for this run, so thrown-transport and
    * transport-failure diagnostics mask the FULL lane set, not just the
    * scorer's own key and the primary's: a provider error body can echo any
@@ -163,6 +168,7 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
       anthropicVersion: "2023-06-01",
       requestTimeoutSec: profile.requestTimeoutSec,
       connectTimeoutSec: input.connectTimeoutSec,
+      ...(input.signal !== undefined ? { signal: input.signal } : {}),
     });
   } catch (cause: unknown) {
     // A thrown transport (should not happen — failures are typed) still

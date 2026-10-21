@@ -195,6 +195,9 @@ async function defaultSleep(seconds: number): Promise<void> {
  * `terminal` is the already-computed classification for this failure (the
  * caller passes it so a retryable failure's body is not parsed twice). */
 function isRetryableTransportFailure(failure: TransportFailure, terminal: TerminalProviderFailure | null): boolean {
+  // #726: a caller cancellation is terminal — never retry a request the
+  // operator (or the engine's cancellation scope) has already abandoned.
+  if (failure.kind === "cancelled") return false;
   if (terminal !== null) return false;
   if (failure.kind !== "http_status") return true;
   if (failure.status === undefined) return true;

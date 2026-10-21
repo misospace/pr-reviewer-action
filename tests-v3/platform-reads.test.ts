@@ -1052,19 +1052,32 @@ test("a resolved tangled platform builds the Tangled read adapter before fixture
 test("github publish issue-comment enumeration reports completeness (#1027)", async () => {
   const publish = (fetchImpl: FetchLike) => new GitHubPublishApi({ repo: "o/r", prNumber: "9", token: "Bearer t", fetchImpl });
   const comment = (id: number) => ({ id, body: `c${id}` });
-  // A full first page followed by a short page proves the enumeration ended.
-  const complete = recorder((url) => (url.searchParams.get("page") === "1"
-    ? json(Array.from({ length: 100 }, (_, index) => comment(index)))
+  const page = (from: number, count: number) => Array.from({ length: count }, (_, index) => comment(from + index));
+  const nextHeader = (url: string) => ({ link: `<${url}>; rel="next", <${url}>; rel="last"` });
+  const firstPage = "https://api.github.com/repos/o/r/issues/9/comments?per_page=100";
+
+  // Following the Link targets to their end proves the enumeration finished:
+  // a full first page carrying a next target, then a last page without one.
+  const complete = recorder((url) => (url.searchParams.get("page") === null
+    ? json(page(0, 100), 200, nextHeader(`${firstPage}&page=2`))
     : json([comment(100)])));
   const proven = await publish(complete.fetchImpl).listIssueCommentsResult();
   assert.equal(proven.complete, true);
   assert.equal(proven.comments.length, 101);
 
-  // Page 1 full, page 2 fails: the accumulated comments still come back, but
+  // #1121: the absence of a next target is the proof of the end — a final
+  // page that happens to be exactly full still completes.
+  const exactEnd = recorder(() => json(page(0, 100)));
+  const exact = await publish(exactEnd.fetchImpl).listIssueCommentsResult();
+  assert.equal(exact.complete, true);
+  assert.equal(exact.comments.length, 100);
+  assert.equal(exactEnd.seen.length, 1);
+
+  // The next page fails: the accumulated comments still come back, but
   // completeness is explicitly false — a newer comment may live on the page
   // that failed, which is what makes the old untyped list unsafe to read.
-  const truncated = recorder((url) => (url.searchParams.get("page") === "1"
-    ? json(Array.from({ length: 100 }, (_, index) => comment(index)))
+  const truncated = recorder((url) => (url.searchParams.get("page") === null
+    ? json(page(0, 100), 200, nextHeader(`${firstPage}&page=2`))
     : json({ message: "boom" }, 502)));
   const incomplete = await publish(truncated.fetchImpl).listIssueCommentsResult();
   assert.equal(incomplete.complete, false);
@@ -1072,26 +1085,65 @@ test("github publish issue-comment enumeration reports completeness (#1027)", as
   // The untyped read keeps its exact behavior: the same accumulated list.
   assert.deepEqual(await publish(truncated.fetchImpl).listIssueComments(), incomplete.comments);
 
-  // A THROWN page-2 request is the other truncation shape and must report the
-  // same thing — the boundary input is the transport failure itself, not a
-  // synthesized empty page.
+  // A THROWN next-page request is the other truncation shape and must report
+  // the same thing — the boundary input is the transport failure itself, not
+  // a synthesized empty page.
   const throwing = recorder((url) => {
     if (url.searchParams.get("page") === "2") throw new Error("page two unavailable");
-    return json(Array.from({ length: 100 }, (_, index) => comment(index)));
+    return json(page(0, 100), 200, nextHeader(`${firstPage}&page=2`));
   });
   const thrown = await publish(throwing.fetchImpl).listIssueCommentsResult();
   assert.equal(thrown.complete, false);
   assert.equal(thrown.comments.length, 100);
   assert.equal(throwing.seen.length, 2);
 
-  // Every page full means the enumeration never PROVED an end: the page cap
-  // is an incomplete read, so it fails closed rather than claiming the
-  // accumulated set is the whole set.
-  const neverEnds = recorder(() => json(Array.from({ length: 100 }, (_, index) => comment(index))));
+  // A non-array page is unusable, not a completed empty enumeration.
+  const malformed = recorder(() => json({ message: "not a list" }));
+  const bad = await publish(malformed.fetchImpl).listIssueCommentsResult();
+  assert.equal(bad.complete, false);
+  assert.deepEqual(bad.comments, []);
+
+  // #1121/#252: on THIS consumer the Link target is itself untrusted input
+  // (the precheck adapter pins its own version of these boundary tokens).
+  // A cross-origin next target never receives the token — the origin-bound
+  // transport refuses before fetching — and degrades the read to incomplete
+  // without ever requesting the hostile URL.
+  const crossOrigin = recorder((url) => (url.hostname === "evil.example"
+    ? json([])
+    : json(page(0, 100), 200, { link: `<https://evil.example/next>; rel="next"` })));
+  const poisoned = await publish(crossOrigin.fetchImpl).listIssueCommentsResult();
+  assert.equal(poisoned.complete, false);
+  assert.equal(poisoned.comments.length, 100);
+  assert.equal(crossOrigin.seen.length, 1, "the cross-origin Link target is never fetched");
+
+  // A syntactically unusable next target is the same failure shape: an
+  // unverifiable continuation proves no end.
+  const badTarget = recorder(() => json(page(0, 100), 200, { link: `<https://api.github.com:bad/x>; rel="next"` }));
+  const unresolved = await publish(badTarget.fetchImpl).listIssueCommentsResult();
+  assert.equal(unresolved.complete, false);
+  assert.equal(badTarget.seen.length, 1, "an unparseable target is rejected, not fetched");
+
+  // Every page full WITH a next target means the enumeration never PROVED
+  // an end: the page cap is an incomplete read, so it fails closed rather
+  // than claiming the accumulated set is the whole set.
+  const neverEnds = recorder(() => json(page(0, 100), 200, nextHeader(`${firstPage}&page=next`)));
   const capped = await publish(neverEnds.fetchImpl).listIssueCommentsResult();
   assert.equal(capped.complete, false);
-  assert.equal(capped.comments.length, 1000);
-  assert.equal(neverEnds.seen.length, 10);
+  assert.equal(capped.comments.length, 10_000);
+  assert.equal(neverEnds.seen.length, 100);
+
+  // #1121: the cap is the DEGRADE bound, not a completeness cliff — a PR
+  // past the old fixed 10-page loop's 1000-comment reach still enumerates
+  // to a proven end (the old loop reported every such PR as permanently
+  // incomplete, degrading every absence-reasoning reader forever).
+  const justPastTheOldCliff = recorder((url) => (url.searchParams.get("page") === null
+    ? json(page(0, 100), 200, nextHeader(`${firstPage}&page=2`))
+    : url.searchParams.get("page") === "2"
+      ? json(page(100, 100), 200, nextHeader(`${firstPage}&page=3`))
+      : json([comment(200)])));
+  const past = await publish(justPastTheOldCliff.fetchImpl).listIssueCommentsResult();
+  assert.equal(past.complete, true);
+  assert.equal(past.comments.length, 201);
 });
 
 // ── #1027: the Forgejo publish-side enumeration is fail-closed too ─────────
@@ -1119,4 +1171,115 @@ test("forgejo publish issue-comment enumeration reports completeness (#1027)", a
     assert.deepEqual(await forgejo(failing.fetchImpl).listIssueCommentsResult(), { complete: false, comments: [] });
     assert.deepEqual(await forgejo(failing.fetchImpl).listIssueComments(), []);
   }
+});
+
+// ── #1121: sticky upsert patch-target selection fails closed on an
+//    unproven issue-comment enumeration ──────────────────────────────────────
+
+test("#1121: github sticky upsert refuses to pick a patch target from a truncated enumeration", async () => {
+  const publish = (fetchImpl: FetchLike) => new GitHubPublishApi({ repo: "o/r", prNumber: "9", token: "Bearer t", fetchImpl });
+  const marker = "<!-- m -->";
+  const ownedSticky = { id: 7, body: `${marker}\nold`, updated_at: "2026-10-14T08:00:00Z", user: { login: "ci-bot" } };
+  const filler = (n: number) => ({ id: n, body: `human ${n}`, user: { login: "human" } });
+  const firstPage = "https://api.github.com/repos/o/r/issues/9/comments?per_page=100";
+  // The hostile input ITSELF: a full first page that already returned the
+  // owned sticky candidate, followed by a failed next page. The old code
+  // PATCHed the older sticky (or created a duplicate when the owned sticky
+  // lived past the truncation); the selection is a claim about absence, so
+  // an unproven enumeration must produce NO write and NO identity read.
+  for (const failing of [
+    recorder((url) => (url.searchParams.get("page") === null
+      ? json([ownedSticky, ...Array.from({ length: 99 }, (_, i) => filler(i))], 200, { link: `<${firstPage}&page=2>; rel="next"` })
+      : json({ message: "boom" }, 502))),
+    recorder((url) => {
+      if (url.searchParams.get("page") === "2") throw new Error("page two unavailable");
+      return json([ownedSticky, ...Array.from({ length: 99 }, (_, i) => filler(i))], 200, { link: `<${firstPage}&page=2>; rel="next"` });
+    }),
+  ]) {
+    const result = await publish(failing.fetchImpl).upsertStickyComment(marker, `${marker}\nnew`);
+    assert.equal(result.ok, false, "an incomplete enumeration never mutates");
+    assert.equal(result.created, false);
+    assert.ok(typeof result.error === "string" && result.error !== "", "the failure is reported, not silent");
+    assert.equal(failing.seen.filter((c) => c.method === "PATCH").length, 0, "no PATCH on a truncated enumeration");
+    assert.equal(failing.seen.filter((c) => c.method === "POST").length, 0, "no create on a truncated enumeration");
+    assert.equal(failing.seen.filter((c) => c.url === "https://api.github.com/graphql").length, 0,
+      "the identity read is skipped entirely — nothing can be authorized from a partial list");
+  }
+
+  // The duplicate-creation shape of the same hazard: partial pages that
+  // happen to contain NO marker comment would fall to the creation path and
+  // leave a second managed sticky alongside the real (unread) publication.
+  const noMarkerYet = recorder((url) => (url.searchParams.get("page") === null
+    ? json(Array.from({ length: 100 }, (_, i) => filler(i)), 200, { link: `<${firstPage}&page=2>; rel="next"` })
+    : json({ message: "boom" }, 502)));
+  const duplicate = await publish(noMarkerYet.fetchImpl).upsertStickyComment(marker, `${marker}\nnew`);
+  assert.equal(duplicate.ok, false);
+  assert.equal(noMarkerYet.seen.filter((c) => c.method === "POST").length, 0,
+    "absence of a marker in a PARTIAL list proves nothing — never create");
+
+  // Page-cap exhaustion is the third unproven shape.
+  const capped = recorder(() => json([ownedSticky, ...Array.from({ length: 99 }, (_, i) => filler(i))], 200, { link: `<${firstPage}&page=next>; rel="next"` }));
+  const capResult = await publish(capped.fetchImpl).upsertStickyComment(marker, `${marker}\nnew`);
+  assert.equal(capResult.ok, false);
+  assert.equal(capped.seen.filter((c) => c.method === "PATCH").length, 0);
+  assert.equal(capped.seen.filter((c) => c.method === "POST").length, 0);
+
+  // Positive control proving the check (mutation probe: dropping the
+  // completeness guard turns the failures above red, dropping the proof of
+  // the end turns this one red): a Link-followed enumeration that ENDS
+  // selects the newest owned marker exactly as before.
+  const proven = recorder((url, init) => {
+    if ((init?.method ?? "GET") === "PATCH") return json({ id: 8, updated_at: "2026-10-16T09:00:00Z" });
+    if (url.pathname === "/graphql") return json({ data: { viewer: { login: "ci-bot" } } });
+    if (url.searchParams.get("page") === null) {
+      return json([
+        { id: 3, body: `${marker}\ncontributor quote`, updated_at: "2026-10-16T10:00:00Z", user: { login: "contributor" } },
+        { id: 7, body: `${marker}\nolder`, updated_at: "2026-10-14T08:00:00Z", user: { login: "ci-bot" } },
+        ...Array.from({ length: 98 }, (_, i) => filler(i)),
+      ], 200, { link: `<${firstPage}&page=2>; rel="next"` });
+    }
+    return json([{ id: 8, body: `${marker}\nowned newest`, updated_at: "2026-10-15T09:00:00Z", user: { login: "ci-bot" } }]);
+  });
+  const patched = await publish(proven.fetchImpl).upsertStickyComment(marker, `${marker}\nnew`);
+  assert.deepEqual(patched, { ok: true, created: false, commentId: 8, updatedAt: "2026-10-16T09:00:00Z" });
+  assert.equal(proven.seen.filter((c) => c.method === "PATCH").length, 1);
+  assert.ok(proven.seen.some((c) => c.method === "PATCH" && c.url === "https://api.github.com/repos/o/r/issues/comments/8"),
+    "the newest OWNED marker wins across pages, the foreign newest is never touched");
+});
+
+test("#1121: forgejo sticky upsert stays fail closed when its strict enumeration read fails", async () => {
+  const forgejo = (fetchImpl: FetchLike) =>
+    new ForgejoPublishApi({ repo: "o/r", prNumber: "9", token: "t", baseUrl: "https://forge.example", fetchImpl });
+  const marker = "<!-- m -->";
+  const ownedSticky = { id: 7, body: `${marker}\nold`, updated_at: "2026-10-14T08:00:00Z", user: { login: "ci-bot" } };
+  // The same hostile input: the FIRST page already returned the owned
+  // candidate, the next page fails or throws. The strict reader throws rather
+  // than returning a partial list, and the upsert turns that into a reported
+  // failure — it never PATCHes the older sticky and never creates a duplicate.
+  // (The first page must be exactly full for the reader to reach the second.)
+  const firstFullPage = [ownedSticky, ...Array.from({ length: 49 }, (_, i) => ({ id: 100 + i, body: `human ${i}`, user: { login: "human" } }))];
+  for (const failing of [
+    recorder((url) => (url.searchParams.get("page") === "1"
+      ? json(firstFullPage)
+      : json({ message: "boom" }, 502))),
+    recorder((url) => {
+      if (url.searchParams.get("page") === "2") throw new Error("instance unreachable");
+      return json(firstFullPage);
+    }),
+  ]) {
+    const result = await forgejo(failing.fetchImpl).upsertStickyComment(marker, `${marker}\nnew`);
+    assert.equal(result.ok, false, "a failed strict enumeration never authorizes a mutation");
+    assert.equal(result.created, false);
+    assert.ok(typeof result.error === "string" && result.error !== "");
+    assert.equal(failing.seen.filter((c) => c.method === "PATCH").length, 0, "no PATCH on a failed enumeration");
+    assert.equal(failing.seen.filter((c) => c.method === "POST").length, 0, "no create on a failed enumeration");
+  }
+
+  // Pin the already-safe positive: a complete short enumeration still patches.
+  const ok = recorder((url) => (url.pathname.endsWith("/issues/comments/7")
+    ? json({ id: 7, updated_at: "2026-10-16T09:00:00Z" })
+    : json([ownedSticky])));
+  assert.deepEqual(await forgejo(ok.fetchImpl).upsertStickyComment(marker, `${marker}\nnew`), {
+    ok: true, created: false, commentId: 7, updatedAt: "2026-10-16T09:00:00Z",
+  });
 });

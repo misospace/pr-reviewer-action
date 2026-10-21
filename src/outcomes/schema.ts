@@ -114,6 +114,16 @@ export function isProvenHeadSha(value: unknown): value is string {
   return typeof value === "string" && HEAD_SHA_RE.test(value);
 }
 const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T/;
+// #1151: `ISO_TIMESTAMP_RE` is an unanchored prefix and `Date.parse` tolerates
+// trailing control characters (NUL is not JS whitespace, so `trim` leaves it),
+// so without this guard "…T00:00:00Z\u0000" persists verbatim and two events
+// for the SAME instant persist as distinct strings. Reject any control
+// character outright — the persisted field must be canonical. A legitimate
+// seam can never emit a control-bearing instant, parseable or not, so the
+// whole EVENT fails closed rather than surviving as a sanitized observation:
+// stricter than the bare canonicality rule, deliberately, because a hostile
+// value that reaches this field did not arrive by accident.
+const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f]/;
 
 function boundedText(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;
@@ -128,7 +138,7 @@ function isoTimestamp(value: unknown): string | null {
   // Date.parse alone accepts far too much ("0" parses as 2000-01-01); an
   // event's instant must look like an ISO-8601 timestamp before the parse
   // result is trusted.
-  if (text === "" || !ISO_TIMESTAMP_RE.test(text) || Number.isNaN(Date.parse(text))) return null;
+  if (text === "" || CONTROL_CHARS_RE.test(text) || !ISO_TIMESTAMP_RE.test(text) || Number.isNaN(Date.parse(text))) return null;
   return text;
 }
 
@@ -146,6 +156,13 @@ export function normalizeOutcomeEvent(raw: unknown): OutcomeEvent | null {
   const kind = rec.kind as OutcomeEventKind;
   if (typeof rec.provenance !== "string" || !PROVENANCES.has(rec.provenance as OutcomeProvenance)) return null;
   if (KIND_PROVENANCE[kind] !== rec.provenance) return null;
+  // #1151 acceptance: a control character anywhere in `at` — parseable or
+  // not — is a crafted value no legitimate seam emits, so the EVENT fails
+  // closed; nulling the field would keep the hostile observation in the
+  // ledger. This is distinct from an ordinary unparseable `at` (no control characters), which is an unprovable instant
+  // and normalizes to null while the event survives. Tested on the TRIMMED
+  // value so real JS whitespace padding (itself C0) stays canonical.
+  if (typeof rec.at === "string" && CONTROL_CHARS_RE.test(rec.at.trim())) return null;
   const headSha = isProvenHeadSha(rec.head_sha) ? rec.head_sha : null;
   const event: OutcomeEvent = {
     finding_id: rec.finding_id,

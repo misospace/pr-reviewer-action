@@ -150,6 +150,9 @@ export interface ImageTransportOptions {
   githubToken?: string;
   /** Whole-request bound in ms (curl `--max-time`). */
   maxTimeMs?: number;
+  /** #726 (engine cancellation): caller-owned abort, composed with the
+   * whole-request deadline so both keep their own semantics. */
+  signal?: AbortSignal;
 }
 
 /** The production `HttpJson` for image provenance. */
@@ -173,7 +176,9 @@ export function createImageHttpJson(options: ImageTransportOptions = {}): HttpJs
     if (!Object.keys(outgoing).some((key) => key.toLowerCase() === "user-agent")) outgoing["User-Agent"] = USER_AGENT;
     if (options.githubToken && url.startsWith(GITHUB_PREFIX)) outgoing.Authorization = `Bearer ${options.githubToken}`;
 
-    const signal = AbortSignal.timeout(maxTimeMs);
+    const signal = options.signal !== undefined
+      ? AbortSignal.any([AbortSignal.timeout(maxTimeMs), options.signal])
+      : AbortSignal.timeout(maxTimeMs);
     let current = new URL(url);
     let response: Response;
     for (let redirects = 0; ; redirects += 1) {

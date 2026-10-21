@@ -194,6 +194,11 @@ export interface PrecheckSpec {
   /** Injected Linear collector for the selection signature (tests;
    * production uses the real GraphQL adapter). */
   linearCollect?: typeof import("./linear.js").collectFromPr | undefined;
+  /** Explicit sink for precheck's legacy stderr diagnostics. Omitted, the
+   * lines go to process.stderr exactly as before (the standalone precheck
+   * entrypoint); the engine's admission stage injects its error sink so a
+   * host-owned output boundary is never bypassed via process streams. */
+  diagnostics?: ((line: string) => void) | undefined;
 }
 
 export interface PrecheckOutput {
@@ -299,6 +304,7 @@ async function selectAuthenticatedManagedBody(
   reviews: readonly ManagedReview[],
   publishMode: string,
   commentMarker: string,
+  diagnostics: (line: string) => void,
 ): Promise<string> {
   const marker = commentMarker || "<!-- ai-pr-reviewer -->";
   const mode = (publishMode ?? "").toLowerCase();
@@ -323,7 +329,7 @@ async function selectAuthenticatedManagedBody(
       : { identity: { kind: "login", login: identity }, reason: "user-login" };
   }
   if (resolution.identity === null || (resolution.identity.kind === "login" && resolution.identity.login.trim() === "")) {
-    process.stderr.write(
+    diagnostics(
       `warning: could not authenticate the action's own forge identity on ${adapter.platform} (reason: ${resolution.reason}); refusing to skip or carry a verdict from an unauthenticated managed body (fail closed)\n`,
     );
     return "";
@@ -386,6 +392,7 @@ function platformOutputs(base: Partial<PrecheckOutput>, resolvedPlatform: string
  * surface, or throws where the v2 shell exits nonzero (missing inputs,
  * unsupported platform, Forgejo permission refusal). */
 export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
+  const diagnostics = spec.diagnostics ?? ((line: string): void => { process.stderr.write(line); });
   const env = spec.env;
   const repo = env.REPO ?? "";
   const prNumber = env.PR_NUMBER ?? "";
@@ -589,7 +596,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
       );
     }
     forceReview = true;
-    process.stderr.write(
+    diagnostics(
       `[precheck] ${command} comment command accepted from ${JSON.stringify(commenter)}: forcing a fresh review\n`,
     );
   }
@@ -607,7 +614,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
     spec.adapter.listIssueComments(),
     spec.adapter.listPrReviews(),
   ]);
-  const lastCommentBody = await selectAuthenticatedManagedBody(spec.adapter, comments, reviews, publishMode, commentMarker);
+  const lastCommentBody = await selectAuthenticatedManagedBody(spec.adapter, comments, reviews, publishMode, commentMarker, diagnostics);
   const storedFingerprint = extractStoredFingerprint(lastCommentBody);
   const previousFingerprints = storedFingerprint ? [storedFingerprint] : [];
 
@@ -629,12 +636,12 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
       // match a stored marker forces a fresh review.
       configEnv.PRECHECK_SELECTION_SIGNATURE =
         `unavailable-${process.pid}-${Date.now()}-${Math.floor(Math.random() * 32768)}`;
-      process.stderr.write(
+      diagnostics(
         "warning: deep_review=auto could not determine every selection input; forcing a fresh review (stale-skip disabled for this run)\n",
       );
     }
     if (error) {
-      process.stderr.write(`build_selection_fingerprint: ${error}\n`);
+      diagnostics(`build_selection_fingerprint: ${error}\n`);
     }
   }
 
@@ -653,7 +660,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
       : { contentFingerprint: "", warnings: ["trusted base revision unavailable; repository skills disabled"] };
     configEnv.REPOSITORY_SKILLS_FINGERPRINT = skills.contentFingerprint || "unavailable";
     if (skills.warnings.length > 0) {
-      process.stderr.write(`[precheck] WARNING: ${skills.warnings.join("; ")}\n`);
+      diagnostics(`[precheck] WARNING: ${skills.warnings.join("; ")}\n`);
     }
   }
   const configLines = collectConfigLines(configEnv);
@@ -695,7 +702,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
           // none→success/failure/pending is exactly the transition that
           // must re-open the review.
           if (headSha === "" || storedCiState === "") {
-            process.stderr.write(
+            diagnostics(
               "warning: carried request_changes marker lacks " + (headSha === "" ? "head_sha" : "ci_state") + "; forcing a fresh review (fail closed)\n",
             );
             return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "ci-stale-carried-verdict");
@@ -706,7 +713,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
           // verdict-relevant input cannot be proven unchanged — review
           // afresh.
           if (live === null || live !== storedCiState) {
-            process.stderr.write(
+            diagnostics(
               "warning: carried request_changes is CI-stale (stored: " + storedCiState + ", live: " + (live ?? "unknown") + "); forcing a fresh review\n",
             );
             return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "ci-stale-carried-verdict");

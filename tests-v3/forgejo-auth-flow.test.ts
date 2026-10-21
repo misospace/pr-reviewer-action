@@ -6,7 +6,7 @@ import { forgejoAncillaryWrite, forgejoApiBase } from "../src/platform/forgejo-a
 import { ForgejoPublishApi } from "../src/platform/publish-api.js";
 import { ForgejoAdapter } from "../src/platform/forgejo.js";
 import type { FetchLike } from "../src/platform/http.js";
-import { buildAdapter, buildPublishApi, precheckMain } from "../src/run/entrypoints.js";
+import { buildAdapter, buildPublishApi } from "../src/run/entrypoints.js";
 import { buildPlatformReadAdapter } from "../src/run/platform.js";
 import { runPrecheck } from "../src/precheck/decide.js";
 import {
@@ -99,7 +99,6 @@ test("missing OIDC on a fork cannot fall back to either runner token", async (t)
   try {
     const stage = { ...integrationStage(), IS_FORK_PR: "true" };
     await assert.rejects(actionMain({ ...integrationInputs(), IS_FORK_PR: "true" }), /requires ACTIONS_ID_TOKEN_REQUEST_URL/);
-    await assert.rejects(precheckMain(stage), /requires ACTIONS_ID_TOKEN_REQUEST_URL/);
     assert.equal(await buildAdapter(stage).getPr(), null);
     const { api } = buildPublishApi(stage);
     assert.deepEqual(await api.createReview({ body: "review", event: "COMMENT", comments: [] }), {
