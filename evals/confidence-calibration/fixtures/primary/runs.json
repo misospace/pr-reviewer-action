@@ -1,5 +1,5 @@
 {
-  "_readme": "SYNTHETIC pilot fixtures for the confidence-scorer calibration pilot (#1074). Every entry here is a fabricated review of a fabricated PR: nothing in this tree was produced by a real review run, and no id matches any corpus id. They exist so `scripts/confidence_calibration.py score` and `report` can be exercised offline through the production bridge. Provenance stays honest by construction: rows produced from this index are marked source=fixture.",
+  "_readme": "SYNTHETIC pilot fixtures for the confidence-scorer calibration pilot (#1074). Every entry here is a fabricated review of a fabricated PR: nothing in this tree was produced by a real review run, and no id matches any corpus id. They exist so `scripts/confidence_calibration.py score` and `report` can be exercised offline through the production bridge. Provenance stays honest by construction: rows produced from this index are marked source=fixture. Every entry also pins a fabricated synthetic base_sha so the production proof-pin gate (#1155) resolves and the offline flow exercises anchored scoring end to end.",
   "mode": "tools_off",
   "work_dir": ".",
   "synthetic": true,
@@ -10,6 +10,7 @@
       "synthetic": true,
       "repo_full_name": "synthetic/pilot-fixture",
       "head_sha": "000000000000000000000000000000000000000a",
+      "base_sha": "0000000000000000000000000000000000000001",
       "title": "synthetic: add widget config helper",
       "defect": {
         "description": "SYNTHETIC defect: the config helper resolves relative paths against cwd instead of the repo root, so scheduled runs silently no-op (availability).",
@@ -27,6 +28,7 @@
       "synthetic": true,
       "repo_full_name": "synthetic/pilot-fixture",
       "head_sha": "000000000000000000000000000000000000000b",
+      "base_sha": "0000000000000000000000000000000000000002",
       "title": "synthetic: refactor auth token cache",
       "defect": {
         "description": "SYNTHETIC defect: the token cache serializes live credentials into a world-readable temp file on every refresh.",
@@ -44,6 +46,7 @@
       "synthetic": true,
       "repo_full_name": "synthetic/pilot-fixture",
       "head_sha": "000000000000000000000000000000000000000c",
+      "base_sha": "0000000000000000000000000000000000000003",
       "title": "synthetic: queue worker retry policy",
       "defect": {
         "description": "SYNTHETIC defect: the retry loop can spin forever when the queue broker reports transient loss, wedging the worker pool (availability).",
@@ -61,6 +64,7 @@
       "synthetic": true,
       "repo_full_name": "synthetic/pilot-fixture",
       "head_sha": "000000000000000000000000000000000000000d",
+      "base_sha": "0000000000000000000000000000000000000004",
       "title": "synthetic: docs typo sweep",
       "run_dir": "runs/pilot-synth-flip",
       "ok": true,
@@ -72,6 +76,7 @@
       "synthetic": true,
       "repo_full_name": "synthetic/pilot-fixture",
       "head_sha": "000000000000000000000000000000000000000e",
+      "base_sha": "0000000000000000000000000000000000000005",
       "title": "synthetic: bump dev dependency",
       "run_dir": "runs/pilot-synth-unscored",
       "ok": true,
@@ -83,6 +88,7 @@
       "synthetic": true,
       "repo_full_name": "synthetic/pilot-fixture",
       "head_sha": "000000000000000000000000000000000000000f",
+      "base_sha": "0000000000000000000000000000000000000006",
       "run_dir": "runs/pilot-synth-errored",
       "ok": false,
       "error": "synthetic fixture: review process exited 1 (fabricated error, no artifacts written)"
@@ -93,6 +99,7 @@
       "synthetic": true,
       "repo_full_name": "synthetic/pilot-fixture",
       "head_sha": "0000000000000000000000000000000000000010",
+      "base_sha": "0000000000000000000000000000000000000007",
       "run_dir": "runs/pilot-synth-missing",
       "ok": true,
       "error": null

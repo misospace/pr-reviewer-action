@@ -366,11 +366,19 @@ def _run_bridge(subcommand: str, request: dict[str, Any], work_dir: Path) -> dic
     return parsed
 
 
-def build_prompt_via_bridge(request: dict[str, Any], work_dir: Path) -> dict[str, str]:
+def build_prompt_via_bridge(request: dict[str, Any], work_dir: Path) -> dict[str, Any]:
     result = _run_bridge("build-prompt", request, work_dir)
     if not (isinstance(result.get("system"), str) and isinstance(result.get("user"), str)):
         raise RuntimeError("bridge build-prompt returned no system/user strings")
-    return {"system": result["system"], "user": result["user"]}
+    unresolved_pins = result.get("unresolvedPins")
+    if not isinstance(unresolved_pins, list) or not all(isinstance(pin, str) for pin in unresolved_pins):
+        # The bridge bundles production's ONE pin predicate
+        # (`unresolvedConfidencePins`, src/confidence/prompt.ts, emitted as
+        # the production camelCase field); a result without it is a
+        # bridge-contract violation and fails closed at the call site rather
+        # than risking an unanchored scorer call.
+        raise RuntimeError("bridge build-prompt returned no unresolvedPins list")
+    return {"system": result["system"], "user": result["user"], "unresolved_pins": unresolved_pins}
 
 
 def apply_score_via_bridge(
@@ -1172,6 +1180,24 @@ def cmd_score(args: argparse.Namespace) -> int:
                     rows.append(row)
                     continue
                 row["prompt_bytes"] = len((prompt["system"] + "\n" + prompt["user"]).encode("utf-8"))
+                # Production parity (src/engine/review.ts, #1155): a
+                # non-empty unresolved-pins list means the score would grade
+                # content this run cannot identify — the run fails to
+                # `unscored` WITHOUT calling the model. The predicate is the
+                # bridge's own production `unresolvedConfidencePins` output,
+                # so gate and rendered `unknown` markers cannot diverge. No
+                # wire attempt is recorded: the ceiling bounds real provider
+                # calls, and this row made none.
+                if prompt["unresolved_pins"]:
+                    pins = ", ".join(prompt["unresolved_pins"])
+                    row["scorer"] = unscored_row("incomplete_proof_context", "")
+                    _write_audit(
+                        audit_file,
+                        prompt["system"], prompt["user"], "",
+                        note=f"unscored cause: incomplete_proof_context (unresolved pins: {pins})",
+                    )
+                    rows.append(row)
+                    continue
                 raw_answer = ""
                 cause: str | None = None
                 model_name = ""

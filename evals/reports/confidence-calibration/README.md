@@ -175,6 +175,28 @@ before any consumer reads it. Keys travel only in HTTP auth headers; values
 are never printed. Redirects are refused, not followed. One call per row, no
 retries; quota exhaustion is recorded `unscored`, never swept.
 
+**Proof-pin anchoring (production parity, #1155).** The driver applies the
+runtime's own gate: the bridge returns production's
+`unresolvedConfidencePins` verdict with every prompt, and a row whose
+`head_sha` / `base_sha` / `review_result` pin did not resolve is recorded
+`unscored` with cause `incomplete_proof_context` — **zero wire attempts,
+zero budget consumed** — instead of letting the model grade content the run
+cannot identify. This matters for the live run: `evals/corpus-real-prs.json`
+entries currently pin `head_sha` but **not** `base_sha`, so until the
+sampled entries anchor their diff base, every corpus row fails
+closed to `incomplete_proof_context` and a live sweep over the unmodified
+corpus produces no scores — by construction and at zero wire cost, never an
+unanchored score. (The pre-flight `planned_calls` arithmetic counts planned
+live rows before the gate, so at an exact ceiling edge a carried-spend
+re-run may still refuse exit 3 — the conservative direction, and free
+either way.) Anchoring is bounded follow-up data work: the eval-harness
+corpus loader already accepts and validates a full-40-hex `base_sha` field
+(`scripts/eval_harness.py`), though the pilot driver itself checks only
+non-emptiness, matching production's emptiness predicate. The synthetic
+fixture index pins a fabricated `base_sha`
+per entry precisely so the offline flow exercises anchored scoring end to
+end.
+
 ## Limits and unknowns
 
 - No live inference yet: every quality number above is pending. The
@@ -207,5 +229,9 @@ retries; quota exhaustion is recorded `unscored`, never swept.
   mask set.
 - Clean-corpus entries have no titles/categories, so the claimed domain mix
   of the clean half is unknown until checkout.
+- Real-corpus anchoring: sampled entries do not yet pin `base_sha`, so the
+  live quality columns additionally require the corpus anchoring follow-up
+  above; the gate makes the gap explicit (`incomplete_proof_context`) rather
+  than silently scoring unanchored prompts.
 - Adjudication of novel-concern candidates against the known bug is manual
   (`eval_adjudicate.py` style), not automated.

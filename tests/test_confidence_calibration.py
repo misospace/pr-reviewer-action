@@ -178,9 +178,27 @@ def build_prompt_payload() -> dict:
 
 def test_bridge_build_prompt_wraps_untrusted_envelopes(tmp_path: Path) -> None:
     prompt = build_prompt_via_bridge(build_prompt_payload(), tmp_path)
-    assert set(prompt) == {"system", "user"}
+    assert set(prompt) == {"system", "user", "unresolved_pins"}
+    # A fully pinned payload resolves production's ONE pin predicate.
+    assert prompt["unresolved_pins"] == []
     for kind in ("coverage_claim", "pr_title", "pr_body", "diff", "findings", "review_summary"):
         assert f'<untrusted_review_content kind="{kind}"' in prompt["user"], kind
+
+
+def test_bridge_surfaces_unresolved_pins(tmp_path: Path) -> None:
+    # The bridge bundles production's `unresolvedConfidencePins` (#1155): an
+    # empty required pin is surfaced to the caller, never silently rendered
+    # as a plausible-looking value.
+    payload = build_prompt_payload()
+    del payload["base_sha"]
+    prompt = build_prompt_via_bridge(payload, tmp_path)
+    assert prompt["unresolved_pins"] == ["base_sha"]
+    assert "Base SHA: unknown" in prompt["user"]
+    payload = build_prompt_payload()
+    payload["head_sha"] = ""
+    payload["review_result"] = ""
+    prompt = build_prompt_via_bridge(payload, tmp_path)
+    assert prompt["unresolved_pins"] == ["head_sha", "review_result"]
 
 
 def test_bridge_masks_configured_secret_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -489,6 +507,74 @@ def test_mock_pilot_unscored_rows_never_enter_denominators(mock_pilot: dict) -> 
     assert "pilot-synth-errored" not in eligible_ids
     assert "pilot-synth-missing" not in eligible_ids
     assert "pilot-synth-unscored" not in eligible_ids
+
+
+def test_unresolved_proof_pins_fail_closed_without_wire_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Production parity (#1155, src/engine/review.ts): a required proof pin
+    # that did not resolve means NO scorer call — the run fails to
+    # `unscored` (`incomplete_proof_context`) instead of letting the model
+    # grade content it cannot identify. Regression pin for the AI review on
+    # b03ac30: the bridge's unresolvedPins output must gate the wire, and an
+    # unanchored entry (no base_sha) must never spend budget.
+    runs_dir = fixture_runs_dir_copy(tmp_path)
+    index = runs_dir / "runs.json"
+    payload = json.loads(index.read_text(encoding="utf-8"))
+    for entry in payload["entries"]:
+        entry.pop("base_sha", None)
+    index.write_text(json.dumps(payload), encoding="utf-8")
+
+    pilot = LoopbackProvider(lambda _handler: (200, OPENAI_OK))
+    server, base_url = serve(pilot)
+    for name, value in live_env(base_url).items():
+        monkeypatch.setenv(name, value)
+    try:
+        results_path = tmp_path / "results.json"
+        rc = run_cmd("score", [
+            "--plan", str(live_plan(tmp_path)),
+            "--runs-dir", str(runs_dir),
+            "--out", str(results_path),
+            "--condition", "same-model",
+            "--repeat", "1",
+            "--allow-missing-corpus-entry",
+        ])
+        assert rc == 0
+        results = json.loads(results_path.read_text(encoding="utf-8"))
+        # ZERO provider calls: the gate fires before the wire for every row.
+        assert pilot.requests == []
+        for row in results["rows"]:
+            if row["evidence_state"] == "primary_ok":
+                assert row["scorer"] == {
+                    "status": "unscored", "score": None, "risk": "unknown",
+                    "reason": "", "concerns": [], "model": "",
+                    "cause": "incomplete_proof_context", "caps": [],
+                }
+                assert row["wire_attempts"] == 0
+                assert row["prompt_bytes"] is not None
+        # The audit trail names the machine tokens, never fabricated pins.
+        audit = (runs_dir / "audit" / "pilot-synth-alpha" / "same-model-r0.txt").read_text(encoding="utf-8")
+        assert "unscored cause: incomplete_proof_context (unresolved pins: base_sha)" in audit
+        assert "Base SHA: unknown" in audit
+        # Unscored rows never enter green/clean denominators.
+        assert not [row for row in results["rows"] if green_eligible(row)]
+        # Zero wire spend is visible in the persisted counters too.
+        assert results["lifetime_wire_calls"] == 0
+        assert results["carried_wire_calls"] == 0
+    finally:
+        server.shutdown()
+
+
+def test_bridge_prompt_missing_unresolved_pins_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A bridge result without the unresolved_pins list is a bridge-contract
+    # violation: build_prompt_via_bridge raises, and the call site fails the
+    # row closed instead of scoring an unverifiable prompt. Every malformed
+    # shape fails closed the same way.
+    for bad in ({"system": "s", "user": "u"}, {"system": "s", "user": "u", "unresolvedPins": "base_sha"},
+                {"system": "s", "user": "u", "unresolvedPins": ["base_sha", 7]}):
+        monkeypatch.setattr(confidence_calibration, "_run_bridge", lambda _s, _r, _d, bad=bad: bad)
+        with pytest.raises(RuntimeError, match="unresolvedPins"):
+            build_prompt_via_bridge(build_prompt_payload(), tmp_path)
 
 
 def test_score_requires_corpus_entry_by_default(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
