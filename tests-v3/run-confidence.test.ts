@@ -30,6 +30,7 @@ function mockPlatform(prBody = ""): PlatformReadAdapter {
         number: 7,
         title: "Update README",
         body: prBody,
+        draft: false,
         head: { sha: "a".repeat(40), ref: "feature" },
         base: { ref: "main" },
         user: { login: "someone" },

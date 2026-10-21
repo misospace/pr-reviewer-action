@@ -260,6 +260,27 @@ test("scored maps to the integer as a string", () => {
 });
 
 // ── auth isolation + wire behaviour ──────────────────────────────────────
+test("#726: the scorer propagates the caller's cancellation signal into its transport call", async () => {
+  const controller = new AbortController();
+  const seen: Array<AbortSignal | undefined> = [];
+  const outcome = await runConfidenceScorer({
+    profile: profile(),
+    primaryApiKey: "primary-key-ABC",
+    prompt: { system: "s", user: "u" },
+    connectTimeoutSec: 5,
+    transport: async (chatInput) => {
+      seen.push(chatInput.signal);
+      throw new Error("transport saw the signal");
+    },
+    findings: [],
+    coverage: {},
+    signal: controller.signal,
+  });
+  assert.equal(seen.length, 1, "exactly one transport call");
+  assert.equal(seen[0], controller.signal, "the caller's abort rides the transport input");
+  assert.equal(outcome.result.status, "unscored");
+  assert.equal(outcome.result.cause, "transport_error");
+});
 
 test("distinct non-loopback URL with no key refuses before any transport call", async () => {
   let called = false;

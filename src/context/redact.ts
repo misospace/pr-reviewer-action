@@ -11,6 +11,25 @@ import { committedSourceProvenance, sanitizedSourceProvenance } from "./evidence
 
 const REDACTED = "[REDACTED]";
 
+/** Secret key-name vocabulary: ONE alternation behind every key-name rule in
+ * this module — the flat generic `key=value` masker below (#1170 derives it
+ * from this constant instead of copying it), the PR-artifact rules here
+ * (#1154) and the source-safe rules further down (#876). A single source of
+ * truth is load-bearing: a name one rule protects and another silently
+ * forgets is an unmasked credential nobody notices.
+ *
+ * `private[_-]?key` and `client[_-]?key` joined in #1170: unlike
+ * `client_secret`/`refresh_token` (which match through `secret`/`token`)
+ * they carried no alternative at all, and `private_key: |` / `client_key: |`
+ * is exactly how a PEM key or certificate ships in YAML. The optional
+ * separator matches the compound spellings (`privateKey`, `client-key`) the
+ * same way every other alternative does; the shared 8-character value floor
+ * and the functional name test bound the over-redaction, and the module's
+ * stated preference — over-redaction beats a leaked credential (#1154) —
+ * applies to these names unchanged. */
+export const SECRET_KEY_ALTERNATION =
+  "api[_-]?key|token|password|secret|access[_-]?key|auth[_-]?token|private[_-]?key|client[_-]?key";
+
 // In application order. Each pattern replaces every occurrence; later
 // patterns see the already-redacted text.
 const MASKERS: readonly RegExp[] = [
@@ -20,8 +39,19 @@ const MASKERS: readonly RegExp[] = [
   // Bearer / Basic auth headers and inline tokens
   /Bearer\s+[A-Za-z0-9._-]{20,}/gi,
   /Basic\s+[A-Za-z0-9+/=]{20,}/gi,
-  // Generic key=value / key: value patterns (logs, env dumps, configs)
-  /(api[_-]?key|token|password|secret|access[_-]?key|auth[_-]?token)\s*[:=]\s*['"]?[^\s'"]{8,}/gi,
+  // Generic key=value / key: value patterns (logs, env dumps, configs).
+  // Derived from SECRET_KEY_ALTERNATION (#1170): this entry long predates the
+  // constant (#675) and carried a hardcoded copy of it, so widening the
+  // vocabulary silently left the flat pass behind — exactly the drift the
+  // constant's comment calls unmaskable. The interpolation keeps the old
+  // alternatives and their order, so content matching only pre-#1170 names
+  // masks exactly as before; the new names are pure added coverage, and where
+  // one starts EARLIER than an old alternative in the same compound it only
+  // moves the match start left — more masked, never less. This entry also
+  // stays the only generic `key=value` shape: a quote-aware variant here
+  // would corrupt the serialized JSON this pass masks before `JSON.parse`
+  // (#1157 round 6).
+  new RegExp(`(${SECRET_KEY_ALTERNATION})\\s*[:=]\\s*['"]?[^\\s'"]{8,}`, "gi"),
   // AWS-style access keys
   /AKIA[0-9A-Z]{16}/g,
   // OpenAI-style provider keys (`sk-`, `sk-proj-`, `sk-ant-…`, `sk-or-v1-…`).
@@ -35,13 +65,6 @@ const MASKERS: readonly RegExp[] = [
   // old (server|username|...) form destroyed ordinary `server:` YAML context)
   /(password|client-certificate-data|client-key-data|certificate-authority-data|bearer[_-]?token)\s*:\s*\S+/gi,
 ];
-
-// Secret key-name vocabulary: ONE alternation behind every key-name rule in
-// this module — the PR-artifact rules here (#1154) and the source-safe rules
-// further down (#876). A single source of truth is load-bearing: a name one
-// rule protects and another silently forgets is an unmasked credential nobody
-// notices.
-const SECRET_KEY_ALTERNATION = "api[_-]?key|token|password|secret|access[_-]?key|auth[_-]?token";
 
 /** Unanchored, case-insensitive key-NAME test (#1154), over that vocabulary:
  * the alternative may sit anywhere in the name, so `client_secret`,
@@ -251,13 +274,14 @@ function indentOf(content: string): number {
  * deeper-indent requirement, and `redactDiffText` handles its own headers
  * before a line reaches this function. A header test here was dead code.
  *
- * True residuals, all consequences of the preference above rather than gaps in
- * it: a DEEPER-indented non-credential block is masked; a diff judges each of
- * its two sides with its OWN state (see `redactDiffText`), so a run opened on
- * one side never colours the other; and a key name outside the frozen
- * vocabulary (`client_key`, `private_key` — neither carries an alternative in
- * `SECRET_KEY_ALTERNATION`) opens no run at all, so a block scalar under one of
- * those names survives while the same document under `password:` does not.
+  * True residuals, all consequences of the preference above rather than gaps in
+  * it: a DEEPER-indented non-credential block is masked; a diff judges each of
+  * its two sides with its OWN state (see `redactDiffText`), so a run opened on
+  * one side never colours the other; and a key name carrying NO alternative in
+  * `SECRET_KEY_ALTERNATION` (e.g. `ssh_key`) opens no run at all, so a block
+  * scalar under it survives while the same document under `password:` does not
+  * — joining the vocabulary is a deliberate decision point (#1170 folded in
+  * `client_key`/`private_key`, the shapes this comment previously recorded).
  *
  * The rule's own bound leaves two more shapes unmasked, and the bound is
  * deliberate (generalizing it to "any remainder" would swallow the code block

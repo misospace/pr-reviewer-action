@@ -442,7 +442,11 @@ test("source reads bind to the committed tree, never the working tree (#1015 reg
   // calls. The wrapper is byte-exact in args/cwd, so the bytes the masker
   // sees are the literal bytes of the committed tree.
   const directRunProcess = async (options: any): Promise<any> => {
-    const r = cp.spawnSync(options.file, options.args ?? [], { cwd: options.cwd, env: options.env, encoding: "buffer" });
+    // The caller's env is the tool env (empty in these fixtures), not the
+    // process environment. Production never merges process.env at spawn —
+    // PATH arrives via the buildChildEnv allowlist — so this fixture merge
+    // stands in for "the allowlisted env would have contained PATH".
+    const r = cp.spawnSync(options.file, options.args ?? [], { cwd: options.cwd, env: { ...process.env, ...options.env }, encoding: "buffer" });
     return {
       status: r.error ? "spawn_error" : "exited",
       exitCode: r.status ?? null,
@@ -589,3 +593,59 @@ test("source-bound tool executors stay forge-agnostic (#1015 / fork privilege se
     assert.ok(!source.includes(token), `executors.ts must not reference fork-specific token: ${token}`);
   }
 });
+
+test("#726: a caller cancellation reaches the tool subprocess and fetch seams", () => fixture(async (root) => {
+  // (a) processOutput carries the context signal into the process options.
+  const controller = new AbortController();
+  let seenSignal: AbortSignal | undefined;
+  const seamCtx = ctx(root, {
+    signal: controller.signal,
+    deps: { env: {}, runProcess: (async (o: any) => { seenSignal = o.signal; return { status: "exited", exitCode: 0, stdout: Buffer.from("ok"), stderr: Buffer.from(""), termination: null }; }) as any },
+  });
+  await runCommand("git_status_short", seamCtx);
+  assert.equal(seenSignal, controller.signal, "the subprocess options carry the caller's cancellation signal");
+
+  // (b) Real seam: a pre-aborted signal refuses the launch (fail-closed) and
+  // degrades to an ordinary tool error, never a hang.
+  const abortedCtx = ctx(root, { signal: AbortSignal.abort(), deps: { env: {} } as any });
+  const res = await runCommand("git_status_short", abortedCtx);
+  assert.equal(typeof res.error, "string");
+  assert.notEqual(res.error, "", "a cancelled tool call surfaces as a tool error");
+
+  // (c) The tool fetch seam receives the signal for web_fetch.
+  let fetchSignal: AbortSignal | undefined;
+  const webCtx = ctx(root, {
+    allowedHosts: ["example.com"],
+    signal: controller.signal,
+    deps: { env: {}, fetch: (async (_url: string, init: any) => { fetchSignal = init.signal; return { status: 200, body: "ok" }; }) as any },
+  });
+  const web = await webFetch("http://example.com/x", webCtx);
+  assert.equal(web.content, "ok");
+  assert.equal(fetchSignal, controller.signal, "the web fetch init carries the caller's signal");
+
+  // (d) defaultFetch composes the caller abort with the per-request timeout:
+  // the abort REASON the fetch's signal carries must be the caller's, and it
+  // must arrive without waiting for the per-call timeout (guarded, so a
+  // reverted composition fails the assertion instead of hanging the suite).
+  const caller = new AbortController();
+  const marker = "caller-cancel-marker";
+  const originalFetch = globalThis.fetch;
+  let initSignal: AbortSignal | undefined;
+  (globalThis as any).fetch = async (_url: string, init: any) => {
+    initSignal = init.signal;
+    await new Promise<never>((_resolve, reject) => {
+      init.signal.addEventListener("abort", () => reject(new Error(`aborted reason=${String((init.signal as AbortSignal).reason?.message ?? "none")}`)), { once: true });
+    });
+    throw new Error("unreachable");
+  };
+  try {
+    const depsOnly = ctx(root, { allowedHosts: ["example.com"], signal: caller.signal, deps: { env: {} } as any });
+    const pending = webFetch("http://example.com/x", depsOnly);
+    caller.abort(new Error(marker));
+    const outcome = await Promise.race([pending, new Promise<{ error: string }>((resolve) => setTimeout(() => resolve({ error: "__guard__" }), 2000))]);
+    assert.match(String(outcome.error), new RegExp(marker), "the default fetch carries the caller's cancellation, not just its own timeout");
+    assert.ok(initSignal !== undefined && initSignal.aborted);
+  } finally {
+    (globalThis as any).fetch = originalFetch;
+  }
+}));
