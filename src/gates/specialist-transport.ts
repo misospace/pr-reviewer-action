@@ -109,7 +109,7 @@ function credentialIdentity(apiKey: string): string {
   // computational-effort property the query protects does not apply here —
   // a slow KDF would only add per-request latency without protecting
   // anything this digest cannot already leak (lane identity).
-  // codeql[js/sha-password] -- lane cache key, not a stored/verified password hash
+  // codeql[js/insufficient-password-hash] -- lane cache key, not a stored/verified password hash
   return apiKey === "" ? "unauthenticated" : createHash("sha256").update(apiKey).digest("hex").slice(0, 16);
 }
 
