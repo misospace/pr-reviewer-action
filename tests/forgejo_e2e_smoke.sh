@@ -235,7 +235,7 @@ git clone -q "$FORGEJO_API_URL/reviewer/sample.git" "$WORK"
       }
     }' > "$TMPDIR/engine-request.json"
   ADMISSION_LOG="$(node "$ROOT_DIR/dist/index.js" engine --request "$TMPDIR/engine-request.json" 2>&1)"
-  grep -q 'precheck: skipped (superseded-head)' <<<"$ADMISSION_LOG"
+  grep -qF 'precheck: skipped (superseded-head)' <<<"$ADMISSION_LOG"
 
   export PR_HEAD_SHA="$HEAD_SHA"
   export GITHUB_OUTPUT="$TMPDIR/ci.out"
