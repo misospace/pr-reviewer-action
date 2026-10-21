@@ -1003,6 +1003,45 @@ def test_review_carries_prior_spend_from_runs_json(
     assert payload["lifetime_primary_reviews"] == 28
 
 
+def test_review_carry_ignores_not_run_fillers_against_persisted_counter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression pin (#1182 review): a prior sweep that exhausted the
+    # wall-time budget records `not_run: budget_exhausted` fillers that never
+    # reached the provider. The persisted lifetime counter is the authority;
+    # fillers must not inflate carry (max with the entry count would refuse
+    # later runs the ceiling allows and permanently inflate the counter).
+    harness = _install_fake_harness(monkeypatch)
+    work_dir = tmp_path / "w"
+    work_dir.mkdir()
+    prior = {
+        "mode": "tools_off",
+        "work_dir": str(work_dir),
+        "lifetime_primary_reviews": 5,
+        "entries": [
+            {"pr_id": f"spent-{i}", "kind": "clean", "run_dir": None, "ok": True, "error": None}
+            for i in range(5)
+        ] + [
+            {"pr_id": f"filler-{i}", "kind": "clean", "run_dir": None, "ok": False,
+             "error": "not_run: budget_exhausted"}
+            for i in range(11)
+        ],
+    }
+    (work_dir / "runs.json").write_text(json.dumps(prior), encoding="utf-8")
+    # carried 5 (not 16 entries) + planned 16 <= 21: allowed despite fillers.
+    assert run_cmd("review", [
+        "--plan", str(review_plan(tmp_path, max_primary_reviews=21)), "--work-dir", str(work_dir),
+    ]) == 0
+    assert len(harness.calls) == 16
+    payload = json.loads((work_dir / "runs.json").read_text(encoding="utf-8"))
+    assert payload["lifetime_primary_reviews"] == 21
+    # And the lifetime rule still holds afterwards: 21 + 16 > 36 refuses.
+    assert run_cmd("review", [
+        "--plan", str(review_plan(tmp_path, max_primary_reviews=36)), "--work-dir", str(work_dir),
+    ]) == 3
+    assert len(harness.calls) == 16  # zero new harness/model calls
+
+
 def test_review_prior_runs_json_accounting_edge_cases(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

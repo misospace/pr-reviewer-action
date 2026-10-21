@@ -583,10 +583,15 @@ def cmd_review(args: argparse.Namespace) -> int:
     # harness attempt against a real provider, so a re-run pointed at a work
     # dir that already holds a prior sweep must refuse BEFORE any provider
     # call once carried spend plus this sweep would exceed
-    # max_primary_reviews. The carried count is the persisted monotone
-    # lifetime counter when present (a rewrite replaces entries; the counter
-    # never shrinks), falling back to the entry count for pre-counter files.
-    # An unreadable existing runs.json fails closed, never treated as zero.
+    # max_primary_reviews. The carried count is the larger of the persisted
+    # monotone lifetime counter (a rewrite replaces entries; the counter
+    # never shrinks) and the count of real attempts in entries, which covers
+    # pre-counter files. Only the persisted counter is trusted alone against
+    # ``not_run: budget_exhausted`` fillers: those never reached the
+    # provider, so counting them would permanently inflate carry via the next
+    # persist and refuse runs the ceiling actually allows. Structurally
+    # broken entry records still count as spend (fail closed). An unreadable
+    # existing runs.json fails closed, never treated as zero.
     work_dir = Path(args.work_dir).resolve()
     runs_path = work_dir / "runs.json"
     carried_primary_reviews = 0
@@ -609,7 +614,11 @@ def cmd_review(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return EXIT_BUDGET_ABORT
-        carried_primary_reviews = max(len(prior["entries"]), prior_counter)
+        attempted_prior = sum(
+            1 for entry in prior["entries"]
+            if not isinstance(entry, dict) or not str(entry.get("error") or "").startswith("not_run")
+        )
+        carried_primary_reviews = max(attempted_prior, prior_counter)
     if carried_primary_reviews + len(samples) > ceilings["max_primary_reviews"]:
         print(
             f"review aborted: {carried_primary_reviews} already-spent primary reviews "
