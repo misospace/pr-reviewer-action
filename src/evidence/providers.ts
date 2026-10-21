@@ -150,6 +150,10 @@ export interface RunEvidenceProviderOptions {
   clock?: () => number;
   /** Diagnostic sink (v2: the logging module's stderr fallback). */
   log?: (line: string) => void;
+  /** #726 (engine cancellation): caller-owned abort bound to the provider
+   * subprocess — refused at launch after an abort, whole-tree terminated
+   * mid-flight, exactly like every other owned child. */
+  signal?: AbortSignal;
 }
 
 export function normalizeSeverity(value: unknown): ProviderSeverity {
@@ -378,6 +382,7 @@ export async function runEvidenceProvider(
       ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
       timeoutMs: Math.min(timeoutSec * 1000, MAX_TIMER_MS),
       maxOutputBytes: captureCap,
+      ...(options.signal !== undefined ? { signal: options.signal } : {}),
     });
   } catch (error) {
     throw new PyUncaughtError("OSError", error instanceof Error ? error.message : String(error));

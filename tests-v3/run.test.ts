@@ -28,6 +28,7 @@ function mockPlatform(options: { diff?: string; files?: unknown[]; title?: strin
         number: 7,
         title: options.title ?? "Update README",
         body: options.body ?? "",
+        draft: false,
         head: { sha: "a".repeat(40), ref: "feature" },
         base: { ref: "main" },
         user: { login: "someone" },
@@ -3647,6 +3648,9 @@ test("#846 security review: a one-character or three-character configured API ke
           "ai-primary-retries": "1",
           "ai-primary-retry-delay-sec": "0",
           "on-model-failure": "fail",
+          // #726: admission now runs first; keep the unrelated deep_review=auto
+          // warning out of the error-sink corpus this masking gate inspects.
+          "deep-review": "false",
         },
         runDir,
         workspace: runDir,
@@ -5448,5 +5452,30 @@ test("#1043 review: repository-skills-applied.json resets on reused run dirs", a
     await server.close();
     cleanup();
     rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("#726: harnessTransportAdapter binds the run's cancellation signal to every turn", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ id: "c", choices: [{ message: { content: "x" }, finish_reason: "stop" }] }));
+  });
+  try {
+    // Pre-aborted signal: the turn never reaches the endpoint and fails with
+    // the cancellation, exactly as the loop would see it after an abort.
+    const cancelled = harnessTransportAdapter({} as StageEnv, AbortSignal.abort());
+    await assert.rejects(
+      () => cancelled(server.url, "openai", { model: "m", stream: false, messages: [] }, "k", 5),
+      (error: unknown) => error instanceof Error && /cancelled/.test(error.message),
+    );
+    assert.equal(server.requests.length, 0, "a cancelled harness turn never reaches the endpoint");
+    // No signal: unchanged behavior, the request goes out.
+    const live = harnessTransportAdapter({} as StageEnv);
+    const response = await live(server.url, "openai", { model: "m", stream: false, messages: [] }, "k", 5);
+    assert.ok(response !== null && typeof response === "object");
+    assert.equal(server.requests.length, 1);
+  } finally {
+    await server.close();
   }
 });

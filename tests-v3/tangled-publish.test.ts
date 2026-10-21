@@ -4,7 +4,7 @@ import { TANGLED_MANAGED_REVIEW_COLLECTION, TangledPublishApi } from "../src/pla
 import { TangledAtprotoClient } from "../src/platform/tangled-atproto.js";
 import type { FetchLike } from "../src/platform/http.js";
 import type { TangledContext } from "../src/platform/tangled.js";
-import type { NativeReviewRequest } from "../src/platform/publish-api.js";
+import type { ManagedInlineCommentRef, NativeReviewRequest, PublishReviewRef, ThreadQueryResult } from "../src/platform/publish-api.js";
 import { publishReview, type PublishInput } from "../src/publish/publish.js";
 
 /**
@@ -459,6 +459,12 @@ test("platform id, degraded ops, and getHeadSha", async () => {
     alreadyRequestedTeams: [],
     error: "reviewer requests are not supported on Tangled",
   });
+  // #589: author-side superseded-review deletion is DECLARED unsupported with
+  // a reason (a stated degradation, not an untyped gap), and no delete
+  // operation exists to call.
+  assert.equal(api.supersededReviewDeletion.supported, false);
+  assert.ok((api.supersededReviewDeletion.reason ?? "").length > 0, "the degradation carries a reason");
+  assert.equal(typeof (api as unknown as { deleteSupersededReview?: unknown }).deleteSupersededReview, "undefined");
 
   // #588: the launch-time sourceSha is NEVER the current head — the
   // publication-boundary re-check must compare against a FRESH read.
@@ -542,9 +548,45 @@ const FINDINGS = [{ file: "a.ts", line: 2, severity: "major", message: "A findin
  * assert that NO native review was created. */
 class RecordingTangledApi extends TangledPublishApi {
   nativeCalls = 0;
+  /** #589: every native-review cleanup operation (listing, dismissal,
+   * minimization, inline retirement, thread resolution). A Tangled publish
+   * must never touch any of them. */
+  cleanupCalls = 0;
   override async createReview(request: NativeReviewRequest): Promise<{ ok: boolean; error?: string }> {
     this.nativeCalls += 1;
     return super.createReview(request);
+  }
+  override async listReviews(): Promise<PublishReviewRef[]> {
+    this.cleanupCalls += 1;
+    return super.listReviews();
+  }
+  override async listManagedInlineComments(reviewIds: readonly string[]): Promise<{ supported: boolean; complete: boolean; comments: ManagedInlineCommentRef[] }> {
+    this.cleanupCalls += 1;
+    return super.listManagedInlineComments(reviewIds);
+  }
+  override async retireInlineComment(reviewId: string, commentId: string): Promise<boolean> {
+    this.cleanupCalls += 1;
+    return super.retireInlineComment(reviewId, commentId);
+  }
+  override async dismissReview(reviewId: number | string, message: string): Promise<boolean> {
+    this.cleanupCalls += 1;
+    return super.dismissReview(reviewId, message);
+  }
+  override async minimizedReviewIds(): Promise<string[]> {
+    this.cleanupCalls += 1;
+    return super.minimizedReviewIds();
+  }
+  override async minimizeReview(nodeId: string): Promise<boolean> {
+    this.cleanupCalls += 1;
+    return super.minimizeReview(nodeId);
+  }
+  override async unresolvedSupersededThreads(managedIds: number[]): Promise<ThreadQueryResult> {
+    this.cleanupCalls += 1;
+    return super.unresolvedSupersededThreads(managedIds);
+  }
+  override async resolveThread(threadId: string): Promise<boolean> {
+    this.cleanupCalls += 1;
+    return super.resolveThread(threadId);
   }
 }
 
@@ -917,4 +959,104 @@ test("#588: a failing or empty current-head read fails closed (null)", async () 
 
   const wrongType = makePublishApi(client, {}, async () => 42 as unknown as string);
   assert.equal(await wrongType.api.getHeadSha(), null);
+});
+
+// ── #589: capability gating — no native-review cleanup pass on Tangled ────
+
+/**
+ * #589: with no native review surface there are no native reviews to
+ * dismiss, minimize, retire inline comments from, or resolve threads for,
+ * and the managed record is updated in place, so nothing goes stale. The
+ * cleanup-enabled default (auto/on for the review modes) must therefore skip
+ * the whole sweep with exactly ONE deterministic note, make ZERO native
+ * operations, and never emit the misleading empty-listing warnings the
+ * native cleanup path produces.
+ */
+
+test("#589: a cleanup-enabled review_verdict run skips the native cleanup sweep with one note and zero native operations", async () => {
+  const { client, calls } = makeStub({ did: SESSION_DID });
+  const { api } = makePublishApi(client, {}, async () => HEAD_SHA);
+
+  const result = await publishReview(
+    publishInput({ mode: "review_verdict", verdict: "request_changes", cleanupPreviousNativeReviews: "true" }),
+    api,
+    { diffText: "" },
+  );
+
+  assert.equal(result.status, "published");
+  assert.equal(api.nativeCalls, 0, "no native review may be created on Tangled");
+  assert.equal(api.cleanupCalls, 0, "the cleanup sweep must make zero native review operations on Tangled");
+  const notes = result.messages.filter((m) => m.includes("Skipping native review cleanup"));
+  assert.equal(notes.length, 1, `exactly one degradation note, got: ${JSON.stringify(result.messages)}`);
+  assert.ok(notes[0]?.includes("Tangled has no native pull-review surface"), "the note names the platform-declared reason");
+  assert.ok(!result.messages.some((m) => m.includes("A newer review superseded this run")), "no misleading supersession warning from empty native listings");
+  assert.ok(!result.messages.some((m) => m.includes("No replacement checkpoint")), "the managed record stays the replacement checkpoint");
+  assert.ok(!result.messages.some((m) => m.includes("platform=forgejo")), "no forgejo-worded diagnostic under Tangled");
+  assert.equal(calls.created.length, 1, "the managed record is still published exactly once");
+});
+
+test("#589: a cleanup-enabled review_comment run with inline findings enabled skips the sweep and the inline build", async () => {
+  const { client, calls } = makeStub({ did: SESSION_DID });
+  const { api } = makePublishApi(client, {}, async () => HEAD_SHA);
+
+  const result = await publishReview(
+    publishInput({ mode: "review_comment", inlineFindings: true, findings: FINDINGS, cleanupPreviousNativeReviews: "auto" }),
+    api,
+    // A diff IS available, so on a native platform the feedback read and the
+    // inline build would run; with no native surface they must not even
+    // start — the findings reach the body instead.
+    { diffText: DIFF },
+  );
+
+  assert.equal(result.status, "published");
+  assert.equal(api.nativeCalls, 0);
+  assert.equal(api.cleanupCalls, 0, "no inline-comment enumeration or cleanup operation may run on Tangled");
+  assert.equal(result.messages.filter((m) => m.includes("Skipping native review cleanup")).length, 1);
+  assert.ok(
+    result.messages.some((m) => m.includes("finding(s) were published in the review body instead of as native review comments")),
+    "the body-compensation note still fires",
+  );
+  assert.ok(createdBody(calls).includes("A finding"), "the finding is published in the managed record body");
+});
+
+test("#589: a cleanup-enabled review_blockers run skips the sweep with the same single note", async () => {
+  const { client, calls } = makeStub({ did: SESSION_DID });
+  const { api } = makePublishApi(client, {}, async () => HEAD_SHA);
+
+  const result = await publishReview(
+    publishInput({ mode: "review_blockers", verdict: "request_changes", cleanupPreviousNativeReviews: "auto" }),
+    api,
+    { diffText: "" },
+  );
+
+  assert.equal(result.status, "published");
+  assert.equal(api.nativeCalls, 0);
+  assert.equal(api.cleanupCalls, 0, "cleanup is auto-ON for review_blockers too, and must be skipped with zero native operations");
+  assert.equal(result.messages.filter((m) => m.includes("Skipping native review cleanup")).length, 1);
+  assert.equal(calls.created.length, 1);
+});
+
+test("#589: comment mode never requests native cleanup, so no degradation note is emitted", async () => {
+  const { client } = makeStub({ did: SESSION_DID });
+  const { api } = makePublishApi(client, {}, async () => HEAD_SHA);
+
+  const result = await publishReview(publishInput({ mode: "comment" }), api, { diffText: "" });
+
+  assert.equal(result.status, "published");
+  assert.equal(api.cleanupCalls, 0);
+  assert.ok(!result.messages.some((m) => m.includes("Skipping native review cleanup")), "nothing was requested, so nothing is reported as skipped");
+});
+
+test("#589: an invalid cleanup flag fails the same way on Tangled as on a native platform", async () => {
+  const { client } = makeStub({ did: SESSION_DID });
+  const { api } = makePublishApi(client, {}, async () => HEAD_SHA);
+
+  await assert.rejects(
+    () => publishReview(
+      publishInput({ mode: "review_verdict", verdict: "approve", cleanupPreviousNativeReviews: "maybe" }),
+      api,
+      { diffText: "" },
+    ),
+    /Invalid cleanup_previous_native_reviews value/,
+  );
 });

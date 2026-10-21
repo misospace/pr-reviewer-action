@@ -39,6 +39,7 @@ function mockPlatform(
         number: 7,
         title: "Update README",
         body: prBody,
+        draft: false,
         head: { ...(headSha === null ? {} : { sha: headSha }), ref: "feature" },
         base: { ...(baseSha === null ? {} : { sha: baseSha }), ref: "main" },
         user: { login: "someone" },

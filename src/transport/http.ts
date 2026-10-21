@@ -40,7 +40,11 @@ export type TransportFailureKind =
   | "request_timeout"
   | "network"
   | "http_status"
-  | "response_too_large";
+  | "response_too_large"
+  // #726: the caller's own cancellation AbortSignal fired (#725 worker
+  // lifecycle). Distinct from a timeout so retry/fallback policy never treats
+  // an operator cancellation as a transient upstream hiccup.
+  | "cancelled";
 
 /**
  * Finite response-byte ceiling for model calls (#745). The timeout bounds
@@ -222,6 +226,12 @@ export interface HttpCallInput {
    * Node's request-time header check; absent/empty keeps the outbound headers
    * byte-for-byte unchanged. */
   extraHeaders?: Readonly<Record<string, string>>;
+  /** #726 (engine cancellation): caller-owned abort. An already-aborted
+   * signal rejects with a `cancelled` failure before any socket opens; an
+   * abort mid-flight tears the socket down and rejects the same way.
+   * Distinct from connect/request timeouts, which are transport-owned
+   * deadlines. */
+  signal?: AbortSignal;
 }
 
 export interface HttpCallResult {
@@ -245,6 +255,11 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
   const secure = url.protocol === "https:";
   const transport = secure ? https : http;
   const maxResponseBytes = input.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+  // #726: one cancellation shape for "already aborted" and "aborts later",
+  // so callers classify both the same way.
+  const cancelledFailure = (): TransportFailure =>
+    new TransportFailure("cancelled", "model request cancelled");
+  if (input.signal?.aborted) return Promise.reject(cancelledFailure());
 
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (input.apiFormat === "anthropic") {
@@ -268,12 +283,16 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
     let requestTimer: NodeJS.Timeout | null = null;
     let timedOut = false;
     let connectTimedOut = false;
+    let cancelListener: (() => void) | null = null;
 
     const settle = (fn: () => void): void => {
       if (settled) return;
       settled = true;
       if (connectTimer) clearTimeout(connectTimer);
       if (requestTimer) clearTimeout(requestTimer);
+      // #726: no abort listener survives a settled call on a long-lived
+      // caller signal (a worker runs many requests on one scope).
+      if (cancelListener) input.signal?.removeEventListener("abort", cancelListener);
       fn();
     };
 
@@ -347,6 +366,21 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
         response.on("error", (error: unknown) => settle(() => reject(classifySocketError(error))));
       },
     );
+
+    // #726: the caller's cancellation tears the socket down and latches the
+    // typed rejection. Destroyed without a synthetic error, mirroring the
+    // oversize path: settle() has already latched, so the resulting socket
+    // events no-op. AbortSignal does not replay an abort to listeners added
+    // later, so the post-registration check covers an abort landing between
+    // the entry check and here.
+    if (input.signal) {
+      cancelListener = (): void => {
+        settle(() => reject(cancelledFailure()));
+        request.destroy();
+      };
+      input.signal.addEventListener("abort", cancelListener, { once: true });
+      if (input.signal.aborted) cancelListener();
+    }
 
     request.on("socket", (socket) => {
       // Connect phase: bound by connectTimeoutSec, cleared once the

@@ -1556,6 +1556,10 @@ export interface HarnessDeps {
   /** Remove an artifact (the verdict response unlink path). */
   deleteArtifact?(name: string): void;
   transport: HarnessTransport;
+  /** #726 (engine cancellation): the run's cancellation signal. The native
+   * loop's tool subprocesses and HTTP fetches bind to it (via ToolContext),
+   * so an aborted run stops launching and running tool work. */
+  signal?: AbortSignal;
   timeFn?: () => number;
   /** Diagnostics sink (v2 writes to stderr). */
   log?: (line: string) => void;
@@ -1866,6 +1870,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       cwd: input.workspaceRoot,
       env: env as NodeJS.ProcessEnv,
       timeoutMs: 15000,
+      ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
     }).result;
     if (listed.status === "exited" && listed.exitCode === 0) {
       trackedIndex = buildTrackedIndex(listed.stdout.toString("utf8"));
@@ -1887,6 +1892,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       cwd: input.workspaceRoot,
       env: env as NodeJS.ProcessEnv,
       timeoutMs: 15000,
+      ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
     }).result;
     if (head.status === "exited" && head.exitCode === 0) {
       const sha = head.stdout.toString("utf8").trim();
@@ -1922,6 +1928,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     searchUrl,
     maxSearchResults,
     sourceRevision,
+    ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
     deps: { env: env as NodeJS.ProcessEnv },
   };
 

@@ -88,6 +88,8 @@ export interface EvidenceRunOptions {
   log?: (line: string) => void;
   /** Test seam: replace the per-provider executor. */
   runProvider?: (provider: unknown, options: RunEvidenceProviderOptions) => Promise<EvidenceProviderEntry>;
+  /** #726 (engine cancellation): bound to every provider subprocess. */
+  signal?: AbortSignal;
 }
 
 /** `head_tail_cap`: keep the head (60%) and the tail, UTF-8 safe
@@ -242,6 +244,7 @@ export async function runEvidenceProviders(options: EvidenceRunOptions): Promise
       cwd,
       ...(options.clock ? { clock: options.clock } : {}),
       ...(options.log ? { log: options.log } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
     });
   let entries: EvidenceProviderEntry[];
   if (indexed.length <= 1 || parallelism <= 1) {

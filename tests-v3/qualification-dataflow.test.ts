@@ -390,12 +390,28 @@ test("linear-composite-precheck: non-auto modes never invoke the Linear builder,
   assert.deepEqual(state.calls, []);
 });
 
-test("linear-composite-precheck: the action entry binds the Linear key onto the precheck stage before running it", () => {
-  const source = readFileSync("src/run/action.ts", "utf8");
-  assert.ok(source.includes("const stage: Env = { ...env, ...stageEnvFromConfig(config) };"));
-  assert.ok(source.includes('stage.LINEAR_API_KEY_CONFIGURED = stage.LINEAR_API_KEY ? "true" : "false";'));
-  assert.ok(source.indexOf("actionStageEnv(env)") < source.indexOf("await runPrecheck("));
-  assert.ok(source.includes("env: stage as Record<string, string>"));
+test("linear-composite-precheck: the engine admission stage binds the Linear key onto the precheck stage before running it", () => {
+  // #726: the precheck/fingerprint decision moved into the engine's
+  // admission stage. The dataflow pin moves with it: the pre-admission stage
+  // env (which projects the config carrying the step-bound Linear key) is
+  // built BEFORE runPrecheck is invoked, admission is the engine's FIRST
+  // stage (it precedes repository-config resolution, which needs the base
+  // ref admission resolves), and the Action adapter passes the received
+  // event through to the engine instead of running precheck itself.
+  const admission = readFileSync("src/engine/admission.ts", "utf8");
+  assert.ok(admission.includes("stageEnvFromConfig(config)"));
+  assert.ok(admission.includes("LINEAR_API_KEY_CONFIGURED"));
+  assert.ok(admission.indexOf("LINEAR_API_KEY") < admission.indexOf("runPrecheck("));
+  assert.ok(admission.includes("env: admissionStageEnv(contract, request, workspace)"));
+  const engine = readFileSync("src/engine/review.ts", "utf8");
+  assert.ok(
+    engine.indexOf("await runEngineAdmission(") < engine.indexOf("resolveRepositoryConfig(contract, raw"),
+    "admission must run before repository-config resolution",
+  );
+  const action = readFileSync("src/run/action.ts", "utf8");
+  assert.ok(action.includes("event: event as PrecheckEvent"));
+  assert.ok(action.includes("onAdmission:"));
+  assert.ok(!action.includes("await runPrecheck("), "the Action adapter no longer runs precheck directly");
 });
 
 // ── corpus-evidence-and-broken-arrow (#662) ───────────────────────────────

@@ -83,7 +83,7 @@ export type GhGetResponse = { status: number; body: string };
  */
 export type ToolDeps = {
   env: NodeJS.ProcessEnv;
-  fetch?: (url: string, init: { headers: Record<string, string>; timeoutMs: number; method?: string; body?: string; redirect?: "manual" }) => Promise<NetworkResponse>;
+  fetch?: (url: string, init: { headers: Record<string, string>; timeoutMs: number; method?: string; body?: string; redirect?: "manual"; signal?: AbortSignal }) => Promise<NetworkResponse>;
   ghGet?: (url: string, headers: Record<string, string>, timeoutMs: number) => Promise<GhGetResponse>;
   runProcess?: (options: Parameters<typeof runProcess>[0]) => Promise<ProcessResult>;
 };
@@ -133,6 +133,11 @@ export type ToolContext = {
    * (the PR head SHA). `null` means "not an exact revision" — a branch or
    * default-branch read — and is carried through provenance unchanged. */
   sourceRevision?: string | null;
+  /** #726 (engine cancellation): the run's cancellation signal. A tool
+   * subprocess launched after an abort is refused fail-closed by `runProcess`,
+   * an in-flight one is terminated, and tool HTTP fetches reject — every
+   * path degrades to an ordinary tool-error result, never a hang. */
+  signal?: AbortSignal;
   deps: ToolDeps;
 };
 
@@ -194,13 +199,18 @@ const REVISION_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const defaultFetch: NonNullable<ToolDeps["fetch"]> = async (url, init) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), init.timeoutMs);
+  // #726: the caller's cancellation composes with the per-request timeout —
+  // both keep their own semantics, either one rejects the fetch.
+  const fetchSignal = init.signal !== undefined
+    ? AbortSignal.any([controller.signal, init.signal])
+    : controller.signal;
   try {
     const response = await fetch(url, {
       method: init.method ?? "GET",
       headers: init.headers,
       ...(init.body !== undefined ? { body: init.body } : {}),
       redirect: init.redirect ?? "follow",
-      signal: controller.signal,
+      signal: fetchSignal,
     });
     return {
       status: response.status,
@@ -222,6 +232,7 @@ const processOutput = async (ctx: ToolContext, argv: readonly string[], timeout:
     cwd: ctx.workspaceRoot,
     env: ctx.deps.env,
     timeoutMs: timeout * 1000,
+    ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
   };
   if (ctx.deps.runProcess) return ctx.deps.runProcess(options);
   return runProcess(options).result;
@@ -1007,6 +1018,7 @@ export async function webFetch(url: string, ctx: ToolContext): Promise<Obj> {
         headers: { "User-Agent": USER_AGENT },
         timeoutMs: (ctx.requestTimeout ?? 25) * 1000,
         redirect: "manual",
+        ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
       });
     } catch (e) {
       return { error: String(e) };
@@ -1046,6 +1058,7 @@ export async function webSearch(query: string, ctx: ToolContext): Promise<Obj> {
     const res = await (ctx.deps.fetch ?? defaultFetch)(full, {
       headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
       timeoutMs: (ctx.requestTimeout ?? 20) * 1000,
+      ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
     });
     // urllib semantics: a non-2xx response raises HTTPError before any body
     // parsing — a valid JSON error body is still an error, never evidence.

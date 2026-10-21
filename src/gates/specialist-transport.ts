@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { maskKnownSecrets, redactText } from "../context/redact.js";
 import type { ApiFormat, NormalizedModelResponse, TransportWirePayload } from "../model/types.js";
 import type { SpecialistRequestFn, SpecialistTransportOutcome } from "../specialists/runner.js";
@@ -96,14 +95,35 @@ function failureMessage(
 }
 
 /**
- * #1080: a lane's credential IDENTITY, for the terminal-lane key only — a
- * truncated SHA-256 of the configured API key. The digest is not reversible
- * into the key and never leaves this module, so it cannot become a secret
- * carrier in a log line or an artifact; an empty key yields a fixed
- * `unauthenticated` marker so a keyless lane still keys consistently.
+ * #1080: a lane's credential IDENTITY, for the terminal-lane key only — an
+ * opaque per-process slot label interned from the configured API key. The
+ * key itself never enters the lane string, so the lane cannot become a
+ * secret carrier in a log line or an artifact; distinct configured keys
+ * always intern to distinct slots (no digest means no collision budget to
+ * reason about), and an empty key yields a fixed `unauthenticated` marker
+ * so a keyless lane still keys consistently.
  */
+const credentialSlots = new Map<string, string>();
+let nextCredentialSlot = 0;
+// Deliberately never cleared: a cleared registry would re-intern the same
+// key to a NEW slot while a live latch still remembers the old one, silently
+// re-opening a terminally-latched lane. Growth is bounded by the distinct
+// keys a run configures (a handful), so a lifetime hold costs nothing.
+
 function credentialIdentity(apiKey: string): string {
-  return apiKey === "" ? "unauthenticated" : createHash("sha256").update(apiKey).digest("hex").slice(0, 16);
+  // Deliberately NOT a hash or HMAC: the latch is per-process, so a
+  // credential's identity here is plain string equality, and interning
+  // captures that exactly — a digest would only add collision reasoning,
+  // per-request cost, and (as CWE-916 tooling correctly insists) the shape
+  // of a low-effort password hash, which this is not. The registry is
+  // module-private: entries are created here and never enumerated, logged,
+  // or serialized anywhere.
+  if (apiKey === "") return "unauthenticated";
+  const interned = credentialSlots.get(apiKey);
+  if (interned !== undefined) return interned;
+  const slot = `key-${++nextCredentialSlot}`;
+  credentialSlots.set(apiKey, slot);
+  return slot;
 }
 
 export function specialistRequestFn(config: SpecialistTransportConfig): SpecialistRequestFn {
@@ -121,8 +141,8 @@ const wire = {
     const extraSecrets = Object.values(config.extraHeaders ?? {});
     // #1080: one lane key per (endpoint, model, wire format, credential) tuple.
     // The model comes off the wire payload and is "" when the payload carries
-    // none; the credential enters as a truncated SHA-256 digest, never the key
-    // itself, so a second key on the SAME endpoint and model stays a distinct
+    // none; the credential enters only as its opaque interned slot label, never
+    // the key itself, so a second key on the SAME endpoint and model stays a distinct
     // lane — quota exhaustion is an ACCOUNT condition, so a differently
     // credentialed lane may well recover and must not inherit the latch. A
     // terminal answer for this tuple is permanent by definition, so no wire
