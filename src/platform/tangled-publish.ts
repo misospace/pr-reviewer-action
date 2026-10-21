@@ -98,6 +98,18 @@ export class TangledPublishApi implements PublishPlatformApi {
     reason: "Tangled has no native pull-review surface",
   };
 
+  /** #589: Tangled has no native review objects at all — nothing to dismiss,
+   * minimize, delete, or resolve threads for. The managed top-level record is
+   * updated IN PLACE by `upsertStickyComment`, so a superseded managed body
+   * never stays visible alongside a newer one and no hide mechanism is
+   * needed. Declared explicitly (rather than left absent) so the capability
+   * seam reports "this forge cannot delete reviews" as a stated degradation,
+   * not an untyped gap. */
+  readonly supersededReviewDeletion: NativeReviewSurface = {
+    supported: false,
+    reason: "Tangled has no native reviews to delete: the managed top-level record is updated in place, so no superseded body stays visible",
+  };
+
   /** #588: why the current pull head is unknown on Tangled — the #451
    * publication-boundary re-check can never be satisfied until a
    * trustworthy current-head source exists, so the publish step says so
