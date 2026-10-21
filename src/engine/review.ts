@@ -286,6 +286,7 @@ interface RunCancellation {
 function createRunCancellation(request: ReviewRequest): RunCancellation {
   const scope = createCancellationScope();
   const forks = new Set<ForkedGate>();
+  const cuttings = new Set<Promise<void>>();
   const detail = request.triggerReason === "" ? "" : ` (${request.triggerReason})`;
   const scopeReason = `request cancelled${detail}`;
   const message = `review request cancelled${detail}`;
@@ -317,17 +318,33 @@ function createRunCancellation(request: ReviewRequest): RunCancellation {
     },
     own(fork: ForkedGate): void {
       // Cancelled between the last checkpoint and the launch: never track a
-      // fork nobody will finalize — cut it now instead.
-      if (scope.signal.aborted) { void forget(fork); return; }
+      // fork nobody will finalize — cut it now instead. The cut is registered
+      // so finalize() awaits its termination too: a fork that lands its launch
+      // into an aborted run must not outlive the rejection either.
+      if (scope.signal.aborted) {
+        const cutting = forget(fork);
+        cuttings.add(cutting);
+        void cutting.then(() => { cuttings.delete(cutting); });
+        return;
+      }
       forks.add(fork);
     },
     release(fork: ForkedGate): void {
       forks.delete(fork);
     },
     async finalize(): Promise<void> {
-      const outstanding = [...forks];
-      forks.clear();
-      await Promise.all(outstanding.map(forget));
+      // Drain until a full pass finds nothing: a fork whose launch was still
+      // in flight when the cancellation landed can register while an earlier
+      // drain is awaiting, and the rejection becomes observable only once
+      // every owned child is actually gone.
+      for (;;) {
+        const gates = [...forks];
+        const cuts = [...cuttings];
+        forks.clear();
+        cuttings.clear();
+        if (gates.length === 0 && cuts.length === 0) return;
+        await Promise.all([...gates.map(forget), ...cuts]);
+      }
     },
     dispose(): void {
       request.signal?.removeEventListener("abort", onAbort);

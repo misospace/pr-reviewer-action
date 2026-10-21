@@ -307,6 +307,45 @@ test("cancelling mid-flight finalizes the gate fork the run still owns", async (
   } finally { releaseGate(); await server.close(); f.cleanup(); }
 });
 
+test("cancelling while a gate fork is launching still awaits its termination", async () => {
+  // #726 review: a fork whose launch races the abort must not be cut and
+  // forgotten un-awaited. The abort lands inside the gate workload, i.e.
+  // while the engine is still awaiting forkGate(), so the fork's registration
+  // (own()) races the cancellation rejection — finalize() drains that cut, so
+  // the rejection never becomes observable while the child is winding down.
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  const controller = new AbortController();
+  let gateTerminated = false;
+  let releaseGate!: () => void;
+  const gateGone = new Promise<void>((resolve) => { releaseGate = resolve; });
+  try {
+    const running = runReviewEngine(
+      { ...request(server.url, f.runDir), signal: controller.signal, inputs: { ...inputs, "ai-base-url": server.url, "ci-status-check": "true" } },
+      engineDeps(f.root, f.runDir, {
+        ciGate: {
+          file: "",
+          envAllowlist: [],
+          workload: async (signal: AbortSignal) => {
+            signal.addEventListener("abort", () => {
+              setImmediate(() => { gateTerminated = true; releaseGate(); });
+            }, { once: true });
+            controller.abort();
+            await gateGone;
+            return 1;
+          },
+        },
+      }),
+    );
+    await assert.rejects(running, (error: unknown) => error instanceof RunReviewError && /cancelled/.test(error.message));
+    // Deterministic in both directions: with the fix, finalize() awaits the
+    // registered cut (the macrotask above has run); a regression that abandons
+    // the fork observes false here instead of hanging.
+    assert.equal(gateTerminated, true, "the launch-raced fork's termination was awaited before the rejection");
+    assert.deepEqual(getEventListeners(controller.signal, "abort"), []);
+  } finally { releaseGate(); await server.close(); f.cleanup(); }
+});
+
 test("a completed run detaches from the caller's signal", async () => {
   const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.setHeader("Connection", "close"); res.end(verdictBody()); });
   const f = fixture();
