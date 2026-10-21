@@ -15,6 +15,7 @@
  */
 import { requestJson, requestText, type FetchLike } from "./http.js";
 import { ForgejoAdapter } from "./forgejo.js";
+import { nextLink } from "./github.js";
 import { canonicalUserId, hasUsableOwner, integrationOwnerIdFromAudience, ownerMatchesIdentity, type IdentityResolution, type TrustedOwnerIdentity } from "./owner-identity.js";
 import { parsePlatformBaseUrl, GITHUB_API_BASE } from "./urls.js";
 
@@ -151,6 +152,13 @@ const REQUESTER_TEAM = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 /** #762: the useful-cap bound on the per-id reaction reads. Defined once here
  * so the reader and the caller that bounds its candidate set cannot drift. */
 export const MAX_FEEDBACK_COMMENT_IDS = 50;
+
+/** #1121: the page size and page cap of the GitHub issue-comment enumeration.
+ * 100 pages of 100 bounds the read far beyond any realistic PR while a cap
+ * hit still reports `complete: false` — the same bound-and-degrade posture
+ * as the precheck adapter's `MAX_PAGES`. */
+const ISSUE_COMMENT_PAGE_SIZE = 100;
+const MAX_ISSUE_COMMENT_PAGES = 100;
 
 /** #762: the page cap for a single comment id's reaction listing. 300
  * reactions on one review comment is far beyond any realistic usefulness
@@ -402,32 +410,62 @@ export class GitHubPublishApi implements PublishPlatformApi {
     return (await this.listIssueCommentsResult()).comments;
   }
 
-  /** #1027: only a short page PROVES the enumeration finished. Every exit
-   * that used to be a bare `break` — a non-200 or non-array page, a thrown
-   * request, and exhausting the page cap while the last page was still full —
-   * returns `complete: false` with whatever was accumulated, so a truncated
-   * read can never be read as "this is the whole set". */
+  /** #1027: the enumeration is only complete when it PROVED its end. #1121
+   * proves termination the way the precheck read adapter already does (#971):
+   * follow `Link: rel="next"` targets until none remains, so a PR with more
+   * comments than one page carries no completeness cliff — a fixed `page=`
+   * loop capped at 10 pages permanently reported `complete: false` past 1000
+   * issue comments, degrading every absence-reasoning reader forever. Every
+   * other exit — a non-200, non-array, or unparseable page, a thrown
+   * request, an unusable Link target, and exhausting the page cap while a
+   * next target still existed — returns `complete: false` with whatever was
+   * accumulated, so a truncated read can never be read as "this is the whole
+   * set". `requestText` binds every page (Link targets included) to the
+   * validated origin, so a hostile Link header can never carry the token
+   * off-platform. */
   async listIssueCommentsResult(): Promise<IssueCommentEnumeration> {
     const comments: PublishCommentRef[] = [];
-    for (let page = 1; page <= 10; page += 1) {
+    let url: string | null = this.url(
+      `/repos/${this.repo}/issues/${this.prNumber}/comments?per_page=${ISSUE_COMMENT_PAGE_SIZE}`,
+    );
+    for (let page = 0; url !== null; page += 1) {
+      if (page >= MAX_ISSUE_COMMENT_PAGES) return { complete: false, comments };
       try {
-        const { status, data } = await requestJson(
-          this.url(`/repos/${this.repo}/issues/${this.prNumber}/comments?per_page=100&page=${page}`),
-          this.opts("GET"),
-        );
-        if (status !== 200 || !Array.isArray(data)) return { complete: false, comments };
+        const captured = await requestText(url, this.opts("GET"));
+        if (captured.status !== 200) return { complete: false, comments };
+        let data: unknown;
+        try {
+          data = JSON.parse(captured.text) as unknown;
+        } catch {
+          return { complete: false, comments };
+        }
+        if (!Array.isArray(data)) return { complete: false, comments };
         comments.push(...(data as PublishCommentRef[]));
-        if ((data as unknown[]).length < 100) return { complete: true, comments };
+        const next = nextLink(captured.headers.get("link"));
+        url = next === null ? null : new URL(next, url).toString();
       } catch {
         return { complete: false, comments };
       }
     }
-    return { complete: false, comments };
+    return { complete: true, comments };
   }
 
   async upsertStickyComment(marker: string, body: string): Promise<StickyResult> {
-    const comments = await this.listIssueComments();
-    const matching = comments.filter((c) => typeof c.body === "string" && c.body.includes(marker));
+    // #1121: selecting the PATCH target is a claim about ABSENCE — "no newer
+    // marker comment exists" — exactly like the prior-published-head read
+    // (#1027), so it reads through the completeness-bearing enumeration and
+    // refuses to guess on an unproven one. On a truncated list the selection
+    // would PATCH an OLDER owned sticky (leaving the actual current
+    // publication showing a previous review against a newer head) or, when
+    // the owned sticky lives past the truncation point, fall to the creation
+    // path and leave a duplicate managed sticky behind. Fail closed BEFORE
+    // any identity read or write; `StickyResult.ok: false` is the shape the
+    // caller already reports as a publication failure.
+    const enumeration = await this.listIssueCommentsResult();
+    if (enumeration.complete !== true || !Array.isArray(enumeration.comments)) {
+      return { ok: false, created: false, error: "GitHub sticky comment enumeration is incomplete" };
+    }
+    const matching = enumeration.comments.filter((c) => typeof c.body === "string" && c.body.includes(marker));
     matching.sort((a, b) => String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? "")));
     let target = matching[0];
     // #1098: a marker-bearing comment is visible to every reader, so the
