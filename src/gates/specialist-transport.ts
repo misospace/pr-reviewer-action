@@ -1,7 +1,8 @@
 import { maskKnownSecrets, redactText } from "../context/redact.js";
 import type { ApiFormat, NormalizedModelResponse, TransportWirePayload } from "../model/types.js";
 import type { SpecialistRequestFn, SpecialistTransportOutcome } from "../specialists/runner.js";
-import { describeTransportFailure, TransportFailure } from "../transport/http.js";
+import { describeTransportFailure, resolveEndpoint, TransportFailure } from "../transport/http.js";
+import { applyExtraHeaders } from "../transport/headers.js";
 import { runChatRequest, type ChatRequestInput, type ChatRequestOutcome } from "../transport/transport.js";
 import { classifyTerminalProviderFailure, sharedTerminalLaneLatch, type TerminalLaneLatch, type TerminalProviderReason } from "../transport/terminal.js";
 
@@ -151,7 +152,27 @@ const wire = {
     const laneKey = `${config.baseUrl}\n${laneModel}\n${format}\n${credentialIdentity(config.apiKey)}`;
     const latched = latch.terminalFor(laneKey);
     if (latched !== undefined) {
-      return { ok: false, errorMessage: `lane terminally unavailable (${latched})`, terminal: latched };
+      // #1200: this call never reaches the wire — the lane is known to be
+      // terminally unavailable — so it is NOT a provider attempt: the
+      // specialist telemetry opens no attempt record for it and the aggregate
+      // request counter does not count it.
+      return { ok: false, errorMessage: `lane terminally unavailable (${latched})`, terminal: latched, wire_attempted: false };
+    }
+    // #1200: the endpoint join and the extra-header merge are refused BEFORE
+    // any socket opens, so such a call is not a provider attempt either. Both
+    // fences are the transport's OWN (the same `resolveEndpoint` and the same
+    // `applyExtraHeaders` assertion the wire boundary uses), so this cannot
+    // drift from what the transport would have thrown. The failure text is
+    // the one the transport itself would have produced — masked and capped
+    // exactly as the catch-all below masks a thrown adapter error — so the
+    // persisted failure shape is unchanged.
+    try {
+      resolveEndpoint(config.baseUrl, format);
+      if (config.extraHeaders !== undefined) applyExtraHeaders({}, config.extraHeaders);
+    } catch (error) {
+      const rawMessage = error instanceof Error ? error.message : String(error);
+      const masked = codePointSlice(redactText(maskKnownSecrets(rawMessage, [config.apiKey, ...extraSecrets])), 500);
+      return { ok: false, errorMessage: masked, wire_attempted: false };
     }
     let outcome: ChatRequestOutcome;
     try {

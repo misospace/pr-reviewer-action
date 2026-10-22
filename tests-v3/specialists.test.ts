@@ -1560,6 +1560,7 @@ test("#1200: a phase-deadline reap mid-attempt reports the opened attempt as in-
   assert.equal(records[0]!.elapsed_sec, null, "an in-flight attempt has no settled duration");
   assert.equal(records[0]!.adopted, false);
   assert.equal(records[0]!.retry_trigger, null);
+  assert.equal(result.aggregate.request_count, 1, "the in-flight attempt still counts in the aggregate");
 });
 
 test("#1200: combined_scout roles share the same attempt records and reconcile with unique wire attempts", async () => {
@@ -1595,4 +1596,44 @@ test("#1200: combined_scout roles share the same attempt records and reconcile w
   assert.equal(result.aggregate.request_count, calls);
   const totals = result.aggregate.usage_totals as Record<string, unknown> | null;
   assert.deepEqual(totals!.prompt_tokens, 30, "usage_totals merges unique attempts, not per-role copies");
+});
+
+test("#1200: a call refused before the wire records no attempt and is not counted", async () => {
+  // The #1080 terminal-lane latch refuses a later call on a terminally failed
+  // lane with zero wire attempts. That call is not an attempt: no record is
+  // opened for it and the aggregate counter does not count it.
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async () => ({
+      ok: false,
+      errorMessage: "lane terminally unavailable (quota_exhausted)",
+      terminal: "quota_exhausted",
+      wire_attempted: false,
+    }),
+  }));
+
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.attempts, undefined, "no attempt record for a call that never reached the wire");
+  assert.equal(result.aggregate.request_count, 0, "the refused call is not a wire attempt");
+  // The persisted failure shape is unchanged by the attempt accounting.
+  assert.equal(entry.status, "error");
+  assert.equal(entry.error_kind, "transport");
+  assert.match(String(entry.reason), /quota_exhausted/);
+});
+
+test("#1200: a combined_scout call refused before the wire records no attempt for any role", async () => {
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, execution: "combined_scout" },
+    requestFn: async () => ({
+      ok: false,
+      errorMessage: "lane terminally unavailable (quota_exhausted)",
+      terminal: "quota_exhausted",
+      wire_attempted: false,
+    }),
+  }));
+
+  for (const roleName of ALL_ROLES) {
+    assert.equal(roleEntry(result, roleName).attempts, undefined, `${roleName}: no attempt record for a refused call`);
+  }
+  assert.equal(result.aggregate.request_count, 0, "the refused shared call is not a wire attempt");
 });

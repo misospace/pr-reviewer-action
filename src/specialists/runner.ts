@@ -82,6 +82,12 @@ export interface SpecialistTransportOutcome {
    * and its presence means the runner must not spend another attempt or sleep
    * on this lane. */
   terminal?: TerminalProviderReason;
+  /** #1200: `false` ONLY when the adapter refused the call BEFORE the wire —
+   * the #1080 terminal-lane latch short-circuits every later call on a
+   * terminally failed lane with zero provider attempts. Such a call is not an
+   * attempt: no attempt record is opened for it and the aggregate request
+   * counter does not count it. Absent means the call reached the wire. */
+  wire_attempted?: boolean;
 }
 
 /** `(payload, apiFormat, timeoutSec) => outcome`. Never throws — transport
@@ -421,9 +427,23 @@ class RequestMeter {
 
   wrap(fn: SpecialistRequestFn): SpecialistRequestFn {
     return async (payload, apiFormat, timeoutSec) => {
+      // The attempt is counted when the call is MADE: an attempt still in
+      // flight when the phase deadline reaps the role is a real attempt, and
+      // the aggregate must show it (the reaped entry reports the same record).
       this.count += 1;
       this.bytes += payloadBytes(payload);
       const outcome = await fn(payload, apiFormat, timeoutSec);
+      // #1200: a call the adapter refused BEFORE the wire (the #1080
+      // terminal-lane latch) is not a provider attempt: undo the provisional
+      // count so the aggregate stays the count of REAL wire attempts. (A
+      // refusal that lands after the phase deadline reaped the role is
+      // counted until the aggregate is built — the same narrow straggler hole
+      // the reap site documents.)
+      if (outcome.wire_attempted === false) {
+        this.count -= 1;
+        this.bytes -= payloadBytes(payload);
+        return outcome;
+      }
       if (outcome.ok) {
         const usage = extractResponseUsage(outcome.raw);
         if (usage !== null) this.usage = mergeUsage(this.usage, usage);
@@ -519,6 +539,24 @@ function settleAttempt(
 function markRetryTrigger(record: SpecialistAttemptRecord | null, trigger: SpecialistAttemptRecord["retry_trigger"]): void {
   if (record === null) return;
   record.retry_trigger = trigger;
+}
+
+/** #1200: drop an opened attempt record when the adapter refused the call
+ * BEFORE the wire (the #1080 terminal-lane latch): no provider attempt was
+ * made, so the record would be a phantom attempt. The role keeps its failure
+ * shape; only the attempt accounting changes. */
+function dropAttempt(attempts: SpecialistAttemptRecord[], record: SpecialistAttemptRecord): void {
+  const index = attempts.indexOf(record);
+  if (index >= 0) attempts.splice(index, 1);
+}
+
+/** #1200: does this transport outcome prove a wire attempt was made? A
+ * thrown call is UNKNOWN (the adapter may have reached the wire before it
+ * threw) and counts as an attempt; only an explicit pre-wire refusal does
+ * not. A null outcome is the swallowed-throw case of the overrun retry. */
+function madeWireAttempt(outcome: SpecialistTransportOutcome | null): boolean {
+  if (outcome === null) return true;
+  return outcome.wire_attempted !== false;
 }
 
 async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcome> {
@@ -664,11 +702,20 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
     } catch (error) {
       outcome = { ok: false, errorMessage: error instanceof Error ? error.message : String(error) };
     }
+    // #1200: the adapter may refuse the call BEFORE the wire (#1080's
+    // terminal-lane latch): no provider attempt was made, so the record
+    // opened above is not an attempt and is dropped again — the role keeps
+    // its failure shape, but nothing phantom is recorded or counted.
+    const wireAttempted = madeWireAttempt(outcome);
+    if (!wireAttempted) dropAttempt(attempts, record);
 
-    if (!outcome.ok) {
+    if (!outcome.ok || !wireAttempted) {
       // The attempt failed on the wire: no response, hence no usage/stop
-      // reason to report — elapsed is the only settled fact.
-      settleAttempt(record, now() - attemptStarted, null, knownSecrets);
+      // reason to report — elapsed is the only settled fact. A refused call
+      // carries no response either, and an outcome that claims both a
+      // response and no wire attempt is contradictory: it is refused here
+      // (fail closed) rather than adopted.
+      if (wireAttempted) settleAttempt(record, now() - attemptStarted, null, knownSecrets);
       if (outcome.timeout) {
         record.retry_trigger = null;
         return timeoutFailure(outcome.errorMessage ?? "specialist phase deadline exceeded");
@@ -767,7 +814,11 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
         } catch {
           retried = null;
         }
-        if (retried !== null && retried.ok && !(typeof retried.raw === "object" && retried.raw !== null && (retried.raw as Record<string, unknown>).error)) {
+        // #1200: a retry refused before the wire (#1080's terminal-lane latch)
+        // is not an attempt: the record opened for it is dropped again.
+        const retryAttempted = madeWireAttempt(retried);
+        if (!retryAttempted) dropAttempt(attempts, retryRecord);
+        if (retried !== null && retried.ok && retryAttempted && !(typeof retried.raw === "object" && retried.raw !== null && (retried.raw as Record<string, unknown>).error)) {
           settleAttempt(retryRecord, now() - retryStarted, retried.raw, knownSecrets);
           const retriedText = extractResponseText(retried.raw);
           const retriedArtifact = parseSpecialistResponse(retriedText, role);
@@ -789,7 +840,7 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
           // lane was latched terminally, #1080) never reached the wire at all.
           // None of those recover the truncated response in place, so this is a
           // failure, never a recovery.
-          settleAttempt(retryRecord, now() - retryStarted, retried !== null && retried.ok ? retried.raw : null, knownSecrets);
+          if (retryAttempted) settleAttempt(retryRecord, now() - retryStarted, retried !== null && retried.ok ? retried.raw : null, knownSecrets);
           overrunRetryResult = "failed";
         }
       } else {
@@ -1010,8 +1061,13 @@ async function runSpecialistScout(
     } catch (error) {
       outcome = { ok: false, errorMessage: error instanceof Error ? error.message : String(error) };
     }
-    if (!outcome.ok) {
-      settleAttempt(record, now() - attemptStarted, null, knownSecrets);
+    // #1200: the adapter may refuse the call BEFORE the wire (#1080's
+    // terminal-lane latch): no provider attempt was made, so the shared
+    // record opened above is not an attempt and is dropped again.
+    const wireAttempted = madeWireAttempt(outcome);
+    if (!wireAttempted) dropAttempt(attempts, record);
+    if (!outcome.ok || !wireAttempted) {
+      if (wireAttempted) settleAttempt(record, now() - attemptStarted, null, knownSecrets);
       if (outcome.timeout) {
         record.retry_trigger = null;
         lastError = `timeout: ${outcome.errorMessage ?? "specialist phase deadline exceeded"}`;
@@ -1092,7 +1148,11 @@ async function runSpecialistScout(
         } catch {
           retried = null;
         }
-        if (retried !== null && retried.ok && !(typeof retried.raw === "object" && retried.raw !== null && (retried.raw as Record<string, unknown>).error)) {
+        // #1200: a retry refused before the wire (#1080's terminal-lane latch)
+        // is not an attempt: the record opened for it is dropped again.
+        const retryAttempted = madeWireAttempt(retried);
+        if (!retryAttempted) dropAttempt(attempts, retryRecord);
+        if (retried !== null && retried.ok && retryAttempted && !(typeof retried.raw === "object" && retried.raw !== null && (retried.raw as Record<string, unknown>).error)) {
           settleAttempt(retryRecord, now() - retryStarted, retried.raw, knownSecrets);
           const retriedText = extractResponseText(retried.raw);
           const retriedArtifacts = parseScoutResponse(retriedText, roles);
@@ -1110,7 +1170,7 @@ async function runSpecialistScout(
           // response in place, so it is a failure, never a recovery.
           overrunRetryResult = adopted && !completionOverran(retried.raw) ? "recovered" : "failed";
         } else {
-          settleAttempt(retryRecord, now() - retryStarted, retried !== null && retried.ok ? retried.raw : null, knownSecrets);
+          if (retryAttempted) settleAttempt(retryRecord, now() - retryStarted, retried !== null && retried.ok ? retried.raw : null, knownSecrets);
           overrunRetryResult = "failed";
         }
       } else {
