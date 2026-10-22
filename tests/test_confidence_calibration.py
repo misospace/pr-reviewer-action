@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -62,8 +63,7 @@ render_report = confidence_calibration.render_report
 build_prompt_via_bridge = confidence_calibration.build_prompt_via_bridge
 apply_score_via_bridge = confidence_calibration.apply_score_via_bridge
 review_result_via_bridge = confidence_calibration.review_result_via_bridge
-live_request = confidence_calibration.live_request
-extract_answer_text = confidence_calibration.extract_answer_text
+live_request_via_bridge = confidence_calibration.live_request_via_bridge
 cost_table = confidence_calibration.cost_table
 primary_evidence_state = confidence_calibration.primary_evidence_state
 _safe_component = confidence_calibration._safe_component
@@ -788,14 +788,23 @@ def test_live_backend_missing_env_fails_fast(tmp_path: Path, monkeypatch: pytest
     assert "CONFIDENCE_PILOT_TEST_API_KEY" in capsys.readouterr().err
 
 
-def test_live_request_transport_error_on_refused_connection() -> None:
-    raw, usage, cause = live_request("http://127.0.0.1:1", "openai", "m", "k", "s", "u", 5)
+def test_live_request_transport_error_on_refused_connection(tmp_path: Path) -> None:
+    # The key env name is passed, never the value; a missing value resolves
+    # to an empty key inside the bridge (no auth header), and the refused
+    # connection flows back as the production transport's cause token.
+    raw, usage, cause = live_request_via_bridge(
+        "http://127.0.0.1:1", "openai", "m", "CONFIDENCE_PILOT_TEST_API_KEY",
+        "s", "u", 5, ["CONFIDENCE_PILOT_TEST_API_KEY"], tmp_path,
+    )
     assert raw is None and usage is None and cause == "transport_error"
 
 
-def test_live_request_anthropic_shape(tmp_path: Path) -> None:
-    """The anthropic wire shape: /v1/messages, x-api-key header, text-block
-    extraction, input/output token usage."""
+def test_live_request_anthropic_shape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The anthropic wire shape through the production typed transport:
+    /messages path, x-api-key header (resolved in the bridge from the env
+    NAME), no Authorization header, the production request shape (system +
+    messages, max_tokens, stream:false, no temperature), and input/output
+    token usage."""
     pilot = LoopbackProvider(lambda _handler: (
         200,
         {
@@ -806,10 +815,13 @@ def test_live_request_anthropic_shape(tmp_path: Path) -> None:
         },
     ))
     server, base_url = serve(pilot)
+    monkeypatch.setenv("CONFIDENCE_PILOT_TEST_API_KEY", "anthropic-fake-key")
     try:
-        raw, usage, cause = live_request(
-            base_url, "anthropic", "claude-loopback", "anthropic-fake-key",
+        raw, usage, cause = live_request_via_bridge(
+            base_url, "anthropic", "claude-loopback",
+            "CONFIDENCE_PILOT_TEST_API_KEY",
             "system text", "user text", 10,
+            ["CONFIDENCE_PILOT_TEST_API_KEY"], tmp_path,
         )
         assert cause is None
         assert '"score": 4' in raw
@@ -824,23 +836,71 @@ def test_live_request_anthropic_shape(tmp_path: Path) -> None:
         assert request["anthropic_version"] == "2023-06-01"
         assert request["auth"] is None  # no Authorization header on the anthropic shape
         assert '"system"' in request["body"] and '"messages"' in request["body"]
+        # The production request shape: stream:false present, temperature absent.
+        assert '"stream":false' in request["body"]
+        assert '"temperature"' not in request["body"]
     finally:
         server.shutdown()
 
 
-def test_extract_answer_text_shapes() -> None:
-    openai_payload = {"choices": [{"message": {"content": "hello"}}]}
-    assert extract_answer_text(openai_payload, "openai") == "hello"
-    anthropic_payload = {"content": [
-        {"type": "text", "text": "a"},
-        {"type": "tool_use", "text": "ignored"},
-        {"type": "text", "text": "b"},
-    ]}
-    assert extract_answer_text(anthropic_payload, "anthropic") == "ab"
-    # Fail-soft on unusable shapes: the bridge parser then fails closed.
-    assert extract_answer_text({"nope": 1}, "openai") == ""
-    assert extract_answer_text("not a dict", "openai") == ""
-    assert extract_answer_text({"choices": []}, "openai") == ""
+def test_live_path_delegates_to_production_transport(tmp_path: Path) -> None:
+    # The pilot must not carry its own provider HTTP client: the live path
+    # delegates to the production typed Node transport through the bridge.
+    # Code-level checks (imports, not prose): a stdlib HTTP client must be
+    # unreachable from the driver, and the bridge must import the
+    # production single-shot transport, request builder, and cause mapper.
+    driver_source = (SCRIPTS_DIR / "confidence_calibration.py").read_text(encoding="utf-8")
+    code_lines = [
+        line for line in driver_source.splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    code = "\n".join(code_lines)
+    assert not re.search(r"^\s*(import|from)\s+urllib(\.|\s)", code, re.MULTILINE)
+    assert not re.search(r"\burllib\.(request|error)\b", code)
+    assert "confidence_bridge" in code
+    bridge_source = (SCRIPTS_DIR / "confidence_bridge.ts").read_text(encoding="utf-8")
+    bridge_code = "\n".join(line for line in bridge_source.splitlines() if not line.lstrip().startswith(("*", "//")))
+    assert re.search(r'import \{ runChatRequestOnce \} from "\.\./src/transport/transport\.js"', bridge_code)
+    assert re.search(r'import \{ buildModelRequest \} from "\.\./src/model/request\.js"', bridge_code)
+    assert re.search(r"transportCause", bridge_code)
+    # The cause vocabulary the driver records must stay the production
+    # scorer's own mapping, not a mirrored copy: transportCause is imported
+    # by the bridge, and the pilot-visible tokens are pinned here.
+    assert "confidence_bridge" in driver_source
+    # And an unreachable endpoint flows a production cause through the seam.
+    answer, usage, cause = live_request_via_bridge(
+        "http://127.0.0.1:1", "openai", "m", "CONFIDENCE_PILOT_TEST_API_KEY",
+        "s", "u", 5, ["CONFIDENCE_PILOT_TEST_API_KEY"], tmp_path,
+    )
+    assert (answer, usage, cause) == (None, None, "transport_error")
+
+
+def test_scorer_max_tokens_matches_production() -> None:
+    # The token-budget projection uses the driver's SCORER_MAX_TOKENS while
+    # the live-request itself sends production's CONFIDENCE_MAX_TOKENS;
+    # if they drift, the declared spend ceiling stops bounding real spend.
+    scorer_source = (Path(__file__).resolve().parent.parent / "src" / "confidence" / "scorer.ts").read_text(encoding="utf-8")
+    match = re.search(r"export const CONFIDENCE_MAX_TOKENS = (\d+);", scorer_source)
+    assert match is not None, "production CONFIDENCE_MAX_TOKENS not found"
+    assert confidence_calibration.SCORER_MAX_TOKENS == int(match.group(1))
+
+
+def test_live_request_subprocess_kill_degrades_to_transport_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # If the bridge subprocess is killed at its own timeout (the transport
+    # never returns a cause), the seam raises rather than silently losing
+    # the row; the cmd_score call site records it as transport_error and
+    # still counts exactly one attempt.
+    def fake_run(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd=["node"], timeout=1)
+
+    monkeypatch.setattr(confidence_calibration.subprocess, "run", fake_run)
+    with pytest.raises(subprocess.TimeoutExpired):
+        live_request_via_bridge(
+            "http://127.0.0.1:1", "openai", "m", "CONFIDENCE_PILOT_TEST_API_KEY",
+            "s", "u", 5, ["CONFIDENCE_PILOT_TEST_API_KEY"], tmp_path,
+        )
+    # No request file survives the kill path.
+    assert list(tmp_path.glob("bridge-request-*.json")) == []
 
 
 # ── Budget enforcement ───────────────────────────────────────────────────
@@ -1385,10 +1445,11 @@ def test_live_backend_429_still_counts_as_attempted_call(tmp_path: Path, monkeyp
 def test_live_backend_redirect_is_refused_and_credential_not_forwarded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Production refuses redirects; the default urllib opener would follow a
-    # 30x AND re-send the credential to the redirect target. The pilot must
-    # do neither: the redirect is a recorded failure and the target receives
-    # nothing.
+    # The production transport refuses redirects (http.ts: any terminal
+    # status outside 2xx, including 3xx, is a typed failure — never a
+    # followed hop that would re-send the credential to another host). The
+    # pilot, on that transport, must do neither: the redirect is a recorded
+    # failure and the target receives nothing.
     target = LoopbackProvider(lambda _handler: (200, OPENAI_OK))
     target_server, _target_url = serve(target)
     redirect = LoopbackProvider(lambda handler: (

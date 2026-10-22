@@ -37,9 +37,12 @@ Pipeline (each stage is a separate CLI subcommand on this module):
 
 Trust and security boundaries honored throughout:
 
-- Credentials travel only in HTTP auth headers of the live backend; they
-  are never in URLs, request bodies, argv, or any log/diagnostic string.
-  Env values are never printed. The driver handles env-var NAMES only.
+- The live scorer call runs on the PRODUCTION typed Node transport
+  (``src/transport/``) inside the bridge: the credential crosses the seam
+  only as the NAME of its env var, is resolved in the bridge process, and
+  travels only in the provider's auth header — never in URLs, request
+  bodies, argv, or any log/diagnostic string. Env values are never
+  printed. The driver handles env-var NAMES only.
 - NO retries anywhere: a failed live call is recorded ``unscored`` with a
   redacted cause token and never attempted again.
 - Untrusted PR/diff/review content is data: the production prompt builder
@@ -65,13 +68,10 @@ import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -81,7 +81,10 @@ DEFAULT_CORPUS_HUMAN = REPO_ROOT / "evals" / "corpus-human-findings.json"
 BRIDGE_LAUNCHER = REPO_ROOT / "scripts" / "confidence_bridge.mjs"
 
 # The scorer's single bounded completion budget (mirrors
-# ``src/confidence/scorer.ts`` CONFIDENCE_MAX_TOKENS).
+# ``src/confidence/scorer.ts`` CONFIDENCE_MAX_TOKENS — the budget
+# projection below spends it, the live request sends the production
+# import through the bridge; pinned equal by
+# ``tests/test_confidence_calibration.py::test_scorer_max_tokens_matches_production``).
 SCORER_MAX_TOKENS = 1024
 
 ENV_VAR_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
@@ -327,7 +330,7 @@ def _die_plan_errors(errors: list[str]) -> None:
 # ── Bridge invocation ────────────────────────────────────────────────────
 
 
-def _run_bridge(subcommand: str, request: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+def _run_bridge(subcommand: str, request: dict[str, Any], work_dir: Path, timeout_sec: float = 120) -> dict[str, Any]:
     """Run one bridge subcommand; returns the parsed result object.
 
     The request (including the prompt-bearing inputs) is shuttled through a
@@ -335,7 +338,9 @@ def _run_bridge(subcommand: str, request: dict[str, Any], work_dir: Path) -> dic
     single-line JSON result on stdout and a REDACTED failure line on stderr;
     neither ever contains a credential value (secrets are resolved inside
     the bridge process from env names, and the bridge masks them out of the
-    prompt before returning it).
+    prompt before returning it). ``timeout_sec`` bounds the subprocess: the
+    default covers the prompt/parse subcommands, and the live path passes
+    its own (its transport timeout plus a fixed startup margin).
     """
     node = shutil.which("node")
     if node is None:
@@ -350,7 +355,7 @@ def _run_bridge(subcommand: str, request: dict[str, Any], work_dir: Path) -> dic
             json.dump(request, handle)
         result = subprocess.run(
             [node, str(BRIDGE_LAUNCHER), subcommand, str(tmp_path)],
-            capture_output=True, text=True, timeout=120, check=False,
+            capture_output=True, text=True, timeout=timeout_sec, check=False,
         )
     finally:
         tmp_path.unlink(missing_ok=True)
@@ -717,107 +722,92 @@ def cmd_review(args: argparse.Namespace) -> int:
 
 
 # ── Live backend (exactly ONE call per row; no retries, no backoff) ──────
+# The live scorer call is executed by the PRODUCTION typed Node transport
+# (``src/transport/``) inside the bridge process — the same
+# ``buildModelRequest`` + ``runChatRequestOnce`` single-shot path the
+# runtime scorer uses: one wire attempt, no retry loop, non-2xx (including
+# 3xx) is a typed failure that is never followed, and the credential rides
+# only the provider's auth header. The driver below shuttles the
+# credential's env NAME only; its value is resolved in the bridge and never
+# touches this process's argv, files, or output.
 
 
-def _no_redirect_opener() -> urllib.request.OpenerDirector:
-    """An opener that REFUSES redirects, matching the production transport's
-    stance: a 3xx must never silently hand the request — and with it the
-    credential — to another host. The default opener follows redirects and
-    preserves Authorization/x-api-key across them (CPython only strips
-    content headers), which is exactly the leak this closes."""
-    class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
-            raise urllib.error.HTTPError(req.full_url, code, "redirect refused (pilot never follows redirects)", headers, fp)
-
-    return urllib.request.build_opener(_RefuseRedirect)
-
-
-def live_request(
-    base_url: str, api_format: str, model: str, api_key: str, system: str, user: str, timeout_sec: float
+def live_request_via_bridge(
+    base_url: str,
+    api_format: str,
+    model: str,
+    key_env: str,
+    system: str,
+    user: str,
+    request_timeout_sec: float,
+    secret_env_names: list[str],
+    work_dir: Path,
 ) -> tuple[str | None, dict[str, int] | None, str | None]:
-    """One POST to the provider; returns (raw_answer, usage, cause).
+    """One live scorer call through the production typed Node transport.
 
-    ``cause`` is None on success; otherwise a redacted action-owned token
-    (``http_<code>``, ``timeout``, ``transport_error``). NO retries. The key
-    travels only in the auth header — never in the URL, body, or any raised
-    message this function returns. Endpoint join mirrors the production
-    ``resolveEndpoint`` (``src/transport/http.ts``): base with trailing
-    slashes trimmed, then ``/messages`` (anthropic — the documented base URL
-    already carries ``/v1``) or ``/chat/completions`` (openai). The request
-    shape mirrors the production scorer request: no temperature field is
-    sent.
+    Calls the bridge's ``live-request`` subcommand, which sends the request
+    with ``runChatRequestOnce`` (``src/transport/transport.ts``): exactly
+    one wire attempt, no retries, no backoff. The credential crosses the
+    seam as the NAME of its env var (``key_env``) only; the bridge resolves
+    the value and it travels only in the provider's auth header.
+
+    Returns ``(raw_answer, usage, cause)``: ``cause`` is None on success;
+    otherwise the production scorer's redacted action-owned token
+    (``http_<code>``, ``timeout``, ``response_too_large``,
+    ``transport_error``) — the same mapping ``src/confidence/scorer.ts``
+    applies. A malformed bridge result raises ``RuntimeError``; the call
+    site degrades to ``transport_error`` and records ``unscored``.
     """
-    if api_format == "anthropic":
-        url = base_url.strip().rstrip("/") + "/messages"
-        body = {
+    result = _run_bridge(
+        "live-request",
+        {
+            "base_url": base_url,
+            "api_format": api_format,
             "model": model,
+            "key_env": key_env,
             "system": system,
-            "max_tokens": SCORER_MAX_TOKENS,
-            "messages": [{"role": "user", "content": user}],
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        }
-    else:
-        url = base_url.strip().rstrip("/") + "/chat/completions"
-        body = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "max_tokens": SCORER_MAX_TOKENS,
-        }
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-    request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
-    try:
-        with _no_redirect_opener().open(request, timeout=timeout_sec) as response:
-            payload = json.loads(response.read().decode("utf-8", errors="replace"))
-    except urllib.error.HTTPError as exc:
-        # Drain nothing, log nothing provider-side: the status code is the
-        # only fact the pilot records from a failure. Redirects land here
-        # too (the opener refuses them), so a 3xx is a recorded failure,
-        # never a followed hop.
-        return None, None, f"http_{exc.code}"
-    except (socket.timeout, TimeoutError):
-        return None, None, "timeout"
-    except urllib.error.URLError as exc:
-        if isinstance(getattr(exc, "reason", None), (socket.timeout, TimeoutError)):
-            return None, None, "timeout"
-        return None, None, "transport_error"
-    except OSError:
-        return None, None, "transport_error"
-    usage = payload.get("usage") if isinstance(payload, dict) else None
-    tokens: dict[str, int] | None = None
-    if isinstance(usage, dict):
-        prompt_tokens = usage.get("prompt_tokens" if api_format == "openai" else "input_tokens")
-        completion_tokens = usage.get("completion_tokens" if api_format == "openai" else "output_tokens")
-        if isinstance(prompt_tokens, int) and isinstance(completion_tokens, int):
-            tokens = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
-    return extract_answer_text(payload, api_format), tokens, None
+            "user": user,
+            "request_timeout_sec": request_timeout_sec,
+            "connect_timeout_sec": 10,
+            "secret_env_names": list(secret_env_names),
+        },
+        work_dir,
+        # The transport tears the request down at request_timeout_sec; the
+        # margin only covers Node startup and the bundled-bridge load.
+        timeout_sec=request_timeout_sec + 30,
+    )
+    answer = result.get("answer")
+    cause = result.get("cause")
+    usage = result.get("usage")
+    if not isinstance(answer, (str, type(None))):
+        raise RuntimeError("bridge live-request returned a malformed result (answer)")
+    if not isinstance(cause, (str, type(None))):
+        raise RuntimeError("bridge live-request returned a malformed result (cause)")
+    if usage is not None:
+        if not isinstance(usage, dict):
+            usage = None
+        else:
+            prompt_tokens = usage.get("prompt_tokens")
+            completion_tokens = usage.get("completion_tokens")
+            # JSON providers may state the count as a float (``20.0``);
+            # production normalization passes any JSON number through.
+            # Degrade an unusable usage object to None (the row still
+            # scores, the cost column simply omits it) instead of failing
+            # a successful answer closed.
+            def _token_count(value: Any) -> int | None:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return None
+                if not float(value).is_integer() or value < 0:
+                    return None
+                return int(value)
 
-
-def extract_answer_text(payload: Any, api_format: str) -> str:
-    """Pull the model's text out of the provider response shape (fail-soft)."""
-    if not isinstance(payload, dict):
-        return ""
-    if api_format == "anthropic":
-        content = payload.get("content")
-        if not isinstance(content, list):
-            return ""
-        return "".join(
-            block.get("text", "") for block in content
-            if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
-        )
-    choices = payload.get("choices")
-    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        return ""
-    message = choices[0].get("message")
-    if not isinstance(message, dict) or not isinstance(message.get("content"), str):
-        return ""
-    return message["content"]
+            prompt_count = _token_count(prompt_tokens)
+            completion_count = _token_count(completion_tokens)
+            if prompt_count is None or completion_count is None:
+                usage = None
+            else:
+                usage = {"prompt_tokens": prompt_count, "completion_tokens": completion_count}
+    return answer, usage, cause
 
 
 # ── `score` subcommand ───────────────────────────────────────────────────
@@ -1217,16 +1207,22 @@ def cmd_score(args: argparse.Namespace) -> int:
                         else:
                             cause = "mock_missing_answer"
                 else:  # live — exactly ONE wire attempt, no retries, no backoff
+                    # The call runs on the production typed transport inside
+                    # the bridge: only the credential's env NAME crosses the
+                    # seam, the lane masking set travels by name, and the
+                    # timeout pair bounds the single wire attempt.
                     model_name = os.environ[condition["model_env"]]
                     try:
-                        raw_answer, usage, cause = live_request(
+                        raw_answer, usage, cause = live_request_via_bridge(
                             os.environ[condition["base_url_env"]],
                             os.environ[condition["api_format_env"]],
                             model_name,
-                            os.environ[condition["key_env"]],
+                            condition["key_env"],
                             prompt["system"],
                             prompt["user"],
                             float(ceilings["request_timeout_sec"]),
+                            secret_env_names,
+                            audit_file.parent,
                         )
                     except Exception:  # noqa: BLE001 — any unexpected transport shape degrades to unscored
                         raw_answer, usage, cause = None, None, "transport_error"

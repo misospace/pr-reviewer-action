@@ -215,11 +215,18 @@ end.
   different model family; the operator owns that choice and it is recorded
   as an unknown.
 - Pilot-side prompt construction mirrors production inputs (same builder,
-  same diff-truncation preference, same derived `review_result`) but the
-  pilot's transport is its own stdlib client, not the runtime
-  transport; it matches production on endpoint join, no-redirect policy,
-  auth-header-only credentials, and the no-temperature request shape, but
-  any remaining wire-level difference is a possible unknown.
+  same diff-truncation preference, same derived `review_result`), and the
+  live scorer call runs ON the production typed Node transport (the same
+  `buildModelRequest` + `runChatRequestOnce` single-attempt path the
+  runtime scorer uses, via the Node bridge) — endpoint join, request
+  shape, no-redirect policy, auth-header-only credentials, timeout
+  behavior, usage mapping, and failure causes are the production code
+  itself, not a mirrored copy. Two deliberate pilot differences remain:
+  the token-limit field is fixed to `max_tokens` (the runtime honors the
+  operator's `AI_TOKENS_PARAM`, e.g. `max_completion_tokens`), and there
+  is no cancellation signal — so an endpoint that only accepts
+  `max_completion_tokens` would surface as a recorded live failure, not a
+  silent wire difference.
 - Masking scope: the pilot masks prompt/result content against the primary
   lane credential (`AI_API_KEY`) and the scorer condition's own credential.
   The pilot configures no smart/fallback/specialist lanes (so those

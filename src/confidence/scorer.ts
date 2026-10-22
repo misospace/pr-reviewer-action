@@ -46,8 +46,9 @@ function isLoopbackUrl(rawUrl: string): boolean {
 }
 
 /** Redacted, action-owned cause token for a transport failure — never
- * provider text, never a secret. */
-function transportCause(kind: string, status: number | undefined): string {
+ * provider text, never a secret. Exported so the calibration pilot's
+ * bridge live-request path maps failures through the SAME authority. */
+export function transportCause(kind: string, status: number | undefined): string {
   if (kind === "http_status" && status !== undefined) return `http_${status}`;
   if (kind === "request_timeout" || kind === "connect_timeout") return "timeout";
   if (kind === "response_too_large") return "response_too_large";
