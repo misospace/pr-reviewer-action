@@ -67,7 +67,7 @@ import {
   type NativeLoopRoundTelemetry,
   type ToolTurnSignal,
 } from "./loop.js";
-import { normalizeUsageTelemetry } from "../model/telemetry.js";
+import { normalizeUsageTelemetry, type UsageTelemetry } from "../model/telemetry.js";
 import {
   computePartialCoverage,
   corpusDiffCoveredFiles,
@@ -749,6 +749,14 @@ export interface NativeVerdictOutcome {
   detail: string;
   streamFailureKind: NativeVerdictOutcome["reason"];
   streamFailureDetail: string;
+  /** #1199: the verdict turn's provider-reported usage folded over EVERY
+   * attempt (a streamed→non-streamed retry included, each folded at the same
+   * sites the aggregate `usageAcc` folds them): per-field the sum of the
+   * attempts' reported integers, `null` when every attempt's field was null.
+   * The same provider-reported normalizer the round records use — never
+   * synthesized from elapsed time. Without this fold a retried verdict turn
+   * under-reported its usage (only the final attempt's body was read). */
+  usageTotals: UsageTelemetry;
   /** #1037/#1094: the ONE known-secret list this verdict turn was evaluated
    * against (the lane key plus the configured extra-header VALUES this call
    * sent). The caller persists the verdict artifact through it, so the
@@ -826,11 +834,36 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
   let detail = "";
   let finalBudgetRaisedTo: number | null = null;
 
+  // #1199: fold EVERY attempt's response at exactly the sites the aggregate
+  // `usageAcc` folds it, and maintain the same fold locally so the verdict
+  // turn's own telemetry is not under-reported by a streamed→non-streamed
+  // retry (the final attempt's body alone misses the earlier attempt's
+  // tokens). Per field: the sum of the attempts' reported integers, `null`
+  // when every attempt's field was null — the same provider-reported
+  // normalizer the round records use; never synthesized from elapsed time.
+  const usageTotals: UsageTelemetry = { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null };
+  const foldAttemptUsage = (attemptResponse: unknown): void => {
+    accumulateUsage(input.usageAcc, attemptResponse, input.apiFormat);
+    const usage = normalizeUsageTelemetry(
+      attemptResponse !== null && typeof attemptResponse === "object"
+        ? (attemptResponse as Record<string, unknown>).usage ?? null
+        : null,
+    );
+    for (const field of ["promptTokens", "completionTokens", "cachedTokens", "totalTokens"] as const) {
+      usageTotals[field] =
+        usageTotals[field] === null
+          ? usage[field]
+          : usage[field] === null
+            ? usageTotals[field]
+            : usageTotals[field]! + usage[field]!;
+    }
+  };
+
   const firstAttempt = await request(first);
   attempts += 1;
   response = firstAttempt.response;
   if (response !== null) {
-    accumulateUsage(input.usageAcc, response, input.apiFormat);
+    foldAttemptUsage(response);
     const evaluation = evaluateNativeVerdict(response, knownSecrets);
     ok = evaluation.ok;
     reason = evaluation.reason;
@@ -884,7 +917,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
     attempts += 1;
     response = retry.response;
     if (response !== null) {
-      accumulateUsage(input.usageAcc, response, input.apiFormat);
+      foldAttemptUsage(response);
       const evaluation = evaluateNativeVerdict(response, knownSecrets);
       ok = evaluation.ok;
       reason = evaluation.reason;
@@ -917,6 +950,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
     detail: ok ? "" : detail,
     streamFailureKind,
     streamFailureDetail,
+    usageTotals,
     knownSecrets,
     ...(finalDiagnostics !== null ? { diagnostics: finalDiagnostics } : {}),
     ...(finalBudgetRaisedTo !== null ? { budgetRaisedTo: finalBudgetRaisedTo } : {}),
@@ -1415,6 +1449,19 @@ function preLoopFailureKind(result: HarnessResult): string | null {
   return null;
 }
 
+/** #1199: the closing in-conversation verdict turn's bounded latency/usage
+ * record shape (content-free: one duration, nullable provider-reported token
+ * counts, a boolean). snake_case: persisted verbatim in the harness artifact.
+ * A type (not interface) so the consumers' `as Record<string, unknown>`
+ * projections keep compiling. */
+export type NativeLoopVerdictTelemetry = {
+  model_sec: number;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  cached_tokens: number | null;
+  streamed_fallback: boolean;
+};
+
 export type HarnessResult = Record<string, unknown> & {
   mode?: string;
   planning_error?: string;
@@ -1445,13 +1492,14 @@ export type HarnessResult = Record<string, unknown> & {
    * `tool_loop_meta.round_telemetry`. Content-free (durations, nullable
    * provider-reported token counts, a boolean). snake_case: persisted verbatim
    * in the harness artifact and read back by `verdictTurnTelemetry`. */
-  native_loop_verdict_telemetry?: {
-    model_sec: number;
-    prompt_tokens: number | null;
-    completion_tokens: number | null;
-    cached_tokens: number | null;
-    streamed_fallback: boolean;
-  } | null;
+  native_loop_verdict_telemetry?: NativeLoopVerdictTelemetry | null;
+  /** #1199: the verdict-telemetry record a successful #1145 verdict refresh
+   * REPLACED (moved here before the refreshed record is written). Holds at
+   * most one element — a refresh happens at most once per run; a failed
+   * refresh leaves the standing record untouched. Content-free. snake_case:
+   * persisted verbatim in the harness artifact and consumed (nulled) by
+   * `buildToolLoopTelemetry` into `verdict.superseded`. */
+  native_loop_superseded_verdict_telemetry?: NativeLoopVerdictTelemetry[] | null;
   /** #1145: record of the bounded evidence-repair continuation of the tool
    * loop (present only when a trace-gap probe was supplied and fired).
    * snake_case: persisted verbatim in the harness artifact. */
@@ -1484,6 +1532,11 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
     // Consume the raw verdict record (folded into `verdict` below), exactly as
     // `tool_loop_meta` is consumed above, so it is not duplicated in the artifact.
     result.native_loop_verdict_telemetry = null;
+    // #1199: the same consumption for the superseded verdict record (a
+    // successful #1145 refresh moved the standing verdict's record here — at
+    // most one), folded into `verdict.superseded` below.
+    const supersededTel = supersededVerdictTelemetry(result);
+    result.native_loop_superseded_verdict_telemetry = null;
     return {
       version: TOOL_LOOP_TELEMETRY_VERSION,
       phase: "loop",
@@ -1510,11 +1563,13 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
       // #1199: one bounded, content-free record per native-loop model turn
       // (latency + provider-reported usage + tool disposition counts). A turn
       // that internally retried a streamed response still produced exactly ONE
-      // record, so summing these never double counts a retry. Scope: the
-      // ORIGINAL investigation loop only — the context-compaction digest call is
-      // folded into the aggregate `usage` counters but carries no per-round
-      // record, so `rounds` (+ `repair_rounds` + `verdict`) is a faithful lower
-      // bound of the whole-loop total, never an over-count.
+      // record, and a transport-error turn recorded one with null usage when
+      // the loop stopped on REQUEST_ERROR, so summing these never double
+      // counts a retry and stays a faithful lower bound of the whole-loop
+      // usage. Scope: the ORIGINAL investigation loop only — the
+      // context-compaction digest call is folded into the aggregate `usage`
+      // counters but carries no per-round record, so `rounds` (+ `repair_rounds`
+      // + `verdict`) remains that lower bound.
       rounds: Array.isArray(meta.round_telemetry) ? meta.round_telemetry : [],
       // #1199: the #1145 evidence-repair continuation's own native-loop model
       // turn(s), in their own array so `rounds` stays exactly the investigation
@@ -1530,12 +1585,17 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
         status: result.native_loop_verdict_status ?? "",
         reason: result.native_loop_verdict_reason ?? "",
         // #1199: the closing verdict turn's separate latency/usage record,
-        // distinct from the investigation `rounds` above.
+        // distinct from the investigation `rounds` above, folded over every
+        // verdict attempt. A successful #1145 refresh makes it describe the
+        // REFRESHED verdict — the standing record it replaced rides next to it
+        // in `superseded` (at most one; empty when no refresh replaced a
+        // verdict record; a failed refresh leaves both untouched).
         model_sec: vTel.model_sec,
         prompt_tokens: vTel.prompt_tokens,
         completion_tokens: vTel.completion_tokens,
         cached_tokens: vTel.cached_tokens,
         streamed_fallback: vTel.streamed_fallback,
+        superseded: supersededTel,
       },
     };
   }
@@ -1603,6 +1663,31 @@ function verdictTurnTelemetry(result: HarnessResult): {
     cached_tokens: numOrNull(v.cached_tokens),
     streamed_fallback: v.streamed_fallback === true,
   };
+}
+
+/** #1199: the superseded verdict record(s) — a successful #1145 refresh moves
+ * the standing verdict telemetry here before writing the refreshed record (at
+ * most one element per run). Reads `result.native_loop_superseded_verdict_telemetry`
+ * with per-record projection so malformed records contribute defaults rather
+ * than malformed shapes. Never content: numbers and a boolean only. */
+function supersededVerdictTelemetry(result: HarnessResult): NativeLoopVerdictTelemetry[] {
+  const records = result.native_loop_superseded_verdict_telemetry;
+  if (!Array.isArray(records) || records.length === 0) return [];
+  const numOrNull = (x: unknown): number | null =>
+    typeof x === "number" && Number.isFinite(x) ? x : null;
+  const projected: NativeLoopVerdictTelemetry[] = [];
+  for (const record of records) {
+    if (record === null || typeof record !== "object") continue;
+    const r = record as unknown as Record<string, unknown>;
+    projected.push({
+      model_sec: numOrNull(r.model_sec) ?? 0,
+      prompt_tokens: numOrNull(r.prompt_tokens),
+      completion_tokens: numOrNull(r.completion_tokens),
+      cached_tokens: numOrNull(r.cached_tokens),
+      streamed_fallback: r.streamed_fallback === true,
+    });
+  }
+  return projected;
 }
 
 const fmtUsageTokens = (v: number | null): string => (v === null ? "-" : String(v));
@@ -2441,20 +2526,30 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         // provider usage record, kept separate from the investigation rounds.
         // `model_sec` spans only the model request (including a streamed→
         // non-streamed retry) on the dedicated telemetry clock, and the usage
-        // comes from the response body's own counters — null when the provider
-        // reports none, never estimated. Only the turn that OWNS the verdict
-        // record writes it (the first verdict turn, or a #1145 refresh that
-        // actually produced a new verdict): a failed refresh leaves the standing
-        // verdict's telemetry untouched, exactly as the verdict itself.
+        // is folded over EVERY verdict attempt (`verdict.usageTotals`) — null
+        // when every attempt reported none, never estimated. Only the turn
+        // that OWNS the verdict record writes it (the first verdict turn, or a
+        // #1145 refresh that actually produced a new verdict): a failed
+        // refresh leaves the standing verdict's telemetry untouched, exactly
+        // as the verdict itself. A SUCCESSFUL refresh first moves the standing
+        // record into `native_loop_superseded_verdict_telemetry` (at most one
+        // element — a refresh happens at most once per run), so the refreshed
+        // turn's record does not erase the first verdict turn's from telemetry.
         if (verdict.ok || recordFailure) {
-          const verdictUsage = verdict.response !== null && typeof verdict.response === "object"
-            ? normalizeUsageTelemetry((verdict.response as Record<string, unknown>).usage ?? null)
-            : normalizeUsageTelemetry(null);
+          if (recordFailure === false) {
+            const standing = input.result.native_loop_verdict_telemetry;
+            if (standing !== null && standing !== undefined && typeof standing === "object") {
+              if (!Array.isArray(input.result.native_loop_superseded_verdict_telemetry)) {
+                input.result.native_loop_superseded_verdict_telemetry = [];
+              }
+              input.result.native_loop_superseded_verdict_telemetry!.push({ ...standing });
+            }
+          }
           const verdictTelemetry = {
             model_sec: Number(Math.max(0, telemetryTimeFn() - verdictModelStart).toFixed(3)),
-            prompt_tokens: verdictUsage.promptTokens,
-            completion_tokens: verdictUsage.completionTokens,
-            cached_tokens: verdictUsage.cachedTokens,
+            prompt_tokens: verdict.usageTotals.promptTokens,
+            completion_tokens: verdict.usageTotals.completionTokens,
+            cached_tokens: verdict.usageTotals.cachedTokens,
             streamed_fallback: verdict.retried,
           };
           input.result.native_loop_verdict_telemetry = verdictTelemetry;

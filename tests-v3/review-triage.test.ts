@@ -636,7 +636,16 @@ test("#1003: enabling triage changes no tool, fork, evidence or routing capabili
             ? (tel.repair_rounds as unknown[]).map(stripRoundLatency)
             : tel.repair_rounds,
           verdict: tel.verdict && typeof tel.verdict === "object"
-            ? { ...(tel.verdict as Record<string, unknown>), model_sec: undefined }
+            ? {
+              ...(tel.verdict as Record<string, unknown>),
+              model_sec: undefined,
+              // #1199: superseded verdict records (a #1145 refresh that
+              // replaced the standing verdict) carry run-to-run latency too —
+              // strip it the same way while keeping the token fields.
+              superseded: Array.isArray((tel.verdict as Record<string, unknown>).superseded)
+                ? ((tel.verdict as Record<string, unknown>).superseded as unknown[]).map(stripRoundLatency)
+                : (tel.verdict as Record<string, unknown>).superseded,
+            }
             : tel.verdict,
         }
         : undefined,

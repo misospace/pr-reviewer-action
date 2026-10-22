@@ -147,6 +147,11 @@ export interface ExecutedCall {
  * turn. The loop owns the round timeline and emits exactly one record per
  * model turn (a turn that internally retried a streamed response still
  * produces ONE record, so aggregate totals sum without double counting).
+ * Records cover EVERY model turn: `outcome.rounds` is the count of turns that
+ * returned a response, and a transport-error turn adds at most ONE additional
+ * record (when the loop stops on REQUEST_ERROR) with null provider usage.
+ * Summing round usage over a null contributes nothing, so the persisted
+ * records stay a faithful lower bound of the aggregate usage.
  *
  * Every field is a count, a duration, a nullable provider-reported token total,
  * or a boolean. No prompt text, response text, tool arguments, tool results,
@@ -390,10 +395,15 @@ export async function driveToolLoop(
   const seenKeys = new Set<string>();
 
   // #1199: emit one bounded telemetry record per model turn. Called from both
-  // turn-ending paths (the no-tool-call stop and after tool execution), so the
-  // count of records always equals `outcome.rounds`. Reads only live loop
-  // state — never tool/model content.
+  // turn-ending paths (the no-tool-call stop and after tool execution) and
+  // from the transport-error catch, so the records cover every model turn:
+  // the successful call sites pass `outcome.rounds` (the turn just incremented
+  // it — records 1..rounds in order), while the errored turn does not increment
+  // `outcome.rounds` and emits round `outcome.rounds + 1` with null usage as
+  // the loop's final stop. Reads only live loop state — never tool/model
+  // content.
   const emitRound = (
+    roundIndex: number,
     requested: number,
     executed: number,
     refused: number,
@@ -405,7 +415,7 @@ export async function driveToolLoop(
   ): void => {
     if (options.onRound === undefined) return;
     options.onRound({
-      round: outcome.rounds,
+      round: roundIndex,
       model_sec: roundSec(modelElapsedSec),
       prompt_tokens: usage.promptTokens,
       completion_tokens: usage.completionTokens,
@@ -499,9 +509,24 @@ export async function driveToolLoop(
     try {
       response = await postFn(payload, turnSignal);
     } catch (exc) {
-      // Transport errors end the loop.
+      // Transport errors end the loop. #1199: the errored turn is still a
+      // model turn — emit its record (round index rounds + 1, null usage,
+      // no tool activity) before stopping. `outcome.rounds` is NOT
+      // incremented: it stays the count of turns that returned a response
+      // (the anchor for `usage.rounds_used`, stop reasons, and budget notes).
       outcome.stopReason = STOP_REQUEST_ERROR;
       outcome.error = exc instanceof Error ? exc.message : String(exc);
+      emitRound(
+        outcome.rounds + 1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        Math.max(0, nowFn() - modelStart),
+        normalizeUsageTelemetry(null),
+        roundFellBack,
+      );
       broke = true;
       break;
     }
@@ -517,7 +542,7 @@ export async function driveToolLoop(
     if (calls.length === 0) {
       outcome.finalText = text;
       outcome.stopReason = outcome.toolCallsIssued > 0 ? STOP_MODEL_DONE : STOP_NO_TOOL_CALLS;
-      emitRound(0, 0, 0, 0, 0, modelElapsedSec, turnUsage, roundFellBack);
+      emitRound(outcome.rounds, 0, 0, 0, 0, 0, modelElapsedSec, turnUsage, roundFellBack);
       broke = true;
       break;
     }
@@ -645,7 +670,7 @@ export async function driveToolLoop(
 
     // #1199: the turn's telemetry, emitted once per model turn. A round that
     // ends on budget exhaustion still records its turn before the stop below.
-    emitRound(calls.length, roundExecuted, roundRefused, roundDedup, toolElapsedSec, modelElapsedSec, turnUsage, roundFellBack);
+    emitRound(outcome.rounds, calls.length, roundExecuted, roundRefused, roundDedup, toolElapsedSec, modelElapsedSec, turnUsage, roundFellBack);
 
     if (callsExecuted >= budgets.maxToolCalls) {
       outcome.stopReason = STOP_BUDGET;

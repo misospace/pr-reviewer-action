@@ -646,3 +646,71 @@ test("#1199: emits exactly one record per turn on a max-rounds stop", async () =
   assert.equal(rounds.length, outcome.rounds);
   assert.deepEqual(rounds.map((r) => r.round), [1, 2, 3, 4, 5, 6]);
 });
+
+test("#1199: records a transport-error turn as a round without incrementing rounds", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const postFn = async () => { throw new Error("connection reset by peer"); };
+  // nowFn: [telemetryStart, modelStart, the catch, the record's wall read]
+  const { executeFn, timeFn, nowFn, rounds } = telemetryLoop([], [], [0, 100, 100.5, 100.6]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 8, 120),
+    timeFn,
+    nowFn,
+    onRound: (r) => rounds.push(r),
+  });
+  assert.equal(outcome.stopReason, STOP_REQUEST_ERROR);
+  assert.equal(outcome.error, "connection reset by peer");
+  // the errored turn is recorded but does NOT increment outcome.rounds (that
+  // count anchors usage.rounds_used, stop reasons, and budget notes) — so the
+  // persisted records cover every model turn while rounds stays the count of
+  // turns that returned a response.
+  assert.equal(outcome.rounds, 0);
+  assert.equal(rounds.length, 1);
+  const errored = rounds[0]!;
+  // 1-based model-turn index: an errored first turn is still round 1.
+  assert.equal(errored.round, 1);
+  assert.equal(errored.model_sec, 0.5);
+  // no response body exists: null usage, never a synthesized number, and no
+  // tool activity.
+  assert.equal(errored.prompt_tokens, null);
+  assert.equal(errored.completion_tokens, null);
+  assert.equal(errored.cached_tokens, null);
+  assert.equal(errored.tools_requested, 0);
+  assert.equal(errored.tools_executed, 0);
+  assert.equal(errored.tools_refused, 0);
+  assert.equal(errored.tools_deduplicated, 0);
+  assert.equal(errored.tool_elapsed_sec, 0);
+  assert.equal(errored.requests_remaining, 8);
+  // the remaining-budget view for that turn is read on the UNincremented
+  // rounds count.
+  assert.equal(errored.rounds_remaining, 8);
+  assert.equal(errored.streamed_fallback, false);
+});
+
+test("#1199: a transport-error turn records the streamed fallback it attempted", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const postFn = async (_payload: Record<string, unknown>, turn?: ToolTurnSignal) => {
+    turn?.reportFallback(); // fell back from the streamed attempt before the retry also failed
+    throw new Error("reassembly failed");
+  };
+  // nowFn: [telemetryStart, modelStart, the catch, the record's wall read]
+  const { executeFn, timeFn, nowFn, rounds } = telemetryLoop([], [], [0, 7, 7.25, 7.25]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 8, 120),
+    timeFn,
+    nowFn,
+    onRound: (r) => rounds.push(r),
+  });
+  assert.equal(outcome.stopReason, STOP_REQUEST_ERROR);
+  assert.equal(outcome.rounds, 0);
+  assert.equal(rounds.length, 1);
+  assert.equal(rounds[0]!.round, 1);
+  assert.equal(rounds[0]!.model_sec, 0.25);
+  assert.equal(rounds[0]!.streamed_fallback, true);
+});

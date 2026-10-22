@@ -1311,3 +1311,118 @@ test("#1199: the #1145 evidence-repair continuation's native-loop turn is record
   assert.match(logs.join("\n"), /native_loop repair round 1: model=[0-9.]+s prompt=500 completion=40/);
   assert.match(logs.join("\n"), /native_loop repair round 1: tools requested=1 executed=1 refused=0 dedup=0/);
 });
+
+test("#1199: the verdict record folds EVERY attempt's usage, not just the final one", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  const withUsage = (body: unknown, usage: Record<string, unknown>) => ({ ...(body as object), usage });
+  const scripted = [
+    // the investigation loop
+    withUsage(openAiCall("c1", "read_file", '{"path":"src.ts"}'), { prompt_tokens: 1000, completion_tokens: 50 }),
+    openAiText("evidence gathered"),
+    // verdict attempt 1 (streamed): a body the verdict parser rejects, WITH a
+    // usage block ...
+    withUsage(openAiText("not a verdict body"), { prompt_tokens: 21000, completion_tokens: 900, prompt_tokens_details: { cached_tokens: 16000 } }),
+    // ... which triggers the single non-streamed retry: usable, WITH a usage
+    // block of its own.
+    withUsage(validVerdict(), { prompt_tokens: 22000, completion_tokens: 1000 }),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true" },
+    transport: async () => scripted[n++],
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_retried, true);
+  assert.equal(n, 4);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry;
+  assert.equal(telemetry.verdict.produced, true);
+  assert.equal(telemetry.verdict.streamed_fallback, true);
+  // the verdict record is the SUM over both attempts: the streamed failure's
+  // usage still counts, so a retried verdict turn cannot under-report itself.
+  assert.equal(telemetry.verdict.prompt_tokens, 21000 + 22000);
+  assert.equal(telemetry.verdict.completion_tokens, 900 + 1000);
+  assert.equal(telemetry.verdict.cached_tokens, 16000);
+  // Derivability: the aggregate `usage` folds the same attempts (loop postFn +
+  // both verdict attempts), so sum(rounds) + verdict stays derivable from the
+  // aggregate — the verdict-turn contribution is prompt 21000+22000.
+  assert.equal(artifact.usage.prompt_tokens, 1000 + 21000 + 22000);
+  assert.equal(artifact.usage.completion_tokens, 50 + 900 + 1000);
+  assert.equal(artifact.usage.cached_prompt_tokens, 16000);
+});
+
+test("#1199: a successful #1145 refresh moves the standing verdict record into verdict.superseded", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "notes.md"), "evidence note\n");
+  const withUsage = (body: unknown, usage: Record<string, unknown>) => ({ ...(body as object), usage });
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    // the FIRST verdict turn (usage recorded, then superseded by the refresh)
+    withUsage(validVerdict(), { prompt_tokens: 21000, completion_tokens: 900 }),
+    // the #1145 continuation's own native-loop turn, then the refreshed verdict
+    openAiCall("c2", "read_file", '{"path":"notes.md"}'),
+    withUsage(validVerdict(), { prompt_tokens: 30000, completion_tokens: 700, prompt_tokens_details: { cached_tokens: 25000 } }),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => scripted[n++],
+    traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+    ...withPrompt,
+  }));
+  assert.equal(result.trace_repair_continuation?.outcome, "continued");
+  assert.equal(result.trace_repair_continuation?.verdict_refreshed, true);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry;
+  // `verdict` describes the REFRESHED verdict ...
+  assert.equal(telemetry.verdict.produced, true);
+  assert.equal(telemetry.verdict.prompt_tokens, 30000);
+  assert.equal(telemetry.verdict.completion_tokens, 700);
+  assert.equal(telemetry.verdict.cached_tokens, 25000);
+  // ... and the FIRST verdict's record survived next to it.
+  const superseded = telemetry.verdict.superseded;
+  assert.ok(Array.isArray(superseded) && superseded.length === 1, "exactly one superseded record");
+  const first = superseded[0]!;
+  assert.equal(typeof first.model_sec, "number");
+  assert.ok(first.model_sec >= 0);
+  assert.equal(first.prompt_tokens, 21000);
+  assert.equal(first.completion_tokens, 900);
+  assert.equal(first.cached_tokens, null);
+  assert.equal(first.streamed_fallback, false);
+  // the raw records were consumed (folded into the verdict sub-object), not
+  // duplicated at the top level of the artifact.
+  assert.equal(artifact.native_loop_superseded_verdict_telemetry, null);
+});
+
+test("#1199: a failed #1145 refresh keeps the standing verdict record (no superseded push)", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "notes.md"), "evidence note\n");
+  const withUsage = (body: unknown, usage: Record<string, unknown>) => ({ ...(body as object), usage });
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    withUsage(validVerdict(), { prompt_tokens: 21000, completion_tokens: 900 }),
+    openAiCall("c2", "read_file", '{"path":"notes.md"}'),
+    // the refresh produces no reusable verdict → the first verdict stands
+    openAiText("not a verdict"),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => scripted[n++],
+    traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+    ...withPrompt,
+  }));
+  assert.equal(result.trace_repair_continuation?.verdict_refreshed, false);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry;
+  // `verdict` still describes the FIRST verdict and nothing was superseded.
+  assert.equal(telemetry.verdict.prompt_tokens, 21000);
+  assert.equal(telemetry.verdict.completion_tokens, 900);
+  assert.deepEqual(telemetry.verdict.superseded, []);
+});
