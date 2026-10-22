@@ -1,0 +1,14 @@
+{
+  "verdict": "request_changes",
+  "review_markdown": "## Review\n\nSYNTHETIC fixture review. Docs-only sweep; one heading is misspelled and one sentence contradicts the config reference. Minor findings only.",
+  "findings": [
+    {
+      "severity": "minor",
+      "category": "docs",
+      "file": "docs/widgets.md",
+      "line": 3,
+      "message": "SYNTHETIC finding: heading typo ('Widgit')."
+    }
+  ],
+  "required_checks": "none"
+}

@@ -1,0 +1,7 @@
+diff --git a/src/only/diff.ts b/src/only/diff.ts
+index aaaaaaa..bbbbbbb 100644
+--- a/src/only/diff.ts
++++ b/src/only/diff.ts
+@@ -1 +1,2 @@
+ // SYNTHETIC pilot fixture diff — the only artifact this entry has.
++export const missing = true;

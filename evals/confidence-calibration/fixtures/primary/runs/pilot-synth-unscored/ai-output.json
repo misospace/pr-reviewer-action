@@ -1,0 +1,14 @@
+{
+  "verdict": "approve",
+  "review_markdown": "## Review\n\nSYNTHETIC fixture review. Dev-dependency bump only; nothing runtime-facing changes.",
+  "findings": [
+    {
+      "severity": "info",
+      "category": "deps",
+      "file": "package.json",
+      "line": 12,
+      "message": "SYNTHETIC finding: new dev dependency added; pin is a caret range."
+    }
+  ],
+  "required_checks": "complete"
+}

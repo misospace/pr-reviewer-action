@@ -1,0 +1,8 @@
+diff --git a/package.json b/package.json
+index 8888888..9999999 100644
+--- a/package.json
++++ b/package.json
+@@ -10,2 +10,3 @@
+     "devDependencies": {
++      "synthetic-dev-tool": "^1.0.0",
+       "esbuild": "0.28.2"

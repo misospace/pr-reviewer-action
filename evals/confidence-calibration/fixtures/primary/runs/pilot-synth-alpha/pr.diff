@@ -1,0 +1,18 @@
+diff --git a/src/widget/config.ts b/src/widget/config.ts
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/src/widget/config.ts
+@@ -0,0 +1,12 @@
++// SYNTHETIC pilot fixture diff — not a real change.
++export interface WidgetConfig {
++  name: string;
++  retries: number;
++}
++
++export function defaultConfig(): WidgetConfig {
++  return {
++    name: "widget",
++    retries: 3,
++  };
++}

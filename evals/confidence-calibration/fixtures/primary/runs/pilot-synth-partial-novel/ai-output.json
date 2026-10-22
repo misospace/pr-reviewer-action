@@ -1,0 +1,14 @@
+{
+  "verdict": "request_changes",
+  "review_markdown": "## Review\n\nSYNTHETIC fixture review. The drain loop in src/widget/beta.ts no longer terminates; findings below. Note the coverage account: the tool loop ran out of budget before reading every touched file.",
+  "findings": [
+    {
+      "severity": "major",
+      "category": "correctness",
+      "file": "src/widget/beta.ts",
+      "line": 4,
+      "message": "SYNTHETIC finding: drainQueue loops forever after the condition was replaced with `true`."
+    }
+  ],
+  "required_checks": "complete"
+}

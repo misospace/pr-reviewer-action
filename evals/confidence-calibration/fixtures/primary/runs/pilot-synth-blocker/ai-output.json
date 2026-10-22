@@ -1,0 +1,14 @@
+{
+  "verdict": "request_changes",
+  "review_markdown": "## Review\n\nSYNTHETIC fixture review. The persisted cache file is created world-readable and holds live credential material; this is a blocker until the mode is tightened and the legacy cache file is removed.",
+  "findings": [
+    {
+      "severity": "blocker",
+      "category": "security",
+      "file": "src/auth/token_cache.ts",
+      "line": 47,
+      "message": "SYNTHETIC finding: credential cache is written world-readable (mode 0o666) into a predictable temp path."
+    }
+  ],
+  "required_checks": "complete"
+}

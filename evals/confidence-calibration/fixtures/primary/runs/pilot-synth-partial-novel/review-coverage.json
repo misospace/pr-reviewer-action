@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "tool_loop_ran": true,
+  "enforcement_harness": "harness",
+  "route": "primary",
+  "partial_coverage": "tool loop exhausted its budget before reading src/widget/qux.ts",
+  "incomplete_reason": "tool_loop_budget_exhausted",
+  "required_checks": "complete"
+}

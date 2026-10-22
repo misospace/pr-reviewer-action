@@ -1,0 +1,85 @@
+{
+  "plan_version": 1,
+  "created": "2026-10-20",
+  "source_issue": 1074,
+  "blinded": true,
+  "blinding_note": "The scorer's inputs exclude every corpus defect annotation: only the run's own artifacts (diff, PR title/body, findings, review summary, review_result, required checks, coverage) reach the scorer prompt, so the scorer grades the review blind to the ground-truth defect anchor. Defect metadata is used only offline, by the report, for calibration math.",
+  "rubric": {
+    "id": "confidence-rubric-v1",
+    "source": "src/confidence/prompt.ts production prompt + src/confidence/result.ts deterministic ceilings",
+    "provenance": "pinned at plan creation; bridge bundles from the checked-out source tree"
+  },
+  "sample": {
+    "vulnerable": [
+      "pr-reviewer-action-16-61",
+      "pr-reviewer-action-131-274",
+      "courier-46-61",
+      "pr-reviewer-action-554-597",
+      "miso-gallery-56-207",
+      "dispatch-121-252",
+      "alert-triage-53-62",
+      "pr-reviewer-action-457-547"
+    ],
+    "clean": [
+      "pr-reviewer-action-630-clean",
+      "pr-reviewer-action-628-clean",
+      "pr-reviewer-action-133-clean",
+      "pr-reviewer-action-499-clean",
+      "dispatch-468-clean",
+      "dispatch-104-clean",
+      "courier-64-clean",
+      "alert-triage-71-clean"
+    ]
+  },
+  "selection_rationale": "The vulnerable mix spans security (pr-reviewer-action-554-597 maintainer gate, miso-gallery-56-207 unauthenticated route), correctness/availability (pr-reviewer-action-131-274, courier-46-61, dispatch-121-252, alert-triage-53-62), config/CI (pr-reviewer-action-16-61), and supply-chain/minor (pr-reviewer-action-457-547). The clean corpus entries carry no titles, so their domain mix is recorded as unknown \u2014 a documented limitation of this pilot, not a claim about those PRs.",
+  "ceilings": {
+    "max_primary_reviews": 16,
+    "max_scorer_calls": 48,
+    "max_scorer_output_tokens": 60000,
+    "wall_time_budget_sec": {
+      "review": 21600,
+      "score": 7200
+    },
+    "request_timeout_sec": 120,
+    "temperature": "omitted \u2014 matches the production scorer request, which sends no temperature field",
+    "repeats_per_condition": 2,
+    "retries": "none \u2014 a failed call is recorded unscored, never retried"
+  },
+  "conditions": [
+    {
+      "id": "baseline",
+      "backend": "none",
+      "purpose": "control: the scorer lane is off; rows carry the canonical disabled result and consume no calls"
+    },
+    {
+      "id": "mock",
+      "backend": "mock",
+      "answers": "evals/confidence-calibration/mock-scorer-answers.json",
+      "purpose": "offline validation of the plumbing: canned raw answers exercised through the production parse/ceiling path"
+    },
+    {
+      "id": "same-model",
+      "backend": "live",
+      "base_url_env": "CONFIDENCE_PILOT_SAME_BASE_URL",
+      "model_env": "CONFIDENCE_PILOT_SAME_MODEL",
+      "key_env": "CONFIDENCE_PILOT_SAME_API_KEY",
+      "api_format_env": "CONFIDENCE_PILOT_SAME_API_FORMAT",
+      "independence": "same endpoint+model as the primary lane \u2014 anchoring/variance control, NOT independent evidence",
+      "secret_env_names": [
+        "AI_API_KEY"
+      ]
+    },
+    {
+      "id": "heterogeneous",
+      "backend": "live",
+      "base_url_env": "CONFIDENCE_PILOT_HETERO_BASE_URL",
+      "model_env": "CONFIDENCE_PILOT_HETERO_MODEL",
+      "key_env": "CONFIDENCE_PILOT_HETERO_API_KEY",
+      "api_format_env": "CONFIDENCE_PILOT_HETERO_API_FORMAT",
+      "independence": "distinct model family per plan; the operator must configure a different family than the primary \u2014 the driver cannot verify family identity, recorded as an unknown",
+      "secret_env_names": [
+        "AI_API_KEY"
+      ]
+    }
+  ]
+}
