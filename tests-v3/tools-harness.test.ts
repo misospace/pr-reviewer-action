@@ -1231,3 +1231,83 @@ test("#1199: a streamed→non-streamed loop turn is flagged once and never split
   // aggregate rounds_used matches the persisted per-round count.
   assert.equal(artifact.tool_loop_telemetry.usage.rounds_used, rounds.length);
 });
+
+test("#1199: the verdict latency rides the telemetry clock, not the scripted budget clock", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    // A scripted budget clock that sits nowhere near any wall clock: a verdict
+    // duration measured against it would be negative (clamped to 0) or
+    // astronomically large — never a real measurement.
+    timeFn: () => 1e6,
+    transport: async () => {
+      await new Promise((r) => setTimeout(r, 25));
+      return scripted[n++];
+    },
+    ...withPrompt,
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const modelSec = artifact.tool_loop_telemetry.verdict.model_sec as number;
+  assert.equal(typeof modelSec, "number");
+  // A real measurement of the verdict turn: bounded and positive, and nowhere
+  // near the scripted budget clock's 1e6.
+  assert.ok(modelSec > 0, `verdict model_sec must be a real duration, got ${modelSec}`);
+  assert.ok(modelSec < 2, `verdict model_sec must not be a budget-clock artifact, got ${modelSec}`);
+});
+
+test("#1199: the #1145 evidence-repair continuation's native-loop turn is recorded too", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "notes.md"), "evidence note\n");
+  const withUsage = (body: unknown, usage: Record<string, unknown>) => ({ ...(body as object), usage });
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+    // The #1145 continuation's own native-loop turn (one tool call), then the
+    // refreshed verdict turn it justifies.
+    withUsage(openAiCall("c2", "read_file", '{"path":"notes.md"}'), { prompt_tokens: 500, completion_tokens: 40 }),
+    validVerdict(),
+  ];
+  let n = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    transport: async () => scripted[n++],
+    log: (line) => { logs.push(line); },
+    traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+    ...withPrompt,
+  }));
+  assert.equal(result.trace_repair_continuation?.outcome, "continued");
+  // Two investigation turns + the verdict turn, the continuation's own turn,
+  // and the refreshed verdict turn it justifies.
+  assert.equal(n, 5);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry;
+  // The investigation loop's rounds stay exactly the investigation loop's turns.
+  assert.equal(telemetry.rounds.length, 2);
+  assert.equal(telemetry.usage.rounds_used, 2);
+  // The continuation is a native-loop run too, so its model turn is recorded —
+  // in its own array, so the investigation `rounds` keep their meaning.
+  assert.equal(telemetry.repair_rounds.length, 1);
+  const repairRound = telemetry.repair_rounds[0];
+  assert.equal(repairRound.round, 1);
+  assert.equal(repairRound.prompt_tokens, 500);
+  assert.equal(repairRound.completion_tokens, 40);
+  assert.equal(repairRound.cached_tokens, null);
+  assert.equal(repairRound.tools_requested, 1);
+  assert.equal(repairRound.tools_executed, 1);
+  assert.equal(typeof repairRound.model_sec, "number");
+  assert.ok(repairRound.model_sec >= 0);
+  // ... and it is heartbeat-logged under its own scope.
+  assert.match(logs.join("\n"), /native_loop repair round 1: model=[0-9.]+s prompt=500 completion=40/);
+  assert.match(logs.join("\n"), /native_loop repair round 1: tools requested=1 executed=1 refused=0 dedup=0/);
+});

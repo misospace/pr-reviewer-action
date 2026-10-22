@@ -1511,11 +1511,16 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
       // (latency + provider-reported usage + tool disposition counts). A turn
       // that internally retried a streamed response still produced exactly ONE
       // record, so summing these never double counts a retry. Scope: the
-      // ORIGINAL investigation loop only — the context-compaction digest call and
-      // the #1145 evidence-repair round are folded into the aggregate `usage`
-      // counters but carry no per-round record, so `rounds` (+ `verdict`) is a
-      // faithful lower bound of the whole-loop total, never an over-count.
+      // ORIGINAL investigation loop only — the context-compaction digest call is
+      // folded into the aggregate `usage` counters but carries no per-round
+      // record, so `rounds` (+ `repair_rounds` + `verdict`) is a faithful lower
+      // bound of the whole-loop total, never an over-count.
       rounds: Array.isArray(meta.round_telemetry) ? meta.round_telemetry : [],
+      // #1199: the #1145 evidence-repair continuation's own native-loop model
+      // turn(s), in their own array so `rounds` stays exactly the investigation
+      // loop's turns (one per model turn, matching `usage.rounds_used`). Empty
+      // when no continuation ran.
+      repair_rounds: Array.isArray(meta.repair_round_telemetry) ? meta.repair_round_telemetry : [],
       stop_reason: result.stop_reason ?? "",
       budget_exhausted: Boolean(result.budget_exhausted),
       degraded: "native_loop_degraded" in result,
@@ -1559,6 +1564,7 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
     compaction: { summarize: 0, truncate: 0 },
     // #1199: the loop never ran, so there are no per-round records.
     rounds: [],
+    repair_rounds: [],
     stop_reason: PRE_LOOP_STOP_REASON,
     failure,
     budget_exhausted: false,
@@ -1606,14 +1612,21 @@ const fmtWholeSec = (v: number): string => `${Math.round(v)}s`;
 /** #1199: the concise per-round heartbeat lines for normal workflow logs. Two
  * lines (a model line and a tools line), content-free: numbers and enums only,
  * never prompt/response text, tool arguments, credentials, or provider error
- * bodies. A missing provider-usage figure prints as `-`, never a guess. */
-export function nativeLoopRoundLogLines(rec: NativeLoopRoundTelemetry): string[] {
+ * bodies. A missing provider-usage figure prints as `-`, never a guess.
+ *
+ * `scope` names the native-loop run the record came from: the investigation
+ * loop (the default) or the #1145 evidence-repair continuation. */
+export function nativeLoopRoundLogLines(
+  rec: NativeLoopRoundTelemetry,
+  scope: "investigation" | "repair" = "investigation",
+): string[] {
+  const label = scope === "repair" ? "repair round" : "round";
   const modelLine =
-    `  native_loop round ${rec.round}: model=${fmtLatencySec(rec.model_sec)}` +
+    `  native_loop ${label} ${rec.round}: model=${fmtLatencySec(rec.model_sec)}` +
     ` prompt=${fmtUsageTokens(rec.prompt_tokens)} completion=${fmtUsageTokens(rec.completion_tokens)}` +
     ` cached=${fmtUsageTokens(rec.cached_tokens)}`;
   const toolsLine =
-    `  native_loop round ${rec.round}: tools requested=${rec.tools_requested}` +
+    `  native_loop ${label} ${rec.round}: tools requested=${rec.tools_requested}` +
     ` executed=${rec.tools_executed} refused=${rec.tools_refused} dedup=${rec.tools_deduplicated}` +
     ` tool_elapsed=${fmtLatencySec(rec.tool_elapsed_sec)}` +
     ` remaining req=${rec.requests_remaining} rounds=${rec.rounds_remaining} wall=${fmtWholeSec(rec.wall_clock_remaining_sec)}` +
@@ -1942,6 +1955,12 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // artifact and drives the per-round heartbeat logs. Content-free by
   // construction (see NativeLoopRoundTelemetry).
   const roundTelemetry: NativeLoopRoundTelemetry[] = [];
+  // #1199: the #1145 evidence-repair continuation is its OWN native-loop run
+  // over the same conversation, so its model turn(s) get their own records.
+  // They live in a SEPARATE array so the investigation `rounds` stay exactly
+  // the investigation loop's turns (one per model turn, matching
+  // `usage.rounds_used`), and every native-loop model turn is still recorded.
+  const repairRoundTelemetry: NativeLoopRoundTelemetry[] = [];
 
   const postFn = async (payload: Record<string, unknown>, turn?: ToolTurnSignal): Promise<unknown> => {
     const remainingCheck = (): number => {
@@ -2178,6 +2197,10 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     // #1199: per-round latency/usage records (persisted into tool_loop_telemetry
     // and consumed/nulled with the rest of this meta by buildToolLoopTelemetry).
     round_telemetry: roundTelemetry,
+    // #1199: the #1145 evidence-repair continuation's own per-turn records.
+    // The array reference is captured here and filled by the continuation's
+    // loop further down, so the artifact sees every native-loop model turn.
+    repair_round_telemetry: repairRoundTelemetry,
   };
   // #810: on any budget stop, account from the loop's own call log which
   // changed files and specialist leads were never read/resolved. A degraded
@@ -2395,7 +2418,12 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           if (remaining <= 0) throw new Error("smart tool-loop wall-clock budget exhausted");
           verdictTimeout = Math.min(input.turnTimeout, Math.max(1, Math.trunc(remaining)));
         }
-        const verdictModelStart = timeFn();
+        // #1199: the verdict turn's latency is measured on the SAME dedicated
+        // telemetry clock the per-round records use — never the scripted
+        // budget `timeFn`. Mixing the two (starting on one and subtracting
+        // from the other) both consumed a scripted budget-clock value and
+        // produced a garbage duration.
+        const verdictModelStart = telemetryTimeFn();
         const verdict = await produceNativeVerdict({
           verdictPayload,
           baseUrl: input.baseUrl,
@@ -2627,6 +2655,15 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
               anthropicEffortSupported: anthropicEffort,
               summarizeFn,
               timeFn,
+              // #1199: the continuation is a native-loop run too, so its model
+              // turn(s) are recorded on the same dedicated telemetry clock and
+              // persisted under `repair_rounds` — every native-loop model turn
+              // is measured, not just the investigation loop's.
+              nowFn: telemetryTimeFn,
+              onRound: (rec) => {
+                repairRoundTelemetry.push(rec);
+                for (const line of nativeLoopRoundLogLines(rec, "repair")) log(line);
+              },
             });
           } catch (exc) {
             const message = exc instanceof Error ? exc.message : String(exc);

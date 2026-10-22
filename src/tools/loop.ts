@@ -175,6 +175,10 @@ export interface NativeLoopRoundTelemetry {
   tool_elapsed_sec: number;
   requests_remaining: number;
   rounds_remaining: number;
+  /** Wall-clock budget left for this loop run, measured on the telemetry clock
+   * (real elapsed time since the loop started) against the run's wall-clock
+   * budget. The budget STOP itself is decided on the budget clock; this field
+   * only reports how much of that budget is left. */
   wall_clock_remaining_sec: number;
   /** True when this turn's streamed transport fell back to a non-streamed call. */
   streamed_fallback: boolean;

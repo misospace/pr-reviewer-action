@@ -629,6 +629,12 @@ test("#1003: enabling triage changes no tool, fork, evidence or routing capabili
             ? { ...(tel.usage as Record<string, unknown>), elapsed_sec: undefined, peak_conversation_tokens: undefined }
             : undefined,
           rounds: Array.isArray(tel.rounds) ? (tel.rounds as unknown[]).map(stripRoundLatency) : tel.rounds,
+          // #1199: the #1145 evidence-repair continuation's own per-turn records
+          // carry the same run-to-run timing fields — strip them too, so the
+          // capability comparison stays about the tool/budget/evidence surface.
+          repair_rounds: Array.isArray(tel.repair_rounds)
+            ? (tel.repair_rounds as unknown[]).map(stripRoundLatency)
+            : tel.repair_rounds,
           verdict: tel.verdict && typeof tel.verdict === "object"
             ? { ...(tel.verdict as Record<string, unknown>), model_sec: undefined }
             : tel.verdict,
