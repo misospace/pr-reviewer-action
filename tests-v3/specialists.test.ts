@@ -1391,6 +1391,50 @@ test("#1200: a transport retry records two attempts with the trigger on the fail
   assertRecordsReconcile(result, ALL_ROLES);
 });
 
+test("#1200: an exhausted transport loop marks the final failure with its cause", async () => {
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, apiKey: REALISTIC_KEY },
+    requestFn: async () => {
+      calls += 1;
+      throw new Error("connection reset by endpoint");
+    },
+  }));
+
+  assert.equal(calls, 2, "the role gets exactly MAX_ATTEMPTS wire attempts");
+  const records = attemptRecords(result, "correctness");
+  assert.deepEqual(records.map((record) => record.attempt_type), ["initial", "transport-retry"]);
+  // The final failure ends the loop only because the ceiling forbids another
+  // attempt, so — matching the skipped-overrun rule — it names its own cause.
+  assert.deepEqual(records.map((record) => record.retry_trigger), ["transport-failure", "transport-failure"]);
+  assert.deepEqual(records.map((record) => record.adopted), [false, false]);
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.status, "error");
+  assert.equal(entry.error_kind, "transport");
+  assertRecordsReconcile(result, ALL_ROLES);
+});
+
+test("#1200: an exhausted combined_scout transport loop marks the shared final failure with its cause", async () => {
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, execution: "combined_scout" },
+    requestFn: async () => {
+      calls += 1;
+      throw new Error("connection reset by endpoint");
+    },
+  }));
+
+  assert.equal(calls, 2, "the shared call gets exactly MAX_ATTEMPTS wire attempts");
+  for (const roleName of ALL_ROLES) {
+    const records = attemptRecords(result, roleName);
+    assert.deepEqual(records.map((record) => record.attempt_type), ["initial", "transport-retry"], `${roleName}: shared loop records`);
+    assert.deepEqual(records.map((record) => record.retry_trigger), ["transport-failure", "transport-failure"], `${roleName}: final exhausted attempt names its cause`);
+    assert.deepEqual(records.map((record) => record.adopted), [false, false]);
+  }
+  assert.equal(result.aggregate.request_count, 2, "the meter counts the two unique wire attempts, not per-role copies");
+});
+
 test("#1200: a recovered completion-overrun retry records both attempts' timing and usage", async () => {
   let calls = 0;
   const result = await runSpecialists(baseInput({

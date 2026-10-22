@@ -128,8 +128,11 @@ export interface SpecialistAttemptRecord {
    * attempt flips the earlier record to false. */
   adopted: boolean;
   /** This attempt's own outcome that caused the follow-up attempt (or would
-   * have had one been possible when the retry was skipped). Null on a
-   * last/no-follow-up attempt. */
+   * have had one been possible): marked even when no follow-up fired — the
+   * skipped overrun ceiling and the exhausted transport loop both name their
+   * cause. Stays null only for outcomes that are never retry-eligible by
+   * policy: a final success, a timeout, a #1080 terminal provider failure, a
+   * 200 carrying an error body, and an in-flight reaped record. */
   retry_trigger: "transport-failure" | "completion-overrun" | null;
 }
 
@@ -691,7 +694,10 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
         if (delay > 0) await sleep(delay);
         continue;
       }
-      record.retry_trigger = null;
+      // The transport loop exhausted: this failure ends the role only
+      // because the ceiling forbids another attempt, so — matching the
+      // skipped-overrun rule — the record still names its own cause.
+      record.retry_trigger = "transport-failure";
       const failureArtifact = emptyArtifact(role);
       failureArtifact.errors.push(`${lastFailure.kind}: ${lastFailure.message}`);
       return finish(failureArtifact, "error", lastFailure.kind, null, payload, { error: `${lastFailure.kind}: ${lastFailure.message}` });
@@ -1027,7 +1033,9 @@ async function runSpecialistScout(
         if (delay > 0) await sleep(delay);
         continue;
       }
-      record.retry_trigger = null;
+      // Exhausted transport loop, same rule as `runSpecialistRole`: the
+      // ceiling, not the absence of a cause, is what ends the attempts.
+      record.retry_trigger = "transport-failure";
       break;
     }
     settleAttempt(record, now() - attemptStarted, outcome.raw, knownSecrets);
