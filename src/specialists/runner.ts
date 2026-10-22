@@ -643,11 +643,17 @@ function recordWireRetries(
   }
   // The just-opened records sit at the array tail; move them all before the
   // outer record they belong to (still present — its indexing position is
-  // the one fact this splice must not disturb).
+  // the one fact this splice must not disturb). Re-attachment is
+  // unconditional: the records were spliced out above, and losing them would
+  // break the exactly-once accounting far worse than a degraded position.
   const moved = attempts.splice(attempts.length - records.length, records.length);
-  const outerIndex = attempts.indexOf(record);
-  if (outerIndex >= 0) attempts.splice(outerIndex, 0, ...moved);
-  else attempts.splice(0, 0, ...moved);
+  attempts.splice(attempts.indexOf(record), 0, ...moved);
+  // `indexOf(record)` is -1 only in the unreachable state (every recording
+  // site opens `record` immediately before its call and nothing drops it
+  // before this runs): `splice(-1, …)` then inserts before the array's last
+  // element — a degraded order, never a lost record — and this helper stays
+  // fail-soft (a throw here would reject the role's promise and poison the
+  // race).
 }
 
 async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcome> {
