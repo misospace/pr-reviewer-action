@@ -32,11 +32,12 @@ Ceilings, declared before any run and enforced by the driver (a plan that
 cannot fit its planned calls refuses to start with exit 3 and no spend;
 progressive exhaustion stops mid-phase with an explicit `budget_exhausted`
 marker and explicit unscored rows for anything unattempted — never a
-retry): 16 primary reviews, 48 scorer calls, 60 000 completion tokens, 6 h
-review-phase / 2 h score-phase wall time, 120 s request timeout, no
-temperature field on the wire (matching the production scorer request),
-**retries: none** (a failed call is recorded `unscored` with a cause
-token).
+retry): 16 primary reviews, 48 scorer calls (ATTEMPTED calls — the counter
+is an upper bound: a row whose provider call never reached the provider
+still counts), 60 000 completion tokens, 6 h review-phase / 2 h score-phase
+wall time, 120 s request timeout, no temperature field on the wire (matching
+the production scorer request), **retries: none** (a failed call is recorded
+`unscored` with a cause token).
 
 ## Hard invariant
 
@@ -71,6 +72,10 @@ fixtures (`evals/confidence-calibration/fixtures/`, clearly marked synthetic
   before any call with exit 3; progressive exhaustion stops with
   `budget_exhausted: true` and explicit unscored rows for everything
   unattempted.
+- **Call/cost accounting:** the call and cost counters count ATTEMPTED
+  calls, not provider requests — an upper bound. A row whose provider call
+  never reached the provider (a timeout, a refused connection) still
+  counts, because the attempt is what the ceilings bound.
 - Full suite: `tests/test_confidence_calibration.py` (pytest), zero external
   inference (mock backend + loopback servers only);
   `scripts/confidence_calibration.py` coverage 85%.
@@ -157,6 +162,13 @@ python scripts/confidence_calibration.py review --plan evals/confidence-calibrat
 # `lifetime_wire_calls`). Start a fresh pilot in a fresh --work-dir. The bound
 # is a sequential re-run pre-flight, not a lock: concurrent invocations over one
 # work dir are outside the pilot's single-operator scope (same as the scorer's).
+# `max_scorer_calls` is a lifetime bound for the RUNS DIR across invocations
+# (any --out, with or without --merge): the driver records the spent scorer
+# calls in <runs-dir>/scorer-spend.json and refuses with exit 3 and zero
+# provider calls when carried spend + the planned calls would exceed the
+# ceiling. A malformed or unreadable ledger fails closed the same way (exit 3,
+# zero provider calls) — spend that cannot be accounted for is never treated as
+# zero spend. Start a fresh pilot in a fresh --runs-dir to reset the bound.
 # one live condition per sweep (the 48-call ceiling fits one condition with
 # repeats; see the note above about running both)
 python scripts/confidence_calibration.py score --plan evals/confidence-calibration/sample-plan.json \
@@ -172,8 +184,11 @@ state (derived through the production `strictReviewResult`, verdict policy
 `pr.diff.truncated` exactly as production does, and the canonical score is
 credential-masked and re-bounded through the same pass the runtime applies
 before any consumer reads it. Keys travel only in HTTP auth headers; values
-are never printed. Redirects are refused, not followed. One call per row, no
-retries; quota exhaustion is recorded `unscored`, never swept.
+are never printed and never written to disk — the persisted audit answer is
+the credential-masked copy (the same production redaction the runtime
+applies to a raw provider response), not the provider's raw text. Redirects
+are refused, not followed. One call per row, no retries; quota exhaustion is
+recorded `unscored`, never swept.
 
 **Proof-pin anchoring (production parity, #1155).** The driver applies the
 runtime's own gate: the bridge returns production's
@@ -221,12 +236,21 @@ end.
   runtime scorer uses, via the Node bridge) — endpoint join, request
   shape, no-redirect policy, auth-header-only credentials, timeout
   behavior, usage mapping, and failure causes are the production code
-  itself, not a mirrored copy. Two deliberate pilot differences remain:
+  itself, not a mirrored copy. Three deliberate pilot differences remain:
   the token-limit field is fixed to `max_tokens` (the runtime honors the
-  operator's `AI_TOKENS_PARAM`, e.g. `max_completion_tokens`), and there
+  operator's `AI_TOKENS_PARAM`, e.g. `max_completion_tokens`); there
   is no cancellation signal — so an endpoint that only accepts
   `max_completion_tokens` would surface as a recorded live failure, not a
-  silent wire difference.
+  silent wire difference; and the bridge sends no `reasoning_effort` field
+  (production sends the tier-configured `profile.reasoningEffort` —
+  `src/confidence/scorer.ts` — while the pilot's plan declares no effort,
+  so the bridge passes an empty effort).
+- Credential isolation: production refuses to send a primary credential to a
+  distinct endpoint (`src/confidence/scorer.ts`, the scorer call site), and
+  the pilot has no inherited-credential path at all — every live condition
+  declares its own endpoint env var AND its own key env var, and literal
+  credential values are rejected at plan validation — so no credential can
+  reach a secondary endpoint by inheritance.
 - Masking scope: the pilot masks prompt/result content against the primary
   lane credential (`AI_API_KEY`) and the scorer condition's own credential.
   The pilot configures no smart/fallback/specialist lanes (so those
