@@ -93,6 +93,46 @@ export type SpecialistRequestFn = (
   timeoutSec: number,
 ) => Promise<SpecialistTransportOutcome>;
 
+/** #1200: bounded, content-free record of ONE actual provider attempt a role
+ * made — every real wire attempt appears exactly once in role telemetry.
+ * The set of keys is closed and carries no model response content, no prompts,
+ * no credentials, and no header values; missing provider facts stay null
+ * (never inferred from siblings). */
+export interface SpecialistAttemptRecord {
+  /** Where this attempt fired in the retry model. `initial` is the first
+   * wire attempt of the role run, `transport-retry` the later attempts of the
+   * transport loop, `overrun-retry` the one-shot completion-overrun recovery
+   * call. A `skipped` overrun retry opens no record — no attempt was made. */
+  attempt_type: "initial" | "transport-retry" | "overrun-retry";
+  /** The completion-token budget actually sent on this attempt
+   * (`max_tokens`, or `max_completion_tokens` when configured). */
+  max_tokens: number;
+  /** Wall-clock seconds of this attempt, 3-decimal-rounded. Null (unknown)
+   * while the attempt is in flight — the phase-deadline reap snapshots the
+   * sink before a straggler attempt ever settles. */
+  elapsed_sec: number | null;
+  /** Provider-reported input tokens; null when the provider reported
+   * nothing (never inferred). */
+  prompt_tokens: number | null;
+  /** Provider-reported output tokens; null when not reported. */
+  completion_tokens: number | null;
+  /** Provider-reported cached tokens; null when not reported. */
+  cached_tokens: number | null;
+  /** Bounded (`boundedStopReason`) stop reason of this attempt's response;
+   * null when the attempt produced no response the runner could read from
+   * (transport failure, timeout, 200 carrying an error body). */
+  stop_reason: string | null;
+  /** True when this attempt's response became the role's final adopted
+   * response. Exactly one record is adopted (or none: the role was reaped,
+   * cancelled mid-run, or never produced a usable response). A later adopted
+   * attempt flips the earlier record to false. */
+  adopted: boolean;
+  /** This attempt's own outcome that caused the follow-up attempt (or would
+   * have had one been possible when the retry was skipped). Null on a
+   * last/no-follow-up attempt. */
+  retry_trigger: "transport-failure" | "completion-overrun" | null;
+}
+
 export interface SpecialistRoleEntry {
   role: string;
   status: "ok" | "degraded" | "error" | "skipped";
@@ -136,6 +176,13 @@ export interface SpecialistRoleEntry {
    * the ceiling, or no time budget left). Absent when no overrun was
    * detected. */
   overrun_retry_result?: "recovered" | "failed" | "skipped" | null;
+  /** #1200: this role's per-attempt records, chronological, one per actual
+   * wire attempt (initial + transport retries + the overrun-retry retry).
+   * Absent when the role made no wire attempt (input/guard/skip failures, a
+   * cancel before the first attempt, a phase deadline hit before any attempt
+   * was opened). Optional field: adding it does not change the entries that
+   * lack attempts. */
+  attempts?: SpecialistAttemptRecord[];
   /** #846: present only for an error entry whose failure was an actual HTTP
    * error response from the model endpoint (never for input/timeout/guard
    * failures, or a 200 carrying an error body). */
@@ -286,6 +333,9 @@ function roleEntry(
     outputChars?: number | null;
     overrunDetected?: boolean;
     overrunRetryResult?: "recovered" | "failed" | "skipped" | null;
+    /** #1200: this role's per-attempt records; emitted (as per-record copies)
+     * only when at least one wire attempt was made. */
+    attempts?: SpecialistAttemptRecord[] | undefined;
   } = {},
 ): SpecialistRoleEntry {
   return {
@@ -308,6 +358,9 @@ function roleEntry(
     ...(options.outputChars !== undefined ? { output_chars: options.outputChars } : {}),
     ...(options.overrunDetected !== undefined ? { overrun_detected: options.overrunDetected } : {}),
     ...(options.overrunRetryResult !== undefined ? { overrun_retry_result: options.overrunRetryResult } : {}),
+    ...(options.attempts !== undefined && options.attempts.length > 0
+      ? { attempts: options.attempts.map((record) => ({ ...record })) }
+      : {}),
   };
 }
 
@@ -390,6 +443,11 @@ interface RoleRunOptions {
   /** #758: telemetry-only tag for which corpus this role ran against. */
   corpusSource: "standard" | "adversarial";
   roleModel?: SpecialistRoleModel;
+  /** #1200: the role's own attempt-record sink, opened by the orchestrator so
+   * a phase-deadline reap can snapshot in-flight attempts even though the
+   * role promise never settles. Every opened attempt is appended here and
+   * settled in place; the same array feeds the entry via `finish`. */
+  attempts: SpecialistAttemptRecord[];
   /** Called once the wire payload exists, before any attempt: v2 writes
    * `specialist-<role>.request.json` at that point, so a role later reaped
    * at the phase deadline still leaves its request artifact. */
@@ -403,8 +461,70 @@ interface RoleRunOutcome {
   artifact: SpecialistArtifact;
 }
 
+/** #1200: the completion-token budget a payload actually carries. */
+function attemptBudget(payload: SpecialistPayload): number {
+  return (payload.max_tokens ?? payload.max_completion_tokens) as number;
+}
+
+/** #1200: open an attempt record when the wire attempt starts — unsettled
+ * (elapsed usage/stop all null) so a phase-deadline reap mid-attempt still
+ * exposes existence-shaped telemetry: the attempt happened even though this
+ * campaign never observed it finish. */
+function openAttempt(
+  attempts: SpecialistAttemptRecord[],
+  attemptType: SpecialistAttemptRecord["attempt_type"],
+  maxTokens: number,
+): SpecialistAttemptRecord {
+  const record: SpecialistAttemptRecord = {
+    attempt_type: attemptType,
+    max_tokens: maxTokens,
+    elapsed_sec: null,
+    prompt_tokens: null,
+    completion_tokens: null,
+    cached_tokens: null,
+    stop_reason: null,
+    adopted: false,
+    retry_trigger: null,
+  };
+  attempts.push(record);
+  return record;
+}
+
+/** #1200: settle one attempt record in place. `raw` is the response the
+ * attempt produced, when it produced any — usage and the bounded stop reason
+ * come from it and stay null (never inferred) when it carries none. */
+function settleAttempt(
+  record: SpecialistAttemptRecord,
+  elapsedSec: number | null,
+  raw: unknown,
+  secrets: readonly (string | null | undefined)[],
+): void {
+  if (elapsedSec !== null) record.elapsed_sec = Math.round(elapsedSec * 1000) / 1000;
+  if (raw === null || raw === undefined) return;
+  const usage = extractResponseUsage(raw);
+  if (usage !== null) {
+    record.prompt_tokens = usage.prompt_tokens;
+    record.completion_tokens = usage.completion_tokens;
+    record.cached_tokens = usage.cached_tokens;
+  }
+  record.stop_reason = boundedStopReason(responseStopReason(raw), secrets);
+}
+
+/** #1200: mark the record whose own outcome caused the follow-up attempt (or
+ * would have, had one been possible); a null candidate — no try was adopted
+ * yet — simply has no trigger to record. */
+function markRetryTrigger(record: SpecialistAttemptRecord | null, trigger: SpecialistAttemptRecord["retry_trigger"]): void {
+  if (record === null) return;
+  record.retry_trigger = trigger;
+}
+
 async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcome> {
   const { role, userMessage, system, config, deadline, now, sleep, requestFn, cancelled, corpusSource } = options;
+  // #1200: the orchestrator-owned attempt sink records every wire attempt
+  // this role makes — opened before each call, settled in place, snapshotted
+  // onto the entry by `finish` (and by the phase-deadline reap even when this
+  // campaign never settles).
+  const attempts = options.attempts;
   const started = now();
   // #1037: ONE known-secret list for every response surface of this role —
   // the in-body-error message, the stop reason, and the persisted response
@@ -424,6 +544,15 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
   // error body).
   let errorStatus: number | undefined;
   let errorDetail: string | undefined;
+  // #1200: the record whose response is currently the role's final candidate.
+  let adoptedAttempt: SpecialistAttemptRecord | null = null;
+  /** Promote a settled attempt to the role's adopted response, demoting the
+   * previous candidate so exactly one record is ever adopted. */
+  const adopt = (record: SpecialistAttemptRecord): void => {
+    if (adoptedAttempt !== null && adoptedAttempt !== record) adoptedAttempt.adopted = false;
+    adoptedAttempt = record;
+    record.adopted = true;
+  };
 
   const finish = (
     artifact: SpecialistArtifact,
@@ -455,6 +584,9 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
       ...(diagnostics.outputChars !== undefined && diagnostics.outputChars !== null ? { outputChars: diagnostics.outputChars } : {}),
       ...(diagnostics.overrunDetected === true ? { overrunDetected: true } : {}),
       ...(diagnostics.overrunRetryResult !== undefined && diagnostics.overrunRetryResult !== null ? { overrunRetryResult: diagnostics.overrunRetryResult } : {}),
+      // #1200: the entry carries per-attempt records — one per real wire
+      // attempt — snapped by value from this role's sink at outcome time.
+      attempts,
     }),
     request,
     // #1037: the RAW response body is the provider's reflection surface, and
@@ -517,6 +649,11 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
     if (remaining < MIN_ATTEMPT_TIMEOUT_SEC) {
       return timeoutFailure("specialist phase deadline exceeded");
     }
+    // #1200: open this attempt's record before the wire call and settle it in
+    // place after it returns — the record exists from the moment the attempt
+    // is real, so a mid-flight phase reaper sees it too.
+    const record = openAttempt(attempts, attempt === 1 ? "initial" : "transport-retry", attemptBudget(payload));
+    const attemptStarted = now();
     const attemptTimeout = Math.min(config.roleTimeoutSec, remaining);
     let outcome: SpecialistTransportOutcome;
     try {
@@ -526,7 +663,11 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
     }
 
     if (!outcome.ok) {
+      // The attempt failed on the wire: no response, hence no usage/stop
+      // reason to report — elapsed is the only settled fact.
+      settleAttempt(record, now() - attemptStarted, null, knownSecrets);
       if (outcome.timeout) {
+        record.retry_trigger = null;
         return timeoutFailure(outcome.errorMessage ?? "specialist phase deadline exceeded");
       }
       lastFailure = new RoleFailure("transport", outcome.errorMessage ?? "transport failure", outcome.status, outcome.statusDetail);
@@ -538,16 +679,19 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
       // artifact's v2 field set identical to a retried-then-failed role. The
       // normalized reason rides the entry's existing `reason` field.
       if (outcome.terminal !== undefined) {
+        record.retry_trigger = null;
         const terminalArtifact = emptyArtifact(role);
         const terminalMessage = `${lastFailure.kind}: ${lastFailure.message}`;
         terminalArtifact.errors.push(terminalMessage);
         return finish(terminalArtifact, "error", lastFailure.kind, null, payload, { error: terminalMessage }, { terminalReason: outcome.terminal });
       }
       if (attempt < MAX_ATTEMPTS) {
+        record.retry_trigger = "transport-failure";
         const delay = Math.min(RETRY_DELAY_SEC, Math.max(0, deadline - now()));
         if (delay > 0) await sleep(delay);
         continue;
       }
+      record.retry_trigger = null;
       const failureArtifact = emptyArtifact(role);
       failureArtifact.errors.push(`${lastFailure.kind}: ${lastFailure.message}`);
       return finish(failureArtifact, "error", lastFailure.kind, null, payload, { error: `${lastFailure.kind}: ${lastFailure.message}` });
@@ -557,6 +701,7 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
     // attempt's HTTP detail must not leak onto a success entry (#846).
     errorStatus = undefined;
     errorDetail = undefined;
+    settleAttempt(record, now() - attemptStarted, outcome.raw, knownSecrets);
 
     // A 200 whose body is an error object is a transport failure (some
     // gateways do this); never parse it as a lead set.
@@ -582,6 +727,9 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
       return finish(emptyArtifact(role), "error", "timeout", null, payload, outcome.raw);
     }
 
+    // From here the response drives the role's outcome: this attempt is the
+    // adopted candidate until a later one replaces it.
+    adopt(record);
     let response = outcome.raw;
     let responseText = extractResponseText(response);
     let artifact = parseSpecialistResponse(responseText, role);
@@ -595,12 +743,18 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
     // exhausted its budget is as untrustworthy as a truncated one. A response
     // that carries leads is never retried, so valid partial leads are kept.
     if (overrunDetected && artifact.leads.length === 0) {
+      // #1200: the just-settled candidate is the trigger for whatever happens
+      // next; mark it even when no retry can follow, so the skipped case
+      // (ceiling reached / no budget / cancelled) still records its cause.
+      markRetryTrigger(adoptedAttempt, "completion-overrun");
       const retryPayload = overrunRetryPayload(payload, config.maxTokens);
       const remainingForRetry = deadline - now();
       if (retryPayload !== null && !cancelled.value && remainingForRetry >= MIN_ATTEMPT_TIMEOUT_SEC) {
         const retryTokens = (retryPayload.max_tokens ?? retryPayload.max_completion_tokens) as number;
         overrunRetry = true;
         retryMaxTokens = retryTokens;
+        const retryRecord = openAttempt(attempts, "overrun-retry", retryTokens);
+        const retryStarted = now();
         let retried: SpecialistTransportOutcome | null = null;
         try {
           retried = await requestFn(retryPayload, config.apiFormat, Math.min(config.roleTimeoutSec, remainingForRetry));
@@ -608,6 +762,7 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
           retried = null;
         }
         if (retried !== null && retried.ok && !(typeof retried.raw === "object" && retried.raw !== null && (retried.raw as Record<string, unknown>).error)) {
+          settleAttempt(retryRecord, now() - retryStarted, retried.raw, knownSecrets);
           const retriedText = extractResponseText(retried.raw);
           const retriedArtifact = parseSpecialistResponse(retriedText, role);
           // Adopt a clean re-parse so any leads it carries are kept.
@@ -616,6 +771,7 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
             response = retried.raw;
             responseText = retriedText;
             artifact = retriedArtifact;
+            adopt(retryRecord);
           }
           // "recovered" requires all three: the retry parsed acceptably, it was
           // adopted, and it cleared the completion limit. A retry that fails to
@@ -627,6 +783,7 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
           // lane was latched terminally, #1080) never reached the wire at all.
           // None of those recover the truncated response in place, so this is a
           // failure, never a recovery.
+          settleAttempt(retryRecord, now() - retryStarted, retried !== null && retried.ok ? retried.raw : null, knownSecrets);
           overrunRetryResult = "failed";
         }
       } else {
@@ -771,6 +928,16 @@ async function runSpecialistScout(
   // #1037: the scout's own response-side known-secret list — same shape as
   // the per-role one (the scout is one call shared by every role).
   const knownSecrets = callKnownSecrets(config.apiKey, config.extraHeaders);
+  // #1200: ONE shared attempt sink — the scout's calls run on behalf of every
+  // role, so every role entry carries the same records and the aggregate
+  // `request_count` reflects the unique wire attempts, never roles × attempts.
+  const attempts: SpecialistAttemptRecord[] = [];
+  let adoptedAttempt: SpecialistAttemptRecord | null = null;
+  const adopt = (record: SpecialistAttemptRecord): void => {
+    if (adoptedAttempt !== null && adoptedAttempt !== record) adoptedAttempt.adopted = false;
+    adoptedAttempt = record;
+    record.adopted = true;
+  };
   // #846: set only when the terminal failure was an actual HTTP error
   // response (never for input/timeout failures or a 200 carrying an error
   // body).
@@ -783,7 +950,15 @@ async function runSpecialistScout(
       const artifact = emptyArtifact(role);
       artifact.errors.push(message);
       artifacts[role] = artifact;
-      entries.push(roleEntry(role, artifact, "error", message.split(":", 1)[0] ?? "transport", now() - started, { errorStatus, errorDetail }));
+      entries.push(roleEntry(
+        role,
+        artifact,
+        "error",
+        message.split(":", 1)[0] ?? "transport",
+        now() - started,
+        // #1200: a failure exit after wire attempts carries the records made so far; before any attempt the sink is empty and no field is emitted (v2 parity for the input failure).
+        { errorStatus, errorDetail, attempts: attempts.length > 0 ? attempts : undefined },
+      ));
     }
     // v2 writes specialist-scout.request.json before the call, so a failed
     // scout still leaves it; there is no response artifact on failure.
@@ -818,6 +993,10 @@ async function runSpecialistScout(
       lastError = "timeout: specialist phase deadline exceeded";
       break;
     }
+    // #1200: open the attempt's record before the wire call; the scout's
+    // shared loop follows the same open/settle rules as the per-role path.
+    const record = openAttempt(attempts, attempt === 1 ? "initial" : "transport-retry", attemptBudget(payload));
+    const attemptStarted = now();
     const attemptTimeout = Math.min(config.roleTimeoutSec, remaining);
     let outcome: SpecialistTransportOutcome;
     try {
@@ -826,7 +1005,9 @@ async function runSpecialistScout(
       outcome = { ok: false, errorMessage: error instanceof Error ? error.message : String(error) };
     }
     if (!outcome.ok) {
+      settleAttempt(record, now() - attemptStarted, null, knownSecrets);
       if (outcome.timeout) {
+        record.retry_trigger = null;
         lastError = `timeout: ${outcome.errorMessage ?? "specialist phase deadline exceeded"}`;
         break;
       }
@@ -836,14 +1017,20 @@ async function runSpecialistScout(
       // #1080: terminal provider failure — no retry, no sleep, same failure
       // text. The latch on the adapter also short-circuits every LATER role
       // on this lane with zero wire attempts.
-      if (outcome.terminal !== undefined) break;
+      if (outcome.terminal !== undefined) {
+        record.retry_trigger = null;
+        break;
+      }
       if (attempt < MAX_ATTEMPTS) {
+        record.retry_trigger = "transport-failure";
         const delay = Math.min(RETRY_DELAY_SEC, Math.max(0, deadline - now()));
         if (delay > 0) await sleep(delay);
         continue;
       }
+      record.retry_trigger = null;
       break;
     }
+    settleAttempt(record, now() - attemptStarted, outcome.raw, knownSecrets);
     if (typeof outcome.raw === "object" && outcome.raw !== null && (outcome.raw as Record<string, unknown>).error) {
       // See the matching comment above `runSpecialistRole`'s in-body-error
       // branch: `maskDiagnostic`'s whole-string pass covers a one-character
@@ -855,6 +1042,7 @@ async function runSpecialistScout(
       );
       break;
     }
+    adopt(record);
     let response = outcome.raw;
     let responseText = extractResponseText(response);
     let artifacts = parseScoutResponse(responseText, roles);
@@ -879,12 +1067,17 @@ async function runSpecialistScout(
       });
 
     if (initialOverran && anyZeroLead(artifacts)) {
+      // #1200: trigger marked on the just-settled candidate, even when the
+      // retry is then skipped (ceiling reached / no budget).
+      markRetryTrigger(adoptedAttempt, "completion-overrun");
       const retryPayload = overrunRetryPayload(payload, config.maxTokens);
       const remainingForRetry = deadline - now();
       if (retryPayload !== null && remainingForRetry >= MIN_ATTEMPT_TIMEOUT_SEC) {
         const retryTokens = (retryPayload.max_tokens ?? retryPayload.max_completion_tokens) as number;
         overrunRetry = true;
         retryMaxTokens = retryTokens;
+        const retryRecord = openAttempt(attempts, "overrun-retry", retryTokens);
+        const retryStarted = now();
         let retried: SpecialistTransportOutcome | null = null;
         try {
           retried = await requestFn(retryPayload, config.apiFormat, Math.min(config.roleTimeoutSec, remainingForRetry));
@@ -892,6 +1085,7 @@ async function runSpecialistScout(
           retried = null;
         }
         if (retried !== null && retried.ok && !(typeof retried.raw === "object" && retried.raw !== null && (retried.raw as Record<string, unknown>).error)) {
+          settleAttempt(retryRecord, now() - retryStarted, retried.raw, knownSecrets);
           const retriedText = extractResponseText(retried.raw);
           const retriedArtifacts = parseScoutResponse(retriedText, roles);
           // Adopt a usable re-parse so any leads it carries are kept.
@@ -900,6 +1094,7 @@ async function runSpecialistScout(
             response = retried.raw;
             responseText = retriedText;
             artifacts = retriedArtifacts;
+            adopt(retryRecord);
           }
           // "recovered" requires all three: the retry parsed acceptably, it was
           // adopted, and it cleared the completion limit. A retry that fails to
@@ -907,6 +1102,7 @@ async function runSpecialistScout(
           // response in place, so it is a failure, never a recovery.
           overrunRetryResult = adopted && !completionOverran(retried.raw) ? "recovered" : "failed";
         } else {
+          settleAttempt(retryRecord, now() - retryStarted, retried !== null && retried.ok ? retried.raw : null, knownSecrets);
           overrunRetryResult = "failed";
         }
       } else {
@@ -944,7 +1140,13 @@ async function runSpecialistScout(
       if (stopReason !== null) diagnostics.stopReason = stopReason;
       if (initialOverran) diagnostics.overrunDetected = true;
       if (overrunRetryResult !== null) diagnostics.overrunRetryResult = overrunRetryResult;
-      return roleEntry(role, artifact, overrunUnrecovered ? "degraded" : statusOf(artifact), overrunUnrecovered ? "overrun" : parseFailed ? "parser" : null, elapsed, diagnostics);
+      return roleEntry(role, artifact, overrunUnrecovered ? "degraded" : statusOf(artifact), overrunUnrecovered ? "overrun" : parseFailed ? "parser" : null, elapsed, {
+        ...diagnostics,
+        // #1200: every role entry carries the shared attempt records — the
+        // scout ran them on behalf of all roles; role arrays overlap by design
+        // (the aggregate request_count counts unique wire attempts).
+        ...(attempts.length > 0 ? { attempts } : {}),
+      });
     });
     return {
       entries,
@@ -1045,6 +1247,19 @@ export async function runSpecialists(input: SpecialistRunInput): Promise<Special
       const roleWork = new Map<string, Promise<RoleRunOutcome>>();
       const roleCancel = new Map<string, { value: boolean }>();
       for (const role of input.rolesToRun) roleCancel.set(role, { value: false });
+      // #1200: per-role attempt sinks — arrays the role coroutines mutate as
+      // attempts open/settle, readable here even when the phase deadline reaps
+      // the coroutine before it settles, so the reaped entry still sees every
+      // attempt made up to the reap.
+      const attemptsSink = new Map<string, SpecialistAttemptRecord[]>();
+      const attemptsFor = (role: string): SpecialistAttemptRecord[] => {
+        let sink = attemptsSink.get(role);
+        if (sink === undefined) {
+          sink = [];
+          attemptsSink.set(role, sink);
+        }
+        return sink;
+      };
 
       const launch = (role: string): void => {
         // #758: the correctness role runs blinded (adversarial corpus +
@@ -1072,6 +1287,7 @@ export async function runSpecialists(input: SpecialistRunInput): Promise<Special
             requestFn: meteredRequestFn,
             cancelled: roleCancel.get(role)!,
             corpusSource: useAdversarial ? "adversarial" : "standard",
+            attempts: attemptsFor(role),
             ...(input.roleModels?.[role] !== undefined ? { roleModel: input.roleModels[role] } : {}),
             onRequest: (payload) => {
               artifacts.requests[role] = payload;
@@ -1115,7 +1331,15 @@ export async function runSpecialists(input: SpecialistRunInput): Promise<Special
           const timeoutArtifact = emptyArtifact(role);
           timeoutArtifact.errors.push(`timeout: specialist phase exceeded ${config.phaseTimeoutSec}s`);
           artifacts.perRole[role] = timeoutArtifact;
-          entries.push(roleEntry(role, timeoutArtifact, "error", "timeout", now() - phaseStarted));
+          // #1200: the reaped entry still reports the attempts opened before
+          // the reap (snapshot by value — the fire-and-forget straggler keeps
+          // mutating this role's sink array). Note the one narrow accounting
+          // hole this accepts: straggler attempts made after the reap still
+          // count in the aggregate meter, but can never reach this entry's
+          // records — the phase was lost anyway, and the log line's role
+          // totals remain the entry-observable truth.
+          const reapedAttempts = (attemptsSink.get(role) ?? []).map((record) => ({ ...record }));
+          entries.push(roleEntry(role, timeoutArtifact, "error", "timeout", now() - phaseStarted, { attempts: reapedAttempts }));
           // The straggler's own promise is left to resolve in the
           // background (fire-and-forget); it is never awaited again and its
           // rejection, if any, must not surface as unhandled.

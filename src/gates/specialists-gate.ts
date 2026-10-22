@@ -47,7 +47,7 @@ import { resolveSpecialistProfiles, anthropicJsonObjectsPromptOnlyWarning, tierR
  * Role artifacts and raw provider response bodies have none: a response is
  * `json.dumps(json.loads(body))` in v2, so its numbers keep their own form. */
 const REQUEST_FLOATS: ReadonlySet<string> = new Set(["temperature"]);
-const AGGREGATE_FLOATS: ReadonlySet<string> = new Set(["aggregate_elapsed_sec", "roles[].elapsed_sec"]);
+const AGGREGATE_FLOATS: ReadonlySet<string> = new Set(["aggregate_elapsed_sec", "roles[].elapsed_sec", "roles[].attempts[].elapsed_sec"]);
 const NO_FLOATS: ReadonlySet<string> = new Set();
 
 const ROLE_GUARD_MESSAGE = "refused to write the role artifact: workspace escape or symlink";
@@ -224,6 +224,22 @@ function roleLine(entry: SpecialistRoleEntry): string {
   if (entry.stop_reason !== undefined && entry.stop_reason !== null) usageNote += ` stop_reason=${entry.stop_reason}`;
   if (entry.output_chars !== undefined && entry.output_chars !== null) usageNote += ` output_chars=${pyStr(entry.output_chars)}`;
   if (entry.overrun_retry_result !== undefined && entry.overrun_retry_result !== null) usageNote += ` overrun=${entry.overrun_retry_result}`;
+  // #1200: per-attempt cost summary — totals must not hide discarded attempts.
+  // Each segment renders that attempt's own elapsed/usage/stop facts; unknown
+  // facts render "?" exactly where the persisted entries keep null. Adoption
+  // is stated on every segment so a record that lost to a later attempt stays
+  // visible as the cost it was.
+  const attempts = entry.attempts;
+  if (attempts !== undefined && attempts.length > 0) {
+    const segments = attempts.map((record) => {
+      const elapsed = record.elapsed_sec === null ? "?" : pyFloatRepr(record.elapsed_sec);
+      const inTokens = record.prompt_tokens === null ? "?" : pyStr(record.prompt_tokens);
+      const outTokens = record.completion_tokens === null ? "?" : pyStr(record.completion_tokens);
+      const stop = record.stop_reason === null ? "?" : record.stop_reason;
+      return `${record.attempt_type} ${elapsed}s in=${inTokens} out=${outTokens} stop=${stop} adopted=${record.adopted}`;
+    });
+    usageNote += ` attempts=${attempts.length} (${segments.join("; ")})`;
+  }
   return `specialist ${entry.role}: ${entry.status}${suffix}${reason}${httpDetail} — ${entry.lead_count} lead(s), ${entry.errors_count} error(s), ${pyFloatRepr(entry.elapsed_sec)}s${usageNote}`;
 }
 
