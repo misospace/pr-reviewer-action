@@ -13,6 +13,8 @@ import {
   adaptiveLoopBudgets,
   driveToolLoop,
   extractToolCalls,
+  type NativeLoopRoundTelemetry,
+  type ToolTurnSignal,
 } from "../src/tools/loop.js";
 import { buildSummarizerConversation } from "../src/tools/harness.js";
 
@@ -456,4 +458,191 @@ test("#1043 review: the summarizer request advertises no tools in either wire fo
   const loopConversation = new Conversation();
   const loopPayload = loopConversation.toRequestPayload("openai", "m", { stream: false }) as Record<string, unknown>;
   assert.ok(Array.isArray(loopPayload.tools) && (loopPayload.tools as unknown[]).length > 0);
+});
+
+// ---------------------------------------------------------------------------
+// #1199 — per-round model latency and provider-reported token usage.
+// A dedicated telemetry clock (`nowFn`) keeps per-round measurement independent
+// of the budget clock, so these tests pin latency without touching the
+// scripted wall-clock sequences the reliability tests above rely on.
+// ---------------------------------------------------------------------------
+
+function telemetryLoop(
+  responses: unknown[],
+  execResults: Record<string, unknown>[],
+  nowClock: number[],
+) {
+  let responseIndex = 0;
+  let execIndex = 0;
+  let nowIndex = 0;
+  const postFn = async () => responses[responseIndex++];
+  const executeFn = async () => execResults[execIndex++] ?? { tool: "?", status: "error", result: { error: "none" } };
+  // Budget clock is held constant so no wall-clock stop fires; per-round
+  // latency is measured purely by the separate telemetry clock below.
+  const timeFn = () => 0;
+  const nowFn = () => nowClock[nowIndex++] ?? Number.MAX_SAFE_INTEGER / 2;
+  const rounds: NativeLoopRoundTelemetry[] = [];
+  return { postFn, executeFn, timeFn, nowFn, rounds };
+}
+
+test("#1199: onRound records one bounded telemetry record per model turn", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const turn1 = {
+    ...openAiCall("c1", "read_file", '{"path":"a.ts"}'),
+    usage: { prompt_tokens: 18420, completion_tokens: 1330, total_tokens: 19750, prompt_tokens_details: { cached_tokens: 16000 } },
+  };
+  const turn2 = openAiText("done");
+  // nowFn: [telemetryStart, r1 modelStart, modelEnd, toolStart, toolEnd, wall, r2 modelStart, modelEnd, wall]
+  const { postFn, executeFn, timeFn, nowFn, rounds } = telemetryLoop(
+    [turn1, turn2],
+    [{ tool: "read_file", status: "ok", result: { content: "x" } }],
+    [0, 1, 13.4, 13.8, 14.2, 15, 15, 18, 18],
+  );
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 8, 120),
+    timeFn,
+    nowFn,
+    onRound: (r) => rounds.push(r),
+  });
+  // one record per model turn, matching outcome.rounds (no double counting).
+  assert.equal(rounds.length, outcome.rounds);
+  assert.equal(rounds.length, 2);
+  const r1 = rounds[0]!;
+  assert.equal(r1.round, 1);
+  assert.equal(r1.model_sec, 12.4);
+  assert.equal(r1.prompt_tokens, 18420);
+  assert.equal(r1.completion_tokens, 1330);
+  assert.equal(r1.cached_tokens, 16000);
+  assert.equal(r1.tools_requested, 1);
+  assert.equal(r1.tools_executed, 1);
+  assert.equal(r1.tools_refused, 0);
+  assert.equal(r1.tools_deduplicated, 0);
+  assert.equal(r1.tool_elapsed_sec, 0.4);
+  assert.equal(r1.requests_remaining, 7);
+  assert.equal(r1.rounds_remaining, 7);
+  assert.equal(r1.wall_clock_remaining_sec, 105);
+  assert.equal(r1.streamed_fallback, false);
+  const r2 = rounds[1]!;
+  assert.equal(r2.round, 2);
+  assert.equal(r2.model_sec, 3);
+  // the stop turn reported no usage block → null, never a synthesized number.
+  assert.equal(r2.prompt_tokens, null);
+  assert.equal(r2.completion_tokens, null);
+  assert.equal(r2.cached_tokens, null);
+  assert.equal(r2.tools_requested, 0);
+  assert.equal(r2.tool_elapsed_sec, 0);
+  assert.equal(r2.rounds_remaining, 6);
+  assert.equal(r2.wall_clock_remaining_sec, 102);
+});
+
+test("#1199: provider usage is normalized provider-neutrally (Anthropic-shaped body)", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const turn1 = {
+    content: [
+      { type: "text", text: "thinking" },
+      { type: "tool_use", id: "t1", name: "read_file", input: { path: "a.ts" } },
+    ],
+    usage: { input_tokens: 500, output_tokens: 40, cache_read_input_tokens: 300 },
+  };
+  const turn2 = { content: [{ type: "text", text: "done" }] };
+  const { postFn, executeFn, timeFn, nowFn, rounds } = telemetryLoop(
+    [turn1, turn2],
+    [{ tool: "read_file", status: "ok", result: { content: "x" } }],
+    [],
+  );
+  await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "anthropic",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 8, 120),
+    timeFn,
+    nowFn,
+    onRound: (r) => rounds.push(r),
+  });
+  assert.equal(rounds.length, 2);
+  assert.equal(rounds[0]!.prompt_tokens, 500);
+  assert.equal(rounds[0]!.completion_tokens, 40);
+  assert.equal(rounds[0]!.cached_tokens, 300);
+  // no telemetry clock → constant → zero latency (not asserted for a real run)
+  assert.equal(rounds[0]!.model_sec, 0);
+});
+
+test("#1199: a streamed→non-streamed fallback is recorded once, never per wire request", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  let turns = 0;
+  const postFn = async (_payload: Record<string, unknown>, turn?: ToolTurnSignal) => {
+    turns++;
+    turn?.reportFallback(); // the transport seam reports a fallback for this turn
+    return turns === 1 ? openAiCall("c1", "read_file", '{"path":"a.ts"}') : openAiText("done");
+  };
+  const { executeFn, timeFn, nowFn, rounds } = telemetryLoop(
+    [],
+    [{ tool: "read_file", status: "ok", result: {} }],
+    [],
+  );
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 8, 120),
+    timeFn,
+    nowFn,
+    onRound: (r) => rounds.push(r),
+  });
+  // two turns → two records (a retried turn does NOT emit a second record).
+  assert.equal(rounds.length, outcome.rounds);
+  assert.equal(rounds.length, 2);
+  assert.equal(rounds[0]!.streamed_fallback, true);
+  assert.equal(rounds[1]!.streamed_fallback, true);
+});
+
+test("#1199: executed + refused + deduplicated always equals requested", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // one valid call, a duplicate of it, and an invalid-argument call.
+  const multi = openAiCall("c1", "t", '{"n":1}');
+  const mc = (multi as { choices: Array<{ message: { tool_calls: unknown[] } }> }).choices[0]!.message.tool_calls;
+  mc.push({ id: "c2", type: "function", function: { name: "t", arguments: '{"n":1}' } });
+  mc.push({ id: "c3", type: "function", function: { name: "t", arguments: '{"bad' } });
+  const { postFn, executeFn, timeFn, nowFn, rounds } = telemetryLoop(
+    [multi, openAiText("done")],
+    [{ tool: "t", status: "ok", result: {} }],
+    [],
+  );
+  await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 8, 120),
+    timeFn,
+    nowFn,
+    onRound: (r) => rounds.push(r),
+  });
+  const r1 = rounds[0]!;
+  assert.equal(r1.tools_requested, 3);
+  assert.equal(r1.tools_executed, 1);
+  assert.equal(r1.tools_deduplicated, 1);
+  assert.equal(r1.tools_refused, 1);
+  assert.equal(r1.tools_executed + r1.tools_refused + r1.tools_deduplicated, r1.tools_requested);
+});
+
+test("#1199: emits exactly one record per turn on a max-rounds stop", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const responses = Array.from({ length: 6 }, (_, i) => openAiCall(`c${i}`, "t", "{}"));
+  const exec = responses.map(() => ({ tool: "t", status: "ok", result: {} }));
+  const { postFn, executeFn, timeFn, nowFn, rounds } = telemetryLoop(responses, exec, []);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(3, 50, 120),
+    timeFn,
+    nowFn,
+    onRound: (r) => rounds.push(r),
+  });
+  assert.equal(outcome.stopReason, STOP_MAX_ROUNDS);
+  assert.equal(rounds.length, outcome.rounds);
+  assert.deepEqual(rounds.map((r) => r.round), [1, 2, 3, 4, 5, 6]);
 });

@@ -33,6 +33,7 @@ import {
 } from "../model/conversation.js";
 import type { EvidenceProvenance } from "../context/evidence-provenance.js";
 import { SKILL_RESULT_MAX_BYTES } from "../context/repository-skills.js";
+import { normalizeUsageTelemetry, type UsageTelemetry } from "../model/telemetry.js";
 
 // Stop reasons (LoopOutcome.stopReason)
 export const STOP_MODEL_DONE = "model-stopped";
@@ -139,6 +140,54 @@ export interface ExecutedCall {
   args: Record<string, unknown>;
   /** Executor shape: {"tool", "status", "result"}. */
   result: Record<string, unknown>;
+}
+
+/**
+ * #1199: bounded, content-free per-round telemetry for one native-loop model
+ * turn. The loop owns the round timeline and emits exactly one record per
+ * model turn (a turn that internally retried a streamed response still
+ * produces ONE record, so aggregate totals sum without double counting).
+ *
+ * Every field is a count, a duration, a nullable provider-reported token total,
+ * or a boolean. No prompt text, response text, tool arguments, tool results,
+ * credentials, or provider error bodies ever ride here. `prompt_tokens` /
+ * `completion_tokens` / `cached_tokens` are the provider's own reported numbers
+ * normalized provider-neutrally by `normalizeUsageTelemetry`; a provider that
+ * reports nothing leaves them `null` — never estimated from elapsed time.
+ */
+export interface NativeLoopRoundTelemetry {
+  /** 1-based model-turn index within this loop run. */
+  round: number;
+  /** Wall-clock seconds the model request took, incl. any streamed→non-streamed
+   * retry the turn performed (the whole time waiting on a usable response). */
+  model_sec: number;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  cached_tokens: number | null;
+  /** Tool calls the model requested this turn (executed + refused + deduplicated). */
+  tools_requested: number;
+  tools_executed: number;
+  /** Calls not executed because they were over budget or had invalid arguments. */
+  tools_refused: number;
+  /** Calls answered from the dedup note without re-running. */
+  tools_deduplicated: number;
+  /** Wall-clock seconds the round's (concurrent) tool execution took. */
+  tool_elapsed_sec: number;
+  requests_remaining: number;
+  rounds_remaining: number;
+  wall_clock_remaining_sec: number;
+  /** True when this turn's streamed transport fell back to a non-streamed call. */
+  streamed_fallback: boolean;
+}
+
+/**
+ * #1199: the per-turn signal the loop hands to `postFn` so the transport seam
+ * can report a streamed→non-streamed fallback into the round's telemetry. The
+ * summarizer/digest request does not pass one, so its fallbacks are never
+ * attributed to an investigation round.
+ */
+export interface ToolTurnSignal {
+  reportFallback(): void;
 }
 
 export interface LoopOutcome {
@@ -272,6 +321,13 @@ export interface DriveToolLoopOptions {
   summarizeFn?: ((block: string) => string | Promise<string>) | null;
   /** Injectable clock (seconds) for deterministic tests. */
   timeFn?: () => number;
+  /** #1199: injectable telemetry clock (seconds) for per-round latency. It is
+   * kept separate from `timeFn` so per-round measurement never perturbs the
+   * budget clock's scripted sequences; the harness passes a dedicated monotonic
+   * clock so the two never share state. Defaults to `performance.now()/1000`. */
+  nowFn?: () => number;
+  /** #1199: invoked once per model turn with that turn's bounded telemetry. */
+  onRound?: (round: NativeLoopRoundTelemetry) => void;
 }
 
 /**
@@ -288,7 +344,7 @@ export interface DriveToolLoopOptions {
  */
 export async function driveToolLoop(
   conversation: Conversation,
-  postFn: (payload: Record<string, unknown>) => Promise<unknown>,
+  postFn: (payload: Record<string, unknown>, turn?: ToolTurnSignal) => Promise<unknown>,
   executeFn: (toolName: string, args: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>,
   options: DriveToolLoopOptions,
 ): Promise<LoopOutcome> {
@@ -300,6 +356,11 @@ export async function driveToolLoop(
   const cachePrefix = options.cachePrefix ?? false;
   const summarizeFn = options.summarizeFn ?? null;
   const timeFn = options.timeFn ?? (() => performance.now() / 1000);
+  // #1199: per-round latency rides a monotonic telemetry clock, deliberately
+  // distinct from the budget `timeFn` so adding latency measurement never
+  // shifts the scripted budget-clock sequences the reliability tests pin.
+  const nowFn = options.nowFn ?? (() => performance.now() / 1000);
+  const roundSec = (n: number): number => Number(Math.max(0, n).toFixed(3));
 
   const outcome: LoopOutcome = {
     executed: [],
@@ -320,8 +381,43 @@ export async function driveToolLoop(
     peakConversationTokens: 0,
   };
   const started = timeFn();
+  const telemetryStart = nowFn();
   let callsExecuted = 0;
   const seenKeys = new Set<string>();
+
+  // #1199: emit one bounded telemetry record per model turn. Called from both
+  // turn-ending paths (the no-tool-call stop and after tool execution), so the
+  // count of records always equals `outcome.rounds`. Reads only live loop
+  // state — never tool/model content.
+  const emitRound = (
+    requested: number,
+    executed: number,
+    refused: number,
+    deduplicated: number,
+    toolElapsedSec: number,
+    modelElapsedSec: number,
+    usage: UsageTelemetry,
+    fellBack: boolean,
+  ): void => {
+    if (options.onRound === undefined) return;
+    options.onRound({
+      round: outcome.rounds,
+      model_sec: roundSec(modelElapsedSec),
+      prompt_tokens: usage.promptTokens,
+      completion_tokens: usage.completionTokens,
+      cached_tokens: usage.cachedTokens,
+      tools_requested: requested,
+      tools_executed: executed,
+      tools_refused: refused,
+      tools_deduplicated: deduplicated,
+      tool_elapsed_sec: roundSec(toolElapsedSec),
+      requests_remaining: Math.max(0, budgets.maxToolCalls - callsExecuted),
+      rounds_remaining: Math.max(0, budgets.maxRounds - outcome.rounds),
+      wall_clock_remaining_sec: roundSec(Math.max(0, budgets.wallClockSec - (nowFn() - telemetryStart))),
+      streamed_fallback: fellBack,
+    });
+  };
+
   // Python while-else: the else clause (STOP_MAX_ROUNDS) runs only when the
   // loop condition expires naturally — never after a break.
   let broke = false;
@@ -389,8 +485,15 @@ export async function driveToolLoop(
       anthropicEffortSupported: options.anthropicEffortSupported ?? false,
     });
     let response: unknown;
+    // #1199: the turn's telemetry. `modelElapsedSec` spans the whole wait for a
+    // usable response (including a streamed→non-streamed retry, which `postFn`
+    // folds into this one call), and `roundFellBack` is set by `postFn` through
+    // the `turnSignal` only when that fallback actually fired this turn.
+    let roundFellBack = false;
+    const turnSignal: ToolTurnSignal = { reportFallback: () => { roundFellBack = true; } };
+    const modelStart = nowFn();
     try {
-      response = await postFn(payload);
+      response = await postFn(payload, turnSignal);
     } catch (exc) {
       // Transport errors end the loop.
       outcome.stopReason = STOP_REQUEST_ERROR;
@@ -398,6 +501,11 @@ export async function driveToolLoop(
       broke = true;
       break;
     }
+    const modelElapsedSec = Math.max(0, nowFn() - modelStart);
+    const usageObj = response !== null && typeof response === "object"
+      ? (response as Record<string, unknown>).usage ?? null
+      : null;
+    const turnUsage = normalizeUsageTelemetry(usageObj);
 
     outcome.rounds++;
     const { calls, text } = extractToolCalls(response, options.apiFormat);
@@ -405,6 +513,7 @@ export async function driveToolLoop(
     if (calls.length === 0) {
       outcome.finalText = text;
       outcome.stopReason = outcome.toolCallsIssued > 0 ? STOP_MODEL_DONE : STOP_NO_TOOL_CALLS;
+      emitRound(0, 0, 0, 0, 0, modelElapsedSec, turnUsage, roundFellBack);
       broke = true;
       break;
     }
@@ -427,6 +536,12 @@ export async function driveToolLoop(
     type Disposition = { callId: string; kind: "error" | "dup" | "budget"; data: Record<string, unknown> } | { callId: string; kind: "exec"; data: number };
     const plan: Disposition[] = [];
     const toExecute = new Map<number, { name: string; args: Record<string, unknown> }>();
+    // #1199: per-round disposition counts (a tri-partition of `calls.length`:
+    // executed + refused + deduplicated === requested). Refusals cover both the
+    // invalid-argument error and the over-budget note.
+    let roundExecuted = 0;
+    let roundRefused = 0;
+    let roundDedup = 0;
     for (let idx = 0; idx < calls.length; idx++) {
       const call = calls[idx]!;
       const callId = call.id;
@@ -446,26 +561,34 @@ export async function driveToolLoop(
           kind: "error",
           data: { error: `Invalid tool arguments (not a JSON object): ${message}` },
         });
+        roundRefused++;
         continue;
       }
       const key = requestKey(call.name, args as Record<string, unknown>);
       if (seenKeys.has(key)) {
         plan.push({ callId, kind: "dup", data: { note: DUPLICATE_NOTE } });
+        roundDedup++;
         continue;
       }
       if (callsExecuted >= budgets.maxToolCalls) {
         plan.push({ callId, kind: "budget", data: { error: BUDGET_NOTE } });
+        roundRefused++;
         continue;
       }
       seenKeys.add(key);
       callsExecuted++;
       toExecute.set(idx, { name: call.name, args: args as Record<string, unknown> });
       plan.push({ callId, kind: "exec", data: idx });
+      roundExecuted++;
     }
 
     // Fan out the executions (read-only, independent within a round).
     const resultsByIdx = new Map<number, Record<string, unknown>>();
+    // #1199: the round's tool execution window (the concurrent fan-out only;
+    // the sequential disposition decisions above are not tool time).
+    let toolElapsedSec = 0;
     if (toExecute.size > 0) {
+      const toolStart = nowFn();
       const entries = [...toExecute.entries()];
       const settled = await Promise.all(
         entries.map(async ([idx, { name, args }]) => {
@@ -482,6 +605,7 @@ export async function driveToolLoop(
         }),
       );
       for (const [idx, result] of settled) resultsByIdx.set(idx, result);
+      toolElapsedSec = Math.max(0, nowFn() - toolStart);
     }
 
     // Apply results in call order (synthetic refusals inline).
@@ -514,6 +638,10 @@ export async function driveToolLoop(
         ...(exec.name === "read_skill" ? { maxBytes: SKILL_RESULT_MAX_BYTES } : {}),
       });
     }
+
+    // #1199: the turn's telemetry, emitted once per model turn. A round that
+    // ends on budget exhaustion still records its turn before the stop below.
+    emitRound(calls.length, roundExecuted, roundRefused, roundDedup, toolElapsedSec, modelElapsedSec, turnUsage, roundFellBack);
 
     if (callsExecuted >= budgets.maxToolCalls) {
       outcome.stopReason = STOP_BUDGET;

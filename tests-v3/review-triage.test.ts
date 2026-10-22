@@ -608,18 +608,34 @@ test("#1003: enabling triage changes no tool, fork, evidence or routing capabili
   assert.equal(on.toolCalls, off.toolCalls);
   // Same tool surface, same budget, same execution — only the harness's
   // wall-clock/telemetry measurements are allowed to differ between two runs.
-  const capabilityOf = (harness: Record<string, unknown>): unknown => ({
-    ...harness,
-    usage: harness.usage ? { ...(harness.usage as Record<string, unknown>), peak_conversation_tokens: undefined } : undefined,
-    tool_loop_telemetry: harness.tool_loop_telemetry
-      ? {
-        ...(harness.tool_loop_telemetry as Record<string, unknown>),
-        usage: (harness.tool_loop_telemetry as { usage: Record<string, unknown> }).usage
-          ? { ...(harness.tool_loop_telemetry as { usage: Record<string, unknown> }).usage, elapsed_sec: undefined, peak_conversation_tokens: undefined }
-          : undefined,
-      }
-      : undefined,
-  });
+  const capabilityOf = (harness: Record<string, unknown>): unknown => {
+    const tel = harness.tool_loop_telemetry as Record<string, unknown> | undefined;
+    // #1199: per-round telemetry adds model/tool latency and the remaining
+    // wall-clock budget — run-to-run timing, not a capability change. Strip the
+    // latency fields (and the verdict-turn latency) while keeping every
+    // deterministic field (round number, token usage, tool-disposition counts),
+    // so triage still cannot change the tool/budget/evidence surface.
+    const stripRoundLatency = (r: unknown): unknown =>
+      r && typeof r === "object"
+        ? { ...r, model_sec: undefined, tool_elapsed_sec: undefined, wall_clock_remaining_sec: undefined }
+        : r;
+    return {
+      ...harness,
+      usage: harness.usage ? { ...(harness.usage as Record<string, unknown>), peak_conversation_tokens: undefined } : undefined,
+      tool_loop_telemetry: tel
+        ? {
+          ...tel,
+          usage: tel.usage
+            ? { ...(tel.usage as Record<string, unknown>), elapsed_sec: undefined, peak_conversation_tokens: undefined }
+            : undefined,
+          rounds: Array.isArray(tel.rounds) ? (tel.rounds as unknown[]).map(stripRoundLatency) : tel.rounds,
+          verdict: tel.verdict && typeof tel.verdict === "object"
+            ? { ...(tel.verdict as Record<string, unknown>), model_sec: undefined }
+            : tel.verdict,
+        }
+        : undefined,
+    };
+  };
   assert.deepEqual(capabilityOf(on.harness), capabilityOf(off.harness));
   // The capability the test is really about: triage is not an access grant,
   // so the harness still ran read-only tools it was already allowed to run.

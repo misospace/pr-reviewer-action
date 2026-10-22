@@ -1127,3 +1127,107 @@ test("#1154 r2: the verdict projection keeps secret-named CATEGORY values", () =
   const prObject = redactPrTextDeep({ secret_handling_changes: "reported" }) as Record<string, unknown>;
   assert.equal(prObject.secret_handling_changes, "[REDACTED]");
 });
+
+// ---------------------------------------------------------------------------
+// #1199 — per-round latency and provider-reported usage, end to end.
+// ---------------------------------------------------------------------------
+
+test("#1199: per-round + verdict latency/usage persisted in the artifact and logged", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  const withUsage = (body: unknown, usage: Record<string, unknown>) => ({ ...(body as object), usage });
+  const scripted = [
+    withUsage(openAiCall("c1", "read_file", '{"path":"src.ts"}'), { prompt_tokens: 18420, completion_tokens: 1330, prompt_tokens_details: { cached_tokens: 16000 } }),
+    // second investigation turn reports NO usage → recorded as null, not a guess.
+    openAiText("evidence gathered"),
+    withUsage(validVerdict(), { prompt_tokens: 21000, completion_tokens: 900, prompt_tokens_details: { cached_tokens: 16000 } }),
+  ];
+  let n = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    transport: async () => scripted[n++],
+    log: (line) => { logs.push(line); },
+    ...withPrompt,
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry;
+  assert.equal(telemetry.phase, "loop");
+
+  // Two investigation turns: the tool-call turn and the no-tool stop turn.
+  const rounds = telemetry.rounds;
+  assert.ok(Array.isArray(rounds), "rounds is a persisted array");
+  assert.equal(rounds.length, 2);
+  assert.equal(rounds[0].round, 1);
+  assert.equal(rounds[0].prompt_tokens, 18420);
+  assert.equal(rounds[0].completion_tokens, 1330);
+  assert.equal(rounds[0].cached_tokens, 16000);
+  assert.equal(rounds[0].tools_requested, 1);
+  assert.equal(rounds[0].tools_executed, 1);
+  // Latency is measured on a dedicated monotonic clock, so it is a real
+  // (tiny) non-negative number here, never the scripted budget clock's 0.
+  assert.equal(typeof rounds[0].model_sec, "number");
+  assert.ok(rounds[0].model_sec >= 0);
+  assert.ok(rounds[0].tool_elapsed_sec >= 0);
+  assert.equal(rounds[0].streamed_fallback, false);
+  assert.equal(rounds[1].round, 2);
+  assert.equal(rounds[1].tools_requested, 0);
+  // missing provider usage stays null, never synthesized from elapsed time.
+  assert.equal(rounds[1].prompt_tokens, null);
+  assert.equal(rounds[1].completion_tokens, null);
+  assert.equal(rounds[1].cached_tokens, null);
+
+  // The closing verdict turn's telemetry is separate from the investigation rounds.
+  assert.equal(telemetry.verdict.produced, true);
+  assert.equal(typeof telemetry.verdict.model_sec, "number");
+  assert.ok(telemetry.verdict.model_sec >= 0);
+  assert.equal(telemetry.verdict.prompt_tokens, 21000);
+  assert.equal(telemetry.verdict.completion_tokens, 900);
+  assert.equal(telemetry.verdict.cached_tokens, 16000);
+  assert.equal(telemetry.verdict.streamed_fallback, false);
+  // The raw verdict record is consumed (folded into the verdict sub-object),
+  // not duplicated at the top level of the artifact.
+  assert.equal(artifact.native_loop_verdict_telemetry, null);
+
+  // Concise heartbeat lines appear in normal workflow logs. Latency is the
+  // measured (monotonic-clock) value, so match its shape, not an exact number.
+  const joined = logs.join("\n");
+  assert.match(joined, /native_loop round 1: model=[0-9.]+s prompt=18420 completion=1330 cached=16000/);
+  assert.match(joined, /native_loop round 1: tools requested=1 executed=1 refused=0 dedup=0 tool_elapsed=[0-9.]+s/);
+  assert.match(joined, /native_loop verdict: model=[0-9.]+s prompt=21000 completion=900 cached=16000/);
+});
+
+test("#1199: a streamed→non-streamed loop turn is flagged once and never split", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  const verdict = validVerdict();
+  const scripted = [
+    // first loop turn: a streamed 200 body carrying an error key → postFn
+    // retries it once non-streamed and reports the fallback for that turn.
+    { error: "stream truncated" },
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    verdict,
+  ];
+  let n = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true" },
+    transport: async () => scripted[n++],
+    log: (line) => { logs.push(line); },
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const rounds = artifact.tool_loop_telemetry.rounds;
+  // the fallback turn is ONE round record, flagged, not two; the retried
+  // request did not burn a second round.
+  assert.equal(rounds.length, 2);
+  assert.equal(rounds[0].round, 1);
+  assert.equal(rounds[0].streamed_fallback, true);
+  assert.equal(rounds[1].streamed_fallback, false);
+  // aggregate rounds_used matches the persisted per-round count.
+  assert.equal(artifact.tool_loop_telemetry.usage.rounds_used, rounds.length);
+});
