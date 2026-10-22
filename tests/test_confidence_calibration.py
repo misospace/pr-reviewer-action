@@ -31,6 +31,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -285,6 +286,45 @@ def test_bridge_launcher_cache_key_covers_imported_dependencies(tmp_path: Path) 
     assert run() == {"value": "second", "dyn": "dyn-two"}  # dynamic-import dep: same
 
 
+def test_bridge_launcher_cache_lives_in_a_private_per_user_directory(tmp_path: Path) -> None:
+    """Regression pin (#1182 review): the bundle cache must not live in a
+    shared, world-writable directory with a predictable, content-derived
+    name — a local user who pre-creates that path would have their code
+    executed with the pilot's credentials in the environment. The cache
+    lives under the user's own home, mode 0700, and nothing is created
+    under the shared temp dir."""
+    home = tmp_path / "home"
+    home.mkdir()
+    shared_tmp = tmp_path / "shared-tmp"
+    shared_tmp.mkdir()
+    bin_dir = tmp_path / "launcher"
+    bin_dir.mkdir()
+    shutil.copy(BRIDGE, bin_dir / "confidence_bridge.mjs")
+    (bin_dir / "node_modules").symlink_to(REPO_ROOT / "node_modules")
+    (bin_dir / "confidence_bridge.ts").write_text(
+        'console.log("bundled");\n', encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["TMPDIR"] = str(shared_tmp)
+    result = subprocess.run(
+        ["node", str(bin_dir / "confidence_bridge.mjs"), "noop", "ignored.json"],
+        capture_output=True, text=True, timeout=120, check=False, env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    cache_dir = home / ".cache" / "pr-reviewer-action" / "confidence-bridge-cache"
+    assert cache_dir.is_dir()
+    assert stat.S_IMODE(cache_dir.stat().st_mode) == 0o700
+    # The bundle file itself is private to its user.
+    bundles = list(cache_dir.glob("*.cjs"))
+    assert bundles
+    for bundle in bundles:
+        assert stat.S_IMODE(bundle.stat().st_mode) == 0o600
+    # Nothing is created in the shared temp dir.
+    assert not (shared_tmp / "confidence-bridge-cache").exists()
+    assert list(shared_tmp.iterdir()) == []
+
+
 def apply_score(answer: str, findings: list | None = None, coverage: dict | None = None, model: str = "pilot-model", tmp_path: Path | None = None) -> dict:
     return apply_score_via_bridge(answer, findings or [], coverage or {}, model, tmp_path or Path("/tmp"))
 
@@ -460,7 +500,9 @@ def test_mock_pilot_audit_files_written(mock_pilot: dict) -> None:
     assert not (audit_dir / "pilot-synth-missing").exists()
     audit_text = (audit_dir / "pilot-synth-alpha" / "mock-r0.txt").read_text(encoding="utf-8")
     assert "=== system ===" in audit_text and "=== user ===" in audit_text
-    assert "=== raw answer ===" in audit_text
+    # The answer section is the (credential-masked) copy — a mock row has no
+    # provider and no credential, so its canned answer is written as-is.
+    assert "=== answer ===" in audit_text
 
 
 def test_mock_pilot_report_buckets_and_denominators(mock_pilot: dict) -> None:
@@ -788,15 +830,87 @@ def test_live_backend_missing_env_fails_fast(tmp_path: Path, monkeypatch: pytest
     assert "CONFIDENCE_PILOT_TEST_API_KEY" in capsys.readouterr().err
 
 
+def test_live_audit_answer_is_the_credential_masked_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression pin (#1182 review): a provider that ECHOES the credential
+    # must not leave it in cleartext on disk. Production masks the raw
+    # response before persisting it (src/engine/review.ts, redactTextDeep);
+    # the pilot persists the same masked copy, and the raw answer stays in
+    # memory for scoring only.
+    secret = "loopback-echoed-key-4242"
+
+    def respond(_handler):
+        return (200, {"choices": [{"message": {"content": raw_answer(4, "medium", f"the key is {secret}")}}]})
+
+    pilot = LoopbackProvider(respond)
+    server, base_url = serve(pilot)
+    for name, value in live_env(base_url, secret).items():
+        monkeypatch.setenv(name, value)
+    try:
+        runs_dir = fixture_runs_dir_copy(tmp_path)
+        argv = live_score_argv(tmp_path, runs_dir, tmp_path / "results.json", max_calls=10)
+        assert run_cmd("score", argv) == 0
+        results = json.loads((tmp_path / "results.json").read_text(encoding="utf-8"))
+        scored = [row for row in results["rows"] if row["scorer"]["status"] == "scored"]
+        assert scored, "masking is a persistence concern: the row must still score"
+        audit_dir = runs_dir / "audit"
+        written = sorted(audit_dir.rglob("*.txt"))
+        assert written
+        for path in written:
+            text = path.read_text(encoding="utf-8")
+            assert secret not in text, f"the credential leaked into {path}"
+        # The persisted answer is the masked copy (the production marker),
+        # not the provider's raw text.
+        audit_text = (audit_dir / "pilot-synth-alpha" / "same-model-r0.txt").read_text(encoding="utf-8")
+        assert "=== answer ===" in audit_text
+        assert "⟦•⟧" in audit_text
+        assert secret not in json.dumps(results)
+    finally:
+        server.shutdown()
+
+
+def test_unscored_live_row_keeps_the_masked_transport_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    # Regression pin (#1182 review): the bridge's masked transport detail is
+    # retained for the operator — on disk, in the audit note, bounded to a
+    # single line — and never on stdout (stdout keeps the cause token).
+    pilot = LoopbackProvider(lambda _handler: (429, {"error": {"message": "slow down"}}))
+    server, base_url = serve(pilot)
+    for name, value in live_env(base_url).items():
+        monkeypatch.setenv(name, value)
+    try:
+        runs_dir = fixture_runs_dir_copy(tmp_path)
+        argv = live_score_argv(tmp_path, runs_dir, tmp_path / "results.json", max_calls=10)
+        assert run_cmd("score", argv) == 0
+        captured = capsys.readouterr()
+        assert "HTTP 429" not in captured.out + captured.err
+        note = (runs_dir / "audit" / "pilot-synth-alpha" / "same-model-r0.txt").read_text(encoding="utf-8")
+        assert "unscored cause: http_429" in note
+        assert "diagnostic:" in note
+        diagnostic_line = next(line for line in note.splitlines() if "diagnostic:" in line)
+        diagnostic_part = diagnostic_line.split("diagnostic: ", 1)[1]
+        assert "HTTP 429" in diagnostic_part
+        assert len(diagnostic_part) <= 400
+    finally:
+        server.shutdown()
+
+
 def test_live_request_transport_error_on_refused_connection(tmp_path: Path) -> None:
     # The key env name is passed, never the value; a missing value resolves
     # to an empty key inside the bridge (no auth header), and the refused
     # connection flows back as the production transport's cause token.
-    raw, usage, cause = live_request_via_bridge(
+    raw, usage, cause, diagnostic, masked = live_request_via_bridge(
         "http://127.0.0.1:1", "openai", "m", "CONFIDENCE_PILOT_TEST_API_KEY",
         "s", "u", 5, ["CONFIDENCE_PILOT_TEST_API_KEY"], tmp_path,
     )
     assert raw is None and usage is None and cause == "transport_error"
+    # The bridge's masked transport detail rides along (never a secret).
+    assert isinstance(diagnostic, str)
+    # No answer on the failure path, so no masked copy either.
+    assert masked == ""
+    assert "ECONNREFUSED" in diagnostic
 
 
 def test_live_request_anthropic_shape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -817,7 +931,7 @@ def test_live_request_anthropic_shape(tmp_path: Path, monkeypatch: pytest.Monkey
     server, base_url = serve(pilot)
     monkeypatch.setenv("CONFIDENCE_PILOT_TEST_API_KEY", "anthropic-fake-key")
     try:
-        raw, usage, cause = live_request_via_bridge(
+        raw, usage, cause, diagnostic, masked = live_request_via_bridge(
             base_url, "anthropic", "claude-loopback",
             "CONFIDENCE_PILOT_TEST_API_KEY",
             "system text", "user text", 10,
@@ -826,6 +940,10 @@ def test_live_request_anthropic_shape(tmp_path: Path, monkeypatch: pytest.Monkey
         assert cause is None
         assert '"score": 4' in raw
         assert usage == {"prompt_tokens": 5, "completion_tokens": 7}
+        assert diagnostic == ""
+        # The credential-masked copy of the answer rides along beside the
+        # raw one; only the masked copy is ever persisted.
+        assert isinstance(masked, str) and masked
         request = pilot.requests[0]
         # Production endpoint join (src/transport/http.ts resolveEndpoint):
         # the anthropic base URL already carries /v1, so the path is exactly
@@ -857,22 +975,45 @@ def test_live_path_delegates_to_production_transport(tmp_path: Path) -> None:
     code = "\n".join(code_lines)
     assert not re.search(r"^\s*(import|from)\s+urllib(\.|\s)", code, re.MULTILINE)
     assert not re.search(r"\burllib\.(request|error)\b", code)
+    # No OTHER network client may reach the pilot's live path either: the
+    # driver must not import any network-capable stdlib module at all
+    # (#1182 review — the delegation pin must not be trivially bypassable by
+    # a different HTTP client).
+    for module in (
+        "http.client", "http.client2", "httplib", "httpx", "requests",
+        "aiohttp", "urllib3", "socket", "ssl", "asyncio", "xmlrpc",
+        "ftplib", "smtplib", "telnetlib", "webbrowser",
+    ):
+        assert not re.search(
+            rf"^\s*(import|from)\s+{re.escape(module)}(\.|\s|$)", code, re.MULTILINE
+        ), f"the pilot driver must not import {module}"
+    assert not re.search(r"\b(?:urlopen|urlretrieve|create_connection)\b", code)
     assert "confidence_bridge" in code
     bridge_source = (SCRIPTS_DIR / "confidence_bridge.ts").read_text(encoding="utf-8")
     bridge_code = "\n".join(line for line in bridge_source.splitlines() if not line.lstrip().startswith(("*", "//")))
     assert re.search(r'import \{ runChatRequestOnce \} from "\.\./src/transport/transport\.js"', bridge_code)
     assert re.search(r'import \{ buildModelRequest \} from "\.\./src/model/request\.js"', bridge_code)
     assert re.search(r"transportCause", bridge_code)
+    # The bridge must not open a second HTTP client of its own: the wire
+    # attempt belongs to the production transport, not to the bridge
+    # (#1182 review).
+    assert not re.search(r"\bfetch\s*\(", bridge_code)
+    assert not re.search(r'from "node:(?:http|https)"', bridge_code)
+    assert not re.search(r'require\(\s*"node:(?:http|https)"', bridge_code)
     # The cause vocabulary the driver records must stay the production
     # scorer's own mapping, not a mirrored copy: transportCause is imported
     # by the bridge, and the pilot-visible tokens are pinned here.
     assert "confidence_bridge" in driver_source
     # And an unreachable endpoint flows a production cause through the seam.
-    answer, usage, cause = live_request_via_bridge(
+    answer, usage, cause, diagnostic, masked = live_request_via_bridge(
         "http://127.0.0.1:1", "openai", "m", "CONFIDENCE_PILOT_TEST_API_KEY",
         "s", "u", 5, ["CONFIDENCE_PILOT_TEST_API_KEY"], tmp_path,
     )
     assert (answer, usage, cause) == (None, None, "transport_error")
+    # The bridge's masked transport detail is retained for the operator
+    # (#1182 review): it is a bounded, single-line string, never a raw
+    # provider body.
+    assert isinstance(diagnostic, str)
 
 
 def test_scorer_max_tokens_matches_production() -> None:
@@ -1511,6 +1652,35 @@ def test_unsafe_path_components_are_rejected(tmp_path: Path, capsys: pytest.Capt
     assert "unsafe path component" in capsys.readouterr().err
 
 
+def test_nul_byte_pr_id_is_a_plan_level_rejection_not_a_crash(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # Regression pin (#1182 review): a NUL-bearing pr_id passes every other
+    # path-component check (it is not empty, not "."/"..", holds no
+    # separator) but makes every filesystem call raise. It must be a
+    # plan-level rejection (exit 2, "unsafe path component") — never a
+    # mid-loop ValueError out of mkdir.
+    with pytest.raises(ValueError):
+        _safe_component("evil\x00id")
+    runs_dir = tmp_path / "nul-hostile"
+    runs_dir.mkdir()
+    (runs_dir / "runs.json").write_text(
+        json.dumps({"mode": "tools_off", "work_dir": ".", "entries": [
+            {"pr_id": "evil\x00id", "kind": "clean", "run_dir": None, "ok": False, "error": None},
+        ]}),
+        encoding="utf-8",
+    )
+    rc = run_cmd("score", [
+        "--plan", str(SAMPLE_PLAN), "--runs-dir", str(runs_dir),
+        "--out", str(tmp_path / "results.json"), "--condition", "mock",
+        "--allow-missing-corpus-entry",
+    ])
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "unsafe path component" in captured.err
+    assert "Traceback" not in captured.err + captured.out
+
+
 def test_budget_ceiling_that_fits_completes_all_calls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Regression pin for the budget double-count: 5 planned calls against a
     # ceiling of 6 FIT — every call must happen and nothing may abort. The
@@ -1678,6 +1848,168 @@ def test_score_merge_lifetime_ceiling_refuses_third_re_run(
         assert run_cmd("score", [*argv, "--merge"]) == 3
         assert len(pilot.requests) == 10
         assert results_path.read_text(encoding="utf-8") == before
+    finally:
+        server.shutdown()
+
+
+# ── Scorer spend ledger (the runs dir's lifetime bound) ─────────────────
+
+
+def live_score_argv(tmp_path: Path, runs_dir: Path, results_path: Path, **plan_kwargs) -> list[str]:
+    """The live score invocation used by the spend-ledger tests."""
+    return [
+        "--plan", str(live_plan(tmp_path, **plan_kwargs)),
+        "--runs-dir", str(runs_dir),
+        "--out", str(results_path),
+        "--condition", "same-model",
+        "--repeat", "1",
+        "--allow-missing-corpus-entry",
+    ]
+
+
+def test_fresh_runs_dir_without_ledger_scores_normally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression pin (#1182 review): the spend ledger is created LAZILY, on
+    # the first live attempt. A fresh runs dir behaves exactly as before —
+    # the planned calls go out, and the ledger records exactly them.
+    pilot = LoopbackProvider(lambda _handler: (200, OPENAI_OK))
+    server, base_url = serve(pilot)
+    for name, value in live_env(base_url).items():
+        monkeypatch.setenv(name, value)
+    try:
+        runs_dir = fixture_runs_dir_copy(tmp_path)
+        assert not (runs_dir / "scorer-spend.json").exists()
+        results_path = tmp_path / "results.json"
+        argv = live_score_argv(tmp_path, runs_dir, results_path, max_calls=10)
+        assert run_cmd("score", argv) == 0
+        assert len(pilot.requests) == 5
+        ledger = json.loads((runs_dir / "scorer-spend.json").read_text(encoding="utf-8"))
+        assert ledger == {"version": 1, "lifetime_wire_calls": 5}
+    finally:
+        server.shutdown()
+
+
+def test_score_rerun_without_merge_refuses_at_lifetime_spend_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    # Regression pin (#1182 review): max_scorer_calls is a LIFETIME bound for
+    # the RUNS DIR. Before the ledger, a plain (non-merge) re-run reset the
+    # counter to zero and could spend the ceiling again and again. The
+    # re-run must refuse (exit 3) with ZERO provider requests.
+    pilot = LoopbackProvider(lambda _handler: (200, OPENAI_OK))
+    server, base_url = serve(pilot)
+    for name, value in live_env(base_url).items():
+        monkeypatch.setenv(name, value)
+    try:
+        runs_dir = fixture_runs_dir_copy(tmp_path)
+        results_path = tmp_path / "results.json"
+        argv = live_score_argv(tmp_path, runs_dir, results_path, max_calls=5)
+        assert run_cmd("score", argv) == 0
+        assert len(pilot.requests) == 5
+        before = results_path.read_text(encoding="utf-8")
+        capsys.readouterr()
+        # 5 spent + 5 planned > max_scorer_calls=5: refuse before any call.
+        assert run_cmd("score", argv) == 3
+        assert len(pilot.requests) == 5  # zero new provider requests
+        err = capsys.readouterr().err
+        assert "already-spent wire attempts" in err
+        assert "no call was made and no budget was spent" in err
+        assert results_path.read_text(encoding="utf-8") == before
+    finally:
+        server.shutdown()
+
+
+def test_score_spend_ledger_is_monotone_across_invocations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The persisted lifetime counter only ever grows: the second invocation's
+    # value is the first's plus this invocation's attempts, never less.
+    pilot = LoopbackProvider(lambda _handler: (200, OPENAI_OK))
+    server, base_url = serve(pilot)
+    for name, value in live_env(base_url).items():
+        monkeypatch.setenv(name, value)
+    try:
+        runs_dir = fixture_runs_dir_copy(tmp_path)
+        results_path = tmp_path / "results.json"
+        argv = live_score_argv(tmp_path, runs_dir, results_path, max_calls=10)
+        assert run_cmd("score", argv) == 0
+        first = json.loads((runs_dir / "scorer-spend.json").read_text(encoding="utf-8"))
+        assert first["lifetime_wire_calls"] == 5
+        assert run_cmd("score", argv) == 0
+        second = json.loads((runs_dir / "scorer-spend.json").read_text(encoding="utf-8"))
+        assert second["lifetime_wire_calls"] >= first["lifetime_wire_calls"] + 5
+        assert second["lifetime_wire_calls"] == 10
+        assert len(pilot.requests) == 10
+    finally:
+        server.shutdown()
+
+
+@pytest.mark.parametrize("ledger_text", [
+    "{not json at all",
+    json.dumps({"version": 1}),
+    json.dumps({"version": 1, "lifetime_wire_calls": "many"}),
+    json.dumps({"version": 1, "lifetime_wire_calls": -1}),
+    json.dumps({"version": 1, "lifetime_wire_calls": True}),
+    json.dumps([1, 2, 3]),
+])
+def test_malformed_spend_ledger_fails_closed_with_zero_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, ledger_text: str
+) -> None:
+    # An unaccountable spend record must never be treated as zero spend:
+    # a malformed ledger fails closed (exit 3) before any provider call.
+    pilot = LoopbackProvider(lambda _handler: (200, OPENAI_OK))
+    server, base_url = serve(pilot)
+    for name, value in live_env(base_url).items():
+        monkeypatch.setenv(name, value)
+    try:
+        runs_dir = fixture_runs_dir_copy(tmp_path)
+        (runs_dir / "scorer-spend.json").write_text(ledger_text, encoding="utf-8")
+        argv = live_score_argv(tmp_path, runs_dir, tmp_path / "results.json", max_calls=10)
+        assert run_cmd("score", argv) == 3
+        assert len(pilot.requests) == 0
+        err = capsys.readouterr().err
+        assert "scorer-spend.json" in err
+        assert "no call was made and no budget was spent" in err
+        # The malformed ledger is never overwritten into a usable one.
+        assert (runs_dir / "scorer-spend.json").read_text(encoding="utf-8") == ledger_text
+    finally:
+        server.shutdown()
+
+
+def test_mock_rows_never_create_a_spend_ledger(tmp_path: Path) -> None:
+    # A zero-cost mock sweep spends nothing, so it must not create (or
+    # modify) the runs dir's spend ledger.
+    runs_dir = fixture_runs_dir_copy(tmp_path)
+    assert run_cmd("score", [
+        "--plan", str(SAMPLE_PLAN), "--runs-dir", str(runs_dir),
+        "--out", str(tmp_path / "results.json"), "--condition", "mock",
+        "--allow-missing-corpus-entry",
+    ]) == 0
+    assert not (runs_dir / "scorer-spend.json").exists()
+
+
+def test_spend_ledger_write_failure_fails_closed_before_any_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    # Spend that cannot be recorded cannot be bounded: the ledger write
+    # happens BEFORE the provider call, so a failed write stops the sweep
+    # (exit 3) with zero provider requests.
+    pilot = LoopbackProvider(lambda _handler: (200, OPENAI_OK))
+    server, base_url = serve(pilot)
+    for name, value in live_env(base_url).items():
+        monkeypatch.setenv(name, value)
+
+    def broken_write(_path, _total):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(confidence_calibration, "_write_scorer_spend", broken_write)
+    try:
+        runs_dir = fixture_runs_dir_copy(tmp_path)
+        argv = live_score_argv(tmp_path, runs_dir, tmp_path / "results.json", max_calls=10)
+        assert run_cmd("score", argv) == 3
+        assert len(pilot.requests) == 0
+        assert "no call was made and no budget was spent" in capsys.readouterr().err
     finally:
         server.shutdown()
 

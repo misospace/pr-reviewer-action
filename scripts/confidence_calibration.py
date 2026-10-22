@@ -30,8 +30,13 @@ Pipeline (each stage is a separate CLI subcommand on this module):
    into a canonical ConfidenceResult via the bridge's ``apply-score``.
    Budget ceilings are enforced BEFORE each call; an exhausted budget is a
    normal, recorded outcome (``budget_exhausted: true``, exit 0), never an
-   error. Every row's prompt text and raw answer are persisted under
-   ``<runs-dir>/audit/`` for later adjudication.
+   error. Every row's prompt text and the CREDENTIAL-MASKED copy of its
+   answer are persisted under ``<runs-dir>/audit/`` for later adjudication
+   (the raw provider answer stays in memory and is never written to disk).
+   The scorer's call ceiling is a LIFETIME bound for the runs dir: the
+   spent calls are recorded in ``<runs-dir>/scorer-spend.json`` and a
+   re-run that would exceed the ceiling refuses with exit 3 and zero
+   provider calls.
 4. ``report`` -- render the markdown metrics report from ``results.json``
    (pure functions, importable). It reports, it never judges; exit 0 always.
 
@@ -42,7 +47,9 @@ Trust and security boundaries honored throughout:
   only as the NAME of its env var, is resolved in the bridge process, and
   travels only in the provider's auth header — never in URLs, request
   bodies, argv, or any log/diagnostic string. Env values are never
-  printed. The driver handles env-var NAMES only.
+  printed and never written to disk: the persisted audit answer is the
+  credential-masked copy the bridge produces with production's own
+  ``redactTextDeep``. The driver handles env-var NAMES only.
 - NO retries anywhere: a failed live call is recorded ``unscored`` with a
   redacted cause token and never attempted again.
 - Untrusted PR/diff/review content is data: the production prompt builder
@@ -86,6 +93,13 @@ BRIDGE_LAUNCHER = REPO_ROOT / "scripts" / "confidence_bridge.mjs"
 # import through the bridge; pinned equal by
 # ``tests/test_confidence_calibration.py::test_scorer_max_tokens_matches_production``).
 SCORER_MAX_TOKENS = 1024
+
+# The per-pilot lifetime scorer-spend ledger, stored in the RUNS DIR (the
+# pilot instance): the scorer's call ceiling is a lifetime bound for that
+# instance across invocations, so the carried spend must live next to the
+# runs it accounts for — not only inside a results file that a plain
+# re-run never reads.
+SCORER_SPEND_FILENAME = "scorer-spend.json"
 
 ENV_VAR_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 # Condition fields are validated against a per-backend ALLOW-list (see
@@ -742,7 +756,7 @@ def live_request_via_bridge(
     request_timeout_sec: float,
     secret_env_names: list[str],
     work_dir: Path,
-) -> tuple[str | None, dict[str, int] | None, str | None]:
+) -> tuple[str | None, dict[str, int] | None, str | None, str, str]:
     """One live scorer call through the production typed Node transport.
 
     Calls the bridge's ``live-request`` subcommand, which sends the request
@@ -751,12 +765,20 @@ def live_request_via_bridge(
     seam as the NAME of its env var (``key_env``) only; the bridge resolves
     the value and it travels only in the provider's auth header.
 
-    Returns ``(raw_answer, usage, cause)``: ``cause`` is None on success;
-    otherwise the production scorer's redacted action-owned token
+    Returns ``(raw_answer, usage, cause, diagnostic, masked_answer)``:
+    ``cause`` is None on
+    success; otherwise the production scorer's redacted action-owned token
     (``http_<code>``, ``timeout``, ``response_too_large``,
     ``transport_error``) — the same mapping ``src/confidence/scorer.ts``
-    applies. A malformed bridge result raises ``RuntimeError``; the call
-    site degrades to ``transport_error`` and records ``unscored``.
+    applies. ``diagnostic`` is the bridge's secret-masked transport detail
+    (empty when the bridge reported none). A malformed bridge result raises
+    ``RuntimeError``; the call site degrades to ``transport_error`` and
+    records ``unscored``.
+
+    ``masked_answer`` is the credential-masked COPY of the answer (the
+    bridge's ``masked_answer``, produced with production's own
+    ``redactTextDeep``): the raw answer stays in memory for scoring, and
+    only the masked copy is ever persisted.
     """
     result = _run_bridge(
         "live-request",
@@ -779,6 +801,12 @@ def live_request_via_bridge(
     answer = result.get("answer")
     cause = result.get("cause")
     usage = result.get("usage")
+    diagnostic = result.get("diagnostic")
+    if not isinstance(diagnostic, str):
+        diagnostic = ""
+    masked_answer = result.get("masked_answer")
+    if not isinstance(masked_answer, str):
+        masked_answer = ""
     if not isinstance(answer, (str, type(None))):
         raise RuntimeError("bridge live-request returned a malformed result (answer)")
     if not isinstance(cause, (str, type(None))):
@@ -807,7 +835,7 @@ def live_request_via_bridge(
                 usage = None
             else:
                 usage = {"prompt_tokens": prompt_count, "completion_tokens": completion_count}
-    return answer, usage, cause
+    return answer, usage, cause, diagnostic, masked_answer
 
 
 # ── `score` subcommand ───────────────────────────────────────────────────
@@ -817,10 +845,21 @@ def _safe_component(value: str) -> str:
     """Validate a pr_id/condition_id as a single filesystem path component.
 
     Operator-authored but still untrusted-by-convention: a ``../`` or
-    absolute-looking id must never escape the audit tree or the work dir.
-    Returns the value unchanged when safe; raises ValueError otherwise.
+    absolute-looking id must never escape the audit tree or the work dir,
+    and a NUL byte must never reach a filesystem call (a NUL-bearing id
+    raises deep inside ``mkdir`` instead of being rejected up front, which
+    would turn a hostile id into a mid-loop crash instead of a plan-level
+    rejection). Returns the value unchanged when safe; raises ValueError
+    otherwise.
     """
-    if not value or value in (".", "..") or "/" in value or "\\" in value or Path(value).name != value:
+    if (
+        not value
+        or value in (".", "..")
+        or "/" in value
+        or "\\" in value
+        or "\x00" in value
+        or Path(value).name != value
+    ):
         raise ValueError(f"unsafe path component: {value!r}")
     return value
 
@@ -831,14 +870,55 @@ def _audit_path(audit_dir: Path, pr_id: str, condition_id: str, repeat_index: in
     return audit_dir / pr_id / f"{condition_id}-r{repeat_index}.txt"
 
 
-def _write_audit(path: Path, system: str, user: str, raw_answer: str, note: str) -> None:
+def _write_audit(path: Path, system: str, user: str, answer: str, note: str) -> None:
+    """Persist one row's audit trail.
+
+    The answer section holds the CREDENTIAL-MASKED copy of the provider
+    answer (the bridge's ``masked_answer``) for live rows — the raw answer
+    stays in memory and is never written to disk, so a provider that echoes
+    the credential cannot leave it in cleartext in the audit tree. Mock rows
+    have no provider and no credential, so their canned answer is written
+    as-is.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     sections = [f"=== system ===\n{system}", f"=== user ===\n{user}"]
-    if raw_answer:
-        sections.append(f"=== raw answer ===\n{raw_answer}")
+    if answer:
+        sections.append(f"=== answer ===\n{answer}")
     if note:
         sections.append(f"=== note ===\n{note}")
     path.write_text("\n\n".join(sections) + "\n", encoding="utf-8")
+
+
+def _bounded_diagnostic(text: str, limit: int = 400) -> str:
+    """One-line, length-bounded operator diagnostic.
+
+    The bridge's diagnostic is already secret-masked; this only keeps it a
+    single line and bounded so a provider-authored detail can never bloat
+    (or structure) the audit note.
+    """
+    flattened = " ".join(str(text or "").split())
+    return flattened[:limit]
+
+
+def _write_scorer_spend(path: Path, lifetime_wire_calls: int) -> None:
+    """Persist the per-pilot scorer spend ledger atomically.
+
+    The ledger is written BEFORE the provider call it accounts for, so a
+    crash can never leave an unmetered call behind, and it is replaced
+    atomically (temp file in the same directory + ``os.replace``) so a
+    reader never observes a half-written counter. The persisted value only
+    ever grows.
+    """
+    payload = {"version": 1, "lifetime_wire_calls": int(lifetime_wire_calls)}
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+            handle.write("\n")
+        os.replace(tmp_path, path)
+    except OSError:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _resolve_condition_path(raw: str, plan_path: Path) -> Path:
@@ -903,6 +983,28 @@ def cmd_score(args: argparse.Namespace) -> int:
         print(f"score error: {exc}", file=sys.stderr)
         return EXIT_INVALID_PLAN
 
+    # Per-pilot lifetime scorer-spend ledger (#1182 review): the scorer's
+    # call ceiling is a LIFETIME bound for the RUNS DIR (the pilot
+    # instance), not a per-invocation one, so the carried spend lives in the
+    # runs dir itself — the results file's own counter only accounts for
+    # the file it was written to, and a plain re-run never reads it. An
+    # unreadable or malformed ledger fails closed: an unaccountable spend
+    # record must never be treated as zero spend.
+    spend_path = runs_dir / SCORER_SPEND_FILENAME
+    ledger_calls = 0
+    if spend_path.is_file():
+        ledger = _read_json_soft(spend_path)
+        counter = ledger.get("lifetime_wire_calls") if isinstance(ledger, dict) else None
+        if not isinstance(counter, int) or isinstance(counter, bool) or counter < 0:
+            print(
+                f"score aborted: {spend_path} exists but is unreadable or malformed; "
+                "prior scorer spend cannot be accounted, so no call was made "
+                "and no budget was spent",
+                file=sys.stderr,
+            )
+            return EXIT_BUDGET_ABORT
+        ledger_calls = counter
+
     # Pre-flight: every selected live condition needs its four env vars set
     # (NAMES only here; values are read at call time and never printed).
     for cid in selected:
@@ -960,15 +1062,18 @@ def cmd_score(args: argparse.Namespace) -> int:
     # the larger of the file's row-level wire-attempt sum and the persisted
     # lifetime counter: a merge replaces re-selected conditions' rows
     # wholesale, so the row sum alone would let repeated same-condition
-    # re-runs exceed the lifetime ceiling — no call is ever free.
+    # re-runs exceed the lifetime ceiling — no call is ever free. The
+    # runs dir's own spend ledger (the lifetime bound for the pilot
+    # instance) is the other side of that max: it covers a plain re-run
+    # that never reads a results file.
     out_path = Path(args.out).resolve()
     existing_results: dict[str, Any] | None = None
-    carried_calls = 0
+    merge_row_sum = 0
     if args.merge and out_path.is_file():
         candidate_results = _read_json_soft(out_path)
         if isinstance(candidate_results, dict) and isinstance(candidate_results.get("rows"), list):
             existing_results = candidate_results
-            carried_calls = max(
+            merge_row_sum = max(
                 sum(
                     int(row.get("wire_attempts") or 0)
                     for row in existing_results["rows"]
@@ -976,6 +1081,7 @@ def cmd_score(args: argparse.Namespace) -> int:
                 ),
                 int(existing_results.get("lifetime_wire_calls") or 0),
             )
+    carried_calls = max(ledger_calls, merge_row_sum)
 
     planned_calls = sum(
         1
@@ -986,6 +1092,9 @@ def cmd_score(args: argparse.Namespace) -> int:
         and primary_evidence_state(run_entries[pr_id], _resolve_run_dir(runs_dir, run_entries[pr_id])) == "primary_ok"
     )
     calls_made = carried_calls
+    # The running lifetime total persisted in the runs dir's spend ledger:
+    # monotone, never below the carried spend.
+    ledger_total = ledger_calls
     if carried_calls + planned_calls > ceilings["max_scorer_calls"]:
         print(
             f"score aborted: {carried_calls} already-spent wire attempts plus {planned_calls} "
@@ -1191,6 +1300,8 @@ def cmd_score(args: argparse.Namespace) -> int:
                 raw_answer = ""
                 cause: str | None = None
                 model_name = ""
+                diagnostic = ""
+                masked_answer = ""
                 if condition["backend"] == "mock":
                     answers = mock_answers[cid]
                     key = f"{cid}::{pr_id}::{repeat_index}"
@@ -1212,8 +1323,23 @@ def cmd_score(args: argparse.Namespace) -> int:
                     # seam, the lane masking set travels by name, and the
                     # timeout pair bounds the single wire attempt.
                     model_name = os.environ[condition["model_env"]]
+                    # Record the spend BEFORE the call: a call that is never
+                    # recorded can never be bounded, so the ledger write
+                    # happens first and a failed write stops the sweep
+                    # (exit 3) instead of spending unmetered.
+                    ledger_total = max(ledger_total, carried_calls) + 1
                     try:
-                        raw_answer, usage, cause = live_request_via_bridge(
+                        _write_scorer_spend(spend_path, ledger_total)
+                    except OSError as exc:
+                        print(
+                            "score aborted: the scorer spend ledger could not be "
+                            f"written ({type(exc).__name__}); no call was made and "
+                            "no budget was spent",
+                            file=sys.stderr,
+                        )
+                        return EXIT_BUDGET_ABORT
+                    try:
+                        raw_answer, usage, cause, diagnostic, masked_answer = live_request_via_bridge(
                             os.environ[condition["base_url_env"]],
                             os.environ[condition["api_format_env"]],
                             model_name,
@@ -1225,21 +1351,37 @@ def cmd_score(args: argparse.Namespace) -> int:
                             audit_file.parent,
                         )
                     except Exception:  # noqa: BLE001 — any unexpected transport shape degrades to unscored
-                        raw_answer, usage, cause = None, None, "transport_error"
+                        raw_answer, usage, cause, diagnostic, masked_answer = (
+                            None, None, "transport_error", "", "",
+                        )
                     if usage is not None:
                         row["usage"] = usage
                     # One attempted model call per live row, success or not —
                     # that attempt is what the cost ceilings bound.
                     calls_made += 1
                     row["wire_attempts"] = 1
+                # What the audit file may hold: for a live row only the
+                # credential-masked copy of the answer (the raw answer stays
+                # in memory for scoring); a mock row has no provider and no
+                # credential, so its canned answer is written as-is.
+                audit_answer = (
+                    masked_answer
+                    if condition["backend"] == "live"
+                    else raw_answer
+                )
                 latency_ms = int((time.monotonic() - started) * 1000)
                 if cause is not None:
                     row["scorer"] = unscored_row(cause, model_name)
                     row["latency_ms"] = latency_ms
+                    note = f"unscored cause: {cause}"
+                    if condition["backend"] == "live" and diagnostic:
+                        # The masked transport detail stays on disk (the
+                        # audit tree), never on stdout.
+                        note += f" — diagnostic: {_bounded_diagnostic(diagnostic)}"
                     _write_audit(
                         audit_file,
                         prompt["system"], prompt["user"], "",
-                        note=f"unscored cause: {cause}",
+                        note=note,
                     )
                     rows.append(row)
                     continue
@@ -1253,7 +1395,7 @@ def cmd_score(args: argparse.Namespace) -> int:
                     row["latency_ms"] = latency_ms
                     _write_audit(
                         audit_file,
-                        prompt["system"], prompt["user"], raw_answer,
+                        prompt["system"], prompt["user"], audit_answer,
                         note="unscored cause: bridge_apply_score_failed",
                     )
                     rows.append(row)
@@ -1262,7 +1404,7 @@ def cmd_score(args: argparse.Namespace) -> int:
                 row["latency_ms"] = latency_ms
                 _write_audit(
                     audit_file,
-                    prompt["system"], prompt["user"], raw_answer, "",
+                    prompt["system"], prompt["user"], audit_answer, "",
                 )
                 rows.append(row)
             if budget_exhausted:

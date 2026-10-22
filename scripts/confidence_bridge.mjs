@@ -6,19 +6,37 @@
  *   node scripts/confidence_bridge.mjs <subcommand> <infile>
  *
  * Bundles `scripts/confidence_bridge.ts` with esbuild's JS API into a cache
- * file under os.tmpdir()/confidence-bridge-cache/ whose name embeds a sha256
- * over the FULL transitive local import graph (every resolved module's bytes,
- * plus unresolved relative specifiers as text) and the esbuild version, so a
- * stale bundle can never be loaded after the bridge source OR any imported
- * production module changes. Then loads the CJS bundle and
- * invokes its CLI with the caller's argv. Quiet by design: no output of its
- * own beyond what the bridge itself prints (result JSON on stdout, a
- * redacted failure line on stderr).
+ * file under the USER'S PRIVATE cache directory
+ * (`$HOME/.cache/pr-reviewer-action/confidence-bridge-cache/`) whose name
+ * embeds a sha256 over the FULL transitive local import graph (every
+ * resolved module's bytes, plus unresolved relative specifiers as text) and
+ * the esbuild version, so a stale bundle can never be loaded after the
+ * bridge source OR any imported production module changes. Then loads the
+ * CJS bundle and invokes its CLI with the caller's argv. Quiet by design: no
+ * output of its own beyond what the bridge itself prints (result JSON on
+ * stdout, a redacted failure line on stderr).
+ *
+ * The cache directory is per-user and mode 0700 by construction: a shared,
+ * world-writable directory with a predictable, content-derived name would
+ * let a local user pre-create the bundle path and have their code executed
+ * with the pilot's credentials in the environment. A symlinked cache path,
+ * a failed permission fix, or an unavailable home directory falls back to a
+ * FRESH private directory (mkdtemp, mode 0700) — never to a shared one.
  *
  * Deliberately kept small: it is pilot tooling, not part of the action.
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -84,6 +102,35 @@ function bundleDigestOf(entry) {
 }
 
 const esbuildVersion = typeof esbuild.version === "string" ? esbuild.version : "unknown";
+
+/** The private cache directory for the bundled bridge.
+ *
+ * Preferred: the current user's own cache directory, created 0700 and
+ * re-chmod'ed (a pre-existing directory could be world-writable). A
+ * symlink at the cache path would redirect the bundle — and the pilot's
+ * credentials — into an attacker-controlled directory, so it is refused.
+ * Fallback (symlinked path, failed permission fix, no home directory): a
+ * FRESH private directory from mkdtemp (mode 0700 by default). There is
+ * deliberately no shared/world-writable fallback. */
+function resolveCacheDir() {
+  const home = os.homedir();
+  if (typeof home === "string" && home !== "") {
+    const dir = path.join(home, ".cache", "pr-reviewer-action", "confidence-bridge-cache");
+    try {
+      const existing = lstatSync(dir, { throwIfNoEntry: false });
+      if (existing !== undefined && existing.isSymbolicLink()) {
+        return mkdtempSync(path.join(os.tmpdir(), "confidence-bridge-"));
+      }
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      chmodSync(dir, 0o700);
+      return dir;
+    } catch {
+      return mkdtempSync(path.join(os.tmpdir(), "confidence-bridge-"));
+    }
+  }
+  return mkdtempSync(path.join(os.tmpdir(), "confidence-bridge-"));
+}
+
 // The launcher's own bytes enter the digest too, so editing the esbuild
 // build options below invalidates the cache alongside graph and toolchain.
 const digest = bundleDigestOf(bridgeSource)
@@ -91,11 +138,11 @@ const digest = bundleDigestOf(bridgeSource)
   .update(esbuildVersion)
   .digest("hex")
   .slice(0, 16);
-const cacheDir = path.join(os.tmpdir(), "confidence-bridge-cache");
+const cacheDir = resolveCacheDir();
 const bundlePath = path.join(cacheDir, `confidence-bridge-${digest}.cjs`);
 
 if (!existsSync(bundlePath)) {
-  mkdirSync(cacheDir, { recursive: true });
+  mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
   const result = await esbuild.build({
     entryPoints: [bridgeSource],
     bundle: true,
@@ -107,9 +154,16 @@ if (!existsSync(bundlePath)) {
     write: false,
   });
   // Write-then-rename so two concurrent launches never observe a half-written
-  // bundle under the shared cache name.
+  // bundle under the cache name. The temp file is created fresh per launch,
+  // so the 0600 mode applies: the bundle carries no credential, but it is
+  // the pilot's own code and stays private to its user.
   const tmpPath = `${bundlePath}.${process.pid}.tmp`;
-  writeFileSync(tmpPath, result.outputFiles[0].contents);
+  writeFileSync(tmpPath, result.outputFiles[0].contents, { mode: 0o600 });
+  try {
+    chmodSync(tmpPath, 0o600);
+  } catch {
+    /* best effort: the mode option already applies to a fresh temp file */
+  }
   renameSync(tmpPath, bundlePath);
 }
 

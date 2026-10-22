@@ -49,15 +49,20 @@
  * typed failure that is never followed. The credential crosses the seam
  * only as the NAME of the env var holding it (`key_env`); the value is
  * resolved in this process and rides only the provider's auth header.
- * Result: {answer, usage, cause, diagnostic} — on success `answer` is the
- * normalized response text and `usage` the prompt/completion token counts
- * (null when the provider sent none), with `cause` null; on a failure
- * `answer` and `usage` are null, `cause` is the production scorer's
+ * Result: {answer, masked_answer, usage, cause, diagnostic} — on success
+ * `answer` is the normalized response text and `usage` the prompt/completion
+ * token counts (null when the provider sent none), with `cause` null; on a
+ * failure `answer` and `usage` are null, `cause` is the production scorer's
  * action-owned token (`transportCause`: `http_<code>`, `timeout`,
  * `response_too_large`, `transport_error`) and `diagnostic` is the
  * secret-masked `describeTransportFailure` detail (mask set = every named
- * lane secret plus the resolved key). Success and typed failure both exit
- * 0; only malformed input or a missing/empty `key_env` exits 1.
+ * lane secret plus the resolved key). `masked_answer` is the answer's
+ * CREDENTIAL-MASKED COPY — the same production redaction the runtime
+ * applies before persisting a raw provider response (`redactTextDeep`,
+ * `src/engine/review.ts`) — so the driver can persist a copy that can never
+ * carry the credential, while the raw `answer` stays in memory for
+ * scoring; it is null on the failure path. Success and typed failure both
+ * exit 0; only malformed input or a missing/empty `key_env` exits 1.
  *
  * On any error a REDACTED message goes to stderr (never a secret value,
  * never input content — a JSON parse error message could echo file bytes)
@@ -72,7 +77,7 @@
  * typecheck`).
  */
 import * as fs from "node:fs";
-import { maskDiagnostic, maskKnownSecrets, redactText } from "../src/context/redact.js";
+import { maskDiagnostic, maskKnownSecrets, redactText, redactTextDeep } from "../src/context/redact.js";
 import { strictReviewResult } from "../src/enforcement/verdict-policy.js";
 import { buildConfidencePrompt, type ConfidencePromptInputs } from "../src/confidence/prompt.js";
 import { CONFIDENCE_MAX_TOKENS, transportCause } from "../src/confidence/scorer.js";
@@ -289,6 +294,17 @@ function positiveTimeout(value: unknown, subcommand: string, field: string): num
   return value;
 }
 
+/** The credential-masked COPY of the provider answer. Production persists a
+ * raw provider response through `redactTextDeep` (`src/engine/review.ts`),
+ * not through value masking alone: configured-value masking left a
+ * PROVIDER-authored credential (`api_key=…`, `Bearer …`, `sk-…`) in
+ * cleartext on disk. The pilot persists THIS copy, so a provider that
+ * echoes the credential cannot leave it behind in the audit tree. */
+function maskAnswer(answer: string, secrets: (string | null | undefined)[]): string {
+  const masked = redactTextDeep(answer, secrets);
+  return typeof masked === "string" ? masked : "";
+}
+
 /** The pilot's live scorer call on the production single-shot transport
  * (#1182): one wire attempt, no retries, non-2xx never followed. The
  * credential value is resolved here from its env name and rides only the
@@ -351,6 +367,7 @@ async function liveRequest(argv: string[]): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
     emit({
       answer: null,
+      masked_answer: null,
       usage: null,
       cause: "transport_error",
       diagnostic: maskDiagnostic(message, diagnosticSecrets),
@@ -360,6 +377,7 @@ async function liveRequest(argv: string[]): Promise<void> {
   if (outcome.status === "ok") {
     emit({
       answer: outcome.response.content,
+      masked_answer: maskAnswer(outcome.response.content, diagnosticSecrets),
       usage: outcome.response.usage !== null
         ? {
             prompt_tokens: outcome.response.usage.promptTokens,
@@ -373,6 +391,7 @@ async function liveRequest(argv: string[]): Promise<void> {
   }
   emit({
     answer: null,
+    masked_answer: null,
     usage: null,
     cause: transportCause(outcome.failure.kind, outcome.failure.status),
     diagnostic: describeTransportFailure(outcome.failure, { secrets: diagnosticSecrets }),
