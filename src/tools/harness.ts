@@ -1450,12 +1450,17 @@ function preLoopFailureKind(result: HarnessResult): string | null {
 }
 
 /** #1199: the closing in-conversation verdict turn's bounded latency/usage
- * record shape (content-free: one duration, nullable provider-reported token
- * counts, a boolean). snake_case: persisted verbatim in the harness artifact.
- * A type (not interface) so the consumers' `as Record<string, unknown>`
- * projections keep compiling. */
+ * record shape (content-free: one duration — null when a persisted record is
+ * malformed —, nullable provider-reported token counts, a boolean). snake_case:
+ * persisted verbatim in the harness artifact.
+ *
+ * A TYPE ALIAS deliberately, not an interface: an object-literal type is
+ * assignable to `Record<string, unknown>` (implicit index signatures) while an
+ * interface with the same members is NOT — which is exactly what this shape's
+ * loose `as Record<string, unknown>` projections and payload plumbing depend
+ * on. */
 export type NativeLoopVerdictTelemetry = {
-  model_sec: number;
+  model_sec: number | null;
   prompt_tokens: number | null;
   completion_tokens: number | null;
   cached_tokens: number | null;
@@ -1680,7 +1685,7 @@ function supersededVerdictTelemetry(result: HarnessResult): NativeLoopVerdictTel
     if (record === null || typeof record !== "object") continue;
     const r = record as unknown as Record<string, unknown>;
     projected.push({
-      model_sec: numOrNull(r.model_sec) ?? 0,
+      model_sec: numOrNull(r.model_sec),
       prompt_tokens: numOrNull(r.prompt_tokens),
       completion_tokens: numOrNull(r.completion_tokens),
       cached_tokens: numOrNull(r.cached_tokens),
@@ -2522,20 +2527,32 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           timeFn,
           tier: input.tier,
         });
+        // #1199/#1145: decide acceptance ONCE, before any telemetry is written.
+        // Short-circuits to false with zero budget-clock reads when the verdict
+        // is unusable; on a usable verdict it consumes exactly the one read the
+        // acceptance gate below used to spend (the telemetry block in between
+        // touches only the telemetry clock), so every scripted clock sequence
+        // is preserved — the read just happens earlier. Without this, a refresh
+        // whose verdict is usable BUT whose run's deadline has expired would
+        // still have displaced the standing verdict's telemetry record before
+        // the acceptance gate rejected it.
+        const verdictAccepted = verdict.ok && (deadline === null || timeFn() < deadline);
         // #1199: the closing in-conversation verdict turn gets its OWN latency +
         // provider usage record, kept separate from the investigation rounds.
         // `model_sec` spans only the model request (including a streamed→
         // non-streamed retry) on the dedicated telemetry clock, and the usage
         // is folded over EVERY verdict attempt (`verdict.usageTotals`) — null
-        // when every attempt reported none, never estimated. Only the turn
-        // that OWNS the verdict record writes it (the first verdict turn, or a
-        // #1145 refresh that actually produced a new verdict): a failed
-        // refresh leaves the standing verdict's telemetry untouched, exactly
-        // as the verdict itself. A SUCCESSFUL refresh first moves the standing
+        // when every attempt reported none, never estimated. Only the turn that
+        // OWNS the verdict record writes it (the first verdict turn — which
+        // keeps its record even on failure, as a diagnostic — or a #1145
+        // refresh that is actually ACCEPTED): a refresh that fails OR is
+        // usable-but-unaccepted (the run's deadline expired first) leaves the
+        // standing verdict's telemetry and superseded record untouched, exactly
+        // as the verdict itself. An accepted refresh first moves the standing
         // record into `native_loop_superseded_verdict_telemetry` (at most one
         // element — a refresh happens at most once per run), so the refreshed
         // turn's record does not erase the first verdict turn's from telemetry.
-        if (verdict.ok || recordFailure) {
+        if (recordFailure || (verdict.ok && verdictAccepted)) {
           if (recordFailure === false) {
             const standing = input.result.native_loop_verdict_telemetry;
             if (standing !== null && standing !== undefined && typeof standing === "object") {
@@ -2605,7 +2622,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
             deps.deleteArtifact?.(`ai-response.${input.tier}.json`);
           }
         }
-        if (verdict.ok && (deadline === null || timeFn() < deadline)) {
+        if (verdictAccepted) {
           input.result.native_loop_verdict_produced = true;
           input.result.native_loop_verdict_status = "accepted";
           input.result.native_loop_verdict_transport = verdict.transport;

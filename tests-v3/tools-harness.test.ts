@@ -1426,3 +1426,84 @@ test("#1199: a failed #1145 refresh keeps the standing verdict record (no supers
   assert.equal(telemetry.verdict.completion_tokens, 900);
   assert.deepEqual(telemetry.verdict.superseded, []);
 });
+
+test("#1199: an unaccepted #1145 refresh (deadline expired) keeps the standing verdict record", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "notes.md"), "evidence note\n");
+  const withUsage = (body: unknown, usage: Record<string, unknown>) => ({ ...(body as object), usage });
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    // the FIRST verdict turn (accepted; its telemetry must stay standing)
+    withUsage(validVerdict(), { prompt_tokens: 21000, completion_tokens: 900 }),
+    // the #1145 continuation's own native-loop turn, then the refresh's verdict
+    // — usable on its own, but the acceptance read below rejects it.
+    openAiCall("c2", "read_file", '{"path":"notes.md"}'),
+    validVerdict(),
+  ];
+  // Scripted budget-clock reads, 1:1 with this scenario (enumerated with a
+  // logging clock; 26 reads exactly). `deadline` = first read + 10
+  // (TOOL_LOOP_WALL_CLOCK_SEC). The indices:
+  //   0 harness deadline · 1 loop start · 2-8 loop rounds (wall checks, per-turn
+  //   remaining checks, per-executed-call gate+remaining, loop elapsed) ·
+  //   9 pre-verdict smart gate · 10 verdictStartedAt · 11-12 first-verdict
+  //   budget checks · 13 FIRST verdict's acceptance read (< deadline →
+  //   accepted) · 14 verdictElapsedSec · 15 pre-repair deadlineLeft ·
+  //   16-21 repair round (start/wall/remaining/exec gate+remaining/elapsed) ·
+  //   22-23 refresh budget checks · 24 refresh ACCEPTANCE read landing at/after
+  //   the deadline — the race under test · 25 teardown gate (pre-deadline, so
+  //   the standing verdict keeps `native_loop_verdict_produced`).
+  const vals = [
+    0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9,
+    1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0, 2.1, 2.2, 2.3, 2.4,
+    10.2, 2.6,
+  ];
+  let vi = 0;
+  let n = 0;
+  const logged: number[] = []; // exhausted reads repeat the last value → drift stays observable in the assertions
+  const { result } = await runToolHarness(deps({
+    env: {
+      TOOL_HARNESS_TIER: "smart",
+      SMART_BASE_URL: "http://smart.test/v1",
+      SMART_MODEL: "smart1",
+      SMART_API_KEY: "k",
+      AI_STREAM: "false",
+      TOOL_LOOP_WALL_CLOCK_SEC: "10",
+      SYSTEM_PROMPT: "You are the reviewer.",
+    },
+    transport: async () => scripted[n++],
+    traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+    timeFn: () => {
+      const v = vals[vi] ?? vals[vals.length - 1]!;
+      vi += 1;
+      logged.push(v);
+      return v;
+    },
+  }));
+  // The refresh's verdict was usable but the run's deadline expired before it
+  // could be accepted: the refresh is NOT what stands.
+  assert.equal(result.trace_repair_continuation?.outcome, "continued");
+  assert.equal(result.trace_repair_continuation?.verdict_refreshed, false);
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  // the acceptance decision is computed once: 26 budget-clock reads, exactly
+  // as enumerated (no extra read introduced by the race fix).
+  assert.equal(logged.length, 26);
+  assert.equal(logged[24], 10.2);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.smart.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry;
+  // `verdict` still describes the FIRST verdict, and nothing was superseded:
+  // an unaccepted refresh leaves the standing record untouched, exactly like a
+  // failed one.
+  assert.equal(telemetry.verdict.produced, true);
+  assert.equal(telemetry.verdict.prompt_tokens, 21000);
+  assert.equal(telemetry.verdict.completion_tokens, 900);
+  assert.equal(typeof telemetry.verdict.model_sec, "number");
+  assert.ok(telemetry.verdict.model_sec >= 0);
+  assert.deepEqual(telemetry.verdict.superseded, []);
+  // the raw records were consumed (folded into the verdict sub-object).
+  assert.equal(artifact.native_loop_verdict_telemetry, null);
+  assert.equal(artifact.native_loop_superseded_verdict_telemetry, null);
+});
