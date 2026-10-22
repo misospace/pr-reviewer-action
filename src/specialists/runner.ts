@@ -88,6 +88,37 @@ export interface SpecialistTransportOutcome {
    * attempt: no attempt record is opened for it and the aggregate request
    * counter does not count it. Absent means the call reached the wire. */
   wire_attempted?: boolean;
+  /** #1200: the discarded actual wire attempts the transport's OWN
+   * same-request retry loop made inside this call — a retryable 429/5xx
+   * status, or a 400 a #824 max_tokens clamp / #1047 structured-output strip
+   * retry answered — in wire order. Each is a real provider attempt: exactly
+   * one attempt record is opened for it (`attempt_type: "wire-retry"`), and
+   * the aggregate request counter counts it. Present only when the wire
+   * adapter reported any; a call refused before the wire never carries it,
+   * and neither does its absence lie about a single-wire call. */
+  discarded_wire_attempts?: readonly SpecialistDiscardedWireAttempt[];
+  /** #1200: the completion-token budget the transport's FINAL wire call of
+   * this invocation actually sent — the clamped cap when a #824 clamp retry
+   * fired, null when that call's wire body carried no token field — as the
+   * transport reported it. The caller's attempt record states THIS budget
+   * when present; absent means the wire adapter did not report (a test-injected
+   * `SpecialistRequestFn`, by contract unchanged), and the payload's own
+   * budget stands. */
+  wire_sent_max_tokens?: number | null;
+}
+
+/** #1200: the transport's own bounded, content-free view of one discarded
+ * wire attempt it made inside a specialist call. Carries no body text, no
+ * headers, no provider prose — only timing and the wire payload's token
+ * budget as the loop sent it. */
+export interface SpecialistDiscardedWireAttempt {
+  /** Wall-clock seconds of the discarded wire call. */
+  elapsed_sec: number;
+  /** The completion-token budget this discarded call actually sent; null
+   * when the wire body carried neither `max_tokens` nor
+   * `max_completion_tokens` (unreadable in a genuine specialist lane, whose
+   * payloads always carry one). */
+  max_tokens: number | null;
 }
 
 /** `(payload, apiFormat, timeoutSec) => outcome`. Never throws — transport
@@ -106,10 +137,14 @@ export type SpecialistRequestFn = (
  * (never inferred from siblings). */
 export interface SpecialistAttemptRecord {
   /** Where this attempt fired in the retry model. `initial` is the first
-   * wire attempt of the role run, `transport-retry` the later attempts of the
-   * transport loop, `overrun-retry` the one-shot completion-overrun recovery
-   * call. A `skipped` overrun retry opens no record — no attempt was made. */
-  attempt_type: "initial" | "transport-retry" | "overrun-retry";
+   * wire attempt of the role run, `transport-retry` the later attempts of
+   * the transport loop, `overrun-retry` the one-shot completion-overrun
+   * recovery call, and `wire-retry` a discarded same-request retry the wire
+   * transport itself made inside one of those call attempts (a retryable
+   * 429/5xx status, or a 400 a #824 max_tokens clamp / #1047 structured-
+   * output strip retry answered). A `skipped` overrun retry opens no record
+   * — no attempt was made. */
+  attempt_type: "initial" | "transport-retry" | "overrun-retry" | "wire-retry";
   /** The completion-token budget actually sent on this attempt
    * (`max_tokens`, or `max_completion_tokens` when configured). */
   max_tokens: number;
@@ -138,7 +173,9 @@ export interface SpecialistAttemptRecord {
    * skipped overrun ceiling and the exhausted transport loop both name their
    * cause. Stays null only for outcomes that are never retry-eligible by
    * policy: a final success, a timeout, a #1080 terminal provider failure, a
-   * 200 carrying an error body, and an in-flight reaped record. */
+   * 200 carrying an error body, and an in-flight reaped record. A
+   * `wire-retry` record's outcome DID cause its follow-up — the transport's
+   * own same-request retry — so it always marks `transport-failure`. */
   retry_trigger: "transport-failure" | "completion-overrun" | null;
 }
 
@@ -186,7 +223,9 @@ export interface SpecialistRoleEntry {
    * detected. */
   overrun_retry_result?: "recovered" | "failed" | "skipped" | null;
   /** #1200: this role's per-attempt records, chronological, one per actual
-   * wire attempt (initial + transport retries + the overrun-retry retry).
+   * wire attempt (initial + transport retries + the overrun-retry retry,
+   * plus the transport's own discarded same-request `wire-retry` calls
+   * inside those attempts, each in wire order).
    * Absent when the role made no wire attempt (input/guard/skip failures, a
    * cancel before the first attempt, a phase deadline hit before any attempt
    * was opened). Optional field: adding it does not change the entries that
@@ -444,6 +483,15 @@ class RequestMeter {
         this.bytes -= payloadBytes(payload);
         return outcome;
       }
+      // #1200: the transport's own discarded same-request retries are real
+      // wire attempts: the outcome carries the discarded calls the transport
+      // reported, the role's attempt sink records each exactly once, and the
+      // aggregate counts them on the same footing — one count when the call
+      // is made plus one per discarded wire call it reports. (Bytes keep
+      // counting the payload the runner built; per-wire body bytes of a
+      // clamped/strip retry body are outside this entry's shape, and the
+      // meter's byte total was the same single payload before this change.)
+      this.count += outcome.discarded_wire_attempts?.length ?? 0;
       if (outcome.ok) {
         const usage = extractResponseUsage(outcome.raw);
         if (usage !== null) this.usage = mergeUsage(this.usage, usage);
@@ -557,6 +605,49 @@ function dropAttempt(attempts: SpecialistAttemptRecord[], record: SpecialistAtte
 function madeWireAttempt(outcome: SpecialistTransportOutcome | null): boolean {
   if (outcome === null) return true;
   return outcome.wire_attempted !== false;
+}
+
+/** #1200: record the transport's own same-request wire retries: each
+ * discarded actual wire attempt inside one request attempt is a real
+ * provider attempt whose own outcome caused the follow-up (that is what
+ * "discarded" means), so it opens a `wire-retry` record — settled from the
+ * transport's report with the elapsed time and the budget THAT call sent;
+ * usage and stop reason stay null, because a discarded attempt produced no
+ * response data the runner could read — and marks `transport-failure`. The
+ * records are re-seated BEFORE the outer record so the entry keeps its
+ * chronological wire order: the outer record's settled facts describe the
+ * FINAL wire call, which fired after every discarded one. The final call's
+ * actually-sent budget also lands on the outer record when the transport
+ * reported it: a #824 clamp retry completes the call at the LOWERED cap, and
+ * "the budget actually sent" is that cap, not the configured one.
+ *
+ * A pre-wire-refused call (`wire_attempted: false`) can never carry these —
+ * the adapter reports nothing for a call it never made — so this runs before
+ * the refusal's record drop without producing a phantom either way. */
+function recordWireRetries(
+  attempts: SpecialistAttemptRecord[],
+  record: SpecialistAttemptRecord,
+  outcome: SpecialistTransportOutcome,
+  payload: SpecialistPayload,
+): void {
+  if (typeof outcome.wire_sent_max_tokens === "number") record.max_tokens = outcome.wire_sent_max_tokens;
+  const discarded = outcome.discarded_wire_attempts;
+  if (discarded === undefined || discarded.length === 0) return;
+  const records: SpecialistAttemptRecord[] = [];
+  for (const call of discarded) {
+    const wireRecord = openAttempt(attempts, "wire-retry", call.max_tokens ?? attemptBudget(payload));
+    // A discarded call carries no response body: elapsed is its only fact.
+    settleAttempt(wireRecord, call.elapsed_sec, null, []);
+    wireRecord.retry_trigger = "transport-failure";
+    records.push(wireRecord);
+  }
+  // The just-opened records sit at the array tail; move them all before the
+  // outer record they belong to (still present — its indexing position is
+  // the one fact this splice must not disturb).
+  const moved = attempts.splice(attempts.length - records.length, records.length);
+  const outerIndex = attempts.indexOf(record);
+  if (outerIndex >= 0) attempts.splice(outerIndex, 0, ...moved);
+  else attempts.splice(0, 0, ...moved);
 }
 
 async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcome> {
@@ -702,6 +793,10 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
     } catch (error) {
       outcome = { ok: false, errorMessage: error instanceof Error ? error.message : String(error) };
     }
+    // #1200: the transport's own discarded same-request wire attempts ride
+    // the outcome and join the record set before the refusal split below; a
+    // pre-wire-refused outcome never carries any (comment at the helper).
+    recordWireRetries(attempts, record, outcome, payload);
     // #1200: the adapter may refuse the call BEFORE the wire (#1080's
     // terminal-lane latch): no provider attempt was made, so the record
     // opened above is not an attempt and is dropped again — the role keeps
@@ -813,6 +908,12 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
           retried = await requestFn(retryPayload, config.apiFormat, Math.min(config.roleTimeoutSec, remainingForRetry));
         } catch {
           retried = null;
+        }
+        if (retried !== null) {
+          // #1200: the retry call's own discarded same-request wire attempts
+          // ride its outcome the same way (a swallowed throw is the one shape
+          // that could not report them; it never returned).
+          recordWireRetries(attempts, retryRecord, retried, retryPayload);
         }
         // #1200: a retry refused before the wire (#1080's terminal-lane latch)
         // is not an attempt: the record opened for it is dropped again.
@@ -1061,6 +1162,11 @@ async function runSpecialistScout(
     } catch (error) {
       outcome = { ok: false, errorMessage: error instanceof Error ? error.message : String(error) };
     }
+    // #1200: the transport's own discarded same-request wire attempts ride
+    // the outcome and join the shared record set before the refusal split
+    // below; a pre-wire-refused outcome never carries any (comment at the
+    // helper).
+    recordWireRetries(attempts, record, outcome, payload);
     // #1200: the adapter may refuse the call BEFORE the wire (#1080's
     // terminal-lane latch): no provider attempt was made, so the shared
     // record opened above is not an attempt and is dropped again.
@@ -1147,6 +1253,12 @@ async function runSpecialistScout(
           retried = await requestFn(retryPayload, config.apiFormat, Math.min(config.roleTimeoutSec, remainingForRetry));
         } catch {
           retried = null;
+        }
+        if (retried !== null) {
+          // #1200: the retry call's own discarded same-request wire attempts
+          // ride its outcome the same way (a swallowed throw is the one shape
+          // that could not report them; it never returned).
+          recordWireRetries(attempts, retryRecord, retried, retryPayload);
         }
         // #1200: a retry refused before the wire (#1080's terminal-lane latch)
         // is not an attempt: the record opened for it is dropped again.

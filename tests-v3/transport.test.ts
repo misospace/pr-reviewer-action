@@ -949,6 +949,98 @@ test("Retry-After is capped at the maximum delay; HTTP-date forms are ignored", 
   }
 });
 
+// ── per-wire-call reports for per-attempt attribute telemetry (#1200) ────────
+// The request loop can make SEVERAL actual wire attempts inside one
+// `runChatRequest` call (retryable 429/5xx statuses, the #824 clamp, the
+// #1047 strip); `onWireCall` turns each into one bounded report so the
+// specialist attempt telemetry can account them exactly once.
+
+interface SeenWireCall {
+  discarded: boolean;
+  elapsedSec: number;
+  maxTokens: number | null;
+}
+
+/** An input with a token budget, an injectable sleep capture, and a report
+ * collector for `onWireCall`. */
+function reportInput(baseUrl: string, slept: number[], seen: SeenWireCall[], maxTokens = 256) {
+  return {
+    ...retryInput(baseUrl, slept),
+    payload: payload({ model: "m", stream: false, max_tokens: maxTokens, messages: [] }),
+    onWireCall: (report: SeenWireCall): void => { seen.push(report); },
+  };
+}
+
+test("#1200: one successful wire call reports exactly once, not discarded", async () => {
+  const { server, count } = await retryServer([200]);
+  const slept: number[] = [];
+  const seen: SeenWireCall[] = [];
+  try {
+    const outcome = await runChatRequest(reportInput(server.url, slept, seen));
+    assert.equal(outcome.status, "ok");
+    assert.equal(count(), 1);
+    assert.deepEqual(seen.map((call) => call.discarded), [false]);
+    assert.deepEqual(seen.map((call) => call.maxTokens), [256], "the budget this call actually sent");
+    assert.ok(seen[0]!.elapsedSec >= 0, "each report carries the call's own elapsed time");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1200: a retryable 429 discard and its follow-up are two reports on one call", async () => {
+  const { server, count } = await retryServer([429, 200], "0");
+  const slept: number[] = [];
+  const seen: SeenWireCall[] = [];
+  try {
+    const outcome = await runChatRequest(reportInput(server.url, slept, seen));
+    assert.equal(outcome.status, "ok");
+    assert.equal(count(), 2);
+    assert.deepEqual(seen.map((call) => call.discarded), [true, false]);
+    assert.deepEqual(seen.map((call) => call.maxTokens), [256, 256], "both wire calls sent the same budget");
+    assert.deepEqual(slept, [0], "the backoff stays inside the one reported wire call's lifetime");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1200: each side of a clamp retry reports the budget its wire call actually sent", async () => {
+  const { server, requests } = await cappedServer(8192, (requested) =>
+    `max_tokens: ${requested} > 8192, which is the maximum allowed number of output tokens for <model>`);
+  const slept: number[] = [];
+  const seen: SeenWireCall[] = [];
+  const stderr = captureStderr();
+  try {
+    const outcome = await runChatRequest(reportInput(server.url, slept, seen, 16384));
+    assert.equal(outcome.status, "ok");
+    assert.equal(requests.length, 2);
+    assert.deepEqual(seen.map((call) => call.discarded), [true, false]);
+    assert.deepEqual(seen.map((call) => call.maxTokens), [16384, 8192], "the clamp lowered the follow-up call's budget");
+    assert.deepEqual(stderr.lines.filter((line) => line.includes("clamped")),
+      ["clamped max_tokens 16384 -> 8192 (provider limit)\n"]);
+  } finally {
+    stderr.restore();
+    await server.close();
+  }
+});
+
+test("#1200: a single non-retryable failure reports once as not discarded", async () => {
+  const server = await startMockServer((_req, _reqBody, res) => {
+    res.statusCode = 400;
+    res.end(JSON.stringify({ error: { message: "unrelated 400" } }));
+  });
+  const slept: number[] = [];
+  const seen: SeenWireCall[] = [];
+  try {
+    const outcome = await runChatRequest(reportInput(server.url, slept, seen));
+    assert.equal(outcome.status, "failure");
+    assert.deepEqual(seen.map((call) => call.discarded), [false], "a returned failure is a real wire attempt that caused no follow-up");
+    assert.deepEqual(seen.map((call) => call.maxTokens), [256]);
+    assert.deepEqual(slept, []);
+  } finally {
+    await server.close();
+  }
+});
+
 // ── max_tokens clamp-and-retry on HTTP 400 (#824) ───────────────────────────
 // Some providers reject a max_tokens above the model's output cap with a 400
 // instead of truncating. The transport parses only an explicitly stated cap

@@ -1621,6 +1621,219 @@ test("#1200: a call refused before the wire records no attempt and is not counte
   assert.match(String(entry.reason), /quota_exhausted/);
 });
 
+test("#1200: the transport's own discarded same-request wire attempts are recorded exactly once", async () => {
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, apiKey: REALISTIC_KEY },
+    requestFn: async () => ({
+      ok: true,
+      // The wire transport reports a 429-discard it made inside this call.
+      discarded_wire_attempts: [{ elapsed_sec: 0.5, max_tokens: 4096 }],
+      wire_sent_max_tokens: 4096,
+      raw: {
+        choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 60, completion_tokens: 12 },
+      },
+    }),
+  }));
+
+  const records = attemptRecords(result, "correctness");
+  assert.deepEqual(records.map((record) => record.attempt_type), ["wire-retry", "initial"], "records stay chronological — the discarded call fired first");
+  assert.equal(records[0]!.elapsed_sec, 0.5);
+  assert.equal(records[0]!.max_tokens, 4096, "the discarded call's own budget");
+  assert.equal(records[0]!.retry_trigger, "transport-failure", "its outcome caused the same-request follow-up");
+  assert.equal(records[0]!.adopted, false);
+  assert.equal(records[0]!.prompt_tokens, null, "a discarded attempt produced no response data — nothing is inferred");
+  assert.equal(records[0]!.stop_reason, null);
+  assert.equal(records[1]!.attempt_type, "initial");
+  assert.equal(records[1]!.adopted, true);
+  assert.deepEqual((records[1]! as Record<string, unknown>).prompt_tokens, 60, "the final wire call's own usage settles the outer record");
+  assertRecordsReconcile(result, ["correctness"]);
+  assert.equal(result.aggregate.request_count, 2, "the meter counts both real wire attempts");
+});
+
+test("#1200: a clamped final wire call corrects the record's max_tokens to the actually-sent budget", async () => {
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, apiKey: REALISTIC_KEY },
+    requestFn: async () => ({
+      ok: true,
+      wire_sent_max_tokens: 1024,
+      discarded_wire_attempts: [{ elapsed_sec: 0.2, max_tokens: 4096 }],
+      raw: {
+        choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 11, completion_tokens: 4 },
+      },
+    }),
+  }));
+
+  const records = attemptRecords(result, "correctness");
+  assert.deepEqual(records.map((record) => record.attempt_type), ["wire-retry", "initial"]);
+  assert.equal(records[0]!.max_tokens, 4096, "the discarded call sent the configured budget");
+  assert.equal(records[1]!.max_tokens, 1024, "the final wire call sent the clamped cap");
+  assert.equal(records[1]!.adopted, true);
+  assertRecordsReconcile(result, ["correctness"]);
+});
+
+test("#1200: an overrun-retry call's own discarded wire attempts are recorded too", async () => {
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, apiKey: REALISTIC_KEY },
+    requestFn: async () => {
+      calls += 1;
+      return calls === 1
+        // Empty leads at the cap: eligible for the one bounded overrun retry.
+        ? { ok: true, raw: { choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "max_tokens" }], usage: { prompt_tokens: 20, completion_tokens: 4096 } } }
+        : {
+            ok: true,
+            // The retry call hit a 429 once before its 200, same-request retry.
+            discarded_wire_attempts: [{ elapsed_sec: 0.3, max_tokens: 32768 }],
+            wire_sent_max_tokens: 32768,
+            raw: { choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "stop" }], usage: { prompt_tokens: 22, completion_tokens: 29000 } },
+          };
+    },
+  }));
+
+  const records = attemptRecords(result, "correctness");
+  assert.deepEqual(records.map((record) => record.attempt_type), ["initial", "wire-retry", "overrun-retry"]);
+  assert.equal(records[1]!.retry_trigger, "transport-failure");
+  assert.equal(records[1]!.adopted, false, "records inside the retry call are never adopted");
+  assert.equal(records[2]!.adopted, true);
+  assert.equal(records[2]!.max_tokens, 32768);
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.overrun_retry_result, "recovered");
+  assertRecordsReconcile(result, ["correctness"]);
+  assert.equal(result.aggregate.request_count, 3);
+});
+
+test("#1200: a final transport failure keeps its discarded wire calls recorded and counts them", async () => {
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, apiKey: REALISTIC_KEY },
+    requestFn: async () => {
+      calls += 1;
+      // Each runner attempt: one discarded 429, then the final 504.
+      return {
+        ok: false,
+        errorMessage: "planner model request failed with HTTP 504: gateway closed",
+        status: 504,
+        wire_attempted: true,
+        discarded_wire_attempts: [{ elapsed_sec: 0.7, max_tokens: 4096 }],
+      };
+    },
+  }));
+
+  assert.equal(calls, 2, "the role gets exactly MAX_ATTEMPTS calls");
+  const records = attemptRecords(result, "correctness");
+  assert.deepEqual(records.map((record) => record.attempt_type), ["wire-retry", "initial", "wire-retry", "transport-retry"], "records stay chronological per attempt");
+  assert.deepEqual(records.map((record) => record.retry_trigger), [
+    "transport-failure",
+    "transport-failure",
+    "transport-failure",
+    "transport-failure",
+  ], "every discarded call names its cause; the exhausted final one keeps the 12c0e06 rule");
+  assert.deepEqual(records.map((record) => record.adopted), [false, false, false, false]);
+  assertRecordsReconcile(result, ["correctness"]);
+  assert.equal(result.aggregate.request_count, 4, "the meter counts every actual wire attempt: 2 calls × 2 wire attempts each");
+});
+
+test("#1200: the shared scout call's discarded wire attempts join the shared records once", async () => {
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, execution: "combined_scout" },
+    requestFn: async () => ({
+      ok: true,
+      discarded_wire_attempts: [{ elapsed_sec: 0.4, max_tokens: 4096 }],
+      wire_sent_max_tokens: 4096,
+      raw: {
+        choices: [{
+          message: { content: JSON.stringify({ correctness: { leads: [] }, security: { leads: [] }, tests: { leads: [] } }) },
+          finish_reason: "stop",
+        }],
+        usage: { prompt_tokens: 30, completion_tokens: 11 },
+      },
+    }),
+  }));
+
+  const byRole = ALL_ROLES.map((role) => attemptRecords(result, role));
+  for (const role of ALL_ROLES) {
+    const records = attemptRecords(result, role);
+    assert.deepEqual(records.map((record) => record.attempt_type), ["wire-retry", "initial"], `${role}: shared records, chronological`);
+    assert.equal(records[0]!.retry_trigger, "transport-failure");
+  }
+  assert.deepEqual(byRole[0], byRole[1], "role entries share identical record content");
+  assert.deepEqual(byRole[1], byRole[2]);
+  // The shared call made TWO real wire attempts: the meter counts 2, never
+  // roles × records.
+  assert.equal(result.aggregate.request_count, 2);
+  const totals = result.aggregate.usage_totals as Record<string, unknown> | null;
+  assert.deepEqual(totals!.prompt_tokens, 30, "usage_totals merges unique attempts, not per-role copies");
+});
+
+// ---------------------------------------------------------------------------
+// #1200 wire-telemetry seam fixtures: the wire adapter's own reports
+// ---------------------------------------------------------------------------
+
+test("#1200: the wire adapter carries the transport's discarded wire attempts on the outcome", async () => {
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://endpoint.test/v1",
+    apiKey: "sk-adapter-wiretest",
+    anthropicVersion: "2023-06-01",
+    runChat: async (input) => {
+      input.onWireCall?.({ discarded: true, elapsedSec: 0.5, maxTokens: 256 });
+      input.onWireCall?.({ discarded: false, elapsedSec: 1.25, maxTokens: 128 });
+      return {
+        status: "ok",
+        response: { id: "1", object: "chat.completion", model: "m", content: "ok", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+        raw: { id: "1", choices: [{ message: { content: "ok" }, finish_reason: "stop" }] },
+      };
+    },
+  });
+  const outcome = await requestFn({ model: "m", messages: [], max_tokens: 256 } as never, "openai", 5);
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(outcome.discarded_wire_attempts, [{ elapsed_sec: 0.5, max_tokens: 256 }]);
+  assert.equal(outcome.wire_sent_max_tokens, 128, "the final wire call's actually-sent budget");
+});
+
+test("#1200: a wire adapter outcome with no transport reports carries no attempt telemetry", async () => {
+  // A test-seam `runChat` that never reports keeps the outcome clean: the
+  // runner's accounting falls back to the payload's declared budget and adds
+  // no discarded records — the seam cannot silently stretch the telemetry.
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://endpoint.test/v1",
+    apiKey: "sk-adapter-wiretest",
+    anthropicVersion: "2023-06-01",
+    runChat: async () => ({
+      status: "ok",
+      response: { id: "1", object: "chat.completion", model: "m", content: "ok", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+      raw: { id: "1", choices: [{ message: { content: "ok" }, finish_reason: "stop" }] },
+    }),
+  });
+  const outcome = await requestFn({ model: "m", messages: [], max_tokens: 256 } as never, "openai", 5);
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.discarded_wire_attempts, undefined);
+  assert.equal(outcome.wire_sent_max_tokens, undefined);
+});
+
+test("#1200: a latched lane refusal reports nothing and opens no discarded attempt", async () => {
+  const latch = {
+    terminalFor: (lane: string): "model_unavailable" => "model_unavailable",
+    latch: (lane: string, reason: string): void => undefined,
+  };
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://endpoint.test/v1",
+    apiKey: "sk-adapter-latch",
+    anthropicVersion: "2023-06-01",
+    terminalLatch: latch,
+  });
+  const outcome = await requestFn({ model: "correctness-model", messages: [], max_tokens: 256 } as never, "openai", 5);
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.wire_attempted, false);
+  assert.equal(outcome.discarded_wire_attempts, undefined, "a call that never reached the wire reports no wire attempts");
+  assert.equal(outcome.wire_sent_max_tokens, undefined);
+});
+
 test("#1200: a combined_scout call refused before the wire records no attempt for any role", async () => {
   const result = await runSpecialists(baseInput({
     config: { ...baseInput().config, execution: "combined_scout" },
