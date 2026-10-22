@@ -381,10 +381,13 @@ export interface UsageAccumulator {
  * one source of truth: a field the provider did not report is `null` here and
  * contributes nothing to the aggregate.
  *
- * The records are a LOWER BOUND of this aggregate, never an over-count: the
- * aggregate also holds the model turns that carry no record — the
- * context-compaction digest call, and an unaccepted or failed #1145 verdict
- * refresh (its tokens are billed but its verdict record is not written). */
+ * #1199 (review round 5): the aggregate is derivable from the persisted
+ * records EXACTLY. Every model turn this function charges lands either in a
+ * per-round/verdict record or in `native_loop_unrecorded_usage`'s categories
+ * (the context-compaction digest calls, and a #1145 verdict refresh that
+ * failed or was not accepted); there is no charge without a persisted record,
+ * so summing the artifact's records reproduces the aggregate without double
+ * counting retries. */
 export function accumulateUsage(acc: UsageAccumulator, response: unknown, apiFormat: string): void {
   const res = response as Record<string, unknown> | null;
   const usage = res !== null && typeof res === "object" ? res.usage : null;
@@ -775,6 +778,12 @@ export interface ProduceVerdictInput {
   extraHeaders?: Readonly<Record<string, string>>;
   turnTimeout: number;
   usageAcc: UsageAccumulator;
+  /** #1199 (review round 5): when the caller provides one, every attempt is
+   * also folded into a SIDE-CAR accumulator for a `native_loop_unrecorded_usage`
+   * category — used by a #1145 refresh turn, whose usage must land in a
+   * persisted record when the refresh ends without one (failed or unaccepted).
+   * The same fold sites as `usageAcc`, by construction — never divergent. */
+  unrecordedAcc?: UsageAccumulator;
   deadline: number | null;
   transport: HarnessTransport;
   timeFn: () => number;
@@ -791,10 +800,11 @@ export interface ProduceVerdictInput {
  * rejects — retry once non-streamed. #1047: that single retry raises its
  * completion budget when the streamed body's own shape shows the token cap
  * destroyed the verdict (token-cap stop reason, or the whole budget spent on
- * reasoning before any text); no additional call is ever spent. Never
- * throws: transport errors are classified, not propagated. Every returned
- * body is folded into usageAcc.
- */
+  * reasoning before any text); no additional call is ever spent. Never
+  * throws: transport errors are classified, not propagated. Every returned
+  * body is folded into usageAcc (and into `unrecordedAcc` when the caller
+  * supplies one, at exactly the same sites).
+  */
 export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<NativeVerdictOutcome> {
   const { transport, timeFn } = input;
   // #1037: one known-secret list for every response surface of this verdict
@@ -839,6 +849,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
   const usageTotals: UsageTelemetry = { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null };
   const foldAttemptUsage = (attemptResponse: unknown): void => {
     accumulateUsage(input.usageAcc, attemptResponse, input.apiFormat);
+    if (input.unrecordedAcc !== undefined) accumulateUsage(input.unrecordedAcc, attemptResponse, input.apiFormat);
     const usage = normalizeUsageTelemetry(
       attemptResponse !== null && typeof attemptResponse === "object"
         ? (attemptResponse as Record<string, unknown>).usage ?? null
@@ -1501,6 +1512,17 @@ export type HarnessResult = Record<string, unknown> & {
    * persisted verbatim in the harness artifact and consumed (nulled) by
    * `buildToolLoopTelemetry` into `verdict.superseded`. */
   native_loop_superseded_verdict_telemetry?: NativeLoopVerdictTelemetry[] | null;
+  /** #1199 (review round 5): usage the aggregate `usage` fold charged but
+   * that has no per-round or verdict record — the context-compaction digest
+   * calls, and a #1145 verdict refresh that failed or was not accepted (its
+   * tokens are billed but its verdict record is not written, so the records
+   * below cannot sum to the aggregate without it). Persisted at exactly the
+   * sites the aggregate snapshot is written. Content-free: request counts and
+   * provider-reported token totals only, normalized the same way as every
+   * other usage figure. snake_case: persisted verbatim in the
+   * harness artifact and consumed (nulled) by `buildToolLoopTelemetry` into
+   * its `unrecorded_usage` object. */
+  native_loop_unrecorded_usage?: Record<string, unknown> | null;
   /** #1145: record of the bounded evidence-repair continuation of the tool
    * loop (present only when a trace-gap probe was supplied and fired).
    * snake_case: persisted verbatim in the harness artifact. */
@@ -1538,6 +1560,12 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
     // most one), folded into `verdict.superseded` below.
     const supersededTel = supersededVerdictTelemetry(result);
     result.native_loop_superseded_verdict_telemetry = null;
+    // #1199 (review round 5): the same consumption for the usage that carries
+    // no round or verdict record (compaction digest calls, a failed or
+    // unaccepted #1145 refresh), folded into `unrecorded_usage` below so the
+    // records + these categories derive the aggregate exactly.
+    const unrecordedTel = unrecordedUsageTotals(result);
+    result.native_loop_unrecorded_usage = null;
     return {
       version: TOOL_LOOP_TELEMETRY_VERSION,
       phase: "loop",
@@ -1566,17 +1594,23 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
       // that internally retried a streamed response still produced exactly ONE
       // record, and a transport-error turn recorded one with null usage when
       // the loop stopped on REQUEST_ERROR, so summing these never double
-      // counts a retry and stays a faithful lower bound of the whole-loop
-      // usage. Scope: the ORIGINAL investigation loop only — the
-      // context-compaction digest call is folded into the aggregate `usage`
-      // counters but carries no per-round record, so `rounds` (+ `repair_rounds`
-      // + `verdict`) remains that lower bound.
+      // counts a retry. Scope: the ORIGINAL investigation loop only — the
+      // #1145 continuation's turns ride `repair_rounds`, and the turns that
+      // carry no round/verdict record at all ride `unrecorded_usage`.
       rounds: Array.isArray(meta.round_telemetry) ? meta.round_telemetry : [],
       // #1199: the #1145 evidence-repair continuation's own native-loop model
       // turn(s), in their own array so `rounds` stays exactly the investigation
       // loop's turns (one per model turn, matching `usage.rounds_used`). Empty
       // when no continuation ran.
       repair_rounds: Array.isArray(meta.repair_round_telemetry) ? meta.repair_round_telemetry : [],
+      // #1199 (review round 5): the aggregate `usage`'s charges that have no
+      // round or verdict record — `context_compaction` (the compaction digest
+      // calls) and `verdict_refresh` (a #1145 refresh that failed or was not
+      // accepted). Categories appear only when actually charged; the object is
+      // empty when every aggregate charge already rides a record above, so
+      // summing `rounds` + `repair_rounds` + `verdict` (+ `superseded`) +
+      // `unrecorded_usage` reproduces the aggregate exactly.
+      unrecorded_usage: unrecordedTel,
       stop_reason: result.stop_reason ?? "",
       budget_exhausted: Boolean(result.budget_exhausted),
       degraded: "native_loop_degraded" in result,
@@ -1623,9 +1657,11 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
       tool_result_bytes: 0,
     },
     compaction: { summarize: 0, truncate: 0 },
-    // #1199: the loop never ran, so there are no per-round records.
+    // #1199: the loop never ran, so there are no per-round records — and
+    // nothing was charged without a record either.
     rounds: [],
     repair_rounds: [],
+    unrecorded_usage: {},
     stop_reason: PRE_LOOP_STOP_REASON,
     failure,
     budget_exhausted: false,
@@ -1687,6 +1723,33 @@ function supersededVerdictTelemetry(result: HarnessResult): NativeLoopVerdictTel
       cached_tokens: numOrNull(r.cached_tokens),
       streamed_fallback: r.streamed_fallback === true,
     });
+  }
+  return projected;
+}
+
+/** #1199 (review round 5): the persisted usage categories for the charges that
+ * carry no round or verdict record. Reads `result.native_loop_unrecorded_usage`
+ * with per-category projection so a malformed record contributes safe numeric
+ * defaults rather than a malformed shape. The field names match the aggregate
+ * they must sum into (`usage`): request count, prompt/completion totals, the
+ * cache-aware `cached_prompt_tokens`, and the cache-hit ratio — content free,
+ * numbers only. */
+function unrecordedUsageTotals(result: HarnessResult): Record<string, Record<string, unknown>> {
+  const raw = result.native_loop_unrecorded_usage;
+  const projected: Record<string, Record<string, unknown>> = {};
+  if (raw === null || typeof raw !== "object") return projected;
+  const numOrDefault = (x: unknown): number => (typeof x === "number" && Number.isFinite(x) ? x : 0);
+  for (const category of ["context_compaction", "verdict_refresh"] as const) {
+    const record = (raw as Record<string, unknown>)[category];
+    if (record === null || typeof record !== "object") continue;
+    const r = record as Record<string, unknown>;
+    projected[category] = {
+      requests: numOrDefault(r.requests),
+      prompt_tokens: numOrDefault(r.prompt_tokens),
+      completion_tokens: numOrDefault(r.completion_tokens),
+      cached_prompt_tokens: numOrDefault(r.cached_prompt_tokens),
+      cache_hit_ratio: numOrDefault(r.cache_hit_ratio),
+    };
   }
   return projected;
 }
@@ -2047,8 +2110,30 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // the investigation loop's turns (one per model turn, matching
   // `usage.rounds_used`), and every native-loop model turn is still recorded.
   const repairRoundTelemetry: NativeLoopRoundTelemetry[] = [];
+  // #1199 (review round 5): usage the aggregate folds that has NO round or
+  // verdict record, split into the categories `native_loop_unrecorded_usage`
+  // persists. Folded at exactly the same sites as `usageAcc` (the side-car
+  // fold below, and `foldAttemptUsage` for the refresh turn), so a category
+  // can never drift from what the aggregate actually received: the compaction
+  // digest calls go to `compactionUsage` (rids postFn with no turn signal, so
+  // no round record), and a #1145 refresh turn that ends without a verdict
+  // record (failed or unaccepted — decided AFTER `produceNativeVerdict`
+  // returns, so the side-car folds first and is only PERSISTED when the
+  // refresh is unrecorded) goes to `refreshUsage`.
+  const compactionUsage: UsageAccumulator = { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 };
+  const refreshUsage: UsageAccumulator = { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 };
+  let refreshTurnRecorded = true;
+  // Persisted beside every aggregate snapshot: categories appear only when
+  // really charged, and the field is null when every aggregate charge already
+  // rides a persisted record.
+  const unrecordedUsageRecord = (): Record<string, unknown> | null => {
+    const categories: Record<string, unknown> = {};
+    if (compactionUsage.requests > 0) categories.context_compaction = usageWithCacheRatio(compactionUsage);
+    if (!refreshTurnRecorded && refreshUsage.requests > 0) categories.verdict_refresh = usageWithCacheRatio(refreshUsage);
+    return Object.keys(categories).length > 0 ? categories : null;
+  };
 
-  const postFn = async (payload: Record<string, unknown>, turn?: ToolTurnSignal): Promise<unknown> => {
+  const postFn = async (payload: Record<string, unknown>, turn?: ToolTurnSignal, sidecar?: UsageAccumulator): Promise<unknown> => {
     const remainingCheck = (): number => {
       if (deadline === null) return input.turnTimeout;
       const remaining = deadline - timeFn();
@@ -2083,6 +2168,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       response = await deps.transport(input.baseUrl, input.apiFormat, fallback, input.apiKey, retryTimeout);
     }
     accumulateUsage(usageAcc, response, input.apiFormat);
+    if (sidecar !== undefined) accumulateUsage(sidecar, response, input.apiFormat);
     return response;
   };
 
@@ -2227,8 +2313,11 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         anthropicEffortSupported: anthropicEffort,
       });
       // The digest call rides the loop's postFn so its spend is counted in
-      // usage_acc and it gets the same streamed-turn fallback.
-      return postFn(payload as Record<string, unknown>).then((response) => {
+      // usage_acc and it gets the same streamed-turn fallback; the same fold
+      // lands in the `context_compaction` category so the aggregate stays
+      // derived from the persisted records (the digest call carries no round
+      // record — it is not a model turn of the loop timeline).
+      return postFn(payload as Record<string, unknown>, undefined, compactionUsage).then((response) => {
         const { text } = extractToolCalls(response, input.apiFormat);
         return text;
       });
@@ -2368,6 +2457,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   input.result.tool_results = outcome.executed.map((call) => maskKnownSecretsDeep(call.result, harnessSecrets));
   input.result.executed_request_count = outcome.executed.filter((c) => c.result.status === "ok").length;
   input.result.native_loop_usage = usageWithCacheRatio(usageAcc);
+  input.result.native_loop_unrecorded_usage = unrecordedUsageRecord();
   input.result.native_loop_error = outcome.error
     ? maskKnownSecrets(outcome.error, harnessSecrets)
     : "smart tool-loop deadline exceeded";
@@ -2384,6 +2474,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     input.result.stop_reason = outcome.stopReason;
     if (outcome.error) input.result.native_loop_error = maskKnownSecrets(outcome.error, harnessSecrets);
     input.result.native_loop_usage = usageWithCacheRatio(usageAcc);
+    input.result.native_loop_unrecorded_usage = unrecordedUsageRecord();
     return false;
   }
 
@@ -2394,6 +2485,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     input.result.native_loop_verdict_status = "fallback";
     input.result.native_loop_verdict_reason = "tool-error";
     input.result.usage = usageWithCacheRatio(usageAcc);
+    input.result.native_loop_unrecorded_usage = unrecordedUsageRecord();
     writeOutputs(input.result, harnessMarkdown, deps);
     return true;
   }
@@ -2518,6 +2610,13 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           ...(input.extraHeaders !== undefined ? { extraHeaders: input.extraHeaders } : {}),
           turnTimeout: verdictTimeout,
           usageAcc,
+          // #1199 (review round 5): a refresh turn folds its every attempt into
+          // the `verdict_refresh` side-car too. Acceptance is decided below,
+          // AFTER the call returns, so the side-car paper trail is kept only
+          // when the refresh ends without a verdict record (see
+          // `refreshTurnRecorded`); an ACCEPTED refresh's usage already rides
+          // the refreshed verdict record and the side-car is discarded.
+          ...(recordFailure === false ? { unrecordedAcc: refreshUsage } : {}),
           deadline,
           transport: deps.transport,
           timeFn,
@@ -2533,6 +2632,12 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         // still have displaced the standing verdict's telemetry record before
         // the acceptance gate rejected it.
         const verdictAccepted = verdict.ok && (deadline === null || timeFn() < deadline);
+        // #1199 (review round 5): a refresh whose verdict is usable but not
+        // accepted (or failed outright) charged the aggregate with NO verdict
+        // record — mark the `verdict_refresh` side-car for persistence so the
+        // records still derive the aggregate. Decided right at the acceptance
+        // gate, before any record-writing side effect can complicate it.
+        if (recordFailure === false && !verdictAccepted) refreshTurnRecorded = false;
         // #1199: the closing in-conversation verdict turn gets its OWN latency +
         // provider usage record, kept separate from the investigation rounds.
         // `model_sec` spans only the model request (including a streamed→
@@ -2845,7 +2950,11 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   }
 
   // Token/cost telemetry (loop turns + the verdict turn).
+  // #1199 (review round 5): token/cost telemetry (loop turns + verdict turn +
+  // the unrecorded categories) — the aggregate snapshot and its derived records
+  // are stamped together, at exactly this point.
   input.result.usage = usageWithCacheRatio(usageAcc);
+  input.result.native_loop_unrecorded_usage = unrecordedUsageRecord();
   if (input.tier === "smart" && deadline !== null && timeFn() >= deadline) {
     delete input.result.native_loop_verdict_produced;
     input.result.native_loop_verdict_status = "fallback";

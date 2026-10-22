@@ -151,8 +151,7 @@ export interface ExecutedCall {
  * returned a response, and a transport-error turn adds at most ONE additional
  * record (when the loop stops on REQUEST_ERROR) with null provider usage.
  * Summing round usage over a null contributes nothing, so the persisted
- * records stay a faithful lower bound of the aggregate usage.
- *
+ * records never over-count the aggregate usage.
  * Every field is a count, a duration, a nullable provider-reported token total,
  * or a boolean. No prompt text, response text, tool arguments, tool results,
  * credentials, or provider error bodies ever ride here. `prompt_tokens` /
@@ -165,10 +164,11 @@ export interface ExecutedCall {
  * leaves them `null` — never estimated from elapsed time.
  *
  * Summing the records over the whole run reproduces the aggregate's usage for
- * every turn that carries a record; the aggregate additionally holds the
- * turns that carry none (the context-compaction digest call, and an
- * unaccepted or failed #1145 verdict refresh), so the records are a lower
- * bound of it — never an over-count.
+ * every turn that carries a record. The aggregate's charges that carry NONE
+ * (the context-compaction digest call, and a failed or unaccepted #1145
+ * verdict refresh) are persisted in their own `unrecorded_usage` categories,
+ * so records + those categories derive the aggregate exactly — never an
+ * under-count, never an over-count (#1199 review round 5).
  */
 export interface NativeLoopRoundTelemetry {
   /** 1-based model-turn index within this loop run. */
@@ -203,7 +203,9 @@ export interface NativeLoopRoundTelemetry {
  * #1199: the per-turn signal the loop hands to `postFn` so the transport seam
  * can report a streamed→non-streamed fallback into the round's telemetry. The
  * summarizer/digest request does not pass one, so its fallbacks are never
- * attributed to an investigation round.
+ * attributed to an investigation round; its spend rides the dedicated
+ * `unrecorded_usage.context_compaction` category instead (it is not a model
+ * turn of the loop timeline).
  */
 export interface ToolTurnSignal {
   reportFallback(): void;

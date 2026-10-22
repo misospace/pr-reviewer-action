@@ -1256,17 +1256,21 @@ test("#1199: Anthropic rounds + verdict derive the aggregate usage (cache tokens
   // #1199 review flagged: Anthropic's aggregate prompt total adds the cache
   // tokens, so a record that reported only input_tokens could not sum to it.
   // Every recorded turn counts: the investigation rounds, the #1145 repair
-  // continuation's rounds, and the verdict record (plus a superseded one, if
-  // a refresh ever replaced it). The aggregate additionally holds the turns
-  // that carry NO record (the compaction digest call, an unaccepted #1145
-  // refresh), so the records stay a LOWER BOUND of it — never an over-count.
+  // continuation's rounds, the verdict record (plus a superseded one, if a
+  // refresh ever replaced it), and the `unrecorded_usage` categories for the
+  // turns that carry no round or verdict record (this scenario has none —
+  // no compaction fired, the refresh accepted — so it is empty). No charge
+  // goes unrecorded, so summing the records reproduces the aggregate exactly.
   const sum = (field: string): number => {
     const fromRounds = [...rounds, ...(telemetry.repair_rounds as Record<string, unknown>[])]
       .reduce((total: number, r: Record<string, unknown>) => total + (r[field] as number), 0);
     const superseded = (telemetry.verdict.superseded as Record<string, unknown>[])
       .reduce((total: number, r: Record<string, unknown>) => total + (r[field] as number), 0);
-    return fromRounds + superseded + (telemetry.verdict[field] as number);
+    const unrecorded = Object.values(telemetry.unrecorded_usage as Record<string, Record<string, unknown>>)
+      .reduce((total: number, r) => total + (r[field] as number), 0);
+    return fromRounds + superseded + (telemetry.verdict[field] as number) + unrecorded;
   };
+  assert.deepEqual(telemetry.unrecorded_usage, {});
   assert.equal(sum("prompt_tokens"), artifact.usage.prompt_tokens);
   assert.equal(sum("completion_tokens"), artifact.usage.completion_tokens);
   assert.equal(sum("cached_tokens"), artifact.usage.cached_prompt_tokens);
@@ -1275,6 +1279,72 @@ test("#1199: Anthropic rounds + verdict derive the aggregate usage (cache tokens
   assert.equal(artifact.usage.cached_prompt_tokens, 16300);
   // The aggregate's cache-hit ratio follows the same accounted prompt total.
   assert.equal(artifact.usage.cache_hit_ratio, 0.428);
+});
+
+test("#1199: the compaction digest's spend is persisted in unrecorded_usage, so the records derive the aggregate", async () => {
+  const { root, deps } = workspace();
+  // A conversation budget small enough that compaction fires mid-loop:
+  // context 6400 → conversation budget 4000 approx tokens, result envelope cap
+  // 2000 bytes, corpus cap 7200 bytes. The corpus (~1850 tokens) plus four
+  // read results (~512 tokens each) crosses the budget before round 5, so the
+  // single digest model call happens exactly there — between rounds, carrying
+  // NO round record of its own.
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n" + "d".repeat(7400) + "\n");
+  for (let i = 1; i <= 6; i++) fs.writeFileSync(path.join(root, `big${i}.txt`), "e".repeat(6000));
+  const readCall = (id: string, file: string, prompt: number, completion: number) => ({
+    choices: [{ message: { content: null, tool_calls: [{ id, type: "function", function: { name: "read_file", arguments: `{"path":"${file}"}` } }] } }],
+    usage: { prompt_tokens: prompt, completion_tokens: completion },
+  });
+  const textWithUsage = (t: string, prompt: number, completion: number) => ({
+    choices: [{ message: { content: t } }],
+    usage: { prompt_tokens: prompt, completion_tokens: completion },
+  });
+  const scripted = [
+    readCall("t1", "big1.txt", 850, 60),
+    readCall("t2", "big2.txt", 860, 60),
+    readCall("t3", "big3.txt", 870, 60),
+    readCall("t4", "big4.txt", 880, 60),
+    // round 5's pre-request compaction: the digest call rides postFn (its
+    // spend is folded into the aggregate) but is not a loop-timeline turn.
+    textWithUsage("digest of the oldest evidence", 3210, 55),
+    readCall("t5", "big5.txt", 890, 60),
+    textWithUsage("evidence gathered", 920, 40),
+    textWithUsage(JSON.stringify({ verdict: "approve", review_markdown: "## Review\nLooks fine.", findings: [] }), 21000, 900),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, MODEL_CONTEXT_TOKENS: "6400", TOOL_LOOP_SUMMARIZE: "true", TOOL_MAX_ROUNDS: "6" },
+    transport: async () => scripted[n++],
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(n, 8);
+
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry;
+  const rounds = telemetry.rounds;
+  // SIX loop turns (five reads + the no-tool stop), but the digest call is NOT
+  // one of them — it has no round record.
+  assert.equal(rounds.length, 6);
+  assert.equal(rounds.map((r: Record<string, unknown>) => r.prompt_tokens).join(","), "850,860,870,880,890,920");
+  assert.deepEqual(telemetry.compaction, { summarize: 1, truncate: 0 });
+  // ... its spend is instead persisted as the unrecorded category it is.
+  assert.deepEqual(telemetry.unrecorded_usage, {
+    context_compaction: { requests: 1, prompt_tokens: 3210, completion_tokens: 55, cached_prompt_tokens: 0, cache_hit_ratio: 0 },
+  });
+
+  // EXACT derivability: sum(rounds) + verdict + unrecorded categories === the
+  // aggregate the artifact published.
+  assert.equal(artifact.usage.prompt_tokens, 850 + 860 + 870 + 880 + 3210 + 890 + 920 + 21000);
+  assert.equal(artifact.usage.completion_tokens, 60 * 4 + 55 + 60 + 40 + 900);
+  const sum = (field: string): number => {
+    const fromRounds = rounds.reduce((total: number, r: Record<string, unknown>) => total + (r[field] as number), 0);
+    const unrecorded = Object.values(telemetry.unrecorded_usage as Record<string, Record<string, unknown>>)
+      .reduce((total: number, r) => total + (r[field === "cached_tokens" ? "cached_prompt_tokens" : field] as number), 0);
+    return fromRounds + (telemetry.verdict[field] as number) + unrecorded;
+  };
+  assert.equal(sum("prompt_tokens"), artifact.usage.prompt_tokens);
+  assert.equal(sum("completion_tokens"), artifact.usage.completion_tokens);
+  assert.equal(sum("cached_tokens"), artifact.usage.cached_prompt_tokens);
 });
 
 test("#1199: a streamed→non-streamed loop turn is flagged once and never split", async () => {
@@ -1474,9 +1544,31 @@ test("#1199: a successful #1145 refresh moves the standing verdict record into v
   // the raw records were consumed (folded into the verdict sub-object), not
   // duplicated at the top level of the artifact.
   assert.equal(artifact.native_loop_superseded_verdict_telemetry, null);
+  // An ACCEPTED refresh's usage rides the refreshed verdict record — no
+  // unrecorded category exists, and the aggregate (21000 first verdict + 30000
+  // refreshed verdict) derives exactly from rounds (no usage in this script) +
+  // repair rounds (no usage) + verdict + superseded.
+  assert.deepEqual(telemetry.unrecorded_usage, {});
+  assert.equal(artifact.usage.prompt_tokens, 21000 + 30000);
+  assert.equal(artifact.usage.completion_tokens, 900 + 700);
+  assert.equal(artifact.usage.cached_prompt_tokens, 25000);
+  const sum = (field: string): number => {
+    const fromRounds = [
+      ...(telemetry.rounds as Record<string, unknown>[]),
+      ...(telemetry.repair_rounds as Record<string, unknown>[]),
+    ].reduce((total: number, r: Record<string, unknown>) => total + (r[field] as number), 0);
+    const superseded = (telemetry.verdict.superseded as Record<string, unknown>[])
+      .reduce((total: number, r: Record<string, unknown>) => total + (r[field] as number), 0);
+    const unrecorded = Object.values(telemetry.unrecorded_usage as Record<string, Record<string, unknown>>)
+      .reduce((total: number, r) => total + (r[field] as number), 0);
+    return fromRounds + superseded + (telemetry.verdict[field] as number) + unrecorded;
+  };
+  assert.equal(sum("prompt_tokens"), artifact.usage.prompt_tokens);
+  assert.equal(sum("completion_tokens"), artifact.usage.completion_tokens);
+  assert.equal(sum("cached_tokens"), artifact.usage.cached_prompt_tokens);
 });
 
-test("#1199: a failed #1145 refresh keeps the standing verdict record (no superseded push)", async () => {
+test("#1199: a failed #1145 refresh keeps the standing verdict record and persists its unrecorded spend", async () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
   fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
@@ -1487,14 +1579,18 @@ test("#1199: a failed #1145 refresh keeps the standing verdict record (no supers
     openAiText("evidence gathered"),
     withUsage(validVerdict(), { prompt_tokens: 21000, completion_tokens: 900 }),
     openAiCall("c2", "read_file", '{"path":"notes.md"}'),
-    // the refresh produces no reusable verdict → the first verdict stands
-    openAiText("not a verdict"),
+    // Streamed refresh attempt 1: parses no verdict — WITH usage →
+    // ... triggers the single non-streamed retry: also parses no verdict,
+    // also WITH usage. Both attempts are billed (aggregate), neither ends in
+    // a verdict record, so BOTH must land in the unrecorded category.
+    withUsage(openAiText("not a verdict"), { prompt_tokens: 12000, completion_tokens: 200, prompt_tokens_details: { cached_tokens: 1200 } }),
+    withUsage(openAiText("not a verdict"), { prompt_tokens: 13000, completion_tokens: 150 }),
   ];
   let n = 0;
   const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true" },
     transport: async () => scripted[n++],
     traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
-    ...withPrompt,
   }));
   assert.equal(result.trace_repair_continuation?.verdict_refreshed, false);
   const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
@@ -1503,6 +1599,16 @@ test("#1199: a failed #1145 refresh keeps the standing verdict record (no supers
   assert.equal(telemetry.verdict.prompt_tokens, 21000);
   assert.equal(telemetry.verdict.completion_tokens, 900);
   assert.deepEqual(telemetry.verdict.superseded, []);
+  // The refresh's per-field attempt sum IS persisted — exactly what the
+  // aggregate charged for it and no record otherwise represented.
+  assert.deepEqual(telemetry.unrecorded_usage, {
+    verdict_refresh: { requests: 2, prompt_tokens: 25000, completion_tokens: 350, cached_prompt_tokens: 1200, cache_hit_ratio: 0.048 },
+  });
+  // EXACT derivability: investigation rounds (no usage) + first verdict +
+  // repair rounds (no usage) + the failed refresh's two attempts == aggregate.
+  assert.equal(artifact.usage.prompt_tokens, 21000 + 25000);
+  assert.equal(artifact.usage.completion_tokens, 900 + 350);
+  assert.equal(artifact.usage.cached_prompt_tokens, 1200);
 });
 
 test("#1199: an unaccepted #1145 refresh (deadline expired) keeps the standing verdict record", async () => {
@@ -1517,9 +1623,11 @@ test("#1199: an unaccepted #1145 refresh (deadline expired) keeps the standing v
     // the FIRST verdict turn (accepted; its telemetry must stay standing)
     withUsage(validVerdict(), { prompt_tokens: 21000, completion_tokens: 900 }),
     // the #1145 continuation's own native-loop turn, then the refresh's verdict
-    // — usable on its own, but the acceptance read below rejects it.
+    // — usable on its own, but the acceptance read below rejects it. Its usage
+    // is billed anyway (the aggregate is charged), so it must land in the
+    // `verdict_refresh` unrecorded category.
     openAiCall("c2", "read_file", '{"path":"notes.md"}'),
-    validVerdict(),
+    withUsage(validVerdict(), { prompt_tokens: 33000, completion_tokens: 500 }),
   ];
   // Scripted budget-clock reads, 1:1 with this scenario (enumerated with a
   // logging clock; 26 reads exactly). `deadline` = first read + 10
@@ -1584,4 +1692,12 @@ test("#1199: an unaccepted #1145 refresh (deadline expired) keeps the standing v
   // the raw records were consumed (folded into the verdict sub-object).
   assert.equal(artifact.native_loop_verdict_telemetry, null);
   assert.equal(artifact.native_loop_superseded_verdict_telemetry, null);
+  // The unaccepted refresh was still billed (one attempt, WITH usage): that
+  // charge has no verdict record, so it is persisted as its own category.
+  assert.deepEqual(telemetry.unrecorded_usage, {
+    verdict_refresh: { requests: 1, prompt_tokens: 33000, completion_tokens: 500, cached_prompt_tokens: 0, cache_hit_ratio: 0 },
+  });
+  // EXACT derivability with the unrecorded category folded in.
+  assert.equal(artifact.usage.prompt_tokens, 21000 + 33000);
+  assert.equal(artifact.usage.completion_tokens, 900 + 500);
 });
