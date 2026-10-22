@@ -568,11 +568,16 @@ test("#1145: the refreshed verdict does not re-append the corpus", async () => {
   assert.equal(JSON.parse(String((choice.message as Record<string, unknown>).content)).review_markdown, "## Review\nrefreshed");
 });
 
-test("#1145: the repair round's wall-clock allowance subtracts the verdict turn's elapsed time", async () => {
+test("#1145/#1198: a verdict turn consuming the remaining wall-clock budget leaves no repair round (skipped_no_budget)", async () => {
   const { root, deps } = workspace();
   seedWorkspace(root);
-  // A controllable clock: the scripted transport advances it, so the first
-  // verdict turn can consume the rest of the wall-clock budget.
+  // A controllable clock: every timeFn call pre-advances 1s, and the scripted
+  // transport adds an 87s jump on the FIRST verdict turn. The whole-exchange
+  // deadline (#1198) is taken before the loop, so the verdict turn must land
+  // strictly inside it (99s into a 100s exchange) — while its measured spend
+  // (loop 7s + verdict 90s) exhausts the 10s budget: the repair-gate tick
+  // (100s) is past the deadline, so no repair round and no refresh run and
+  // the standing verdict is kept.
   let now = 0;
   const scripted = baseScripted([
     openAiCall("c2", "read_file", '{"path":"notes.md"}'),
@@ -584,13 +589,17 @@ test("#1145: the repair round's wall-clock allowance subtracts the verdict turn'
     loopInput(
       deps({
         transport: async () => {
-          // Two loop rounds (1s each), then the FIRST verdict turn (9s) —
-          // together with the loop's own 2s that exhausts the 10s budget.
-          now += calls === 2 ? 9 : 1;
+          // Two loop rounds, then the FIRST verdict turn consumes the rest of
+          // the wall-clock budget.
+          now += calls === 2 ? 87 : 0;
           return scripted[calls++];
         },
-        env: { SYSTEM_PROMPT: "You are the reviewer.", TOOL_LOOP_WALL_CLOCK_SEC: "10" },
-        timeFn: () => now,
+        env: { SYSTEM_PROMPT: "You are the reviewer.", TOOL_LOOP_WALL_CLOCK_SEC: "100" },
+        timeFn: () => {
+          const tick = now;
+          now += 1;
+          return tick;
+        },
       }),
       {
         result,

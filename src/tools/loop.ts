@@ -272,6 +272,17 @@ export interface DriveToolLoopOptions {
   summarizeFn?: ((block: string) => string | Promise<string>) | null;
   /** Injectable clock (seconds) for deterministic tests. */
   timeFn?: () => number;
+  /**
+   * #1198: whole-exchange absolute deadline, in timeFn-epoch seconds — the
+   * harness takes it from its own clock BEFORE pre-loop setup (MCP connect,
+   * the tracked-index snapshot, …), so that time counts against
+   * `tool-loop-wall-clock-sec` too. When a finite number, the between-rounds
+   * check stops the loop as soon as the injected clock reaches it; when
+   * unset/null/non-finite the legacy elapsed-since-own-start check applies
+   * unchanged. `budgets.wallClockSec` stays the configured ceiling and keeps
+   * feeding LoopOutcome telemetry.
+   */
+  wallClockDeadline?: number | null;
 }
 
 /**
@@ -300,6 +311,12 @@ export async function driveToolLoop(
   const cachePrefix = options.cachePrefix ?? false;
   const summarizeFn = options.summarizeFn ?? null;
   const timeFn = options.timeFn ?? (() => performance.now() / 1000);
+  // #1198: only a FINITE absolute deadline replaces the between-rounds elapsed
+  // check; anything else falls back to it exactly as before.
+  const wallClockDeadline =
+    typeof options.wallClockDeadline === "number" && Number.isFinite(options.wallClockDeadline)
+      ? options.wallClockDeadline
+      : null;
 
   const outcome: LoopOutcome = {
     executed: [],
@@ -327,7 +344,11 @@ export async function driveToolLoop(
   let broke = false;
 
   loop: while (outcome.rounds < budgets.maxRounds) {
-    if (timeFn() - started > budgets.wallClockSec) {
+    if (
+      wallClockDeadline !== null
+        ? timeFn() >= wallClockDeadline
+        : timeFn() - started > budgets.wallClockSec
+    ) {
       outcome.stopReason = STOP_WALL_CLOCK;
       broke = true;
       break;
