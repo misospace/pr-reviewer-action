@@ -200,7 +200,10 @@ export async function createReviewWorkspace(
   request: WorkspaceRequest,
 ): Promise<WorkspaceHandle> {
   const headSha = normalizeSha(request.headSha, "headSha");
-  const baseSha = request.baseSha === undefined ? "" : normalizeSha(request.baseSha, "baseSha");
+  // The documented empty-string sentinel is honored verbatim; any nonempty
+  // value (including whitespace-only) must still pass SHA validation.
+  const baseSha =
+    request.baseSha === undefined || request.baseSha === "" ? "" : normalizeSha(request.baseSha, "baseSha");
   const gitBinary = request.gitBinary ?? "git";
 
   return mirror.lock(async () => {
