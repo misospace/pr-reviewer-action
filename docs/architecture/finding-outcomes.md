@@ -52,7 +52,12 @@ The table is enforced structurally, not just documented:
 seam listed for its kind (an untrusted ledger can neither re-label where an
 observation came from nor mint a lifecycle outcome it never observed),
 rejects a `dismissed` event without a bounded reason, and rejects `feedback`
-claiming `trusted: true`. This validates WHAT a payload claims, not WHO wrote
+claiming `trusted: true`. A `feedback` event claiming more than
+`MAX_FEEDBACK_COUNT` reactions (far above anything the page-capped #762 read
+can observe) is rejected outright (#1127): an over-ceiling tally is a crafted
+claim, not merely an unprovable one, and one event must never be able to
+inflate the aggregate reaction counts without bound. This validates WHAT a
+payload claims, not WHO wrote
 it: an `operator`-provenance adjudication is meaningful only because the
 persistence channel that stores ledgers is itself the trusted-operator seam
 (ledger authenticity is that channel's guarantee, never inferable from the
