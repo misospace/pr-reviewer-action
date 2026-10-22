@@ -538,7 +538,7 @@ test("#1199: onRound records one bounded telemetry record per model turn", async
   assert.equal(r2.wall_clock_remaining_sec, 102);
 });
 
-test("#1199: provider usage is normalized provider-neutrally (Anthropic-shaped body)", async () => {
+test("#1199: provider usage is accounted in the configured format's convention (Anthropic-shaped body)", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");
   const turn1 = {
@@ -563,7 +563,10 @@ test("#1199: provider usage is normalized provider-neutrally (Anthropic-shaped b
     onRound: (r) => rounds.push(r),
   });
   assert.equal(rounds.length, 2);
-  assert.equal(rounds[0]!.prompt_tokens, 500);
+  // Anthropic reports the cache read tokens OUTSIDE input_tokens, so the
+  // prompt total is 500 + 300 — the same accounting the loop aggregate folds,
+  // so the persisted records sum to the aggregate (#1199 derivability).
+  assert.equal(rounds[0]!.prompt_tokens, 800);
   assert.equal(rounds[0]!.completion_tokens, 40);
   assert.equal(rounds[0]!.cached_tokens, 300);
   // no telemetry clock → constant → zero latency (not asserted for a real run)

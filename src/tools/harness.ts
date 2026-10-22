@@ -371,34 +371,29 @@ export interface UsageAccumulator {
 }
 
 /** Fold a turn's token usage into the loop accumulator (telemetry). Tolerant:
- * a response without a usage block (or with odd values) is skipped. */
+ * a response without a usage block (or with odd values) is skipped.
+ *
+ * #1199: the accounting is the SHARED one (`normalizeUsageTelemetry`), the
+ * same function the persisted per-turn telemetry records read, so the records
+ * sum to this aggregate instead of under-reporting it — including #910's
+ * Anthropic convention, where the cache read/write tokens are reported OUTSIDE
+ * `input_tokens` and therefore belong in the prompt total. One accounting,
+ * one source of truth: a field the provider did not report is `null` here and
+ * contributes nothing to the aggregate.
+ *
+ * The records are a LOWER BOUND of this aggregate, never an over-count: the
+ * aggregate also holds the model turns that carry no record — the
+ * context-compaction digest call, and an unaccepted or failed #1145 verdict
+ * refresh (its tokens are billed but its verdict record is not written). */
 export function accumulateUsage(acc: UsageAccumulator, response: unknown, apiFormat: string): void {
   const res = response as Record<string, unknown> | null;
   const usage = res !== null && typeof res === "object" ? res.usage : null;
   if (usage === null || typeof usage !== "object") return;
-  const u = usage as Record<string, unknown>;
-  const intOf = (v: unknown): number => {
-    const n = typeof v === "number" ? v : Number(v);
-    return Number.isFinite(n) && n !== 0 ? Math.trunc(n) : 0;
-  };
   acc.requests += 1;
-  // #910: Anthropic counts cache reads/writes outside input_tokens, so the
-  // prompt total is all three; streamed Anthropic turns arrive in OpenAI
-  // shape with the uncached count in prompt_tokens and the cache fields kept.
-  if (apiFormat === "anthropic") {
-    const cacheRead = intOf(u.cache_read_input_tokens);
-    const uncached = "prompt_tokens" in u ? intOf(u.prompt_tokens) : intOf(u.input_tokens);
-    acc.prompt_tokens += uncached + cacheRead + intOf(u.cache_creation_input_tokens);
-    acc.completion_tokens += "completion_tokens" in u ? intOf(u.completion_tokens) : intOf(u.output_tokens);
-    acc.cached_prompt_tokens += cacheRead;
-  } else {
-    acc.prompt_tokens += intOf(u.prompt_tokens);
-    acc.completion_tokens += intOf(u.completion_tokens);
-    const details = u.prompt_tokens_details;
-    if (details !== null && typeof details === "object") {
-      acc.cached_prompt_tokens += intOf((details as Record<string, unknown>).cached_tokens);
-    }
-  }
+  const accounted = normalizeUsageTelemetry(usage, apiFormat);
+  acc.prompt_tokens += accounted.promptTokens ?? 0;
+  acc.completion_tokens += accounted.completionTokens ?? 0;
+  acc.cached_prompt_tokens += accounted.cachedTokens ?? 0;
 }
 
 /** Stamp the loop's accumulated usage with cache_hit_ratio for telemetry. */
@@ -848,6 +843,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
       attemptResponse !== null && typeof attemptResponse === "object"
         ? (attemptResponse as Record<string, unknown>).usage ?? null
         : null,
+      input.apiFormat,
     );
     for (const field of ["promptTokens", "completionTokens", "cachedTokens", "totalTokens"] as const) {
       usageTotals[field] =

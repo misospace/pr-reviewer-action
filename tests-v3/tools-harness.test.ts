@@ -1199,6 +1199,84 @@ test("#1199: per-round + verdict latency/usage persisted in the artifact and log
   assert.match(joined, /native_loop verdict: model=[0-9.]+s prompt=21000 completion=900 cached=16000/);
 });
 
+test("#1199: Anthropic rounds + verdict derive the aggregate usage (cache tokens counted once)", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Anthropic reports the cache read/write tokens OUTSIDE input_tokens, so the
+  // prompt total of a turn is uncached + cache read + cache write (#910).
+  const anthropicUsage = (input: number, output: number, cacheRead: number, cacheCreation: number) => ({
+    input_tokens: input,
+    output_tokens: output,
+    cache_read_input_tokens: cacheRead,
+    cache_creation_input_tokens: cacheCreation,
+  });
+  const scripted = [
+    {
+      content: [{ type: "tool_use", id: "t1", name: "read_file", input: { path: "src.ts" } }],
+      usage: anthropicUsage(500, 40, 300, 200),
+    },
+    {
+      content: [{ type: "text", text: "evidence gathered" }],
+      usage: anthropicUsage(100, 10, 0, 0),
+    },
+    {
+      content: [{
+        type: "text",
+        text: JSON.stringify({ verdict: "approve", review_markdown: "## Review\nLooks fine.", findings: [] }),
+      }],
+      usage: anthropicUsage(21000, 900, 16000, 0),
+    },
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    env: { SYSTEM_PROMPT: "You are the reviewer.", AI_API_FORMAT: "anthropic" },
+    transport: async () => scripted[n++],
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry;
+  const rounds = telemetry.rounds;
+  assert.equal(rounds.length, 2);
+  // Per-turn prompt totals include the cache tokens Anthropic reports
+  // separately: 500 + 300 + 200, then 100 + 0 + 0.
+  assert.equal(rounds[0].prompt_tokens, 1000);
+  assert.equal(rounds[0].completion_tokens, 40);
+  assert.equal(rounds[0].cached_tokens, 300);
+  assert.equal(rounds[1].prompt_tokens, 100);
+  assert.equal(rounds[1].completion_tokens, 10);
+  assert.equal(rounds[1].cached_tokens, 0);
+  // The verdict turn is accounted the same way: 21000 + 16000 + 0.
+  assert.equal(telemetry.verdict.prompt_tokens, 37000);
+  assert.equal(telemetry.verdict.completion_tokens, 900);
+  assert.equal(telemetry.verdict.cached_tokens, 16000);
+
+  // The persisted records DERIVE the aggregate — the acceptance criterion the
+  // #1199 review flagged: Anthropic's aggregate prompt total adds the cache
+  // tokens, so a record that reported only input_tokens could not sum to it.
+  // Every recorded turn counts: the investigation rounds, the #1145 repair
+  // continuation's rounds, and the verdict record (plus a superseded one, if
+  // a refresh ever replaced it). The aggregate additionally holds the turns
+  // that carry NO record (the compaction digest call, an unaccepted #1145
+  // refresh), so the records stay a LOWER BOUND of it — never an over-count.
+  const sum = (field: string): number => {
+    const fromRounds = [...rounds, ...(telemetry.repair_rounds as Record<string, unknown>[])]
+      .reduce((total: number, r: Record<string, unknown>) => total + (r[field] as number), 0);
+    const superseded = (telemetry.verdict.superseded as Record<string, unknown>[])
+      .reduce((total: number, r: Record<string, unknown>) => total + (r[field] as number), 0);
+    return fromRounds + superseded + (telemetry.verdict[field] as number);
+  };
+  assert.equal(sum("prompt_tokens"), artifact.usage.prompt_tokens);
+  assert.equal(sum("completion_tokens"), artifact.usage.completion_tokens);
+  assert.equal(sum("cached_tokens"), artifact.usage.cached_prompt_tokens);
+  assert.equal(artifact.usage.prompt_tokens, 38100);
+  assert.equal(artifact.usage.completion_tokens, 950);
+  assert.equal(artifact.usage.cached_prompt_tokens, 16300);
+  // The aggregate's cache-hit ratio follows the same accounted prompt total.
+  assert.equal(artifact.usage.cache_hit_ratio, 0.428);
+});
+
 test("#1199: a streamed→non-streamed loop turn is flagged once and never split", async () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");

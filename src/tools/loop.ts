@@ -156,9 +156,19 @@ export interface ExecutedCall {
  * Every field is a count, a duration, a nullable provider-reported token total,
  * or a boolean. No prompt text, response text, tool arguments, tool results,
  * credentials, or provider error bodies ever ride here. `prompt_tokens` /
- * `completion_tokens` / `cached_tokens` are the provider's own reported numbers
- * normalized provider-neutrally by `normalizeUsageTelemetry`; a provider that
- * reports nothing leaves them `null` — never estimated from elapsed time.
+ * `completion_tokens` / `cached_tokens` are the provider's own reported
+ * numbers, accounted in the configured wire format's convention by
+ * `normalizeUsageTelemetry` — the SAME accounting the loop aggregate folds,
+ * so the persisted records sum to it (Anthropic reports its cache tokens
+ * outside `input_tokens`, so they belong in the prompt total; OpenAI's
+ * `prompt_tokens` already includes them). A provider that reports nothing
+ * leaves them `null` — never estimated from elapsed time.
+ *
+ * Summing the records over the whole run reproduces the aggregate's usage for
+ * every turn that carries a record; the aggregate additionally holds the
+ * turns that carry none (the context-compaction digest call, and an
+ * unaccepted or failed #1145 verdict refresh), so the records are a lower
+ * bound of it — never an over-count.
  */
 export interface NativeLoopRoundTelemetry {
   /** 1-based model-turn index within this loop run. */
@@ -524,7 +534,7 @@ export async function driveToolLoop(
         0,
         0,
         Math.max(0, nowFn() - modelStart),
-        normalizeUsageTelemetry(null),
+        normalizeUsageTelemetry(null, options.apiFormat),
         roundFellBack,
       );
       broke = true;
@@ -534,7 +544,7 @@ export async function driveToolLoop(
     const usageObj = response !== null && typeof response === "object"
       ? (response as Record<string, unknown>).usage ?? null
       : null;
-    const turnUsage = normalizeUsageTelemetry(usageObj);
+    const turnUsage = normalizeUsageTelemetry(usageObj, options.apiFormat);
 
     outcome.rounds++;
     const { calls, text } = extractToolCalls(response, options.apiFormat);
