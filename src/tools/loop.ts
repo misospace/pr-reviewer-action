@@ -342,6 +342,12 @@ export interface DriveToolLoopOptions {
   summarizeFn?: ((block: string) => string | Promise<string>) | null;
   /** Injectable clock (seconds) for deterministic tests. */
   timeFn?: () => number;
+  /**
+   * #1198: whole-exchange absolute deadline, in timeFn-epoch seconds. When a
+   * finite number, the between-rounds check stops as soon as the clock reaches
+   * it; unset/null/non-finite preserves the legacy elapsed-since-loop-start check.
+   */
+  wallClockDeadline?: number | null;
   /** #1199: injectable telemetry clock (seconds) for per-round latency. It is
    * kept separate from `timeFn` so per-round measurement never perturbs the
    * budget clock's scripted sequences; the harness passes a dedicated monotonic
@@ -377,6 +383,10 @@ export async function driveToolLoop(
   const cachePrefix = options.cachePrefix ?? false;
   const summarizeFn = options.summarizeFn ?? null;
   const timeFn = options.timeFn ?? (() => performance.now() / 1000);
+  const wallClockDeadline =
+    typeof options.wallClockDeadline === "number" && Number.isFinite(options.wallClockDeadline)
+      ? options.wallClockDeadline
+      : null;
   // #1199: per-round latency rides a monotonic telemetry clock, deliberately
   // distinct from the budget `timeFn` so adding latency measurement never
   // shifts the scripted budget-clock sequences the reliability tests pin.
@@ -449,7 +459,11 @@ export async function driveToolLoop(
   let broke = false;
 
   loop: while (outcome.rounds < budgets.maxRounds) {
-    if (timeFn() - started > budgets.wallClockSec) {
+    if (
+      wallClockDeadline !== null
+        ? timeFn() >= wallClockDeadline
+        : timeFn() - started > budgets.wallClockSec
+    ) {
       outcome.stopReason = STOP_WALL_CLOCK;
       broke = true;
       break;
