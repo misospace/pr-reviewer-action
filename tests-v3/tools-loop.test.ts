@@ -231,6 +231,45 @@ test("transport errors end the loop with the request-error stop reason", async (
   assert.equal(outcome.degraded, true);
 });
 
+test("#747: temperature null omits the field from every round; an absent temperature keeps 0.0", async () => {
+  const anthropicCall = { content: [{ type: "tool_use", id: "a1", name: "t", input: {} }] };
+  const anthropicText = { content: [{ type: "text", text: "done" }] };
+  const rounds = {
+    openai: [openAiCall("c1", "t", "{}"), openAiText("done")],
+    anthropic: [anthropicCall, anthropicText],
+  };
+  for (const apiFormat of ["openai", "anthropic"] as const) {
+    for (const temperature of [null, undefined]) {
+      const conversation = new Conversation();
+      conversation.addUser("corpus");
+      const payloads: Array<Record<string, unknown>> = [];
+      const scripted = rounds[apiFormat];
+      const outcome = await driveToolLoop(
+        conversation,
+        async (payload) => {
+          payloads.push(payload);
+          return scripted[payloads.length - 1];
+        },
+        async () => ({ tool: "t", status: "ok", result: {} }),
+        {
+          apiFormat,
+          model: "m",
+          budgets: adaptiveLoopBudgets(2, 4, 120),
+          timeFn: () => 0,
+          ...(temperature === undefined ? {} : { temperature }),
+        },
+      );
+      const label = `${apiFormat}, temperature ${String(temperature)}`;
+      assert.equal(outcome.stopReason, STOP_MODEL_DONE, label);
+      assert.equal(payloads.length, 2, label);
+      for (const payload of payloads) {
+        if (temperature === null) assert.equal("temperature" in payload, false, label);
+        else assert.equal(payload.temperature, 0.0, label);
+      }
+    }
+  }
+});
+
 test("wall-clock deadline stops the loop between rounds", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");
