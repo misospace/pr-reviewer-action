@@ -176,6 +176,50 @@ test("exhaustion-aware budget notes appear from the second round onward", async 
   assert.match(notes[0]!.content, /^\[loop budget\] 3 of 4 tool request\(s\)/);
 });
 
+test("#1222: OpenAI loop requests preserve prior messages as an exact prefix", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const responses = [
+    openAiCall("c1", "read_file", '{"path":"a.ts"}'),
+    openAiCall("c2", "read_file", '{"path":"b.ts"}'),
+    openAiText("done"),
+  ];
+  const payloads: Array<Record<string, unknown>> = [];
+  let responseIndex = 0;
+  const outcome = await driveToolLoop(
+    conversation,
+    async (payload) => {
+      payloads.push(structuredClone(payload));
+      return responses[responseIndex++];
+    },
+    async (_name, args) => ({ tool: "read_file", status: "ok", result: { content: String(args.path ?? "") } }),
+    {
+      apiFormat: "openai",
+      model: "m",
+      budgets: adaptiveLoopBudgets(3, 8, 120),
+      timeFn: () => 0,
+    },
+  );
+
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  assert.equal(payloads.length, 3);
+  for (let index = 1; index < payloads.length; index++) {
+    const previous = payloads[index - 1]!.messages as Array<Record<string, unknown>>;
+    const current = payloads[index]!.messages as Array<Record<string, unknown>>;
+    assert.deepEqual(
+      current.slice(0, previous.length),
+      previous,
+      `round ${index + 1} rewrote round ${index}'s OpenAI message prefix`,
+    );
+    assert.deepEqual(payloads[index]!.tools, payloads[index - 1]!.tools, "tool schema prefix must stay stable");
+  }
+
+  const notes = conversation.events.filter((e) => e.kind === "turn_note") as Array<{ content: string }>;
+  assert.equal(notes.length, 2);
+  assert.match(notes[0]!.content, /^\[loop budget\] 7 of 8 tool request\(s\)/);
+  assert.match(notes[1]!.content, /^\[loop budget\] 6 of 8 tool request\(s\)/);
+});
+
 test("duplicate calls are answered from a dedup note without burning budget", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");
