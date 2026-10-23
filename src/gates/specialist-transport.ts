@@ -1,7 +1,8 @@
 import { maskKnownSecrets, redactText } from "../context/redact.js";
 import type { ApiFormat, NormalizedModelResponse, TransportWirePayload } from "../model/types.js";
-import type { SpecialistRequestFn, SpecialistTransportOutcome } from "../specialists/runner.js";
-import { describeTransportFailure, TransportFailure } from "../transport/http.js";
+import type { SpecialistDiscardedWireAttempt, SpecialistRequestFn, SpecialistTransportOutcome } from "../specialists/runner.js";
+import { describeTransportFailure, resolveEndpoint, TransportFailure } from "../transport/http.js";
+import { applyExtraHeaders } from "../transport/headers.js";
 import { runChatRequest, type ChatRequestInput, type ChatRequestOutcome } from "../transport/transport.js";
 import { classifyTerminalProviderFailure, sharedTerminalLaneLatch, type TerminalLaneLatch, type TerminalProviderReason } from "../transport/terminal.js";
 
@@ -151,9 +152,46 @@ const wire = {
     const laneKey = `${config.baseUrl}\n${laneModel}\n${format}\n${credentialIdentity(config.apiKey)}`;
     const latched = latch.terminalFor(laneKey);
     if (latched !== undefined) {
-      return { ok: false, errorMessage: `lane terminally unavailable (${latched})`, terminal: latched };
+      // #1200: this call never reaches the wire — the lane is known to be
+      // terminally unavailable — so it is NOT a provider attempt: the
+      // specialist telemetry opens no attempt record for it and the aggregate
+      // request counter does not count it.
+      return { ok: false, errorMessage: `lane terminally unavailable (${latched})`, terminal: latched, wire_attempted: false };
+    }
+    // #1200: the endpoint join and the extra-header merge are refused BEFORE
+    // any socket opens, so such a call is not a provider attempt either. Both
+    // fences are the transport's OWN (the same `resolveEndpoint` and the same
+    // `applyExtraHeaders` assertion the wire boundary uses), so this cannot
+    // drift from what the transport would have thrown. The failure text is
+    // the one the transport itself would have produced — masked and capped
+    // exactly as the catch-all below masks a thrown adapter error — so the
+    // persisted failure shape is unchanged.
+    try {
+      resolveEndpoint(config.baseUrl, format);
+      if (config.extraHeaders !== undefined) applyExtraHeaders({}, config.extraHeaders);
+    } catch (error) {
+      const rawMessage = error instanceof Error ? error.message : String(error);
+      const masked = codePointSlice(redactText(maskKnownSecrets(rawMessage, [config.apiKey, ...extraSecrets])), 500);
+      return { ok: false, errorMessage: masked, wire_attempted: false };
     }
     let outcome: ChatRequestOutcome;
+    // #1200: the transport's own same-request retry loop (retryable 429/5xx
+    // statuses, the #824 max_tokens clamp, the #1047 structured-output strip)
+    // makes SEVERAL actual wire attempts inside this one call. Its per-call
+    // decision reports are collected here and carried on the outcome, so a
+    // discarded wire attempt is a real, recorded provider attempt exactly
+    // once — never hidden inside the single outer call the runner sees.
+    const discardedWireAttempts: SpecialistDiscardedWireAttempt[] = [];
+    let wireSentMaxTokens: number | null = null;
+    let wireReported = false;
+    const wireTelemetry = (base: SpecialistTransportOutcome): SpecialistTransportOutcome =>
+      wireReported
+        ? {
+            ...base,
+            ...(discardedWireAttempts.length > 0 ? { discarded_wire_attempts: discardedWireAttempts } : {}),
+            wire_sent_max_tokens: wireSentMaxTokens,
+          }
+        : base;
     try {
       outcome = await runChat({
         baseUrl: config.baseUrl,
@@ -166,6 +204,13 @@ const wire = {
         connectTimeoutSec: timeoutSec,
         ...(config.extraHeaders !== undefined ? { extraHeaders: config.extraHeaders } : {}),
         ...(config.sleep !== undefined ? { sleep: config.sleep } : {}),
+        onWireCall: (report) => {
+          wireReported = true;
+          if (report.discarded) {
+            discardedWireAttempts.push({ elapsed_sec: report.elapsedSec, max_tokens: report.maxTokens });
+          }
+          wireSentMaxTokens = report.maxTokens;
+        },
       });
     } catch (error) {
       // #1080: a throwing adapter can still hand back a typed transport
@@ -174,16 +219,16 @@ const wire = {
         const terminal = classifyTerminalProviderFailure(error);
         if (terminal !== null) {
           latch.latch(laneKey, terminal.reason);
-          return { ok: false, errorMessage: `lane terminally unavailable (${terminal.reason})`, terminal: terminal.reason };
+          return wireTelemetry({ ok: false, errorMessage: `lane terminally unavailable (${terminal.reason})`, terminal: terminal.reason });
         }
       }
       const rawMessage = error instanceof Error ? error.message : String(error);
       const masked = codePointSlice(redactText(maskKnownSecrets(rawMessage, [config.apiKey, ...extraSecrets])), 500);
-      return { ok: false, errorMessage: masked, timeout: masked.toLowerCase().includes("timed out") };
+      return wireTelemetry({ ok: false, errorMessage: masked, timeout: masked.toLowerCase().includes("timed out") });
     }
     if (outcome.status === "ok") {
       const raw = payload.stream === true ? toV2Completion(outcome.response) : outcome.raw;
-      return { ok: true, raw };
+      return wireTelemetry({ ok: true, raw });
     }
     // #1080: latch FIRST so the classification is recorded even if the
     // masking below throws on a pathological body, then report the reason
@@ -192,13 +237,13 @@ const wire = {
     if (terminal !== null) latch.latch(laneKey, terminal.reason);
     const { message, timeout, status, statusDetail } = failureMessage(outcome, config.apiKey, extraSecrets);
     const masked = codePointSlice(redactText(maskKnownSecrets(message, [config.apiKey, ...extraSecrets])), 500);
-    return {
+    return wireTelemetry({
       ok: false,
       errorMessage: masked,
       timeout: timeout || masked.toLowerCase().includes("timed out"),
       ...(status !== undefined ? { status } : {}),
       ...(statusDetail !== undefined ? { statusDetail } : {}),
       ...(terminal !== null ? { terminal: terminal.reason } : {}),
-    };
+    });
   };
 }

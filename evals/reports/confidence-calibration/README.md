@@ -196,16 +196,23 @@ runtime's own gate: the bridge returns production's
 `head_sha` / `base_sha` / `review_result` pin did not resolve is recorded
 `unscored` with cause `incomplete_proof_context` — **zero wire attempts,
 zero budget consumed** — instead of letting the model grade content the run
-cannot identify. This matters for the live run: `evals/corpus-real-prs.json`
-entries currently pin `head_sha` but **not** `base_sha`, so until the
-sampled entries anchor their diff base, every corpus row fails
-closed to `incomplete_proof_context` and a live sweep over the unmodified
-corpus produces no scores — by construction and at zero wire cost, never an
-unanchored score. (The pre-flight `planned_calls` arithmetic counts planned
-live rows before the gate, so at an exact ceiling edge a carried-spend
-re-run may still refuse exit 3 — the conservative direction, and free
-either way.) Anchoring is bounded follow-up data work: the eval-harness
-corpus loader already accepts and validates a full-40-hex `base_sha` field
+cannot identify. This gate is why the first live run was blocked:
+`evals/corpus-real-prs.json` originally pinned `head_sha` but **not**
+`base_sha`, so a live sweep over the unmodified corpus would have produced
+no scores — by construction and at zero wire cost, never an unanchored
+score. That follow-up data work is **done** (#1191, 2026-10-22): all 41
+corpus entries — including all 16 sampled by this plan — now pin a
+validated `base_sha`, recovered as the fork point from each PR's landing
+commit on `origin/main` and verified (`git cat-file -e`, proper ancestor of
+`head_sha`, non-empty `git diff base...head`, defect anchor present in the
+diff); recovery method and verification are recorded in the corpus
+`metadata.base_sha_provenance`. The live pilot can therefore produce
+anchored scores, and the gate remains the standing protection that fails
+any future entry whose base does not resolve. (The pre-flight
+`planned_calls` arithmetic counts planned live rows before the gate, so at
+an exact ceiling edge a carried-spend re-run may still refuse exit 3 — the
+conservative direction, and free either way.) The eval-harness corpus
+loader accepts and validates the full-40-hex `base_sha` field
 (`scripts/eval_harness.py`), though the pilot driver itself checks only
 non-emptiness, matching production's emptiness predicate. The synthetic
 fixture index pins a fabricated `base_sha`
@@ -260,9 +267,10 @@ end.
   mask set.
 - Clean-corpus entries have no titles/categories, so the claimed domain mix
   of the clean half is unknown until checkout.
-- Real-corpus anchoring: sampled entries do not yet pin `base_sha`, so the
-  live quality columns additionally require the corpus anchoring follow-up
-  above; the gate makes the gap explicit (`incomplete_proof_context`) rather
-  than silently scoring unanchored prompts.
+- Real-corpus anchoring: resolved by #1191 — every entry in
+  `evals/corpus-real-prs.json` now pins a validated `base_sha`, so the
+  live quality columns no longer depend on further data work; the gate
+  still fails closed (`incomplete_proof_context`) rather than silently
+  scoring unanchored prompts.
 - Adjudication of novel-concern candidates against the known bug is manual
   (`eval_adjudicate.py` style), not automated.

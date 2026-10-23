@@ -82,6 +82,24 @@ test("workspace: isolated exact-head extraction, normalized metadata, idempotent
   }
 });
 
+test("workspace: the empty baseSha sentinel behaves like an omitted base (exact-head, mergeBaseSha = \"\")", async () => {
+  const env = await ready("sentinel/repo");
+  try {
+    const handle = await createReviewWorkspace(env.cache, { headSha: env.head, baseSha: "" });
+    assert.equal(handle.info.headSha, env.head);
+    assert.equal(handle.info.mergeBaseSha, "");
+    assert.ok((await readdir(handle.info.rootPath)).includes("README.md"));
+    await handle.close();
+    // Ambiguity guard: a whitespace-only value is a malformed SHA, not the sentinel.
+    await assert.rejects(
+      createReviewWorkspace(env.cache, { headSha: env.head, baseSha: "   " }),
+      (error: unknown) => error instanceof AcquisitionError && error.code === "invalid_head",
+    );
+  } finally {
+    await env.close();
+  }
+});
+
 test("workspace: merge-base matches raw git merge-base (Action parity)", async () => {
   const fixture = await startGitHttpFixture();
   try {

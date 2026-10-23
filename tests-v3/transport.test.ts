@@ -10,7 +10,7 @@ import {
   OVERSIZE_ERROR_BODY_PREFIX_BYTES,
 } from "../src/transport/http.js";
 import { KNOWN_SECRET_REDACTED, maskKnownSecrets, redactText } from "../src/context/redact.js";
-import { parseStatedTokenCap, runChatRequest } from "../src/transport/transport.js";
+import { HTTP_RETRY_ATTEMPTS, parseStatedTokenCap, runChatRequest } from "../src/transport/transport.js";
 import { callKnownSecrets, ExtraHeadersError } from "../src/transport/headers.js";
 import { startMockServer, sseResponse } from "./helpers.js";
 import type { TransportWirePayload } from "../src/model/types.js";
@@ -946,6 +946,139 @@ test("Retry-After is capped at the maximum delay; HTTP-date forms are ignored", 
     assert.deepEqual(slept2, [1000]);
   } finally {
     await dated.server.close();
+  }
+});
+
+// ── per-wire-call reports for per-attempt attribute telemetry (#1200) ────────
+// The request loop can make SEVERAL actual wire attempts inside one
+// `runChatRequest` call (retryable 429/5xx statuses, the #824 clamp, the
+// #1047 strip); `onWireCall` turns each into one bounded report so the
+// specialist attempt telemetry can account them exactly once.
+
+interface SeenWireCall {
+  discarded: boolean;
+  elapsedSec: number;
+  maxTokens: number | null;
+}
+
+/** An input with a token budget, an injectable sleep capture, and a report
+ * collector for `onWireCall`. */
+function reportInput(baseUrl: string, slept: number[], seen: SeenWireCall[], maxTokens = 256) {
+  return {
+    ...retryInput(baseUrl, slept),
+    payload: payload({ model: "m", stream: false, max_tokens: maxTokens, messages: [] }),
+    onWireCall: (report: SeenWireCall): void => { seen.push(report); },
+  };
+}
+
+test("#1200: one successful wire call reports exactly once, not discarded", async () => {
+  const { server, count } = await retryServer([200]);
+  const slept: number[] = [];
+  const seen: SeenWireCall[] = [];
+  try {
+    const outcome = await runChatRequest(reportInput(server.url, slept, seen));
+    assert.equal(outcome.status, "ok");
+    assert.equal(count(), 1);
+    assert.deepEqual(seen.map((call) => call.discarded), [false]);
+    assert.deepEqual(seen.map((call) => call.maxTokens), [256], "the budget this call actually sent");
+    assert.ok(seen[0]!.elapsedSec >= 0, "each report carries the call's own elapsed time");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1200: a retryable 429 discard and its follow-up are two reports on one call", async () => {
+  const { server, count } = await retryServer([429, 200], "0");
+  const slept: number[] = [];
+  const seen: SeenWireCall[] = [];
+  try {
+    const outcome = await runChatRequest(reportInput(server.url, slept, seen));
+    assert.equal(outcome.status, "ok");
+    assert.equal(count(), 2);
+    assert.deepEqual(seen.map((call) => call.discarded), [true, false]);
+    assert.deepEqual(seen.map((call) => call.maxTokens), [256, 256], "both wire calls sent the same budget");
+    assert.deepEqual(slept, [0], "the backoff stays inside the one reported wire call's lifetime");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1200: each side of a clamp retry reports the budget its wire call actually sent", async () => {
+  const { server, requests } = await cappedServer(8192, (requested) =>
+    `max_tokens: ${requested} > 8192, which is the maximum allowed number of output tokens for <model>`);
+  const slept: number[] = [];
+  const seen: SeenWireCall[] = [];
+  const stderr = captureStderr();
+  try {
+    const outcome = await runChatRequest(reportInput(server.url, slept, seen, 16384));
+    assert.equal(outcome.status, "ok");
+    assert.equal(requests.length, 2);
+    assert.deepEqual(seen.map((call) => call.discarded), [true, false]);
+    assert.deepEqual(seen.map((call) => call.maxTokens), [16384, 8192], "the clamp lowered the follow-up call's budget");
+    assert.deepEqual(stderr.lines.filter((line) => line.includes("clamped")),
+      ["clamped max_tokens 16384 -> 8192 (provider limit)\n"]);
+  } finally {
+    stderr.restore();
+    await server.close();
+  }
+});
+
+test("#1200: a single non-retryable failure reports once as not discarded", async () => {
+  const server = await startMockServer((_req, _reqBody, res) => {
+    res.statusCode = 400;
+    res.end(JSON.stringify({ error: { message: "unrelated 400" } }));
+  });
+  const slept: number[] = [];
+  const seen: SeenWireCall[] = [];
+  try {
+    const outcome = await runChatRequest(reportInput(server.url, slept, seen));
+    assert.equal(outcome.status, "failure");
+    assert.deepEqual(seen.map((call) => call.discarded), [false], "a returned failure is a real wire attempt that caused no follow-up");
+    assert.deepEqual(seen.map((call) => call.maxTokens), [256]);
+    assert.deepEqual(slept, []);
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1200: a strip-retry discard reports the pre-strip call and carries the token field through", async () => {
+  let requests = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    requests++;
+    if (requests === 1) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: { message: "response_format is not supported by this model" } }));
+      return;
+    }
+    res.end(JSON.stringify({ id: "1", choices: [{ message: { content: "ok" }, finish_reason: "stop" }] }));
+  });
+  const slept: number[] = [];
+  const seen: SeenWireCall[] = [];
+  try {
+    const outcome = await runChatRequest({
+      ...reportInput(server.url, slept, seen, 900),
+      payload: payload({ model: "m", stream: false, max_tokens: 900, response_format: { type: "json_object" } }),
+    });
+    assert.equal(outcome.status, "ok", "the strip retry succeeded");
+    assert.deepEqual(seen.map((call) => call.discarded), [true, false], "the pre-strip call was discarded for the one retry");
+    assert.deepEqual(seen.map((call) => call.maxTokens), [900, 900], "the strip leaves the token field untouched on both calls");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1200: an exhausted 429 loop reports every discarded attempt and its final call", async () => {
+  const { server, count } = await retryServer([429], "0");
+  const slept: number[] = [];
+  const seen: SeenWireCall[] = [];
+  try {
+    const outcome = await runChatRequest(reportInput(server.url, slept, seen));
+    assert.equal(outcome.status, "failure");
+    assert.equal(count(), HTTP_RETRY_ATTEMPTS);
+    assert.deepEqual(seen.map((call) => call.discarded), [true, true, false], "each retried call is discarded; the final call returns");
+    assert.deepEqual(seen.map((call) => call.maxTokens), [256, 256, 256]);
+  } finally {
+    await server.close();
   }
 });
 

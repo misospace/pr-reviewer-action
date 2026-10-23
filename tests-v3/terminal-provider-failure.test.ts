@@ -799,6 +799,110 @@ test("#1080: a terminal specialist failure costs one attempt with no sleep, and 
   assert.equal(wireCalls, 2, "a different model on the same endpoint still gets its own attempt");
 });
 
+test("#1200: a latched terminal lane records no attempt for the roles it short-circuits", async () => {
+  // #1200 acceptance: every record in role telemetry is a REAL wire attempt.
+  // The #1080 lane latch refuses a later call on a terminally failed lane
+  // with zero wire attempts, so such a call must open no attempt record and
+  // must not be counted as a request.
+  let wireCalls = 0;
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://model.test",
+    apiKey: "k",
+    anthropicVersion: "2023-06-01",
+    terminalLatch: freshLatch(),
+    runChat: async () => {
+      wireCalls += 1;
+      return { status: "failure", failure: httpFailure(429, MINIMAX_BODY) };
+    },
+  });
+
+  // prime_then_fanout runs the FIRST role to completion before the others
+  // launch, so the terminal failure has latched the lane by the time the
+  // later role calls — deterministically, without racing the roles.
+  const result = await runSpecialists(specialistInput({
+    config: { ...specialistInput({}).config, execution: "prime_then_fanout" },
+    rolesToRun: ["correctness", "security"],
+    rolePrompts: { correctness: "be correct", security: "be secure" },
+    requestFn,
+    sleep: async (seconds) => {
+      // The phase-deadline race sleep must never win against the request work.
+      if (seconds >= 60) return new Promise(() => undefined);
+      await new Promise((resolve) => setImmediate(resolve));
+    },
+  }));
+
+  assert.equal(wireCalls, 1, "only the first role's call reaches the wire");
+  const roles = result.aggregate.roles as SpecialistRoleEntry[];
+  const first = roles.find((entry) => entry.role === "correctness")!;
+  const second = roles.find((entry) => entry.role === "security")!;
+  assert.equal(first.attempts?.length, 1, "the one real wire attempt is recorded");
+  assert.equal(first.attempts?.[0]?.attempt_type, "initial");
+  assert.equal(first.attempts?.[0]?.adopted, false);
+  assert.equal(first.attempts?.[0]?.retry_trigger, null, "a terminal failure is never retry-eligible");
+  assert.equal(second.attempts, undefined, "a call refused before the wire is not an attempt");
+  assert.equal(result.aggregate.request_count, 1, "the refused call is not counted as a wire attempt");
+  // The persisted failure shape is unchanged for the short-circuited role.
+  assert.equal(second.status, "error");
+  assert.equal(second.error_kind, "transport");
+  assert.match(String(second.reason), /quota_exhausted/);
+});
+
+test("#1200: a call refused before the wire (a malformed lane config) records no attempt", async () => {
+  // The endpoint join and the extra-header merge are refused before any
+  // socket opens, so such a call is not a provider attempt either: no
+  // attempt record, and the aggregate counter does not count it.
+  const phaseSleep = async (seconds: number): Promise<void> => {
+    if (seconds >= 60) return new Promise(() => undefined);
+    await new Promise((resolve) => setImmediate(resolve));
+  };
+
+  let endpointWireCalls = 0;
+  const malformedEndpoint = specialistRequestFn({
+    baseUrl: "not a url",
+    apiKey: "k",
+    anthropicVersion: "2023-06-01",
+    terminalLatch: freshLatch(),
+    runChat: async () => {
+      endpointWireCalls += 1;
+      return { status: "failure", failure: httpFailure(500, "unreachable") };
+    },
+  });
+  const endpointResult = await runSpecialists(specialistInput({
+    requestFn: malformedEndpoint,
+    sleep: phaseSleep,
+  }));
+  const endpointEntry = (endpointResult.aggregate.roles as SpecialistRoleEntry[]).find((candidate) => candidate.role === "correctness");
+  assert.equal(endpointWireCalls, 0, "the malformed endpoint never reaches the wire");
+  assert.equal(endpointEntry?.attempts, undefined, "a call refused before the wire is not an attempt");
+  assert.equal(endpointResult.aggregate.request_count, 0, "the refused call is not a wire attempt");
+  assert.equal(endpointEntry?.status, "error");
+  assert.equal(endpointEntry?.error_kind, "transport");
+  assert.match(String(endpointResult.artifacts.perRole.correctness?.errors[0]), /Invalid URL/, "the persisted failure text is the one the transport itself produces");
+
+  let headerWireCalls = 0;
+  const reservedHeader = specialistRequestFn({
+    baseUrl: "http://model.test",
+    apiKey: "k",
+    anthropicVersion: "2023-06-01",
+    terminalLatch: freshLatch(),
+    // A hand-built map that collides with a transport header the action owns:
+    // the wire boundary refuses it before anything is sent.
+    extraHeaders: { authorization: "Bearer other" },
+    runChat: async () => {
+      headerWireCalls += 1;
+      return { status: "failure", failure: httpFailure(500, "unreachable") };
+    },
+  });
+  const headerResult = await runSpecialists(specialistInput({
+    requestFn: reservedHeader,
+    sleep: phaseSleep,
+  }));
+  const headerEntry = (headerResult.aggregate.roles as SpecialistRoleEntry[]).find((candidate) => candidate.role === "correctness");
+  assert.equal(headerWireCalls, 0, "the refused header set never reaches the wire");
+  assert.equal(headerEntry?.attempts, undefined, "a call refused before the wire is not an attempt");
+  assert.equal(headerResult.aggregate.request_count, 0, "the refused call is not a wire attempt");
+});
+
 test("#1080: the combined-scout lane loop behaves the same way", async () => {
   let wireCalls = 0;
   const requestFn = specialistRequestFn({
