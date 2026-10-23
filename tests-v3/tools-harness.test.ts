@@ -367,7 +367,7 @@ test("smart-tier wall-clock exhaustion stops the loop with the deadline stop rea
     },
   }));
   assert.equal(result.stop_reason, "wall-clock-exceeded");
-  assert.equal(result.native_loop_error, "smart tool-loop deadline exceeded");
+  assert.equal(result.native_loop_error, "tool-loop deadline exceeded");
   assert.equal(result.native_loop_verdict_produced, undefined);
 });
 
