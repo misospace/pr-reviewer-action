@@ -169,6 +169,24 @@ test("#1220: Anthropic prompt caching advances through the growing native-loop t
   // OpenAI is unaffected: cachePrefix remains an Anthropic-only wire concern.
   const openai = c.toRequestPayload("openai", "m", { cachePrefix: true });
   assert.equal(JSON.stringify(openai).includes("cache_control"), false);
+
+  // Verdict rendering drops transient turn notes, so when a closing user
+  // instruction shares a message with tool results it IS stable and the
+  // moving breakpoint may advance through that final text block.
+  const verdictConversation = new Conversation();
+  verdictConversation.system = "reviewer prompt";
+  verdictConversation.addAssistantToolCalls([{ id: "v", name: "read_file", arguments: "{}" }]);
+  verdictConversation.addToolResult("v", "evidence");
+  verdictConversation.addUser("Produce the final verdict.");
+  const verdict = verdictConversation.toRequestPayload("anthropic", "m", {
+    cachePrefix: true,
+    verdictTurn: true,
+    keepFullHistoryOnVerdict: true,
+  });
+  const verdictMessages = verdict.messages as Array<{ role: string; content: unknown }>;
+  const verdictTail = verdictMessages.at(-1)!.content as Array<Record<string, unknown>>;
+  assert.equal(verdictTail.at(-1)!.type, "text");
+  assert.deepEqual(verdictTail.at(-1)!.cache_control, { type: "ephemeral" });
 });
 
 test("collapsed verdict turn folds history into the system note and keeps a closing user turn", () => {
