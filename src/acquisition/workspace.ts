@@ -449,9 +449,10 @@ async function readBoundedGitPointer(path: string): Promise<string | null> {
  * `realpath` (git writes the admin pointer canonicalized, so a symlinked
  * tmpdir ancestor must not break the proof). Any failure — missing,
  * unreadable, or symlinked pointer, oversized pointer, content that is
- * not a `gitdir:` line, or a pointer target outside the mirror — is
- * unproven: the entry is left in place (fail closed, never removed) for
- * whoever can prove it. */
+ * not a `gitdir:` line, a `gitdir:` first line carrying NUL bytes, or a
+ * pointer target
+ * outside the mirror — is unproven: the entry is left in place (fail
+ * closed, never removed) for whoever can prove it. */
 async function workspaceOwnedByMirror(dir: string, mirrorPath: string): Promise<boolean> {
   try {
     const raw = await readBoundedGitPointer(join(dir, ".git"));
@@ -463,6 +464,12 @@ async function workspaceOwnedByMirror(dir: string, mirrorPath: string): Promise<
     // line, never a blob whose tail could smuggle a path component in.
     const line = raw.slice(0, raw.indexOf("\n") === -1 ? raw.length : raw.indexOf("\n")).trimEnd();
     if (!line.startsWith("gitdir:")) {
+      return false;
+    }
+    // NUL is not filesystem-path-safe and never appears in a valid git
+    // pointer; a NUL-bearing line is junk, not a provable target (fail
+    // closed, same posture as the string-`startsWith` containment below).
+    if (line.includes("\u0000")) {
       return false;
     }
     const target = resolve(dir, line.slice("gitdir:".length).trim());
@@ -489,8 +496,9 @@ async function workspaceOwnedByMirror(dir: string, mirrorPath: string): Promise<
  * or containment under the mirror's `realpath` when an ancestor is a
  * symlink; git writes the pointer canonicalized). An entry whose
  * ownership cannot be proven — missing or unreadable or symlinked
- * pointer, oversized pointer, content that is not a `gitdir:` line, or a
- * pointer target outside the mirror — is left in place: a shared root can
+ * pointer, oversized pointer, content that is not a `gitdir:` line, a
+ * NUL-bearing `gitdir:` first line, or a pointer target outside the
+ * mirror — is left in place: a shared root can
  * never cause cross-repository removals, a skipped entry counts as neither
  * removed nor failed, and an entry unprovable by every sweep stays
  * operator/maintenance work.

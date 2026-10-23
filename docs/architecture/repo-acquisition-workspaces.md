@@ -136,9 +136,11 @@ gc/prune/repack and disables auto-gc on every mirror command.
   `workspaces` sibling, an aged entry is removed only when its `.git`
   gitdir pointer names an admin directory strictly inside the supplied
   mirror's directory (textual containment, or under the mirror's
-  `realpath` for symlinked ancestors); unprovable entries — missing,
-  symlinked, oversized, or non-`gitdir:` pointer, or a target outside the
-  mirror — are left in place (a sweep never removes what it cannot prove,
+   `realpath` for symlinked ancestors); unprovable entries — missing,
+   symlinked, oversized, non-`gitdir:` or NUL-bearing-first-line pointer,
+   or a target
+   outside the mirror — are left in place (a sweep never removes what it
+   cannot prove,
   and a pointerless entry is unprovable by ANY sweep, so reclaiming those
   stays operator/maintenance work) and count as neither removed nor
   failed, so one repository's sweep can never delete another's checkout

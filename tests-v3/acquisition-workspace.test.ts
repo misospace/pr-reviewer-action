@@ -701,6 +701,7 @@ test("workspace: sweepStaleWorkspaces is isolated by mirror ownership across a s
   let wsB1: WorkspaceHandle | undefined;
   let wsB2: WorkspaceHandle | undefined;
   let wsB3: WorkspaceHandle | undefined;
+  let wsB4: WorkspaceHandle | undefined;
   try {
     // Two mirrors under ONE cache root: distinct sha256 siblings that both
     // derive the same shared `workspaces` sibling.
@@ -761,8 +762,26 @@ test("workspace: sweepStaleWorkspaces is isolated by mirror ownership across a s
     assert.deepEqual(alphaSweep2, { removed: 0, failed: 0 });
     wsB3 = created;
     assert.ok((await readdir(wsB3.info.rootPath)).includes("README.md"));
+
+    // Overlap with close(): an AGED beta workspace closed concurrently
+    // with an alpha sweep under disjoint per-mirror locks. The sweep sees
+    // the aged entry (or finds it already gone) but its ownership proof
+    // can only name beta, so alpha removes nothing; beta's close cleans
+    // its own checkout and registration regardless of the interleaving.
+    wsB4 = await createReviewWorkspace(betaCache, { headSha: headB });
+    await utimes(wsB4.info.rootPath, old, old);
+    const b4Path = wsB4.info.rootPath;
+    const [alphaSweep3] = await Promise.all([
+      sweepStaleWorkspaces(alphaCache, { maxAgeMs: 1_800_000 }),
+      wsB4.close(),
+    ]);
+    assert.deepEqual(alphaSweep3, { removed: 0, failed: 0 });
+    await assert.rejects(lstat(b4Path));
+    const betaListAfter = gitIn(betaCache.path, ["worktree", "list", "--porcelain"]);
+    assert.ok(!betaListAfter.includes(b4Path));
+    await lstat(wsB3.info.rootPath);
   } finally {
-    for (const handle of [wsA, wsB1, wsB2, wsB3]) {
+    for (const handle of [wsA, wsB1, wsB2, wsB3, wsB4]) {
       if (handle !== undefined) await handle.close().catch(() => undefined);
     }
     await rm(root, { recursive: true, force: true });
@@ -780,6 +799,7 @@ test("workspace: sweepStaleWorkspaces leaves entries whose mirror ownership is u
   const oversized = join(workspaces, "oversized-git");
   const notpointer = join(workspaces, "not-a-pointer");
   const mixedlines = join(workspaces, "mixed-lines-git");
+  const nulbearing = join(workspaces, "nul-pointer-git");
   try {
     // Positive control: a real owned, aged workspace is still removed.
     const stale = await createReviewWorkspace(env.cache, { headSha: env.head });
@@ -811,7 +831,12 @@ test("workspace: sweepStaleWorkspaces leaves entries whose mirror ownership is u
     // the tail must never smuggle containment in.
     await mkdir(mixedlines, { mode: 0o700 });
     await writeFile(join(mixedlines, ".git"), `nope\n${join(env.cache.path, "worktrees", "x")}\n`);
-    for (const dir of [plain, linked, outside, traversal, oversized, notpointer, mixedlines]) {
+    // (h) NUL-bearing: even text that would otherwise contain INSIDE the
+    // mirror is junk — NUL never appears in a valid pointer and is not
+    // filesystem-path-safe, so the proof fails closed.
+    await mkdir(nulbearing, { mode: 0o700 });
+    await writeFile(join(nulbearing, ".git"), `gitdir: ${env.cache.path}/worktrees/x\u0000evil\n`);
+    for (const dir of [plain, linked, outside, traversal, oversized, notpointer, mixedlines, nulbearing]) {
       await utimes(dir, old, old);
     }
 
@@ -827,8 +852,22 @@ test("workspace: sweepStaleWorkspaces leaves entries whose mirror ownership is u
     await lstat(oversized);
     await lstat(notpointer);
     await lstat(mixedlines);
+    await lstat(nulbearing);
     assertOnlyMirrorWorktree(env);
     await stale.close();
+
+    // Hostile-root refusal is preserved around the ownership skip: with
+    // the workspaces root replaced by a symlink, the sweep refuses before
+    // enumerating anything and removes nothing.
+    await rm(workspaces, { recursive: true, force: true });
+    await symlink(join(env.root, "elsewhere"), workspaces);
+    await assert.rejects(
+      sweepStaleWorkspaces(env.cache, { maxAgeMs: 1_800_000 }),
+      (error: unknown) =>
+        error instanceof AcquisitionError &&
+        error.code === "workspace_refusal" &&
+        /symlink/.test(error.message),
+    );
   } finally {
     await env.close();
   }
