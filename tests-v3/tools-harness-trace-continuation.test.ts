@@ -805,3 +805,110 @@ test("#1210: an unwired native loop still fails gh_api closed in-band", async ()
   assert.equal(toolCall.status, "error");
   assert.equal((toolCall.result as Record<string, unknown>).error, "platform transport not configured");
 });
+
+// #1226: the per-call tool timeout is clamped to the remaining wall-clock
+// budget at the loop's tool-execution seam, so a large
+// TOOL_REQUEST_TIMEOUT_SEC cannot outlive TOOL_LOOP_WALL_CLOCK_SEC. The
+// fixture's constant clock makes the remaining budget exact: the deadline is
+// captured once (clock 0, so deadline = wall clock) and every remaining
+// check reads that same constant, scripting the remaining budget
+// independently of how many clock reads the loop performs.
+
+test("#1226: a gh_api call inside a near-exhausted exchange is clamped to the remaining wall-clock budget", async () => {
+  const { root, deps } = workspace();
+  seedWorkspace(root);
+  const scripted = [
+    openAiCall("c1", "gh_api", '{"endpoint":"repos/o/r/pulls/1"}'),
+    openAiText("evidence gathered"),
+    openAiVerdict("done"),
+  ];
+  let calls = 0;
+  const seamTimeouts: number[] = [];
+  const { result } = await runToolHarness(deps({
+    transport: async () => scripted[calls++],
+    env: {
+      SYSTEM_PROMPT: "You are the reviewer.",
+      TOOL_REQUEST_TIMEOUT_SEC: "300",
+      TOOL_LOOP_WALL_CLOCK_SEC: "10",
+    },
+    ghApi: async (_endpoint: string, opts?: { timeoutMs: number }) => {
+      seamTimeouts.push(opts?.timeoutMs ?? -1);
+      return { data: { number: 1, title: "the pull" } };
+    },
+  }));
+  // Remaining budget = 10s exactly, so the 300s per-call bound is clamped
+  // down to it: min(300, max(1, trunc(10))).
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.deepEqual(seamTimeouts, [10000]);
+  assert.ok(seamTimeouts[0]! <= 10 * 1000, "the per-call timeout must not exceed the remaining wall-clock budget");
+  assert.ok(seamTimeouts[0]! < 300 * 1000, "the unclamped TOOL_REQUEST_TIMEOUT_SEC must not reach the seam");
+  const toolCall = (result.tool_results as Array<Record<string, unknown>>)[0] as Record<string, unknown>;
+  assert.equal(toolCall.status, "ok");
+});
+
+test("#1226: a gh_api call well inside the exchange keeps the configured per-call timeout", async () => {
+  const { root, deps } = workspace();
+  seedWorkspace(root);
+  const scripted = [
+    openAiCall("c1", "gh_api", '{"endpoint":"repos/o/r/pulls/1"}'),
+    openAiText("evidence gathered"),
+    openAiVerdict("done"),
+  ];
+  let calls = 0;
+  const seamTimeouts: number[] = [];
+  const { result } = await runToolHarness(deps({
+    transport: async () => scripted[calls++],
+    env: {
+      SYSTEM_PROMPT: "You are the reviewer.",
+      TOOL_REQUEST_TIMEOUT_SEC: "25",
+      TOOL_LOOP_WALL_CLOCK_SEC: "500",
+    },
+    ghApi: async (_endpoint: string, opts?: { timeoutMs: number }) => {
+      seamTimeouts.push(opts?.timeoutMs ?? -1);
+      return { data: { number: 1, title: "the pull" } };
+    },
+  }));
+  // Remaining budget 500s dwarfs the 25s per-call bound: no clamp applies.
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.deepEqual(seamTimeouts, [25000]);
+});
+
+test("#1226: a tool call against a sub-second remaining budget gets the 1s floor, never zero", async () => {
+  const { root, deps } = workspace();
+  seedWorkspace(root);
+  const scripted = [
+    openAiCall("c1", "gh_api", '{"endpoint":"repos/o/r/pulls/1"}'),
+    openAiText("evidence gathered"),
+    openAiVerdict("done"),
+  ];
+  let calls = 0;
+  let firstTurnServed = false;
+  const seamTimeouts: number[] = [];
+  const { result } = await runToolHarness(deps({
+    transport: async () => {
+      const response = scripted[calls++];
+      firstTurnServed = true;
+      return response;
+    },
+    timeFn: () => {
+      // Deadline capture reads 0 (deadline = 0 + 10); from the first tool
+      // execution onward the clock sits at 9.5, so remaining reads 0.5s:
+      // trunc(0.5) is 0 and the clamp must floor that to 1s, not 0.
+      if (!firstTurnServed) return 0;
+      return 9.5;
+    },
+    env: {
+      SYSTEM_PROMPT: "You are the reviewer.",
+      TOOL_REQUEST_TIMEOUT_SEC: "300",
+      TOOL_LOOP_WALL_CLOCK_SEC: "10",
+    },
+    ghApi: async (_endpoint: string, opts?: { timeoutMs: number }) => {
+      seamTimeouts.push(opts?.timeoutMs ?? -1);
+      return { data: { number: 1, title: "the pull" } };
+    },
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.deepEqual(seamTimeouts, [1000]);
+  const toolCall = (result.tool_results as Array<Record<string, unknown>>)[0] as Record<string, unknown>;
+  assert.equal(toolCall.status, "ok");
+});
