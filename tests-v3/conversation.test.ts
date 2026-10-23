@@ -130,6 +130,47 @@ test("verdict turn drops tools unconditionally and applies response_format", () 
   assert.equal(aVerdict.tools, undefined);
 });
 
+test("#1220: Anthropic prompt caching advances through the growing native-loop transcript", () => {
+  const c = new Conversation();
+  c.system = "reviewer prompt";
+  c.addUser("planning context");
+
+  const first = c.toRequestPayload("anthropic", "m", { cachePrefix: true });
+  const firstSystem = first.system as Array<Record<string, unknown>>;
+  const firstTools = first.tools as Array<Record<string, unknown>>;
+  const firstMessages = first.messages as Array<{ role: string; content: unknown }>;
+  assert.deepEqual(firstSystem[0]!.cache_control, { type: "ephemeral" });
+  assert.deepEqual(firstTools.at(-1)!.cache_control, { type: "ephemeral" });
+  assert.deepEqual(firstMessages[0]!.content, [{
+    type: "text",
+    text: "planning context",
+    cache_control: { type: "ephemeral" },
+  }]);
+
+  // A real next round grows the transcript with an assistant tool_use and a
+  // user tool_result. Rendering is fresh: the old planning-message marker is
+  // gone, and the ONE moving message breakpoint advances to the newest result.
+  c.addAssistantToolCalls([{ id: "a", name: "read_file", arguments: '{"path":"src/a.ts"}' }]);
+  c.addToolResult("a", { content: "file body" });
+  const second = c.toRequestPayload("anthropic", "m", { cachePrefix: true });
+  const secondMessages = second.messages as Array<{ role: string; content: unknown }>;
+  assert.equal(secondMessages.length, 3);
+  assert.equal(typeof secondMessages[0]!.content, "string");
+  const toolUse = secondMessages[1]!.content as Array<Record<string, unknown>>;
+  assert.equal(toolUse[0]!.cache_control, undefined);
+  const toolResult = secondMessages[2]!.content as Array<Record<string, unknown>>;
+  assert.deepEqual(toolResult[0]!.cache_control, { type: "ephemeral" });
+
+  // System + final tool definition + latest message block = three explicit
+  // breakpoints, safely below Anthropic's four-breakpoint request limit.
+  const markerCount = JSON.stringify(second).match(/"cache_control"/g)?.length ?? 0;
+  assert.equal(markerCount, 3);
+
+  // OpenAI is unaffected: cachePrefix remains an Anthropic-only wire concern.
+  const openai = c.toRequestPayload("openai", "m", { cachePrefix: true });
+  assert.equal(JSON.stringify(openai).includes("cache_control"), false);
+});
+
 test("collapsed verdict turn folds history into the system note and keeps a closing user turn", () => {
   const c = new Conversation();
   c.system = "reviewer prompt";
