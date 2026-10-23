@@ -726,6 +726,51 @@ export type ConversationEvent =
 export type WireMessage = Record<string, unknown>;
 
 /**
+ * Add ONE moving Anthropic prompt-cache breakpoint to the newest cacheable
+ * message block. The renderer builds fresh wire messages for every request,
+ * so an older moving breakpoint never survives into the next round: round N
+ * caches the prefix through its newest completed conversation block, and
+ * round N+1 advances that breakpoint after the new assistant/tool exchange.
+ *
+ * Anthropic accepts cache_control on text, tool_use, and tool_result blocks.
+ * String user content is normalized to a text block only in this wire copy;
+ * the neutral Conversation events remain untouched. System + tool-definition
+ * breakpoints are retained separately, keeping the request at three explicit
+ * breakpoints maximum (below Anthropic's four-breakpoint limit).
+ */
+function markLatestAnthropicMessageCacheBreakpoint(messages: WireMessage[]): void {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex--) {
+    const message = messages[messageIndex]!;
+    const content = message.content;
+
+    if (typeof content === "string") {
+      if (content === "") continue;
+      message.content = [{
+        type: "text",
+        text: content,
+        cache_control: { type: "ephemeral" },
+      }];
+      return;
+    }
+
+    if (!Array.isArray(content)) continue;
+    for (let blockIndex = content.length - 1; blockIndex >= 0; blockIndex--) {
+      const block = content[blockIndex];
+      if (block === null || typeof block !== "object" || Array.isArray(block)) continue;
+      const record = block as Record<string, unknown>;
+      const type = record.type;
+      if (type !== "text" && type !== "tool_use" && type !== "tool_result") continue;
+      if (type === "text" && (typeof record.text !== "string" || record.text === "")) continue;
+      content[blockIndex] = {
+        ...record,
+        cache_control: { type: "ephemeral" },
+      };
+      return;
+    }
+  }
+}
+
+/**
  * Append-only multi-turn conversation state for native tool calling. The
  * class is API-agnostic internally: the caller appends neutral events and the
  * wire-shape conversion happens at `toRequestPayload` time, so a single
@@ -1371,9 +1416,10 @@ export class Conversation {
     if (outputConfig !== null) payload.output_config = outputConfig;
     // Anthropic prompt caching is opt-in (#263 Part 2): unlike OpenAI's
     // automatic prefix cache, it caches nothing unless cache_control markers
-    // are present. Mark the stable prefix — the system block and the tools
-    // block (the two large turn-invariant pieces) — so the multi-turn loop
-    // reuses them. The growing messages tail stays uncached.
+    // are present. Keep the stable system/tool breakpoints AND advance one
+    // moving message breakpoint through the growing transcript (#1220). That
+    // lets each native-loop round reuse the previous assistant/tool history
+    // instead of repeatedly prefilling the full accumulated conversation.
     if (options.cachePrefix) {
       if (system) {
         payload.system = [
@@ -1387,6 +1433,7 @@ export class Conversation {
           cache_control: { type: "ephemeral" },
         };
       }
+      markLatestAnthropicMessageCacheBreakpoint(messages);
     }
     return payload;
   }
