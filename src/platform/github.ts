@@ -201,11 +201,11 @@ export class GitHubAdapter implements PlatformReadAdapter {
     }
   }
 
-  private options(accept?: string): Parameters<typeof requestJson>[1] {
+  private options(accept?: string, timeoutMs?: number): Parameters<typeof requestJson>[1] {
     return {
       token: this.token,
       accept,
-      timeoutMs: this.timeoutMs,
+      timeoutMs: timeoutMs ?? this.timeoutMs,
       fetchImpl: this.fetchImpl,
       allowedOrigin: this.origin,
     };
@@ -412,14 +412,14 @@ export class GitHubAdapter implements PlatformReadAdapter {
   }
 
   /** The validated read-only seam, mirroring `pr_reviewer.platform.gh_api`
-   * on the GitHub backend: hardcoded api.github.com origin, Bearer auth,
-   * JSON parse, `{"error": ...}` on failures — never a throw. */
-  async ghApi(endpoint: string): Promise<GhApiResult> {
+   * on the GitHub backend: the adapter's validated API base origin, Bearer
+   * auth, JSON parse, `{"error": ...}` on failures — never a throw. */
+  async ghApi(endpoint: string, opts?: { timeoutMs?: number }): Promise<GhApiResult> {
     const validated = this.validate(endpoint);
     if ("error" in validated) return validated;
     if (!this.token) return { error: "Missing GH_TOKEN" };
     try {
-      const { status, data } = await requestJson(this.url(validated.full_path), this.options("application/vnd.github.v3+json"));
+      const { status, data } = await requestJson(this.url(validated.full_path), this.options("application/vnd.github.v3+json", opts?.timeoutMs));
       if (status !== 200) {
         return { error: `GitHub API error: ${status}` };
       }

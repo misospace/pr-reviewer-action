@@ -27,15 +27,32 @@ import { maskAndTruncate, maskAndTruncateSource, maskAndTruncateSourceDetailed, 
 import { committedSourceProvenance, sanitizedSourceProvenance, untrustedTextProvenance, type EvidenceProvenance } from "../context/evidence-provenance.js";
 import { isRepositorySkillPath, readRepositorySkill, SKILL_LIMITS, SKILL_RESULT_MAX_BYTES } from "../context/repository-skills.js";
 import { USER_AGENT } from "../platform/user-agent.js";
+import { decodeEndpointPath } from "../platform/endpoint.js";
 import { runProcess, type ProcessResult } from "../runtime/subprocess.js";
 import { pyDumpsCompact, pyDumpsSorted } from "../model/conversation.js";
 
 export const GH_DENY_SUBSTRINGS = [
   "/actions/secrets",
+  "/actions/variables",
   "/dependabot/secrets",
   "/environments/",
   "/dispatches",
 ] as const;
+
+/**
+ * Deny substrings for the API ENDPOINT validator only. The workspace path
+ * guard keeps the shared list above: refusing a blob ENDPOINT is a decision
+ * about the API surface, not a statement about a file the PR happens to add
+ * under a `git/blobs/` directory (#1215 review).
+ *
+ * Blob CONTENT is refused here: the generic `gh_api` channel has no file
+ * path, so it cannot apply the path-aware source-safe masking a blob's bytes
+ * need — and base64-encoded bytes hide every credential shape from the
+ * redactor, so an encoded blob would reach the conversation intact. Blob
+ * bytes are served by `repo_contents`, whose file read knows the path and
+ * masks the decoded bytes (#876).
+ */
+export const GH_API_DENY_SUBSTRINGS = [...GH_DENY_SUBSTRINGS, "/git/blobs"] as const;
 
 /** Port of platform.SENSITIVE_PATH_RE (case-insensitive). */
 export const SENSITIVE_PATH_RE =
@@ -53,6 +70,17 @@ const REPO_CONTENTS_BLOB_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const REPO_CONTENTS_MAX_BYTES = 12000;
 const REPO_CONTENTS_DEFAULT_MAX_ENTRIES = 200;
 const REPO_CONTENTS_MAX_ENTRIES = 500;
+
+/**
+ * `encodeURIComponent` leaves `!'()*` unencoded; the platform endpoint
+ * validator rejects them (stricter charset than the tool-side path policy),
+ * so percent-encode the residue (#1210 review). EVERY segment of every
+ * endpoint this module builds goes through it, so the contents and blob
+ * builders cannot drift apart (#1215 review).
+ */
+export function encodeEndpointSegment(segment: string): string {
+  return segment.replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+}
 
 /**
  * The tool harness executes same-repo code, so command execution must not be
@@ -74,17 +102,17 @@ export const GIT_GREP_DEFAULT_MAX_RESULTS = 60;
 export const GIT_GREP_MAX_RESULTS_LIMIT = 200;
 
 export type NetworkResponse = { status: number; headers?: Record<string, string>; body: string; url?: string };
-export type GhGetResponse = { status: number; body: string };
 
 /**
- * Injected I/O seams. `ghGet` performs one authenticated platform GET and
- * returns the raw status+body (it may throw on transport failure; a timeout
- * throw carries `name === "AbortError"`). `fetch` serves web_fetch/web_search.
+ * Injected I/O seams. `ghApi` is the run's configured forge read capability
+ * (#1210): a validated GitHub-shaped endpoint path in, `{"data": ...}` or
+ * `{"error": ...}` out — it mirrors `PlatformAdapter.ghApi` and never throws
+ * for policy or HTTP errors. `fetch` serves web_fetch/web_search.
  */
 export type ToolDeps = {
   env: NodeJS.ProcessEnv;
   fetch?: (url: string, init: { headers: Record<string, string>; timeoutMs: number; method?: string; body?: string; redirect?: "manual"; signal?: AbortSignal }) => Promise<NetworkResponse>;
-  ghGet?: (url: string, headers: Record<string, string>, timeoutMs: number) => Promise<GhGetResponse>;
+  ghApi?: (endpoint: string, opts?: { timeoutMs: number }) => Promise<{ data?: unknown; error?: string }>;
   runProcess?: (options: Parameters<typeof runProcess>[0]) => Promise<ProcessResult>;
 };
 
@@ -341,8 +369,9 @@ export function validateEndpoint(
   if (isRootLevel) {
     const full = `/${parts.join("/")}`;
     const lower = full.toLowerCase();
-    for (const deny of GH_DENY_SUBSTRINGS) {
-      if (lower.includes(deny)) return { error: `Path segment denied: ${deny}` };
+    const decoded = decodeEndpointPath(full).toLowerCase();
+    for (const deny of GH_API_DENY_SUBSTRINGS) {
+      if (lower.includes(deny) || decoded.includes(deny)) return { error: `Path segment denied: ${deny}` };
     }
     return { full_path: full, repo_key: "" };
   }
@@ -358,22 +387,38 @@ export function validateEndpoint(
     return { error: `Endpoint prefix not allowed: ${full}` };
   }
   const lower = full.toLowerCase();
-  for (const deny of GH_DENY_SUBSTRINGS) {
-    if (lower.includes(deny)) return { error: `Path segment denied: ${deny}` };
+  const decoded = decodeEndpointPath(full).toLowerCase();
+  for (const deny of GH_API_DENY_SUBSTRINGS) {
+    if (lower.includes(deny) || decoded.includes(deny)) return { error: `Path segment denied: ${deny}` };
   }
   return { full_path: full, repo_key: repoKey };
 }
 
 export const _validate_endpoint = validateEndpoint;
 
-function ghHeaders(ctx: ToolContext): Record<string, string> | { error: string } {
-  const token = ctx.deps.env.GH_TOKEN || ctx.deps.env.GITHUB_TOKEN || "";
-  if (!token) return { error: "Missing GH_TOKEN" };
-  return {
-    Authorization: `Bearer ${token}`,
-    Accept: "application/vnd.github.v3+json",
-    "User-Agent": USER_AGENT,
-  };
+/**
+ * One validated forge read through the run's configured platform capability
+ * (#1210). The endpoint is the tool-level-validated GitHub-shaped path; the
+ * platform adapter re-validates it structurally, attaches its own credential,
+ * and answers in-band (`{"data"}`/`{"error"}`). Unwired runs fail closed here.
+ */
+async function forgeGet(ctx: ToolContext, endpoint: string): Promise<{ data?: unknown; error?: string }> {
+  if (!ctx.deps.ghApi) throw new Error("platform transport not configured");
+  return ctx.deps.ghApi(endpoint, { timeoutMs: (ctx.requestTimeout ?? 25) * 1000 });
+}
+
+export async function ghApi(endpoint: string, ctx: ToolContext): Promise<Obj> {
+  const v = validateEndpoint(endpoint, ctx.allowedGhRepos, ctx.currentRepo);
+  if (v.error) return { error: v.error };
+  try {
+    const res = await forgeGet(ctx, v.full_path ?? "");
+    if (res.error !== undefined) return { error: res.error };
+    return { data: res.data };
+  } catch (exc) {
+    const err = exc as Error;
+    if (err?.name === "AbortError") return { error: `GitHub API timed out after ${ctx.requestTimeout ?? 25}s` };
+    return { error: err?.message ?? String(exc) };
+  }
 }
 
 /** Standard HTTP reason phrases — the full `http.client.responses` table
@@ -403,30 +448,6 @@ function httpReason(status: number): string {
     509: "Bandwidth Limit Exceeded", 510: "Not Extended", 511: "Network Authentication Required",
   };
   return reasons[status] ?? "Error";
-}
-
-async function ghGet(ctx: ToolContext, url: string): Promise<{ status: number; body: string }> {
-  if (!ctx.deps.ghGet) throw new Error("platform transport not configured");
-  const headers = ghHeaders(ctx);
-  if ("error" in headers) throw new Error(headers.error);
-  return ctx.deps.ghGet(url, headers, (ctx.requestTimeout ?? 25) * 1000);
-}
-
-export async function ghApi(endpoint: string, ctx: ToolContext): Promise<Obj> {
-  const v = validateEndpoint(endpoint, ctx.allowedGhRepos, ctx.currentRepo);
-  if (v.error) return { error: v.error };
-  try {
-    const res = await ghGet(ctx, `https://api.github.com${v.full_path}`);
-    if (res.status >= 400) {
-      return { error: `GitHub API error: ${res.status} ${httpReason(res.status)}` };
-    }
-    return { data: JSON.parse(res.body) };
-  } catch (exc) {
-    if (exc instanceof Error && exc.message === "Missing GH_TOKEN") return { error: exc.message };
-    const err = exc as Error;
-    if (err?.name === "AbortError") return { error: `GitHub API timed out after ${ctx.requestTimeout ?? 25}s` };
-    return { error: err?.message ?? String(exc) };
-  }
 }
 
 /** Port of `platform._validate_repo_contents` + `_repo_contents_github`;
@@ -463,12 +484,17 @@ export async function repoContents(
   const cap = Math.max(1, Math.min(optInt(maxEntries) ?? REPO_CONTENTS_DEFAULT_MAX_ENTRIES, REPO_CONTENTS_MAX_ENTRIES));
   const timeoutSec = ctx.requestTimeout ?? 25;
 
-  const contentsUrl = (p: string, r: string | null): string => {
-    const encodedRepo = repo.split("/").map((part) => encodeURIComponent(part)).join("/");
+  // One repo-scoped prefix for EVERY endpoint this tool builds, so the
+  // contents and blob builders cannot drift apart in how they encode the
+  // repo segment (#1215 review).
+  const encodedRepo = repo.split("/").map((part) => encodeURIComponent(part)).join("/");
+  const repoPrefix = `/repos/${encodeEndpointSegment(encodedRepo)}`;
+
+  const contentsEndpoint = (p: string, r: string | null): string => {
     const encodedPath = p ? p.split("/").map((part) => encodeURIComponent(part)).join("/") : "";
-    let url = `https://api.github.com/repos/${encodedRepo}/contents/${encodedPath}`.replace(/\/+$/, "");
-    if (r !== null) url += `?ref=${encodeURIComponent(r)}`;
-    return url;
+    let endpoint = `${repoPrefix}/contents/${encodeEndpointSegment(encodedPath)}`.replace(/\/+$/, "");
+    if (r !== null) endpoint += `?ref=${encodeEndpointSegment(encodeURIComponent(r))}`;
+    return endpoint;
   };
 
   // File preflight: find the parent directory listing and locate the entry so
@@ -482,9 +508,9 @@ export async function repoContents(
     const basename = idx > 0 ? path_.slice(idx + 1) : path_;
     let parentData: unknown;
     try {
-      const res = await ghGet(ctx, contentsUrl(parentPath, ref_));
-      if (res.status >= 400) throw new Error("preflight status");
-      parentData = JSON.parse(res.body);
+      const res = await forgeGet(ctx, contentsEndpoint(parentPath, ref_));
+      if (res.error !== undefined) throw new Error("preflight status");
+      parentData = res.data;
     } catch {
       return { error: "Repository contents file preflight failed" };
     }
@@ -505,17 +531,16 @@ export async function repoContents(
     }
   }
 
-  const encodedRepo = repo.split("/").map((part) => encodeURIComponent(part)).join("/");
-  const url = blobSha
-    ? `https://api.github.com/repos/${encodedRepo}/git/blobs/${blobSha}`
-    : contentsUrl(path_, ref_);
+  const endpoint = blobSha
+    ? `${repoPrefix}/git/blobs/${blobSha}`
+    : contentsEndpoint(path_, ref_);
   let data: unknown;
   try {
-    const res = await ghGet(ctx, url);
-    if (res.status >= 400) {
-      return { error: `GitHub contents API error: ${res.status} ${httpReason(res.status)}` };
+    const res = await forgeGet(ctx, endpoint);
+    if (res.error !== undefined) {
+      return { error: res.error };
     }
-    data = JSON.parse(res.body);
+    data = res.data;
   } catch (exc) {
     const err = exc as Error;
     if (err?.name === "AbortError") {
@@ -593,6 +618,36 @@ function decodeGhApiContentsFile(data: unknown): Obj | null {
     return { path, sha, size, binary: true, truncated: false };
   }
   return { path, sha, size, content: text };
+}
+
+/** A response payload that still carries base64-encoded bytes after the
+ * Contents-file decode declined it (#1215 review). The Contents API file
+ * object is claimed above; anything else with a base64 `content` field is
+ * encoded source (a Git blob, or another endpoint answering with bytes)
+ * whose credential shapes the redactor cannot see.
+ *
+ * The scan visits every node at any depth and the encoding comparison is
+ * case-insensitive: the guard is the last line against encoded bytes reaching
+ * the conversation, so a payload nested in an array or an object, or spelled
+ * `BASE64`, must not walk past it (#1215 review). The traversal is iterative
+ * and unbounded — a depth-capped scan lets a payload below the cap reach the
+ * model unmasked (#1215 review round 3). */
+function isBase64ContentPayload(data: unknown): boolean {
+  const stack: unknown[] = [data];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (Array.isArray(current)) {
+      for (const item of current) stack.push(item);
+      continue;
+    }
+    if (current === null || typeof current !== "object") continue;
+    const payload = current as Obj;
+    if (typeof payload.encoding === "string" && payload.encoding.toLowerCase() === "base64" && typeof payload.content === "string") {
+      return true;
+    }
+    for (const value of Object.values(payload)) stack.push(value);
+  }
+  return false;
 }
 
 export async function readFile(input: string, ctx: ToolContext, offset?: number | null, limit?: number | null): Promise<Obj> {
@@ -1336,9 +1391,24 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
           break;
         }
         const data = res.data;
+        // A payload that still carries a base64 `content` field here is one
+        // the Contents-file decode did not claim (#1215 review): a Git blob
+        // (`repos/o/r/git/blobs/<sha>`) or any other endpoint answering with
+        // encoded bytes. Emitting it verbatim would hand the model
+        // base64-encoded source bytes — the redactor cannot match a
+        // credential inside them, so it would reach the conversation intact.
+        // Refuse instead; blob bytes are served by `repo_contents`, which
+        // knows the file path and masks the decoded bytes.
+        if (isBase64ContentPayload(data)) {
+          throw new Error("Refusing response with base64-encoded content payload");
+        }
         let text = "";
         if (data !== null && typeof data === "object") {
-          text = pyCompactJson(data).slice(0, cap);
+          // The module invariant: every result passes secret redaction + a
+          // byte cap before it reaches the conversation (#1210 review). The
+          // forge payload is untrusted data — mask the FULL text first so a
+          // credential straddling the cap is masked whole (#926 order).
+          text = bounded(pyCompactJson(data));
         }
         result = { response: text };
         break;

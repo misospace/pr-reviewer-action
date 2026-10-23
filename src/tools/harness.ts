@@ -1843,6 +1843,11 @@ export interface HarnessDeps {
    * `runNativeLoop` (which invokes it at most once after an accepted
    * verdict). Absent = the pre-#1145 loop, byte-for-byte. */
   traceGapProbe?: TraceGapProbe;
+  /** #1210: the run's configured forge read capability, threaded to the
+   * native loop's gh_api/repo_contents executors (mirrors
+   * `PlatformAdapter.ghApi`). Absent keeps the pre-#1210
+   * "platform transport not configured" behavior byte for byte. */
+  ghApi?: (endpoint: string, opts?: { timeoutMs: number }) => Promise<{ data?: unknown; error?: string }>;
 }
 
 /**
@@ -2248,7 +2253,10 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     maxSearchResults,
     sourceRevision,
     ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
-    deps: { env: env as NodeJS.ProcessEnv },
+    deps: {
+      env: env as NodeJS.ProcessEnv,
+      ...(deps.ghApi !== undefined ? { ghApi: deps.ghApi } : {}),
+    },
   };
 
   const executeFn = async (toolName: string, args: Record<string, unknown>): Promise<Record<string, unknown>> => {

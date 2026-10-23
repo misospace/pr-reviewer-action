@@ -76,8 +76,11 @@ export interface PlatformAdapter {
   repoPermission(): Promise<string | null>;
   /** The validated read-only API seam — the TS mirror of
    * `pr_reviewer.platform.gh_api`: returns `{"data": ...}` on success or
-   * `{"error": ...}`, never throws for policy rejections. */
-  ghApi(endpoint: string): Promise<GhApiResult>;
+   * `{"error": ...}`, never throws for policy rejections. `opts.timeoutMs`
+   * is an optional per-call override of the adapter's request timeout (the
+   * native tool loop passes its configured request bound, #1210); callers
+   * omitting it keep the adapter default. */
+  ghApi(endpoint: string, opts?: { timeoutMs?: number }): Promise<GhApiResult>;
 }
 
 /** Outcome of a platform read that the v2 seam can fail: `ok` mirrors the

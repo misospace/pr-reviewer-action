@@ -142,6 +142,21 @@ test("endpoint validation rejects hostile paths on both backends", () => {
   if (!("error" in root)) assert.equal(root.repo_key, "");
 });
 
+test("endpoint deny lists survive percent-encoding (#1215 review)", () => {
+  // The deny list is a substring check, so a smuggled escape would walk a
+  // denied segment past it: `%2F` and `%61` are decoded by the server before
+  // it routes the request.
+  assert.equal("error" in validateEndpoint("repos/o/r/actions%2Fsecrets", "*", "o/r"), true);
+  assert.equal("error" in validateEndpoint("repos/o/r/%61ctions/secrets", "*", "o/r"), true);
+  assert.equal("error" in validateEndpoint("repos/o/r/actions/variables", "*", "o/r"), true);
+  // A malformed escape is left as it is rather than failing the whole path,
+  // and the denied segment beside it is still caught.
+  assert.equal("error" in validateEndpoint("repos/o/r/actions%2Fsecrets%zz", "*", "o/r"), true);
+  // Blob endpoints stay available on the platform seam: `repo_contents` reads
+  // file bytes through it (the tool-side validator refuses them).
+  assert.equal("error" in validateEndpoint("repos/o/r/git/blobs/abc", "*", "o/r"), false);
+});
+
 test("forgejo path translation fails closed outside the table", () => {
   assert.equal(ForgejoAdapter.translate("/repos/o/r/pulls/12", "o/r"), "/api/v1/repos/o/r/pulls/12");
   assert.equal(ForgejoAdapter.translate("/repos/o/r/pulls/12.diff", "o/r"), "/api/v1/repos/o/r/pulls/12.diff");
@@ -236,4 +251,26 @@ test("github adapter surfaces API errors through the ghApi envelope", async () =
   const result = await adapter.ghApi("repos/o/r/pulls/1");
   assert.match(String(result.error), /403/);
   assert.equal(await adapter.repoPermission(), "unknown");
+});
+
+test("github adapter ghApi honors the per-call timeout override (#1210)", async () => {
+  // The native tool loop passes its configured request bound per call; the
+  // adapter must apply THAT bound, not its constructor default, so a hung
+  // forge read aborts on the loop's clock. A fetch that never resolves
+  // except through its abort signal proves the override reaches requestText.
+  const adapter = new GitHubAdapter({
+    repo: "o/r",
+    prNumber: "1",
+    token: "Bearer t",
+    timeoutMs: 90_000,
+    fetchImpl: ((_input: string | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+    })) as FetchLike,
+  });
+  // A 20 ms override must abort long before the 90 s constructor default —
+  // elapsed time discriminates the two bounds.
+  const startedAt = Date.now();
+  const result = await adapter.ghApi("repos/o/r/pulls/1", { timeoutMs: 20 });
+  assert.match(String(result.error), /Platform request failed/);
+  assert.ok(Date.now() - startedAt < 10_000, "the per-call override bound fired, not the adapter default");
 });

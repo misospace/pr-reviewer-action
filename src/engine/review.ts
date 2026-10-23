@@ -17,7 +17,7 @@ import { buildHarnessObligations } from "../requirements/obligations.js";
 import { externalChecksConclusion } from "../precheck/decide.js";
 import { readStandardsFileAtRef, StandardsFileRefError } from "../context/standards-file-ref.js";
 import { discoverRepositorySkills, readRepositorySkill, renderExplicitSkill, renderSkillCatalog, repositorySkillsAllowed } from "../context/repository-skills.js";
-import { loopContextLimits } from "../tools/harness.js";
+import { loopContextLimits, type HarnessDeps } from "../tools/harness.js";
 import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
@@ -1239,7 +1239,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
           ciState: traceCiState,
         })
         : undefined;
-      await runToolHarnessPhase(ws, env, workspace, log, cancellation.scope.signal, traceGapProbe);
+      await runToolHarnessPhase(ws, env, workspace, log, cancellation.scope.signal, traceGapProbe, adapter.ghApi.bind(adapter));
       checkpoint();
       traceGapContinuation = traceGapContinuationSummary(safeJson(ws.read("tool-harness.json")));
     }
@@ -1281,6 +1281,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       env, ws, profiles, streamBool, userMessage, log, errorLog, annotate, clock, sleep: dependencies.sleep,
       budgets, generatedPaths, standards, runDir, workspace,
       signal: cancellation.scope.signal,
+      ghApi: adapter.ghApi.bind(adapter),
     });
     delete env.TOOL_ESCALATION;
     checkpoint();
@@ -2861,6 +2862,9 @@ interface SmartReviewInput extends ReviewCallInput {
   runDir: string;
   /** The checkout the tool executors read (never the artifact run dir). */
   workspace: string;
+  /** #1210: the run's configured forge read capability for the smart tier's
+   * native loop (same adapter the primary tier binds). */
+  ghApi?: HarnessDeps["ghApi"];
 }
 
 /** review.sh `run_smart_review`: the escalated smart review with its own
@@ -2898,7 +2902,7 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
       env.SMART_REASONING_EFFORT = profiles.smart.reasoningEffort;
       env.TOOL_HARNESS_TIER = "smart";
       try {
-        await runToolHarnessPhase(ws, env, input.workspace, log, input.signal);
+        await runToolHarnessPhase(ws, env, input.workspace, log, input.signal, undefined, input.ghApi);
       } catch (cause) {
         errorLog(`smart tool harness failed: ${cause instanceof Error ? cause.message : String(cause)}`);
         ws.write("tool-harness.smart.json", '{"tier":"smart","mode":"native_loop","error":"execution failed","stop_reason":"request-error","rounds":0,"planned_request_count":0,"executed_request_count":0,"tool_results":[]}\n');

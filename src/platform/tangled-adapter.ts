@@ -174,7 +174,7 @@ export class TangledAdapter implements PlatformReadAdapter {
 
   /** The validated read-only API seam: unavailable, so it reports an error
    * and never throws (the contract for `ghApi`). */
-  async ghApi(_endpoint: string): Promise<GhApiResult> {
+  async ghApi(_endpoint: string, _opts?: { timeoutMs?: number }): Promise<GhApiResult> {
     return { error: tangledCapabilityError("gh_api reads").message };
   }
 

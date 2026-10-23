@@ -757,3 +757,51 @@ test("#1145 wiring: runToolHarness forwards deps.traceGapProbe to the native loo
   const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8")) as Record<string, unknown>;
   assert.deepEqual(artifact.trace_repair_continuation, result.trace_repair_continuation);
 });
+
+test("#1210 wiring: runToolHarness forwards deps.ghApi to the native loop executors", async () => {
+  // The production path is stages.runToolHarnessPhase → runToolHarness →
+  // runNativeLoop → ToolContext.deps.ghApi. The run's configured forge
+  // capability must reach the gh_api executor through the entry point the
+  // action actually uses, or every permitted call fails with
+  // "platform transport not configured" (#1210).
+  const { root, deps } = workspace();
+  seedWorkspace(root);
+  const scripted = [
+    openAiCall("c1", "gh_api", '{"endpoint":"repos/o/r/pulls/1"}'),
+    openAiText("evidence gathered"),
+    openAiVerdict("done"),
+  ];
+  let calls = 0;
+  const seamCalls: Array<{ endpoint: string; timeoutMs: number }> = [];
+  const { result } = await runToolHarness(deps({
+    transport: async () => scripted[calls++],
+    env: { SYSTEM_PROMPT: "You are the reviewer.", TOOL_REQUEST_TIMEOUT_SEC: "7" },
+    ghApi: async (endpoint: string, opts?: { timeoutMs: number }) => {
+      seamCalls.push({ endpoint, timeoutMs: opts?.timeoutMs ?? -1 });
+      return { data: { number: 1, title: "the pull" } };
+    },
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.deepEqual(seamCalls, [{ endpoint: "/repos/o/r/pulls/1", timeoutMs: 7000 }]);
+  const toolCall = (result.tool_results as Array<Record<string, unknown>>)[0] as Record<string, unknown>;
+  assert.equal(toolCall.status, "ok");
+  assert.equal((toolCall.result as Record<string, unknown>).response, '{"number":1,"title":"the pull"}');
+});
+
+test("#1210: an unwired native loop still fails gh_api closed in-band", async () => {
+  const { deps } = workspace();
+  const scripted = [
+    openAiCall("c1", "gh_api", '{"endpoint":"repos/o/r/pulls/1"}'),
+    openAiText("evidence gathered"),
+    openAiVerdict("done"),
+  ];
+  let calls = 0;
+  const result = freshResult();
+  const handled = await runNativeLoop(
+    loopInput(deps({ transport: async () => scripted[calls++], env: { SYSTEM_PROMPT: "You are the reviewer." } }), { result }),
+  );
+  assert.equal(handled, true);
+  const toolCall = (result.tool_results as Array<Record<string, unknown>>)[0] as Record<string, unknown>;
+  assert.equal(toolCall.status, "error");
+  assert.equal((toolCall.result as Record<string, unknown>).error, "platform transport not configured");
+});
