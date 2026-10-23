@@ -38,6 +38,18 @@ test("#680: validates paths and integer anchors, deduplicates threads, caps comm
   assert.deepEqual(result.comments[0], { path: "new", body: `**Info:** first\n\n_Automated finding from AI PR review._${idMarker(findings.at(-2) as Record<string, unknown>)}`, line: 1, side: "RIGHT" });
 });
 
+test("#1163: a NUL-bearing path is unanchorable — the finding is skipped, not anchored", () => {
+  // Fail closed regardless of the diff positions map: NUL is illegal in any
+  // POSIX path component, so the path proves no anchor even before the
+  // positions lookup could answer.
+  const result = buildComments([
+    { file: "a\u0000.ts", line: 1, message: "nul" },
+    { file: "new\u0000", line: 1, message: "nul suffix" },
+  ], diff, 20, { forgejoPositions: false });
+  assert.deepEqual(result.comments, []);
+  assert.equal(result.skipped, 2);
+});
+
 test("#680: Forgejo uses diff-relative positions and ignores metadata slots", () => {
   const result = buildComments([{ file: "new", line: 2, message: "x" }], diff, 20, { forgejoPositions: true });
   assert.deepEqual(result.comments[0], { path: "new", body: `**Info:** x\n\n_Automated finding from AI PR review._${idMarker({ file: "new", line: 2, message: "x" })}`, new_position: 3 });
