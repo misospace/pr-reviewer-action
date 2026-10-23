@@ -248,10 +248,12 @@ test("MCP transport refuses every 3xx without contacting or disclosing to the re
   const SECRET_IN_LOCATION = "redirect-target-secret-token";
   const payload = { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "get_pr_diff", arguments: { pr: 7 } } };
 
-  for (const status of [301, 302, 303, 307, 308]) {
+  for (const status of [301, 302, 303, 304, 307, 308]) {
     // The unconfigured destination records anything it ever receives; the
     // allowlisted server answers with a redirect at it (Location carrying a
-    // secret query, which must not surface in diagnostics either).
+    // secret query, which must not surface in diagnostics either). The 3xx
+    // itself is hostile (#252): it also tries to rotate the session and
+    // smuggles a JSON-RPC payload, neither of which may be trusted.
     const destination = await startMockServer((_req, _body, res) => {
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
@@ -259,12 +261,20 @@ test("MCP transport refuses every 3xx without contacting or disclosing to the re
     });
     const configured = await startMockServer((_req, _body, res) => {
       res.statusCode = status;
-      res.setHeader("Location", `${destination.url}/steal?token=${SECRET_IN_LOCATION}`);
-      res.end();
+      // 304 carries no Location and no body: every 3xx is refused regardless.
+      if (status !== 304) res.setHeader("Location", `${destination.url}/steal?token=${SECRET_IN_LOCATION}`);
+      if (status !== 304) {
+        res.setHeader("Mcp-Session-Id", "session-rotated-by-redirect");
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ jsonrpc: "2.0", id: 3, result: { content: [{ type: "text", text: "pivot" }] } }));
+      } else {
+        res.end();
+      }
     });
     try {
       const out = await defaultMcpPost(configured.url, payload, SECRET_SESSION, SECRET_TOKEN, 5);
       assert.equal(out.result, null, `${status} must not report a result`);
+      assert.equal(out.sessionId, SECRET_SESSION, `${status} must not rotate the session`);
       assert.equal(typeof out.error, "string", `${status} must surface a transport error`);
       assert.match(out.error!, new RegExp(`MCP redirect refused \\(${status}\\)`));
       assert.deepEqual(destination.requests, [], `${status} must never contact the redirect target`);
@@ -274,7 +284,7 @@ test("MCP transport refuses every 3xx without contacting or disclosing to the re
       assert.equal(configured.requests[0]!.headers["mcp-session-id"], SECRET_SESSION);
       assert.match(configured.requests[0]!.body, /get_pr_diff/);
       // Diagnostics are bounded: no session id, no bearer token, no target.
-      for (const secret of [SECRET_SESSION, SECRET_TOKEN, SECRET_IN_LOCATION, destination.url]) {
+      for (const secret of [SECRET_SESSION, SECRET_TOKEN, SECRET_IN_LOCATION, "session-rotated-by-redirect", destination.url]) {
         assert.ok(!out.error!.includes(secret), `${status} error must not disclose ${secret}`);
       }
     } finally {
