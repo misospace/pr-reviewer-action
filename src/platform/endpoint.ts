@@ -21,6 +21,28 @@ export const GH_DENY_SUBSTRINGS: readonly string[] = [
   "/dispatches",
 ];
 
+const PERCENT_ESCAPE_RE = /%([0-9a-f]{2})/gi;
+
+/**
+ * Percent-decoded form of an endpoint path, for the deny comparison.
+ *
+ * The deny list is a substring check, so a smuggled escape would walk a
+ * denied segment straight past it: `/actions%2Fsecrets` and `/%61ctions/secrets`
+ * are the same request as `/actions/secrets` once the server decodes them.
+ * Each escape is decoded independently (a malformed escape is left as it is
+ * rather than failing the whole path), so the comparison sees the segment the
+ * server will route to (#1215 review).
+ */
+export function decodeEndpointPath(path: string): string {
+  return path.replace(PERCENT_ESCAPE_RE, (match) => {
+    try {
+      return decodeURIComponent(match);
+    } catch {
+      return match;
+    }
+  });
+}
+
 // Repo-scoped endpoint prefixes; they require the owner/repo allowlist check.
 const GH_API_ALLOWED_PREFIXES: readonly string[] = ["/repos/"];
 
@@ -57,8 +79,9 @@ export function validateEndpoint(endpoint: string, allowedRepos: string | readon
   if (isRootLevel) {
     const full_path = `/${parts.join("/")}`;
     const lower = full_path.toLowerCase();
+    const decoded = decodeEndpointPath(full_path).toLowerCase();
     for (const deny of GH_DENY_SUBSTRINGS) {
-      if (lower.includes(deny)) return { error: `Path segment denied: ${deny}` };
+      if (lower.includes(deny) || decoded.includes(deny)) return { error: `Path segment denied: ${deny}` };
     }
     return { full_path, repo_key: "" };
   }
@@ -76,8 +99,9 @@ export function validateEndpoint(endpoint: string, allowedRepos: string | readon
     return { error: `Endpoint prefix not allowed: ${full_path}` };
   }
   const lower = full_path.toLowerCase();
+  const decoded = decodeEndpointPath(full_path).toLowerCase();
   for (const deny of GH_DENY_SUBSTRINGS) {
-    if (lower.includes(deny)) return { error: `Path segment denied: ${deny}` };
+    if (lower.includes(deny) || decoded.includes(deny)) return { error: `Path segment denied: ${deny}` };
   }
   return { full_path, repo_key };
 }

@@ -64,9 +64,11 @@ parameters: { type: "object", properties: { path: { type: "string", description:
       "capability (on non-GitHub forges only translated endpoints are " +
       "served; unmapped ones are refused). Path must start with repos/, " +
       "issues/, search/, releases/, git/ and target an allowlisted repo. " +
+      "Blob content (git/blobs) is refused here — read file bytes with " +
+      "repo_contents, which masks them. " +
       "Prefer this over web_fetch for anything on the forge: releases " +
       "(repos/o/r/releases/tags/TAG) and version diffs " +
-      "(repos/o/r/compare/BASE...HEAD) — it avoids the HTML pages that " +
+      "(repos/o/r/compare/BASE...HEAD) — it avoids HTML pages that " +
       "often 404.",
     parameters: {
       type: "object",

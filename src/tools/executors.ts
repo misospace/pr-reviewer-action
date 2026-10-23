@@ -27,6 +27,7 @@ import { maskAndTruncate, maskAndTruncateSource, maskAndTruncateSourceDetailed, 
 import { committedSourceProvenance, sanitizedSourceProvenance, untrustedTextProvenance, type EvidenceProvenance } from "../context/evidence-provenance.js";
 import { isRepositorySkillPath, readRepositorySkill, SKILL_LIMITS, SKILL_RESULT_MAX_BYTES } from "../context/repository-skills.js";
 import { USER_AGENT } from "../platform/user-agent.js";
+import { decodeEndpointPath } from "../platform/endpoint.js";
 import { runProcess, type ProcessResult } from "../runtime/subprocess.js";
 import { pyDumpsCompact, pyDumpsSorted } from "../model/conversation.js";
 
@@ -37,6 +38,21 @@ export const GH_DENY_SUBSTRINGS = [
   "/environments/",
   "/dispatches",
 ] as const;
+
+/**
+ * Deny substrings for the API ENDPOINT validator only. The workspace path
+ * guard keeps the shared list above: refusing a blob ENDPOINT is a decision
+ * about the API surface, not a statement about a file the PR happens to add
+ * under a `git/blobs/` directory (#1215 review).
+ *
+ * Blob CONTENT is refused here: the generic `gh_api` channel has no file
+ * path, so it cannot apply the path-aware source-safe masking a blob's bytes
+ * need — and base64-encoded bytes hide every credential shape from the
+ * redactor, so an encoded blob would reach the conversation intact. Blob
+ * bytes are served by `repo_contents`, whose file read knows the path and
+ * masks the decoded bytes (#876).
+ */
+export const GH_API_DENY_SUBSTRINGS = [...GH_DENY_SUBSTRINGS, "/git/blobs"] as const;
 
 /** Port of platform.SENSITIVE_PATH_RE (case-insensitive). */
 export const SENSITIVE_PATH_RE =
@@ -54,6 +70,17 @@ const REPO_CONTENTS_BLOB_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const REPO_CONTENTS_MAX_BYTES = 12000;
 const REPO_CONTENTS_DEFAULT_MAX_ENTRIES = 200;
 const REPO_CONTENTS_MAX_ENTRIES = 500;
+
+/**
+ * `encodeURIComponent` leaves `!'()*` unencoded; the platform endpoint
+ * validator rejects them (stricter charset than the tool-side path policy),
+ * so percent-encode the residue (#1210 review). EVERY segment of every
+ * endpoint this module builds goes through it, so the contents and blob
+ * builders cannot drift apart (#1215 review).
+ */
+export function encodeEndpointSegment(segment: string): string {
+  return segment.replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+}
 
 /**
  * The tool harness executes same-repo code, so command execution must not be
@@ -342,8 +369,9 @@ export function validateEndpoint(
   if (isRootLevel) {
     const full = `/${parts.join("/")}`;
     const lower = full.toLowerCase();
-    for (const deny of GH_DENY_SUBSTRINGS) {
-      if (lower.includes(deny)) return { error: `Path segment denied: ${deny}` };
+    const decoded = decodeEndpointPath(full).toLowerCase();
+    for (const deny of GH_API_DENY_SUBSTRINGS) {
+      if (lower.includes(deny) || decoded.includes(deny)) return { error: `Path segment denied: ${deny}` };
     }
     return { full_path: full, repo_key: "" };
   }
@@ -359,8 +387,9 @@ export function validateEndpoint(
     return { error: `Endpoint prefix not allowed: ${full}` };
   }
   const lower = full.toLowerCase();
-  for (const deny of GH_DENY_SUBSTRINGS) {
-    if (lower.includes(deny)) return { error: `Path segment denied: ${deny}` };
+  const decoded = decodeEndpointPath(full).toLowerCase();
+  for (const deny of GH_API_DENY_SUBSTRINGS) {
+    if (lower.includes(deny) || decoded.includes(deny)) return { error: `Path segment denied: ${deny}` };
   }
   return { full_path: full, repo_key: repoKey };
 }
@@ -455,15 +484,16 @@ export async function repoContents(
   const cap = Math.max(1, Math.min(optInt(maxEntries) ?? REPO_CONTENTS_DEFAULT_MAX_ENTRIES, REPO_CONTENTS_MAX_ENTRIES));
   const timeoutSec = ctx.requestTimeout ?? 25;
 
+  // One repo-scoped prefix for EVERY endpoint this tool builds, so the
+  // contents and blob builders cannot drift apart in how they encode the
+  // repo segment (#1215 review).
+  const encodedRepo = repo.split("/").map((part) => encodeURIComponent(part)).join("/");
+  const repoPrefix = `/repos/${encodeEndpointSegment(encodedRepo)}`;
+
   const contentsEndpoint = (p: string, r: string | null): string => {
-    const encodedRepo = repo.split("/").map((part) => encodeURIComponent(part)).join("/");
     const encodedPath = p ? p.split("/").map((part) => encodeURIComponent(part)).join("/") : "";
-    // encodeURIComponent leaves `!'()*` unencoded; the platform endpoint
-    // validator rejects them (stricter charset than the tool-side path
-    // policy), so percent-encode the residue (#1210 review).
-    const encode = (part: string): string => part.replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
-    let endpoint = `/repos/${encode(encodedRepo)}/contents/${encode(encodedPath)}`.replace(/\/+$/, "");
-    if (r !== null) endpoint += `?ref=${encodeURIComponent(r).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)}`;
+    let endpoint = `${repoPrefix}/contents/${encodeEndpointSegment(encodedPath)}`.replace(/\/+$/, "");
+    if (r !== null) endpoint += `?ref=${encodeEndpointSegment(encodeURIComponent(r))}`;
     return endpoint;
   };
 
@@ -501,9 +531,8 @@ export async function repoContents(
     }
   }
 
-  const encodedRepo = repo.split("/").map((part) => encodeURIComponent(part)).join("/");
   const endpoint = blobSha
-    ? `/repos/${encodedRepo}/git/blobs/${blobSha}`
+    ? `${repoPrefix}/git/blobs/${blobSha}`
     : contentsEndpoint(path_, ref_);
   let data: unknown;
   try {
@@ -589,6 +618,27 @@ function decodeGhApiContentsFile(data: unknown): Obj | null {
     return { path, sha, size, binary: true, truncated: false };
   }
   return { path, sha, size, content: text };
+}
+
+/** A response payload that still carries base64-encoded bytes after the
+ * Contents-file decode declined it (#1215 review). The Contents API file
+ * object is claimed above; anything else with a base64 `content` field is
+ * encoded source (a Git blob, or another endpoint answering with bytes)
+ * whose credential shapes the redactor cannot see.
+ *
+ * The scan is recursive and the encoding comparison is case-insensitive: the
+ * guard is the last line against encoded bytes reaching the conversation, so
+ * a payload nested in an array or an object, or spelled `BASE64`, must not
+ * walk past it (#1215 review). */
+function isBase64ContentPayload(data: unknown, depth = 0): boolean {
+  if (depth > 4) return false;
+  if (Array.isArray(data)) return data.some((item) => isBase64ContentPayload(item, depth + 1));
+  if (data === null || typeof data !== "object") return false;
+  const payload = data as Obj;
+  if (typeof payload.encoding === "string" && payload.encoding.toLowerCase() === "base64" && typeof payload.content === "string") {
+    return true;
+  }
+  return Object.values(payload).some((value) => isBase64ContentPayload(value, depth + 1));
 }
 
 export async function readFile(input: string, ctx: ToolContext, offset?: number | null, limit?: number | null): Promise<Obj> {
@@ -1332,6 +1382,17 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
           break;
         }
         const data = res.data;
+        // A payload that still carries a base64 `content` field here is one
+        // the Contents-file decode did not claim (#1215 review): a Git blob
+        // (`repos/o/r/git/blobs/<sha>`) or any other endpoint answering with
+        // encoded bytes. Emitting it verbatim would hand the model
+        // base64-encoded source bytes — the redactor cannot match a
+        // credential inside them, so it would reach the conversation intact.
+        // Refuse instead; blob bytes are served by `repo_contents`, which
+        // knows the file path and masks the decoded bytes.
+        if (isBase64ContentPayload(data)) {
+          throw new Error("Refusing response with base64-encoded content payload");
+        }
         let text = "";
         if (data !== null && typeof data === "object") {
           // The module invariant: every result passes secret redaction + a

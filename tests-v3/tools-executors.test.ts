@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  ALLOWED_COMMANDS, UNTRACKED_PATH_ERROR, allowlistedHost, buildTrackedIndex, executeToolRequest, findFiles, ghApi, gitBlame, gitGrep,
+  ALLOWED_COMMANDS, UNTRACKED_PATH_ERROR, allowlistedHost, buildTrackedIndex, encodeEndpointSegment, executeToolRequest, findFiles, ghApi, gitBlame, gitGrep,
   listTree, readFile, resolveWorkspacePath, runCommand, validateEndpoint,
   webFetch, webSearch, type ToolContext,
 } from "../src/tools/executors.js";
@@ -100,6 +100,8 @@ test("gh endpoint guard applies repo and denied-path policy on repo and root rou
   assert.equal(validateEndpoint("repos/other/r/pulls", ["*"]).repo_key, "other/r");
   assert.equal(validateEndpoint("search/code?q=foo", []).repo_key, "");
   for (const route of ["repos/o/r/actions/secrets", "issues/actions/secrets", "search/actions/secrets"]) assert.match(validateEndpoint(route, ["o/r"]).error!, /Path segment denied/);
+  // The blob endpoint is refused on the API surface (#1215 review).
+  assert.match(validateEndpoint("repos/o/r/git/blobs/abc", ["o/r"]).error!, /Path segment denied/);
   assert.match(validateEndpoint("file:///etc/passwd", []).error!, /Dot-segment not allowed/);
   const bad = await ghApi("repos/o/r/actions/secrets", ctx("/tmp", { allowedGhRepos: ["o/r"], deps: { ...deps(), ghApi: async () => { throw Error("must not call"); } } })); assert.match(bad.error, /Path segment denied/);
 });
@@ -243,6 +245,156 @@ test("gh_api JSON responses are secret-redacted before reaching the conversation
   assert.equal(res.status, "ok");
   assert.match(res.result.response, /\[REDACTED\]/);
   assert.doesNotMatch(res.result.response, /ghp_/);
+});
+
+test("gh_api refuses blob content endpoints: encoded source bytes never reach the model (#1215 review)", async () => {
+  const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+  const encoded = Buffer.from(`token: ${secret}\n`, "utf8").toString("base64");
+  const seen: string[] = [];
+  const wired = ctx("/tmp", {
+    allowedGhRepos: ["o/r"],
+    deps: {
+      ...deps(),
+      ghApi: async (endpoint: string) => {
+        seen.push(endpoint);
+        return { data: { content: encoded, encoding: "base64", sha: "a".repeat(40), url: "https://api.github.com/repos/o/r/git/blobs/x" } };
+      },
+    },
+  });
+  const blob = await executeToolRequest("gh_api", { endpoint: `repos/o/r/git/blobs/${"a".repeat(40)}` }, wired);
+  assert.equal(blob.status, "error");
+  assert.match(String(blob.result.error), /Path segment denied/);
+  // The blob endpoint never reaches the forge capability at all.
+  assert.deepEqual(seen, []);
+  // Neither the credential nor any encoding of it is in the model-facing result.
+  const surfaced = JSON.stringify(blob.result);
+  assert.doesNotMatch(surfaced, /ghp_/);
+  assert.doesNotMatch(surfaced, /ABCDEFGHIJKLMNOPQRSTUVWXYZ123456/);
+  assert.doesNotMatch(surfaced, new RegExp(Buffer.from(secret, "utf8").toString("base64")));
+  assert.doesNotMatch(surfaced, new RegExp(encoded.slice(0, 24)));
+});
+
+test("gh_api refuses an undecoded base64 content payload (#1215 review)", async () => {
+  const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+  const encoded = Buffer.from(`token: ${secret}\n`, "utf8").toString("base64");
+  const res = await executeToolRequest("gh_api", { endpoint: "repos/o/r/pulls/1" },
+    ctx("/tmp", { allowedGhRepos: ["o/r"], deps: { ...deps(), ghApi: async () => ({ data: { content: encoded, encoding: "base64" } }) } }));
+  // A base64 payload no decoder claimed is encoded source bytes: emitting it
+  // verbatim would hand the model bytes the redactor cannot match.
+  assert.equal(res.status, "error");
+  assert.match(String(res.result.error), /base64/);
+  const surfaced = JSON.stringify(res.result);
+  assert.doesNotMatch(surfaced, /ghp_/);
+  assert.doesNotMatch(surfaced, new RegExp(encoded.slice(0, 24)));
+});
+
+test("a nested or oddly spelled base64 payload is still refused (#1215 review)", async () => {
+  const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+  const encoded = Buffer.from(`token: ${secret}\n`, "utf8").toString("base64");
+  const payloads = [
+    { items: [{ content: encoded, encoding: "base64" }] },
+    { blob: { content: encoded, encoding: "BASE64" } },
+    [{ content: encoded, encoding: "base64" }],
+  ];
+  for (const data of payloads) {
+    const res = await executeToolRequest("gh_api", { endpoint: "repos/o/r/pulls/1" },
+      ctx("/tmp", { allowedGhRepos: ["o/r"], deps: { ...deps(), ghApi: async () => ({ data }) } }));
+    assert.equal(res.status, "error");
+    assert.match(String(res.result.error), /base64/);
+    assert.doesNotMatch(JSON.stringify(res.result), /ghp_/);
+  }
+});
+
+test("the blob endpoint refusal survives percent-encoding (#1215 review)", async () => {
+  const seen: string[] = [];
+  const wired = ctx("/tmp", {
+    allowedGhRepos: ["o/r"],
+    deps: { ...deps(), ghApi: async (endpoint: string) => { seen.push(endpoint); return { data: { number: 1 } }; } },
+  });
+  // `/git/blobs%2F<sha>` and `/%67it/blobs/<sha>` are the same request once
+  // the server decodes them: the refusal must not depend on the spelling.
+  for (const endpoint of [`repos/o/r/git/blobs%2F${"a".repeat(40)}`, `repos/o/r/%67it/blobs/${"a".repeat(40)}`]) {
+    const res = await executeToolRequest("gh_api", { endpoint }, wired);
+    assert.equal(res.status, "error");
+    assert.match(String(res.result.error), /Path segment denied/);
+  }
+  assert.deepEqual(seen, []);
+  // The same spelling outside the blob endpoint is unaffected.
+  const ok = await executeToolRequest("gh_api", { endpoint: "repos/o/r/pulls/1" }, wired);
+  assert.equal(ok.status, "ok");
+});
+
+test("blob bytes reach the model only through repo_contents, and masked (#1215 review)", async () => {
+  const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+  const encoded = Buffer.from(`token: ${secret}\n`, "utf8").toString("base64");
+  const res = await executeToolRequest("repo_contents", { repo: "o/r", path: "src/app.ts" },
+    ctx("/tmp", {
+      allowedGhRepos: ["o/r"],
+      deps: {
+        ...deps(),
+        ghApi: async (endpoint: string) => {
+          if (endpoint === "/repos/o/r/contents/src") {
+            return { data: [{ name: "app.ts", type: "file", path: "src/app.ts", sha: "f".repeat(40) }] };
+          }
+          if (endpoint === `/repos/o/r/git/blobs/${"f".repeat(40)}`) {
+            return { data: { encoding: "base64", content: encoded } };
+          }
+          throw new Error(`Unexpected endpoint: ${endpoint}`);
+        },
+      },
+    }));
+  // The file-read channel serves the blob's bytes, masked with the
+  // path-aware source-safe policy.
+  assert.equal(res.status, "ok");
+  assert.match(res.result.content, /redacted:credential/);
+  assert.doesNotMatch(res.result.content, /ghp_/);
+  assert.doesNotMatch(res.result.content, /ABCDEFGHIJKLMNOPQRSTUVWXYZ123456/);
+});
+
+test("the endpoint builders residue-encode every segment and share one repo prefix (#1215 review)", async () => {
+  // `encodeURIComponent` leaves `!'()*` unencoded and the platform endpoint
+  // validator rejects them, so every segment this module builds is
+  // residue-encoded — through ONE encoder, so the two builders cannot drift.
+  assert.equal(encodeEndpointSegment("o'!r(x)*"), "o%27%21r%28x%29%2A");
+  assert.equal(encodeEndpointSegment("plain-path"), "plain-path");
+  const endpoints: string[] = [];
+  const wired = ctx("/tmp", {
+    allowedGhRepos: ["o/r"],
+    deps: {
+      ...deps(),
+      ghApi: async (endpoint: string) => {
+        endpoints.push(endpoint);
+        if (endpoint.includes("/contents/")) {
+          return { data: [{ name: "app.ts", type: "file", path: "src/app.ts", sha: "f".repeat(40) }] };
+        }
+        return { data: { encoding: "base64", content: Buffer.from("const x = 1;\n", "utf8").toString("base64") } };
+      },
+    },
+  });
+  // A path carrying the residue characters reaches the seam percent-encoded —
+  // the reachable case the platform endpoint validator would reject raw.
+  const res = await executeToolRequest("repo_contents", { repo: "o/r", path: "dir'!(1)/app.ts" }, wired);
+  assert.equal(res.status, "ok");
+  const contents = endpoints.find((e) => e.includes("/contents/"))!;
+  assert.match(contents, /%27%21%281%29/);
+  assert.doesNotMatch(contents, /[!'()*]/);
+  // The preflight (contents) endpoint and the blob endpoint share the same
+  // repo-scoped prefix — one builder, one encoding.
+  const blob = endpoints.find((e) => e.includes("/git/blobs/"))!;
+  assert.equal(contents.split("/contents/")[0], blob.split("/git/blobs/")[0]);
+});
+
+test("the blob endpoint refusal does not touch workspace paths (#1215 review)", async () => {
+  // The refusal is an API-surface decision: a file the PR adds under a
+  // `git/blobs/` directory is still readable in the workspace.
+  await fixture(async (root) => {
+    fs.mkdirSync(path.join(root, "git", "blobs"), { recursive: true });
+    const file = path.join(root, "git", "blobs", "note.txt");
+    fs.writeFileSync(file, "hello\n");
+    const guarded = resolveWorkspacePath("git/blobs/note.txt", root);
+    assert.equal(guarded.error, null);
+    assert.equal(guarded.path, fs.realpathSync(file));
+  });
 });
 
 test("the tool-level gates run before the real adapter bound as the seam (#1210)", async () => {

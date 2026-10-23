@@ -142,6 +142,21 @@ test("endpoint validation rejects hostile paths on both backends", () => {
   if (!("error" in root)) assert.equal(root.repo_key, "");
 });
 
+test("endpoint deny lists survive percent-encoding (#1215 review)", () => {
+  // The deny list is a substring check, so a smuggled escape would walk a
+  // denied segment past it: `%2F` and `%61` are decoded by the server before
+  // it routes the request.
+  assert.equal("error" in validateEndpoint("repos/o/r/actions%2Fsecrets", "*", "o/r"), true);
+  assert.equal("error" in validateEndpoint("repos/o/r/%61ctions/secrets", "*", "o/r"), true);
+  assert.equal("error" in validateEndpoint("repos/o/r/actions/variables", "*", "o/r"), true);
+  // A malformed escape is left as it is rather than failing the whole path,
+  // and the denied segment beside it is still caught.
+  assert.equal("error" in validateEndpoint("repos/o/r/actions%2Fsecrets%zz", "*", "o/r"), true);
+  // Blob endpoints stay available on the platform seam: `repo_contents` reads
+  // file bytes through it (the tool-side validator refuses them).
+  assert.equal("error" in validateEndpoint("repos/o/r/git/blobs/abc", "*", "o/r"), false);
+});
+
 test("forgejo path translation fails closed outside the table", () => {
   assert.equal(ForgejoAdapter.translate("/repos/o/r/pulls/12", "o/r"), "/api/v1/repos/o/r/pulls/12");
   assert.equal(ForgejoAdapter.translate("/repos/o/r/pulls/12.diff", "o/r"), "/api/v1/repos/o/r/pulls/12.diff");
