@@ -605,6 +605,25 @@ test("forgejo ghApi joins the translated /api/v1 path to the bare base exactly o
   assert.equal(seen[0]!.url, "https://git.example/api/v1/repos/o/r/pulls/5");
 });
 
+test("forgejo ghApi honors the per-call timeout override (#1210)", async () => {
+  // Mirror of the GitHub adapter test: the native tool loop's per-call bound
+  // must reach requestText through the async (JWT-exchanging) options path.
+  const adapter = new ForgejoAdapter({
+    repo: "o/r",
+    prNumber: "5",
+    baseUrl: "https://git.example",
+    token: "t",
+    timeoutMs: 90_000,
+    fetchImpl: ((_input: string | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+    })) as FetchLike,
+  });
+  const startedAt = Date.now();
+  const result = await adapter.ghApi("repos/o/r/pulls/5", { timeoutMs: 20 });
+  assert.match(String(result.error), /Platform request failed/);
+  assert.ok(Date.now() - startedAt < 10_000, "the per-call override bound fired, not the adapter default");
+});
+
 // ── Enrichment clients ──────────────────────────────────────────────────
 
 test("github enrichment is pinned to api.github.com and only serves the linked-source endpoint shapes", async () => {

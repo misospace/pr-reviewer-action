@@ -86,7 +86,7 @@ export class SemanticFixtureAdapter implements PlatformReadAdapter {
     return this.platform === "github" ? "unknown" : null;
   }
 
-  async ghApi(endpoint: string): Promise<GhApiResult> {
+  async ghApi(endpoint: string, _opts?: { timeoutMs?: number }): Promise<GhApiResult> {
     return { error: `gh_api is unavailable in semantic fixture mode: ${endpoint}` };
   }
 

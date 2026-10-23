@@ -172,11 +172,11 @@ export class ForgejoAdapter implements PlatformReadAdapter {
     return `token ${this.token}`;
   }
 
-  private async options(accept?: string): Promise<Parameters<typeof requestJson>[1]> {
+  private async options(accept?: string, timeoutMs?: number): Promise<Parameters<typeof requestJson>[1]> {
     return {
       token: await this.authorizationHeader(),
       accept,
-      timeoutMs: this.timeoutMs,
+      timeoutMs: timeoutMs ?? this.timeoutMs,
       fetchImpl: this.fetchImpl,
       allowedOrigin: this.origin,
     };
@@ -875,7 +875,7 @@ export class ForgejoAdapter implements PlatformReadAdapter {
   /** The validated read-only seam, mirroring `pr_reviewer.platform.gh_api`
    * on the Forgejo backend: GitHub-shaped paths translated onto /api/v1,
    * anything unmapped fails closed with "Endpoint not supported". */
-  async ghApi(endpoint: string): Promise<GhApiResult> {
+  async ghApi(endpoint: string, opts?: { timeoutMs?: number }): Promise<GhApiResult> {
     const validated = this.validate(endpoint);
     if ("error" in validated) return validated;
     const translated = ForgejoAdapter.translate(validated.full_path, validated.repo_key);
@@ -888,7 +888,7 @@ export class ForgejoAdapter implements PlatformReadAdapter {
     try {
       // `translate` already returns the /api/v1-prefixed path (as v2's
       // `_forgejo_translate` does); join it to the bare base like v2.
-      const { status, data } = await requestJson(`${this.baseUrl}${translated}`, (await this.options("application/json")));
+      const { status, data } = await requestJson(`${this.baseUrl}${translated}`, (await this.options("application/json", opts?.timeoutMs)));
       if (status !== 200) return { error: `Forgejo API error: ${status}` };
       return { data };
     } catch (error) {

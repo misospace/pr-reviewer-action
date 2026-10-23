@@ -32,6 +32,7 @@ import { pyDumpsCompact, pyDumpsSorted } from "../model/conversation.js";
 
 export const GH_DENY_SUBSTRINGS = [
   "/actions/secrets",
+  "/actions/variables",
   "/dependabot/secrets",
   "/environments/",
   "/dispatches",
@@ -74,17 +75,17 @@ export const GIT_GREP_DEFAULT_MAX_RESULTS = 60;
 export const GIT_GREP_MAX_RESULTS_LIMIT = 200;
 
 export type NetworkResponse = { status: number; headers?: Record<string, string>; body: string; url?: string };
-export type GhGetResponse = { status: number; body: string };
 
 /**
- * Injected I/O seams. `ghGet` performs one authenticated platform GET and
- * returns the raw status+body (it may throw on transport failure; a timeout
- * throw carries `name === "AbortError"`). `fetch` serves web_fetch/web_search.
+ * Injected I/O seams. `ghApi` is the run's configured forge read capability
+ * (#1210): a validated GitHub-shaped endpoint path in, `{"data": ...}` or
+ * `{"error": ...}` out — it mirrors `PlatformAdapter.ghApi` and never throws
+ * for policy or HTTP errors. `fetch` serves web_fetch/web_search.
  */
 export type ToolDeps = {
   env: NodeJS.ProcessEnv;
   fetch?: (url: string, init: { headers: Record<string, string>; timeoutMs: number; method?: string; body?: string; redirect?: "manual"; signal?: AbortSignal }) => Promise<NetworkResponse>;
-  ghGet?: (url: string, headers: Record<string, string>, timeoutMs: number) => Promise<GhGetResponse>;
+  ghApi?: (endpoint: string, opts?: { timeoutMs: number }) => Promise<{ data?: unknown; error?: string }>;
   runProcess?: (options: Parameters<typeof runProcess>[0]) => Promise<ProcessResult>;
 };
 
@@ -366,14 +367,29 @@ export function validateEndpoint(
 
 export const _validate_endpoint = validateEndpoint;
 
-function ghHeaders(ctx: ToolContext): Record<string, string> | { error: string } {
-  const token = ctx.deps.env.GH_TOKEN || ctx.deps.env.GITHUB_TOKEN || "";
-  if (!token) return { error: "Missing GH_TOKEN" };
-  return {
-    Authorization: `Bearer ${token}`,
-    Accept: "application/vnd.github.v3+json",
-    "User-Agent": USER_AGENT,
-  };
+/**
+ * One validated forge read through the run's configured platform capability
+ * (#1210). The endpoint is the tool-level-validated GitHub-shaped path; the
+ * platform adapter re-validates it structurally, attaches its own credential,
+ * and answers in-band (`{"data"}`/`{"error"}`). Unwired runs fail closed here.
+ */
+async function forgeGet(ctx: ToolContext, endpoint: string): Promise<{ data?: unknown; error?: string }> {
+  if (!ctx.deps.ghApi) throw new Error("platform transport not configured");
+  return ctx.deps.ghApi(endpoint, { timeoutMs: (ctx.requestTimeout ?? 25) * 1000 });
+}
+
+export async function ghApi(endpoint: string, ctx: ToolContext): Promise<Obj> {
+  const v = validateEndpoint(endpoint, ctx.allowedGhRepos, ctx.currentRepo);
+  if (v.error) return { error: v.error };
+  try {
+    const res = await forgeGet(ctx, v.full_path ?? "");
+    if (res.error !== undefined) return { error: res.error };
+    return { data: res.data };
+  } catch (exc) {
+    const err = exc as Error;
+    if (err?.name === "AbortError") return { error: `GitHub API timed out after ${ctx.requestTimeout ?? 25}s` };
+    return { error: err?.message ?? String(exc) };
+  }
 }
 
 /** Standard HTTP reason phrases — the full `http.client.responses` table
@@ -403,30 +419,6 @@ function httpReason(status: number): string {
     509: "Bandwidth Limit Exceeded", 510: "Not Extended", 511: "Network Authentication Required",
   };
   return reasons[status] ?? "Error";
-}
-
-async function ghGet(ctx: ToolContext, url: string): Promise<{ status: number; body: string }> {
-  if (!ctx.deps.ghGet) throw new Error("platform transport not configured");
-  const headers = ghHeaders(ctx);
-  if ("error" in headers) throw new Error(headers.error);
-  return ctx.deps.ghGet(url, headers, (ctx.requestTimeout ?? 25) * 1000);
-}
-
-export async function ghApi(endpoint: string, ctx: ToolContext): Promise<Obj> {
-  const v = validateEndpoint(endpoint, ctx.allowedGhRepos, ctx.currentRepo);
-  if (v.error) return { error: v.error };
-  try {
-    const res = await ghGet(ctx, `https://api.github.com${v.full_path}`);
-    if (res.status >= 400) {
-      return { error: `GitHub API error: ${res.status} ${httpReason(res.status)}` };
-    }
-    return { data: JSON.parse(res.body) };
-  } catch (exc) {
-    if (exc instanceof Error && exc.message === "Missing GH_TOKEN") return { error: exc.message };
-    const err = exc as Error;
-    if (err?.name === "AbortError") return { error: `GitHub API timed out after ${ctx.requestTimeout ?? 25}s` };
-    return { error: err?.message ?? String(exc) };
-  }
 }
 
 /** Port of `platform._validate_repo_contents` + `_repo_contents_github`;
@@ -463,12 +455,16 @@ export async function repoContents(
   const cap = Math.max(1, Math.min(optInt(maxEntries) ?? REPO_CONTENTS_DEFAULT_MAX_ENTRIES, REPO_CONTENTS_MAX_ENTRIES));
   const timeoutSec = ctx.requestTimeout ?? 25;
 
-  const contentsUrl = (p: string, r: string | null): string => {
+  const contentsEndpoint = (p: string, r: string | null): string => {
     const encodedRepo = repo.split("/").map((part) => encodeURIComponent(part)).join("/");
     const encodedPath = p ? p.split("/").map((part) => encodeURIComponent(part)).join("/") : "";
-    let url = `https://api.github.com/repos/${encodedRepo}/contents/${encodedPath}`.replace(/\/+$/, "");
-    if (r !== null) url += `?ref=${encodeURIComponent(r)}`;
-    return url;
+    // encodeURIComponent leaves `!'()*` unencoded; the platform endpoint
+    // validator rejects them (stricter charset than the tool-side path
+    // policy), so percent-encode the residue (#1210 review).
+    const encode = (part: string): string => part.replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+    let endpoint = `/repos/${encode(encodedRepo)}/contents/${encode(encodedPath)}`.replace(/\/+$/, "");
+    if (r !== null) endpoint += `?ref=${encodeURIComponent(r).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)}`;
+    return endpoint;
   };
 
   // File preflight: find the parent directory listing and locate the entry so
@@ -482,9 +478,9 @@ export async function repoContents(
     const basename = idx > 0 ? path_.slice(idx + 1) : path_;
     let parentData: unknown;
     try {
-      const res = await ghGet(ctx, contentsUrl(parentPath, ref_));
-      if (res.status >= 400) throw new Error("preflight status");
-      parentData = JSON.parse(res.body);
+      const res = await forgeGet(ctx, contentsEndpoint(parentPath, ref_));
+      if (res.error !== undefined) throw new Error("preflight status");
+      parentData = res.data;
     } catch {
       return { error: "Repository contents file preflight failed" };
     }
@@ -506,16 +502,16 @@ export async function repoContents(
   }
 
   const encodedRepo = repo.split("/").map((part) => encodeURIComponent(part)).join("/");
-  const url = blobSha
-    ? `https://api.github.com/repos/${encodedRepo}/git/blobs/${blobSha}`
-    : contentsUrl(path_, ref_);
+  const endpoint = blobSha
+    ? `/repos/${encodedRepo}/git/blobs/${blobSha}`
+    : contentsEndpoint(path_, ref_);
   let data: unknown;
   try {
-    const res = await ghGet(ctx, url);
-    if (res.status >= 400) {
-      return { error: `GitHub contents API error: ${res.status} ${httpReason(res.status)}` };
+    const res = await forgeGet(ctx, endpoint);
+    if (res.error !== undefined) {
+      return { error: res.error };
     }
-    data = JSON.parse(res.body);
+    data = res.data;
   } catch (exc) {
     const err = exc as Error;
     if (err?.name === "AbortError") {
@@ -1338,7 +1334,11 @@ export async function executeToolRequest(tool: string, args: Obj, ctx: ToolConte
         const data = res.data;
         let text = "";
         if (data !== null && typeof data === "object") {
-          text = pyCompactJson(data).slice(0, cap);
+          // The module invariant: every result passes secret redaction + a
+          // byte cap before it reaches the conversation (#1210 review). The
+          // forge payload is untrusted data — mask the FULL text first so a
+          // credential straddling the cap is masked whole (#926 order).
+          text = bounded(pyCompactJson(data));
         }
         result = { response: text };
         break;

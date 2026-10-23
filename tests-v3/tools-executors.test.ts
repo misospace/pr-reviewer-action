@@ -10,6 +10,8 @@ import {
 } from "../src/tools/executors.js";
 import { McpToolset, isReadOnlyTool, parseServerSpecs, splitNamespaced } from "../src/tools/mcp.js";
 import { USER_AGENT } from "../src/platform/user-agent.js";
+import { GitHubAdapter } from "../src/platform/github.js";
+import { ForgejoAdapter } from "../src/platform/forgejo.js";
 import { REDACTED_SOURCE } from "../src/context/redact.js";
 
 function fixture(fn: (root: string, outside: string) => Promise<void> | void): Promise<void> {
@@ -99,13 +101,13 @@ test("gh endpoint guard applies repo and denied-path policy on repo and root rou
   assert.equal(validateEndpoint("search/code?q=foo", []).repo_key, "");
   for (const route of ["repos/o/r/actions/secrets", "issues/actions/secrets", "search/actions/secrets"]) assert.match(validateEndpoint(route, ["o/r"]).error!, /Path segment denied/);
   assert.match(validateEndpoint("file:///etc/passwd", []).error!, /Dot-segment not allowed/);
-  const bad = await ghApi("repos/o/r/actions/secrets", ctx("/tmp", { allowedGhRepos: ["o/r"], deps: { ...deps(), ghGet: async () => { throw Error("must not call"); } } })); assert.match(bad.error, /Path segment denied/);
+  const bad = await ghApi("repos/o/r/actions/secrets", ctx("/tmp", { allowedGhRepos: ["o/r"], deps: { ...deps(), ghApi: async () => { throw Error("must not call"); } } })); assert.match(bad.error, /Path segment denied/);
 });
 
 test("gh_api decodes Contents API file objects instead of slicing base64 (#913)", async () => {
   const call = (payload: unknown) =>
     executeToolRequest("gh_api", { endpoint: "repos/o/r/contents/action.yml" },
-      ctx("/tmp", { allowedGhRepos: ["o/r"], deps: { ...deps(), env: { GH_TOKEN: "test-token" }, ghGet: async () => ({ status: 200, body: JSON.stringify(payload) }) } }));
+      ctx("/tmp", { allowedGhRepos: ["o/r"], deps: { ...deps(), ghApi: async () => ({ data: payload }) } }));
   const fileObj = (path: string, bytes: Buffer, shaSeed: string) => ({
     type: "file", encoding: "base64", path, sha: shaSeed.repeat(40), size: bytes.length,
     content: bytes.toString("base64").replace(/(.{60})/g, "$1\n"),
@@ -161,17 +163,150 @@ test("gh_api decodes Contents API file objects instead of slicing base64 (#913)"
   assert.equal(meta.result.response, '{"number":913,"title":"x"}');
 });
 
+test("gh_api and repo_contents fail closed without a wired forge capability (#1210)", async () => {
+  const unwired = ctx("/tmp", { allowedGhRepos: ["o/r"], deps: deps() });
+  const api = await executeToolRequest("gh_api", { endpoint: "repos/o/r/pulls/1" }, unwired);
+  assert.equal(api.status, "error");
+  assert.equal(api.result.error, "platform transport not configured");
+  // Without a `path` the dir read reaches the seam call directly.
+  const noPath = await executeToolRequest("repo_contents", { repo: "o/r" }, unwired);
+  assert.equal(noPath.status, "error");
+  assert.equal(noPath.result.error, "platform transport not configured");
+  // With a `path` the preflight masks any seam failure first.
+  const withPath = await executeToolRequest("repo_contents", { repo: "o/r", path: "README.md" }, unwired);
+  assert.equal(withPath.status, "error");
+  assert.equal(withPath.result.error, "Repository contents file preflight failed");
+});
+
+test("gh_api and repo_contents route validated endpoints through the forge capability (#1210)", async () => {
+  const endpoints: string[] = [];
+  const timeouts: number[] = [];
+  const wired = ctx("/tmp", {
+    allowedGhRepos: ["o/r"],
+    requestTimeout: 7,
+    deps: {
+      ...deps(),
+      ghApi: async (endpoint: string, opts?: { timeoutMs: number }) => {
+        endpoints.push(endpoint);
+        timeouts.push(opts?.timeoutMs ?? -1);
+        if (endpoint.startsWith("/repos/o/r/contents/src")) {
+          return { data: [{ name: "app.ts", type: "file", path: "src/app.ts", sha: "f".repeat(40) }] };
+        }
+        if (endpoint === `/repos/o/r/git/blobs/${"f".repeat(40)}`) {
+          return { data: { encoding: "base64", content: Buffer.from("const x = 1;\n", "utf8").toString("base64") } };
+        }
+        return { data: { number: 1 } };
+      },
+    },
+  });
+  const api = await executeToolRequest("gh_api", { endpoint: "repos/o/r/pulls/1" }, wired);
+  assert.equal(api.status, "ok");
+  assert.equal(api.result.response, '{"number":1}');
+  const contents = await executeToolRequest("repo_contents", { repo: "o/r", path: "src/app.ts", ref: "main" }, wired);
+  assert.equal(contents.status, "ok");
+  assert.equal(contents.result.content, "const x = 1;\n");
+  // The validated GitHub-shaped paths (allowlist, deny-substring and
+  // dot-segment policy applied tool-side BEFORE the seam) and the loop's
+  // configured request bound reach the capability.
+  assert.deepEqual(endpoints, ["/repos/o/r/pulls/1", "/repos/o/r/contents/src?ref=main", `/repos/o/r/git/blobs/${"f".repeat(40)}`]);
+  assert.deepEqual(timeouts, [7000, 7000, 7000]);
+});
+
+test("forge-capability errors surface in-band from the executors (#1210)", async () => {
+  const refusal = `Endpoint not supported on PLATFORM=forgejo: /repos/o/r/contents/src`;
+  const wired = ctx("/tmp", {
+    allowedGhRepos: ["o/r"],
+    deps: {
+      ...deps(),
+      ghApi: async (endpoint: string) => endpoint.startsWith("/repos/o/r/contents")
+        ? { error: refusal }
+        : { error: "Forgejo API error: 404" },
+    },
+  });
+  // gh_api: the adapter's curated in-band error passes through verbatim.
+  const api = await executeToolRequest("gh_api", { endpoint: "repos/o/r/pulls/9" }, wired);
+  assert.equal(api.status, "error");
+  assert.equal(api.result.error, "Forgejo API error: 404");
+  // repo_contents without a path: the final read's error surfaces.
+  const dir = await executeToolRequest("repo_contents", { repo: "o/r" }, wired);
+  assert.equal(dir.status, "error");
+  assert.equal(dir.result.error, refusal);
+  // repo_contents with a path: the preflight keeps its generic masking.
+  const file = await executeToolRequest("repo_contents", { repo: "o/r", path: "src/app.ts" }, wired);
+  assert.equal(file.status, "error");
+  assert.equal(file.result.error, "Repository contents file preflight failed");
+});
+
+test("gh_api JSON responses are secret-redacted before reaching the conversation (#1210 review)", async () => {
+  const res = await executeToolRequest("gh_api", { endpoint: "repos/o/r/pulls/1" },
+    ctx("/tmp", { allowedGhRepos: ["o/r"], deps: { ...deps(), ghApi: async () => ({ data: { body: "token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456" } }) } }));
+  assert.equal(res.status, "ok");
+  assert.match(res.result.response, /\[REDACTED\]/);
+  assert.doesNotMatch(res.result.response, /ghp_/);
+});
+
+test("the tool-level gates run before the real adapter bound as the seam (#1210)", async () => {
+  const seen: Array<{ url: string; auth: string | null }> = [];
+  const adapter = new GitHubAdapter({
+    repo: "o/r",
+    prNumber: "1",
+    token: "Bearer t",
+    fetchImpl: (async (input: string | URL, init?: RequestInit) => {
+      seen.push({ url: String(input), auth: (init?.headers as Record<string, string> | undefined)?.Authorization ?? null });
+      return new Response(JSON.stringify({ number: 1 }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as never,
+  });
+  const wired = ctx("/tmp", { allowedGhRepos: ["o/r"], deps: { ...deps(), ghApi: adapter.ghApi.bind(adapter) } });
+  const ok = await executeToolRequest("gh_api", { endpoint: "repos/o/r/pulls/1" }, wired);
+  assert.equal(ok.status, "ok");
+  // The validated endpoint path joins the adapter's own validated base, and
+  // the adapter's credential — not the tool context env — rides the request.
+  assert.equal(seen[0]!.url, "https://api.github.com/repos/o/r/pulls/1");
+  assert.equal(seen[0]!.auth, "Bearer t");
+
+  // A query-string endpoint passes through the validator unchanged.
+  seen.length = 0;
+  const q = await executeToolRequest("gh_api", { endpoint: "repos/o/r/issues?state=open" }, wired);
+  assert.equal(q.status, "ok");
+  assert.equal(seen[0]!.url, "https://api.github.com/repos/o/r/issues?state=open");
+
+  // A repo outside the tool allowlist never reaches the adapter's fetch.
+  seen.length = 0;
+  const notAllowed = await executeToolRequest("gh_api", { endpoint: "repos/other/r/pulls/1" }, wired);
+  assert.match(String(notAllowed.result.error), /Repo not allowed/);
+  assert.deepEqual(seen, []);
+
+  // Secret variables are deny-listed, not merely "read-only".
+  const denied = await executeToolRequest("gh_api", { endpoint: "repos/o/r/actions/variables/TOKEN" }, wired);
+  assert.match(String(denied.result.error), /Path segment denied/);
+  assert.deepEqual(seen, []);
+});
+
+test("repo_contents through the real Forgejo adapter fails closed in-band (#1210)", async () => {
+  const adapter = new ForgejoAdapter({
+    repo: "o/r",
+    prNumber: "1",
+    baseUrl: "https://git.example",
+    token: "t",
+    fetchImpl: (async () => { throw new Error("must not fetch"); }) as never,
+  });
+  const wired = ctx("/tmp", { allowedGhRepos: ["o/r"], deps: { ...deps(), ghApi: adapter.ghApi.bind(adapter) } });
+  const dir = await executeToolRequest("repo_contents", { repo: "o/r" }, wired);
+  assert.equal(dir.status, "error");
+  assert.match(String(dir.result.error), /Endpoint not supported on PLATFORM=forgejo/);
+});
+
 test("repo_contents masks credentials before truncating decoded files (#927)", async () => {
   const call = (bytes: Buffer | string) => executeToolRequest("repo_contents", { repo: "o/r", path: "src/app.ts" },
-    ctx("tmp", { allowedGhRepos: ["o/r"], deps: { ...deps(), env: { GH_TOKEN: "test-token" }, ghGet: async (url) => {
-      if (url === "https://api.github.com/repos/o/r/contents/src") {
-        return { status: 200, body: JSON.stringify([{ name: "app.ts", type: "file", path: "src/app.ts", sha: "f".repeat(40) }]) };
+    ctx("tmp", { allowedGhRepos: ["o/r"], deps: { ...deps(), ghApi: async (endpoint: string) => {
+      if (endpoint === "/repos/o/r/contents/src") {
+        return { data: [{ name: "app.ts", type: "file", path: "src/app.ts", sha: "f".repeat(40) }] };
       }
-      if (url === `https://api.github.com/repos/o/r/git/blobs/${"f".repeat(40)}`) {
+      if (endpoint === `/repos/o/r/git/blobs/${"f".repeat(40)}`) {
         const encoded = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes, "utf8");
-        return { status: 200, body: JSON.stringify({ encoding: "base64", content: encoded.toString("base64") }) };
+        return { data: { encoding: "base64", content: encoded.toString("base64") } };
       }
-      throw new Error(`Unexpected GitHub URL: ${url}`);
+      throw new Error(`Unexpected endpoint: ${endpoint}`);
     } } }));
 
   const straddleText = "x".repeat(11957) + "\n" + 'const v = "ghp_' + "A".repeat(36) + '";\n' + "tail();\n".repeat(10);
@@ -397,7 +532,7 @@ test("gh_api Contents provenance records the blob sha as the revision (#1015)", 
     ctx("/tmp", {
       allowedGhRepos: ["o/r"],
       sourceRevision: "c".repeat(40),
-      deps: { ...deps(), env: { GH_TOKEN: "test-token" }, ghGet: async () => ({ status: 200, body: JSON.stringify(payload) }) },
+      deps: { ...deps(), ghApi: async () => ({ data: payload }) },
     }));
   assert.equal(res.status, "ok");
   assert.match(res.result.content, /redacted:credential/);

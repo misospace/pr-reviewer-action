@@ -59,12 +59,15 @@ parameters: { type: "object", properties: { path: { type: "string", description:
   {
     name: "gh_api",
     description:
-      "Read-only GitHub REST API call returning structured JSON. Path " +
-      "must start with repos/, issues/, search/, releases/, git/ and " +
-      "target an allowlisted repo. Prefer this over web_fetch for " +
-      "anything on github.com: releases (repos/o/r/releases/tags/TAG) " +
-      "and version diffs (repos/o/r/compare/BASE...HEAD) — it avoids the " +
-      "HTML pages that often 404.",
+      "Read-only REST API call returning structured JSON. Endpoint paths " +
+      "are GitHub-REST-shaped and served through the run's configured forge " +
+      "capability (on non-GitHub forges only translated endpoints are " +
+      "served; unmapped ones are refused). Path must start with repos/, " +
+      "issues/, search/, releases/, git/ and target an allowlisted repo. " +
+      "Prefer this over web_fetch for anything on the forge: releases " +
+      "(repos/o/r/releases/tags/TAG) and version diffs " +
+      "(repos/o/r/compare/BASE...HEAD) — it avoids the HTML pages that " +
+      "often 404.",
     parameters: {
       type: "object",
       properties: {

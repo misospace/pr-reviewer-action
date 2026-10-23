@@ -109,7 +109,7 @@ export class FixtureAdapter implements PlatformAdapter {
     return this.spec.permission ?? null;
   }
 
-  async ghApi(endpoint: string): Promise<GhApiResult> {
+  async ghApi(endpoint: string, _opts?: { timeoutMs?: number }): Promise<GhApiResult> {
     const responses = this.spec.gh_api ?? {};
     if (Object.hasOwn(responses, endpoint)) {
       const value = responses[endpoint];

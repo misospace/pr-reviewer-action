@@ -237,3 +237,25 @@ test("github adapter surfaces API errors through the ghApi envelope", async () =
   assert.match(String(result.error), /403/);
   assert.equal(await adapter.repoPermission(), "unknown");
 });
+
+test("github adapter ghApi honors the per-call timeout override (#1210)", async () => {
+  // The native tool loop passes its configured request bound per call; the
+  // adapter must apply THAT bound, not its constructor default, so a hung
+  // forge read aborts on the loop's clock. A fetch that never resolves
+  // except through its abort signal proves the override reaches requestText.
+  const adapter = new GitHubAdapter({
+    repo: "o/r",
+    prNumber: "1",
+    token: "Bearer t",
+    timeoutMs: 90_000,
+    fetchImpl: ((_input: string | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+    })) as FetchLike,
+  });
+  // A 20 ms override must abort long before the 90 s constructor default —
+  // elapsed time discriminates the two bounds.
+  const startedAt = Date.now();
+  const result = await adapter.ghApi("repos/o/r/pulls/1", { timeoutMs: 20 });
+  assert.match(String(result.error), /Platform request failed/);
+  assert.ok(Date.now() - startedAt < 10_000, "the per-call override bound fired, not the adapter default");
+});

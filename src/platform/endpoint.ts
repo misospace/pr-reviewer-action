@@ -15,6 +15,7 @@ const GH_SAFE_PATH_RE = /^[A-Za-z0-9._~/%?&=:+,-]+$/;
 
 export const GH_DENY_SUBSTRINGS: readonly string[] = [
   "/actions/secrets",
+  "/actions/variables",
   "/dependabot/secrets",
   "/environments/",
   "/dispatches",

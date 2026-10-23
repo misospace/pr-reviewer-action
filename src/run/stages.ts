@@ -621,8 +621,10 @@ export function normalizedToOpenAiChat(response: NormalizedModelResponse): Recor
 /** #1145: the probe is threaded through `HarnessDeps` as an additive
  * optional field (the harness's `RunNativeLoopInput` carries it; the native
  * loop invokes it at most once after an accepted verdict). Omitting it
- * keeps the loop byte-for-byte pre-#1145. */
-export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDir: string, log: (line: string) => void, signal?: AbortSignal, traceGapProbe?: TraceGapProbe): Promise<void> {
+ * keeps the loop byte-for-byte pre-#1145. #1210: likewise `ghApi` — the
+ * run's configured forge read capability, bound to the native loop's
+ * gh_api/repo_contents executors. */
+export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDir: string, log: (line: string) => void, signal?: AbortSignal, traceGapProbe?: TraceGapProbe, ghApi?: HarnessDeps["ghApi"]): Promise<void> {
   const deps: HarnessDeps & { signal?: AbortSignal, traceGapProbe?: TraceGapProbe } = {
     env,
     cwd: runDir,
@@ -636,6 +638,7 @@ export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDi
     ...(signal !== undefined ? { signal } : {}),
     log,
     ...(traceGapProbe !== undefined ? { traceGapProbe } : {}),
+    ...(ghApi !== undefined ? { ghApi } : {}),
   };
   await runToolHarness(deps);
 }
