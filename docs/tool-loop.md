@@ -220,7 +220,12 @@ The stop reason itself is recorded separately and always: the marker's
 budget stop that left nothing unread (for example, coverage the corpus-diff
 credit completed) is still visible for the #810/#847 exhaustion-rate
 comparison. `coverage`/`coverage_stop_reason` keep their narrower meaning:
-a confirmed coverage gap.
+a confirmed coverage gap. Two fail-closed shapes complete that picture:
+a loop that ran but left its harness artifact unreadable synthesizes
+`coverage_stop_reason: "harness-unreadable"` with `coverage: "partial"`
+(#899 — unknown coverage never publishes as complete), and the standalone
+`publish` CLI that could not confirm coverage at all (no run artifact to
+read) publishes `coverage: "unknown"` with no stop reason (#873/#838).
 
 **Partial coverage never approves.** `review-result: partial` means the
 review's own coverage is incomplete; gate merges on both the verdict and the
