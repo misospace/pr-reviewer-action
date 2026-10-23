@@ -57,6 +57,7 @@ async function run(env: Record<string, string>, options: Partial<SpecialistsGate
     ...(options.productionTransport ? {} : { requestFn: options.requestFn ?? mockTransport() }),
     stdout: (line) => out.push(line),
     stderr: (line) => err.push(line),
+    ...(options.now !== undefined ? { now: options.now } : {}),
     ...(options.sleep !== undefined ? { sleep: options.sleep } : {}),
   });
   return { code, root, out, err, read: (name) => readFileSync(join(root, name), "utf8") };
@@ -891,6 +892,58 @@ test("#846: a specialist role's HTTP errors carry status, a redacted body excerp
   }
 });
 
+test("#1200: the role log line and the persisted aggregate carry reconciled per-attempt records with Python float timing", async () => {
+  let call = 0;
+  const result = await run(
+    { DEEP_REVIEW: "auto", AI_STREAM: "false" },
+    {
+      // A constant clock makes every attempt's settled duration exactly the
+      // float 0.0 — observable in the persisted aggregate as `"0.0"`,
+      // distinguishing a Python-float rendered number from a JSON integral.
+      now: () => 100,
+      requestFn: async () => {
+        call += 1;
+        return call === 1
+          ? { ok: false, errorMessage: "connection reset by endpoint" }
+          : { ok: true, raw: leadsResponse([]) };
+      },
+      // Interpret seconds as milliseconds (the #846 test's trick): the 5s
+      // transport-retry delay stays well inside the 600s phase race sleep.
+      sleep: (seconds) => new Promise((resolve) => setTimeout(resolve, Math.max(0, seconds))),
+      setup: (root) => writeFileSync(join(root, "classification.json"), JSON.stringify({ pr_kind: "dependency_upgrade", risk_flags: [], changed_files_summary: ["package.json"] })),
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.equal(call, 2, "the single selected role gets exactly MAX_ATTEMPTS attempts");
+
+  const roleLine = result.out.find((line) => line.startsWith("specialist tests:"));
+  assert.ok(roleLine, `expected a "specialist tests:" log line, got: ${JSON.stringify(result.out)}`);
+  assert.match(
+    roleLine!,
+    /attempts=2 \(initial 0\.0s in=\? out=\? stop=\? adopted=false; transport-retry 0\.0s in=10 out=5 stop=stop adopted=true\)/,
+  );
+
+  const aggregate = JSON.parse(result.read("specialists.json")) as {
+    request_count: number;
+    roles: { role: string; attempts?: Array<Record<string, unknown>> }[];
+  };
+  const testsRole = aggregate.roles.find((role) => role.role === "tests")!;
+  assert.deepEqual(testsRole.attempts!.map((record) => record.attempt_type), ["initial", "transport-retry"]);
+  assert.deepEqual(testsRole.attempts!.map((record) => record.adopted), [false, true]);
+  assert.equal(testsRole.attempts![0]!.retry_trigger, "transport-failure");
+  assert.equal(testsRole.attempts![1]!.retry_trigger, null);
+  assert.equal(aggregate.request_count, 2, "the meter counts what the records claim");
+  // #1200: the settled only-at-reap case never happens here, so a settled
+  // attempt's elapsed is a Python float in the persisted JSON — `0.0`, not `0`.
+  assert.match(
+    result.read("specialists.json"),
+    /"attempt_type": "initial",\n *"max_tokens": 16384,\n *"elapsed_sec": 0\.0,/,
+    "attempt elapsed_sec renders as a Python float",
+  );
+  rmSync(result.root, { recursive: true, force: true });
+});
+
 test("#846 security review: a one-character or three-character configured API key is masked in a specialist role's log/artifacts", async () => {
   for (const apiKey of ["k", "abc"]) {
     const server = await startMockServer((_req, _body, res) => {
@@ -965,6 +1018,15 @@ test("#1061: the shipped default cap is 16384 and an overrun role logs a bounded
     assert.match(line!, /stop_reason=max_tokens/);
     assert.match(line!, /output_chars=10/);
     assert.match(line!, /overrun=failed/);
+    // #1200: the per-attempt summary makes the discarded retry's cost visible
+    // in the log — the initial attempt stayed adopted, the overrun retry did
+    // not recover, and both attempts' usage and stop reason are shown.
+    assert.match(line!, /attempts=2 \(initial [0-9.]+s in=10 out=4096 stop=max_tokens adopted=true; overrun-retry [0-9.]+s in=10 out=4096 stop=max_tokens adopted=false\)/);
+    // #1200: the persisted aggregate carries the same per-attempt records.
+    const entryEmitted = (JSON.parse(result.read("specialists.json")) as { roles: Array<{ role: string; attempts?: Array<Record<string, unknown>> }> }).roles
+      .find((role) => role.role === "correctness")!;
+    assert.deepEqual(entryEmitted.attempts!.map((record) => record.attempt_type), ["initial", "overrun-retry"]);
+    assert.deepEqual(entryEmitted.attempts!.map((record) => record.adopted), [true, false]);
     // The diagnostic never carries the response body.
     assert.ok(!line!.includes('{"leads":['), "the log line must not carry the response body");
   } finally {

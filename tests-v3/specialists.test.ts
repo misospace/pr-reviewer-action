@@ -1285,3 +1285,568 @@ test("#1094: the scout refuses a shared reply embedding a configured credential 
   const artifactsText = JSON.stringify(result.artifacts);
   assert.ok(!artifactsText.includes(canary), `per-role artifacts leaked the canary: ${artifactsText}`);
 });
+
+// ---------------------------------------------------------------------------
+// #1200: per-attempt retry telemetry — every actual wire attempt appears
+// exactly once in role telemetry as bounded content-free records; totals
+// reconcile; missing provider usage stays null.
+// ---------------------------------------------------------------------------
+
+/** The per-attempt records a role entry carries ([] when the role ran with
+ * no wire attempts — e.g. input/skip failures). */
+function attemptRecords(result: Awaited<ReturnType<typeof runSpecialists>>, role: string): Array<Record<string, unknown>> {
+  return ((roleEntry(result, role).attempts ?? []) as Array<Record<string, unknown>>);
+}
+
+/** #1200 acceptance: entry-usage reconciliation — the aggregate counters must
+ * line up with the per-attempt records. `usage_totals` counts every reported
+ * fact the meter saw, so sums over records must equal it per key. */
+function assertRecordsReconcile(
+  result: Awaited<ReturnType<typeof runSpecialists>>,
+  roles: readonly string[],
+): void {
+  const aggregate = result.aggregate;
+  const totalRecords = roles.reduce((sum, role) => sum + attemptRecords(result, role).length, 0);
+  assert.equal(aggregate.request_count, totalRecords, "request_count reconciles with per-attempt records");
+  const totals = aggregate.usage_totals as Record<string, unknown> | null;
+  if (totals === null) {
+    for (const role of roles) {
+      for (const record of attemptRecords(result, role)) {
+        assert.equal(record.prompt_tokens, null);
+        assert.equal(record.completion_tokens, null);
+        assert.equal(record.cached_tokens, null);
+      }
+    }
+    return;
+  }
+  for (const key of ["prompt_tokens", "completion_tokens", "cached_tokens"] as const) {
+    const reported = roles.flatMap((role) => attemptRecords(result, role))
+      .map((record) => record[key])
+      .filter((value): value is number => typeof value === "number");
+    const expected = reported.length === 0 ? null : reported.reduce((sum, value) => sum + value, 0);
+    assert.equal(totals[key], expected, `usage_totals.${key} sums the per-attempt records`);
+  }
+}
+
+test("#1200: a successful first attempt records one adopted initial attempt", async () => {
+  const result = await runSpecialists(baseInput({
+    requestFn: async () => ({
+      ok: true,
+      raw: {
+        choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 101, completion_tokens: 7 },
+      },
+    }),
+  }));
+  for (const roleName of ALL_ROLES) {
+    const records = attemptRecords(result, roleName);
+    assert.equal(records.length, 1, `${roleName}: exactly one wire attempt`);
+    const record = records[0]!;
+    assert.equal(record.attempt_type, "initial");
+    assert.equal(record.max_tokens, 4096);
+    assert.equal(record.adopted, true);
+    assert.equal(record.retry_trigger, null);
+    assert.equal(record.prompt_tokens, 101);
+    assert.equal(record.completion_tokens, 7);
+    assert.equal(record.cached_tokens, null);
+    assert.equal(record.stop_reason, "stop");
+    assert.equal(typeof record.elapsed_sec, "number");
+    assert.ok((record.elapsed_sec as number) >= 0);
+  }
+  assertRecordsReconcile(result, ALL_ROLES);
+});
+
+test("#1200: a transport retry records two attempts with the trigger on the failed one", async () => {
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, apiKey: REALISTIC_KEY },
+    requestFn: async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("connection reset by endpoint");
+      return {
+        ok: true,
+        raw: {
+          choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 50, completion_tokens: 9 },
+        },
+      };
+    },
+  }));
+
+  const records = attemptRecords(result, "correctness");
+  assert.equal(records.length, 2);
+  assert.equal(records[0]!.attempt_type, "initial");
+  assert.equal(records[0]!.retry_trigger, "transport-failure", "the failed attempt carries its cause");
+  assert.equal(records[0]!.adopted, false);
+  assert.equal(records[0]!.prompt_tokens, null, "a wire failure reports no usage — never inferred");
+  assert.equal(records[0]!.stop_reason, null);
+  assert.equal(records[1]!.attempt_type, "transport-retry");
+  assert.equal(records[1]!.retry_trigger, null);
+  assert.equal(records[1]!.adopted, true);
+  assert.equal(records[1]!.prompt_tokens, 50);
+  assert.equal(records[1]!.completion_tokens, 9);
+  const entry = roleEntry(result, "correctness");
+  assert.deepEqual((entry.usage as Record<string, unknown>).prompt_tokens, 50, "entry usage stays the adopted response's");
+  assertRecordsReconcile(result, ALL_ROLES);
+});
+
+test("#1200: an exhausted transport loop marks the final failure with its cause", async () => {
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, apiKey: REALISTIC_KEY },
+    requestFn: async () => {
+      calls += 1;
+      throw new Error("connection reset by endpoint");
+    },
+  }));
+
+  assert.equal(calls, 2, "the role gets exactly MAX_ATTEMPTS wire attempts");
+  const records = attemptRecords(result, "correctness");
+  assert.deepEqual(records.map((record) => record.attempt_type), ["initial", "transport-retry"]);
+  // The final failure ends the loop only because the ceiling forbids another
+  // attempt, so — matching the skipped-overrun rule — it names its own cause.
+  assert.deepEqual(records.map((record) => record.retry_trigger), ["transport-failure", "transport-failure"]);
+  assert.deepEqual(records.map((record) => record.adopted), [false, false]);
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.status, "error");
+  assert.equal(entry.error_kind, "transport");
+  assertRecordsReconcile(result, ALL_ROLES);
+});
+
+test("#1200: an exhausted combined_scout transport loop marks the shared final failure with its cause", async () => {
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, execution: "combined_scout" },
+    requestFn: async () => {
+      calls += 1;
+      throw new Error("connection reset by endpoint");
+    },
+  }));
+
+  assert.equal(calls, 2, "the shared call gets exactly MAX_ATTEMPTS wire attempts");
+  for (const roleName of ALL_ROLES) {
+    const records = attemptRecords(result, roleName);
+    assert.deepEqual(records.map((record) => record.attempt_type), ["initial", "transport-retry"], `${roleName}: shared loop records`);
+    assert.deepEqual(records.map((record) => record.retry_trigger), ["transport-failure", "transport-failure"], `${roleName}: final exhausted attempt names its cause`);
+    assert.deepEqual(records.map((record) => record.adopted), [false, false]);
+  }
+  assert.equal(result.aggregate.request_count, 2, "the meter counts the two unique wire attempts, not per-role copies");
+});
+
+test("#1200: a recovered completion-overrun retry records both attempts' timing and usage", async () => {
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, apiKey: REALISTIC_KEY },
+    requestFn: async () => {
+      calls += 1;
+      return calls === 1
+        // Empty leads at the cap: eligible for the one bounded overrun retry.
+        ? { ok: true, raw: { choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "max_tokens" }], usage: { prompt_tokens: 20, completion_tokens: 4096 } } }
+        // Recovered: clean parse and a normal stop at the raised budget.
+        : { ok: true, raw: { choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "stop" }], usage: { prompt_tokens: 20, completion_tokens: 29300 } } };
+    },
+  }));
+
+  const records = attemptRecords(result, "correctness");
+  assert.deepEqual(records.map((record) => record.attempt_type), ["initial", "overrun-retry"]);
+  assert.equal(records[0]!.retry_trigger, "completion-overrun");
+  assert.equal(records[0]!.adopted, false, "the retry superseded the initial response");
+  assert.equal(records[0]!.completion_tokens, 4096);
+  assert.equal(records[0]!.stop_reason, "max_tokens");
+  assert.equal(records[1]!.retry_trigger, null);
+  assert.equal(records[1]!.adopted, true);
+  assert.equal(records[1]!.completion_tokens, 29300);
+  assert.equal(records[1]!.stop_reason, "stop");
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.overrun_retry_result, "recovered");
+  assert.deepEqual((entry.usage as Record<string, unknown>).completion_tokens, 29300, "entry usage is the retry's own");
+  assertRecordsReconcile(result, ALL_ROLES);
+});
+
+test("#1200: a failed overrun retry keeps its discarded cost visible in the records", async () => {
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, apiKey: REALISTIC_KEY },
+    requestFn: async () => {
+      calls += 1;
+      return calls === 1
+        ? { ok: true, raw: { choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "max_tokens" }], usage: { prompt_tokens: 20, completion_tokens: 4096 } } }
+        // The retry ran but failed to parse; its tokens stay discarded cost.
+        : { ok: true, raw: { choices: [{ message: { content: "NOT JSON AT ALL" }, finish_reason: "stop" }], usage: { prompt_tokens: 20, completion_tokens: 500 } } };
+    },
+  }));
+
+  const records = attemptRecords(result, "correctness");
+  assert.deepEqual(records.map((record) => record.attempt_type), ["initial", "overrun-retry"]);
+  assert.equal(records[0]!.retry_trigger, "completion-overrun");
+  assert.equal(records[0]!.adopted, true, "the discarded retry leaves the original response adopted");
+  assert.equal(records[0]!.completion_tokens, 4096);
+  assert.equal(records[1]!.retry_trigger, null);
+  assert.equal(records[1]!.adopted, false);
+  assert.equal(records[1]!.completion_tokens, 500);
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.overrun_retry_result, "failed");
+  assert.deepEqual((entry.usage as Record<string, unknown>).completion_tokens, 4096, "entry usage is the retained response's");
+  assertRecordsReconcile(result, ALL_ROLES);
+});
+
+test("#1200: a skipped overrun retry opens no retry record but marks the cause", async () => {
+  // The budget is already at the overrun-retry ceiling, so no retry payload
+  // is possible: no second wire attempt, but the initial record still names
+  // the completion-overrun trigger that led to the skip.
+  const seen: number[] = [];
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, maxTokens: 32768, apiKey: REALISTIC_KEY },
+    requestFn: async (payload) => {
+      seen.push(payload.max_tokens as number);
+      return {
+        ok: true,
+        raw: { choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "max_tokens" }], usage: { prompt_tokens: 20, completion_tokens: 32768 } },
+      };
+    },
+  }));
+
+  assert.deepEqual(seen, [32768], "no retry is possible above the ceiling");
+  const records = attemptRecords(result, "correctness");
+  assert.equal(records.length, 1);
+  assert.equal(records[0]!.attempt_type, "initial");
+  assert.equal(records[0]!.retry_trigger, "completion-overrun", "the cause is recorded even though no retry fired");
+  assert.equal(records[0]!.adopted, true);
+  assert.equal(records[0]!.stop_reason, "max_tokens");
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.overrun_retry_result, "skipped");
+  assertRecordsReconcile(result, ALL_ROLES);
+});
+
+test("#1200: missing provider usage stays null in records, the entry, and the aggregate", async () => {
+  const result = await runSpecialists(baseInput({
+    requestFn: async () => ({
+      ok: true,
+      raw: { choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "stop" }] },
+    }),
+  }));
+  for (const roleName of ALL_ROLES) {
+    for (const record of attemptRecords(result, roleName)) {
+      assert.equal(record.prompt_tokens, null);
+      assert.equal(record.completion_tokens, null);
+      assert.equal(record.cached_tokens, null, "no cached token is inferred from reported totals");
+      assert.equal(record.stop_reason, "stop");
+    }
+    assert.equal(roleEntry(result, roleName).usage, null);
+  }
+  assert.equal(result.aggregate.usage_totals, null, "no usage totals are fabricated");
+});
+
+test("#1200: a phase-deadline reap mid-attempt reports the opened attempt as in-flight", async () => {
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, phaseTimeoutSec: 0.3 },
+    requestFn: () => new Promise(() => undefined),
+    // The phase race's sleep must actually fire (the role coroutine never settles).
+    sleep: async () => { await new Promise((resolve) => setImmediate(resolve)); },
+  }));
+
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.status, "error");
+  assert.equal(entry.error_kind, "timeout");
+  const records = entry.attempts as Array<Record<string, unknown>>;
+  assert.equal(records.length, 1, "the opened initial attempt is visible at the reap");
+  assert.equal(records[0]!.attempt_type, "initial");
+  assert.equal(records[0]!.elapsed_sec, null, "an in-flight attempt has no settled duration");
+  assert.equal(records[0]!.adopted, false);
+  assert.equal(records[0]!.retry_trigger, null);
+  assert.equal(result.aggregate.request_count, 1, "the in-flight attempt still counts in the aggregate");
+});
+
+test("#1200: combined_scout roles share the same attempt records and reconcile with unique wire attempts", async () => {
+  const scoutResponse = {
+    choices: [{
+      message: { content: JSON.stringify({ correctness: { leads: [] }, security: { leads: [] }, tests: { leads: [] } }) },
+      finish_reason: "stop",
+    }],
+    usage: { prompt_tokens: 30, completion_tokens: 11 },
+  };
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, execution: "combined_scout" },
+    requestFn: async () => {
+      calls += 1;
+      return { ok: true, raw: scoutResponse };
+    },
+  }));
+
+  const byRole = ALL_ROLES.map((role) => attemptRecords(result, role));
+  for (const role of ALL_ROLES) {
+    const records = attemptRecords(result, role);
+    assert.equal(records.length, 1, `${role}: the shared call is one attempt on its behalf`);
+    assert.equal(records[0]!.attempt_type, "initial");
+    assert.equal(records[0]!.adopted, true);
+    assert.equal(records[0]!.prompt_tokens, 30);
+  }
+  assert.deepEqual(byRole[0], byRole[1], "role entries share identical record content");
+  assert.deepEqual(byRole[1], byRole[2]);
+  // The scout's ONE call is one wire attempt: the records are shared, never
+  // multiplied per role, and the meter count matches reality.
+  assert.equal(calls, 1);
+  assert.equal(result.aggregate.request_count, calls);
+  const totals = result.aggregate.usage_totals as Record<string, unknown> | null;
+  assert.deepEqual(totals!.prompt_tokens, 30, "usage_totals merges unique attempts, not per-role copies");
+});
+
+test("#1200: a call refused before the wire records no attempt and is not counted", async () => {
+  // The #1080 terminal-lane latch refuses a later call on a terminally failed
+  // lane with zero wire attempts. That call is not an attempt: no record is
+  // opened for it and the aggregate counter does not count it.
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    requestFn: async () => ({
+      ok: false,
+      errorMessage: "lane terminally unavailable (quota_exhausted)",
+      terminal: "quota_exhausted",
+      wire_attempted: false,
+    }),
+  }));
+
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.attempts, undefined, "no attempt record for a call that never reached the wire");
+  assert.equal(result.aggregate.request_count, 0, "the refused call is not a wire attempt");
+  // The persisted failure shape is unchanged by the attempt accounting.
+  assert.equal(entry.status, "error");
+  assert.equal(entry.error_kind, "transport");
+  assert.match(String(entry.reason), /quota_exhausted/);
+});
+
+test("#1200: the transport's own discarded same-request wire attempts are recorded exactly once", async () => {
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, apiKey: REALISTIC_KEY },
+    requestFn: async () => ({
+      ok: true,
+      // The wire transport reports a 429-discard it made inside this call.
+      discarded_wire_attempts: [{ elapsed_sec: 0.5, max_tokens: 4096 }],
+      wire_sent_max_tokens: 4096,
+      raw: {
+        choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 60, completion_tokens: 12 },
+      },
+    }),
+  }));
+
+  const records = attemptRecords(result, "correctness");
+  assert.deepEqual(records.map((record) => record.attempt_type), ["wire-retry", "initial"], "records stay chronological — the discarded call fired first");
+  assert.equal(records[0]!.elapsed_sec, 0.5);
+  assert.equal(records[0]!.max_tokens, 4096, "the discarded call's own budget");
+  assert.equal(records[0]!.retry_trigger, "transport-failure", "its outcome caused the same-request follow-up");
+  assert.equal(records[0]!.adopted, false);
+  assert.equal(records[0]!.prompt_tokens, null, "a discarded attempt produced no response data — nothing is inferred");
+  assert.equal(records[0]!.stop_reason, null);
+  assert.equal(records[1]!.attempt_type, "initial");
+  assert.equal(records[1]!.adopted, true);
+  assert.deepEqual((records[1]! as Record<string, unknown>).prompt_tokens, 60, "the final wire call's own usage settles the outer record");
+  assertRecordsReconcile(result, ["correctness"]);
+  assert.equal(result.aggregate.request_count, 2, "the meter counts both real wire attempts");
+});
+
+test("#1200: a clamped final wire call corrects the record's max_tokens to the actually-sent budget", async () => {
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, apiKey: REALISTIC_KEY },
+    requestFn: async () => ({
+      ok: true,
+      wire_sent_max_tokens: 1024,
+      discarded_wire_attempts: [{ elapsed_sec: 0.2, max_tokens: 4096 }],
+      raw: {
+        choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 11, completion_tokens: 4 },
+      },
+    }),
+  }));
+
+  const records = attemptRecords(result, "correctness");
+  assert.deepEqual(records.map((record) => record.attempt_type), ["wire-retry", "initial"]);
+  assert.equal(records[0]!.max_tokens, 4096, "the discarded call sent the configured budget");
+  assert.equal(records[1]!.max_tokens, 1024, "the final wire call sent the clamped cap");
+  assert.equal(records[1]!.adopted, true);
+  assertRecordsReconcile(result, ["correctness"]);
+});
+
+test("#1200: an overrun-retry call's own discarded wire attempts are recorded too", async () => {
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, apiKey: REALISTIC_KEY },
+    requestFn: async () => {
+      calls += 1;
+      return calls === 1
+        // Empty leads at the cap: eligible for the one bounded overrun retry.
+        ? { ok: true, raw: { choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "max_tokens" }], usage: { prompt_tokens: 20, completion_tokens: 4096 } } }
+        : {
+            ok: true,
+            // The retry call hit a 429 once before its 200, same-request retry.
+            discarded_wire_attempts: [{ elapsed_sec: 0.3, max_tokens: 32768 }],
+            wire_sent_max_tokens: 32768,
+            raw: { choices: [{ message: { content: '{"leads":[]}' }, finish_reason: "stop" }], usage: { prompt_tokens: 22, completion_tokens: 29000 } },
+          };
+    },
+  }));
+
+  const records = attemptRecords(result, "correctness");
+  assert.deepEqual(records.map((record) => record.attempt_type), ["initial", "wire-retry", "overrun-retry"]);
+  assert.equal(records[1]!.retry_trigger, "transport-failure");
+  assert.equal(records[1]!.adopted, false, "records inside the retry call are never adopted");
+  assert.equal(records[2]!.adopted, true);
+  assert.equal(records[2]!.max_tokens, 32768);
+  const entry = roleEntry(result, "correctness");
+  assert.equal(entry.overrun_retry_result, "recovered");
+  assertRecordsReconcile(result, ["correctness"]);
+  assert.equal(result.aggregate.request_count, 3);
+});
+
+test("#1200: a final transport failure keeps its discarded wire calls recorded and counts them", async () => {
+  let calls = 0;
+  const result = await runSpecialists(baseInput({
+    rolesToRun: ["correctness"],
+    config: { ...baseInput().config, apiKey: REALISTIC_KEY },
+    requestFn: async () => {
+      calls += 1;
+      // Each runner attempt: one discarded 429, then the final 504.
+      return {
+        ok: false,
+        errorMessage: "planner model request failed with HTTP 504: gateway closed",
+        status: 504,
+        wire_attempted: true,
+        discarded_wire_attempts: [{ elapsed_sec: 0.7, max_tokens: 4096 }],
+      };
+    },
+  }));
+
+  assert.equal(calls, 2, "the role gets exactly MAX_ATTEMPTS calls");
+  const records = attemptRecords(result, "correctness");
+  assert.deepEqual(records.map((record) => record.attempt_type), ["wire-retry", "initial", "wire-retry", "transport-retry"], "records stay chronological per attempt");
+  assert.deepEqual(records.map((record) => record.retry_trigger), [
+    "transport-failure",
+    "transport-failure",
+    "transport-failure",
+    "transport-failure",
+  ], "every discarded call names its cause; the exhausted final one keeps the 12c0e06 rule");
+  assert.deepEqual(records.map((record) => record.adopted), [false, false, false, false]);
+  assertRecordsReconcile(result, ["correctness"]);
+  assert.equal(result.aggregate.request_count, 4, "the meter counts every actual wire attempt: 2 calls × 2 wire attempts each");
+});
+
+test("#1200: the shared scout call's discarded wire attempts join the shared records once", async () => {
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, execution: "combined_scout" },
+    requestFn: async () => ({
+      ok: true,
+      discarded_wire_attempts: [{ elapsed_sec: 0.4, max_tokens: 4096 }],
+      wire_sent_max_tokens: 4096,
+      raw: {
+        choices: [{
+          message: { content: JSON.stringify({ correctness: { leads: [] }, security: { leads: [] }, tests: { leads: [] } }) },
+          finish_reason: "stop",
+        }],
+        usage: { prompt_tokens: 30, completion_tokens: 11 },
+      },
+    }),
+  }));
+
+  const byRole = ALL_ROLES.map((role) => attemptRecords(result, role));
+  for (const role of ALL_ROLES) {
+    const records = attemptRecords(result, role);
+    assert.deepEqual(records.map((record) => record.attempt_type), ["wire-retry", "initial"], `${role}: shared records, chronological`);
+    assert.equal(records[0]!.retry_trigger, "transport-failure");
+  }
+  assert.deepEqual(byRole[0], byRole[1], "role entries share identical record content");
+  assert.deepEqual(byRole[1], byRole[2]);
+  // The shared call made TWO real wire attempts: the meter counts 2, never
+  // roles × records.
+  assert.equal(result.aggregate.request_count, 2);
+  const totals = result.aggregate.usage_totals as Record<string, unknown> | null;
+  assert.deepEqual(totals!.prompt_tokens, 30, "usage_totals merges unique attempts, not per-role copies");
+});
+
+// ---------------------------------------------------------------------------
+// #1200 wire-telemetry seam fixtures: the wire adapter's own reports
+// ---------------------------------------------------------------------------
+
+test("#1200: the wire adapter carries the transport's discarded wire attempts on the outcome", async () => {
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://endpoint.test/v1",
+    apiKey: "sk-adapter-wiretest",
+    anthropicVersion: "2023-06-01",
+    runChat: async (input) => {
+      input.onWireCall?.({ discarded: true, elapsedSec: 0.5, maxTokens: 256 });
+      input.onWireCall?.({ discarded: false, elapsedSec: 1.25, maxTokens: 128 });
+      return {
+        status: "ok",
+        response: { id: "1", object: "chat.completion", model: "m", content: "ok", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+        raw: { id: "1", choices: [{ message: { content: "ok" }, finish_reason: "stop" }] },
+      };
+    },
+  });
+  const outcome = await requestFn({ model: "m", messages: [], max_tokens: 256 } as never, "openai", 5);
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(outcome.discarded_wire_attempts, [{ elapsed_sec: 0.5, max_tokens: 256 }]);
+  assert.equal(outcome.wire_sent_max_tokens, 128, "the final wire call's actually-sent budget");
+});
+
+test("#1200: a wire adapter outcome with no transport reports carries no attempt telemetry", async () => {
+  // A test-seam `runChat` that never reports keeps the outcome clean: the
+  // runner's accounting falls back to the payload's declared budget and adds
+  // no discarded records — the seam cannot silently stretch the telemetry.
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://endpoint.test/v1",
+    apiKey: "sk-adapter-wiretest",
+    anthropicVersion: "2023-06-01",
+    runChat: async () => ({
+      status: "ok",
+      response: { id: "1", object: "chat.completion", model: "m", content: "ok", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+      raw: { id: "1", choices: [{ message: { content: "ok" }, finish_reason: "stop" }] },
+    }),
+  });
+  const outcome = await requestFn({ model: "m", messages: [], max_tokens: 256 } as never, "openai", 5);
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.discarded_wire_attempts, undefined);
+  assert.equal(outcome.wire_sent_max_tokens, undefined);
+});
+
+test("#1200: a latched lane refusal reports nothing and opens no discarded attempt", async () => {
+  const latch = {
+    terminalFor: (lane: string): "model_unavailable" => "model_unavailable",
+    latch: (lane: string, reason: string): void => undefined,
+  };
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://endpoint.test/v1",
+    apiKey: "sk-adapter-latch",
+    anthropicVersion: "2023-06-01",
+    terminalLatch: latch,
+  });
+  const outcome = await requestFn({ model: "correctness-model", messages: [], max_tokens: 256 } as never, "openai", 5);
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.wire_attempted, false);
+  assert.equal(outcome.discarded_wire_attempts, undefined, "a call that never reached the wire reports no wire attempts");
+  assert.equal(outcome.wire_sent_max_tokens, undefined);
+});
+
+test("#1200: a combined_scout call refused before the wire records no attempt for any role", async () => {
+  const result = await runSpecialists(baseInput({
+    config: { ...baseInput().config, execution: "combined_scout" },
+    requestFn: async () => ({
+      ok: false,
+      errorMessage: "lane terminally unavailable (quota_exhausted)",
+      terminal: "quota_exhausted",
+      wire_attempted: false,
+    }),
+  }));
+
+  for (const roleName of ALL_ROLES) {
+    assert.equal(roleEntry(result, roleName).attempts, undefined, `${roleName}: no attempt record for a refused call`);
+  }
+  assert.equal(result.aggregate.request_count, 0, "the refused shared call is not a wire attempt");
+});
