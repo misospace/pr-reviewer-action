@@ -134,6 +134,58 @@ test("the loop gathers evidence and the in-conversation verdict is produced and 
   assert.ok(fs.existsSync(path.join(root, "tool-harness.md")));
 });
 
+test("#1220: the Anthropic native harness advances its cache breakpoint after tool evidence", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+
+  const anthropicCall = {
+    content: [{ type: "tool_use", id: "a1", name: "read_file", input: { path: "src.ts" } }],
+    stop_reason: "tool_use",
+    usage: { input_tokens: 100, output_tokens: 5 },
+  };
+  const anthropicDone = {
+    content: [{ type: "text", text: "evidence gathered" }],
+    stop_reason: "end_turn",
+    usage: { input_tokens: 110, output_tokens: 4 },
+  };
+  const anthropicVerdict = {
+    content: [{ type: "text", text: JSON.stringify({ verdict: "approve", review_markdown: "## Review\\nLooks fine.", findings: [] }) }],
+    stop_reason: "end_turn",
+    usage: { input_tokens: 120, output_tokens: 12 },
+  };
+  const scripted = [anthropicCall, anthropicDone, anthropicVerdict];
+  const payloads: Array<Record<string, unknown>> = [];
+  let transportCalls = 0;
+
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_API_FORMAT: "anthropic" },
+    transport: async (_baseUrl, _apiFormat, payload) => {
+      payloads.push(structuredClone(payload));
+      return scripted[transportCalls++];
+    },
+  }));
+
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(payloads.length, 3);
+
+  const firstMessages = payloads[0]!.messages as Array<{ role: string; content: unknown }>;
+  const firstPlanning = firstMessages.at(-1)!.content as Array<Record<string, unknown>>;
+  assert.deepEqual(firstPlanning.at(-1)!.cache_control, { type: "ephemeral" });
+
+  const secondMessages = payloads[1]!.messages as Array<{ role: string; content: unknown }>;
+  const initialPlanning = secondMessages[0]!.content;
+  assert.equal(typeof initialPlanning, "string", "the old moving marker must not persist");
+  const latestResult = secondMessages.at(-1)!.content as Array<Record<string, unknown>>;
+  assert.equal(latestResult[0]!.type, "tool_result");
+  assert.deepEqual(latestResult[0]!.cache_control, { type: "ephemeral" });
+  assert.equal(latestResult.at(-1)!.type, "text", "round 2 carries the transient budget note after tool results");
+  assert.equal(latestResult.at(-1)!.cache_control, undefined, "the replace-on-next-round note must stay outside the cached prefix");
+
+  const secondMarkers = JSON.stringify(payloads[1]).match(/"cache_control"/g)?.length ?? 0;
+  assert.equal(secondMarkers, 3, "system + tools + latest transcript block");
+});
+
 test("#1094: the accepted-verdict artifact is a PROJECTION — a gateway echo of a configured header VALUE never reaches disk", async () => {
   // #252: the hostile shape itself, not a benign stand-in. A gateway answers
   // HTTP 200 with a VALID verdict envelope and quotes the configured
