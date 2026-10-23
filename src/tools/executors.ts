@@ -626,19 +626,28 @@ function decodeGhApiContentsFile(data: unknown): Obj | null {
  * encoded source (a Git blob, or another endpoint answering with bytes)
  * whose credential shapes the redactor cannot see.
  *
- * The scan is recursive and the encoding comparison is case-insensitive: the
- * guard is the last line against encoded bytes reaching the conversation, so
- * a payload nested in an array or an object, or spelled `BASE64`, must not
- * walk past it (#1215 review). */
-function isBase64ContentPayload(data: unknown, depth = 0): boolean {
-  if (depth > 4) return false;
-  if (Array.isArray(data)) return data.some((item) => isBase64ContentPayload(item, depth + 1));
-  if (data === null || typeof data !== "object") return false;
-  const payload = data as Obj;
-  if (typeof payload.encoding === "string" && payload.encoding.toLowerCase() === "base64" && typeof payload.content === "string") {
-    return true;
+ * The scan visits every node at any depth and the encoding comparison is
+ * case-insensitive: the guard is the last line against encoded bytes reaching
+ * the conversation, so a payload nested in an array or an object, or spelled
+ * `BASE64`, must not walk past it (#1215 review). The traversal is iterative
+ * and unbounded — a depth-capped scan lets a payload below the cap reach the
+ * model unmasked (#1215 review round 3). */
+function isBase64ContentPayload(data: unknown): boolean {
+  const stack: unknown[] = [data];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (Array.isArray(current)) {
+      for (const item of current) stack.push(item);
+      continue;
+    }
+    if (current === null || typeof current !== "object") continue;
+    const payload = current as Obj;
+    if (typeof payload.encoding === "string" && payload.encoding.toLowerCase() === "base64" && typeof payload.content === "string") {
+      return true;
+    }
+    for (const value of Object.values(payload)) stack.push(value);
   }
-  return Object.values(payload).some((value) => isBase64ContentPayload(value, depth + 1));
+  return false;
 }
 
 export async function readFile(input: string, ctx: ToolContext, offset?: number | null, limit?: number | null): Promise<Obj> {

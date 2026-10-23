@@ -291,10 +291,22 @@ test("gh_api refuses an undecoded base64 content payload (#1215 review)", async 
 test("a nested or oddly spelled base64 payload is still refused (#1215 review)", async () => {
   const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
   const encoded = Buffer.from(`token: ${secret}\n`, "utf8").toString("base64");
+  // Deeply nested payloads must not walk past the guard: a depth-capped scan
+  // let the payload below the cap reach the model unmasked (#1215 review
+  // round 3).
+  const nest = (depth: number): object => {
+    let node: Record<string, unknown> = { content: encoded, encoding: "base64" };
+    for (let i = 0; i < depth; i += 1) node = { child: node };
+    return node;
+  };
   const payloads = [
     { items: [{ content: encoded, encoding: "base64" }] },
     { blob: { content: encoded, encoding: "BASE64" } },
     [{ content: encoded, encoding: "base64" }],
+    nest(5),
+    nest(6),
+    nest(64),
+    nest(1024),
   ];
   for (const data of payloads) {
     const res = await executeToolRequest("gh_api", { endpoint: "repos/o/r/pulls/1" },
