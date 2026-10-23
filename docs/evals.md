@@ -622,6 +622,34 @@ live. The harness therefore:
   `HUMAN_REVIEWS_CONTEXT` = `false`). They are fetched as of today and can
   contain the later human finding itself.
 
+### Semantic-fixture directory placement
+
+Offline runs that serve the PR identity through the semantic-fixture seam
+(`SEMANTIC_FIXTURE_MODE=true` + `SEMANTIC_FIXTURE_DIR=<dir>`) read it from
+`<dir>/.semantic-fixture/` (`pr.json`, `diff`, `files.json`). The fixture
+directory must be **outside the reviewed checkout** — and outside the per-run
+artifact directory (`PR_REVIEWER_RUN_DIR`), which the harness also manages.
+On a real-PR corpus entry, prepare resets the reused clone with
+`git clean -ffdx` inside that checkout before the runtime starts, so a fixture
+written there is deleted before it can be read. Pick a dedicated temp
+directory whose name cannot collide with the harness's own tree (the checkout
+is `<work_dir>/<repo_full_name with "/" replaced by "-">`).
+
+Since #726 admission is the engine's first stage, the deleted fixture does not
+surface as a fixture error: the adapter serves no PR at all, and the run fails
+closed with skip reason `pr-draft` before any context artifact is written —
+the symptom points at the draft gate rather than at the deleted fixture. That
+cost PR #1117 CI cycles (`validate-python` red on `437d31c`, then again on the
+first fix attempt `ec0a224`). When an offline run skips `pr-draft` on a PR
+that is not a draft, first check whether the fixture directory was inside the
+checkout.
+
+The harness's own semantic-corpus entries are unaffected: their fixture
+repository is freshly materialized per entry (`_materialize_semantic_fixture`:
+fresh temp dir, `git init`, corpus files committed, the untracked
+`.semantic-fixture/` written afterwards) and is never reset, so the clean
+never runs inside it.
+
 ### Human-findings corpus
 
 `evals/corpus-human-findings.json` holds defects a maintainer flagged at a
