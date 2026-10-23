@@ -2640,7 +2640,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         // whose verdict is usable BUT whose run's deadline has expired would
         // still have displaced the standing verdict's telemetry record before
         // the acceptance gate rejected it.
-        const verdictAccepted = verdict.ok && (deadline === null || timeFn() < deadline);
+        const verdictAccepted = verdict.ok && timeFn() < deadline;
         // #1199 (review round 5): a refresh whose verdict is usable but not
         // accepted (or failed outright) charged the aggregate with NO verdict
         // record — mark the `verdict_refresh` side-car for persistence so the
