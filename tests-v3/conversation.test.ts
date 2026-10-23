@@ -183,9 +183,9 @@ test("#1220: Anthropic prompt caching advances through the growing native-loop t
   const openai = c.toRequestPayload("openai", "m", { cachePrefix: true });
   assert.equal(JSON.stringify(openai).includes("cache_control"), false);
 
-  // Verdict rendering drops transient turn notes, so when a closing user
-  // instruction shares a message with tool results it IS stable and the
-  // moving breakpoint may advance through that final text block.
+  // A closing verdict instruction is stable history. When it shares an
+  // Anthropic user message with tool results, the moving breakpoint may
+  // advance through that final text block.
   const verdictConversation = new Conversation();
   verdictConversation.system = "reviewer prompt";
   verdictConversation.addAssistantToolCalls([{ id: "v", name: "read_file", arguments: "{}" }]);
