@@ -100,6 +100,19 @@ test("a finding without a usable file produces no annotation", () => {
   assert.deepEqual(renderBlockingAnnotations(findings), ["::error file=ok.ts,line=3::[major] kept"]);
 });
 
+// #1163: a NUL-bearing path is unanchorable and fails closed — before the
+// shared predicate it normalized non-empty and its raw NUL byte (not touched
+// by the workflow-command escaping) reached the `::error` annotation.
+test("#1163: a NUL-bearing path renders no annotation and no location in the summary", () => {
+  const findings = [
+    { severity: "blocker", file: "a\u0000.ts", line: 1, message: "nul path" },
+    { severity: "major", file: "ok.ts", line: 3, message: "kept" },
+  ];
+  assert.deepEqual(renderBlockingAnnotations(findings), ["::error file=ok.ts,line=3::[major] kept"]);
+  // The finding still counts; its entry degrades to severity + message.
+  assert.equal(blockingGateSummary(findings), "2 blocking finding(s): [blocker] — nul path");
+});
+
 test("the line property appears only for a positive integer", () => {
   const render = (line: unknown): string[] => {
     const finding: Record<string, unknown> = { severity: "major", file: "f.ts", message: "m" };

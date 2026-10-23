@@ -3,6 +3,7 @@
  * GitHub and Forgejo publish the same validated findings. */
 import { createHash } from "node:crypto";
 import { redactText } from "../context/redact.js";
+import { safePath } from "../findings/safe-path.js";
 import { reserveSuggestionOpeners } from "../metadata/markers.js";
 import { findingIdentityFromRecord, renderFindingIdentityMarker, stripFindingIdentityMarkers } from "../outcomes/identity.js";
 import { sanitizeMarkdown } from "./sanitize.js";
@@ -204,10 +205,6 @@ export function findingToBody(finding: Finding, linkMode: string): string {
 
 function isRecord(value: unknown): value is Finding {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function safePath(path: unknown): path is string {
-  return typeof path === "string" && path.length > 0 && !path.startsWith("/") && !path.split("/").includes("..");
 }
 
 /** #762: the validated one-click suggestion action for a comment. */

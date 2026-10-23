@@ -8,6 +8,7 @@
  * finding can therefore never forge a second command, smuggle a raw newline
  * into the log, or close a fence in the summary. */
 import { redactText } from "../context/redact.js";
+import { safePath } from "../findings/safe-path.js";
 
 /** Cap on the `::error` annotations the gate emits for one run. */
 export const BLOCKING_ANNOTATION_LIMIT = 10;
@@ -32,13 +33,6 @@ export function escapeWorkflowData(value: string): string {
     .replace(/%/g, "%25")
     .replace(/\r/g, "%0D")
     .replace(/\n/g, "%0A");
-}
-
-/** The `safePath` check mirrored from `src/publish/inline-findings.ts`:
- * non-empty, repository-relative, no `..` segment — a finding's file must
- * be an anchor the forge can place, not an escape from the repository. */
-function safePath(path: unknown): path is string {
-  return typeof path === "string" && path.length > 0 && !path.startsWith("/") && !path.split("/").includes("..");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
