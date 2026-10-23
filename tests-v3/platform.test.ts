@@ -173,6 +173,49 @@ test("forgejo path translation fails closed outside the table", () => {
   assert.equal(ForgejoAdapter.translate("/notifications", ""), null);
 });
 
+test("#1225: forgejo translation splits the query string before segment matching", () => {
+  // A GitHub-shaped endpoint carrying a query is served on GitHub; segment
+  // matching must see `issues`, not `issues?state=open`.
+  assert.equal(
+    ForgejoAdapter.translate("/repos/o/r/issues?state=open", "o/r"),
+    "/api/v1/repos/o/r/issues?state=open",
+  );
+  // Multiple parameters survive intact.
+  assert.equal(
+    ForgejoAdapter.translate("/repos/o/r/pulls?state=closed&sort=updated", "o/r"),
+    "/api/v1/repos/o/r/pulls?state=closed&sort=updated",
+  );
+  // Regression: endpoints without a query translate exactly as before.
+  assert.equal(ForgejoAdapter.translate("/repos/o/r/issues", "o/r"), "/api/v1/repos/o/r/issues");
+  // The re-attached query composes with the `.diff` suffix mapping and the
+  // root-level search branch.
+  assert.equal(
+    ForgejoAdapter.translate("/repos/o/r/pulls/12/diff?whitespace=ignore-all", "o/r"),
+    "/api/v1/repos/o/r/pulls/12.diff?whitespace=ignore-all",
+  );
+  assert.equal(ForgejoAdapter.translate("/search/issues?q=foo+bar", ""), "/api/v1/search/issues?q=foo+bar");
+  // Stripping the query never smuggles an unmapped segment into the table.
+  assert.equal(ForgejoAdapter.translate("/repos/o/r/contents/src?ref=main", "o/r"), null);
+});
+
+test("#1225: forgejo ghApi serves a query-carrying endpoint through the seam", async () => {
+  const requested: string[] = [];
+  const fetchImpl: FetchLike = async (url) => {
+    requested.push(String(url));
+    return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  const adapter = new ForgejoAdapter({
+    repo: "o/r",
+    prNumber: "1",
+    baseUrl: "https://git.example.com",
+    token: "tok",
+    fetchImpl,
+  });
+  const result = await adapter.ghApi("repos/o/r/issues?state=open");
+  assert.equal(result.error, undefined, "no longer fails closed as an unsupported endpoint");
+  assert.deepEqual(requested, ["https://git.example.com/api/v1/repos/o/r/issues?state=open"]);
+});
+
 // ── Fork detection fails closed ─────────────────────────────────────────
 
 test("deriveIsFork treats unknown origins as forks", () => {

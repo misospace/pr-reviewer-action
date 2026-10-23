@@ -901,15 +901,31 @@ export class ForgejoAdapter implements PlatformReadAdapter {
 
   /** Port of `_forgejo_translate`: map a validated GitHub-shaped path onto
    * the Forgejo /api/v1 namespace. Returns null (fail closed) for anything
-   * outside the table. */
+   * outside the table. #1225: a query string is split off before segment
+   * matching and re-attached verbatim to the translated URL, so a
+   * query-carrying endpoint (`issues?state=open`) behaves identically across
+   * forges. Splitting on the FIRST `?` matches RFC 3986: everything after it
+   * is inert query data (its charset is fenced upstream by validateEndpoint)
+   * and the remaining path must still match the table exactly — a `?`
+   * smuggled into a segment leaves a query-free path that fails the lookup
+   * (fail closed); it never reinterprets the path that is matched. */
   static translate(fullPath: string, repoKey: string): string | null {
+    const queryIndex = fullPath.indexOf("?");
+    const path = queryIndex === -1 ? fullPath : fullPath.slice(0, queryIndex);
+    const query = queryIndex === -1 ? "" : fullPath.slice(queryIndex);
+    const translated = ForgejoAdapter.translatePath(path, repoKey);
+    return translated === null ? null : `${translated}${query}`;
+  }
+
+  /** The segment-matching table, operating on a query-free path. */
+  private static translatePath(path: string, repoKey: string): string | null {
     if (!repoKey) {
-      if (fullPath.startsWith("/search/")) return `/api/v1${fullPath}`;
+      if (path.startsWith("/search/")) return `/api/v1${path}`;
       return null;
     }
     const repos = `/repos/${repoKey}`;
-    if (!fullPath.startsWith(repos)) return null;
-    const rest = fullPath.slice(repos.length);
+    if (!path.startsWith(repos)) return null;
+    const rest = path.slice(repos.length);
     if (rest === "/pulls" || rest.startsWith("/pulls/")) {
       if (rest.endsWith("/diff")) {
         const n = rest.slice("/pulls/".length, -"/diff".length);
