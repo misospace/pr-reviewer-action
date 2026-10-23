@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { gitEnv } from "../src/acquisition/git-env.js";
 import { MirrorCache } from "../src/acquisition/mirror.js";
 import { assertNoEscapingSymlinks, createReviewWorkspace, sweepStaleWorkspaces } from "../src/acquisition/workspace.js";
-import { AcquisitionError } from "../src/acquisition/types.js";
+import { AcquisitionError, type WorkspaceHandle } from "../src/acquisition/types.js";
 import { initRepo, startGitHttpFixture } from "./acquisition-fixture.js";
 
 const FIXTURE_IDENTITY = {
@@ -552,6 +552,12 @@ test("workspace: sweepStaleWorkspaces refuses a workspaces root that changed dur
     const workspaces = join(env.root, "workspaces");
     const stale = join(workspaces, "stale-workspace");
     await mkdir(stale, { recursive: true });
+    // Worktree-shaped entry: the sweep only processes entries whose `.git`
+    // gitdir pointer proves ownership by this mirror, so the planted
+    // crashed leftover carries that pointer — exactly what a real
+    // `worktree add` leaves behind — and reaches the lock and the swap
+    // detection below.
+    await writeFile(join(stale, ".git"), `gitdir: ${join(env.cache.path, "worktrees", "stale-workspace")}\n`);
     const old = new Date(Date.now() - 3_600_000);
     await utimes(stale, old, old);
 
@@ -683,5 +689,186 @@ test("security scan: a tree deeper than the scan bound is refused", async () => 
     );
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("workspace: sweepStaleWorkspaces is isolated by mirror ownership across a shared workspaces root", async () => {
+  const fixture = await startGitHttpFixture();
+  const headA = await initRepo(fixture, "iso/alpha");
+  const headB = await initRepo(fixture, "iso/beta");
+  const root = await tempRoot();
+  let wsA: WorkspaceHandle | undefined;
+  let wsB1: WorkspaceHandle | undefined;
+  let wsB2: WorkspaceHandle | undefined;
+  let wsB3: WorkspaceHandle | undefined;
+  let wsB4: WorkspaceHandle | undefined;
+  try {
+    // Two mirrors under ONE cache root: distinct sha256 siblings that both
+    // derive the same shared `workspaces` sibling.
+    const alphaCache = new MirrorCache({
+      rootDir: root,
+      platform: "forgejo",
+      repoFullName: "iso/alpha",
+      cloneUrl: `${fixture.baseUrl}/iso/alpha.git`,
+    });
+    const betaCache = new MirrorCache({
+      rootDir: root,
+      platform: "forgejo",
+      repoFullName: "iso/beta",
+      cloneUrl: `${fixture.baseUrl}/iso/beta.git`,
+    });
+    await alphaCache.ensureMirror();
+    await betaCache.ensureMirror();
+    wsA = await createReviewWorkspace(alphaCache, { headSha: headA });
+    wsB1 = await createReviewWorkspace(betaCache, { headSha: headB }); // live, stays fresh
+    wsB2 = await createReviewWorkspace(betaCache, { headSha: headB }); // to be aged
+    const old = new Date(Date.now() - 3_600_000);
+    await utimes(wsA.info.rootPath, old, old);
+    await utimes(wsB2.info.rootPath, old, old);
+
+    // Alpha's sweep removes its own aged workspace only: beta's aged
+    // workspace shares the root but is not alpha's to remove.
+    const alphaSweep = await sweepStaleWorkspaces(alphaCache, { maxAgeMs: 1_800_000 });
+    assert.deepEqual(alphaSweep, { removed: 1, failed: 0 });
+    await assert.rejects(lstat(wsA.info.rootPath));
+    await lstat(wsB1.info.rootPath);
+    await lstat(wsB2.info.rootPath);
+    // Both of beta's worktrees are still registered against the beta
+    // mirror: alpha's sweep never touched beta's admin directory.
+    const betaList = gitIn(betaCache.path, ["worktree", "list", "--porcelain"]);
+    assert.ok(betaList.includes(wsB1.info.rootPath));
+    assert.ok(betaList.includes(wsB2.info.rootPath));
+    // And alpha's mirror carries only its own bare self: the swept
+    // registration is pruned, and no beta registration ever appears.
+    const alphaRegs = gitIn(alphaCache.path, ["worktree", "list", "--porcelain"])
+      .split("\n")
+      .filter((line) => line.startsWith("worktree "));
+    assert.deepEqual(alphaRegs, [`worktree ${alphaCache.path}`]);
+
+    // Beta's sweep then removes its own aged workspace; the fresh one
+    // stays (the per-entry age policy is preserved).
+    const betaSweep = await sweepStaleWorkspaces(betaCache, { maxAgeMs: 1_800_000 });
+    assert.deepEqual(betaSweep, { removed: 1, failed: 0 });
+    await assert.rejects(lstat(wsB2.info.rootPath));
+    await lstat(wsB1.info.rootPath);
+
+    // Overlap with extraction: an alpha sweep and a concurrent beta
+    // extraction run under disjoint per-mirror locks, and the sweep still
+    // cannot touch the beta entries it shares the root with.
+    const [alphaSweep2, created] = await Promise.all([
+      sweepStaleWorkspaces(alphaCache, { maxAgeMs: 1_800_000 }),
+      createReviewWorkspace(betaCache, { headSha: headB }),
+    ]);
+    assert.deepEqual(alphaSweep2, { removed: 0, failed: 0 });
+    wsB3 = created;
+    assert.ok((await readdir(wsB3.info.rootPath)).includes("README.md"));
+
+    // Overlap with close(): an AGED beta workspace closed concurrently
+    // with an alpha sweep under disjoint per-mirror locks. The sweep sees
+    // the aged entry (or finds it already gone) but its ownership proof
+    // can only name beta, so alpha removes nothing; beta's close cleans
+    // its own checkout and registration regardless of the interleaving.
+    wsB4 = await createReviewWorkspace(betaCache, { headSha: headB });
+    await utimes(wsB4.info.rootPath, old, old);
+    const b4Path = wsB4.info.rootPath;
+    const [alphaSweep3] = await Promise.all([
+      sweepStaleWorkspaces(alphaCache, { maxAgeMs: 1_800_000 }),
+      wsB4.close(),
+    ]);
+    assert.deepEqual(alphaSweep3, { removed: 0, failed: 0 });
+    await assert.rejects(lstat(b4Path));
+    const betaListAfter = gitIn(betaCache.path, ["worktree", "list", "--porcelain"]);
+    assert.ok(!betaListAfter.includes(b4Path));
+    await lstat(wsB3.info.rootPath);
+  } finally {
+    for (const handle of [wsA, wsB1, wsB2, wsB3, wsB4]) {
+      if (handle !== undefined) await handle.close().catch(() => undefined);
+    }
+    await rm(root, { recursive: true, force: true });
+    await fixture.close();
+  }
+});
+
+test("workspace: sweepStaleWorkspaces leaves entries whose mirror ownership is unprovable", async () => {
+  const env = await ready("unprov/repo");
+  const workspaces = join(env.root, "workspaces");
+  const plain = join(workspaces, "plain-aged");
+  const linked = join(workspaces, "linked-git");
+  const outside = join(workspaces, "outside-target");
+  const traversal = join(workspaces, "traversal-target");
+  const oversized = join(workspaces, "oversized-git");
+  const notpointer = join(workspaces, "not-a-pointer");
+  const mixedlines = join(workspaces, "mixed-lines-git");
+  const nulbearing = join(workspaces, "nul-pointer-git");
+  try {
+    // Positive control: a real owned, aged workspace is still removed.
+    const stale = await createReviewWorkspace(env.cache, { headSha: env.head });
+    const old = new Date(Date.now() - 3_600_000);
+    await utimes(stale.info.rootPath, old, old);
+
+    // (a) No `.git` at all: not a worktree this mirror can prove.
+    await mkdir(plain, { mode: 0o700 });
+    // (b) A `.git` SYMLINK: even though the target would prove ownership,
+    // the pointer itself is unprovable (no-follow open refuses it).
+    await mkdir(linked, { mode: 0o700 });
+    await symlink(join(stale.info.rootPath, ".git"), join(linked, ".git"));
+    // (c) A `gitdir:` line naming a target outside every mirror.
+    await mkdir(outside, { mode: 0o700 });
+    await writeFile(join(outside, ".git"), "gitdir: /nonexistent/outside\n");
+    // (d) A `gitdir:` that traverses out: the textual resolve lands
+    // outside the mirror and fails containment.
+    await mkdir(traversal, { mode: 0o700 });
+    await writeFile(join(traversal, ".git"), "gitdir: ../escape-target/.git\n");
+    // (e) An oversized pointer: over the read bound it is unprovable, and
+    // even a `gitdir:` prefix inside the junk must not be trusted.
+    await mkdir(oversized, { mode: 0o700 });
+    await writeFile(join(oversized, ".git"), `gitdir: ${env.cache.path}/worktrees/x${"a".repeat(8192)}\n`);
+    // (f) A regular `.git` FILE whose content is not a `gitdir:` pointer.
+    await mkdir(notpointer, { mode: 0o700 });
+    await writeFile(join(notpointer, ".git"), "this is not a worktree pointer\n");
+    // (g) Multi-line: only the FIRST line is the pointer, so a junk first
+    // line stays unprovable even when a trailing line names the mirror —
+    // the tail must never smuggle containment in.
+    await mkdir(mixedlines, { mode: 0o700 });
+    await writeFile(join(mixedlines, ".git"), `nope\n${join(env.cache.path, "worktrees", "x")}\n`);
+    // (h) NUL-bearing: even text that would otherwise contain INSIDE the
+    // mirror is junk — NUL never appears in a valid pointer and is not
+    // filesystem-path-safe, so the proof fails closed.
+    await mkdir(nulbearing, { mode: 0o700 });
+    await writeFile(join(nulbearing, ".git"), `gitdir: ${env.cache.path}/worktrees/x\u0000evil\n`);
+    for (const dir of [plain, linked, outside, traversal, oversized, notpointer, mixedlines, nulbearing]) {
+      await utimes(dir, old, old);
+    }
+
+    // Only the real owned workspace is removed; every unprovable entry is
+    // skipped — neither removed nor failed — and left in place.
+    const result = await sweepStaleWorkspaces(env.cache, { maxAgeMs: 1_800_000 });
+    assert.deepEqual(result, { removed: 1, failed: 0 });
+    await assert.rejects(lstat(stale.info.rootPath));
+    await lstat(plain);
+    await lstat(linked);
+    await lstat(outside);
+    await lstat(traversal);
+    await lstat(oversized);
+    await lstat(notpointer);
+    await lstat(mixedlines);
+    await lstat(nulbearing);
+    assertOnlyMirrorWorktree(env);
+    await stale.close();
+
+    // Hostile-root refusal is preserved around the ownership skip: with
+    // the workspaces root replaced by a symlink, the sweep refuses before
+    // enumerating anything and removes nothing.
+    await rm(workspaces, { recursive: true, force: true });
+    await symlink(join(env.root, "elsewhere"), workspaces);
+    await assert.rejects(
+      sweepStaleWorkspaces(env.cache, { maxAgeMs: 1_800_000 }),
+      (error: unknown) =>
+        error instanceof AcquisitionError &&
+        error.code === "workspace_refusal" &&
+        /symlink/.test(error.message),
+    );
+  } finally {
+    await env.close();
   }
 });

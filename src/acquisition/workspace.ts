@@ -30,15 +30,21 @@
  *
  * Crash recovery: `sweepStaleWorkspaces` removes workspaces left behind by
  * workers that died before `close()` (age-based) and prunes their worktree
- * registrations. The sweep applies the SAME workspaces-root refusal as
- * extraction: a symlinked or non-directory root is refused, a missing root
- * is a no-op, and the root is re-verified inside the mirror lock
- * immediately before the removals, so a root swapped mid-sweep is refused
- * rather than swept.
+ * registrations. Because every mirror under a cache root shares ONE sibling
+ * `workspaces` root, the sweep only removes entries whose `.git` gitdir
+ * pointer proves ownership by the supplied mirror — a shared root can never
+ * leak cross-repository removals — and leaves unprovable entries in place
+ * (a pointerless entry is unprovable by ANY sweep; reclaiming those stays
+ * operator/maintenance work). The sweep applies the SAME workspaces-root
+ * refusal as extraction: a symlinked or non-directory root is refused, a
+ * missing root is a no-op, and the root is re-verified inside the mirror
+ * lock immediately before the removals, so a root swapped mid-sweep is
+ * refused rather than swept.
  */
 
+import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, lstat, readlink, readdir, rm } from "node:fs/promises";
+import { chmod, mkdir, lstat, open, readlink, readdir, realpath, rm } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { runProcess } from "../runtime/subprocess.js";
 import { gitInvocationEnv } from "./git-env.js";
@@ -391,10 +397,111 @@ function isSameWorkspacesRoot(captured: WorkspacesRootIdentity, current: Workspa
   return captured.dev === current.dev && captured.ino === current.ino;
 }
 
+/** Bound for reading a worktree `.git` pointer file (a single path line);
+ * the pointer is controller-owned, the cap only matches the module's
+ * bounding style. */
+const GIT_POINTER_MAX_BYTES = 4096;
+/** `O_NOFOLLOW` is not defined on every platform; there the no-follow
+ * guarantee degrades to the platform default (the read stays bounded and
+ * same-descriptor either way). */
+const NOFOLLOW_FLAG = constants.O_NOFOLLOW ?? 0;
+
+/** Read a small worktree pointer file (a workspace's `.git`) WITHOUT a
+ * check-then-use gap: open once with no-follow semantics (a symlinked file
+ * is refused, never followed), size-check via `fstat` on that descriptor,
+ * and read at most maxBytes+1 from the SAME descriptor — so the bound
+ * cannot be bypassed by swapping the file between a separate stat and
+ * read, and the bytes read are provably the bytes that were size-checked.
+ * `null` on any failure (unreadable, symlinked, not a regular file,
+ * oversized): callers treat that as unproven, fail closed. */
+async function readBoundedGitPointer(path: string): Promise<string | null> {
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | NOFOLLOW_FLAG);
+  } catch {
+    return null;
+  }
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > GIT_POINTER_MAX_BYTES) {
+      return null;
+    }
+    const buffer = Buffer.alloc(GIT_POINTER_MAX_BYTES + 1);
+    const { bytesRead } = await handle.read(buffer, 0, GIT_POINTER_MAX_BYTES + 1, 0);
+    if (bytesRead > GIT_POINTER_MAX_BYTES) {
+      return null;
+    }
+    return buffer.subarray(0, bytesRead).toString("utf8").trim();
+  } catch {
+    return null;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
+/** Prove that a directory under the SHARED workspaces root belongs to the
+ * supplied mirror: git's worktree admin pointer (the workspace's `.git`
+ * file, `gitdir: <path>`) must name an admin directory strictly inside the
+ * mirror's directory. The target is resolved TEXTUALLY from the workspace
+ * directory (a relative `gitdir:` that traverses out lands outside and
+ * fails), and containment is checked both against the mirror's textual
+ * path and, when that path's ancestors include a symlink, against its
+ * `realpath` (git writes the admin pointer canonicalized, so a symlinked
+ * tmpdir ancestor must not break the proof). Any failure — missing,
+ * unreadable, or symlinked pointer, oversized pointer, content that is
+ * not a `gitdir:` line, a `gitdir:` first line carrying NUL bytes, or a
+ * pointer target
+ * outside the mirror — is unproven: the entry is left in place (fail
+ * closed, never removed) for whoever can prove it. */
+async function workspaceOwnedByMirror(dir: string, mirrorPath: string): Promise<boolean> {
+  try {
+    const raw = await readBoundedGitPointer(join(dir, ".git"));
+    if (raw === null) {
+      return false;
+    }
+    // Only the FIRST line is the pointer (`gitdir: <path>`); trailing lines
+    // are junk no valid pointer carries, so the parsed value is that single
+    // line, never a blob whose tail could smuggle a path component in.
+    const line = raw.slice(0, raw.indexOf("\n") === -1 ? raw.length : raw.indexOf("\n")).trimEnd();
+    if (!line.startsWith("gitdir:")) {
+      return false;
+    }
+    // NUL is not filesystem-path-safe and never appears in a valid git
+    // pointer; a NUL-bearing line is junk, not a provable target (fail
+    // closed, same posture as the string-`startsWith` containment below).
+    if (line.includes("\u0000")) {
+      return false;
+    }
+    const target = resolve(dir, line.slice("gitdir:".length).trim());
+    const prefix = resolve(mirrorPath);
+    if (target.startsWith(prefix + sep)) {
+      return true;
+    }
+    const realPrefix = await realpath(mirrorPath);
+    return target.startsWith(realPrefix + sep);
+  } catch {
+    return false;
+  }
+}
+
 /** Crash recovery: remove workspace directories older than `maxAgeMs` and
  * prune their mirror worktree registrations. Removals and the prune run
  * under the per-mirror lock so they cannot interleave with extraction or
  * close().
+ *
+ * Ownership is proven per entry BEFORE any removal: every mirror under
+ * the cache root shares one sibling `workspaces` root, so an aged entry
+ * is only removed when its `.git` gitdir pointer names an admin directory
+ * strictly inside the supplied mirror's directory (textual containment,
+ * or containment under the mirror's `realpath` when an ancestor is a
+ * symlink; git writes the pointer canonicalized). An entry whose
+ * ownership cannot be proven — missing or unreadable or symlinked
+ * pointer, oversized pointer, content that is not a `gitdir:` line, a
+ * NUL-bearing `gitdir:` first line, or a pointer target outside the
+ * mirror — is left in place: a shared root can
+ * never cause cross-repository removals, a skipped entry counts as neither
+ * removed nor failed, and an entry unprovable by every sweep stays
+ * operator/maintenance work.
  *
  * The sweep REJECTS with `AcquisitionError("workspace_refusal")` when the
  * workspaces root is hostile (a symlink or not a directory), when it
@@ -451,6 +558,12 @@ export async function sweepStaleWorkspaces(
       // mtime only: ctime cannot be backdated and would make every
       // observed age look fresh.
       if (info.mtimeMs > cutoff) continue;
+      // Ownership proof: every mirror under the cache root shares this one
+      // workspaces root, so an aged entry that does not prove itself THIS
+      // mirror's own worktree (via its `.git` gitdir pointer) belongs to a
+      // mirror — it is skipped (neither removed nor failed) and left in
+      // place; only that mirror's own sweep can prove and reclaim it.
+      if (!(await workspaceOwnedByMirror(dir, mirror.path))) continue;
       stale.push(dir);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
