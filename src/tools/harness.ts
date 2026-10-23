@@ -801,7 +801,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
       let timeout = input.turnTimeout;
       if (input.deadline !== null) {
         const remaining = input.deadline - timeFn();
-        if (remaining <= 0) throw new Error("smart tool-loop wall-clock budget exhausted");
+        if (remaining <= 0) throw new Error("tool-loop wall-clock budget exhausted");
         timeout = Math.min(input.turnTimeout, Math.max(1, Math.trunc(remaining)));
       }
       return { response: await transport(input.baseUrl, input.apiFormat, payload, input.apiKey, timeout), transportError: null };
@@ -1718,7 +1718,13 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     ...adaptiveLoopBudgets(maxRounds, input.maxRequests, wallClock, roundsExplicit),
     maxConversationTokens: loopContextLimits(env, limitsProfile).maxConversationTokens,
   };
-  const deadline = input.tier === "smart" ? timeFn() + wallClock : null;
+  // #1198: a true whole-exchange deadline for EITHER tier, taken once here —
+  // before the MCP chain and every turn — so pre-loop setup and an unclamped
+  // closing verdict turn can no longer push the exchange past the configured
+  // `tool-loop-wall-clock-sec` ceiling. Everything downstream (per-turn
+  // clamps, refusal results, verdict/acceptance/repair gating) already honors
+  // a non-null deadline; only the smart tier supplied one before.
+  const deadline = timeFn() + wallClock;
   // #1094 review round 3: the loop's NON-verdict response surfaces (tool-call
   // arguments, the closing text, loop errors, tool results) are
   // provider-influenced too, but they are STRUCTURAL — they feed the verdict
@@ -1829,7 +1835,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     const remainingCheck = (): number => {
       if (deadline === null) return input.turnTimeout;
       const remaining = deadline - timeFn();
-      if (remaining <= 0) throw new Error("smart tool-loop wall-clock budget exhausted");
+      if (remaining <= 0) throw new Error("tool-loop wall-clock budget exhausted");
       return Math.min(input.turnTimeout, Math.max(1, Math.trunc(remaining)));
     };
     let timeout = remainingCheck();
@@ -1934,7 +1940,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
 
   const executeFn = async (toolName: string, args: Record<string, unknown>): Promise<Record<string, unknown>> => {
     if (deadline !== null && timeFn() >= deadline) {
-      return { tool: toolName, status: "error", result: { error: "smart tool-loop deadline exceeded" } };
+      return { tool: toolName, status: "error", result: { error: "tool-loop deadline exceeded" } };
     }
     // Route mcp__server__tool to the MCP client; everything else falls through
     // to the built-in read-only executor. A separator-mangled variant of an
@@ -1956,7 +1962,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       if (deadline !== null) {
         const remaining = deadline - timeFn();
         if (remaining <= 0) {
-          return { tool: toolName, status: "error", result: { error: "smart tool-loop deadline exceeded" } };
+          return { tool: toolName, status: "error", result: { error: "tool-loop deadline exceeded" } };
         }
         toolset.timeoutSec = Math.min(input.requestTimeout, Math.max(1, Math.trunc(remaining)));
       }
@@ -1973,7 +1979,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     if (deadline !== null) {
       const remaining = deadline - timeFn();
       if (remaining <= 0) {
-        return { tool: toolName, status: "error", result: { error: "smart tool-loop deadline exceeded" } };
+        return { tool: toolName, status: "error", result: { error: "tool-loop deadline exceeded" } };
       }
       toolTimeout = Math.min(input.requestTimeout, Math.max(1, Math.trunc(remaining)));
     }
@@ -2025,6 +2031,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       anthropicEffortSupported: anthropicEffort,
       summarizeFn,
       timeFn,
+      // #1198: the whole-exchange absolute deadline taken above — the loop's
+      // between-rounds check honors it instead of only elapsed loop time.
+      wallClockDeadline: deadline,
     },
   );
 
@@ -2259,7 +2268,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         let verdictTimeout = input.turnTimeout;
         if (deadline !== null) {
           const remaining = deadline - timeFn();
-          if (remaining <= 0) throw new Error("smart tool-loop wall-clock budget exhausted");
+          if (remaining <= 0) throw new Error("tool-loop wall-clock budget exhausted");
           verdictTimeout = Math.min(input.turnTimeout, Math.max(1, Math.trunc(remaining)));
         }
         const verdict = await produceNativeVerdict({
@@ -2468,6 +2477,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
               anthropicEffortSupported: anthropicEffort,
               summarizeFn,
               timeFn,
+              // #1198: the repair round shares the ORIGINAL run's absolute
+              // deadline — the allowance above is a share, never an extension.
+              wallClockDeadline: deadline,
             });
           } catch (exc) {
             const message = exc instanceof Error ? exc.message : String(exc);
