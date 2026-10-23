@@ -371,6 +371,155 @@ test("smart-tier wall-clock exhaustion stops the loop with the deadline stop rea
   assert.equal(result.native_loop_verdict_produced, undefined);
 });
 
+// #1198: the whole-exchange ceiling now binds BOTH tiers. These primary-tier
+// tests mirror the smart wall-clock test above: an absolute deadline taken
+// before the loop (including pre-loop setup) with a scripted transport whose
+// 5th argument (the clamped timeout) is captured, AI_STREAM false, and a
+// timeFn advanced in fixed steps so every remaining-budget clamp is
+// deterministic. The deadline = step + ceiling; tick n reads n·step.
+
+test("#1198 primary: a near-deadline loop turn gets the remaining budget and the next round sees none", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Deadline = 18 + 100 = 118. The first turn's request starts with 46s left
+  // (clamped below the 60s turn timeout); the SECOND between-rounds check
+  // (126) is past the deadline, so no second model request is ever opened.
+  let clock = 0;
+  const timeouts: number[] = [];
+  let transportCalls = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiCall("c2", "read_file", '{"path":"src.ts"}'),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: { TOOL_LOOP_WALL_CLOCK_SEC: "100" },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, timeout) => {
+      timeouts.push(timeout);
+      return scripted[transportCalls++];
+    },
+    timeFn: () => {
+      clock += 18;
+      return clock;
+    },
+  }));
+  assert.deepEqual(timeouts, [46], "the turn must be clamped to the remaining exchange budget");
+  assert.ok(timeouts[0]! < 60, "strictly below the configured turn timeout");
+  assert.equal(result.mode, "native_loop");
+  assert.equal(result.stop_reason, "wall-clock-exceeded");
+  assert.equal(result.rounds, 1);
+  assert.equal((result.tool_calls as unknown[]).length, 1, "executed calls stay recorded");
+  assert.equal(result.native_loop_degraded, undefined);
+  assert.equal(result.native_loop_error, undefined);
+  assert.equal(result.native_loop_verdict_produced, undefined);
+});
+
+test("#1198 primary: a near-deadline verdict turn is clamped to the remaining budget and still accepted", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Deadline = 10 + 150 = 160. The loop spends two rounds, then the verdict
+  // turn's request is clamped from 60s to the 40s that remain and its
+  // acceptance check (tick 130) lands strictly inside the exchange.
+  let clock = 0;
+  const timeouts: number[] = [];
+  let transportCalls = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "150" },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, timeout) => {
+      timeouts.push(timeout);
+      return scripted[transportCalls++];
+    },
+    timeFn: () => {
+      clock += 10;
+      return clock;
+    },
+  }));
+  assert.deepEqual(timeouts, [60, 60, 40]);
+  assert.ok(timeouts[2]! < 60, "the verdict turn must be clamped below the per-turn timeout");
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+});
+
+test("#1198 primary: a verdict turn landing past the exchange deadline is fallback with reason deadline", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Deadline = 10 + 115 = 125. The verdict turn still gets its clamped
+  // request (5s left) and a VALID body, but the acceptance check (tick 130)
+  // is past the deadline — smart-tier parity: fallback, reason "deadline".
+  let clock = 0;
+  const timeouts: number[] = [];
+  let transportCalls = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "115" },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, timeout) => {
+      timeouts.push(timeout);
+      return scripted[transportCalls++];
+    },
+    timeFn: () => {
+      clock += 10;
+      return clock;
+    },
+  }));
+  assert.deepEqual(timeouts, [60, 45, 5]);
+  assert.equal(result.native_loop_verdict_produced, undefined);
+  assert.equal(result.native_loop_verdict_status, "fallback");
+  assert.equal(result.native_loop_verdict_reason, "deadline");
+});
+
+test("#1198 smart: a near-deadline verdict turn is clamped to the remaining budget and still accepted", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Same tick map as the primary accepted-verdict test plus one tick for the
+  // smart degradation gate: deadline = 10 + 160 = 170, verdict request
+  // clamped to the 40s that remain, accepted inside the exchange, and the
+  // post-verdict telemetry gate (tick 160) still inside the deadline too.
+  let clock = 0;
+  const timeouts: number[] = [];
+  let transportCalls = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: {
+      ...withPrompt.env,
+      TOOL_HARNESS_TIER: "smart",
+      SMART_BASE_URL: "http://smart.test/v1",
+      SMART_MODEL: "smart1",
+      SMART_API_KEY: "k",
+      AI_STREAM: "false",
+      TOOL_LOOP_WALL_CLOCK_SEC: "160",
+    },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, timeout) => {
+      timeouts.push(timeout);
+      return scripted[transportCalls++];
+    },
+    timeFn: () => {
+      clock += 10;
+      return clock;
+    },
+  }));
+  assert.deepEqual(timeouts, [60, 60, 40]);
+  assert.ok(timeouts[2]! < 60, "the verdict turn must be clamped below the per-turn timeout");
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  assert.ok(fs.existsSync(path.join(root, "tool-harness.smart.json")));
+});
+
 test("invalid env integers crash loudly like v2's int()", async () => {
   const { deps } = workspace();
   await assert.rejects(
