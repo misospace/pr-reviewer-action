@@ -13,6 +13,7 @@ import {
   adaptiveLoopBudgets,
   driveToolLoop,
   extractToolCalls,
+  type DriveToolLoopOptions,
   type NativeLoopRoundTelemetry,
   type ToolTurnSignal,
 } from "../src/tools/loop.js";
@@ -249,6 +250,83 @@ test("wall-clock deadline stops the loop between rounds", async () => {
   });
   assert.equal(outcome.stopReason, STOP_WALL_CLOCK);
   assert.equal(outcome.rounds, 1);
+});
+
+// #1198: when the harness passes an absolute whole-exchange deadline, the
+// between-rounds check fires on the ABSOLUTE clock instead of time-since-own-
+// start, so pre-loop setup time and a deadline taken before the loop both
+// count — and a loop that starts past the deadline never opens a round.
+
+test("#1198: an absolute deadline already past at loop start stops before any model request", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  let postCalls = 0;
+  const postFn = async () => {
+    postCalls++;
+    return openAiCall("c1", "t", "{}");
+  };
+  const executeFn = async () => ({ tool: "t", status: "ok", result: {} });
+  // A constant clock past the deadline: the absolute check is independent of
+  // the loop's own started time, so zero remaining budget must end the run
+  // without a single new model request.
+  const timeFn = () => 500;
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 10, 120),
+    wallClockDeadline: 100,
+    timeFn,
+  });
+  assert.equal(outcome.stopReason, STOP_WALL_CLOCK);
+  assert.equal(outcome.rounds, 0);
+  assert.equal(postCalls, 0, "no new model request begins with zero remaining budget");
+  assert.equal(outcome.toolCallsIssued, 0);
+});
+
+test("#1198: an absolute deadline fires before a new model request between rounds", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // Clock: started=0, round-1 check=5 (runs), round-2 check=100 (at the
+  // deadline → stops BEFORE the second postFn call). The legacy elapsed check
+  // (100 - 0 vs the 120s ceiling) would have opened round 2 here.
+  const { postFn, executeFn, timeFn } = scriptedLoop(
+    [openAiCall("c1", "t", "{}"), openAiCall("c2", "t", "{}")],
+    [{ tool: "t", status: "ok", result: {} }, { tool: "t", status: "ok", result: {} }],
+    [0, 5, 100],
+  );
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 10, 120),
+    wallClockDeadline: 100,
+    timeFn,
+  });
+  assert.equal(outcome.stopReason, STOP_WALL_CLOCK);
+  assert.equal(outcome.rounds, 1);
+  assert.equal(outcome.toolCallsIssued, 1);
+});
+
+test("#1198: without a finite absolute deadline the elapsed-since-start check still applies", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // Unset, null, and non-finite deadlines all fall back to the legacy check.
+  for (const deadline of [undefined, null, Number.POSITIVE_INFINITY] as const) {
+    const { postFn, executeFn, timeFn } = scriptedLoop(
+      [openAiCall("c1", "t", "{}"), openAiCall("c2", "t", "{}")],
+      [{ tool: "t", status: "ok", result: {} }, { tool: "t", status: "ok", result: {} }],
+      [0, 0, 999],
+    );
+    const options: DriveToolLoopOptions = {
+      apiFormat: "openai",
+      model: "m",
+      budgets: adaptiveLoopBudgets(4, 10, 120),
+      timeFn,
+    };
+    if (deadline !== undefined) options.wallClockDeadline = deadline;
+    const outcome = await driveToolLoop(conversation, postFn, executeFn, options);
+    assert.equal(outcome.stopReason, STOP_WALL_CLOCK, String(deadline));
+    assert.equal(outcome.rounds, 1, String(deadline));
+  }
 });
 
 test("compaction: blunt truncation backstops when no summarizer frees enough", async () => {
