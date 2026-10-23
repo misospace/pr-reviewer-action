@@ -180,6 +180,7 @@ DOGFOOD_OVERRIDES = {
     "ai-api-key",
     "ai-response-format",
     "ai-anthropic-effort-support",
+    "ai-specialist-anthropic-effort-support",
     "ai-reasoning-effort",
     "ai-primary-reasoning-effort",
     "ai-smart-reasoning-effort",
