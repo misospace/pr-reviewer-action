@@ -6,6 +6,7 @@ import {
   FEEDBACK_ACTOR_CAP,
   markerReviewResult,
   publishReview,
+  publishStepRuns,
   renderFindingsSummary,
   renderOutsideDiffSection,
   renderPartialCoverageNotice,
@@ -466,6 +467,46 @@ test("#1161: an observed allow-approve warns about its deprecation; an absent in
   const absent = new MockPublishApi();
   const absentResult = await publishReview(input({ mode: "review_verdict" }), absent, { diffText: "" });
   assert.ok(!absentResult.messages.some((message) => message.includes("allow-approve")));
+});
+
+test("#1158: publishStepRuns derives publication from the publish mode alone", () => {
+  // Every valid mode publishes — including `comment`, which used to require
+  // the legacy `publish-review-comment` flag in the action entry while the
+  // publish seam published it unconditionally (#1158).
+  for (const mode of ["comment", "review_comment", "review_verdict", "review_blockers"] as const) {
+    assert.equal(publishStepRuns(mode), true, mode);
+  }
+  for (const mode of [undefined, "", "commentx", "COMMENTS", "review"]) {
+    assert.equal(publishStepRuns(mode), false, JSON.stringify(mode));
+  }
+});
+
+test("#1158: an observed publish-review-comment warns about its deprecation and publication is unaffected", async () => {
+  // Same observable-value rule as `allow-approve` (#1161): the publisher is
+  // told only a value that DIFFERS from the contract default, because the
+  // runner merges the default and can never distinguish an explicit "false"
+  // from an unset input. Only `true` reaches the seam in production.
+  const api = new MockPublishApi();
+  const result = await publishReview(input({ mode: "comment", publishReviewComment: true }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.equal(api.sticky.length, 1, "the sticky comment published anyway — the mode alone decides");
+  assert.ok(result.messages.some((message) => message.startsWith("WARN: ")
+    && message.includes("'publish-review-comment' is deprecated")
+    && message.includes("no longer affects publication")
+    && message.includes("value: true")
+    && message.includes("publish-mode: comment")), JSON.stringify(result.messages));
+
+  // The same warning on a native mode: no historical behavior for it there.
+  for (const mode of ["review_comment", "review_verdict"] as const) {
+    const modeApi = new MockPublishApi();
+    const modeResult = await publishReview(input({ mode, publishReviewComment: true }), modeApi, { diffText: "" });
+    assert.equal(modeResult.status, "published", mode);
+    assert.ok(modeResult.messages.some((message) => message.includes("'publish-review-comment' is deprecated")), mode);
+  }
+
+  const absent = new MockPublishApi();
+  const absentResult = await publishReview(input({ mode: "comment" }), absent, { diffText: "" });
+  assert.ok(!absentResult.messages.some((message) => message.includes("publish-review-comment")));
 });
 
 test("#1161/#1145: a missing or invalid verdict is never published as an approval or a blocking request", async () => {

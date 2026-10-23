@@ -434,12 +434,12 @@ inputs:
     v2_id: publish_review_comment
     required: false
     default: "false"
-    description: "If true, publish or update a PR comment with the generated review"
+    description: "DEPRECATED — accepted for backward compatibility but ignored: publication is decided by 'publish-mode' alone ('comment' publishes or updates the sticky PR comment with no legacy flag; #1158), and setting it to anything other than the default logs a deprecation warning. A workflow that set this to enable the sticky comment should select 'publish-mode: comment' instead and can drop the input."
   - id: publish-mode
     v2_id: publish_mode
     required: false
     default: "review_comment"
-    description: "Publish mode for the review. 'review_comment' (default) submits a non-blocking native PR review, so findings can anchor to diff lines. 'comment' publishes a sticky PR comment instead. 'review_verdict' publishes the final verdict natively: an 'approve' verdict becomes a native approval (same-repository PRs; cross-repository PRs additionally need approve-forks: true) and a 'request_changes' verdict becomes a native blocking request. 'review_blockers' publishes blocking requests only: a 'request_changes' verdict becomes a native blocking request, an 'approve' verdict is published as an advisory comment, and the mode never publishes an approval. review_comment, review_verdict and review_blockers need permissions: pull-requests: write."
+    description: "Publish mode for the review. 'review_comment' (default) submits a non-blocking native PR review, so findings can anchor to diff lines. 'comment' publishes a sticky PR comment instead (no separate legacy flag is involved; #1158). 'review_verdict' publishes the final verdict natively: an 'approve' verdict becomes a native approval (same-repository PRs; cross-repository PRs additionally need approve-forks: true) and a 'request_changes' verdict becomes a native blocking request. 'review_blockers' publishes blocking requests only: a 'request_changes' verdict becomes a native blocking request, an 'approve' verdict is published as an advisory comment, and the mode never publishes an approval. review_comment, review_verdict and review_blockers need permissions: pull-requests: write."
   - id: allow-approve
     v2_id: allow_approve
     required: false
@@ -905,7 +905,7 @@ outputs:
   # findings, or approval.
   - id: confidence-status
     v2_id: confidence_status
-    description: "Confidence scorer outcome (#1073): 'scored' when the scorer ran and produced a usable score, 'unscored' when it was enabled but the call failed, timed out, produced no usable score, this run's publish step is skipped (publish-mode comment with publish-review-comment unset — the scorer never calls the model for a review that will not publish), or a required proof-context pin (head SHA, base SHA, review_result) did not resolve (#1155 — the scorer never grades a prompt it cannot anchor), and empty when the scorer is disabled (ai-confidence-model unset)."
+    description: "Confidence scorer outcome (#1073): 'scored' when the scorer ran and produced a usable score, 'unscored' when it was enabled but the call failed, timed out, produced no usable score, the run would not publish at all (the publish-step-skipped defensive branch — config resolution rejects an unrecognized publish-mode before the review runs, so this branch should never fire: the scorer never calls the model for a review that will not publish), or a required proof-context pin (head SHA, base SHA, review_result) did not resolve (#1155 — the scorer never grades a prompt it cannot anchor), and empty when the scorer is disabled (ai-confidence-model unset)."
   - id: confidence-score
     v2_id: confidence_score
     description: "Integer 0-5 confidence score from the scorer; empty when the scorer is disabled or did not produce a usable score (never a spurious 0). Advisory telemetry only — never affects the verdict, findings, or approval."

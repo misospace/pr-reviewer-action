@@ -36,7 +36,6 @@ jobs:
           ai-model: gpt-4.1
           ai-api-key: ${{ secrets.OPENAI_API_KEY }}
           standards-file: CLAUDE.md
-          publish-review-comment: "true"
 ```
 
 ### Anthropic-compatible via `ai-api-format`
@@ -52,7 +51,6 @@ Set `ai-api-format: anthropic` to post to `/messages` instead of `/chat/completi
     ai-model: claude-sonnet-4-5
     ai-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
     ai-max-tokens: "8192"
-    publish-review-comment: "true"
 ```
 
 `ai-api-format` has a matching sibling for every model slot: `ai-fallback-api-format`, `ai-primary-api-format`, `ai-smart-api-format`, and `ai-specialist-api-format`. Each defaults to blank and inherits the primary `ai-api-format` unless that profile is active with its own format — so a model on a different provider format must set its own.

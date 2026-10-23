@@ -42,14 +42,14 @@ export type PublishMode = "comment" | "review_comment" | "review_verdict" | "rev
  * Whether the action entry's publish step runs for this mode: the single
  * decision shared by the entry's publish gate and the confidence scorer's
  * eligibility gate, so a privileged scorer call can only happen when the
- * review body will actually be published. `comment` still requires the
- * legacy `publish-review-comment` flag; #1161: `review_blockers` publishes
- * a native review like the other native modes.
+ * review body will actually be published. #1158: the publish mode ALONE
+ * decides — `comment` publishes the sticky PR comment without any legacy
+ * flag, exactly like the publish seam does (the legacy `publish-review-comment`
+ * input is deprecated and inert).
  */
-export function publishStepRuns(mode: string | undefined, legacyCommentFlag: boolean): boolean {
+export function publishStepRuns(mode: string | undefined): boolean {
   const value = mode ?? "";
-  return value === "review_comment" || value === "review_verdict" || value === "review_blockers"
-    || (value === "comment" && legacyCommentFlag);
+  return value === "review_comment" || value === "review_verdict" || value === "review_blockers" || value === "comment";
 }
 
 export type NativeReviewEvent = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
@@ -87,6 +87,11 @@ export interface PublishInput {
    * compatibility, but it gates nothing and changes no published event —
    * it is read only to warn the operator that it no longer has an effect. */
   allowApprove?: boolean;
+  /** #1158: DEPRECATED and inert, like `allowApprove`. Publication is
+   * decided by `mode` alone (`comment` publishes the sticky PR comment with
+   * no legacy flag); the field is read only to warn the operator that the
+   * input no longer has an effect. */
+  publishReviewComment?: boolean;
   approveForks: boolean;
   /** Fork-ness from the precheck (fail-closed); null derives from the platform. */
   isForkPr: boolean | null;
@@ -1276,6 +1281,15 @@ export async function publishReview(
   // input no longer does that.
   if (input.allowApprove !== undefined) {
     messages.push(`WARN: 'allow-approve' is deprecated and no longer affects publication (value: ${input.allowApprove}); use 'publish-mode: review_verdict' to publish the verdict, or 'publish-mode: review_blockers' for blockers-only behavior.`);
+  }
+  // #1158: `publish-review-comment` is deprecated and inert for the same
+  // reason — the publish mode alone decides what is published
+  // (`publishStepRuns` above). It is read here only to tell the operator
+  // that the input no longer has an effect. The projected value is
+  // `true` in practice: the runner merges the contract default, so only a
+  // value that differs from "false" reaches this seam.
+  if (input.publishReviewComment !== undefined) {
+    messages.push(`WARN: 'publish-review-comment' is deprecated and no longer affects publication (value: ${input.publishReviewComment}); the publishing behavior is decided by 'publish-mode' alone — use 'publish-mode: comment' to publish or update the sticky PR comment.`);
   }
   let outcomes: string | undefined;
   // #1116: the tally line is emitted only with the artifact it describes —

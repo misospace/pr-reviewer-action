@@ -1699,14 +1699,13 @@ secrets: [profiles.primary.apiKey],
   const confidenceResolution = resolveConfidenceProfile(env);
   for (const warning of confidenceResolution.warnings) log(`WARNING: ${warning}`);
   // The scorer's eligibility gate is now EXACTLY the `shouldPublish` decision
-  // the action entry applies at the publish seam: `comment` mode counts as
-  // publishing only when the legacy `publish-review-comment` flag is set,
-  // and `review_blockers` counts as publishing like the other native modes
+  // the action entry applies at the publish seam: the publish mode alone
+  // decides, for every mode including `comment` (#1158 — the legacy
+  // `publish-review-comment` flag no longer gates publication anywhere) and
+  // `review_blockers` counts as publishing like the other native modes
   // (shared `publishStepRuns` predicate, so the two sites cannot diverge).
-  // The previous round-5 gate overshot: it scored `comment`-mode runs whose
-  // publish step is skipped — a privileged outbound scorer call for a review
-  // that will not publish.
-  const reviewWillPublish = publishStepRuns(env.PUBLISH_MODE, env.PUBLISH_REVIEW_COMMENT === "true");
+  // A run whose publish step is skipped still gets no privileged scorer call.
+  const reviewWillPublish = publishStepRuns(env.PUBLISH_MODE);
   const confidenceProfile = confidenceResolution.profile;
   // #1155: the proof-context pins the scorer call is anchored to. An empty
   // one means the score would grade content (or an outcome) this run could
