@@ -308,6 +308,46 @@ test("#868 maintainer follow-up: a 200 verdict-turn reply that parses to {verdic
   }
 });
 
+test("#747: an empty AI_TEMPERATURE omits temperature from every loop and verdict request on both tiers", async () => {
+  const smartEnv = {
+    TOOL_HARNESS_TIER: "smart",
+    SMART_BASE_URL: "http://smart.test/v1",
+    SMART_MODEL: "smart1",
+    SMART_API_KEY: "k",
+  };
+  for (const tier of ["primary", "smart"] as const) {
+    for (const aiTemperature of ["", "0.1"]) {
+      const { root, deps } = workspace();
+      const corpus = tier === "smart" ? "review-corpus.smart.truncated.md" : "review-corpus.truncated.md";
+      fs.writeFileSync(path.join(root, corpus), "# PR Diff\\n+ change\\n");
+      fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\\n");
+      const scripted = [openAiCall("c1", "read_file", '{"path":"src.ts"}'), openAiText("evidence gathered"), validVerdict()];
+      const payloads: Array<Record<string, unknown>> = [];
+      const { result } = await runToolHarness(deps({
+        env: {
+          ...withPrompt.env,
+          ...(tier === "smart" ? smartEnv : {}),
+          AI_TEMPERATURE: aiTemperature,
+        },
+        transport: async (_url, _format, payload) => {
+          payloads.push(payload as Record<string, unknown>);
+          return scripted[payloads.length - 1];
+        },
+      }));
+      const label = `${tier}, AI_TEMPERATURE=${JSON.stringify(aiTemperature)}`;
+      assert.equal(result.native_loop_verdict_produced, true, label);
+      assert.equal(payloads.length, 3, label);
+      const [round1, round2, verdict] = payloads;
+      for (const loopPayload of [round1!, round2!]) {
+        if (aiTemperature === "") assert.equal("temperature" in loopPayload, false, label);
+        else assert.equal(loopPayload.temperature, 0.0, label);
+      }
+      if (aiTemperature === "") assert.equal("temperature" in verdict!, false, label);
+      else assert.equal(verdict!.temperature, 0.1, label);
+    }
+  }
+});
+
 test("smart-tier tool failures fall back to the primary review without a smart verdict", async () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff\n+ change\n");
