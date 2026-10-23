@@ -178,7 +178,9 @@ test("#1220: the Anthropic native harness advances its cache breakpoint after to
   assert.equal(typeof initialPlanning, "string", "the old moving marker must not persist");
   const latestResult = secondMessages.at(-1)!.content as Array<Record<string, unknown>>;
   assert.equal(latestResult[0]!.type, "tool_result");
-  assert.deepEqual(latestResult.at(-1)!.cache_control, { type: "ephemeral" });
+  assert.deepEqual(latestResult[0]!.cache_control, { type: "ephemeral" });
+  assert.equal(latestResult.at(-1)!.type, "text", "round 2 carries the transient budget note after tool results");
+  assert.equal(latestResult.at(-1)!.cache_control, undefined, "the replace-on-next-round note must stay outside the cached prefix");
 
   const secondMarkers = JSON.stringify(payloads[1]).match(/"cache_control"/g)?.length ?? 0;
   assert.equal(secondMarkers, 3, "system + tools + latest transcript block");
