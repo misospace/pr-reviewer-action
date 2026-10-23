@@ -2,12 +2,13 @@
  * must be EXACTLY the action entry's `shouldPublish` decision. Drives the
  * real `actionMain()` entrypoint (no injected adapter) against a mocked
  * GitHub API and a mocked model, with the scorer pointed at its own mock
- * server under a distinct model name. Asserts:
- * - `comment` mode with the legacy `publish-review-comment` flag unset skips
- *   the publish step entirely: ZERO scorer-model requests, `unscored`
- *   confidence outputs, and no confidence artifacts in the run dir;
- * - the same run with the flag set publishes and the scorer fires and scores
- *   (positive control proving the mock wiring would have carried a call). */
+ * server under a distinct model name. Asserts (#1158):
+ * - `comment` mode with the legacy `publish-review-comment` flag unset
+ *   publishes the sticky PR comment (the publish mode alone decides) and
+ *   the scorer fires and scores;
+ * - the same run with the deprecated flag set keeps the identical
+ *   publication and scoring and adds only the deprecation warning on
+ *   stdout. */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -208,43 +209,72 @@ async function runCase(options: { publishReviewComment: string }): Promise<CaseR
   };
 }
 
-test("#1073 action: comment mode with publish-review-comment unset skips the publish step and never calls the scorer", async () => {
+/** Captures everything the entry writes to stdout while `run()` executes,
+ * without suppressing the stream (each chunk is echoed) — used to observe
+ * the publisher's messages: `publishWith` mirrors its step messages to
+ * stdout, so the deprecated-input WARN the publish seam pushes lands here. */
+async function withCapturedStdout<T>(run: () => Promise<T>): Promise<{ lines: string[]; result: T }> {
+  const lines: string[] = [];
+  const original = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((chunk: Uint8Array | string, ...rest: never[]) => {
+    lines.push(String(chunk));
+    return original(chunk, ...(rest as []));
+  }) as unknown as typeof process.stdout.write;
+  try {
+    return { lines, result: await run() };
+  } finally {
+    process.stdout.write = original;
+  }
+}
+
+test("#1073/#1158 action: comment mode publishes the sticky comment and the scorer fires with the legacy flag unset", async () => {
   const result = await runCase({ publishReviewComment: "false" });
   try {
     assert.equal(result.exitCode, 0);
     assert.equal(result.outputs["should-review"], "true");
-    assert.equal(result.scorerRequests, 0, "a privileged scorer call fired for a run whose publish step is skipped");
-    // The confidence outputs are the unscored shape.
-    assert.equal(result.outputs["confidence-status"], "unscored");
-    assert.equal(result.outputs["confidence-score"], "");
-    // Unscored shape: the risk band fails closed to `unknown` and the model
-    // stays "" (no scorer transport call was ever attempted).
-    assert.equal(result.outputs["confidence-risk"], "unknown");
-    assert.equal(result.outputs["confidence-model"], "");
-    // No wire artifacts (the model was never called), but the score artifact
-    // records WHY there is no score, so `unscored` is never unexplained.
-    assert.deepEqual(result.confidenceArtifacts, ["confidence-score.json"]);
-    assert.equal(result.confidenceScoreArtifact?.status, "unscored");
-    assert.equal(result.confidenceScoreArtifact?.cause, "not_published");
-    assert.equal(result.confidenceScoreArtifact?.score, null);
-    // The publish step itself was skipped: no sticky comment POST at all.
-    assert.equal(result.commentPosts.length, 0, "the publish step ran despite the legacy flag being unset");
+    assert.equal(result.scorerRequests, 1, "the scorer did not grade a publishing comment-mode run");
+    assert.equal(result.outputs["confidence-status"], "scored");
+    assert.equal(result.outputs["confidence-score"], "4");
+    assert.equal(result.outputs["confidence-model"], SCORER_MODEL);
+    for (const name of ["confidence-request.json", "confidence-response.json", "confidence-score.json"]) {
+      assert.ok(result.confidenceArtifacts.includes(name), `${name} is missing for a scored comment-mode run`);
+    }
+    assert.equal(result.confidenceScoreArtifact?.status, "scored");
+    assert.equal(result.confidenceScoreArtifact?.score, 4);
+    // #1158: the publish step ran from the publish mode alone — the sticky
+    // comment (with its confidence section) was published.
+    assert.equal(result.commentPosts.length, 1, "the sticky comment did not publish");
+    assert.match(result.commentPosts[0]!, /## Independent Confidence/);
   } finally {
     await result.cleanup();
   }
 });
 
-test("#1073 action: comment mode with publish-review-comment set publishes and the scorer fires (positive control)", async () => {
-  const result = await runCase({ publishReviewComment: "true" });
+test("#1073/#1158 action: comment mode with publish-review-comment set warns, publishes, and scores identically", async () => {
+  // Positional control: the identical run with the flag unset proves any
+  // difference in the flagged case is the flag's, not the mock wiring's.
+  const unflagged = await runCase({ publishReviewComment: "false" });
   try {
-    assert.equal(result.exitCode, 0);
-    assert.equal(result.scorerRequests, 1, "the scorer did not grade a publishing comment-mode run");
-    assert.equal(result.outputs["confidence-status"], "scored");
-    assert.equal(result.outputs["confidence-score"], "4");
-    assert.equal(result.outputs["confidence-model"], SCORER_MODEL);
-    assert.equal(result.commentPosts.length, 1, "the sticky comment published");
-    assert.match(result.commentPosts[0]!, /## Independent Confidence/);
+    assert.equal(unflagged.exitCode, 0);
+    assert.equal(unflagged.scorerRequests, 1);
+    assert.equal(unflagged.commentPosts.length, 1);
+    const flagged = await withCapturedStdout(() => runCase({ publishReviewComment: "true" }));
+    try {
+      assert.equal(flagged.result.exitCode, 0);
+      assert.equal(flagged.result.scorerRequests, 1);
+      assert.equal(flagged.result.outputs["confidence-status"], "scored");
+      assert.equal(flagged.result.commentPosts.length, 1, "the sticky comment published");
+      assert.match(flagged.result.commentPosts[0]!, /## Independent Confidence/);
+      // The deprecated input is observed on this run and warns; the same run
+      // keeps publishing and scoring identically.
+      assert.ok(
+        flagged.lines.some((line) => line.includes("WARN: 'publish-review-comment' is deprecated") && line.includes("no longer affects publication")),
+        `expected the publish-review-comment deprecation warning on stdout:\n${flagged.lines.join("")}`,
+      );
+    } finally {
+      await flagged.result.cleanup();
+    }
   } finally {
-    await result.cleanup();
+    await unflagged.cleanup();
   }
 });

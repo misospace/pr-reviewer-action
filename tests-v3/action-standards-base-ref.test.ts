@@ -17,7 +17,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { actionMain } from "../src/run/action.js";
-import { startMockServer } from "./helpers.js";
+import { startMockServer, type CapturedRequest } from "./helpers.js";
 
 const GIT_ENV = {
   ...process.env,
@@ -50,13 +50,17 @@ function verdictBody(): string {
   });
 }
 
-/** A minimal GitHub REST mock sufficient for precheck + review: PR object
- * (JSON or the v3.diff media type, branched on Accept), empty comment/review
- * lists (no prior managed review to skip against), and a one-file diff. Any
- * GraphQL call (PR body revision, conversation comments, review threads)
- * gets a 404, which every caller treats as an empty/failed optional read. */
-function startGithubMock(baseSha: string, headSha: string): ReturnType<typeof startMockServer> {
-  return startMockServer((req, _body, res) => {
+/** A minimal GitHub REST mock sufficient for precheck + review + a
+ * `comment`-mode publish: PR object (JSON or the v3.diff media type,
+ * branched on Accept), empty comment/review lists (no prior managed review
+ * to skip against), and a one-file diff. #1158: comment mode publishes from
+ * the publish mode alone, so the sticky-comment POST is captured in
+ * `commentPosts`. Any GraphQL call (PR body revision, conversation
+ * comments, review threads) gets a 404, which every caller treats as an
+ * empty/failed optional read. */
+function startGithubMock(baseSha: string, headSha: string): Promise<{ url: string; requests: CapturedRequest[]; close: () => Promise<void>; commentPosts: string[] }> {
+  const commentPosts: string[] = [];
+  return startMockServer((req, body, res) => {
     const url = req.url ?? "";
     res.setHeader("Content-Type", "application/json");
     if (url.startsWith("/repos/o/r/pulls/7/files")) {
@@ -68,7 +72,21 @@ function startGithubMock(baseSha: string, headSha: string): ReturnType<typeof st
       return;
     }
     if (url.startsWith("/repos/o/r/issues/7/comments")) {
+      if (req.method === "POST") {
+        commentPosts.push(body);
+        res.statusCode = 201;
+        res.end(JSON.stringify({ id: 100 }));
+        return;
+      }
       res.end("[]");
+      return;
+    }
+    if (url.startsWith("/repos/o/r/collaborators/")) {
+      res.end(JSON.stringify({ permission: "write", role: "write" }));
+      return;
+    }
+    if (url.startsWith("/repos/o/r/issues/comments/")) {
+      res.end(JSON.stringify({ id: 1 }));
       return;
     }
     if (url.startsWith("/repos/o/r/pulls/7")) {
@@ -95,7 +113,7 @@ function startGithubMock(baseSha: string, headSha: string): ReturnType<typeof st
     }
     res.statusCode = 404;
     res.end(JSON.stringify({ message: "not found" }));
-  });
+  }).then((server) => ({ ...server, commentPosts }));
 }
 
 test("#885: actionMain wires precheck's base SHA into the review stage — standards come from the base ref with no PR_REVIEWER_BASE_REF set by the caller", async () => {
@@ -166,12 +184,16 @@ test("#885: actionMain wires precheck's base SHA into the review stage — stand
       "INPUT_TOOL-MODE": "off",
       "INPUT_DEEP-REVIEW": "false",
       "INPUT_CI-STATUS-CHECK": "false",
-      // Keep this test to precheck+review only: "comment" mode with
-      // publish-review-comment left at its default "false" never publishes.
+      // #1158: comment mode publishes from the publish mode alone, so the
+      // run below also drives the sticky-comment publish path.
       "INPUT_PUBLISH-MODE": "comment",
     };
     const exitCode = await actionMain(env);
     assert.equal(exitCode, 0);
+
+    // #1158 regression proof at this seam: the publish step ran and updated
+    // the sticky comment exactly once.
+    assert.equal(github.commentPosts.length, 1, "the comment-mode publish step did not run");
 
     const runDirs = readdirSync(runnerTemp).filter((name) => name.startsWith("v3-review-run-"));
     assert.equal(runDirs.length, 1, `expected exactly one run dir, got: ${runDirs.join(", ")}`);

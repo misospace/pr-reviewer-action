@@ -435,6 +435,17 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
       && env.ALLOW_APPROVE.trim().toLowerCase() !== "false"
       ? { allowApprove: boolInput(env.ALLOW_APPROVE) }
       : {}),
+    // #1158: the deprecated `publish-review-comment` input, the same
+    // observable-value shape as `allow-approve` above: the runner merges the
+    // contract default into every input it exports, so an explicitly "false"
+    // value is indistinguishable from an unset one, and only the value that
+    // differs from the default ("true") warns. It gates nothing — the
+    // publisher reads it only to warn that the input no longer has an effect.
+    ...(env.PUBLISH_REVIEW_COMMENT !== undefined
+      && env.PUBLISH_REVIEW_COMMENT.trim() !== ""
+      && env.PUBLISH_REVIEW_COMMENT.trim().toLowerCase() !== "false"
+      ? { publishReviewComment: boolInput(env.PUBLISH_REVIEW_COMMENT) }
+      : {}),
     approveForks: boolInput(env.APPROVE_FORKS),
     isForkPr: env.IS_FORK_PR === undefined || env.IS_FORK_PR === "" ? null : env.IS_FORK_PR === "true",
     upstreamLinkMode: upstreamLinkMode(env.UPSTREAM_LINK_MODE),

@@ -1156,44 +1156,29 @@ test("#1073: a provider error echoing the scorer credential is masked in the art
   }
 });
 
-test("#1073: comment mode with the legacy publish-review-comment flag unset does NOT score", async () => {
+test("#1073/#1158: comment mode scores without any legacy flag — the publish mode alone decides", async () => {
   const server = await startMockServer(routedHandler((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
     res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 5, risk: "low", reason: "all clear", concerns: [] })));
   }));
   const scorerInputs = { "ai-confidence-model": SCORER_MODEL, "ai-confidence-base-url": server.url };
   try {
-    // The scorer call is privileged and must not fire when the action entry's
-    // publish step is skipped: `comment` mode with the legacy
-    // `publish-review-comment` flag false never publishes, so scoring it
-    // would make an outbound model call for a review that lands nowhere.
+    // #1158: the entry publishes a `comment`-mode review with the legacy
+    // `publish-review-comment` input unset — publication is decided by the
+    // publish mode alone, identical to the publish seam — so the scorer
+    // grades it and a privileged outbound call is not wasted on a review
+    // that lands nowhere.
     const commentMode = await runConfidenceRun(server, {
       ...scorerInputs,
       "publish-mode": "comment",
-      "publish-review-comment": "false",
     }, "", true);
-    assert.equal(scorerRequests(server), 0, "the scorer fired for a run whose publish step is skipped");
-    assert.equal(commentMode.result.outputs.confidenceStatus, "unscored");
-    // No wire artifacts: the model was never called.
-    for (const name of ["confidence-request.json", "confidence-response.json"]) {
-      assert.ok(!existsSync(join(commentMode.runDir, name)), `${name} was written for a run that never called the scorer`);
+    assert.ok(scorerRequests(server) > 0, "the scorer skipped a publishing comment-mode run");
+    assert.equal(commentMode.result.outputs.confidenceStatus, "scored");
+    assert.equal(commentMode.result.outputs.confidenceScore, "5");
+    for (const name of ["confidence-request.json", "confidence-response.json", "confidence-score.json"]) {
+      assert.ok(existsSync(join(commentMode.runDir, name)), `${name} is missing for a scored comment-mode run`);
     }
-    // The cause is observable: the score artifact records WHY there is no
-    // score, so `unscored` is never an unexplained status.
-    const skippedArtifact = JSON.parse(readFileSync(join(commentMode.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
-    assert.equal(skippedArtifact.status, "unscored");
-    assert.equal(skippedArtifact.cause, "not_published");
-    assert.equal(skippedArtifact.score, null);
-    assert.equal(skippedArtifact.model, "");
-    // The cause reaches the log too, not only the persisted artifact.
-    assert.ok(
-      commentMode.logs.some((line) => line.includes("confidence scorer: unscored (not_published)")),
-      `expected the not_published cause in the log: ${JSON.stringify(commentMode.logs)}`,
-    );
-    // The review itself still completed; only the entry-level publish step
-    // (and with it the scorer) is skipped.
-    assert.equal(commentMode.result.outputs.verdict, "approve");
-    assert.ok(commentMode.result.outputs.reviewMarkdown.length > 0);
+    assert.match(commentMode.result.marker, /"confidence_status":"scored"/);
   } finally {
     await server.close();
   }
@@ -1223,15 +1208,16 @@ test("#1073: the risk band is the scorer's own, not a function of the score", as
   }
 });
 
-test("#1073: comment mode with the legacy publish-review-comment flag set does score", async () => {
+test("#1073/#1158: comment mode with the deprecated publish-review-comment flag set scores identically", async () => {
   const server = await startMockServer(routedHandler((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
     res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 5, risk: "low", reason: "all clear", concerns: [] })));
   }));
   const scorerInputs = { "ai-confidence-model": SCORER_MODEL, "ai-confidence-base-url": server.url };
   try {
-    // With the legacy flag set, the action entry's publish step runs for
-    // `comment` mode, so the scorer grades the review.
+    // Parity with the scorer gate above (#1158): the deprecated legacy flag
+    // changes nothing about a comment-mode run's eligibility — the publish
+    // step runs either way, so the scorer grades it either way.
     const commentMode = await runConfidenceRun(server, {
       ...scorerInputs,
       "publish-mode": "comment",

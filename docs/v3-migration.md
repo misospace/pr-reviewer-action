@@ -311,6 +311,10 @@ v3's `verdict-policy` defaults to `strict` (#811, below). Set
 deprecated and ignored — see
 [Publish modes and approvals](#publish-modes-and-approvals) below.
 
+`publish_review_comment` → `publish-review-comment` is also still a retained
+input, but it is deprecated and ignored (#1158): see the sticky-comment
+paragraph in [Publish modes and approvals](#publish-modes-and-approvals).
+
 ### Publish modes and approvals
 
 `publish-mode: review_verdict` publishes the final verdict natively: an
@@ -324,6 +328,16 @@ existing workflows keep loading, but it gates nothing: absent, `false` and
 `true` all produce the same published event, and setting it to anything
 other than the default logs a deprecation warning. A v2 workflow that set
 `allow-approve: "true"` to publish the verdict can simply drop the input.
+
+`publish-review-comment` is **deprecated and ignored** (#1158). It is still
+accepted so existing workflows keep loading, but the publish mode alone
+decides publication in both the action entry and the `publish` CLI:
+`publish-mode: comment` publishes and updates the sticky PR comment with no
+legacy flag involved, and setting the input to anything other than the
+default logs a deprecation warning. A v2 workflow that toggled the sticky
+comment with `publish_review_comment: "true"` can drop the input and set
+`publish-mode: comment` instead — with the mode alone, the sticky comment
+now publishes where the unset flag left it silent.
 
 > **Upgrading warning — native approvals are no longer opt-in.**
 > Under v2, `publish-mode: review_verdict` published a native `APPROVE`

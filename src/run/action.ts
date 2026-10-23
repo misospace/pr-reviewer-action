@@ -108,13 +108,14 @@ export function actionStageEnv(env: NodeJS.ProcessEnv): Env {
 }
 
 function shouldPublish(stage: Env): boolean {
-  // The scorer's eligibility gate (src/run/review.ts) mirrors THIS decision
-  // through the shared `publishStepRuns` predicate. Both sites read
-  // PUBLISH_MODE/PUBLISH_REVIEW_COMMENT from their own config resolution;
-  // that stays equivalent only while publish-* inputs stay out of
-  // repository-config narrowing (they do today — make them repo-configurable
-  // and the two sites can silently diverge).
-  return publishStepRuns(stage.PUBLISH_MODE, stage.PUBLISH_REVIEW_COMMENT === "true");
+  // The scorer's eligibility gate (src/engine/review.ts) mirrors THIS
+  // decision through the shared `publishStepRuns` predicate. Both sites read
+  // PUBLISH_MODE through the same stage config resolution (one process, per
+  // #726); that shared predicate is what keeps them equivalent — make
+  // publish-mode repo-configurable and the exposure narrows to one value
+  // they already share. #1158: the publish mode alone decides publication;
+  // the legacy publish-review-comment input is deprecated and inert here.
+  return publishStepRuns(stage.PUBLISH_MODE);
 }
 
 export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<number> {

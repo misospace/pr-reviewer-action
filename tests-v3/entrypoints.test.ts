@@ -97,6 +97,18 @@ test("#1161: the deprecated allow-approve input is read for the warning only, an
   assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", ALLOW_APPROVE: " TRUE " } as NodeJS.ProcessEnv, "github").allowApprove, true);
 });
 
+test("#1158: the deprecated publish-review-comment input is read for the warning only, and an absent input stays absent", () => {
+  // The same observable-value shape as `allow-approve` above: only a value
+  // that differs from the contract default ("false") reaches the publish
+  // seam, and only that one warns. Setting the input never changes what the
+  // publish step runs — publication is decided by PUBLISH_MODE alone.
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").publishReviewComment, undefined);
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", PUBLISH_REVIEW_COMMENT: "" } as NodeJS.ProcessEnv, "github").publishReviewComment, undefined);
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", PUBLISH_REVIEW_COMMENT: "false" } as NodeJS.ProcessEnv, "github").publishReviewComment, undefined);
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", PUBLISH_REVIEW_COMMENT: "true" } as NodeJS.ProcessEnv, "github").publishReviewComment, true);
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", PUBLISH_REVIEW_COMMENT: " TRUE " } as NodeJS.ProcessEnv, "github").publishReviewComment, true);
+});
+
 test("publish entrypoint rejects an invalid publish mode fail-closed", async () => {
   await assert.rejects(
     publishMain({
