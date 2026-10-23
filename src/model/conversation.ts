@@ -738,10 +738,7 @@ export type WireMessage = Record<string, unknown>;
  * breakpoints are retained separately, keeping the request at three explicit
  * breakpoints maximum (below Anthropic's four-breakpoint limit).
  */
-function markLatestAnthropicMessageCacheBreakpoint(
-  messages: WireMessage[],
-  hasTransientTurnNotes: boolean,
-): void {
+function markLatestAnthropicMessageCacheBreakpoint(messages: WireMessage[]): void {
   for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex--) {
     const message = messages[messageIndex]!;
     const content = message.content;
@@ -758,29 +755,11 @@ function markLatestAnthropicMessageCacheBreakpoint(
 
     if (!Array.isArray(content)) continue;
 
-    // A loop turn's user message is commonly [tool_result..., turn_note].
-    // addTurnNote REPLACES that note before the next request, so caching
-    // through the trailing text would deliberately cache a prefix that the
-    // next round cannot reproduce. Prefer the newest tool_result whenever
-    // this message carries one: all result blocks persist, while the driver
-    // note after them is transient. This is the key to making the moving
-    // breakpoint actually hit on round N+1.
-    let preferredIndex = -1;
-    if (hasTransientTurnNotes) {
-      for (let blockIndex = content.length - 1; blockIndex >= 0; blockIndex--) {
-        const block = content[blockIndex];
-        if (block !== null && typeof block === "object" && !Array.isArray(block)
-            && (block as Record<string, unknown>).type === "tool_result") {
-          preferredIndex = blockIndex;
-          break;
-        }
-      }
-    }
-
-    const candidates = preferredIndex >= 0
-      ? [preferredIndex]
-      : Array.from({ length: content.length }, (_, index) => content.length - 1 - index);
-    for (const blockIndex of candidates) {
+    // Turn notes are append-only historical events (#1222), so the newest
+    // cacheable block is stable on the next request too. Walk backward and
+    // mark exactly that block; older moving markers never survive because
+    // wire messages are freshly rendered for every request.
+    for (let blockIndex = content.length - 1; blockIndex >= 0; blockIndex--) {
       const block = content[blockIndex];
       if (block === null || typeof block !== "object" || Array.isArray(block)) continue;
       const record = block as Record<string, unknown>;
@@ -893,19 +872,18 @@ export class Conversation {
     this.events.push({ kind: "system_note", content });
   }
 
-  /** Append trusted driver guidance as its own event (#701).
+  /** Append trusted driver guidance as its own historical event (#701/#1222).
    * Turn notes are produced by the loop driver itself (never by model or tool
-   * output), so they are NOT wrapped in the untrusted-data envelope. There is
-   * exactly ONE note in the conversation at any time: adding a new note drops
-   * any previous one, so the note always sits at the tail with the latest
-   * remaining-budget counts instead of piling up a stale note per round.
+   * output), so they are NOT wrapped in the untrusted-data envelope. They are
+   * append-only: a note the model saw on round N must remain in the transcript
+   * on round N+1, both for conversational fidelity and so automatic
+   * prefix-caching endpoints can reuse the prior request byte-for-byte.
    * Rendering: OpenAI gets a plain user message; Anthropic cannot have two
    * adjacent user messages, so a note that follows tool results is appended
    * as a text block inside the same user turn that carries those results
    * (tool_result blocks first, then text — the documented Anthropic shape). */
   addTurnNote(content: string): void {
     if (!content) return;
-    this.events = this.events.filter((e) => e.kind !== "turn_note");
     this.events.push({ kind: "turn_note", content });
   }
 
@@ -1077,9 +1055,10 @@ export class Conversation {
    * messages keyed by `tool_call_id`. Assistant tool calls are emitted on a
    * single assistant message whose content may be `null` when the model
    * produced only tool_calls (matching OpenAI's non-streaming schema).
-   * `includeTurnNotes=false` (verdict turn) drops driver budget notes — they
-   * describe loop-turn state that no longer applies once tools are gone.
-   * system_note events are verdict-turn-only state and are never rendered
+   * `includeTurnNotes=false` drops historical driver budget notes only on
+   * the collapsed-verdict path. Full-history verdicts retain them so the
+   * transcript stays faithful and prefix-stable. system_note events are
+   * verdict-turn-only state and are never rendered
    * here (same as v2). */
   renderOpenAiMessages(includeTurnNotes = true): WireMessage[] {
     const messages: WireMessage[] = [];
@@ -1123,7 +1102,8 @@ export class Conversation {
    * from the same executor round are batched onto a single user message to
    * match Anthropic's batching convention. Assistant tool calls become
    * `{"type": "tool_use", "id", "name", "input"}` content blocks.
-   * `includeTurnNotes=false` (verdict turn) drops driver budget notes. */
+   * `includeTurnNotes=false` is used only by the collapsed-verdict path;
+   * full-history verdicts retain the historical notes (#1222). */
   /** Render neutral events as an Anthropic-format messages list. (Public for
    * tests; v2 renders these through the private method with identical
    * output.) */
@@ -1276,6 +1256,10 @@ export class Conversation {
     const temperature = options.temperature ?? null;
     const verdictTurn = options.verdictTurn ?? false;
     const keepFullHistoryOnVerdict = options.keepFullHistoryOnVerdict ?? false;
+    // A full-history verdict must preserve the exact transcript the model saw
+    // during the loop (#1222). Historical budget notes are part of that
+    // transcript; only the collapsed-verdict path intentionally drops them.
+    const includeTurnNotes = !verdictTurn || keepFullHistoryOnVerdict;
     const responseFormat = options.responseFormat ?? null;
     const tokensParam = options.tokensParam ?? "max_tokens";
     const cachePrefix = options.cachePrefix ?? false;
@@ -1292,7 +1276,7 @@ export class Conversation {
         keepFullHistoryOnVerdict,
         responseFormat,
         cachePrefix,
-        includeTurnNotes: !verdictTurn,
+        includeTurnNotes,
         reasoningEffort,
         anthropicEffortSupported,
         anthropicStructuredOutputSupported,
@@ -1307,7 +1291,7 @@ export class Conversation {
       keepFullHistoryOnVerdict,
       responseFormat,
       tokensParam,
-      includeTurnNotes: !verdictTurn,
+      includeTurnNotes,
       reasoningEffort,
     });
   }
@@ -1459,7 +1443,7 @@ export class Conversation {
           cache_control: { type: "ephemeral" },
         };
       }
-      markLatestAnthropicMessageCacheBreakpoint(messages, options.includeTurnNotes);
+      markLatestAnthropicMessageCacheBreakpoint(messages);
     }
     return payload;
   }

@@ -83,24 +83,37 @@ test("malformed arguments survive as opaque strings (round-trip property)", () =
   assert.equal(msg.tool_calls[0]!.function.arguments, '{"path": "x", trunc');
 });
 
-test("turn notes: one at a time, OpenAI user message, Anthropic rides the tool-result turn, dropped on verdict turn", () => {
+test("#1222: turn notes are append-only history and survive full-history verdict rendering", () => {
   const c = new Conversation();
   c.addAssistantToolCalls([{ id: "t1", name: "read_file", arguments: "{}" }]);
   c.addToolResult("t1", "ok");
   c.addTurnNote("note one");
   c.addTurnNote("note two");
-  assert.equal(c.events.filter((e) => e.kind === "turn_note").length, 1);
+
+  const notes = c.events.filter((e) => e.kind === "turn_note") as Array<{ content: string }>;
+  assert.deepEqual(notes.map((n) => n.content), ["note one", "note two"]);
+
   const openai = c.renderOpenAiMessages() as Array<{ role: string; content: unknown }>;
-  assert.deepEqual(openai.at(-1)!, { role: "user", content: "note two" });
+  assert.deepEqual(openai.slice(-2), [
+    { role: "user", content: "note one" },
+    { role: "user", content: "note two" },
+  ]);
+
   const anthropic = c.renderAnthropicMessages() as Array<{ role: string; content: Array<Record<string, unknown>> }>;
   const last = anthropic.at(-1)!;
   assert.equal(last.role, "user");
-  assert.equal(last.content[0]!.type, "tool_result");
-  assert.equal(last.content[1]!.type, "text");
-  assert.equal(last.content[1]!.text, "note two");
-  const verdict = c.toRequestPayload("openai", "m", { verdictTurn: true, keepFullHistoryOnVerdict: true });
-  const messages = verdict.messages as Array<{ role: string; content: unknown }>;
-  assert.ok(!messages.some((m) => m.role === "user" && m.content === "note two"));
+  assert.deepEqual(last.content.map((b) => b.type), ["tool_result", "text", "text"]);
+  assert.equal(last.content[1]!.text, "note one");
+  assert.equal(last.content[2]!.text, "note two");
+
+  const fullVerdict = c.toRequestPayload("openai", "m", { verdictTurn: true, keepFullHistoryOnVerdict: true });
+  const fullMessages = fullVerdict.messages as Array<{ role: string; content: unknown }>;
+  assert.ok(fullMessages.some((m) => m.role === "user" && m.content === "note one"));
+  assert.ok(fullMessages.some((m) => m.role === "user" && m.content === "note two"));
+
+  const collapsedVerdict = c.toRequestPayload("openai", "m", { verdictTurn: true });
+  const collapsedMessages = collapsedVerdict.messages as Array<{ role: string; content: unknown }>;
+  assert.ok(!collapsedMessages.some((m) => m.content === "note one" || m.content === "note two"));
 });
 
 test("verdict turn drops tools unconditionally and applies response_format", () => {
@@ -170,9 +183,9 @@ test("#1220: Anthropic prompt caching advances through the growing native-loop t
   const openai = c.toRequestPayload("openai", "m", { cachePrefix: true });
   assert.equal(JSON.stringify(openai).includes("cache_control"), false);
 
-  // Verdict rendering drops transient turn notes, so when a closing user
-  // instruction shares a message with tool results it IS stable and the
-  // moving breakpoint may advance through that final text block.
+  // A closing verdict instruction is stable history. When it shares an
+  // Anthropic user message with tool results, the moving breakpoint may
+  // advance through that final text block.
   const verdictConversation = new Conversation();
   verdictConversation.system = "reviewer prompt";
   verdictConversation.addAssistantToolCalls([{ id: "v", name: "read_file", arguments: "{}" }]);
