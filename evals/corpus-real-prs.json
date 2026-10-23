@@ -6,6 +6,7 @@
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 68,
         "head_sha": "f7cf242547282f954a2812c6172a9a5221cc3d9e",
+        "base_sha": "bb96c379754c868c4530d2165db3078e371f2a28",
         "title": "refactor: complete extraction of core logic from run_review.sh",
         "size": {
           "additions": 1121,
@@ -35,6 +36,7 @@
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 16,
         "head_sha": "82c4ebe8408cdab639d6e038b8841157e137842a",
+        "base_sha": "fec83308864a3af1185a717c1b70c5cb04b09340",
         "title": "feat: harden tool harness uncertainty controls",
         "size": {
           "additions": 197,
@@ -64,6 +66,7 @@
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 144,
         "head_sha": "789991fc4483899d59832e3c0ff5c6e75da1ffbe",
+        "base_sha": "495865958bc394085a433dcee14aedec4e808e05",
         "title": "refactor: extract shared publish helpers to deduplicate native review cleanup",
         "size": {
           "additions": 184,
@@ -93,6 +96,7 @@
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 65,
         "head_sha": "fa0ced754a9b1e143cfa73e81730cea932fcdd05",
+        "base_sha": "3d5023d39824f88e5a7b4fad84e8de04105fd7fa",
         "title": "feat: add review_comment publish mode and document all three modes",
         "size": {
           "additions": 83,
@@ -122,6 +126,7 @@
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 99,
         "head_sha": "02144bc64c8b9cf90874909fe1b13392712ec94a",
+        "base_sha": "07cd4ae353e4160b1c649b9d565d571b98523aa0",
         "title": "feat: add built-in CI status check before reviewing (#98)",
         "size": {
           "additions": 149,
@@ -151,6 +156,7 @@
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 15,
         "head_sha": "c99c5688458dfc00025d6ea27d98f5277cbb1ed2",
+        "base_sha": "1503ba4f8d92002f8c469b08277309378f898046",
         "title": "feat: add secure tool-harness planning mode",
         "size": {
           "additions": 699,
@@ -180,6 +186,7 @@
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 107,
         "head_sha": "a4a0e2b1aaa8a98b8ee2b114fa6611aa32b51bdd",
+        "base_sha": "2aca65847c3589a09ce22e4144eff3cce57ff445",
         "title": "feat: cleanup superseded native PR reviews by default for non-comment publish modes",
         "size": {
           "additions": 341,
@@ -209,6 +216,7 @@
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 131,
         "head_sha": "374d8a48b17362b3eb5f241012321e0b85104758",
+        "base_sha": "2805bb876805e9250dcbe79f458a01cde0a1ce9a",
         "title": "feat: add incremental PR review scope to avoid full re-review on every commit",
         "size": {
           "additions": 902,
@@ -238,6 +246,7 @@
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 45,
         "head_sha": "601b9dd2b8449e7cdcdc343d1e46d8796f7d5538",
+        "base_sha": "8298a30f9e7bd3aa6d68688b5c9837ad200c22d6",
         "title": "security: apply secret redaction to evidence provider output",
         "size": {
           "additions": 825,
@@ -267,6 +276,7 @@
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 45,
         "head_sha": "601b9dd2b8449e7cdcdc343d1e46d8796f7d5538",
+        "base_sha": "8298a30f9e7bd3aa6d68688b5c9837ad200c22d6",
         "title": "security: apply secret redaction to evidence provider output",
         "size": {
           "additions": 825,
@@ -296,6 +306,7 @@
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 262,
         "head_sha": "d2cfd711177ddafe61e3344d42929f7632f25505",
+        "base_sha": "5ea064bee00b95fe4d1c792ba6916c07e080f62e",
         "title": "feat(tool-loop): in-conversation verdict for native_loop (5/7 of #197)",
         "size": {
           "additions": 186,
@@ -325,6 +336,7 @@
         "repo_full_name": "misospace/dispatch",
         "number": 932,
         "head_sha": "d676411e0e2d0d3ea85fc2d7fc2cb0c3bde695e2",
+        "base_sha": "4d83229e5d46c3dbc112d0609e882b78f3d689d7",
         "title": "feat(ci-failures): file issues from repeated default-branch workflow failures",
         "size": {
           "additions": 766,
@@ -354,6 +366,7 @@
         "repo_full_name": "misospace/dispatch",
         "number": 333,
         "head_sha": "8033b1e5e610b2998c1173d6255c1f2b03f98429",
+        "base_sha": "c35f673bc131aa26f567e24466e3a6757345154e",
         "title": "feat(sync): share sync locking across all sync entry-points",
         "size": {
           "additions": 249,
@@ -383,6 +396,7 @@
         "repo_full_name": "misospace/dispatch",
         "number": 358,
         "head_sha": "20bf4965c271349689e06068547af7fc55851a0c",
+        "base_sha": "c2e50772ea866d81f297e713405edbc8b177240d",
         "title": "feat: add agent-agnostic heartbeat orchestration API",
         "size": {
           "additions": 710,
@@ -412,6 +426,7 @@
         "repo_full_name": "misospace/dispatch",
         "number": 462,
         "head_sha": "0a7283f43686844fc428c3569405ad5e1cc533ce",
+        "base_sha": "57937929d5e7beeea5c2e2a48118b2ce2aa62072",
         "title": "feat(groomer): add hosted llm grooming",
         "size": {
           "additions": 2359,
@@ -441,6 +456,7 @@
         "repo_full_name": "misospace/dispatch",
         "number": 462,
         "head_sha": "0a7283f43686844fc428c3569405ad5e1cc533ce",
+        "base_sha": "57937929d5e7beeea5c2e2a48118b2ce2aa62072",
         "title": "feat(groomer): add hosted llm grooming",
         "size": {
           "additions": 2359,
@@ -470,6 +486,7 @@
         "repo_full_name": "misospace/dispatch",
         "number": 454,
         "head_sha": "5ae8d83aed7676d1a7f9cc159de3e4e20e7e122a",
+        "base_sha": "a99fd2556ed6e2aae91cc9c08a4cb44d718792e8",
         "title": "feat: 3-tier lane model (local/cloud/frontier) with backward-compat aliases",
         "size": {
           "additions": 409,
@@ -499,6 +516,7 @@
         "repo_full_name": "misospace/dispatch",
         "number": 121,
         "head_sha": "14e77f18238ac402389e3874665f260629125b9f",
+        "base_sha": "cf96478ab4409864df213ecdfcdaae1af26a67d6",
         "title": "feat: add issue reconciliation service (closes #114)",
         "size": {
           "additions": 799,
@@ -528,6 +546,7 @@
         "repo_full_name": "misospace/dispatch",
         "number": 121,
         "head_sha": "14e77f18238ac402389e3874665f260629125b9f",
+        "base_sha": "cf96478ab4409864df213ecdfcdaae1af26a67d6",
         "title": "feat: add issue reconciliation service (closes #114)",
         "size": {
           "additions": 799,
@@ -557,6 +576,7 @@
         "repo_full_name": "misospace/alert-triage",
         "number": 53,
         "head_sha": "77b6b04e6e4793e424145b5c862394ebdb15b439",
+        "base_sha": "53d4c355c64196f20f88f70fa5c2102a85c225f5",
         "title": "Merge remote commit 4259b8c into the local branch so the push is a fast-forward (GitHub issue mirror, closes #14)",
         "size": {
           "additions": 587,
@@ -586,6 +606,7 @@
         "repo_full_name": "misospace/courier",
         "number": 46,
         "head_sha": "881347c5e2f690da0cc317a6acf4d095cd68ef46",
+        "base_sha": "bcbf215a88c2788861095ce61bfe91f0c1c8672c",
         "title": "feat(controller): verify terminal PR state",
         "size": {
           "additions": 1348,
@@ -615,6 +636,7 @@
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 163,
         "head_sha": "134e1e6911a1515b22741a32529c4efb1d05b997",
+        "base_sha": "56e4c9abdb61bf56ee73e6eadb62280367694ac3",
         "title": "feat: add deterministic PR classification and risk flags",
         "size": {
           "additions": 882,
@@ -644,6 +666,7 @@
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 457,
         "head_sha": "065150383a64c093f5c45d43fcd74211101cd354",
+        "base_sha": "a14a8bb4e15ac6765eba782b2b21c7bcb351ffee",
         "title": "feat(forgejo): Add support for Authorized Integration authentication",
         "size": {
           "additions": 544,
@@ -673,6 +696,7 @@
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 554,
         "head_sha": "5c71820d27585acb9c8f6e6ae811e00acf2ff0a6",
+        "base_sha": "5b6b2cf658ce634ba3e5b8eafe83ec2504600534",
         "title": "fix(precheck): wire the @ai-reviewer dismiss directive into production",
         "size": {
           "additions": 458,
@@ -702,6 +726,7 @@
         "repo_full_name": "misospace/miso-gallery",
         "number": 56,
         "head_sha": "5ffb962ff7840fca121e4891020030d50b858bf9",
+        "base_sha": "6b1ddddc628064bcfe26bc865c6eaba7c05ab0ce",
         "title": "fix: add /images/ route for public direct image access",
         "size": {
           "additions": 6,
@@ -731,6 +756,7 @@
         "repo_full_name": "misospace/miso-gallery",
         "number": 21,
         "head_sha": "40633ef562f030db704123331322b73c4454eb29",
+        "base_sha": "223f1c03df424b10d302e6b1aa15575f662b96fa",
         "title": "fix(security): auth cleanup + CSRF + hashed local password",
         "size": {
           "additions": 418,
@@ -762,6 +788,7 @@
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 630,
         "head_sha": "0025d328b2d4e999058be4921c0f9e07748e0dbe",
+        "base_sha": "cad78277c4f294f81f50570ade93258e0527f0fd",
         "size": {
           "additions": null,
           "deletions": null,
@@ -776,6 +803,7 @@
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 628,
         "head_sha": "dc217aef61c53c2adb9af1f416a15e1b06e950d0",
+        "base_sha": "8b4f314e829219e8a583983a21291d2763b02ee9",
         "size": {
           "changedFiles": 21,
           "total_changed_lines": 3329
@@ -788,6 +816,7 @@
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 133,
         "head_sha": "c709740117ff8600d4b7ca967871e01cd1b31320",
+        "base_sha": "3c3a93e81e099861fc8aad976043fee7e0f16833",
         "size": {
           "changedFiles": 5,
           "total_changed_lines": 428
@@ -800,6 +829,7 @@
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 499,
         "head_sha": "c1f193a9d43f94b5e31374e4461b3153a84d4b5e",
+        "base_sha": "0f9fc1026467f9fb199e6df74c91d6fa880477e0",
         "size": {
           "changedFiles": 3,
           "total_changed_lines": 148
@@ -812,6 +842,7 @@
         "repo_full_name": "misospace/dispatch",
         "number": 468,
         "head_sha": "2e8c95ba5b4f482f9dd95b2f7d1bfaf9e83a6f1a",
+        "base_sha": "bd547050b43110915b7b31f3ea651783afd400b5",
         "size": {
           "changedFiles": 24,
           "total_changed_lines": 2707
@@ -824,6 +855,7 @@
         "repo_full_name": "misospace/dispatch",
         "number": 104,
         "head_sha": "6925188ae7b968a983f43e6b30a5729d67184b8f",
+        "base_sha": "f919fc1c507a010327627f40d3d188a47bcf6b43",
         "size": {
           "changedFiles": 7,
           "total_changed_lines": 2769
@@ -836,6 +868,7 @@
         "repo_full_name": "misospace/dispatch",
         "number": 181,
         "head_sha": "421a04d670a67a0f691ee32073ee6781d32648e3",
+        "base_sha": "ef1652cc0271332f5891d5869e4707ed80f80dac",
         "size": {
           "changedFiles": 10,
           "total_changed_lines": 1318
@@ -848,6 +881,7 @@
         "repo_full_name": "misospace/dispatch",
         "number": 1025,
         "head_sha": "e8cecb0acecf397177967bfed05936651e5516ae",
+        "base_sha": "33b88519b4ff338dbb934a026600919b6271aa4f",
         "size": {
           "changedFiles": 6,
           "total_changed_lines": 137
@@ -860,6 +894,7 @@
         "repo_full_name": "misospace/alert-triage",
         "number": 71,
         "head_sha": "f25b767e8d867baf59d108922aecc4a9ab129f17",
+        "base_sha": "b7b4fd1697b75632f569d54b4db578387da752be",
         "size": {
           "changedFiles": 4,
           "total_changed_lines": 2055
@@ -872,6 +907,7 @@
         "repo_full_name": "misospace/alert-triage",
         "number": 43,
         "head_sha": "8d5ada6695e476697d6ec67c7eb413fe8d3ca828",
+        "base_sha": "83c50340ec3442328108f6a6d8d2efbef143282a",
         "size": {
           "changedFiles": 6,
           "total_changed_lines": 1244
@@ -884,6 +920,7 @@
         "repo_full_name": "misospace/alert-triage",
         "number": 90,
         "head_sha": "b310d497bb97f5945e629e4afc9d4b4bfd25da7e",
+        "base_sha": "2964a619cf9f5b8e438db03fb9aa5db69a5cefd2",
         "size": {
           "changedFiles": 3,
           "total_changed_lines": 137
@@ -896,6 +933,7 @@
         "repo_full_name": "misospace/courier",
         "number": 64,
         "head_sha": "aaef5406713446a449a29965973384878d3bcb83",
+        "base_sha": "25803c8177867a057ec1c025cd7bd78081eefa13",
         "size": {
           "changedFiles": 11,
           "total_changed_lines": 2031
@@ -908,6 +946,7 @@
         "repo_full_name": "misospace/courier",
         "number": 100,
         "head_sha": "d5cb1197b022359f6a7ef7be44b212a6a1e49538",
+        "base_sha": "a4937a17ddbbc948e86fe4be1a617f8eceb106f4",
         "size": {
           "changedFiles": 7,
           "total_changed_lines": 719
@@ -920,6 +959,7 @@
         "repo_full_name": "misospace/courier",
         "number": 143,
         "head_sha": "72f8a4673351d808114a2fb48e6652db54e318e8",
+        "base_sha": "8809b5f9e3848ad851559540f2ce5cfec83a704b",
         "size": {
           "changedFiles": 3,
           "total_changed_lines": 141
@@ -932,6 +972,7 @@
         "repo_full_name": "misospace/pr-reviewer-action",
         "number": 600,
         "head_sha": "8457760a0315eb8834f15ce8204a8ae18c10f5d1",
+        "base_sha": "219c6fb20770fddeeb5241d80ff1e71fc64bd9dd",
         "size": {
           "changedFiles": 4,
           "total_changed_lines": 1217
@@ -948,6 +989,8 @@
       "vulnerable": 27,
       "clean": 15
     },
-    "built_at": "2026-09-26"
+    "built_at": "2026-09-26",
+    "base_sha_anchored_at": "2026-10-22",
+    "base_sha_provenance": "base_sha (#1191) pins each PR's three-dot diff base (GitHub's merge base for base...head). Recovered from local git clones of the source repos: the PR's landing commit on origin/main was located (GitHub's 'Merge pull request #N' merge commit, else the squash commit with the ' (#N)' subject suffix) and base_sha = git merge-base <head_sha> <landing-commit>^1, i.e. the fork point - immune to main later absorbing the branch's own commits (e.g. dispatch-333-879). Where the branch had already merged main in before landing, that first parent is itself an ancestor of head and base_sha resolves to it - GitHub's advanced merge base. Every value verified to resolve (git cat-file -e <sha>^{commit}), to be a proper ancestor of head_sha with a non-empty git diff base...head, and for vulnerable entries to leave the defect anchor file present in that diff."
   }
 }
