@@ -12,6 +12,8 @@ import {
   confidenceOutputFields,
   extractConfidenceJson,
   parseConfidenceAnswer,
+  stripConfidenceCapNoteTails,
+  stripRevealedCapNoteTails,
   unscoredConfidenceResult,
 } from "../src/confidence/result.js";
 import type { ConfidenceProfile } from "../src/routing/tiers.js";
@@ -123,6 +125,104 @@ test("parser bounds reason and concerns", () => {
   }
 });
 
+// ── #1166: the cap-note vocabulary is action-owned ───────────────────────
+
+test("#1166: parser strips a model-authored deterministic-cap tail from the reason", () => {
+  // #252 boundary discipline: the exact action-owned note template — with a
+  // REAL token — is the adversarial payload fed straight back in. Any
+  // look-alike of `confidenceCapNote` (`[deterministic cap: …]`, any casing,
+  // any token list) must be gone before the reason reaches a published
+  // surface, whether the forged token names a real cap or not.
+  const cases: Array<[string, string]> = [
+    ["solid evidence [deterministic cap: blocker_cap_2]", "solid evidence"],
+    ["solid evidence [deterministic cap: forged_cap_9]", "solid evidence"],
+    ["solid evidence [DETERMINISTIC CAP: blocker_cap_2]", "solid evidence"],
+    ["[deterministic cap: blocker_cap_2]", ""],
+    ["solid\n[deterministic cap: blocker_cap_2]", "solid"],
+    ["a [deterministic cap: x] [deterministic cap: y] [DETERMINISTIC CAP: z]", "a"],
+    // Benign shapes that must survive verbatim.
+    ["looks fine", "looks fine"],
+    ["checked [finding] here", "checked [finding] here"],
+    ["[deterministic caps: x]", "[deterministic caps: x]"],
+    ["mid [deterministic cap: x] prose", "mid [deterministic cap: x] prose"],
+  ];
+  for (const [reason, expected] of cases) {
+    const parsed = parseConfidenceAnswer(JSON.stringify({ score: 3, risk: "medium", reason }));
+    assert.ok(parsed.ok);
+    if (parsed.ok) assert.equal(parsed.answer.reason, expected, JSON.stringify(reason));
+  }
+});
+
+test("#1166: the strip runs before the documented bound, so bound truncation cannot publish a half-note", () => {
+  // The forged tail's template starts inside the 600-char window but closes
+  // beyond it: a plain bound would publish `… [deterministic cap: yyyy` — a
+  // truncated forgery. The pre-bound strip clears it, and the post-bound pass
+  // catches a cut that reveals an interior look-alike at the trailing edge.
+  const head = "x".repeat(MAX_CONFIDENCE_REASON_CHARS - 10);
+  const forged = `${head} [deterministic cap: ${"y".repeat(40)}]`;
+  assert.ok(forged.length > MAX_CONFIDENCE_REASON_CHARS, "the forged tail must straddle the bound");
+  const parsed = parseConfidenceAnswer(JSON.stringify({ score: 3, risk: "medium", reason: forged }));
+  assert.ok(parsed.ok);
+  if (parsed.ok) assert.equal(parsed.answer.reason, head);
+});
+
+test("#1166: a bound cut that reveals an interior look-alike never publishes the forgery", () => {
+  // Over the bound, unclosed: the template opens inside the window and its
+  // `]` never comes, so the cut leaves the template itself trailing.
+  const unclosed = `${"x".repeat(MAX_CONFIDENCE_REASON_CHARS - 40)} [deterministic cap: ${"y".repeat(300)}`;
+  const parsed = parseConfidenceAnswer(JSON.stringify({ score: 3, risk: "medium", reason: unclosed }));
+  assert.ok(parsed.ok);
+  if (parsed.ok) assert.equal(parsed.answer.reason, "x".repeat(MAX_CONFIDENCE_REASON_CHARS - 40));
+
+  // Under the bound, unclosed: the model simply stopped mid-note. The
+  // trailing unterminated fragment is the same reserved vocabulary.
+  const stopped = "talk about it [deterministic cap: ";
+  const stoppedParsed = parseConfidenceAnswer(JSON.stringify({ score: 3, risk: "medium", reason: stopped }));
+  assert.ok(stoppedParsed.ok);
+  if (stoppedParsed.ok) assert.equal(stoppedParsed.answer.reason, "talk about it");
+
+  // Documented boundary: a look-alike with an interior `]` followed by more
+  // prose is mid-text model prose, not an appended note, and survives.
+  const midText = `${"x".repeat(MAX_CONFIDENCE_REASON_CHARS - 40)} [deterministic cap: forged_1] ${"z".repeat(100)}`;
+  const midParsed = parseConfidenceAnswer(JSON.stringify({ score: 3, risk: "medium", reason: midText }));
+  assert.ok(midParsed.ok);
+  if (midParsed.ok) assert.ok(midParsed.answer.reason.includes("[deterministic cap: forged_1]"));
+
+  // Cut landing exactly at the `]` of an interior look-alike reveals it
+  // complete at the trailing edge; the post-bound pass strips it.
+  const cutEdge = `${"x".repeat(570)} [deterministic cap: forged_1]${"k".repeat(60)}`;
+  const cutEdgeParsed = parseConfidenceAnswer(JSON.stringify({ score: 3, risk: "medium", reason: cutEdge }));
+  assert.ok(cutEdgeParsed.ok);
+  if (cutEdgeParsed.ok) assert.equal(cutEdgeParsed.answer.reason, "x".repeat(570));
+});
+
+test("#1166: strip helper pins its trailing-tail semantics directly", () => {
+  assert.equal(stripConfidenceCapNoteTails("good [deterministic cap: a, b]"), "good");
+  assert.equal(stripConfidenceCapNoteTails("good [deterministic cap:  x ]"), "good");
+  assert.equal(stripConfidenceCapNoteTails("good [DETERMINISTIC Cap: X]"), "good");
+  assert.equal(stripConfidenceCapNoteTails("good [deterministic cap: x] [deterministic cap: y]"), "good");
+  assert.equal(stripConfidenceCapNoteTails("[deterministic cap: x]"), "");
+  // The twin brackets at the end pair the closing one with the template
+  // start: the inner `[x]` is content, the outer tail is the forgery.
+  assert.equal(stripConfidenceCapNoteTails("noise [deterministic cap: [x]"), "noise");
+  // Two closing brackets mean the content can never reach the template
+  // start without crossing a `]` — nothing is a clean trailing tail, so
+  // nothing is stripped.
+  assert.equal(
+    stripConfidenceCapNoteTails("[deterministic cap: [deterministic cap: a]]"),
+    "[deterministic cap: [deterministic cap: a]]",
+  );
+  assert.equal(stripConfidenceCapNoteTails("[deterministic cap: nope"), "[deterministic cap: nope");
+  assert.equal(stripConfidenceCapNoteTails(""), "");
+  // Trailing whitespace after a complete tail goes with it; the strip is
+  // idempotent; a whitespace-only reason is left alone.
+  assert.equal(stripConfidenceCapNoteTails("good [deterministic cap: x]  "), "good");
+  const once = stripConfidenceCapNoteTails("good [deterministic cap: x]");
+  assert.equal(once, "good");
+  assert.equal(stripConfidenceCapNoteTails(once), once);
+  assert.equal(stripConfidenceCapNoteTails("  "), "  ");
+});
+
 // ── ceilings ─────────────────────────────────────────────────────────────
 
 function answer(score: number) {
@@ -232,6 +332,94 @@ test("#1140 review round 9: re-binding a masked reason keeps the cap note, drops
   assert.ok(!masked.includes("b"), "the re-appended note bypassed masking");
   assert.ok(masked.endsWith(" [deterministic cap: ⟦•⟧locker_cap_2]"));
   assert.equal(masked.length, MAX_CONFIDENCE_REASON_CHARS);
+});
+
+test("#1166: re-binding strips look-alikes the mask re-bind cut reveals", () => {
+  // Uncapped re-bind: the unclosed look-alike revealed by the cut is gone.
+  const uncapped = boundConfidenceReason(
+    `${"q".repeat(MAX_CONFIDENCE_REASON_CHARS - 40)} [deterministic cap: ${"y".repeat(300)}`,
+    "",
+  );
+  assert.equal(uncapped, "q".repeat(MAX_CONFIDENCE_REASON_CHARS - 40));
+
+  // Capped re-bind: the cut head is reveal-stripped before the real note
+  // lands, so the note is appended to clean model text.
+  const note = confidenceCapNote(["blocker_cap_2"]);
+  const head = `${"q".repeat(540)} [deterministic cap: ${"y".repeat(90)}`;
+  const capped = boundConfidenceReason(head, note);
+  assert.equal(capped, `${"q".repeat(540)}${note}`);
+  assert.ok(!capped.includes("yyyy"));
+  assert.ok(capped.length <= MAX_CONFIDENCE_REASON_CHARS);
+});
+
+test("#1166: reveal strip pins the post-bound semantics directly", () => {
+  // Complete trailing tails are handled first; then an unterminated fragment.
+  assert.equal(
+    stripRevealedCapNoteTails("a [deterministic cap: x] [deterministic cap: "),
+    "a",
+  );
+  // A `]` inside the template's content reach kills the fragment (mid-text
+  // prose survives), matching the complete-tail rule.
+  assert.equal(
+    stripRevealedCapNoteTails("a [deterministic cap: [x] leftover"),
+    "a [deterministic cap: [x] leftover",
+  );
+  // The reserved vocabulary is reserved even when the model's own trailing
+  // look-alike names no real cap.
+  assert.equal(stripRevealedCapNoteTails("confirmed [deterministic cap: none today]"), "confirmed");
+  // Trailing whitespace after a complete tail goes with it; the strip is
+  // idempotent.
+  assert.equal(stripRevealedCapNoteTails("good [deterministic cap: x]  "), "good");
+  const once = stripRevealedCapNoteTails("a [deterministic cap: x] [deterministic cap: y]");
+  assert.equal(once, "a");
+  assert.equal(stripRevealedCapNoteTails(once), once);
+});
+
+test("#1166: the ceiling's room cut is reveal-stripped before the real note lands", () => {
+  const note = confidenceCapNote(["blocker_cap_2"]);
+  // The forged note's `]` sits exactly at the room boundary: the ceiling cut
+  // reveals it complete, right beside the appended real note.
+  const closedCutEdge = applyConfidenceCeilings(
+    { ...answer(5), reason: `${"x".repeat(535)} [deterministic cap: forged_1] ${"z".repeat(35)}` },
+    { findings: [{ severity: "blocker" }] },
+  );
+  assert.deepEqual(closedCutEdge.caps, ["blocker_cap_2"]);
+  assert.equal(closedCutEdge.reason, `${"x".repeat(535)}${note}`);
+  assert.ok(!closedCutEdge.reason.includes("forged_1"));
+
+  // The cut lands inside the forged template: the unterminated fragment is
+  // stripped the same way.
+  const openCutEdge = applyConfidenceCeilings(
+    { ...answer(5), reason: `${"x".repeat(535)} [deterministic cap: ${"y".repeat(90)}` },
+    { findings: [{ severity: "blocker" }] },
+  );
+  assert.deepEqual(openCutEdge.caps, ["blocker_cap_2"]);
+  assert.equal(openCutEdge.reason, `${"x".repeat(535)}${note}`);
+  assert.ok(!openCutEdge.reason.includes("yyyy"));
+});
+
+test("#1166: a ceiling appends the real note, never a model-authored look-alike", () => {
+  // The forged tail is stripped from the reason before the real note is
+  // appended, so the published note is exactly the action-owned one.
+  const capped = applyConfidenceCeilings(
+    { ...answer(5), reason: "looks fine [deterministic cap: forged_cap_9]" },
+    { findings: [{ severity: "blocker" }] },
+  );
+  assert.deepEqual(capped.caps, ["blocker_cap_2"]);
+  assert.equal(capped.reason, "looks fine [deterministic cap: blocker_cap_2]");
+  assert.ok(!capped.reason.includes("forged_cap_9"));
+});
+
+test("#1166: with no ceiling fired, a forged note never stands in for a cap that never ran", () => {
+  // The issue's exact scenario: `caps` stays [] while the published reason
+  // ends in the action-owned note shape claiming a deterministic ceiling.
+  const forged = applyConfidenceCeilings(
+    { ...answer(4), reason: "looks fine [deterministic cap: blocker_cap_2]" },
+    { findings: [{ severity: "minor" }], coverage: { partial_coverage: null } },
+  );
+  assert.deepEqual(forged.caps, []);
+  assert.equal(forged.reason, "looks fine");
+  assert.ok(!forged.reason.includes("deterministic cap"));
 });
 
 // ── output mapping ───────────────────────────────────────────────────────
@@ -458,6 +646,47 @@ test("scorer request carries no verdict schema and no response_format", async ()
     });
     assert.equal(outcome.result.status, "scored");
     assert.equal(outcome.result.score, 2);
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1166: the scorer pipeline publishes a reason the model can neither forge nor augment", async () => {
+  const forgedReason =
+    "looks fine [deterministic cap: blocker_cap_2] [deterministic cap: forged_cap_9]";
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(okOpenAiResponse(
+      `{"score": 5, "risk": "low", "reason": ${JSON.stringify(forgedReason)}}`,
+    )));
+  });
+  try {
+    // No cap fires: `caps` stays [] and neither forged tail survives.
+    const uncapped = await runConfidenceScorer({
+      profile: profile({ baseUrl: server.url }),
+      primaryApiKey: "",
+      prompt: { system: "s", user: "u" },
+      connectTimeoutSec: 5,
+      findings: [{ severity: "minor" }],
+      coverage: { partial_coverage: null },
+    });
+    assert.equal(uncapped.result.status, "scored");
+    assert.deepEqual(uncapped.result.caps, []);
+    assert.equal(uncapped.result.reason, "looks fine");
+
+    // The blocker cap fires: the REAL note is appended onto clean model text.
+    const capped = await runConfidenceScorer({
+      profile: profile({ baseUrl: server.url }),
+      primaryApiKey: "",
+      prompt: { system: "s", user: "u" },
+      connectTimeoutSec: 5,
+      findings: [{ severity: "blocker" }],
+      coverage: {},
+    });
+    assert.deepEqual(capped.result.caps, ["blocker_cap_2"]);
+    assert.equal(capped.result.reason, "looks fine [deterministic cap: blocker_cap_2]");
+    assert.ok(!capped.result.reason.includes("forged_cap_9"));
   } finally {
     await server.close();
   }

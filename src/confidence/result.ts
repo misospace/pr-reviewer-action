@@ -40,7 +40,8 @@ export interface ConfidenceResult {
   risk: ConfidenceRisk | "";
   /** Bounded scorer explanation; "" when disabled or unscored (the cause
    * lives in the persisted artifact and the log, never in a public output).
-   * Cap notes are appended here when a deterministic ceiling fired. */
+   * Cap notes are appended here when a deterministic ceiling fired, and a
+   * model-authored look-alike of the note is stripped (#1166). */
   reason: string;
   /** Bounded advisory concerns; empty unless scored. */
   concerns: ConfidenceConcern[];
@@ -134,6 +135,77 @@ export function confidenceCapNote(caps: readonly string[]): string {
   return caps.length === 0 ? "" : ` [deterministic cap: ${caps.join(", ")}]`;
 }
 
+const CONFIDENCE_CAP_NOTE_TEMPLATE = "deterministic cap:";
+
+/**
+ * #1166: the note vocabulary above is ACTION-OWNED — it is emitted only by
+ * `confidenceCapNote` from the structured `caps` field, never by the model.
+ * A scorer reason that already ends in a look-alike tail must not survive
+ * into a published surface: after a real cap fires the appended note would
+ * sit beside the forgery, and with no cap at all the forgery would stand in
+ * for a ceiling that never fired while `caps` stayed `[]`. Only the TRAILING
+ * tail is reserved for the note — a look-alike in mid-sentence prose is
+ * model text, not an appended note, and is left alone.
+ *
+ * Each trailing tail matches `confidenceCapNote`'s template with any casing
+ * and token list: optional whitespace, `[`, `deterministic cap:`, any
+ * `]`-free content, `]`. The backward scan keeps a tail-crowded answer from
+ * going quadratic — the reason arrives unbounded from a transport response,
+ * where every earlier step is a single linear pass — and `]`/`[` handling
+ * mirrors the template's own `[^]]`-content rule.
+ */
+export function stripConfidenceCapNoteTails(reason: string): string {
+  let end = reason.length;
+  for (;;) {
+    let at = end;
+    while (at > 0 && /\s/.test(reason[at - 1]!)) at -= 1;
+    if (at === 0 || reason[at - 1] !== "]") break;
+    at -= 1; // the trailing bracket of a candidate tail
+    // Walk backward through the candidate's content for the template
+    // start. Content forbids `]` exactly like the note template does; a
+    // `[` may appear inside it, so the template literal decides.
+    let tailStart = -1;
+    let probe = at - 1;
+    while (probe >= 0) {
+      const char = reason.charCodeAt(probe);
+      if (char === 0x5d /* ] */) break;
+      if (char === 0x5b /* [ */
+        && reason.slice(probe + 1, probe + 1 + CONFIDENCE_CAP_NOTE_TEMPLATE.length).toLowerCase()
+          === CONFIDENCE_CAP_NOTE_TEMPLATE) {
+        tailStart = probe;
+        break;
+      }
+      probe -= 1;
+    }
+    if (tailStart < 0) break;
+    while (tailStart > 0 && /\s/.test(reason[tailStart - 1]!)) tailStart -= 1;
+    end = tailStart;
+  }
+  return reason.slice(0, end);
+}
+
+/**
+ * #1166: strip the cap-note look-alikes a LENGTH CUT can reveal at the
+ * trailing edge. The mid-answer pass above removes look-alike tails from the
+ * model's raw answer, but a bound — the parser's own
+ * `MAX_CONFIDENCE_REASON_CHARS` or `boundConfidenceReason`'s masked re-bind —
+ * can pull an INTERIOR look-alike onto the trailing edge, either complete or
+ * truncated into an unterminated fragment that still reads as the note
+ * (`… [deterministic cap: yyy`). Post-bound text is inside the documented
+ * bound, so a plain regex pass stays linear; the loop re-runs the complete
+ * strip because removing one fragment can reveal another.
+ */
+const CONFIDENCE_TRUNCATED_CAP_NOTE_RE = new RegExp(`\\[${CONFIDENCE_CAP_NOTE_TEMPLATE}[^\\]]*$`, "i");
+
+export function stripRevealedCapNoteTails(reason: string): string {
+  let text = stripConfidenceCapNoteTails(reason);
+  for (;;) {
+    const match = CONFIDENCE_TRUNCATED_CAP_NOTE_RE.exec(text);
+    if (match === null) return text.trimEnd();
+    text = stripConfidenceCapNoteTails(text.slice(0, match.index));
+  }
+}
+
 /**
  * Re-bound a MASKED reason to `MAX_CONFIDENCE_REASON_CHARS` while keeping the
  * deterministic cap note (#1140 review round 9). A plain slice is right for
@@ -150,13 +222,19 @@ export function confidenceCapNote(caps: readonly string[]): string {
  * unmasked rebuilt note would put the run's own credential back on the surface
  * that was just masked. Over-redacting the note is the accepted cost, and the
  * exact caps are still recorded verbatim in the result's structured `caps`
- * field. The room below is reserved from the note's MASKED length.
+ * field. The room below is reserved from the note's MASKED length. #1166: the
+ * cut head is reveal-stripped of cap-note look-alikes before the note lands.
  */
 export function boundConfidenceReason(maskedReason: string, capNote: string): string {
   if (maskedReason.length <= MAX_CONFIDENCE_REASON_CHARS) return maskedReason;
-  if (capNote === "") return maskedReason.slice(0, MAX_CONFIDENCE_REASON_CHARS);
+  // #1166: the cut itself can reveal an interior cap-note look-alike at the
+  // trailing edge, so the cut head is stripped BEFORE the note slot is taken.
+  if (capNote === "") {
+    return stripRevealedCapNoteTails(maskedReason.slice(0, MAX_CONFIDENCE_REASON_CHARS));
+  }
   const room = Math.max(0, MAX_CONFIDENCE_REASON_CHARS - capNote.length);
-  return `${maskedReason.slice(0, room).trimEnd()}${capNote}`.slice(0, MAX_CONFIDENCE_REASON_CHARS);
+  const head = stripRevealedCapNoteTails(maskedReason.slice(0, room)).trimEnd();
+  return `${head}${capNote}`.slice(0, MAX_CONFIDENCE_REASON_CHARS);
 }
 
 /** A successfully parsed, pre-ceiling scorer answer. */
@@ -247,9 +325,17 @@ export function parseConfidenceAnswer(raw: string): ConfidenceParseOutcome {
     ? riskValue as ConfidenceRisk
     : "unknown";
   if (risk === "unknown" && riskValue !== "unknown") notes.push("risk_unknown_malformed");
-  const reason = typeof parsed.reason === "string"
-    ? parsed.reason.replace(/\s+/g, " ").trim().slice(0, MAX_CONFIDENCE_REASON_CHARS)
+  // #1166: pre-bound, the model's trailing look-alike tails are stripped so
+  // a bound cannot slide one into the published head; post-bound, the reveals
+  // the cut itself drags onto the trailing edge are stripped too.
+  const reasonRaw = typeof parsed.reason === "string"
+    ? parsed.reason.replace(/\s+/g, " ").trim()
     : "";
+  const reasonHead = boundConfidenceField(
+    stripConfidenceCapNoteTails(reasonRaw),
+    MAX_CONFIDENCE_REASON_CHARS,
+  );
+  const reason = stripRevealedCapNoteTails(reasonHead);
   const concerns = Array.isArray(parsed.concerns)
     ? parsed.concerns.slice(0, MAX_CONFIDENCE_CONCERNS)
       .map(parseConcern)
@@ -281,6 +367,11 @@ export function applyConfidenceCeilings(
   answer: ParsedConfidenceAnswer,
   input: ConfidenceCeilingInput,
 ): { score: number; risk: ConfidenceRisk; reason: string; caps: string[] } {
+  // #1166: the reason is cleaned of a model-authored note look-alike in
+  // BOTH branches — with caps the real note is appended beside clean model
+  // text, and with no caps a forged note never stands in for a ceiling that
+  // did not fire.
+  const cleanReason = stripConfidenceCapNoteTails(answer.reason);
   let score = answer.score;
   const caps: string[] = [];
   const findings = Array.isArray(input.findings) ? input.findings : [];
@@ -306,15 +397,19 @@ export function applyConfidenceCeilings(
     caps.push("incomplete_coverage_cap_3");
   }
   if (caps.length === 0) {
-    return { score, risk: answer.risk, reason: answer.reason, caps };
+    return { score, risk: answer.risk, reason: cleanReason, caps };
   }
   // The cap note is appended to the model's own reason, so the model's share
   // shrinks to whatever the note leaves — the RESULT stays within the same
   // documented bound either way (slicing to MAX + note.length instead would
-  // publish a reason longer than MAX_CONFIDENCE_REASON_CHARS).
+  // publish a reason longer than MAX_CONFIDENCE_REASON_CHARS). #1166: the
+  // room cut itself can reveal a look-alike at the trailing edge, so the cut
+  // head is reveal-stripped before the real note is appended.
   const note = confidenceCapNote(caps);
   const room = Math.max(0, MAX_CONFIDENCE_REASON_CHARS - note.length);
-  const head = answer.reason.length > room ? answer.reason.slice(0, room).trimEnd() : answer.reason;
+  const head = cleanReason.length > room
+    ? stripRevealedCapNoteTails(cleanReason.slice(0, room)).trimEnd()
+    : cleanReason;
   const reason = `${head}${note}`.slice(0, MAX_CONFIDENCE_REASON_CHARS);
   return { score, risk: answer.risk, reason, caps };
 }
