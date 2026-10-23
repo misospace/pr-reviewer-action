@@ -294,7 +294,9 @@ export async function driveToolLoop(
 ): Promise<LoopOutcome> {
   const budgets: LoopBudgets = options.budgets ?? adaptiveLoopBudgets(4, 16, 600);
   const maxTokens = options.maxTokens ?? 1024;
-  const temperature = options.temperature ?? 0.0;
+  // #747: null means "omit the field" (planningTemperature for an empty
+  // AI_TEMPERATURE); only an absent value takes the 0.0 planning default.
+  const temperature = options.temperature === undefined ? 0.0 : options.temperature;
   const stream = options.stream ?? false;
   const tokensParam = options.tokensParam ?? "max_tokens";
   const cachePrefix = options.cachePrefix ?? false;
