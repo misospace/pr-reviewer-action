@@ -12,6 +12,10 @@
  *    against already-advertised (read-only-filtered) routes.
  *  - **Namespaced** — advertised as `mcp__<server>__<tool>` so MCP names can
  *    never shadow a built-in tool.
+ *  - **No redirects** (#1217) — the allowlist approves only the configured
+ *    URL, so every 3xx is a bounded transport error: the session id and the
+ *    JSON-RPC body are never forwarded to an unconfigured origin, and the
+ *    `Location` target is never read or reported in diagnostics.
  *  - **Bounded / untrusted** — results are treated as untrusted corpus text
  *    by the caller (masked + capped like web_fetch).
  *
@@ -161,7 +165,12 @@ const jsonRpcErrorReason = (status: number): string => {
  * (result-or-null, session_id, error). Handles a plain `application/json`
  * body or an SSE (`text/event-stream`) framing — MCP streamable-HTTP may use
  * either. The session id is read from the `Mcp-Session-Id` response header
- * (set on initialize). */
+ * (set on initialize).
+ *
+ * Redirects are never followed (#1217): `redirect: "manual"` plus an explicit
+ * 3xx refusal means a configured server cannot bounce the request — body and
+ * `Mcp-Session-Id` included — to an origin outside the allowlist. Same
+ * fail-closed policy as the platform transports (`src/platform/http.ts`). */
 export const defaultMcpPost: McpPostFn = async (url, payload, sessionId, token, timeoutSec) => {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -177,8 +186,22 @@ export const defaultMcpPost: McpPostFn = async (url, payload, sessionId, token, 
       method: "POST",
       headers,
       body: JSON.stringify(payload),
+      redirect: "manual",
       signal: controller.signal,
     });
+    // Every 3xx is refused without reading `Location`, so neither the target
+    // nor a secret-bearing redirect URL can reach the diagnostic. The session
+    // id is left untouched: a refused response is not trusted to rotate it.
+    if (response.status >= 300 && response.status < 400) {
+      // Release the refused response without consuming it, so no redirect
+      // payload is parsed and the connection is not held open.
+      void response.body?.cancel().catch(() => undefined);
+      return {
+        result: null,
+        sessionId,
+        error: `MCP redirect refused (${response.status}); redirects are never followed and redirect targets are not reported`,
+      };
+    }
     const newSession = response.headers.get("Mcp-Session-Id") ?? sessionId;
     if (response.status >= 400) {
       return { result: null, sessionId: newSession, error: `HTTP Error ${response.status}: ${jsonRpcErrorReason(response.status)}` };
