@@ -754,7 +754,28 @@ function markLatestAnthropicMessageCacheBreakpoint(messages: WireMessage[]): voi
     }
 
     if (!Array.isArray(content)) continue;
+
+    // A loop turn's user message is commonly [tool_result..., turn_note].
+    // addTurnNote REPLACES that note before the next request, so caching
+    // through the trailing text would deliberately cache a prefix that the
+    // next round cannot reproduce. Prefer the newest tool_result whenever
+    // this message carries one: all result blocks persist, while the driver
+    // note after them is transient. This is the key to making the moving
+    // breakpoint actually hit on round N+1.
+    let preferredIndex = -1;
     for (let blockIndex = content.length - 1; blockIndex >= 0; blockIndex--) {
+      const block = content[blockIndex];
+      if (block !== null && typeof block === "object" && !Array.isArray(block)
+          && (block as Record<string, unknown>).type === "tool_result") {
+        preferredIndex = blockIndex;
+        break;
+      }
+    }
+
+    const candidates = preferredIndex >= 0
+      ? [preferredIndex]
+      : Array.from({ length: content.length }, (_, index) => content.length - 1 - index);
+    for (const blockIndex of candidates) {
       const block = content[blockIndex];
       if (block === null || typeof block !== "object" || Array.isArray(block)) continue;
       const record = block as Record<string, unknown>;
