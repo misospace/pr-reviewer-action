@@ -82,6 +82,10 @@ as `mcp__<server>__<tool>` so an MCP name can never shadow a built-in tool.
 `tool-mcp-token` is sent as a bearer token to every configured server. A
 server that fails to connect is logged and skipped — it never breaks the
 loop. Empty `tool-mcp-servers` (the default) disables MCP entirely.
+The allowlist approves only the configured URL, so the transport never follows
+a redirect (#1217): every `3xx` is a bounded transport error, the session id
+and JSON-RPC body are never forwarded to an unconfigured origin, and the
+`Location` target is never read or reported.
 
 ## Budgets
 

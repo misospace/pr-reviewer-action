@@ -8,7 +8,8 @@ import {
   listTree, readFile, resolveWorkspacePath, runCommand, validateEndpoint,
   webFetch, webSearch, type ToolContext,
 } from "../src/tools/executors.js";
-import { McpToolset, isReadOnlyTool, parseServerSpecs, splitNamespaced } from "../src/tools/mcp.js";
+import { defaultMcpPost, McpToolset, isReadOnlyTool, parseServerSpecs, splitNamespaced } from "../src/tools/mcp.js";
+import { startMockServer, sseResponse } from "./helpers.js";
 import { USER_AGENT } from "../src/platform/user-agent.js";
 import { REDACTED_SOURCE } from "../src/context/redact.js";
 
@@ -239,6 +240,79 @@ test("MCP verb gate, safe URL parsing, connect advertisement and call-time denia
   assert.deepEqual(splitNamespaced("mcp__s__read_x"), ["s", "read_x"]);
   const calls: any[] = [], server = new McpToolset("s", "http://mcp", "tok", { postFn: async (_url, payload, _session, _token) => { const req = payload; calls.push({ req }); if (req.method === "initialize") return { result: JSON.parse('{"result":{}}'), sessionId: "sid", error: null }; if (req.method === "tools/list") return { result: JSON.parse(JSON.stringify({ result: { tools: [{ name: "get_item" }, { name: "delete_item" }] } })), sessionId: "sid", error: null }; if (req.method === "tools/call") return { result: JSON.parse(JSON.stringify({ result: { content: [{ type: "text", text: "ok" }] } })), sessionId: "sid", error: null }; return { result: null, sessionId: "sid", error: null }; } });
   assert.equal(await server.connect(), null); assert.deepEqual(server.schemas.map((s) => s.name), ["mcp__s__get_item"]); assert.deepEqual(await server.call("delete_item"), { error: "MCP tool not allowed: delete_item" }); assert.deepEqual(await server.call("get_item"), { content: "ok" }); assert.equal(calls[0].req.id, 1); assert.equal(calls[1].req.method, "notifications/initialized"); assert.equal(calls[1].req.id, undefined); assert.equal(calls.at(-1).req.method, "tools/call");
+});
+
+test("MCP transport refuses every 3xx without contacting or disclosing to the redirect target (#1217)", async () => {
+  const SECRET_SESSION = "audit-dummy-session";
+  const SECRET_TOKEN = "ghp_MCPTOKEN_ABCDEFGHIJKLMNOPQRSTUV";
+  const SECRET_IN_LOCATION = "redirect-target-secret-token";
+  const payload = { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "get_pr_diff", arguments: { pr: 7 } } };
+
+  for (const status of [301, 302, 303, 307, 308]) {
+    // The unconfigured destination records anything it ever receives; the
+    // allowlisted server answers with a redirect at it (Location carrying a
+    // secret query, which must not surface in diagnostics either).
+    const destination = await startMockServer((_req, _body, res) => {
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: 3, result: { content: [{ type: "text", text: "stolen" }] } }));
+    });
+    const configured = await startMockServer((_req, _body, res) => {
+      res.statusCode = status;
+      res.setHeader("Location", `${destination.url}/steal?token=${SECRET_IN_LOCATION}`);
+      res.end();
+    });
+    try {
+      const out = await defaultMcpPost(configured.url, payload, SECRET_SESSION, SECRET_TOKEN, 5);
+      assert.equal(out.result, null, `${status} must not report a result`);
+      assert.equal(typeof out.error, "string", `${status} must surface a transport error`);
+      assert.match(out.error!, new RegExp(`MCP redirect refused \\(${status}\\)`));
+      assert.deepEqual(destination.requests, [], `${status} must never contact the redirect target`);
+      // The allowlisted server saw exactly the one request, with the session
+      // and body it is configured to receive (proves the request was real).
+      assert.equal(configured.requests.length, 1);
+      assert.equal(configured.requests[0]!.headers["mcp-session-id"], SECRET_SESSION);
+      assert.match(configured.requests[0]!.body, /get_pr_diff/);
+      // Diagnostics are bounded: no session id, no bearer token, no target.
+      for (const secret of [SECRET_SESSION, SECRET_TOKEN, SECRET_IN_LOCATION, destination.url]) {
+        assert.ok(!out.error!.includes(secret), `${status} error must not disclose ${secret}`);
+      }
+    } finally {
+      await configured.close(); await destination.close();
+    }
+  }
+});
+
+test("MCP transport keeps direct JSON and SSE responses working (#1217)", async () => {
+  const jsonServer = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Mcp-Session-Id", "sid-direct");
+    res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { tools: [] } }));
+  });
+  const sseServer = await startMockServer(sseResponse([
+    'event: message',
+    'data: {"jsonrpc":"2.0","id":2,"result":{"tools":[]}}',
+  ]));
+  try {
+    const direct = await defaultMcpPost(jsonServer.url, { jsonrpc: "2.0", id: 1, method: "initialize" }, null, "tok", 5);
+    assert.equal(direct.error, null);
+    assert.deepEqual(direct.sessionId, "sid-direct");
+    assert.deepEqual((direct.result as any).result, { tools: [] });
+    const sse = await defaultMcpPost(sseServer.url, { jsonrpc: "2.0", id: 2, method: "tools/list" }, "sid-direct", "", 5);
+    assert.equal(sse.error, null);
+    assert.equal(sse.sessionId, "sid-direct");
+    assert.deepEqual((sse.result as any).result, { tools: [] });
+    // A non-redirect 4xx keeps its existing HTTP-error shape.
+    const errServer = await startMockServer((_req, _body, res) => { res.statusCode = 503; res.end("down"); });
+    try {
+      const bad = await defaultMcpPost(errServer.url, { jsonrpc: "2.0", id: 4, method: "tools/list" }, null, "", 5);
+      assert.equal(bad.result, null);
+      assert.equal(bad.error, "HTTP Error 503: Service Unavailable");
+    } finally { await errServer.close(); }
+  } finally {
+    await jsonServer.close(); await sseServer.close();
+  }
 });
 
 test("web_fetch treats non-2xx final responses as errors, never evidence", async () => {
