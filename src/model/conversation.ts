@@ -1055,9 +1055,10 @@ export class Conversation {
    * messages keyed by `tool_call_id`. Assistant tool calls are emitted on a
    * single assistant message whose content may be `null` when the model
    * produced only tool_calls (matching OpenAI's non-streaming schema).
-   * `includeTurnNotes=false` (verdict turn) drops driver budget notes — they
-   * describe loop-turn state that no longer applies once tools are gone.
-   * system_note events are verdict-turn-only state and are never rendered
+   * `includeTurnNotes=false` drops historical driver budget notes only on
+   * the collapsed-verdict path. Full-history verdicts retain them so the
+   * transcript stays faithful and prefix-stable. system_note events are
+   * verdict-turn-only state and are never rendered
    * here (same as v2). */
   renderOpenAiMessages(includeTurnNotes = true): WireMessage[] {
     const messages: WireMessage[] = [];
@@ -1101,7 +1102,8 @@ export class Conversation {
    * from the same executor round are batched onto a single user message to
    * match Anthropic's batching convention. Assistant tool calls become
    * `{"type": "tool_use", "id", "name", "input"}` content blocks.
-   * `includeTurnNotes=false` (verdict turn) drops driver budget notes. */
+   * `includeTurnNotes=false` is used only by the collapsed-verdict path;
+   * full-history verdicts retain the historical notes (#1222). */
   /** Render neutral events as an Anthropic-format messages list. (Public for
    * tests; v2 renders these through the private method with identical
    * output.) */
