@@ -308,6 +308,46 @@ test("#868 maintainer follow-up: a 200 verdict-turn reply that parses to {verdic
   }
 });
 
+test("#747: an empty AI_TEMPERATURE omits temperature from every loop and verdict request on both tiers", async () => {
+  const smartEnv = {
+    TOOL_HARNESS_TIER: "smart",
+    SMART_BASE_URL: "http://smart.test/v1",
+    SMART_MODEL: "smart1",
+    SMART_API_KEY: "k",
+  };
+  for (const tier of ["primary", "smart"] as const) {
+    for (const aiTemperature of ["", "0.1"]) {
+      const { root, deps } = workspace();
+      const corpus = tier === "smart" ? "review-corpus.smart.truncated.md" : "review-corpus.truncated.md";
+      fs.writeFileSync(path.join(root, corpus), "# PR Diff\\n+ change\\n");
+      fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\\n");
+      const scripted = [openAiCall("c1", "read_file", '{"path":"src.ts"}'), openAiText("evidence gathered"), validVerdict()];
+      const payloads: Array<Record<string, unknown>> = [];
+      const { result } = await runToolHarness(deps({
+        env: {
+          ...withPrompt.env,
+          ...(tier === "smart" ? smartEnv : {}),
+          AI_TEMPERATURE: aiTemperature,
+        },
+        transport: async (_url, _format, payload) => {
+          payloads.push(payload as Record<string, unknown>);
+          return scripted[payloads.length - 1];
+        },
+      }));
+      const label = `${tier}, AI_TEMPERATURE=${JSON.stringify(aiTemperature)}`;
+      assert.equal(result.native_loop_verdict_produced, true, label);
+      assert.equal(payloads.length, 3, label);
+      const [round1, round2, verdict] = payloads;
+      for (const loopPayload of [round1!, round2!]) {
+        if (aiTemperature === "") assert.equal("temperature" in loopPayload, false, label);
+        else assert.equal(loopPayload.temperature, 0.0, label);
+      }
+      if (aiTemperature === "") assert.equal("temperature" in verdict!, false, label);
+      else assert.equal(verdict!.temperature, 0.1, label);
+    }
+  }
+});
+
 test("smart-tier tool failures fall back to the primary review without a smart verdict", async () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff\n+ change\n");
@@ -367,8 +407,157 @@ test("smart-tier wall-clock exhaustion stops the loop with the deadline stop rea
     },
   }));
   assert.equal(result.stop_reason, "wall-clock-exceeded");
-  assert.equal(result.native_loop_error, "smart tool-loop deadline exceeded");
+  assert.equal(result.native_loop_error, "tool-loop deadline exceeded");
   assert.equal(result.native_loop_verdict_produced, undefined);
+});
+
+// #1198: the whole-exchange ceiling now binds BOTH tiers. These primary-tier
+// tests mirror the smart wall-clock test above: an absolute deadline taken
+// before the loop (including pre-loop setup) with a scripted transport whose
+// 5th argument (the clamped timeout) is captured, AI_STREAM false, and a
+// timeFn advanced in fixed steps so every remaining-budget clamp is
+// deterministic. The deadline = step + ceiling; tick n reads n·step.
+
+test("#1198 primary: a near-deadline loop turn gets the remaining budget and the next round sees none", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Deadline = 18 + 100 = 118. The first turn's request starts with 46s left
+  // (clamped below the 60s turn timeout); the SECOND between-rounds check
+  // (126) is past the deadline, so no second model request is ever opened.
+  let clock = 0;
+  const timeouts: number[] = [];
+  let transportCalls = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiCall("c2", "read_file", '{"path":"src.ts"}'),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: { TOOL_LOOP_WALL_CLOCK_SEC: "100" },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, timeout) => {
+      timeouts.push(timeout);
+      return scripted[transportCalls++];
+    },
+    timeFn: () => {
+      clock += 18;
+      return clock;
+    },
+  }));
+  assert.deepEqual(timeouts, [46], "the turn must be clamped to the remaining exchange budget");
+  assert.ok(timeouts[0]! < 60, "strictly below the configured turn timeout");
+  assert.equal(result.mode, "native_loop");
+  assert.equal(result.stop_reason, "wall-clock-exceeded");
+  assert.equal(result.rounds, 1);
+  assert.equal((result.tool_calls as unknown[]).length, 1, "executed calls stay recorded");
+  assert.equal(result.native_loop_degraded, undefined);
+  assert.equal(result.native_loop_error, undefined);
+  assert.equal(result.native_loop_verdict_produced, undefined);
+});
+
+test("#1198 primary: a near-deadline verdict turn is clamped to the remaining budget and still accepted", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Deadline = 10 + 150 = 160. The loop spends two rounds, then the verdict
+  // turn's request is clamped from 60s to the 40s that remain and its
+  // acceptance check (tick 130) lands strictly inside the exchange.
+  let clock = 0;
+  const timeouts: number[] = [];
+  let transportCalls = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "150" },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, timeout) => {
+      timeouts.push(timeout);
+      return scripted[transportCalls++];
+    },
+    timeFn: () => {
+      clock += 10;
+      return clock;
+    },
+  }));
+  assert.deepEqual(timeouts, [60, 60, 40]);
+  assert.ok(timeouts[2]! < 60, "the verdict turn must be clamped below the per-turn timeout");
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+});
+
+test("#1198 primary: a verdict turn landing past the exchange deadline is fallback with reason deadline", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Deadline = 10 + 115 = 125. The verdict turn still gets its clamped
+  // request (5s left) and a VALID body, but the acceptance check (tick 130)
+  // is past the deadline — smart-tier parity: fallback, reason "deadline".
+  let clock = 0;
+  const timeouts: number[] = [];
+  let transportCalls = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "115" },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, timeout) => {
+      timeouts.push(timeout);
+      return scripted[transportCalls++];
+    },
+    timeFn: () => {
+      clock += 10;
+      return clock;
+    },
+  }));
+  assert.deepEqual(timeouts, [60, 45, 5]);
+  assert.equal(result.native_loop_verdict_produced, undefined);
+  assert.equal(result.native_loop_verdict_status, "fallback");
+  assert.equal(result.native_loop_verdict_reason, "deadline");
+});
+
+test("#1198 smart: a near-deadline verdict turn is clamped to the remaining budget and still accepted", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Same tick map as the primary accepted-verdict test plus one tick for the
+  // smart degradation gate: deadline = 10 + 160 = 170, verdict request
+  // clamped to the 40s that remain, accepted inside the exchange, and the
+  // post-verdict telemetry gate (tick 160) still inside the deadline too.
+  let clock = 0;
+  const timeouts: number[] = [];
+  let transportCalls = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: {
+      ...withPrompt.env,
+      TOOL_HARNESS_TIER: "smart",
+      SMART_BASE_URL: "http://smart.test/v1",
+      SMART_MODEL: "smart1",
+      SMART_API_KEY: "k",
+      AI_STREAM: "false",
+      TOOL_LOOP_WALL_CLOCK_SEC: "160",
+    },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, timeout) => {
+      timeouts.push(timeout);
+      return scripted[transportCalls++];
+    },
+    timeFn: () => {
+      clock += 10;
+      return clock;
+    },
+  }));
+  assert.deepEqual(timeouts, [60, 60, 40]);
+  assert.ok(timeouts[2]! < 60, "the verdict turn must be clamped below the per-turn timeout");
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  assert.ok(fs.existsSync(path.join(root, "tool-harness.smart.json")));
 });
 
 test("invalid env integers crash loudly like v2's int()", async () => {
@@ -1126,4 +1315,578 @@ test("#1154 r2: the verdict projection keeps secret-named CATEGORY values", () =
   // masks, which is the behavior this projection opted out of.
   const prObject = redactPrTextDeep({ secret_handling_changes: "reported" }) as Record<string, unknown>;
   assert.equal(prObject.secret_handling_changes, "[REDACTED]");
+});
+
+// ---------------------------------------------------------------------------
+// #1199 — per-round latency and provider-reported usage, end to end.
+// ---------------------------------------------------------------------------
+
+test("#1199: per-round + verdict latency/usage persisted in the artifact and logged", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  const withUsage = (body: unknown, usage: Record<string, unknown>) => ({ ...(body as object), usage });
+  const scripted = [
+    withUsage(openAiCall("c1", "read_file", '{"path":"src.ts"}'), { prompt_tokens: 18420, completion_tokens: 1330, prompt_tokens_details: { cached_tokens: 16000 } }),
+    // second investigation turn reports NO usage → recorded as null, not a guess.
+    openAiText("evidence gathered"),
+    withUsage(validVerdict(), { prompt_tokens: 21000, completion_tokens: 900, prompt_tokens_details: { cached_tokens: 16000 } }),
+  ];
+  let n = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    transport: async () => scripted[n++],
+    log: (line) => { logs.push(line); },
+    ...withPrompt,
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry;
+  assert.equal(telemetry.phase, "loop");
+
+  // Two investigation turns: the tool-call turn and the no-tool stop turn.
+  const rounds = telemetry.rounds;
+  assert.ok(Array.isArray(rounds), "rounds is a persisted array");
+  assert.equal(rounds.length, 2);
+  assert.equal(rounds[0].round, 1);
+  assert.equal(rounds[0].prompt_tokens, 18420);
+  assert.equal(rounds[0].completion_tokens, 1330);
+  assert.equal(rounds[0].cached_tokens, 16000);
+  assert.equal(rounds[0].tools_requested, 1);
+  assert.equal(rounds[0].tools_executed, 1);
+  // Latency is measured on a dedicated monotonic clock, so it is a real
+  // (tiny) non-negative number here, never the scripted budget clock's 0.
+  assert.equal(typeof rounds[0].model_sec, "number");
+  assert.ok(rounds[0].model_sec >= 0);
+  assert.ok(rounds[0].tool_elapsed_sec >= 0);
+  assert.equal(rounds[0].streamed_fallback, false);
+  assert.equal(rounds[1].round, 2);
+  assert.equal(rounds[1].tools_requested, 0);
+  // missing provider usage stays null, never synthesized from elapsed time.
+  assert.equal(rounds[1].prompt_tokens, null);
+  assert.equal(rounds[1].completion_tokens, null);
+  assert.equal(rounds[1].cached_tokens, null);
+
+  // The closing verdict turn's telemetry is separate from the investigation rounds.
+  assert.equal(telemetry.verdict.produced, true);
+  assert.equal(typeof telemetry.verdict.model_sec, "number");
+  assert.ok(telemetry.verdict.model_sec >= 0);
+  assert.equal(telemetry.verdict.prompt_tokens, 21000);
+  assert.equal(telemetry.verdict.completion_tokens, 900);
+  assert.equal(telemetry.verdict.cached_tokens, 16000);
+  assert.equal(telemetry.verdict.streamed_fallback, false);
+  // The raw verdict record is consumed (folded into the verdict sub-object),
+  // not duplicated at the top level of the artifact.
+  assert.equal(artifact.native_loop_verdict_telemetry, null);
+
+  // Concise heartbeat lines appear in normal workflow logs. Latency is the
+  // measured (monotonic-clock) value, so match its shape, not an exact number.
+  const joined = logs.join("\n");
+  assert.match(joined, /native_loop round 1: model=[0-9.]+s prompt=18420 completion=1330 cached=16000/);
+  assert.match(joined, /native_loop round 1: tools requested=1 executed=1 refused=0 dedup=0 tool_elapsed=[0-9.]+s/);
+  assert.match(joined, /native_loop verdict: model=[0-9.]+s prompt=21000 completion=900 cached=16000/);
+});
+
+test("#1199: Anthropic rounds + verdict derive the aggregate usage (cache tokens counted once)", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Anthropic reports the cache read/write tokens OUTSIDE input_tokens, so the
+  // prompt total of a turn is uncached + cache read + cache write (#910).
+  const anthropicUsage = (input: number, output: number, cacheRead: number, cacheCreation: number) => ({
+    input_tokens: input,
+    output_tokens: output,
+    cache_read_input_tokens: cacheRead,
+    cache_creation_input_tokens: cacheCreation,
+  });
+  const scripted = [
+    {
+      content: [{ type: "tool_use", id: "t1", name: "read_file", input: { path: "src.ts" } }],
+      usage: anthropicUsage(500, 40, 300, 200),
+    },
+    {
+      content: [{ type: "text", text: "evidence gathered" }],
+      usage: anthropicUsage(100, 10, 0, 0),
+    },
+    {
+      content: [{
+        type: "text",
+        text: JSON.stringify({ verdict: "approve", review_markdown: "## Review\nLooks fine.", findings: [] }),
+      }],
+      usage: anthropicUsage(21000, 900, 16000, 0),
+    },
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    env: { SYSTEM_PROMPT: "You are the reviewer.", AI_API_FORMAT: "anthropic" },
+    transport: async () => scripted[n++],
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry;
+  const rounds = telemetry.rounds;
+  assert.equal(rounds.length, 2);
+  // Per-turn prompt totals include the cache tokens Anthropic reports
+  // separately: 500 + 300 + 200, then 100 + 0 + 0.
+  assert.equal(rounds[0].prompt_tokens, 1000);
+  assert.equal(rounds[0].completion_tokens, 40);
+  assert.equal(rounds[0].cached_tokens, 300);
+  assert.equal(rounds[1].prompt_tokens, 100);
+  assert.equal(rounds[1].completion_tokens, 10);
+  assert.equal(rounds[1].cached_tokens, 0);
+  // The verdict turn is accounted the same way: 21000 + 16000 + 0.
+  assert.equal(telemetry.verdict.prompt_tokens, 37000);
+  assert.equal(telemetry.verdict.completion_tokens, 900);
+  assert.equal(telemetry.verdict.cached_tokens, 16000);
+
+  // The persisted records DERIVE the aggregate — the acceptance criterion the
+  // #1199 review flagged: Anthropic's aggregate prompt total adds the cache
+  // tokens, so a record that reported only input_tokens could not sum to it.
+  // Every recorded turn counts: the investigation rounds, the #1145 repair
+  // continuation's rounds, the verdict record (plus a superseded one, if a
+  // refresh ever replaced it), and the `unrecorded_usage` categories for the
+  // turns that carry no round or verdict record (this scenario has none —
+  // no compaction fired, the refresh accepted — so it is empty). No charge
+  // goes unrecorded, so summing the records reproduces the aggregate exactly.
+  const sum = (field: string): number => {
+    const fromRounds = [...rounds, ...(telemetry.repair_rounds as Record<string, unknown>[])]
+      .reduce((total: number, r: Record<string, unknown>) => total + (r[field] as number), 0);
+    const superseded = (telemetry.verdict.superseded as Record<string, unknown>[])
+      .reduce((total: number, r: Record<string, unknown>) => total + (r[field] as number), 0);
+    const unrecorded = Object.values(telemetry.unrecorded_usage as Record<string, Record<string, unknown>>)
+      .reduce((total: number, r) => total + (r[field] as number), 0);
+    return fromRounds + superseded + (telemetry.verdict[field] as number) + unrecorded;
+  };
+  assert.deepEqual(telemetry.unrecorded_usage, {});
+  assert.equal(sum("prompt_tokens"), artifact.usage.prompt_tokens);
+  assert.equal(sum("completion_tokens"), artifact.usage.completion_tokens);
+  assert.equal(sum("cached_tokens"), artifact.usage.cached_prompt_tokens);
+  assert.equal(artifact.usage.prompt_tokens, 38100);
+  assert.equal(artifact.usage.completion_tokens, 950);
+  assert.equal(artifact.usage.cached_prompt_tokens, 16300);
+  // The aggregate's cache-hit ratio follows the same accounted prompt total.
+  assert.equal(artifact.usage.cache_hit_ratio, 0.428);
+});
+
+test("#1199: the compaction digest's spend is persisted in unrecorded_usage, so the records derive the aggregate", async () => {
+  const { root, deps } = workspace();
+  // A conversation budget small enough that compaction fires mid-loop:
+  // context 6400 → conversation budget 4000 approx tokens, result envelope cap
+  // 2000 bytes, corpus cap 7200 bytes. The corpus (~1850 tokens) plus four
+  // read results (~512 tokens each) crosses the budget before round 5, so the
+  // single digest model call happens exactly there — between rounds, carrying
+  // NO round record of its own.
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n" + "d".repeat(7400) + "\n");
+  for (let i = 1; i <= 6; i++) fs.writeFileSync(path.join(root, `big${i}.txt`), "e".repeat(6000));
+  const readCall = (id: string, file: string, prompt: number, completion: number) => ({
+    choices: [{ message: { content: null, tool_calls: [{ id, type: "function", function: { name: "read_file", arguments: `{"path":"${file}"}` } }] } }],
+    usage: { prompt_tokens: prompt, completion_tokens: completion },
+  });
+  const textWithUsage = (t: string, prompt: number, completion: number) => ({
+    choices: [{ message: { content: t } }],
+    usage: { prompt_tokens: prompt, completion_tokens: completion },
+  });
+  const scripted = [
+    readCall("t1", "big1.txt", 850, 60),
+    readCall("t2", "big2.txt", 860, 60),
+    readCall("t3", "big3.txt", 870, 60),
+    readCall("t4", "big4.txt", 880, 60),
+    // round 5's pre-request compaction: the digest call rides postFn (its
+    // spend is folded into the aggregate) but is not a loop-timeline turn.
+    textWithUsage("digest of the oldest evidence", 3210, 55),
+    readCall("t5", "big5.txt", 890, 60),
+    textWithUsage("evidence gathered", 920, 40),
+    textWithUsage(JSON.stringify({ verdict: "approve", review_markdown: "## Review\nLooks fine.", findings: [] }), 21000, 900),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, MODEL_CONTEXT_TOKENS: "6400", TOOL_LOOP_SUMMARIZE: "true", TOOL_MAX_ROUNDS: "6" },
+    transport: async () => scripted[n++],
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(n, 8);
+
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry;
+  const rounds = telemetry.rounds;
+  // SIX loop turns (five reads + the no-tool stop), but the digest call is NOT
+  // one of them — it has no round record.
+  assert.equal(rounds.length, 6);
+  assert.equal(rounds.map((r: Record<string, unknown>) => r.prompt_tokens).join(","), "850,860,870,880,890,920");
+  assert.deepEqual(telemetry.compaction, { summarize: 1, truncate: 0 });
+  // ... its spend is instead persisted as the unrecorded category it is.
+  assert.deepEqual(telemetry.unrecorded_usage, {
+    context_compaction: { requests: 1, prompt_tokens: 3210, completion_tokens: 55, cached_prompt_tokens: 0, cache_hit_ratio: 0 },
+  });
+
+  // EXACT derivability: sum(rounds) + verdict + unrecorded categories === the
+  // aggregate the artifact published.
+  assert.equal(artifact.usage.prompt_tokens, 850 + 860 + 870 + 880 + 3210 + 890 + 920 + 21000);
+  assert.equal(artifact.usage.completion_tokens, 60 * 4 + 55 + 60 + 40 + 900);
+  const sum = (field: string): number => {
+    const fromRounds = rounds.reduce((total: number, r: Record<string, unknown>) => total + (r[field] as number), 0);
+    const unrecorded = Object.values(telemetry.unrecorded_usage as Record<string, Record<string, unknown>>)
+      .reduce((total: number, r) => total + (r[field === "cached_tokens" ? "cached_prompt_tokens" : field] as number), 0);
+    return fromRounds + (telemetry.verdict[field] as number) + unrecorded;
+  };
+  assert.equal(sum("prompt_tokens"), artifact.usage.prompt_tokens);
+  assert.equal(sum("completion_tokens"), artifact.usage.completion_tokens);
+  assert.equal(sum("cached_tokens"), artifact.usage.cached_prompt_tokens);
+});
+
+test("#1199: a streamed→non-streamed loop turn is flagged once and never split", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  const verdict = validVerdict();
+  const scripted = [
+    // first loop turn: a streamed 200 body carrying an error key → postFn
+    // retries it once non-streamed and reports the fallback for that turn.
+    { error: "stream truncated" },
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    verdict,
+  ];
+  let n = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true" },
+    transport: async () => scripted[n++],
+    log: (line) => { logs.push(line); },
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const rounds = artifact.tool_loop_telemetry.rounds;
+  // the fallback turn is ONE round record, flagged, not two; the retried
+  // request did not burn a second round.
+  assert.equal(rounds.length, 2);
+  assert.equal(rounds[0].round, 1);
+  assert.equal(rounds[0].streamed_fallback, true);
+  assert.equal(rounds[1].streamed_fallback, false);
+  // aggregate rounds_used matches the persisted per-round count.
+  assert.equal(artifact.tool_loop_telemetry.usage.rounds_used, rounds.length);
+});
+
+test("#1199: the verdict latency rides the telemetry clock, not the scripted budget clock", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    // A scripted budget clock that sits nowhere near any wall clock: a verdict
+    // duration measured against it would be negative (clamped to 0) or
+    // astronomically large — never a real measurement.
+    timeFn: () => 1e6,
+    transport: async () => {
+      await new Promise((r) => setTimeout(r, 25));
+      return scripted[n++];
+    },
+    ...withPrompt,
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const modelSec = artifact.tool_loop_telemetry.verdict.model_sec as number;
+  assert.equal(typeof modelSec, "number");
+  // A real measurement of the verdict turn: bounded and positive, and nowhere
+  // near the scripted budget clock's 1e6.
+  assert.ok(modelSec > 0, `verdict model_sec must be a real duration, got ${modelSec}`);
+  assert.ok(modelSec < 2, `verdict model_sec must not be a budget-clock artifact, got ${modelSec}`);
+});
+
+test("#1199: the #1145 evidence-repair continuation's native-loop turn is recorded too", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "notes.md"), "evidence note\n");
+  const withUsage = (body: unknown, usage: Record<string, unknown>) => ({ ...(body as object), usage });
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+    // The #1145 continuation's own native-loop turn (one tool call), then the
+    // refreshed verdict turn it justifies.
+    withUsage(openAiCall("c2", "read_file", '{"path":"notes.md"}'), { prompt_tokens: 500, completion_tokens: 40 }),
+    validVerdict(),
+  ];
+  let n = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    transport: async () => scripted[n++],
+    log: (line) => { logs.push(line); },
+    traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+    ...withPrompt,
+  }));
+  assert.equal(result.trace_repair_continuation?.outcome, "continued");
+  // Two investigation turns + the verdict turn, the continuation's own turn,
+  // and the refreshed verdict turn it justifies.
+  assert.equal(n, 5);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry;
+  // The investigation loop's rounds stay exactly the investigation loop's turns.
+  assert.equal(telemetry.rounds.length, 2);
+  assert.equal(telemetry.usage.rounds_used, 2);
+  // The continuation is a native-loop run too, so its model turn is recorded —
+  // in its own array, so the investigation `rounds` keep their meaning.
+  assert.equal(telemetry.repair_rounds.length, 1);
+  const repairRound = telemetry.repair_rounds[0];
+  assert.equal(repairRound.round, 1);
+  assert.equal(repairRound.prompt_tokens, 500);
+  assert.equal(repairRound.completion_tokens, 40);
+  assert.equal(repairRound.cached_tokens, null);
+  assert.equal(repairRound.tools_requested, 1);
+  assert.equal(repairRound.tools_executed, 1);
+  assert.equal(typeof repairRound.model_sec, "number");
+  assert.ok(repairRound.model_sec >= 0);
+  // ... and it is heartbeat-logged under its own scope.
+  assert.match(logs.join("\n"), /native_loop repair round 1: model=[0-9.]+s prompt=500 completion=40/);
+  assert.match(logs.join("\n"), /native_loop repair round 1: tools requested=1 executed=1 refused=0 dedup=0/);
+});
+
+test("#1199: the verdict record folds EVERY attempt's usage, not just the final one", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  const withUsage = (body: unknown, usage: Record<string, unknown>) => ({ ...(body as object), usage });
+  const scripted = [
+    // the investigation loop
+    withUsage(openAiCall("c1", "read_file", '{"path":"src.ts"}'), { prompt_tokens: 1000, completion_tokens: 50 }),
+    openAiText("evidence gathered"),
+    // verdict attempt 1 (streamed): a body the verdict parser rejects, WITH a
+    // usage block ...
+    withUsage(openAiText("not a verdict body"), { prompt_tokens: 21000, completion_tokens: 900, prompt_tokens_details: { cached_tokens: 16000 } }),
+    // ... which triggers the single non-streamed retry: usable, WITH a usage
+    // block of its own.
+    withUsage(validVerdict(), { prompt_tokens: 22000, completion_tokens: 1000 }),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true" },
+    transport: async () => scripted[n++],
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_retried, true);
+  assert.equal(n, 4);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry;
+  assert.equal(telemetry.verdict.produced, true);
+  assert.equal(telemetry.verdict.streamed_fallback, true);
+  // the verdict record is the SUM over both attempts: the streamed failure's
+  // usage still counts, so a retried verdict turn cannot under-report itself.
+  assert.equal(telemetry.verdict.prompt_tokens, 21000 + 22000);
+  assert.equal(telemetry.verdict.completion_tokens, 900 + 1000);
+  assert.equal(telemetry.verdict.cached_tokens, 16000);
+  // Derivability: the aggregate `usage` folds the same attempts (loop postFn +
+  // both verdict attempts), so sum(rounds) + verdict stays derivable from the
+  // aggregate — the verdict-turn contribution is prompt 21000+22000.
+  assert.equal(artifact.usage.prompt_tokens, 1000 + 21000 + 22000);
+  assert.equal(artifact.usage.completion_tokens, 50 + 900 + 1000);
+  assert.equal(artifact.usage.cached_prompt_tokens, 16000);
+});
+
+test("#1199: a successful #1145 refresh moves the standing verdict record into verdict.superseded", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "notes.md"), "evidence note\n");
+  const withUsage = (body: unknown, usage: Record<string, unknown>) => ({ ...(body as object), usage });
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    // the FIRST verdict turn (usage recorded, then superseded by the refresh)
+    withUsage(validVerdict(), { prompt_tokens: 21000, completion_tokens: 900 }),
+    // the #1145 continuation's own native-loop turn, then the refreshed verdict
+    openAiCall("c2", "read_file", '{"path":"notes.md"}'),
+    withUsage(validVerdict(), { prompt_tokens: 30000, completion_tokens: 700, prompt_tokens_details: { cached_tokens: 25000 } }),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    transport: async () => scripted[n++],
+    traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+    ...withPrompt,
+  }));
+  assert.equal(result.trace_repair_continuation?.outcome, "continued");
+  assert.equal(result.trace_repair_continuation?.verdict_refreshed, true);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry;
+  // `verdict` describes the REFRESHED verdict ...
+  assert.equal(telemetry.verdict.produced, true);
+  assert.equal(telemetry.verdict.prompt_tokens, 30000);
+  assert.equal(telemetry.verdict.completion_tokens, 700);
+  assert.equal(telemetry.verdict.cached_tokens, 25000);
+  // ... and the FIRST verdict's record survived next to it.
+  const superseded = telemetry.verdict.superseded;
+  assert.ok(Array.isArray(superseded) && superseded.length === 1, "exactly one superseded record");
+  const first = superseded[0]!;
+  assert.equal(typeof first.model_sec, "number");
+  assert.ok(first.model_sec >= 0);
+  assert.equal(first.prompt_tokens, 21000);
+  assert.equal(first.completion_tokens, 900);
+  assert.equal(first.cached_tokens, null);
+  assert.equal(first.streamed_fallback, false);
+  // the raw records were consumed (folded into the verdict sub-object), not
+  // duplicated at the top level of the artifact.
+  assert.equal(artifact.native_loop_superseded_verdict_telemetry, null);
+  // An ACCEPTED refresh's usage rides the refreshed verdict record — no
+  // unrecorded category exists, and the aggregate (21000 first verdict + 30000
+  // refreshed verdict) derives exactly from rounds (no usage in this script) +
+  // repair rounds (no usage) + verdict + superseded.
+  assert.deepEqual(telemetry.unrecorded_usage, {});
+  assert.equal(artifact.usage.prompt_tokens, 21000 + 30000);
+  assert.equal(artifact.usage.completion_tokens, 900 + 700);
+  assert.equal(artifact.usage.cached_prompt_tokens, 25000);
+  const sum = (field: string): number => {
+    const fromRounds = [
+      ...(telemetry.rounds as Record<string, unknown>[]),
+      ...(telemetry.repair_rounds as Record<string, unknown>[]),
+    ].reduce((total: number, r: Record<string, unknown>) => total + (r[field] as number), 0);
+    const superseded = (telemetry.verdict.superseded as Record<string, unknown>[])
+      .reduce((total: number, r: Record<string, unknown>) => total + (r[field] as number), 0);
+    const unrecorded = Object.values(telemetry.unrecorded_usage as Record<string, Record<string, unknown>>)
+      .reduce((total: number, r) => total + (r[field] as number), 0);
+    return fromRounds + superseded + (telemetry.verdict[field] as number) + unrecorded;
+  };
+  assert.equal(sum("prompt_tokens"), artifact.usage.prompt_tokens);
+  assert.equal(sum("completion_tokens"), artifact.usage.completion_tokens);
+  assert.equal(sum("cached_tokens"), artifact.usage.cached_prompt_tokens);
+});
+
+test("#1199: a failed #1145 refresh keeps the standing verdict record and persists its unrecorded spend", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "notes.md"), "evidence note\n");
+  const withUsage = (body: unknown, usage: Record<string, unknown>) => ({ ...(body as object), usage });
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    withUsage(validVerdict(), { prompt_tokens: 21000, completion_tokens: 900 }),
+    openAiCall("c2", "read_file", '{"path":"notes.md"}'),
+    // Streamed refresh attempt 1: parses no verdict — WITH usage →
+    // ... triggers the single non-streamed retry: also parses no verdict,
+    // also WITH usage. Both attempts are billed (aggregate), neither ends in
+    // a verdict record, so BOTH must land in the unrecorded category.
+    withUsage(openAiText("not a verdict"), { prompt_tokens: 12000, completion_tokens: 200, prompt_tokens_details: { cached_tokens: 1200 } }),
+    withUsage(openAiText("not a verdict"), { prompt_tokens: 13000, completion_tokens: 150 }),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true" },
+    transport: async () => scripted[n++],
+    traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+  }));
+  assert.equal(result.trace_repair_continuation?.verdict_refreshed, false);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry;
+  // `verdict` still describes the FIRST verdict and nothing was superseded.
+  assert.equal(telemetry.verdict.prompt_tokens, 21000);
+  assert.equal(telemetry.verdict.completion_tokens, 900);
+  assert.deepEqual(telemetry.verdict.superseded, []);
+  // The refresh's per-field attempt sum IS persisted — exactly what the
+  // aggregate charged for it and no record otherwise represented.
+  assert.deepEqual(telemetry.unrecorded_usage, {
+    verdict_refresh: { requests: 2, prompt_tokens: 25000, completion_tokens: 350, cached_prompt_tokens: 1200, cache_hit_ratio: 0.048 },
+  });
+  // EXACT derivability: investigation rounds (no usage) + first verdict +
+  // repair rounds (no usage) + the failed refresh's two attempts == aggregate.
+  assert.equal(artifact.usage.prompt_tokens, 21000 + 25000);
+  assert.equal(artifact.usage.completion_tokens, 900 + 350);
+  assert.equal(artifact.usage.cached_prompt_tokens, 1200);
+});
+
+test("#1199: an unaccepted #1145 refresh (deadline expired) keeps the standing verdict record", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "notes.md"), "evidence note\n");
+  const withUsage = (body: unknown, usage: Record<string, unknown>) => ({ ...(body as object), usage });
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    // the FIRST verdict turn (accepted; its telemetry must stay standing)
+    withUsage(validVerdict(), { prompt_tokens: 21000, completion_tokens: 900 }),
+    // the #1145 continuation's own native-loop turn, then the refresh's verdict
+    // — usable on its own, but the acceptance read below rejects it. Its usage
+    // is billed anyway (the aggregate is charged), so it must land in the
+    // `verdict_refresh` unrecorded category.
+    openAiCall("c2", "read_file", '{"path":"notes.md"}'),
+    withUsage(validVerdict(), { prompt_tokens: 33000, completion_tokens: 500 }),
+  ];
+  // Scripted budget-clock reads, 1:1 with this scenario (enumerated with a
+  // logging clock; 26 reads exactly). `deadline` = first read + 10
+  // (TOOL_LOOP_WALL_CLOCK_SEC). The indices:
+  //   0 harness deadline · 1 loop start · 2-8 loop rounds (wall checks, per-turn
+  //   remaining checks, per-executed-call gate+remaining, loop elapsed) ·
+  //   9 pre-verdict smart gate · 10 verdictStartedAt · 11-12 first-verdict
+  //   budget checks · 13 FIRST verdict's acceptance read (< deadline →
+  //   accepted) · 14 verdictElapsedSec · 15 pre-repair deadlineLeft ·
+  //   16-21 repair round (start/wall/remaining/exec gate+remaining/elapsed) ·
+  //   22-23 refresh budget checks · 24 refresh ACCEPTANCE read landing at/after
+  //   the deadline — the race under test · 25 teardown gate (pre-deadline, so
+  //   the standing verdict keeps `native_loop_verdict_produced`).
+  const vals = [
+    0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9,
+    1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0, 2.1, 2.2, 2.3, 2.4,
+    10.2, 2.6,
+  ];
+  let vi = 0;
+  let n = 0;
+  const logged: number[] = []; // exhausted reads repeat the last value → drift stays observable in the assertions
+  const { result } = await runToolHarness(deps({
+    env: {
+      TOOL_HARNESS_TIER: "smart",
+      SMART_BASE_URL: "http://smart.test/v1",
+      SMART_MODEL: "smart1",
+      SMART_API_KEY: "k",
+      AI_STREAM: "false",
+      TOOL_LOOP_WALL_CLOCK_SEC: "10",
+      SYSTEM_PROMPT: "You are the reviewer.",
+    },
+    transport: async () => scripted[n++],
+    traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+    timeFn: () => {
+      const v = vals[vi] ?? vals[vals.length - 1]!;
+      vi += 1;
+      logged.push(v);
+      return v;
+    },
+  }));
+  // The refresh's verdict was usable but the run's deadline expired before it
+  // could be accepted: the refresh is NOT what stands.
+  assert.equal(result.trace_repair_continuation?.outcome, "continued");
+  assert.equal(result.trace_repair_continuation?.verdict_refreshed, false);
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  // the acceptance decision is computed once: 26 budget-clock reads, exactly
+  // as enumerated (no extra read introduced by the race fix).
+  assert.equal(logged.length, 26);
+  assert.equal(logged[24], 10.2);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.smart.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry;
+  // `verdict` still describes the FIRST verdict, and nothing was superseded:
+  // an unaccepted refresh leaves the standing record untouched, exactly like a
+  // failed one.
+  assert.equal(telemetry.verdict.produced, true);
+  assert.equal(telemetry.verdict.prompt_tokens, 21000);
+  assert.equal(telemetry.verdict.completion_tokens, 900);
+  assert.equal(typeof telemetry.verdict.model_sec, "number");
+  assert.ok(telemetry.verdict.model_sec >= 0);
+  assert.deepEqual(telemetry.verdict.superseded, []);
+  // the raw records were consumed (folded into the verdict sub-object).
+  assert.equal(artifact.native_loop_verdict_telemetry, null);
+  assert.equal(artifact.native_loop_superseded_verdict_telemetry, null);
+  // The unaccepted refresh was still billed (one attempt, WITH usage): that
+  // charge has no verdict record, so it is persisted as its own category.
+  assert.deepEqual(telemetry.unrecorded_usage, {
+    verdict_refresh: { requests: 1, prompt_tokens: 33000, completion_tokens: 500, cached_prompt_tokens: 0, cache_hit_ratio: 0 },
+  });
+  // EXACT derivability with the unrecorded category folded in.
+  assert.equal(artifact.usage.prompt_tokens, 21000 + 33000);
+  assert.equal(artifact.usage.completion_tokens, 900 + 500);
 });

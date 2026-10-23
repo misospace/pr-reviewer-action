@@ -30,6 +30,30 @@ export interface ChatRequestInput {
    * attempt of this request (including clamp/strip retries). Once aborted,
    * the loop makes no further attempt and returns the `cancelled` failure. */
   signal?: AbortSignal;
+  /** #1200: observation hook for per-attempt retry telemetry, optional for
+   * every caller that does not consume it. The loop reports ONE event per
+   * actual wire call — at its decision point, after the call finished and
+   * before any same-request retry or return — so callers can account the
+   * discarded wire attempts a single `runChatRequest` call may make. */
+  onWireCall?: (report: WireCallReport) => void;
+}
+
+/** #1200: the bounded, content-free report of ONE actual wire call the
+ * request loop made. No body text, no headers, no provider prose — the
+ * report carries only the loop's own decision about the call. */
+export interface WireCallReport {
+  /** `true` when the loop discarded this call's outcome and made a
+   * same-request retry follow-up (a retryable 429/5xx status, or a 400 a
+   * max_tokens clamp / structured-output strip retry answers, #824/#1047).
+   * `false` when this call's outcome is what `runChatRequest` returns. */
+  discarded: boolean;
+  /** Wall-clock seconds of this wire call (measured around its HTTP turn). */
+  elapsedSec: number;
+  /** The completion-token budget THIS call actually sent
+   * (`max_tokens` / `max_completion_tokens`); null when the loop payload
+   * carries neither field. Repeated per call so a clamped retry's lowered
+   * budget is observable per attempt. */
+  maxTokens: number | null;
 }
 
 /** #1047: the structured-output surface a strip retry removed from the wire:
@@ -99,7 +123,20 @@ async function runChatRequestLoop(input: ChatRequestInput, clampRemaining: boole
     if (input.signal?.aborted) {
       return { status: "failure", failure: new TransportFailure("cancelled", "model request cancelled") };
     }
+    // #1200: report ONE event per actual wire call, at its decision point.
+    // A discarded call (the loop followed it with a same-request retry) and
+    // a returned one alike are real provider attempts; the clamp/strip
+    // recursions and the nested strip loop carry this hook with their copied
+    // input, so the whole retry tree reports through it.
+    const callStart = Date.now();
     const outcome = await runChatRequestOnce(input);
+    const report = (discarded: boolean): void => {
+      input.onWireCall?.({
+        discarded,
+        elapsedSec: (Date.now() - callStart) / 1000,
+        maxTokens: tokenFieldAndValue(input.payload.body)?.value ?? null,
+      });
+    };
     if (outcome.status === "failure") {
       // #1080: a TERMINAL provider failure (quota exhausted, model retired)
       // spends no attempt and no sleep here — the original failure is returned
@@ -112,6 +149,7 @@ async function runChatRequestLoop(input: ChatRequestInput, clampRemaining: boole
       // unchanged for every non-terminal failure.
       const terminal = classifyTerminalProviderFailure(outcome.failure);
       if (terminal !== null) {
+        report(false);
         process.stderr.write(`${terminalProviderFailureLine(terminal, callKnownSecrets(input.apiKey, input.extraHeaders))}; bypassing same-request retries\n`);
         return outcome;
       }
@@ -119,6 +157,7 @@ async function runChatRequestLoop(input: ChatRequestInput, clampRemaining: boole
         ? tokenClampRetry(input, outcome.failure)
         : null;
       if (clamp !== null) {
+        report(true);
         process.stderr.write(`clamped ${clamp.field} ${clamp.from} -> ${clamp.to} (${clamp.reason})\n`);
         return runChatRequestLoop(clamp.input, false, stripRemaining);
       }
@@ -126,11 +165,13 @@ async function runChatRequestLoop(input: ChatRequestInput, clampRemaining: boole
         ? structuredOutputStripRetry(input, outcome.failure)
         : null;
       if (strip !== null) {
+        report(true);
         process.stderr.write(`removed ${strip.surface} for one retry (HTTP 400 body named it)\n`);
         const retryOutcome = await runChatRequestLoop(strip.input, clampRemaining, false);
         // #1047 (review): a successful strip retry is tagged with the surface
         // it dropped, so callers can report the EFFECTIVE request rather than
-        // the configuration; a failed one returns unchanged.
+        // the configuration; a failed one returns unchanged. The nested loop
+        // reported its own wire calls, so this branch reports nothing more.
         if (retryOutcome.status === "ok") {
           return { ...retryOutcome, strippedStructuredOutput: strip.surface };
         }
@@ -142,10 +183,14 @@ async function runChatRequestLoop(input: ChatRequestInput, clampRemaining: boole
         && RETRYABLE_HTTP_STATUSES.has(outcome.failure.status)
         && attempt < HTTP_RETRY_ATTEMPTS
       ) {
+        report(true);
         const delaySec = outcome.failure.retryAfterSec ?? 2 ** (attempt - 1);
         await sleep(Math.max(0, Math.min(delaySec, HTTP_RETRY_MAX_DELAY_SEC)) * 1000);
         continue;
       }
+      report(false);
+    } else {
+      report(false);
     }
     return outcome;
   }
