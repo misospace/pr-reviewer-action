@@ -738,7 +738,10 @@ export type WireMessage = Record<string, unknown>;
  * breakpoints are retained separately, keeping the request at three explicit
  * breakpoints maximum (below Anthropic's four-breakpoint limit).
  */
-function markLatestAnthropicMessageCacheBreakpoint(messages: WireMessage[]): void {
+function markLatestAnthropicMessageCacheBreakpoint(
+  messages: WireMessage[],
+  hasTransientTurnNotes: boolean,
+): void {
   for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex--) {
     const message = messages[messageIndex]!;
     const content = message.content;
@@ -763,12 +766,14 @@ function markLatestAnthropicMessageCacheBreakpoint(messages: WireMessage[]): voi
     // note after them is transient. This is the key to making the moving
     // breakpoint actually hit on round N+1.
     let preferredIndex = -1;
-    for (let blockIndex = content.length - 1; blockIndex >= 0; blockIndex--) {
-      const block = content[blockIndex];
-      if (block !== null && typeof block === "object" && !Array.isArray(block)
-          && (block as Record<string, unknown>).type === "tool_result") {
-        preferredIndex = blockIndex;
-        break;
+    if (hasTransientTurnNotes) {
+      for (let blockIndex = content.length - 1; blockIndex >= 0; blockIndex--) {
+        const block = content[blockIndex];
+        if (block !== null && typeof block === "object" && !Array.isArray(block)
+            && (block as Record<string, unknown>).type === "tool_result") {
+          preferredIndex = blockIndex;
+          break;
+        }
       }
     }
 
@@ -1454,7 +1459,7 @@ export class Conversation {
           cache_control: { type: "ephemeral" },
         };
       }
-      markLatestAnthropicMessageCacheBreakpoint(messages);
+      markLatestAnthropicMessageCacheBreakpoint(messages, options.includeTurnNotes);
     }
     return payload;
   }
