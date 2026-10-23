@@ -145,7 +145,9 @@ count and opts only that tier out of the scaling, under the same rule: up to
   the smart/escalated tier this is also clamped to whatever remains of the
   wall-clock deadline, so a slow turn can't single-handedly blow past it.
 - `tool-request-timeout-sec` (default 20) bounds each individual tool
-  execution (file read, grep, API call, fetch).
+  execution (file read, grep, API call, fetch). At the loop's per-call seam
+  this is clamped to the remaining wall-clock budget (floor 1s), so a large
+  configured value cannot outlive `tool-loop-wall-clock-sec`.
 
 ### Context limits
 
