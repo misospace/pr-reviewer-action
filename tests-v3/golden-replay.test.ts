@@ -20,6 +20,19 @@ import type { PlatformReadAdapter } from "../src/platform/types.js";
 const ROOT = resolve(__dirname, "..", "..");
 const FIXTURES = join(ROOT, "tests", "fixtures", "golden-replay");
 
+// #1238: the golden runtime must be able to reach the action's OWN source
+// tree, because the gate-absence witness reads the implementation that
+// actually runs. In production that tree is the action's install directory
+// (GITHUB_ACTION_PATH); the replay points it at this repository. Set
+// deterministically — the suite must not depend on the ambient value — and
+// restored after the run.
+const PREVIOUS_ACTION_PATH = process.env.GITHUB_ACTION_PATH;
+process.env.GITHUB_ACTION_PATH = ROOT;
+after(() => {
+  if (PREVIOUS_ACTION_PATH === undefined) delete process.env.GITHUB_ACTION_PATH;
+  else process.env.GITHUB_ACTION_PATH = PREVIOUS_ACTION_PATH;
+});
+
 // Redaction marker tokens: a blocking claim that cites a token the PR's own
 // source does not contain is a claim the evidence cannot support. The plain
 // `[REDACTED]` placeholder is module-private (src/context/redact.ts:10), so it

@@ -252,6 +252,14 @@ function isUnverifiedGrounding(finding: ArtifactFinding): boolean {
   return (finding as { grounding_status?: unknown }).grounding_status === "unverified";
 }
 
+function isUnverifiedBlockingGrounding(finding: ArtifactFinding): boolean {
+  const status = (finding as { grounding_status?: unknown }).grounding_status;
+  if (status !== "unverified") return false;
+  const original = finding.capped_from;
+  if (original === "blocker" || original === "major") return true;
+  return original === undefined && (finding.severity === "blocker" || finding.severity === "major");
+}
+
 /**
  * #1016: a blocker-level finding the deterministic boundary demoted to minor
  * because its source claim could not be checked. `capped_from` and
@@ -288,6 +296,13 @@ export function relaxUnverifiedBlockerVerdict(
   // outright when any open finding has grounding_status="unverified". The
   // strict verdict mapping applies the same fail-closed rule via the
   // `forced` flag at its call site.
+  //
+  // #1238: this refusal is deliberately BROADER than the strict mapping's
+  // unknown-evidence forcing (isUnverifiedBlockingGrounding, which scopes to
+  // originally blocker/major findings). The non-strict policies are opt-in
+  // legacy paths; they stay conservative — an unverified claim of any
+  // original severity holds the relaxation — while strict (the default)
+  // never lets an unverified non-blocking claim expand the blocking surface.
   if (findings.some(isUnverifiedGrounding)) return false;
   const allRelaxable = findings.every((finding) =>
     isAlwaysNonBlockingCategory(finding.category)
@@ -510,12 +525,12 @@ function strictRequestChangesDetail(input: {
  * — a forcing layer (evidence blocker, tool-harness failure, min-successful,
  * `required_check_validation_mode=fail`) fired for these inputs. The
  * mapping also computes a #1016 unknown-evidence signal from the artifact's
- * own `grounding_status`: any demoted finding with `grounding_status ===
- * "unverified"` (the verifier could not check the claim — it did not disprove
- * the claim) forces `request_changes` with a `#1016` attribution note, so
- * an approve cannot silently certify a clean review the verifier never
- * confirmed. Refuted/unsupported demotions alone do not force — they flow
- * through the normal strict mapping.
+ * own `grounding_status`: an originally blocker/major finding with
+ * `grounding_status === "unverified"` (the verifier could not check the
+ * claim — it did not disprove it) forces `request_changes` with a `#1016`
+ * attribution note. Unverified minor/info findings concern non-blocking
+ * claims and cannot expand the blocking surface. Refuted/unsupported
+ * demotions alone do not force — they flow through the normal strict mapping.
  *
  * When an override flips the model verdict, the attribution note names
  * EVERY contributing safety signal — blocker counts, unverified-grounding
@@ -538,7 +553,7 @@ export function applyStrictVerdictPolicy(
   const findings = Array.isArray(artifact.findings) ? artifact.findings : [];
   const modelVerdict = options.modelVerdict;
   const counts = severityCounts(findings);
-  const unverifiedGrounding = findings.some(isUnverifiedGrounding);
+  const unverifiedGrounding = findings.some(isUnverifiedBlockingGrounding);
 
   let verdict: VerdictValue;
   let overridden: boolean;

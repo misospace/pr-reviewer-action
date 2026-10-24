@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import {
   applyBlockerVerification,
   type SourceReader,
   type SourceReadResult,
 } from "../src/enforcement/blocker-verification.js";
+import { createActionSourceReader } from "../src/enforcement/action-source.js";
 import {
   applyStrictVerdictPolicy,
   applyVerdictPolicy,
@@ -20,6 +22,10 @@ import { publishReview } from "../src/publish/publish.js";
 import type { NativeReviewRequest, PublishPlatformApi } from "../src/platform/publish-api.js";
 
 const REVISION = "a".repeat(40);
+
+/** #1238: the executing action's own source tree — the repository root in
+* this checkout (in production: the action's install directory). */
+const ACTION_ROOT = resolve(__dirname, "..", "..");
 
 function artifact(overrides: Partial<ReviewArtifact> = {}): ReviewArtifact {
   return {
@@ -641,4 +647,212 @@ test("#1016 findings_severity_gated: a positively refuted blocker demotion still
   applyVerdictPolicy(blocked, "findings_severity_gated", gated);
   assert.equal(relaxUnverifiedBlockerVerdict(blocked, { forced: false }), true);
   assert.equal(blocked.verdict, "approve");
+});
+
+// ---------------------------------------------------------------------------
+// #1238 — input-declaration and gate-absence claims at the finding→verdict path.
+// ---------------------------------------------------------------------------
+
+test("#1238 the incident shape: fabricated input claim refuted, gate claim refuted, verdict approves", async () => {
+  // Sanitized replay of the production failure: a major finding fabricated
+  // the action's declared input name and a minor finding derived gate
+  // absence from the metadata. The registry witness (the executing action's
+  // embedded contract) positively contradicts the input claim, and the
+  // action's own implementation positively contradicts the gate claim (the
+  // draft and label gates ARE implemented), so the strict mapping derives
+  // an approve — no claim can expand the blocking surface.
+  const a = artifact({
+    verdict: "request_changes",
+    findings: [
+      finding({
+        severity: "major",
+        file: ".github/workflows/ai_pr_review.yaml",
+        line: 36,
+        message: "The pinned action declares its API-key input as `ai-key` (action.yml at v3.7.0), so `ai-api-key` is an unexpected input that GitHub ignores and the action runs without the endpoint credential.",
+      }),
+      finding({
+        severity: "minor",
+        file: ".github/workflows/ai_pr_review.yaml",
+        line: 20,
+        message: "The comment says the action itself skips drafts and non-matching labels, but that filtering is done by this workflow's own `if` (the action metadata declares no `if:` or label input).",
+      }),
+      finding({
+        severity: "info",
+        category: "verification",
+        file: ".github/workflows/ai_pr_review.yaml",
+        line: 36,
+        message: "Please confirm the workflow's configured secret is present in the CI environment.",
+      }),
+    ],
+  });
+  const result = await applyBlockerVerification(a.findings, {
+    readSource: unavailableReader,
+    expectedRevision: REVISION,
+    declaredActionInputs: new Set(["github-token", "ai-base-url", "ai-api-key", "ai-model", "rereview-label"]),
+    readActionSource: createActionSourceReader({ root: ACTION_ROOT }),
+  });
+  assert.equal(result.demoted, 1);
+  assert.equal(a.findings[0]!.grounding_status, "refuted");
+  assert.equal(a.findings[0]!.severity, "minor");
+  assert.equal(a.findings[1]!.grounding_status, "refuted");
+  assert.equal(a.findings[1]!.severity, "minor");
+  assert.equal(a.findings[1]!.capped_from, undefined);
+  assert.equal(a.findings[2]!.grounding_status, undefined);
+  const outcome = applyStrictVerdictPolicy(a, { modelVerdict: "request_changes", forced: false });
+  assert.equal(a.verdict, "approve");
+  assert.equal(outcome.verdict, "approve");
+  assert.ok(a.review_markdown.includes("no blocker or major finding out of 3 open"));
+});
+
+test("#1238 the incident gate claim stays unverified when the action source is unavailable", async () => {
+  // Fail-safe control: without the action's own implementation the gate
+  // claim cannot be checked, so it stays unknown evidence (unverified) —
+  // never refuted. The minor stays minor and cannot expand the blocking
+  // surface.
+  const a = artifact({
+    verdict: "request_changes",
+    findings: [
+      finding({
+        severity: "minor",
+        file: ".github/workflows/ai_pr_review.yaml",
+        line: 20,
+        message: "The comment says the action itself skips drafts and non-matching labels, but that filtering is done by this workflow's own `if` (the action metadata declares no `if:` or label input).",
+      }),
+    ],
+  });
+  const result = await applyBlockerVerification(a.findings, {
+    readSource: unavailableReader,
+    expectedRevision: REVISION,
+    declaredActionInputs: new Set(["github-token", "ai-base-url", "ai-api-key", "ai-model", "rereview-label"]),
+    readActionSource: createActionSourceReader({ root: resolve(ACTION_ROOT, "no-such-action-tree") }),
+  });
+  assert.equal(result.demoted, 0);
+  assert.equal(a.findings[0]!.grounding_status, "unverified");
+  assert.equal(a.findings[0]!.severity, "minor");
+  assert.equal(a.findings[0]!.capped_from, undefined);
+});
+
+test("#1238 an unverified major input claim still fails closed to request_changes", async () => {
+  // Fail-safe control: without the registry witness the boundary cannot
+  // check the claim. An originally-major demotion is unknown evidence, so
+  // the strict mapping keeps request_changes with the #1016 attribution.
+  const a = artifact({
+    verdict: "request_changes",
+    findings: [
+      finding({
+        severity: "major",
+        file: ".github/workflows/ai_pr_review.yaml",
+        line: 36,
+        message: "The pinned action declares input `ai-key`, so the workflow's credential never reaches the action.",
+      }),
+    ],
+  });
+  const result = await applyBlockerVerification(a.findings, {
+    readSource: unavailableReader,
+    expectedRevision: REVISION,
+    declaredActionInputs: null,
+  });
+  assert.equal(result.demoted, 1);
+  assert.equal(a.findings[0]!.grounding_status, "unverified");
+  assert.equal(a.findings[0]!.capped_from, "major");
+  // The model approved; the strict mapping refuses to certify an approve
+  // from evidence it could not check, and attributes the unknown evidence.
+  applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+  assert.equal(a.verdict, "request_changes");
+  assert.ok(a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"));
+});
+
+test("#1238 a genuine missing-input claim is retained as substantiated and keeps blocking", async () => {
+  // The preservation control the issue pins: an input the registry truly
+  // lacks grounds the claim — the finding keeps its major severity, mutates
+  // nothing, and the strict mapping keeps request_changes from the open
+  // blocking finding.
+  const a = artifact({
+    verdict: "request_changes",
+    findings: [
+      finding({
+        severity: "major",
+        file: ".github/workflows/ai_pr_review.yaml",
+        line: 30,
+        message: "the pinned action's metadata declares no `unicorn-mode` input, so the workflow's setting is silently dropped",
+      }),
+    ],
+  });
+  const result = await applyBlockerVerification(a.findings, {
+    readSource: unavailableReader,
+    expectedRevision: REVISION,
+    declaredActionInputs: new Set(["github-token", "ai-api-key", "rereview-label"]),
+  });
+  assert.equal(result.demoted, 0);
+  assert.equal(a.findings[0]!.severity, "major");
+  assert.equal(a.findings[0]!.grounding_status, undefined);
+  applyStrictVerdictPolicy(a, { modelVerdict: "request_changes", forced: false });
+  assert.equal(a.verdict, "request_changes");
+});
+
+test("#1238 a mixed finding keeps its confirmed missing-input claim and stays blocking", async () => {
+  // One finding can carry two claims about the action's declared inputs:
+  // `ai-api-key` IS declared, so that absence claim is positively
+  // contradicted, and `model-input` is NOT declared, so that absence claim
+  // is a genuine defect the witness confirms. The confirmed claim keeps the
+  // finding substantiated — it must not be demoted whole because a sibling
+  // claim in the same finding was refuted (#1238: preserve true findings).
+  const a = artifact({
+    verdict: "request_changes",
+    findings: [
+      finding({
+        severity: "major",
+        file: ".github/workflows/ai_pr_review.yaml",
+        line: 30,
+        message: "The action does not declare `ai-api-key` input. The action does not declare `model-input` input.",
+      }),
+    ],
+  });
+  const result = await applyBlockerVerification(a.findings, {
+    readSource: unavailableReader,
+    expectedRevision: REVISION,
+    declaredActionInputs: new Set(["github-token", "ai-api-key", "rereview-label"]),
+  });
+  assert.equal(result.demoted, 0);
+  assert.equal(a.findings[0]!.severity, "major");
+  assert.equal(a.findings[0]!.grounding_status, undefined);
+  // The model approved; the confirmed defect is still an open blocking
+  // finding, so the strict mapping keeps request_changes.
+  applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+  assert.equal(a.verdict, "request_changes");
+});
+
+test("#1240 a claim about another revision is unverified and still fails closed", async () => {
+  // The declared-input registry speaks for the EXECUTING revision only: a
+  // claim that names a different revision is unverified — never refuted,
+  // never grounded. Unverified must not demote a TRUE finding out of the
+  // blocking set: the finding keeps `capped_from: "major"`, and the strict
+  // mapping counts an unverified blocker/major as blocking, so the verdict
+  // stays request_changes instead of relaxing to approve.
+  const a = artifact({
+    verdict: "request_changes",
+    findings: [
+      finding({
+        severity: "major",
+        file: ".github/workflows/ai_pr_review.yaml",
+        line: 36,
+        message: "The pinned action declares its API-key input as `ai-key` (action.yml at v3.6.1), so `ai-api-key` is an unexpected input that GitHub ignores.",
+      }),
+    ],
+  });
+  const result = await applyBlockerVerification(a.findings, {
+    readSource: unavailableReader,
+    expectedRevision: REVISION,
+    declaredActionInputs: new Set(["github-token", "ai-base-url", "ai-api-key", "ai-model", "rereview-label"]),
+    executingActionVersion: "v3.7.0",
+  });
+  assert.equal(result.demoted, 1);
+  assert.equal(a.findings[0]!.grounding_status, "unverified");
+  assert.equal(a.findings[0]!.capped_from, "major");
+  assert.equal(a.findings[0]!.severity, "minor");
+  // The model approved; the strict mapping refuses to certify an approve
+  // from a claim it could not check, and attributes the unknown evidence.
+  applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+  assert.equal(a.verdict, "request_changes");
+  assert.ok(a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"));
 });
