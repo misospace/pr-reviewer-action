@@ -5,7 +5,8 @@ import { getEventListeners } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runReview, rawInputsFromEnv, RunReviewError } from "../src/run/review.js";
-import { runReviewEngine } from "../src/engine/review.js";
+import { runReviewEngine, createRunCancellation } from "../src/engine/review.js";
+import { GateLaunchError, forkGate, type ForkedGate } from "../src/gates/gates.js";
 import { runEngineAdmission, admissionStageEnv } from "../src/engine/admission.js";
 import type { ReviewDependencies, ReviewRequest } from "../src/engine/types.js";
 import { actionStageEnv } from "../src/run/action.js";
@@ -344,6 +345,100 @@ test("cancelling while a gate fork is launching still awaits its termination", a
     assert.equal(gateTerminated, true, "the launch-raced fork's termination was awaited before the rejection");
     assert.deepEqual(getEventListeners(controller.signal, "abort"), []);
   } finally { releaseGate(); await server.close(); f.cleanup(); }
+});
+
+test("#1183: a claimed fork whose launch lands after the abort is cut and awaited before finalize returns", async () => {
+  // The launch-suspension seam for the PROCESS path: a controlled launch
+  // handed to claimFork stands in for the forkGate launch that suspends on
+  // its preflight/launch probes. The window the old own()-after-await left:
+  // finalize used to be able to close its final empty pass before the fork
+  // landed, making the cancellation rejection observable while the child's
+  // termination was not yet awaited.
+  const controller = new AbortController();
+  const cancellation = createRunCancellation({ ...request("", "/run-dir"), signal: controller.signal });
+  let settleLaunch!: (fork: ForkedGate) => void;
+  const launch = new Promise<ForkedGate>((resolve) => { settleLaunch = resolve; });
+  let cutStarted = false;
+  let settleCut!: () => void;
+  const cut = new Promise<void>((resolve) => { settleCut = resolve; });
+  const fork: ForkedGate = {
+    gate: "ci",
+    join: async () => { throw new Error("a cut fork is never joined"); },
+    abort: async () => { cutStarted = true; await cut; },
+  };
+  const claimed = cancellation.claimFork(launch);
+  controller.abort();
+  // The rejection is observable now; the drain must still be open.
+  await assert.rejects(cancellation.cancelled, (error: unknown) => error instanceof RunReviewError && /cancelled/.test(error.message));
+  let finalized = false;
+  const draining = cancellation.finalize().then(() => { finalized = true; });
+  // A regression to own()-after-await closes finalize on its first (empty)
+  // pass immediately: give it every macrotask chance to do exactly that.
+  await new Promise<void>((resolve) => { setImmediate(resolve); });
+  assert.equal(finalized, false, "finalize must stay pending while a claimed launch has not landed");
+  settleLaunch(fork);
+  await new Promise<void>((resolve) => { setImmediate(resolve); });
+  assert.equal(finalized, false, "finalize must stay pending while the landed fork's cut is outstanding");
+  settleCut();
+  // Hang guard: a drain that never completes fails here instead of hanging
+  // the suite (same pattern as the gate tests above).
+  const escaped = await Promise.race([
+    draining.then(() => true),
+    new Promise<boolean>((resolve) => { setTimeout(() => resolve(false), 2000); }),
+  ]);
+  assert.equal(escaped, true, "finalize completes once the landed fork's termination has");
+  assert.equal(cutStarted, true, "the landed fork was cut");
+  assert.equal(await claimed, fork, "the claim hands the landed fork to the caller");
+});
+
+test("#1183: a claimed launch that is refused drains finalize and surfaces the refusal to the claimer", async () => {
+  const controller = new AbortController();
+  const cancellation = createRunCancellation({ ...request("", "/run-dir"), signal: controller.signal });
+  let refuseLaunch!: (error: Error) => void;
+  const launch = new Promise<ForkedGate>((_resolve, reject) => { refuseLaunch = reject; });
+  const claimed = cancellation.claimFork(launch);
+  controller.abort();
+  // The unsettled claim keeps the drain open exactly like a landing one…
+  let finalized = false;
+  const draining = cancellation.finalize().then(() => { finalized = true; });
+  await new Promise<void>((resolve) => { setImmediate(resolve); });
+  assert.equal(finalized, false, "finalize must stay pending while a claimed launch has not settled");
+  // …and once the launch is refused, nothing was ever launched, so the drain
+  // completes rather than hanging or waiting on a fork that never lands.
+  refuseLaunch(new GateLaunchError("ci", "launch refused"));
+  const escaped = await Promise.race([
+    draining.then(() => true),
+    new Promise<boolean>((resolve) => { setTimeout(() => resolve(false), 2000); }),
+  ]);
+  assert.equal(escaped, true, "finalize drains a refused claimed launch");
+  await assert.rejects(claimed, (error: unknown) => error instanceof GateLaunchError && /launch refused/.test(error.message));
+});
+
+test("#1183: an abort inside the real fork launch window refuses the spawn with no child un-awaited", async () => {
+  // Same race against the REAL process path: the claim registers before
+  // forkGate suspends on its pgrep preflight, and the abort is delivered
+  // synchronously right after the claim — spawn can only ever happen a
+  // macrotask later, so this deterministically lands inside the launch
+  // suspension. runProcess then refuses the pre-aborted launch, forkGate
+  // surfaces the refusal, and the claim drain completes cleanly: no child
+  // exists to outlive the run un-awaited.
+  const controller = new AbortController();
+  const cancellation = createRunCancellation({ ...request("", "/run-dir"), signal: controller.signal });
+  const claimed = cancellation.claimFork(forkGate("ci", {
+    file: "bash",
+    args: ["-c", "sleep 60"],
+    envAllowlist: ["PATH", "HOME"],
+  }, {
+    ambientEnv: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
+    scope: cancellation.scope,
+  }));
+  controller.abort();
+  const escaped = await Promise.race([
+    cancellation.finalize().then(() => true),
+    new Promise<boolean>((resolve) => { setTimeout(() => resolve(false), 5000); }),
+  ]);
+  assert.equal(escaped, true, "finalize drains the real refused launch");
+  await assert.rejects(claimed, (error: unknown) => error instanceof GateLaunchError && /cancelled before launch/.test(error.message));
 });
 
 test("a completed run detaches from the caller's signal", async () => {

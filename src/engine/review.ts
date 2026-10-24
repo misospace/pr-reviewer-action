@@ -259,8 +259,12 @@ interface RunCancellation {
   readonly cancelled: Promise<never>;
   /** The only way an aborted run leaves the pipeline: throws. */
   checkpoint(): void;
-  /** Track an owned gate fork so cancellation finalizes it. */
-  own(fork: ForkedGate): void;
+  /** Claim a gate fork's launch BEFORE awaiting it: the pending launch is
+   * registered synchronously, so a cancellation landing while the launch
+   * suspends (the preflight/launch probes inside `forkGate`) is still
+   * drained by `finalize()` — the fork is cut and its termination awaited
+   * once the launch lands. Resolves with the fork for the caller. */
+  claimFork<T extends ForkedGate>(launch: Promise<T>): Promise<T>;
   /** Stop tracking a fork this run has already joined. */
   release(fork: ForkedGate): void;
   /** Abort every still-outstanding owned fork. Idempotent. */
@@ -279,14 +283,20 @@ interface RunCancellation {
  *   pipeline terminates at the next boundary instead of finishing (and
  *   instead of an in-flight model verdict reaching the fallback, escalation
  *   or enforcement stages);
- * - `finalize()` aborts the gate forks this run owns, awaited BEFORE the
- *   rejection is observable, so no gate child outlives a cancelled run.
+ * - `finalize()` aborts the gate forks this run owns — including forks whose
+ *   launch is still in flight (`claimFork` registers it before the await) —
+ *   awaited BEFORE the rejection is observable, so no gate child outlives a
+ *   cancelled run.
  * `dispose()` removes the caller's abort listener on both exit paths.
+ *
+ * Exported for the cancellation-contract tests (#1183): the launch-suspension
+ * seam for the process path is a controlled launch handed to `claimFork`.
  */
-function createRunCancellation(request: ReviewRequest): RunCancellation {
+export function createRunCancellation(request: ReviewRequest): RunCancellation {
   const scope = createCancellationScope();
   const forks = new Set<ForkedGate>();
   const cuttings = new Set<Promise<void>>();
+  const pendingLaunches = new Set<Promise<void>>();
   const detail = request.triggerReason === "" ? "" : ` (${request.triggerReason})`;
   const scopeReason = `request cancelled${detail}`;
   const message = `review request cancelled${detail}`;
@@ -316,18 +326,35 @@ function createRunCancellation(request: ReviewRequest): RunCancellation {
     checkpoint(): void {
       if (scope.signal.aborted) throw new RunReviewError(message, 1);
     },
-    own(fork: ForkedGate): void {
-      // Cancelled between the last checkpoint and the launch: never track a
-      // fork nobody will finalize — cut it now instead. The cut is registered
-      // so finalize() awaits its termination too: a fork that lands its launch
-      // into an aborted run must not outlive the rejection either.
-      if (scope.signal.aborted) {
-        const cutting = forget(fork);
-        cuttings.add(cutting);
-        void cutting.then(() => { cuttings.delete(cutting); });
-        return;
-      }
-      forks.add(fork);
+    claimFork<T extends ForkedGate>(launch: Promise<T>): Promise<T> {
+      // The claim registers the launch synchronously, BEFORE the caller
+      // awaits it, so a cancellation landing while the launch suspends
+      // (the preflight/launch probes inside forkGate) is still drained by
+      // finalize() — the window the old own()-after-await left open (#1183).
+      // When the launch lands: into a live scope the fork is owned like
+      // before; into an aborted scope it is never tracked as a fork nobody
+      // will finalize but cut instead, and the cut is registered so
+      // finalize() awaits its termination too.
+      const landed = launch.then((fork) => {
+        if (scope.signal.aborted) {
+          const cutting = forget(fork);
+          cuttings.add(cutting);
+          void cutting.then(() => { cuttings.delete(cutting); });
+          return cutting.then(() => fork);
+        }
+        forks.add(fork);
+        return fork;
+      });
+      // finalize() drains the claim until the launch has landed AND either
+      // the fork is tracked or its cut has completed; a rejected launch
+      // (GateLaunchError) has no child to await and drains immediately.
+      const tracked: Promise<void> = landed.then(
+        () => undefined,
+        () => undefined,
+      );
+      pendingLaunches.add(tracked);
+      void tracked.then(() => { pendingLaunches.delete(tracked); });
+      return landed;
     },
     release(fork: ForkedGate): void {
       forks.delete(fork);
@@ -336,21 +363,20 @@ function createRunCancellation(request: ReviewRequest): RunCancellation {
       // Drain until a full pass finds nothing: a fork whose launch was still
       // in flight when the cancellation landed can register while an earlier
       // drain is awaiting, and the rejection becomes observable only once
-      // every owned child is actually gone. Known residual, stated: a fork
-      // whose PROCESS launch suspends past finalize's final empty pass (the
-      // preflight/launch probes inside forkGate) calls own() only after the
-      // rejection is already observable, so its cut cannot be awaited from
-      // here — the scope signal wired into forkGate bounds that child instead
-      // (runProcess refuses a pre-aborted launch and terminates an in-flight
-      // tree), so nothing outlives the run un-terminated, only un-awaited
-      // (follow-up: #1183).
+      // every owned child is actually gone. The pre-await claim (#1183)
+      // closes the window this used to state as a residual: the pending
+      // launch itself keeps this drain alive from the claim, through the
+      // launch landing, to the end of the landed fork's termination — no
+      // owned child can slip past a final empty pass un-awaited.
       for (;;) {
         const gates = [...forks];
         const cuts = [...cuttings];
+        const launches = [...pendingLaunches];
         forks.clear();
         cuttings.clear();
-        if (gates.length === 0 && cuts.length === 0) return;
-        await Promise.all([...gates.map(forget), ...cuts]);
+        pendingLaunches.clear();
+        if (gates.length === 0 && cuts.length === 0 && launches.length === 0) return;
+        await Promise.all([...gates.map(forget), ...cuts, ...launches]);
       }
     },
     dispose(): void {
@@ -937,14 +963,15 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       checkpoint();
       // The gate child is marked so it can never start a review (or another
       // gate) itself: the recursion stops at depth one.
-      ciFork = await forkGate("ci", dependencies.ciGate ?? ciGateBranch({ entry }), {
+      // Claimed before the await: the launch suspends inside forkGate
+      // (preflight + launch probe), and a cancellation landing there is
+      // still awaited by finalize() (#1183). Owned from landing to join:
+      // cancellation finalizes it even if the run dies in between.
+      ciFork = await cancellation.claimFork(forkGate("ci", dependencies.ciGate ?? ciGateBranch({ entry }), {
         // GITHUB_OUTPUT is the ported v2 stage ABI the CI gate child writes.
         ambientEnv: { ...request.ambient, [GATE_CHILD_ENV]: "1", GITHUB_OUTPUT: join(runDir, CI_GATE_OUTPUT_FILE) },
         scope: cancellation.scope,
-      });
-      // Owned from here: cancellation finalizes it even if the run dies
-      // between this fork and its join.
-      cancellation.own(ciFork);
+      }));
       log("CI status gating launched concurrently");
       env.CI_GATE_ACTIVE = "true";
     } else {
@@ -1071,7 +1098,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       equivalentPathsArgv.push("--equivalent-paths", "specialist-equivalent-paths.md");
     }
     checkpoint();
-    const specialistFork = await forkGate("specialists", {
+    // Claimed before the await, same #1183 rule as the CI fork: this branch
+    // lands synchronously today, but the claim keeps the ownership window
+    // closed if the workload launch ever suspends.
+    const specialistFork = await cancellation.claimFork(forkGate("specialists", {
       file: "",
       envAllowlist: [],
       workload: async () => runSpecialistsGate({
@@ -1084,8 +1114,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
         stderr: (line) => errorLog(line),
         ...(dependencies.sleep !== undefined ? { sleep: dependencies.sleep } : {}),
       }),
-    }, { scope: cancellation.scope });
-    cancellation.own(specialistFork);
+    }, { scope: cancellation.scope }));
     specialistOutcome = await specialistFork.join();
     cancellation.release(specialistFork);
   }
