@@ -41,14 +41,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * those), `null` when it reported none. Junk is never published as a count:
  * a boolean, an empty string, an object, an array, `null`, and a missing
  * field are all "not reported".
+ *
+ * #1207: a negative number is malformed input, not a measurement — no
+ * provider reports negative tokens. A negative count (numeric or numeric
+ * string) is "not reported", exactly like a missing field: the persisted
+ * per-turn record reports `null` and the loop aggregate (`accumulateUsage`)
+ * contributes 0 — while any positive part the same body reports still counts,
+ * per-field, the same way a missing name would.
  */
 function intOrNull(value: unknown): number | null {
-  if (typeof value === "number") return Number.isFinite(value) ? Math.trunc(value) : null;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value < 0) return null;
+    // Normalize -0 (`-0 < 0` is false) so a `-0` survives as exactly `0` —
+    // same number, no signed zero pinned into records.
+    const t = Math.trunc(value);
+    return t === 0 ? 0 : t;
+  }
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (trimmed === "") return null;
     const n = Number(trimmed);
-    return Number.isFinite(n) ? Math.trunc(n) : null;
+    if (!Number.isFinite(n) || n < 0) return null;
+    const t = Math.trunc(n);
+    return t === 0 ? 0 : t;
   }
   return null;
 }
