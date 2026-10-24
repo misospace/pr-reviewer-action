@@ -31,9 +31,9 @@ import {
   pyIsStrictInt,
   pyJsonLoads,
   pyReprStr,
-  pyStrip,
   pyTruthy,
 } from "./pyjson.js";
+import { pyStrip } from "../platform/py.js";
 
 export const ARTIFACT_VERSION = 1;
 export const SARIF_VERSION = "2.1.0";

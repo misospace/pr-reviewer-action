@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { LoopContextError, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, reusableVerdictEnvelope, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
+import { LoopContextError, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, reusableVerdictEnvelope, produceNativeVerdict, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
 import { OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
 import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
@@ -1977,4 +1977,32 @@ test("#1199: an unaccepted #1145 refresh (deadline expired) keeps the standing v
   // EXACT derivability with the unrecorded category folded in.
   assert.equal(artifact.usage.prompt_tokens, 21000 + 33000);
   assert.equal(artifact.usage.completion_tokens, 900 + 500);
+});
+
+test("#1216: produceNativeVerdict's exhausted-budget failure is tier-neutral — the shared verdict turn never wears the smart prefix", async () => {
+  // The verdict turn is shared by both lanes since #1198, so an
+  // already-expired deadline must produce the SAME diagnostic the loop's
+  // other exhausted-budget paths use — a hardcoded "smart" prefix mislabeled
+  // every primary-lane failure. The gate must also fail closed BEFORE any
+  // wire attempt.
+  let transportCalls = 0;
+  const outcome = await produceNativeVerdict({
+    verdictPayload: {},
+    baseUrl: "http://model.test/v1",
+    apiFormat: "openai",
+    apiKey: "primary-lane-key",
+    turnTimeout: 5,
+    usageAcc: { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 },
+    deadline: 10,
+    transport: async () => {
+      transportCalls += 1;
+      return {};
+    },
+    timeFn: () => 20,
+    tier: "primary",
+  });
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.reason, "transport");
+  assert.equal(outcome.detail, "tool-loop wall-clock budget exhausted");
+  assert.equal(transportCalls, 0);
 });

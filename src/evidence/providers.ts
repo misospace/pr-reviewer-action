@@ -14,9 +14,9 @@ import {
   pyReprStr,
   pyRound3,
   pyStr,
-  pyStrip,
   pyTruthy,
 } from "./pyjson.js";
+import { pyStrip } from "../platform/py.js";
 
 /**
  * Evidence-provider execution (#679, #706 PR 5a) — the port of `run_provider`

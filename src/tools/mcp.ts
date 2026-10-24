@@ -17,7 +17,10 @@
  *    JSON-RPC body are never forwarded to an unconfigured origin, and the
  *    `Location` target is never read or reported in diagnostics.
  *  - **Bounded / untrusted** — results are treated as untrusted corpus text
- *    by the caller (masked + capped like web_fetch).
+ *    by the caller (masked + capped like web_fetch). Successful response
+ *    bodies are additionally counted as they stream and refused past
+ *    `MCP_MAX_RESPONSE_BYTES` (#1233), so a misbehaving configured server
+ *    cannot exhaust runner memory before the harness truncates.
  *
  * The HTTP transport is an injected callable (`postFn`) so the module is
  * unit-testable against a scripted MCP server with no network.
@@ -143,6 +146,14 @@ export function parseJsonRpc(body: string): unknown {
   }
 }
 
+/** Response-byte ceiling for the MCP transport (#1233), matching the model
+ * and platform transports (`src/transport/http.ts`, `src/platform/http.ts`).
+ * Counted on the wire as bytes arrive — independent of `Content-Length` — so
+ * a misbehaving configured server cannot make the transport buffer an
+ * unbounded JSON/SSE document before parsing. Crossing the cap cancels the
+ * stream immediately; a partial document is never parsed or published. */
+export const MCP_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+
 export type McpPostResult = { result: unknown; sessionId: string | null; error: string | null };
 export type McpPostFn = (
   url: string,
@@ -150,6 +161,7 @@ export type McpPostFn = (
   sessionId: string | null,
   token: string,
   timeoutSec: number,
+  maxResponseBytes?: number,
 ) => Promise<McpPostResult>;
 
 const jsonRpcErrorReason = (status: number): string => {
@@ -161,6 +173,44 @@ const jsonRpcErrorReason = (status: number): string => {
   return reasons[status] ?? "Error";
 };
 
+/** Read `response.body` chunk by chunk with a hard cap (#1233), port of
+ * `readCappedBody` in `src/platform/http.ts`. A body of exactly `maxBytes`
+ * bytes is fine; the moment the running total would exceed it the stream is
+ * cancelled and a bounded, credential-free error string is returned — the
+ * partial document is never decoded, let alone parsed. An absent (null) body
+ * is an empty payload, matching `response.text()` on a bodyless response. */
+async function readCappedBody(response: Response, maxBytes: number): Promise<{ text: string } | { error: string }> {
+  if (response.body === null) return { text: "" };
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      const bytes: Uint8Array = chunk.value ?? new Uint8Array(0);
+      total += bytes.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        return { error: `MCP response exceeded the ${maxBytes}-byte response limit (received at least ${total} bytes); partial response bodies are never parsed` };
+      }
+      chunks.push(bytes);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  // UTF-8 non-fatal decoding with BOM handling, as the MCP spec mandates
+  // UTF-8 (same simplification as the platform transport); the byte cap was
+  // enforced on the wire, not on decoded characters.
+  return { text: new TextDecoder().decode(out) };
+}
+
 /** Default transport: POST one JSON-RPC message; return
  * (result-or-null, session_id, error). Handles a plain `application/json`
  * body or an SSE (`text/event-stream`) framing — MCP streamable-HTTP may use
@@ -170,8 +220,14 @@ const jsonRpcErrorReason = (status: number): string => {
  * Redirects are never followed (#1217): `redirect: "manual"` plus an explicit
  * 3xx refusal means a configured server cannot bounce the request — body and
  * `Mcp-Session-Id` included — to an origin outside the allowlist. Same
- * fail-closed policy as the platform transports (`src/platform/http.ts`). */
-export const defaultMcpPost: McpPostFn = async (url, payload, sessionId, token, timeoutSec) => {
+ * fail-closed policy as the platform transports (`src/platform/http.ts`).
+ *
+ * Successful bodies are read through `readCappedBody` (#1233): the
+ * `MCP_MAX_RESPONSE_BYTES` ceiling (overridable per call for tests) is
+ * enforced while streaming, so initialization, tools/list, and tools/call
+ * responses of any declared or undeclared size are refused during receipt
+ * rather than buffered. Non-success bodies are cancelled unread. */
+export const defaultMcpPost: McpPostFn = async (url, payload, sessionId, token, timeoutSec, maxResponseBytes) => {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "application/json, text/event-stream",
@@ -204,10 +260,14 @@ export const defaultMcpPost: McpPostFn = async (url, payload, sessionId, token, 
     }
     const newSession = response.headers.get("Mcp-Session-Id") ?? sessionId;
     if (response.status >= 400) {
+      // The error body is never rendered, so never read it: cancel to release
+      // the connection instead of leaving the stream open (#1233).
+      void response.body?.cancel().catch(() => undefined);
       return { result: null, sessionId: newSession, error: `HTTP Error ${response.status}: ${jsonRpcErrorReason(response.status)}` };
     }
-    const body = await response.text();
-    return { result: parseJsonRpc(body), sessionId: newSession, error: null };
+    const body = await readCappedBody(response, maxResponseBytes ?? MCP_MAX_RESPONSE_BYTES);
+    if ("error" in body) return { result: null, sessionId: newSession, error: body.error };
+    return { result: parseJsonRpc(body.text), sessionId: newSession, error: null };
   } catch (exc) {
     return { result: null, sessionId, error: exc instanceof Error ? exc.message : String(exc) };
   } finally {

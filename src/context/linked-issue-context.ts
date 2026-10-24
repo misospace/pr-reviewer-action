@@ -35,9 +35,9 @@
 
 import type { FetchLike } from "../platform/http.js";
 import { isPlainObject, jqAlt, jqEach, jqEachOpt, jqField, jqPretty, jqRaw, JqError } from "../platform/jq.js";
-import { pyOr, pyStr } from "../platform/py.js";
+import { pyOr, pyStr, pyStrip } from "../platform/py.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
-import { collectFromPr, linearIssueToV2, parsePrefixes, pyStrip, renderLinearMarkdown, type CollectResult } from "../precheck/linear.js";
+import { collectFromPr, linearIssueToV2, parsePrefixes, renderLinearMarkdown, type CollectResult } from "../precheck/linear.js";
 import { acceptedLinkedIssues, extractLinkedIssueRefs, isPullRequestPayload } from "../precheck/linked-issues.js";
 import { pyJsonDump, pyJsonDumpsLine } from "./py-json.js";
 import { redactPrTextLines } from "./redact.js";

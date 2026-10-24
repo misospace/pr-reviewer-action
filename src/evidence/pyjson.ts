@@ -11,7 +11,8 @@
  * deep nesting cannot overflow the Node stack), a `PyFloat` box that keeps
  * float-ness through the pipeline (every plain JS `number` a decoded value
  * holds is an int; unsafe ints are `bigint`), and the `str()`, truthiness,
- * `strip()`, `int()` and `json.dumps` helpers the ports need. Pure data
+ * `int()` and `json.dumps` helpers the ports need (strip lives in
+ * `platform/py`). Pure data
  * transforms: no I/O, no process, no network. */
 
 // ── Values ────────────────────────────────────────────────────────────────
@@ -150,13 +151,6 @@ export function pyTruthy(value: unknown): boolean {
 // `str.isspace()` / `str.strip()` whitespace (differs from JS `trim`: adds
 // \x1c-\x1f and \x85, excludes ﻿).
 const PY_WS = "\\t\\n\\v\\f\\r \\x1c-\\x1f\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
-const STRIP_RE = new RegExp(`^[${PY_WS}]+|[${PY_WS}]+$`, "g");
-
-/** `str.strip()` with no arguments. */
-export function pyStrip(text: string): string {
-  return text.replace(STRIP_RE, "");
-}
-
 const INT_TEXT = new RegExp(`^[${PY_WS}]*([+-]?)([0-9]+(?:_[0-9]+)*)[${PY_WS}]*$`);
 
 /** `int(text)` for a str: ASCII digits with optional sign, between-digit
