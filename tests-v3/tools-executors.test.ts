@@ -624,6 +624,175 @@ test("MCP transport keeps direct JSON and SSE responses working (#1217)", async 
   }
 });
 
+test("MCP transport enforces the response-byte cap exactly and one over (#1233)", async () => {
+  const CAP = 4096;
+  const json = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { tools: [] } });
+  // Trailing spaces are legal JSON whitespace, so the padded document parses
+  // while the on-the-wire size lands exactly on the cap.
+  const exact = json + " ".repeat(CAP - Buffer.byteLength(json));
+  assert.equal(Buffer.byteLength(exact), CAP);
+  const payload = { jsonrpc: "2.0", id: 1, method: "tools/list" };
+
+  const exactServer = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Mcp-Session-Id", "sid-cap");
+    res.end(exact);
+  });
+  const overServer = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(exact + " ");
+  });
+  try {
+    const atCap = await defaultMcpPost(exactServer.url, payload, null, "tok", 5, CAP);
+    assert.equal(atCap.error, null, "exactly the cap must be accepted");
+    assert.deepEqual(atCap.sessionId, "sid-cap");
+    assert.deepEqual((atCap.result as any).result, { tools: [] });
+
+    const oneOver = await defaultMcpPost(overServer.url, payload, "sid-keep", "", 5, CAP);
+    assert.equal(oneOver.result, null, "one byte over the cap must never be parsed");
+    assert.equal(oneOver.sessionId, "sid-keep");
+    assert.match(oneOver.error!, new RegExp(`exceeded the ${CAP}-byte response limit`));
+    // Bounded and credential-free: only the numbers appear, never a body slice.
+    assert.ok(!oneOver.error!.includes("jsonrpc"));
+    assert.ok(!oneOver.error!.includes("tools"));
+
+    // Multi-byte content pins the accounting to wire bytes, not UTF-16 code
+    // units: `wideOver` is CAP+1 bytes but only CAP-63 characters, so a
+    // string-length implementation would wrongly accept it.
+    const wide = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { tools: [], note: "é".repeat(64) } });
+    assert.equal(Buffer.byteLength(wide), wide.length + 64, "é must contribute 2 wire bytes each");
+    const pad = CAP - Buffer.byteLength(wide);
+    const wideExactServer = await startMockServer((_req, _body, res) => {
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(wide + " ".repeat(pad));
+    });
+    const wideOverServer = await startMockServer((_req, _body, res) => {
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(wide + " ".repeat(pad + 1));
+    });
+    try {
+      assert.equal(Buffer.byteLength(wide + " ".repeat(pad)), CAP);
+      const wideAtCap = await defaultMcpPost(wideExactServer.url, payload, null, "", 5, CAP);
+      assert.equal(wideAtCap.error, null, "multi-byte body of exactly the cap must be accepted");
+      assert.deepEqual((wideAtCap.result as any).result.tools, []);
+      const wideOverCap = await defaultMcpPost(wideOverServer.url, payload, null, "", 5, CAP);
+      assert.equal(wideOverCap.result, null, "one wire byte over the cap must be refused even when shorter in characters");
+      assert.match(wideOverCap.error!, new RegExp(`exceeded the ${CAP}-byte response limit`));
+    } finally {
+      await wideExactServer.close(); await wideOverServer.close();
+    }
+  } finally {
+    await exactServer.close(); await overServer.close();
+  }
+});
+
+test("MCP transport counts bytes streamed without Content-Length and refuses oversized SSE (#1233)", async () => {
+  const CAP = 4096;
+  const json = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { tools: [] } });
+  const exact = json + " ".repeat(CAP - Buffer.byteLength(json));
+  const payload = { jsonrpc: "2.0", id: 1, method: "tools/list" };
+
+  // Chunked transfer-encoding (Node uses it whenever Content-Length is unset)
+  // with cuts straddling the cap boundary: the accounting must count wire
+  // bytes as they arrive, not trust or require a declared length.
+  const writeChunked = (body: string, chunkSize: number) =>
+    startMockServer((_req, _body, res) => {
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      let offset = 0;
+      while (offset < body.length) {
+        res.write(body.slice(offset, offset + chunkSize));
+        offset += chunkSize;
+      }
+      res.end();
+    });
+
+  const exactChunked = await writeChunked(exact, 997);
+  const overChunked = await writeChunked(exact + "  ", 997);
+  const sseOver = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "text/event-stream");
+    res.write("event: message\ndata: " + json);
+    res.write("\ndata: " + "s".repeat(CAP));
+    res.end("\n\n");
+  });
+  try {
+    const atCap = await defaultMcpPost(exactChunked.url, payload, null, "", 5, CAP);
+    assert.equal(atCap.error, null, "chunked body of exactly the cap must be accepted");
+    assert.deepEqual((atCap.result as any).result, { tools: [] });
+
+    const over = await defaultMcpPost(overChunked.url, payload, null, "", 5, CAP);
+    assert.equal(over.result, null, "chunked body crossing the cap mid-stream must be refused");
+    assert.match(over.error!, new RegExp(`exceeded the ${CAP}-byte response limit`));
+
+    const sse = await defaultMcpPost(sseOver.url, payload, null, "", 5, CAP);
+    assert.equal(sse.result, null, "an oversized SSE document must be refused before framing is parsed");
+    assert.match(sse.error!, new RegExp(`exceeded the ${CAP}-byte response limit`));
+    assert.ok(!sse.error!.includes("data:"));
+  } finally {
+    await exactChunked.close(); await overChunked.close(); await sseOver.close();
+  }
+});
+
+test("MCP transport cancels the stream the moment the cap is crossed (#1233)", async () => {
+  const CAP = 64 * 1024;
+  const chunk = Buffer.alloc(16 * 1024, 0x20);
+  let closed = false;
+  let written = 0;
+  // An effectively endless JSON-of-spaces stream: a transport that buffered
+  // to completion (the pre-#1233 behavior) would hang here; a capping
+  // transport must cancel after ~CAP bytes and the server must observe the
+  // client hanging up.
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.on("close", () => { closed = true; });
+    const push = (): void => {
+      if (closed) return;
+      written += chunk.length;
+      if (!res.write(chunk)) res.once("drain", push);
+      else setImmediate(push);
+    };
+    push();
+  });
+  try {
+    const out = await defaultMcpPost(server.url, { jsonrpc: "2.0", id: 1, method: "initialize" }, null, "", 15, CAP);
+    assert.equal(out.result, null);
+    assert.match(out.error!, new RegExp(`exceeded the ${CAP}-byte response limit`));
+    for (let i = 0; i < 40 && !closed; i++) await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.ok(closed, "the oversized stream must be cancelled, not drained to completion");
+    // Cancellation happens during receipt: the server never gets to pour the
+    // whole unbounded document into the socket (the margin absorbs TCP and
+    // undici queueing between the cap breach and the hang-up).
+    assert.ok(written < CAP + 8 * 1024 * 1024, `server wrote ${written} bytes; expected cancellation near the ${CAP}-byte cap`);
+  } finally {
+    await server.close();
+  }
+});
+
+test("MCP transport releases non-success bodies without reading them (#1233)", async () => {
+  // A 5xx body far past the cap keeps the existing constant HTTP-error shape:
+  // the error body is never read, capped, or rendered.
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 500;
+    res.setHeader("Content-Type", "text/plain");
+    res.setHeader("Mcp-Session-Id", "sid-err");
+    res.end("x".repeat(4 * 1024 * 1024));
+  });
+  try {
+    const out = await defaultMcpPost(server.url, { jsonrpc: "2.0", id: 4, method: "tools/list" }, "sid-keep", "tok", 5, 1024);
+    assert.equal(out.result, null);
+    assert.equal(out.error, "HTTP Error 500: Internal Server Error");
+    assert.equal(out.sessionId, "sid-err");
+  } finally {
+    await server.close();
+  }
+});
+
 test("web_fetch treats non-2xx final responses as errors, never evidence", async () => {
   const context = (status: number, body: string) => ctx("/tmp", {
     allowedHosts: ["github.com"],
