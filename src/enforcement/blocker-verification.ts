@@ -177,13 +177,17 @@ const ACTION_SUBJECT_CUE_RE = /\b(?:pinned|upstream|the )?action(?:'s)?\b/i;
  * span (where cue scanning is masked). */
 const MANIFEST_SUBJECT_RE = /\baction\.ya?ml\b/i;
 /**
- * A reference to some OTHER action (an owner/repo path, optionally with a
- * ref, or a `uses:` key): the registry witnesses only the EXECUTING action,
- * so a sentence that names another action never yields candidates. Evaluated
- * on the raw sentence because the reference typically sits inside a quoted
- * span (masked for cue scanning).
+ * A reference to some OTHER action: an owner/repo path WITH an explicit ref
+ * (actions/checkout@v4, owner/repo@sha) or a `uses:` key. The @ref is
+ * required — an optional-ref shape would swallow every word/word path
+ * citation ("src/run/action.ts", "docs/inputs.md", a ratio) and silently
+ * exempt path-bearing fabricated claims from verification. Evaluated on the
+ * raw sentence because the reference typically sits inside a quoted span
+ * (masked for cue scanning). A bare owner/repo mention without a ref is not
+ * recognized (fail-safe: the candidate survives to the witness, which can
+ * only ground or mark unverified, never wrongly refute).
  */
-const OTHER_ACTION_REF_RE = /\b[\w.-]+\/[\w.-]+(?:@[^\s`,]*)?|\buses\s*:/i;
+const OTHER_ACTION_REF_RE = /\b[\w.-]+\/[\w.-]+@[^\s`,]*|\buses\s*:/i;
 /**
  * Attribute-scope cues: the claim constrains an attribute of the input
  * (requiredness, default, documentation, fork behavior) that the declared-id
@@ -235,17 +239,21 @@ interface InputCandidate {
 }
 
 /**
- * The message with every quoted span's interior replaced by "a" glyphs:
- * same length and indices, so sentence/clause scans and cue regexes never
- * read inside a citation — "`action.yml`" no longer splits a sentence at
- * its dot, a comma inside backticks no longer splits a clause, and a quoted
- * token can never complete (or forge) a cue phrase. Other-action guards
- * that must see cited references evaluate the RAW text instead.
+ * The message with every quoted span — including its backtick delimiters —
+ * replaced by "a" glyphs: same length and indices, so sentence/clause scans
+ * and cue regexes never read inside or across a citation — "`action.yml`"
+ * no longer splits a sentence at its dot, a comma inside backticks no
+ * longer splits a clause, a quoted token can never complete (or forge) a
+ * cue phrase, and filler shapes like "has an `ai-key` input" remain one
+ * contiguous word run to the cue scanner. Other-action guards that must see
+ * cited references evaluate the RAW text instead.
  */
 function maskedForScan(message: string): string {
   const chars = message.split("");
   for (const span of quotedSpans(message)) {
-    for (let i = span.start; i < span.end; i += 1) chars[i] = "a";
+    for (let i = Math.max(0, span.start - 1); i < Math.min(message.length, span.end + 1); i += 1) {
+      chars[i] = "a";
+    }
   }
   return chars.join("");
 }
@@ -421,21 +429,29 @@ export async function applyBlockerVerification(
       } else {
         const normalized = new Set([...declared].map((input) => input.toLowerCase()));
         const resolved = inputCandidates.filter((candidate) => candidate.direction !== "ambiguous");
+        // Refutation requires POSITIVE contradiction by the witness: an
+        // absence claim about an input the registry declares. A presence
+        // claim about an input the registry lacks is NOT a contradiction —
+        // the claim may describe a manifest revision the running bundle
+        // predates (a PR adding the input to this very action) — so it is
+        // marked unverified, never refuted (#1238 review: refutation only
+        // on facts the witness can decide).
         const refuted = resolved.find((candidate) =>
-          (candidate.direction === "presence" && !normalized.has(candidate.token))
-          || (candidate.direction === "absence" && normalized.has(candidate.token)));
+          candidate.direction === "absence" && normalized.has(candidate.token));
         const grounded = resolved.find((candidate) =>
-          (candidate.direction === "presence" && normalized.has(candidate.token))
-          || (candidate.direction === "absence" && !normalized.has(candidate.token)));
+          (candidate.direction === "absence" && !normalized.has(candidate.token))
+          || (candidate.direction === "presence" && normalized.has(candidate.token)));
         if (refuted !== undefined) {
           status = "refuted";
-          reason = `${refuted.direction === "presence" ? "input-absent" : "input-declared"}:${refuted.token}`;
+          reason = `input-declared:${refuted.token}`;
         } else if (grounded !== undefined) {
           status = "grounded";
           reason = `${grounded.direction === "presence" ? "input-declared" : "input-absent"}:${grounded.token}`;
         } else {
           status = "unverified";
-          reason = "input-claim-unresolvable";
+          reason = resolved.some((candidate) => candidate.direction === "presence")
+            ? "input-presence-unverified"
+            : "input-claim-unresolvable";
         }
       }
     } else if (kind === "gate_absence") {

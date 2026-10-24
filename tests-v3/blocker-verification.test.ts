@@ -308,7 +308,7 @@ test("input declaration claims are checked against the embedded contract registr
   ];
   const result = await verify(claims, async () => { throw new Error("input claims must not read source"); }, registry);
   assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
-    ["refuted", "input-absent:ai-key"],
+    ["unverified", "input-presence-unverified"],
     ["refuted", "input-declared:ai-api-key"],
     ["grounded", "input-absent:unicorn-mode"],
     ["grounded", "input-declared:rereview-label"],
@@ -317,22 +317,25 @@ test("input declaration claims are checked against the embedded contract registr
   assert.equal(claims[2]?.capped_from, undefined);
   assert.equal(claims[2]?.grounding_status, undefined);
   assert.equal(claims[0]?.severity, "minor");
-  assert.equal(claims[0]?.grounding_status, "refuted");
+  assert.equal(claims[0]?.grounding_status, "unverified");
   assert.equal(result.demoted, 2);
 });
 
-test("the #1238 incident message resolves both fabricated halves against the clause windows", async () => {
+test("the #1238 incident message refutes on the positively contradicted half", async () => {
   // The captured incident claim carries both directions in one sentence:
-  // `ai-key` sits in the presence clause, `ai-api-key` in the absence clause
-  // after ", so". Each token's clause window resolves independently and the
-  // finding is refuted on the first positively contradicted fact.
+  // `ai-key` sits in a presence clause the registry cannot contradict (the
+  // claim could describe a newer manifest), while `ai-api-key` sits in an
+  // absence clause the registry POSITIVELY contradicts (the executing
+  // contract declares it). Refutation requires positive contradiction, so
+  // the finding is refuted on the second half and the first half is
+  // subsumed by the per-finding composition.
   const finding = markerFinding({
     file: ".github/workflows/ai_pr_review.yaml",
     message: "The pinned action declares its API-key input as `ai-key` (action.yml at v3.7.0), so `ai-api-key` is an unexpected input that GitHub ignores and the action runs without the endpoint credential.",
   });
   const result = await verify([finding], async () => { throw new Error("input claims must not read source"); }, new Set(["github-token", "ai-api-key", "rereview-label"]));
   assert.equal(result.findings[0]?.status, "refuted");
-  assert.equal(result.findings[0]?.reason, "input-absent:ai-key");
+  assert.equal(result.findings[0]?.reason, "input-declared:ai-api-key");
   assert.equal(finding.severity, "minor");
   assert.equal(finding.capped_from, "blocker");
   assert.equal(finding.grounding_status, "refuted");
@@ -421,6 +424,7 @@ test("#1238 review hardening: claims the registry cannot decide are never refute
   const registry = new Set(["github-token", "ai-api-key", "rereview-label", "ai-base-url", "fetch-depth"]);
   const claims = [
     // Another action's inputs: the registry witnesses only the executing action.
+    markerFinding({ message: "The `actions/checkout@v4` action declares input `fetch-depth`, so the checkout is shallow" }),
     markerFinding({ message: "The `actions/checkout` action declares input `fetch-depth` with a default of 1, but this workflow relies on full history" }),
     // Attribute-scoped claims (requiredness) are outside the witness.
     markerFinding({ message: "The action does not declare input `ai-api-key` as required, so a missing secret fails silently" }),
@@ -434,24 +438,47 @@ test("#1238 review hardening: claims the registry cannot decide are never refute
   assert.ok(claims.every((finding) => finding.grounding_status === undefined && finding.severity === "blocker"));
 });
 
-test("#1238 widened presence vocabulary refutes common fabricated phrasings", async () => {
+test("#1238 widened presence vocabulary marks fabricated presence claims without refuting", async () => {
   const registry = new Set(["github-token", "ai-api-key", "rereview-label"]);
   const claims = [
     markerFinding({ message: "The pinned action uses `ai-key` as the API-key input, so `ai-api-key` never arrives." }),
     markerFinding({ message: "The pinned action's API-key input is named `ai-key`." }),
     markerFinding({ message: "The pinned action requires input `ai-key`." }),
+    markerFinding({ message: "The pinned action has an `ai-key` input." }),
     // The manifest-file citation is a legitimate subject; the sentence dot
     // inside `action.yml` must not split it away from its claim.
     markerFinding({ message: "The `action.yml` declares no `rereview-label` input, so the label never triggers re-review." }),
   ];
   const result = await verify(claims, async () => { throw new Error("input claims must not read source"); }, registry);
   assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
-    ["refuted", "input-absent:ai-key"],
-    ["refuted", "input-absent:ai-key"],
-    ["refuted", "input-absent:ai-key"],
+    ["unverified", "input-presence-unverified"],
+    ["unverified", "input-presence-unverified"],
+    ["unverified", "input-presence-unverified"],
+    ["unverified", "input-presence-unverified"],
     ["refuted", "input-declared:rereview-label"],
   ]);
-  assert.equal(result.demoted, 4);
+  assert.equal(result.demoted, 5);
+});
+
+test("#1238 path citations do not exempt claims, and true claims are never refuted", async () => {
+  const registry = new Set(["github-token", "ai-api-key", "rereview-label"]);
+  const claims = [
+    // A word/word path citation must not silence the witness (regression:
+    // an over-broad other-action guard exempted exactly these).
+    markerFinding({ message: "The action declares input `ai-key` in src/run/action.ts, so the credential is dropped." }),
+    // True claims about OTHER actions' inputs (no @ref citation) and about
+    // inputs a PR ADDS to this action (the running registry predates them)
+    // are unverifiable, never refuted.
+    markerFinding({ message: "The checkout action uses the `fetch-depth` input." }),
+    markerFinding({ message: "The action's new flag input is named `ai-new-flag`." }),
+  ];
+  const result = await verify(claims, async () => { throw new Error("input claims must not read source"); }, registry);
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["unverified", "input-presence-unverified"],
+    ["unverified", "input-presence-unverified"],
+    ["unverified", "input-presence-unverified"],
+  ]);
+  assert.ok(claims.every((finding) => finding.grounding_status === "unverified"));
 });
 
 test("#1238 already-processed and already-capped findings are skipped, never re-verified", async () => {

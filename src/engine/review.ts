@@ -1573,7 +1573,16 @@ secrets: [profiles.primary.apiKey],
     // fabricated claim cannot re-enter as a live blocker. The boundary skips
     // findings it already processed.
     if (verificationOptions !== null && Array.isArray(reviewRecord.findings)) {
-      const settledPass = await applyBlockerVerification(reviewRecord.findings as ArtifactFinding[], verificationOptions);
+      // Only findings the first pass never classified (grounded findings
+      // carry no grounding_status, so the processed-index set is the reliable
+      // record — re-reading grounded claims would spend the source-read
+      // budget twice). Re-emitted findings sit at new array positions and
+      // are verified here.
+      const processed = new Set((blockerVerification?.findings ?? []).map((entry) => entry.index));
+      const settledPass = await applyBlockerVerification(
+        (reviewRecord.findings as ArtifactFinding[]).filter((_, index) => !processed.has(index)),
+        verificationOptions,
+      );
       blockerVerification = mergeBlockerVerificationPasses(blockerVerification, settledPass);
     }
     const forced = failClosedEnforcementFired(enforcementInputs)
@@ -1610,7 +1619,16 @@ secrets: [profiles.primary.apiKey],
     // (same rationale as the strict branch above); the relaxers below then
     // see the final grounding states.
     if (verificationOptions !== null && Array.isArray(reviewRecord.findings)) {
-      const settledPass = await applyBlockerVerification(reviewRecord.findings as ArtifactFinding[], verificationOptions);
+      // Only findings the first pass never classified (grounded findings
+      // carry no grounding_status, so the processed-index set is the reliable
+      // record — re-reading grounded claims would spend the source-read
+      // budget twice). Re-emitted findings sit at new array positions and
+      // are verified here.
+      const processed = new Set((blockerVerification?.findings ?? []).map((entry) => entry.index));
+      const settledPass = await applyBlockerVerification(
+        (reviewRecord.findings as ArtifactFinding[]).filter((_, index) => !processed.has(index)),
+        verificationOptions,
+      );
       blockerVerification = mergeBlockerVerificationPasses(blockerVerification, settledPass);
     }
     // #977: the model's own request_changes is relaxed only when every
