@@ -818,7 +818,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
   const request = async (payload: Record<string, unknown>): Promise<{ response: unknown; transportError: string | null }> => {
     try {
       const remaining = input.deadline - timeFn();
-      if (remaining <= 0) throw new Error("smart tool-loop wall-clock budget exhausted");
+      if (remaining <= 0) throw new Error("tool-loop wall-clock budget exhausted");
       const timeout = Math.min(input.turnTimeout, Math.max(1, Math.trunc(remaining)));
       return { response: await transport(input.baseUrl, input.apiFormat, payload, input.apiKey, timeout), transportError: null };
     } catch (exc) {
