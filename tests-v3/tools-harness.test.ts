@@ -869,6 +869,42 @@ test("#910: cache_hit_ratio stays within 0..1 for a well-cached Anthropic turn",
   assert.equal(usageWithCacheRatio(acc).cache_hit_ratio, 0.998);
 });
 
+test("#1207: a malformed negative usage body publishes no negative aggregate number or ratio", () => {
+  // #1199 made the aggregate and the per-turn records share ONE accounting
+  // (normalizeUsageTelemetry), so the clamp there covers both: the negative
+  // counts contribute 0 here and the record reports null (telemetry.test.ts).
+  const openai = { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 };
+  accumulateUsage(openai, {
+    usage: { prompt_tokens: -5, completion_tokens: -3, total_tokens: -8, prompt_tokens_details: { cached_tokens: -2 } },
+  }, "openai");
+  assert.deepEqual(openai, { requests: 1, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 });
+  assert.equal(usageWithCacheRatio(openai).cache_hit_ratio, 0);
+
+  const anthropic = { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 };
+  accumulateUsage(anthropic, {
+    usage: { input_tokens: -5, output_tokens: -3, cache_read_input_tokens: -1, cache_creation_input_tokens: -3 },
+  }, "anthropic");
+  assert.deepEqual(anthropic, { requests: 1, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 });
+  assert.equal(usageWithCacheRatio(anthropic).cache_hit_ratio, 0);
+});
+
+test("#1207: the aggregate cache_hit_ratio stays within 0..1 against the clamped source", () => {
+  // A malformed POSITIVE body (cached > prompt) hits the existing upper
+  // clamp; a malformed negative turn folded AFTER a well-cached turn cannot
+  // pull the ratio back toward or below zero — the clamped source only ever
+  // contributes counts >= 0.
+  const acc = { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 };
+  accumulateUsage(acc, { usage: { input_tokens: 1, output_tokens: 9, cache_read_input_tokens: 44402, cache_creation_input_tokens: 97 } }, "anthropic");
+  assert.equal(usageWithCacheRatio(acc).cache_hit_ratio, 0.998);
+  const overflow = { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 };
+  accumulateUsage(overflow, { usage: { prompt_tokens: 40, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 100 } } }, "openai");
+  assert.equal(usageWithCacheRatio(overflow).cache_hit_ratio, 1);
+  accumulateUsage(acc, { usage: { prompt_tokens: -50, completion_tokens: -5, prompt_tokens_details: { cached_tokens: -100 } } }, "openai");
+  const ratio = usageWithCacheRatio(acc).cache_hit_ratio as number;
+  assert.ok(ratio >= 0 && ratio <= 1, `ratio ${ratio} out of 0..1`);
+  assert.equal(acc.prompt_tokens, 44500);
+});
+
 test("#910: streamed turns keep their cache counts through the OpenAI projection", () => {
   const anthropic = reassembleSse([
     'data: {"type":"message_start","message":{"id":"m","model":"x","usage":{"input_tokens":3,"output_tokens":0,"cache_read_input_tokens":900,"cache_creation_input_tokens":100}}}',

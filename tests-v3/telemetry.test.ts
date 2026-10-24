@@ -84,6 +84,49 @@ test("junk token fields are never published as counts", () => {
   );
 });
 
+test("a negative token count is malformed input, not a measurement (#1207)", () => {
+  // No provider reports negative tokens, so a negative count is "not
+  // reported", exactly like a missing field: the record reports null (the
+  // aggregate contributes 0) and can never publish a negative token count.
+  assert.deepEqual(
+    normalizeUsageTelemetry({
+      prompt_tokens: -5,
+      completion_tokens: -3,
+      total_tokens: -8,
+      prompt_tokens_details: { cached_tokens: -2 },
+    }, "openai"),
+    { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null },
+  );
+  // A negative numeric string counts as malformed the same way.
+  assert.deepEqual(
+    normalizeUsageTelemetry({ prompt_tokens: "-5", completion_tokens: "-3" }, "openai"),
+    { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null },
+  );
+  // -0 survives the clamp as exactly 0 (no signed zero pinned into records).
+  assert.equal(normalizeUsageTelemetry({ prompt_tokens: -0, completion_tokens: "-0" }, "openai").promptTokens, 0);
+  // The derived-total fallback survives a malformed-negative reported total:
+  // the fallback synthesizes only from the reported (non-negative) siblings.
+  assert.deepEqual(
+    normalizeUsageTelemetry({ prompt_tokens: 5, completion_tokens: 3, total_tokens: -100 }, "openai"),
+    { promptTokens: 5, completionTokens: 3, cachedTokens: null, totalTokens: 8 },
+  );
+  // Anthropic: negative counts in every format-native field.
+  assert.deepEqual(
+    normalizeUsageTelemetry({
+      input_tokens: -5,
+      output_tokens: -2,
+      cache_read_input_tokens: -1,
+      cache_creation_input_tokens: -3,
+    }, "anthropic"),
+    { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null },
+  );
+  // Per-field accounting: a positive part of the same malformed body still
+  // counts, the same way a missing name would not suppress its siblings.
+  const mixed = normalizeUsageTelemetry({ input_tokens: -5, output_tokens: 9, cache_read_input_tokens: 25 }, "anthropic");
+  assert.deepEqual(mixed, { promptTokens: 25, completionTokens: 9, cachedTokens: 25, totalTokens: 34 });
+  assert.equal(cacheHitRatio(mixed), 1);
+});
+
 test("missing usage degrades to nulls, never throws", () => {
   assert.deepEqual(
     normalizeUsageTelemetry(undefined, "openai"),
