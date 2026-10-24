@@ -103,6 +103,22 @@ const SENTENCE_DELIMITERS = new Set([".", "!", "?", ";", "\n"]);
  * structure, not sentence punctuation.
  */
 const PATH_LIKE_TOKEN_CHAR_RE = /[A-Za-z0-9._~+@/-]/;
+/**
+ * The character AFTER a swallowed dot must itself open a path segment:
+ * lowercase alphanumerics do, and a sentence onset essentially never does.
+ * Without this, a missing space after a terminal period ("…b.ts.The
+ * metadata…") or an ellipsis ("…b.ts...The") would extend the path run
+ * across a real sentence boundary and forge cue co-occurrence (#252: the
+ * boundary token tested directly).
+ */
+const PATH_SEGMENT_START_RE = /[a-z0-9]/;
+/**
+ * Bound on the path-run expansion per dot. A run longer than any real
+ * citation is not a citation, and the bound keeps the widened scanner's
+ * per-dot work O(1) so MAX_CLAIM_SCAN_LENGTH still caps the boundary's
+ * worst-case work on pathological dense path-like input.
+ */
+const PATH_LIKE_TOKEN_MAX_SPAN = 512;
 
 /**
  * #1242: true when the `.` at `index` sits strictly INSIDE a token that
@@ -113,12 +129,22 @@ const PATH_LIKE_TOKEN_CHAR_RE = /[A-Za-z0-9._~+@/-]/;
  */
 function isPathInternalDot(text: string, index: number): boolean {
   if (text[index] !== ".") return false;
+  if (!PATH_LIKE_TOKEN_CHAR_RE.test(text[index - 1] ?? "")) return false;
+  if (!PATH_SEGMENT_START_RE.test(text[index + 1] ?? "")) return false;
+  let sawSeparator = false;
   let start = index;
-  while (start > 0 && PATH_LIKE_TOKEN_CHAR_RE.test(text[start - 1] ?? "")) start -= 1;
+  const floor = Math.max(0, index - PATH_LIKE_TOKEN_MAX_SPAN);
+  while (start > floor && PATH_LIKE_TOKEN_CHAR_RE.test(text[start - 1] ?? "")) {
+    start -= 1;
+    if (text[start] === "/") sawSeparator = true;
+  }
   let end = index + 1;
-  while (end < text.length && PATH_LIKE_TOKEN_CHAR_RE.test(text[end] ?? "")) end += 1;
-  if (start === index || end === index + 1) return false;
-  return text.slice(start, end).includes("/");
+  const ceil = Math.min(text.length, index + 1 + PATH_LIKE_TOKEN_MAX_SPAN);
+  while (end < ceil && PATH_LIKE_TOKEN_CHAR_RE.test(text[end] ?? "")) {
+    if (text[end] === "/") sawSeparator = true;
+    end += 1;
+  }
+  return sawSeparator;
 }
 
 /**
@@ -131,8 +157,13 @@ function isPathInternalDot(text: string, index: number): boolean {
  * metadata declares no label input." must reach the cue families whole.
  * The decision safety does NOT widen with the unit: cue direction stays
  * clause-scoped inside it (`clauseWindow`, `gateClauseRanges`), so a
- * semicolon-joined neighbor clause can never attribute a cue to a token or
- * gate its own clause does not carry.
+ * semicolon-joined neighbor clause can never carry the absence assertion
+ * for a token or behavior its own clause does not name. What is unit-scoped
+ * — the action-subject/input vocabulary gates and the gate-coverage set —
+ * is unit-scoped at comma scope in #1238 unchanged: a comma-joined message
+ * whose clauses jointly carry the cue families already classifies as one
+ * claim today, and #1242 extends that SAME accepted semantics across `;`
+ * and bare path citations as the issue asks.
  *
  * The committed-literal scanner (#1016 `sentenceContaining`) deliberately
  * KEEPS the tight sentence split: its assertion/expectation cues are judged

@@ -669,6 +669,25 @@ test("#1242 gate-absence claim citing a bare path is classified and decided like
   assert.equal(split.severity, "minor");
 });
 
+test("#1242 terminal and ellipsis dots after a cited path still split claim units", async () => {
+  // Adversarial-boundary control (#252): the path-run expansion must not
+  // eat a real sentence boundary when the space after the terminal period
+  // is missing. A sentence onset after "…b.ts." or "…b.ts..." is not a path
+  // segment, so no half carries all four cue families and the claim stays
+  // untouched — the swallowed-dot shape that would forge cue co-occurrence.
+  const noSpace = markerFinding({ message: "The action never filters by label docs/a/b.ts.The metadata declares no draft input." });
+  const ellipsis = markerFinding({ message: "The action never filters by label docs/a/b.ts...The metadata declares no draft input." });
+  const result = await verify(
+    [noSpace, ellipsis],
+    async () => { throw new Error("unclassified claims must not be read"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.deepEqual(result.findings, []);
+  assert.equal(noSpace.grounding_status, undefined);
+  assert.equal(ellipsis.grounding_status, undefined);
+});
+
 test("#1242 semicolon-joined input-declaration clauses share the unit but keep clause-scoped direction", async () => {
   // The token and its action subject sat in different `;`-joined clauses,
   // so the candidate was never recognized. The unit now spans the
