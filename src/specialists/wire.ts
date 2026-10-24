@@ -164,9 +164,7 @@ export function mergeUsage(
 ): Record<string, number | null> {
   if (into === null) {
     const first: Record<string, number | null> = {};
-    for (const [key, value] of Object.entries(usage)) {
-      first[key] = typeof value === "number" && value >= 0 ? value : null;
-    }
+    for (const [key, value] of Object.entries(usage)) first[key] = asInt(value);
     return first;
   }
   const merged: Record<string, number | null> = { ...into };

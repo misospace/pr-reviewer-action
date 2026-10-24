@@ -1909,6 +1909,12 @@ test("#1235: mergeUsage never folds a negative count into the specialist aggrega
       { prompt_tokens: -50, completion_tokens: 2, cached_tokens: null, total_tokens: -48 } as SpecialistUsage),
     { prompt_tokens: 10, completion_tokens: 5 },
   );
+  // The first entry keeps the reader's contract for junk too: a float or
+  // `-0` never enters the aggregate as reported (`-0` clamps to exactly 0).
+  assert.deepEqual(
+    mergeUsage(null, { prompt_tokens: -0, completion_tokens: 2.5, cached_tokens: null, total_tokens: 2.5 }),
+    { prompt_tokens: 0, completion_tokens: null, cached_tokens: null, total_tokens: null },
+  );
   // A negative running value (a malformed pre-fold state) is treated as not
   // started: replaced, never carried or added to.
   assert.deepEqual(
