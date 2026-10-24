@@ -189,6 +189,16 @@ const MANIFEST_SUBJECT_RE = /\baction\.ya?ml\b/i;
  */
 const OTHER_ACTION_REF_RE = /\b[\w.-]+\/[\w.-]+@[^\s`,]*|\buses\s*:/i;
 /**
+ * Broad other-action MENTION: any word/word path (a file path, a ratio, a
+ * bare owner/repo reference) or a `uses:` key. When the claim's own sentence
+ * mentions such a path, a refutation would decide facts about THAT artifact
+ * with the EXECUTING action's registry, so a positively-contradicted
+ * candidate downgrades to unverified instead of refuting. Candidates are
+ * still selected with the narrow @ref guard (OTHER_ACTION_REF_RE) so path
+ * citations do not silently exempt claims from verification.
+ */
+const OTHER_ACTION_MENTION_RE = /\b[\w.-]+\/[\w.-]+|\buses\s*:/i;
+/**
  * Attribute-scope cues: the claim constrains an attribute of the input
  * (requiredness, default, documentation, fork behavior) that the declared-id
  * registry cannot speak to. Such claims are not candidates — the boundary
@@ -236,6 +246,10 @@ type InputDirection = "presence" | "absence" | "ambiguous";
 interface InputCandidate {
   token: string;
   direction: InputDirection;
+  /** The raw claim sentence mentions another action (broad path shape): a
+   * positive contradiction from the registry cannot decide THAT action's
+   * inputs, so refutation downgrades to unverified. */
+  otherActionMention: boolean;
 }
 
 /**
@@ -323,7 +337,11 @@ function classifyInputDeclaration(message: string): InputCandidate[] {
     if (INPUT_ATTRIBUTE_SCOPE_RE.test(windowText)) continue;
     const direction = windowDirection(windowText);
     if (direction === "none") continue;
-    candidates.push({ token: raw.toLowerCase(), direction });
+    candidates.push({
+      token: raw.toLowerCase(),
+      direction,
+      otherActionMention: OTHER_ACTION_MENTION_RE.test(message.slice(start, end)),
+    });
   }
   return candidates;
 }
@@ -436,22 +454,31 @@ export async function applyBlockerVerification(
         // predates (a PR adding the input to this very action) — so it is
         // marked unverified, never refuted (#1238 review: refutation only
         // on facts the witness can decide).
-        const refuted = resolved.find((candidate) =>
+        const contradicted = resolved.find((candidate) =>
           candidate.direction === "absence" && normalized.has(candidate.token));
-        const grounded = resolved.find((candidate) =>
-          (candidate.direction === "absence" && !normalized.has(candidate.token))
-          || (candidate.direction === "presence" && normalized.has(candidate.token)));
-        if (refuted !== undefined) {
-          status = "refuted";
-          reason = `input-declared:${refuted.token}`;
-        } else if (grounded !== undefined) {
-          status = "grounded";
-          reason = `${grounded.direction === "presence" ? "input-declared" : "input-absent"}:${grounded.token}`;
-        } else {
+        if (contradicted !== undefined && contradicted.otherActionMention) {
+          // The claim's sentence names another artifact (a path or bare
+          // owner/repo reference): the registry cannot decide ITS inputs,
+          // so even a positively-contradicted candidate only marks
+          // unverified.
           status = "unverified";
-          reason = resolved.some((candidate) => candidate.direction === "presence")
-            ? "input-presence-unverified"
-            : "input-claim-unresolvable";
+          reason = "other-action-claim-unverified";
+        } else if (contradicted !== undefined) {
+          status = "refuted";
+          reason = `input-declared:${contradicted.token}`;
+        } else {
+          const grounded = resolved.find((candidate) =>
+            (candidate.direction === "absence" && !normalized.has(candidate.token))
+            || (candidate.direction === "presence" && normalized.has(candidate.token)));
+          if (grounded !== undefined) {
+            status = "grounded";
+            reason = `${grounded.direction === "presence" ? "input-declared" : "input-absent"}:${grounded.token}`;
+          } else {
+            status = "unverified";
+            reason = resolved.some((candidate) => candidate.direction === "presence")
+              ? "input-presence-unverified"
+              : "input-claim-unresolvable";
+          }
         }
       }
     } else if (kind === "gate_absence") {

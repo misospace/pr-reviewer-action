@@ -1577,12 +1577,22 @@ secrets: [profiles.primary.apiKey],
       // carry no grounding_status, so the processed-index set is the reliable
       // record — re-reading grounded claims would spend the source-read
       // budget twice). Re-emitted findings sit at new array positions and
-      // are verified here.
+      // are verified here. The filtered array reindexes from zero, so the
+      // pass's entry indices are remapped back to absolute positions before
+      // the merge (the artifact is a diagnostic consumed by position).
       const processed = new Set((blockerVerification?.findings ?? []).map((entry) => entry.index));
-      const settledPass = await applyBlockerVerification(
-        (reviewRecord.findings as ArtifactFinding[]).filter((_, index) => !processed.has(index)),
-        verificationOptions,
-      );
+      const pending: ArtifactFinding[] = [];
+      const absoluteIndex: number[] = [];
+      (reviewRecord.findings as ArtifactFinding[]).forEach((finding, index) => {
+        if (!processed.has(index)) {
+          pending.push(finding);
+          absoluteIndex.push(index);
+        }
+      });
+      const settledPass = await applyBlockerVerification(pending, verificationOptions);
+      for (const entry of settledPass.findings) {
+        entry.index = absoluteIndex[entry.index] ?? entry.index;
+      }
       blockerVerification = mergeBlockerVerificationPasses(blockerVerification, settledPass);
     }
     const forced = failClosedEnforcementFired(enforcementInputs)
@@ -1623,12 +1633,22 @@ secrets: [profiles.primary.apiKey],
       // carry no grounding_status, so the processed-index set is the reliable
       // record — re-reading grounded claims would spend the source-read
       // budget twice). Re-emitted findings sit at new array positions and
-      // are verified here.
+      // are verified here. The filtered array reindexes from zero, so the
+      // pass's entry indices are remapped back to absolute positions before
+      // the merge (the artifact is a diagnostic consumed by position).
       const processed = new Set((blockerVerification?.findings ?? []).map((entry) => entry.index));
-      const settledPass = await applyBlockerVerification(
-        (reviewRecord.findings as ArtifactFinding[]).filter((_, index) => !processed.has(index)),
-        verificationOptions,
-      );
+      const pending: ArtifactFinding[] = [];
+      const absoluteIndex: number[] = [];
+      (reviewRecord.findings as ArtifactFinding[]).forEach((finding, index) => {
+        if (!processed.has(index)) {
+          pending.push(finding);
+          absoluteIndex.push(index);
+        }
+      });
+      const settledPass = await applyBlockerVerification(pending, verificationOptions);
+      for (const entry of settledPass.findings) {
+        entry.index = absoluteIndex[entry.index] ?? entry.index;
+      }
       blockerVerification = mergeBlockerVerificationPasses(blockerVerification, settledPass);
     }
     // #977: the model's own request_changes is relaxed only when every

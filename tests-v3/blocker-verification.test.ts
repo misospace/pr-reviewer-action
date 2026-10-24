@@ -438,6 +438,26 @@ test("#1238 review hardening: claims the registry cannot decide are never refute
   assert.ok(claims.every((finding) => finding.grounding_status === undefined && finding.severity === "blocker"));
 });
 
+test("#1238 a bare other-action subject downgrades contradiction to unverified", async () => {
+  // The registry witnesses only the EXECUTING action, so an absence claim
+  // about another action's inputs is not contradicted even when the token
+  // collides with one of this action's declared ids. The broad other-action
+  // mention (bare owner/repo or any word/word path) downgrades the positive
+  // contradiction to an unverified marking instead of refuting.
+  const registry = new Set(["github-token", "ai-api-key"]);
+  const claims = [
+    markerFinding({ message: "The `actions/checkout` action does not support the `ai-api-key` input." }),
+    markerFinding({ message: "The action declares no `ai-api-key` input in src/run/action.ts, so the credential is dropped." }),
+  ];
+  const result = await verify(claims, async () => { throw new Error("other-action claims must not read source"); }, registry);
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["unverified", "other-action-claim-unverified"],
+    ["unverified", "other-action-claim-unverified"],
+  ]);
+  assert.ok(claims.every((finding) => finding.severity === "minor" && finding.grounding_status === "unverified"));
+  assert.equal(result.demoted, 2);
+});
+
 test("#1238 widened presence vocabulary marks fabricated presence claims without refuting", async () => {
   const registry = new Set(["github-token", "ai-api-key", "rereview-label"]);
   const claims = [
