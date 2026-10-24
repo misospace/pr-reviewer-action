@@ -1514,6 +1514,16 @@ secrets: [profiles.primary.apiKey],
       readSource: createHeadSourceReader({ workspace, revision: expectedRevision }),
       expectedRevision,
       declaredActionInputs: new Set(contract.inputs.map((input) => input.id)),
+      // #1240: the build stamp of the revision THIS run executes. The
+      // action-input and gate-absence witnesses speak for the executing
+      // revision's release line only, so a claim that names a different
+      // line or another patch is unverified — never refuted, never
+      // grounded. The value comes from the bundle's OWN build stamp
+      // (src/version.ts) and never from an environment variable, an Action
+      // input, or any byte outside the bundle. On the dogfood path the
+      // bundle itself is built from the PR head, so the stamp — like the
+      // embedded contract — inherits the PR's trust level.
+      executingActionVersion: ACTION_VERSION,
       // #1238: the gate-absence witness — a reader over the EXECUTING
       // action's own source tree (its install directory), so a claim that
       // the action lacks a deterministic gate can be checked against the

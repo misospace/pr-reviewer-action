@@ -19,8 +19,8 @@ const requirementFinding = (overrides: Partial<ArtifactFinding> = {}): ArtifactF
   severity: "major", category: "security", file: "src/a.ts", line: null,
   message: "requirement not enforced: X is a standard", ...overrides,
 });
-const verify = (findings: ArtifactFinding[], read: (file: string) => Promise<SourceReadResult>, declaredActionInputs?: ReadonlySet<string> | null, readActionSource?: ActionSourceReader | null) =>
-  applyBlockerVerification(findings, { readSource: read, expectedRevision: revision, declaredActionInputs, readActionSource });
+const verify = (findings: ArtifactFinding[], read: (file: string) => Promise<SourceReadResult>, declaredActionInputs?: ReadonlySet<string> | null, readActionSource?: ActionSourceReader | null, executingActionVersion?: string | null) =>
+  applyBlockerVerification(findings, { readSource: read, expectedRevision: revision, declaredActionInputs, readActionSource, executingActionVersion });
 const available = (result: SourceReadResult): Promise<SourceReadResult> => Promise.resolve(result);
 /** #1238: a fake witness over the EXECUTING action's own source tree. */
 const actionSource = (files: Record<string, string>): ActionSourceReader => async (path) => {
@@ -853,4 +853,273 @@ test("read budget is bounded and remaining candidates are unverified", async () 
   assert.ok(result.findings.slice(MAX_VERIFICATION_READS).every((entry) =>
     entry.status === "unverified" && entry.reason === "read-budget-exhausted"));
   assert.equal(result.demoted, 25 - MAX_VERIFICATION_READS);
+});
+
+// ---------------------------------------------------------------------------
+// #1240 — revision scoping: the action-side witnesses speak for the
+// EXECUTING revision only.
+// ---------------------------------------------------------------------------
+
+const INPUT_REGISTRY = new Set(["github-token", "ai-api-key", "rereview-label"]);
+/** The #1238 incident claim, citing a revision. */
+const incidentClaim = (revision: string): string =>
+  `The pinned action declares its API-key input as \`ai-key\` (action.yml at ${revision}), so \`ai-api-key\` is an unexpected input that GitHub ignores and the action runs without the endpoint credential.`;
+/** The #1238 incident gate claim, citing a revision. */
+const incidentGateClaim = (revision: string): string =>
+  `The action never skips drafts, metadata declares no label input (action.yml at ${revision}).`;
+
+test("#1240 an input claim naming a different revision is unverified, never refuted", async () => {
+  // The registry witness is the EXECUTING action's embedded contract: a
+  // claim about v3.6.1's manifest is not decidable with v3.7.0's contract,
+  // so the finding is unverified — never refuted, never grounded.
+  const finding = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message: incidentClaim("v3.6.1") });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+  );
+  assert.equal(result.findings[0]?.kind, "input_declaration");
+  assert.equal(result.findings[0]?.status, "unverified");
+  assert.equal(result.findings[0]?.reason, "other-revision-unverified");
+  assert.equal(finding.grounding_status, "unverified");
+  // Fail-safe direction: the finding keeps its original severity in
+  // `capped_from`, so the strict verdict mapping still counts it as
+  // blocking (an unverified blocker/major never relaxes).
+  assert.equal(finding.capped_from, "blocker");
+  assert.equal(finding.severity, "minor");
+  assert.equal(result.demoted, 1);
+});
+
+test("#1240 an input claim naming the EXECUTING revision is still refuted", async () => {
+  // The #1238 incident fix must survive: the same claim text citing the
+  // executing revision is decided by the executing revision's registry.
+  const finding = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message: incidentClaim("v3.7.0") });
+  // The comparison ignores an optional leading `v` on either side: the
+  // bare form names the same revision.
+  const bare = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message: incidentClaim("3.7.0") });
+  const result = await verify(
+    [finding, bare],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+  );
+  assert.equal(result.findings[0]?.status, "refuted");
+  assert.equal(result.findings[0]?.reason, "input-declared:ai-api-key");
+  assert.equal(finding.grounding_status, "refuted");
+  assert.equal(result.findings[1]?.status, "refuted");
+  assert.equal(result.findings[1]?.reason, "input-declared:ai-api-key");
+  assert.equal(bare.grounding_status, "refuted");
+});
+
+test("#1240 a sha qualifier that prefixes the executing build's sha is still decided", async () => {
+  // A dogfood build stamps "v3.7.0-dev+abc1234": a claim citing that sha
+  // (or a prefix of it) names the EXECUTING revision, so the claim stays
+  // decidable.
+  const finding = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message: incidentClaim("abc1234") });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0-dev+abc1234",
+  );
+  assert.equal(result.findings[0]?.status, "refuted");
+  assert.equal(result.findings[0]?.reason, "input-declared:ai-api-key");
+  assert.equal(finding.grounding_status, "refuted");
+});
+
+test("#1240 a sha qualifier that is not the executing build is unverified", async () => {
+  const finding = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message: incidentClaim("def5678") });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0-dev+abc1234",
+  );
+  assert.equal(result.findings[0]?.status, "unverified");
+  assert.equal(result.findings[0]?.reason, "other-revision-unverified");
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1240 a gate claim naming a different revision is unverified, not refuted", async () => {
+  // The implementation witness is the EXECUTING action's own tree: a claim
+  // about another revision's gates is not decidable with it.
+  const finding = markerFinding({ message: incidentGateClaim("v3.6.1") });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+    "v3.7.0",
+  );
+  assert.equal(result.findings[0]?.kind, "gate_absence");
+  assert.equal(result.findings[0]?.status, "unverified");
+  assert.equal(result.findings[0]?.reason, "other-revision-unverifiable");
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1240 a gate claim naming the EXECUTING revision is still refuted", async () => {
+  const finding = markerFinding({ message: incidentGateClaim("v3.7.0") });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+    "v3.7.0",
+  );
+  assert.equal(result.findings[0]?.status, "refuted");
+  assert.equal(result.findings[0]?.reason, "gate-implemented:draft-skip,label-filter");
+  assert.equal(finding.grounding_status, "refuted");
+});
+
+test("#1240 an unstamped build applies no revision scoping", async () => {
+  // A local/test build carries no stamp, so the decision path is exactly
+  // what it is today: the claim is decided (refuted) even though it names
+  // a revision the running bundle does not claim to be.
+  const finding = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message: incidentClaim("v3.6.1") });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    null,
+  );
+  assert.equal(result.findings[0]?.status, "refuted");
+  assert.equal(result.findings[0]?.reason, "input-declared:ai-api-key");
+  assert.equal(finding.grounding_status, "refuted");
+});
+
+test("#1240 a claim without any revision qualifier is decided as before", async () => {
+  const finding = markerFinding({
+    file: ".github/workflows/ai_pr_review.yaml",
+    message: "The pinned action declares its API-key input as `ai-key`, so `ai-api-key` is an unexpected input that GitHub ignores.",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+  );
+  assert.equal(result.findings[0]?.status, "refuted");
+  assert.equal(result.findings[0]?.reason, "input-declared:ai-api-key");
+  assert.equal(finding.grounding_status, "refuted");
+});
+
+test("#1240 a bare integer introduced by a keyword is not a revision", async () => {
+  // "version 2" introduces a bare integer — a number, not a revision
+  // identifier — so the claim stays decidable. "release notes" introduces a
+  // word, which is no revision at all.
+  const introduced = markerFinding({
+    message: "The action at version 2 does not declare input `ai-api-key`, so the credential never arrives.",
+  });
+  const prose = markerFinding({
+    message: "The pinned action declares its API-key input as `ai-key` (see release notes), so `ai-api-key` is an unexpected input.",
+  });
+  const result = await verify(
+    [introduced, prose],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+  );
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["refuted", "input-declared:ai-api-key"],
+    ["refuted", "input-declared:ai-api-key"],
+  ]);
+});
+
+test("#1240 a qualifier in a neighbouring sentence still scopes the whole message", async () => {
+  // The revision scope is the WHOLE finding message: a claim and the
+  // revision it talks about can sit in different sentences, and a scan that
+  // only read the claim's own sentence would decide the claim with the
+  // executing revision's witnesses while the message names another revision.
+  const input = markerFinding({
+    message: "The action does not declare `ai-api-key` input; the v3.6.1 manifest confirms it.",
+  });
+  const gate = markerFinding({
+    message: "The action never skips drafts, metadata declares no label input. This was true at v3.6.1.",
+  });
+  const result = await verify(
+    [input, gate],
+    async () => { throw new Error("claims must not read source"); },
+    INPUT_REGISTRY,
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+    "v3.7.0",
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "unverified", "other-revision-unverified"],
+    ["gate_absence", "unverified", "other-revision-unverifiable"],
+  ]);
+  assert.ok(input.grounding_status === "unverified" && gate.grounding_status === "unverified");
+});
+
+test("#1240 a dogfood build of the line answers for the release version", async () => {
+  // The dogfood stamp "v3.7.0-dev+abc1234" speaks for the v3.7.0 LINE: the
+  // #1238 incident claim text cites "v3.7.0" and must stay refuted in a
+  // dogfood run, exactly as in a release run.
+  const finding = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message: incidentClaim("v3.7.0") });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0-dev+abc1234",
+  );
+  assert.equal(result.findings[0]?.status, "refuted");
+  assert.equal(result.findings[0]?.reason, "input-declared:ai-api-key");
+  assert.equal(finding.grounding_status, "refuted");
+});
+
+test("#1240 qualifier shapes over-fire only for real revision identifiers", async () => {
+  // Precision: a partial version of the SAME line ("v3.7"), a bare integer
+  // after a keyword ("version 2", "ref: 1234") and an all-letter hex word
+  // ("defaced") name no other revision, so a claim that would otherwise be
+  // refuted stays decided.
+  const claims = [
+    "The action does not declare `ai-api-key` input (v3.7).",
+    "The action does not declare `ai-api-key` input (version 2).",
+    "The action does not declare `ai-api-key` input (ref: 1234).",
+    "The action does not declare `ai-api-key` input (the manifest defaced the claim).",
+  ];
+  const findings = claims.map((message) => markerFinding({ message }));
+  const result = await verify(
+    findings,
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+  );
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["refuted", "input-declared:ai-api-key"],
+    ["refuted", "input-declared:ai-api-key"],
+    ["refuted", "input-declared:ai-api-key"],
+    ["refuted", "input-declared:ai-api-key"],
+  ]);
+});
+
+test("#1240 another line or another patch is unverified", async () => {
+  // Mismatch: "v2" names another line and "v3.6.1" another patch of this
+  // line — neither is decidable with the executing revision's witnesses.
+  const claims = [
+    "The action does not declare `ai-api-key` input (v2).",
+    "The action does not declare `ai-api-key` input (v3.6.1).",
+  ];
+  const findings = claims.map((message) => markerFinding({ message }));
+  const result = await verify(
+    findings,
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+  );
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["unverified", "other-revision-unverified"],
+    ["unverified", "other-revision-unverified"],
+  ]);
+  assert.ok(findings.every((finding) => finding.grounding_status === "unverified"));
 });

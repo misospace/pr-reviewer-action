@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import { ACTION_GATES, UNCOVERED_GATE_SUBJECTS } from "../src/enforcement/action-gates.js";
@@ -197,6 +198,87 @@ test("#1238 the reader refuses a directory and an oversize file inside the tree"
     const oversize = await read("huge.ts");
     assert.equal(oversize.status, "unavailable");
     assert.equal(oversize.status === "unavailable" ? oversize.reason : "", "too-large");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#1240 the reader refuses a path carrying a NUL byte", async () => {
+  // A NUL byte truncates the path at the OS boundary, so the bytes after
+  // it would address a different file than the containment check proved.
+  const root = mkdtempSync(resolve(tmpdir(), "action-source-"));
+  try {
+    writeFileSync(resolve(root, "action.yml"), "name: pr-reviewer-action\n", "utf8");
+    writeFileSync(resolve(root, "gate.ts"), 'skip_reason: "pr-draft"\n', "utf8");
+    const read = createActionSourceReader({ root });
+    for (const bad of ["gate.ts\0.png", "gate\0.ts", "\0", "gate.ts\0"]) {
+      const result = await read(bad);
+      assert.equal(result.status, "unavailable", `path ${JSON.stringify(bad)} must not be served`);
+      assert.equal(result.status === "unavailable" ? result.reason : "", "invalid-path");
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#1240 a symlink inside the tree still serves the file it points at", async () => {
+  // The read goes through ONE handle opened on the RESOLVED path: a symlink
+  // that stays inside the action's own tree is still served, while the
+  // O_NOFOLLOW guard refuses a final-component symlink that replaced the
+  // file after the realpath check.
+  const root = mkdtempSync(resolve(tmpdir(), "action-source-"));
+  try {
+    writeFileSync(resolve(root, "action.yml"), "name: pr-reviewer-action\n", "utf8");
+    writeFileSync(resolve(root, "gate.ts"), 'skip_reason: "pr-draft"\n', "utf8");
+    symlinkSync(resolve(root, "gate.ts"), resolve(root, "link.ts"));
+    const read = createActionSourceReader({ root });
+    const result = await read("link.ts");
+    assert.equal(result.status, "ok");
+    assert.equal(result.status === "ok" ? result.text : "", 'skip_reason: "pr-draft"\n');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * #1240: create a FIFO. Node has no `mkfifo` API, so the platform's own
+ * `mkfifo` is used; false when the platform has none (Windows), in which
+ * case the caller skips the test.
+ */
+function mkfifoSync(path: string): boolean {
+  try {
+    execFileSync("mkfifo", [path]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test("#1240 a FIFO inside the tree is refused as not-a-file, never blocking the read", async (t) => {
+  // Opening a FIFO read-only BLOCKS until a writer opens it: without the
+  // O_NONBLOCK guard the boundary would hang on a special file inside the
+  // action's own tree instead of refusing it. The read must return
+  // "not-a-file" — and it must do so promptly, so the assertion races the
+  // read against a timer instead of hanging the suite.
+  const root = mkdtempSync(resolve(tmpdir(), "action-source-"));
+  try {
+    writeFileSync(resolve(root, "action.yml"), "name: pr-reviewer-action\n", "utf8");
+    const fifo = resolve(root, "gate.ts");
+    if (!mkfifoSync(fifo)) {
+      t.skip("this platform has no mkfifo");
+      return;
+    }
+    const read = createActionSourceReader({ root });
+    const timeout = new Promise<{ kind: "timeout" }>((resolveTimeout) => {
+      setTimeout(() => resolveTimeout({ kind: "timeout" }), 5_000).unref?.();
+    });
+    const outcome = await Promise.race([
+      read("gate.ts").then((value) => ({ kind: "read" as const, value })),
+      timeout,
+    ]);
+    if (outcome.kind === "timeout") assert.fail("the read must not block on a FIFO");
+    assert.equal(outcome.value.status, "unavailable");
+    assert.equal(outcome.value.status === "unavailable" ? outcome.value.reason : "", "not-a-file");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

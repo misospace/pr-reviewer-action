@@ -42,6 +42,33 @@ export interface BlockerVerificationOptions {
    * unverified.
    */
   readActionSource?: ActionSourceReader | null | undefined;
+  /**
+   * #1240: the build stamp of the revision THIS run executes ("v3.7.0" for
+   * a release build, "v3.7.0-dev+abc1234" for a dogfood build, "" for an
+   * unstamped local/test build).
+   *
+   * The declared-input registry and the implementation tree speak for the
+   * EXECUTING revision's RELEASE LINE, so a claim that names a DIFFERENT
+   * line or another patch is not decidable with them: it is unverified —
+   * never refuted, never grounded. A dogfood build of the `v3.7.0` line
+   * answers for `v3.7.0` (the same line). Known limitation: a dev build's
+   * contract may carry inputs added after the release, so a claim about
+   * such an input stays unverified rather than refuted.
+   *
+   * The stamp comes from the bundle's own build stamp (src/version.ts) and
+   * never from an environment variable, an Action input, or any byte
+   * OUTSIDE the bundle. On the dogfood path the bundle itself is built
+   * from the PR head, so the stamp — like the embedded contract — inherits
+   * the PR's trust level.
+   *
+   * An unstamped build (null/undefined/"") applies NO revision scoping.
+   * Only the builds that ship to consumers are stamped
+   * (.github/workflows/manual-release.yml and release-please.yaml stamp
+   * `release`; ai-pr-review.yaml and ai-pr-review-fork.yaml stamp `dev`),
+   * so an unstamped build is a local/test-only configuration, not a
+   * production path.
+   */
+  executingActionVersion?: string | null | undefined;
 }
 
 export interface FindingGrounding {
@@ -325,9 +352,196 @@ interface InputCandidate {
   token: string;
   direction: InputDirection;
   /** The raw claim sentence mentions another action (broad path shape): a
-   * positive contradiction from the registry cannot decide THAT action's
+   *   positive contradiction from the registry cannot decide THAT action's
    * inputs, so refutation downgrades to unverified. */
   otherActionMention: boolean;
+}
+
+// ── #1240: revision scoping ──────────────────────────────────────────────
+// The witnesses this boundary uses for the action's own claims belong to the
+// EXECUTING revision: the embedded V3 contract (declared inputs) and the
+// action's own implementation tree (deterministic gates). A claim that names
+// a DIFFERENT revision — a workflow pinning `owner/repo@v3.6.1`, or prose
+// saying "the action at v3.6.1 does not declare `x`" — is not decidable with
+// those witnesses: a TRUE claim about another revision would be refuted
+// (false refutation) and a FALSE one grounded. Such a claim is UNVERIFIED:
+// never refuted, never grounded.
+//
+// The scope of the revision scan is the WHOLE finding message: a claim and
+// the revision it talks about can sit in different sentences ("The action
+// does not declare `x` input; the v3.6.1 manifest confirms it."), and a
+// scan that only looked at the claim's own sentence would decide the claim
+// with the executing revision's witnesses while the message itself names
+// another revision.
+
+/**
+ * #1240: a revision identifier a finding message names.
+ */
+interface RevisionQualifier {
+  /** The identifier as written, lowercased. */
+  text: string;
+  kind: "version" | "sha";
+}
+
+/**
+ * A version-shaped token: `v` + one to three numeric components with an
+ * optional pre-release/build suffix ("v3", "v3.7", "v3.7.0",
+ * "v3.7.0-dev+abc1234"), or the unprefixed form with at least three numeric
+ * components ("3.7.0").
+ */
+const VERSION_QUALIFIER_RE = /^v?(\d+(?:\.\d+)*)(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z][0-9A-Za-z.-]*)?$/;
+/** A commit sha in its short or full form: 7–40 hex characters. */
+const SHA_QUALIFIER_RE = /^[0-9a-f]{7,40}$/i;
+/**
+ * The words that INTRODUCE a revision identifier. The introduced token
+ * counts as a qualifier only when it is version-like or SHA-like: a bare
+ * integer ("version 2", "ref: 1234") names no revision, and a prose word
+ * ("release notes") names none either.
+ */
+const REVISION_KEYWORD_RE = /\b(?:revision|release|tag|version|commit|branch|ref)\b\s*[:=]?\s*([^\s]+)/gi;
+
+/**
+ * #1240: is the token a version identifier? The `v` form is a version
+ * marker on its own and carries one to three numeric components; the bare
+ * form needs a full major.minor.patch ("3.7.0") to be unambiguously a
+ * version — a bare integer or a bare major.minor is a number, not a
+ * revision.
+ */
+function isVersionLike(token: string): boolean {
+  const match = VERSION_QUALIFIER_RE.exec(token);
+  if (match === null) return false;
+  const components = match[1]!.split(".").length;
+  if (/^v/i.test(token)) return components >= 1 && components <= 3;
+  return components >= 3;
+}
+
+/**
+ * #1240: is the token a commit sha? A sha carries at least one digit: an
+ * all-letter hex word ("defaced") is prose, not a revision identifier.
+ */
+function isShaLike(token: string): boolean {
+  return SHA_QUALIFIER_RE.test(token) && /\d/.test(token);
+}
+
+/**
+ * The token without the punctuation that surrounds it: a citation's
+ * backticks, quotes, brackets and a trailing period are not part of the
+ * identifier ("`v3.7.0`" and "v3.7.0)." both name "v3.7.0").
+ */
+function stripTokenEdges(token: string): string {
+  return token.replace(/^[`"'([{<]+/, "").replace(/[`"')\]}>.,;:!?]+$/, "");
+}
+
+/**
+ * #1240: the revision qualifiers a finding message names.
+ *
+ * A qualifier is a revision identifier appearing as a STANDALONE token:
+ * version-like ("v3.7.0", "3.7.0"), SHA-like ("abc1234"), or a token a
+ * revision keyword introduces that is itself version-like or SHA-like
+ * ("version: v3.6.1"). The scan is O(message) and bounded by
+ * MAX_CLAIM_SCAN_LENGTH.
+ */
+function revisionQualifiers(message: string): RevisionQualifier[] {
+  const found: RevisionQualifier[] = [];
+  if (message.length > MAX_CLAIM_SCAN_LENGTH) return found;
+  const seen = new Set<string>();
+  const push = (text: string, kind: RevisionQualifier["kind"]): void => {
+    const key = `${kind}:${text}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    found.push({ text, kind });
+  };
+  for (const raw of message.split(/\s+/)) {
+    const token = stripTokenEdges(raw);
+    if (token === "") continue;
+    // Cheap prefilter: every revision identifier carries a digit, so an
+    // ordinary prose word never qualifies.
+    if (!/\d/.test(token)) continue;
+    if (isVersionLike(token)) push(token.toLowerCase(), "version");
+    else if (isShaLike(token)) push(token.toLowerCase(), "sha");
+  }
+  for (const match of message.matchAll(REVISION_KEYWORD_RE)) {
+    const token = stripTokenEdges(match[1] ?? "");
+    if (token === "") continue;
+    if (isVersionLike(token)) push(token.toLowerCase(), "version");
+    else if (isShaLike(token)) push(token.toLowerCase(), "sha");
+  }
+  return found;
+}
+
+/**
+ * #1240: the revision identifier without an optional leading `v`, lowercased
+ * — the comparison form for "is this the executing revision?".
+ */
+function normalizeRevisionToken(text: string): string {
+  const lower = text.trim().toLowerCase();
+  return lower.startsWith("v") ? lower.slice(1) : lower;
+}
+
+/**
+ * #1240: the executing stamp, normalized once.
+ *
+ * - `full`: the stamp lowercased, leading `v` stripped ("v3.7.0-dev+abc1234"
+ *   → "3.7.0-dev+abc1234");
+ * - `base`: the numeric components of the version BEFORE any `-`/`+` suffix
+ *   ("v3.7.0-dev+abc1234" → "3.7.0");
+ * - `sha`: the hex run after `+` in the stamp, if any (dev builds only).
+ */
+interface ExecutingRevision {
+  full: string;
+  base: readonly string[];
+  sha: string | null;
+}
+
+function executingRevision(stamp: string): ExecutingRevision {
+  const full = normalizeRevisionToken(stamp);
+  const version = full.split(/[-+]/)[0] ?? full;
+  const plus = full.indexOf("+");
+  const build = plus === -1 ? "" : full.slice(plus + 1);
+  return {
+    full,
+    base: version.split("."),
+    sha: SHA_QUALIFIER_RE.test(build) ? build : null,
+  };
+}
+
+/**
+ * #1240: does the qualifier name the EXECUTING revision?
+ *
+ * The action-side witnesses speak for the executing revision's RELEASE
+ * LINE, so a qualifier matches when it names that line:
+ *
+ * (a) a version-like qualifier with no pre-release/build suffix of its own
+ *     whose numeric components are a PREFIX of the executing base
+ *     components — "3", "3.7" and "3.7.0" match the base "3.7.0", while
+ *     "2" and "3.7.1" do not;
+ * (b) any qualifier whose normalized full text EQUALS the executing full
+ *     text — "v3.7.0-dev+abc1234" matches that stamp exactly;
+ * (c) a SHA-like qualifier that is a prefix of the sha a dogfood build
+ *     embeds ("abc1234" against "v3.7.0-dev+abc1234").
+ *
+ * Every other qualifier names a DIFFERENT revision.
+ */
+function qualifierMatchesExecutingRevision(qualifier: RevisionQualifier, executing: ExecutingRevision): boolean {
+  const text = normalizeRevisionToken(qualifier.text);
+  if (text === executing.full) return true;
+  if (qualifier.kind === "sha") {
+    return executing.sha !== null && executing.sha.startsWith(text);
+  }
+  const match = VERSION_QUALIFIER_RE.exec(text);
+  if (match === null) return false;
+  // A qualifier carrying its own pre-release/build suffix names a specific
+  // build, not a line: only the exact-stamp rule (b) can match it.
+  if (/[-+]/.test(text)) return false;
+  const components = match[1]!.split(".");
+  return components.every((component, index) => executing.base[index] === component);
+}
+
+/**
+ * #1240: does the message name a revision OTHER than the executing one?
+ */
+function namesOtherRevision(qualifiers: readonly RevisionQualifier[], executing: ExecutingRevision): boolean {
+  return qualifiers.some((qualifier) => !qualifierMatchesExecutingRevision(qualifier, executing));
 }
 
 /**
@@ -467,7 +681,12 @@ function gateAbsenceSentences(message: string): GateSentence[] {
       && GATE_BEHAVIOR_RE.test(maskedSentence)
       && GATE_ABSENCE_RE.test(maskedSentence)
       && GATE_METADATA_RE.test(maskedSentence)
-    ) sentences.push({ raw: message.slice(cursor, end), masked: maskedSentence });
+    ) {
+      sentences.push({
+        raw: message.slice(cursor, end),
+        masked: maskedSentence,
+      });
+    }
     cursor = end;
   }
   return sentences;
@@ -478,19 +697,32 @@ interface ClaimClassification {
   inputCandidates: InputCandidate[];
   /** #1238: the sentences that assert a gate absence. */
   gateSentences: GateSentence[];
+  /** #1240: the revision qualifiers the WHOLE finding message names — the
+   * scope of the revision scan (a claim and the revision it talks about
+   * can sit in different sentences). */
+  qualifiers: RevisionQualifier[];
 }
 
 /** Classify once per finding; the input candidates and the gate-absence
  * sentences are reused by the verification branch instead of rescanning the
- * message. */
+ * message. The revision-qualifier scan (#1240) runs once per message, over
+ * the whole message. */
 function classifyClaim(message: string): ClaimClassification {
-  if (assertsCommittedMarker(message)) return { kind: "committed_literal", inputCandidates: [], gateSentences: [] };
+  if (assertsCommittedMarker(message)) {
+    return { kind: "committed_literal", inputCandidates: [], gateSentences: [], qualifiers: [] };
+  }
   const inputCandidates = classifyInputDeclaration(message);
-  if (inputCandidates.length > 0) return { kind: "input_declaration", inputCandidates, gateSentences: [] };
+  if (inputCandidates.length > 0) {
+    return { kind: "input_declaration", inputCandidates, gateSentences: [], qualifiers: revisionQualifiers(message) };
+  }
   const gateSentences = gateAbsenceSentences(message);
-  if (gateSentences.length > 0) return { kind: "gate_absence", inputCandidates: [], gateSentences };
-  if (REQUIREMENT_NOT_ENFORCED_RE.test(message)) return { kind: "requirement_claim", inputCandidates: [], gateSentences: [] };
-  return { kind: null, inputCandidates: [], gateSentences: [] };
+  if (gateSentences.length > 0) {
+    return { kind: "gate_absence", inputCandidates: [], gateSentences, qualifiers: revisionQualifiers(message) };
+  }
+  if (REQUIREMENT_NOT_ENFORCED_RE.test(message)) {
+    return { kind: "requirement_claim", inputCandidates: [], gateSentences: [], qualifiers: [] };
+  }
+  return { kind: null, inputCandidates: [], gateSentences: [], qualifiers: [] };
 }
 
 /** The word tokens of a sentence, lowercased, with their character spans. */
@@ -650,13 +882,25 @@ async function gateAttested(
  * Only then is the finding refuted. Anything else — a scoped claim, an
  * absent marker, an unreadable file, a claim the registry cannot decide —
  * stays unverified, and a gate-absence claim is NEVER grounded.
+ *
+ * #1240: the witness speaks for the EXECUTING revision's release line only.
+ * A message that names a different line or another patch is not decidable
+ * with it: every gate sentence of that message is undecidable, and the
+ * result is unverified with the other-revision reason.
  */
 async function decideGateAbsence(
   sentences: readonly GateSentence[],
   witness: ActionSourceReader | null | undefined,
   budget: ActionSourceBudget,
+  executing: ExecutingRevision | null,
+  qualifiers: readonly RevisionQualifier[],
 ): Promise<{ status: GroundingStatus; reason: string }> {
   const unverifiable = { status: "unverified", reason: "gate-absence-unverifiable" } as const;
+  // #1240: the message names a revision the executing one does not answer
+  // for — no gate sentence of it is decidable.
+  if (executing !== null && namesOtherRevision(qualifiers, executing)) {
+    return { status: "unverified", reason: "other-revision-unverifiable" };
+  }
   if (witness === undefined || witness === null) return unverifiable;
   for (const sentence of sentences) {
     // The other-action guards read the RAW sentence: a cited
@@ -718,6 +962,16 @@ export async function applyBlockerVerification(
   // The action's own implementation reads of this pass: one read per cited
   // file (however many gates cite it), bounded by MAX_ACTION_SOURCE_READS.
   const actionSourceBudget: ActionSourceBudget = { reads: 0, cache: new Map<string, ActionSourceReadResult>() };
+  // #1240: the revision THIS run executes. An unstamped build (null,
+  // undefined or "") applies NO revision scoping: only the builds that ship
+  // to consumers are stamped (.github/workflows/manual-release.yml and
+  // release-please.yaml stamp `release`; ai-pr-review.yaml and
+  // ai-pr-review-fork.yaml stamp `dev`), so an unstamped build is a
+  // local/test-only configuration, not a production path — and the
+  // decision path is then exactly what it is today.
+  const executing = typeof options.executingActionVersion === "string" && options.executingActionVersion.trim() !== ""
+    ? executingRevision(options.executingActionVersion)
+    : null;
 
   for (let index = 0; index < findings.length; index += 1) {
     const finding = findings[index]!;
@@ -731,14 +985,24 @@ export async function applyBlockerVerification(
     // it here could misattribute the original severity and re-force a
     // verdict those paths settled.
     if (finding.capped_from !== undefined || finding.ci_capped === true) continue;
-    const { kind, inputCandidates, gateSentences } = classifyClaim(finding.message);
+    const { kind, inputCandidates, gateSentences, qualifiers } = classifyClaim(finding.message);
     if (kind === null) continue;
 
     let status: GroundingStatus;
     let reason: string;
     if (kind === "input_declaration") {
+      // #1240: the declared-input registry speaks for the EXECUTING
+      // revision's release line only. A message that names a DIFFERENT
+      // line or another patch is not decidable with it: the whole finding
+      // becomes unverified — never refuted, never grounded. This check
+      // runs before the contradiction/grounding logic and before the
+      // other-action downgrade: a revision mismatch wins the reason.
+      const otherRevision = executing !== null && namesOtherRevision(qualifiers, executing);
       const declared = options.declaredActionInputs;
-      if (declared === undefined || declared === null) {
+      if (otherRevision) {
+        status = "unverified";
+        reason = "other-revision-unverified";
+      } else if (declared === undefined || declared === null) {
         status = "unverified";
         reason = "input-registry-unavailable";
       } else {
@@ -786,7 +1050,7 @@ export async function applyBlockerVerification(
       // other shape stays unverified, the fail-safe direction — a missing
       // marker is no proof of absence, and a claim the registry does not
       // cover cannot be decided at all.
-      const decision = await decideGateAbsence(gateSentences, options.readActionSource, actionSourceBudget);
+      const decision = await decideGateAbsence(gateSentences, options.readActionSource, actionSourceBudget, executing, qualifiers);
       status = decision.status;
       reason = decision.reason;
     } else if (!safeFile(finding.file)) {

@@ -42,13 +42,16 @@ export interface ArtifactFinding {
    * every hunk's new-side range. Content-level only — never changes
    * verdict, requirement coverage, or any other policy input. */
   outside_diff?: boolean;
-  /** #1016, extended #1238: set by the deterministic blocker-verification
-   * boundary when a model-authored source-backed claim (committed-source
-   * literal, requirement claim, action-input declaration, or gate-absence)
-   * was not substantiated by its witness — exact-head source for the first
-   * two, the executing action's embedded contract for input declarations,
-   * and the executing action's own implementation tree for gate-absence
-   * claims.
+  /** #1016, extended #1238, extended #1240: set by the deterministic
+   * blocker-verification boundary when a model-authored source-backed claim
+   * (committed-source literal, requirement claim, action-input declaration,
+   * or gate-absence) was not substantiated by its witness — exact-head
+   * source for the first two, the executing action's embedded contract for
+   * input declarations, and the executing action's own implementation tree
+   * for gate-absence claims.
+   * The action-side witnesses speak for the EXECUTING revision's release
+   * line only: a claim that names a different line or another patch is
+   * unverified — never refuted, never grounded.
    * One of "refuted" (the witness positively contradicts the claim),
    * "unverified" (the witness could not check it), or "unsupported" (no
    * concrete evidence to verify). Blocker/major findings are demoted to

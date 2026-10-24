@@ -1,4 +1,6 @@
-import { readFile, realpath, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, realpath, stat } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { isAbsolute, resolve, sep } from "node:path";
 
 /**
@@ -129,6 +131,14 @@ async function verifyActionRoot(base: string, workspaceRoot: string | null): Pro
  * the root is rejected. Everything the reader cannot decide — a missing
  * file, an oversized file, an escaping symlink, a root that is not an
  * action checkout — is reported as `unavailable`, never as evidence.
+ *
+ * TOCTOU (#1240): the size/regular-file check and the read happen on ONE
+ * open file handle, never on a re-opened path. A separate `stat()` followed
+ * by `readFile()` leaves a window in which the checked file is replaced
+ * before the authoritative witness is read (CodeQL `js/file-system-race`).
+ * The handle is bound to the inode that was opened, so the bytes served are
+ * the bytes that were checked; `O_NOFOLLOW` additionally refuses a
+ * final-component symlink that appeared after the realpath check.
  */
 export function createActionSourceReader(options: ActionSourceReaderOptions = {}): ActionSourceReader {
   const base = options.root === undefined || options.root === null || options.root.trim() === ""
@@ -149,6 +159,13 @@ export function createActionSourceReader(options: ActionSourceReaderOptions = {}
     if (typeof relativePath !== "string" || relativePath.length === 0) {
       return { status: "unavailable", reason: "invalid-path" };
     }
+    // A NUL byte truncates the path at the OS boundary: the bytes after it
+    // would address a different file than the containment check proved, and
+    // the node APIs reject it inconsistently across platforms. Refuse it
+    // before any path arithmetic.
+    if (relativePath.includes("\0")) {
+      return { status: "unavailable", reason: "invalid-path" };
+    }
     const target = resolve(base, relativePath);
     if (target !== base && !target.startsWith(base + sep)) {
       return { status: "unavailable", reason: "outside-action-root" };
@@ -164,17 +181,33 @@ export function createActionSourceReader(options: ActionSourceReaderOptions = {}
     if (!isInside(targetReal, root.real)) {
       return { status: "unavailable", reason: "outside-action-root" };
     }
+    // ONE handle for the check and the read (#1240 TOCTOU): the handle is
+    // bound to the inode that was opened, so the regular-file and size
+    // checks and the served bytes all describe the same file. `O_NOFOLLOW`
+    // refuses a final-component symlink that replaced the file after the
+    // realpath check; it is not available on Windows, where the realpath
+    // containment check stands alone. `O_NONBLOCK` keeps the open itself
+    // from blocking on a FIFO: opening a FIFO read-only waits for a
+    // writer, which would hang the boundary on a special file inside the
+    // tree instead of returning "not-a-file".
+    let handle: FileHandle | null = null;
     try {
-      const info = await stat(targetReal);
-      if (!info.isFile()) return { status: "unavailable", reason: "not-a-file" };
-      if (info.size > MAX_ACTION_SOURCE_BYTES) return { status: "unavailable", reason: "too-large" };
+      const flags = process.platform === "win32"
+        ? constants.O_RDONLY
+        : constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+      handle = await open(targetReal, flags);
     } catch {
       return { status: "unavailable", reason: "not-found" };
     }
     try {
-      return { status: "ok", text: await readFile(targetReal, "utf8") };
+      const info = await handle.stat();
+      if (!info.isFile()) return { status: "unavailable", reason: "not-a-file" };
+      if (info.size > MAX_ACTION_SOURCE_BYTES) return { status: "unavailable", reason: "too-large" };
+      return { status: "ok", text: await handle.readFile("utf8") };
     } catch {
       return { status: "unavailable", reason: "read-failed" };
+    } finally {
+      await handle.close().catch(() => undefined);
     }
   };
 }
