@@ -1,7 +1,7 @@
 import { requestText } from "../platform/http.js";
 import type { FetchLike } from "../platform/http.js";
 import { isPlainObject } from "../platform/jq.js";
-import { pyStr, pyTruthy } from "../platform/py.js";
+import { pyStr, pyStrip, pyTruthy } from "../platform/py.js";
 import { LINEAR_PRIORITY_LABELS, type LinkedIssue } from "../context/types.js";
 import { pyJsonDumpsLine } from "../context/py-json.js";
 
@@ -37,24 +37,6 @@ const ISSUE_QUERY = `query PrReviewerIssue($id: String!) {
 }`;
 
 export class LinearContextError extends Error {}
-
-/** Python `str.isspace()` code points: what a bare `str.strip()` removes. */
-const PY_WHITESPACE = new Set([
-  0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x85, 0xa0, 0x1680,
-  0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a,
-  0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
-]);
-
-/** Python `str.strip()` with no argument (JavaScript `trim()` also strips
- * U+FEFF and misses U+001C..U+001F). */
-export function pyStrip(value: string): string {
-  const chars = [...value];
-  let start = 0;
-  let end = chars.length;
-  while (start < end && PY_WHITESPACE.has(chars[start]!.codePointAt(0)!)) start += 1;
-  while (end > start && PY_WHITESPACE.has(chars[end - 1]!.codePointAt(0)!)) end -= 1;
-  return chars.slice(start, end).join("");
-}
 
 /** Parse a comma-separated allowlist of Linear team-key prefixes. */
 export function parsePrefixes(value: string): string[] {
