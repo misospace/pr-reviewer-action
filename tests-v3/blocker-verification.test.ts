@@ -392,12 +392,15 @@ test("ambiguous input direction is unverified and invalid token shapes are ignor
   assert.ok(invalid.every((finding) => finding.grounding_status === undefined));
 });
 
-test("gate absence claims are always unverified and require an action subject", async () => {
-  const absence = markerFinding({ severity: "minor", message: "The action never skips drafts; metadata declares no label input." });
-  const blocker = markerFinding({ message: "The action never skips drafts; metadata declares no label input." });
-  const noAction = markerFinding({ message: "Draft filtering is absent; metadata declares no label input." });
+test("gate absence claims are always unverified, sentence-scoped, and require an action subject", async () => {
+  // All four cue families must co-occur in ONE sentence; cues split across
+  // sentences leave the finding untouched.
+  const absence = markerFinding({ severity: "minor", message: "The action never skips drafts, metadata declares no label input." });
+  const blocker = markerFinding({ message: "The action never skips drafts, metadata declares no label input." });
+  const split = markerFinding({ message: "The action never skips drafts. The metadata declares no label input." });
+  const noAction = markerFinding({ message: "Draft filtering is absent, metadata declares no label input." });
   const inputOnly = markerFinding({ message: "There is no label input `label-name`" });
-  const result = await verify([absence, blocker, noAction, inputOnly], async () => { throw new Error("gate absence must not read source"); }, new Set());
+  const result = await verify([absence, blocker, split, noAction, inputOnly], async () => { throw new Error("gate absence must not read source"); }, new Set());
   assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
     ["gate_absence", "unverified", "gate-absence-unverifiable"],
     ["gate_absence", "unverified", "gate-absence-unverifiable"],
@@ -409,13 +412,66 @@ test("gate absence claims are always unverified and require an action subject", 
   assert.equal(blocker.capped_from, "blocker");
   assert.equal(blocker.grounding_status, "unverified");
   assert.equal(result.demoted, 1);
+  assert.equal(split.grounding_status, undefined);
   assert.equal(noAction.grounding_status, undefined);
   assert.equal(inputOnly.grounding_status, undefined);
 });
 
+test("#1238 review hardening: claims the registry cannot decide are never refuted", async () => {
+  const registry = new Set(["github-token", "ai-api-key", "rereview-label", "ai-base-url", "fetch-depth"]);
+  const claims = [
+    // Another action's inputs: the registry witnesses only the executing action.
+    markerFinding({ message: "The `actions/checkout` action declares input `fetch-depth` with a default of 1, but this workflow relies on full history" }),
+    // Attribute-scoped claims (requiredness) are outside the witness.
+    markerFinding({ message: "The action does not declare input `ai-api-key` as required, so a missing secret fails silently" }),
+    // Runtime-behavior phrasing is not a manifest-declaration claim.
+    markerFinding({ message: "The action's `ai-api-key` input is ignored for fork pull requests" }),
+    // A direction cue in a later sentence must not leak into an earlier one.
+    markerFinding({ message: "The workflow passes the `ai-api-key` input to the action. The action does not declare `ai-key`." }),
+  ];
+  const result = await verify(claims, async () => { throw new Error("undecidable claims must not read source"); }, registry);
+  assert.deepEqual(result.findings, []);
+  assert.ok(claims.every((finding) => finding.grounding_status === undefined && finding.severity === "blocker"));
+});
+
+test("#1238 widened presence vocabulary refutes common fabricated phrasings", async () => {
+  const registry = new Set(["github-token", "ai-api-key", "rereview-label"]);
+  const claims = [
+    markerFinding({ message: "The pinned action uses `ai-key` as the API-key input, so `ai-api-key` never arrives." }),
+    markerFinding({ message: "The pinned action's API-key input is named `ai-key`." }),
+    markerFinding({ message: "The pinned action requires input `ai-key`." }),
+    // The manifest-file citation is a legitimate subject; the sentence dot
+    // inside `action.yml` must not split it away from its claim.
+    markerFinding({ message: "The `action.yml` declares no `rereview-label` input, so the label never triggers re-review." }),
+  ];
+  const result = await verify(claims, async () => { throw new Error("input claims must not read source"); }, registry);
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["refuted", "input-absent:ai-key"],
+    ["refuted", "input-absent:ai-key"],
+    ["refuted", "input-absent:ai-key"],
+    ["refuted", "input-declared:rereview-label"],
+  ]);
+  assert.equal(result.demoted, 4);
+});
+
+test("#1238 already-processed and already-capped findings are skipped, never re-verified", async () => {
+  const registry = new Set(["ai-api-key"]);
+  const processed = markerFinding({ message: "the action declares input `ai-key`" });
+  processed.grounding_status = "refuted";
+  const categoryCapped = markerFinding({ severity: "minor", capped_from: "blocker", message: "the action declares input `ai-key`" });
+  const ciCapped = markerFinding({ severity: "info", ci_capped: true, message: "the action declares input `ai-key`" });
+  const result = await verify([processed, categoryCapped, ciCapped], async () => { throw new Error("skipped findings must not read source"); }, registry);
+  assert.deepEqual(result.findings, []);
+  assert.equal(result.demoted, 0);
+  assert.equal(categoryCapped.severity, "minor");
+  assert.equal(categoryCapped.grounding_status, undefined);
+  assert.equal(ciCapped.severity, "info");
+  assert.equal(ciCapped.grounding_status, undefined);
+});
+
 test("input and gate scans respect the claim length budget", async () => {
   const input = markerFinding({ message: `the action declares input \`ai-key\` ${"x".repeat(MAX_CLAIM_SCAN_LENGTH)}` });
-  const gate = markerFinding({ message: `The action never skips drafts; metadata declares no label input. ${"x".repeat(MAX_CLAIM_SCAN_LENGTH)}` });
+  const gate = markerFinding({ message: `The action never skips drafts, metadata declares no label input. ${"x".repeat(MAX_CLAIM_SCAN_LENGTH)}` });
   const result = await verify([input, gate], async () => { throw new Error("oversized claims must not read source"); }, new Set());
   assert.deepEqual(result.findings, []);
   assert.equal(input.grounding_status, undefined);

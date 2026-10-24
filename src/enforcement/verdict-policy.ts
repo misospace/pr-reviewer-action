@@ -296,6 +296,13 @@ export function relaxUnverifiedBlockerVerdict(
   // outright when any open finding has grounding_status="unverified". The
   // strict verdict mapping applies the same fail-closed rule via the
   // `forced` flag at its call site.
+  //
+  // #1238: this refusal is deliberately BROADER than the strict mapping's
+  // unknown-evidence forcing (isUnverifiedBlockingGrounding, which scopes to
+  // originally blocker/major findings). The non-strict policies are opt-in
+  // legacy paths; they stay conservative — an unverified claim of any
+  // original severity holds the relaxation — while strict (the default)
+  // never lets an unverified non-blocking claim expand the blocking surface.
   if (findings.some(isUnverifiedGrounding)) return false;
   const allRelaxable = findings.every((finding) =>
     isAlwaysNonBlockingCategory(finding.category)

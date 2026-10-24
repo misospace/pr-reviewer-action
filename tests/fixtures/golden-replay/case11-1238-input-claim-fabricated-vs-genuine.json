@@ -4,7 +4,7 @@
   "status": "active",
   "provenance": {
     "source_head": "bfb68648d6b4444f19c70c001e0e830e1fe8e64b",
-    "origin": "Consumer-repo review (head bfb6864) of a workflow pinning misospace/pr-reviewer-action@5b1839535748f3afd1bd3ef04e8009302cba9aa6 (tag v3.7.0). The model fabricated two claims about the pinned action itself: that its metadata declares `ai-key` while `ai-api-key` is absent (both false at that revision - the contract declares ai-api-key), and that draft/label filtering is absent because the metadata declares no such input (false - the precheck implements the draft gate and rereview-label drives label re-review). Its upstream fetches had been truncated by the harness and it stopped at tool-call-budget-exhausted; the review published request_changes with zero blockers. Sanitized: repository, endpoint, model, and secret names replaced with placeholders; finding messages preserved in substance.",
+    "origin": "Consumer-repo review (head bfb6864) of a workflow pinning misospace/pr-reviewer-action@5b1839535748f3afd1bd3ef04e8009302cba9aa6 (tag v3.7.0). The model fabricated two claims about the pinned action itself: that its metadata declares `ai-key` while `ai-api-key` is absent (both false at that revision - the contract declares ai-api-key), and that draft/label filtering is absent because the metadata declares no such input (false - the precheck implements the draft gate and rereview-label drives label re-review). Its upstream fetches had been truncated by the harness and it stopped at tool-call-budget-exhausted; the review published request_changes with zero blockers. Sanitized: the consumer repository, endpoint, model, and secret references are placeholders; the pinned upstream action reference and the pinned source shape are kept as factual citations of the incident (the `uses:` pin and the workflow skeleton), with no credential material.",
     "evidence_transform": "sanitized",
     "model_response": "Recorded representative response from the 2026-10-23 review run of head bfb6864 (zero live inference): request_changes with one fabricated input-name major, one metadata-derived gate-absence minor, and one verification ask (secrets confirmation)."
   },
@@ -65,13 +65,15 @@
   },
   "config": {},
   "expect": {
-    "verdict": "comment",
+    "verdict": "approve",
     "blocking_finding_ids": [],
     "unsupported_blocking_claims": 0,
     "supported_blocking_claims": 0,
     "published_body_excludes": [],
     "published_body_includes": [
-      "listed above as non-blocking"
+      "listed above as non-blocking",
+      "tool-call-budget-exhausted",
+      "model verdict was 'request_changes'"
     ],
     "grounding_status": {
       "f1238-input": "refuted",

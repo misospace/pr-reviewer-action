@@ -172,6 +172,25 @@ function assertsCommittedMarker(message: string): boolean {
 // `ai-api-key` is unexpected") still resolves each token's direction.
 
 const ACTION_SUBJECT_CUE_RE = /\b(?:pinned|upstream|the )?action(?:'s)?\b/i;
+/** The action's own manifest cited by file name is a legitimate subject for
+ * an input-declaration claim, even though the citation sits inside a quoted
+ * span (where cue scanning is masked). */
+const MANIFEST_SUBJECT_RE = /\baction\.ya?ml\b/i;
+/**
+ * A reference to some OTHER action (an owner/repo path, optionally with a
+ * ref, or a `uses:` key): the registry witnesses only the EXECUTING action,
+ * so a sentence that names another action never yields candidates. Evaluated
+ * on the raw sentence because the reference typically sits inside a quoted
+ * span (masked for cue scanning).
+ */
+const OTHER_ACTION_REF_RE = /\b[\w.-]+\/[\w.-]+(?:@[^\s`,]*)?|\buses\s*:/i;
+/**
+ * Attribute-scope cues: the claim constrains an attribute of the input
+ * (requiredness, default, documentation, fork behavior) that the declared-id
+ * registry cannot speak to. Such claims are not candidates — the boundary
+ * never refutes a fact its witness cannot decide.
+ */
+const INPUT_ATTRIBUTE_SCOPE_RE = /\b(?:as\s+(?:required|optional)|defaults?\s+(?:to|of|value)|\bdocs\b|documentation|deprecated|forks?\b)/i;
 /**
  * Presence/absence cue classes for the claim's direction. Absence is tested
  * first: a negated-declaration phrase ("declares no X", "not declared",
@@ -180,11 +199,13 @@ const ACTION_SUBJECT_CUE_RE = /\b(?:pinned|upstream|the )?action(?:'s)?\b/i;
  * next to a presence cue in the same clause ("declares input `x` that is
  * unexpected") is a mixed window and stays unresolvable — the fail-safe
  * direction: ambiguity never fabricates refutation and never grounds a
- * claim the boundary does not structurally understand.
+ * claim the boundary does not structurally understand. Runtime-behavior
+ * cues ("is dropped", "is ignored") are deliberately absent: they describe
+ * what the action DOES, not what its metadata DECLARES.
  */
 const INPUT_NEGATED_DECLARATION_RE = /\b(?:not\s+declared|declares?\s+no|declared\s+no|does\s+not\s+(?:declare|appear|accept|forward|support))\b/i;
-const INPUT_ABSENCE_CUE_RE = /\b(?:unexpected|not\s+declared|declares?\s+no|declared\s+no|does\s+not\s+(?:declare|appear|accept|forward|support)|not\s+an?\s+input|no\s+such\s+input|undeclared|unknown\s+input|invalid\s+input|not\s+recognized|unrecognized|missing\s+input|is\s+dropped|is\s+ignored)\b/i;
-const INPUT_PRESENCE_CUE_RE = /\b(?:declares?|declared|accepts?|accepting|accepted)\b/i;
+const INPUT_ABSENCE_CUE_RE = /\b(?:unexpected|not\s+declared|declares?\s+no|declared\s+no|does\s+not\s+(?:declare|appear|accept|forward|support)|not\s+an?\s+input|no\s+such\s+input|undeclared|unknown\s+input|invalid\s+input|not\s+recognized|unrecognized|missing\s+input)\b/i;
+const INPUT_PRESENCE_CUE_RE = /\b(?:declares?|declared|accepts?|accepting|accepted|uses?|exposes?|named|requires?|expects?|has\s+(?:an?\s+)?[a-z-]+\s+inputs?)\b/i;
 /** Action input ids: kebab-case identifiers, length-bounded. Quoted spans
  * only — plain-prose mechanism words ("no label input") are deliberately
  * not candidates; no semantic matching. */
@@ -192,11 +213,19 @@ const INPUT_TOKEN_RE = /^[a-z][a-z0-9-]{2,63}$/i;
 /** Clause delimiters for the direction window. Parentheses are deliberately
  * NOT delimiters: a parenthetical source citation ("... as `ai-key`
  * (action.yml at v3.7.0), so ...") must not cut the token off from its
- * carrying clause. */
+ * carrying clause. Windows are bounded by the token's sentence. */
 const CLAUSE_DELIMITER_RE = /[,;]|\b(?:but|and|so|yet|or)\b/gi;
 const GATE_BEHAVIOR_RE = /\b(?:drafts?|labels?|skips?|gates?|filters?|dedupes?|fingerprints?)\b/i;
 const GATE_ABSENCE_RE = /\b(?:absent|absence|doesn'?t|does\s+not|never|lacks?|missing|not\s+implement(?:ed|ing)?|not\s+perform(?:ed|ing)?|declares?\s+no)\b/i;
 const GATE_METADATA_RE = /\b(?:metadata|manifest|inputs?\s+(?:list|block|names?))\b/i;
+/**
+ * Upper bound on quoted spans the input-claim scan inspects per message.
+ * The incident-class claim cites a handful of names; a pathological
+ * all-backticks message must not turn the boundary into an O(spans x bytes)
+ * stall (see MAX_CLAIM_SCAN_LENGTH for the message-level bound). Spans past
+ * the cap are not candidates (untouched, the fail-safe direction).
+ */
+const MAX_CLAIM_SPANS = 24;
 
 type InputDirection = "presence" | "absence" | "ambiguous";
 
@@ -205,13 +234,38 @@ interface InputCandidate {
   direction: InputDirection;
 }
 
-/** The clause window around a token span: the text between the nearest
- * clause delimiters flanking it (or the sentence/s message bounds). */
-function clauseWindow(message: string, from: number, to: number): string {
-  let start = 0;
-  let end = message.length;
-  for (const match of message.matchAll(CLAUSE_DELIMITER_RE)) {
-    const index = match.index ?? 0;
+/**
+ * The message with every quoted span's interior replaced by "a" glyphs:
+ * same length and indices, so sentence/clause scans and cue regexes never
+ * read inside a citation — "`action.yml`" no longer splits a sentence at
+ * its dot, a comma inside backticks no longer splits a clause, and a quoted
+ * token can never complete (or forge) a cue phrase. Other-action guards
+ * that must see cited references evaluate the RAW text instead.
+ */
+function maskedForScan(message: string): string {
+  const chars = message.split("");
+  for (const span of quotedSpans(message)) {
+    for (let i = span.start; i < span.end; i += 1) chars[i] = "a";
+  }
+  return chars.join("");
+}
+
+/** Sentence bounds around a span, mirroring sentenceContaining's delimiters. */
+function sentenceBounds(masked: string, from: number, to: number): { start: number; end: number } {
+  let start = from;
+  while (start > 0 && !SENTENCE_DELIMITERS.has(masked[start - 1] ?? "")) start -= 1;
+  let end = to;
+  while (end < masked.length && !SENTENCE_DELIMITERS.has(masked[end] ?? "")) end += 1;
+  return { start, end };
+}
+
+/** The clause window around a token span, bounded by the token's sentence
+ * so a direction cue in a later sentence can never leak backwards. */
+function clauseWindow(masked: string, sentenceStart: number, sentenceEnd: number, from: number, to: number): string {
+  let start = sentenceStart;
+  let end = sentenceEnd;
+  for (const match of masked.slice(sentenceStart, sentenceEnd).matchAll(CLAUSE_DELIMITER_RE)) {
+    const index = sentenceStart + (match.index ?? 0);
     if (index < from) {
       start = index + match[0]!.length;
     } else {
@@ -219,7 +273,7 @@ function clauseWindow(message: string, from: number, to: number): string {
       break;
     }
   }
-  return message.slice(start, end);
+  return masked.slice(start, end);
 }
 
 function windowDirection(window: string): InputDirection | "none" {
@@ -232,20 +286,34 @@ function windowDirection(window: string): InputDirection | "none" {
 
 /**
  * Collect the quoted input-id candidates a message asserts about the
- * action's declared inputs. Each candidate must sit in a sentence carrying
- * the action-subject cue and input vocabulary; its direction resolves
- * within that token's clause window only. Tokens whose sentence carries no
- * claim direction are not candidates (a mention, not a claim).
+ * EXECUTING action's declared inputs. Each candidate must sit in a sentence
+ * carrying the action-subject cue (or a manifest-file citation) and input
+ * vocabulary, must not name another action, and its direction resolves
+ * within that token's sentence-bounded clause window. Attribute-scoped
+ * claims and directionless mentions are not candidates.
  */
 function classifyInputDeclaration(message: string): InputCandidate[] {
   const candidates: InputCandidate[] = [];
+  // Cheap prefilter before the span walk: no action subject and no input
+  // vocabulary anywhere means no input claim.
   if (message.length > MAX_CLAIM_SCAN_LENGTH) return candidates;
-  for (const span of quotedSpans(message)) {
+  if (!/action/i.test(message) || !/\binputs?\b/i.test(message)) return candidates;
+  const masked = maskedForScan(message);
+  const spans = quotedSpans(message).slice(0, MAX_CLAIM_SPANS);
+  for (const span of spans) {
     const raw = message.slice(span.start, span.end).trim();
     if (!INPUT_TOKEN_RE.test(raw)) continue;
-    const sentence = sentenceContaining(message, span.start, span.end);
-    if (!ACTION_SUBJECT_CUE_RE.test(sentence) || !/\binputs?\b/i.test(sentence)) continue;
-    const direction = windowDirection(clauseWindow(message, span.start, span.end));
+    const { start, end } = sentenceBounds(masked, span.start, span.end);
+    const maskedSentence = masked.slice(start, end);
+    if (!ACTION_SUBJECT_CUE_RE.test(maskedSentence) && !MANIFEST_SUBJECT_RE.test(message.slice(start, end))) continue;
+    if (!/\binputs?\b/i.test(maskedSentence)) continue;
+    // The registry only answers for the executing action.
+    if (OTHER_ACTION_REF_RE.test(message.slice(start, end))) continue;
+    const windowText = clauseWindow(masked, start, end, span.start, span.end);
+    // Attribute-scope claims (requiredness, defaults, docs, fork behavior)
+    // are outside the declared-id witness's authority.
+    if (INPUT_ATTRIBUTE_SCOPE_RE.test(windowText)) continue;
+    const direction = windowDirection(windowText);
     if (direction === "none") continue;
     candidates.push({ token: raw.toLowerCase(), direction });
   }
@@ -259,22 +327,44 @@ function classifyInputDeclaration(message: string): InputCandidate[] {
  * label input" premise). The boundary can never positively disprove a
  * behavior-existence claim from in-run sources, so recognition here leads
  * only to an `unverified` marking — never a refutation and never a
- * grounding. Whole-message scan, bounded by MAX_CLAIM_SCAN_LENGTH.
+ * grounding. Sentence-scoped: every cue family must co-occur in one
+ * sentence, bounded by MAX_CLAIM_SCAN_LENGTH.
  */
 function assertsGateAbsence(message: string): boolean {
-  return message.length <= MAX_CLAIM_SCAN_LENGTH
-    && ACTION_SUBJECT_CUE_RE.test(message)
-    && GATE_BEHAVIOR_RE.test(message)
-    && GATE_ABSENCE_RE.test(message)
-    && GATE_METADATA_RE.test(message);
+  if (message.length > MAX_CLAIM_SCAN_LENGTH) return false;
+  if (!/action/i.test(message)) return false;
+  const masked = maskedForScan(message);
+  let cursor = 0;
+  while (cursor < masked.length) {
+    while (cursor < masked.length && SENTENCE_DELIMITERS.has(masked[cursor] ?? "")) cursor += 1;
+    let end = cursor;
+    while (end < masked.length && !SENTENCE_DELIMITERS.has(masked[end] ?? "")) end += 1;
+    const sentence = masked.slice(cursor, end);
+    if (
+      ACTION_SUBJECT_CUE_RE.test(sentence)
+      && GATE_BEHAVIOR_RE.test(sentence)
+      && GATE_ABSENCE_RE.test(sentence)
+      && GATE_METADATA_RE.test(sentence)
+    ) return true;
+    cursor = end;
+  }
+  return false;
 }
 
-function classify(message: string): GroundingKind | null {
-  if (assertsCommittedMarker(message)) return "committed_literal";
-  if (classifyInputDeclaration(message).length > 0) return "input_declaration";
-  if (assertsGateAbsence(message)) return "gate_absence";
-  if (REQUIREMENT_NOT_ENFORCED_RE.test(message)) return "requirement_claim";
-  return null;
+interface ClaimClassification {
+  kind: GroundingKind | null;
+  inputCandidates: InputCandidate[];
+}
+
+/** Classify once per finding; the input candidates are reused by the
+ * verification branch instead of rescanning the message. */
+function classifyClaim(message: string): ClaimClassification {
+  if (assertsCommittedMarker(message)) return { kind: "committed_literal", inputCandidates: [] };
+  const inputCandidates = classifyInputDeclaration(message);
+  if (inputCandidates.length > 0) return { kind: "input_declaration", inputCandidates };
+  if (assertsGateAbsence(message)) return { kind: "gate_absence", inputCandidates: [] };
+  if (REQUIREMENT_NOT_ENFORCED_RE.test(message)) return { kind: "requirement_claim", inputCandidates: [] };
+  return { kind: null, inputCandidates: [] };
 }
 
 /**
@@ -309,20 +399,28 @@ export async function applyBlockerVerification(
   for (let index = 0; index < findings.length; index += 1) {
     const finding = findings[index]!;
     if (finding.category === "verification") continue;
-    const kind = classify(finding.message);
+    // Already processed by an earlier pass of this boundary (the engine runs
+    // it again after thread settlement re-emits prior findings): never
+    // re-verify, re-demote, or overwrite a recorded grounding.
+    if (finding.grounding_status !== undefined) continue;
+    // Another deterministic capping path (#775 non-blocking categories,
+    // #976 CI evidence) already claimed this finding's severity: re-deriving
+    // it here could misattribute the original severity and re-force a
+    // verdict those paths settled.
+    if (finding.capped_from !== undefined || finding.ci_capped === true) continue;
+    const { kind, inputCandidates } = classifyClaim(finding.message);
     if (kind === null) continue;
 
     let status: GroundingStatus;
     let reason: string;
     if (kind === "input_declaration") {
-      const candidates = classifyInputDeclaration(finding.message);
       const declared = options.declaredActionInputs;
       if (declared === undefined || declared === null) {
         status = "unverified";
         reason = "input-registry-unavailable";
       } else {
         const normalized = new Set([...declared].map((input) => input.toLowerCase()));
-        const resolved = candidates.filter((candidate) => candidate.direction !== "ambiguous");
+        const resolved = inputCandidates.filter((candidate) => candidate.direction !== "ambiguous");
         const refuted = resolved.find((candidate) =>
           (candidate.direction === "presence" && !normalized.has(candidate.token))
           || (candidate.direction === "absence" && normalized.has(candidate.token)));

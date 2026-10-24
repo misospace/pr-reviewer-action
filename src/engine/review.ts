@@ -394,6 +394,19 @@ export function createRunCancellation(request: ReviewRequest): RunCancellation {
  * completion throws `RunReviewError`, so a verdict reached after the caller
  * cancelled cannot reach a later publisher. Nothing about this changes when
  * `request.signal` is absent (the Action adapter path). */
+/** #1238: fold a second boundary pass (run after thread settlement
+ * re-emitted prior findings) into the recorded verification result so the
+ * artifact and the demotion note reflect every pass. Findings the first
+ * pass processed are skipped inside the boundary itself, so the second
+ * pass only reports newly settled findings. */
+function mergeBlockerVerificationPasses(
+  first: Awaited<ReturnType<typeof applyBlockerVerification>> | null,
+  second: Awaited<ReturnType<typeof applyBlockerVerification>>,
+): Awaited<ReturnType<typeof applyBlockerVerification>> {
+  if (first === null) return second;
+  return { findings: [...first.findings, ...second.findings], demoted: first.demoted + second.demoted };
+}
+
 export async function runReviewEngine(request: ReviewRequest, dependencies: ReviewDependencies): Promise<RunReviewResult> {
   if (request.signal !== undefined && request.signal.aborted) throw new RunReviewError("review request cancelled before start", 1);
   const cancellation = createRunCancellation(request);
@@ -1493,14 +1506,15 @@ secrets: [profiles.primary.apiKey],
   const candidateRevision = context.headSha || String(pr.headRefOid ?? "") || "";
   const expectedRevision = HEX_SHA_RE.test(candidateRevision) ? candidateRevision : null;
   let blockerVerification: Awaited<ReturnType<typeof applyBlockerVerification>> | null = null;
+  let verificationOptions: Parameters<typeof applyBlockerVerification>[1] | null = null;
   if (Array.isArray(reviewRecord.findings)) {
     capCiEvidenceFindings(reviewRecord.findings as ArtifactFinding[], ciChecksMarkdown);
-    const readSource = createHeadSourceReader({ workspace, revision: expectedRevision });
-    blockerVerification = await applyBlockerVerification(reviewRecord.findings as ArtifactFinding[], {
-      readSource,
+    verificationOptions = {
+      readSource: createHeadSourceReader({ workspace, revision: expectedRevision }),
       expectedRevision,
       declaredActionInputs: new Set(contract.inputs.map((input) => input.id)),
-    });
+    };
+    blockerVerification = await applyBlockerVerification(reviewRecord.findings as ArtifactFinding[], verificationOptions);
   }
   const verdictPolicy = env.VERDICT_POLICY ?? "strict";
   // Captured before any layer mutates it: the strict mapping (#811) takes the
@@ -1554,6 +1568,14 @@ secrets: [profiles.primary.apiKey],
       applyConfirmedUnmetEscalation(reviewRecord as never, requirementTraceResult.trace, traceRequirementTexts);
     }
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
+    // #1238: thread settlement (inside the overlays) re-emits prior reviews'
+    // findings after the boundary ran; verify them too so a carried-over
+    // fabricated claim cannot re-enter as a live blocker. The boundary skips
+    // findings it already processed.
+    if (verificationOptions !== null && Array.isArray(reviewRecord.findings)) {
+      const settledPass = await applyBlockerVerification(reviewRecord.findings as ArtifactFinding[], verificationOptions);
+      blockerVerification = mergeBlockerVerificationPasses(blockerVerification, settledPass);
+    }
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
     // #1016: the strict mapping computes the unknown-evidence forcing
@@ -1584,6 +1606,13 @@ secrets: [profiles.primary.apiKey],
       applyConfirmedUnmetEscalation(reviewRecord as never, requirementTraceResult.trace, traceRequirementTexts);
     }
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
+    // #1238: second boundary pass over findings thread settlement re-emitted
+    // (same rationale as the strict branch above); the relaxers below then
+    // see the final grounding states.
+    if (verificationOptions !== null && Array.isArray(reviewRecord.findings)) {
+      const settledPass = await applyBlockerVerification(reviewRecord.findings as ArtifactFinding[], verificationOptions);
+      blockerVerification = mergeBlockerVerificationPasses(blockerVerification, settledPass);
+    }
     // #977: the model's own request_changes is relaxed only when every
     // still-open finding is a verification ask and no independent
     // deterministic gate fired. The overlays above have already run, so
@@ -1617,7 +1646,7 @@ secrets: [profiles.primary.apiKey],
       findings: blockerVerification.findings,
     })}\n`, "utf8"));
     reviewRecord.review_markdown = String(reviewRecord.review_markdown ?? "")
-      + `\n\n_${blockerVerification.demoted} finding(s) making source-backed claims that were positively contradicted or could not be confirmed against exact-head source are listed above as non-blocking. Deterministic enforcement gates are unaffected._`;
+      + `\n\n_${blockerVerification.demoted} finding(s) making source-backed claims that deterministic verification positively contradicted or could not substantiate are listed above as non-blocking. Deterministic enforcement gates are unaffected._`;
   }
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(reviewRecord)}\n`, "utf8"));
 
