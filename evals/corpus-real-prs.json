@@ -985,7 +985,8 @@
   "metadata": {
     "description": "Real merged PRs reviewed at their actual head commit (issue #779). Vulnerable entries introduced a defect that a later merged PR fixed; clean entries have no later fix and score false positives. Anchors (file/line_range) were extracted from the candidate JSON's file_lines field, cross-checked via git log -S and the commits/{sha}/pulls API.",
     "source_issue": "misospace/pr-reviewer-action#779",
-    "candidate_count": {
+    "pre_audit_candidate_count": {
+      "note": "Counts from the build-time candidate JSON (#1203), before the audit that produced the final arrays; not necessarily equal to their lengths.",
       "vulnerable": 27,
       "clean": 15
     },
