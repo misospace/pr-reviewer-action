@@ -17,8 +17,8 @@ const requirementFinding = (overrides: Partial<ArtifactFinding> = {}): ArtifactF
   severity: "major", category: "security", file: "src/a.ts", line: null,
   message: "requirement not enforced: X is a standard", ...overrides,
 });
-const verify = (findings: ArtifactFinding[], read: (file: string) => Promise<SourceReadResult>) =>
-  applyBlockerVerification(findings, { readSource: read, expectedRevision: revision });
+const verify = (findings: ArtifactFinding[], read: (file: string) => Promise<SourceReadResult>, declaredActionInputs?: ReadonlySet<string> | null) =>
+  applyBlockerVerification(findings, { readSource: read, expectedRevision: revision, declaredActionInputs });
 const available = (result: SourceReadResult): Promise<SourceReadResult> => Promise.resolve(result);
 
 test("literal marker absent from authoritative source is refuted and demoted", async () => {
@@ -101,16 +101,36 @@ test("requirement claim with cited code evidence is grounded or refuted", async 
   assert.equal(result.demoted, 1);
 });
 
-test("ordinary, non-blocking, and verification findings are untouched", async () => {
+test("ordinary and verification findings are untouched", async () => {
   const ordinary = markerFinding({ message: "fix the off-by-one" });
-  const minor = markerFinding({ severity: "minor" });
-  const info = markerFinding({ severity: "info" });
   const verification = markerFinding({ category: "verification" });
-  const findings = [ordinary, minor, info, verification];
-  const result = await verify(findings, async () => { throw new Error("reader should not run"); });
+  const result = await verify([ordinary, verification], async () => { throw new Error("reader should not run"); });
   assert.deepEqual(result.findings, []);
   assert.equal(result.demoted, 0);
-  assert.ok(findings.every((finding) => finding.grounding_status === undefined));
+  assert.equal(ordinary.grounding_status, undefined);
+  assert.equal(verification.grounding_status, undefined);
+});
+
+test("non-grounded minor and info marker claims are marked but never raised or demoted", async () => {
+  const minor = markerFinding({ severity: "minor" });
+  const info = markerFinding({ severity: "info" });
+  const result = await verify([minor, info], async () => ({ status: "unavailable", reason: "no-exact-revision" }));
+  assert.deepEqual(result.findings.map(({ status }) => status), ["unverified", "unverified"]);
+  assert.equal(result.demoted, 0);
+  assert.equal(minor.severity, "minor");
+  assert.equal(minor.capped_from, undefined);
+  assert.equal(minor.grounding_status, "unverified");
+  assert.equal(info.severity, "info");
+  assert.equal(info.capped_from, undefined);
+  assert.equal(info.grounding_status, "unverified");
+});
+
+test("grounded minor marker claims are marked in results without mutation", async () => {
+  const finding = markerFinding({ severity: "minor" });
+  const result = await verify([finding], async () => source("⟦redacted:credential⟧"));
+  assert.equal(result.findings[0]?.status, "grounded");
+  assert.equal(finding.severity, "minor");
+  assert.equal(finding.grounding_status, undefined);
 });
 
 test("marker mentions that are not cited as committed content are left untouched", async () => {
@@ -276,6 +296,130 @@ test("cited spans without a concrete line are unsupported, never grounded elsewh
     ["unsupported", "no-concrete-location"], ["unsupported", "no-concrete-location"],
   ]);
   assert.equal(result.demoted, 4);
+});
+
+test("input declaration claims are checked against the embedded contract registry", async () => {
+  const registry = new Set(["github-token", "ai-api-key", "rereview-label", "ai-base-url"]);
+  const claims = [
+    markerFinding({ message: "the action declares input `ai-key`" }),
+    markerFinding({ message: "`ai-api-key` is an unexpected input for the pinned action" }),
+    markerFinding({ message: "the action metadata declares no `unicorn-mode` input; the workflow sets it" }),
+    markerFinding({ message: "the action declares input `rereview-label`" }),
+  ];
+  const result = await verify(claims, async () => { throw new Error("input claims must not read source"); }, registry);
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["refuted", "input-absent:ai-key"],
+    ["refuted", "input-declared:ai-api-key"],
+    ["grounded", "input-absent:unicorn-mode"],
+    ["grounded", "input-declared:rereview-label"],
+  ]);
+  assert.equal(claims[2]?.severity, "blocker");
+  assert.equal(claims[2]?.capped_from, undefined);
+  assert.equal(claims[2]?.grounding_status, undefined);
+  assert.equal(claims[0]?.severity, "minor");
+  assert.equal(claims[0]?.grounding_status, "refuted");
+  assert.equal(result.demoted, 2);
+});
+
+test("the #1238 incident message resolves both fabricated halves against the clause windows", async () => {
+  // The captured incident claim carries both directions in one sentence:
+  // `ai-key` sits in the presence clause, `ai-api-key` in the absence clause
+  // after ", so". Each token's clause window resolves independently and the
+  // finding is refuted on the first positively contradicted fact.
+  const finding = markerFinding({
+    file: ".github/workflows/ai_pr_review.yaml",
+    message: "The pinned action declares its API-key input as `ai-key` (action.yml at v3.7.0), so `ai-api-key` is an unexpected input that GitHub ignores and the action runs without the endpoint credential.",
+  });
+  const result = await verify([finding], async () => { throw new Error("input claims must not read source"); }, new Set(["github-token", "ai-api-key", "rereview-label"]));
+  assert.equal(result.findings[0]?.status, "refuted");
+  assert.equal(result.findings[0]?.reason, "input-absent:ai-key");
+  assert.equal(finding.severity, "minor");
+  assert.equal(finding.capped_from, "blocker");
+  assert.equal(finding.grounding_status, "refuted");
+  assert.equal(result.demoted, 1);
+});
+
+test("clause windows isolate direction cues so a mixed sentence still resolves", async () => {
+  // `alpha-mode`'s clause is a presence claim the registry would ground;
+  // `ai-api-key`'s clause (after ", so") is an absence claim the registry
+  // refutes. Refutation wins the per-finding composition.
+  const finding = markerFinding({
+    message: "the action declares input `alpha-mode`, so `ai-api-key` is an unexpected input",
+  });
+  const result = await verify([finding], async () => { throw new Error("input claims must not read source"); }, new Set(["ai-api-key", "alpha-mode"]));
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["refuted", "input-declared:ai-api-key"],
+  ]);
+  assert.equal(finding.grounding_status, "refuted");
+});
+
+test("input claims without the action subject in their sentence stay untouched", async () => {
+  // A compact claim whose sentence never names the action is ambiguous
+  // subject-wise (the registry witnesses only the executing action), so the
+  // boundary leaves it untouched rather than fabricating refutation.
+  const finding = markerFinding({ message: "the input `ai-api-key` is unexpected here" });
+  const result = await verify([finding], async () => { throw new Error("input claims must not read source"); }, new Set(["ai-api-key"]));
+  assert.deepEqual(result.findings, []);
+  assert.equal(finding.grounding_status, undefined);
+});
+
+test("input claims without a registry are unverified without raising minor or info", async () => {
+  const minor = markerFinding({ severity: "minor", message: "the action declares input `ai-key`" });
+  const info = markerFinding({ severity: "info", message: "the action declares input `ai-key`" });
+  const result = await verify([minor, info], async () => { throw new Error("input claims must not read source"); }, null);
+  assert.deepEqual(result.findings.map(({ reason }) => reason), ["input-registry-unavailable", "input-registry-unavailable"]);
+  assert.equal(result.demoted, 0);
+  assert.equal(minor.severity, "minor");
+  assert.equal(minor.capped_from, undefined);
+  assert.equal(minor.grounding_status, "unverified");
+  assert.equal(info.severity, "info");
+  assert.equal(info.capped_from, undefined);
+  assert.equal(info.grounding_status, "unverified");
+});
+
+test("ambiguous input direction is unverified and invalid token shapes are ignored", async () => {
+  // A clause window carrying an independent presence cue next to an
+  // independent absence cue (neither a negated-declaration phrase) is a
+  // mixed window: the boundary cannot tell which fact the claim asserts,
+  // so it marks unverified instead of guessing a direction.
+  const ambiguous = markerFinding({ message: "the action declares input `x-token` that is unexpected" });
+  const invalid = ["if:", "a.b", "two words", "ab"].map((token) => markerFinding({ message: `the action declares input \`${token}\`` }));
+  const result = await verify([ambiguous, ...invalid], async () => { throw new Error("input claims must not read source"); }, new Set(["x-token"]));
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.findings[0]?.status, "unverified");
+  assert.equal(result.findings[0]?.reason, "input-claim-unresolvable");
+  assert.equal(ambiguous.grounding_status, "unverified");
+  assert.ok(invalid.every((finding) => finding.grounding_status === undefined));
+});
+
+test("gate absence claims are always unverified and require an action subject", async () => {
+  const absence = markerFinding({ severity: "minor", message: "The action never skips drafts; metadata declares no label input." });
+  const blocker = markerFinding({ message: "The action never skips drafts; metadata declares no label input." });
+  const noAction = markerFinding({ message: "Draft filtering is absent; metadata declares no label input." });
+  const inputOnly = markerFinding({ message: "There is no label input `label-name`" });
+  const result = await verify([absence, blocker, noAction, inputOnly], async () => { throw new Error("gate absence must not read source"); }, new Set());
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["gate_absence", "unverified", "gate-absence-unverifiable"],
+    ["gate_absence", "unverified", "gate-absence-unverifiable"],
+  ]);
+  assert.equal(absence.severity, "minor");
+  assert.equal(absence.capped_from, undefined);
+  assert.equal(absence.grounding_status, "unverified");
+  assert.equal(blocker.severity, "minor");
+  assert.equal(blocker.capped_from, "blocker");
+  assert.equal(blocker.grounding_status, "unverified");
+  assert.equal(result.demoted, 1);
+  assert.equal(noAction.grounding_status, undefined);
+  assert.equal(inputOnly.grounding_status, undefined);
+});
+
+test("input and gate scans respect the claim length budget", async () => {
+  const input = markerFinding({ message: `the action declares input \`ai-key\` ${"x".repeat(MAX_CLAIM_SCAN_LENGTH)}` });
+  const gate = markerFinding({ message: `The action never skips drafts; metadata declares no label input. ${"x".repeat(MAX_CLAIM_SCAN_LENGTH)}` });
+  const result = await verify([input, gate], async () => { throw new Error("oversized claims must not read source"); }, new Set());
+  assert.deepEqual(result.findings, []);
+  assert.equal(input.grounding_status, undefined);
+  assert.equal(gate.grounding_status, undefined);
 });
 
 test("read budget is bounded and remaining candidates are unverified", async () => {

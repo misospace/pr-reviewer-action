@@ -3,7 +3,7 @@ import type { EvidenceProvenance } from "../context/evidence-provenance.js";
 import type { ArtifactFinding } from "./artifact.js";
 
 export type GroundingStatus = "grounded" | "refuted" | "unverified" | "unsupported";
-export type GroundingKind = "committed_literal" | "requirement_claim";
+export type GroundingKind = "committed_literal" | "requirement_claim" | "input_declaration" | "gate_absence";
 
 export const SANITIZER_MARKERS: readonly string[] = ["⟦redacted:credential⟧", "⟦•⟧", "[REDACTED]"];
 export const REQUIREMENT_NOT_ENFORCED_RE = /^\s*requirement\s+not\s+enforced\b/i;
@@ -24,6 +24,7 @@ export type SourceReader = (file: string) => Promise<SourceReadResult>;
 export interface BlockerVerificationOptions {
   readSource: SourceReader;
   expectedRevision: string | null;
+  declaredActionInputs?: ReadonlySet<string> | null | undefined;
 }
 
 export interface FindingGrounding {
@@ -158,8 +159,120 @@ function assertsCommittedMarker(message: string): boolean {
  * the marker in bare prose (no quotes) also escapes verification — it
  * stays blocking, which is the fail-safe side of this boundary.
  */
+// ── #1238: input-declaration and gate-absence claim kinds ───────────────
+// The #1016 incident family this boundary extends: fabricated claims about
+// the REVIEWING ACTION's own declared inputs ("declares `ai-key`, not
+// `ai-api-key`") and about its deterministic gates ("no draft/label
+// filtering because the metadata declares no such input") survived as
+// substantiated findings and drove request_changes with zero blockers.
+// Verification witness: the executing action's own embedded contract
+// (`declaredActionInputs`) — the exact revision the run executes, offline
+// and deterministic. Classification is sentence-scoped with a clause window
+// so one sentence carrying both directions ("declares `ai-key` ..., so
+// `ai-api-key` is unexpected") still resolves each token's direction.
+
+const ACTION_SUBJECT_CUE_RE = /\b(?:pinned|upstream|the )?action(?:'s)?\b/i;
+/**
+ * Presence/absence cue classes for the claim's direction. Absence is tested
+ * first: a negated-declaration phrase ("declares no X", "not declared",
+ * "does not declare") shares its verb with the presence vocabulary, so when
+ * it matches it defines the direction by itself. An independent absence cue
+ * next to a presence cue in the same clause ("declares input `x` that is
+ * unexpected") is a mixed window and stays unresolvable — the fail-safe
+ * direction: ambiguity never fabricates refutation and never grounds a
+ * claim the boundary does not structurally understand.
+ */
+const INPUT_NEGATED_DECLARATION_RE = /\b(?:not\s+declared|declares?\s+no|declared\s+no|does\s+not\s+(?:declare|appear|accept|forward|support))\b/i;
+const INPUT_ABSENCE_CUE_RE = /\b(?:unexpected|not\s+declared|declares?\s+no|declared\s+no|does\s+not\s+(?:declare|appear|accept|forward|support)|not\s+an?\s+input|no\s+such\s+input|undeclared|unknown\s+input|invalid\s+input|not\s+recognized|unrecognized|missing\s+input|is\s+dropped|is\s+ignored)\b/i;
+const INPUT_PRESENCE_CUE_RE = /\b(?:declares?|declared|accepts?|accepting|accepted)\b/i;
+/** Action input ids: kebab-case identifiers, length-bounded. Quoted spans
+ * only — plain-prose mechanism words ("no label input") are deliberately
+ * not candidates; no semantic matching. */
+const INPUT_TOKEN_RE = /^[a-z][a-z0-9-]{2,63}$/i;
+/** Clause delimiters for the direction window. Parentheses are deliberately
+ * NOT delimiters: a parenthetical source citation ("... as `ai-key`
+ * (action.yml at v3.7.0), so ...") must not cut the token off from its
+ * carrying clause. */
+const CLAUSE_DELIMITER_RE = /[,;]|\b(?:but|and|so|yet|or)\b/gi;
+const GATE_BEHAVIOR_RE = /\b(?:drafts?|labels?|skips?|gates?|filters?|dedupes?|fingerprints?)\b/i;
+const GATE_ABSENCE_RE = /\b(?:absent|absence|doesn'?t|does\s+not|never|lacks?|missing|not\s+implement(?:ed|ing)?|not\s+perform(?:ed|ing)?|declares?\s+no)\b/i;
+const GATE_METADATA_RE = /\b(?:metadata|manifest|inputs?\s+(?:list|block|names?))\b/i;
+
+type InputDirection = "presence" | "absence" | "ambiguous";
+
+interface InputCandidate {
+  token: string;
+  direction: InputDirection;
+}
+
+/** The clause window around a token span: the text between the nearest
+ * clause delimiters flanking it (or the sentence/s message bounds). */
+function clauseWindow(message: string, from: number, to: number): string {
+  let start = 0;
+  let end = message.length;
+  for (const match of message.matchAll(CLAUSE_DELIMITER_RE)) {
+    const index = match.index ?? 0;
+    if (index < from) {
+      start = index + match[0]!.length;
+    } else {
+      end = index;
+      break;
+    }
+  }
+  return message.slice(start, end);
+}
+
+function windowDirection(window: string): InputDirection | "none" {
+  if (INPUT_ABSENCE_CUE_RE.test(window)) {
+    if (INPUT_NEGATED_DECLARATION_RE.test(window)) return "absence";
+    return INPUT_PRESENCE_CUE_RE.test(window) ? "ambiguous" : "absence";
+  }
+  return INPUT_PRESENCE_CUE_RE.test(window) ? "presence" : "none";
+}
+
+/**
+ * Collect the quoted input-id candidates a message asserts about the
+ * action's declared inputs. Each candidate must sit in a sentence carrying
+ * the action-subject cue and input vocabulary; its direction resolves
+ * within that token's clause window only. Tokens whose sentence carries no
+ * claim direction are not candidates (a mention, not a claim).
+ */
+function classifyInputDeclaration(message: string): InputCandidate[] {
+  const candidates: InputCandidate[] = [];
+  if (message.length > MAX_CLAIM_SCAN_LENGTH) return candidates;
+  for (const span of quotedSpans(message)) {
+    const raw = message.slice(span.start, span.end).trim();
+    if (!INPUT_TOKEN_RE.test(raw)) continue;
+    const sentence = sentenceContaining(message, span.start, span.end);
+    if (!ACTION_SUBJECT_CUE_RE.test(sentence) || !/\binputs?\b/i.test(sentence)) continue;
+    const direction = windowDirection(clauseWindow(message, span.start, span.end));
+    if (direction === "none") continue;
+    candidates.push({ token: raw.toLowerCase(), direction });
+  }
+  return candidates;
+}
+
+/**
+ * Gate-absence recognition (#1238): the message asserts that a
+ * deterministic behavior of the action is absent while deriving that
+ * conclusion from the action's metadata/input list (the incident's "no
+ * label input" premise). The boundary can never positively disprove a
+ * behavior-existence claim from in-run sources, so recognition here leads
+ * only to an `unverified` marking — never a refutation and never a
+ * grounding. Whole-message scan, bounded by MAX_CLAIM_SCAN_LENGTH.
+ */
+function assertsGateAbsence(message: string): boolean {
+  return message.length <= MAX_CLAIM_SCAN_LENGTH
+    && ACTION_SUBJECT_CUE_RE.test(message)
+    && GATE_BEHAVIOR_RE.test(message)
+    && GATE_ABSENCE_RE.test(message)
+    && GATE_METADATA_RE.test(message);
+}
+
 function classify(message: string): GroundingKind | null {
   if (assertsCommittedMarker(message)) return "committed_literal";
+  if (classifyInputDeclaration(message).length > 0) return "input_declaration";
+  if (assertsGateAbsence(message)) return "gate_absence";
   if (REQUIREMENT_NOT_ENFORCED_RE.test(message)) return "requirement_claim";
   return null;
 }
@@ -195,13 +308,42 @@ export async function applyBlockerVerification(
 
   for (let index = 0; index < findings.length; index += 1) {
     const finding = findings[index]!;
-    if ((finding.severity !== "blocker" && finding.severity !== "major") || finding.category === "verification") continue;
+    if (finding.category === "verification") continue;
     const kind = classify(finding.message);
     if (kind === null) continue;
 
     let status: GroundingStatus;
     let reason: string;
-    if (!safeFile(finding.file)) {
+    if (kind === "input_declaration") {
+      const candidates = classifyInputDeclaration(finding.message);
+      const declared = options.declaredActionInputs;
+      if (declared === undefined || declared === null) {
+        status = "unverified";
+        reason = "input-registry-unavailable";
+      } else {
+        const normalized = new Set([...declared].map((input) => input.toLowerCase()));
+        const resolved = candidates.filter((candidate) => candidate.direction !== "ambiguous");
+        const refuted = resolved.find((candidate) =>
+          (candidate.direction === "presence" && !normalized.has(candidate.token))
+          || (candidate.direction === "absence" && normalized.has(candidate.token)));
+        const grounded = resolved.find((candidate) =>
+          (candidate.direction === "presence" && normalized.has(candidate.token))
+          || (candidate.direction === "absence" && !normalized.has(candidate.token)));
+        if (refuted !== undefined) {
+          status = "refuted";
+          reason = `${refuted.direction === "presence" ? "input-absent" : "input-declared"}:${refuted.token}`;
+        } else if (grounded !== undefined) {
+          status = "grounded";
+          reason = `${grounded.direction === "presence" ? "input-declared" : "input-absent"}:${grounded.token}`;
+        } else {
+          status = "unverified";
+          reason = "input-claim-unresolvable";
+        }
+      }
+    } else if (kind === "gate_absence") {
+      status = "unverified";
+      reason = "gate-absence-unverifiable";
+    } else if (!safeFile(finding.file)) {
       status = kind === "committed_literal" ? "unverified" : "unsupported";
       reason = kind === "committed_literal" ? "no-location" : "no-concrete-location";
     } else if (reads >= MAX_VERIFICATION_READS) {
@@ -289,10 +431,12 @@ export async function applyBlockerVerification(
     }
 
     if (status !== "grounded") {
-      if (finding.capped_from === undefined) finding.capped_from = finding.severity;
-      finding.severity = "minor";
       finding.grounding_status = status;
-      demoted += 1;
+      if (finding.severity === "blocker" || finding.severity === "major") {
+        if (finding.capped_from === undefined) finding.capped_from = finding.severity;
+        finding.severity = "minor";
+        demoted += 1;
+      }
     }
     entries.push({ index, status, kind, reason });
   }

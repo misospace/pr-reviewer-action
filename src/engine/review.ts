@@ -1499,6 +1499,7 @@ secrets: [profiles.primary.apiKey],
     blockerVerification = await applyBlockerVerification(reviewRecord.findings as ArtifactFinding[], {
       readSource,
       expectedRevision,
+      declaredActionInputs: new Set(contract.inputs.map((input) => input.id)),
     });
   }
   const verdictPolicy = env.VERDICT_POLICY ?? "strict";
@@ -1616,7 +1617,7 @@ secrets: [profiles.primary.apiKey],
       findings: blockerVerification.findings,
     })}\n`, "utf8"));
     reviewRecord.review_markdown = String(reviewRecord.review_markdown ?? "")
-      + `\n\n_${blockerVerification.demoted} finding(s) asserting committed source text could not be confirmed against exact-head source and are listed above as non-blocking. Deterministic enforcement gates are unaffected._`;
+      + `\n\n_${blockerVerification.demoted} finding(s) making source-backed claims that were positively contradicted or could not be confirmed against exact-head source are listed above as non-blocking. Deterministic enforcement gates are unaffected._`;
   }
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(reviewRecord)}\n`, "utf8"));
 

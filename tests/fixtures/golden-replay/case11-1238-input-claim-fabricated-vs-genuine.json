@@ -1,0 +1,81 @@
+{
+  "contract": "golden-replay/v1",
+  "name": "case11-1238-input-claim-fabricated-vs-genuine",
+  "status": "active",
+  "provenance": {
+    "source_head": "bfb68648d6b4444f19c70c001e0e830e1fe8e64b",
+    "origin": "Consumer-repo review (head bfb6864) of a workflow pinning misospace/pr-reviewer-action@5b1839535748f3afd1bd3ef04e8009302cba9aa6 (tag v3.7.0). The model fabricated two claims about the pinned action itself: that its metadata declares `ai-key` while `ai-api-key` is absent (both false at that revision - the contract declares ai-api-key), and that draft/label filtering is absent because the metadata declares no such input (false - the precheck implements the draft gate and rereview-label drives label re-review). Its upstream fetches had been truncated by the harness and it stopped at tool-call-budget-exhausted; the review published request_changes with zero blockers. Sanitized: repository, endpoint, model, and secret names replaced with placeholders; finding messages preserved in substance.",
+    "evidence_transform": "sanitized",
+    "model_response": "Recorded representative response from the 2026-10-23 review run of head bfb6864 (zero live inference): request_changes with one fabricated input-name major, one metadata-derived gate-absence minor, and one verification ask (secrets confirmation)."
+  },
+  "engine": "run-review",
+  "pr": {
+    "head_sha": "bfb68648d6b4444f19c70c001e0e830e1fe8e64b",
+    "title": "Add AI PR review workflow",
+    "body": "",
+    "diff": "diff --git a/.github/workflows/ai_pr_review.yaml b/.github/workflows/ai_pr_review.yaml\nnew file mode 100644\nindex 0000000..9c41f0a\n--- /dev/null\n+++ b/.github/workflows/ai_pr_review.yaml\n@@ -0,0 +1,36 @@\n+name: AI PR Review\n+\n+on:\n+  pull_request:\n+    types: [opened, reopened, synchronize, ready_for_review, labeled]\n+\n+permissions:\n+  contents: read\n+  pull-requests: write\n+  checks: read\n+\n+concurrency:\n+  group: ai-review-${{ github.event.pull_request.number }}${{ github.event.action == 'labeled' && format('-label-{0}', github.run_id) || '' }}\n+  cancel-in-progress: true\n+\n+jobs:\n+  ai-review:\n+    runs-on: ubuntu-latest\n+    steps:\n+      # The action also skips drafts and non-matching labels.\n+      - name: Check out the pull request head\n+        uses: actions/checkout@v4\n+        with:\n+          fetch-depth: 0\n+          ref: ${{ github.event.pull_request.head.sha }}\n+      - name: Run the AI review\n+        uses: misospace/pr-reviewer-action@5b1839535748f3afd1bd3ef04e8009302cba9aa6 # v3.7.0\n+        with:\n+          github-token: ${{ secrets.GITHUB_TOKEN }}\n+          ai-base-url: ${{ secrets.AI_ENDPOINT }}\n+          ai-api-format: openai\n+          ai-model: review-model\n+          ai-max-tokens: \"16384\"\n+          ai-temperature: \"0.1\"\n+          ai-response-format: json_schema\n+          ai-api-key: ${{ secrets.MINIMAX_API_KEY }}\n",
+    "files": [
+      {
+        "filename": ".github/workflows/ai_pr_review.yaml",
+        "status": "added",
+        "additions": 36,
+        "deletions": 0,
+        "changes": 36
+      }
+    ],
+    "threads": []
+  },
+  "source_files": {
+    ".github/workflows/ai_pr_review.yaml": "name: AI PR Review\n\non:\n  pull_request:\n    types: [opened, reopened, synchronize, ready_for_review, labeled]\n\npermissions:\n  contents: read\n  pull-requests: write\n  checks: read\n\nconcurrency:\n  group: ai-review-${{ github.event.pull_request.number }}${{ github.event.action == 'labeled' && format('-label-{0}', github.run_id) || '' }}\n  cancel-in-progress: true\n\njobs:\n  ai-review:\n    runs-on: ubuntu-latest\n    steps:\n      # The action also skips drafts and non-matching labels.\n      - name: Check out the pull request head\n        uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n          ref: ${{ github.event.pull_request.head.sha }}\n      - name: Run the AI review\n        uses: misospace/pr-reviewer-action@5b1839535748f3afd1bd3ef04e8009302cba9aa6 # v3.7.0\n        with:\n          github-token: ${{ secrets.GITHUB_TOKEN }}\n          ai-base-url: ${{ secrets.AI_ENDPOINT }}\n          ai-api-format: openai\n          ai-model: review-model\n          ai-max-tokens: \"16384\"\n          ai-temperature: \"0.1\"\n          ai-response-format: json_schema\n          ai-api-key: ${{ secrets.MINIMAX_API_KEY }}\n"
+  },
+  "secrets": [],
+  "recorded_model_response": {
+    "verdict": "request_changes",
+    "review_markdown": "## Summary\n\nThe review stopped at tool-call-budget-exhausted after 22 successful reads; upstream fetches of the pinned action's metadata were truncated. The workflow's credential is passed under an input name the pinned action reportedly does not declare.\n\n## Findings\n\n- **Major** (.github/workflows/ai_pr_review.yaml:36) - the pinned action declares its API-key input as `ai-key`, so `ai-api-key` is dropped by GitHub.\n- **Minor** (.github/workflows/ai_pr_review.yaml:20) - the draft/label filtering comment is inaccurate; the filtering comes from the workflow's own `if`.\n- **Info** (.github/workflows/ai_pr_review.yaml:36) - confirm the configured secret exists in the CI environment.\n\n## Recommendation\n\nRequest changes: rename the credential input.\n",
+    "smart_review_requested": false,
+    "smart_review_reason": null,
+    "findings": [
+      {
+        "id": "f1238-input",
+        "severity": "major",
+        "category": "bug",
+        "file": ".github/workflows/ai_pr_review.yaml",
+        "line": 36,
+        "message": "The pinned action declares its API-key input as `ai-key` (action.yml at v3.7.0), so `ai-api-key` is an unexpected input that GitHub ignores and the action runs without the endpoint credential."
+      },
+      {
+        "id": "f1238-gate",
+        "severity": "minor",
+        "category": "bug",
+        "file": ".github/workflows/ai_pr_review.yaml",
+        "line": 20,
+        "message": "The comment says the action itself skips drafts and non-matching labels, but that filtering is done by this workflow's own `if` (the action metadata declares no `if:` or label input)."
+      },
+      {
+        "id": "f1238-verify",
+        "severity": "info",
+        "category": "verification",
+        "file": ".github/workflows/ai_pr_review.yaml",
+        "line": 36,
+        "message": "Please confirm the workflow's configured secret is present in the CI environment; the review cannot read repository secrets."
+      }
+    ],
+    "requirement_coverage": null,
+    "required_check_dispositions": null
+  },
+  "config": {},
+  "expect": {
+    "verdict": "comment",
+    "blocking_finding_ids": [],
+    "unsupported_blocking_claims": 0,
+    "supported_blocking_claims": 0,
+    "published_body_excludes": [],
+    "published_body_includes": [
+      "listed above as non-blocking"
+    ],
+    "grounding_status": {
+      "f1238-input": "refuted",
+      "f1238-gate": "unverified"
+    }
+  }
+}
