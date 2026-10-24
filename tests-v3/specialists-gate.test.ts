@@ -1189,3 +1189,24 @@ test("#1061: a valid-empty overrun is classified and logged, not reported as a c
     rmSync(result.root, { recursive: true, force: true });
   }
 });
+
+test("#1235: toV2Completion projects malformed-negative usage as 0, never a negative number", () => {
+  // The streamed-turn projection has no "not reported" slot (a missing usage
+  // already projects as 0), so a malformed negative count projects as 0 too —
+  // the same contribution the #1207 clamp gives the loop aggregate.
+  assert.deepEqual(
+    toV2Completion({
+      id: "s1", object: "chat.completion", model: "m", content: "x", toolCalls: [], finishReason: "stop",
+      usage: { promptTokens: -5, completionTokens: -3, totalTokens: -8 }, error: null,
+    }).usage,
+    { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+  );
+  // Positive siblings of a malformed body survive the projection unchanged.
+  assert.deepEqual(
+    toV2Completion({
+      id: "s1", object: "chat.completion", model: "m", content: "x", toolCalls: [], finishReason: "stop",
+      usage: { promptTokens: -5, completionTokens: 7, totalTokens: 7 }, error: null,
+    }).usage,
+    { prompt_tokens: 0, completion_tokens: 7, total_tokens: 7 },
+  );
+});

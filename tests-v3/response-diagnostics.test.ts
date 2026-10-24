@@ -297,3 +297,44 @@ test("#1047 (review): an OpenAI finish_reason gets the same mask-before-bound tr
   assert.equal(JSON.stringify(result.record).includes(key.slice(0, 16)), false);
   assert.equal(JSON.stringify(result.record).includes(key), false);
 });
+
+test("#1235: a malformed-negative usage body publishes no negative counts in the record", () => {
+  // The #1235 mirror of the #1207 clamp: a negative count is "not reported",
+  // so the record carries no negative number — and no key at all, the same
+  // shape as a body reporting nothing.
+  const result = describeUnusableResponse({
+    response: openaiBody({ usage: { prompt_tokens: -100, completion_tokens: -5 } }),
+    apiFormat: "openai",
+    profile: "Primary",
+    streamed: false,
+    failureKind: "not_object",
+  });
+  assert.ok(result);
+  assert.equal("completion_tokens" in result.record, false);
+  assert.equal("prompt_tokens" in result.record, false);
+  // A negative count can also never masquerade as billed tokens in the
+  // classification (the framing-loss / reasoning-only branches).
+  assert.equal(result.class, "zero-output");
+  // Anthropic shape, per-field: a positive sibling survives, the negative
+  // part stays out of the record.
+  const mixed = describeUnusableResponse({
+    response: anthropicBody({ usage: { input_tokens: -7, output_tokens: 64 } }),
+    apiFormat: "anthropic",
+    profile: "Primary",
+    streamed: false,
+    failureKind: "not_object",
+  });
+  assert.ok(mixed);
+  assert.equal(mixed.record.completion_tokens, 64);
+  assert.equal("prompt_tokens" in mixed.record, false);
+  // -0 survives the clamp as exactly 0 (no signed zero pinned into records).
+  const zero = describeUnusableResponse({
+    response: openaiBody({ usage: { prompt_tokens: 1, completion_tokens: -0 } }),
+    apiFormat: "openai",
+    profile: "Primary",
+    streamed: false,
+    failureKind: "not_object",
+  });
+  assert.ok(zero);
+  assert.ok(Object.is(zero.record.completion_tokens, 0));
+});

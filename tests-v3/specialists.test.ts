@@ -14,11 +14,14 @@ import {
   runSpecialists,
   completionOverran,
   responseStopReason,
+  extractResponseUsage,
+  mergeUsage,
   DEFAULT_SPECIALIST_MAX_TOKENS,
   OVERRUN_RETRY_CEILING,
   type SpecialistCorpusWorkspace,
   type SpecialistRunInput,
   type SpecialistTransportOutcome,
+  type SpecialistUsage,
 } from "../src/specialists/index.js";
 import { fitToBytes } from "../src/specialists/render.js";
 import { reassembleSse } from "../src/transport/sse.js";
@@ -1849,4 +1852,67 @@ test("#1200: a combined_scout call refused before the wire records no attempt fo
     assert.equal(roleEntry(result, roleName).attempts, undefined, `${roleName}: no attempt record for a refused call`);
   }
   assert.equal(result.aggregate.request_count, 0, "the refused shared call is not a wire attempt");
+});
+
+// ---------------------------------------------------------------------------
+// wire.ts usage accounting — #1235
+// ---------------------------------------------------------------------------
+
+test("#1235: extractResponseUsage clamps negative provider counts to not-reported (the #1207 decision)", () => {
+  // No provider reports negative tokens: a malformed body whose every count
+  // is negative reports nothing at all, per shape.
+  assert.equal(extractResponseUsage({
+    usage: {
+      prompt_tokens: -5,
+      completion_tokens: -3,
+      total_tokens: -8,
+      prompt_tokens_details: { cached_tokens: -2 },
+      completion_tokens_details: { reasoning_tokens: -1 },
+    },
+  }), null);
+  assert.equal(extractResponseUsage({
+    usage: { input_tokens: -7, output_tokens: -2, cache_read_input_tokens: -4, cache_creation_input_tokens: -9 },
+  }), null);
+  assert.equal(extractResponseUsage({
+    usage: { promptTokens: -4, completionTokens: -2, totalTokens: -6 },
+  }), null);
+  // Per-field: positive siblings of the same malformed body still count.
+  assert.deepEqual(extractResponseUsage({
+    usage: { prompt_tokens: -5, completion_tokens: 9, prompt_tokens_details: { cached_tokens: 4 } },
+  }), { prompt_tokens: null, completion_tokens: 9, cached_tokens: 4, total_tokens: null });
+  // The derived-total fallback survives a malformed-negative reported total,
+  // synthesizing only from the reported (non-negative) siblings.
+  assert.deepEqual(extractResponseUsage({
+    usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: -100 },
+  }), { prompt_tokens: 5, completion_tokens: 3, cached_tokens: null, total_tokens: 8 });
+  // A negative reasoning count is "not reported": the record carries no
+  // reasoning field at all rather than a negative one.
+  assert.deepEqual(extractResponseUsage({
+    usage: { completion_tokens: 5, completion_tokens_details: { reasoning_tokens: -3 } },
+  }), { prompt_tokens: null, completion_tokens: 5, cached_tokens: null, total_tokens: null });
+  // -0 survives as exactly 0 (no signed zero pinned into records).
+  const zero = extractResponseUsage({ usage: { prompt_tokens: -0 } });
+  assert.ok(zero !== null);
+  assert.ok(Object.is(zero.prompt_tokens, 0));
+});
+
+test("#1235: mergeUsage never folds a negative count into the specialist aggregate", () => {
+  // The first entry clamps negatives to null (not-reported), like the reader.
+  assert.deepEqual(
+    mergeUsage(null, { prompt_tokens: -5, completion_tokens: 9, cached_tokens: -2, total_tokens: -8 }),
+    { prompt_tokens: null, completion_tokens: 9, cached_tokens: null, total_tokens: null },
+  );
+  // A negative count contributes 0 to the running total; positive siblings
+  // still fold normally.
+  assert.deepEqual(
+    mergeUsage({ prompt_tokens: 10, completion_tokens: 3 },
+      { prompt_tokens: -50, completion_tokens: 2, cached_tokens: null, total_tokens: -48 } as SpecialistUsage),
+    { prompt_tokens: 10, completion_tokens: 5 },
+  );
+  // A negative running value (a malformed pre-fold state) is treated as not
+  // started: replaced, never carried or added to.
+  assert.deepEqual(
+    mergeUsage({ prompt_tokens: -7 }, { prompt_tokens: 4, completion_tokens: null, cached_tokens: null, total_tokens: 4 } as SpecialistUsage),
+    { prompt_tokens: 4, total_tokens: 4 },
+  );
 });

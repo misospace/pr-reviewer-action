@@ -51,7 +51,15 @@ function codePointSlice(text: string, max: number): string {
   return points.length <= max ? text : points.slice(0, max).join("");
 }
 
-/** The v2 SSE reassembler's result shape for a streamed turn. */
+/** The v2 SSE reassembler's result shape for a streamed turn.
+ * #1235 mirrors the #1207 clamp: a negative provider-reported count is
+ * malformed input, not a measurement, and this shape has no "not reported"
+ * slot (a missing usage already projects as 0), so it projects as 0 — the
+ * fold's contribution for a malformed field is 0 either way. */
+function usageCount(value: number): number {
+  return value > 0 ? value : 0;
+}
+
 export function toV2Completion(response: NormalizedModelResponse): Record<string, unknown> {
   const message: Record<string, unknown> = { role: "assistant", content: response.content };
   if (response.toolCalls.length > 0) message.tool_calls = response.toolCalls;
@@ -62,9 +70,9 @@ export function toV2Completion(response: NormalizedModelResponse): Record<string
     model: response.model,
     choices: [{ index: 0, message, finish_reason: response.finishReason }],
     usage: {
-      prompt_tokens: usage.promptTokens,
-      completion_tokens: usage.completionTokens,
-      total_tokens: usage.totalTokens,
+      prompt_tokens: usageCount(usage.promptTokens),
+      completion_tokens: usageCount(usage.completionTokens),
+      total_tokens: usageCount(usage.totalTokens),
     },
   };
   if (response.error !== undefined && response.error !== null) result.error = response.error;
