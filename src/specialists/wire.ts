@@ -53,9 +53,14 @@ export interface SpecialistUsage {
   total_tokens: number | null;
 }
 
+/** #1207/#1235: a negative token count is malformed input, not a measurement —
+ * no provider reports negative tokens. It is "not reported" (`null`), per
+ * field, so a malformed body can never publish a negative count here either;
+ * positive siblings of the same body still count. `-0` survives as exactly 0
+ * (no signed zero pinned into records). */
 function asInt(value: unknown): number | null {
-  if (typeof value !== "number" || !Number.isInteger(value)) return null;
-  return value;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) return null;
+  return value === 0 ? 0 : value;
 }
 
 /** Normalize provider token usage from a (re)assembled chat response. Handles
@@ -148,17 +153,30 @@ export function responseStopReason(response: unknown): string | null {
 }
 
 /** Merge one response's usage into a running total (thread-safe by
- * construction in JS: no interleaving within a single synchronous call). */
+ * construction in JS: no interleaving within a single synchronous call).
+ * #1235 mirrors the #1207 clamp at the fold: a negative count (malformed
+ * input, exactly what `asInt` refuses upstream) contributes 0 — and a
+ * malformed running value (a negative in particular) is "not started",
+ * replaced rather than carried, on every fold the running state takes part
+ * in: the standing record is re-normalized through `asInt` up front, so a
+ * negative running value never survives even when the incoming field for the
+ * same key is itself malformed (the `continue` alone would carry it). */
 export function mergeUsage(
   into: Record<string, number | null> | null,
   usage: SpecialistUsage,
 ): Record<string, number | null> {
-  if (into === null) return { ...usage };
-  const merged: Record<string, number | null> = { ...into };
+  if (into === null) {
+    const first: Record<string, number | null> = {};
+    for (const [key, value] of Object.entries(usage)) first[key] = asInt(value);
+    return first;
+  }
+  const merged: Record<string, number | null> = {};
+  for (const [key, current] of Object.entries(into)) merged[key] = asInt(current);
   for (const [key, value] of Object.entries(usage)) {
-    if (typeof value !== "number" || !Number.isInteger(value)) continue;
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0) continue;
     const current = merged[key];
-    merged[key] = typeof current === "number" && Number.isInteger(current) ? current + value : value;
+    merged[key] =
+      typeof current === "number" && Number.isInteger(current) && current >= 0 ? current + value : value;
   }
   return merged;
 }

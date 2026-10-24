@@ -46,12 +46,89 @@ export interface SpecialistTransportConfig {
   terminalLatch?: TerminalLaneLatch;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function codePointSlice(text: string, max: number): string {
   const points = Array.from(text);
   return points.length <= max ? text : points.slice(0, max).join("");
 }
 
-/** The v2 SSE reassembler's result shape for a streamed turn. */
+/** The v2 SSE reassembler's result shape for a streamed turn.
+ * #1235 mirrors the #1207 clamp: a negative provider-reported count is
+ * malformed input, not a measurement, and this shape has no "not reported"
+ * slot (a missing usage already projects as 0), so it projects as 0 — the
+ * fold's contribution for a malformed field is 0 either way. */
+function usageCount(value: number): number {
+  return value > 0 ? value : 0;
+}
+
+/** The same bounded depth the masking walker in `src/context/redact.ts`
+ * uses for the same class of JSON-shaped provider body (`MAX_MASK_DEPTH`,
+ * kept a module-private detail there; a local mirror costs a pointed
+ * comment, not a widened export). */
+const MAX_USAGE_PRUNE_DEPTH = 32;
+
+function pruneNegativeUsageCounts(
+  node: unknown,
+  depth: number,
+): { changed: boolean; value: unknown } {
+  if (!isRecord(node)) return { changed: false, value: node };
+  if (depth >= MAX_USAGE_PRUNE_DEPTH) {
+    // #252 fail-closed, same shape as the masking walker's cutoff: a branch
+    // deeper than this walker masters cannot be verified to carry no
+    // negative count, so it is never published the way it arrived — `null`
+    // is "not reported" for every accounting reader probing its keys
+    // (`isRecord(null)` is always false).
+    return { changed: true, value: null };
+  }
+  let changed = false;
+  const value = Object.fromEntries(
+    Object.entries(node).flatMap(([key, item]): [string, unknown][] => {
+      if (typeof item === "number" && Number.isFinite(item) && (item < 0 || Object.is(item, -0))) {
+        // A negative count is removed (the body's own "not reported"); a
+        // `-0` count normalizes to a reported exactly-`0` one. Both mark
+        // changed without carrying the malformed shape onward.
+        changed = true;
+        return Object.is(item, -0) ? [[key, 0]] : [];
+      }
+      const nested = pruneNegativeUsageCounts(item, depth + 1);
+      if (nested.changed) changed = true;
+      return [[key, nested.value]];
+    }),
+  );
+  return { changed, value: changed ? value : node };
+}
+
+/** #1235 (review): the non-streamed ok path hands the genuine provider wire
+ * body forward, and the runner persists it behind per-leaf string masking
+ * that keeps structure intact — so a negative provider-reported count would
+ * ride `specialist-<role>.response.json` verbatim: the one publication
+ * surface the streamed projection (`usageCount`) covered but this path had
+ * not. The same #1207 decision applies: the count is malformed input, not a
+ * measurement. The offending field is removed — the body's own "not
+ * reported"; every accounting reader (`extractResponseUsage` and its
+ * presence-based fallbacks) treats an absent count as null exactly the way
+ * the clamp would — and a `-0` count normalizes to exactly `0`. The sweep is
+ * bounded to the top-level `usage` record, including its nested details
+ * records, and never the rest of the body: legitimate negative numbers exist
+ * elsewhere (e.g. `logprobs`) and no accounting surface outside `usage` is
+ * read. A body with nothing malformed returns unchanged (same reference), so
+ * provider bodies that carry no malformed usage numbers keep their identical
+ * identity and bytes end to end. The rebuild never assigns `out[key] = …`:
+ * `Object.fromEntries` only (CreateDataPropertyOrThrow), so a hostile own
+ * `__proto__` key from JSON.parse defines a data property and cannot invoke
+ * the prototype setter into a forged accounting record — the #252 boundary
+ * the masking walker wrote the same norm for. */
+function withoutNegativeUsage(raw: unknown): unknown {
+  if (!isRecord(raw)) return raw;
+  const usage = raw.usage;
+  if (!isRecord(usage)) return raw;
+  const pruned = pruneNegativeUsageCounts(usage, 0);
+  return pruned.changed ? { ...raw, usage: pruned.value } : raw;
+}
+
 export function toV2Completion(response: NormalizedModelResponse): Record<string, unknown> {
   const message: Record<string, unknown> = { role: "assistant", content: response.content };
   if (response.toolCalls.length > 0) message.tool_calls = response.toolCalls;
@@ -62,9 +139,9 @@ export function toV2Completion(response: NormalizedModelResponse): Record<string
     model: response.model,
     choices: [{ index: 0, message, finish_reason: response.finishReason }],
     usage: {
-      prompt_tokens: usage.promptTokens,
-      completion_tokens: usage.completionTokens,
-      total_tokens: usage.totalTokens,
+      prompt_tokens: usageCount(usage.promptTokens),
+      completion_tokens: usageCount(usage.completionTokens),
+      total_tokens: usageCount(usage.totalTokens),
     },
   };
   if (response.error !== undefined && response.error !== null) result.error = response.error;
@@ -227,7 +304,11 @@ const wire = {
       return wireTelemetry({ ok: false, errorMessage: masked, timeout: masked.toLowerCase().includes("timed out") });
     }
     if (outcome.status === "ok") {
-      const raw = payload.stream === true ? toV2Completion(outcome.response) : outcome.raw;
+      // #1235: the streamed projection clamps in `toV2Completion`; the
+      // non-streamed genuine body clamps its top-level usage record here, so
+      // either way the body that reaches the runner — and the persisted
+      // artifact — publishes no negative provider-reported count.
+      const raw = payload.stream === true ? toV2Completion(outcome.response) : withoutNegativeUsage(outcome.raw);
       return wireTelemetry({ ok: true, raw });
     }
     // #1080: latch FIRST so the classification is recorded even if the

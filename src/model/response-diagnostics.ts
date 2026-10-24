@@ -109,8 +109,13 @@ interface BlockShape {
   promptTokens: number | undefined;
 }
 
+/** #1207/#1235: a negative count is malformed input, not a measurement — no
+ * provider reports negative tokens. It is "not reported" (`undefined`), per
+ * field, so a diagnostics record can never publish a negative count; the
+ * `??` fallbacks treat it exactly like a missing field. `-0` survives as 0. */
 function intOrUndefined(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isInteger(value) ? value : undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) return undefined;
+  return value === 0 ? 0 : value;
 }
 
 function blockShapeOf(response: Record<string, unknown>, secrets: readonly (string | null | undefined)[]): BlockShape {
