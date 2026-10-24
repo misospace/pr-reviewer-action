@@ -1,6 +1,9 @@
 import { authorizesLiteralClaim, verifySourceSpan } from "../context/evidence-provenance.js";
 import type { EvidenceProvenance } from "../context/evidence-provenance.js";
 import type { ArtifactFinding } from "./artifact.js";
+import { ACTION_GATES, UNCOVERED_GATE_SUBJECTS } from "./action-gates.js";
+import type { ActionGate } from "./action-gates.js";
+import type { ActionSourceReadResult, ActionSourceReader } from "./action-source.js";
 
 export type GroundingStatus = "grounded" | "refuted" | "unverified" | "unsupported";
 export type GroundingKind = "committed_literal" | "requirement_claim" | "input_declaration" | "gate_absence";
@@ -8,6 +11,13 @@ export type GroundingKind = "committed_literal" | "requirement_claim" | "input_d
 export const SANITIZER_MARKERS: readonly string[] = ["⟦redacted:credential⟧", "⟦•⟧", "[REDACTED]"];
 export const REQUIREMENT_NOT_ENFORCED_RE = /^\s*requirement\s+not\s+enforced\b/i;
 export const MAX_VERIFICATION_READS = 20;
+/**
+ * #1238: upper bound on the action-source reads one boundary pass may
+ * spend on the executing action's own implementation (the gate-absence
+ * witness). Separate from MAX_VERIFICATION_READS, which budgets reads of
+ * the REVIEWED repository's source.
+ */
+export const MAX_ACTION_SOURCE_READS = 4;
 /**
  * #1016 (review pass): a `requirement_claim` is grounded only when the cited
  * span is present within ±EVIDENCE_LINE_WINDOW lines of the cited line. A
@@ -25,6 +35,13 @@ export interface BlockerVerificationOptions {
   readSource: SourceReader;
   expectedRevision: string | null;
   declaredActionInputs?: ReadonlySet<string> | null | undefined;
+  /**
+   * #1238: witness for gate-absence claims — a reader over the EXECUTING
+   * action's own source tree. Absent (or null) means no witness is
+   * available, which is the pre-#1238 behavior: the claim stays
+   * unverified.
+   */
+  readActionSource?: ActionSourceReader | null | undefined;
 }
 
 export interface FindingGrounding {
@@ -230,8 +247,69 @@ const INPUT_TOKEN_RE = /^[a-z][a-z0-9-]{2,63}$/i;
  * carrying clause. Windows are bounded by the token's sentence. */
 const CLAUSE_DELIMITER_RE = /[,;]|\b(?:but|and|so|yet|or)\b/gi;
 const GATE_BEHAVIOR_RE = /\b(?:drafts?|labels?|skips?|gates?|filters?|dedupes?|fingerprints?)\b/i;
-const GATE_ABSENCE_RE = /\b(?:absent|absence|doesn'?t|does\s+not|never|lacks?|missing|not\s+implement(?:ed|ing)?|not\s+perform(?:ed|ing)?|declares?\s+no)\b/i;
+/**
+ * Absence cues for the gate-absence shape. The declaration family
+ * ("declares no", "has no", "contains no", ...) is what the incident's
+ * premise used; the negation family ("never", "does not", "not
+ * implemented") covers the direct behavioral phrasing. A bare "no" is
+ * deliberately absent: it would match any negation in any sentence.
+ */
+const GATE_ABSENCE_RE = /\b(?:absent|absence|doesn'?t|does\s+not|never|lacks?|missing|not\s+implement(?:ed|ing)?|not\s+perform(?:ed|ing)?|declares?\s+no|has\s+no|have\s+no|contains?\s+no|lists?\s+no|exposes?\s+no|offers?\s+no)\b/i;
 const GATE_METADATA_RE = /\b(?:metadata|manifest|inputs?\s+(?:list|block|names?))\b/i;
+/**
+ * #1238: the gate-absence decision vocabulary. The witness (the executing
+ * action's own implementation) proves that a gate EXISTS, so it can only
+ * contradict a claim that says the action LACKS the behavior — a claim
+ * that affirms the gate's presence is not contradicted by its existence and
+ * stays unverified.
+ *
+ * - ABSENCE_CUE_WORDS negate ("never", "not", "no", "without", ...).
+ * - MECHANISM_WORDS name a gate BEHAVIOR ("skips", "filters", "gates", ...).
+ *   A cue bound to a mechanism word is a claim about what the action does.
+ * - QUALIFIER_WORDS SCOPE a subject ("whose", "only", "except", ...). A
+ *   scoped claim is not decidable by an implementation witness.
+ * - DISPLACED_FORM_WORDS are the passive forms of a behavior claim ("is
+ *   done by", "is handled by", ...) whose agent decides WHO performs it.
+ */
+const GATE_ABSENCE_CUE_WORDS: ReadonlySet<string> = new Set([
+  "never", "not", "no", "without", "lacks", "lack", "lacking", "missing", "absent",
+  "cannot", "can't", "wont", "won't", "fails", "fail", "failed", "neither", "nor",
+]);
+const GATE_MECHANISM_WORDS: ReadonlySet<string> = new Set([
+  "skip", "skips", "skipped", "skipping",
+  "filter", "filters", "filtering", "filtered",
+  "gate", "gates", "gated", "gating",
+  "screen", "screens", "screened", "screening",
+  "exclude", "excludes", "excluding", "excluded",
+  "reject", "rejects", "rejecting", "rejected",
+  "ignore", "ignores", "ignoring", "ignored",
+  "drop", "drops", "dropping", "dropped",
+  "handle", "handles", "handling", "handled",
+  "enforce", "enforces", "enforcing", "enforced",
+  "perform", "performs", "performing", "performed",
+  "implement", "implements", "implementing", "implemented",
+  "process", "processes", "processing", "processed",
+]);
+const GATE_QUALIFIER_WORDS: ReadonlySet<string> = new Set([
+  "whose", "which", "when", "unless", "except", "where", "only", "just",
+  "specifically", "besides", "within", "under",
+]);
+const GATE_DISPLACED_FORM_WORDS: ReadonlySet<string> = new Set([
+  "done", "handled", "provided", "implemented", "performed", "executed",
+]);
+/**
+ * A word of a claim sentence, with its character span. The gate scan
+ * matches words, never substrings: "no" must not match inside "not", and
+ * a possessive keeps its head word ("action's" is the action subject).
+ */
+interface GateToken {
+  word: string;
+  start: number;
+  end: number;
+}
+
+/** Word tokens of a sentence: letters/digits, with intra-word apostrophes. */
+const GATE_WORD_RE = /[A-Za-z0-9]+(?:'[A-Za-z0-9]+)*/g;
 /**
  * Upper bound on quoted spans the input-claim scan inspects per message.
  * The incident-class claim cites a handful of names; a pathological
@@ -347,50 +425,266 @@ function classifyInputDeclaration(message: string): InputCandidate[] {
 }
 
 /**
+ * A sentence of a claim message that carries the gate-absence shape: the
+ * action subject, a gate behavior word, an absence cue and a
+ * metadata/input-list cue, all in ONE sentence.
+ */
+interface GateSentence {
+  /** The sentence as written — the other-action guard must see citations. */
+  raw: string;
+  /** The same sentence with quoted spans masked — cues, subjects and
+   * qualifiers can never be forged by a cited span. */
+  masked: string;
+}
+
+/**
  * Gate-absence recognition (#1238): the message asserts that a
  * deterministic behavior of the action is absent while deriving that
  * conclusion from the action's metadata/input list (the incident's "no
- * label input" premise). The boundary can never positively disprove a
- * behavior-existence claim from in-run sources, so recognition here leads
- * only to an `unverified` marking — never a refutation and never a
- * grounding. Sentence-scoped: every cue family must co-occur in one
- * sentence, bounded by MAX_CLAIM_SCAN_LENGTH.
+ * label input" premise). Sentence-scoped: every cue family must co-occur
+ * in one sentence, bounded by MAX_CLAIM_SCAN_LENGTH.
+ *
+ * Each matching sentence is returned twice — masked (so a quoted span can
+ * never forge a cue) and raw (so the other-action guard can see a cited
+ * `owner/repo@ref` or `uses:` key). The masking preserves length and
+ * indices, so both views describe the same characters.
+ *
+ * An empty list means the message asserts no gate absence.
  */
-function assertsGateAbsence(message: string): boolean {
-  if (message.length > MAX_CLAIM_SCAN_LENGTH) return false;
-  if (!/action/i.test(message)) return false;
+function gateAbsenceSentences(message: string): GateSentence[] {
+  const sentences: GateSentence[] = [];
+  if (message.length > MAX_CLAIM_SCAN_LENGTH) return sentences;
+  if (!/action/i.test(message)) return sentences;
   const masked = maskedForScan(message);
   let cursor = 0;
   while (cursor < masked.length) {
     while (cursor < masked.length && SENTENCE_DELIMITERS.has(masked[cursor] ?? "")) cursor += 1;
     let end = cursor;
     while (end < masked.length && !SENTENCE_DELIMITERS.has(masked[end] ?? "")) end += 1;
-    const sentence = masked.slice(cursor, end);
+    const maskedSentence = masked.slice(cursor, end);
     if (
-      ACTION_SUBJECT_CUE_RE.test(sentence)
-      && GATE_BEHAVIOR_RE.test(sentence)
-      && GATE_ABSENCE_RE.test(sentence)
-      && GATE_METADATA_RE.test(sentence)
-    ) return true;
+      ACTION_SUBJECT_CUE_RE.test(maskedSentence)
+      && GATE_BEHAVIOR_RE.test(maskedSentence)
+      && GATE_ABSENCE_RE.test(maskedSentence)
+      && GATE_METADATA_RE.test(maskedSentence)
+    ) sentences.push({ raw: message.slice(cursor, end), masked: maskedSentence });
     cursor = end;
   }
-  return false;
+  return sentences;
 }
 
 interface ClaimClassification {
   kind: GroundingKind | null;
   inputCandidates: InputCandidate[];
+  /** #1238: the sentences that assert a gate absence. */
+  gateSentences: GateSentence[];
 }
 
-/** Classify once per finding; the input candidates are reused by the
- * verification branch instead of rescanning the message. */
+/** Classify once per finding; the input candidates and the gate-absence
+ * sentences are reused by the verification branch instead of rescanning the
+ * message. */
 function classifyClaim(message: string): ClaimClassification {
-  if (assertsCommittedMarker(message)) return { kind: "committed_literal", inputCandidates: [] };
+  if (assertsCommittedMarker(message)) return { kind: "committed_literal", inputCandidates: [], gateSentences: [] };
   const inputCandidates = classifyInputDeclaration(message);
-  if (inputCandidates.length > 0) return { kind: "input_declaration", inputCandidates };
-  if (assertsGateAbsence(message)) return { kind: "gate_absence", inputCandidates: [] };
-  if (REQUIREMENT_NOT_ENFORCED_RE.test(message)) return { kind: "requirement_claim", inputCandidates: [] };
-  return { kind: null, inputCandidates: [] };
+  if (inputCandidates.length > 0) return { kind: "input_declaration", inputCandidates, gateSentences: [] };
+  const gateSentences = gateAbsenceSentences(message);
+  if (gateSentences.length > 0) return { kind: "gate_absence", inputCandidates: [], gateSentences };
+  if (REQUIREMENT_NOT_ENFORCED_RE.test(message)) return { kind: "requirement_claim", inputCandidates: [], gateSentences: [] };
+  return { kind: null, inputCandidates: [], gateSentences: [] };
+}
+
+/** The word tokens of a sentence, lowercased, with their character spans. */
+function gateTokens(sentence: string): GateToken[] {
+  const tokens: GateToken[] = [];
+  for (const match of sentence.matchAll(GATE_WORD_RE)) {
+    const start = match.index ?? 0;
+    tokens.push({ word: match[0].toLowerCase(), start, end: start + match[0].length });
+  }
+  return tokens;
+}
+
+/**
+ * The clause ranges of a sentence: the segments between the clause
+ * delimiters (a comma, a semicolon, or the words but/and/so/yet/or — the
+ * same boundary semantics the input-declaration direction window uses). A
+ * delimiter word is part of no clause.
+ */
+function gateClauseRanges(sentence: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  let cursor = 0;
+  for (const match of sentence.matchAll(CLAUSE_DELIMITER_RE)) {
+    const at = match.index ?? 0;
+    if (at > cursor) ranges.push({ start: cursor, end: at });
+    cursor = at + match[0].length;
+  }
+  if (cursor < sentence.length) ranges.push({ start: cursor, end: sentence.length });
+  return ranges;
+}
+
+/** True when the token names the executing action ("action", "action's"). */
+function isActionSubjectToken(word: string): boolean {
+  return word === "action" || word === "action's";
+}
+
+/**
+ * #1238: does the claim assert that the ACTION lacks the behavior? The
+ * implementation witness proves the gate EXISTS, so it may contradict only
+ * a claim of absence. Two forms qualify:
+ *
+ * (a) NEGATION-BOUND: an absence cue is followed, in the same clause, by a
+ *     mechanism word with at most two intervening tokens. The clause must
+ *     name the action — otherwise the cue is attributed to a different
+ *     actor ("the workflow never skips drafts") and says nothing about the
+ *     action's own gates.
+ * (b) DISPLACEMENT: a mechanism word is followed by "is|are" + a passive
+ *     form + "by", and the words right after "by" do not name the action.
+ *     The behavior is attributed to something else, which the action's own
+ *     implementation contradicts — the shape the #1238 incident claim used
+ *     ("that filtering is done by this workflow's own `if`").
+ *
+ * The sentence and its tokens are the MASKED view: a quoted span can never
+ * forge a cue, a subject or a qualifier.
+ */
+function assertsActionAbsence(sentence: string, tokens: readonly GateToken[]): boolean {
+  for (const range of gateClauseRanges(sentence)) {
+    const clause = tokens.filter((token) => token.start >= range.start && token.end <= range.end);
+    // (a) negation bound.
+    if (clause.some((token) => isActionSubjectToken(token.word))) {
+      for (let i = 0; i < clause.length; i += 1) {
+        if (!GATE_ABSENCE_CUE_WORDS.has(clause[i]!.word)) continue;
+        for (let j = i + 1; j < clause.length && j - i - 1 <= 2; j += 1) {
+          if (GATE_MECHANISM_WORDS.has(clause[j]!.word)) return true;
+        }
+      }
+    }
+    // (b) displacement: the behavior is attributed to another agent.
+    for (let m = 0; m + 3 < clause.length; m += 1) {
+      if (!GATE_MECHANISM_WORDS.has(clause[m]!.word)) continue;
+      const verb = clause[m + 1]!.word;
+      if (verb !== "is" && verb !== "are") continue;
+      if (!GATE_DISPLACED_FORM_WORDS.has(clause[m + 2]!.word)) continue;
+      if (clause[m + 3]!.word !== "by") continue;
+      const target = clause.slice(m + 4, m + 7).map((token) => token.word);
+      if (!target.some(isActionSubjectToken)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * #1238: the registry gates whose behavior subject a sentence names,
+ * sorted by id. A subject occurrence QUALIFIED by a scoping word ("whose",
+ * "only", ...) drops that gate from the covered set entirely: the claim is
+ * scoped, and an implementation witness cannot decide a scoped claim.
+ */
+function coveredActionGates(tokens: readonly GateToken[]): ActionGate[] {
+  const covered: ActionGate[] = [];
+  for (const gate of ACTION_GATES) {
+    const occurrences = tokens
+      .map((token, index) => ({ token, index }))
+      .filter(({ token }) => gate.subjects.includes(token.word));
+    if (occurrences.length === 0) continue;
+    const qualified = occurrences.some(({ index }) => {
+      for (let offset = -3; offset <= 3; offset += 1) {
+        if (offset === 0) continue;
+        const neighbor = tokens[index + offset];
+        if (neighbor !== undefined && GATE_QUALIFIER_WORDS.has(neighbor.word)) return true;
+      }
+      return false;
+    });
+    if (qualified) continue;
+    covered.push(gate);
+  }
+  return covered.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/**
+ * #1238: the action-source budget of one boundary pass — the reads spent
+ * on the executing action's own implementation and the per-file cache (one
+ * read per cited file, however many gates cite it).
+ */
+interface ActionSourceBudget {
+  reads: number;
+  cache: Map<string, ActionSourceReadResult>;
+}
+
+/**
+ * #1238: is the gate attested by the action's own implementation? Only a
+ * POSITIVE marker presence in the cited implementation file counts. A
+ * missing marker is NOT proof the gate is absent (it may be implemented
+ * elsewhere), and an unreadable file is no evidence at all — both are
+ * undecided, never refutation and never grounding.
+ */
+async function gateAttested(
+  gate: ActionGate,
+  read: ActionSourceReader,
+  budget: ActionSourceBudget,
+): Promise<boolean> {
+  let result = budget.cache.get(gate.implementation);
+  if (result === undefined) {
+    if (budget.reads >= MAX_ACTION_SOURCE_READS) return false;
+    budget.reads += 1;
+    result = await read(gate.implementation);
+    budget.cache.set(gate.implementation, result);
+  }
+  if (result.status === "unavailable") return false;
+  return result.text.includes(gate.marker);
+}
+
+/**
+ * #1238: decide a gate-absence claim, ONE SENTENCE AT A TIME.
+ *
+ * The decision is never made across sentences: a manifest-only sentence
+ * (a declaration about the action's inputs) is never refuted because
+ * another sentence in the same message carries a behavioral absence. Each
+ * sentence is judged on its own:
+ *
+ *  (a) it must not mention ANOTHER action — the executing action's
+ *      implementation cannot decide another action's gates;
+ *  (b) it must not name a behavior the registry does not cover;
+ *  (c) it must name at least one covered, unqualified gate subject;
+ *  (d) it must ASSERT the action's absence of that behavior;
+ *  (e) every covered gate of that sentence must be ATTESTED by the
+ *      action's own implementation.
+ *
+ * Only then is the finding refuted. Anything else — a scoped claim, an
+ * absent marker, an unreadable file, a claim the registry cannot decide —
+ * stays unverified, and a gate-absence claim is NEVER grounded.
+ */
+async function decideGateAbsence(
+  sentences: readonly GateSentence[],
+  witness: ActionSourceReader | null | undefined,
+  budget: ActionSourceBudget,
+): Promise<{ status: GroundingStatus; reason: string }> {
+  const unverifiable = { status: "unverified", reason: "gate-absence-unverifiable" } as const;
+  if (witness === undefined || witness === null) return unverifiable;
+  for (const sentence of sentences) {
+    // The other-action guards read the RAW sentence: a cited
+    // `owner/repo@ref` or `uses:` key usually sits inside a quoted span,
+    // which the masked view hides.
+    if (OTHER_ACTION_REF_RE.test(sentence.raw) || OTHER_ACTION_MENTION_RE.test(sentence.raw)) continue;
+    // Everything else reads the masked view, like every other cue scan in
+    // this boundary: a quoted span can never forge a cue, a subject or a
+    // qualifier.
+    const tokens = gateTokens(sentence.masked);
+    if (UNCOVERED_GATE_SUBJECTS.some((subject) => tokens.some((token) => token.word === subject))) continue;
+    const covered = coveredActionGates(tokens);
+    if (covered.length === 0) continue;
+    if (!assertsActionAbsence(sentence.masked, tokens)) continue;
+    const attested: string[] = [];
+    let allAttested = true;
+    for (const gate of covered) {
+      if (!await gateAttested(gate, witness, budget)) {
+        allAttested = false;
+        break;
+      }
+      attested.push(gate.id);
+    }
+    if (allAttested) {
+      return { status: "refuted", reason: `gate-implemented:${attested.sort().join(",")}` };
+    }
+  }
+  return unverifiable;
 }
 
 /**
@@ -421,6 +715,9 @@ export async function applyBlockerVerification(
   const entries: FindingGrounding[] = [];
   let reads = 0;
   let demoted = 0;
+  // The action's own implementation reads of this pass: one read per cited
+  // file (however many gates cite it), bounded by MAX_ACTION_SOURCE_READS.
+  const actionSourceBudget: ActionSourceBudget = { reads: 0, cache: new Map<string, ActionSourceReadResult>() };
 
   for (let index = 0; index < findings.length; index += 1) {
     const finding = findings[index]!;
@@ -434,7 +731,7 @@ export async function applyBlockerVerification(
     // it here could misattribute the original severity and re-force a
     // verdict those paths settled.
     if (finding.capped_from !== undefined || finding.ci_capped === true) continue;
-    const { kind, inputCandidates } = classifyClaim(finding.message);
+    const { kind, inputCandidates, gateSentences } = classifyClaim(finding.message);
     if (kind === null) continue;
 
     let status: GroundingStatus;
@@ -482,8 +779,16 @@ export async function applyBlockerVerification(
         }
       }
     } else if (kind === "gate_absence") {
-      status = "unverified";
-      reason = "gate-absence-unverifiable";
+      // #1238: the metadata cannot decide a behavior-existence claim —
+      // the action's own implementation can. The decision is made per
+      // sentence (never across sentences): a claim whose named gate the
+      // executing implementation POSITIVELY implements is refuted; every
+      // other shape stays unverified, the fail-safe direction — a missing
+      // marker is no proof of absence, and a claim the registry does not
+      // cover cannot be decided at all.
+      const decision = await decideGateAbsence(gateSentences, options.readActionSource, actionSourceBudget);
+      status = decision.status;
+      reason = decision.reason;
     } else if (!safeFile(finding.file)) {
       status = kind === "committed_literal" ? "unverified" : "unsupported";
       reason = kind === "committed_literal" ? "no-location" : "no-concrete-location";

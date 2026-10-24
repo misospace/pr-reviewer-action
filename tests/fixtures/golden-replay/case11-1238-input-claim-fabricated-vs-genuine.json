@@ -77,7 +77,7 @@
     ],
     "grounding_status": {
       "f1238-input": "refuted",
-      "f1238-gate": "unverified"
+      "f1238-gate": "refuted"
     }
   }
 }

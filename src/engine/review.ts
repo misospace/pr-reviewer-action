@@ -67,6 +67,7 @@ import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleMod
 import { reviewArtifactFromParsed, type ArtifactFinding } from "../enforcement/artifact.js";
 import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
 import { applyBlockerVerification } from "../enforcement/blocker-verification.js";
+import { createActionSourceReader } from "../enforcement/action-source.js";
 import { createHeadSourceReader } from "../enforcement/source-verifier.js";
 import { capCiEvidenceFindings } from "../enforcement/ci-evidence.js";
 import { markerReviewResult, publishStepRuns } from "../publish/publish.js";
@@ -1513,6 +1514,14 @@ secrets: [profiles.primary.apiKey],
       readSource: createHeadSourceReader({ workspace, revision: expectedRevision }),
       expectedRevision,
       declaredActionInputs: new Set(contract.inputs.map((input) => input.id)),
+      // #1238: the gate-absence witness — a reader over the EXECUTING
+      // action's own source tree (its install directory), so a claim that
+      // the action lacks a deterministic gate can be checked against the
+      // implementation that actually runs. The reviewed repository's
+      // checkout is passed along: a root inside it is PR-controlled bytes
+      // and must never decide a refutation. Both boundary passes share this
+      // options object, so the post-settlement pass sees the same witness.
+      readActionSource: createActionSourceReader({ workspaceRoot: workspace }),
     };
     blockerVerification = await applyBlockerVerification(reviewRecord.findings as ArtifactFinding[], verificationOptions);
   }

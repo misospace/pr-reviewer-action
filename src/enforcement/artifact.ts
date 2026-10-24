@@ -46,7 +46,9 @@ export interface ArtifactFinding {
    * boundary when a model-authored source-backed claim (committed-source
    * literal, requirement claim, action-input declaration, or gate-absence)
    * was not substantiated by its witness — exact-head source for the first
-   * two, the executing action's embedded contract for input declarations.
+   * two, the executing action's embedded contract for input declarations,
+   * and the executing action's own implementation tree for gate-absence
+   * claims.
    * One of "refuted" (the witness positively contradicts the claim),
    * "unverified" (the witness could not check it), or "unsupported" (no
    * concrete evidence to verify). Blocker/major findings are demoted to

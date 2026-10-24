@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import {
   applyBlockerVerification,
   type SourceReader,
   type SourceReadResult,
 } from "../src/enforcement/blocker-verification.js";
+import { createActionSourceReader } from "../src/enforcement/action-source.js";
 import {
   applyStrictVerdictPolicy,
   applyVerdictPolicy,
@@ -20,6 +22,10 @@ import { publishReview } from "../src/publish/publish.js";
 import type { NativeReviewRequest, PublishPlatformApi } from "../src/platform/publish-api.js";
 
 const REVISION = "a".repeat(40);
+
+/** #1238: the executing action's own source tree — the repository root in
+* this checkout (in production: the action's install directory). */
+const ACTION_ROOT = resolve(__dirname, "..", "..");
 
 function artifact(overrides: Partial<ReviewArtifact> = {}): ReviewArtifact {
   return {
@@ -647,13 +653,14 @@ test("#1016 findings_severity_gated: a positively refuted blocker demotion still
 // #1238 — input-declaration and gate-absence claims at the finding→verdict path.
 // ---------------------------------------------------------------------------
 
-test("#1238 the incident shape: fabricated input claim refuted, gate claim marked, verdict approves", async () => {
+test("#1238 the incident shape: fabricated input claim refuted, gate claim refuted, verdict approves", async () => {
   // Sanitized replay of the production failure: a major finding fabricated
   // the action's declared input name and a minor finding derived gate
   // absence from the metadata. The registry witness (the executing action's
-  // embedded contract) positively contradicts the input claim, the gate
-  // claim is honestly marked unverified, and the strict mapping derives an
-  // approve — the unverified minor cannot expand the blocking surface.
+  // embedded contract) positively contradicts the input claim, and the
+  // action's own implementation positively contradicts the gate claim (the
+  // draft and label gates ARE implemented), so the strict mapping derives
+  // an approve — no claim can expand the blocking surface.
   const a = artifact({
     verdict: "request_changes",
     findings: [
@@ -682,11 +689,12 @@ test("#1238 the incident shape: fabricated input claim refuted, gate claim marke
     readSource: unavailableReader,
     expectedRevision: REVISION,
     declaredActionInputs: new Set(["github-token", "ai-base-url", "ai-api-key", "ai-model", "rereview-label"]),
+    readActionSource: createActionSourceReader({ root: ACTION_ROOT }),
   });
   assert.equal(result.demoted, 1);
   assert.equal(a.findings[0]!.grounding_status, "refuted");
   assert.equal(a.findings[0]!.severity, "minor");
-  assert.equal(a.findings[1]!.grounding_status, "unverified");
+  assert.equal(a.findings[1]!.grounding_status, "refuted");
   assert.equal(a.findings[1]!.severity, "minor");
   assert.equal(a.findings[1]!.capped_from, undefined);
   assert.equal(a.findings[2]!.grounding_status, undefined);
@@ -694,6 +702,34 @@ test("#1238 the incident shape: fabricated input claim refuted, gate claim marke
   assert.equal(a.verdict, "approve");
   assert.equal(outcome.verdict, "approve");
   assert.ok(a.review_markdown.includes("no blocker or major finding out of 3 open"));
+});
+
+test("#1238 the incident gate claim stays unverified when the action source is unavailable", async () => {
+  // Fail-safe control: without the action's own implementation the gate
+  // claim cannot be checked, so it stays unknown evidence (unverified) —
+  // never refuted. The minor stays minor and cannot expand the blocking
+  // surface.
+  const a = artifact({
+    verdict: "request_changes",
+    findings: [
+      finding({
+        severity: "minor",
+        file: ".github/workflows/ai_pr_review.yaml",
+        line: 20,
+        message: "The comment says the action itself skips drafts and non-matching labels, but that filtering is done by this workflow's own `if` (the action metadata declares no `if:` or label input).",
+      }),
+    ],
+  });
+  const result = await applyBlockerVerification(a.findings, {
+    readSource: unavailableReader,
+    expectedRevision: REVISION,
+    declaredActionInputs: new Set(["github-token", "ai-base-url", "ai-api-key", "ai-model", "rereview-label"]),
+    readActionSource: createActionSourceReader({ root: resolve(ACTION_ROOT, "no-such-action-tree") }),
+  });
+  assert.equal(result.demoted, 0);
+  assert.equal(a.findings[0]!.grounding_status, "unverified");
+  assert.equal(a.findings[0]!.severity, "minor");
+  assert.equal(a.findings[0]!.capped_from, undefined);
 });
 
 test("#1238 an unverified major input claim still fails closed to request_changes", async () => {

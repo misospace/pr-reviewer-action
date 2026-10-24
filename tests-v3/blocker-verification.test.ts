@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { committedSourceProvenance, sanitizedSourceProvenance } from "../src/context/evidence-provenance.js";
 import { applyBlockerVerification, MAX_CLAIM_SCAN_LENGTH, MAX_VERIFICATION_READS, type SourceReadResult } from "../src/enforcement/blocker-verification.js";
+import { ACTION_GATES } from "../src/enforcement/action-gates.js";
+import type { ActionSourceReader } from "../src/enforcement/action-source.js";
 import type { ArtifactFinding } from "../src/enforcement/artifact.js";
 
 const revision = "a".repeat(40);
@@ -17,9 +19,14 @@ const requirementFinding = (overrides: Partial<ArtifactFinding> = {}): ArtifactF
   severity: "major", category: "security", file: "src/a.ts", line: null,
   message: "requirement not enforced: X is a standard", ...overrides,
 });
-const verify = (findings: ArtifactFinding[], read: (file: string) => Promise<SourceReadResult>, declaredActionInputs?: ReadonlySet<string> | null) =>
-  applyBlockerVerification(findings, { readSource: read, expectedRevision: revision, declaredActionInputs });
+const verify = (findings: ArtifactFinding[], read: (file: string) => Promise<SourceReadResult>, declaredActionInputs?: ReadonlySet<string> | null, readActionSource?: ActionSourceReader | null) =>
+  applyBlockerVerification(findings, { readSource: read, expectedRevision: revision, declaredActionInputs, readActionSource });
 const available = (result: SourceReadResult): Promise<SourceReadResult> => Promise.resolve(result);
+/** #1238: a fake witness over the EXECUTING action's own source tree. */
+const actionSource = (files: Record<string, string>): ActionSourceReader => async (path) => {
+  const text = files[path];
+  return text === undefined ? { status: "unavailable", reason: "not-found" } : { status: "ok", text };
+};
 
 test("literal marker absent from authoritative source is refuted and demoted", async () => {
   const finding = markerFinding();
@@ -395,7 +402,7 @@ test("ambiguous input direction is unverified and invalid token shapes are ignor
   assert.ok(invalid.every((finding) => finding.grounding_status === undefined));
 });
 
-test("gate absence claims are always unverified, sentence-scoped, and require an action subject", async () => {
+test("gate absence claims without a witness are unverified, sentence-scoped, and require an action subject", async () => {
   // All four cue families must co-occur in ONE sentence; cues split across
   // sentences leave the finding untouched.
   const absence = markerFinding({ severity: "minor", message: "The action never skips drafts, metadata declares no label input." });
@@ -418,6 +425,315 @@ test("gate absence claims are always unverified, sentence-scoped, and require an
   assert.equal(split.grounding_status, undefined);
   assert.equal(noAction.grounding_status, undefined);
   assert.equal(inputOnly.grounding_status, undefined);
+});
+
+test("#1238 a gate absence claim contradicted by the action's own implementation is refuted", async () => {
+  // The witness is the EXECUTING action's own source tree: the draft gate
+  // and the label gate are both implemented there, so a claim that the
+  // action has neither is positively contradicted by the implementation
+  // that actually runs.
+  const finding = markerFinding({ message: "The action never skips drafts, metadata declares no label input." });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.equal(result.findings[0]?.kind, "gate_absence");
+  assert.equal(result.findings[0]?.status, "refuted");
+  assert.equal(result.findings[0]?.reason, "gate-implemented:draft-skip,label-filter");
+  assert.equal(finding.severity, "minor");
+  assert.equal(finding.capped_from, "blocker");
+  assert.equal(finding.grounding_status, "refuted");
+  assert.equal(result.demoted, 1);
+});
+
+test("#1238 a gate absence claim phrased with 'has no' is classified and refuted", async () => {
+  // The absence vocabulary covers the declaration family ("has no",
+  // "contains no", ...) next to the negation family, so the incident class
+  // is recognized in the shape a model actually writes.
+  const finding = markerFinding({ message: "The action has no draft filtering, because the metadata declares no draft input." });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.equal(result.findings[0]?.kind, "gate_absence");
+  assert.equal(result.findings[0]?.status, "refuted");
+  assert.equal(result.findings[0]?.reason, "gate-implemented:draft-skip");
+  assert.equal(finding.grounding_status, "refuted");
+});
+
+test("#1238 the incident gate sentence is refuted by the action's own implementation", async () => {
+  // The #1238 incident claim: the model said the draft/label filtering was
+  // NOT the action's own ("that filtering is done by this workflow's own
+  // `if`"), which the action's own implementation contradicts — the draft
+  // gate and the label gate ARE implemented there.
+  const finding = markerFinding({
+    message: "The comment says the action itself skips drafts and non-matching labels, but that filtering is done by this workflow's own `if` (the action metadata declares no `if:` or label input).",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.equal(result.findings[0]?.kind, "gate_absence");
+  assert.equal(result.findings[0]?.status, "refuted");
+  assert.equal(result.findings[0]?.reason, "gate-implemented:draft-skip,label-filter");
+  assert.equal(finding.grounding_status, "refuted");
+});
+
+test("#1238 a claim that affirms the gate's presence is never refuted", async () => {
+  // The witness proves the gate EXISTS, so it can only contradict a claim
+  // that says the action LACKS the behavior. A claim that the filtering is
+  // not configurable, or that the action skips drafts, says nothing the
+  // implementation contradicts.
+  const claims = [
+    "The action's draft filtering is not configurable because the action metadata declares no draft input.",
+    "The action skips drafts even though the workflow has no `if` guard, because the action metadata declares no draft input.",
+  ];
+  const findings = claims.map((message) => markerFinding({ message }));
+  const result = await verify(
+    findings,
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["unverified", "gate-absence-unverifiable"],
+    ["unverified", "gate-absence-unverifiable"],
+  ]);
+  assert.ok(findings.every((finding) => finding.grounding_status === "unverified"));
+});
+
+test("#1238 a scoped gate claim is never refuted", async () => {
+  // The claim is scoped ("PRs whose only label is `bug`"): the witness can
+  // prove the label gate exists, but it cannot decide a claim about a
+  // subset of pull requests, so the claim stays unverified.
+  const finding = markerFinding({
+    message: "The action does not skip PRs whose only label is `bug`, because the metadata declares no label input.",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.equal(result.findings[0]?.status, "unverified");
+  assert.equal(result.findings[0]?.reason, "gate-absence-unverifiable");
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1238 a gate claim about ANOTHER action is never refuted", async () => {
+  // The executing action's implementation cannot decide another action's
+  // gates, so a claim naming another action stays unverified.
+  const finding = markerFinding({
+    message: "The `owner/other-action@v1` action never skips drafts and its metadata declares no draft input.",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.equal(result.findings[0]?.status, "unverified");
+  assert.equal(result.findings[0]?.reason, "gate-absence-unverifiable");
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1238 the gate decision is made per sentence, never across sentences", async () => {
+  // A manifest-only sentence (a declaration about the action's inputs) is
+  // never refuted because ANOTHER sentence in the same message carries a
+  // behavioral absence — and it is never the deciding sentence either.
+  const manifestOnly = markerFinding({
+    message: "The action's metadata declares no draft input. The action never skips drafts, metadata declares no label input.",
+  });
+  const manifestOnlyWithUndecidable = markerFinding({
+    message: "The action's metadata declares no draft input. The action never skips PRs whose only label is `bug`, because the metadata declares no label input.",
+  });
+  const result = await verify(
+    [manifestOnly, manifestOnlyWithUndecidable],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  // The behavioral sentence decides the first finding; the manifest-only
+  // sentence never decides the second one.
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["refuted", "gate-implemented:draft-skip,label-filter"],
+    ["unverified", "gate-absence-unverifiable"],
+  ]);
+});
+
+test("#1238 a partially attested gate claim is not decided", async () => {
+  // The claim names two gates, but the implementation attests only one of
+  // them: a partially attested claim is not decided, so it stays
+  // unverified rather than refuted.
+  const finding = markerFinding({ message: "The action never skips drafts, metadata declares no label input." });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\n' }),
+  );
+  assert.equal(result.findings[0]?.status, "unverified");
+  assert.equal(result.findings[0]?.reason, "gate-absence-unverifiable");
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1238 a gate absence claim is never grounded", async () => {
+  // The witness proves the gate EXISTS — it can refute a claim of absence,
+  // but it can never substantiate one. A gate-absence claim is therefore
+  // only ever "refuted" or "unverified".
+  const findings = [
+    markerFinding({ message: "The action never skips drafts, metadata declares no label input." }),
+    markerFinding({ message: "The action's metadata declares no draft input." }),
+    markerFinding({ message: "The action never skips drafts and never dedupes commits, metadata declares no label input." }),
+  ];
+  const result = await verify(
+    findings,
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.deepEqual(result.findings.map(({ status }) => status), ["refuted", "unverified", "unverified"]);
+  assert.ok(result.findings.every((entry) => entry.status !== "grounded"));
+});
+
+test("#1238 a gate claim citing another action's path is not decided", async () => {
+  // The other-action MENTION guard is deliberately broad: a sentence that
+  // cites a path (or a `uses:` key) names another artifact, and the
+  // executing action's registry cannot decide that artifact's gates. The
+  // claim therefore stays unverified rather than being refuted.
+  const claims = [
+    "The action never skips drafts, metadata declares no label input (see src/precheck/decide.ts).",
+    "The workflow `uses: actions/checkout@v4` and the action never skips drafts, metadata declares no label input.",
+  ];
+  const findings = claims.map((message) => markerFinding({ message }));
+  const result = await verify(
+    findings,
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["unverified", "gate-absence-unverifiable"],
+    ["unverified", "gate-absence-unverifiable"],
+  ]);
+});
+
+test("#1238 a quoted cue word cannot forge an absence assertion", async () => {
+  // The cue scan reads the MASKED view: a cited span is a citation, not
+  // the claim's own wording, so a quoted "never" cannot turn a claim that
+  // AFFIRMS the behavior into an absence assertion the witness refutes.
+  const finding = markerFinding({
+    message: "The action `never` skips drafts, metadata declares no label input.",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.equal(result.findings[0]?.status, "unverified");
+  assert.equal(result.findings[0]?.reason, "gate-absence-unverifiable");
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1238 the witness is only ever asked for the registry's own implementation paths", async () => {
+  // The action-source reader is only ever pointed at the registry's own
+  // implementation paths: no path taken from a finding or a model message
+  // can reach the action's own tree.
+  const requested: string[] = [];
+  const read: ActionSourceReader = async (path) => {
+    requested.push(path);
+    return { status: "ok", text: 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' };
+  };
+  const finding = markerFinding({ message: "The action never skips drafts, metadata declares no label input." });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    read,
+  );
+  assert.equal(result.findings[0]?.status, "refuted");
+  const registryPaths = [...new Set(ACTION_GATES.map((gate) => gate.implementation))].sort();
+  assert.deepEqual([...new Set(requested)].sort(), registryPaths);
+});
+
+test("#1238 a gate absence claim stays unverified when the action source is unavailable", async () => {
+  // No witness: the boundary cannot check the claim, so the claim is
+  // unknown evidence (unverified), never refuted and never grounded.
+  const finding = markerFinding({ message: "The action never skips drafts, metadata declares no label input." });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({}),
+  );
+  assert.equal(result.findings[0]?.kind, "gate_absence");
+  assert.equal(result.findings[0]?.status, "unverified");
+  assert.equal(result.findings[0]?.reason, "gate-absence-unverifiable");
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1238 a missing marker never grounds or refutes a gate absence claim", async () => {
+  // A missing marker is NOT proof that the gate is absent — the gate may be
+  // implemented elsewhere — so the claim stays unverified (the fail-safe
+  // direction), never "grounded" and never "refuted".
+  const finding = markerFinding({ message: "The action never skips drafts, metadata declares no label input." });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": "// no gate here\n" }),
+  );
+  assert.equal(result.findings[0]?.status, "unverified");
+  assert.equal(result.findings[0]?.reason, "gate-absence-unverifiable");
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1238 a gate absence claim naming a gate the registry does not cover stays unverified", async () => {
+  // The claim names a behavior (dedupe) the registry does not speak about:
+  // even though the draft and label gates are attested, the claim as a
+  // whole cannot be decided, so it stays unverified.
+  const finding = markerFinding({ message: "The action never skips drafts and never dedupes commits, metadata declares no label input." });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.equal(result.findings[0]?.kind, "gate_absence");
+  assert.equal(result.findings[0]?.status, "unverified");
+  assert.equal(result.findings[0]?.reason, "gate-absence-unverifiable");
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1238 a manifest-only absence claim is never refuted by the implementation witness", async () => {
+  // The witness speaks to BEHAVIOR claims. "the action's metadata declares
+  // no draft input" is a DECLARATION claim: the action implementing a draft
+  // gate does not contradict the absence of a `draft` entry in the
+  // manifest, so the claim stays unverified — the boundary never refutes a
+  // claim it does not structurally understand.
+  const declaration = markerFinding({ message: "The action's metadata declares no draft input." });
+  const behavior = markerFinding({ message: "The action never filters drafts, metadata declares no label input." });
+  const result = await verify(
+    [declaration, behavior],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.equal(result.findings[0]?.kind, "gate_absence");
+  assert.equal(result.findings[0]?.status, "unverified");
+  assert.equal(result.findings[0]?.reason, "gate-absence-unverifiable");
+  assert.equal(declaration.grounding_status, "unverified");
+  // The behavior claim about the same subject is decided by the witness.
+  assert.equal(result.findings[1]?.kind, "gate_absence");
+  assert.equal(result.findings[1]?.status, "refuted");
+  assert.equal(behavior.grounding_status, "refuted");
 });
 
 test("#1238 review hardening: claims the registry cannot decide are never refuted", async () => {
