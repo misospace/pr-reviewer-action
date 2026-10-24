@@ -1210,3 +1210,208 @@ test("#1235: toV2Completion projects malformed-negative usage as 0, never a nega
     { prompt_tokens: 0, completion_tokens: 7, total_tokens: 7 },
   );
 });
+
+test("#1235: the non-streamed ok path publishes no negative usage count in the raw body", async () => {
+  const malformed = {
+    id: "c1",
+    object: "chat.completion",
+    model: "m",
+    choices: [{ index: 0, message: { role: "assistant", content: '{"leads":[]}' }, finish_reason: "stop" }],
+    usage: {
+      prompt_tokens: -5,
+      completion_tokens: 9,
+      total_tokens: 4,
+      input_tokens: -7,
+      output_tokens: -3,
+      prompt_tokens_details: { cached_tokens: -2, audio_tokens: 3 },
+      completion_tokens_details: { reasoning_tokens: -1 },
+      negative_notes: [-1, 2],
+    },
+  };
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://endpoint.test/v1",
+    apiKey: "sk-adapter-clamp",
+    anthropicVersion: "2023-06-01",
+    runChat: async () => ({
+      status: "ok",
+      response: { id: "c1", object: "chat.completion", model: "m", content: "", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+      raw: malformed,
+    }),
+  });
+  const outcome = await requestFn({ model: "m", messages: [], max_tokens: 256 } as never, "openai", 5);
+  assert.equal(outcome.ok, true);
+  // Every negative count is gone (the body's own "not reported": an absent
+  // count reads as null in every accounting reader), positive siblings —
+  // including inside the nested details records — survive untouched, and no
+  // `-0` can land in the persisted record either.
+  assert.deepEqual((outcome.raw as Record<string, unknown>).usage, {
+    completion_tokens: 9,
+    total_tokens: 4,
+    prompt_tokens_details: { audio_tokens: 3 },
+    completion_tokens_details: {},
+    // Arrays are not walked (documented bounded-sweep rationale: arrays are
+    // not an accounting surface) — an array in the usage block forwards
+    // untouched.
+    negative_notes: [-1, 2],
+  });
+
+  // A body with a `-0`-shaped usage count normalizes to exactly 0.
+  const signedZero = { ...malformed, usage: { prompt_tokens: -0 } };
+  const requestFnZero = specialistRequestFn({
+    baseUrl: "http://endpoint.test/v1",
+    apiKey: "sk-adapter-clamp",
+    anthropicVersion: "2023-06-01",
+    runChat: async () => ({
+      status: "ok",
+      response: { id: "c1", object: "chat.completion", model: "m", content: "", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+      raw: signedZero,
+    }),
+  });
+  const zero = await requestFnZero({ model: "m", messages: [], max_tokens: 256 } as never, "openai", 5);
+  assert.ok(zero.ok);
+  const zeroUsage = (zero.raw as { usage?: Record<string, unknown> }).usage;
+  assert.ok(zeroUsage !== undefined);
+  assert.ok(Object.is(zeroUsage.prompt_tokens, 0));
+
+  // Anthropic alias counts are inside the same bounded sweep.
+  const anthropic = { id: "c1", type: "message", role: "assistant", content: [], usage: { input_tokens: -7, output_tokens: 2 } };
+  const requestFnAnthropic = specialistRequestFn({
+    baseUrl: "http://endpoint.test",
+    apiKey: "sk-adapter-clamp",
+    anthropicVersion: "2023-06-01",
+    runChat: async () => ({
+      status: "ok",
+      response: { id: "c1", object: "chat.completion", model: "m", content: "", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+      raw: anthropic,
+    }),
+  });
+  const anthropicOutcome = await requestFnAnthropic({ model: "m", messages: [] } as never, "anthropic", 5);
+  assert.deepEqual((anthropicOutcome.raw as Record<string, unknown>).usage, { output_tokens: 2 });
+
+  // A body with nothing malformed in its usage record is forwarded
+  // unchanged — same reference, byte-identical persistence.
+  const clean = {
+    id: "c2",
+    object: "chat.completion",
+    model: "m",
+    choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+  };
+  const requestFnClean = specialistRequestFn({
+    baseUrl: "http://endpoint.test/v1",
+    apiKey: "sk-adapter-clamp",
+    anthropicVersion: "2023-06-01",
+    runChat: async () => ({
+      status: "ok",
+      response: { id: "c2", object: "chat.completion", model: "m", content: "ok", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+      raw: clean,
+    }),
+  });
+  const cleanOutcome = await requestFnClean({ model: "m", messages: [], max_tokens: 256 } as never, "openai", 5);
+  assert.ok(cleanOutcome.ok);
+  assert.ok(cleanOutcome.raw === clean, "no malformed usage number: the genuine provider body forwards unchanged");
+  // A missing (or non-record) usage stays an untouched forward too.
+  const usageless = { id: "c3", object: "chat.completion", toolCalls: [], finishReason: "stop", error: undefined } as unknown as { id?: string; object?: string };
+  const requestFnUsageless = specialistRequestFn({
+    baseUrl: "http://endpoint.test/v1",
+    apiKey: "sk-adapter-clamp",
+    anthropicVersion: "2023-06-01",
+    runChat: async () => ({
+      status: "ok",
+      response: { id: "c3", object: "chat.completion", model: "m", content: "", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+      raw: usageless,
+    }),
+  });
+  const usagelessOutcome = await requestFnUsageless({ model: "m", messages: [], max_tokens: 256 } as never, "openai", 5);
+  assert.ok(usagelessOutcome.ok);
+  assert.ok(usagelessOutcome.raw === usageless, "a non-record usage forwards unchanged");
+  // Never a deep sweep: a legitimate negative number elsewhere in the body
+  // (e.g. logprobs) is none of this invariant's business.
+  const withLogprobs = {
+    id: "c4",
+    object: "chat.completion",
+    choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop", logprobs: { content: [{ token: "x", logprob: -0.42 }] } }],
+    usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+  };
+  const requestFnLogprobs = specialistRequestFn({
+    baseUrl: "http://endpoint.test/v1",
+    apiKey: "sk-adapter-clamp",
+    anthropicVersion: "2023-06-01",
+    runChat: async () => ({
+      status: "ok",
+      response: { id: "c4", object: "chat.completion", model: "m", content: "ok", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+      raw: withLogprobs,
+    }),
+  });
+  const logprobsOutcome = await requestFnLogprobs({ model: "m", messages: [], max_tokens: 256 } as never, "openai", 5);
+  assert.ok(logprobsOutcome.ok);
+  assert.ok(logprobsOutcome.raw === withLogprobs, "negatives outside the top-level usage record are untouched");
+});
+
+test("#1235/#252: the usage prune feeds the hostile key itself — an own __proto__ usage key never invokes the prototype setter", async () => {
+  // JSON.parse defines a hostile `__proto__` literal as an OWN DATA property;
+  // the rebuild path must define it back as a data property (fromEntries),
+  // never invoke the prototype setter — a setter would graft the hostile
+  // object as the rebuilt usage record's PROTOTYPE, making its injected
+  // fields (prompt_tokens: 999) dot-readable by `extractResponseUsage` and
+  // the fold, i.e. attacker-authored accounting.
+  const hostile = JSON.parse(
+    '{"id":"h1","object":"chat.completion","choices":[],"usage":{"__proto__":{"prompt_tokens":999},"prompt_tokens":-5,"completion_tokens":2}}',
+  ) as { id?: string; object?: string };
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://endpoint.test/v1",
+    apiKey: "sk-adapter-clamp",
+    anthropicVersion: "2023-06-01",
+    runChat: async () => ({
+      status: "ok",
+      response: { id: "h1", object: "chat.completion", model: "m", content: "", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+      raw: hostile,
+    }),
+  });
+  const outcome = await requestFn({ model: "m", messages: [], max_tokens: 256 } as never, "openai", 5);
+  assert.ok(outcome.ok);
+  const usage = (outcome.raw as { usage: Record<string, unknown> }).usage;
+  assert.ok(Object.is(Object.getPrototypeOf(usage), Object.prototype), "the rebuild never adopted a hostile prototype");
+  assert.equal(Object.hasOwn(usage, "__proto__"), true, "the hostile key survives as an own data property");
+  assert.equal(usage.prompt_tokens, undefined, "no hostile-injected count becomes dot-readable after the rebuild");
+  assert.ok(Object.hasOwn(usage, "completion_tokens"), "positive siblings survive the hostile-key rebuild");
+});
+
+test("#1235: the usage prune fails closed past its mastered depth (a deep branch is never published unverified)", async () => {
+  const deepUsage: Record<string, unknown> = { prompt_tokens: 5, completion_tokens: 2 };
+  // A negative count 40 records deep (past MAX_USAGE_PRUNE_DEPTH=32).
+  let branch: Record<string, unknown> = { deep_negative: -1, deep_positive: 3 };
+  for (let depth = 0; depth < 40; depth++) branch = { [`level_${depth}`]: branch };
+  deepUsage.nested = branch;
+  const raw = { id: "c5", object: "chat.completion", choices: [], usage: deepUsage };
+  const requestFn = specialistRequestFn({
+    baseUrl: "http://endpoint.test/v1",
+    apiKey: "sk-adapter-clamp",
+    anthropicVersion: "2023-06-01",
+    runChat: async () => ({
+      status: "ok",
+      response: { id: "c5", object: "chat.completion", model: "m", content: "", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+      raw,
+    }),
+  });
+  const outcome = await requestFn({ model: "m", messages: [], max_tokens: 256 } as never, "openai", 5);
+  assert.ok(outcome.ok);
+  const usage = (outcome.raw as { usage: Record<string, unknown> }).usage;
+  assert.equal(JSON.stringify(usage).includes("-1"), false, "an unmastered-depth branch is never published unverified");
+  assert.equal(JSON.stringify(usage).includes("deep_negative"), false);
+  // The mastered prefix of the branch is walked and kept: descending wrapper
+  // keys level_39..level_10 all land a nested wrapper record.
+  const nested = usage.nested as Record<string, unknown> | null;
+  assert.ok(nested !== null && typeof nested === "object", "the mastered branch is walked and kept");
+  let cursor: Record<string, unknown> = nested!;
+  for (let key = 39; key >= 10; key--) {
+    const child = cursor[`level_${key}`];
+    assert.ok(child !== null && typeof child === "object", `mastered wrapper level_${key} kept`);
+    cursor = child as Record<string, unknown>;
+  }
+  // The record one past the walker's cap is the null cutoff ("not
+  // reported"): descending the next wrapper key lands on it, and nothing
+  // below that level is published at all.
+  assert.equal(cursor[`level_9`], null, "the first unmastered record level is the null cutoff");
+  assert.ok(!JSON.stringify(usage).includes("level_8"), "nothing below the unmastered record level is published");
+});

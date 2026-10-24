@@ -1922,3 +1922,29 @@ test("#1235: mergeUsage never folds a negative count into the specialist aggrega
     { prompt_tokens: 4, total_tokens: 4 },
   );
 });
+
+test("#1235: mergeUsage replaces a malformed running value even when the incoming field is malformed too", () => {
+  // A negative running value is "not started" regardless of the incoming
+  // field: fold({-7}, {-5}) reports nothing rather than letting the
+  // incoming-field skip carry the -7 onward.
+  assert.deepEqual(
+    mergeUsage({ prompt_tokens: -7 }, { prompt_tokens: -5, completion_tokens: null, cached_tokens: null, total_tokens: null } as SpecialistUsage),
+    { prompt_tokens: null },
+  );
+  // The reader's own contract holds for every malformed running value: a
+  // float degrades to not-reported, and a `-0` running value stays exactly
+  // 0 (no signed zero carried).
+  assert.deepEqual(
+    mergeUsage({ prompt_tokens: 2.5 }, { prompt_tokens: -5, completion_tokens: null, cached_tokens: null, total_tokens: null } as SpecialistUsage),
+    { prompt_tokens: null },
+  );
+  assert.ok(
+    Object.is(
+      mergeUsage(
+        { prompt_tokens: -0 } as unknown as Record<string, number | null>,
+        { prompt_tokens: -5, completion_tokens: null, cached_tokens: null, total_tokens: null } as SpecialistUsage,
+      ).prompt_tokens,
+      0,
+    ),
+  );
+});

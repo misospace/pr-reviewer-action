@@ -156,8 +156,11 @@ export function responseStopReason(response: unknown): string | null {
  * construction in JS: no interleaving within a single synchronous call).
  * #1235 mirrors the #1207 clamp at the fold: a negative count (malformed
  * input, exactly what `asInt` refuses upstream) contributes 0 — and a
- * negative running value is treated as "not started", replaced rather than
- * carried — so the aggregate can never publish a negative number. */
+ * malformed running value (a negative in particular) is "not started",
+ * replaced rather than carried, on every fold the running state takes part
+ * in: the standing record is re-normalized through `asInt` up front, so a
+ * negative running value never survives even when the incoming field for the
+ * same key is itself malformed (the `continue` alone would carry it). */
 export function mergeUsage(
   into: Record<string, number | null> | null,
   usage: SpecialistUsage,
@@ -167,7 +170,8 @@ export function mergeUsage(
     for (const [key, value] of Object.entries(usage)) first[key] = asInt(value);
     return first;
   }
-  const merged: Record<string, number | null> = { ...into };
+  const merged: Record<string, number | null> = {};
+  for (const [key, current] of Object.entries(into)) merged[key] = asInt(current);
   for (const [key, value] of Object.entries(usage)) {
     if (typeof value !== "number" || !Number.isInteger(value) || value < 0) continue;
     const current = merged[key];
