@@ -243,6 +243,84 @@ const OTHER_ACTION_REF_RE = /\b[\w.-]+\/[\w.-]+@[^\s`,]*|\buses\s*:/i;
  */
 const OTHER_ACTION_MENTION_RE = /\b[\w.-]+\/[\w.-]+|\buses\s*:/i;
 /**
+ * The modifiers that refer to the EXECUTING action itself. A claim whose
+ * action noun carries one of them ("the action", "the pinned action",
+ * "the executing action") is about this action; any other modifier names
+ * another artifact ("the checkout action", "the `owner/repo` action").
+ *
+ * The boundary has no repository identity, so it cannot tell a name that
+ * refers to this action ("the pr-reviewer-action") from one that refers
+ * to another one. An unrecognized modifier is therefore read as another
+ * action — the fail-safe direction: an unknown claim is never treated as
+ * confirmed, and an unverified blocker/major still fails closed.
+ */
+const SELF_ACTION_MODIFIERS: ReadonlySet<string> = new Set([
+  "", "a", "an", "the", "this", "that", "these", "those", "its", "their",
+  "our", "own", "same", "current", "pinned", "upstream", "reviewed",
+  "executing", "running", "published", "released", "deployed", "shipped",
+  "configured", "target", "given", "above", "following", "present",
+  "mentioned", "cited", "included", "underlying",
+]);
+/**
+ * The modifier of an action noun: what names the action the claim is
+ * about. A quoted reference ("`owner/repo` action") and a plain name
+ * ("the checkout action") both name the action; "the", "its" and a bare
+ * noun refer to the EXECUTING action.
+ */
+function actionModifier(raw: string, start: number): string {
+  let cursor = start - 1;
+  while (cursor >= 0 && /\s/.test(raw[cursor]!)) cursor -= 1;
+  // A possessive modifier ("`owner/repo`'s action"): the name carries the
+  // possessive, so the name is read past it.
+  if (cursor >= 1 && raw[cursor] === "s" && raw[cursor - 1] === "'") {
+    cursor -= 2;
+    while (cursor >= 0 && /\s/.test(raw[cursor]!)) cursor -= 1;
+  }
+  if (cursor < 0) return "";
+  if (raw[cursor] === "`") {
+    const open = raw.lastIndexOf("`", cursor - 1);
+    if (open === -1) return "";
+    return raw.slice(open + 1, cursor).toLowerCase();
+  }
+  const end = cursor;
+  while (cursor >= 0 && /[A-Za-z0-9]/.test(raw[cursor]!)) cursor -= 1;
+  return raw.slice(cursor + 1, end + 1).toLowerCase();
+}
+
+/**
+ * Does the clause attribute its claim to ANOTHER action?
+ *
+ * The subject of an action claim is the noun phrase ending in "action", so
+ * the modifier immediately before that noun decides whose action it is:
+ * "the action" (this action) versus "the checkout action" / "the
+ * `owner/repo` action" (another one). The registry witnesses the
+ * EXECUTING action only, so a claim about another one is never decided
+ * with it — neither grounded nor refuted.
+ *
+ * A file-path citation is not an action subject: "action.yml" and
+ * "src/run/action.ts" are path components, not nouns, so they are skipped
+ * (#1238: path citations do not exempt claims — a genuine
+ * missing-declaration claim that cites a path stays decidable). The
+ * sentence split cuts at the "." of "action.yml", so the path component is
+ * recognized from the text that follows the clause.
+ */
+function clauseNamesOtherAction(rawClause: string, rawTail: string): boolean {
+  for (const match of rawClause.matchAll(/action/gi)) {
+    const start = match.index ?? 0;
+    const end = start + match[0]!.length;
+    const before = start > 0 ? rawClause[start - 1]! : "";
+    const after = rawClause[end] ?? "";
+    // A standalone word only: "actionary" is not the action noun.
+    if (/[A-Za-z0-9]/.test(before) || /[A-Za-z0-9]/.test(after)) continue;
+    // A path component: "src/run/action.ts" (the "/" is inside the clause)
+    // and "action.yml" (the sentence split cut the clause at its ".").
+    if (before === "/") continue;
+    if (end === rawClause.length && /^\.[a-z][a-z0-9]*/.test(rawTail)) continue;
+    if (!SELF_ACTION_MODIFIERS.has(actionModifier(rawClause, start))) return true;
+  }
+  return false;
+}
+/**
  * Attribute-scope cues: the claim constrains an attribute of the input
  * (requiredness, default, documentation, fork behavior) that the declared-id
  * registry cannot speak to. Such claims are not candidates — the boundary
@@ -353,8 +431,14 @@ interface InputCandidate {
   direction: InputDirection;
   /** The raw claim sentence mentions another action (broad path shape): a
    *   positive contradiction from the registry cannot decide THAT action's
-   * inputs, so refutation downgrades to unverified. */
+   *   inputs, so refutation downgrades to unverified. */
   otherActionMention: boolean;
+  /** The raw claim CLAUSE names another action as its subject (a modifier
+   *   in front of the action noun: "the `owner/repo` action", "the
+   *   checkout action"): the registry speaks for the executing action only,
+   *   so such a claim is never decided with it — neither grounded nor
+   *   refuted. */
+  otherActionSubject: boolean;
 }
 
 // ── #1240: revision scoping ──────────────────────────────────────────────
@@ -574,8 +658,10 @@ function sentenceBounds(masked: string, from: number, to: number): { start: numb
 }
 
 /** The clause window around a token span, bounded by the token's sentence
- * so a direction cue in a later sentence can never leak backwards. */
-function clauseWindow(masked: string, sentenceStart: number, sentenceEnd: number, from: number, to: number): string {
+ * so a direction cue in a later sentence can never leak backwards. The
+ * offsets are returned so the RAW text of the same clause can be read
+ * (the mask preserves length and indices). */
+function clauseWindow(masked: string, sentenceStart: number, sentenceEnd: number, from: number, to: number): { start: number; end: number } {
   let start = sentenceStart;
   let end = sentenceEnd;
   for (const match of masked.slice(sentenceStart, sentenceEnd).matchAll(CLAUSE_DELIMITER_RE)) {
@@ -587,7 +673,7 @@ function clauseWindow(masked: string, sentenceStart: number, sentenceEnd: number
       break;
     }
   }
-  return masked.slice(start, end);
+  return { start, end };
 }
 
 function windowDirection(window: string): InputDirection | "none" {
@@ -623,7 +709,8 @@ function classifyInputDeclaration(message: string): InputCandidate[] {
     if (!/\binputs?\b/i.test(maskedSentence)) continue;
     // The registry only answers for the executing action.
     if (OTHER_ACTION_REF_RE.test(message.slice(start, end))) continue;
-    const windowText = clauseWindow(masked, start, end, span.start, span.end);
+    const clause = clauseWindow(masked, start, end, span.start, span.end);
+    const windowText = masked.slice(clause.start, clause.end);
     // Attribute-scope claims (requiredness, defaults, docs, fork behavior)
     // are outside the declared-id witness's authority.
     if (INPUT_ATTRIBUTE_SCOPE_RE.test(windowText)) continue;
@@ -633,6 +720,13 @@ function classifyInputDeclaration(message: string): InputCandidate[] {
       token: raw.toLowerCase(),
       direction,
       otherActionMention: OTHER_ACTION_MENTION_RE.test(message.slice(start, end)),
+      // The subject of the claim is the clause's action noun: the clause
+      // is read RAW because a cited reference (`owner/repo`, "checkout")
+      // names the action it talks about.
+      otherActionSubject: clauseNamesOtherAction(
+        message.slice(clause.start, clause.end),
+        message.slice(clause.end),
+      ),
     });
   }
   return candidates;
@@ -1008,6 +1102,22 @@ export async function applyBlockerVerification(
       } else {
         const normalized = new Set([...declared].map((input) => input.toLowerCase()));
         const resolved = inputCandidates.filter((candidate) => candidate.direction !== "ambiguous");
+        // A claim that the action does NOT declare an input the registry
+        // lacks is a genuine defect claim, and the witness POSITIVELY
+        // confirms it: the input really is undeclared. It therefore keeps
+        // the finding alive even when a sibling claim in the same finding
+        // is contradicted — a finding that carries a true defect must not
+        // be demoted whole (#1238: preserve true findings, including
+        // genuinely undeclared inputs).
+        //
+        // The claim must be about the EXECUTING action: a claim that names
+        // another action as its subject is never decided with this
+        // registry (neither grounded nor refuted), so it cannot ground the
+        // finding either.
+        const missing = resolved.find((candidate) =>
+          candidate.direction === "absence"
+          && !normalized.has(candidate.token)
+          && !candidate.otherActionSubject);
         // Refutation requires POSITIVE contradiction by the witness: an
         // absence claim about an input the registry declares. A presence
         // claim about an input the registry lacks is NOT a contradiction —
@@ -1017,23 +1127,46 @@ export async function applyBlockerVerification(
         // on facts the witness can decide).
         const contradicted = resolved.find((candidate) =>
           candidate.direction === "absence" && normalized.has(candidate.token));
-        if (contradicted !== undefined && contradicted.otherActionMention) {
+        // A claim about another action's inputs is unknown evidence, never
+        // a refutation: the registry witnesses the executing action only.
+        // A foreign claim the registry WOULD have decided (grounded or
+        // refuted) had it been about this action is undecided for that
+        // reason; a foreign claim the registry could not decide anyway
+        // keeps the ordinary unknown-evidence reason.
+        const foreign = resolved.some((candidate) =>
+          candidate.otherActionSubject
+          && (candidate.direction === "absence" || normalized.has(candidate.token)));
+        if (missing !== undefined) {
+          status = "grounded";
+          reason = `input-absent:${missing.token}`;
+        } else if (contradicted !== undefined && contradicted.otherActionMention) {
           // The claim's sentence names another artifact (a path or bare
           // owner/repo reference): the registry cannot decide ITS inputs,
           // so even a positively-contradicted candidate only marks
           // unverified.
           status = "unverified";
           reason = "other-action-claim-unverified";
+        } else if (foreign) {
+          // Unknown evidence must never certify a clean review (#1016): a
+          // finding that carries a claim about another action cannot be
+          // refuted whole.
+          status = "unverified";
+          reason = "other-action-claim-unverified";
         } else if (contradicted !== undefined) {
           status = "refuted";
           reason = `input-declared:${contradicted.token}`;
         } else {
+          // A presence claim about an input the registry declares is
+          // confirmed, but it asserts no defect of its own: it does not by
+          // itself keep a finding blocking that also carries a refuted
+          // claim.
           const grounded = resolved.find((candidate) =>
-            (candidate.direction === "absence" && !normalized.has(candidate.token))
-            || (candidate.direction === "presence" && normalized.has(candidate.token)));
+            candidate.direction === "presence"
+            && normalized.has(candidate.token)
+            && !candidate.otherActionSubject);
           if (grounded !== undefined) {
             status = "grounded";
-            reason = `${grounded.direction === "presence" ? "input-declared" : "input-absent"}:${grounded.token}`;
+            reason = `input-declared:${grounded.token}`;
           } else {
             status = "unverified";
             reason = resolved.some((candidate) => candidate.direction === "presence")

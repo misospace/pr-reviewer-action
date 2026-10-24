@@ -790,6 +790,38 @@ test("#1238 a genuine missing-input claim is retained as substantiated and keeps
   assert.equal(a.verdict, "request_changes");
 });
 
+test("#1238 a mixed finding keeps its confirmed missing-input claim and stays blocking", async () => {
+  // One finding can carry two claims about the action's declared inputs:
+  // `ai-api-key` IS declared, so that absence claim is positively
+  // contradicted, and `model-input` is NOT declared, so that absence claim
+  // is a genuine defect the witness confirms. The confirmed claim keeps the
+  // finding substantiated — it must not be demoted whole because a sibling
+  // claim in the same finding was refuted (#1238: preserve true findings).
+  const a = artifact({
+    verdict: "request_changes",
+    findings: [
+      finding({
+        severity: "major",
+        file: ".github/workflows/ai_pr_review.yaml",
+        line: 30,
+        message: "The action does not declare `ai-api-key` input. The action does not declare `model-input` input.",
+      }),
+    ],
+  });
+  const result = await applyBlockerVerification(a.findings, {
+    readSource: unavailableReader,
+    expectedRevision: REVISION,
+    declaredActionInputs: new Set(["github-token", "ai-api-key", "rereview-label"]),
+  });
+  assert.equal(result.demoted, 0);
+  assert.equal(a.findings[0]!.severity, "major");
+  assert.equal(a.findings[0]!.grounding_status, undefined);
+  // The model approved; the confirmed defect is still an open blocking
+  // finding, so the strict mapping keeps request_changes.
+  applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+  assert.equal(a.verdict, "request_changes");
+});
+
 test("#1240 a claim about another revision is unverified and still fails closed", async () => {
   // The declared-input registry speaks for the EXECUTING revision only: a
   // claim that names a different revision is unverified — never refuted,

@@ -352,7 +352,8 @@ test("the #1238 incident message refutes on the positively contradicted half", a
 test("clause windows isolate direction cues so a mixed sentence still resolves", async () => {
   // `alpha-mode`'s clause is a presence claim the registry would ground;
   // `ai-api-key`'s clause (after ", so") is an absence claim the registry
-  // refutes. Refutation wins the per-finding composition.
+  // refutes. A confirmed presence claim asserts no defect of its own, so
+  // refutation still wins the per-finding composition.
   const finding = markerFinding({
     message: "the action declares input `alpha-mode`, so `ai-api-key` is an unexpected input",
   });
@@ -360,6 +361,129 @@ test("clause windows isolate direction cues so a mixed sentence still resolves",
   assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
     ["refuted", "input-declared:ai-api-key"],
   ]);
+  assert.equal(finding.grounding_status, "refuted");
+});
+
+test("#1238 a genuinely missing declaration survives a refuted sibling claim", async () => {
+  // One finding can carry more than one claim. `ai-api-key` is declared, so
+  // that absence claim is positively contradicted; `model-input` is not
+  // declared, so that absence claim is a genuine defect the witness
+  // confirms. The true claim survives: the finding is not demoted whole
+  // because one of its claims was refuted (#1238: preserve true findings).
+  const finding = markerFinding({
+    message: "The action does not declare `ai-api-key` input. The action does not declare `model-input` input.",
+  });
+  const result = await verify([finding], async () => { throw new Error("input claims must not read source"); }, new Set(["github-token", "ai-api-key"]));
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "grounded", "input-absent:model-input"],
+  ]);
+  assert.equal(result.demoted, 0);
+  assert.equal(finding.severity, "blocker");
+  assert.equal(finding.grounding_status, undefined);
+});
+
+test("#1238 a claim about another action's inputs is never decided with this action's registry", async () => {
+  // The registry witnesses the EXECUTING action only. A claim that names
+  // another action as its subject is unknown evidence: it must not ground
+  // the finding (the registry cannot confirm another action's inputs) and
+  // must not refute it either. The subject is the clause's action noun, so
+  // every phrasing that puts a name in front of "action" is another
+  // action's claim.
+  const mixed = markerFinding({
+    message: "The action does not declare `ai-api-key` input. `owner/repo` action does not declare `model-input` input.",
+  });
+  const alone = markerFinding({
+    message: "`owner/repo` action does not declare `model-input` input.",
+  });
+  const bareName = markerFinding({
+    message: "The checkout action does not declare `model-input` input.",
+  });
+  const possessive = markerFinding({
+    message: "`owner/repo`'s action does not declare `model-input` input.",
+  });
+  const foreignPresence = markerFinding({
+    message: "`owner/repo` action declares input `ai-api-key`.",
+  });
+  const result = await verify([mixed, alone, bareName, possessive, foreignPresence], async () => { throw new Error("input claims must not read source"); }, new Set(["github-token", "ai-api-key"]));
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "unverified", "other-action-claim-unverified"],
+    ["input_declaration", "unverified", "other-action-claim-unverified"],
+    ["input_declaration", "unverified", "other-action-claim-unverified"],
+    ["input_declaration", "unverified", "other-action-claim-unverified"],
+    ["input_declaration", "unverified", "other-action-claim-unverified"],
+  ]);
+  assert.equal(result.demoted, 5);
+  assert.ok([mixed, alone, bareName, possessive, foreignPresence].every((finding) =>
+    finding.severity === "minor" && finding.grounding_status === "unverified"));
+});
+
+test("#1238 the claim's own clause decides its subject, not the whole message", async () => {
+  // One sentence can carry a claim about this action and a claim about
+  // another one. Each claim's subject is its own clause's action noun, so
+  // the confirmed claim about this action is still grounded.
+  const finding = markerFinding({
+    message: "The action does not declare `model-input` input, but `owner/repo` action does not declare `ai-key` input.",
+  });
+  const result = await verify([finding], async () => { throw new Error("input claims must not read source"); }, new Set(["github-token", "ai-api-key"]));
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "grounded", "input-absent:model-input"],
+  ]);
+  assert.equal(result.demoted, 0);
+  assert.equal(finding.severity, "blocker");
+  assert.equal(finding.grounding_status, undefined);
+});
+
+test("#1238 a path citation does not stop a genuine missing declaration from grounding", async () => {
+  // A file-path citation is not another action's subject: the claim is
+  // still about the executing action, so the registry decides it. The
+  // unquoted "action.yml" spelling cuts the clause at its ".", so the path
+  // component must be recognized from the text that follows it.
+  const pathFile = markerFinding({
+    message: "The action does not declare `model-input` input in src/run/action.ts, so the setting is dropped.",
+  });
+  const manifest = markerFinding({
+    message: "The action does not declare `model-input` input in action.yml, so the setting is dropped.",
+  });
+  const result = await verify([pathFile, manifest], async () => { throw new Error("input claims must not read source"); }, new Set(["github-token", "ai-api-key"]));
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "grounded", "input-absent:model-input"],
+    ["input_declaration", "grounded", "input-absent:model-input"],
+  ]);
+  assert.equal(result.demoted, 0);
+  assert.equal(pathFile.severity, "blocker");
+  assert.equal(pathFile.grounding_status, undefined);
+  assert.equal(manifest.severity, "blocker");
+  assert.equal(manifest.grounding_status, undefined);
+});
+
+test("#1238 a claim naming this action in a descriptive way still grounds", async () => {
+  // The boundary has no repository identity, so it resolves the subject
+  // from the modifier of the action noun. The usual self-referring
+  // modifiers name THIS action, so the claim stays decidable.
+  const finding = markerFinding({
+    message: "The executing action does not declare `model-input` input, so the setting is dropped.",
+  });
+  const result = await verify([finding], async () => { throw new Error("input claims must not read source"); }, new Set(["github-token", "ai-api-key"]));
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "grounded", "input-absent:model-input"],
+  ]);
+  assert.equal(result.demoted, 0);
+  assert.equal(finding.severity, "blocker");
+  assert.equal(finding.grounding_status, undefined);
+});
+
+test("#1238 a refuted claim alone still demotes a finding that carries no confirmed defect", async () => {
+  // The composition stays fail-safe: a finding whose only decidable claim
+  // is contradicted is refuted and demoted, whatever else it mentions.
+  const finding = markerFinding({
+    message: "The action does not declare `ai-api-key` input. The action does not declare `ai-base-url` input.",
+  });
+  const result = await verify([finding], async () => { throw new Error("input claims must not read source"); }, new Set(["github-token", "ai-api-key", "ai-base-url"]));
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["refuted", "input-declared:ai-api-key"],
+  ]);
+  assert.equal(result.demoted, 1);
+  assert.equal(finding.severity, "minor");
   assert.equal(finding.grounding_status, "refuted");
 });
 
