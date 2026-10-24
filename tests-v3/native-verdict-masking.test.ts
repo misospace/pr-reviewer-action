@@ -32,7 +32,7 @@ test("#868: produceNativeVerdict masks the configured key end to end (mock trans
     apiKey,
     turnTimeout: 5,
     usageAcc: newUsageAcc(),
-    deadline: null,
+    deadline: 100,
     transport: async () => ({ error: { message: `stream error: bad credential ${apiKey}` } }),
     timeFn: () => 0,
   });
