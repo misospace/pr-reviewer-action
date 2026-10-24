@@ -13,8 +13,9 @@
  *  - every executor result is redacted + byte-capped before it can reach the
  *    conversation or corpus (untrusted data, never instructions);
  *  - MCP routing resolves only against already-advertised read-only routes;
- *  - the smart tier is deadline-bounded and degrades to the primary review on
- *    transport/wall-clock/tool failure (fallback is availability recovery).
+ *  - the tool loop is wall-clock deadline-bounded on both tiers, and the
+ *    smart tier degrades to the primary review on transport/wall-clock/tool
+ *    failure (fallback is availability recovery).
  *
  * All I/O is injected (`HarnessDeps`): workspace file reads/writes, the model
  * transport, the clock, and the specialist-leads renderer (the specialists
@@ -784,7 +785,9 @@ export interface ProduceVerdictInput {
    * persisted record when the refresh ends without one (failed or unaccepted).
    * The same fold sites as `usageAcc`, by construction — never divergent. */
   unrecordedAcc?: UsageAccumulator;
-  deadline: number | null;
+  /** Absolute wall-clock deadline in timeFn-epoch seconds; every attempt's
+   * timeout is clamped to the remaining budget. */
+  deadline: number;
   transport: HarnessTransport;
   timeFn: () => number;
   /** #1047: the lane name for failure diagnostics ("primary" | "smart").
@@ -814,12 +817,9 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
 
   const request = async (payload: Record<string, unknown>): Promise<{ response: unknown; transportError: string | null }> => {
     try {
-      let timeout = input.turnTimeout;
-      if (input.deadline !== null) {
-        const remaining = input.deadline - timeFn();
-        if (remaining <= 0) throw new Error("tool-loop wall-clock budget exhausted");
-        timeout = Math.min(input.turnTimeout, Math.max(1, Math.trunc(remaining)));
-      }
+      const remaining = input.deadline - timeFn();
+      if (remaining <= 0) throw new Error("smart tool-loop wall-clock budget exhausted");
+      const timeout = Math.min(input.turnTimeout, Math.max(1, Math.trunc(remaining)));
       return { response: await transport(input.baseUrl, input.apiFormat, payload, input.apiKey, timeout), transportError: null };
     } catch (exc) {
       return { response: null, transportError: exc instanceof Error ? exc.message : String(exc) };
@@ -2001,9 +2001,10 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // #1198: a true whole-exchange deadline for EITHER tier, taken once here —
   // before the MCP chain and every turn — so pre-loop setup and an unclamped
   // closing verdict turn can no longer push the exchange past the configured
-  // `tool-loop-wall-clock-sec` ceiling. Everything downstream (per-turn
-  // clamps, refusal results, verdict/acceptance/repair gating) already honors
-  // a non-null deadline; only the smart tier supplied one before.
+  // `tool-loop-wall-clock-sec` ceiling. The deadline is a guaranteed number
+  // (resolveLoopLimits clamps the wall-clock bounds), and every downstream
+  // consumer (per-turn clamps, refusal results, verdict/acceptance/repair
+  // gating) treats it as one.
   const deadline = timeFn() + wallClock;
   // #1094 review round 3: the loop's NON-verdict response surfaces (tool-call
   // arguments, the closing text, loop errors, tool results) are
@@ -2032,11 +2033,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     });
     let connectError: string | null;
     try {
-      if (deadline !== null) {
-        const remaining = deadline - timeFn();
-        if (remaining <= 0) break;
-        toolset.timeoutSec = Math.min(input.requestTimeout, Math.max(1, Math.trunc(remaining / 3)));
-      }
+      const remaining = deadline - timeFn();
+      if (remaining <= 0) break;
+      toolset.timeoutSec = Math.min(input.requestTimeout, Math.max(1, Math.trunc(remaining / 3)));
       connectError = await toolset.connect();
     } catch (exc) {
       connectError = exc instanceof Error ? exc.message : String(exc);
@@ -2146,7 +2145,6 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
 
   const postFn = async (payload: Record<string, unknown>, turn?: ToolTurnSignal, sidecar?: UsageAccumulator): Promise<unknown> => {
     const remainingCheck = (): number => {
-      if (deadline === null) return input.turnTimeout;
       const remaining = deadline - timeFn();
       if (remaining <= 0) throw new Error("tool-loop wall-clock budget exhausted");
       return Math.min(input.turnTimeout, Math.max(1, Math.trunc(remaining)));
@@ -2260,7 +2258,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   };
 
   const executeFn = async (toolName: string, args: Record<string, unknown>): Promise<Record<string, unknown>> => {
-    if (deadline !== null && timeFn() >= deadline) {
+    if (timeFn() >= deadline) {
       return { tool: toolName, status: "error", result: { error: "tool-loop deadline exceeded" } };
     }
     // Route mcp__server__tool to the MCP client; everything else falls through
@@ -2280,13 +2278,11 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       if (routed !== toolName) log(`  MCP tool name '${toolName}' resolved to '${routed}'`);
       const toolset = mcpRoutes.get(routed)!;
       const bareTool = splitNamespaced(routed)![1];
-      if (deadline !== null) {
-        const remaining = deadline - timeFn();
-        if (remaining <= 0) {
-          return { tool: toolName, status: "error", result: { error: "tool-loop deadline exceeded" } };
-        }
-        toolset.timeoutSec = Math.min(input.requestTimeout, Math.max(1, Math.trunc(remaining)));
+      const mcpRemaining = deadline - timeFn();
+      if (mcpRemaining <= 0) {
+        return { tool: toolName, status: "error", result: { error: "tool-loop deadline exceeded" } };
       }
+      toolset.timeoutSec = Math.min(input.requestTimeout, Math.max(1, Math.trunc(mcpRemaining)));
       const res = await toolset.call(bareTool, typeof args === "object" && args !== null ? args : {});
       if (res.error) {
         return { tool: toolName, status: "error", result: { error: res.error } };
@@ -2296,14 +2292,11 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     }
 
     const normalized = normalizeToolRequest({ tool: toolName, args });
-    let toolTimeout = input.requestTimeout;
-    if (deadline !== null) {
-      const remaining = deadline - timeFn();
-      if (remaining <= 0) {
-        return { tool: toolName, status: "error", result: { error: "tool-loop deadline exceeded" } };
-      }
-      toolTimeout = Math.min(input.requestTimeout, Math.max(1, Math.trunc(remaining)));
+    const toolRemaining = deadline - timeFn();
+    if (toolRemaining <= 0) {
+      return { tool: toolName, status: "error", result: { error: "tool-loop deadline exceeded" } };
     }
+    const toolTimeout = Math.min(input.requestTimeout, Math.max(1, Math.trunc(toolRemaining)));
     return executeToolRequest(normalized.tool, normalized.args, { ...toolCtx, requestTimeout: toolTimeout });
   };
 
@@ -2459,12 +2452,12 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     input.tier === "smart" &&
     (outcome.stopReason === "request-error" ||
       outcome.stopReason === "wall-clock-exceeded" ||
-      (deadline !== null && timeFn() >= deadline))
+      timeFn() >= deadline)
   ) {
     input.result.mode = "native_loop";
     input.result.rounds = outcome.rounds;
     input.result.stop_reason =
-      deadline !== null && timeFn() >= deadline ? "wall-clock-exceeded" : outcome.stopReason;
+      timeFn() >= deadline ? "wall-clock-exceeded" : outcome.stopReason;
     input.result.planned_request_count = outcome.toolCallsIssued;
   input.result.tool_calls = outcome.executed.map((call) => ({
     tool: call.tool,
@@ -2607,12 +2600,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           // the lane's own endpoint assertion.
           anthropicStructuredOutputSupported: anthropicStructuredOutput,
         }) as Record<string, unknown>;
-        let verdictTimeout = input.turnTimeout;
-        if (deadline !== null) {
-          const remaining = deadline - timeFn();
-          if (remaining <= 0) throw new Error("tool-loop wall-clock budget exhausted");
-          verdictTimeout = Math.min(input.turnTimeout, Math.max(1, Math.trunc(remaining)));
-        }
+        const verdictRemaining = deadline - timeFn();
+        if (verdictRemaining <= 0) throw new Error("tool-loop wall-clock budget exhausted");
+        const verdictTimeout = Math.min(input.turnTimeout, Math.max(1, Math.trunc(verdictRemaining)));
         // #1199: the verdict turn's latency is measured on the SAME dedicated
         // telemetry clock the per-round records use — never the scripted
         // budget `timeFn`. Mixing the two (starting on one and subtracting
@@ -2648,7 +2638,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         // whose verdict is usable BUT whose run's deadline has expired would
         // still have displaced the standing verdict's telemetry record before
         // the acceptance gate rejected it.
-        const verdictAccepted = verdict.ok && (deadline === null || timeFn() < deadline);
+        const verdictAccepted = verdict.ok && timeFn() < deadline;
         // #1199 (review round 5): a refresh whose verdict is usable but not
         // accepted (or failed outright) charged the aggregate with NO verdict
         // record — mark the `verdict_refresh` side-car for persistence so the
@@ -2753,7 +2743,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         if (recordFailure) {
           input.result.native_loop_verdict_status = "fallback";
           input.result.native_loop_verdict_reason =
-            deadline !== null && timeFn() >= deadline ? "deadline" : verdict.reason;
+            timeFn() >= deadline ? "deadline" : verdict.reason;
           input.result.native_loop_verdict_error = verdict.detail;
           // #1047: masked whole against the loop's key — the record carries
           // no response content, but the static field names can collide with
@@ -2842,7 +2832,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         // `skipped_no_budget`.
         const wallClockLeft = budgets.wallClockSec - outcome.elapsedSec - verdictElapsedSec;
         const roundsLeft = budgets.maxRounds - outcome.rounds;
-        const deadlineLeft = deadline === null || timeFn() < deadline;
+        const deadlineLeft = timeFn() < deadline;
         if (!instruction) {
           // A vacuous instruction is treated as a no-op probe: no loop, no
           // record — the run stays exactly as before.
@@ -2975,7 +2965,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // are stamped together, at exactly this point.
   input.result.usage = usageWithCacheRatio(usageAcc);
   input.result.native_loop_unrecorded_usage = unrecordedUsageRecord();
-  if (input.tier === "smart" && deadline !== null && timeFn() >= deadline) {
+  if (input.tier === "smart" && timeFn() >= deadline) {
     delete input.result.native_loop_verdict_produced;
     input.result.native_loop_verdict_status = "fallback";
     input.result.native_loop_verdict_reason = "deadline";
