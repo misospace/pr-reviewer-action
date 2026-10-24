@@ -228,18 +228,27 @@ const MANIFEST_SUBJECT_RE = /\baction\.ya?ml\b/i;
  * exempt path-bearing fabricated claims from verification. Evaluated on the
  * raw sentence because the reference typically sits inside a quoted span
  * (masked for cue scanning). A bare owner/repo mention without a ref is not
- * recognized (fail-safe: the candidate survives to the witness, which can
- * only ground or mark unverified, never wrongly refute).
+ * recognized here: the subject of a claim is decided by the clause-subject
+ * resolution (clauseNamesOtherAction), and a mention alone — a path or a
+ * bare name anywhere in the sentence — never disarms the witness (#1240
+ * review round: exempting path-cited claims let a fabricated major keep
+ * forcing request_changes).
  */
 const OTHER_ACTION_REF_RE = /\b[\w.-]+\/[\w.-]+@[^\s`,]*|\buses\s*:/i;
 /**
  * Broad other-action MENTION: any word/word path (a file path, a ratio, a
- * bare owner/repo reference) or a `uses:` key. When the claim's own sentence
- * mentions such a path, a refutation would decide facts about THAT artifact
- * with the EXECUTING action's registry, so a positively-contradicted
- * candidate downgrades to unverified instead of refuting. Candidates are
- * still selected with the narrow @ref guard (OTHER_ACTION_REF_RE) so path
- * citations do not silently exempt claims from verification.
+ * bare owner/repo reference) or a `uses:` key. It guards the GATE-absence
+ * decision only: a gate sentence naming any path could be about another
+ * artifact's implementation, and the gate path has no clause-subject
+ * resolution, so the conservative guard keeps such a sentence unverified
+ * instead of risking a false refutation.
+ *
+ * The INPUT-declaration path deliberately does NOT use it (#1240 review):
+ * its subject is resolved per clause (clauseNamesOtherAction), which treats
+ * a file-path citation as what it is — "src/run/action.ts" is a path, not
+ * another action. A bare-mention downgrade there would let a fabricated
+ * claim escape refutation by citing any path, keeping a source-contradicted
+ * major finding blocking (#1238 is exactly about that outcome).
  */
 const OTHER_ACTION_MENTION_RE = /\b[\w.-]+\/[\w.-]+|\buses\s*:/i;
 /**
@@ -429,15 +438,12 @@ type InputDirection = "presence" | "absence" | "ambiguous";
 interface InputCandidate {
   token: string;
   direction: InputDirection;
-  /** The raw claim sentence mentions another action (broad path shape): a
-   *   positive contradiction from the registry cannot decide THAT action's
-   *   inputs, so refutation downgrades to unverified. */
-  otherActionMention: boolean;
   /** The raw claim CLAUSE names another action as its subject (a modifier
    *   in front of the action noun: "the `owner/repo` action", "the
    *   checkout action"): the registry speaks for the executing action only,
    *   so such a claim is never decided with it — neither grounded nor
-   *   refuted. */
+   *   refuted. A file-path citation is not a subject (#1240 review): it
+   *   never downgrades a positive contradiction. */
   otherActionSubject: boolean;
 }
 
@@ -719,10 +725,10 @@ function classifyInputDeclaration(message: string): InputCandidate[] {
     candidates.push({
       token: raw.toLowerCase(),
       direction,
-      otherActionMention: OTHER_ACTION_MENTION_RE.test(message.slice(start, end)),
       // The subject of the claim is the clause's action noun: the clause
       // is read RAW because a cited reference (`owner/repo`, "checkout")
-      // names the action it talks about.
+      // names the action it talks about. A bare path citation in the
+      // sentence is not a subject and must not disarm the witness.
       otherActionSubject: clauseNamesOtherAction(
         message.slice(clause.start, clause.end),
         message.slice(clause.end),
@@ -1139,13 +1145,6 @@ export async function applyBlockerVerification(
         if (missing !== undefined) {
           status = "grounded";
           reason = `input-absent:${missing.token}`;
-        } else if (contradicted !== undefined && contradicted.otherActionMention) {
-          // The claim's sentence names another artifact (a path or bare
-          // owner/repo reference): the registry cannot decide ITS inputs,
-          // so even a positively-contradicted candidate only marks
-          // unverified.
-          status = "unverified";
-          reason = "other-action-claim-unverified";
         } else if (foreign) {
           // Unknown evidence must never certify a clean review (#1016): a
           // finding that carries a claim about another action cannot be

@@ -881,21 +881,60 @@ test("#1238 review hardening: claims the registry cannot decide are never refute
 test("#1238 a bare other-action subject downgrades contradiction to unverified", async () => {
   // The registry witnesses only the EXECUTING action, so an absence claim
   // about another action's inputs is not contradicted even when the token
-  // collides with one of this action's declared ids. The broad other-action
-  // mention (bare owner/repo or any word/word path) downgrades the positive
-  // contradiction to an unverified marking instead of refuting.
+  // collides with one of this action's declared ids. The clause-subject
+  // resolution decides it: the modifier in front of the action noun names
+  // another artifact, so the positive contradiction downgrades to an
+  // unverified marking instead of refuting.
   const registry = new Set(["github-token", "ai-api-key"]);
   const claims = [
     markerFinding({ message: "The `actions/checkout` action does not support the `ai-api-key` input." }),
-    markerFinding({ message: "The action declares no `ai-api-key` input in src/run/action.ts, so the credential is dropped." }),
   ];
   const result = await verify(claims, async () => { throw new Error("other-action claims must not read source"); }, registry);
   assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
     ["unverified", "other-action-claim-unverified"],
-    ["unverified", "other-action-claim-unverified"],
   ]);
   assert.ok(claims.every((finding) => finding.severity === "minor" && finding.grounding_status === "unverified"));
-  assert.equal(result.demoted, 2);
+  assert.equal(result.demoted, 1);
+});
+
+test("#1238 review round 5: a path citation never disarms a positive contradiction", async () => {
+  // "src/run/action.ts" is a path, not another action's subject: the claim
+  // is about THIS action, so the embedded contract decides it. A fabricated
+  // absence claim that cites any word/word path must still be REFUTED —
+  // downgrading it to unverified would keep a source-contradicted major
+  // finding forcing request_changes, the exact #1238 incident outcome.
+  const registry = new Set(["github-token", "ai-api-key"]);
+  const claims = [
+    markerFinding({ message: "The action declares no `ai-api-key` input in src/run/action.ts, so the credential is dropped." }),
+    markerFinding({ message: "The action does not declare `ai-api-key` input in contracts/action-v3.yml." }),
+    markerFinding({ message: "The action does not declare `ai-api-key` input; see misospace/pr-reviewer-action README." }),
+  ];
+  const result = await verify(claims, async () => { throw new Error("input claims must not read source"); }, registry);
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["refuted", "input-declared:ai-api-key"],
+    ["refuted", "input-declared:ai-api-key"],
+    ["refuted", "input-declared:ai-api-key"],
+  ]);
+  assert.ok(claims.every((finding) => finding.severity === "minor" && finding.grounding_status === "refuted"));
+  assert.equal(result.demoted, 3);
+});
+
+test("#1238 accepted trade-off: an appositive mention does not re-subject a self-subject clause", async () => {
+  // The subject of a claim is the modifier of its clause's action noun. A
+  // bare owner/repo thrown into the clause in apposition, while the noun
+  // still carries a self modifier ("The action, `actions/checkout` in this
+  // case, ..."), names the claim's subject as THIS action, so the registry
+  // decides it and the contradicted absence claim is refuted. The old
+  // sentence-wide mention guard caught this shape at the cost of exempting
+  // every path-cited fabrication; the clause doctrine wins (#1240 review).
+  const registry = new Set(["github-token", "ai-api-key"]);
+  const finding = markerFinding({
+    message: "The action, `actions/checkout` in this case, does not declare the `ai-api-key` input.",
+  });
+  const result = await verify([finding], async () => { throw new Error("input claims must not read source"); }, registry);
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["refuted", "input-declared:ai-api-key"],
+  ]);
 });
 
 test("#1238 widened presence vocabulary marks fabricated presence claims without refuting", async () => {
