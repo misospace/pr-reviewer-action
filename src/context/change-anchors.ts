@@ -20,6 +20,7 @@
 
 import { closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { isPySpaceCode, pyLstrip, pyRstrip, pyStrip } from "../platform/py.js";
 import { pySplitLines } from "../requirements/ledger.js";
 import { pyJsonDump } from "./py-json.js";
 import { createPrTextLineMasker, redactDiffText, redactPrTextLines } from "./redact.js";
@@ -51,22 +52,6 @@ export const MAX_COUNTERPARTS = 8;
 const PY_WS_CLASS = "\\t\\n\\v\\f\\r\\x1c-\\x20\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
 /** Python `re` `\w` for str patterns (`str.isalnum()` or `_`). */
 const PY_WORD_CLASS = "\\p{L}\\p{N}_";
-
-function isPySpaceCode(code: number): boolean {
-  return (
-    (code >= 0x09 && code <= 0x0d) ||
-    (code >= 0x1c && code <= 0x20) ||
-    code === 0x85 ||
-    code === 0xa0 ||
-    code === 0x1680 ||
-    (code >= 0x2000 && code <= 0x200a) ||
-    code === 0x2028 ||
-    code === 0x2029 ||
-    code === 0x202f ||
-    code === 0x205f ||
-    code === 0x3000
-  );
-}
 
 /** Translate a Python `re` pattern (as written in the v2 module) into an
  * equivalent `u`-mode JavaScript RegExp. */
@@ -140,22 +125,6 @@ function pyHead(text: string, n: number): string {
     seen += 1;
   }
   return text.slice(0, i);
-}
-
-function pyLstrip(text: string): string {
-  let i = 0;
-  while (i < text.length && isPySpaceCode(text.charCodeAt(i))) i += 1;
-  return text.slice(i);
-}
-
-function pyRstrip(text: string): string {
-  let end = text.length;
-  while (end > 0 && isPySpaceCode(text.charCodeAt(end - 1))) end -= 1;
-  return text.slice(0, end);
-}
-
-function pyStrip(text: string): string {
-  return pyRstrip(pyLstrip(text));
 }
 
 /** Python `text.strip(chars)`. */

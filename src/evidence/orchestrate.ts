@@ -44,9 +44,9 @@ import {
   pyJsonDumps,
   pyJsonLoads,
   pyStr,
-  pyStrip,
   pyTruthy,
 } from "./pyjson.js";
+import { pyRstrip, pyStrip } from "../platform/py.js";
 import { MAX_FINDINGS as SARIF_DEFAULT_MAX_FINDINGS, pyOsErrorMessage, sarifProviderEntry, splitSarifPaths, type SarifEvidenceEntry } from "./sarif.js";
 
 export const EVIDENCE_MARKDOWN_FILE = "evidence-providers.md";
@@ -122,10 +122,6 @@ function pyPathStr(raw: string): string {
   const parts = raw.split("/").filter((part) => part !== "" && part !== ".");
   const body = parts.join("/");
   return leading + body || (leading === "" ? "." : leading);
-}
-
-function pyRstrip(text: string): string {
-  return pyStrip(`x${text}`).slice(1);
 }
 
 function loadConfig(configPathRaw: string, cwd: string): { providers: unknown[]; error: string } {

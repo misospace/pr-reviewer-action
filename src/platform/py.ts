@@ -1,7 +1,7 @@
 /** Minimal Python semantics for the ports of `pr_reviewer/forgejo_backend.py`
  * normalizers (#706 PR 1): `dict.get` defaults, truthiness for `x or y`,
  * `str()` of JSON scalars, code-point string ordering, and
- * `urllib.parse.quote(s, safe="")`. A Python normalizer that would raise
+ * `urllib.parse.quote(s, safe=""), and bare `str.strip()`. A Python normalizer that would raise
  * (e.g. `.get` on a non-dict) throws `PyError`; the v2 CLI then exits
  * nonzero, which the shell seam reports as a failed fetch. */
 
@@ -57,6 +57,46 @@ export function pyFloatRepr(value: number): string {
   const intPart = digits.slice(0, exponent + 1).padEnd(exponent + 1, "0");
   const fracPart = digits.slice(exponent + 1);
   return `${sign}${intPart}.${fracPart || "0"}`;
+}
+
+// ── whitespace strip -------------------------------------------------------
+
+/** Python `str.isspace()`: the code points a bare `str.strip()` removes
+ * (JS `trim()` strips U+FEFF, and misses U+001C..U+001F). Every member is
+ * BMP, so scanning UTF-16 code units is code-point-faithful. */
+export function isPySpaceCode(code: number): boolean {
+  return (
+    (code >= 0x09 && code <= 0x0d) ||
+    (code >= 0x1c && code <= 0x20) ||
+    code === 0x85 ||
+    code === 0xa0 ||
+    code === 0x1680 ||
+    (code >= 0x2000 && code <= 0x200a) ||
+    code === 0x2028 ||
+    code === 0x2029 ||
+    code === 0x202f ||
+    code === 0x205f ||
+    code === 0x3000
+  );
+}
+
+/** Python `str.lstrip()` with no argument. */
+export function pyLstrip(text: string): string {
+  let i = 0;
+  while (i < text.length && isPySpaceCode(text.charCodeAt(i))) i += 1;
+  return text.slice(i);
+}
+
+/** Python `str.rstrip()` with no argument. */
+export function pyRstrip(text: string): string {
+  let end = text.length;
+  while (end > 0 && isPySpaceCode(text.charCodeAt(end - 1))) end -= 1;
+  return text.slice(0, end);
+}
+
+/** Python `str.strip()` with no argument. */
+export function pyStrip(text: string): string {
+  return pyRstrip(pyLstrip(text));
 }
 
 export function pyReprString(text: string): string {

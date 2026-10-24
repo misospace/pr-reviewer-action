@@ -31,7 +31,7 @@
 
 import { ForgejoEnrichClient, GitHubEnrichClient } from "../platform/enrich.js";
 import { compareCodePoints } from "../platform/jq.js";
-import { pyFloatRepr, pyTruthy } from "../platform/py.js";
+import { pyFloatRepr, pyStrip, pyTruthy } from "../platform/py.js";
 import { pyUrlHost, PyUrlValueError } from "../platform/py-url.js";
 import {
   fetchSource,
@@ -42,7 +42,7 @@ import {
 } from "../platform/safe-fetch.js";
 import type { BudgetTracker } from "./budget.js";
 import { classifyUrl, normalizeUrl, type UrlClassification } from "./enrichment.js";
-import { pyStrip, stripSourceToText } from "./strip-source-text.js";
+import { stripSourceToText } from "./strip-source-text.js";
 
 export const SKIP_FETCH_HOSTS: ReadonlySet<string> = new Set(["gitlab.com", "bitbucket.org"]);
 const MAX_URLS = 25;

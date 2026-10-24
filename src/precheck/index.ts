@@ -29,7 +29,6 @@ export {
   extractIssueIdentifiers,
   fetchIssue,
   linearIssueToV2,
-  pyStrip,
   renderLinearMarkdown,
   LinearContextError,
   LINEAR_API_URL,

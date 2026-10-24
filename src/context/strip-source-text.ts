@@ -14,6 +14,7 @@
  * hostile body cannot pin the event loop. */
 
 import { HTML5_ENTITIES, INVALID_CHARREFS, INVALID_CODEPOINTS } from "./html-entities.js";
+import { pyStrip } from "../platform/py.js";
 
 /** A Python exception the ported code raises where v2 would (the v2 caller
  * propagates it, aborting the linked-sources render). */
@@ -99,7 +100,6 @@ export function pyDecodeUtf8Ignore(bytes: Uint8Array): string {
 /** `str.isspace()` code points (CPython: bidirectional WS/B/S or Zs). */
 const PY_SPACE = "\\t\\n\\v\\f\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
 const PY_LSTRIP_RE = new RegExp(`^[${PY_SPACE}]+`, "u");
-const PY_SPACE_CHAR_RE = new RegExp(`^[${PY_SPACE}]$`, "u");
 const BLANK_LINES_RE = new RegExp(`\\n[${PY_SPACE}]*\\n+`, "gu");
 
 /** Number of code points (`len(str)`). */
@@ -126,16 +126,6 @@ export function pyPrefix(text: string, n: number): string {
     count += 1;
   }
   return text.slice(0, i);
-}
-
-/** `str.strip()` (linear: a `[ws]+$` regex backtracks quadratically over a
- * long interior whitespace run). All `str.isspace` code points are BMP. */
-export function pyStrip(text: string): string {
-  let start = 0;
-  let end = text.length;
-  while (start < end && PY_SPACE_CHAR_RE.test(text[start]!)) start += 1;
-  while (end > start && PY_SPACE_CHAR_RE.test(text[end - 1]!)) end -= 1;
-  return text.slice(start, end);
 }
 
 // --- looks_like_html / strip_html ---------------------------------------------
