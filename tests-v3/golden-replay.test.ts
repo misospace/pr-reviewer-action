@@ -33,6 +33,20 @@ after(() => {
   else process.env.GITHUB_ACTION_PATH = PREVIOUS_ACTION_PATH;
 });
 
+// #1238: the workflow-side witness joins the reviewed repository's
+// workflow steps to the action they invoke, so the replay must be able to
+// name the action under review. The runner exports
+// `GITHUB_ACTION_REPOSITORY` for the action that runs; the replay pins it
+// to the action the fixtures pin in their `uses:` lines. Set
+// deterministically — the suite must not depend on the ambient value — and
+// restored after the run.
+const PREVIOUS_ACTION_REPOSITORY = process.env.GITHUB_ACTION_REPOSITORY;
+process.env.GITHUB_ACTION_REPOSITORY = "misospace/pr-reviewer-action";
+after(() => {
+  if (PREVIOUS_ACTION_REPOSITORY === undefined) delete process.env.GITHUB_ACTION_REPOSITORY;
+  else process.env.GITHUB_ACTION_REPOSITORY = PREVIOUS_ACTION_REPOSITORY;
+});
+
 // Redaction marker tokens: a blocking claim that cites a token the PR's own
 // source does not contain is a claim the evidence cannot support. The plain
 // `[REDACTED]` placeholder is module-private (src/context/redact.ts:10), so it

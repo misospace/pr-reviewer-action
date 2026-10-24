@@ -46,9 +46,14 @@ export interface ArtifactFinding {
    * blocker-verification boundary when a model-authored source-backed claim
    * (committed-source literal, requirement claim, action-input declaration,
    * or gate-absence) was not substantiated by its witness — exact-head
-   * source for the first two, the executing action's embedded contract for
-   * input declarations, and the executing action's own implementation tree
-   * for gate-absence claims.
+   * source for the first two, the executing action's embedded contract and
+   * the reviewed repository's own workflow input names for input
+   * declarations, and the executing action's own implementation tree for
+   * gate-absence claims.
+   * The workflow witness is PER FILE and anchored to the finding's OWN
+   * cited file: it reports only what that file's DIRECT action step
+   * passes, it corroborates (grounds) a workflow-scoped claim about the
+   * mapping, and it never establishes an absence — so it never refutes.
    * The action-side witnesses speak for the EXECUTING revision's release
    * line only: a claim that names a different line or another patch is
    * unverified — never refuted, never grounded.

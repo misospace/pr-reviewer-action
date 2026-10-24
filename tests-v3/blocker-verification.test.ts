@@ -19,8 +19,8 @@ const requirementFinding = (overrides: Partial<ArtifactFinding> = {}): ArtifactF
   severity: "major", category: "security", file: "src/a.ts", line: null,
   message: "requirement not enforced: X is a standard", ...overrides,
 });
-const verify = (findings: ArtifactFinding[], read: (file: string) => Promise<SourceReadResult>, declaredActionInputs?: ReadonlySet<string> | null, readActionSource?: ActionSourceReader | null, executingActionVersion?: string | null) =>
-  applyBlockerVerification(findings, { readSource: read, expectedRevision: revision, declaredActionInputs, readActionSource, executingActionVersion });
+const verify = (findings: ArtifactFinding[], read: (file: string) => Promise<SourceReadResult>, declaredActionInputs?: ReadonlySet<string> | null, readActionSource?: ActionSourceReader | null, executingActionVersion?: string | null, workflowInputsByFile?: ReadonlyMap<string, ReadonlySet<string>> | null) =>
+  applyBlockerVerification(findings, { readSource: read, expectedRevision: revision, declaredActionInputs, readActionSource, executingActionVersion, workflowInputsByFile });
 const available = (result: SourceReadResult): Promise<SourceReadResult> => Promise.resolve(result);
 /** #1238: a fake witness over the EXECUTING action's own source tree. */
 const actionSource = (files: Record<string, string>): ActionSourceReader => async (path) => {
@@ -874,6 +874,12 @@ test("#1238 review hardening: claims the registry cannot decide are never refute
     markerFinding({ message: "The workflow passes the `ai-api-key` input to the action. The action does not declare `ai-key`." }),
   ];
   const result = await verify(claims, async () => { throw new Error("undecidable claims must not read source"); }, registry);
+  // #1238: with no workflow witness the workflow-mapping vocabulary is not
+  // a cue at all, so "The workflow passes the `ai-api-key` input to the
+  // action." is classified exactly as it was before the feature: no
+  // candidate, no decision. The anti-leak property the case pins still
+  // holds: the second sentence's absence cue did not turn it into an
+  // absence claim.
   assert.deepEqual(result.findings, []);
   assert.ok(claims.every((finding) => finding.grounding_status === undefined && finding.severity === "blocker"));
 });
@@ -1285,4 +1291,549 @@ test("#1240 another line or another patch is unverified", async () => {
     ["unverified", "other-revision-unverified"],
   ]);
   assert.ok(findings.every((finding) => finding.grounding_status === "unverified"));
+});
+
+// ---------------------------------------------------------------------------
+// #1238: the workflow-side witness — the reviewed repository's own workflow
+// input names at the exact reviewed head.
+// ---------------------------------------------------------------------------
+
+/**
+ * #1238: the workflow-side witness is PER FILE — the `with:` names the
+ * finding's OWN cited file passes to the action under review. The stock
+ * `markerFinding` cites "src/a.ts", so that is the file the witness must
+ * speak for.
+ */
+const WORKFLOW_INPUTS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["src/a.ts", new Set(["github-token", "ai-api-key", "ai-model"])],
+]);
+
+test("#1238 a workflow-scoped presence claim the workflow witness does NOT corroborate is never refuted", async () => {
+  // The cited file's direct action step passes `ai-api-key`, never
+  // `ai-key` — but the reader sees only the DIRECT action steps of that
+  // file. A local composite action, a reusable workflow or a remote
+  // composite can pass `ai-key` to the action through a surface the
+  // reader never sees, so "this file does not pass `ai-key`" is NOT an
+  // absence the witness can establish. The witness therefore CORROBORATES
+  // and never refutes: the claim stays unknown evidence (unverified), the
+  // finding is demoted as unknown evidence — never as a refutation — and
+  // the review fails closed on it.
+  const finding = markerFinding({
+    message: "the workflow passes `ai-key` as the action's credential input",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    null,
+    WORKFLOW_INPUTS,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "unverified", "input-presence-unverified"],
+  ]);
+  // Unknown evidence, not a refutation: the demotion is the #1016
+  // unverified demotion, which the strict mapping still holds as blocking.
+  assert.equal(result.demoted, 1);
+  assert.equal(finding.severity, "minor");
+  assert.equal(finding.capped_from, "blocker");
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1238 a workflow-scoped presence claim the workflow witness confirms is grounded", async () => {
+  // The workflow passes `ai-api-key`: the reviewed repository's own
+  // workflow file is the authority on what the runner passes, so the
+  // mapping claim is corroborated by the witness.
+  const finding = markerFinding({
+    message: "the workflow passes `ai-api-key` as the action's credential input",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    null,
+    WORKFLOW_INPUTS,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "grounded", "workflow-input:ai-api-key"],
+  ]);
+  assert.equal(result.demoted, 0);
+  assert.equal(finding.severity, "blocker");
+  assert.equal(finding.grounding_status, undefined);
+});
+
+test("#1238 the workflow witness alone grounds a mapping claim the registry cannot speak for", async () => {
+  // The registry speaks for what the ACTION declares; the mapping claim
+  // is about what the WORKFLOW passes. The workflow's own bytes decide it
+  // — the witness alone grounds it, with or without the registry's
+  // agreement.
+  const byFile: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+    ["src/a.ts", new Set(["ai-key"])],
+  ]);
+  const finding = markerFinding({
+    message: "the workflow passes `ai-key` as the action's credential input",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    null,
+    byFile,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "grounded", "workflow-input:ai-key"],
+  ]);
+  assert.equal(result.demoted, 0);
+  assert.equal(finding.severity, "blocker");
+  assert.equal(finding.grounding_status, undefined);
+});
+
+test("#1238 without the workflow witness the same claim keeps today's behavior", async () => {
+  // No witness for the finding's file: the mapping-verb vocabulary is not
+  // a cue at all, so the sentence is classified exactly as it was before
+  // this feature — no candidate, no decision, no artifact change.
+  const finding = markerFinding({
+    message: "the workflow passes `ai-key` as the action's credential input",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    null,
+    null,
+  );
+  assert.deepEqual(result.findings, []);
+  assert.equal(finding.grounding_status, undefined);
+  assert.equal(finding.severity, "blocker");
+});
+
+test("#1238 a claim that does not name the workflow is never decided by the workflow witness", async () => {
+  // The witness speaks about the workflow-to-action mapping only. A claim
+  // that does not name the workflow keeps today's behavior.
+  const finding = markerFinding({ message: "the action declares input `ai-key`" });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    null,
+    WORKFLOW_INPUTS,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "unverified", "input-presence-unverified"],
+  ]);
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1238 a foreign-subject claim stays unverified with the workflow witness available", async () => {
+  // The claim names another action as its subject: the workflow witness
+  // (like the declaration registry) speaks for THIS action only, so the
+  // other-action guard wins over the workflow rules.
+  const finding = markerFinding({
+    message: "the workflow passes `ai-api-key` to the `owner/repo` action's credential input",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    null,
+    WORKFLOW_INPUTS,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "unverified", "other-action-claim-unverified"],
+  ]);
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1238 a genuine missing-input claim still grounds with the workflow witness available", async () => {
+  // The claim is about what the ACTION declares and it is true: the input
+  // is undeclared. The workflow witness never rescues or refutes it.
+  const finding = markerFinding({
+    message: "the action does not declare `model-input` input, so the setting is dropped",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    null,
+    WORKFLOW_INPUTS,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "grounded", "input-absent:model-input"],
+  ]);
+  assert.equal(result.demoted, 0);
+  assert.equal(finding.severity, "blocker");
+  assert.equal(finding.grounding_status, undefined);
+});
+
+test("#1238 an uncorroborated workflow claim is never refuted by a sibling presence claim", async () => {
+  // One finding, two claims: the workflow-scoped one ("the workflow passes
+  // `ai-key`") the witness cannot corroborate, and a sibling about the
+  // DECLARED `ai-api-key`. The workflow witness never refutes, so the
+  // claim is not refuted and the finding is NOT demoted into an
+  // approve-able state: the registry decides the sibling claim and the
+  // finding stays blocking.
+  const finding = markerFinding({
+    message: "the workflow passes `ai-key` as the action's credential input, and the action declares input `ai-api-key`",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    null,
+    WORKFLOW_INPUTS,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "grounded", "input-declared:ai-api-key"],
+  ]);
+  assert.equal(result.demoted, 0);
+  assert.equal(finding.severity, "blocker");
+  assert.equal(finding.grounding_status, undefined);
+});
+
+test("#1238 a negated mapping verb is an absence cue in a workflow-scoped clause", async () => {
+  // "the workflow does not pass `x`" asserts the mapping LACKS that name:
+  // the direction is absence, so the declaration registry (which speaks
+  // for what the action DECLARES) cannot refute it — the claim stays
+  // unknown evidence and the review fails closed.
+  const finding = markerFinding({
+    message: "the workflow does not pass `ai-api-key` to the action's credential input",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    null,
+    WORKFLOW_INPUTS,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "unverified", "input-claim-unresolvable"],
+  ]);
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1238 a mapping verb outside a workflow-scoped clause is not a cue", async () => {
+  // The mapping vocabulary speaks about the workflow-to-action mapping
+  // only. In a clause that does not name the workflow it says nothing,
+  // so the claim is untouched exactly as it was before #1238.
+  const finding = markerFinding({
+    message: "the runner passes `ai-key` as the action's credential input",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    null,
+    WORKFLOW_INPUTS,
+  );
+  assert.deepEqual(result.findings, []);
+  assert.equal(finding.grounding_status, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// #1238 adversarial cases: each one is a regression guard for a review
+// finding against the workflow witness.
+// ---------------------------------------------------------------------------
+
+test("#1238 a finding whose file has no witness entry is never refuted by the workflow witness", async () => {
+  // The witness is anchored to the file the FINDING cited. A workflow that
+  // reaches the action through a local composite action has no direct
+  // action step, so it has no entry: the claim stays undecided. A PR
+  // author must not be able to silence a true finding by moving the
+  // invocation into a composite.
+  const otherFile = new Map<string, ReadonlySet<string>>([
+    [".github/workflows/other.yaml", new Set(["ai-api-key"])],
+  ]);
+  const finding = markerFinding({
+    file: ".github/workflows/ci.yaml",
+    message: "the workflow passes `ai-key` as the action's credential input",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    null,
+    otherFile,
+  );
+  // Not refuted: there is no witness for that file, so the claim keeps
+  // the behavior it had before the witness existed.
+  assert.deepEqual(result.findings, []);
+  assert.equal(finding.grounding_status, undefined);
+  assert.equal(finding.severity, "blocker");
+});
+
+test("#1238 a claim whose SUBJECT is the action is decided by the registry, never by the workflow witness", async () => {
+  // "the action declares the `ai-api-key` input the workflow expects" is a
+  // claim about the ACTION's own declaration: the workflow only MENTIONED
+  // is not its subject. The action really does declare `ai-api-key`, and
+  // PR-controlled workflow bytes must never refute that.
+  const finding = markerFinding({
+    message: "the action declares the `ai-api-key` input the workflow expects",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    null,
+    WORKFLOW_INPUTS,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "grounded", "input-declared:ai-api-key"],
+  ]);
+  assert.equal(finding.grounding_status, undefined);
+});
+
+test("#1238 a workflow-scoped ABSENCE claim is never refuted by the declaration registry", async () => {
+  // The registry speaks for what the ACTION declares; "the workflow does
+  // not declare the `ai-api-key` input" is about what the WORKFLOW
+  // declares, so the registry may not refute it. The claim stays
+  // unverified — unknown evidence, fail-closed.
+  const finding = markerFinding({
+    message: "the workflow does not declare the `ai-api-key` input the action expects",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    null,
+    WORKFLOW_INPUTS,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "unverified", "input-claim-unresolvable"],
+  ]);
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1238 the workflow scope is resolved by SUBJECT, not by a word match", async () => {
+  // The workflow witness may only decide a claim whose SUBJECT is the
+  // workflow. These claims merely MENTION the workflow, so the registry
+  // decides them — the reason is the registry's, never the witness's.
+  const mentions = [
+    "the action declares the `ai-api-key` input the workflow expects",
+    "the action accepts the `ai-api-key` input the workflow supplies",
+    "the action exposes the `ai-api-key` input to the workflow",
+    "GitHub ignores the workflow's `ai-api-key` input the action expects",
+  ];
+  for (const message of mentions) {
+    const finding = markerFinding({ message });
+    const result = await verify(
+      [finding],
+      async () => { throw new Error("input claims must not read source"); },
+      INPUT_REGISTRY,
+      null,
+      null,
+      WORKFLOW_INPUTS,
+    );
+    assert.deepEqual(
+      result.findings.map(({ kind, status, reason }) => [kind, status, reason]),
+      [["input_declaration", "grounded", "input-declared:ai-api-key"]],
+      `the registry decides: ${message}`,
+    );
+  }
+});
+
+test("#1238 a workflow-scoped claim is corroborated by the witness, never refuted by it", async () => {
+  // The mirror image of the case above: here the workflow IS the subject,
+  // so the witness speaks about the claim — but only in the presence
+  // direction, and only to CORROBORATE. A name the cited file's direct
+  // action step passes grounds the claim; a name it does not pass leaves
+  // the claim undecided (never refuted).
+  const scoped = [
+    "the workflow passes `ai-key` as the action's credential input",
+    "the workflow's credential input is named `ai-key`, so the action drops the credential",
+    "the calling workflow does not pass `ai-key` to the action's credential input",
+  ];
+  for (const message of scoped) {
+    const finding = markerFinding({ message });
+    const result = await verify(
+      [finding],
+      async () => { throw new Error("input claims must not read source"); },
+      INPUT_REGISTRY,
+      null,
+      null,
+      WORKFLOW_INPUTS,
+    );
+    const decisions = result.findings.map(({ status, reason }) => [status, reason]);
+    // The mapping cue applies only to a workflow-scoped clause, so every
+    // one of these sentences produces a candidate — and the presence
+    // direction is decided by the workflow's own bytes.
+    assert.ok(decisions.length === 1, `a workflow-scoped claim is a candidate: ${message}`);
+    if (message.includes("does not pass")) {
+      // An absence-direction claim is NEVER decided by the witness.
+      assert.deepEqual(decisions, [["unverified", "input-claim-unresolvable"]], message);
+    } else {
+      // The witness does not pass `ai-key`, so it corroborates nothing —
+      // and it never refutes: the claim is unknown evidence.
+      assert.deepEqual(decisions, [["unverified", "input-presence-unverified"]], message);
+    }
+  }
+});
+
+test("#1238 the witness is looked up under the canonical tree path of the finding's file", async () => {
+  // Git's tree lookups key on the canonical path, so the boundary
+  // canonicalizes the cited path the same way the head source reader does:
+  // "./.github/workflows/review.yaml" and ".github/workflows//review.yaml"
+  // name the same tree entry.
+  const byFile: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+    [".github/workflows/review.yaml", new Set(["ai-api-key"])],
+  ]);
+  const corroborated = markerFinding({
+    file: "./.github/workflows//review.yaml",
+    message: "the workflow passes `ai-api-key` as the action's credential input",
+  });
+  const uncorroborated = markerFinding({
+    file: "./.github/workflows//review.yaml",
+    message: "the workflow passes `ai-key` as the action's credential input",
+  });
+  const result = await verify(
+    [corroborated, uncorroborated],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    null,
+    byFile,
+  );
+  // The entry IS found under the canonical path: the cited file's direct
+  // action step passes `ai-api-key`, so the mapping claim is corroborated.
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "grounded", "workflow-input:ai-api-key"],
+    // A name the file does not pass is not corroborated — and never
+    // refuted.
+    ["input_declaration", "unverified", "input-presence-unverified"],
+  ]);
+});
+
+test("#1238 no witness ⇒ identical decision for every claim shape that is not workflow-scoped", async () => {
+  // The witness may only CHANGE the decision of a workflow-scoped claim.
+  // For every other shape the decision — status, reason and severity —
+  // must be byte-for-byte what it was without the witness.
+  const shapes = [
+    "the action declares input `ai-key`",
+    "the action declares input `rereview-label`",
+    "the action does not declare `model-input` input, so the setting is dropped",
+    "the action does not declare the `ai-api-key` input the action expects",
+    "the `actions/checkout` action does not support the `ai-api-key` input",
+    "the action does not declare input `ai-api-key` as required, so a missing secret fails silently",
+    "the action's `ai-api-key` input is ignored for fork pull requests",
+  ];
+  for (const message of shapes) {
+    const withWitness = markerFinding({ message });
+    const withoutWitness = markerFinding({ message });
+    const [a, b] = await Promise.all([
+      verify([withWitness], async () => { throw new Error("input claims must not read source"); }, INPUT_REGISTRY, null, null, WORKFLOW_INPUTS),
+      verify([withoutWitness], async () => { throw new Error("input claims must not read source"); }, INPUT_REGISTRY, null, null, null),
+    ]);
+    assert.deepEqual(
+      a.findings.map(({ status, reason }) => [status, reason]),
+      b.findings.map(({ status, reason }) => [status, reason]),
+      `identical decision with and without the witness: ${message}`,
+    );
+    assert.equal(withWitness.grounding_status, withoutWitness.grounding_status, message);
+    assert.equal(withWitness.severity, withoutWitness.severity, message);
+    assert.equal(withWitness.capped_from, withoutWitness.capped_from, message);
+  }
+});
+
+test("#1238 with a witness present NO workflow-scoped claim is ever refuted by the workflow witness", async () => {
+  // The invariant the correction rests on: the workflow witness speaks
+  // only from POSITIVE evidence about the finding's own cited file, so it
+  // can ground a workflow-scoped claim and can never refute one. Every
+  // reason string the boundary may produce for such a claim is listed
+  // here — the refutation reason (`workflow-input-absent:…`) is gone for
+  // good.
+  const claims = [
+    // Corroborated by the cited file's direct action step → grounded.
+    "the workflow passes `ai-api-key` as the action's credential input",
+    "the workflow's credential input is named `ai-api-key`, so the action keeps the credential",
+    // Not corroborated (the file does not pass that name) → unknown
+    // evidence, never a refutation.
+    "the workflow passes `ai-key` as the action's credential input",
+    "the workflow's credential input is named `ai-key`, so the action drops the credential",
+    // An absence-direction claim → unknown evidence (the witness says
+    // which names the workflow passes, not which it lacks).
+    "the workflow does not pass `ai-key` to the action's credential input",
+  ];
+  const allowed = new Set([
+    "workflow-input:ai-api-key",
+    "input-presence-unverified",
+    "input-claim-unresolvable",
+  ]);
+  for (const message of claims) {
+    const finding = markerFinding({ message });
+    const result = await verify(
+      [finding],
+      async () => { throw new Error("input claims must not read source"); },
+      INPUT_REGISTRY,
+      null,
+      null,
+      WORKFLOW_INPUTS,
+    );
+    for (const entry of result.findings) {
+      assert.notEqual(entry.status, "refuted", `the witness never refutes: ${message}`);
+      assert.ok(
+        allowed.has(entry.reason),
+        `unexpected reason ${entry.reason} for: ${message}`,
+      );
+    }
+    assert.ok(
+      !result.findings.some((entry) => entry.reason.startsWith("workflow-input-absent:")),
+      `the refutation reason is gone: ${message}`,
+    );
+    // An uncorroborated workflow claim is never demoted into an
+    // approve-able state by the witness: a grounded claim keeps its
+    // severity, an unverified one is the #1016 unknown-evidence demotion
+    // the strict mapping still holds as blocking.
+    assert.ok(
+      result.findings.length === 0 || finding.grounding_status === undefined || finding.grounding_status === "unverified",
+      `only grounding or unknown evidence for: ${message}`,
+    );
+  }
+});
+
+test("#1238 a message that names a DIFFERENT workflow file does not use the witness", async () => {
+  // The witness is anchored to the finding's OWN cited file. A message
+  // that cites another workflow file is talking about THAT file, so the
+  // witness must not decide it: the claim keeps the behavior it had
+  // before the witness existed.
+  const byFile: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+    [".github/workflows/review.yaml", new Set(["ai-api-key"])],
+  ]);
+  const foreign = markerFinding({
+    file: ".github/workflows/review.yaml",
+    message: "the workflow passes `ai-api-key` as the action's credential input, but `.github/workflows/other.yaml` passes `ai-key`",
+  });
+  const own = markerFinding({
+    file: ".github/workflows/review.yaml",
+    message: "the workflow passes `ai-api-key` as the action's credential input, and `.github/workflows/review.yaml` is the workflow under review",
+  });
+  const result = await verify(
+    [foreign, own],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    null,
+    byFile,
+  );
+  // The mismatched citation takes the witness out of the decision
+  // entirely (no mapping cue → no candidate → no decision), while a
+  // citation of the finding's OWN file is not a mismatch and leaves the
+  // witness in place.
+  assert.deepEqual(result.findings.map(({ index, kind, status, reason }) => [index, kind, status, reason]), [
+    [1, "input_declaration", "grounded", "workflow-input:ai-api-key"],
+  ]);
+  assert.equal(foreign.grounding_status, undefined);
+  assert.equal(foreign.severity, "blocker");
+  assert.equal(own.grounding_status, undefined);
+  assert.equal(own.severity, "blocker");
 });

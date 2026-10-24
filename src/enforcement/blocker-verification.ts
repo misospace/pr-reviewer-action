@@ -43,6 +43,36 @@ export interface BlockerVerificationOptions {
    */
   readActionSource?: ActionSourceReader | null | undefined;
   /**
+   * #1238: witness for the WORKFLOW half of the input mapping — the input
+   * names the REVIEWED repository's own workflows pass to this action at the
+   * exact reviewed head, keyed by the workflow file that passes them.
+   *
+   * It is a separate witness from the embedded contract because it answers
+   * a different question: the contract speaks for what the action DECLARES,
+   * this one for what a workflow PASSES.
+   *
+   * The map is PER FILE and only a file that was read completely AND
+   * contains a DIRECT step invoking this action has an entry, so the
+   * boundary may only speak about the file the FINDING itself cited: no
+   * entry for that file means no witness for that finding, and the claim
+   * keeps exactly the behavior it had before. A workflow that reaches the
+   * action through a local composite action or a reusable workflow has no
+   * direct action step, so it has no entry, so nothing is refuted on its
+   * word.
+   *
+   * The witness CORROBORATES and NEVER REFUTES. It grounds a workflow-scoped
+   * claim about the mapping when the cited file's direct action step passes
+   * that name, and it establishes NO absence: the reader sees only the
+   * direct action steps of a file, so "this file does not pass X" is not an
+   * absence it can establish. An uncorroborated workflow-scoped claim is
+   * never refuted — it falls through to the ordinary unknown-evidence path
+   * and the review fails closed on it.
+   *
+   * Absent (or null) means no witness is available, which is the pre-#1238
+   * behavior: the claim stays exactly as it was decided before.
+   */
+  workflowInputsByFile?: ReadonlyMap<string, ReadonlySet<string>> | null | undefined;
+  /**
    * #1240: the build stamp of the revision THIS run executes ("v3.7.0" for
    * a release build, "v3.7.0-dev+abc1234" for a dogfood build, "" for an
    * unstamped local/test build).
@@ -92,6 +122,22 @@ export function safeFile(file: unknown): file is string {
     && !file.startsWith("-")
     && !file.split(/[\\/]/).includes("..")
     && !file.includes("\0");
+}
+
+/**
+ * Canonicalize a cited tree path before it is used as a git revarg or
+ * pathspec, or as a lookup key into a per-file witness.
+ *
+ * Git's tree lookups key on the canonical path — a raw citation like
+ * `src//a.ts` or `./src/a.ts` fails `git show` even when the canonical
+ * entry exists — so the reader normalizes empty and `.` segments on both
+ * sides of the seam and never lets a normalization mismatch become an
+ * affirmative "path absent". `safeFile` has already rejected absolute
+ * paths, leading `-`, `..` segments, and NUL, so stripping empty/dot
+ * segments cannot introduce traversal.
+ */
+export function canonicalTreePath(file: string): string {
+  return file.split("/").filter((segment) => segment !== "" && segment !== ".").join("/");
 }
 
 /**
@@ -351,6 +397,75 @@ const INPUT_ATTRIBUTE_SCOPE_RE = /\b(?:as\s+(?:required|optional)|defaults?\s+(?
 const INPUT_NEGATED_DECLARATION_RE = /\b(?:not\s+declared|declares?\s+no|declared\s+no|does\s+not\s+(?:declare|appear|accept|forward|support))\b/i;
 const INPUT_ABSENCE_CUE_RE = /\b(?:unexpected|not\s+declared|declares?\s+no|declared\s+no|does\s+not\s+(?:declare|appear|accept|forward|support)|not\s+an?\s+input|no\s+such\s+input|undeclared|unknown\s+input|invalid\s+input|not\s+recognized|unrecognized|missing\s+input)\b/i;
 const INPUT_PRESENCE_CUE_RE = /\b(?:declares?|declared|accepts?|accepting|accepted|uses?|exposes?|named|requires?|expects?|has\s+(?:an?\s+)?[a-z-]+\s+inputs?)\b/i;
+/**
+ * #1238: the workflow-to-action mapping vocabulary. A clause whose SUBJECT
+ * is the WORKFLOW and a mapping verb asserts that the workflow supplies
+ * that input name to the action ("the workflow passes `ai-key`"); the same
+ * verb in a clause that does not name the workflow — or that only mentions
+ * it — says nothing about the mapping and is not a cue at all.
+ */
+const WORKFLOW_MAPPING_PRESENCE_RE = /\b(?:passes|passed|provides|provided|supplies|supplied|sends|sent|feeds|fed)\b/i;
+/**
+ * #1238: the NEGATED mapping verb ("does not pass", "never passes", "no
+ * longer provides") is an absence cue of its own: it asserts that the
+ * workflow does NOT supply that input name. The negated verb may take its
+ * base form ("pass"), so the base forms join the mapping vocabulary here.
+ * Like its positive counterpart, it is a cue only in a workflow-SUBJECT
+ * clause, and only when the finding has a workflow witness.
+ */
+const WORKFLOW_MAPPING_NEGATION_RE = /\b(?:does\s+not|do\s+not|doesn't|don't|never|no\s+longer|not)\s+(?:pass|passes|passed|provide|provides|provided|supply|supplies|supplied|send|sends|sent|feed|feeds|fed)\b/i;
+/**
+ * #1238: the words that may stand between the start of a clause and the
+ * workflow noun without breaking the workflow's SUBJECT position: the
+ * determiners, plus the few adjectives and nouns that name the workflow
+ * itself ("the calling workflow", "the CI workflow"). Any other word — a
+ * verb, or a noun like "action" or "input" — means the workflow is only
+ * MENTIONED in that clause, not its subject.
+ */
+const WORKFLOW_SUBJECT_DETERMINERS: ReadonlySet<string> = new Set([
+  "the", "this", "that", "its", "a", "an", "each", "every", "one",
+  "review", "reviewing", "calling", "consumer", "current", "ci",
+]);
+/**
+ * #1238: a clause that names the WORKFLOW. The mapping witness speaks only
+ * about the workflow-to-action input mapping, so only a workflow-scoped
+ * claim can be decided with it. The word is read from the MASKED clause
+ * window: a citation cannot forge the scope.
+ */
+const WORKFLOW_SUBJECT_RE = /\bworkflows?\b/i;
+/**
+ * #1238: is the WORKFLOW the SUBJECT of this clause?
+ *
+ * The workflow witness may only decide a claim that is ABOUT the workflow's
+ * own mapping. A claim whose subject is the ACTION ("the action declares
+ * the `ai-api-key` input the workflow expects") is about what the action
+ * declares, and PR-controlled workflow bytes must never refute it.
+ *
+ * The rule: the FIRST workflow mention in the clause's MASKED text must be
+ * in subject position — the text before it may consist of nothing but
+ * determiners/adjectives (WORKFLOW_SUBJECT_DETERMINERS) and whitespace.
+ * A quoted span cannot forge the mention (the scan reads the masked view),
+ * and a masked-out citation is not a word of the claim, so it neither
+ * establishes nor breaks the subject position.
+ *
+ * The rule is deliberately conservative: an unrecognized word in front of
+ * the workflow noun means "not workflow-scoped", which leaves the claim
+ * undecided rather than refuted.
+ */
+function clauseWorkflowSubject(maskedClause: string): boolean {
+  const match = WORKFLOW_SUBJECT_RE.exec(maskedClause);
+  if (match === null) return false;
+  const before = maskedClause.slice(0, match.index);
+  for (const word of before.split(/[^A-Za-z0-9']+/)) {
+    if (word === "") continue;
+    // A run of the mask glyph is a masked-out citation, not a word of the
+    // claim: the mask replaces a quoted span AND its delimiters, so such a
+    // run is never shorter than three glyphs.
+    if (/^a{3,}$/i.test(word)) continue;
+    if (!WORKFLOW_SUBJECT_DETERMINERS.has(word.toLowerCase())) return false;
+  }
+  return true;
+}
 /** Action input ids: kebab-case identifiers, length-bounded. Quoted spans
  * only — plain-prose mechanism words ("no label input") are deliberately
  * not candidates; no semantic matching. */
@@ -445,6 +560,12 @@ interface InputCandidate {
    *   refuted. A file-path citation is not a subject (#1240 review): it
    *   never downgrades a positive contradiction. */
   otherActionSubject: boolean;
+  /** #1238: the clause's SUBJECT is the WORKFLOW (the workflow noun opens
+   *   the clause), so the claim is about the workflow-to-action input
+   *   mapping. The declaration registry does NOT speak for what a
+   *   workflow passes or declares, so such a claim is never decided with
+   *   the registry — neither grounded nor refuted by it. */
+  workflowSubject: boolean;
 }
 
 // ── #1240: revision scoping ──────────────────────────────────────────────
@@ -682,12 +803,31 @@ function clauseWindow(masked: string, sentenceStart: number, sentenceEnd: number
   return { start, end };
 }
 
-function windowDirection(window: string): InputDirection | "none" {
-  if (INPUT_ABSENCE_CUE_RE.test(window)) {
-    if (INPUT_NEGATED_DECLARATION_RE.test(window)) return "absence";
-    return INPUT_PRESENCE_CUE_RE.test(window) ? "ambiguous" : "absence";
+/**
+ * The direction a clause window asserts.
+ *
+ * The absence/presence cue families behave exactly as they did before
+ * #1238. The workflow-mapping vocabulary is ADDED for a workflow-scoped
+ * clause only: "the workflow passes `ai-key`" asserts that the workflow
+ * supplies that input name (presence), while the negated form ("the
+ * workflow does not pass `ai-key`") asserts that it does not (absence). In
+ * a clause that does not name the workflow the same verbs are not cues at
+ * all — they say nothing about the workflow-to-action mapping.
+ *
+ * The mapping vocabulary is a cue ONLY when the finding has a workflow
+ * witness entry: without one, those sentences are classified exactly as
+ * they were before this feature, so the boundary's decision — and the
+ * artifact it produces — is byte-for-byte what it was.
+ */
+function windowDirection(window: string, workflowSubject: boolean, workflowWitnessAvailable: boolean): InputDirection | "none" {
+  const mappingActive = workflowSubject && workflowWitnessAvailable;
+  const mappingNegated = mappingActive && WORKFLOW_MAPPING_NEGATION_RE.test(window);
+  const mappingPresence = mappingActive && WORKFLOW_MAPPING_PRESENCE_RE.test(window);
+  if (INPUT_ABSENCE_CUE_RE.test(window) || mappingNegated) {
+    if (INPUT_NEGATED_DECLARATION_RE.test(window) || mappingNegated) return "absence";
+    return (INPUT_PRESENCE_CUE_RE.test(window) || mappingPresence) ? "ambiguous" : "absence";
   }
-  return INPUT_PRESENCE_CUE_RE.test(window) ? "presence" : "none";
+  return (INPUT_PRESENCE_CUE_RE.test(window) || mappingPresence) ? "presence" : "none";
 }
 
 /**
@@ -697,8 +837,12 @@ function windowDirection(window: string): InputDirection | "none" {
  * vocabulary, must not name another action, and its direction resolves
  * within that token's sentence-bounded clause window. Attribute-scoped
  * claims and directionless mentions are not candidates.
+ *
+ * `workflowWitnessAvailable` gates the workflow-mapping cue vocabulary: it
+ * is a cue only for a finding that HAS a workflow witness entry. Without
+ * one, the message is classified exactly as it was before #1238.
  */
-function classifyInputDeclaration(message: string): InputCandidate[] {
+function classifyInputDeclaration(message: string, workflowWitnessAvailable: boolean): InputCandidate[] {
   const candidates: InputCandidate[] = [];
   // Cheap prefilter before the span walk: no action subject and no input
   // vocabulary anywhere means no input claim.
@@ -720,7 +864,12 @@ function classifyInputDeclaration(message: string): InputCandidate[] {
     // Attribute-scope claims (requiredness, defaults, docs, fork behavior)
     // are outside the declared-id witness's authority.
     if (INPUT_ATTRIBUTE_SCOPE_RE.test(windowText)) continue;
-    const direction = windowDirection(windowText);
+    // #1238: the workflow scope is resolved by SUBJECT, from the MASKED
+    // clause window — the same window the direction is read from — so a
+    // citation can neither forge nor hide it. It is a property of the
+    // message and is always computed.
+    const workflowSubject = clauseWorkflowSubject(windowText);
+    const direction = windowDirection(windowText, workflowSubject, workflowWitnessAvailable);
     if (direction === "none") continue;
     candidates.push({
       token: raw.toLowerCase(),
@@ -733,6 +882,7 @@ function classifyInputDeclaration(message: string): InputCandidate[] {
         message.slice(clause.start, clause.end),
         message.slice(clause.end),
       ),
+      workflowSubject,
     });
   }
   return candidates;
@@ -807,11 +957,11 @@ interface ClaimClassification {
  * sentences are reused by the verification branch instead of rescanning the
  * message. The revision-qualifier scan (#1240) runs once per message, over
  * the whole message. */
-function classifyClaim(message: string): ClaimClassification {
+function classifyClaim(message: string, workflowWitnessAvailable: boolean): ClaimClassification {
   if (assertsCommittedMarker(message)) {
     return { kind: "committed_literal", inputCandidates: [], gateSentences: [], qualifiers: [] };
   }
-  const inputCandidates = classifyInputDeclaration(message);
+  const inputCandidates = classifyInputDeclaration(message, workflowWitnessAvailable);
   if (inputCandidates.length > 0) {
     return { kind: "input_declaration", inputCandidates, gateSentences: [], qualifiers: revisionQualifiers(message) };
   }
@@ -1032,6 +1182,72 @@ async function decideGateAbsence(
 }
 
 /**
+ * #1238: a workflow-directory path citation in a finding message
+ * (`.github/workflows/…`, `.gitea/workflows/…`, `.forgejo/workflows/…`).
+ *
+ * The witness is anchored to the finding's OWN cited file, so a message
+ * that names a DIFFERENT workflow file is talking about a file this
+ * witness says nothing about.
+ */
+const WORKFLOW_FILE_CITATION_RE = /(?:\.github|\.gitea|\.forgejo)\/workflows\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*/g;
+
+/**
+ * #1238: does the finding's RAW message cite a workflow file OTHER than
+ * the finding's own file?
+ *
+ * The witness speaks only about the file the finding cited. A message that
+ * names a different workflow file is making its claim about THAT file, so
+ * the witness must not decide it: the finding keeps the behavior it had
+ * before the witness existed.
+ *
+ * The scan reads the RAW message (a citation inside a quoted span is still
+ * a citation) and compares each cited path with the canonical form of the
+ * finding's own file. A citation of the finding's OWN file is not a
+ * mismatch.
+ */
+function citesAnotherWorkflowFile(message: string, ownTreePath: string): boolean {
+  for (const match of message.matchAll(WORKFLOW_FILE_CITATION_RE)) {
+    // A trailing "." is sentence punctuation, not part of the path.
+    const cited = canonicalTreePath(match[0].replace(/\.+$/, ""));
+    if (cited !== ownTreePath) return true;
+  }
+  return false;
+}
+
+/**
+ * The workflow witness for ONE finding: the input names the finding's OWN
+ * cited file passes to the action under review.
+ *
+ * The witness is anchored to the file the model itself cited. A file with
+ * no entry — never read completely, unparsable, without a DIRECT action
+ * step, or a different file — yields NO witness, and the claim keeps the
+ * behavior it had before the witness existed. A message that names a
+ * DIFFERENT workflow file yields no witness either: the witness says
+ * nothing about that other file.
+ *
+ * The witness speaks ONLY from POSITIVE evidence about the finding's own
+ * file: it grounds a workflow-scoped presence claim whose token IS among
+ * the names the file's direct action step passes, and it establishes NO
+ * absence — so it never refutes a claim.
+ */
+function workflowWitnessNames(
+  finding: ArtifactFinding,
+  byFile: ReadonlyMap<string, ReadonlySet<string>> | null | undefined,
+): ReadonlySet<string> | null {
+  if (byFile === undefined || byFile === null) return null;
+  const file = finding.file;
+  if (!safeFile(file)) return null;
+  const treePath = canonicalTreePath(file);
+  if (treePath === "") return null;
+  // The witness is per file: a message that cites another workflow file
+  // is not about this one, so the witness stays out of it.
+  if (citesAnotherWorkflowFile(finding.message, treePath)) return null;
+  const names = byFile.get(treePath);
+  if (names === undefined) return null;
+  return new Set([...names].map((name) => name.toLowerCase()));
+}
+
+/**
  * Extract backtick-delimited code spans from a finding message. Used by the
  * `requirement_claim` branch: a generic "requirement not enforced" assertion
  * carries no machine-checkable evidence of a specific violation unless it
@@ -1085,7 +1301,12 @@ export async function applyBlockerVerification(
     // it here could misattribute the original severity and re-force a
     // verdict those paths settled.
     if (finding.capped_from !== undefined || finding.ci_capped === true) continue;
-    const { kind, inputCandidates, gateSentences, qualifiers } = classifyClaim(finding.message);
+    // #1238: the workflow witness for THIS finding: the input names the
+    // finding's own cited file passes to the action under review. No entry
+    // for that file means no witness, and the claim keeps the behavior it
+    // had before the witness existed.
+    const workflowNames = workflowWitnessNames(finding, options.workflowInputsByFile);
+    const { kind, inputCandidates, gateSentences, qualifiers } = classifyClaim(finding.message, workflowNames !== null);
     if (kind === null) continue;
 
     let status: GroundingStatus;
@@ -1108,6 +1329,17 @@ export async function applyBlockerVerification(
       } else {
         const normalized = new Set([...declared].map((input) => input.toLowerCase()));
         const resolved = inputCandidates.filter((candidate) => candidate.direction !== "ambiguous");
+        // #1238: the registry speaks for what the ACTION DECLARES. A
+        // WORKFLOW-scoped claim is about what the WORKFLOW passes or
+        // declares, so the registry may neither refute it nor ground it:
+        // refuting it would be a false refutation (PR-controlled workflow
+        // bytes deciding a claim about the action's own manifest), and
+        // grounding it would certify a claim about a mapping the registry
+        // does not speak for. Such a claim is unknown evidence here — the
+        // workflow witness corroborates it, and only in the presence
+        // direction: the witness grounds the claim when the cited file's
+        // direct action step passes that name, and never refutes it.
+        //
         // A claim that the action does NOT declare an input the registry
         // lacks is a genuine defect claim, and the witness POSITIVELY
         // confirms it: the input really is undeclared. It therefore keeps
@@ -1123,7 +1355,8 @@ export async function applyBlockerVerification(
         const missing = resolved.find((candidate) =>
           candidate.direction === "absence"
           && !normalized.has(candidate.token)
-          && !candidate.otherActionSubject);
+          && !candidate.otherActionSubject
+          && !candidate.workflowSubject);
         // Refutation requires POSITIVE contradiction by the witness: an
         // absence claim about an input the registry declares. A presence
         // claim about an input the registry lacks is NOT a contradiction —
@@ -1132,7 +1365,9 @@ export async function applyBlockerVerification(
         // marked unverified, never refuted (#1238 review: refutation only
         // on facts the witness can decide).
         const contradicted = resolved.find((candidate) =>
-          candidate.direction === "absence" && normalized.has(candidate.token));
+          candidate.direction === "absence"
+          && normalized.has(candidate.token)
+          && !candidate.workflowSubject);
         // A claim about another action's inputs is unknown evidence, never
         // a refutation: the registry witnesses the executing action only.
         // A foreign claim the registry WOULD have decided (grounded or
@@ -1142,6 +1377,38 @@ export async function applyBlockerVerification(
         const foreign = resolved.some((candidate) =>
           candidate.otherActionSubject
           && (candidate.direction === "absence" || normalized.has(candidate.token)));
+        // #1238: the WORKFLOW-side witness — the input names the finding's
+        // own cited file passes to the action under review at the exact
+        // reviewed head. It answers exactly one question: does the
+        // workflow-to-action mapping of THAT file carry that name?
+        //
+        // It NEVER decides a claim that is not workflow-scoped (the claim's
+        // subject must BE the workflow), and it NEVER decides an
+        // absence-direction claim: the mapping witness says which names
+        // the workflow passes, not which names the action lacks.
+        //
+        // The witness is absent (null) whenever the finding's own file has
+        // no entry: then every claim below keeps the behavior it had
+        // before the witness existed.
+        //
+        // A workflow-scoped presence claim the workflow witness
+        // CORROBORATES: the cited file's direct action step passes that
+        // name. That is a POSITIVE fact about the finding's own file, so
+        // it grounds the claim.
+        //
+        // The witness NEVER refutes. The reader sees only the DIRECT
+        // action steps of the cited file, so "this file does not pass X"
+        // is NOT an absence it can establish: a local composite action, a
+        // reusable workflow or a remote composite can pass an input name
+        // to the action through a surface the reader never sees. A claim
+        // the witness does not corroborate therefore falls through to the
+        // ordinary unknown-evidence path below — never refuted, so the
+        // review fails closed on it.
+        const workflowGrounded = workflowNames === null ? undefined : resolved.find((candidate) =>
+          candidate.workflowSubject
+          && candidate.direction === "presence"
+          && workflowNames.has(candidate.token)
+          && !candidate.otherActionSubject);
         if (missing !== undefined) {
           status = "grounded";
           reason = `input-absent:${missing.token}`;
@@ -1154,6 +1421,9 @@ export async function applyBlockerVerification(
         } else if (contradicted !== undefined) {
           status = "refuted";
           reason = `input-declared:${contradicted.token}`;
+        } else if (workflowGrounded !== undefined) {
+          status = "grounded";
+          reason = `workflow-input:${workflowGrounded.token}`;
         } else {
           // A presence claim about an input the registry declares is
           // confirmed, but it asserts no defect of its own: it does not by

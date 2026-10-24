@@ -69,6 +69,7 @@ import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxCiOnlyVerdict, relax
 import { applyBlockerVerification } from "../enforcement/blocker-verification.js";
 import { createActionSourceReader } from "../enforcement/action-source.js";
 import { createHeadSourceReader } from "../enforcement/source-verifier.js";
+import { readWorkflowInputNamesByFile, resolveActionSlug } from "../enforcement/workflow-inputs.js";
 import { capCiEvidenceFindings } from "../enforcement/ci-evidence.js";
 import { markerReviewResult, publishStepRuns } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
@@ -1510,10 +1511,41 @@ secrets: [profiles.primary.apiKey],
   let verificationOptions: Parameters<typeof applyBlockerVerification>[1] | null = null;
   if (Array.isArray(reviewRecord.findings)) {
     capCiEvidenceFindings(reviewRecord.findings as ArtifactFinding[], ciChecksMarkdown);
+    // #1238: the WORKFLOW-side witness — the input names the REVIEWED
+    // repository's own workflows pass to this action, read at the exact
+    // reviewed head. It answers the half of the input mapping the action
+    // side cannot: what the workflow actually passes.
+    //
+    // The witness is PER FILE: only a workflow file that was read
+    // completely AND invokes this action directly has an entry, so the
+    // boundary may only speak about the file a finding itself cited. A
+    // repository that reaches the action through a composite action has
+    // no entry, so the witness says nothing about that mapping.
+    //
+    // The witness CORROBORATES and never refutes: it grounds a
+    // workflow-scoped claim about the mapping when the cited file's direct
+    // action step passes that name, and it establishes no absence — the
+    // reader sees only the direct action steps, so an uncorroborated claim
+    // stays undecided and the review fails closed on it.
+    //
+    // Built ONCE, before the options object, so the pre-settlement and the
+    // post-settlement pass see the same witness. A failure is NO witness
+    // (null), never an exception into the review pipeline: an unavailable
+    // witness leaves the boundary's behavior exactly as it was.
+    const workflowInputs = await readWorkflowInputNamesByFile({
+      workspace,
+      revision: expectedRevision,
+      actionSlug: resolveActionSlug(),
+    }).catch(() => null);
     verificationOptions = {
       readSource: createHeadSourceReader({ workspace, revision: expectedRevision }),
       expectedRevision,
       declaredActionInputs: new Set(contract.inputs.map((input) => input.id)),
+      // #1238: the workflow-side witness, keyed by the workflow file that
+      // passes the names. Absent (null) whenever the reviewed repository's
+      // workflows could not be read or do not invoke this action — then no
+      // claim is decided with it.
+      workflowInputsByFile: workflowInputs,
       // #1240: the build stamp of the revision THIS run executes. The
       // action-input and gate-absence witnesses speak for the executing
       // revision's release line only, so a claim that names a different
