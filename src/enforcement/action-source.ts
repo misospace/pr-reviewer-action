@@ -1,19 +1,27 @@
-import { constants } from "node:fs";
-import { open, realpath, stat } from "node:fs/promises";
-import type { FileHandle } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import { isAbsolute, resolve, sep } from "node:path";
+import { ACTION_SOURCE_FILES } from "../../.v3-generated/action-source.generated.js";
 
 /**
- * #1238: reads a file from the EXECUTING ACTION's own source tree — the
- * tree of the revision this run executes (the action's install directory),
- * not the reviewed repository. The blocker-verification boundary uses it as
- * the witness for gate-absence claims: a claim that a deterministic gate of
+ * #1238: the witness for gate-absence claims — the EXECUTING action's own
+ * implementation, and nothing else. A claim that a deterministic gate of
  * the action is absent can only be decided by the action's own
- * implementation.
+ * implementation; the boundary uses this reader to consult it.
  *
- * The reader is read-only, offline, and bounded: no shell, no exec, no
- * network, no writes. Only paths that come from the registry constants are
- * ever read — a path taken from a finding, a model message, or any other
+ * #1240: the witness bytes are EMBEDDED INTO THE EXECUTING BUNDLE at build
+ * time (scripts/generate-action-source.mjs), and this reader performs NO
+ * filesystem content read at all. The bundle IS the executing action's own
+ * implementation — the install tree's `src/` is not what runs — so the
+ * embedded bytes are revision-bound by construction and no check/read race
+ * can exist: there is no check, no path walk, and no read to race. The
+ * earlier filesystem reader resolved a path, proved containment, and opened
+ * the file in separate steps, so a concurrent mutation of the action tree
+ * could swap an intermediate component between the proof and the read and
+ * serve bytes from outside the action root.
+ *
+ * The reader is offline and bounded: no shell, no exec, no network, no
+ * writes. Only paths that come from the registry constants are ever
+ * consulted — a path taken from a finding, a model message, or any other
  * untrusted input never reaches this module.
  */
 export interface ActionSourceReadOk {
@@ -31,7 +39,7 @@ export type ActionSourceReader = (relativePath: string) => Promise<ActionSourceR
 
 /**
  * Upper bound on the bytes one action-source read may pull. The files the
- * registry cites are tens of kilobytes; the cap keeps a pathological tree
+ * registry cites are tens of kilobytes; the cap keeps a pathological embed
  * from turning the boundary into a memory sink.
  */
 export const MAX_ACTION_SOURCE_BYTES = 1024 * 1024;
@@ -39,7 +47,9 @@ export const MAX_ACTION_SOURCE_BYTES = 1024 * 1024;
 export interface ActionSourceReaderOptions {
   /**
    * The action's own source root. Defaults to `GITHUB_ACTION_PATH` when
-   * the runner provides it, else the shipped bundle's own location.
+   * the runner provides it, else the shipped bundle's own location. #1240:
+   * it carries no bytes — it only proves the executing implementation is
+   * not the reviewed repository's own.
    */
   root?: string | null;
   /**
@@ -55,12 +65,14 @@ export interface ActionSourceReaderOptions {
  * The action's own source root.
  *
  * (a) `GITHUB_ACTION_PATH` when it is a non-empty absolute path — the
- * action's install directory as the runner reports it; read if present,
- * never required.
+ * action's install directory as the runner reports it.
  * (b) otherwise the bundle's own location: in the shipped `dist/index.js`
  * this is the action root (the parent of `dist/`), while in the test build
- * it points inside `.test-build` and simply finds nothing — the intended
- * fail-safe.
+ * it points inside `.test-build`.
+ *
+ * #1240: the root no longer supplies the witness bytes — they are embedded
+ * in the bundle — so it is consulted for ONE thing only: proving the
+ * executing implementation is not the reviewed repository's own.
  */
 export function resolveActionSourceRoot(env: NodeJS.ProcessEnv = process.env): string {
   const candidate = env.GITHUB_ACTION_PATH;
@@ -70,7 +82,10 @@ export function resolveActionSourceRoot(env: NodeJS.ProcessEnv = process.env): s
   return resolve(__dirname, "..");
 }
 
-type ActionRootCheck = { ok: true; real: string } | { ok: false; reason: string };
+/** True when `candidate` IS `parent` or lies inside it. */
+function isInside(candidate: string, parent: string): boolean {
+  return candidate === parent || candidate.startsWith(parent + sep);
+}
 
 /** The realpath of `path`, or null when it cannot be resolved. */
 async function realPathOrNull(path: string): Promise<string | null> {
@@ -81,64 +96,47 @@ async function realPathOrNull(path: string): Promise<string | null> {
   }
 }
 
-/** True when `candidate` IS `parent` or lies inside it. */
-function isInside(candidate: string, parent: string): boolean {
-  return candidate === parent || candidate.startsWith(parent + sep);
-}
+type ActionRootProvenance = { ok: true } | { ok: false; reason: string };
 
 /**
- * #1238: the witness root's provenance. Two properties must hold before a
- * single byte is served:
+ * #1240: the ONE provenance rule left to a path-based decision — the
+ * executing bytes must not be the reviewed repository's bytes.
  *
- * (a) the root must NOT be the reviewed repository (or live inside it) —
- *     PR-controlled bytes can never decide a refutation of the action's own
- *     gates;
- * (b) the root must BE an action checkout: it must carry an `action.yml`
- *     manifest that resolves (under the same containment rule as every
- *     other read) to a regular file inside it.
+ * The `uses: ./` shape runs the reviewed repository itself as the action,
+ * so the executing bytes are PR-controlled and must never decide a
+ * refutation of the action's own gates. The root is refused when it lies
+ * inside the reviewed workspace — lexically, or after resolving both paths
+ * (a symlinked root's lexical path can lie outside the workspace while its
+ * bytes live inside it).
  *
- * A root failing either check refuses every read; a refused read is no
- * evidence, so the boundary keeps the claim unverified.
+ * A root that does not exist is NOT refused on that basis: the witness no
+ * longer depends on the tree at all, so a missing install directory
+ * proves nothing about the bytes being served.
  */
-async function verifyActionRoot(base: string, workspaceRoot: string | null): Promise<ActionRootCheck> {
-  if (workspaceRoot !== null) {
-    const rootReal = await realPathOrNull(base);
-    const workspaceReal = await realPathOrNull(workspaceRoot);
-    if (rootReal !== null && workspaceReal !== null && isInside(rootReal, workspaceReal)) {
-      return { ok: false, reason: "root-inside-workspace" };
-    }
-    if (isInside(base, workspaceRoot)) return { ok: false, reason: "root-inside-workspace" };
-  }
+async function checkRootProvenance(base: string, workspaceRoot: string | null): Promise<ActionRootProvenance> {
+  if (workspaceRoot === null) return { ok: true };
+  if (isInside(base, workspaceRoot)) return { ok: false, reason: "root-inside-workspace" };
   const rootReal = await realPathOrNull(base);
-  if (rootReal === null) return { ok: false, reason: "root-not-an-action" };
-  const manifest = resolve(base, "action.yml");
-  if (manifest !== base && !manifest.startsWith(base + sep)) {
-    return { ok: false, reason: "root-not-an-action" };
+  const workspaceReal = await realPathOrNull(workspaceRoot);
+  if (rootReal !== null && workspaceReal !== null && isInside(rootReal, workspaceReal)) {
+    return { ok: false, reason: "root-inside-workspace" };
   }
-  const manifestReal = await realPathOrNull(manifest);
-  if (manifestReal === null) return { ok: false, reason: "root-not-an-action" };
-  if (!isInside(manifestReal, rootReal)) return { ok: false, reason: "root-not-an-action" };
-  const info = await stat(manifestReal).catch(() => null);
-  if (info === null || !info.isFile()) return { ok: false, reason: "root-not-an-action" };
-  return { ok: true, real: rootReal };
+  return { ok: true };
 }
 
 /**
- * A reader over the action's own source tree.
+ * A reader over the executing action's own implementation bytes.
  *
- * Containment: the relative path is resolved under the root and the file's
- * realpath is compared against the root's realpath, so a symlink escaping
- * the root is rejected. Everything the reader cannot decide — a missing
- * file, an oversized file, an escaping symlink, a root that is not an
- * action checkout — is reported as `unavailable`, never as evidence.
+ * The served bytes are the ones embedded in this bundle at build time, so
+ * a read is a map lookup: there is no path arithmetic, no containment
+ * check, and no filesystem access whose result could change under the
+ * reader's feet. A mutation of the action's install tree — including a
+ * swap of an intermediate directory for a symlink pointing outside it —
+ * cannot change what is served.
  *
- * TOCTOU (#1240): the size/regular-file check and the read happen on ONE
- * open file handle, never on a re-opened path. A separate `stat()` followed
- * by `readFile()` leaves a window in which the checked file is replaced
- * before the authoritative witness is read (CodeQL `js/file-system-race`).
- * The handle is bound to the inode that was opened, so the bytes served are
- * the bytes that were checked; `O_NOFOLLOW` additionally refuses a
- * final-component symlink that appeared after the realpath check.
+ * Everything the reader cannot serve is reported as `unavailable`, never
+ * as evidence: a path that is not embedded, a path carrying a NUL byte,
+ * and a root that is the reviewed repository (the `uses: ./` shape).
  */
 export function createActionSourceReader(options: ActionSourceReaderOptions = {}): ActionSourceReader {
   const base = options.root === undefined || options.root === null || options.root.trim() === ""
@@ -148,66 +146,33 @@ export function createActionSourceReader(options: ActionSourceReaderOptions = {}
     ? null
     : resolve(options.workspaceRoot);
   // The root's provenance is decided once per reader: it cannot change
-  // under the reader's own feet, and re-checking it per read would stat
-  // the same paths for every cited file.
-  let rootCheck: Promise<ActionRootCheck> | null = null;
-  const checkRoot = (): Promise<ActionRootCheck> => {
-    if (rootCheck === null) rootCheck = verifyActionRoot(base, workspaceRoot);
+  // under the reader's own feet, and re-checking it per read would
+  // resolve the same paths for every cited file.
+  let rootCheck: Promise<ActionRootProvenance> | null = null;
+  const checkRoot = (): Promise<ActionRootProvenance> => {
+    if (rootCheck === null) rootCheck = checkRootProvenance(base, workspaceRoot);
     return rootCheck;
   };
   return async (relativePath: string): Promise<ActionSourceReadResult> => {
     if (typeof relativePath !== "string" || relativePath.length === 0) {
       return { status: "unavailable", reason: "invalid-path" };
     }
-    // A NUL byte truncates the path at the OS boundary: the bytes after it
-    // would address a different file than the containment check proved, and
-    // the node APIs reject it inconsistently across platforms. Refuse it
-    // before any path arithmetic.
+    // A NUL byte truncates the path at the OS boundary: it can never name
+    // an embedded file, and refusing it explicitly keeps the refusal
+    // visible instead of folding it into "not found".
     if (relativePath.includes("\0")) {
       return { status: "unavailable", reason: "invalid-path" };
     }
-    const target = resolve(base, relativePath);
-    if (target !== base && !target.startsWith(base + sep)) {
-      return { status: "unavailable", reason: "outside-action-root" };
-    }
     const root = await checkRoot();
     if (!root.ok) return { status: "unavailable", reason: root.reason };
-    let targetReal: string;
-    try {
-      targetReal = await realpath(target);
-    } catch {
-      return { status: "unavailable", reason: "not-found" };
+    const text = ACTION_SOURCE_FILES.get(relativePath);
+    if (text === undefined) return { status: "unavailable", reason: "not-found" };
+    // Defensive: the generator refuses to embed an oversize file, so this
+    // never fires — but the bound the reader advertises is enforced here
+    // rather than assumed.
+    if (Buffer.byteLength(text, "utf8") > MAX_ACTION_SOURCE_BYTES) {
+      return { status: "unavailable", reason: "too-large" };
     }
-    if (!isInside(targetReal, root.real)) {
-      return { status: "unavailable", reason: "outside-action-root" };
-    }
-    // ONE handle for the check and the read (#1240 TOCTOU): the handle is
-    // bound to the inode that was opened, so the regular-file and size
-    // checks and the served bytes all describe the same file. `O_NOFOLLOW`
-    // refuses a final-component symlink that replaced the file after the
-    // realpath check; it is not available on Windows, where the realpath
-    // containment check stands alone. `O_NONBLOCK` keeps the open itself
-    // from blocking on a FIFO: opening a FIFO read-only waits for a
-    // writer, which would hang the boundary on a special file inside the
-    // tree instead of returning "not-a-file".
-    let handle: FileHandle | null = null;
-    try {
-      const flags = process.platform === "win32"
-        ? constants.O_RDONLY
-        : constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
-      handle = await open(targetReal, flags);
-    } catch {
-      return { status: "unavailable", reason: "not-found" };
-    }
-    try {
-      const info = await handle.stat();
-      if (!info.isFile()) return { status: "unavailable", reason: "not-a-file" };
-      if (info.size > MAX_ACTION_SOURCE_BYTES) return { status: "unavailable", reason: "too-large" };
-      return { status: "ok", text: await handle.readFile("utf8") };
-    } catch {
-      return { status: "unavailable", reason: "read-failed" };
-    } finally {
-      await handle.close().catch(() => undefined);
-    }
+    return { status: "ok", text };
   };
 }

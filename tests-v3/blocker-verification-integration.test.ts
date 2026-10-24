@@ -27,8 +27,10 @@ import type { NativeReviewRequest, PublishPlatformApi } from "../src/platform/pu
 
 const REVISION = "a".repeat(40);
 
-/** #1238: the executing action's own source tree — the repository root in
-* this checkout (in production: the action's install directory). */
+/** #1240: the executing action's own source root — the repository root in
+* this checkout (in production: the action's install directory). The
+* witness bytes are embedded in the bundle, so the root only carries the
+* `uses: ./` provenance: a root inside the reviewed workspace is refused. */
 const ACTION_ROOT = resolve(__dirname, "..", "..");
 
 function artifact(overrides: Partial<ReviewArtifact> = {}): ReviewArtifact {
@@ -693,7 +695,7 @@ test("#1238 the incident shape: fabricated input claim refuted, gate claim refut
     readSource: unavailableReader,
     expectedRevision: REVISION,
     declaredActionInputs: new Set(["github-token", "ai-base-url", "ai-api-key", "ai-model", "rereview-label"]),
-    readActionSource: createActionSourceReader({ root: ACTION_ROOT }),
+    readActionSource: createActionSourceReader(),
   });
   assert.equal(result.demoted, 1);
   assert.equal(a.findings[0]!.grounding_status, "refuted");
@@ -728,7 +730,10 @@ test("#1238 the incident gate claim stays unverified when the action source is u
     readSource: unavailableReader,
     expectedRevision: REVISION,
     declaredActionInputs: new Set(["github-token", "ai-base-url", "ai-api-key", "ai-model", "rereview-label"]),
-    readActionSource: createActionSourceReader({ root: resolve(ACTION_ROOT, "no-such-action-tree") }),
+    // #1240: the witness is unavailable when the executing bytes could be
+    // the reviewed repository's own (the `uses: ./` shape), so the gate
+    // claim cannot be checked and stays unknown evidence.
+    readActionSource: createActionSourceReader({ root: ACTION_ROOT, workspaceRoot: ACTION_ROOT }),
   });
   assert.equal(result.demoted, 0);
   assert.equal(a.findings[0]!.grounding_status, "unverified");

@@ -1556,13 +1556,16 @@ secrets: [profiles.primary.apiKey],
       // bundle itself is built from the PR head, so the stamp — like the
       // embedded contract — inherits the PR's trust level.
       executingActionVersion: ACTION_VERSION,
-      // #1238: the gate-absence witness — a reader over the EXECUTING
-      // action's own source tree (its install directory), so a claim that
-      // the action lacks a deterministic gate can be checked against the
-      // implementation that actually runs. The reviewed repository's
-      // checkout is passed along: a root inside it is PR-controlled bytes
-      // and must never decide a refutation. Both boundary passes share this
-      // options object, so the post-settlement pass sees the same witness.
+      // #1238: the gate-absence witness — the EXECUTING action's own
+      // implementation, embedded into THIS BUNDLE at build time (the bundle
+      // IS the implementation that runs; the action's install directory's
+      // `src/` is not what executes), so the bytes a gate-absence claim is
+      // checked against are revision-bound by construction and no
+      // filesystem read can be raced (#1240). The reviewed repository's
+      // checkout is passed along: a root inside it is the `uses: ./` shape,
+      // where the executing bytes are PR-controlled and must never decide a
+      // refutation. Both boundary passes share this options object, so the
+      // post-settlement pass sees the same witness.
       readActionSource: createActionSourceReader({ workspaceRoot: workspace }),
     };
     blockerVerification = await applyBlockerVerification(reviewRecord.findings as ArtifactFinding[], verificationOptions);
