@@ -124,6 +124,91 @@ export const MAX_CLAIM_SCAN_LENGTH = 16_384;
 const SENTENCE_DELIMITERS = new Set([".", "!", "?", ";", "\n"]);
 
 /**
+ * #1242: characters that can be part of a path-like citation token written
+ * in bare prose — a repo path (`src/precheck/decide.ts`), an owner/repo@ref
+ * reference, a dotted version. The `.` inside such a token is path
+ * structure, not sentence punctuation.
+ */
+const PATH_LIKE_TOKEN_CHAR_RE = /[A-Za-z0-9._~+@/-]/;
+/**
+ * The character AFTER a swallowed dot must itself open a path segment:
+ * lowercase alphanumerics do, and a sentence onset essentially never does.
+ * Without this, a missing space after a terminal period ("…b.ts.The
+ * metadata…") or an ellipsis ("…b.ts...The") would extend the path run
+ * across a real sentence boundary and forge cue co-occurrence (#252: the
+ * boundary token tested directly).
+ */
+const PATH_SEGMENT_START_RE = /[a-z0-9]/;
+/**
+ * Bound on the path-run expansion per dot. A run longer than any real
+ * citation is not a citation, and the bound keeps the widened scanner's
+ * per-dot work O(1) so MAX_CLAIM_SCAN_LENGTH still caps the boundary's
+ * worst-case work on pathological dense path-like input.
+ */
+const PATH_LIKE_TOKEN_MAX_SPAN = 512;
+
+/**
+ * #1242: true when the `.` at `index` sits strictly INSIDE a token that
+ * contains a path separator. A terminal dot (the one ending a sentence after
+ * a cited path) and a leading dot are still boundaries, and a dotted token
+ * without a separator ("e.g.", a bare ratio, `decide.ts` alone) still
+ * splits — the widening stays confined to unmistakable path citations.
+ */
+function isPathInternalDot(text: string, index: number): boolean {
+  if (text[index] !== ".") return false;
+  if (!PATH_LIKE_TOKEN_CHAR_RE.test(text[index - 1] ?? "")) return false;
+  if (!PATH_SEGMENT_START_RE.test(text[index + 1] ?? "")) return false;
+  let sawSeparator = false;
+  let start = index;
+  const floor = Math.max(0, index - PATH_LIKE_TOKEN_MAX_SPAN);
+  while (start > floor && PATH_LIKE_TOKEN_CHAR_RE.test(text[start - 1] ?? "")) {
+    start -= 1;
+    if (text[start] === "/") sawSeparator = true;
+  }
+  let end = index + 1;
+  const ceil = Math.min(text.length, index + 1 + PATH_LIKE_TOKEN_MAX_SPAN);
+  while (end < ceil && PATH_LIKE_TOKEN_CHAR_RE.test(text[end] ?? "")) {
+    if (text[end] === "/") sawSeparator = true;
+    end += 1;
+  }
+  return sawSeparator;
+}
+
+/**
+ * #1242: the claim-unit boundary for the two #1238 scanners (input
+ * declaration and gate absence). A claim unit is wider than a sentence: a
+ * `;`-joined clause chain is ONE assertion, and a `.` inside a path-like
+ * citation token is path structure, not a split — the incident shapes
+ * "The action never filters by label; its metadata declares no label
+ * input." and "The action never skips drafts (see src/precheck/decide.ts),
+ * metadata declares no label input." must reach the cue families whole.
+ * The decision safety does NOT widen with the unit: cue direction stays
+ * clause-scoped inside it (`clauseWindow`, `gateClauseRanges`), so a
+ * semicolon-joined neighbor clause can never carry the absence assertion
+ * for a token or behavior its own clause does not name. What is unit-scoped
+ * — the action-subject/input vocabulary gates and the gate-coverage set —
+ * is unit-scoped at comma scope in #1238 unchanged: a comma-joined message
+ * whose clauses jointly carry the cue families already classifies as one
+ * claim today, and #1242 extends that SAME accepted semantics across `;`
+ * and bare path citations as the issue asks.
+ *
+ * The committed-literal scanner (#1016 `sentenceContaining`) deliberately
+ * KEEPS the tight sentence split: its assertion/expectation cues are judged
+ * over the whole sentence, not per clause, so widening the unit there would
+ * let an expectation cue from a semicolon-joined neighbor clause ("...never
+ * wired up") bleed into the marker's own existence assertion and flip its
+ * classification. The #1238 scanners can widen safely only because their
+ * cue attribution is clause-anchored within the unit.
+ */
+function isClaimUnitBoundary(text: string, index: number): boolean {
+  const char = text[index];
+  if (char === undefined || !SENTENCE_DELIMITERS.has(char)) return false;
+  if (char === ";") return false;
+  if (char === ".") return !isPathInternalDot(text, index);
+  return true;
+}
+
+/**
  * Character ranges `[start, end)` of quoted spans in `message`: the interior
  * of single-backtick spans (`...`) and triple-backtick fences
  * (```...```), i.e. text a reviewer explicitly cites rather than prose.
@@ -211,8 +296,9 @@ function assertsCommittedMarker(message: string): boolean {
 // substantiated findings and drove request_changes with zero blockers.
 // Verification witness: the executing action's own embedded contract
 // (`declaredActionInputs`) — the exact revision the run executes, offline
-// and deterministic. Classification is sentence-scoped with a clause window
-// so one sentence carrying both directions ("declares `ai-key` ..., so
+// and deterministic. Classification is claim-unit-scoped (#1242: one unit
+// may span a `;`-joined clause chain or a bare path citation) with a clause
+// window so one unit carrying both directions ("declares `ai-key` ..., so
 // `ai-api-key` is unexpected") still resolves each token's direction.
 
 const ACTION_SUBJECT_CUE_RE = /\b(?:pinned|upstream|the )?action(?:'s)?\b/i;
@@ -564,12 +650,13 @@ function maskedForScan(message: string): string {
   return chars.join("");
 }
 
-/** Sentence bounds around a span, mirroring sentenceContaining's delimiters. */
+/** Claim-unit bounds around a span (#1242 boundaries, see
+ * isClaimUnitBoundary; NOT the committed-literal scanner's tight split). */
 function sentenceBounds(masked: string, from: number, to: number): { start: number; end: number } {
   let start = from;
-  while (start > 0 && !SENTENCE_DELIMITERS.has(masked[start - 1] ?? "")) start -= 1;
+  while (start > 0 && !isClaimUnitBoundary(masked, start - 1)) start -= 1;
   let end = to;
-  while (end < masked.length && !SENTENCE_DELIMITERS.has(masked[end] ?? "")) end += 1;
+  while (end < masked.length && !isClaimUnitBoundary(masked, end)) end += 1;
   return { start, end };
 }
 
@@ -600,10 +687,11 @@ function windowDirection(window: string): InputDirection | "none" {
 
 /**
  * Collect the quoted input-id candidates a message asserts about the
- * EXECUTING action's declared inputs. Each candidate must sit in a sentence
- * carrying the action-subject cue (or a manifest-file citation) and input
- * vocabulary, must not name another action, and its direction resolves
- * within that token's sentence-bounded clause window. Attribute-scoped
+ * EXECUTING action's declared inputs. Each candidate must sit in a claim
+ * unit (#1242 boundaries) carrying the action-subject cue (or a
+ * manifest-file citation) and input vocabulary, must not name another
+ * action, and its direction resolves within that token's unit-bounded
+ * clause window. Attribute-scoped
  * claims and directionless mentions are not candidates.
  */
 function classifyInputDeclaration(message: string): InputCandidate[] {
@@ -639,14 +727,15 @@ function classifyInputDeclaration(message: string): InputCandidate[] {
 }
 
 /**
- * A sentence of a claim message that carries the gate-absence shape: the
+ * A claim unit of a message that carries the gate-absence shape: the
  * action subject, a gate behavior word, an absence cue and a
- * metadata/input-list cue, all in ONE sentence.
+ * metadata/input-list cue, all in ONE claim unit (#1242: a `;`-joined
+ * clause chain or a message spanning a bare path citation counts as one).
  */
 interface GateSentence {
-  /** The sentence as written — the other-action guard must see citations. */
+  /** The unit as written — the other-action guard must see citations. */
   raw: string;
-  /** The same sentence with quoted spans masked — cues, subjects and
+  /** The same unit with quoted spans masked — cues, subjects and
    * qualifiers can never be forged by a cited span. */
   masked: string;
 }
@@ -655,10 +744,10 @@ interface GateSentence {
  * Gate-absence recognition (#1238): the message asserts that a
  * deterministic behavior of the action is absent while deriving that
  * conclusion from the action's metadata/input list (the incident's "no
- * label input" premise). Sentence-scoped: every cue family must co-occur
- * in one sentence, bounded by MAX_CLAIM_SCAN_LENGTH.
+ * label input" premise). Claim-unit-scoped (#1242 boundaries): every cue
+ * family must co-occur in one unit, bounded by MAX_CLAIM_SCAN_LENGTH.
  *
- * Each matching sentence is returned twice — masked (so a quoted span can
+ * Each matching unit is returned twice — masked (so a quoted span can
  * never forge a cue) and raw (so the other-action guard can see a cited
  * `owner/repo@ref` or `uses:` key). The masking preserves length and
  * indices, so both views describe the same characters.
@@ -672,9 +761,9 @@ function gateAbsenceSentences(message: string): GateSentence[] {
   const masked = maskedForScan(message);
   let cursor = 0;
   while (cursor < masked.length) {
-    while (cursor < masked.length && SENTENCE_DELIMITERS.has(masked[cursor] ?? "")) cursor += 1;
+    while (cursor < masked.length && isClaimUnitBoundary(masked, cursor)) cursor += 1;
     let end = cursor;
-    while (end < masked.length && !SENTENCE_DELIMITERS.has(masked[end] ?? "")) end += 1;
+    while (end < masked.length && !isClaimUnitBoundary(masked, end)) end += 1;
     const maskedSentence = masked.slice(cursor, end);
     if (
       ACTION_SUBJECT_CUE_RE.test(maskedSentence)
@@ -864,12 +953,14 @@ async function gateAttested(
 }
 
 /**
- * #1238: decide a gate-absence claim, ONE SENTENCE AT A TIME.
+ * #1238: decide a gate-absence claim, ONE CLAIM UNIT AT A TIME.
  *
- * The decision is never made across sentences: a manifest-only sentence
- * (a declaration about the action's inputs) is never refuted because
- * another sentence in the same message carries a behavioral absence. Each
- * sentence is judged on its own:
+ * The decision is never made across units: a manifest-only unit (a
+ * declaration about the action's inputs) is never refuted because another
+ * unit in the same message carries a behavioral absence. Each unit is
+ * judged on its own (#1242: a `;`-joined clause chain is ONE unit, but the
+ * absence assertion below stays CLAUSE-scoped, so joining clauses never
+ * attributes one clause's negation to another clause's subject):
  *
  *  (a) it must not mention ANOTHER action — the executing action's
  *      implementation cannot decide another action's gates;
