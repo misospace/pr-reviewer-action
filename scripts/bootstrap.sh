@@ -42,10 +42,6 @@ BOOTSTRAP_DOWNLOAD_TIMEOUT_SECS="${BOOTSTRAP_DOWNLOAD_TIMEOUT_SECS:-300}"
 BOOTSTRAP_MISE_INSTALL_TIMEOUT_SECS="${BOOTSTRAP_MISE_INSTALL_TIMEOUT_SECS:-600}"
 BOOTSTRAP_NPM_CI_TIMEOUT_SECS="${BOOTSTRAP_NPM_CI_TIMEOUT_SECS:-900}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-MISE_CONFIG="$REPO_ROOT/.mise/config.toml"
-
 CLEANUP_DIR=""
 RUN_BOUNDED_NOTE=""
 # Published by validate_install_dir: the canonical path that was actually
@@ -69,6 +65,51 @@ fail() {
   printf 'bootstrap: %s\n' "$*" >&2
   exit 1
 }
+
+# dirname(1) replacement for the paths this script resolves (#1274):
+# pure bash, so a host without coreutils' dirname cannot make the
+# bootstrap mis-root itself, and an empty path fails closed instead of
+# being handed to `cd` -- a silent no-op on bash <= 5.2 (SCRIPT_DIR
+# would become the caller's cwd) and a hard `cd: : No such file or
+# directory` abort on bash 5.3+. Matches dirname(1) on the shapes this
+# script sees: absolute paths, repo-relative script paths and bare
+# command names. Needs no arrays or other bash 4 features: macOS still
+# ships bash 3.2 and this script has to run there.
+path_dirname() {
+  local path="$1"
+  if [ -z "$path" ]; then
+    fail "cannot derive a directory from an empty path"
+  fi
+  # Trailing slashes are not separators of their own, the way dirname(1)
+  # ignores them; a bare "/" stays "/".
+  while [ "$path" != "/" ] && [ "${path%/}" != "$path" ]; do
+    path="${path%/}"
+  done
+  case "$path" in
+  */*)
+    path="${path%/*}"
+    # "/x" loses its only component: the parent is the root.
+    [ -n "$path" ] || path="/"
+    ;;
+  *) path="." ;;
+  esac
+  # The tail-strip above can leave an internal double slash behind
+  # ("a//b" -> "a/"): strip it, so the result matches dirname(1) exactly.
+  while [ "$path" != "/" ] && [ "${path%/}" != "$path" ]; do
+    path="${path%/}"
+  done
+  printf '%s\n' "$path"
+}
+
+# The script's own directory, resolved from ${BASH_SOURCE[0]} itself: no
+# external dirname call sits between the two, and a directory that
+# cannot be resolved is a controlled failure -- never a guessed
+# SCRIPT_DIR.
+script_dir="$(cd "$(path_dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" ||
+  fail "cannot resolve the directory containing this script (${BASH_SOURCE[0]}); refusing to guess"
+SCRIPT_DIR="$script_dir"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+MISE_CONFIG="$REPO_ROOT/.mise/config.toml"
 
 # True when the exact directory is already on PATH. Compared as a literal
 # `:PATH:` member so empty entries and globs cannot produce a false match.
@@ -308,7 +349,7 @@ require_process_tools() {
 print_receipt() {
   local start="$1" npm_cache launcher_dir
   local revision="unknown" revision_short="unknown" branch="unknown" invocation
-  launcher_dir="$(dirname "$MISE_BIN")"
+  launcher_dir="$(path_dirname "$MISE_BIN")"
   npm_cache="$(npm config get cache 2>/dev/null || printf 'unknown')"
   if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     revision="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')"
@@ -600,7 +641,7 @@ run_default() {
     fi
   fi
 
-  launcher_dir="$(dirname "$MISE_BIN")"
+  launcher_dir="$(path_dirname "$MISE_BIN")"
   resolved="$(command -v mise 2>/dev/null || true)"
   if [ "$(abspath "$resolved")" != "$MISE_BIN" ]; then
     note "$launcher_dir is not on PATH, so a bare 'mise' will not resolve in this shell. Run: export PATH=\"$launcher_dir:\$PATH\" -- and put that same line in your shell rc to keep it in later shells. Bootstrap completed; only the PATH convenience is missing."
