@@ -42,6 +42,7 @@ import {
 } from "../platform/safe-fetch.js";
 import type { BudgetTracker } from "./budget.js";
 import { classifyUrl, normalizeUrl, type UrlClassification } from "./enrichment.js";
+import { fenceDelimiterFor } from "./fence.js";
 import { stripSourceToText } from "./strip-source-text.js";
 
 export const SKIP_FETCH_HOSTS: ReadonlySet<string> = new Set(["gitlab.com", "bitbucket.org"]);
@@ -387,11 +388,10 @@ function classify(url: string): UrlClassification | null {
 
 /** A code fence longer than any backtick run in `text` (deliberate
  * divergence: v2 always used three backticks, so fetched text containing
- * a fence could close it and turn the rest of the corpus into code). */
+ * a fence could close it and turn the rest of the corpus into code).
+ * Canonical rule: `fenceDelimiterFor` (#1258). */
 export function fenceFor(text: string): string {
-  let longest = 0;
-  for (const run of text.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
-  return "`".repeat(Math.max(3, longest + 1));
+  return fenceDelimiterFor(text);
 }
 
 async function fetchSections(ctx: Ctx): Promise<Map<number, Uint8Array | null>> {

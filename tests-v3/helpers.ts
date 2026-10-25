@@ -2,6 +2,39 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import type { IncomingMessage } from "node:http";
 
+/** Line indexes of `doc` that sit INSIDE an open CommonMark code fence
+ * (#1258): a fence opens with up to three leading spaces then ``` / ~~~ (a
+ * backtick opener may carry an info string), and closes only with a line
+ * that is solely the same fence character, at least as long as the opener.
+ * The opener and closer lines themselves are not "inside". Coarse by design:
+ * just enough to prove a heading is (not) swallowed by a code block hostile
+ * content opened. */
+export function linesInsideCodeFences(doc: string): Set<number> {
+  const inside = new Set<number>();
+  let fenceChar = "";
+  let fenceLength = 0;
+  for (const [index, line] of doc.split("\n").entries()) {
+    const closer = /^ {0,3}([`~]+)\s*$/.exec(line);
+    // CommonMark closers are a pure run of one fence character — a mixed
+    // ``~`` line is plain content, never a closer.
+    const pure = closer !== null && ![...closer[1]!].some((c) => c !== closer[1]![0]);
+    if (fenceChar !== "") {
+      if (pure && closer[1]![0] === fenceChar && closer[1]!.length >= fenceLength) {
+        fenceChar = "";
+        continue;
+      }
+      inside.add(index);
+      continue;
+    }
+    const opener = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (opener) {
+      fenceChar = opener[1]![0] as string;
+      fenceLength = opener[1]!.length;
+    }
+  }
+  return inside;
+}
+
 export interface CapturedRequest {
   headers: http.IncomingHttpHeaders;
   /** Raw on-the-wire header name/value pairs (#1037): `headers` lowercases
