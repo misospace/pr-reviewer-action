@@ -254,6 +254,14 @@ function isUnverifiedGrounding(finding: ArtifactFinding): boolean {
   return (finding as { grounding_status?: unknown }).grounding_status === "unverified";
 }
 
+function isUnverifiedBlockingGrounding(finding: ArtifactFinding): boolean {
+  const status = (finding as { grounding_status?: unknown }).grounding_status;
+  if (status !== "unverified") return false;
+  const original = finding.capped_from;
+  if (original === "blocker" || original === "major") return true;
+  return original === undefined && (finding.severity === "blocker" || finding.severity === "major");
+}
+
 /**
  * #1016: a blocker-level finding the deterministic boundary demoted to minor
  * because its source claim could not be checked. `capped_from` and
@@ -534,7 +542,7 @@ export function applyStrictVerdictPolicy(
   const findings = Array.isArray(artifact.findings) ? artifact.findings : [];
   const modelVerdict = options.modelVerdict;
   const counts = severityCounts(findings);
-  const unverifiedGrounding = findings.some(isUnverifiedGrounding);
+  const unverifiedGrounding = findings.some(isUnverifiedBlockingGrounding);
 
   let verdict: VerdictValue;
   let overridden: boolean;
