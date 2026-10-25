@@ -16,6 +16,12 @@
  * verdict but a derivation: see `applyStrictVerdictPolicy` below.
  */
 import type { ReviewArtifact, ArtifactFinding } from "./artifact.js";
+import {
+  CI_ONLY_RELAXATION_NOTE,
+  GATED_FINDINGS_RELAXATION_NOTE,
+  REFUTED_GROUNDING_RELAXATION_NOTE,
+  VERIFICATION_ONLY_RELAXATION_NOTE,
+} from "./artifact.js";
 import type { VerdictValue } from "../model/types.js";
 
 /**
@@ -195,10 +201,7 @@ export function relaxVerificationOnlyVerdict(
   const findings = artifact.findings;
   if (!Array.isArray(findings) || findings.length === 0) return false;
   if (!findings.every((finding) => isAlwaysNonBlockingCategory(finding.category))) return false;
-  artifact.review_markdown = (artifact.review_markdown || "")
-    + "\n\n_Verdict relaxed from structured findings (#977): every open finding is a "
-    + "verification request the review tools cannot check, so the author has nothing to "
-    + "change. The findings remain listed above._";
+  artifact.review_markdown = (artifact.review_markdown || "") + "\n\n" + VERIFICATION_ONLY_RELAXATION_NOTE;
   artifact.verdict = "approve";
   artifact.verdict_source = "findings";
   return true;
@@ -222,8 +225,7 @@ export function relaxCiOnlyVerdict(
     isAlwaysNonBlockingCategory(finding.category)
     || (finding.ci_capped === true && finding.severity === "info"));
   if (!allRelaxable) return false;
-  artifact.review_markdown = (artifact.review_markdown || "")
-    + "\n\n_Verdict relaxed from CI-only findings (#976): check conclusions are shown for context and gate the merge independently; they are not review blockers._";
+  artifact.review_markdown = (artifact.review_markdown || "") + "\n\n" + CI_ONLY_RELAXATION_NOTE;
   artifact.verdict = "approve";
   artifact.verdict_source = "findings";
   return true;
@@ -295,8 +297,7 @@ export function relaxUnverifiedBlockerVerdict(
     || (finding.ci_capped === true && finding.severity === "info"));
   if (!allRelaxable) return false;
   if (!findings.some(isRefutedOrUnsupportedGrounding)) return false;
-  artifact.review_markdown = (artifact.review_markdown || "")
-    + "\n\n_Verdict relaxed from structured findings (#1016): every open finding was either a verification request or a source claim the deterministic blocker-verification boundary positively refuted against exact-head source; the findings remain listed above and deterministic gates are unaffected._";
+  artifact.review_markdown = (artifact.review_markdown || "") + "\n\n" + REFUTED_GROUNDING_RELAXATION_NOTE;
   artifact.verdict = "approve";
   artifact.verdict_source = "findings";
   return true;
@@ -353,12 +354,7 @@ export function applyVerdictPolicy(
       && artifact.verdict === "request_changes"
       && !hasUnresolvedRequiredCheck(artifact)
     ) {
-      artifact.review_markdown += (
-        "\n\n_Verdict relaxed from structured findings "
-        + "(verdict_policy=findings_severity_gated): every blocking finding "
-        + "was in a category this repository marks non-blocking "
-        + "(non_blocking_finding_categories); they remain listed above._"
-      );
+      artifact.review_markdown += "\n\n" + GATED_FINDINGS_RELAXATION_NOTE;
       artifact.verdict = "approve";
       source = "findings";
     }

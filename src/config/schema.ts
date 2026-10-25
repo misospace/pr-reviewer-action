@@ -70,7 +70,11 @@ export const ENUM_INPUTS: Readonly<Record<string, readonly string[]>> = Object.f
   "tool-mode": ["off", "native_loop"],
   "primary-request-shape": ["default", "trailing_task"],
   "smart-request-shape": ["default", "trailing_task"],
-  platform: ["auto", "forgejo", "github"],
+  // #1247: 'tangled' is a resolvable platform (`src/platform/resolve.ts`
+  // implements it and the contract documents it), so the typed config
+  // vocabulary must accept it — the resolver, not this enum, owns the
+  // fail-closed TANGLED_REPO_DID requirement.
+  platform: ["auto", "forgejo", "github", "tangled"],
   "forgejo-auth-method": ["token", "authorized_integration"],
 });
 

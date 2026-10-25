@@ -44,6 +44,20 @@ source "$SCRIPT_DIR/_lib/assert.sh"
 
 TMPROOT="${TMPDIR:-/tmp}"
 
+# The interpreter the stub scripts run under. A stub is started
+# through the PATH the scenario hands the bootstrap, and the
+# missing-pgrep scenario below hands it a PATH that holds no shell at
+# all: a `#!/usr/bin/env bash` shebang cannot resolve its interpreter
+# through such a PATH, so the stub dies before it runs and the
+# bootstrap sees an empty string where the tool's output belongs.
+# That empty string is not a harmless detail: the bootstrap resolves
+# its own directory with `cd "$(dirname ...)"`, and bash 5.3 turned
+# `cd ""` into an error (bash 5.2 and older treated it as a no-op),
+# so the bootstrap aborted before it could report the prerequisite
+# error the scenario asserts on. An absolute shebang keeps every stub
+# startable under any PATH.
+BASH_ABS="${BASH:-/bin/bash}"
+
 # The pinned digest the stub sha256sum reports; parsed out of the script
 # under test so the fixture cannot drift from the pinned value.
 PINNED_DIGEST="$(grep -E 'linux-x64\) printf' "$BOOTSTRAP" | grep -oE '[0-9a-f]{64}' | head -n 1)"
@@ -1063,11 +1077,11 @@ new_sandbox
 NOPGREP_BIN="$SANDBOX/bin-nopgrep"
 mkdir -p "$NOPGREP_BIN"
 cat >"$NOPGREP_BIN/sha256sum" <<EOF
-#!/usr/bin/env bash
+#!$BASH_ABS
 printf '%s\n' '$PINNED_DIGEST'
 EOF
 cat >"$NOPGREP_BIN/curl" <<EOF
-#!/usr/bin/env bash
+#!$BASH_ABS
 printf downloaded > "$SANDBOX/curl-ran-nopgrep"
 exit 0
 EOF
