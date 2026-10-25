@@ -37,9 +37,13 @@
  * floored at three — because a unified-diff context line has a leading
  * space, which Markdown still accepts as a closing fence, so v2's fixed
  * ```diff wrapper was closable by PR-controlled diff bytes. A benign diff
- * (no run of three or more backticks) keeps the exact v2 bytes. */
+ * (no run of three or more backticks) keeps the exact v2 bytes. Every fence
+ * this module closes also begins on its own line (#1261 review): a payload
+ * without a trailing newline gets a separator newline rather than merging
+ * with the closer — the merge left the fence unclosable and swallowed the
+ * sections after it. */
 
-import { fenceDelimiterFor } from "../context/fence.js";
+import { endsWithNewline, fenceDelimiterFor } from "../context/fence.js";
 import { reframeForCorpus } from "../context/repo-map.js";
 import { classificationLine, prMetadataLine } from "./projections.js";
 import { truncateClean } from "./truncate.js";
@@ -344,12 +348,19 @@ export function buildReviewCorpus(
    * one-line `jq -c` JSON projection (lines start with a structural JSON
    * character, so no line can be a bare closing fence) or version-hint lines,
    * which always start with the diff's `+`/`-` marker. Raw diff bytes never
-   * come through here — they take the #1258 adaptive fence below. */
+   * come through here — they take the #1258 adaptive fence below. The closer
+   * always begins on its own line: a payload without a trailing newline gets
+   * a separator newline, never a merge (#1261 review — a merged closer is
+   * not a pure backtick run and would leave the fence unclosable, swallowing
+   * the sections after it). */
   const pushSection = (header: string | undefined, content: Uint8Array, fenced?: string): void => {
     if (header !== undefined) push(enc(`${header}\n`));
     if (fenced !== undefined) push(enc(`\`\`\`${fenced}\n`));
     push(content);
-    if (fenced !== undefined) push(enc("```\n"));
+    if (fenced !== undefined) {
+      if (!endsWithNewline(content)) push(enc("\n"));
+      push(enc("```\n"));
+    }
     push(enc("\n"));
   };
 
@@ -416,13 +427,18 @@ export function buildReviewCorpus(
   // #1258: the fence delimiter is adaptive (longer than any backtick run in
   // the diff content), so no PR-controlled diff line can close the block and
   // forge or swallow the sections after it; the closer matches the opener's
-  // own length, the only close CommonMark honors for this block.
+  // own length, the only close CommonMark honors for this block. #1261
+  // review: the closer always begins on its own line — a diff artifact
+  // without a trailing newline gets a separator newline so the closer can
+  // never merge into the payload's last line (an unclosable fence would
+  // swallow every section after it). The payload bytes themselves are never
+  // touched, so the #921 byte certification below still finds them exactly.
   const diffFence = fenceDelimiterFor(diffContent);
   const diffSectionBytes = concat(
     enc("# PR Diff\n"),
     enc(`${diffFence}diff\n`),
     diffContent,
-    enc(`${diffFence}\n\n`),
+    enc(`${endsWithNewline(diffContent) ? "" : "\n"}${diffFence}\n\n`),
   );
   const diffSectionOffset = bodyLength;
   push(diffSectionBytes);

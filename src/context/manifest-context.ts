@@ -20,8 +20,10 @@
  *   symlink named like a manifest never pulls a runner file into the corpus
  *   (#805); a refused path that exists gets its own notice;
  * - the line count is the number of newline bytes (GNU `wc -l`), and the
- *   file is embedded verbatim, so one without a trailing newline runs into
- *   the closing fence exactly as `cat` would.
+ *   file is embedded verbatim — when it lacks a trailing newline, a
+ *   separator newline is emitted before the closing fence so the closer
+ *   always begins on its own line (#1261 review; v2 let the two merge,
+ *   which left the fence unclosable).
  *
  * #1258 (deliberate divergence from v2): the embedding fence is adaptive —
  * a delimiter longer than any backtick run in the file, floored at three.
@@ -31,7 +33,7 @@
 
 import { readFileSync } from "node:fs";
 import { jqEach, jqField } from "../platform/jq.js";
-import { fenceDelimiterFor } from "./fence.js";
+import { endsWithNewline, fenceDelimiterFor } from "./fence.js";
 import { workspaceFsPath, workspacePathExists, workspaceRegularFile } from "./workspace-path.js";
 
 export const MANIFEST_LINE_BUDGET = 1200;
@@ -96,7 +98,16 @@ export function buildManifestContext(prFilesRaw: unknown, workspace: string): Ma
       }
       total += lines;
       const fence = fenceDelimiterFor(content);
-      parts.push(enc(`## File: ${file} (${lines} lines)\n${fence}yaml\n`), content, enc(`${fence}\n\n`));
+      // #1261 review: the closer must begin on its own line — a manifest
+      // without a trailing newline must not merge into it (an unclosable
+      // fence would swallow every corpus section after it). The payload
+      // bytes themselves are never touched.
+      const separator = endsWithNewline(content) ? "" : "\n";
+      parts.push(
+        enc(`## File: ${file} (${lines} lines)\n${fence}yaml\n`),
+        content,
+        enc(`${separator}${fence}\n\n`),
+      );
     }
   }
   return { artifacts: new Map([["manifest-context.md", new Uint8Array(Buffer.concat(parts))]]), manifests };

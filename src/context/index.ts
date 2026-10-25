@@ -65,7 +65,7 @@ export {
   renderPrThread,
   timestampSortKeyForTest,
 } from "./pr-thread.js";
-export { fenceDelimiterFor, longestBacktickRun } from "./fence.js";
+export { endsWithNewline, fenceDelimiterFor, longestBacktickRun } from "./fence.js";
 export {
   FINDING_TRAILER,
   MAX_BYTES_DEFAULT as REVIEW_THREADS_MAX_BYTES_DEFAULT,

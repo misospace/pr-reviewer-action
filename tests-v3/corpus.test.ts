@@ -780,12 +780,11 @@ const hostileDiff =
 
 const hostileWorkspace = () => ({
   ...baseWorkspace(),
+  // baseWorkspace's `prDiffTruncated`/`prFilesTruncatedJson` artifacts carry
+  // no trailing newline on purpose: the #1261 regressions below pin that
+  // every closer still begins on its own line.
   prDiff: enc(hostileDiff),
   prDiffTruncated: enc(hostileDiff),
-  // baseWorkspace's no-newline "[]" merges the # PR Files closer into a
-  // `[]``` ` line — a real jq/truncateClean artifact always ends in a
-  // newline, and the fence walker below needs the closer clean.
-  prFilesTruncatedJson: enc("[]\n"),
   toolHarnessMd: enc("1. `run_command` (ok): benign harness sentinel\n"),
   evidenceProvidersMd: enc("provider-alpha: benign evidence sentinel\n"),
 });
@@ -861,4 +860,41 @@ test("#1258: the section-boundary bytes around the adaptive fence are balanced",
   // with real corpus sections immediately after it.
   assert.ok(/^`+$/.test(lines[closerAt] as string));
   assert.ok(lines.slice(closerAt + 1).includes("# Tool Harness Findings"));
+});
+
+// #1261 review: every closer must begin on its own line. A payload without
+// a trailing newline used to merge with its closer — `[]``` ` from the
+// file list, `+hint``` ` from the version hints, and the diff's own closer —
+// leaving fences unclosable that swallowed the sections after them (and an
+// unclosed pre-diff fence could even close INSIDE hostile diff bytes,
+// re-enabling the escape the adaptive fence prevents).
+test("#1261: payloads without trailing newlines keep every closer on its own line and every real heading outside code blocks", () => {
+  // The diff artifact ends mid-forged-heading: no trailing newline.
+  const noNewlineDiff = hostileDiff.slice(0, -1);
+  const ws = {
+    ...hostileWorkspace(),
+    versionHintsTruncatedTxt: enc("+image: repo/app:9.9.9"), // no trailing newline
+    prDiff: enc(noNewlineDiff),
+    prDiffTruncated: enc(noNewlineDiff),
+  };
+  const result = buildReviewCorpus(ws, baseOptions);
+  const corpus = dec(result.artifacts.get("review-corpus.md")!);
+  // Each closer stands on its own line after a separator newline, and the
+  // payload's final line is preserved verbatim ahead of it.
+  assert.ok(corpus.includes("```json\n[]\n```\n"), "the PR Files closer is its own line after the no-newline [] payload");
+  assert.ok(corpus.includes("```text\n+image: repo/app:9.9.9\n```\n"), "the Version Hints closer is its own line");
+  assert.ok(corpus.includes("+# Evidence Providers\n````\n\n"), "the diff closer is its own line after the intact payload tail");
+  // No merged-closer shapes survive (the diff's own " ```" content line is
+  // legitimate payload — only the concrete merges are gone).
+  assert.ok(!corpus.includes("[]```"), "no []``` merge");
+  assert.ok(!corpus.includes("9.9.9```"), "no hint``` merge");
+  assert.ok(!corpus.includes("Providers````"), "no payload-into-diff-closer merge");
+  // Every real section heading — before and after the diff — stays outside
+  // every code block, and the #921 certification still carries the payload
+  // bytes exactly.
+  const inside = linesInsideCodeFences(corpus);
+  for (const heading of ["# PR Files", "# Version Hints from Diff", "# PR Diff", "# Tool Harness Findings", "# Evidence Providers", "# Linked Sources"]) {
+    assert.ok(!inside.has(corpusLineIndexOf(corpus, heading)), `${heading} stays outside every code block`);
+  }
+  assert.equal(dec(result.corpusDiffPayload), noNewlineDiff);
 });

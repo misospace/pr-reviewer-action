@@ -35,3 +35,13 @@ export function longestBacktickRun(data: Uint8Array | string): number {
 export function fenceDelimiterFor(data: Uint8Array | string): string {
   return "`".repeat(Math.max(3, longestBacktickRun(data) + 1));
 }
+
+/** True when `data` is empty or ends with a newline. An adaptive fence's
+ * closer must begin on its own line (#1261 review): concatenating it onto a
+ * payload that lacks a trailing newline leaves the fence unclosable — the
+ * merged line is not a pure backtick run — and every section after it is
+ * swallowed by the still-open block. */
+export function endsWithNewline(data: Uint8Array | string): boolean {
+  if (typeof data === "string") return data.length === 0 || data.endsWith("\n");
+  return data.length === 0 || data[data.length - 1] === 0x0a;
+}
