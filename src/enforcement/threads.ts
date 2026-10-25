@@ -20,7 +20,7 @@
  * outside the finding vocabulary) defaults to minor, and re-emission never
  * escalates: Minor/Info-only re-emissions must leave an approve standing.
  */
-import type { ArtifactFinding, ReviewArtifact } from "./artifact.js";
+import { markRelaxationNotesSuperseded, type ArtifactFinding, type ReviewArtifact } from "./artifact.js";
 import { isAlwaysNonBlockingCategory, isBlockingSeverity } from "./verdict-policy.js";
 
 export const THREAD_DISPOSITIONS: readonly string[] = ["fixed", "open", "disputed", "withdrawn"];
@@ -186,6 +186,10 @@ export function applyReviewThreadEnforcement(
       );
       artifact.verdict = "request_changes";
       artifact.verdict_source = "findings";
+      // #1248: this flip also retires any earlier relaxation note it
+      // contradicts (the provenance stays "findings" — the escalated
+      // thread blockers, not an enforcement overlay, decided here).
+      markRelaxationNotesSuperseded(artifact);
     }
   }
   if (!changed) {

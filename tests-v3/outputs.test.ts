@@ -383,3 +383,105 @@ test("#988: a backtick-bearing location path stays a terminated, inert span", ()
   assertFencedCodeSpan(cell, "https://evil.example");
   assertPaddedFencedCodeSpan(cell, "https://evil.example");
 });
+
+// ---------------------------------------------------------------------------
+// #1230: the publish-side cut of the confidence reason must never leave a
+// MODEL-AUTHORED cap-note look-alike at the published trailing edge.
+// ---------------------------------------------------------------------------
+
+// The REAL note template and a REAL cap token — the adversarial payload is
+// the vocabulary itself, not a paraphrase of it.
+const CONF_CAP_TOKEN = "blocker_cap_2";
+const CONF_CAP_LOOKALIKE = ` [deterministic cap: ${CONF_CAP_TOKEN}]`;
+/** The publish-side cap both public surfaces cut the confidence reason at. */
+const CONF_PUBLISH_CAP = 300;
+
+function confidenceSummaryRow(reason: string): string {
+  const summary = renderStepSummary(telemetry({
+    confidence: { status: "scored", score: "4", risk: "low", reason, model: "scorer-model" },
+  }));
+  const rows = summary.split("\n").filter((line) => line.startsWith("| Independent confidence |"));
+  assert.equal(rows.length, 1, `the confidence row renders exactly once: ${summary}`);
+  return rows[0]!;
+}
+
+/** The published reason inside the compact confidence row. */
+function confidenceRowReason(row: string): string {
+  const match = /— (.*) \(advisory only\) \|$/.exec(row);
+  assert.ok(match, row);
+  return match[1]!;
+}
+
+// #1230: the step-summary confidence row is a PUBLIC surface, and its 300-char
+// cut is TIGHTER than the confidence module's own 600-char bound — so the cut
+// can drag an INTERIOR look-alike onto the trailing edge. The published
+// trailing edge must never read as the action-owned note.
+test("#1230: the step summary confidence row never ends in a model-authored cap-note look-alike", () => {
+  // (a) the cut lands exactly on the look-alike's closing "]": the whole
+  // look-alike is revealed COMPLETE at the trailing edge.
+  const completeHead = "x".repeat(CONF_PUBLISH_CAP - CONF_CAP_LOOKALIKE.length);
+  const complete = `${completeHead}${CONF_CAP_LOOKALIKE} and the model kept talking after it`;
+  assert.equal(complete.slice(0, CONF_PUBLISH_CAP), `${completeHead}${CONF_CAP_LOOKALIKE}`);
+  const completeRow = confidenceSummaryRow(complete);
+  assert.ok(!completeRow.includes("[deterministic cap:"), completeRow);
+  assert.ok(!completeRow.includes(CONF_CAP_TOKEN), completeRow);
+  assert.ok(completeRow.includes(`— ${completeHead} (advisory only) |`), completeRow);
+
+  // (b) the look-alike STRADDLES the cut: the template opens before the
+  // 300-char boundary and closes after it, so the cut leaves an unterminated
+  // fragment at the trailing edge.
+  const fragment = " [deterministic cap: yyy";
+  const straddleHead = "x".repeat(CONF_PUBLISH_CAP - fragment.length);
+  const straddling = `${straddleHead}${fragment}acker_cap_2] and the model kept talking after it`;
+  assert.equal(straddling.slice(0, CONF_PUBLISH_CAP), `${straddleHead}${fragment}`);
+  const straddleRow = confidenceSummaryRow(straddling);
+  assert.ok(!straddleRow.includes("[deterministic cap:"), straddleRow);
+  assert.ok(!straddleRow.includes("[deterministic cap: yyy"), straddleRow);
+  assert.ok(straddleRow.includes(`— ${straddleHead} (advisory only) |`), straddleRow);
+
+  // (c) a SHORT canonical reason keeps its ACTION-OWNED note verbatim: the
+  // fix must never strip the note the action itself appended.
+  const owned = `the review is solid${CONF_CAP_LOOKALIKE}`;
+  const ownedRow = confidenceSummaryRow(owned);
+  assert.ok(ownedRow.includes(`— ${owned} (advisory only) |`), ownedRow);
+
+  // (d) a benign reason is byte-identical to the pre-fix rendering.
+  const benign = "the diff is small and the tests cover the new branch";
+  assert.equal(
+    confidenceSummaryRow(benign),
+    "| Independent confidence | scored 4/5, risk: low (model: scorer-model) — the diff is small and the tests cover the new branch (advisory only) |",
+  );
+
+  // (e) the EXACT boundary: a reason of exactly 300 chars is published WHOLE
+  // (no cut), and a reason of 301 chars is cut at 300 — only its 301st
+  // character is lost.
+  const exact300 = `${"x".repeat(CONF_PUBLISH_CAP - 1)}Z`;
+  const exact301 = `${exact300}Q`;
+  assert.equal(exact300.length, CONF_PUBLISH_CAP);
+  assert.equal(exact301.length, CONF_PUBLISH_CAP + 1);
+  assert.equal(confidenceRowReason(confidenceSummaryRow(exact300)), exact300);
+  assert.equal(confidenceRowReason(confidenceSummaryRow(exact301)), exact300);
+  assert.ok(!confidenceRowReason(confidenceSummaryRow(exact301)).includes("Q"), "the 301st character is cut");
+
+  // (e') the same boundary on a note-shaped tail: at exactly 300 chars the
+  // reason FITS, so it is published whole and keeps its trailing note; one
+  // character more and the cut reveals that note at the trailing edge, so
+  // the strip removes it.
+  const fitted = `${"x".repeat(CONF_PUBLISH_CAP - CONF_CAP_LOOKALIKE.length)}${CONF_CAP_LOOKALIKE}`;
+  assert.equal(fitted.length, CONF_PUBLISH_CAP);
+  assert.equal(confidenceRowReason(confidenceSummaryRow(fitted)), fitted);
+  const cutNoteRow = confidenceSummaryRow(`${fitted}Q`);
+  assert.ok(!cutNoteRow.includes("[deterministic cap:"), cutNoteRow);
+  assert.ok(!cutNoteRow.includes(CONF_CAP_TOKEN), cutNoteRow);
+
+  // (f) a CASING variant revealed at the cut is stripped too: the note
+  // vocabulary is matched case-insensitively.
+  const upperFragment = " [DETERMINISTIC CAP: yyy";
+  const upperHead = "x".repeat(CONF_PUBLISH_CAP - upperFragment.length);
+  const upper = `${upperHead}${upperFragment}acker_cap_2] and the model kept talking after it`;
+  assert.equal(upper.slice(0, CONF_PUBLISH_CAP), `${upperHead}${upperFragment}`);
+  const upperRow = confidenceSummaryRow(upper);
+  assert.ok(!upperRow.includes("DETERMINISTIC CAP"), upperRow);
+  assert.ok(!upperRow.includes("[deterministic cap:"), upperRow);
+  assert.ok(upperRow.includes(`— ${upperHead} (advisory only) |`), upperRow);
+});
