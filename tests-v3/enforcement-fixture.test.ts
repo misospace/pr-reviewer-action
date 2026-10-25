@@ -198,3 +198,33 @@ test("fixture contract mismatch fails closed", () => {
     assert.equal(readFileSync(path, "utf8").length > 0, true);
   });
 });
+
+test("enforcement fixture keeps relax-then-force provenance and body honest end to end (#1248)", () => {
+  withFixtures((dir) => {
+    const relaxThenForce = runEnforcementFixture(writeJson(dir, "relax-then-force.json", {
+      contract: "enforcement-pipeline/v1",
+      artifact: {
+        verdict: "request_changes",
+        review_markdown: "review",
+        findings: [{ severity: "blocker", category: "tests", file: "a.ts", line: 1, message: "untested change" }],
+      },
+      tool_harness: { planning_error: "plan broke" },
+      config: {
+        verdict_policy: "findings_severity_gated",
+        non_blocking_finding_categories: "tests",
+        tool_failure_enforcement: true,
+      },
+    }));
+    assert.equal(relaxThenForce.ok, true);
+    const artifact = JSON.parse(relaxThenForce.values!.artifact!);
+    // Policy relaxes to approve (verdict_source=findings); the tool-failure
+    // overlay forces request_changes back and must own the provenance.
+    assert.equal(artifact.verdict, "request_changes");
+    assert.equal(artifact.verdict_source, "enforcement");
+    assert.match(
+      artifact.review_markdown,
+      /_Verdict relaxation superseded by enforcement: originally relaxed from structured findings \(verdict_policy=findings_severity_gated\)/,
+    );
+    assert.doesNotMatch(artifact.review_markdown, /_Verdict relaxed from/, "the stale relaxed-verdict claim must not stand unqualified");
+  });
+});

@@ -42,12 +42,26 @@ export interface ArtifactFinding {
    * every hunk's new-side range. Content-level only — never changes
    * verdict, requirement coverage, or any other policy input. */
   outside_diff?: boolean;
-  /** #1016: set by the deterministic blocker-verification boundary when a
-   * model-authored source/requirement claim could not be confirmed against
-   * exact-head source and was demoted to non-blocking. One of "refuted"
-   * (exact-head committed source contradicts the claim), "unverified"
-   * (source could not be authoritatively checked), or "unsupported" (no
-   * concrete location). Never set on a grounded finding. */
+  /** #1016, extended #1238, extended #1240: set by the deterministic
+   * blocker-verification boundary when a model-authored source-backed claim
+   * (committed-source literal, requirement claim, action-input declaration,
+   * or gate-absence) was not substantiated by its witness — exact-head
+   * source for the first two, the executing action's embedded contract and
+   * the reviewed repository's own workflow input names for input
+   * declarations, and the executing action's own implementation tree for
+   * gate-absence claims.
+   * The workflow witness is PER FILE and anchored to the finding's OWN
+   * cited file: it reports only what that file's DIRECT action step
+   * passes, it corroborates (grounds) a workflow-scoped claim about the
+   * mapping, and it never establishes an absence — so it never refutes.
+   * The action-side witnesses speak for the EXECUTING revision's release
+   * line only: a claim that names a different line or another patch is
+   * unverified — never refuted, never grounded.
+   * One of "refuted" (the witness positively contradicts the claim),
+   * "unverified" (the witness could not check it), or "unsupported" (no
+   * concrete evidence to verify). Blocker/major findings are demoted to
+   * minor with it; minor/info findings carry it without a severity change.
+   * Never set on a grounded finding. */
   grounding_status?: "refuted" | "unverified" | "unsupported";
 }
 
@@ -190,4 +204,74 @@ export function reviewArtifactFromParsed(parsed: ParsedReviewVerdict): ReviewArt
  */
 export function serializeReviewArtifact(artifact: ReviewArtifact): string {
   return `${JSON.stringify(artifact)}\n`;
+}
+
+/**
+ * #1248: the four action-authored relaxation disclosures, as exact full-text
+ * constants shared with the writers in `verdict-policy.ts` (single source of
+ * truth: a note edited there can never silently stop matching here).
+ */
+export const GATED_FINDINGS_RELAXATION_NOTE =
+  "_Verdict relaxed from structured findings (verdict_policy=findings_severity_gated): "
+  + "every blocking finding was in a category this repository marks non-blocking "
+  + "(non_blocking_finding_categories); they remain listed above._";
+
+export const VERIFICATION_ONLY_RELAXATION_NOTE =
+  "_Verdict relaxed from structured findings (#977): every open finding is a "
+  + "verification request the review tools cannot check, so the author has nothing to "
+  + "change. The findings remain listed above._";
+
+export const CI_ONLY_RELAXATION_NOTE =
+  "_Verdict relaxed from CI-only findings (#976): check conclusions are shown for "
+  + "context and gate the merge independently; they are not review blockers._";
+
+export const REFUTED_GROUNDING_RELAXATION_NOTE =
+  "_Verdict relaxed from structured findings (#1016): every open finding was either a "
+  + "verification request or a source claim the deterministic blocker-verification "
+  + "boundary positively refuted against exact-head source; the findings remain listed "
+  + "above and deterministic gates are unaffected._";
+
+const RELAXATION_NOTES: readonly string[] = [
+  GATED_FINDINGS_RELAXATION_NOTE,
+  VERIFICATION_ONLY_RELAXATION_NOTE,
+  CI_ONLY_RELAXATION_NOTE,
+  REFUTED_GROUNDING_RELAXATION_NOTE,
+];
+
+function escapeRegExpLiteral(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * #1248: matches a relaxation note only as its complete action-authored line
+ * (full exact text, anchored start-to-end of line — the same exact-full-text
+ * posture as the enforcement-banner matcher in `enforce.ts`). Matching the
+ * opener prefix alone would rewrite model prose that merely begins a line
+ * with "_Verdict relaxed from … findings"; model prose can still only be
+ * rewritten by reproducing one of the notes byte-identically as its own
+ * whole line, which is indistinguishable from the action's own note.
+ */
+const RELAXATION_NOTE_RE = new RegExp(
+  `^(?:${RELAXATION_NOTES.map(escapeRegExpLiteral).join("|")})$`,
+  "gm",
+);
+
+const RELAXATION_NOTE_OPENER = "_Verdict relaxed";
+
+/**
+ * #1248: retire stale relaxation claims in the published body. A
+ * findings-policy relaxation appends "_Verdict relaxed from … findings …_"
+ * while the verdict is approve; when a deterministic layer later flips the
+ * verdict back to request_changes (relax-then-force), that note would keep
+ * asserting a relaxation that no longer holds. Marking it superseded keeps
+ * the body honest without deleting the original disclosure. The rewritten
+ * text can never re-match (idempotent).
+ */
+export function markRelaxationNotesSuperseded(artifact: ReviewArtifact): void {
+  artifact.review_markdown = (artifact.review_markdown || "")
+    .replace(
+      RELAXATION_NOTE_RE,
+      (note) => `_Verdict relaxation superseded by enforcement: originally `
+        + `relaxed${note.slice(RELAXATION_NOTE_OPENER.length)}`,
+    );
 }

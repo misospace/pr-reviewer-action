@@ -1,0 +1,64 @@
+{
+  "contract": "golden-replay/v1",
+  "name": "case13-1238-workflow-input-name-mapping",
+  "status": "active",
+  "provenance": {
+    "source_head": "5c1a7f0d3b9e2468ac1d5e7f0b2d4a6c8e0f2a4b",
+    "origin": "Follow-up shape of the #1238 incident: the model asserted the WORKFLOW-TO-ACTION input mapping instead of the action's own declaration - it claimed the workflow names its credential input `ai-key` while the reviewed workflow passes `ai-api-key`, so GitHub would drop the workflow's credential. The reviewed repository's own workflow file (the workflow-side witness, read at the exact reviewed head) is a POSITIVE witness only: it corroborates the names that file's DIRECT action step passes and it never establishes an absence, so it never refutes the fabricated name. The claim is therefore unknown evidence and the review does NOT approve. Sanitized: repository, endpoint, model, and secret names replaced with placeholders; the pinned upstream action reference and the workflow skeleton are kept as factual citations of the incident shape.",
+    "evidence_transform": "sanitized",
+    "model_response": "Recorded representative response (zero live inference): request_changes with one fabricated workflow-mapping major."
+  },
+  "engine": "run-review",
+  "pr": {
+    "head_sha": "5c1a7f0d3b9e2468ac1d5e7f0b2d4a6c8e0f2a4b",
+    "title": "Add AI PR review workflow",
+    "body": "",
+    "diff": "diff --git a/.github/workflows/ai_pr_review.yaml b/.github/workflows/ai_pr_review.yaml\nnew file mode 100644\nindex 0000000..9c41f0a\n--- /dev/null\n+++ b/.github/workflows/ai_pr_review.yaml\n@@ -0,0 +1,32 @@\n+name: AI PR Review\n+\n+on:\n+  pull_request:\n+    types: [opened, reopened, synchronize, ready_for_review, labeled]\n+\n+permissions:\n+  contents: read\n+  pull-requests: write\n+  checks: read\n+\n+jobs:\n+  ai-review:\n+    runs-on: ubuntu-latest\n+    steps:\n+      - name: Check out the pull request head\n+        uses: actions/checkout@v4\n+        with:\n+          fetch-depth: 0\n+          ref: ${{ github.event.pull_request.head.sha }}\n+      - name: Run the AI review\n+        uses: misospace/pr-reviewer-action@5b1839535748f3afd1bd3ef04e8009302cba9aa6 # v3.7.0\n+        with:\n+          github-token: ${{ secrets.GITHUB_TOKEN }}\n+          ai-base-url: ${{ secrets.AI_ENDPOINT }}\n+          ai-api-format: openai\n+          ai-model: review-model\n+          ai-api-key: ${{ secrets.MINIMAX_API_KEY }}\n",
+    "files": [
+      {
+        "filename": ".github/workflows/ai_pr_review.yaml",
+        "status": "added",
+        "additions": 32,
+        "deletions": 0,
+        "changes": 32
+      }
+    ],
+    "threads": []
+  },
+  "source_files": {
+    ".github/workflows/ai_pr_review.yaml": "name: AI PR Review\n\non:\n  pull_request:\n    types: [opened, reopened, synchronize, ready_for_review, labeled]\n\npermissions:\n  contents: read\n  pull-requests: write\n  checks: read\n\njobs:\n  ai-review:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Check out the pull request head\n        uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n          ref: ${{ github.event.pull_request.head.sha }}\n      - name: Run the AI review\n        uses: misospace/pr-reviewer-action@5b1839535748f3afd1bd3ef04e8009302cba9aa6 # v3.7.0\n        with:\n          github-token: ${{ secrets.GITHUB_TOKEN }}\n          ai-base-url: ${{ secrets.AI_ENDPOINT }}\n          ai-api-format: openai\n          ai-model: review-model\n          ai-api-key: ${{ secrets.MINIMAX_API_KEY }}\n"
+  },
+  "secrets": [],
+  "recorded_model_response": {
+    "verdict": "request_changes",
+    "review_markdown": "## Summary\n\nThe workflow names its credential input under an input name the pinned action does not declare, so GitHub drops it.\n\n## Findings\n\n- **Major** (.github/workflows/ai_pr_review.yaml:32) - the workflow's credential input is named `ai-key`, so GitHub drops the action's credential.\n\n## Recommendation\n\nRequest changes: rename the credential input.\n",
+    "smart_review_requested": false,
+    "smart_review_reason": null,
+    "findings": [
+      {
+        "id": "f1238-workflow-input",
+        "severity": "major",
+        "category": "bug",
+        "file": ".github/workflows/ai_pr_review.yaml",
+        "line": 32,
+        "message": "the workflow's credential input is named `ai-key`, so GitHub drops the action's credential"
+      }
+    ],
+    "requirement_coverage": null,
+    "required_check_dispositions": null
+  },
+  "config": {},
+  "expect": {
+    "verdict": "request_changes",
+    "blocking_finding_ids": [],
+    "unsupported_blocking_claims": 0,
+    "supported_blocking_claims": 0,
+    "published_body_excludes": [],
+    "published_body_includes": [
+      "listed above as non-blocking"
+    ],
+    "grounding_status": {
+      "f1238-workflow-input": "unverified"
+    }
+  }
+}

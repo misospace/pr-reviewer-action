@@ -1,22 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { redactSourceTextDetailed } from "../context/redact.js";
 import { committedSourceProvenance, sanitizedSourceProvenance } from "../context/evidence-provenance.js";
-import { safeFile } from "./blocker-verification.js";
+import { canonicalTreePath, safeFile } from "./blocker-verification.js";
 import type { SourceReadResult, SourceReader } from "./blocker-verification.js";
-
-/**
- * Canonicalize a cited tree path before it is used as a git revarg or
- * pathspec. Git's tree lookups key on the canonical path — a raw citation
- * like `src//a.ts` or `./src/a.ts` fails `git show` even when the canonical
- * entry exists — so the reader normalizes empty and `.` segments on both
- * sides of the seam and never lets a normalization mismatch become an
- * affirmative "path absent". `safeFile` has already rejected absolute
- * paths, leading `-`, `..` segments, and NUL, so stripping empty/dot
- * segments cannot introduce traversal.
- */
-function canonicalTreePath(file: string): string {
-  return file.split("/").filter((segment) => segment !== "" && segment !== ".").join("/");
-}
 
 /**
  * A `-z` `ls-tree` record header: `<mode> SP <type> SP <object-id>`. git
