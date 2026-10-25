@@ -67,7 +67,10 @@ import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleMod
 import { reviewArtifactFromParsed, type ArtifactFinding } from "../enforcement/artifact.js";
 import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
 import { applyBlockerVerification } from "../enforcement/blocker-verification.js";
+import { createActionSourceReader } from "../enforcement/action-source.js";
+import { createPinnedActionWitness, resolvePinnedActionRevision } from "../enforcement/pinned-action-source.js";
 import { createHeadSourceReader } from "../enforcement/source-verifier.js";
+import { readWorkflowInputNamesByFile, resolveActionSlug } from "../enforcement/workflow-inputs.js";
 import { capCiEvidenceFindings } from "../enforcement/ci-evidence.js";
 import { markerReviewResult, publishStepRuns } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
@@ -394,6 +397,19 @@ export function createRunCancellation(request: ReviewRequest): RunCancellation {
  * completion throws `RunReviewError`, so a verdict reached after the caller
  * cancelled cannot reach a later publisher. Nothing about this changes when
  * `request.signal` is absent (the Action adapter path). */
+/** #1238: fold a second boundary pass (run after thread settlement
+ * re-emitted prior findings) into the recorded verification result so the
+ * artifact and the demotion note reflect every pass. Findings the first
+ * pass processed are skipped inside the boundary itself, so the second
+ * pass only reports newly settled findings. */
+function mergeBlockerVerificationPasses(
+  first: Awaited<ReturnType<typeof applyBlockerVerification>> | null,
+  second: Awaited<ReturnType<typeof applyBlockerVerification>>,
+): Awaited<ReturnType<typeof applyBlockerVerification>> {
+  if (first === null) return second;
+  return { findings: [...first.findings, ...second.findings], demoted: first.demoted + second.demoted };
+}
+
 export async function runReviewEngine(request: ReviewRequest, dependencies: ReviewDependencies): Promise<RunReviewResult> {
   if (request.signal !== undefined && request.signal.aborted) throw new RunReviewError("review request cancelled before start", 1);
   const cancellation = createRunCancellation(request);
@@ -1493,13 +1509,91 @@ secrets: [profiles.primary.apiKey],
   const candidateRevision = context.headSha || String(pr.headRefOid ?? "") || "";
   const expectedRevision = HEX_SHA_RE.test(candidateRevision) ? candidateRevision : null;
   let blockerVerification: Awaited<ReturnType<typeof applyBlockerVerification>> | null = null;
+  let verificationOptions: Parameters<typeof applyBlockerVerification>[1] | null = null;
   if (Array.isArray(reviewRecord.findings)) {
     capCiEvidenceFindings(reviewRecord.findings as ArtifactFinding[], ciChecksMarkdown);
-    const readSource = createHeadSourceReader({ workspace, revision: expectedRevision });
-    blockerVerification = await applyBlockerVerification(reviewRecord.findings as ArtifactFinding[], {
-      readSource,
+    // #1238: the WORKFLOW-side witness — the input names the REVIEWED
+    // repository's own workflows pass to this action, read at the exact
+    // reviewed head. It answers the half of the input mapping the action
+    // side cannot: what the workflow actually passes.
+    //
+    // The witness is PER FILE: only a workflow file that was read
+    // completely AND invokes this action directly has an entry, so the
+    // boundary may only speak about the file a finding itself cited. A
+    // repository that reaches the action through a composite action has
+    // no entry, so the witness says nothing about that mapping.
+    //
+    // The witness CORROBORATES and never refutes: it grounds a
+    // workflow-scoped claim about the mapping when the cited file's direct
+    // action step passes that name, and it establishes no absence — the
+    // reader sees only the direct action steps, so an uncorroborated claim
+    // stays undecided and the review fails closed on it.
+    //
+    // Built ONCE, before the options object, so the pre-settlement and the
+    // post-settlement pass see the same witness. A failure is NO witness
+    // (null), never an exception into the review pipeline: an unavailable
+    // witness leaves the boundary's behavior exactly as it was.
+    const workflowInputs = await readWorkflowInputNamesByFile({
+      workspace,
+      revision: expectedRevision,
+      actionSlug: resolveActionSlug(),
+    }).catch(() => null);
+    verificationOptions = {
+      readSource: createHeadSourceReader({ workspace, revision: expectedRevision }),
       expectedRevision,
-    });
+      declaredActionInputs: new Set(contract.inputs.map((input) => input.id)),
+      // #1238: the workflow-side witness, keyed by the workflow file that
+      // passes the names. Absent (null) whenever the reviewed repository's
+      // workflows could not be read or do not invoke this action — then no
+      // claim is decided with it.
+      workflowInputsByFile: workflowInputs,
+      // #1240: the build stamp of the revision THIS run executes. The
+      // action-input and gate-absence witnesses speak for the executing
+      // revision's release line only, so a claim that names a different
+      // line or another patch is unverified — never refuted, never
+      // grounded. The value comes from the bundle's OWN build stamp
+      // (src/version.ts) and never from an environment variable, an Action
+      // input, or any byte outside the bundle. On the dogfood path the
+      // bundle itself is built from the PR head, so the stamp — like the
+      // embedded contract — inherits the PR's trust level. The one
+      // exception is the golden-replay test seam
+      // (`dependencies.executingActionVersion`, #1240): a test-host-only
+      // dependency, the same class of injection as `adapter` itself; no
+      // production path sets it.
+      executingActionVersion: dependencies.executingActionVersion ?? ACTION_VERSION,
+      // #1238: the gate-absence witness — the EXECUTING action's own
+      // implementation, embedded into THIS BUNDLE at build time (the bundle
+      // IS the implementation that runs; the action's install directory's
+      // `src/` is not what executes), so the bytes a gate-absence claim is
+      // checked against are revision-bound by construction and no
+      // filesystem read can be raced (#1240). The reviewed repository's
+      // checkout is passed along: a root inside it is the `uses: ./` shape,
+      // where the executing bytes are PR-controlled and must never decide a
+      // refutation. Both boundary passes share this options object, so the
+      // post-settlement pass sees the same witness.
+      readActionSource: createActionSourceReader({ workspaceRoot: workspace }),
+      // #1240 (pinned-revision witness): the exact commit the CONSUMER
+      // pinned this run's action step, per the runner's own metadata
+      // (`GITHUB_ACTION_REPOSITORY` + `GITHUB_ACTION_REF`). A claim that
+      // names a revision the executing witnesses do not answer for is
+      // decided against THIS pinned revision's own manifest and gate
+      // implementation — fetched through the platform's validated,
+      // origin-pinned read-only API seam at the exact content-addressed
+      // commit, never from the reviewed workspace's bytes. Any pin that is
+      // not a full commit SHA (tag, branch, `uses: ./`, missing metadata)
+      // admits NO pinned witness: those claims stay unverified exactly as
+      // before, and a Forgejo deployment whose seam cannot serve contents
+      // reads fails the same way. The identity rule that keeps planted
+      // bytes out — a pin naming the repository under review admits no
+      // witness — lives in resolvePinnedActionRevision itself.
+      pinnedActionSource: (() => {
+        const pinned = resolvePinnedActionRevision();
+        return pinned === null
+          ? null
+          : createPinnedActionWitness({ pinned, ghApi: (endpoint, opts) => adapter.ghApi(endpoint, opts) });
+      })(),
+    };
+    blockerVerification = await applyBlockerVerification(reviewRecord.findings as ArtifactFinding[], verificationOptions);
   }
   const verdictPolicy = env.VERDICT_POLICY ?? "strict";
   // Captured before any layer mutates it: the strict mapping (#811) takes the
@@ -1553,6 +1647,33 @@ secrets: [profiles.primary.apiKey],
       applyConfirmedUnmetEscalation(reviewRecord as never, requirementTraceResult.trace, traceRequirementTexts);
     }
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
+    // #1238: thread settlement (inside the overlays) re-emits prior reviews'
+    // findings after the boundary ran; verify them too so a carried-over
+    // fabricated claim cannot re-enter as a live blocker. The boundary skips
+    // findings it already processed.
+    if (verificationOptions !== null && Array.isArray(reviewRecord.findings)) {
+      // Only findings the first pass never classified (grounded findings
+      // carry no grounding_status, so the processed-index set is the reliable
+      // record — re-reading grounded claims would spend the source-read
+      // budget twice). Re-emitted findings sit at new array positions and
+      // are verified here. The filtered array reindexes from zero, so the
+      // pass's entry indices are remapped back to absolute positions before
+      // the merge (the artifact is a diagnostic consumed by position).
+      const processed = new Set((blockerVerification?.findings ?? []).map((entry) => entry.index));
+      const pending: ArtifactFinding[] = [];
+      const absoluteIndex: number[] = [];
+      (reviewRecord.findings as ArtifactFinding[]).forEach((finding, index) => {
+        if (!processed.has(index)) {
+          pending.push(finding);
+          absoluteIndex.push(index);
+        }
+      });
+      const settledPass = await applyBlockerVerification(pending, verificationOptions);
+      for (const entry of settledPass.findings) {
+        entry.index = absoluteIndex[entry.index] ?? entry.index;
+      }
+      blockerVerification = mergeBlockerVerificationPasses(blockerVerification, settledPass);
+    }
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
     // #1016: the strict mapping computes the unknown-evidence forcing
@@ -1583,6 +1704,32 @@ secrets: [profiles.primary.apiKey],
       applyConfirmedUnmetEscalation(reviewRecord as never, requirementTraceResult.trace, traceRequirementTexts);
     }
     applyAllEnforcement(reviewRecord as never, enforcementInputs);
+    // #1238: second boundary pass over findings thread settlement re-emitted
+    // (same rationale as the strict branch above); the relaxers below then
+    // see the final grounding states.
+    if (verificationOptions !== null && Array.isArray(reviewRecord.findings)) {
+      // Only findings the first pass never classified (grounded findings
+      // carry no grounding_status, so the processed-index set is the reliable
+      // record — re-reading grounded claims would spend the source-read
+      // budget twice). Re-emitted findings sit at new array positions and
+      // are verified here. The filtered array reindexes from zero, so the
+      // pass's entry indices are remapped back to absolute positions before
+      // the merge (the artifact is a diagnostic consumed by position).
+      const processed = new Set((blockerVerification?.findings ?? []).map((entry) => entry.index));
+      const pending: ArtifactFinding[] = [];
+      const absoluteIndex: number[] = [];
+      (reviewRecord.findings as ArtifactFinding[]).forEach((finding, index) => {
+        if (!processed.has(index)) {
+          pending.push(finding);
+          absoluteIndex.push(index);
+        }
+      });
+      const settledPass = await applyBlockerVerification(pending, verificationOptions);
+      for (const entry of settledPass.findings) {
+        entry.index = absoluteIndex[entry.index] ?? entry.index;
+      }
+      blockerVerification = mergeBlockerVerificationPasses(blockerVerification, settledPass);
+    }
     // #977: the model's own request_changes is relaxed only when every
     // still-open finding is a verification ask and no independent
     // deterministic gate fired. The overlays above have already run, so
@@ -1616,7 +1763,7 @@ secrets: [profiles.primary.apiKey],
       findings: blockerVerification.findings,
     })}\n`, "utf8"));
     reviewRecord.review_markdown = String(reviewRecord.review_markdown ?? "")
-      + `\n\n_${blockerVerification.demoted} finding(s) asserting committed source text could not be confirmed against exact-head source and are listed above as non-blocking. Deterministic enforcement gates are unaffected._`;
+      + `\n\n_${blockerVerification.demoted} finding(s) making source-backed claims that deterministic verification positively contradicted or could not substantiate are listed above as non-blocking. Deterministic enforcement gates are unaffected._`;
   }
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(reviewRecord)}\n`, "utf8"));
 

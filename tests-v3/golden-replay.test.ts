@@ -20,6 +20,47 @@ import type { PlatformReadAdapter } from "../src/platform/types.js";
 const ROOT = resolve(__dirname, "..", "..");
 const FIXTURES = join(ROOT, "tests", "fixtures", "golden-replay");
 
+// #1238: the golden runtime must be able to reach the action's OWN source
+// tree, because the gate-absence witness reads the implementation that
+// actually runs. In production that tree is the action's install directory
+// (GITHUB_ACTION_PATH); the replay points it at this repository. Set
+// deterministically — the suite must not depend on the ambient value — and
+// restored after the run.
+const PREVIOUS_ACTION_PATH = process.env.GITHUB_ACTION_PATH;
+process.env.GITHUB_ACTION_PATH = ROOT;
+after(() => {
+  if (PREVIOUS_ACTION_PATH === undefined) delete process.env.GITHUB_ACTION_PATH;
+  else process.env.GITHUB_ACTION_PATH = PREVIOUS_ACTION_PATH;
+});
+
+// #1238: the workflow-side witness joins the reviewed repository's
+// workflow steps to the action they invoke, so the replay must be able to
+// name the action under review. The runner exports
+// `GITHUB_ACTION_REPOSITORY` for the action that runs; the replay pins it
+// to the action the fixtures pin in their `uses:` lines. Set
+// deterministically — the suite must not depend on the ambient value — and
+// restored after the run.
+const PREVIOUS_ACTION_REPOSITORY = process.env.GITHUB_ACTION_REPOSITORY;
+process.env.GITHUB_ACTION_REPOSITORY = "misospace/pr-reviewer-action";
+after(() => {
+  if (PREVIOUS_ACTION_REPOSITORY === undefined) delete process.env.GITHUB_ACTION_REPOSITORY;
+  else process.env.GITHUB_ACTION_REPOSITORY = PREVIOUS_ACTION_REPOSITORY;
+});
+
+// #1240: the pinned-revision witness refuses to serve when the pinned action
+// repository IS the repository under review — in production the runner
+// exports that identity as `GITHUB_REPOSITORY`. Every replay here mocks the
+// reviewed PR as `repo: "o/r"`, so the suite must pin the ambient identity
+// to it and never inherit the ambient value: this repository's own CI sets
+// it to exactly the pinned slug above, which would make the fail-closed
+// same-repo refusal fire on every replay of a consumer pin.
+const PREVIOUS_REPOSITORY = process.env.GITHUB_REPOSITORY;
+process.env.GITHUB_REPOSITORY = "o/r";
+after(() => {
+  if (PREVIOUS_REPOSITORY === undefined) delete process.env.GITHUB_REPOSITORY;
+  else process.env.GITHUB_REPOSITORY = PREVIOUS_REPOSITORY;
+});
+
 // Redaction marker tokens: a blocking claim that cites a token the PR's own
 // source does not contain is a claim the evidence cannot support. The plain
 // `[REDACTED]` placeholder is module-private (src/context/redact.ts:10), so it
@@ -87,6 +128,15 @@ interface GoldenCase {
   priorBlockerId?: string | undefined;
   secrets?: string[];
   expectedMismatchKeys?: string[] | undefined;
+  /** #1240: the consumer-pinned revision the replay's pinned-revision witness
+   * serves (fixture `pinned_action`): the exact commit SHA plus the action's
+   * own bytes at that revision, keyed by repo-relative path. Absent means the
+   * case has no pinned witness — exactly today's behavior. */
+  pinnedAction?: { ref: string; files: Record<string, string> } | undefined;
+  /** #1240: the executing build stamp the replay runs under (fixture
+   * `executing_action_version`). Absent means the unstamped test build: no
+   * revision scoping, exactly today's behavior. */
+  executingActionVersion?: string | undefined;
   expect: GoldenExpect;
 }
 
@@ -96,6 +146,20 @@ interface RefusedCase {
   status: "active" | "expected-failure";
   reason: string;
   expectRefusal?: string | undefined;
+}
+
+// #1240: the fixture's pinned-revision witness. Malformed values (a ref that
+// is not a full 40-hex SHA, a files map that is not a plain object of
+// strings) are treated as ABSENT — a fixture may never crash a replay.
+function parsePinnedAction(raw: unknown): { ref: string; files: Record<string, string> } | undefined {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const candidate = raw as Record<string, unknown>;
+  const ref = candidate.ref;
+  if (typeof ref !== "string" || !/^[0-9a-f]{40}$/.test(ref)) return undefined;
+  const files = candidate.files;
+  if (files === null || typeof files !== "object" || Array.isArray(files)) return undefined;
+  if (!Object.values(files as Record<string, unknown>).every((value) => typeof value === "string")) return undefined;
+  return { ref, files: files as Record<string, string> };
 }
 
 // Contract gate: every validation failure is a refusal, never a replay.
@@ -128,6 +192,8 @@ function validateCase(raw: unknown): GoldenCase | { refusal: string } {
     expectedMismatchKeys: Array.isArray(fx.expected_mismatch_keys)
       ? ((fx.expected_mismatch_keys as unknown[]).filter((s): s is string => typeof s === "string"))
       : undefined,
+    pinnedAction: parsePinnedAction(fx.pinned_action),
+    executingActionVersion: typeof fx.executing_action_version === "string" ? fx.executing_action_version : undefined,
     expect: (fx.expect ?? {}) as GoldenExpect,
   };
 }
@@ -156,7 +222,15 @@ function verdictBody(v: Record<string, unknown>): string {
   });
 }
 
-function mockPlatform(pr: Record<string, unknown>): PlatformReadAdapter {
+// #1240: the consumer-pinned revision the case's `ghApi` seam serves: the
+// exact commit SHA plus the action's own bytes at that revision.
+type PinnedActionFixture = { ref: string; files: Record<string, string> };
+
+// The action slug the harness pins (the module-level GITHUB_ACTION_REPOSITORY
+// above): the only slug the pinned-revision witness serves.
+const PINNED_ACTION_SLUG = "misospace/pr-reviewer-action";
+
+function mockPlatform(pr: Record<string, unknown>, pinned?: PinnedActionFixture): PlatformReadAdapter {
   const headSha = String(pr.head_sha ?? "");
   const diff = String(pr.diff ?? "");
   const files = (pr.files as unknown[] | undefined) ?? [];
@@ -187,7 +261,25 @@ function mockPlatform(pr: Record<string, unknown>): PlatformReadAdapter {
     listPrReviews: () => Promise.resolve([]),
     repoPermission: () => Promise.resolve(null),
     authenticatedIdentity: () => Promise.resolve(null),
-    ghApi: () => Promise.resolve({ error: "not served" }),
+    // #1238/#1240: the pinned-revision witness fetches the action's own
+    // manifest and gate implementation at the exact pinned commit through
+    // the contents-API seam (`repos/<slug>/contents/<path>?ref=<sha>`).
+    // Serve the fixture's bytes — base64, exactly the response shape the
+    // witness decodes — only for the harness-pinned slug and the case's
+    // pinned ref with a path the case provides; everything else keeps
+    // failing closed exactly as before.
+    ghApi: (endpoint: string) => {
+      const match = new RegExp(
+        `^repos/${PINNED_ACTION_SLUG.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/contents/(.+)\\?ref=([0-9a-f]{40})$`,
+      ).exec(endpoint);
+      if (pinned !== undefined && match !== null && match[2] === pinned.ref) {
+        const content = pinned.files[match[1] ?? ""];
+        if (content !== undefined) {
+          return Promise.resolve({ data: { type: "file", content: Buffer.from(content, "utf8").toString("base64") } });
+        }
+      }
+      return Promise.resolve({ error: "not served" });
+    },
     externalChecks: () => Promise.resolve([]),
   } as unknown as PlatformReadAdapter;
 }
@@ -402,6 +494,14 @@ async function replayRunReview(c: GoldenCase): Promise<CaseScore> {
   // (matched on the JSON placeholder) cannot block — both values were
   // 40-char hex placeholders at load time.
   const sourceDir = mkdtempSync(join(tmpdir(), "golden-source-"));
+  // #1240: the pinned-revision witness resolves the consumer pin from the
+  // runner's own metadata: GITHUB_ACTION_REPOSITORY is pinned at module
+  // level above, GITHUB_ACTION_REF here, per replay. Set deterministically
+  // (mirroring the module-level PREVIOUS_* pattern) and restored in the
+  // finally below. Cases without a pinned action leave the variable exactly
+  // as found, so they get no witness.
+  const previousActionRef = process.env.GITHUB_ACTION_REF;
+  if (c.pinnedAction !== undefined) process.env.GITHUB_ACTION_REF = c.pinnedAction.ref;
   try {
     execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: sourceDir });
     execFileSync("git", ["config", "user.email", "golden@example.com"], { cwd: sourceDir });
@@ -435,9 +535,13 @@ async function replayRunReview(c: GoldenCase): Promise<CaseScore> {
       },
       runDir,
       workspace: sourceDir,
-      platformAdapter: mockPlatform(pr),
+      platformAdapter: mockPlatform(pr, c.pinnedAction),
       persistArtifacts: true,
       quiet: true,
+      // #1240 test seam: the executing build stamp. Passed only when the
+      // fixture names one; unset means the unstamped test build (no
+      // revision scoping) and today's decision path exactly.
+      ...(c.executingActionVersion !== undefined ? { executingActionVersion: c.executingActionVersion } : {}),
     });
     const artifact = result.reviewArtifact as unknown as {
       findings?: ArtifactFinding[];
@@ -487,6 +591,8 @@ async function replayRunReview(c: GoldenCase): Promise<CaseScore> {
     };
     return scoreCase(c, result.outputs.verdict, findings, recordedFindings(c), published, artifact.thread_dispositions);
   } finally {
+    if (previousActionRef === undefined) delete process.env.GITHUB_ACTION_REF;
+    else process.env.GITHUB_ACTION_REF = previousActionRef;
     await server.close();
     rmSync(runDir, { recursive: true, force: true });
     rmSync(sourceDir, { recursive: true, force: true });

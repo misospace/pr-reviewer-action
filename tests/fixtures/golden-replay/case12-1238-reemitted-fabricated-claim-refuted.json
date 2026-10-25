@@ -1,0 +1,84 @@
+{
+  "contract": "golden-replay/v1",
+  "name": "case12-1238-reemitted-fabricated-claim-refuted",
+  "status": "active",
+  "provenance": {
+    "source_head": "bfb68648d6b4444f19c70c001e0e830e1fe8e64b",
+    "origin": "Follow-up shape of the #1238 incident: a PRIOR review published the fabricated input-name claim as a native review thread; the author fixed nothing (the claim was false) and pushed a trivial change. The next run re-emits the unresolved thread as a live blocker finding after the deterministic boundary's first pass, so the boundary runs again over the settled findings - the registry witness positively contradicts the re-emitted claim and the strict mapping derives an approve instead of re-blocking on the carried-over fabrication. Sanitized: repository, endpoint, model, and secret names replaced with placeholders; the thread message preserves the incident claim in substance.",
+    "evidence_transform": "sanitized",
+    "model_response": "Recorded representative response (zero live inference): a plain approve with an empty thread_dispositions, so deterministic settlement downgrades the un-dispositioned thread to open and re-emits the original finding."
+  },
+  "engine": "run-review",
+  "pr": {
+    "head_sha": "bfb68648d6b4444f19c70c001e0e830e1fe8e64b",
+    "title": "Tune AI review workflow concurrency",
+    "body": "Adjust the concurrency group for label-triggered runs.",
+    "diff": "diff --git a/.github/workflows/ai_pr_review.yaml b/.github/workflows/ai_pr_review.yaml\nindex 9c41f0a..1d7b2c3 100644\n--- a/.github/workflows/ai_pr_review.yaml\n+++ b/.github/workflows/ai_pr_review.yaml\n@@ -12,7 +12,7 @@\n concurrency:\n-  group: ai-review-${{ github.event.pull_request.number }}\n+  group: ai-review-${{ github.event.pull_request.number }}${{ github.event.action == 'labeled' && format('-label-{0}', github.run_id) || '' }}\n   cancel-in-progress: true\n",
+    "files": [
+      {
+        "filename": ".github/workflows/ai_pr_review.yaml",
+        "status": "modified",
+        "additions": 1,
+        "deletions": 1,
+        "changes": 2
+      }
+    ],
+    "threads": [
+      {
+        "thread_id": "PRRT_1238",
+        "path": ".github/workflows/ai_pr_review.yaml",
+        "line": 36,
+        "original_line": 36,
+        "resolved": false,
+        "outdated": false,
+        "comments": [
+          {
+            "id": 123801,
+            "user": {
+              "login": "ai-pr-review"
+            },
+            "created_at": "2026-10-23T14:03:00Z",
+            "updated_at": "2026-10-23T14:03:00Z",
+            "body": "**🛑 Blocker (bug):** The pinned action declares its API-key input as `ai-key` (action.yml at v3.7.0), so `ai-api-key` is an unexpected input that GitHub ignores and the action runs without the endpoint credential.\n\n_Automated finding from AI PR review._"
+          }
+        ]
+      }
+    ]
+  },
+  "source_files": {
+    ".github/workflows/ai_pr_review.yaml": "name: AI PR Review\n\non:\n  pull_request:\n    types: [opened, reopened, synchronize, ready_for_review, labeled]\n\npermissions:\n  contents: read\n  pull-requests: write\n  checks: read\n\nconcurrency:\n  group: ai-review-${{ github.event.pull_request.number }}${{ github.event.action == 'labeled' && format('-label-{0}', github.run_id) || '' }}\n  cancel-in-progress: true\n\njobs:\n  ai-review:\n    runs-on: ubuntu-latest\n    steps:\n      # The action also skips drafts and non-matching labels.\n      - name: Check out the pull request head\n        uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n          ref: ${{ github.event.pull_request.head.sha }}\n      - name: Run the AI review\n        uses: misospace/pr-reviewer-action@5b1839535748f3afd1bd3ef04e8009302cba9aa6 # v3.7.0\n        with:\n          github-token: ${{ secrets.GITHUB_TOKEN }}\n          ai-base-url: ${{ secrets.AI_ENDPOINT }}\n          ai-api-format: openai\n          ai-model: review-model\n          ai-max-tokens: \"16384\"\n          ai-temperature: \"0.1\"\n          ai-response-format: json_schema\n          ai-api-key: ${{ secrets.MINIMAX_API_KEY }}\n"
+  },
+  "secrets": [],
+  "recorded_model_response": {
+    "verdict": "approve",
+    "review_markdown": "The concurrency group now separates label-triggered runs from push-triggered ones. No new findings in this diff.\n",
+    "smart_review_requested": false,
+    "smart_review_reason": null,
+    "findings": [],
+    "requirement_coverage": null,
+    "required_check_dispositions": null,
+    "thread_dispositions": []
+  },
+  "config": {},
+  "prior_blocker_id": "PRRT_1238",
+  "expect": {
+    "verdict": "approve",
+    "blocking_finding_ids": [],
+    "unsupported_blocking_claims": 0,
+    "supported_blocking_claims": 0,
+    "published_body_excludes": [],
+    "published_body_includes": [
+      "listed above as non-blocking"
+    ],
+    "grounding_status": {
+      "The pinned action declares its API-key input": "refuted"
+    },
+    "thread_dispositions": [
+      {
+        "thread_id": "PRRT_1238",
+        "disposition": "open",
+        "evidence": null
+      }
+    ]
+  }
+}

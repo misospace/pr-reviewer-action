@@ -90,6 +90,11 @@ export interface ReviewDependencies {
    * adapter supplies the #914 ack-reaction behavior here). Awaited when it
    * returns a promise. Never invoked on a skipped admission. */
   onAdmission?: (admission: PrecheckOutput) => void | Promise<void>;
+  /** #1240 TEST SEAM ONLY: replay the stamped-build revision-scoping path
+   * with a given release stamp. Production callers never set it — the
+   * engine takes the executing identity from the bundle's own build stamp
+   * (src/version.ts), the only stamp a running build can vouch for. */
+  executingActionVersion?: string;
 }
 
 export type { RunReviewResult as EngineRunResult };

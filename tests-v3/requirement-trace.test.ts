@@ -9,6 +9,7 @@ import { applyRequirementTraceFragment, workspaceAt } from "../src/prompt/index.
 import { traceChangedText } from "../src/run/review.js";
 import { RunWorkspace } from "../src/run/workspace.js";
 import { applyStrictVerdictPolicy, relaxCiOnlyVerdict, relaxVerificationOnlyVerdict } from "../src/enforcement/verdict-policy.js";
+import { applyBlockerVerification } from "../src/enforcement/blocker-verification.js";
 import { isValidOwnerPattern, parseRequirementOwners, resolveRequirementOwners } from "../src/config/requirement-owners.js";
 import {
   applyConfirmedUnmetEscalation,
@@ -4376,4 +4377,48 @@ test("#1248: a confirmed-unmet escalation flip supersedes a prior relaxation not
   assert.equal(art.verdict_source, "enforcement");
   assert.ok(art.review_markdown.includes("_Verdict relaxation superseded by enforcement: originally relaxed from structured findings"));
   assert.ok(!art.review_markdown.includes("_Verdict relaxed from"));
+});
+
+test("#1240 the model-evidence boundary never overturns a deterministic confirmed-unmet escalation", async () => {
+  // The escalation's message embeds the requirement's own text — pull-request
+  // controlled prose. When that prose happens to read like a gate-absence
+  // claim about the action's own implementation, the boundary used to refute
+  // it: the escalation's blocker was demoted and the strict mapping derived
+  // an approve the deterministic layer never decided. The deterministic layer
+  // owns deterministic decisions — the boundary leaves its findings alone.
+  const trace = traceWithRows([{
+    requirement_id: "req-985",
+    disposition: "unverifiable",
+    proof: "structural_state",
+    enforcement: [{ file: "src/precheck/decide.ts", line: 1 }],
+    test: [],
+    reason: "the cited repository state at head does not satisfy the requirement",
+    notes: ["structural-proof-unconfirmed"],
+  }]);
+  const art = artifact({ verdict: "approve", verdict_source: "model" });
+  const escalated = applyConfirmedUnmetEscalation(
+    art,
+    trace,
+    new Map([["req-985", "the action never filters drafts, its metadata declares no input"]]),
+  );
+  assert.equal(escalated, 1);
+  const finding = art.findings[0]!;
+  assert.equal(finding.category, "requirements");
+  assert.equal(finding.severity, "blocker");
+  const result = await applyBlockerVerification(art.findings, {
+    readSource: async () => { throw new Error("boundary must not read reviewed repository"); },
+    expectedRevision: null,
+    declaredActionInputs: new Set(["ai-api-key"]),
+    readActionSource: async (path) => (path === "src/precheck/decide.ts"
+      ? { status: "ok", text: 'skip_reason: "pr-draft"\n' }
+      : { status: "unavailable", reason: "not-found" }),
+    executingActionVersion: "v3.7.0",
+  });
+  assert.deepEqual(result.findings, []);
+  assert.equal(finding.grounding_status, undefined);
+  assert.equal(finding.capped_from, undefined);
+  assert.equal(finding.severity, "blocker");
+  // The strict mapping still derives the escalation's request_changes.
+  const outcome = applyStrictVerdictPolicy(art, { modelVerdict: "approve", forced: false });
+  assert.equal(outcome.verdict, "request_changes");
 });
