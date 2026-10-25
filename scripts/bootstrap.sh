@@ -104,9 +104,14 @@ path_dirname() {
 # The script's own directory, resolved from ${BASH_SOURCE[0]} itself: no
 # external dirname call sits between the two, and a directory that
 # cannot be resolved is a controlled failure -- never a guessed
-# SCRIPT_DIR.
-script_dir="$(cd "$(path_dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" ||
-  fail "cannot resolve the directory containing this script (${BASH_SOURCE[0]}); refusing to guess"
+# SCRIPT_DIR. BASH_SOURCE is unset when the script is piped or sourced
+# oddly, and under `set -u` expanding it raw would abort with an unbound
+# variable error instead of the controlled message below.
+script_source="${BASH_SOURCE[0]:-}"
+[ -n "$script_source" ] ||
+  fail "cannot resolve the directory containing this script: BASH_SOURCE is empty; refusing to guess"
+script_dir="$(cd "$(path_dirname "$script_source")" 2>/dev/null && pwd)" ||
+  fail "cannot resolve the directory containing this script ($script_source); refusing to guess"
 SCRIPT_DIR="$script_dir"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 MISE_CONFIG="$REPO_ROOT/.mise/config.toml"

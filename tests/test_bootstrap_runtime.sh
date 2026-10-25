@@ -25,6 +25,9 @@
 #     ${BASH_SOURCE[0]}, #1274), setup still roots itself correctly and
 #     completes: the receipt records the real checkout and the stubbed
 #     dirname is never invoked
+#   - when the bootstrap cannot resolve its own directory at all
+#     (BASH_SOURCE unset, e.g. piped execution, #1274), it exits non-zero
+#     with the controlled message and installs nothing
 #
 # Auto-discovered by the CI validate-bash job. Target runtime: seconds.
 set -euo pipefail
@@ -1147,6 +1150,40 @@ check_contains "the receipt names the launcher directory it derived itself" \
   "$nodirname_body" "($BIN/mise)"
 check "the unusable dirname stub was never invoked" \
   "$(test -e "$SANDBOX/dirname-calls.log" && printf yes || printf no)" "no"
+
+echo ""
+echo "=== bootstrap runtime: an unresolvable own directory fails closed ==="
+new_sandbox
+# The fail-closed half of the ask (#1274): when the bootstrap cannot
+# resolve its own directory at all it must exit non-zero with a
+# controlled message that names the failure, and install neither the
+# launcher nor npm dependencies -- never fall back to the caller's cwd.
+# Executed through stdin, which leaves BASH_SOURCE unset; the sandbox
+# PATH is empty, so a pre-fix fallback to the caller's cwd could not
+# silently "work" either.
+unresolvable_out="$SANDBOX/unresolvable.out"
+env "HOME=$SANDBOX/home" "PATH=$BIN" "${BASH:-bash}" -s \
+  <"$BOOTSTRAP" >"$unresolvable_out" 2>&1 &
+BOOTSTRAP_PID=$!
+if wait_exited_or_deadline 20; then
+  check_ne "bootstrap exits non-zero when its own directory cannot be resolved" \
+    "$BOOTSTRAP_RC" "0"
+else
+  check_ne "bootstrap exits non-zero when its own directory cannot be resolved" \
+    "timed-out" "0"
+fi
+reap_bootstrap
+unresolvable_body="$(cat "$unresolvable_out")"
+check_contains "failure is the controlled message, prefixed by the bootstrap" \
+  "$unresolvable_body" "bootstrap: cannot resolve the directory containing this script"
+check_not_contains "failure is controlled, not a raw unbound-variable abort" \
+  "$unresolvable_body" "unbound variable"
+check_not_contains "failure is controlled, not a raw bash cd error" \
+  "$unresolvable_body" "No such file or directory"
+check "no launcher was installed when the directory cannot be resolved" \
+  "$(test -e "$INSTALL_DIR/mise" && printf yes || printf no)" "no"
+check_not_contains "the receipt was never reached (no setup completion)" \
+  "$unresolvable_body" "Setup complete in"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
