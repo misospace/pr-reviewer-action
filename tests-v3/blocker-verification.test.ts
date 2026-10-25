@@ -748,6 +748,165 @@ test("#1238 a gate claim citing another action's path is not decided", async () 
   ]);
 });
 
+test("#1242 semicolon-joined gate-absence clauses are one claim unit", async () => {
+  // "The action never filters by label; its metadata declares no label
+  // input." split at the `;`, so no half carried all four cue families and
+  // the claim was left untouched — the #1238 symptom in this phrasing. It
+  // now classifies as gate_absence and is decided by the same rules as the
+  // comma-joined equivalent, with the absence assertion still clause-scoped.
+  const split = markerFinding({ message: "The action never filters by label; its metadata declares no label input." });
+  const joined = markerFinding({ message: "The action never filters by label, metadata declares no label input." });
+  const result = await verify(
+    [split, joined],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["gate_absence", "refuted", "gate-implemented:label-filter"],
+    ["gate_absence", "refuted", "gate-implemented:label-filter"],
+  ]);
+  assert.equal(split.grounding_status, "refuted");
+  assert.equal(split.severity, "minor");
+});
+
+test("#1242 gate-absence claim citing a bare path is classified and decided like its un-split equivalent", async () => {
+  // The `.` inside the cited path `src/precheck/decide.ts` split the claim
+  // so no half carried all four cue families: the claim was never
+  // recognized as a source claim at all. The path-internal dot is now
+  // path structure, not a split, so it reaches the cue families whole and
+  // the (unchanged) other-action mention guard decides it exactly like the
+  // same citation written where it did not split the unit.
+  const split = markerFinding({ message: "The action never skips drafts (see src/precheck/decide.ts), metadata declares no label input." });
+  const trailing = markerFinding({ message: "The action never skips drafts, metadata declares no label input (see src/precheck/decide.ts)." });
+  const result = await verify(
+    [split, trailing],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["gate_absence", "unverified", "gate-absence-unverifiable"],
+    ["gate_absence", "unverified", "gate-absence-unverifiable"],
+  ]);
+  assert.equal(split.grounding_status, "unverified");
+  assert.equal(split.severity, "minor");
+});
+
+test("#1242 terminal and ellipsis dots after a cited path still split claim units", async () => {
+  // Adversarial-boundary control (#252): the path-run expansion must not
+  // eat a real sentence boundary when the space after the terminal period
+  // is missing. A sentence onset after "…b.ts." or "…b.ts..." is not a path
+  // segment, so no half carries all four cue families and the claim stays
+  // untouched — the swallowed-dot shape that would forge cue co-occurrence.
+  const noSpace = markerFinding({ message: "The action never filters by label docs/a/b.ts.The metadata declares no draft input." });
+  const ellipsis = markerFinding({ message: "The action never filters by label docs/a/b.ts...The metadata declares no draft input." });
+  const result = await verify(
+    [noSpace, ellipsis],
+    async () => { throw new Error("unclassified claims must not be read"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.deepEqual(result.findings, []);
+  assert.equal(noSpace.grounding_status, undefined);
+  assert.equal(ellipsis.grounding_status, undefined);
+});
+
+test("#1242 a lowercase sentence onset after a terminal path dot keeps the split", async () => {
+  // Capitalization was never the discriminator (#1242 review round): the
+  // same missing-space shape with a lowercase onset word must split like
+  // its uppercase twin, or the path run would join two real sentences into
+  // one unit and forge cue co-occurrence across the boundary. The
+  // extension rule rejects the onset word, and the twin (a real space)
+  // pins both variants to the identical untouched outcome.
+  const noSpace = markerFinding({ message: "The action never filters by label docs/a/b.ts.and the metadata declares no draft input." });
+  const withSpace = markerFinding({ message: "The action never filters by label docs/a/b.ts. and the metadata declares no draft input." });
+  const result = await verify(
+    [noSpace, withSpace],
+    async () => { throw new Error("unclassified claims must not be read"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.deepEqual(result.findings, []);
+  assert.equal(noSpace.grounding_status, undefined);
+  assert.equal(withSpace.grounding_status, undefined);
+});
+
+test("#1242 a lowercase onset after an ellipsis keeps the split", async () => {
+  // The ellipsis dots break the run before any segment is read, no matter
+  // the onset's case; the trailing sentence ("more input.") carries input
+  // vocabulary but no action subject in its own unit, so its cues must not
+  // classify the earlier gate-absence text across the boundary.
+  const ellipsis = markerFinding({ message: "The action never filters by label docs/a/b.ts...more input." });
+  const result = await verify(
+    [ellipsis],
+    async () => { throw new Error("unclassified claims must not be read"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.deepEqual(result.findings, []);
+  assert.equal(ellipsis.grounding_status, undefined);
+});
+
+test("#1242 a fabricated input claim gains no cues across a swallowed boundary", async () => {
+  // #1242 review round: had the extension rule let a lowercase onset swell
+  // the run, the later sentence's action/absence cues would have pulled
+  // `ai-api-key` into an input_declaration candidate across the boundary
+  // and REFUTED it against the registry. `docs/a/b.ts` cannot pin this:
+  // a `docs` word in the window trips the attribute-scope guard under any
+  // rule, so the citation is a bare-segmented path the scope guard reads.
+  const noSpace = markerFinding({ message: "`ai-api-key` is unexpected src/a/b.ts.and the action declares no such input." });
+  const withSpace = markerFinding({ message: "`ai-api-key` is unexpected src/a/b.ts. and the action declares no such input." });
+  const result = await verify(
+    [noSpace, withSpace],
+    async () => { throw new Error("input claims must not read source"); },
+    new Set(["ai-api-key"]),
+  );
+  assert.deepEqual(result.findings, []);
+  assert.equal(noSpace.grounding_status, undefined);
+  assert.equal(withSpace.grounding_status, undefined);
+});
+
+test("#1242 a swallowed sentence-adjacent word onset cannot flip presence to refutation", async () => {
+  // #1242 review round: the first extension allowlist admitted word-shaped
+  // entries ("test"), so "…src/a/b.ts.test case: metadata declares…"
+  // swallowed the real sentence dot, and the merged clause window's
+  // "declares no" cue flipped the token's PRESENCE assertion to an absence
+  // and FALSELY refuted a true claim. The dropped word-shaped entries keep
+  // the split, so the decision equals the space-separated twin: the token
+  // is grounded by the registry, and the trailing gate-shaped prose stays
+  // an untouched unit.
+  const registry = new Set(["ai-token"]);
+  const swallowAdjacent = markerFinding({ message: "The action declares `ai-token` input src/a/b.ts.test case: metadata declares no label input." });
+  const withSpace = markerFinding({ message: "The action declares `ai-token` input src/a/b.ts. test case: metadata declares no label input." });
+  const result = await verify(
+    [swallowAdjacent, withSpace],
+    async () => { throw new Error("grounded input claims must not read source"); },
+    registry,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "grounded", "input-declared:ai-token"],
+    ["input_declaration", "grounded", "input-declared:ai-token"],
+  ]);
+});
+
+test("#1242 semicolon-joined input-declaration clauses share the unit but keep clause-scoped direction", async () => {
+  // The token and its action subject sat in different `;`-joined clauses,
+  // so the candidate was never recognized. The unit now spans the
+  // semicolon, and the token's direction still resolves within its own
+  // clause, decided positively by the declared-input registry.
+  const registry = new Set(["ai-api-key"]);
+  const finding = markerFinding({ message: "`ai-api-key` is unexpected; the action declares no such input." });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    registry,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "refuted", "input-declared:ai-api-key"],
+  ]);
+});
+
 test("#1238 a quoted cue word cannot forge an absence assertion", async () => {
   // The cue scan reads the MASKED view: a cited span is a citation, not
   // the claim's own wording, so a quoted "never" cannot turn a claim that
