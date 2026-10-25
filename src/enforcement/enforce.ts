@@ -8,7 +8,7 @@
  * The final reviewer still owns the verdict — these overlays run after the
  * verdict policy and are themselves deterministic policy, not model input.
  */
-import type { ReviewArtifact } from "./artifact.js";
+import { markRelaxationNotesSuperseded, type ReviewArtifact } from "./artifact.js";
 import { applyReviewThreadEnforcement, type EnforcementThread } from "./threads.js";
 import { applyHumanReviewEnforcement, type EnforcementHumanReview } from "./human-reviews.js";
 
@@ -30,14 +30,25 @@ export interface EnforcementOutcome {
   reason: string;
 }
 
-/** Shared output-mutation discipline: append the section, force the verdict. */
+/**
+ * Shared output-mutation discipline: append the section, force the verdict.
+ * #1248: when this flips a verdict that was not already request_changes,
+ * enforcement owns the final verdict — record `verdict_source=enforcement`
+ * (a no-flip overlay leaves existing provenance untouched) and retire any
+ * earlier relaxation note the flip contradicts.
+ */
 function forceRequestChanges(
   artifact: ReviewArtifact,
   sectionMd: string,
   reason: string,
 ): EnforcementOutcome {
+  const flipsVerdict = artifact.verdict !== "request_changes";
   artifact.review_markdown = (artifact.review_markdown || "") + sectionMd;
   artifact.verdict = "request_changes";
+  if (flipsVerdict) {
+    artifact.verdict_source = "enforcement";
+    markRelaxationNotesSuperseded(artifact);
+  }
   return { applied: true, reason };
 }
 
