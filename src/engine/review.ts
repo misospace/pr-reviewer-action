@@ -68,6 +68,7 @@ import { reviewArtifactFromParsed, type ArtifactFinding } from "../enforcement/a
 import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
 import { applyBlockerVerification } from "../enforcement/blocker-verification.js";
 import { createActionSourceReader } from "../enforcement/action-source.js";
+import { createPinnedActionWitness, resolvePinnedActionRevision } from "../enforcement/pinned-action-source.js";
 import { createHeadSourceReader } from "../enforcement/source-verifier.js";
 import { readWorkflowInputNamesByFile, resolveActionSlug } from "../enforcement/workflow-inputs.js";
 import { capCiEvidenceFindings } from "../enforcement/ci-evidence.js";
@@ -1554,8 +1555,12 @@ secrets: [profiles.primary.apiKey],
       // (src/version.ts) and never from an environment variable, an Action
       // input, or any byte outside the bundle. On the dogfood path the
       // bundle itself is built from the PR head, so the stamp — like the
-      // embedded contract — inherits the PR's trust level.
-      executingActionVersion: ACTION_VERSION,
+      // embedded contract — inherits the PR's trust level. The one
+      // exception is the golden-replay test seam
+      // (`dependencies.executingActionVersion`, #1240): a test-host-only
+      // dependency, the same class of injection as `adapter` itself; no
+      // production path sets it.
+      executingActionVersion: dependencies.executingActionVersion ?? ACTION_VERSION,
       // #1238: the gate-absence witness — the EXECUTING action's own
       // implementation, embedded into THIS BUNDLE at build time (the bundle
       // IS the implementation that runs; the action's install directory's
@@ -1567,6 +1572,26 @@ secrets: [profiles.primary.apiKey],
       // refutation. Both boundary passes share this options object, so the
       // post-settlement pass sees the same witness.
       readActionSource: createActionSourceReader({ workspaceRoot: workspace }),
+      // #1240 (pinned-revision witness): the exact commit the CONSUMER
+      // pinned this run's action step, per the runner's own metadata
+      // (`GITHUB_ACTION_REPOSITORY` + `GITHUB_ACTION_REF`). A claim that
+      // names a revision the executing witnesses do not answer for is
+      // decided against THIS pinned revision's own manifest and gate
+      // implementation — fetched through the platform's validated,
+      // origin-pinned read-only API seam at the exact content-addressed
+      // commit, never from the reviewed workspace's bytes. Any pin that is
+      // not a full commit SHA (tag, branch, `uses: ./`, missing metadata)
+      // admits NO pinned witness: those claims stay unverified exactly as
+      // before, and a Forgejo deployment whose seam cannot serve contents
+      // reads fails the same way. The identity rule that keeps planted
+      // bytes out — a pin naming the repository under review admits no
+      // witness — lives in resolvePinnedActionRevision itself.
+      pinnedActionSource: (() => {
+        const pinned = resolvePinnedActionRevision();
+        return pinned === null
+          ? null
+          : createPinnedActionWitness({ pinned, ghApi: (endpoint, opts) => adapter.ghApi(endpoint, opts) });
+      })(),
     };
     blockerVerification = await applyBlockerVerification(reviewRecord.findings as ArtifactFinding[], verificationOptions);
   }

@@ -40,6 +40,10 @@ export interface RunReviewOptions {
   /** #726: host side effect after a PASSING admission, before any review
    * stage (the Action adapter's #914 ack reaction). */
   onAdmission?: (admission: PrecheckOutput) => void | Promise<void>;
+  /** #1240 TEST SEAM ONLY: replay the stamped-build revision-scoping path
+   * (see ReviewDependencies.executingActionVersion). Production paths never
+   * set it; the engine falls back to the bundle's own build stamp. */
+  executingActionVersion?: string;
 }
 
 export function runtimeBundleEntry(env: NodeJS.ProcessEnv): string | null {
@@ -107,6 +111,7 @@ export async function runReview(options: RunReviewOptions): Promise<RunReviewRes
     ...(options.ciGate !== undefined ? { ciGate: options.ciGate } : {}),
     ciGateEntry: (options.ciGate ? "" : (options.ciGateEntry ?? runtimeBundleEntry(env))) ?? "",
     ...(options.onAdmission !== undefined ? { onAdmission: options.onAdmission } : {}),
+    ...(options.executingActionVersion !== undefined ? { executingActionVersion: options.executingActionVersion } : {}),
   };
   return runReviewEngine(request, dependencies);
 }

@@ -1,0 +1,81 @@
+{
+  "contract": "golden-replay/v1",
+  "name": "case13-1238-pinned-revision-claim-refuted",
+  "status": "active",
+  "provenance": {
+    "source_head": "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2",
+    "origin": "Consumer-repo review (head c3d4e5f) of a workflow pinning misospace/pr-reviewer-action@5b1839535748f3afd1bd3ef04e8009302cba9aa6 (tag v3.7.0) while the executing bundle is the v3.8.0 release line - the #1238 incident with the executing revision differing from the consumer-pinned revision. The model fabricated two claims naming the pinned commit itself: that the pinned revision's metadata declares the API-key input as `ai-key` while `ai-api-key` is absent (false at that revision - its action.yml declares ai-api-key), and that draft/label filtering is absent at that revision because the metadata declares no such input (false - the pinned precheck implements the draft gate and the label re-review). Pre-#1240 a claim naming a revision the executing witnesses do not answer for stayed unverified, so the fabricated request_changes could not be disproven; the pinned-revision witness now decides both claims against the pinned revision's own fetched bytes. Sanitized: the consumer repository, endpoint, model, and secret references are placeholders; the pinned upstream commit and the pinned source shape (the uses: pin and the workflow skeleton) are kept as factual citations of the incident, with no credential material.",
+    "evidence_transform": "sanitized",
+    "model_response": "Recorded representative response (zero live inference): request_changes with two majors, each naming the consumer-pinned commit 5b1839535748f3afd1bd3ef04e8009302cba9aa6 as a standalone token - one fabricated input-name claim and one metadata-derived gate-absence claim - against the executing stamp v3.8.0."
+  },
+  "engine": "run-review",
+  "executing_action_version": "v3.8.0",
+  "pinned_action": {
+    "ref": "5b1839535748f3afd1bd3ef04e8009302cba9aa6",
+    "files": {
+      "action.yml": "name: AI PR Review\n\ndescription: Reviews pull requests with an OpenAI-compatible or Anthropic-compatible model (cloud or self-hosted) and publishes the result as a sticky comment or native review.\n\ninputs:\n  ai-api-key:\n    description: Endpoint credential for the model API. It travels only through the provider auth header.\n    required: false\n  ai-model:\n    description: Model identifier to review with.\n    required: true\n\nruns:\n  using: node24\n  main: dist/index.js\n",
+      "src/precheck/decide.ts": "// Precheck admission: the deterministic skip gates the action runs before\n// any model call. #961 skips draft PRs; #231 skips labeled events whose\n// label is not the re-review label.\n\nexport interface PrecheckEvent {\n  action: string;\n  label?: string;\n}\n\nexport interface PrecheckOutput {\n  decision: \"review\" | \"skip\";\n  skip_reason?: string;\n}\n\nexport function decide(event: PrecheckEvent, pr: { draft: boolean }): PrecheckOutput {\n  if (pr.draft) {\n    // #961: a draft PR never reviews, whatever else the event carries.\n    return { decision: \"skip\", skip_reason: \"pr-draft\" };\n  }\n  if (event.action === \"labeled\" && event.label !== \"ai-review\") {\n    // #231: a labeled event only reviews when the label is the re-review label.\n    return { decision: \"skip\", skip_reason: \"unrelated-label\" };\n  }\n  return { decision: \"review\" };\n}\n"
+    }
+  },
+  "pr": {
+    "head_sha": "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2",
+    "title": "Add AI PR review workflow",
+    "body": "",
+    "diff": "diff --git a/.github/workflows/ai_pr_review.yaml b/.github/workflows/ai_pr_review.yaml\nnew file mode 100644\nindex 0000000..9c41f0a\n--- /dev/null\n+++ b/.github/workflows/ai_pr_review.yaml\n@@ -0,0 +1,36 @@\n+name: AI PR Review\n+\n+on:\n+  pull_request:\n+    types: [opened, reopened, synchronize, ready_for_review, labeled]\n+\n+permissions:\n+  contents: read\n+  pull-requests: write\n+  checks: read\n+\n+concurrency:\n+  group: ai-review-${{ github.event.pull_request.number }}${{ github.event.action == 'labeled' && format('-label-{0}', github.run_id) || '' }}\n+  cancel-in-progress: true\n+\n+jobs:\n+  ai-review:\n+    runs-on: ubuntu-latest\n+    steps:\n+      # The action also skips drafts and non-matching labels.\n+      - name: Check out the pull request head\n+        uses: actions/checkout@v4\n+        with:\n+          fetch-depth: 0\n+          ref: ${{ github.event.pull_request.head.sha }}\n+      - name: Run the AI review\n+        uses: misospace/pr-reviewer-action@5b1839535748f3afd1bd3ef04e8009302cba9aa6 # v3.7.0\n+        with:\n+          github-token: ${{ secrets.GITHUB_TOKEN }}\n+          ai-base-url: ${{ secrets.AI_ENDPOINT }}\n+          ai-api-format: openai\n+          ai-model: review-model\n+          ai-max-tokens: \"16384\"\n+          ai-temperature: \"0.1\"\n+          ai-response-format: json_schema\n+          ai-api-key: ${{ secrets.MINIMAX_API_KEY }}\n",
+    "files": [
+      {
+        "filename": ".github/workflows/ai_pr_review.yaml",
+        "status": "added",
+        "additions": 36,
+        "deletions": 0,
+        "changes": 36
+      }
+    ],
+    "threads": []
+  },
+  "source_files": {
+    ".github/workflows/ai_pr_review.yaml": "name: AI PR Review\n\non:\n  pull_request:\n    types: [opened, reopened, synchronize, ready_for_review, labeled]\n\npermissions:\n  contents: read\n  pull-requests: write\n  checks: read\n\nconcurrency:\n  group: ai-review-${{ github.event.pull_request.number }}${{ github.event.action == 'labeled' && format('-label-{0}', github.run_id) || '' }}\n  cancel-in-progress: true\n\njobs:\n  ai-review:\n    runs-on: ubuntu-latest\n    steps:\n      # The action also skips drafts and non-matching labels.\n      - name: Check out the pull request head\n        uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n          ref: ${{ github.event.pull_request.head.sha }}\n      - name: Run the AI review\n        uses: misospace/pr-reviewer-action@5b1839535748f3afd1bd3ef04e8009302cba9aa6 # v3.7.0\n        with:\n          github-token: ${{ secrets.GITHUB_TOKEN }}\n          ai-base-url: ${{ secrets.AI_ENDPOINT }}\n          ai-api-format: openai\n          ai-model: review-model\n          ai-max-tokens: \"16384\"\n          ai-temperature: \"0.1\"\n          ai-response-format: json_schema\n          ai-api-key: ${{ secrets.MINIMAX_API_KEY }}\n"
+  },
+  "secrets": [],
+  "recorded_model_response": {
+    "verdict": "request_changes",
+    "review_markdown": "## Summary\n\nThe workflow pins the action at commit 5b1839535748f3afd1bd3ef04e8009302cba9aa6 (tag v3.7.0) and passes the credential under an input name the pinned revision's metadata reportedly does not declare. The review checked that pin against the pinned revision's own metadata and implementation.\n\n## Findings\n\n- **Major** (.github/workflows/ai_pr_review.yaml:36) - the action at commit 5b1839535748f3afd1bd3ef04e8009302cba9aa6 declares its API-key input as `ai-key`, so `ai-api-key` is an unexpected input that GitHub ignores.\n- **Major** (.github/workflows/ai_pr_review.yaml:20) - the action at commit 5b1839535748f3afd1bd3ef04e8009302cba9aa6 never skips drafts and never filters labels because its metadata declares no input for either gate.\n\n## Recommendation\n\nRequest changes: rename the credential input and declare the draft/label gate inputs.\n",
+    "smart_review_requested": false,
+    "smart_review_reason": null,
+    "findings": [
+      {
+        "id": "f1238p-input",
+        "severity": "major",
+        "category": "bug",
+        "file": ".github/workflows/ai_pr_review.yaml",
+        "line": 36,
+        "message": "The pinned action at commit 5b1839535748f3afd1bd3ef04e8009302cba9aa6 declares its API-key input as `ai-key` (action.yml), so `ai-api-key` is an unexpected input that GitHub ignores and the action runs without the endpoint credential."
+      },
+      {
+        "id": "f1238p-gate",
+        "severity": "major",
+        "category": "bug",
+        "file": ".github/workflows/ai_pr_review.yaml",
+        "line": 20,
+        "message": "The action at commit 5b1839535748f3afd1bd3ef04e8009302cba9aa6 never skips drafts and never filters labels because its metadata declares no input for either gate."
+      }
+    ],
+    "requirement_coverage": null,
+    "required_check_dispositions": null
+  },
+  "config": {},
+  "expect": {
+    "verdict": "approve",
+    "blocking_finding_ids": [],
+    "unsupported_blocking_claims": 0,
+    "supported_blocking_claims": 0,
+    "published_body_excludes": [],
+    "published_body_includes": [
+      "model verdict was 'request_changes'"
+    ],
+    "grounding_status": {
+      "f1238p-input": "refuted",
+      "f1238p-gate": "refuted"
+    }
+  }
+}

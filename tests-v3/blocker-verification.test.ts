@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { committedSourceProvenance, sanitizedSourceProvenance } from "../src/context/evidence-provenance.js";
-import { applyBlockerVerification, MAX_CLAIM_SCAN_LENGTH, MAX_VERIFICATION_READS, type SourceReadResult } from "../src/enforcement/blocker-verification.js";
+import { applyBlockerVerification, MAX_CLAIM_SCAN_LENGTH, MAX_VERIFICATION_READS, type PinnedActionWitness, type SourceReadResult } from "../src/enforcement/blocker-verification.js";
 import { ACTION_GATES } from "../src/enforcement/action-gates.js";
 import type { ActionSourceReader } from "../src/enforcement/action-source.js";
 import type { ArtifactFinding } from "../src/enforcement/artifact.js";
@@ -19,8 +19,8 @@ const requirementFinding = (overrides: Partial<ArtifactFinding> = {}): ArtifactF
   severity: "major", category: "security", file: "src/a.ts", line: null,
   message: "requirement not enforced: X is a standard", ...overrides,
 });
-const verify = (findings: ArtifactFinding[], read: (file: string) => Promise<SourceReadResult>, declaredActionInputs?: ReadonlySet<string> | null, readActionSource?: ActionSourceReader | null, executingActionVersion?: string | null, workflowInputsByFile?: ReadonlyMap<string, ReadonlySet<string>> | null) =>
-  applyBlockerVerification(findings, { readSource: read, expectedRevision: revision, declaredActionInputs, readActionSource, executingActionVersion, workflowInputsByFile });
+const verify = (findings: ArtifactFinding[], read: (file: string) => Promise<SourceReadResult>, declaredActionInputs?: ReadonlySet<string> | null, readActionSource?: ActionSourceReader | null, executingActionVersion?: string | null, workflowInputsByFile?: ReadonlyMap<string, ReadonlySet<string>> | null, pinnedActionSource?: PinnedActionWitness | null) =>
+  applyBlockerVerification(findings, { readSource: read, expectedRevision: revision, declaredActionInputs, readActionSource, executingActionVersion, workflowInputsByFile, pinnedActionSource });
 const available = (result: SourceReadResult): Promise<SourceReadResult> => Promise.resolve(result);
 /** #1238: a fake witness over the EXECUTING action's own source tree. */
 const actionSource = (files: Record<string, string>): ActionSourceReader => async (path) => {
@@ -1026,7 +1026,8 @@ test("read budget is bounded and remaining candidates are unverified", async () 
 
 // ---------------------------------------------------------------------------
 // #1240 — revision scoping: the action-side witnesses speak for the
-// EXECUTING revision only.
+// EXECUTING revision, or for the pinned revision through the
+// pinned-witness seam (see the pinned-witness section below).
 // ---------------------------------------------------------------------------
 
 const INPUT_REGISTRY = new Set(["github-token", "ai-api-key", "rereview-label"]);
@@ -1291,6 +1292,358 @@ test("#1240 another line or another patch is unverified", async () => {
     ["unverified", "other-revision-unverified"],
   ]);
   assert.ok(findings.every((finding) => finding.grounding_status === "unverified"));
+});
+
+// ---------------------------------------------------------------------------
+// #1240 — the pinned-revision witness: a claim that names the exact commit
+// the CONSUMER pinned is decided with that revision's own contract and
+// implementation, not left unverified.
+// ---------------------------------------------------------------------------
+
+/** The full lowercase 40-hex commit the consumer pinned (distinct from
+ * the reviewed-revision "a"*40 and from any executing-build sha). */
+const PINNED_SHA = "0123456789abcdef0123456789abcdef01234567";
+/** A THIRD revision: a 40-hex sha neither the executing build nor the
+ * pinned pin answers for. */
+const THIRD_SHA = "b".repeat(39) + "1";
+/** The #1238 draft gate's attesting bytes, as the executing tree's
+ * reader serves them in the tests above. */
+const DRAFT_GATE_TEXT = 'skip_reason: "pr-draft"\n';
+
+/** #1238: a fake witness over the PINNED revision's own contract and
+ * implementation tree. `declared` is the input id set the pinned
+ * action.yml declares (null = undecidable); `files` the implementation
+ * bytes; `reads` records the files the witness actually served, so a
+ * test can prove which witness a read went through. */
+const pinnedWitness = (
+  declared: ReadonlySet<string> | null,
+  files: Record<string, string> = {},
+): { witness: PinnedActionWitness; reads: string[] } => {
+  const reads: string[] = [];
+  return {
+    reads,
+    witness: {
+      revision: PINNED_SHA,
+      read: async (path) => {
+        reads.push(path);
+        const text = files[path];
+        return text === undefined ? { status: "unavailable", reason: "not-found" } : { status: "ok", text };
+      },
+      declaredInputs: async () =>
+        declared === null ? null : new Set([...declared].map((input) => input.toLowerCase())),
+    },
+  };
+};
+
+test("#1240 a claim naming the pinned sha is decided by the pinned witness, not left unverified", async () => {
+  // The consumer pins the action at PINNED_SHA and the message names that
+  // pin: the pinned revision's own contract decides the claim — refuted
+  // when the pin really does declare the input — instead of the claim
+  // staying unverified as before.
+  const message = `The action at commit \`${PINNED_SHA}\` does not declare the \`ai-api-key\` input.`;
+  const { witness } = pinnedWitness(new Set(["github-token", "ai-api-key", "rereview-label"]));
+  const withWitness = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message });
+  const a = await verify(
+    [withWitness],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+    null,
+    witness,
+  );
+  assert.deepEqual(a.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "refuted", "pinned-input-declared:ai-api-key"],
+  ]);
+  assert.equal(withWitness.grounding_status, "refuted");
+  // Without the pinned witness the identical claim keeps today's
+  // other-revision outcome: unverified, never refuted.
+  const withoutWitness = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message });
+  const b = await verify(
+    [withoutWitness],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+    null,
+    null,
+  );
+  assert.deepEqual(b.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "unverified", "other-revision-unverified"],
+  ]);
+  assert.equal(withoutWitness.grounding_status, "unverified");
+  assert.equal(withoutWitness.capped_from, "blocker");
+});
+
+test("#1240 a pinned-sha citation in a DIFFERENT sentence still routes the claim to the pinned witness", async () => {
+  // The revision scan covers the WHOLE message: the claim and the pin it
+  // talks about can sit in different sentences, and the pinned witness
+  // must decide (not block) either layout.
+  const inputMessage = "The action does not declare the `ai-api-key` input. The commit 0123456789abcdef0123456789abcdef01234567 confirms it.";
+  const gateMessage = "The action never skips drafts, metadata declares no such input. Confirmed at commit 0123456789abcdef0123456789abcdef01234567.";
+  const { witness } = pinnedWitness(new Set(["github-token", "ai-api-key"]), { "src/precheck/decide.ts": DRAFT_GATE_TEXT });
+  const findings = [
+    markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message: inputMessage }),
+    markerFinding({ message: gateMessage }),
+  ];
+  const result = await verify(
+    findings,
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+    null,
+    witness,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "refuted", "pinned-input-declared:ai-api-key"],
+    ["gate_absence", "refuted", "pinned-gate-implemented:draft-skip"],
+  ]);
+});
+
+test("#1240 a pinned absence claim the pinned registry lacks is grounded with the pinned prefix", async () => {
+  // The pin really does not declare `ai-key`: the pinned contract
+  // positively confirms the claim — grounded, with the `pinned-` reason
+  // so the artifact records which revision's manifest it speaks for.
+  const message = `The action at commit \`${PINNED_SHA}\` does not declare the \`ai-key\` input.`;
+  const { witness } = pinnedWitness(new Set(["github-token", "ai-api-key"]));
+  const finding = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+    null,
+    witness,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "grounded", "pinned-input-absent:ai-key"],
+  ]);
+  assert.equal(result.demoted, 0);
+  assert.equal(finding.grounding_status, undefined);
+});
+
+test("#1240 a pinned registry that is undecidable leaves the claim unverified", async () => {
+  // declaredInputs() is null (the pinned action.yml could not be fetched
+  // or parsed): no fact about the pin's manifest is available, so the
+  // claim is unverified — with the pinned reason, not the executing one.
+  const message = `The action at commit \`${PINNED_SHA}\` does not declare the \`ai-key\` input.`;
+  const { witness } = pinnedWitness(null);
+  const finding = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+    null,
+    witness,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "unverified", "pinned-input-registry-unavailable"],
+  ]);
+  assert.equal(finding.grounding_status, "unverified");
+  assert.equal(finding.capped_from, "blocker");
+});
+
+test("#1240 a claim naming a THIRD revision stays unverified with the pinned witness present", async () => {
+  // The pin answers for its own sha only: a claim naming some other
+  // 40-hex sha is not decidable with either witness.
+  const message = `The action at commit \`${THIRD_SHA}\` does not declare the \`ai-api-key\` input.`;
+  const { witness } = pinnedWitness(new Set(["ai-api-key"]));
+  const finding = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+    null,
+    witness,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "unverified", "other-revision-unverified"],
+  ]);
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1240 a version-like qualifier never matches the sha pin", async () => {
+  // The pin is an exact commit, not a release line: "v9.9.9" names a
+  // line, so it can never match the pin — the claim stays unverified
+  // even with the pinned witness available. (The version is quoted so
+  // its dots stay masked and the claim is one whole sentence.)
+  const message = `The action at \`v9.9.9\` does not declare the \`ai-api-key\` input.`;
+  const { witness } = pinnedWitness(new Set(["ai-api-key"]));
+  const finding = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+    null,
+    witness,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "unverified", "other-revision-unverified"],
+  ]);
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1240 a claim naming BOTH the executing line and the pin is decided via the pinned witness", async () => {
+  // Qualifiers that match the executing revision are not "other": only
+  // the pin-naming qualifier is, and it matches the pin — so the claim
+  // is decided with the pinned witness instead of being left unverified.
+  // (The version is quoted so its dots stay masked and the claim is
+  // one whole sentence.)
+  const message = `The action at commit \`${PINNED_SHA}\` of the \`v3.7.0\` line does not declare the \`ai-api-key\` input.`;
+  const { witness } = pinnedWitness(new Set(["ai-api-key"]));
+  const finding = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+    null,
+    witness,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "refuted", "pinned-input-declared:ai-api-key"],
+  ]);
+  assert.equal(finding.grounding_status, "refuted");
+});
+
+test("#1240 a gate claim naming the pinned sha is decided by the pinned implementation witness", async () => {
+  const message = `The action at commit \`${PINNED_SHA}\` never skips drafts, metadata declares no such input.`;
+
+  // (a) the pin's implementation positively attests the gate: refuted,
+  // with the `pinned-` reason.
+  const { witness, reads } = pinnedWitness(new Set(["ai-api-key"]), { "src/precheck/decide.ts": DRAFT_GATE_TEXT });
+  const refuted = markerFinding({ message });
+  const a = await verify(
+    [refuted],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    null,
+    "v3.7.0",
+    null,
+    witness,
+  );
+  assert.deepEqual(a.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["gate_absence", "refuted", "pinned-gate-implemented:draft-skip"],
+  ]);
+  assert.deepEqual(reads, ["src/precheck/decide.ts"]);
+
+  // (b) the pin's implementation lacks the marker: a missing marker is
+  // no proof of absence — unverified, exactly as with the executing
+  // witness.
+  const { witness: emptyWitness } = pinnedWitness(new Set(["ai-api-key"]));
+  const unattested = markerFinding({ message });
+  const b = await verify(
+    [unattested],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    null,
+    "v3.7.0",
+    null,
+    emptyWitness,
+  );
+  assert.deepEqual(b.findings.map(({ status, reason }) => [status, reason]), [
+    ["unverified", "gate-absence-unverifiable"],
+  ]);
+
+  // (c) without the pinned witness the identical claim keeps today's
+  // other-revision outcome — and the executing witness is never
+  // consulted for it.
+  const noWitness = markerFinding({ message });
+  const c = await verify(
+    [noWitness],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": DRAFT_GATE_TEXT }),
+    "v3.7.0",
+  );
+  assert.deepEqual(c.findings.map(({ status, reason }) => [status, reason]), [
+    ["unverified", "other-revision-unverifiable"],
+  ]);
+  assert.equal(noWitness.grounding_status, "unverified");
+});
+
+test("#1240 the pinned witness draws on its own read budget, never the executing one", async () => {
+  // Both witnesses are available and the claim names the pin: the
+  // attestation read must go through the PINNED witness (and its own
+  // budget) — the executing reader is never consulted.
+  const message = `The action at commit \`${PINNED_SHA}\` never skips drafts, metadata declares no such input.`;
+  const executingReads: string[] = [];
+  const executingReader: ActionSourceReader = async (path) => {
+    executingReads.push(path);
+    const text = path === "src/precheck/decide.ts" ? DRAFT_GATE_TEXT : undefined;
+    return text === undefined ? { status: "unavailable", reason: "not-found" } : { status: "ok", text };
+  };
+  const { witness, reads } = pinnedWitness(new Set(["ai-api-key"]), { "src/precheck/decide.ts": DRAFT_GATE_TEXT });
+  const finding = markerFinding({ message });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    executingReader,
+    "v3.7.0",
+    null,
+    witness,
+  );
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["refuted", "pinned-gate-implemented:draft-skip"],
+  ]);
+  assert.deepEqual(executingReads, []);
+  assert.deepEqual(reads, ["src/precheck/decide.ts"]);
+});
+
+test("#1240 an unstamped build names a random sha: no scoping, the executing registry decides", async () => {
+  // An unstamped build applies NO revision scoping — even with a pinned
+  // witness present: the claim is decided with the executing registry,
+  // with the executing reason (no `pinned-` prefix). The named sha
+  // starts with a digit, so it is a revision qualifier only, never an
+  // input token.
+  const message = "The action at commit `3f9a2c1b4d5e` does not declare the `ai-api-key` input.";
+  const { witness } = pinnedWitness(new Set(["ai-api-key"]));
+  const finding = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "",
+    null,
+    witness,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "refuted", "input-declared:ai-api-key"],
+  ]);
+  assert.equal(finding.grounding_status, "refuted");
+});
+
+test("#1240 a claim naming only the executing line stays on the executing path with a pinned witness present", async () => {
+  // No "other" qualifier: the executing registry decides, and the
+  // reason carries no `pinned-` prefix. (The version is quoted so its
+  // dots stay masked and the claim is one whole sentence.)
+  const message = "The action at `v3.7.0` does not declare the `ai-api-key` input.";
+  const { witness } = pinnedWitness(new Set(["ai-api-key"]));
+  const finding = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+    null,
+    witness,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "refuted", "input-declared:ai-api-key"],
+  ]);
+  assert.equal(finding.grounding_status, "refuted");
 });
 
 // ---------------------------------------------------------------------------

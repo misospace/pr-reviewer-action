@@ -31,6 +31,30 @@ export interface SourceReadUnavailable { status: "unavailable"; reason: string; 
 export type SourceReadResult = SourceReadOk | SourceReadUnavailable;
 export type SourceReader = (file: string) => Promise<SourceReadResult>;
 
+/**
+ * #1240 (pinned-revision witness): the witness for the revision the
+ * CONSUMER pinned — the exact commit the consumer's workflow pins, and
+ * nothing else.
+ *
+ * Unlike the executing witnesses (the embedded contract and the embedded
+ * implementation tree), which speak for the revision THIS run executes,
+ * this one speaks for a DIFFERENT revision: the pinned one. Its bytes are
+ * a content-addressed fetch through the platform API at the exact pinned
+ * commit (runner metadata `GITHUB_ACTION_REPOSITORY` / `GITHUB_ACTION_REF`)
+ * — never bytes of the reviewed workspace, never the executing bundle —
+ * and they are bounded and cached: `read` serves one registry-cited file
+ * AT the pinned revision, `declaredInputs` the pinned revision's own
+ * declared input ids (null when undecidable).
+ */
+export interface PinnedActionWitness {
+  /** Full lowercase 40-hex commit SHA the consumer pinned. */
+  readonly revision: string;
+  /** Bounded, cached read of one registry-cited file AT the pinned revision. */
+  read(relativePath: string): Promise<ActionSourceReadResult>;
+  /** Lowercased input ids the pinned revision's action.yml declares; null when undecidable. */
+  declaredInputs(): Promise<ReadonlySet<string> | null>;
+}
+
 export interface BlockerVerificationOptions {
   readSource: SourceReader;
   expectedRevision: string | null;
@@ -99,6 +123,26 @@ export interface BlockerVerificationOptions {
    * production path.
    */
   executingActionVersion?: string | null | undefined;
+  /**
+   * #1240 (pinned-revision witness): the witness for the exact commit the
+   * CONSUMER pinned (runner metadata `GITHUB_ACTION_REPOSITORY` /
+   * `GITHUB_ACTION_REF`, a content-addressed fetch through the platform
+   * API — never reviewed-workspace bytes).
+   *
+   * The declared-input registry and the implementation tree speak for the
+   * EXECUTING revision's release line, so a claim naming a DIFFERENT
+   * revision is not decidable with them — it is unverified. This witness
+   * is the exception: when every qualifier the message names that fails
+   * the executing match matches the pinned revision, the claim is decided
+   * with THIS witness (the pinned contract, the pinned implementation
+   * tree) instead of being left unverified. A claim naming any other
+   * revision stays unverified exactly as before.
+   *
+   * Absent (or null) means no pinned witness is available, which is
+   * exactly today's behavior: every claim naming a different revision
+   * stays unverified.
+   */
+  pinnedActionSource?: PinnedActionWitness | null | undefined;
 }
 
 export interface FindingGrounding {
@@ -578,6 +622,18 @@ interface InputCandidate {
 // (false refutation) and a FALSE one grounded. Such a claim is UNVERIFIED:
 // never refuted, never grounded.
 //
+// The exception is the pinned-revision witness (PinnedActionWitness): the
+// consumer pins the action at an exact commit, and that PIN's own contract
+// and implementation tree are a second, separate witness. Per finding, the
+// qualifiers that FAIL the executing match are "other"; when every "other"
+// qualifier matches the pinned revision, the claim is decided with the
+// PINNED witnesses instead of being left unverified (the reasons are
+// prefixed `pinned-`). Only SHA-like qualifiers can match the pin — it is
+// an exact commit, not a release line — so a version-like qualifier never
+// does: a message naming both a different line and the pin is still a
+// claim about the other line and stays unverified. A message naming any
+// revision neither witness answers for stays unverified exactly as before.
+//
 // The scope of the revision scan is the WHOLE finding message: a claim and
 // the revision it talks about can sit in different sentences ("The action
 // does not declare `x` input; the v3.6.1 manifest confirms it."), and a
@@ -749,10 +805,19 @@ function qualifierMatchesExecutingRevision(qualifier: RevisionQualifier, executi
 }
 
 /**
- * #1240: does the message name a revision OTHER than the executing one?
+ * #1240: does the qualifier name the PINNED revision?
+ *
+ * The pin is an EXACT COMMIT, not a release line: only a SHA-like
+ * qualifier can name it, and it matches when the pinned sha EXTENDS the
+ * qualifier — the full 40-hex sha, or the short form the consumer quoted
+ * (a prefix of the pin). A version-like qualifier names a line, never a
+ * commit, so it can never match the pin: a message naming both a
+ * different line and the pin is still a claim about the other line, and
+ * it stays unverified.
  */
-function namesOtherRevision(qualifiers: readonly RevisionQualifier[], executing: ExecutingRevision): boolean {
-  return qualifiers.some((qualifier) => !qualifierMatchesExecutingRevision(qualifier, executing));
+function qualifierMatchesPinnedRevision(qualifier: RevisionQualifier, pinned: string): boolean {
+  if (qualifier.kind !== "sha") return false;
+  return pinned.startsWith(normalizeRevisionToken(qualifier.text));
 }
 
 /**
@@ -1133,22 +1198,27 @@ async function gateAttested(
  * absent marker, an unreadable file, a claim the registry cannot decide —
  * stays unverified, and a gate-absence claim is NEVER grounded.
  *
- * #1240: the witness speaks for the EXECUTING revision's release line only.
- * A message that names a different line or another patch is not decidable
- * with it: every gate sentence of that message is undecidable, and the
- * result is unverified with the other-revision reason.
+ * #1240: the witness speaks for ONE revision only — the executing
+ * revision's release line, or the pinned revision (when the caller
+ * selected the pinned witness). The revision check is driven by the
+ * CALLER: `blockedRevision` is true when the message names a revision
+ * neither witness answers for, and then every gate sentence of the
+ * message is undecidable — the result is unverified with the
+ * other-revision reason. The per-sentence logic below runs against the
+ * SELECTED witness as written; only the attested-success reason is
+ * prefixed `pinned-` when the pinned witness decided.
  */
 async function decideGateAbsence(
   sentences: readonly GateSentence[],
   witness: ActionSourceReader | null | undefined,
   budget: ActionSourceBudget,
-  executing: ExecutingRevision | null,
-  qualifiers: readonly RevisionQualifier[],
+  blockedRevision: boolean,
+  usePinned: boolean,
 ): Promise<{ status: GroundingStatus; reason: string }> {
   const unverifiable = { status: "unverified", reason: "gate-absence-unverifiable" } as const;
-  // #1240: the message names a revision the executing one does not answer
-  // for — no gate sentence of it is decidable.
-  if (executing !== null && namesOtherRevision(qualifiers, executing)) {
+  // #1240: the message names a revision neither witness answers for — no
+  // gate sentence of it is decidable.
+  if (blockedRevision) {
     return { status: "unverified", reason: "other-revision-unverifiable" };
   }
   if (witness === undefined || witness === null) return unverifiable;
@@ -1175,7 +1245,7 @@ async function decideGateAbsence(
       attested.push(gate.id);
     }
     if (allAttested) {
-      return { status: "refuted", reason: `gate-implemented:${attested.sort().join(",")}` };
+      return { status: "refuted", reason: `${usePinned ? "pinned-" : ""}gate-implemented:${attested.sort().join(",")}` };
     }
   }
   return unverifiable;
@@ -1278,6 +1348,16 @@ export async function applyBlockerVerification(
   // The action's own implementation reads of this pass: one read per cited
   // file (however many gates cite it), bounded by MAX_ACTION_SOURCE_READS.
   const actionSourceBudget: ActionSourceBudget = { reads: 0, cache: new Map<string, ActionSourceReadResult>() };
+  // The PINNED revision's implementation reads of this pass: a SEPARATE
+  // budget from the executing one — the pinned and the executing bytes
+  // must never share a path cache — with the same MAX_ACTION_SOURCE_READS
+  // semantics.
+  const pinnedBudget: ActionSourceBudget = { reads: 0, cache: new Map<string, ActionSourceReadResult>() };
+  // #1240 (pinned-revision witness): the exact commit the CONSUMER pinned,
+  // and its own contract/implementation witnesses. Absent (or null) means
+  // no pinned witness: every claim naming a different revision stays
+  // unverified exactly as before.
+  const pinned = options.pinnedActionSource;
   // #1240: the revision THIS run executes. An unstamped build (null,
   // undefined or "") applies NO revision scoping: only the builds that ship
   // to consumers are stamped (.github/workflows/manual-release.yml and
@@ -1309,23 +1389,41 @@ export async function applyBlockerVerification(
     const { kind, inputCandidates, gateSentences, qualifiers } = classifyClaim(finding.message, workflowNames !== null);
     if (kind === null) continue;
 
+    // #1240: the revision qualifiers that fail the EXECUTING match. An
+    // unstamped build applies NO scoping: there is no executing revision,
+    // so nothing is "other" and the decision path is exactly what it is
+    // today. When a pinned witness is available and EVERY "other"
+    // qualifier matches the pinned revision, the claim is decided with
+    // the PINNED witnesses (usePinned); any other revision named keeps
+    // today's unverified outcome (blockedRevision).
+    const other: RevisionQualifier[] = executing === null
+      ? []
+      : qualifiers.filter((qualifier) => !qualifierMatchesExecutingRevision(qualifier, executing));
+    const usePinned = other.length > 0 && pinned != null
+      && other.every((qualifier) => qualifierMatchesPinnedRevision(qualifier, pinned.revision));
+    const blockedRevision = other.length > 0 && !usePinned;
+
     let status: GroundingStatus;
     let reason: string;
     if (kind === "input_declaration") {
       // #1240: the declared-input registry speaks for the EXECUTING
       // revision's release line only. A message that names a DIFFERENT
       // line or another patch is not decidable with it: the whole finding
-      // becomes unverified — never refuted, never grounded. This check
-      // runs before the contradiction/grounding logic and before the
-      // other-action downgrade: a revision mismatch wins the reason.
-      const otherRevision = executing !== null && namesOtherRevision(qualifiers, executing);
-      const declared = options.declaredActionInputs;
-      if (otherRevision) {
+      // becomes unverified — never refuted, never grounded — unless every
+      // "other" qualifier matches the pinned revision, in which case the
+      // claim is decided with the PINNED revision's own contract instead.
+      // This check runs before the contradiction/grounding logic and
+      // before the other-action downgrade: a revision mismatch wins the
+      // reason.
+      const declared = usePinned && pinned != null
+        ? await pinned.declaredInputs()
+        : options.declaredActionInputs;
+      if (blockedRevision) {
         status = "unverified";
         reason = "other-revision-unverified";
       } else if (declared === undefined || declared === null) {
         status = "unverified";
-        reason = "input-registry-unavailable";
+        reason = usePinned ? "pinned-input-registry-unavailable" : "input-registry-unavailable";
       } else {
         const normalized = new Set([...declared].map((input) => input.toLowerCase()));
         const resolved = inputCandidates.filter((candidate) => candidate.direction !== "ambiguous");
@@ -1409,9 +1507,14 @@ export async function applyBlockerVerification(
           && candidate.direction === "presence"
           && workflowNames.has(candidate.token)
           && !candidate.otherActionSubject);
+        // The three registry-decided outcomes are prefixed `pinned-` when
+        // the PINNED witness decided (the claim is a fact about that
+        // revision's manifest, not the executing one's); the shared
+        // reasons (other-action, workflow-input, the unverified
+        // fallthroughs) are unchanged either way.
         if (missing !== undefined) {
           status = "grounded";
-          reason = `input-absent:${missing.token}`;
+          reason = `${usePinned ? "pinned-" : ""}input-absent:${missing.token}`;
         } else if (foreign) {
           // Unknown evidence must never certify a clean review (#1016): a
           // finding that carries a claim about another action cannot be
@@ -1420,7 +1523,7 @@ export async function applyBlockerVerification(
           reason = "other-action-claim-unverified";
         } else if (contradicted !== undefined) {
           status = "refuted";
-          reason = `input-declared:${contradicted.token}`;
+          reason = `${usePinned ? "pinned-" : ""}input-declared:${contradicted.token}`;
         } else if (workflowGrounded !== undefined) {
           status = "grounded";
           reason = `workflow-input:${workflowGrounded.token}`;
@@ -1435,7 +1538,7 @@ export async function applyBlockerVerification(
             && !candidate.otherActionSubject);
           if (grounded !== undefined) {
             status = "grounded";
-            reason = `input-declared:${grounded.token}`;
+            reason = `${usePinned ? "pinned-" : ""}input-declared:${grounded.token}`;
           } else {
             status = "unverified";
             reason = resolved.some((candidate) => candidate.direction === "presence")
@@ -1452,7 +1555,18 @@ export async function applyBlockerVerification(
       // other shape stays unverified, the fail-safe direction — a missing
       // marker is no proof of absence, and a claim the registry does not
       // cover cannot be decided at all.
-      const decision = await decideGateAbsence(gateSentences, options.readActionSource, actionSourceBudget, executing, qualifiers);
+      //
+      // #1240: the witness is the one the selection above chose — the
+      // executing action's own tree, or the PINNED revision's tree — and
+      // each witness draws on its OWN budget: the pinned and the
+      // executing bytes must never share a path cache.
+      const decision = await decideGateAbsence(
+        gateSentences,
+        usePinned && pinned != null ? pinned.read.bind(pinned) : options.readActionSource,
+        usePinned ? pinnedBudget : actionSourceBudget,
+        blockedRevision,
+        usePinned,
+      );
       status = decision.status;
       reason = decision.reason;
     } else if (!safeFile(finding.file)) {
