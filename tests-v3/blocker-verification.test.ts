@@ -2595,3 +2595,224 @@ test("#1240 a deterministic enforcement finding is never decided by the model-ev
   assert.equal(model.severity, "minor");
   assert.equal(model.capped_from, "blocker");
 });
+
+// ---------------------------------------------------------------------------
+// #1262 — classification composes: a message that carries MORE THAN ONE
+// claim kind gets one decision per kind on the same leaf logic, and the
+// decisions combine fail-closed — grounded > unverified > refuted >
+// unsupported — with the reason and kind taken from the FIRST decision
+// (classification order) that carries the winning tier's status.
+// ---------------------------------------------------------------------------
+
+test("#1262 a mixed message is decided on the combined claims, not the first match", async () => {
+  // The issue's case: the input claim is source-contradicted (the registry
+  // declares `ai-api-key`) while the sibling gate-absence claim is one the
+  // boundary cannot decide (no implementation witness — and a dedupe gate
+  // is not covered anyway). The first-match classifier used to refute the
+  // finding whole on the input claim alone; composition decides both, and
+  // unknown evidence must never be erased by a sibling contradiction
+  // (#1016): the combined status is the gate decision's unverified, with
+  // the gate decision's reason.
+  const finding = markerFinding({
+    message: "The action does not declare `ai-api-key` input. The action has no dedupe gate because its metadata declares no input for it.",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("mixed claims must not read source"); },
+    INPUT_REGISTRY,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["gate_absence", "unverified", "gate-absence-unverifiable"],
+  ]);
+  assert.equal(result.demoted, 1);
+  assert.equal(finding.severity, "minor");
+  // Mirror of demotion: the original severity survives in capped_from, so
+  // the strict verdict mapping still counts the finding as blocking.
+  assert.equal(finding.capped_from, "blocker");
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1262 the mirror: a refuted gate claim does not erase an unverified workflow input claim", async () => {
+  // The gate claim IS refuted (the executing implementation attests both
+  // gates), but the sibling input claim is workflow-scoped and
+  // uncorroborated: the workflow witness is present, yet the cited file
+  // does not pass that name — and the witness NEVER refutes, so the claim
+  // falls through to the unknown-evidence path. Unknown evidence must not
+  // be erased by the contradiction: the combined status is unverified, NOT
+  // refuted, and the finding demotes as unknown evidence (#1016), keeping
+  // it blocking through capped_from.
+  const finding = markerFinding({
+    message: "the workflow passes `ai-key` as the action's credential input. The action never skips drafts, metadata declares no label input.",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("mixed claims must not read source"); },
+    INPUT_REGISTRY,
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+    null,
+    WORKFLOW_INPUTS,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "unverified", "input-presence-unverified"],
+  ]);
+  assert.equal(result.demoted, 1);
+  assert.equal(finding.severity, "minor");
+  assert.equal(finding.capped_from, "blocker");
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1262 refuted and refuted compose: the first contradicted kind decides the reason", async () => {
+  // Both claims are positively contradicted: the input claim by the
+  // declared-input registry (`ai-api-key` IS declared) and the gate claim
+  // by the implementation witness (both gates attested). A finding every
+  // decidable claim of which is contradicted is refuted and demoted (the
+  // unchanged rule) — with ONE combined entry — and the refuted tie-break
+  // follows the classification order: input_declaration precedes
+  // gate_absence, so the entry carries the input decision's reason.
+  const finding = markerFinding({
+    message: "The action does not declare `ai-api-key` input. The action never skips drafts, metadata declares no label input.",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("mixed claims must not read source"); },
+    INPUT_REGISTRY,
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.equal(result.findings.length, 1);
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "refuted", "input-declared:ai-api-key"],
+  ]);
+  assert.equal(result.demoted, 1);
+  assert.equal(finding.severity, "minor");
+  assert.equal(finding.capped_from, "blocker");
+  assert.equal(finding.grounding_status, "refuted");
+});
+
+test("#1262 a grounded sibling keeps the finding alive over its unverified gate sibling", async () => {
+  // The input claim is a genuine defect the registry positively confirms
+  // (`model-input` really is undeclared — grounded), and the sibling
+  // gate-absence claim is undecided (no implementation witness). Verified
+  // truth keeps the finding (fail-safe): the combined status is grounded,
+  // the finding is untouched, and the entry carries the winning
+  // (grounded) decision's kind and reason.
+  const finding = markerFinding({
+    message: "The action does not declare `model-input` input. The action never skips drafts, metadata declares no label input.",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("mixed claims must not read source"); },
+    INPUT_REGISTRY,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "grounded", "input-absent:model-input"],
+  ]);
+  assert.equal(result.demoted, 0);
+  assert.equal(finding.severity, "blocker");
+  assert.equal(finding.grounding_status, undefined);
+  assert.equal(finding.capped_from, undefined);
+});
+
+test("#1262 the source-read kinds share one read of the cited file", async () => {
+  // A message carrying BOTH source-read kinds (`committed_literal` via the
+  // quoted marker marked as written, and the leading `requirement not
+  // enforced` assertion) consumes ONE read: the read is memoized per
+  // finding, so the composite costs no extra MAX_VERIFICATION_READS unit.
+  let reads = 0;
+  const counting = async (file: string): Promise<SourceReadResult> => {
+    reads += 1;
+    return source(file === "src/a.ts" ? "one\nconst tolerance = 2\n" : "unrelated");
+  };
+  const finding = markerFinding({
+    message: "requirement not enforced: `one` violates standard X. The file commits the literal `[REDACTED]` as written.",
+  });
+  const result = await verify([finding], counting);
+  assert.equal(reads, 1);
+  // The requirement claim is grounded at the cited line; the sibling
+  // marker claim is refuted; grounded truth keeps the finding (fail-safe)
+  // and the entry carries the first grounded decision in classification
+  // order.
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["requirement_claim", "grounded", "evidence-verified"],
+  ]);
+  assert.equal(result.demoted, 0);
+  assert.equal(finding.severity, "blocker");
+  assert.equal(finding.grounding_status, undefined);
+});
+
+test("#1262 the shared read outlives the budget's last unit for its sibling kind", async () => {
+  // 19 earlier findings exhaust MAX_VERIFICATION_READS-1; the mixed
+  // finding's first source-read kind consumes the pass's LAST unit and
+  // memoizes the read. The requirement sibling must decide on that
+  // memoized read — not spend itself on read-budget-exhausted: the shared
+  // read already answered the question, and a sibling contradiction must
+  // never demote a verified claim (#1016).
+  let reads = 0;
+  const counting = async (): Promise<SourceReadResult> => {
+    reads += 1;
+    return source("one\nconst tolerance = 2\n");
+  };
+  const prior = Array.from({ length: 19 }, () => markerFinding());
+  const mixed = markerFinding({
+    message: "requirement not enforced: `one` violates standard X. The file commits the literal `[REDACTED]` as written.",
+  });
+  const result = await verify([...prior, mixed], counting);
+  assert.equal(reads, MAX_VERIFICATION_READS);
+  assert.equal(result.findings[19]?.kind, "requirement_claim");
+  assert.equal(result.findings[19]?.status, "grounded");
+  assert.equal(result.findings[19]?.reason, "evidence-verified");
+  assert.equal(result.demoted, 19);
+  assert.equal(mixed.severity, "blocker");
+  assert.equal(mixed.grounding_status, undefined);
+  assert.equal(mixed.capped_from, undefined);
+});
+
+test("#1262 a non-authoritative shared read leaves both source kinds unknown evidence", async () => {
+  // A sanitized provenance is no evidence at all: BOTH source-read kinds
+  // of the mixed message share the one read and each returns
+  // non-authoritative-source, so the combined status is unverified —
+  // unknown evidence, not a refutation — and the finding demotes as
+  // unknown evidence (capped_from preserved for the strict mapping).
+  const finding = markerFinding({
+    message: "requirement not enforced: `one` violates standard X. The file commits the literal `[REDACTED]` as written.",
+  });
+  let reads = 0;
+  const result = await verify([finding], async () => {
+    reads += 1;
+    return { status: "ok", text: "one\nconst tolerance = 2\n", provenance: sanitizedSourceProvenance(1, "src/a.ts", revision) };
+  });
+  assert.equal(reads, 1);
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["committed_literal", "unverified", "non-authoritative-source"],
+  ]);
+  assert.equal(result.demoted, 1);
+  assert.equal(finding.severity, "minor");
+  assert.equal(finding.capped_from, "blocker");
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1262 combined-unverified with DIFFERENT unknown reasons per source-read kind", async () => {
+  // The combined-unverified case where the two source-read kinds disagree
+  // on WHY they are unknown: the requirement claim cites a line beyond the
+  // end of the file (unverified/line-beyond-end) while the sibling marker
+  // claim is positively contradicted by the same authoritative read
+  // (refuted/marker-absent). The unknown evidence must win the combination
+  // (unverified > refuted) — the sibling contradiction may not erase it —
+  // and the winning entry carries the winning kind's status and reason.
+  const finding = markerFinding({
+    line: 99,
+    message: "requirement not enforced: `one` violates standard X. The file commits the literal `[REDACTED]` as written.",
+  });
+  let reads = 0;
+  const result = await verify([finding], async () => {
+    reads += 1;
+    return source("one\nconst tolerance = 2\n");
+  });
+  assert.equal(reads, 1);
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["requirement_claim", "unverified", "line-beyond-end"],
+  ]);
+  assert.equal(result.demoted, 1);
+  assert.equal(finding.severity, "minor");
+  assert.equal(finding.capped_from, "blocker");
+  assert.equal(finding.grounding_status, "unverified");
+});
