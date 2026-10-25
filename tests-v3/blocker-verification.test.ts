@@ -1249,12 +1249,17 @@ test("#1240 qualifier shapes over-fire only for real revision identifiers", asyn
   // Precision: a partial version of the SAME line ("v3.7"), a bare integer
   // after a keyword ("version 2", "ref: 1234") and an all-letter hex word
   // ("defaced") name no other revision, so a claim that would otherwise be
-  // refuted stays decided.
+  // refuted stays decided. #1263: neither does a bare numeric triple with
+  // no introducer ("Node 20.11.1") nor a short hex run ("colour a1b2c3d") —
+  // shape alone cannot tell them apart from an incidental version-like
+  // token, so they must not leave the claim other-revision-unverified.
   const claims = [
     "The action does not declare `ai-api-key` input (v3.7).",
     "The action does not declare `ai-api-key` input (version 2).",
     "The action does not declare `ai-api-key` input (ref: 1234).",
     "The action does not declare `ai-api-key` input (the manifest defaced the claim).",
+    "The action does not declare `ai-api-key` input; it also requires Node 20.11.1.",
+    "The action does not declare `ai-api-key` input (colour a1b2c3d).",
   ];
   const findings = claims.map((message) => markerFinding({ message }));
   const result = await verify(
@@ -1264,12 +1269,169 @@ test("#1240 qualifier shapes over-fire only for real revision identifiers", asyn
     null,
     "v3.7.0",
   );
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), claims.map(
+    () => ["refuted", "input-declared:ai-api-key"] as const,
+  ));
+});
+
+test("#1263 an introduced bare triple or short hex run still fails closed", async () => {
+  // The trade-off the narrowing must preserve: a claim that GENUINELY
+  // names another revision stays unverified — never refuted with the
+  // executing revision's bytes. An introducer ("at", "pinned at",
+  // "version") is what marks a bare numeric triple or short hex run as a
+  // cited revision, and a full-length sha needs no introducer at all.
+  // #252: the chained introducer ("pinned at", "at commit") and the
+  // introducer word itself are fed directly — a non-overlapping scan that
+  // let the first introducer swallow the second would fail OPEN on exactly
+  // the citation this rule exists to protect.
+  const claims = [
+    "The action does not declare `ai-api-key` input (action.yml at 20.11.1).",
+    "The action does not declare `ai-api-key` input (action.yml at a1b2c3d).",
+    "The action does not declare `ai-api-key` input; the version 20.11.1 manifest confirms it.",
+    "The action does not declare `ai-api-key` input; the version:: 20.11.1 manifest confirms it.",
+    "The action does not declare `ai-api-key` input; pinned at abc1234 the manifest confirms it.",
+    "The action does not declare `ai-api-key` input; at commit abc1234 the manifest confirms it.",
+    "The action does not declare `ai-api-key` input; pinned at 20.11.1 the manifest confirms it.",
+    `The action does not declare \`ai-api-key\` input (${THIRD_SHA}).`,
+  ];
+  const findings = claims.map((message) => markerFinding({ message }));
+  const result = await verify(
+    findings,
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+  );
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), claims.map(
+    () => ["unverified", "other-revision-unverified"] as const,
+  ));
+  assert.ok(findings.every((finding) => finding.grounding_status === "unverified"));
+});
+
+test("#1263 a standalone suffixed stamp names another revision and fails closed", async () => {
+  // #1263: the standalone scan trusts the two shapes an incidental token
+  // cannot take — the deliberate `v` marker and a pre-release/build suffix.
+  // A stamp carrying that suffix ("3.7.0-dev+abc1234") names a revision on
+  // its own, so a claim citing it stays unverified instead of being refuted
+  // with the executing revision's bytes. #252: the fence's OWN boundary
+  // token is fed to it, not just benign input.
+  const claims = [
+    "The action does not declare `ai-api-key` input (3.7.0-dev+abc1234).",
+    "The action does not declare `ai-api-key` input (v3.7.0-rc.1).",
+  ];
+  const findings = claims.map((message) => markerFinding({ message }));
+  const result = await verify(
+    findings,
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.8.0",
+  );
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), claims.map(
+    () => ["unverified", "other-revision-unverified"] as const,
+  ));
+  assert.ok(findings.every((finding) => finding.grounding_status === "unverified"));
+});
+
+test("#1263 a citation with a connector or punctuation still names another revision", async () => {
+  // #1263: the introducer hop binds the identifier through a bounded
+  // CONNECTOR layer and ONE separator class, so a genuine citation that
+  // puts a connector word or a piece of punctuation between the introducer
+  // and the identifier is never missed: "pinned to abc1234", "version of
+  // 3.6.1", "released as 3.6.1", "action.yml at, 3.6.1". Missing one
+  // fails OPEN — the claim names another revision and is then decided with
+  // the EXECUTING revision's bytes. #252: the fence's own boundary tokens
+  // (the connector words, the separator punctuation, the verb forms) are
+  // fed to it directly, not just the plain "at <token>" shape.
+  const citations = [
+    "pinned to abc1234",
+    "pinned to 3.6.1",
+    "version of 3.6.1",
+    "released as 3.6.1",
+    "tagged as abc1234",
+    "committed as abc1234",
+    "at commit sha abc1234",
+    "at the abc1234",
+    "action.yml at, 3.6.1",
+    "action.yml at; 3.6.1",
+  ];
+  const claims = citations.map((citation) =>
+    `The action does not declare \`ai-api-key\` input; ${citation} the manifest confirms it.`);
+  const findings = claims.map((message) => markerFinding({ message }));
+  const result = await verify(
+    findings,
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+  );
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), claims.map(
+    () => ["unverified", "other-revision-unverified"] as const,
+  ));
+  assert.ok(findings.every((finding) => finding.grounding_status === "unverified"));
+});
+
+test("#1263 the connector layer does not re-open the bare-token precision hole", async () => {
+  // #1263: the connector layer is CLOSED — it never skips an ordinary word
+  // to find a version-shaped token. "the version of Node 20.11.1" binds
+  // "Node", "release notes mention Node 20.11.1" binds "notes", and "at
+  // the time of the 20.11.1 release" binds "time": none of them names a
+  // revision, so the claim stays decided with the executing registry
+  // instead of being left other-revision-unverified. #252: the boundary
+  // tokens the layer must NOT cross (an ordinary word between the
+  // introducer and the number) are fed to it directly.
+  const claims = [
+    "The action does not declare `ai-api-key` input (the version of Node 20.11.1).",
+    "The action does not declare `ai-api-key` input (release notes mention Node 20.11.1).",
+    "The action does not declare `ai-api-key` input (at the time of the 20.11.1 release).",
+  ];
+  const findings = claims.map((message) => markerFinding({ message }));
+  const result = await verify(
+    findings,
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+  );
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), claims.map(
+    () => ["refuted", "input-declared:ai-api-key"] as const,
+  ));
+  assert.ok(findings.every((finding) => finding.grounding_status === "refuted"));
+});
+
+test("#1263 the introducer scan stays bounded on a long separator run and a long introducer chain", async () => {
+  // #1263: the separator between an introducer and its identifier is ONE
+  // character class, so a long whitespace run cannot be split in many ways
+  // (the scan was quadratic there), and a long chain of introducer words
+  // cannot blow up either. The claim still names another revision, so it
+  // must stay unverified — never refuted with the executing revision's
+  // bytes — and the scan must complete. #252: the hostile shape itself (a
+  // multi-kilobyte separator run, a multi-kilobyte introducer chain) is
+  // fed to the scan. No wall-clock assertion: timing is flaky; the shape
+  // and the outcome are what is pinned.
+  const separatorHead = "The action does not declare `ai-api-key` input; action.yml at";
+  const separatorTail = "3.6.1 confirms it.";
+  const separatorRun = `${separatorHead}${" ".repeat(16_000 - separatorHead.length - separatorTail.length)}${separatorTail}`;
+  const chainHead = "The action does not declare `ai-api-key` input;";
+  const chainTail = " 3.6.1 confirms it.";
+  const introducerChain = `${chainHead}${" at".repeat(Math.floor((16_000 - chainHead.length - chainTail.length) / 3))}${chainTail}`;
+  // Both messages stay inside the message-level scan bound, so the scan
+  // really runs on them.
+  assert.ok(separatorRun.length <= MAX_CLAIM_SCAN_LENGTH);
+  assert.ok(introducerChain.length <= MAX_CLAIM_SCAN_LENGTH);
+  const findings = [separatorRun, introducerChain].map((message) => markerFinding({ message }));
+  const result = await verify(
+    findings,
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+  );
   assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
-    ["refuted", "input-declared:ai-api-key"],
-    ["refuted", "input-declared:ai-api-key"],
-    ["refuted", "input-declared:ai-api-key"],
-    ["refuted", "input-declared:ai-api-key"],
+    ["unverified", "other-revision-unverified"],
+    ["unverified", "other-revision-unverified"],
   ]);
+  assert.ok(findings.every((finding) => finding.grounding_status === "unverified"));
 });
 
 test("#1240 another line or another patch is unverified", async () => {
@@ -1373,6 +1535,55 @@ test("#1240 a claim naming the pinned sha is decided by the pinned witness, not 
   ]);
   assert.equal(withoutWitness.grounding_status, "unverified");
   assert.equal(withoutWitness.capped_from, "blocker");
+});
+
+test("#1263 a claim naming the pinned sha's SHORT form is decided by the pinned witness", async () => {
+  // #1263: the pin is an EXACT COMMIT, and the consumer's short quote is a
+  // prefix of it. The narrowing of the standalone scan must not silently
+  // kill that route: a claim citing the pin's short form is a claim about
+  // the PINNED revision, so it is decided with the PINNED contract — never
+  // with the executing revision's registry, which would decide it with the
+  // wrong bytes. #252: the fence's own boundary token — the short form
+  // itself, with NO introducer word around it — is fed to it.
+  const shortSha = PINNED_SHA.slice(0, 7);
+  const message = `The action does not declare the \`ai-api-key\` input (${shortSha}).`;
+  // (a) the pin really does declare the input: the PINNED contract
+  // refutes the claim, with the `pinned-` reason that records which
+  // revision's manifest decided it.
+  const declaring = pinnedWitness(new Set(["github-token", "ai-api-key", "rereview-label"]));
+  const refuted = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message });
+  const a = await verify(
+    [refuted],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+    null,
+    declaring.witness,
+  );
+  assert.deepEqual(a.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "refuted", "pinned-input-declared:ai-api-key"],
+  ]);
+  assert.equal(refuted.grounding_status, "refuted");
+  // (b) the pin does NOT declare the input: the PINNED contract confirms
+  // the claim (grounded, `pinned-` reason). The executing registry DOES
+  // declare it, so the executing path would have refuted the claim —
+  // this outcome proves the PINNED bytes decided it.
+  const lacking = pinnedWitness(new Set(["github-token"]));
+  const grounded = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message });
+  const b = await verify(
+    [grounded],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+    null,
+    lacking.witness,
+  );
+  assert.deepEqual(b.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "grounded", "pinned-input-absent:ai-api-key"],
+  ]);
+  assert.equal(b.demoted, 0);
 });
 
 test("#1240 a pinned-sha citation in a DIFFERENT sentence still routes the claim to the pinned witness", async () => {
