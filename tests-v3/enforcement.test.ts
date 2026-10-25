@@ -689,3 +689,79 @@ test("#812: publish ciState reaches the marker; omitted when not read", () => {
   const without = buildRunMetadataMarker({ headSha: "h", baseSha: "b", reviewResult: "issues" });
   assert.ok(!without.includes("ci_state"), "markers without a CI read stay byte-identical to pre-#812");
 });
+
+// ---------------------------------------------------------------------------
+// #1248: relax-then-force provenance and body honesty.
+// ---------------------------------------------------------------------------
+
+const GATED_RELAX_NOTE = "\n\n_Verdict relaxed from structured findings "
+  + "(verdict_policy=findings_severity_gated): every blocking finding was in a "
+  + "category this repository marks non-blocking (non_blocking_finding_categories); "
+  + "they remain listed above._";
+
+test("#1248: enforcement overlays update verdict_source when forcing back a relaxed verdict", () => {
+  const relaxed: ReviewArtifact = {
+    verdict: "request_changes",
+    review_markdown: "review" + GATED_RELAX_NOTE,
+    findings: [finding("blocker", "tests")],
+  };
+  applyVerdictPolicy(relaxed, "findings_severity_gated", {
+    nonBlockingCategories: parseNonBlockingCategories("tests"),
+    securityFlagged: false,
+  });
+  assert.equal(relaxed.verdict, "approve");
+  assert.equal(relaxed.verdict_source, "findings");
+
+  const outcome = applyEvidenceBlockerEnforcement(relaxed, {
+    has_blocker: true,
+    providers: [{ id: "sec", provider_severity: "blocker" }],
+  });
+  assert.equal(outcome.applied, true);
+  assert.equal(relaxed.verdict, "request_changes");
+  assert.equal(relaxed.verdict_source, "enforcement", "the forcing layer owns the verdict, not the earlier relaxation");
+  assert.ok(
+    relaxed.review_markdown.includes("_Verdict relaxation superseded by enforcement: originally relaxed from structured findings"),
+    `stale relaxed-verdict claim survives: ${relaxed.review_markdown}`,
+  );
+  assert.ok(!relaxed.review_markdown.includes("_Verdict relaxed from structured findings"), "the original claim must not stand unqualified");
+});
+
+test("#1248: required-check fail mode updates verdict_source when forcing back a relaxed verdict", () => {
+  const relaxed: ReviewArtifact = {
+    verdict: "request_changes",
+    review_markdown: "review" + GATED_RELAX_NOTE,
+    findings: [finding("blocker", "tests")],
+    required_check_dispositions: [],
+  };
+  applyVerdictPolicy(relaxed, "findings_severity_gated", {
+    nonBlockingCategories: parseNonBlockingCategories("tests"),
+    securityFlagged: false,
+  });
+  assert.equal(relaxed.verdict, "approve");
+  assert.equal(relaxed.verdict_source, "findings");
+
+  const result = applyRequiredCheckValidation(relaxed, {
+    enabled: "true",
+    mode: "fail",
+    mustCheck: ["verify route access controls are in place"],
+  });
+  assert.equal(result.status, "incomplete");
+  assert.equal(relaxed.verdict, "request_changes");
+  assert.equal(relaxed.verdict_source, "enforcement");
+  assert.ok(
+    relaxed.review_markdown.includes("_Verdict relaxation superseded by enforcement: originally relaxed from structured findings"),
+    `stale relaxed-verdict claim survives: ${relaxed.review_markdown}`,
+  );
+});
+
+test("#1248: forcing a verdict that was already request_changes keeps its provenance and untouched markdown", () => {
+  const blocked: ReviewArtifact = {
+    verdict: "request_changes",
+    review_markdown: "review",
+    findings: [finding("blocker")],
+    verdict_source: "findings",
+  };
+  applyEvidenceBlockerEnforcement(blocked, { has_blocker: true, providers: [{ id: "sec", provider_severity: "blocker" }] });
+  assert.equal(blocked.verdict_source, "findings", "no flip means no provenance rewrite");
+  assert.ok(!blocked.review_markdown.includes("superseded"), "nothing to supersede without a relaxation note");
+});

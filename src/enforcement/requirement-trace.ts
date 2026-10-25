@@ -69,6 +69,7 @@
  */
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import type { ReviewArtifact } from "./artifact.js";
+import { markRelaxationNotesSuperseded } from "./enforce.js";
 import { workspaceRegularFile, workspaceFsPath, workspacePathExists, workspacePathHasSymlinkComponent } from "../context/workspace-path.js";
 import { detectLanguage, isTestPath } from "../context/change-anchors.js";
 
@@ -2370,6 +2371,8 @@ export function applyConfirmedUnmetEscalation(
   if (artifact.verdict === "approve") {
     artifact.verdict = "request_changes";
     artifact.verdict_source = "enforcement";
+    // #1248: retire any earlier relaxation note this flip contradicts.
+    markRelaxationNotesSuperseded(artifact);
   }
   return rows.length;
 }

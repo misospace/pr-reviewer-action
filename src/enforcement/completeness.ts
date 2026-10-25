@@ -20,6 +20,7 @@
  * consequences.
  */
 import type { ReviewArtifact } from "./artifact.js";
+import { markRelaxationNotesSuperseded } from "./enforce.js";
 import {
   evaluateRequiredCheckCoverage,
   type RequiredCheckCoverage,
@@ -182,7 +183,16 @@ export function applyRequiredCheckValidation(
       );
     }
     if (status === "incomplete" && mode === "fail") {
+      // #1248: a fail-mode flip is enforcement deciding the verdict, not the
+      // findings policy that relaxed it — record the provenance and retire
+      // any earlier relaxation note the flip contradicts. A verdict already
+      // at request_changes keeps its existing provenance (no flip).
+      const flipsVerdict = artifact.verdict !== "request_changes";
       artifact.verdict = "request_changes";
+      if (flipsVerdict) {
+        artifact.verdict_source = "enforcement";
+        markRelaxationNotesSuperseded(artifact);
+      }
       artifact.review_markdown += (
         "\n\n_required_check_validation_mode=fail: treating the missing "
         + "required checks as blocking._"
