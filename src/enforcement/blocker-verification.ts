@@ -1215,7 +1215,19 @@ function gateAbsenceSentences(message: string): GateSentence[] {
 }
 
 interface ClaimClassification {
-  kind: GroundingKind | null;
+  /**
+   * #1262: EVERY claim kind the message carries, in the fixed enumeration
+   * order below. The scans always run — the first-match short-circuit is
+   * gone — so a message that carries both an input-declaration claim and a
+   * gate-absence claim classifies as BOTH, and each kind gets its own
+   * decision below. Skipping one scan (the bug) silently decided the
+   * finding on its first matching claim only: a refuted input claim ate a
+   * sibling gate-absence claim the boundary could not confirm (its unknown
+   * evidence was erased and the strict verdict mapping lost the
+   * request_changes it owed), and an undecidable gate claim ate a refutable
+   * input claim the other way round.
+   */
+  kinds: GroundingKind[];
   inputCandidates: InputCandidate[];
   /** #1238: the sentences that assert a gate absence. */
   gateSentences: GateSentence[];
@@ -1226,27 +1238,30 @@ interface ClaimClassification {
 }
 
 /** Classify once per finding; the input candidates and the gate-absence
- * sentences are reused by the verification branch instead of rescanning the
+ * sentences are reused by the verification branches instead of rescanning the
  * message. The revision-qualifier scan (#1240) runs once per message, over
- * the whole message. `pinnedSha` is the exact commit the consumer pinned
- * (#1263): the scan trusts the pin's own SHORT form as a qualifier, so a
- * claim citing it is decided with the PINNED contract. */
+ * the whole message. (#1262: composition — every scan ALWAYS runs, so the
+ * `kinds` list carries each claim kind the message has.) `pinnedSha` is the
+ * exact commit the consumer pinned (#1263): the scan trusts the pin's own
+ * SHORT form as a qualifier, so a claim citing it is decided with the
+ * PINNED contract. */
 function classifyClaim(message: string, workflowWitnessAvailable: boolean, pinnedSha: string | null = null): ClaimClassification {
+  const kinds: GroundingKind[] = [];
   if (assertsCommittedMarker(message)) {
-    return { kind: "committed_literal", inputCandidates: [], gateSentences: [], qualifiers: [] };
+    kinds.push("committed_literal");
   }
   const inputCandidates = classifyInputDeclaration(message, workflowWitnessAvailable);
   if (inputCandidates.length > 0) {
-    return { kind: "input_declaration", inputCandidates, gateSentences: [], qualifiers: revisionQualifiers(message, pinnedSha) };
+    kinds.push("input_declaration");
   }
   const gateSentences = gateAbsenceSentences(message);
   if (gateSentences.length > 0) {
-    return { kind: "gate_absence", inputCandidates: [], gateSentences, qualifiers: revisionQualifiers(message, pinnedSha) };
+    kinds.push("gate_absence");
   }
   if (REQUIREMENT_NOT_ENFORCED_RE.test(message)) {
-    return { kind: "requirement_claim", inputCandidates: [], gateSentences: [], qualifiers: [] };
+    kinds.push("requirement_claim");
   }
-  return { kind: null, inputCandidates: [], gateSentences: [], qualifiers: [] };
+  return { kinds, inputCandidates, gateSentences, qualifiers: revisionQualifiers(message, pinnedSha) };
 }
 
 /** The word tokens of a sentence, lowercased, with their character spans. */
@@ -1549,12 +1564,281 @@ function extractCodeSpans(message: string): string[] {
   return out;
 }
 
+/**
+ * #1262: the input-declaration decision of one finding, extracted from the
+ * single-kind branch. The leaf logic — statuses, reasons, precedence — is
+ * byte-identical to what the `kind === "input_declaration"` branch ran
+ * before classification composed.
+ */
+async function decideInputDecision(
+  candidates: readonly InputCandidate[],
+  declaredRegistry: ReadonlySet<string> | null | undefined,
+  pinned: PinnedActionWitness | null | undefined,
+  workflowNames: ReadonlySet<string> | null,
+  blockedRevision: boolean,
+  usePinned: boolean,
+): Promise<{ status: GroundingStatus; reason: string }> {
+  let status: GroundingStatus;
+  let reason: string;
+  // #1240: the declared-input registry speaks for the EXECUTING
+  // revision's release line only. A message that names a DIFFERENT
+  // line or another patch is not decidable with it: the whole finding
+  // becomes unverified — never refuted, never grounded — unless every
+  // "other" qualifier matches the pinned revision, in which case the
+  // claim is decided with the PINNED revision's own contract instead.
+  // This check runs before the contradiction/grounding logic and
+  // before the other-action downgrade: a revision mismatch wins the
+  // reason.
+  const declared = usePinned && pinned != null ? await pinned.declaredInputs() : declaredRegistry;
+  if (blockedRevision) {
+    status = "unverified";
+    reason = "other-revision-unverified";
+  } else if (declared === undefined || declared === null) {
+    status = "unverified";
+    reason = usePinned ? "pinned-input-registry-unavailable" : "input-registry-unavailable";
+  } else {
+    const normalized = new Set([...declared].map((input) => input.toLowerCase()));
+    const resolved = candidates.filter((candidate) => candidate.direction !== "ambiguous");
+    // #1238: the registry speaks for what the ACTION DECLARES. A
+    // WORKFLOW-scoped claim is about what the WORKFLOW passes or
+    // declares, so the registry may neither refute it nor ground it:
+    // refuting it would be a false refutation (PR-controlled workflow
+    // bytes deciding a claim about the action's own manifest), and
+    // grounding it would certify a claim about a mapping the registry
+    // does not speak for. Such a claim is unknown evidence here — the
+    // workflow witness corroborates it, and only in the presence
+    // direction: the witness grounds the claim when the cited file's
+    // direct action step passes that name, and never refutes it.
+    //
+    // A claim that the action does NOT declare an input the registry
+    // lacks is a genuine defect claim, and the witness POSITIVELY
+    // confirms it: the input really is undeclared. It therefore keeps
+    // the finding alive even when a sibling claim in the same finding
+    // is contradicted — a finding that carries a true defect must not
+    // be demoted whole (#1238: preserve true findings, including
+    // genuinely undeclared inputs).
+    //
+    // The claim must be about the EXECUTING action: a claim that names
+    // another action as its subject is never decided with this
+    // registry (neither grounded nor refuted), so it cannot ground the
+    // finding either.
+    const missing = resolved.find((candidate) =>
+      candidate.direction === "absence"
+      && !normalized.has(candidate.token)
+      && !candidate.otherActionSubject
+      && !candidate.workflowSubject);
+    // Refutation requires POSITIVE contradiction by the witness: an
+    // absence claim about an input the registry declares. A presence
+    // claim about an input the registry lacks is NOT a contradiction —
+    // the claim may describe a manifest revision the running bundle
+    // predates (a PR adding the input to this very action) — so it is
+    // marked unverified, never refuted (#1238 review: refutation only
+    // on facts the witness can decide).
+    const contradicted = resolved.find((candidate) =>
+      candidate.direction === "absence"
+      && normalized.has(candidate.token)
+      && !candidate.workflowSubject);
+    // A claim about another action's inputs is unknown evidence, never
+    // a refutation: the registry witnesses the executing action only.
+    // A foreign claim the registry WOULD have decided (grounded or
+    // refuted) had it been about this action is undecided for that
+    // reason; a foreign claim the registry could not decide anyway
+    // keeps the ordinary unknown-evidence reason.
+    const foreign = resolved.some((candidate) =>
+      candidate.otherActionSubject
+      && (candidate.direction === "absence" || normalized.has(candidate.token)));
+    // #1238: the WORKFLOW-side witness — the input names the finding's
+    // own cited file passes to the action under review at the exact
+    // reviewed head. It answers exactly one question: does the
+    // workflow-to-action mapping of THAT file carry that name?
+    //
+    // It NEVER decides a claim that is not workflow-scoped (the claim's
+    // subject must BE the workflow), and it NEVER decides an
+    // absence-direction claim: the mapping witness says which names
+    // the workflow passes, not which names the action lacks.
+    //
+    // The witness is absent (null) whenever the finding's own file has
+    // no entry: then every claim below keeps the behavior it had
+    // before the witness existed.
+    //
+    // A workflow-scoped presence claim the workflow witness
+    // CORROBORATES: the cited file's direct action step passes that
+    // name. That is a POSITIVE fact about the finding's own file, so
+    // it grounds the claim.
+    //
+    // The witness NEVER refutes. The reader sees only the DIRECT
+    // action steps of the cited file, so "this file does not pass X"
+    // is NOT an absence it can establish: a local composite action, a
+    // reusable workflow or a remote composite can pass an input name
+    // to the action through a surface the reader never sees. A claim
+    // the witness does not corroborate therefore falls through to the
+    // ordinary unknown-evidence path below — never refuted, so the
+    // review fails closed on it.
+    const workflowGrounded = workflowNames === null ? undefined : resolved.find((candidate) =>
+      candidate.workflowSubject
+      && candidate.direction === "presence"
+      && workflowNames.has(candidate.token)
+      && !candidate.otherActionSubject);
+    // The three registry-decided outcomes are prefixed `pinned-` when
+    // the PINNED witness decided (the claim is a fact about that
+    // revision's manifest, not the executing one's); the shared
+    // reasons (other-action, workflow-input, the unverified
+    // fallthroughs) are unchanged either way.
+    if (missing !== undefined) {
+      status = "grounded";
+      reason = `${usePinned ? "pinned-" : ""}input-absent:${missing.token}`;
+    } else if (foreign) {
+      // Unknown evidence must never certify a clean review (#1016): a
+      // finding that carries a claim about another action cannot be
+      // refuted whole.
+      status = "unverified";
+      reason = "other-action-claim-unverified";
+    } else if (contradicted !== undefined) {
+      status = "refuted";
+      reason = `${usePinned ? "pinned-" : ""}input-declared:${contradicted.token}`;
+    } else if (workflowGrounded !== undefined) {
+      status = "grounded";
+      reason = `workflow-input:${workflowGrounded.token}`;
+    } else {
+      // A presence claim about an input the registry declares is
+      // confirmed, but it asserts no defect of its own: it does not by
+      // itself keep a finding blocking that also carries a refuted
+      // claim.
+      const grounded = resolved.find((candidate) =>
+        candidate.direction === "presence"
+        && normalized.has(candidate.token)
+        && !candidate.otherActionSubject);
+      if (grounded !== undefined) {
+        status = "grounded";
+        reason = `${usePinned ? "pinned-" : ""}input-declared:${grounded.token}`;
+      } else {
+        status = "unverified";
+        reason = resolved.some((candidate) => candidate.direction === "presence")
+          ? "input-presence-unverified"
+          : "input-claim-unresolvable";
+      }
+    }
+  }
+  return { status, reason };
+}
+
+/**
+ * #1262: the decision of one source-read claim kind (`committed_literal`
+ * or `requirement_claim`), extracted from the common else chain.
+ * `committed_literal` and `requirement_claim` share ONE read of the
+ * cited file: `budget` is the pass-wide source-read counter and `shared`
+ * memoizes the read per finding, so a message carrying BOTH kinds
+ * consumes a single MAX_VERIFICATION_READS unit — one read total, exactly
+ * like the single-kind path. The leaf logic — statuses, reasons, the
+ * marker and cited-evidence checks — is byte-identical to what the
+ * single-kind path ran.
+ */
+async function decideSourceClaim(
+  kind: Extract<GroundingKind, "committed_literal" | "requirement_claim">,
+  finding: ArtifactFinding,
+  readSource: SourceReader,
+  expectedRevision: string | null,
+  budget: { reads: number },
+  shared: { result: SourceReadResult | null },
+): Promise<{ status: GroundingStatus; reason: string }> {
+  if (!safeFile(finding.file)) {
+    return kind === "committed_literal"
+      ? { status: "unverified", reason: "no-location" }
+      : { status: "unsupported", reason: "no-concrete-location" };
+  }
+  // The memo is consulted BEFORE the budget guard (#1262 review): a
+  // finding whose first source-read kind consumed the pass's last
+  // MAX_VERIFICATION_READS unit already holds the read result its sibling
+  // kind needs — spending the sibling on `read-budget-exhausted` would
+  // decide nothing the shared read had not already decided. A fresh read
+  // (no memo) still respects the budget: exhausted means unverified, the
+  // fail-safe direction.
+  let read = shared.result;
+  if (read === null) {
+    if (budget.reads >= MAX_VERIFICATION_READS) {
+      return { status: "unverified", reason: "read-budget-exhausted" };
+    }
+    budget.reads += 1;
+    read = await readSource(finding.file);
+    shared.result = read;
+  }
+  if (read.status === "unavailable") {
+    if (read.reason === "not-found") {
+      return kind === "committed_literal"
+        ? { status: "refuted", reason: "marker-absent" }
+        : { status: "refuted", reason: "location-missing" };
+    }
+    return { status: "unverified", reason: read.reason };
+  }
+  if (!authorizesLiteralClaim(read.provenance, expectedRevision)) {
+    // Defense-in-depth: the reader binds provenance to the same exact
+    // revision, so this is normally just "committed_source and
+    // unsynthesized". A reader that reads a different revision (or a
+    // stale one) still fails closed here rather than grounding the claim.
+    return { status: "unverified", reason: "non-authoritative-source" };
+  }
+  if (kind === "committed_literal") {
+    const present = SANITIZER_MARKERS.some((marker) => verifySourceSpan(read.text, marker).present);
+    return present
+      ? { status: "grounded", reason: "marker-present" }
+      : { status: "refuted", reason: "marker-absent" };
+  }
+  // requirement_claim: a generic standard assertion cannot promote
+  // CHANGES_REQUESTED on file/line existence alone — line 3 of
+  // `const x = 1; const y = 2; const z = 3;` does not establish that
+  // a violated standard lives there. Independent, machine-checkable
+  // evidence of a specific violation is required: a backticked code
+  // span whose bytes match the exact-head source. The evidence must
+  // sit at the cited location (#1016 review pass): the span is
+  // grounded only when it occurs within ±EVIDENCE_LINE_WINDOW lines
+  // of the cited line. A span found only elsewhere in the file is
+  // unknown evidence, not confirmation (unverified); a claim with no
+  // cited evidence is unsupported, and one whose spans the source
+  // contains nowhere is refuted (source positively disproves the
+  // cited pattern). A span without a concrete cited line can never
+  // ground, even when it matches elsewhere.
+  const spans = extractCodeSpans(finding.message);
+  if (spans.length === 0) {
+    return { status: "unsupported", reason: "no-cited-evidence" };
+  }
+  const line = finding.line;
+  const citedLine = typeof line === "number" && Number.isInteger(line) && line >= 1 ? line : null;
+  if (citedLine === null) {
+    return { status: "unsupported", reason: "no-concrete-location" };
+  }
+  const lines = read.text.split(/\r?\n/);
+  if (citedLine > lines.length) {
+    // A cited line past the end of the file is an unverifiable
+    // location, not positive disproof (the model may count a
+    // trailing-newline-terminated file one line longer), so it
+    // must not refute into the relaxable path.
+    return { status: "unverified", reason: "line-beyond-end" };
+  }
+  // Compare cited spans to the window modulo carriage returns:
+  // model citations carry LF line endings even when the commit
+  // uses CRLF, and the line-ending representation must never
+  // by itself flip grounded into refuted.
+  const strip = (s: string): string => s.replace(/\r/g, "");
+  const windowText = strip(lines
+    .slice(Math.max(0, citedLine - 1 - EVIDENCE_LINE_WINDOW), citedLine + EVIDENCE_LINE_WINDOW)
+    .join("\n"));
+  if (spans.some((span) => verifySourceSpan(windowText, strip(span)).present)) {
+    return { status: "grounded", reason: "evidence-verified" };
+  }
+  if (spans.some((span) => verifySourceSpan(strip(read.text), strip(span)).present)) {
+    return { status: "unverified", reason: "evidence-location-mismatch" };
+  }
+  return { status: "refuted", reason: "evidence-mismatch" };
+}
+
 export async function applyBlockerVerification(
   findings: ArtifactFinding[],
   options: BlockerVerificationOptions,
 ): Promise<BlockerVerificationResult> {
   const entries: FindingGrounding[] = [];
-  let reads = 0;
+  // The reviewed-repository source-read budget of this pass, consumed by
+  // the source-read claim kinds (decideSourceClaim).
+  const readBudget = { reads: 0 };
   let demoted = 0;
   // The action's own implementation reads of this pass: one read per cited
   // file (however many gates cite it), bounded by MAX_ACTION_SOURCE_READS.
@@ -1579,6 +1863,10 @@ export async function applyBlockerVerification(
   const executing = typeof options.executingActionVersion === "string" && options.executingActionVersion.trim() !== ""
     ? executingRevision(options.executingActionVersion)
     : null;
+  // #1262: the grounding tiers — the combined decision is the HIGHEST tier
+  // among the finding's per-kind decisions (see the combine comment in the
+  // loop).
+  const groundingTier: Record<GroundingStatus, number> = { grounded: 3, unverified: 2, refuted: 1, unsupported: 0 };
 
   for (let index = 0; index < findings.length; index += 1) {
     const finding = findings[index]!;
@@ -1607,14 +1895,17 @@ export async function applyBlockerVerification(
     // for that file means no witness, and the claim keeps the behavior it
     // had before the witness existed.
     const workflowNames = workflowWitnessNames(finding, options.workflowInputsByFile);
-    const { kind, inputCandidates, gateSentences, qualifiers } = classifyClaim(
+    // #1262: classification composes — every scan runs and `kinds` carries
+    // EVERY claim kind the message has; a mixed message gets one decision
+    // per kind below instead of only the first match's.
+    const { kinds, inputCandidates, gateSentences, qualifiers } = classifyClaim(
       finding.message,
       workflowNames !== null,
       // #1263: the pin's own short form is a qualifier — only the pin can
       // say which short quote names it.
       pinned?.revision ?? null,
     );
-    if (kind === null) continue;
+    if (kinds.length === 0) continue;
 
     // #1240: the revision qualifiers that fail the EXECUTING match. An
     // unstamped build applies NO scoping: there is no executing revision,
@@ -1630,258 +1921,68 @@ export async function applyBlockerVerification(
       && other.every((qualifier) => qualifierMatchesPinnedRevision(qualifier, pinned.revision));
     const blockedRevision = other.length > 0 && !usePinned;
 
-    let status: GroundingStatus;
-    let reason: string;
-    if (kind === "input_declaration") {
-      // #1240: the declared-input registry speaks for the EXECUTING
-      // revision's release line only. A message that names a DIFFERENT
-      // line or another patch is not decidable with it: the whole finding
-      // becomes unverified — never refuted, never grounded — unless every
-      // "other" qualifier matches the pinned revision, in which case the
-      // claim is decided with the PINNED revision's own contract instead.
-      // This check runs before the contradiction/grounding logic and
-      // before the other-action downgrade: a revision mismatch wins the
-      // reason.
-      const declared = usePinned && pinned != null
-        ? await pinned.declaredInputs()
-        : options.declaredActionInputs;
-      if (blockedRevision) {
-        status = "unverified";
-        reason = "other-revision-unverified";
-      } else if (declared === undefined || declared === null) {
-        status = "unverified";
-        reason = usePinned ? "pinned-input-registry-unavailable" : "input-registry-unavailable";
+    // #1262: ONE decision per claim kind the message carries, in the kind
+    // order classification produced. Each decision is the kind's own leaf
+    // logic — byte-identical to the single-kind path — and the two
+    // source-read kinds (`committed_literal`, `requirement_claim`) share
+    // ONE read of the cited file (`sourceClaimRead`), so a mixed message
+    // costs no extra MAX_VERIFICATION_READS unit and exactly one read
+    // total.
+    const sourceClaimRead: { result: SourceReadResult | null } = { result: null };
+    const decisions: Array<{ kind: GroundingKind; status: GroundingStatus; reason: string }> = [];
+    for (const kind of kinds) {
+      if (kind === "input_declaration") {
+        decisions.push({
+          kind,
+          ...(await decideInputDecision(inputCandidates, options.declaredActionInputs, pinned, workflowNames, blockedRevision, usePinned)),
+        });
+      } else if (kind === "gate_absence") {
+        // #1238: the metadata cannot decide a behavior-existence claim —
+        // the action's own implementation can. The decision is made per
+        // sentence (never across sentences). #1240: the witness is the one
+        // the selection above chose — the executing action's own tree, or
+        // the PINNED revision's tree — and each witness draws on its OWN
+        // budget: the pinned and the executing bytes must never share a
+        // path cache.
+        decisions.push({
+          kind,
+          ...(await decideGateAbsence(
+            gateSentences,
+            usePinned && pinned != null ? pinned.read.bind(pinned) : options.readActionSource,
+            usePinned ? pinnedBudget : actionSourceBudget,
+            blockedRevision,
+            usePinned,
+          )),
+        });
       } else {
-        const normalized = new Set([...declared].map((input) => input.toLowerCase()));
-        const resolved = inputCandidates.filter((candidate) => candidate.direction !== "ambiguous");
-        // #1238: the registry speaks for what the ACTION DECLARES. A
-        // WORKFLOW-scoped claim is about what the WORKFLOW passes or
-        // declares, so the registry may neither refute it nor ground it:
-        // refuting it would be a false refutation (PR-controlled workflow
-        // bytes deciding a claim about the action's own manifest), and
-        // grounding it would certify a claim about a mapping the registry
-        // does not speak for. Such a claim is unknown evidence here — the
-        // workflow witness corroborates it, and only in the presence
-        // direction: the witness grounds the claim when the cited file's
-        // direct action step passes that name, and never refutes it.
-        //
-        // A claim that the action does NOT declare an input the registry
-        // lacks is a genuine defect claim, and the witness POSITIVELY
-        // confirms it: the input really is undeclared. It therefore keeps
-        // the finding alive even when a sibling claim in the same finding
-        // is contradicted — a finding that carries a true defect must not
-        // be demoted whole (#1238: preserve true findings, including
-        // genuinely undeclared inputs).
-        //
-        // The claim must be about the EXECUTING action: a claim that names
-        // another action as its subject is never decided with this
-        // registry (neither grounded nor refuted), so it cannot ground the
-        // finding either.
-        const missing = resolved.find((candidate) =>
-          candidate.direction === "absence"
-          && !normalized.has(candidate.token)
-          && !candidate.otherActionSubject
-          && !candidate.workflowSubject);
-        // Refutation requires POSITIVE contradiction by the witness: an
-        // absence claim about an input the registry declares. A presence
-        // claim about an input the registry lacks is NOT a contradiction —
-        // the claim may describe a manifest revision the running bundle
-        // predates (a PR adding the input to this very action) — so it is
-        // marked unverified, never refuted (#1238 review: refutation only
-        // on facts the witness can decide).
-        const contradicted = resolved.find((candidate) =>
-          candidate.direction === "absence"
-          && normalized.has(candidate.token)
-          && !candidate.workflowSubject);
-        // A claim about another action's inputs is unknown evidence, never
-        // a refutation: the registry witnesses the executing action only.
-        // A foreign claim the registry WOULD have decided (grounded or
-        // refuted) had it been about this action is undecided for that
-        // reason; a foreign claim the registry could not decide anyway
-        // keeps the ordinary unknown-evidence reason.
-        const foreign = resolved.some((candidate) =>
-          candidate.otherActionSubject
-          && (candidate.direction === "absence" || normalized.has(candidate.token)));
-        // #1238: the WORKFLOW-side witness — the input names the finding's
-        // own cited file passes to the action under review at the exact
-        // reviewed head. It answers exactly one question: does the
-        // workflow-to-action mapping of THAT file carry that name?
-        //
-        // It NEVER decides a claim that is not workflow-scoped (the claim's
-        // subject must BE the workflow), and it NEVER decides an
-        // absence-direction claim: the mapping witness says which names
-        // the workflow passes, not which names the action lacks.
-        //
-        // The witness is absent (null) whenever the finding's own file has
-        // no entry: then every claim below keeps the behavior it had
-        // before the witness existed.
-        //
-        // A workflow-scoped presence claim the workflow witness
-        // CORROBORATES: the cited file's direct action step passes that
-        // name. That is a POSITIVE fact about the finding's own file, so
-        // it grounds the claim.
-        //
-        // The witness NEVER refutes. The reader sees only the DIRECT
-        // action steps of the cited file, so "this file does not pass X"
-        // is NOT an absence it can establish: a local composite action, a
-        // reusable workflow or a remote composite can pass an input name
-        // to the action through a surface the reader never sees. A claim
-        // the witness does not corroborate therefore falls through to the
-        // ordinary unknown-evidence path below — never refuted, so the
-        // review fails closed on it.
-        const workflowGrounded = workflowNames === null ? undefined : resolved.find((candidate) =>
-          candidate.workflowSubject
-          && candidate.direction === "presence"
-          && workflowNames.has(candidate.token)
-          && !candidate.otherActionSubject);
-        // The three registry-decided outcomes are prefixed `pinned-` when
-        // the PINNED witness decided (the claim is a fact about that
-        // revision's manifest, not the executing one's); the shared
-        // reasons (other-action, workflow-input, the unverified
-        // fallthroughs) are unchanged either way.
-        if (missing !== undefined) {
-          status = "grounded";
-          reason = `${usePinned ? "pinned-" : ""}input-absent:${missing.token}`;
-        } else if (foreign) {
-          // Unknown evidence must never certify a clean review (#1016): a
-          // finding that carries a claim about another action cannot be
-          // refuted whole.
-          status = "unverified";
-          reason = "other-action-claim-unverified";
-        } else if (contradicted !== undefined) {
-          status = "refuted";
-          reason = `${usePinned ? "pinned-" : ""}input-declared:${contradicted.token}`;
-        } else if (workflowGrounded !== undefined) {
-          status = "grounded";
-          reason = `workflow-input:${workflowGrounded.token}`;
-        } else {
-          // A presence claim about an input the registry declares is
-          // confirmed, but it asserts no defect of its own: it does not by
-          // itself keep a finding blocking that also carries a refuted
-          // claim.
-          const grounded = resolved.find((candidate) =>
-            candidate.direction === "presence"
-            && normalized.has(candidate.token)
-            && !candidate.otherActionSubject);
-          if (grounded !== undefined) {
-            status = "grounded";
-            reason = `${usePinned ? "pinned-" : ""}input-declared:${grounded.token}`;
-          } else {
-            status = "unverified";
-            reason = resolved.some((candidate) => candidate.direction === "presence")
-              ? "input-presence-unverified"
-              : "input-claim-unresolvable";
-          }
-        }
-      }
-    } else if (kind === "gate_absence") {
-      // #1238: the metadata cannot decide a behavior-existence claim —
-      // the action's own implementation can. The decision is made per
-      // sentence (never across sentences): a claim whose named gate the
-      // executing implementation POSITIVELY implements is refuted; every
-      // other shape stays unverified, the fail-safe direction — a missing
-      // marker is no proof of absence, and a claim the registry does not
-      // cover cannot be decided at all.
-      //
-      // #1240: the witness is the one the selection above chose — the
-      // executing action's own tree, or the PINNED revision's tree — and
-      // each witness draws on its OWN budget: the pinned and the
-      // executing bytes must never share a path cache.
-      const decision = await decideGateAbsence(
-        gateSentences,
-        usePinned && pinned != null ? pinned.read.bind(pinned) : options.readActionSource,
-        usePinned ? pinnedBudget : actionSourceBudget,
-        blockedRevision,
-        usePinned,
-      );
-      status = decision.status;
-      reason = decision.reason;
-    } else if (!safeFile(finding.file)) {
-      status = kind === "committed_literal" ? "unverified" : "unsupported";
-      reason = kind === "committed_literal" ? "no-location" : "no-concrete-location";
-    } else if (reads >= MAX_VERIFICATION_READS) {
-      status = "unverified";
-      reason = "read-budget-exhausted";
-    } else {
-      reads += 1;
-      const read = await options.readSource(finding.file);
-      if (read.status === "unavailable") {
-        if (read.reason === "not-found") {
-          status = "refuted";
-          reason = kind === "committed_literal" ? "marker-absent" : "location-missing";
-        } else {
-          status = "unverified";
-          reason = read.reason;
-        }
-      } else if (!authorizesLiteralClaim(read.provenance, options.expectedRevision)) {
-        // Defense-in-depth: the reader binds provenance to the same exact
-        // revision, so this is normally just "committed_source and
-        // unsynthesized". A reader that reads a different revision (or a
-        // stale one) still fails closed here rather than grounding the claim.
-        status = "unverified";
-        reason = "non-authoritative-source";
-      } else if (kind === "committed_literal") {
-        const present = SANITIZER_MARKERS.some((marker) => verifySourceSpan(read.text, marker).present);
-        status = present ? "grounded" : "refuted";
-        reason = present ? "marker-present" : "marker-absent";
-      } else {
-        // requirement_claim: a generic standard assertion cannot promote
-        // CHANGES_REQUESTED on file/line existence alone — line 3 of
-        // `const x = 1; const y = 2; const z = 3;` does not establish that
-        // a violated standard lives there. Independent, machine-checkable
-        // evidence of a specific violation is required: a backticked code
-        // span whose bytes match the exact-head source. The evidence must
-        // sit at the cited location (#1016 review pass): the span is
-        // grounded only when it occurs within ±EVIDENCE_LINE_WINDOW lines
-        // of the cited line. A span found only elsewhere in the file is
-        // unknown evidence, not confirmation (unverified); a claim with no
-        // cited evidence is unsupported, and one whose spans the source
-        // contains nowhere is refuted (source positively disproves the
-        // cited pattern). A span without a concrete cited line can never
-        // ground, even when it matches elsewhere.
-        const spans = extractCodeSpans(finding.message);
-        if (spans.length === 0) {
-          status = "unsupported";
-          reason = "no-cited-evidence";
-        } else {
-          const line = finding.line;
-          const citedLine = typeof line === "number" && Number.isInteger(line) && line >= 1 ? line : null;
-          if (citedLine === null) {
-            status = "unsupported";
-            reason = "no-concrete-location";
-          } else {
-            const lines = read.text.split(/\r?\n/);
-            if (citedLine > lines.length) {
-              // A cited line past the end of the file is an unverifiable
-              // location, not positive disproof (the model may count a
-              // trailing-newline-terminated file one line longer), so it
-              // must not refute into the relaxable path.
-              status = "unverified";
-              reason = "line-beyond-end";
-            } else {
-              // Compare cited spans to the window modulo carriage returns:
-              // model citations carry LF line endings even when the commit
-              // uses CRLF, and the line-ending representation must never
-              // by itself flip grounded into refuted.
-              const strip = (s: string): string => s.replace(/\r/g, "");
-              const windowText = strip(lines
-                .slice(Math.max(0, citedLine - 1 - EVIDENCE_LINE_WINDOW), citedLine + EVIDENCE_LINE_WINDOW)
-                .join("\n"));
-              if (spans.some((span) => verifySourceSpan(windowText, strip(span)).present)) {
-                status = "grounded";
-                reason = "evidence-verified";
-              } else if (spans.some((span) => verifySourceSpan(strip(read.text), strip(span)).present)) {
-                status = "unverified";
-                reason = "evidence-location-mismatch";
-              } else {
-                status = "refuted";
-                reason = "evidence-mismatch";
-              }
-            }
-          }
-        }
+        decisions.push({
+          kind,
+          ...(await decideSourceClaim(kind, finding, options.readSource, options.expectedRevision, readBudget, sourceClaimRead)),
+        });
       }
     }
+
+    // #1262: combine the per-kind decisions fail-closed. Tier order
+    // (highest wins): grounded > unverified > refuted > unsupported.
+    //   - Verified truth keeps the finding (fail-safe): a finding that
+    //     carries a positively confirmed claim is not demoted because a
+    //     sibling claim was contradicted.
+    //   - Unknown evidence must never be erased by a sibling
+    //     contradiction (#1016, #1262): unverified outranks refuted, and
+    //     the strict verdict mapping keeps an unverified blocker/major
+    //     blocking.
+    //   - A finding every decidable claim of which is positively
+    //     contradicted is refuted and demoted (the unchanged rule).
+    //   - Weakest is a finding with no evidence at all (unsupported).
+    // The reason and the entry kind come from the FIRST decision, in
+    // classification/enumeration order, that carries the winning tier's
+    // status.
+    let winning = decisions[0]!;
+    for (const decision of decisions) {
+      if (groundingTier[decision.status] > groundingTier[winning.status]) winning = decision;
+    }
+    const status = winning.status;
+    const reason = winning.reason;
 
     if (status !== "grounded") {
       finding.grounding_status = status;
@@ -1891,7 +1992,7 @@ export async function applyBlockerVerification(
         demoted += 1;
       }
     }
-    entries.push({ index, status, kind, reason });
+    entries.push({ index, status, kind: winning.kind, reason });
   }
 
   return { findings: entries, demoted };
