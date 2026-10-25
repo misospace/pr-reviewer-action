@@ -1210,13 +1210,24 @@ export function evaluateApprovalGuardrails(options: {
  * Submit the native review bound to the reviewed commit, attaching inline
  * comments when present. If the platform rejects the JSON payload (e.g. an
  * anchor raced a new push), fall back to the body-only review so publishing
- * never breaks because of inline findings or commit binding.
+ * never breaks because of inline findings or commit binding. #1249: the
+ * body-only fallback can carry a `fallbackBody` — under a non-strict verdict
+ * policy the findings table is not part of the native review body, so the
+ * plain retry would otherwise drop every finding the inline comments carried.
+ * The caller supplies the compensated body only when the findings are not
+ * already in `body` (strict renders them itself), so no policy duplicates the
+ * findings table; the summary is the same bounded renderer the body uses
+ * (at most 50 rows, capped messages).
  */
 export async function submitNativeReview(
   api: PublishPlatformApi,
   options: {
     event: NativeReviewEvent;
     body: string;
+    /** #1249: the body used by the body-only fallback when the findings are
+     * not already part of `body`; omitted keeps the fallback byte-identical
+     * to `body`. */
+    fallbackBody?: string;
     commitId: string;
     comments: NativeReviewComment[];
   },
@@ -1239,7 +1250,7 @@ export async function submitNativeReview(
   if (created.ok) {
     return { ok: true, inlineCount, fellBack: false, ...(created.reviewId !== undefined ? { reviewId: created.reviewId } : {}) };
   }
-  const plain = await api.createReview({ body: options.body, event: options.event });
+  const plain = await api.createReview({ body: options.fallbackBody ?? options.body, event: options.event });
   if (plain.ok) {
     return { ok: true, inlineCount, fellBack: true, ...(plain.reviewId !== undefined ? { reviewId: plain.reviewId } : {}) };
   }
@@ -1893,6 +1904,14 @@ export async function publishReview(
         const event: NativeReviewEvent = input.verdict === "request_changes"
           ? "REQUEST_CHANGES"
           : canApprove ? "APPROVE" : "COMMENT";
+        // #1249: the body-only fallback must not lose the findings the inline
+        // comments carried. Under the strict policy the findings table is
+        // already part of the body, so the fallback body is unchanged (no
+        // duplicate reporting); under any other policy the bounded findings
+        // summary is appended, or nothing when there are no findings.
+        const fallbackBody = strict
+          ? body
+          : body + renderFindingsSummary(input.findings, input.upstreamLinkMode);
         if (canApprove) {
           messages.push(`Submitting native approval for #${input.prNumber}`);
         } else if (event === "REQUEST_CHANGES") {
@@ -1901,12 +1920,17 @@ export async function publishReview(
         const submitted = await submitNativeReview(api, {
           event,
           body,
+          fallbackBody,
           commitId: input.headSha,
           comments: inlineComments,
         });
         fallbackSubmission = submitted.fellBack;
         if (submitted.fellBack) {
-          messages.push("WARN: commit-bound review submission failed; falling back to plain review");
+          const compensated = !strict && fallbackBody !== body;
+          messages.push(
+            "WARN: commit-bound review submission failed; falling back to plain review"
+              + (compensated ? " with the findings summary appended to the review body" : ""),
+          );
           // #1027: the plain fallback carries no inline comments, so nothing
           // this run derived for them was ever published.
           outcomes = undefined;
