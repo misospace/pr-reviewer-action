@@ -47,6 +47,20 @@ after(() => {
   else process.env.GITHUB_ACTION_REPOSITORY = PREVIOUS_ACTION_REPOSITORY;
 });
 
+// #1240: the pinned-revision witness refuses to serve when the pinned action
+// repository IS the repository under review — in production the runner
+// exports that identity as `GITHUB_REPOSITORY`. Every replay here mocks the
+// reviewed PR as `repo: "o/r"`, so the suite must pin the ambient identity
+// to it and never inherit the ambient value: this repository's own CI sets
+// it to exactly the pinned slug above, which would make the fail-closed
+// same-repo refusal fire on every replay of a consumer pin.
+const PREVIOUS_REPOSITORY = process.env.GITHUB_REPOSITORY;
+process.env.GITHUB_REPOSITORY = "o/r";
+after(() => {
+  if (PREVIOUS_REPOSITORY === undefined) delete process.env.GITHUB_REPOSITORY;
+  else process.env.GITHUB_REPOSITORY = PREVIOUS_REPOSITORY;
+});
+
 // Redaction marker tokens: a blocking claim that cites a token the PR's own
 // source does not contain is a claim the evidence cannot support. The plain
 // `[REDACTED]` placeholder is module-private (src/context/redact.ts:10), so it
