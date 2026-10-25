@@ -16,6 +16,12 @@
  * verdict but a derivation: see `applyStrictVerdictPolicy` below.
  */
 import type { ReviewArtifact, ArtifactFinding } from "./artifact.js";
+import {
+  CI_ONLY_RELAXATION_NOTE,
+  GATED_FINDINGS_RELAXATION_NOTE,
+  REFUTED_GROUNDING_RELAXATION_NOTE,
+  VERIFICATION_ONLY_RELAXATION_NOTE,
+} from "./artifact.js";
 import type { VerdictValue } from "../model/types.js";
 
 /**
@@ -195,10 +201,7 @@ export function relaxVerificationOnlyVerdict(
   const findings = artifact.findings;
   if (!Array.isArray(findings) || findings.length === 0) return false;
   if (!findings.every((finding) => isAlwaysNonBlockingCategory(finding.category))) return false;
-  artifact.review_markdown = (artifact.review_markdown || "")
-    + "\n\n_Verdict relaxed from structured findings (#977): every open finding is a "
-    + "verification request the review tools cannot check, so the author has nothing to "
-    + "change. The findings remain listed above._";
+  artifact.review_markdown = (artifact.review_markdown || "") + "\n\n" + VERIFICATION_ONLY_RELAXATION_NOTE;
   artifact.verdict = "approve";
   artifact.verdict_source = "findings";
   return true;
@@ -222,8 +225,7 @@ export function relaxCiOnlyVerdict(
     isAlwaysNonBlockingCategory(finding.category)
     || (finding.ci_capped === true && finding.severity === "info"));
   if (!allRelaxable) return false;
-  artifact.review_markdown = (artifact.review_markdown || "")
-    + "\n\n_Verdict relaxed from CI-only findings (#976): check conclusions are shown for context and gate the merge independently; they are not review blockers._";
+  artifact.review_markdown = (artifact.review_markdown || "") + "\n\n" + CI_ONLY_RELAXATION_NOTE;
   artifact.verdict = "approve";
   artifact.verdict_source = "findings";
   return true;
@@ -296,13 +298,6 @@ export function relaxUnverifiedBlockerVerdict(
   // outright when any open finding has grounding_status="unverified". The
   // strict verdict mapping applies the same fail-closed rule via the
   // `forced` flag at its call site.
-  //
-  // #1238: this refusal is deliberately BROADER than the strict mapping's
-  // unknown-evidence forcing (isUnverifiedBlockingGrounding, which scopes to
-  // originally blocker/major findings). The non-strict policies are opt-in
-  // legacy paths; they stay conservative — an unverified claim of any
-  // original severity holds the relaxation — while strict (the default)
-  // never lets an unverified non-blocking claim expand the blocking surface.
   if (findings.some(isUnverifiedGrounding)) return false;
   const allRelaxable = findings.every((finding) =>
     isAlwaysNonBlockingCategory(finding.category)
@@ -310,8 +305,7 @@ export function relaxUnverifiedBlockerVerdict(
     || (finding.ci_capped === true && finding.severity === "info"));
   if (!allRelaxable) return false;
   if (!findings.some(isRefutedOrUnsupportedGrounding)) return false;
-  artifact.review_markdown = (artifact.review_markdown || "")
-    + "\n\n_Verdict relaxed from structured findings (#1016): every open finding was either a verification request or a source claim the deterministic blocker-verification boundary positively refuted against exact-head source; the findings remain listed above and deterministic gates are unaffected._";
+  artifact.review_markdown = (artifact.review_markdown || "") + "\n\n" + REFUTED_GROUNDING_RELAXATION_NOTE;
   artifact.verdict = "approve";
   artifact.verdict_source = "findings";
   return true;
@@ -368,12 +362,7 @@ export function applyVerdictPolicy(
       && artifact.verdict === "request_changes"
       && !hasUnresolvedRequiredCheck(artifact)
     ) {
-      artifact.review_markdown += (
-        "\n\n_Verdict relaxed from structured findings "
-        + "(verdict_policy=findings_severity_gated): every blocking finding "
-        + "was in a category this repository marks non-blocking "
-        + "(non_blocking_finding_categories); they remain listed above._"
-      );
+      artifact.review_markdown += "\n\n" + GATED_FINDINGS_RELAXATION_NOTE;
       artifact.verdict = "approve";
       source = "findings";
     }
@@ -525,12 +514,12 @@ function strictRequestChangesDetail(input: {
  * — a forcing layer (evidence blocker, tool-harness failure, min-successful,
  * `required_check_validation_mode=fail`) fired for these inputs. The
  * mapping also computes a #1016 unknown-evidence signal from the artifact's
- * own `grounding_status`: an originally blocker/major finding with
- * `grounding_status === "unverified"` (the verifier could not check the
- * claim — it did not disprove it) forces `request_changes` with a `#1016`
- * attribution note. Unverified minor/info findings concern non-blocking
- * claims and cannot expand the blocking surface. Refuted/unsupported
- * demotions alone do not force — they flow through the normal strict mapping.
+ * own `grounding_status`: any demoted finding with `grounding_status ===
+ * "unverified"` (the verifier could not check the claim — it did not disprove
+ * the claim) forces `request_changes` with a `#1016` attribution note, so
+ * an approve cannot silently certify a clean review the verifier never
+ * confirmed. Refuted/unsupported demotions alone do not force — they flow
+ * through the normal strict mapping.
  *
  * When an override flips the model verdict, the attribution note names
  * EVERY contributing safety signal — blocker counts, unverified-grounding

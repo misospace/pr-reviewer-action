@@ -7,6 +7,7 @@ import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 import { EMPTY_DISABLING_INPUTS, loadConfig, REASONING_EFFORT_INPUTS, toCamelCase } from "../src/config/load-config.js";
 import { isSecretValue, redactConfig, toJSON } from "../src/config/types.js";
 import { BOOLEAN_INPUTS, ENUM_INPUTS, FLOAT_INPUTS, INTEGER_INPUTS, SECRET_INPUTS } from "../src/config/schema.js";
+import { resolvePlatform } from "../src/platform/resolve.js";
 import { tierReasoningEffort } from "../src/routing/tiers.js";
 import { assertSupportedNode } from "../src/runtime/node-version.js";
 import { stageEnvFromConfig } from "../src/run/env.js";
@@ -116,6 +117,82 @@ test("#1161: the publish-mode enum accepts the blockers-only mode and still reje
   assert.throws(
     () => loadConfig(contract, { ...required, "publish-mode": "review_approvals" }),
     /must be one of: comment, review_comment, review_verdict, review_blockers/,
+  );
+});
+
+/** The platform values the contract documents, read back out of its prose.
+ * Every single-quoted lowercase token in the `platform` input description
+ * IS a platform value, so the contract and the typed schema can never drift
+ * apart in either direction (#1247): a documented value the schema rejects
+ * (the bug this issue reports) and a schema value the contract does not
+ * document both fail here. */
+function documentedPlatformValues(description: string): Set<string> {
+  return new Set([...description.matchAll(/'([a-z][a-z0-9-]*)'/g)].map((match) => match[1] as string));
+}
+
+test("#1247: the typed platform enum accepts every documented platform value, and 'tangled' still fails closed without TANGLED_REPO_DID", () => {
+  const required = Object.fromEntries(contract.inputs.filter((input) => input.required).map((input) => [input.id, `required-${input.id}`]));
+  // The platform vocabulary the contract documents and `resolvePlatform`
+  // implements. The typed enum is the vocabulary gate only: resolution (and
+  // the Tangled identity requirement) belongs to the platform seam.
+  const supported = ["auto", "forgejo", "github", "tangled"];
+  const platformInput = contract.inputs.find((input) => input.id === "platform");
+  assert.ok(platformInput, "the contract declares the platform input");
+  const documented = documentedPlatformValues(platformInput.description);
+  assert.deepEqual(documented, new Set(supported), "the contract documents exactly the supported platform values");
+  assert.deepEqual(new Set(ENUM_INPUTS["platform"]), documented, "the typed schema accepts exactly the documented platform values");
+
+  // Every supported value survives the typed config and reaches the stage
+  // env the platform seam reads.
+  for (const value of supported) {
+    const config = loadConfig(contract, { ...required, platform: value });
+    assert.equal(config.platform, value, value);
+    assert.equal(stageEnvFromConfig(config).PLATFORM, value, value);
+  }
+
+  // Every accepted value is one the resolver can actually resolve: the typed
+  // vocabulary and the seam never disagree about the supported set.
+  for (const [value, expected] of [
+    ["auto", "github"],
+    ["forgejo", "forgejo"],
+    ["github", "github"],
+    ["tangled", "tangled"],
+  ] as const) {
+    assert.equal(
+      resolvePlatform(value, value === "forgejo" ? "https://forgejo.example" : "", "https://github.com", value === "tangled" ? "did:plc:owner" : ""),
+      expected,
+      value,
+    );
+  }
+
+  // Accepting the value must not move the fail-closed identity requirement:
+  // an explicit 'tangled' without TANGLED_REPO_DID still refuses to resolve,
+  // composed the way the runtime composes it (typed config → stage env →
+  // platform seam).
+  const tangled = stageEnvFromConfig(loadConfig(contract, { ...required, platform: "tangled" }));
+  assert.throws(
+    () => resolvePlatform(tangled.PLATFORM, tangled.FORGEJO_API_URL ?? "", tangled.GITHUB_SERVER_URL ?? "", tangled.TANGLED_REPO_DID ?? ""),
+    /platform 'tangled' requires TANGLED_REPO_DID/,
+  );
+  assert.throws(
+    () => resolvePlatform(tangled.PLATFORM, tangled.FORGEJO_API_URL ?? "", tangled.GITHUB_SERVER_URL ?? "", " "),
+    /platform 'tangled' requires TANGLED_REPO_DID/,
+  );
+  // The same composition resolves once the Tangled identity is present.
+  assert.equal(
+    resolvePlatform(tangled.PLATFORM, tangled.FORGEJO_API_URL ?? "", tangled.GITHUB_SERVER_URL ?? "", "did:plc:owner"),
+    "tangled",
+  );
+
+  // A value outside the documented vocabulary still fails at the config boundary.
+  assert.throws(
+    () => loadConfig(contract, { ...required, platform: "gitlab" }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Input 'platform' must be one of:/);
+      for (const value of supported) assert.ok(error.message.includes(value), value);
+      return true;
+    },
   );
 });
 
