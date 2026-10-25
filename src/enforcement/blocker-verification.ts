@@ -687,9 +687,11 @@ const FULL_SHA_LENGTH = 40;
  * fail closed. Introducers CHAIN: "pinned at abc1234" must bind the
  * identifier, not have "at" swallowed as "pinned"'s token and the citation
  * then missed by the non-overlapping scan (which fails OPEN — the exact
- * shape the introducer exists to protect).
+ * shape the introducer exists to protect). A hop may carry ANY run of
+ * `:`/`=` separators ("version:: 3.6.1"), so a doubled separator cannot
+ * push the identifier out of reach of the capture.
  */
-const REVISION_KEYWORD_RE = /\b(?:(?:revision|release|tag|version|commit|branch|ref|pin|pinned|at)\b\s*[:=]?\s*)+([^\s]+)/gi;
+const REVISION_KEYWORD_RE = /\b(?:(?:revision|release|tag|version|commit|branch|ref|pin|pinned|at)\b\s*[:=]*\s*)+([^\s]+)/gi;
 
 /**
  * #1240: is the token a version identifier? The `v` form is a version

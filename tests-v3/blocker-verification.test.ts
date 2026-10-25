@@ -1288,6 +1288,7 @@ test("#1263 an introduced bare triple or short hex run still fails closed", asyn
     "The action does not declare `ai-api-key` input (action.yml at 20.11.1).",
     "The action does not declare `ai-api-key` input (action.yml at a1b2c3d).",
     "The action does not declare `ai-api-key` input; the version 20.11.1 manifest confirms it.",
+    "The action does not declare `ai-api-key` input; the version:: 20.11.1 manifest confirms it.",
     "The action does not declare `ai-api-key` input; pinned at abc1234 the manifest confirms it.",
     "The action does not declare `ai-api-key` input; at commit abc1234 the manifest confirms it.",
     "The action does not declare `ai-api-key` input; pinned at 20.11.1 the manifest confirms it.",
