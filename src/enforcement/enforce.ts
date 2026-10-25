@@ -8,7 +8,7 @@
  * The final reviewer still owns the verdict — these overlays run after the
  * verdict policy and are themselves deterministic policy, not model input.
  */
-import type { ReviewArtifact } from "./artifact.js";
+import { markRelaxationNotesSuperseded, type ReviewArtifact } from "./artifact.js";
 import { applyReviewThreadEnforcement, type EnforcementThread } from "./threads.js";
 import { applyHumanReviewEnforcement, type EnforcementHumanReview } from "./human-reviews.js";
 
@@ -28,30 +28,6 @@ export interface ToolHarnessArtifact {
 export interface EnforcementOutcome {
   applied: boolean;
   reason: string;
-}
-
-/**
- * #1248: the action-authored relaxation disclosures (findings_severity_gated
- * #775, #977, #976, #1016), matched by their exact line-initial openers.
- * Anchored like `ENFORCED_BANNER_RE`: only this codebase's own note text
- * matches, so model prose is never rewritten.
- */
-const RELAXATION_NOTE_RE = /^_Verdict relaxed from (structured|CI-only) findings/gm;
-
-/**
- * #1248: retire stale relaxation claims in the published body. A
- * findings-policy relaxation appends "_Verdict relaxed from … findings …_"
- * while the verdict is approve; when a deterministic layer later flips the
- * verdict back to request_changes (relax-then-force), that note would keep
- * asserting a relaxation that no longer holds. Marking it superseded keeps
- * the body honest without deleting the original disclosure.
- */
-export function markRelaxationNotesSuperseded(artifact: ReviewArtifact): void {
-  artifact.review_markdown = (artifact.review_markdown || "")
-    .replace(
-      RELAXATION_NOTE_RE,
-      "_Verdict relaxation superseded by enforcement: originally relaxed from $1 findings",
-    );
 }
 
 /**

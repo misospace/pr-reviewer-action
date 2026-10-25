@@ -19,8 +19,7 @@
  * boundary); this module composes it and owns the mode handling and markdown
  * consequences.
  */
-import type { ReviewArtifact } from "./artifact.js";
-import { markRelaxationNotesSuperseded } from "./enforce.js";
+import { markRelaxationNotesSuperseded, type ReviewArtifact } from "./artifact.js";
 import {
   evaluateRequiredCheckCoverage,
   type RequiredCheckCoverage,

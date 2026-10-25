@@ -765,3 +765,33 @@ test("#1248: forcing a verdict that was already request_changes keeps its proven
   assert.equal(blocked.verdict_source, "findings", "no flip means no provenance rewrite");
   assert.ok(!blocked.review_markdown.includes("superseded"), "nothing to supersede without a relaxation note");
 });
+
+test("#1248: a findings_severity_gated thread-escalation flip supersedes the prior relaxation note", () => {
+  const a = artifact({
+    verdict: "approve",
+    verdict_source: "findings",
+    review_markdown: "review" + GATED_RELAX_NOTE,
+    thread_dispositions: [{ thread_id: "t", disposition: "open", evidence: null }],
+  });
+  applyReviewThreadEnforcement(a, [
+    { thread_id: "t", path: "a.py", line: 3, severity: "blocker", message: "issue", own_finding: false, replies: 0 },
+  ], "findings_severity_gated");
+  assert.equal(a.verdict, "request_changes");
+  assert.equal(a.verdict_source, "findings", "thread settlement provenance stays findings");
+  assert.ok(a.review_markdown.includes("_Verdict relaxation superseded by enforcement: originally relaxed from structured findings"));
+  assert.ok(!a.review_markdown.includes("_Verdict relaxed from"), "the stale relaxed-verdict claim must not stand unqualified");
+});
+
+test("#1248: supersede rewrites only action-authored note openers at line start (#252 boundary)", () => {
+  const opener = "_Verdict relaxed from structured findings";
+  const midLine = artifact({
+    verdict: "approve",
+    review_markdown: `review — the model quoted: ${opener} (verdict_policy=findings_severity_gated): copied verbatim inline._`,
+  });
+  applyEvidenceBlockerEnforcement(midLine, { has_blocker: true, providers: [{ id: "sec", provider_severity: "blocker" }] });
+  assert.ok(
+    midLine.review_markdown.includes(`${opener} (verdict_policy=findings_severity_gated): copied verbatim inline.`),
+    "a mid-line mention is not a note opener and stays byte-identical",
+  );
+  assert.ok(!midLine.review_markdown.includes("superseded"), "nothing to supersede mid-line");
+});

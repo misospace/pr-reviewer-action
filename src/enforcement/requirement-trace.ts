@@ -68,8 +68,7 @@
  * path, and the model can never claim `pending` to escape a code proof.
  */
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
-import type { ReviewArtifact } from "./artifact.js";
-import { markRelaxationNotesSuperseded } from "./enforce.js";
+import { markRelaxationNotesSuperseded, type ReviewArtifact } from "./artifact.js";
 import { workspaceRegularFile, workspaceFsPath, workspacePathExists, workspacePathHasSymlinkComponent } from "../context/workspace-path.js";
 import { detectLanguage, isTestPath } from "../context/change-anchors.js";
 

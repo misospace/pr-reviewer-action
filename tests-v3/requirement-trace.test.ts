@@ -4356,3 +4356,24 @@ test("#1145: the escalation is stable against the #976/#977 relaxers (they refus
   assert.equal(relaxVerificationOnlyVerdict(art, { forced: false }), false);
   assert.equal(art.verdict, "request_changes");
 });
+
+test("#1248: a confirmed-unmet escalation flip supersedes a prior relaxation note", () => {
+  const trace = traceWithRows([
+    {
+      requirement_id: "req-1", disposition: "unverifiable", proof: "structural_state",
+      enforcement: [{ file: "src/a.ts", line: 1 }], test: [], reason: "x",
+      notes: ["structural-proof-unconfirmed"],
+    },
+  ]);
+  const art = artifact({
+    verdict: "approve",
+    verdict_source: "findings",
+    review_markdown: "review\n\n_Verdict relaxed from structured findings (verdict_policy=findings_severity_gated): every blocking finding was non-blocking here._",
+  });
+  const escalated = applyConfirmedUnmetEscalation(art, trace, new Map([["req-1", "must hold"]]));
+  assert.equal(escalated, 1);
+  assert.equal(art.verdict, "request_changes");
+  assert.equal(art.verdict_source, "enforcement");
+  assert.ok(art.review_markdown.includes("_Verdict relaxation superseded by enforcement: originally relaxed from structured findings"));
+  assert.ok(!art.review_markdown.includes("_Verdict relaxed from"));
+});
