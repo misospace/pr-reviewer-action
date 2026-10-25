@@ -8,6 +8,7 @@ import {
   publishReview,
   publishStepRuns,
   renderFindingsSummary,
+  renderIndependentConfidenceBlock,
   renderOutsideDiffSection,
   renderPartialCoverageNotice,
   resolveCleanupFlag,
@@ -3413,4 +3414,140 @@ test("#1176: a Forgejo publish run deletes superseded managed reviews that carry
   assert.equal(withFindings.calls.some((c) => c.url.includes("/reviews/12/dismissals")), false, "the just-published review is never dismissed");
   assert.ok(withFindings.result.messages.some((line) => line.includes("carries inline findings") && line.includes("deletion refused")), withFindings.result.messages.join("\n"));
   assert.ok(withFindings.result.messages.some((line) => line.includes("Superseded reviews: eligible=2 dismissed=1 minimized=0 failed=0 deleted=0")), withFindings.result.messages.join("\n"));
+});
+
+// ---------------------------------------------------------------------------
+// #1230: the publish-side cut of the confidence reason must never leave a
+// MODEL-AUTHORED cap-note look-alike at the published trailing edge.
+// ---------------------------------------------------------------------------
+
+// The REAL note template and a REAL cap token — the adversarial payload is
+// the vocabulary itself, not a paraphrase of it.
+const CONF_CAP_TOKEN = "blocker_cap_2";
+const CONF_CAP_LOOKALIKE = ` [deterministic cap: ${CONF_CAP_TOKEN}]`;
+/** The publish-side cap the published reason is cut at. */
+const CONF_PUBLISH_CAP = 300;
+
+function confidenceBlock(reason: string): string {
+  return renderIndependentConfidenceBlock(
+    { status: "scored", score: "4", risk: "low", reason, model: "scorer-model" },
+    "inert",
+  );
+}
+
+/** The published reason line of the confidence section: the head line, the
+ * ">" separator, then the reason itself. */
+function publishedReasonLine(body: string): string {
+  const lines = body.split("\n");
+  assert.ok(lines[2]?.startsWith("> **Independent confidence:"), body);
+  assert.equal(lines[3], ">", body);
+  const line = lines[4] ?? "";
+  assert.ok(line.startsWith("> "), body);
+  return line.slice(2);
+}
+
+// #1230: the published "## Independent Confidence" section is a PUBLIC
+// surface, and its 300-char cut is TIGHTER than the confidence module's own
+// 600-char bound — so the cut can drag an INTERIOR look-alike onto the
+// trailing edge. The published trailing edge must never read as the
+// action-owned note.
+test("#1230: the published confidence reason never ends in a model-authored cap-note look-alike", () => {
+  // (a) the cut lands exactly on the look-alike's closing "]": the whole
+  // look-alike is revealed COMPLETE at the trailing edge.
+  const completeHead = "x".repeat(CONF_PUBLISH_CAP - CONF_CAP_LOOKALIKE.length);
+  const complete = `${completeHead}${CONF_CAP_LOOKALIKE} and the model kept talking after it`;
+  assert.equal(complete.slice(0, CONF_PUBLISH_CAP), `${completeHead}${CONF_CAP_LOOKALIKE}`);
+  const completeBody = confidenceBlock(complete);
+  assert.ok(!completeBody.includes("[deterministic cap:"), completeBody);
+  assert.ok(!completeBody.includes(CONF_CAP_TOKEN), completeBody);
+  assert.ok(completeBody.includes(`> ${completeHead}\n`), completeBody);
+
+  // (b) the look-alike STRADDLES the cut: the template opens before the
+  // 300-char boundary and closes after it, so the cut leaves an unterminated
+  // fragment at the trailing edge.
+  const fragment = " [deterministic cap: yyy";
+  const straddleHead = "x".repeat(CONF_PUBLISH_CAP - fragment.length);
+  const straddling = `${straddleHead}${fragment}acker_cap_2] and the model kept talking after it`;
+  assert.equal(straddling.slice(0, CONF_PUBLISH_CAP), `${straddleHead}${fragment}`);
+  const straddleBody = confidenceBlock(straddling);
+  assert.ok(!straddleBody.includes("[deterministic cap:"), straddleBody);
+  assert.ok(!straddleBody.includes("[deterministic cap: yyy"), straddleBody);
+  assert.ok(straddleBody.includes(`> ${straddleHead}\n`), straddleBody);
+
+  // (c) a SHORT canonical reason keeps its ACTION-OWNED note verbatim: the
+  // fix must never strip the note the action itself appended.
+  const owned = `the review is solid${CONF_CAP_LOOKALIKE}`;
+  const ownedBody = confidenceBlock(owned);
+  assert.ok(ownedBody.includes(`> ${owned}\n`), ownedBody);
+
+  // (d) a benign reason is byte-identical to the pre-fix rendering.
+  const benign = "the diff is small and the tests cover the new branch";
+  assert.ok(confidenceBlock(benign).includes(`> ${benign}\n`), confidenceBlock(benign));
+
+  // (e) the EXACT boundary: a reason of exactly 300 chars is published WHOLE
+  // (no cut), and a reason of 301 chars is cut at 300 — only its 301st
+  // character is lost.
+  const exact300 = `${"x".repeat(CONF_PUBLISH_CAP - 1)}Z`;
+  const exact301 = `${exact300}Q`;
+  assert.equal(exact300.length, CONF_PUBLISH_CAP);
+  assert.equal(exact301.length, CONF_PUBLISH_CAP + 1);
+  assert.equal(publishedReasonLine(confidenceBlock(exact300)), exact300);
+  assert.equal(publishedReasonLine(confidenceBlock(exact301)), exact300);
+  assert.ok(!publishedReasonLine(confidenceBlock(exact301)).includes("Q"), "the 301st character is cut");
+
+  // (e') the same boundary on a note-shaped tail: at exactly 300 chars the
+  // reason FITS, so it is published whole and keeps its trailing note; one
+  // character more and the cut reveals that note at the trailing edge, so
+  // the strip removes it.
+  const fitted = `${"x".repeat(CONF_PUBLISH_CAP - CONF_CAP_LOOKALIKE.length)}${CONF_CAP_LOOKALIKE}`;
+  assert.equal(fitted.length, CONF_PUBLISH_CAP);
+  assert.equal(publishedReasonLine(confidenceBlock(fitted)), fitted);
+  const cutNote = confidenceBlock(`${fitted}Q`);
+  assert.ok(!cutNote.includes("[deterministic cap:"), cutNote);
+  assert.ok(!cutNote.includes(CONF_CAP_TOKEN), cutNote);
+
+  // (f) a CASING variant revealed at the cut is stripped too: the note
+  // vocabulary is matched case-insensitively.
+  const upperFragment = " [DETERMINISTIC CAP: yyy";
+  const upperHead = "x".repeat(CONF_PUBLISH_CAP - upperFragment.length);
+  const upper = `${upperHead}${upperFragment}acker_cap_2] and the model kept talking after it`;
+  assert.equal(upper.slice(0, CONF_PUBLISH_CAP), `${upperHead}${upperFragment}`);
+  const upperBody = confidenceBlock(upper);
+  assert.ok(!upperBody.includes("DETERMINISTIC CAP"), upperBody);
+  assert.ok(!upperBody.includes("[deterministic cap:"), upperBody);
+  assert.ok(upperBody.includes(`> ${upperHead}\n`), upperBody);
+});
+
+// #1230: the advisory-concern EVIDENCE never carries an action-owned note —
+// only the confidence REASON does — so a note-shaped span at its trailing edge
+// is always model-authored and is stripped UNCONDITIONALLY (unlike the
+// reason, whose trailing note may be the action-owned one).
+test("#1230: the published advisory-concern evidence never ends in a model-authored cap-note look-alike", () => {
+  const block = (evidence: string): string => renderIndependentConfidenceBlock(
+    {
+      status: "scored", score: "4", risk: "low", reason: "the review is solid", model: "scorer-model",
+      concerns: [{ file: "src/x.ts", line: 3, evidence }],
+    },
+    "inert",
+  );
+
+  // (a) a SHORT evidence that ends in a model-authored note-shaped span
+  // publishes WITHOUT it.
+  const short = block(`the caller ignores the guard${CONF_CAP_LOOKALIKE}`);
+  assert.ok(short.includes("> - Advisory concern at src/x.ts:3 — the caller ignores the guard\n"), short);
+  assert.ok(!short.includes("[deterministic cap:"), short);
+  assert.ok(!short.includes(CONF_CAP_TOKEN), short);
+
+  // (b) an evidence whose INTERIOR look-alike straddles the 300-char cut
+  // publishes WITHOUT a trailing fragment.
+  const fragment = " [deterministic cap: yyy";
+  const head = "x".repeat(CONF_PUBLISH_CAP - fragment.length);
+  const straddling = block(`${head}${fragment}acker_cap_2] and the model kept talking after it`);
+  assert.ok(!straddling.includes("[deterministic cap:"), straddling);
+  assert.ok(!straddling.includes("[deterministic cap: yyy"), straddling);
+  assert.ok(straddling.includes(`> - Advisory concern at src/x.ts:3 — ${head}\n`), straddling);
+
+  // (c) a benign evidence is byte-identical to the pre-fix rendering.
+  const benign = block("the caller ignores the guard");
+  assert.ok(benign.includes("> - Advisory concern at src/x.ts:3 — the caller ignores the guard\n"), benign);
 });
