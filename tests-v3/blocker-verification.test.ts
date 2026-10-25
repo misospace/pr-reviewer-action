@@ -2190,3 +2190,38 @@ test("#1238 a message that names a DIFFERENT workflow file does not use the witn
   assert.equal(own.grounding_status, undefined);
   assert.equal(own.severity, "blocker");
 });
+
+test("#1240 a deterministic enforcement finding is never decided by the model-evidence boundary", async () => {
+  // #1145 confirmed-unmet escalation: the synthesized finding embeds the
+  // requirement's own text (pull-request-controlled prose). The boundary must
+  // not read that prose as a source claim: a requirement whose wording
+  // happens to look like a gate-absence claim would otherwise be REFUTED
+  // against the action's own implementation, demoting the escalation's
+  // blocker and letting the strict mapping derive an approve the
+  // deterministic layer never decided.
+  const message = "Confirmed-unmet requirement req-abc123def456: the requirement refuted by deterministic proof against checkout at head — “the action never filters drafts, its metadata declares no input”.";
+  const deterministic = markerFinding({ message, category: "requirements", severity: "blocker" });
+  // Adversarial counterpart: the SAME prose as a MODEL claim is still
+  // decided — the guard is scoped to the deterministic category, not to the
+  // message shape.
+  const model = markerFinding({ message, category: "bug", severity: "blocker" });
+  const result = await verify(
+    [deterministic, model],
+    async () => { throw new Error("gate absence must not read reviewed repository"); },
+    INPUT_REGISTRY,
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+    "v3.7.0",
+  );
+  // The deterministic finding is left entirely alone.
+  assert.deepEqual(result.findings.map(({ index, kind, status }) => [index, kind, status]), [
+    [1, "gate_absence", "refuted"],
+  ]);
+  assert.equal(deterministic.grounding_status, undefined);
+  assert.equal(deterministic.capped_from, undefined);
+  assert.equal(deterministic.severity, "blocker");
+  assert.equal(result.demoted, 1);
+  // The model claim with the same prose is decided as usual.
+  assert.equal(model.grounding_status, "refuted");
+  assert.equal(model.severity, "minor");
+  assert.equal(model.capped_from, "blocker");
+});

@@ -25,6 +25,18 @@ export const MAX_ACTION_SOURCE_READS = 4;
  * confirmation.
  */
 export const EVIDENCE_LINE_WINDOW = 2;
+/**
+ * #1240: finding categories the DETERMINISTIC enforcement layer synthesizes
+ * (today: the #1145 confirmed-unmet escalation).
+ *
+ * A deterministic finding is not a model claim: its message carries the
+ * requirement's own text — pull-request-controlled prose — so it is decided
+ * by the deterministic layer alone (the requirement validator's structural
+ * proof at head), never by this boundary. The model's own category allowlist
+ * (src/model/verdict.ts) does not contain these categories, so no model
+ * finding can be mistaken for a deterministic one.
+ */
+export const DETERMINISTIC_FINDING_CATEGORIES: ReadonlySet<string> = new Set(["requirements"]);
 
 export interface SourceReadOk { status: "ok"; text: string; provenance: EvidenceProvenance; }
 export interface SourceReadUnavailable { status: "unavailable"; reason: string; }
@@ -1372,6 +1384,16 @@ export async function applyBlockerVerification(
   for (let index = 0; index < findings.length; index += 1) {
     const finding = findings[index]!;
     if (finding.category === "verification") continue;
+    // #1240: a DETERMINISTIC enforcement finding (the #1145 confirmed-unmet
+    // escalation) is decided by the deterministic layer alone — the
+    // requirement validator's structural proof at head. Its message embeds
+    // the requirement's own text, so reading it here as a source claim would
+    // let a requirement whose prose happens to look like a gate-absence or
+    // input-declaration claim be REFUTED against the action's own
+    // implementation: the escalation's blocker would be demoted and the
+    // strict mapping would derive an approve the deterministic layer never
+    // decided.
+    if (DETERMINISTIC_FINDING_CATEGORIES.has(finding.category)) continue;
     // Already processed by an earlier pass of this boundary (the engine runs
     // it again after thread settlement re-emits prior findings): never
     // re-verify, re-demote, or overwrite a recorded grounding.
