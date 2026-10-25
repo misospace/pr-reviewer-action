@@ -645,6 +645,10 @@ interface InputCandidate {
 // does: a message naming both a different line and the pin is still a
 // claim about the other line and stays unverified. A message naming any
 // revision neither witness answers for stays unverified exactly as before.
+// #1263: the pin's own SHORT form (a prefix of the pinned sha) reaches
+// this comparison as a qualifier — the pin is the only thing that can say
+// which short quote names it — so a claim citing it is decided with the
+// PINNED contract, never with the executing revision's registry.
 //
 // The scope of the revision scan is the WHOLE finding message: a claim and
 // the revision it talks about can sit in different sentences ("The action
@@ -671,13 +675,47 @@ interface RevisionQualifier {
 const VERSION_QUALIFIER_RE = /^v?(\d+(?:\.\d+)*)(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z][0-9A-Za-z.-]*)?$/;
 /** A commit sha in its short or full form: 7–40 hex characters. */
 const SHA_QUALIFIER_RE = /^[0-9a-f]{7,40}$/i;
+/** The length of a full sha1 hex digest (#1263: the only SHA shape the
+ * standalone scan trusts, because no incidental token takes it). */
+const FULL_SHA_LENGTH = 40;
+/** The length of the SHORT form of a commit sha — the prefix a consumer
+ * quotes. #1263: the short form is not standalone evidence on its own (an
+ * incidental token takes it too), but the PINNED revision can vouch for the
+ * one short form that names it. */
+const MIN_SHA_LENGTH = 7;
 /**
  * The words that INTRODUCE a revision identifier. The introduced token
  * counts as a qualifier only when it is version-like or SHA-like: a bare
  * integer ("version 2", "ref: 1234") names no revision, and a prose word
  * ("release notes") names none either.
+ *
+ * #1263: "at" and "pin"/"pinned" are introducers too — the shapes a finding
+ * uses to cite the revision it means ("action.yml at def5678", "true at
+ * v3.6.1", "pinned at abc1234"), and the only context that keeps an
+ * otherwise-ambiguous bare token (a short hex run, a bare numeric triple)
+ * fail closed. Introducers CHAIN: "pinned at abc1234" must bind the
+ * identifier, not have "at" swallowed as "pinned"'s token and the citation
+ * then missed by the non-overlapping scan (which fails OPEN — the exact
+ * shape the introducer exists to protect).
+ *
+ * A hop may carry a run of separators — whitespace, `:`, `=`, `,` and `;`
+ * in ONE character class, so a separator run cannot be split in many ways
+ * and the scan stays linear (#1263: the ambiguous `\s*[:=]*\s*` split a
+ * whitespace run in k+1 ways and made the scan quadratic) — and a bounded
+ * layer of CONNECTOR words ("pinned TO abc1234", "version OF 3.6.1",
+ * "released AS 3.6.1", "at commit SHA abc1234", "at THE abc1234"): a
+ * genuine citation puts a connector or a piece of punctuation between the
+ * introducer and the identifier, and missing it fails OPEN — the claim
+ * names another revision and is then decided with the executing revision's
+ * bytes. The connector layer is closed and bounded: it never skips an
+ * ordinary word to find a version-shaped token ("the version of Node
+ * 20.11.1" binds "Node"), so the #1263 precision is preserved.
+ *
+ * The introducer set also accepts the VERB forms a citation uses ("released
+ * as 3.6.1", "tagged as abc1234", "committed as abc1234") and collapses
+ * "pin"/"pinned" into one form.
  */
-const REVISION_KEYWORD_RE = /\b(?:revision|release|tag|version|commit|branch|ref)\b\s*[:=]?\s*([^\s]+)/gi;
+const REVISION_KEYWORD_RE = /\b(?:(?:revision|release(?:d)?|tag(?:ged)?|version|commit(?:ted)?|branch|ref|pin(?:ned)?|at)\b[\s:=,;]*(?:\b(?:to|of|as|is|in|on|from|into|onto|the|a|an|sha|rev)\b[\s:=,;]*)*)+([^\s]+)/gi;
 
 /**
  * #1240: is the token a version identifier? The `v` form is a version
@@ -712,15 +750,49 @@ function stripTokenEdges(token: string): string {
 }
 
 /**
+ * #1263: does the token name the PINNED revision in its SHORT form? The pin
+ * is an exact commit, so the consumer's short quote is a PREFIX of it — and
+ * only the pin itself can say which short form names it. A short hex run
+ * that is not a prefix of the pin stays incidental (a colour).
+ */
+function isPinnedShortForm(token: string, pinnedSha: string | null): boolean {
+  if (pinnedSha === null) return false;
+  if (token.length < MIN_SHA_LENGTH) return false;
+  return pinnedSha.startsWith(token.toLowerCase());
+}
+
+/**
  * #1240: the revision qualifiers a finding message names.
  *
- * A qualifier is a revision identifier appearing as a STANDALONE token:
- * version-like ("v3.7.0", "3.7.0"), SHA-like ("abc1234"), or a token a
- * revision keyword introduces that is itself version-like or SHA-like
- * ("version: v3.6.1"). The scan is O(message) and bounded by
- * MAX_CLAIM_SCAN_LENGTH.
+ * A qualifier is either a revision identifier appearing as a STANDALONE
+ * token that cannot be an incidental number — a `v`-prefixed version
+ * ("v3.7.0"), a version carrying a pre-release/build suffix
+ * ("3.7.0-dev+abc1234"), or a FULL-length commit sha ("a"*40) — or a token
+ * a revision introducer names ("version: v3.6.1", "action.yml at 3.6.1",
+ * "commit abc1234"), which counts whenever it is version-like or SHA-like.
+ *
+ * #1263: a BARE numeric triple ("20.11.1", a Node version) or a SHORT hex
+ * run ("a1b2c3d", a colour) is not standalone evidence of a revision —
+ * shape alone cannot tell it apart from an incidental version-like token,
+ * and treating it as one leaves a source-contradicted claim
+ * `other-revision-unverified` and forces request_changes through the #1016
+ * unknown-evidence rule. Such a token only qualifies when an introducer
+ * names it, so a claim that genuinely cites another revision
+ * ("at 3.6.1", "pinned at a1b2c3d") still fails closed. The scan is
+ * O(message) and bounded by MAX_CLAIM_SCAN_LENGTH.
+ *
+ * The introducer hop (#1263) carries a bounded layer of CONNECTOR words
+ * and one separator class between the introducer and the identifier
+ * ("pinned to abc1234", "version of 3.6.1", "released as 3.6.1", "at
+ * commit sha abc1234"), so a genuine citation is never missed; the verb
+ * forms ("released", "tagged", "committed") are introducers too.
+ *
+ * #1263: the standalone scan additionally trusts the SHORT form of the
+ * PINNED revision when the consumer pinned one: only the pin can say which
+ * short quote names it, so a claim citing the pin's short form is decided
+ * with the PINNED contract instead of the executing revision's registry.
  */
-function revisionQualifiers(message: string): RevisionQualifier[] {
+function revisionQualifiers(message: string, pinnedSha: string | null = null): RevisionQualifier[] {
   const found: RevisionQualifier[] = [];
   if (message.length > MAX_CLAIM_SCAN_LENGTH) return found;
   const seen = new Set<string>();
@@ -736,8 +808,18 @@ function revisionQualifiers(message: string): RevisionQualifier[] {
     // Cheap prefilter: every revision identifier carries a digit, so an
     // ordinary prose word never qualifies.
     if (!/\d/.test(token)) continue;
-    if (isVersionLike(token)) push(token.toLowerCase(), "version");
-    else if (isShaLike(token)) push(token.toLowerCase(), "sha");
+    if (isVersionLike(token)) {
+      // #1263: standalone, only shapes no incidental number takes: the
+      // deliberate `v` marker, or a stamp-shaped token with a
+      // pre-release/build suffix.
+      if (/^v/i.test(token) || /[-+]/.test(token)) push(token.toLowerCase(), "version");
+    } else if (isShaLike(token) && (token.length === FULL_SHA_LENGTH || isPinnedShortForm(token, pinnedSha))) {
+      // #1263: a full commit hash cannot plausibly be incidental; a short
+      // hex run can (a colour), so it qualifies only via an introducer —
+      // or when it is the PINNED revision's own short form, which the pin
+      // itself vouches for.
+      push(token.toLowerCase(), "sha");
+    }
   }
   for (const match of message.matchAll(REVISION_KEYWORD_RE)) {
     const token = stripTokenEdges(match[1] ?? "");
@@ -822,7 +904,9 @@ function qualifierMatchesExecutingRevision(qualifier: RevisionQualifier, executi
  * The pin is an EXACT COMMIT, not a release line: only a SHA-like
  * qualifier can name it, and it matches when the pinned sha EXTENDS the
  * qualifier — the full 40-hex sha, or the short form the consumer quoted
- * (a prefix of the pin). A version-like qualifier names a line, never a
+ * (a prefix of the pin; #1263: that short form reaches this comparison as
+ * a qualifier because the standalone scan trusts a short hex run that
+ * prefixes the pin). A version-like qualifier names a line, never a
  * commit, so it can never match the pin: a message naming both a
  * different line and the pin is still a claim about the other line, and
  * it stays unverified.
@@ -1033,18 +1117,20 @@ interface ClaimClassification {
 /** Classify once per finding; the input candidates and the gate-absence
  * sentences are reused by the verification branch instead of rescanning the
  * message. The revision-qualifier scan (#1240) runs once per message, over
- * the whole message. */
-function classifyClaim(message: string, workflowWitnessAvailable: boolean): ClaimClassification {
+ * the whole message. `pinnedSha` is the exact commit the consumer pinned
+ * (#1263): the scan trusts the pin's own SHORT form as a qualifier, so a
+ * claim citing it is decided with the PINNED contract. */
+function classifyClaim(message: string, workflowWitnessAvailable: boolean, pinnedSha: string | null = null): ClaimClassification {
   if (assertsCommittedMarker(message)) {
     return { kind: "committed_literal", inputCandidates: [], gateSentences: [], qualifiers: [] };
   }
   const inputCandidates = classifyInputDeclaration(message, workflowWitnessAvailable);
   if (inputCandidates.length > 0) {
-    return { kind: "input_declaration", inputCandidates, gateSentences: [], qualifiers: revisionQualifiers(message) };
+    return { kind: "input_declaration", inputCandidates, gateSentences: [], qualifiers: revisionQualifiers(message, pinnedSha) };
   }
   const gateSentences = gateAbsenceSentences(message);
   if (gateSentences.length > 0) {
-    return { kind: "gate_absence", inputCandidates: [], gateSentences, qualifiers: revisionQualifiers(message) };
+    return { kind: "gate_absence", inputCandidates: [], gateSentences, qualifiers: revisionQualifiers(message, pinnedSha) };
   }
   if (REQUIREMENT_NOT_ENFORCED_RE.test(message)) {
     return { kind: "requirement_claim", inputCandidates: [], gateSentences: [], qualifiers: [] };
@@ -1408,7 +1494,13 @@ export async function applyBlockerVerification(
     // for that file means no witness, and the claim keeps the behavior it
     // had before the witness existed.
     const workflowNames = workflowWitnessNames(finding, options.workflowInputsByFile);
-    const { kind, inputCandidates, gateSentences, qualifiers } = classifyClaim(finding.message, workflowNames !== null);
+    const { kind, inputCandidates, gateSentences, qualifiers } = classifyClaim(
+      finding.message,
+      workflowNames !== null,
+      // #1263: the pin's own short form is a qualifier — only the pin can
+      // say which short quote names it.
+      pinned?.revision ?? null,
+    );
     if (kind === null) continue;
 
     // #1240: the revision qualifiers that fail the EXECUTING match. An
