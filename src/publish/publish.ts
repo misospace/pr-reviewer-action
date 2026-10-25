@@ -20,6 +20,7 @@ import {
   prescriptionKeyDigest, recoverPublishedSuggestion, MAX_CARRYOVER_KEYS_PER_RUN, SEVERITY_LABELS,
 } from "./inline-findings.js";
 import { redactText } from "../context/redact.js";
+import { stripRevealedCapNoteTails } from "../confidence/result.js";
 import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, parseMetadata, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
 import { FINDING_OUTCOMES_SCHEMA, isProvenHeadSha, MAX_LEDGER_EVENTS, normalizeOutcomeEvent, serializeOutcomeLedger, type OutcomeEvent, type OutcomeLedger } from "../outcomes/schema.js";
 import { parseFindingIdentityMarker } from "../outcomes/identity.js";
@@ -30,7 +31,7 @@ import { ownerMatchesIdentity, type TrustedOwnerIdentity } from "../platform/own
 import { strictReviewResult } from "../enforcement/verdict-policy.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
 import { COVERAGE_NOTICE_MAX_ITEMS, type PartialCoverage } from "../tools/coverage.js";
-import { isIncompleteReason, renderFindingsSummary, severityCountsLabel, MAX_REVIEW_TRIAGE_REASON_CHARS, type IncompleteReason } from "./outputs.js";
+import { isIncompleteReason, renderFindingsSummary, severityCountsLabel, MAX_REVIEW_TRIAGE_REASON_CHARS, publishedConfidenceReason, type IncompleteReason } from "./outputs.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
 import type { HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 import { MAX_FEEDBACK_COMMENT_IDS } from "../platform/publish-api.js";
@@ -473,7 +474,7 @@ export function renderIndependentConfidenceBlock(
   const modelNote = confidence.model !== "" ? ` (model: ${escapeCodeSpan(confidence.model, 120)})` : "";
   const lines = ["## Independent Confidence", "", `> ${head}${modelNote}`];
   const reason = escapeTableCell(
-    sanitizeMarkdown(redactText(String(confidence.reason ?? "")), linkMode).replace(/\s+/g, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS),
+    publishedConfidenceReason(sanitizeMarkdown(redactText(String(confidence.reason ?? "")), linkMode)),
   );
   if (reason !== "") {
     lines.push(">", `> ${reason}`);
@@ -487,8 +488,18 @@ export function renderIndependentConfidenceBlock(
     const line = typeof concern.line === "number" && Number.isInteger(concern.line) && concern.line >= 0
       ? `:${concern.line}`
       : "";
+    // #1230: the concern evidence NEVER carries an action-owned note — only
+    // the confidence REASON does — so a note-shaped span at its trailing edge
+    // is always model-authored. The strip is therefore UNCONDITIONAL (unlike
+    // the reason's `publishedConfidenceReason`, which must keep a
+    // reason-fitted action-owned note): the same reveal strip the confidence
+    // module uses (#1166), applied AFTER the cut so a look-alike the cut
+    // reveals — complete, or truncated into an unterminated fragment — cannot
+    // survive at the published trailing edge.
     const evidence = escapeTableCell(
-      sanitizeMarkdown(redactText(String(concern.evidence ?? "")), linkMode).replace(/\s+/g, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS),
+      stripRevealedCapNoteTails(
+        sanitizeMarkdown(redactText(String(concern.evidence ?? "")), linkMode).replace(/\s+/g, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS),
+      ),
     );
     const location = file !== "" || line !== "" ? `${file}${line}` : "";
     const body = evidence !== "" ? ` — ${evidence}` : "";

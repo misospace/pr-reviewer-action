@@ -15,6 +15,7 @@
  */
 import { sanitizeMarkdown, type UpstreamLinkMode } from "./sanitize.js";
 import { redactText } from "../context/redact.js";
+import { stripRevealedCapNoteTails } from "../confidence/result.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
 import { SEVERITY_LABELS } from "./inline-findings.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
@@ -34,6 +35,40 @@ import { isHumanReviewRoutingStatus } from "../routing/human-review-routing.js";
  * two-fold, and cutting an escape pair in half would itself be a rendering
  * bug), so the published bytes are bounded at roughly twice this. */
 export const MAX_REVIEW_TRIAGE_REASON_CHARS = 300;
+
+/**
+ * #1230: the confidence reason as it is published on a public surface (the
+ * published review body and the step summary).
+ *
+ * The canonical reason arrives from the confidence module ALREADY bounded
+ * (600 chars) and reveal-stripped, and the canonical reason's own trailing
+ * note is the ACTION-OWNED one (`confidenceCapNote`, rebuilt from the
+ * structured `caps` field), so a reason that FITS this surface's 300-char
+ * budget is published whole and keeps that note verbatim.
+ *
+ * This surface's cap is TIGHTER than the confidence module's bound, so the
+ * cut can drag an INTERIOR look-alike onto the trailing edge. A CUT reason
+ * therefore takes the same reveal strip the confidence module uses (#1166):
+ * a cut reason can never END in a model-authored `[deterministic cap: …]` —
+ * complete, or truncated into an unterminated fragment. The cost is that a
+ * cut reason DROPS the action-owned note instead of publishing it truncated;
+ * the structured caps remain in `confidence-score.json`.
+ *
+ * The precondition this helper relies on is the confidence module's own
+ * contract: the canonical reason it hands over is strip-clean, and only its
+ * trailing note is the action-owned one. This helper does not re-derive that
+ * property, and it is not a defence against a note-shaped span the CANONICAL
+ * reason already ends in.
+ *
+ * The input is the reason AFTER the caller's own redaction / link
+ * sanitization — this helper owns only the whitespace flattening, the
+ * length cap, and the reveal strip.
+ */
+export function publishedConfidenceReason(reason: string): string {
+  const text = reason.replace(/\s+/g, " ").trim();
+  if (text.length <= MAX_REVIEW_TRIAGE_REASON_CHARS) return text;
+  return stripRevealedCapNoteTails(text.slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS));
+}
 
 // ---------------------------------------------------------------------------
 // Findings summary (moved from publish.ts, #975): the per-finding table a
@@ -538,7 +573,7 @@ export function renderStepSummary(telemetry: StepSummaryTelemetry): string {
   if (telemetry.confidence) {
     const confidence = telemetry.confidence;
     const reason = escapeTableCell(
-      redactText(confidence.reason).replace(/\s+/g, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS),
+      publishedConfidenceReason(redactText(confidence.reason)),
     );
     let value: string;
     if (confidence.status === "scored" && /^[0-5]$/.test(confidence.score)) {
