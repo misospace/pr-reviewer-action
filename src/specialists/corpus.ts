@@ -17,6 +17,7 @@
  * v2 file read is an entry in the `SpecialistCorpusWorkspace` map keyed by the
  * exact v2 filename (`Uint8Array | null`; `null` = file absent). */
 
+import { fenceDelimiterFor } from "../context/fence.js";
 import { fenceSafeLength } from "../context/related-context.js";
 import { MAX_LEDGER_MARKDOWN_BYTES } from "../requirements/ledger.js";
 
@@ -79,11 +80,10 @@ const SECTION_TRUNCATED_MARKER = "…[section truncated to fit specialist corpus
 
 const FENCE_LINE_RE = /^(`{3,})(\S*)\s*$/;
 
-/** Wrap untrusted body in a fence its own backtick runs cannot close. */
+/** Wrap untrusted body in a fence its own backtick runs cannot close
+ * (canonical rule: `fenceDelimiterFor`, #1258). */
 function fence(info: string, body: string): string {
-  let longest = 0;
-  for (const run of body.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
-  const delimiter = "`".repeat(Math.max(3, longest + 1));
+  const delimiter = fenceDelimiterFor(body);
   return `${delimiter}${info}\n${body}\n${delimiter}`;
 }
 

@@ -21,10 +21,17 @@
  *   (#805); a refused path that exists gets its own notice;
  * - the line count is the number of newline bytes (GNU `wc -l`), and the
  *   file is embedded verbatim, so one without a trailing newline runs into
- *   the closing fence exactly as `cat` would. */
+ *   the closing fence exactly as `cat` would.
+ *
+ * #1258 (deliberate divergence from v2): the embedding fence is adaptive —
+ * a delimiter longer than any backtick run in the file, floored at three.
+ * The embedded bytes come from the PR's head tree, so a fixed ```yaml
+ * wrapper was closable by PR-controlled manifest content; a benign manifest
+ * keeps the exact v2 bytes. */
 
 import { readFileSync } from "node:fs";
 import { jqEach, jqField } from "../platform/jq.js";
+import { fenceDelimiterFor } from "./fence.js";
 import { workspaceFsPath, workspacePathExists, workspaceRegularFile } from "./workspace-path.js";
 
 export const MANIFEST_LINE_BUDGET = 1200;
@@ -88,7 +95,8 @@ export function buildManifestContext(prFilesRaw: unknown, workspace: string): Ma
         break;
       }
       total += lines;
-      parts.push(enc(`## File: ${file} (${lines} lines)\n\`\`\`yaml\n`), content, enc("```\n\n"));
+      const fence = fenceDelimiterFor(content);
+      parts.push(enc(`## File: ${file} (${lines} lines)\n${fence}yaml\n`), content, enc(`${fence}\n\n`));
     }
   }
   return { artifacts: new Map([["manifest-context.md", new Uint8Array(Buffer.concat(parts))]]), manifests };

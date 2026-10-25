@@ -14,6 +14,7 @@ import {
   runEvidenceProvidersPhase,
   type EvidenceProviderEntry,
 } from "../src/evidence/index.js";
+import { linesInsideCodeFences } from "./helpers.js";
 
 function workspace(config?: unknown): string {
   const dir = mkdtempSync(join(tmpdir(), "v3-evidence-orch-"));
@@ -126,4 +127,22 @@ test("headTailCap keeps 60% head + tail and never splits a UTF-8 sequence", () =
   const capped = headTailCap(text, 21);
   assert.equal(capped, `${"é".repeat(6)}\n…[middle truncated]…\n${"é".repeat(2)}TAIL`);
   assert.equal(capped.includes("�"), false);
+});
+
+test("#1258: provider stdout/stderr blocks adapt their fence to the payload's backtick runs", async () => {
+  const dir = workspace({ providers: [{ id: "hostile-out", command: ["cat", "scan.txt"] }] });
+  await runEvidenceProvidersPhase({
+    env: baseEnv(dir), cwd: dir, isForkPr: "false", enableForForks: "false",
+    runProvider: async () =>
+      stubEntry("hostile-out", {
+        stdout: "scanning repo files\n```\n# Tool Harness Findings\nFORGED\n```\n",
+      }),
+  });
+  const md = artifacts(dir).md;
+  assert.match(md, /````text\n/, "the 3-run stdout gets a 4-backtick fence");
+  const inside = linesInsideCodeFences(md);
+  const lines = md.split("\n");
+  assert.ok(inside.has(lines.findIndex((line) => line === "```")), "the hostile bare fence line stays inert");
+  assert.ok(inside.has(lines.findIndex((line) => line === "# Tool Harness Findings")), "the forged heading stays inert");
+  assert.ok(!inside.has(lines.findIndex((line) => line.startsWith("## hostile-out"))), "the real provider heading stays live");
 });

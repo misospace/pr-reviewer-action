@@ -34,6 +34,7 @@ import {
   pyDumpsAscii,
 } from "../model/conversation.js";
 import { redactPrTextDeep, redactPrTextLines, redactText } from "../context/redact.js";
+import { fenceDelimiterFor } from "../context/fence.js";
 import { fenceSafeLength } from "../context/related-context.js";
 import { KNOWN_SECRET_REDACTED, maskAndTruncate, maskDiagnostic, maskKnownSecrets, maskKnownSecretsDeep, MIN_KNOWN_SECRET_CONTENT_LEN } from "../context/redact.js";
 import { callKnownSecrets, extraHeadersForEnv } from "../transport/headers.js";
@@ -1064,7 +1065,13 @@ export function buildPlanningContext(
       out = Buffer.from(body, "utf8").subarray(0, cap).toString("utf8") + "\n[truncated]";
       anyClipped = true;
     }
-    if (fence) return `# ${title}\n\`\`\`${fence}\n${out}\n\`\`\``;
+    // #1258: the delimiter is adaptive over the FINAL excerpt bytes (post
+    // truncation) — the diff head carries PR-controlled lines, so a fixed
+    // ```diff fence was closable by the diff itself.
+    if (fence) {
+      const delimiter = fenceDelimiterFor(out);
+      return `# ${title}\n${delimiter}${fence}\n${out}\n${delimiter}`;
+    }
     if (out.startsWith(`# ${title}`)) return out; // self-titled source
     return `# ${title}\n${out}`;
   };

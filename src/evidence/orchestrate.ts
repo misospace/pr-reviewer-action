@@ -27,6 +27,7 @@
 
 import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
+import { fenceDelimiterFor } from "../context/fence.js";
 import { redactText } from "../context/redact.js";
 import {
   DEFAULT_PROVIDER_MAX_OUTPUT_BYTES,
@@ -275,9 +276,12 @@ export async function runEvidenceProviders(options: EvidenceRunOptions): Promise
     const block = headTailCap(text, Math.min(perCap, mdBudget));
     mdBudget -= Buffer.byteLength(block, "utf8");
     mdLines.push(`- ${label}:`);
-    mdLines.push("```text");
+    // #1258: provider stdout/stderr carries untrusted repository/CI bytes —
+    // the delimiter is adaptive over the final (post-cap) block.
+    const fence = fenceDelimiterFor(block);
+    mdLines.push(`${fence}text`);
     mdLines.push(block);
-    mdLines.push("```");
+    mdLines.push(fence);
   };
 
   if (summary.providers.length === 0 && !configError) {

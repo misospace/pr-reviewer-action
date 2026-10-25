@@ -7,6 +7,7 @@
  * renderer output is the persisted artifact and must stay byte-for-byte
  * identical to the Python original. */
 
+import { fenceDelimiterFor } from "./fence.js";
 import { redactPrTextLines } from "./redact.js";
 
 export const SCHEMA_VERSION = 1;
@@ -158,11 +159,10 @@ function truncateBody(body: string): string {
   return `${clipped.trimEnd()}\n[comment truncated]`;
 }
 
-/** Wrap body in a fence its own backtick runs cannot terminate. */
+/** Wrap body in a fence its own backtick runs cannot terminate (canonical
+ * rule: `fenceDelimiterFor`, #1258). */
 export function fence(body: string): string {
-  let longest = 0;
-  for (const run of body.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
-  const delimiter = "`".repeat(Math.max(3, longest + 1));
+  const delimiter = fenceDelimiterFor(body);
   return `${delimiter}\n${body}\n${delimiter}`;
 }
 
