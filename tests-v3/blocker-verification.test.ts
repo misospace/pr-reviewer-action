@@ -1308,6 +1308,31 @@ test("#1263 an introduced bare triple or short hex run still fails closed", asyn
   assert.ok(findings.every((finding) => finding.grounding_status === "unverified"));
 });
 
+test("#1263 a standalone suffixed stamp names another revision and fails closed", async () => {
+  // #1263: the standalone scan trusts the two shapes an incidental token
+  // cannot take — the deliberate `v` marker and a pre-release/build suffix.
+  // A stamp carrying that suffix ("3.7.0-dev+abc1234") names a revision on
+  // its own, so a claim citing it stays unverified instead of being refuted
+  // with the executing revision's bytes. #252: the fence's OWN boundary
+  // token is fed to it, not just benign input.
+  const claims = [
+    "The action does not declare `ai-api-key` input (3.7.0-dev+abc1234).",
+    "The action does not declare `ai-api-key` input (v3.7.0-rc.1).",
+  ];
+  const findings = claims.map((message) => markerFinding({ message }));
+  const result = await verify(
+    findings,
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.8.0",
+  );
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), claims.map(
+    () => ["unverified", "other-revision-unverified"] as const,
+  ));
+  assert.ok(findings.every((finding) => finding.grounding_status === "unverified"));
+});
+
 test("#1240 another line or another patch is unverified", async () => {
   // Mismatch: "v2" names another line and "v3.6.1" another patch of this
   // line — neither is decidable with the executing revision's witnesses.
