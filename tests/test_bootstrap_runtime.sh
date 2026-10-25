@@ -21,6 +21,10 @@
 #     refused too, and nothing is written through it
 #   - with pgrep missing, the default mode fails closed with the
 #     prerequisite error before the downloader ever starts
+#   - the stubs of that scenario start under a PATH that holds no shell
+#     at all, so the bootstrap always reaches the prerequisite check:
+#     every stub that can be started that way carries an absolute
+#     shebang (`#!$BASH_ABS`), never `#!/usr/bin/env bash`
 #
 # Auto-discovered by the CI validate-bash job. Target runtime: seconds.
 set -euo pipefail
@@ -36,6 +40,20 @@ FAIL=0
 source "$SCRIPT_DIR/_lib/assert.sh"
 
 TMPROOT="${TMPDIR:-/tmp}"
+
+# The interpreter the stub scripts run under. A stub is started
+# through the PATH the scenario hands the bootstrap, and the
+# missing-pgrep scenario below hands it a PATH that holds no shell at
+# all: a `#!/usr/bin/env bash` shebang cannot resolve its interpreter
+# through such a PATH, so the stub dies before it runs and the
+# bootstrap sees an empty string where the tool's output belongs.
+# That empty string is not a harmless detail: the bootstrap resolves
+# its own directory with `cd "$(dirname ...)"`, and bash 5.3 turned
+# `cd ""` into an error (bash 5.2 and older treated it as a no-op),
+# so the bootstrap aborted before it could report the prerequisite
+# error the scenario asserts on. An absolute shebang keeps every stub
+# startable under any PATH.
+BASH_ABS="${BASH:-/bin/bash}"
 
 # The pinned digest the stub sha256sum reports; parsed out of the script
 # under test so the fixture cannot drift from the pinned value.
@@ -1053,19 +1071,25 @@ NOPGREP_BIN="$SANDBOX/bin-nopgrep"
 mkdir -p "$NOPGREP_BIN"
 real_dirname="$(command -v dirname)"
 cat >"$NOPGREP_BIN/dirname" <<EOF
-#!/usr/bin/env bash
+#!$BASH_ABS
 exec "$real_dirname" "\$@"
 EOF
 chmod 755 "$NOPGREP_BIN/dirname"
 cat >"$NOPGREP_BIN/sha256sum" <<EOF
-#!/usr/bin/env bash
+#!$BASH_ABS
 printf '%s\n' '$PINNED_DIGEST'
 EOF
 cat >"$NOPGREP_BIN/curl" <<EOF
-#!/usr/bin/env bash
+#!$BASH_ABS
 printf downloaded > "$SANDBOX/curl-ran-nopgrep"
 exit 0
 EOF
+# The bootstrap's first act is to call dirname, so a stub that cannot
+# start under this PATH takes the whole scenario down before the
+# prerequisite error it asserts on is ever printed. Guard that here:
+# the scenario is "no pgrep", not "no shell".
+check "the restricted PATH still starts the stub the bootstrap calls first" \
+  "$(PATH="$NOPGREP_BIN" dirname "$BOOTSTRAP" 2>&1)" "$(dirname "$BOOTSTRAP")"
 nopgrep_out="$SANDBOX/nopgrep.out"
 run_bootstrap_bg "$nopgrep_out" "" \
   "MISE_INSTALL_DIR=$INSTALL_DIR" \
