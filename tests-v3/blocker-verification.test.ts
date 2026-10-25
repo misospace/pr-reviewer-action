@@ -1280,10 +1280,17 @@ test("#1263 an introduced bare triple or short hex run still fails closed", asyn
   // executing revision's bytes. An introducer ("at", "pinned at",
   // "version") is what marks a bare numeric triple or short hex run as a
   // cited revision, and a full-length sha needs no introducer at all.
+  // #252: the chained introducer ("pinned at", "at commit") and the
+  // introducer word itself are fed directly — a non-overlapping scan that
+  // let the first introducer swallow the second would fail OPEN on exactly
+  // the citation this rule exists to protect.
   const claims = [
     "The action does not declare `ai-api-key` input (action.yml at 20.11.1).",
     "The action does not declare `ai-api-key` input (action.yml at a1b2c3d).",
     "The action does not declare `ai-api-key` input; the version 20.11.1 manifest confirms it.",
+    "The action does not declare `ai-api-key` input; pinned at abc1234 the manifest confirms it.",
+    "The action does not declare `ai-api-key` input; at commit abc1234 the manifest confirms it.",
+    "The action does not declare `ai-api-key` input; pinned at 20.11.1 the manifest confirms it.",
     `The action does not declare \`ai-api-key\` input (${THIRD_SHA}).`,
   ];
   const findings = claims.map((message) => markerFinding({ message }));

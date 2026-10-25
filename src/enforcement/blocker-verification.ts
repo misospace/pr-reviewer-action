@@ -684,9 +684,12 @@ const FULL_SHA_LENGTH = 40;
  * uses to cite the revision it means ("action.yml at def5678", "true at
  * v3.6.1", "pinned at abc1234"), and the only context that keeps an
  * otherwise-ambiguous bare token (a short hex run, a bare numeric triple)
- * fail closed.
+ * fail closed. Introducers CHAIN: "pinned at abc1234" must bind the
+ * identifier, not have "at" swallowed as "pinned"'s token and the citation
+ * then missed by the non-overlapping scan (which fails OPEN — the exact
+ * shape the introducer exists to protect).
  */
-const REVISION_KEYWORD_RE = /\b(?:revision|release|tag|version|commit|branch|ref|pin|pinned|at)\b\s*[:=]?\s*([^\s]+)/gi;
+const REVISION_KEYWORD_RE = /\b(?:(?:revision|release|tag|version|commit|branch|ref|pin|pinned|at)\b\s*[:=]?\s*)+([^\s]+)/gi;
 
 /**
  * #1240: is the token a version identifier? The `v` form is a version
