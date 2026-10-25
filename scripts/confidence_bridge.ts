@@ -23,11 +23,12 @@
  * success path exactly: tolerant parse, deterministic ceilings, then the
  * canonical ConfidenceResult, then the credential-masking/re-bound pass the
  * runtime applies before any consumer reads the result
- * (`src/run/review.ts` ~1636-1660): reason and every concern field are
+ * (`src/engine/review.ts`): reason and every concern field are
  * masked against the resolved lane secrets (`maskKnownSecrets` then
  * `redactText`) and re-bounded to the parser's documented limits, with the
- * deterministic cap note surviving the reason re-bound (the note itself is
- * masked first, then re-appended).
+ * deterministic cap note surviving the reason re-bound (#1268: the note is
+ * split off the model share before masking, masked on its own, then
+ * re-appended from `caps`, and one exact-value `maskKnownSecrets` pass over the composed reason closes a boundary-spanning-secret tear).
  *
  * `review-result` input: {verdict, verdict_policy, findings,
  * required_checks, partial_coverage, coverage_unknown} -> the metadata
@@ -89,8 +90,10 @@ import {
   boundConfidenceField,
   boundConfidenceReason,
   confidenceCapNote,
+  confidenceReasonWithoutCapNote,
   MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS,
   MAX_CONFIDENCE_CONCERN_FILE_CHARS,
+  maskComposedConfidenceReason,
   parseConfidenceAnswer,
   scoredConfidenceResult,
   unscoredConfidenceResult,
@@ -181,7 +184,7 @@ function applyScore(argv: string[]): void {
   const coverage = isRecord(input.coverage) ? input.coverage : {};
   const secrets = resolveSecrets(input);
   // Mirror of the production success path (`src/confidence/scorer.ts` +
-  // the masking pass in `src/run/review.ts`): tolerant parse, deterministic
+  // the masking pass in `src/engine/review.ts`): tolerant parse, deterministic
   // ceilings, canonical result, then credential masking/re-bound. A
   // malformed answer fails closed to `unscored` with the parser's cause —
   // exactly as in production.
@@ -214,19 +217,27 @@ function applyScore(argv: string[]): void {
   } catch {
     fail("apply-score", "result_build_failed");
   }
-  // Production masking layer (src/run/review.ts ~1636-1660): every
-  // model-authored field is masked against EVERY lane credential BEFORE the
-  // canonical result exists, then re-bounded to the parser's documented
-  // limits (exact-value masking is not length-preserving, so the bound is
-  // re-applied after masking). The deterministic cap note is masked too and
-  // re-appended by `boundConfidenceReason` — a configured credential may be
-  // a single character occurring inside the note template.
+  // Production masking layer (src/engine/review.ts): every model-authored
+  // field is masked against EVERY lane credential BEFORE the canonical result
+  // exists, then re-bounded to the parser's documented limits (exact-value
+  // masking is not length-preserving, so the bound is re-applied after
+  // masking). #1268: the deterministic cap note is split off the model share
+  // BEFORE masking, masked on its own, and re-appended by
+  // `boundConfidenceReason` from `caps` — masking a combined text could let
+  // `redactText` complete a half-written note look-alike, and a configured
+  // credential may be a single character occurring inside the note template.
   const maskText = (text: string): string => redactText(maskKnownSecrets(text, secrets));
   let canonical: ConfidenceResult;
   try {
     canonical = {
       ...base,
-      reason: boundConfidenceReason(maskText(base.reason), maskText(confidenceCapNote(base.caps))),
+      reason: maskComposedConfidenceReason(
+        boundConfidenceReason(
+          maskText(confidenceReasonWithoutCapNote(base.reason, base.caps)),
+          maskText(confidenceCapNote(base.caps)),
+        ),
+        secrets,
+      ),
       concerns: base.concerns.map((concern) => ({
         file: boundConfidenceField(maskText(concern.file), MAX_CONFIDENCE_CONCERN_FILE_CHARS),
         line: concern.line,

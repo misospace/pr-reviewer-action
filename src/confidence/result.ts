@@ -18,6 +18,8 @@
  * through an explicit in-range integer the model produced.
  */
 
+import { maskKnownSecrets } from "../context/redact.js";
+
 export const CONFIDENCE_RISK_VALUES = ["low", "medium", "high", "critical", "unknown"] as const;
 export type ConfidenceRisk = (typeof CONFIDENCE_RISK_VALUES)[number];
 
@@ -135,6 +137,24 @@ export function confidenceCapNote(caps: readonly string[]): string {
   return caps.length === 0 ? "" : ` [deterministic cap: ${caps.join(", ")}]`;
 }
 
+/**
+ * #1268: the model-authored share of a canonical scored reason — the reason
+ * with the action-owned cap note removed, so the caller can mask the model
+ * text and the note as SEPARATE values. `applyConfidenceCeilings` is the
+ * only producer that appends the note, and it appends exactly
+ * `confidenceCapNote(caps)`; a reason that does not end in the expected note
+ * is returned untouched (the post-masking reveal strip in
+ * `boundConfidenceReason` still bounds the trailing edge). The note is
+ * re-appended from `caps` AFTER masking — never parsed back out of masked
+ * text, which could neither preserve nor rebuild it safely: the note can
+ * carry a configured credential, so an unmasked rebuild would leak it.
+ */
+export function confidenceReasonWithoutCapNote(reason: string, caps: readonly string[]): string {
+  const note = confidenceCapNote(caps);
+  if (note === "" || !reason.endsWith(note)) return reason;
+  return reason.slice(0, reason.length - note.length);
+}
+
 const CONFIDENCE_CAP_NOTE_TEMPLATE = "deterministic cap:";
 
 /**
@@ -207,34 +227,67 @@ export function stripRevealedCapNoteTails(reason: string): string {
 }
 
 /**
- * Re-bound a MASKED reason to `MAX_CONFIDENCE_REASON_CHARS` while keeping the
- * deterministic cap note (#1140 review round 9). A plain slice is right for
- * every other field, but the note is the only place a capped score is explained
- * in the published reason: when masking expanded a note-length reason past the
- * bound, a plain slice would clip exactly that action-owned tail and publish a
- * capped score with no in-reason explanation. So the model's share is trimmed
- * to whatever the note leaves and the note is re-appended.
+ * Re-bind the MASKED model share of the reason to `MAX_CONFIDENCE_REASON_CHARS`
+ * while keeping the deterministic cap note (#1140 review round 9; #1268).
  *
- * `capNote` MUST be the note already run through the caller's masking (build it
- * as `mask(confidenceCapNote(caps))`): masking has to stay TERMINAL on this
- * surface, and a configured credential is allowed to be any length — including
- * one character occurring inside the note template (`blocker_cap_2`), so an
- * unmasked rebuilt note would put the run's own credential back on the surface
- * that was just masked. Over-redacting the note is the accepted cost, and the
- * exact caps are still recorded verbatim in the result's structured `caps`
- * field. The room below is reserved from the note's MASKED length. #1166: the
- * cut head is reveal-stripped of cap-note look-alikes before the note lands.
+ * #1268: `maskedReason` is the note-FREE model share — the caller splits the
+ * action-owned note off BEFORE masking (`confidenceReasonWithoutCapNote`) and
+ * passes the note separately. Masking a combined text lets `redactText`
+ * COMPLETE a look-alike the model only half-wrote: the credential-value rule
+ * consumes the model's closing bracket and the `[REDACTED]` marker supplies
+ * a new one, so a reason whose `caps` stayed `[]` could be published ending
+ * in a note-shaped span no ceiling produced (`x [deterministic cap: password:
+ * a]bcdefgh` → `x [deterministic cap: [REDACTED]`). So the masked model share
+ * is reveal-stripped here as well, and the note — the only note-shaped span
+ * this function can emit — is re-appended from `caps`, never parsed back out
+ * of masked text (the note can carry a configured credential, so an unmasked
+ * rebuild would leak it).
+ *
+ * `capNote` MUST be the note already run through the caller's masking (build
+ * it as `mask(confidenceCapNote(caps))`): masking has to stay TERMINAL on
+ * this surface, and a configured credential is allowed to be any length —
+ * including one character occurring inside the note template
+ * (`blocker_cap_2`) — so an unmasked rebuilt note would put the run's own
+ * credential back on the surface that was just masked. Over-redacting the
+ * note is the accepted cost, and the exact caps are still recorded verbatim
+ * in the result's structured `caps` field. The room below is reserved from
+ * the note's MASKED length. #1166: a cut inside the model share is itself
+ * reveal-stripped before the note lands.
  */
 export function boundConfidenceReason(maskedReason: string, capNote: string): string {
-  if (maskedReason.length <= MAX_CONFIDENCE_REASON_CHARS) return maskedReason;
-  // #1166: the cut itself can reveal an interior cap-note look-alike at the
-  // trailing edge, so the cut head is stripped BEFORE the note slot is taken.
+  const model = stripRevealedCapNoteTails(maskedReason);
   if (capNote === "") {
-    return stripRevealedCapNoteTails(maskedReason.slice(0, MAX_CONFIDENCE_REASON_CHARS));
+    if (model.length <= MAX_CONFIDENCE_REASON_CHARS) return model;
+    return stripRevealedCapNoteTails(model.slice(0, MAX_CONFIDENCE_REASON_CHARS));
   }
   const room = Math.max(0, MAX_CONFIDENCE_REASON_CHARS - capNote.length);
-  const head = stripRevealedCapNoteTails(maskedReason.slice(0, room)).trimEnd();
+  if (model.length <= room) return `${model}${capNote}`;
+  const head = stripRevealedCapNoteTails(model.slice(0, room)).trimEnd();
   return `${head}${capNote}`.slice(0, MAX_CONFIDENCE_REASON_CHARS);
+}
+
+/**
+ * #1268 review hardening: the caller masks the model share and the note as
+ * SEPARATE values, so a configured secret whose literal spans the
+ * model/note boundary is found in neither half and the re-append would
+ * reconstruct it verbatim — a tear in the "masking is terminal" invariant
+ * the split exists to serve. One exact-value `maskKnownSecrets` pass over
+ * the COMPOSED reason closes it. `maskKnownSecrets` only, never
+ * `redactText`: the `⟦•⟧` marker carries no brackets or template text, so
+ * this pass can never complete a cap-note look-alike the way `redactText`'s
+ * `[REDACTED]` can, and the #1268 guarantee — the only note-shaped span in
+ * the composed reason is the action-owned one — survives it (the pass can
+ * over-redact the note itself, the cost #1140 round 9 already accepted).
+ * The substitution can grow the composed reason past the bound only when
+ * the operator's own credential is shorter than the marker; the left cut
+ * keeps the trailing edge — the note — intact, and cutting after masking
+ * can never re-expose what masking already removed.
+ */
+export function maskComposedConfidenceReason(composed: string, secrets: readonly (string | null | undefined)[]): string {
+  const masked = maskKnownSecrets(composed, secrets);
+  return masked.length <= MAX_CONFIDENCE_REASON_CHARS
+    ? masked
+    : masked.slice(masked.length - MAX_CONFIDENCE_REASON_CHARS);
 }
 
 /** A successfully parsed, pre-ceiling scorer answer. */
