@@ -1249,12 +1249,17 @@ test("#1240 qualifier shapes over-fire only for real revision identifiers", asyn
   // Precision: a partial version of the SAME line ("v3.7"), a bare integer
   // after a keyword ("version 2", "ref: 1234") and an all-letter hex word
   // ("defaced") name no other revision, so a claim that would otherwise be
-  // refuted stays decided.
+  // refuted stays decided. #1263: neither does a bare numeric triple with
+  // no introducer ("Node 20.11.1") nor a short hex run ("colour a1b2c3d") —
+  // shape alone cannot tell them apart from an incidental version-like
+  // token, so they must not leave the claim other-revision-unverified.
   const claims = [
     "The action does not declare `ai-api-key` input (v3.7).",
     "The action does not declare `ai-api-key` input (version 2).",
     "The action does not declare `ai-api-key` input (ref: 1234).",
     "The action does not declare `ai-api-key` input (the manifest defaced the claim).",
+    "The action does not declare `ai-api-key` input; it also requires Node 20.11.1.",
+    "The action does not declare `ai-api-key` input (colour a1b2c3d).",
   ];
   const findings = claims.map((message) => markerFinding({ message }));
   const result = await verify(
@@ -1264,12 +1269,35 @@ test("#1240 qualifier shapes over-fire only for real revision identifiers", asyn
     null,
     "v3.7.0",
   );
-  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
-    ["refuted", "input-declared:ai-api-key"],
-    ["refuted", "input-declared:ai-api-key"],
-    ["refuted", "input-declared:ai-api-key"],
-    ["refuted", "input-declared:ai-api-key"],
-  ]);
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), claims.map(
+    () => ["refuted", "input-declared:ai-api-key"] as const,
+  ));
+});
+
+test("#1263 an introduced bare triple or short hex run still fails closed", async () => {
+  // The trade-off the narrowing must preserve: a claim that GENUINELY
+  // names another revision stays unverified — never refuted with the
+  // executing revision's bytes. An introducer ("at", "pinned at",
+  // "version") is what marks a bare numeric triple or short hex run as a
+  // cited revision, and a full-length sha needs no introducer at all.
+  const claims = [
+    "The action does not declare `ai-api-key` input (action.yml at 20.11.1).",
+    "The action does not declare `ai-api-key` input (action.yml at a1b2c3d).",
+    "The action does not declare `ai-api-key` input; the version 20.11.1 manifest confirms it.",
+    `The action does not declare \`ai-api-key\` input (${THIRD_SHA}).`,
+  ];
+  const findings = claims.map((message) => markerFinding({ message }));
+  const result = await verify(
+    findings,
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+  );
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), claims.map(
+    () => ["unverified", "other-revision-unverified"] as const,
+  ));
+  assert.ok(findings.every((finding) => finding.grounding_status === "unverified"));
 });
 
 test("#1240 another line or another patch is unverified", async () => {

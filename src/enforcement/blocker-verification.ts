@@ -671,13 +671,22 @@ interface RevisionQualifier {
 const VERSION_QUALIFIER_RE = /^v?(\d+(?:\.\d+)*)(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z][0-9A-Za-z.-]*)?$/;
 /** A commit sha in its short or full form: 7–40 hex characters. */
 const SHA_QUALIFIER_RE = /^[0-9a-f]{7,40}$/i;
+/** The length of a full sha1 hex digest (#1263: the only SHA shape the
+ * standalone scan trusts, because no incidental token takes it). */
+const FULL_SHA_LENGTH = 40;
 /**
  * The words that INTRODUCE a revision identifier. The introduced token
  * counts as a qualifier only when it is version-like or SHA-like: a bare
  * integer ("version 2", "ref: 1234") names no revision, and a prose word
  * ("release notes") names none either.
+ *
+ * #1263: "at" and "pin"/"pinned" are introducers too — the shapes a finding
+ * uses to cite the revision it means ("action.yml at def5678", "true at
+ * v3.6.1", "pinned at abc1234"), and the only context that keeps an
+ * otherwise-ambiguous bare token (a short hex run, a bare numeric triple)
+ * fail closed.
  */
-const REVISION_KEYWORD_RE = /\b(?:revision|release|tag|version|commit|branch|ref)\b\s*[:=]?\s*([^\s]+)/gi;
+const REVISION_KEYWORD_RE = /\b(?:revision|release|tag|version|commit|branch|ref|pin|pinned|at)\b\s*[:=]?\s*([^\s]+)/gi;
 
 /**
  * #1240: is the token a version identifier? The `v` form is a version
@@ -714,11 +723,22 @@ function stripTokenEdges(token: string): string {
 /**
  * #1240: the revision qualifiers a finding message names.
  *
- * A qualifier is a revision identifier appearing as a STANDALONE token:
- * version-like ("v3.7.0", "3.7.0"), SHA-like ("abc1234"), or a token a
- * revision keyword introduces that is itself version-like or SHA-like
- * ("version: v3.6.1"). The scan is O(message) and bounded by
- * MAX_CLAIM_SCAN_LENGTH.
+ * A qualifier is either a revision identifier appearing as a STANDALONE
+ * token that cannot be an incidental number — a `v`-prefixed version
+ * ("v3.7.0"), a version carrying a pre-release/build suffix
+ * ("3.7.0-dev+abc1234"), or a FULL-length commit sha ("a"*40) — or a token
+ * a revision introducer names ("version: v3.6.1", "action.yml at 3.6.1",
+ * "commit abc1234"), which counts whenever it is version-like or SHA-like.
+ *
+ * #1263: a BARE numeric triple ("20.11.1", a Node version) or a SHORT hex
+ * run ("a1b2c3d", a colour) is not standalone evidence of a revision —
+ * shape alone cannot tell it apart from an incidental version-like token,
+ * and treating it as one leaves a source-contradicted claim
+ * `other-revision-unverified` and forces request_changes through the #1016
+ * unknown-evidence rule. Such a token only qualifies when an introducer
+ * names it, so a claim that genuinely cites another revision
+ * ("at 3.6.1", "pinned at a1b2c3d") still fails closed. The scan is
+ * O(message) and bounded by MAX_CLAIM_SCAN_LENGTH.
  */
 function revisionQualifiers(message: string): RevisionQualifier[] {
   const found: RevisionQualifier[] = [];
@@ -736,8 +756,16 @@ function revisionQualifiers(message: string): RevisionQualifier[] {
     // Cheap prefilter: every revision identifier carries a digit, so an
     // ordinary prose word never qualifies.
     if (!/\d/.test(token)) continue;
-    if (isVersionLike(token)) push(token.toLowerCase(), "version");
-    else if (isShaLike(token)) push(token.toLowerCase(), "sha");
+    if (isVersionLike(token)) {
+      // #1263: standalone, only shapes no incidental number takes: the
+      // deliberate `v` marker, or a stamp-shaped token with a
+      // pre-release/build suffix.
+      if (/^v/i.test(token) || /[-+]/.test(token)) push(token.toLowerCase(), "version");
+    } else if (isShaLike(token) && token.length === FULL_SHA_LENGTH) {
+      // #1263: a full commit hash cannot plausibly be incidental; a short
+      // hex run can (a colour), so it qualifies only via an introducer.
+      push(token.toLowerCase(), "sha");
+    }
   }
   for (const match of message.matchAll(REVISION_KEYWORD_RE)) {
     const token = stripTokenEdges(match[1] ?? "");
