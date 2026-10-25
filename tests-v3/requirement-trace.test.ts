@@ -4368,7 +4368,7 @@ test("#1248: a confirmed-unmet escalation flip supersedes a prior relaxation not
   const art = artifact({
     verdict: "approve",
     verdict_source: "findings",
-    review_markdown: "review\n\n_Verdict relaxed from structured findings (verdict_policy=findings_severity_gated): every blocking finding was non-blocking here._",
+    review_markdown: "review\n\n_Verdict relaxed from structured findings (verdict_policy=findings_severity_gated): every blocking finding was in a category this repository marks non-blocking (non_blocking_finding_categories); they remain listed above._",
   });
   const escalated = applyConfirmedUnmetEscalation(art, trace, new Map([["req-1", "must hold"]]));
   assert.equal(escalated, 1);

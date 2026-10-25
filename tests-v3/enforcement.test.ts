@@ -1,7 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { ParsedReviewVerdict } from "../src/model/types.js";
-import { reviewArtifactFromParsed, type ReviewArtifact } from "../src/enforcement/artifact.js";
+import {
+  CI_ONLY_RELAXATION_NOTE,
+  GATED_FINDINGS_RELAXATION_NOTE,
+  REFUTED_GROUNDING_RELAXATION_NOTE,
+  VERIFICATION_ONLY_RELAXATION_NOTE,
+  markRelaxationNotesSuperseded,
+  reviewArtifactFromParsed,
+  type ReviewArtifact,
+} from "../src/enforcement/artifact.js";
 import { applyVerdictPolicy, applyStrictVerdictPolicy, capCiOnlyFindings, parseNonBlockingCategories, relaxCiOnlyVerdict, securityRiskFlagged } from "../src/enforcement/verdict-policy.js";
 import { capCiEvidenceFindings, parseCiCheckNames } from "../src/enforcement/ci-evidence.js";
 import { enforcementView, prepareThreads, renderReviewThreads } from "../src/context/review-threads.js";
@@ -782,16 +790,57 @@ test("#1248: a findings_severity_gated thread-escalation flip supersedes the pri
   assert.ok(!a.review_markdown.includes("_Verdict relaxed from"), "the stale relaxed-verdict claim must not stand unqualified");
 });
 
-test("#1248: supersede rewrites only action-authored note openers at line start (#252 boundary)", () => {
+const VERIFICATION_RELAX_NOTE = "\n\n_Verdict relaxed from structured findings (#977): every open finding is a verification request the review tools cannot check, so the author has nothing to change. The findings remain listed above._";
+const CI_ONLY_RELAX_NOTE = "\n\n_Verdict relaxed from CI-only findings (#976): check conclusions are shown for context and gate the merge independently; they are not review blockers._";
+const REFUTED_GROUNDING_RELAX_NOTE = "\n\n_Verdict relaxed from structured findings (#1016): every open finding was either a verification request or a source claim the deterministic blocker-verification boundary positively refuted against exact-head source; the findings remain listed above and deterministic gates are unaffected._";
+
+test("#1248: relaxation-note constants match their pinned note bytes", () => {
+  assert.equal(GATED_FINDINGS_RELAXATION_NOTE, GATED_RELAX_NOTE.slice(2));
+  assert.equal(VERIFICATION_ONLY_RELAXATION_NOTE, VERIFICATION_RELAX_NOTE.slice(2));
+  assert.equal(CI_ONLY_RELAXATION_NOTE, CI_ONLY_RELAX_NOTE.slice(2));
+  assert.equal(REFUTED_GROUNDING_RELAXATION_NOTE, REFUTED_GROUNDING_RELAX_NOTE.slice(2));
+});
+
+test("#1248: every action-authored relaxation note is superseded on a flip", () => {
+  for (const note of [GATED_RELAX_NOTE, VERIFICATION_RELAX_NOTE, CI_ONLY_RELAX_NOTE, REFUTED_GROUNDING_RELAX_NOTE]) {
+    const a = artifact({ verdict: "approve", verdict_source: "findings", review_markdown: "review" + note });
+    applyEvidenceBlockerEnforcement(a, { has_blocker: true, providers: [{ id: "sec", provider_severity: "blocker" }] });
+    assert.ok(
+      a.review_markdown.includes("_Verdict relaxation superseded by enforcement: originally relaxed from"),
+      `note not superseded: ${a.review_markdown}`,
+    );
+    assert.ok(!a.review_markdown.includes(note.slice(2)), "the original claim must not stand unqualified");
+    const once = a.review_markdown;
+    markRelaxationNotesSuperseded(a);
+    assert.equal(a.review_markdown, once, "supersede is idempotent");
+  }
+});
+
+test("#1248: supersede rewrites only the exact action-authored note lines (#252 boundary)", () => {
   const opener = "_Verdict relaxed from structured findings";
+  // Hostile boundary token itself: line-initial model prose that imitates the
+  // note opener (with and without the discriminator) but is not the action's
+  // full note must survive byte-identical.
+  const hostileLines = [
+    `${opener} at the start of a model-authored line._`,
+    `${opener} (verdict_policy=findings_severity_gated): model prose that stops early._`,
+    "_Verdict relaxed from CI-only findings at the start of another line._",
+    GATED_RELAX_NOTE.slice(2).replace("they remain listed above._", "quoted with a changed ending._"),
+  ];
   const midLine = artifact({
     verdict: "approve",
-    review_markdown: `review — the model quoted: ${opener} (verdict_policy=findings_severity_gated): copied verbatim inline._`,
+    review_markdown: [
+      `review — the model quoted: ${opener} (verdict_policy=findings_severity_gated): copied verbatim inline._`,
+      ...hostileLines,
+    ].join("\n"),
   });
   applyEvidenceBlockerEnforcement(midLine, { has_blocker: true, providers: [{ id: "sec", provider_severity: "blocker" }] });
   assert.ok(
     midLine.review_markdown.includes(`${opener} (verdict_policy=findings_severity_gated): copied verbatim inline.`),
     "a mid-line mention is not a note opener and stays byte-identical",
   );
-  assert.ok(!midLine.review_markdown.includes("superseded"), "nothing to supersede mid-line");
+  for (const line of hostileLines) {
+    assert.ok(midLine.review_markdown.includes(line), `line-initial model prose was rewritten: ${line}`);
+  }
+  assert.ok(!midLine.review_markdown.includes("superseded"), "nothing to supersede in imitation prose");
 });

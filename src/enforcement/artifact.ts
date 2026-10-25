@@ -193,12 +193,56 @@ export function serializeReviewArtifact(artifact: ReviewArtifact): string {
 }
 
 /**
- * #1248: the action-authored relaxation disclosures (findings_severity_gated
- * #775, #977, #976, #1016), matched by their exact line-initial openers.
- * Anchored like the enforcement-banner matcher in `enforce.ts`: only this
- * codebase's own note text matches, so model prose is never rewritten.
+ * #1248: the four action-authored relaxation disclosures, as exact full-text
+ * constants shared with the writers in `verdict-policy.ts` (single source of
+ * truth: a note edited there can never silently stop matching here).
  */
-const RELAXATION_NOTE_RE = /^_Verdict relaxed from (structured|CI-only) findings/gm;
+export const GATED_FINDINGS_RELAXATION_NOTE =
+  "_Verdict relaxed from structured findings (verdict_policy=findings_severity_gated): "
+  + "every blocking finding was in a category this repository marks non-blocking "
+  + "(non_blocking_finding_categories); they remain listed above._";
+
+export const VERIFICATION_ONLY_RELAXATION_NOTE =
+  "_Verdict relaxed from structured findings (#977): every open finding is a "
+  + "verification request the review tools cannot check, so the author has nothing to "
+  + "change. The findings remain listed above._";
+
+export const CI_ONLY_RELAXATION_NOTE =
+  "_Verdict relaxed from CI-only findings (#976): check conclusions are shown for "
+  + "context and gate the merge independently; they are not review blockers._";
+
+export const REFUTED_GROUNDING_RELAXATION_NOTE =
+  "_Verdict relaxed from structured findings (#1016): every open finding was either a "
+  + "verification request or a source claim the deterministic blocker-verification "
+  + "boundary positively refuted against exact-head source; the findings remain listed "
+  + "above and deterministic gates are unaffected._";
+
+const RELAXATION_NOTES: readonly string[] = [
+  GATED_FINDINGS_RELAXATION_NOTE,
+  VERIFICATION_ONLY_RELAXATION_NOTE,
+  CI_ONLY_RELAXATION_NOTE,
+  REFUTED_GROUNDING_RELAXATION_NOTE,
+];
+
+function escapeRegExpLiteral(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * #1248: matches a relaxation note only as its complete action-authored line
+ * (full exact text, anchored start-to-end of line — the same exact-full-text
+ * posture as the enforcement-banner matcher in `enforce.ts`). Matching the
+ * opener prefix alone would rewrite model prose that merely begins a line
+ * with "_Verdict relaxed from … findings"; model prose can still only be
+ * rewritten by reproducing one of the notes byte-identically as its own
+ * whole line, which is indistinguishable from the action's own note.
+ */
+const RELAXATION_NOTE_RE = new RegExp(
+  `^(?:${RELAXATION_NOTES.map(escapeRegExpLiteral).join("|")})$`,
+  "gm",
+);
+
+const RELAXATION_NOTE_OPENER = "_Verdict relaxed";
 
 /**
  * #1248: retire stale relaxation claims in the published body. A
@@ -206,12 +250,14 @@ const RELAXATION_NOTE_RE = /^_Verdict relaxed from (structured|CI-only) findings
  * while the verdict is approve; when a deterministic layer later flips the
  * verdict back to request_changes (relax-then-force), that note would keep
  * asserting a relaxation that no longer holds. Marking it superseded keeps
- * the body honest without deleting the original disclosure.
+ * the body honest without deleting the original disclosure. The rewritten
+ * text can never re-match (idempotent).
  */
 export function markRelaxationNotesSuperseded(artifact: ReviewArtifact): void {
   artifact.review_markdown = (artifact.review_markdown || "")
     .replace(
       RELAXATION_NOTE_RE,
-      "_Verdict relaxation superseded by enforcement: originally relaxed from $1 findings",
+      (note) => `_Verdict relaxation superseded by enforcement: originally `
+        + `relaxed${note.slice(RELAXATION_NOTE_OPENER.length)}`,
     );
 }
