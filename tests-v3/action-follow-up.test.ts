@@ -39,6 +39,7 @@ function answerBody(content: string): string {
 function startGithubMock(options: {
   permission: string;
   viewerLogin?: string | null;
+  postStatus?: number;
 }): Promise<{
   url: string;
   postedBodies: string[];
@@ -63,6 +64,11 @@ function startGithubMock(options: {
         let text = "";
         try { text = String((JSON.parse(body) as { body?: unknown }).body ?? ""); } catch { text = ""; }
         postedBodies.push(text);
+        if (options.postStatus !== undefined) {
+          res.statusCode = options.postStatus;
+          res.end(JSON.stringify({ message: "post refused" }));
+          return;
+        }
         res.statusCode = 201;
         res.end(JSON.stringify({ id: 200 }));
         return;
@@ -143,6 +149,7 @@ async function runCase(options: {
   viewerLogin?: string | null;
   modelStatus?: number;
   modelContent?: string;
+  postStatus?: number;
 }): Promise<{
   exitCode: number;
   outputs: Record<string, string>;
@@ -164,6 +171,7 @@ async function runCase(options: {
   const github = await startGithubMock({
     permission: options.permission ?? "write",
     ...(options.viewerLogin !== undefined ? { viewerLogin: options.viewerLogin } : {}),
+    ...(options.postStatus !== undefined ? { postStatus: options.postStatus } : {}),
   });
   const eventPath = join(runnerTemp, "event.json");
   writeFileSync(eventPath, commentEvent(options.body));
@@ -256,6 +264,19 @@ test("#1294: an unproven bot identity means no question fires (fail closed, fall
     assert.equal(result.outputs["skip-reason"], "unrelated-comment");
     assert.equal(result.modelRequests, 0, "nothing can be addressed to an unproven identity");
     assert.equal(result.postedBodies.length, 0);
+  } finally {
+    await result.cleanup();
+  }
+});
+
+test("#1294: a refused comment POST skips green as follow-up-answer-failed (posted: false)", async () => {
+  const result = await runCase({ body: `@${BOT_LOGIN} does the retry back off?`, postStatus: 403 });
+  try {
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.outputs["skip-reason"], "follow-up-answer-failed");
+    assert.equal(result.modelRequests, 1, "the model ran; only the write failed");
+    assert.equal(result.postedBodies.length, 1, "one attempt, and it was the rendered body");
+    assert.ok(result.postedBodies[0]!.startsWith(FOLLOWUP_REPLY_MARKER));
   } finally {
     await result.cleanup();
   }

@@ -14,7 +14,7 @@ import {
 } from "../src/followup/plan.js";
 import { FOLLOWUP_REPLY_MARKER } from "../src/followup/classify.js";
 import { InMemoryRateLimitStore } from "../src/followup/rate-limit.js";
-import { MemoryGenerationLedger, type GenerationLedger } from "../src/ingress/dispatch.js";
+import { MemoryGenerationLedger, dispatchCanonicalEvent, type GenerationLedger } from "../src/ingress/dispatch.js";
 import {
   normalizeForgejoEvent,
   normalizeGitHubEvent,
@@ -79,6 +79,7 @@ interface AdapterCalls {
   prLastEditedAt: number;
   postComment: string[];
   resolveHeadSha: number;
+  resolvePrIdentity: number;
 }
 
 interface AdapterFixtureOptions {
@@ -93,6 +94,8 @@ interface AdapterFixtureOptions {
   postCommentThrows?: boolean;
   resolveHeadSha?: string | null;
   resolveHeadShaThrows?: boolean;
+  resolvePrIdentity?: { prId: number; baseSha: string } | null;
+  resolvePrIdentityThrows?: boolean;
 }
 
 /** Recording forge-adapter fake. Defaults: an authorized (admin) reading, an
@@ -111,6 +114,7 @@ function makeAdapter(options: AdapterFixtureOptions = {}): {
     prLastEditedAt: 0,
     postComment: [],
     resolveHeadSha: 0,
+    resolvePrIdentity: 0,
   };
   const defaultReading: AuthorityReading = { permission: "admin", roleName: "", subject: "absent" };
   const adapter: FollowUpForgeAdapter = {
@@ -145,6 +149,11 @@ function makeAdapter(options: AdapterFixtureOptions = {}): {
       calls.resolveHeadSha += 1;
       if (options.resolveHeadShaThrows) throw new Error("head read failed");
       return options.resolveHeadSha ?? null;
+    },
+    async resolvePrIdentity() {
+      calls.resolvePrIdentity += 1;
+      if (options.resolvePrIdentityThrows) throw new Error("identity read failed");
+      return options.resolvePrIdentity ?? null;
     },
   };
   return { adapter, calls };
@@ -432,4 +441,74 @@ test("action/operator parity: one event + fixtures yields a byte-identical promp
   assert.equal(plan.action, "answer");
   assert.deepEqual(outcome, { status: "answered", posted: true });
   assert.equal(hostPrompt, plan.prompt, "the two hosts must build byte-identical prompts for the same event");
+});
+
+test("a post that returns false settles as answered with posted: false and is never retried", async () => {
+  const { adapter, calls } = makeAdapter({ postCommentOk: false });
+  const question = "@reviewer-bot is the retry bounded?";
+  const outcome = await makeConsumer(adapter).handleEvent(commentEvent(question), question);
+  assert.deepEqual(outcome, { status: "answered", posted: false });
+  assert.equal(calls.postComment.length, 1, "exactly one post attempt — the consumer never retries");
+});
+
+test("a post that throws settles as answered with posted: false (the consumer is total)", async () => {
+  const { adapter, calls } = makeAdapter({ postCommentThrows: true });
+  const question = "@reviewer-bot is the retry bounded?";
+  const outcome = await makeConsumer(adapter).handleEvent(commentEvent(question), question);
+  assert.deepEqual(outcome, { status: "answered", posted: false });
+  assert.equal(calls.postComment.length, 1);
+});
+
+test("a hydrated PR identity dedupes a rereview command against a label generation of the same head", async () => {
+  const baseSha = "b".repeat(40);
+  const { adapter, calls } = makeAdapter({
+    resolveHeadSha: RESOLVED_HEAD,
+    resolvePrIdentity: { prId: 9001, baseSha },
+  });
+  const ledger = new MemoryGenerationLedger();
+  const enqueued: ReviewJob[] = [];
+  const consumer = makeConsumer(adapter, {
+    ledger,
+    enqueueRereviewJob: async (job) => {
+      enqueued.push(job);
+      return true;
+    },
+  });
+  // The daemon already scheduled the `ai-review` LABEL generation.
+  const labelEvent = normalizeGitHubEvent({
+    name: "pull_request",
+    action: "labeled",
+    repository: { full_name: "o/r" },
+    installation: { id: 1 },
+    label: { name: "ai-review" },
+    pull_request: { id: 9001, number: 7, head: { sha: RESOLVED_HEAD }, base: { sha: baseSha } },
+    sender: { login: "maintainer" },
+  });
+  assert.ok(labelEvent !== null && labelEvent.kind === "rereview_label");
+  const label = await dispatchCanonicalEvent(labelEvent, { ledger });
+  assert.equal(label.status, "scheduled");
+  // The comment-command rereview on the same head now hydrates to the SAME
+  // identity (prId + baseSha from the adapter) and dedupes instead of
+  // minting a second full review.
+  const outcome = await consumer.handleEvent(commentEvent("/ai-review"), "/ai-review");
+  assert.deepEqual(outcome, { status: "rereview", disposition: "duplicate" });
+  assert.equal(enqueued.length, 0, "no second generation is minted for the same identity");
+  assert.equal(calls.resolvePrIdentity, 1);
+});
+
+test("a failed PR-identity read only loses cross-trigger dedupe — the rereview still mints one generation", async () => {
+  const { adapter, calls } = makeAdapter({ resolveHeadSha: RESOLVED_HEAD, resolvePrIdentityThrows: true });
+  const enqueued: ReviewJob[] = [];
+  const consumer = makeConsumer(adapter, {
+    enqueueRereviewJob: async (job) => {
+      enqueued.push(job);
+      return true;
+    },
+  });
+  const outcome = await consumer.handleEvent(commentEvent("/ai-review"), "/ai-review");
+  assert.deepEqual(outcome, { status: "rereview", disposition: "enqueued" });
+  assert.equal(enqueued.length, 1);
+  assert.equal(enqueued[0]!.prId, 0, "the sentinel identity fields are kept on a failed hydration");
+  assert.equal(enqueued[0]!.baseSha, "");
+  assert.equal(calls.resolvePrIdentity, 1);
 });

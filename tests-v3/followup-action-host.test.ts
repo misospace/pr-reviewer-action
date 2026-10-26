@@ -434,3 +434,38 @@ test("an empty model answer degrades to answer-failed (empty-answer); nothing is
   assert.deepEqual(followUpOutcome(result), { status: "answer-failed", cause: "empty-answer" });
   assert.equal(recs.posts.length, 0);
 });
+
+test("a post returning false settles as answered with posted: false (attempt recorded once)", async () => {
+  const question = "@reviewer-bot is the retry bounded?";
+  const recs: EffectRecs = { answers: [], posts: [] };
+  const result = await runActionFollowUp(
+    githubStage(),
+    ghCommentPayload(question),
+    followUpDeps(
+      stubReadAdapter({ botLogin: BOT_LOGIN, permissionData: { permission: "admin", user: { login: "alice" } } }),
+      recs,
+      { postComment: async (body: string) => { recs.posts.push(body); return false; } },
+    ),
+  );
+  assert.equal(result.route, "follow-up");
+  assert.deepEqual(followUpOutcome(result), { status: "answered", posted: false });
+  assert.equal(recs.posts.length, 1, "one attempt, no retry");
+  assert.ok(recs.posts[0]!.startsWith(FOLLOWUP_REPLY_MARKER), "even a failing post only ever saw the RENDERED body");
+});
+
+test("a throwing post settles as answered with posted: false — the host call never rejects", async () => {
+  const question = "@reviewer-bot is the retry bounded?";
+  const recs: EffectRecs = { answers: [], posts: [] };
+  const result = await runActionFollowUp(
+    githubStage(),
+    ghCommentPayload(question),
+    followUpDeps(
+      stubReadAdapter({ botLogin: BOT_LOGIN, permissionData: { permission: "admin", user: { login: "alice" } } }),
+      recs,
+      { postComment: async (body: string) => { recs.posts.push(body); throw new Error("forge refused"); } },
+    ),
+  );
+  assert.equal(result.route, "follow-up");
+  assert.deepEqual(followUpOutcome(result), { status: "answered", posted: false });
+  assert.equal(recs.posts.length, 1);
+});

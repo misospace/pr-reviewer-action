@@ -82,6 +82,15 @@ export interface FollowUpForgeAdapter {
   /** The PR's current head commit SHA; `null` when it cannot be read (the
    * rereview path fails closed on `null`). */
   resolveHeadSha(repoFullName: string, prNumber: number): Promise<string | null>;
+  /** The PR's stable identity (`prId`, base SHA) for the rereview projection;
+   * optional best-effort capability. Comment payloads normalize with
+   * `prId: 0`/`baseSha: ""` (the `issue.pull_request` link carries no PR
+   * object), and both are generation-IDENTITY fields — hydrating them lets a
+   * comment-command rereview dedupe against a label/push generation of the
+   * same head. A failed or absent read only loses that cross-trigger dedupe
+   * (the projection stays a valid single generation); it never refuses the
+   * rereview. */
+  resolvePrIdentity?(repoFullName: string, prNumber: number): Promise<{ prId: number; baseSha: string } | null>;
 }
 
 /** Host configuration for {@link createFollowUpConsumer}. */
@@ -194,21 +203,45 @@ export function createFollowUpConsumer(options: FollowUpConsumerOptions): Follow
           // Unprovable exact head → fail closed: refuse before touching the
           // ledger, so no partial generation and no leaked reservation.
           if (headSha === null || headSha === "") return "refused";
+          // Hydrate the identity fields a comment payload cannot carry
+          // (`prId: 0`/`baseSha: ""` — the url-only `issue.pull_request`
+          // link). Both are generation IDENTITY fields, so hydration is what
+          // makes a comment-command rereview dedupe against a label/push
+          // generation of the same head+config. Best-effort: a missing or
+          // failed read (or an unusable value) only loses that CROSS-TRIGGER
+          // dedupe — the projected generation is still exactly one valid
+          // review — while comment-vs-comment dedupe always holds (same
+          // head, same sentinel identity).
+          let prId = rereviewEvent.prId;
+          let baseSha = rereviewEvent.baseSha;
+          if (prId === 0 || baseSha === "") {
+            const identity = await adapter.resolvePrIdentity?.(repoFullName, prNumber).catch(() => null);
+            if (identity !== null && identity !== undefined) {
+              if (prId === 0 && Number.isSafeInteger(identity.prId) && identity.prId >= 0) prId = identity.prId;
+              const hydratedBase = identity.baseSha.trim().toLowerCase();
+              if (baseSha === "" && /^[0-9a-f]{7,64}$/.test(hydratedBase)) baseSha = hydratedBase;
+            }
+          }
           // Project the follow-up onto the NORMAL rereview generation and
           // reuse the shipped dispatch path — no second reviewer, no model
           // work. The projection is safe because the generation identity
           // deliberately excludes the producing event kind (reason is
           // routing metadata, `src/jobs/generation.ts`) and a `review` job's
           // identity forces `eventReference` "" (a review's identity never
-          // depends on a comment id, even if the stray event carries one):
-          // a comment-command rereview on an unchanged head therefore
-          // dedupes against the same generation — and against a label
-          // rereview of the same head+config — so one head yields at most
-          // one review generation, never a second reviewer.
+          // depends on a comment id, even if a stray event carries one):
+          // two rereview commands on an unchanged head therefore mint the
+          // SAME generation — and, once the PR identity is hydrated above,
+          // so does a rereview command and a `ai-review`-label (or push)
+          // generation of the same head+config. When the identity cannot be
+          // hydrated the cross-trigger id may differ (an extra full review
+          // of an unchanged head is waste, not corruption), and the queue's
+          // at-most-one-active-generation-per-PR rule stays the bound.
           const projected: CanonicalForgeEvent = {
             ...rereviewEvent,
             kind: "rereview_label",
             headSha,
+            prId,
+            baseSha,
           };
           const outcome = await dispatchCanonicalEvent(projected, {
             ledger: options.ledger,

@@ -68,7 +68,15 @@ import {
 /** The process-shared follow-up Q&A budget for the Action path. The Action
  * runs one webhook delivery per process, so one in-memory store per process
  * is the entire budget surface here; a cross-process host (the operator
- * controller) injects its own durable store. */
+ * controller) injects its own durable store.
+ *
+ * KNOWN DEGRADATION (tracked by #1295): until the durable cross-process
+ * store lands, this per-process window bounds nothing ACROSS deliveries —
+ * repeated authorized questions in separate runs each see a fresh budget,
+ * and the real cross-delivery bound on the Action lane is the forge's own
+ * workflow concurrency, not this gate. The gate still bounds anything one
+ * process plans, and fails closed on its own (a full window answers
+ * nothing). */
 const actionFollowUpRateLimitStore = new InMemoryRateLimitStore();
 
 /** Host-bound dependencies for one Action-mode follow-up run. Every field
@@ -245,7 +253,12 @@ async function bindPlannerDeps(
         const reviews = await adapter.listPrReviews();
         const identity = await resolveTrustedIdentity(adapter);
         if (identity === null) return "";
-        return lastManagedBody(comments, reviews, stage.PUBLISH_MODE ?? "", "", identity);
+        // Same marker resolution as `selectAuthenticatedManagedBody`
+        // (`env.COMMENT_MARKER || "<!-- ai-pr-reviewer -->"`): an operator's
+        // custom comment marker must not silently drop the managed-review
+        // context out of follow-up answers.
+        const commentMarker = stage.COMMENT_MARKER || "<!-- ai-pr-reviewer -->";
+        return lastManagedBody(comments, reviews, stage.PUBLISH_MODE ?? "", commentMarker, identity);
       } catch {
         return "";
       }
