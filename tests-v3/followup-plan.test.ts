@@ -12,18 +12,42 @@ import type { AuthorityReading } from "../src/precheck/comment-authority.js";
 
 const HEAD = "abc1234def5678abc1234def5678abcdef0123";
 
-function ghEvent(body: string, user = "alice"): CanonicalForgeEvent {
+function ghEvent(body: string, user = "alice", repoPr?: { repo?: string; pr?: number }): CanonicalForgeEvent {
+  const repo = repoPr?.repo ?? "o/r";
+  const pr = repoPr?.pr ?? 7;
   const e = normalizeGitHubEvent({
     name: "issue_comment",
     action: "created",
-    repository: { full_name: "o/r" },
+    repository: { full_name: repo },
     installation: { id: 1 },
-    issue: { number: 7, pull_request: { head: { sha: HEAD, repo: { full_name: "o/r" } }, base: { sha: "def5678abcd", repo: { full_name: "o/r" } } } },
+    issue: { number: pr, pull_request: { head: { sha: HEAD, repo: { full_name: repo } }, base: { sha: "def5678abcd", repo: { full_name: repo } } } },
     comment: { id: 555, user: { login: user }, body },
     sender: { login: user },
   });
   assert.ok(e !== null, "fixture event must normalize");
   return e;
+}
+
+/** A hand-built canonical event (operator-mode shape): bypasses the
+ * normalizer's lowercasing, so casing hardening must happen in the planner. */
+function canonicalFollowUp(overrides: Partial<CanonicalForgeEvent> = {}): CanonicalForgeEvent {
+  return {
+    platform: "github",
+    source: "webhook",
+    kind: "follow_up",
+    installationId: "5",
+    repoFullName: "o/r",
+    prNumber: 7,
+    prId: 0,
+    headSha: HEAD,
+    baseSha: "",
+    draft: false,
+    fork: false,
+    labelName: "",
+    actor: "alice",
+    eventReference: "101",
+    ...overrides,
+  };
 }
 
 function forgejoEvent(body: string, user = "alice"): CanonicalForgeEvent {
@@ -54,6 +78,7 @@ function deps(overrides: Partial<FollowUpPlanDeps> = {}): FollowUpPlanDeps {
     readPermission: async () => ALLOW,
     rateLimitStore: new InMemoryRateLimitStore(),
     fetchThreadComments: async () => [],
+    readPrState: async () => ({ state: "open", draft: "not-draft" }),
     ...overrides,
   };
 }
@@ -180,6 +205,52 @@ test("an explicit rereview is NOT bound by the open-ended Q&A budget (#763)", as
   assert.deepEqual(rereview, { action: "rereview" });
 });
 
+test("the per-actor budget is per-actor WITHIN the PR, not repo-wide (#1294)", async () => {
+  const config: FollowUpPlanConfig = { ...CONFIG, rateLimit: { perPr: { limit: 6, windowMs: 60_000 }, perActor: { limit: 1, windowMs: 60_000 } } };
+  const store = new InMemoryRateLimitStore();
+  const d = () => deps({ rateLimitStore: store });
+  // Same actor, same PR: the first question is allowed, the second is not.
+  const first = await planFollowUp({ event: ghEvent("@reviewer-bot q1"), body: "@reviewer-bot q1" }, d(), config);
+  const second = await planFollowUp({ event: ghEvent("@reviewer-bot q2"), body: "@reviewer-bot q2" }, d(), config);
+  assert.equal(first.action, "answer");
+  assert.deepEqual(second, { action: "ignore", reason: "rate-limited" });
+  // Same actor, a different PR: a fresh per-actor-within-PR scope allows it.
+  const otherPr = await planFollowUp(
+    { event: ghEvent("@reviewer-bot q3", "alice", { pr: 8 }), body: "@reviewer-bot q3" },
+    d(),
+    config,
+  );
+  assert.equal(otherPr.action, "answer");
+  // Same actor, a different repo: likewise a fresh scope.
+  const otherRepo = await planFollowUp(
+    { event: ghEvent("@reviewer-bot q4", "alice", { repo: "o/other" }), body: "@reviewer-bot q4" },
+    d(),
+    config,
+  );
+  assert.equal(otherRepo.action, "answer");
+  // A different actor on the original PR is independent: alice's scope is
+  // exhausted but bob's fresh per-actor-within-PR scope still allows.
+  const otherActor = await planFollowUp({ event: ghEvent("@reviewer-bot q5", "bob"), body: "@reviewer-bot q5" }, d(), config);
+  assert.equal(otherActor.action, "answer");
+});
+
+test("a hand-built event cannot split one PR's actor budget by casing", async () => {
+  const config: FollowUpPlanConfig = { ...CONFIG, rateLimit: { perPr: { limit: 6, windowMs: 60_000 }, perActor: { limit: 1, windowMs: 60_000 } } };
+  const store = new InMemoryRateLimitStore();
+  const d = () => deps({ rateLimitStore: store });
+  // Normalized webhook shape (lowercase at the event boundary): allowed.
+  const first = await planFollowUp({ event: ghEvent("@reviewer-bot q1"), body: "@reviewer-bot q1" }, d(), config);
+  assert.equal(first.action, "answer");
+  // Hand-built canonical event with mixed case: the planner's lowercase makes
+  // it the SAME repo/PR/actor scopes, so it is rate-limited, not fresh.
+  const cased = await planFollowUp(
+    { event: canonicalFollowUp({ repoFullName: "O/R", actor: "Alice" }), body: "@reviewer-bot q2" },
+    d(),
+    config,
+  );
+  assert.deepEqual(cased, { action: "ignore", reason: "rate-limited" });
+});
+
 test("an unreadable follow-up body is source-unavailable (fail closed)", async () => {
   // No request body and no readComment.
   assert.deepEqual(await planFollowUp({ event: ghEvent("@reviewer-bot hi") }, deps(), CONFIG), { action: "ignore", reason: "source-unavailable" });
@@ -221,4 +292,74 @@ test("the Action event and the operator canonical event produce the SAME answer"
   assert.ok(fromGitHub.action === "answer" && fromForgejo.action === "answer");
   assert.equal(fromGitHub.prompt, fromForgejo.prompt, "adapter-local payload differences must not leak into the shared prompt");
   assert.equal(fromGitHub.inReplyToCommentId, fromForgejo.inReplyToCommentId);
+});
+
+// #1298: the PR-state gate mirrors the shipped comment-command refusals
+// (`comment-pr-closed` / `comment-pr-draft`) for the Q&A lane: a closed/merged
+// or draft PR spends no model work and posts no reply, on EITHER host, from a
+// capability reading — never a payload sniff.
+test("#1298: a question on a closed PR is ignored and consumes no budget", async () => {
+  const store = new InMemoryRateLimitStore();
+  let threadFetched = false;
+  const plan = await planFollowUp(
+    { event: ghEvent("@reviewer-bot still relevant?"), body: "@reviewer-bot still relevant?" },
+    deps({ rateLimitStore: store, readPrState: async () => ({ state: "closed", draft: "not-draft" }), fetchThreadComments: async () => { threadFetched = true; return []; } }),
+    CONFIG,
+  );
+  assert.deepEqual(plan, { action: "ignore", reason: "pr-closed" });
+  assert.equal(store.countInWindow("pr:github:o/r#7", 60_000, 1_000_000), 0, "a dead lane consumes no Q&A budget");
+  assert.equal(threadFetched, false, "a refused question builds no answer context");
+});
+
+test("#1298: a question on a draft PR is ignored", async () => {
+  const plan = await planFollowUp(
+    { event: ghEvent("@reviewer-bot thoughts?"), body: "@reviewer-bot thoughts?" },
+    deps({ readPrState: async () => ({ state: "open", draft: "draft" }) }),
+    CONFIG,
+  );
+  assert.deepEqual(plan, { action: "ignore", reason: "pr-draft" });
+});
+
+test("#1298: an unproven PR state fails closed — no answer on uncertainty", async () => {
+  const cases: Array<() => Promise<{ state: "open" | "closed" | "unknown"; draft: "draft" | "not-draft" | "unknown" }>> = [
+    async () => ({ state: "unknown", draft: "unknown" }),
+    async () => ({ state: "open", draft: "unknown" }),
+    async () => { throw new Error("pr lookup failed"); },
+  ];
+  for (const readPrState of cases) {
+    const plan = await planFollowUp(
+      { event: ghEvent("@reviewer-bot ping"), body: "@reviewer-bot ping" },
+      deps({ readPrState }),
+      CONFIG,
+    );
+    assert.deepEqual(plan, { action: "ignore", reason: "pr-state-unknown" });
+  }
+});
+
+test("#1298: the gate runs only for questions — never before authority, never for a re-review", async () => {
+  let stateReads = 0;
+  const counting = async () => { stateReads += 1; return { state: "closed" as const, draft: "not-draft" as const }; };
+  // Unauthorized: refused on authority, the state is never consulted.
+  const unauthorized = await planFollowUp(
+    { event: ghEvent("@reviewer-bot hello"), body: "@reviewer-bot hello" },
+    deps({ readPermission: async () => ({ permission: "read", roleName: "", subject: "absent" }), readPrState: counting }),
+    CONFIG,
+  );
+  assert.deepEqual(unauthorized, { action: "ignore", reason: "unauthorized" });
+  // Unaddressed comment: intent guard outranks everything, no state read.
+  const unaddressed = await planFollowUp(
+    { event: ghEvent("looks fine"), body: "looks fine" },
+    deps({ readPrState: counting }),
+    CONFIG,
+  );
+  assert.deepEqual(unaddressed, { action: "ignore", reason: "not-addressed" });
+  // Explicit re-review: its admission stays the review pipeline's own (#1294),
+  // so even a closed PR's command hands back unchanged, without a state read.
+  const rereview = await planFollowUp(
+    { event: ghEvent("/ai-review"), body: "/ai-review" },
+    deps({ readPrState: counting }),
+    CONFIG,
+  );
+  assert.deepEqual(rereview, { action: "rereview" });
+  assert.equal(stateReads, 0, "only a planned question reaches the PR-state gate");
 });

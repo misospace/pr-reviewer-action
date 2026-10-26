@@ -1,4 +1,4 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { validateContract } from "../config/contract.js";
@@ -11,6 +11,7 @@ import { repoScopedUrl } from "../platform/repo-ref.js";
 import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { stageEnvFromConfig } from "./env.js";
 import { buildPublishApi, publishInputFromEnv, publishWith, readEvent, type StepEvent } from "./entrypoints.js";
+import { runActionFollowUp } from "./followup-action.js";
 import { publishStepRuns } from "../publish/publish.js";
 import { rawInputsFromEnv, runReview } from "./review.js";
 import { createRunDir } from "./run-dir.js";
@@ -73,6 +74,32 @@ function inlineCodeValue(text: string): string {
   for (const run of flat.match(/`+/g) ?? []) maxRun = Math.max(maxRun, run.length);
   const delim = "`".repeat(maxRun + 1);
   return `${delim} ${flat} ${delim}`;
+}
+
+/** The raw parsed `GITHUB_EVENT_PATH` payload for the follow-up host (the
+ * only consumer that needs more than `readEvent`'s flat `StepEvent` view).
+ * #892 parity with `readEvent`: the runner payload carries NO top-level
+ * `name` — the event name lives only in `GITHUB_EVENT_NAME` — so the name is
+ * filled in here when the payload has none (a payload-provided string name
+ * always wins). Absent or unparseable is `null` — the follow-up host treats
+ * that as "not a follow-up" and the pipeline proceeds exactly as before. */
+function readRawEventPayload(env: NodeJS.ProcessEnv): unknown {
+  const path = env.GITHUB_EVENT_PATH ?? "";
+  if (path === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  } catch {
+    return null;
+  }
+  const name = env.GITHUB_EVENT_NAME ?? "";
+  if (name !== "" && parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const record = parsed as Record<string, unknown>;
+    if (typeof record.name !== "string" && typeof record.event !== "string") {
+      return { ...record, name };
+    }
+  }
+  return parsed;
 }
 
 /** The label a `labeled` event carries (GitHub sends `{ name }`). Moved to
@@ -147,6 +174,44 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
     process.stderr.write("[v3] Review skipped: comment-not-on-pr\n");
     appendStepSummary(env, "**AI PR Review skipped:** `comment-not-on-pr`");
     return 0;
+  }
+
+  // ── Conversational follow-ups (#1294) ─────────────────────────────────
+  // A `created` `issue_comment` on a PR goes through the shared follow-up
+  // consumer BEFORE the review pipeline: an authorized question addressed to
+  // the reviewer gets a rendered reply (posted through the publish seam,
+  // verdict-free by construction) and consumes no review; an explicit
+  // re-review command falls through so the shipped pipeline below stays the
+  // single owner of review generations (its own admission, exact-head
+  // checks, enforcement, publication, dedup). An `ignored` plan also falls
+  // through — today's precheck skip wording ("unrelated-comment",
+  // "comment-unauthorized", …) is behavior-preserved, and the consumer
+  // performed no write and no model call for it.
+  if (
+    event?.name === "issue_comment"
+    && event.action === "created"
+    && (stage.PR_NUMBER ?? "") !== ""
+  ) {
+    const followUp = await runActionFollowUp(stage as NodeJS.ProcessEnv, readRawEventPayload(env));
+    if (followUp.route === "follow-up" && followUp.outcome.status !== "ignored") {
+      const answered = followUp.outcome.status === "answered" && followUp.outcome.posted;
+      const followUpReason = answered ? "follow-up-answered" : "follow-up-answer-failed";
+      writeOutputs(env, [
+        ["should-review", "false"],
+        ["skip-reason", followUpReason],
+        ["verdict", ""],
+        ["verdict-source", ""],
+        ["review-result", ""],
+      ]);
+      // Only fixed constants on both surfaces — no comment body, prompt, or
+      // answer text ever reaches the log or the step summary.
+      process.stderr.write(`[v3] Follow-up handled: ${followUpReason}\n`);
+      appendStepSummary(
+        env,
+        `**AI PR Review follow-up:** ${answered ? "answered the question in the PR conversation" : "could not post an answer"} (\`${followUpReason}\`).`,
+      );
+      return 0;
+    }
   }
 
   // ── Review ────────────────────────────────────────────────────────────

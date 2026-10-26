@@ -11,11 +11,21 @@
 // remains the only consumer of the (projected) body and this seam never
 // inspects untrusted content beyond the event-header shape and the canonical
 // event's kind.
+//
+// Routing seam: an injected `router` (the operator-mode event router,
+// ./operator-router.js) receives a `follow_up` delivery INSTEAD of `onEvent` —
+// that is how the operator lane CONSUMES the canonical follow-up event rather
+// than merely forwarding it. The router is optional: with none configured the
+// handler behaves exactly as before (every delivery, a `follow_up` included,
+// goes to `onEvent`), and every non-follow-up delivery ALWAYS goes to
+// `onEvent`. A throwing router is handled exactly like a throwing `onEvent` —
+// a fixed 500, no error text echoed.
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { normalizeForgejoEvent } from "../events/normalize.js";
 import type { CanonicalForgeEvent } from "../events/types.js";
 import { projectForgejoWebhookPayload } from "./forgejo-events.js";
 import { verifyForgejoWebhookSignature } from "./signature.js";
+import type { OperatorEventRouter } from "./operator-router.js";
 
 export const DEFAULT_MAX_WEBHOOK_BODY_BYTES = 1_048_576;
 
@@ -26,6 +36,10 @@ export interface ForgejoWebhookHandlerOptions {
   readonly maxBodyBytes?: number | undefined;
   readonly rereviewLabel?: string | undefined;
   readonly onEvent: (event: CanonicalForgeEvent) => void | Promise<void>;
+  /** The operator-mode event router. When present, a canonical `follow_up`
+   * delivery is handed to it (and never to `onEvent`); everything else is
+   * unchanged. Absent → the handler behaves exactly as it did before. */
+  readonly router?: OperatorEventRouter | undefined;
 }
 
 function send(res: ServerResponse, status: number, body: string): void {
@@ -166,7 +180,18 @@ export function createForgejoWebhookHandler(
       }
 
       try {
-        await options.onEvent(event);
+        const router = options.router;
+        if (event.kind === "follow_up" && router !== undefined) {
+          // The operator lane CONSUMES the canonical follow-up event here:
+          // the router drives the shared follow-up consumer, so the delivery
+          // is planned and answered instead of only being forwarded. The
+          // follow-up branch of the router never rejects (the consumer is
+          // total), but a rejection still degrades to the same fixed 500 as
+          // a throwing `onEvent` — the response contract is identical.
+          await router.handleEvent(event);
+        } else {
+          await options.onEvent(event);
+        }
       } catch {
         // Keep the error local — no logging of the event.
         settle(500, '{"status":"internal error"}');

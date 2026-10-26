@@ -91,3 +91,36 @@ export function deriveDraftState(raw: unknown): DraftState {
   if (value === false) return "not-draft";
   return "unknown";
 }
+
+/** Whether a PR is still accepting work, as the forge reports it. `unknown`
+ * means the read proved nothing (a failed lookup) — the caller fails closed. */
+export type PrOpenState = "open" | "closed" | "unknown";
+
+/** One parity-safe PR-state reading: the open/closed half mirrors the
+ * `comment-pr-closed` derivation in `src/precheck/decide.ts` (a merged PR is
+ * reported `closed` by both forges, so `closed` covers merged), and the draft
+ * half IS {@link deriveDraftState} — the ONE draft derivation (#961). */
+export interface PrStateReading {
+  state: PrOpenState;
+  draft: DraftState;
+}
+
+/**
+ * The ONE PR-state derivation (#1298): read open/closed + draft off a
+ * platform PR object (the GitHub pulls-API shape; the Forgejo adapter
+ * normalizes `state` and `draft` to it at the seam). A successfully fetched
+ * PR object with a missing/non-string `state` reads as `open` — the pulls
+ * API always supplies one, mirroring the comment-command gate. A null (or
+ * otherwise unusable) object — a failed lookup — proves NOTHING: both halves
+ * read `unknown`, and the caller fails closed.
+ */
+export function derivePrStateReading(raw: unknown): PrStateReading {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { state: "unknown", draft: "unknown" };
+  }
+  const value = asObject(raw).state;
+  const state: PrOpenState = typeof value === "string"
+    ? (value.toLowerCase() === "closed" ? "closed" : "open")
+    : "open";
+  return { state, draft: deriveDraftState(raw) };
+}

@@ -9,7 +9,7 @@ import { ForgejoAdapter } from "../src/platform/forgejo.js";
 import { GitHubAdapter, nextLink } from "../src/platform/github.js";
 import { PlatformRequestError, type FetchLike } from "../src/platform/http.js";
 import { compareCodePoints, jqCompact } from "../src/platform/jq.js";
-import { forgejoJobStatusPathsMatch, forgejoSelfStatusMatches, forgejoSelfRunOrigin, GITHUB_CONVERSATION_COMMENTS_QUERY, GITHUB_PR_BODY_REVISION_QUERY, GITHUB_REVIEW_THREADS_QUERY, normalizeExternalChecks, normalizeForgejoRunJobs, projectPrFiles } from "../src/platform/normalize.js";
+import { forgejoJobStatusPathsMatch, forgejoSelfStatusMatches, forgejoSelfRunOrigin, GITHUB_CONVERSATION_COMMENTS_QUERY, GITHUB_PR_BODY_REVISION_QUERY, GITHUB_REVIEW_THREADS_QUERY, normalizeExternalChecks, normalizeForgejoConversationComments, normalizeForgejoRunJobs, projectPrFiles } from "../src/platform/normalize.js";
 import { pyQuote, pyStr } from "../src/platform/py.js";
 import { GitHubPublishApi, ForgejoPublishApi } from "../src/platform/publish-api.js";
 import { parseRepoRef, repoScopedUrl } from "../src/platform/repo-ref.js";
@@ -511,8 +511,30 @@ test("nextLink parses RFC 8288 rel=next among several relations", () => {
 
 // ── Forgejo routing ─────────────────────────────────────────────────────
 
-test("forgejo conversation comments paginate 50 at a time and stop on a short page", async () => {
-  const page = (n: number, count: number): unknown[] =>
+test("#1299: the forgejo latest-comments cap drops malformed timestamps first, never a valid recent comment", () => {
+  // The follow-up Q&A budget's snapshot-coverage proof reasons over the
+  // entries the cap RETAINS: a malformed stamp sorting into a newest-first
+  // slot would evict a valid recent question and could make an uncovered
+  // window appear covered. Unparseable stamps therefore sort as the OLDEST
+  // and are the first the cap drops.
+  const malformed = { id: 1, body: "malformed", created_at: "not-a-timestamp", user: { login: "u" } };
+  const valid = (index: number): Record<string, unknown> => ({
+    id: 100 + index,
+    body: `valid ${index}`,
+    created_at: new Date(Date.UTC(2026, 9, 1, 0, 0, 0, index)).toISOString(),
+    user: { login: "u" },
+  });
+  // Over the cap: the malformed comment is dropped, every valid one stays.
+  const capped = normalizeForgejoConversationComments([malformed, ...Array.from({ length: 100 }, (_u, i) => valid(i))]);
+  assert.equal(capped.length, 100);
+  assert.ok(capped.every((c) => (c as Record<string, unknown>).id !== 1), "malformed stamp dropped by the cap");
+  // Under the cap nothing is dropped: the malformed comment stays but sorts
+  // oldest (last in the newest-first order).
+  const underCap = normalizeForgejoConversationComments([malformed, valid(0), valid(1)]);
+  assert.deepEqual(underCap.map((c) => (c as Record<string, unknown>).id), [101, 100, 1]);
+});
+
+test("forgejo conversation comments paginate 50 at a time and stop on a short page", async () => {  const page = (n: number, count: number): unknown[] =>
     Array.from({ length: count }, (_, i) => ({ id: n * 100 + i, body: "b", created_at: `2026-09-0${n}T00:00:${String(i).padStart(2, "0")}Z`, user: { login: "u" } }));
   const { fetchImpl, seen } = recorder((url) => json(url.searchParams.get("page") === "1" ? page(1, 50) : page(2, 2)));
   const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
@@ -521,6 +543,24 @@ test("forgejo conversation comments paginate 50 at a time and stop on a short pa
   assert.deepEqual(seen.map((s) => [s.url, s.auth]), [
     ["https://git.example/api/v1/repos/o/r/issues/5/comments?page=1&limit=50", "token t"],
     ["https://git.example/api/v1/repos/o/r/issues/5/comments?page=2&limit=50", "token t"],
+  ]);
+});
+
+test("#1299: a failed forgejo comment page fails the read instead of silently truncating the ledger", async () => {
+  // The follow-up Q&A budget reads this thread as its durable ledger: a
+  // partial listing presented as a successful read would silently widen the
+  // budget, so a failed page fails the WHOLE read (the budget then denies —
+  // fail closed) instead of ending the listing with what was collected.
+  const { fetchImpl, seen } = recorder((url) => {
+    if (url.searchParams.get("page") === "2") return json({}, 500);
+    return json(Array.from({ length: 50 }, (_, i) => ({ id: i, body: "b", created_at: `2026-09-01T00:00:${String(i).padStart(2, "0")}Z`, user: { login: "u" } })));
+  });
+  const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+  const result = await adapter.listPrConversationComments();
+  assert.equal(result.ok, false);
+  assert.deepEqual(seen.map((s) => s.url), [
+    "https://git.example/api/v1/repos/o/r/issues/5/comments?page=1&limit=50",
+    "https://git.example/api/v1/repos/o/r/issues/5/comments?page=2&limit=50",
   ]);
 });
 

@@ -34,7 +34,18 @@ export type FollowUpIgnoreReason =
    * closed). */
   | "permission-unknown"
   /** The per-PR/per-actor follow-up rate budget is exhausted. */
-  | "rate-limited";
+  | "rate-limited"
+  /** The PR is closed (merged PRs report closed on both forges) — mirroring
+   * the shipped `comment-pr-closed` comment-command gate (#961/#1298): a
+   * question on a closed PR gets no model work and no reply. */
+  | "pr-closed"
+  /** The PR is a draft — mirroring the shipped `comment-pr-draft` gate: a
+   * question on a draft PR gets no model work and no reply. */
+  | "pr-draft"
+  /** The PR-state read could not prove the PR open and non-draft (failed
+   * lookup, or an unrecognizable draft value). Fail closed — like the
+   * `comment-pr-lookup-failed` gate, uncertainty never answers. */
+  | "pr-state-unknown";
 
 /** The classifier's coarse intent for one follow-up comment. */
 export type FollowUpIntent = "ignored" | "rereview" | "question";
