@@ -21,6 +21,21 @@
  * before it is believed; anything else fails closed with an explicit
  * `ExecutionFailureCategory`.
  *
+ * Containment: the request validator only proves LEXICAL containment of
+ * the envelope paths inside the run directory, and lexical containment is
+ * not enough — a symlink planted BELOW the run directory would redirect
+ * the envelope write or the result read outside it. Both envelope paths
+ * are therefore proven against the run directory on disk
+ * (`ensureContained`, which creates the missing parent components inside
+ * the run directory and refuses a symlinked one) before anything is
+ * written, and the envelope is written with no-follow semantics
+ * (`writeFileNoFollow`); the result file is read with no-follow, bounded
+ * semantics (`readBoundedFileNoFollow`). A path that cannot be proven
+ * contained refuses the launch (`launch_refused`) — nothing is launched,
+ * no envelope and no state file are written. The recovery record is read
+ * the same way (no-follow, byte-capped), because it lives in the same
+ * worker-writable directory.
+ *
  * Crash recovery: the executor records the in-flight execution (correlation
  * identity, pid, state) in `<runDir>/.pr-reviewer-execution.json`, so
  * `reconcile` — called by the controller after a restart — can classify the
@@ -32,13 +47,17 @@
  * wired into the Action runtime.
  */
 
-import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdir, open, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { buildChildEnv, extendAllowlist } from "../runtime/env.js";
 import { runProcess } from "../runtime/subprocess.js";
 import type { ProcessHandle, ProcessResult, RunProcessOptions } from "../runtime/subprocess.js";
 import type { LocalExecutorSpec } from "../config/instance-config.js";
 import {
+  MAX_EXECUTION_FAILURE_MESSAGE_CHARS,
+  MAX_EXECUTION_RESULT_FILE_BYTES,
   validateExecutionRequest,
   validateExecutionResult,
   ExecutionRequestError,
@@ -49,6 +68,7 @@ import {
   type ExecutionStatusReport,
   type Executor,
 } from "./types.js";
+import { ensureContained, proveContained, readBoundedFileNoFollow, writeFileNoFollow } from "./paths.js";
 
 /** The executor's coordination variables — the ONLY non-generic keys the
  * child environment ever carries. */
@@ -67,6 +87,24 @@ const BASE_CHILD_ALLOWLIST = ["PATH", "HOME", "TMPDIR"] as const;
 /** Diagnostics tail bound: at most this many characters of stderr survive
  * into a result. */
 const DIAGNOSTIC_TAIL_CHARS = 2_000;
+
+/** Recovery-record bound: the state file is a small JSON record, so its
+ * read is capped (and no-follow) like every other file this executor
+ * consumes — the run directory is worker-writable space, and a planted
+ * file must never be able to make the controller allocate without
+ * bound. */
+const MAX_STATE_FILE_BYTES = 16_384;
+
+/** Failure messages are bounded by the result contract
+ * (`MAX_EXECUTION_FAILURE_MESSAGE_CHARS`). The refusal message embeds
+ * filesystem paths — which the request contract itself allows to be long
+ * — so the message is truncated to the cap: an executor result must
+ * always satisfy the contract it is validated against, or the queue
+ * seam would reject the executor's OWN result. */
+function boundedFailureMessage(message: string): string {
+  if (message.length <= MAX_EXECUTION_FAILURE_MESSAGE_CHARS) return message;
+  return `${message.slice(0, MAX_EXECUTION_FAILURE_MESSAGE_CHARS - 1)}…`;
+}
 
 const FAILURE_CATEGORIES: readonly string[] = [
   "launch_refused", "deadline", "worker_crash", "worker_error", "no_result", "stale_result", "orphaned",
@@ -214,7 +252,30 @@ export class LocalExecutor implements Executor {
       // included) so the worker — and any post-restart audit — sees exactly
       // what was asked.
       await mkdir(validated.runDir, { recursive: true });
-      await writeFile(validated.requestPath, JSON.stringify(validated, null, 2), "utf8");
+      // Containment proof BEFORE anything is written or launched: lexical
+      // containment (the validator's job) does not survive a symlink
+      // planted below the run directory, and such a symlink would
+      // redirect the envelope write or the result read outside it. The
+      // missing parent directories are created INSIDE the run directory
+      // (a symlinked component is refused, never followed), so a nested
+      // envelope path is still usable. An unprovable path refuses the
+      // launch: nothing is written, nothing is launched.
+      const requestProof = await ensureContained(validated.runDir, validated.requestPath);
+      const resultProof = await ensureContained(validated.runDir, validated.resultPath);
+      const refusal = !requestProof.contained
+        ? requestProof
+        : !resultProof.contained
+          ? resultProof
+          : null;
+      if (refusal !== null) {
+        this.runs.delete(validated.runId);
+        return refusedHandle(this.refusedResult(
+          validated,
+          "launch_refused",
+          `the execution was refused before launch: ${refusal.problem}`,
+        ));
+      }
+      await writeFileNoFollow(validated.requestPath, JSON.stringify(validated, null, 2));
       // Crash-window record: the state file exists (pid 0 — not yet
       // launched) BEFORE the spawn, so a crash in the launch window leaves
       // something reconcile can classify instead of an unknown.
@@ -283,7 +344,11 @@ export class LocalExecutor implements Executor {
           await processHandle.abort();
         },
         collect: async (): Promise<ExecutionResult> => {
-          if (run.result !== null) return run.result;
+          // Always await the settled promise: it carries the terminal
+          // state-record write, so a collector that returned the cached
+          // result early could observe a recovery record that still says
+          // "running". The promise resolves to the same frozen result
+          // every time (first terminal wins).
           return settled;
         },
       };
@@ -306,7 +371,7 @@ export class LocalExecutor implements Executor {
       status: "failed" as const,
       resultHeadSha: "" as const,
       failureCategory,
-      failureMessage,
+      failureMessage: boundedFailureMessage(failureMessage),
       resultArtifactPath: "" as const,
       diagnostics: "refused before launch",
       artifactPaths: Object.freeze([]) as readonly string[],
@@ -322,12 +387,18 @@ export class LocalExecutor implements Executor {
   async reconcile(request: ExecutionRequest): Promise<ExecutionReconcileOutcome> {
     const validated = validateExecutionRequest(request);
     const statePath = join(validated.runDir, EXECUTION_STATE_FILE);
-    let text: string;
-    try {
-      text = await readFile(statePath, "utf8");
-    } catch {
+    // The recovery record lives in worker-writable space: it is read
+    // no-follow and byte-capped like every other file this executor
+    // consumes, so a planted file (a symlink, a huge blob) can neither
+    // redirect the read nor make the controller allocate without bound.
+    // An unreadable or oversized record means "nothing to collect"
+    // (fail-safe: the caller may start fresh), exactly like a missing
+    // one.
+    const read = await readBoundedFileNoFollow(statePath, MAX_STATE_FILE_BYTES);
+    if (read.kind !== "ok") {
       return RECONCILE_NONE;
     }
+    const text = read.text;
     let record: unknown;
     try {
       record = JSON.parse(text);
@@ -449,7 +520,7 @@ export class LocalExecutor implements Executor {
       status: "failed" as const,
       resultHeadSha: "",
       failureCategory,
-      failureMessage,
+      failureMessage: boundedFailureMessage(failureMessage),
       resultArtifactPath: "",
     });
 
@@ -504,18 +575,26 @@ export class LocalExecutor implements Executor {
   }
 
   /** Read, correlation-check, and validate the worker's structured result
-   * file. Correlation comes FIRST: a parseable file from another
+   * file. The file is proven contained (no symlink, canonical directory
+   * inside the run directory) and read with no-follow, bounded semantics
+   * before it is parsed at all — a planted symlink is never followed and
+   * an oversized file never reaches the parser. Correlation comes NEXT and
+   * stays first among the CONTENT checks: a parseable file from another
    * generation is `stale`, never a validation target. */
   private async readResultFile(request: ExecutionRequest): Promise<ResultFileOutcome> {
-    let text: string;
-    try {
-      text = await readFile(request.resultPath, "utf8");
-    } catch {
-      return { kind: "missing" };
+    const proof = await proveContained(request.runDir, request.resultPath);
+    if (!proof.contained) {
+      return { kind: "invalid" };
     }
+    const read = await readBoundedFileNoFollow(
+      request.resultPath,
+      MAX_EXECUTION_RESULT_FILE_BYTES,
+    );
+    if (read.kind === "missing") return { kind: "missing" };
+    if (read.kind === "invalid") return { kind: "invalid" };
     let raw: unknown;
     try {
-      raw = JSON.parse(text);
+      raw = JSON.parse(read.text);
     } catch {
       return { kind: "invalid" };
     }
@@ -545,7 +624,7 @@ export class LocalExecutor implements Executor {
       status: partial.status,
       resultHeadSha: "",
       failureCategory: partial.failureCategory ?? ("" as const),
-      failureMessage: partial.failureMessage ?? ("" as const),
+      failureMessage: boundedFailureMessage(partial.failureMessage ?? ("" as const)),
       resultArtifactPath: "",
       diagnostics: "reconciled from the local execution state file",
       artifactPaths: Object.freeze([]) as readonly string[],
@@ -591,7 +670,9 @@ export class LocalExecutor implements Executor {
 
   /** One atomic state-file write: temp file + rename, mirroring the
    * queue-store persistence mechanism, so a reader never sees a torn
-   * record. */
+   * record. The temp path carries a RANDOM suffix and is opened
+   * `O_EXCL|O_NOFOLLOW`: a pre-created symlink at the temp path can
+   * never be followed, and two writers never share a temp file. */
   private async writeStateRecord(
     run: LocalRun,
     state: ExecutionStateRecord["state"],
@@ -609,9 +690,13 @@ export class LocalExecutor implements Executor {
         : {}),
     };
     const target = join(run.request.runDir, EXECUTION_STATE_FILE);
-    const tmp = `${target}.tmp.${process.pid}`;
+    const tmp = `${target}.tmp.${process.pid}.${randomUUID()}`;
     try {
-      const handle = await open(tmp, "w", 0o600);
+      const handle = await open(
+        tmp,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),
+        0o600,
+      );
       try {
         await handle.writeFile(Buffer.from(JSON.stringify(record), "utf8"));
         await handle.sync();

@@ -40,7 +40,7 @@ refuse to express. Enforced structurally:
 | No endpoint URL with embedded credentials; http/https only (self-hosted local endpoints stay first-class) | `endpointAt` in `instance-config.ts` |
 | Model/provider endpoints are operator-owned; repository config can never set one | `contracts/action-v3.yml` `repo-configurable` marking + `validateContract`; `applyRepositoryConfigValues` |
 | Repository config cannot touch tool/MCP/command, network/host, or fork/private-data authority | Same marking: `tool-mode`, `evidence-providers-file`, `*-for-forks`, tokens, and every secret are never `repo-configurable` |
-| Executor profiles are a closed `kind` set with bounded scalars — no image, PodSpec, host path, or executable field exists | `validateExecutorProfile` + `rejectUnknown` |
+| Executor profiles are a closed `kind` set with bounded, operator-owned specs — `local.command`/`local.args` (argv-only) and `oci.image` (image-reference grammar) are the only infrastructure fields, and no PodSpec, host path, or free-form key exists (`kubernetes` profiles carry no spec until #734) | `validateExecutorProfile` + `rejectUnknown` + `validateLocalExecutorSpec`/`validateOciImageSpec` |
 | Budgets and counts carry hard ceilings (file bytes, context tokens, concurrency, list sizes) | `MAX_*` constants in `instance-config.ts` / `effective-config.ts` / `repository-config.ts` |
 
 ### Layer 2 — operator instance config

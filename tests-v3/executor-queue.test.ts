@@ -59,10 +59,15 @@ function makeRecord(jobId: string): JobRecord {
   return newJobRecord(makeJob(jobId), 1_000, 0);
 }
 
-let runSeq = 0;
-
+/** The request for one (job, attempt) is DETERMINISTIC: the adapter builds
+ * the request it dispatches, and the result it collects must correlate
+ * with THAT request — so the harness must hand both sides the same
+ * identity (a per-call counter would make every scripted result belong
+ * to a different run than the request the adapter built). The attempt
+ * number comes from the record, so a scheduler retry still gets its own
+ * generation identity (`run-<job>-<attempt>`). */
 function makeRequest(jobId: string, attempt: number): ExecutionRequest {
-  const runId = `run-${jobId}-${attempt}-${++runSeq}`;
+  const runId = `run-${jobId}-${attempt}`;
   const runDir = `/tmp/pr-reviewer-queue/${runId}`;
   return Object.freeze({
     jobId,
@@ -173,7 +178,7 @@ class StubExecutor implements Executor {
 
 function adapterOver(
   next: () => Promise<ExecutionHandle>,
-  build: QueueRequestBuilder = async (record) => makeRequest(record.job.jobId, record.attempt),
+  build: QueueRequestBuilder = async (record) => makeRequest(record.job.jobId, Math.max(1, record.attempt)),
 ): { adapter: ReturnType<typeof toQueueJobExecutor>; executor: StubExecutor } {
   const executor = new StubExecutor(next);
   return { adapter: toQueueJobExecutor(build, executor), executor };
@@ -201,7 +206,7 @@ async function waitForState(
 
 function baseOptions(executor: Executor): SchedulerOptions {
   const queueExecutor = toQueueJobExecutor(
-    async (record) => makeRequest(record.job.jobId, record.attempt),
+    async (record) => makeRequest(record.job.jobId, Math.max(1, record.attempt)),
     executor,
   );
   return {
@@ -267,6 +272,72 @@ test("resultHeadSha is '' unless the result completed, whatever the executor rep
   const { adapter } = adapterOver(async () => handleFor(smuggled));
   const outcome = await adapter.start(makeRecord("job-a"), new AbortController().signal);
   assert.equal(outcome.resultHeadSha, "");
+});
+
+// ── correlation: the adapter never trusts a backend's result identity ───
+
+test("a result for a foreign runId is refused: the scheduler never sees a foreign success", async () => {
+  // The boundary holds the result-correlation invariant for EVERY backend,
+  // not only for the LocalExecutor: a result that belongs to another
+  // generation must never reach the scheduler as a completed outcome.
+  const request = makeRequest("job-a", 1);
+  const foreign = Object.freeze({
+    ...completedResult(request),
+    runId: "run-somebody-else",
+  }) as ExecutionResult;
+  const { adapter } = adapterOver(async () => handleFor(foreign));
+  const outcome = await adapter.start(makeRecord("job-a"), new AbortController().signal);
+  assert.deepEqual(
+    { ...outcome },
+    { status: "failed", resultHeadSha: "", failureCategory: "stale_result" },
+  );
+});
+
+test("a result for a foreign jobId is refused", async () => {
+  const request = makeRequest("job-a", 1);
+  const foreign = Object.freeze({
+    ...completedResult(request),
+    jobId: "job-b",
+  }) as ExecutionResult;
+  const { adapter } = adapterOver(async () => handleFor(foreign));
+  const outcome = await adapter.start(makeRecord("job-a"), new AbortController().signal);
+  assert.deepEqual(
+    { ...outcome },
+    { status: "failed", resultHeadSha: "", failureCategory: "stale_result" },
+  );
+});
+
+test("a result that violates the result contract is refused", async () => {
+  // The result channel is untrusted at the queue seam: a backend that
+  // returns a malformed result (unknown field, bogus status, a head on a
+  // failed result) must not be mapped onto a scheduler outcome.
+  const request = makeRequest("job-a", 1);
+  const malformed = Object.freeze({
+    ...completedResult(request),
+    extra: "not part of the contract",
+  }) as unknown as ExecutionResult;
+  const { adapter } = adapterOver(async () => handleFor(malformed));
+  const outcome = await adapter.start(makeRecord("job-a"), new AbortController().signal);
+  assert.deepEqual(
+    { ...outcome },
+    { status: "failed", resultHeadSha: "", failureCategory: "executor-error" },
+  );
+});
+
+test("a result whose failure message exceeds the contract cap is refused", async () => {
+  // The result contract bounds its free-text fields, so a backend that
+  // ignores the cap is a contract violation like any other — the adapter
+  // must not launder it into a scheduler outcome.
+  const request = makeRequest("job-a", 1);
+  const oversized = Object.freeze({
+    ...failedResult(request, "launch_refused", "m".repeat(2_001)),
+  }) as ExecutionResult;
+  const { adapter } = adapterOver(async () => handleFor(oversized));
+  const outcome = await adapter.start(makeRecord("job-a"), new AbortController().signal);
+  assert.deepEqual(
+    { ...outcome },
+    { status: "failed", resultHeadSha: "", failureCategory: "executor-error" },
+  );
 });
 
 // ── rejection mapping ───────────────────────────────────────────────────

@@ -34,7 +34,7 @@ receives only:
 | `workspace` | the `WorkspaceInfo` the #732 acquisition layer produced (isolated exact-head worktree; the executor owns its `close()`) |
 | `profiles` | `executor`/`model`/`evidence` profile **names** — approved by the operator's instance config; repository config selects names only |
 | `credentials` | opaque short-lived credential **references** (`ExecutionCredentialRef`); the #735 broker resolves them operator-side — no material ever crosses this boundary |
-| `runDir` / `requestPath` / `resultPath` | worker-owned run directory, the request-envelope file the executor serializes before launch, and the **result storage coordinate** the worker must write its structured result to |
+| `runDir` / `requestPath` / `resultPath` | controller-owned run directory (the executor creates it and the recovery record; the worker writes only the result file), the request-envelope file the executor serializes before launch, and the **result storage coordinate** the worker must write its structured result to |
 
 **Stdout is never the result protocol.** The worker writes its structured
 result JSON to the file at `resultPath`; captured stdout/stderr are
@@ -69,6 +69,19 @@ result from a superseded generation can never be mistaken for the live
 one. The first terminal result wins: `collect()` after settlement is
 idempotent and returns the identical frozen result, so a duplicate result
 can never replace it.
+
+**The result channel is bounded.** The result file is the untrusted
+surface: the executor reads at most `MAX_EXECUTION_RESULT_FILE_BYTES`
+(1 MiB) from it — no-follow open, size check and read from the SAME
+descriptor — so a worker can never make the executor hold an unbounded
+result. The free-text fields are capped too (`diagnostics` ≤ 8 000
+characters, `failureMessage` ≤ 2 000 characters, `artifactPaths` ≤ 64
+entries, `resultHeadSha` ≤ 128 characters); `validateExecutionResult`
+rejects anything larger, and the worker-written file is read through that
+same validator. The executor's own synthesized results respect the same
+caps — a refusal message that embeds a long filesystem path is truncated
+to the cap, so the executor can never produce a result its own contract
+rejects.
 
 ## Required operations
 
@@ -105,6 +118,15 @@ executor type entirely. Each execution receives its own cancellation
 signal — the scheduler creates one `AbortController` per dispatch — so a
 shared long-lived signal across executions is not a supported shape.
 
+**The adapter does not trust the backend.** A collected result is
+re-validated against the result contract and its correlation identity is
+proved against the request the adapter itself built: a result that
+violates the contract settles failed (`executor-error`), and a result
+that belongs to another `runId`/`jobId` settles failed (`stale_result`).
+The correlation invariant therefore holds for EVERY backend, not only for
+the `LocalExecutor` (which enforces it internally as well) — otherwise a
+foreign backend's result could reach the scheduler as a successful head.
+
 ## Local reference backend (`local.ts`)
 
 `LocalExecutor` launches the operator-owned command from the profile's
@@ -128,6 +150,34 @@ overwritten by a stale in-flight write. Terminal classification maps the
 `spawn_error` → `launch_refused`; non-zero exit → `worker_error`;
 signalled → `worker_crash`; exit 0 without a parseable result file →
 `no_result`; mismatched correlation → `stale_result`).
+
+**Containment is proven on the filesystem, not on the string.** The
+request validator only proves LEXICAL containment of the envelope paths
+inside the run directory, and lexical containment does not survive a
+symlink planted below that directory. Before anything is written, both
+envelope paths are therefore proven against the run directory on disk:
+the canonical (`realpath`) directory that would hold the file must be
+the run directory or below it, and the path itself must not be a symlink,
+a hard link, or a non-regular file. The missing parent components are
+created INSIDE the run directory, one at a time, and a component that
+already exists as a symlink is refused rather than followed — so a
+nested envelope path stays usable while a redirected one never opens.
+An unprovable path refuses the launch (`launch_refused`) — nothing is
+written, nothing is launched, and the outside file the symlink pointed at
+is never touched. The envelope is written with no-follow semantics
+(`O_NOFOLLOW`), the result file is read with no-follow semantics and a
+byte cap (size-checked and read from the SAME descriptor, so the bound
+cannot be bypassed by swapping the file in between), and the recovery
+record's temp file is created `O_EXCL`/`O_NOFOLLOW` with a random
+suffix. The recovery record itself is read no-follow and byte-capped
+like every other file the executor consumes — it lives in the same
+worker-writable directory.
+
+`O_NOFOLLOW` covers the FINAL path component only: an intermediate
+component swapped for a symlink between the proof and the I/O is not
+closed by it. The run directory is controller-owned scratch space and the
+only other writer there is the worker itself, so the proof narrows that
+window rather than eliminating it.
 
 ## OCI worker-image contract (`image.ts`)
 
@@ -173,8 +223,17 @@ unchanged.
   lexically inside `runDir`); a pre-aborted signal refuses to start; an
   already-past deadline refuses to launch; uncertain reconcile state is a
   failure or an explicit `running`, never a guess.
+- **Containment is proven, not assumed.** The envelope paths are proven
+  contained against the run directory on disk (canonical directory plus a
+  no-symlink / no-hard-link check) and are opened with no-follow
+  semantics; an unprovable path refuses the launch.
+- **The result channel is bounded.** The result file is read through a
+  byte cap (1 MiB) and the result's free-text fields and artifact list
+  are capped in the validator, so no worker can make the executor hold an
+  unbounded result.
 - **Correlation is identity, not convention.** `runId`/`jobId` mismatches
-  are `stale_result`, not warnings.
+  are `stale_result`, not warnings — at the executor AND at the
+  queue-facing adapter, for every backend.
 - **First terminal result wins.** Duplicate results are idempotent no-ops.
 - **The environment is an allowlist.** Hostile repository-config data
   cannot reach the child's env or argv; the command comes only from the

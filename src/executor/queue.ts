@@ -25,10 +25,21 @@
  * no profile) is a failed outcome, not a crashed pass. The same mapping
  * applies to a rejected `collect`. `resultHeadSha` is "" unless the
  * result status is completed, whatever the executor reported.
+ *
+ * The collected result is NOT taken on trust. An arbitrary backend can
+ * return anything at all, so the adapter re-validates it against the
+ * result contract and then proves its correlation identity against the
+ * request it built: a result that violates the contract, or that belongs
+ * to another generation, is a failed outcome ("executor-error" /
+ * "stale_result") and never a scheduler success. The `LocalExecutor`
+ * enforces the same invariant internally, but the queue-facing boundary
+ * must hold it for every backend — otherwise a foreign result could
+ * reach the scheduler as a successful head.
  */
 
 import type { ExecutionOutcome, JobExecutor } from "../queue/scheduler.js";
 import type { JobRecord } from "../queue/types.js";
+import { validateExecutionResult } from "./types.js";
 import type { ExecutionRequest, ExecutionResult, Executor } from "./types.js";
 
 /** Builds the execution request for one dispatched job record. The host
@@ -44,6 +55,16 @@ function failedOutcome(err: unknown): ExecutionOutcome {
     status: "failed" as const,
     resultHeadSha: "",
     failureCategory: message !== "" ? message : "executor-error",
+  });
+}
+
+/** A failed outcome with a stable machine-readable category (used where
+ * the problem is a contract violation rather than a rejection message). */
+function failedWithCategory(failureCategory: string): ExecutionOutcome {
+  return Object.freeze({
+    status: "failed" as const,
+    resultHeadSha: "",
+    failureCategory,
   });
 }
 
@@ -69,13 +90,27 @@ export function toQueueJobExecutor(
       } catch (err) {
         return failedOutcome(err);
       }
+      // The result channel is untrusted at this seam: an arbitrary
+      // backend may return anything. Re-validate the shape against the
+      // result contract first, then prove the correlation identity
+      // against the request this adapter built — a foreign or malformed
+      // result is a failed outcome, never a scheduler success.
+      let validated: ExecutionResult;
+      try {
+        validated = validateExecutionResult(result);
+      } catch {
+        return failedWithCategory("executor-error");
+      }
+      if (validated.runId !== request.runId || validated.jobId !== request.jobId) {
+        return failedWithCategory("stale_result");
+      }
       return Object.freeze({
-        status: result.status,
-        resultHeadSha: result.status === "completed" ? result.resultHeadSha : "",
+        status: validated.status,
+        resultHeadSha: validated.status === "completed" ? validated.resultHeadSha : "",
         // The category matters only to the scheduler's failed path; the
         // sentinel "" (completed/cancelled results) maps to the same
         // fallback the scheduler's rejection path uses.
-        failureCategory: result.failureCategory === "" ? "executor-error" : result.failureCategory,
+        failureCategory: validated.failureCategory === "" ? "executor-error" : validated.failureCategory,
       });
     },
   };

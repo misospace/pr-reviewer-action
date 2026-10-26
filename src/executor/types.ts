@@ -46,6 +46,29 @@ export const EXECUTION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
  * name. */
 const MAX_PATH_CHARS = 4_096;
 
+/** Largest worker result file the executor will read (bytes). The result
+ * protocol is a file, so the file itself is the untrusted surface: a
+ * worker must never be able to make the executor allocate an arbitrary
+ * amount of memory. The cap leaves room for a validator-legal result
+ * (64 artifact paths of at most 4096 characters each) plus its JSON
+ * overhead. */
+export const MAX_EXECUTION_RESULT_FILE_BYTES = 1_048_576;
+
+/** Largest diagnostics tail an execution result may carry
+ * (characters). */
+export const MAX_EXECUTION_DIAGNOSTICS_CHARS = 8_000;
+
+/** Largest failure message an execution result may carry (characters). */
+export const MAX_EXECUTION_FAILURE_MESSAGE_CHARS = 2_000;
+
+/** Largest number of artifact references an execution result may carry. */
+export const MAX_EXECUTION_ARTIFACT_PATHS = 64;
+
+/** Largest head sha an execution result may carry (characters). A git
+ * object name is at most 64 hex characters; the cap keeps a
+ * pathological value from reaching the durable queue record. */
+export const MAX_EXECUTION_HEAD_SHA_CHARS = 128;
+
 /** Opaque, short-lived credential REFERENCE handed to the execution. Never
  * material: the #735 credential broker resolves references operator-side,
  * so no secret ever travels through this contract or into a request
@@ -452,8 +475,11 @@ const RESULT_FAILURE_CATEGORIES: readonly string[] = [
  * directory), and the sentinel discipline is enforced per status —
  * `completed` requires a non-empty `resultHeadSha` and
  * `resultArtifactPath`, `failed` requires a `failureCategory` from the
- * closed union (and `cancelled` requires both absent). Returns a
- * deep-frozen copy. Throws `ExecutionResultError` on any problem. */
+ * closed union (and `cancelled` requires both absent). The free-text
+ * fields are bounded too (`diagnostics`, `failureMessage`) and the
+ * artifact list is capped, so a worker can never make the executor hold
+ * an unbounded result in memory. Returns a deep-frozen copy. Throws
+ * `ExecutionResultError` on any problem. */
 export function validateExecutionResult(
   value: unknown,
   opts: { runDir?: string } = {},
@@ -489,6 +515,11 @@ export function validateExecutionResult(
   if (status !== "completed" && resultHeadSha !== "") {
     throw new ExecutionResultError("execution result.resultHeadSha must be '' unless completed");
   }
+  if (resultHeadSha.length > MAX_EXECUTION_HEAD_SHA_CHARS) {
+    throw new ExecutionResultError(
+      `execution result.resultHeadSha must be at most ${MAX_EXECUTION_HEAD_SHA_CHARS} characters`,
+    );
+  }
   const failureCategory = item["failureCategory"];
   if (typeof failureCategory !== "string") {
     throw new ExecutionResultError("execution result.failureCategory must be a string");
@@ -509,6 +540,11 @@ export function validateExecutionResult(
   if (status !== "failed" && failureMessage !== "") {
     throw new ExecutionResultError("execution result.failureMessage must be '' unless failed");
   }
+  if (failureMessage.length > MAX_EXECUTION_FAILURE_MESSAGE_CHARS) {
+    throw new ExecutionResultError(
+      `execution result.failureMessage must be at most ${MAX_EXECUTION_FAILURE_MESSAGE_CHARS} characters`,
+    );
+  }
   const resultArtifactPath = item["resultArtifactPath"];
   if (typeof resultArtifactPath !== "string") {
     throw new ExecutionResultError("execution result.resultArtifactPath must be a string");
@@ -523,17 +559,27 @@ export function validateExecutionResult(
   if (typeof diagnostics !== "string") {
     throw new ExecutionResultError("execution result.diagnostics must be a string");
   }
+  if (diagnostics.length > MAX_EXECUTION_DIAGNOSTICS_CHARS) {
+    throw new ExecutionResultError(
+      `execution result.diagnostics must be at most ${MAX_EXECUTION_DIAGNOSTICS_CHARS} characters`,
+    );
+  }
   const artifactPathsRaw = item["artifactPaths"];
   if (!Array.isArray(artifactPathsRaw) || artifactPathsRaw.some((entry) => typeof entry !== "string")) {
     throw new ExecutionResultError("execution result.artifactPaths must be a list of strings");
+  }
+  if (artifactPathsRaw.length > MAX_EXECUTION_ARTIFACT_PATHS) {
+    throw new ExecutionResultError(
+      `execution result.artifactPaths must have at most ${MAX_EXECUTION_ARTIFACT_PATHS} entries`,
+    );
   }
   const resourceMs = item["resourceMs"];
   if (typeof resourceMs !== "number" || !Number.isFinite(resourceMs) || resourceMs < 0) {
     throw new ExecutionResultError("execution result.resourceMs must be a finite non-negative number");
   }
   const observedAtMs = item["observedAtMs"];
-  if (typeof observedAtMs !== "number" || !Number.isFinite(observedAtMs)) {
-    throw new ExecutionResultError("execution result.observedAtMs must be a finite number");
+  if (typeof observedAtMs !== "number" || !Number.isFinite(observedAtMs) || observedAtMs < 0) {
+    throw new ExecutionResultError("execution result.observedAtMs must be a finite non-negative number");
   }
   const resultPaths = [resultArtifactPath, ...artifactPathsRaw as readonly string[]].filter(
     (entry) => entry !== "",

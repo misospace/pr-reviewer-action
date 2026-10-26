@@ -8,7 +8,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { runProcess as realRunProcess, type ProcessHandle, type RunProcessOptions } from "../src/runtime/subprocess.js";
@@ -17,6 +17,7 @@ import {
   EXECUTION_RESULT_ENV_KEY,
   EXECUTION_STATE_FILE,
   LocalExecutor,
+  MAX_EXECUTION_FAILURE_MESSAGE_CHARS,
   validateExecutionRequest,
   validateExecutionResult,
   type ExecutionRequest,
@@ -255,6 +256,177 @@ test("a result file from another correlation identity is stale_result, never col
   }
 });
 
+// ── containment: the envelope/result paths must really live in the run dir ──
+
+test("a symlinked directory below runDir refuses the launch: no child, no envelope, no outside write", async () => {
+  // Lexical containment is not containment: a planted `runDir/sub ->
+  // outside` symlink would send the envelope write (and the result read)
+  // outside the run directory. The launch is refused instead.
+  const fixture = makeRequest();
+  try {
+    const outside = path.join(fixture.root, "outside");
+    mkdirSync(outside, { recursive: true });
+    mkdirSync(fixture.request.runDir, { recursive: true });
+    symlinkSync(outside, path.join(fixture.request.runDir, "sub"), "dir");
+    const request = Object.freeze({
+      ...fixture.request,
+      requestPath: path.join(fixture.request.runDir, "sub", "request.json"),
+      resultPath: path.join(fixture.request.runDir, "sub", "result.json"),
+    });
+    const { launches, deps } = recordingDeps();
+    const handle = await executor("ok", deps).start(request, new AbortController().signal);
+    const result = await handle.collect();
+    assert.equal(result.status, "failed");
+    assert.equal(result.failureCategory, "launch_refused");
+    assert.match(result.failureMessage, /is a symbolic link|outside/);
+    assert.equal(launches.length, 0, "no child was ever spawned");
+    assert.equal(existsSync(path.join(outside, "request.json")), false, "no envelope escaped");
+    assert.equal(existsSync(path.join(outside, "result.json")), false, "no result escaped");
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("a symlinked envelope path refuses the launch and never overwrites the file it points at", async () => {
+  // The envelope path itself is a symlink to an outside file: the write
+  // must never follow it, and the launch is refused before anything runs.
+  const fixture = makeRequest();
+  try {
+    const outsideFile = path.join(fixture.root, "outside", "request.json");
+    mkdirSync(path.dirname(outsideFile), { recursive: true });
+    writeFileSync(outsideFile, "SENTINEL", "utf8");
+    mkdirSync(fixture.request.runDir, { recursive: true });
+    symlinkSync(outsideFile, fixture.request.requestPath);
+    const { launches, deps } = recordingDeps();
+    const handle = await executor("ok", deps).start(fixture.request, new AbortController().signal);
+    const result = await handle.collect();
+    assert.equal(result.status, "failed");
+    assert.equal(result.failureCategory, "launch_refused");
+    assert.match(result.failureMessage, /is a symbolic link/);
+    assert.equal(launches.length, 0, "no child was ever spawned");
+    assert.equal(readFileSync(outsideFile, "utf8"), "SENTINEL", "the outside file was never overwritten");
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("a symlinked result path planted after launch is never read through", async () => {
+  // The worker writes nothing; a symlink is planted at the result path
+  // pointing at a perfectly valid completed result for THIS run. Reading
+  // through it would report "completed" — the executor must refuse the
+  // symlink and settle the run as a missing result.
+  const fixture = makeRequest();
+  try {
+    const outsideFile = path.join(fixture.root, "outside", "result.json");
+    mkdirSync(path.dirname(outsideFile), { recursive: true });
+    writeFileSync(
+      outsideFile,
+      JSON.stringify({
+        status: "completed",
+        runId: fixture.request.runId,
+        jobId: fixture.request.jobId,
+        resultHeadSha: HEAD,
+        resultArtifactPath: fixture.request.resultPath,
+        failureCategory: "",
+        failureMessage: "",
+        diagnostics: "",
+        artifactPaths: [],
+        resourceMs: 1,
+        observedAtMs: 1,
+      }),
+      "utf8",
+    );
+    const handle = await executor("delayed-silent").start(
+      fixture.request,
+      new AbortController().signal,
+    );
+    symlinkSync(outsideFile, fixture.request.resultPath);
+    const result = await handle.collect();
+    assert.equal(result.status, "failed");
+    assert.equal(result.failureCategory, "no_result");
+    assert.equal(result.resultHeadSha, "", "the result was never read through the symlink");
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("an oversized result file is refused by the byte cap before it is parsed", async () => {
+  // The result file is the untrusted surface: a worker must not be able
+  // to make the executor allocate an unbounded result.
+  const fixture = makeRequest();
+  try {
+    const handle = await executor("huge-result").start(
+      fixture.request,
+      new AbortController().signal,
+    );
+    const result = await handle.collect();
+    assert.equal(result.status, "failed");
+    assert.equal(result.failureCategory, "no_result");
+    assert.equal(result.resultHeadSha, "");
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("a nested envelope path whose parent does not exist yet is created inside the run directory", async () => {
+  // The proof creates the missing parent components INSIDE the run
+  // directory (a symlinked component is refused, never followed), so a
+  // nested envelope path stays usable instead of being refused.
+  const fixture = makeRequest();
+  try {
+    const nested = path.join(fixture.request.runDir, "nested", "deeper");
+    const request = Object.freeze({
+      ...fixture.request,
+      requestPath: path.join(nested, "request.json"),
+      resultPath: path.join(nested, "result.json"),
+    });
+    const handle = await executor("ok").start(request, new AbortController().signal);
+    const result = await handle.collect();
+    assert.equal(result.status, "completed");
+    const envelope = JSON.parse(readFileSync(request.requestPath, "utf8"));
+    assert.equal(envelope.runId, request.runId);
+    assert.equal(existsSync(path.join(nested, "result.json")), true);
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("the executor's own result satisfies the result contract even when a path is very long", async () => {
+  // The refusal message embeds the offending path, and the request
+  // contract allows long paths: the message must be truncated to the
+  // contract's cap, or the executor would produce a result its own
+  // validator (and the queue seam) rejects.
+  const fixture = makeRequest();
+  try {
+    const deep = path.join(fixture.root, ...Array.from({ length: 40 }, (_, index) => `d${index}`.padEnd(60, "x")));
+    mkdirSync(deep, { recursive: true });
+    const runDir = path.join(deep, "run");
+    mkdirSync(runDir, { recursive: true });
+    const outsideFile = path.join(fixture.root, "outside-long.json");
+    writeFileSync(outsideFile, "SENTINEL", "utf8");
+    const request = Object.freeze({
+      ...fixture.request,
+      runDir,
+      requestPath: path.join(runDir, "request.json"),
+      resultPath: path.join(runDir, "result.json"),
+    });
+    symlinkSync(outsideFile, request.requestPath);
+    const handle = await executor("ok").start(request, new AbortController().signal);
+    const result = await handle.collect();
+    assert.equal(result.status, "failed");
+    assert.equal(result.failureCategory, "launch_refused");
+    assert.ok(
+      result.failureMessage.length <= MAX_EXECUTION_FAILURE_MESSAGE_CHARS,
+      `the refusal message must respect the contract cap (was ${result.failureMessage.length})`,
+    );
+    // The executor's own result must pass the contract it is validated
+    // against — that is what the queue seam re-checks.
+    assert.ok(validateExecutionResult(result));
+  } finally {
+    cleanup(fixture);
+  }
+});
+
 // ── cancellation & refusal ──────────────────────────────────────────────
 
 test("cancel tree-terminates the worker and settles cancelled, idempotently", async () => {
@@ -459,6 +631,44 @@ test("validateExecutionResult enforces the per-status sentinel discipline", () =
   assert.ok(
     validateExecutionResult({ ...base, resultArtifactPath: "/tmp/other/run/result.json" }, { runDir: "/tmp/other/run" }),
   );
+
+  // Bounded free-text fields and a bounded artifact list: the result is
+  // attacker-sized data, so the contract caps what the executor may hold.
+  assert.throws(
+    () => validateExecutionResult({ ...base, diagnostics: "d".repeat(8001) }),
+    /execution result\.diagnostics must be at most 8000 characters/,
+  );
+  assert.ok(validateExecutionResult({ ...base, diagnostics: "d".repeat(8000) }));
+  assert.throws(
+    () => validateExecutionResult({
+      ...base,
+      status: "failed",
+      resultHeadSha: "",
+      resultArtifactPath: "",
+      failureCategory: "worker_error",
+      failureMessage: "m".repeat(2001),
+    }),
+    /execution result\.failureMessage must be at most 2000 characters/,
+  );
+  assert.ok(validateExecutionResult({
+    ...base,
+    status: "failed",
+    resultHeadSha: "",
+    resultArtifactPath: "",
+    failureCategory: "worker_error",
+    failureMessage: "m".repeat(2000),
+  }));
+  assert.throws(
+    () => validateExecutionResult({
+      ...base,
+      artifactPaths: Array.from({ length: 65 }, (_, index) => `/tmp/artifact-${index}.json`),
+    }),
+    /execution result\.artifactPaths must have at most 64 entries/,
+  );
+  assert.ok(validateExecutionResult({
+    ...base,
+    artifactPaths: Array.from({ length: 64 }, (_, index) => `/tmp/artifact-${index}.json`),
+  }));
 });
 
 // ── reconciliation after a controller restart ───────────────────────────
@@ -466,6 +676,32 @@ test("validateExecutionResult enforces the per-status sentinel discipline", () =
 test("reconcile: no state file means nothing to collect", async () => {
   const fixture = makeRequest();
   try {
+    assert.deepEqual(await executor("ok").reconcile(fixture.request), { kind: "none" });
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("reconcile: a symlinked or oversized recovery record is refused, never read through", async () => {
+  // The recovery record lives in worker-writable space: it is read
+  // no-follow and byte-capped, so a planted symlink (or blob) can
+  // neither redirect the read nor make the controller allocate without
+  // bound. An unreadable record means "nothing to collect".
+  const fixture = makeRequest();
+  try {
+    mkdirSync(fixture.request.runDir, { recursive: true });
+    const outsideFile = path.join(fixture.root, "outside-state.json");
+    writeFileSync(outsideFile, JSON.stringify({ runId: "x" }), "utf8");
+    symlinkSync(outsideFile, path.join(fixture.request.runDir, EXECUTION_STATE_FILE));
+    assert.deepEqual(await executor("ok").reconcile(fixture.request), { kind: "none" });
+
+    // An oversized record is refused the same way.
+    rmSync(path.join(fixture.request.runDir, EXECUTION_STATE_FILE), { force: true });
+    writeFileSync(
+      path.join(fixture.request.runDir, EXECUTION_STATE_FILE),
+      JSON.stringify({ runId: fixture.request.runId, blob: "x".repeat(64 * 1024) }),
+      "utf8",
+    );
     assert.deepEqual(await executor("ok").reconcile(fixture.request), { kind: "none" });
   } finally {
     cleanup(fixture);

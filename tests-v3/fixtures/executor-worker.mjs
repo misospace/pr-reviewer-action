@@ -13,6 +13,9 @@
 //   wrong-run  — write a valid-shaped result with a FOREIGN runId (stale_result)
 //   sleep-long — sleep past any test deadline (deadline / cancellation)
 //   crash      — SIGKILL itself (worker_crash)
+//   delayed-silent — sleep ~500ms, then exit 0 WITHOUT writing a result
+//   huge-result   — write a valid-shaped result whose diagnostics field is
+//                   ~2M characters (the file exceeds the 1 MiB read cap)
 import { readFileSync, writeFileSync } from "node:fs";
 
 const scenario = process.argv[2];
@@ -58,6 +61,12 @@ switch (scenario) {
     break;
   case "crash":
     process.kill(process.pid, "SIGKILL");
+    break;
+  case "delayed-silent":
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    break;
+  case "huge-result":
+    writeResult({ diagnostics: "d".repeat(2_000_000) });
     break;
   default:
     process.exit(2);

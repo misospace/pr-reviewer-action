@@ -10,12 +10,21 @@
  * Operator-mode library (like `src/queue/` and `src/acquisition/`): the
  * future controller daemon (#736) imports it — NOT wired into the Action
  * runtime, `action.yml` and the action pipeline are untouched.
+ *
+ * The filesystem containment / no-follow helpers (`./paths.js`) are
+ * deliberately NOT re-exported here: they are internal to the executor
+ * package, and a future backend imports `src/executor/paths.js` directly.
  */
 
 export {
   EXECUTION_CREDENTIAL_NAME_RE,
   EXECUTION_CREDENTIAL_REF_RE,
   EXECUTION_ID_RE,
+  MAX_EXECUTION_ARTIFACT_PATHS,
+  MAX_EXECUTION_DIAGNOSTICS_CHARS,
+  MAX_EXECUTION_FAILURE_MESSAGE_CHARS,
+  MAX_EXECUTION_HEAD_SHA_CHARS,
+  MAX_EXECUTION_RESULT_FILE_BYTES,
   ExecutionRequestError,
   ExecutionResultError,
   validateExecutionRequest,
