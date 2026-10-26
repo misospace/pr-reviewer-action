@@ -263,8 +263,9 @@ export interface PublishPlatformApi {
    * never adds or strips markers, so a follow-up ANSWER must arrive already
    * rendered by `renderFollowUpReply` (src/followup/reply.ts), which stamps
    * the loop-guard marker; anything else is the caller's own body. Optional:
-   * an adapter without it is a forge with no plain-comment surface (Tangled),
-   * and the caller degrades explicitly. An empty body is refused WITHOUT a
+   * an adapter without it — or one that always refuses (Tangled) — is a forge
+   * with no usable plain-comment surface, and the caller degrades explicitly.
+   * An empty body is refused WITHOUT a
    * request; a hostile body is sent as JSON request DATA only (never in the
    * URL) and the token is bound to the validated platform origin, so
    * untrusted follow-up text can never reach another host or become a path

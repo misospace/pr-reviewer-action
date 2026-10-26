@@ -15,9 +15,6 @@ import type { FetchLike } from "../src/platform/http.js";
 // tests pin the complete producer → write → classifier/consumer path so the
 // seam and the loop guard can never drift apart again.
 
-const BASE = "https://api.github.com";
-const COMMENTS = `${BASE}/repos/o/r/issues/9/comments`;
-
 function recorder(): { fetchImpl: FetchLike; postedBodies: string[] } {
   const postedBodies: string[] = [];
   const fetchImpl: FetchLike = async (_input, init) => {
