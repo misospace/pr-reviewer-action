@@ -36,6 +36,19 @@ export {
   type FollowUpRateLimits,
   type PermissionProbe,
 } from "./plan.js";
+export {
+  FOLLOWUP_ANSWER_MAX_BYTES,
+  runFollowUpEvent,
+  type FollowUpEffects,
+  type FollowUpRereviewDisposition,
+  type FollowUpRunOutcome,
+} from "./controller.js";
+export {
+  createFollowUpAnswerExecutor,
+  FOLLOWUP_ANSWER_MAX_TOKENS,
+  type FollowUpAnswerProfile,
+  type FollowUpExecutorOptions,
+} from "./executor.js";
 export type {
   ClassifyResult,
   FollowUpIgnoreReason,
