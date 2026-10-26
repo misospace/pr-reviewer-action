@@ -560,6 +560,17 @@ const INPUT_ATTRIBUTE_SCOPE_RE = /\b(?:as\s+(?:required|optional)|defaults?\s+(?
  */
 const INPUT_NEGATED_DECLARATION_RE = /\b(?:not\s+declared|declares?\s+no|declared\s+no|does\s+not\s+(?:declare|appear|accept|forward|support))\b/i;
 const INPUT_ABSENCE_CUE_RE = /\b(?:unexpected|not\s+declared|declares?\s+no|declared\s+no|does\s+not\s+(?:declare|appear|accept|forward|support)|not\s+an?\s+input|no\s+such\s+input|undeclared|unknown\s+input|invalid\s+input|not\s+recognized|unrecognized|missing\s+input)\b/i;
+/**
+ * #1264: the declaration-scoped subset of the absence vocabulary, consulted
+ * ONLY for claims that omit the noun "input". The behavior verbs
+ * (`accept`, `forward`, `support`) assert what the action DOES with a name,
+ * not what its manifest DECLARES — a declared input may legitimately not be
+ * forwarded to a composite step or supported in one mode — so without the
+ * noun anchoring them to the input list they must not reach the registry.
+ * The noun-containing alternatives of INPUT_ABSENCE_CUE_RE are omitted:
+ * they imply the noun is present, so the noun gate governs them.
+ */
+const INPUT_ABSENCE_DECLARATION_CUE_RE = /\b(?:not\s+declared|declares?\s+no|declared\s+no|does\s+not\s+(?:declare|appear)|undeclared|unexpected|not\s+recognized|unrecognized)\b/i;
 const INPUT_PRESENCE_CUE_RE = /\b(?:declares?|declared|accepts?|accepting|accepted|uses?|exposes?|named|requires?|expects?|has\s+(?:an?\s+)?[a-z-]+\s+inputs?)\b/i;
 /**
  * #1238: the workflow-to-action mapping vocabulary. A clause whose SUBJECT
@@ -1116,9 +1127,11 @@ function windowDirection(window: string, workflowSubject: boolean, workflowWitne
 function classifyInputDeclaration(message: string, workflowWitnessAvailable: boolean): InputCandidate[] {
   const candidates: InputCandidate[] = [];
   // Cheap prefilter before the span walk: no action subject and no input
-  // vocabulary anywhere means no input claim.
+  // vocabulary anywhere means no input claim. #1264: a message may also
+  // carry the declaration-scoped absence vocabulary without ever naming
+  // the noun ("does not declare `x`"), so that subset admits it too.
   if (message.length > MAX_CLAIM_SCAN_LENGTH) return candidates;
-  if (!/action/i.test(message) || !/\binputs?\b/i.test(message)) return candidates;
+  if (!/action/i.test(message) || !(/\binputs?\b/i.test(message) || INPUT_ABSENCE_DECLARATION_CUE_RE.test(message))) return candidates;
   const masked = maskedForScan(message);
   const spans = quotedSpans(message).slice(0, MAX_CLAIM_SPANS);
   for (const span of spans) {
@@ -1127,7 +1140,14 @@ function classifyInputDeclaration(message: string, workflowWitnessAvailable: boo
     const { start, end } = sentenceBounds(masked, span.start, span.end);
     const maskedSentence = masked.slice(start, end);
     if (!ACTION_SUBJECT_CUE_RE.test(maskedSentence) && !MANIFEST_SUBJECT_RE.test(message.slice(start, end))) continue;
-    if (!/\binputs?\b/i.test(maskedSentence)) continue;
+    // #1264: the noun gate above is the recognition seam for claims that
+    // say "input"; a claim that names the input id and carries the
+    // DECLARATION-SCOPED absence vocabulary in the same sentence ("the
+    // action does not declare `x`") is an input-absence claim too. The
+    // behavior verbs ("does not accept/forward/support `x`") stay noun-
+    // gated: without the noun they describe what the action does, not what
+    // it declares, and the registry does not witness behavior.
+    if (!/\binputs?\b/i.test(maskedSentence) && !INPUT_ABSENCE_DECLARATION_CUE_RE.test(maskedSentence)) continue;
     // The registry only answers for the executing action.
     if (OTHER_ACTION_REF_RE.test(message.slice(start, end))) continue;
     const clause = clauseWindow(masked, start, end, span.start, span.end);
@@ -1142,6 +1162,17 @@ function classifyInputDeclaration(message: string, workflowWitnessAvailable: boo
     const workflowSubject = clauseWorkflowSubject(windowText);
     const direction = windowDirection(windowText, workflowSubject, workflowWitnessAvailable);
     if (direction === "none") continue;
+    // #1264: a no-noun candidate is an input-absence claim only when the
+    // direction resolved unambiguously to absence through the
+    // DECLARATION-scoped vocabulary. Presence and ambiguous directions keep
+    // the noun gate, and a no-noun absence that resolved via the
+    // workflow-mapping negation (no declaration cue in the window) stays
+    // unrecognized — the registry widening must not invent workflow-scoped
+    // claims.
+    if (!/\binputs?\b/i.test(maskedSentence)) {
+      if (direction !== "absence") continue;
+      if (!INPUT_ABSENCE_DECLARATION_CUE_RE.test(windowText)) continue;
+    }
     candidates.push({
       token: raw.toLowerCase(),
       direction,
