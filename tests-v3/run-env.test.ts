@@ -14,6 +14,7 @@ import { resolveLoopLimits } from "../src/tools/harness.js";
 import { adaptiveLoopBudgets } from "../src/tools/loop.js";
 import { stageEnvFromConfig, buildStageEnv, validateStageEnv, type RunContext } from "../src/run/env.js";
 import { buildHumanReviewsSection } from "../src/run/stages.js";
+import { resolveTierProfiles } from "../src/routing/tiers.js";
 import { RunWorkspace } from "../src/run/workspace.js";
 import { rawInputsFromEnv } from "../src/run/review.js";
 import { collectConfigLines, computeConfigHash } from "../src/precheck/fingerprint.js";
@@ -66,6 +67,30 @@ test("projection values: defaults, numbers, booleans, and revealed secrets", () 
   assert.equal(env.GITHUB_TOKEN, "tok", "secrets are revealed on the stage ABI, never redacted");
   assert.equal(env.AI_TEMPERATURE, "0.1", "contract default applies when the input is unset");
   assert.equal(env.REPOSITORY_SKILLS, "false", "typed repository skill opt-in flows through config projection");
+});
+
+test("#1251: stage env carries the fallback lane's inherited settings so tier resolution is single-source", () => {
+  const config = loadConfig(contract, {
+    "repo": "o/r",
+    "pr-number": "7",
+    "ai-base-url": "http://m/v1",
+    "ai-model": "m",
+    "github-token": "tok",
+    "ai-stream": "true",
+  });
+  const env = stageEnvFromConfig(config);
+  // resolveInherited (load-config.ts) is the authoritative fallback
+  // inheritance; the stage env projects its result verbatim.
+  assert.equal(env.AI_FALLBACK_BASE_URL, "http://m/v1");
+  assert.equal(env.AI_FALLBACK_API_FORMAT, "openai");
+  assert.equal(env.AI_FALLBACK_STREAM, "true");
+  // The fallback model never inherits: the lane stays unresolved until
+  // ai-fallback-model is configured.
+  assert.equal(env.AI_FALLBACK_MODEL, "");
+  const profiles = resolveTierProfiles(env);
+  assert.equal(profiles.fallback.resolved, false);
+  assert.equal(profiles.fallback.baseUrl, "http://m/v1");
+  assert.equal(profiles.fallback.stream, true);
 });
 
 test("GH_TOKEN follows config.sh's binding: GH_TOKEN || GITHUB_TOKEN, then the token input", () => {

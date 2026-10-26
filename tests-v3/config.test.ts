@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
-import { validateContract } from "../src/config/contract.js";
+import { AI_MAX_TOKENS_DEFAULT, contractInputDefault, validateContract } from "../src/config/contract.js";
 import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 import { EMPTY_DISABLING_INPUTS, loadConfig, REASONING_EFFORT_INPUTS, toCamelCase } from "../src/config/load-config.js";
 import { isSecretValue, redactConfig, toJSON } from "../src/config/types.js";
@@ -496,6 +496,10 @@ test("defaults are contract sourced and parsing is explicit", () => {
   assert.equal(config.aiMaxTokens, 8192);
   assert.equal(loadConfig(contract, { ...raw, "ai-max-tokens": "" }).aiMaxTokens, 16384);
   assert.equal(loadConfig(contract, { ...raw, "ai-max-tokens": "12" }).aiMaxTokens, 12);
+  // #1251: the raw-env default is the contract's, not a second literal.
+  assert.equal(AI_MAX_TOKENS_DEFAULT, 16384);
+  assert.equal(Number(contractInputDefault("ai-max-tokens")), 16384);
+  assert.equal(contractInputDefault("no-such-input"), undefined);
   assert.equal(config.aiTemperature, 0.1);
   assert.equal(loadConfig(contract, { ...raw, "ai-temperature": "" }).aiTemperature, "");
   // #914: rereview-command is an empty-string carve-out like ai-temperature —

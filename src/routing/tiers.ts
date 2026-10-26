@@ -450,7 +450,11 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
     apiKey: value(env, "AI_SMART_API_KEY", value(env, "AI_API_KEY")),
   };
   const fallback = {
-    baseUrl: value(env, "AI_FALLBACK_BASE_URL"), model: value(env, "AI_FALLBACK_MODEL"),
+    // #1251: raw-env parity with the config loader's resolveInherited —
+    // an unset/empty fallback endpoint inherits the base endpoint (but never
+    // the base model; the config loader deliberately leaves that unset).
+    baseUrl: value(env, "AI_FALLBACK_BASE_URL", value(env, "AI_BASE_URL")),
+    model: value(env, "AI_FALLBACK_MODEL"),
     apiFormat: value(env, "AI_FALLBACK_API_FORMAT", value(env, "AI_API_FORMAT", "openai")),
     apiKey: value(env, "AI_FALLBACK_API_KEY", value(env, "AI_API_KEY")),
   };
@@ -459,7 +463,12 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
   const stream = trueValue(env.AI_STREAM === undefined ? "true" : env.AI_STREAM);
   const timeout = numberValue(env, "AI_REQUEST_TIMEOUT_SEC", 300);
   const connectTimeout = numberValue(env, "AI_CONNECT_TIMEOUT_SEC", 30);
-  const fallbackStream = trueValue(env.AI_FALLBACK_STREAM);
+  // #1251: raw-env parity with resolveInherited — an empty/unset
+  // ai-fallback-stream inherits the base ai-stream, including its
+  // unset-means-"true" default (v2: `${AI_FALLBACK_STREAM:-$AI_STREAM}`).
+  const baseStreamRaw = env.AI_STREAM === undefined ? "true" : env.AI_STREAM;
+  const fallbackStreamRaw = env.AI_FALLBACK_STREAM ?? "";
+  const fallbackStream = trueValue(fallbackStreamRaw === "" ? baseStreamRaw : fallbackStreamRaw);
   return {
     primary: {
       ...primary, resolved: Boolean(primary.model), retries: primaryRetries, retryDelaySec: delay, stream,

@@ -42,6 +42,7 @@ import { reframeForCorpus, renderRepoMapMarkdown, repoMapFromArtifact, trustFram
 import { parseVerdictResponse } from "../model/verdict.js";
 import { VerdictParseFailure } from "../model/types.js";
 import { raisedCompletionBudget } from "../model/call.js";
+import { AI_MAX_TOKENS_DEFAULT } from "../config/contract.js";
 import {
   describeUnusableResponse,
   formatResponseDiagnosticsLine,
@@ -2592,7 +2593,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         }
         const verdictPayload = conversation.toRequestPayload(input.apiFormat, input.model, {
           stream,
-          maxTokens: envIntBounded(env, "AI_MAX_TOKENS", 8192, 256, 200000),
+          maxTokens: envIntBounded(env, "AI_MAX_TOKENS", AI_MAX_TOKENS_DEFAULT, 256, 200000),
           temperature,
           verdictTurn: true,
           keepFullHistoryOnVerdict: true,

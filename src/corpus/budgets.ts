@@ -1,3 +1,5 @@
+import { AI_MAX_TOKENS_DEFAULT } from "../config/contract.js";
+
 /** Tier-aware context budgets (#676): byte-exact port of `apply_context_limits`
  * plus the per-tier profile resolution in scripts/sections/config.sh
  * (lines 146-221).
@@ -40,13 +42,14 @@ export interface BudgetInputs {
   /** FALLBACK_MODEL_CONTEXT_TOKENS (#922): the fallback reuses the primary
    * corpus, so a declared fallback window caps the primary budgets. */
   fallbackModelContextTokens?: string | undefined;
-  /** AI_MAX_TOKENS (default 8192). */
+  /** AI_MAX_TOKENS (contract default: 16384 — #1251 keeps the raw-env
+   * fallback tied to the contract default, not a second literal). */
   aiMaxTokens?: string | undefined;
   /** CONTEXT_LIMIT_MODE (default normal). */
   contextLimitMode?: string | undefined;
 }
 
-const DEFAULT_AI_MAX_TOKENS = 8192;
+const DEFAULT_AI_MAX_TOKENS = AI_MAX_TOKENS_DEFAULT;
 
 /** #922: usable-token ceiling for a declared tier window (v2: 166,666). */
 export const TIER_USABLE_TOKENS_CAP = 400000;
