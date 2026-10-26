@@ -85,7 +85,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export const FINDINGS_SUMMARY_MAX_ROWS = 50;
 
 /** Cap on the model-controlled severity token rendered in the findings table's
- * severity column AND in the per-severity counts.
+ * severity column.
  *
  * #1249: the body-only native-review fallback publishes this summary, so the
  * bound is part of a published surface's contract, not this renderer's
@@ -95,7 +95,9 @@ export const FINDINGS_SUMMARY_MAX_ROWS = 50;
  *
  * The cap applies to the CONTENT, before table escaping expands it (two-fold
  * for `\` and `|`, five-fold for `&`/`<`/`>`), so the published cell is at
- * most roughly five times this. */
+ * most roughly five times this. The per-severity counts do NOT render a
+ * severity at all — they render the closed vocabulary only, so they are
+ * bounded without this cap. */
 export const FINDINGS_SUMMARY_MAX_SEVERITY_CHARS = 64;
 
 /** Cap on the model-controlled path rendered in the findings table's location
@@ -129,24 +131,49 @@ const SEVERITY_RANK = ["blocker", "major", "minor", "info"] as const;
  *
  * The counts ride in a HEADING line (`### Findings (2 major)`), not in a table
  * cell, so they are never table-escaped: a severity carrying a newline would
- * otherwise forge a heading of its own. The token is therefore collapsed and
- * capped like every other model-controlled cell. */
+ * otherwise forge a heading of its own, and a severity carrying a comma would
+ * split into a second count token of its own.
+ *
+ * #1249: the heading is therefore rendered from the CLOSED severity vocabulary
+ * only — no model-controlled text reaches it at all. Only the four known
+ * severities render as a count token, and every finding whose severity is
+ * outside the vocabulary is aggregated into one bounded
+ * `N findings of unknown severity` clause (separate from the counts, so it can
+ * never be read as another severity's count).
+ *
+ * Two properties follow, and both are what the counts line needs:
+ *
+ * - BOUNDED: the line's length is a function of the vocabulary size and the
+ *   finding count alone, never of how many distinct severities a run
+ *   produced. Capping each token's length is not enough on its own — a run
+ *   with thousands of distinct severities renders thousands of tokens.
+ * - UNFORGEABLE: a severity cannot inject a token boundary, a count, or a
+ *   clause, because no part of a severity reaches the line.
+ *
+ * Published bytes are unchanged for every finding whose severity is in the
+ * vocabulary, which is every finding the verdict normalizer produces
+ * (`src/model/verdict.ts` maps every severity through its alias table onto
+ * `blocker`/`major`/`minor`/`info`). */
 export function severityCountsLabel(findings: unknown): string {
   if (!Array.isArray(findings)) return "";
   const counts = new Map<string, number>();
+  let unknownSeverity = 0;
   for (const finding of findings) {
     const severity = isRecord(finding) && typeof finding.severity === "string"
       ? finding.severity
       : "info";
-    counts.set(severity, (counts.get(severity) ?? 0) + 1);
+    if ((SEVERITY_RANK as readonly string[]).includes(severity)) {
+      counts.set(severity, (counts.get(severity) ?? 0) + 1);
+    } else {
+      unknownSeverity += 1;
+    }
   }
-  const ordered = [
-    ...SEVERITY_RANK.filter((severity) => counts.has(severity)),
-    ...[...counts.keys()].filter((severity) => !(SEVERITY_RANK as readonly string[]).includes(severity)).sort(),
-  ];
-  return ordered
-    .map((severity) => `${counts.get(severity)} ${boundedSummaryToken(severity, FINDINGS_SUMMARY_MAX_SEVERITY_CHARS)}`)
-    .join(", ");
+  const tokens = SEVERITY_RANK
+    .filter((severity) => counts.has(severity))
+    .map((severity) => `${counts.get(severity)} ${severity}`);
+  if (unknownSeverity === 0) return tokens.join(", ");
+  const clause = `${unknownSeverity} ${unknownSeverity === 1 ? "finding" : "findings"} of unknown severity`;
+  return tokens.length > 0 ? `${tokens.join(", ")}; ${clause}` : clause;
 }
 
 /** Wrap an already-escaped body in a fence-safe inline-code span: the
@@ -213,8 +240,12 @@ function locationCell(finding: Record<string, unknown>): string {
  * finding. The body-only native-review fallback publishes this summary, so
  * the bound is a published-surface contract, not this renderer's internals.
  * The per-severity counts ride in a heading line rather than a table cell, so
- * they are never table-escaped: the same collapse-and-cap keeps a severity
- * from forging a heading there either.
+ * they are never table-escaped: no part of a finding's severity reaches that
+ * line at all. The counts render the closed severity vocabulary only, and
+ * every finding outside it is aggregated into one `N findings of unknown
+ * severity` clause, so the heading's length is bounded by the vocabulary size
+ * and the finding count — never by how many distinct severities a run
+ * produced — and no severity can forge a count token or a clause there.
  *
  * Per-surface policy for the message cell (#975 / #988): the strict
  * published body (publish.ts) calls this with no opts, keeping the operator's

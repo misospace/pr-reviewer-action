@@ -396,6 +396,10 @@ test("#988: a backtick-bearing location path stays a terminated, inert span", ()
 // the row), and over-long severity and path values (neither of which any
 // producer bounds — the message was already capped at 300 before escaping, so
 // the message case below pins that existing bound rather than a new one).
+//
+// The counts line carries NO model-controlled text at all (see the block
+// below it), so the severity payloads in this block exercise the table cell,
+// not the heading.
 // ---------------------------------------------------------------------------
 
 /** The first column of a finding row — the severity label, between the row's
@@ -435,18 +439,19 @@ test("#1249: a hostile severity cannot forge a heading in the counts line", () =
   assert.ok(severityCell.includes("\\|"), "the pipe is escaped, not dropped");
 });
 
-test("#1249: an over-long severity label is capped in both the cell and the counts", () => {
+test("#1249: an over-long severity label is capped in the cell and never reaches the counts", () => {
   const summary = renderFindingsSummary([{ severity: "S".repeat(5000), file: "a.ts", message: "m" }], "inert");
   const severityCell = findingSeverityCell(findingDataRows(summary)[0]!);
   assert.ok(
     severityCell.length <= FINDINGS_SUMMARY_MAX_SEVERITY_CHARS,
     `the severity cell is capped (${severityCell.length})`,
   );
-  const heading = summary.split("\n").find((line) => line.startsWith("### Findings"))!;
+  const heading = findingsHeading(summary);
   assert.ok(
     heading.length <= "### Findings (1 ".length + FINDINGS_SUMMARY_MAX_SEVERITY_CHARS + 1,
-    `the counts token is capped (${heading.length})`,
+    `the counts line is bounded (${heading.length})`,
   );
+  assert.ok(!heading.includes("S".repeat(64)), "the over-long severity never reaches the counts line");
 });
 
 test("#1249: an over-long path is capped in the location cell", () => {
@@ -467,6 +472,92 @@ test("#1249: an over-long message is capped in the message cell", () => {
   assert.ok(
     cell.length <= 5 * FINDINGS_SUMMARY_MAX_MESSAGE_CHARS,
     `the message cell is capped (${cell.length})`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// #1249: the per-severity counts ride in a HEADING line, which is never
+// table-escaped, so no model-controlled text may reach it: a severity
+// carrying a newline would forge a heading of its own, and a severity
+// carrying a comma would split into a second count token of its own. The
+// counts therefore render the CLOSED severity vocabulary only, and every
+// finding outside it is aggregated into one bounded clause.
+//
+// The payloads below are the boundary itself, not a paraphrase of it: the
+// separator characters, the aggregate's own wording, and a newline that
+// would forge a heading.
+// ---------------------------------------------------------------------------
+
+/** The `### Findings (…)` heading of a rendered summary. */
+function findingsHeading(summary: string): string {
+  return summary.split("\n").find((line) => line.startsWith("### Findings"))!;
+}
+
+test("#1249: severities outside the known vocabulary are aggregated, not rendered", () => {
+  const summary = renderFindingsSummary([
+    { severity: "major", message: "m" },
+    { severity: "custom-alpha", message: "m" },
+    { severity: "custom-beta", message: "m" },
+  ], "inert");
+  const heading = findingsHeading(summary);
+  assert.equal(
+    heading,
+    "### Findings (1 major; 2 findings of unknown severity)",
+    "the known severity counts, then one bounded aggregate clause",
+  );
+  assert.ok(!heading.includes("custom"), "no model-controlled severity text reaches the counts line");
+});
+
+test("#1249: the counts line carries no model-controlled text", () => {
+  // The payloads are the boundaries the counts line must not cross: the token
+  // separator, the clause separator, the aggregate's own wording, and a
+  // newline that would forge a heading of its own.
+  const summary = renderFindingsSummary([
+    { severity: "blocker\n### Forged", message: "m" },
+    { severity: "x, 900 blocker", message: "m" },
+    { severity: "y; 900 blocker", message: "m" },
+    { severity: "other", message: "m" },
+  ], "inert");
+  const heading = findingsHeading(summary);
+  assert.equal(
+    heading,
+    "### Findings (4 findings of unknown severity)",
+    "the counts line renders the aggregate clause and nothing else",
+  );
+  for (const hostile of ["Forged", "900", "blocker", "other", ","]) {
+    assert.ok(!heading.includes(hostile), `the counts line carries no "${hostile}"`);
+  }
+  assert.ok(
+    !summary.split("\n").some((line) => line.startsWith("### Forged")),
+    "the hostile severity never becomes a heading line of its own",
+  );
+});
+
+test("#1249: a flood of distinct severities cannot grow the counts line", () => {
+  const findings = Array.from({ length: 500 }, (_unused, index) => ({
+    severity: `custom-${index}-${"x".repeat(5000)}`,
+    message: "m",
+  }));
+  const summary = renderFindingsSummary(findings, "inert");
+  const heading = findingsHeading(summary);
+  assert.ok(!heading.includes("custom"), "no model-controlled severity text reaches the counts line");
+  assert.ok(
+    heading.length <= "### Findings (500 findings of unknown severity)".length,
+    `the counts line is bounded (${heading.length})`,
+  );
+});
+
+test("#1249: a run with only known severities renders no aggregate clause", () => {
+  const summary = renderFindingsSummary([
+    { severity: "blocker", message: "m" },
+    { severity: "major", message: "m" },
+    { severity: "minor", message: "m" },
+    { severity: "info", message: "m" },
+  ], "inert");
+  assert.equal(
+    findingsHeading(summary),
+    "### Findings (1 blocker, 1 major, 1 minor, 1 info)",
+    "known severities count in rank order and nothing else is rendered",
   );
 });
 
