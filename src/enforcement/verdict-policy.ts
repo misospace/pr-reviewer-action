@@ -563,6 +563,13 @@ export function applyStrictVerdictPolicy(
     // did not produce it, attributing the verdict to "model" would lie
     // about provenance — the deciding authority is the enforcement layer
     // ("enforcement"); the layer's own section discloses the forcing.
+    // #1265: the unknown-evidence veto is deliberately scoped to findings
+    // whose ORIGINAL severity was blocker or major (`isUnverifiedBlockingGrounding`
+    // checks `capped_from`, or severity when no cap was applied). An unverified
+    // minor/info finding stays visible in the published review and carries its
+    // unknown grounding status, but it must not independently turn an otherwise
+    // non-blocking review into request_changes.
+    //
     // #1016: when the only blocker-level demotions are "unverified"
     // (unknown evidence, not refutation), the boundary did not disprove the
     // claim — it could not check it — so an approve would silently
