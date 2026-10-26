@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  FINDINGS_SUMMARY_MAX_LOCATION_CHARS,
+  FINDINGS_SUMMARY_MAX_MESSAGE_CHARS,
   FINDINGS_SUMMARY_MAX_ROWS,
+  FINDINGS_SUMMARY_MAX_SEVERITY_CHARS,
   REVIEW_STEP_OUTPUT_IDS,
   buildCacheHitRatioOutput,
   buildToolCallsOutput,
@@ -382,6 +385,88 @@ test("#988: a backtick-bearing location path stays a terminated, inert span", ()
   const cell = findingLocationCell(stepRow[0]!);
   assertFencedCodeSpan(cell, "https://evil.example");
   assertPaddedFencedCodeSpan(cell, "https://evil.example");
+});
+
+// ---------------------------------------------------------------------------
+// #1249: the findings summary is published by the body-only native-review
+// fallback, so every model-controlled cell it renders is BOUNDED. The
+// payloads below are the boundary itself, not a paraphrase of it: a severity
+// carrying a newline (the per-severity counts ride in a heading line, which
+// is never table-escaped), a severity carrying a raw pipe (which would split
+// the row), and over-long severity/path/message values (which would make the
+// published body unbounded).
+// ---------------------------------------------------------------------------
+
+/** The first column of a finding row — the severity label, between the row's
+ * leading "| " and the first " | " separator. */
+function findingSeverityCell(row: string): string {
+  return row.slice(2, row.indexOf(" | "));
+}
+
+/** The DATA rows of a findings table — the header row and the separator row
+ * are not data rows. */
+function findingDataRows(summary: string): string[] {
+  return summary.split("\n").filter((line) => line.startsWith("| ") && !/^\| (Severity|---) \|/.test(line));
+}
+
+test("#1249: a hostile severity cannot forge a heading in the counts line", () => {
+  const hostile = {
+    severity: "blocker\n### Forged Severity Heading | injected | cell",
+    file: "a.ts",
+    line: 3,
+    message: "ordinary message",
+  };
+  const summary = renderFindingsSummary([hostile], "inert");
+  const lines = summary.split("\n");
+  assert.ok(
+    !lines.some((line) => line.startsWith("### Forged")),
+    "the hostile severity never becomes a heading line of its own",
+  );
+  assert.equal(
+    lines.filter((line) => line.startsWith("### Findings")).length,
+    1,
+    "the counts stay on the one heading line",
+  );
+  const rows = findingDataRows(summary);
+  assert.equal(rows.length, 1, "the hostile severity renders exactly one table row");
+  const severityCell = findingSeverityCell(rows[0]!);
+  assert.ok(!/(?<!\\)\|/.test(severityCell), "the raw pipe in the severity label is escaped, so it cannot split the row");
+  assert.ok(severityCell.includes("\\|"), "the pipe is escaped, not dropped");
+});
+
+test("#1249: an over-long severity label is capped in both the cell and the counts", () => {
+  const summary = renderFindingsSummary([{ severity: "S".repeat(5000), file: "a.ts", message: "m" }], "inert");
+  const severityCell = findingSeverityCell(findingDataRows(summary)[0]!);
+  assert.ok(
+    severityCell.length <= FINDINGS_SUMMARY_MAX_SEVERITY_CHARS,
+    `the severity cell is capped (${severityCell.length})`,
+  );
+  const heading = summary.split("\n").find((line) => line.startsWith("### Findings"))!;
+  assert.ok(
+    heading.length <= "### Findings (1 ".length + FINDINGS_SUMMARY_MAX_SEVERITY_CHARS + 1,
+    `the counts token is capped (${heading.length})`,
+  );
+});
+
+test("#1249: an over-long path is capped in the location cell", () => {
+  const summary = renderFindingsSummary([{ severity: "minor", file: "p".repeat(5000), line: 7, message: "m" }], "inert");
+  const cell = findingLocationCell(findingDataRows(summary)[0]!);
+  assert.ok(cell.includes(":7"), "the line number survives the cap");
+  assert.ok(
+    cell.length <= FINDINGS_SUMMARY_MAX_LOCATION_CHARS + 16,
+    `the location cell is capped (${cell.length})`,
+  );
+});
+
+test("#1249: an over-long message is capped in the message cell", () => {
+  // "&" is the widest escape (five-fold), so this pins the true rendered
+  // bound of the cell rather than the pre-escape one.
+  const summary = renderFindingsSummary([{ severity: "info", message: "&".repeat(5000) }], "inert");
+  const cell = findingMessageCell(findingDataRows(summary)[0]!);
+  assert.ok(
+    cell.length <= 5 * FINDINGS_SUMMARY_MAX_MESSAGE_CHARS,
+    `the message cell is capped (${cell.length})`,
+  );
 });
 
 // ---------------------------------------------------------------------------

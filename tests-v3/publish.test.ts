@@ -1111,6 +1111,25 @@ test("#1249: a non-strict fallback with no findings keeps the body unchanged", a
   );
 });
 
+test("#1249: the body-only fallback appends a BOUNDED summary for a hostile finding", async () => {
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" } }];
+  api.reviewResults = [{ ok: false }, { ok: true }];
+  const hostile = [{ file: "p".repeat(5000), line: 2, severity: "major", message: "m".repeat(5000) }];
+  const result = await publishReview(
+    input({ mode: "review_verdict", inlineFindings: true, findings: hostile }),
+    api,
+    { diffText: DIFF },
+  );
+  assert.equal(result.status, "published");
+  const plain = api.submitted[1]!;
+  assert.ok(plain.body.includes("### Findings"), "the fallback body still carries the findings summary");
+  assert.ok(!plain.body.includes("p".repeat(1000)), "the over-long path is not published in full");
+  assert.ok(!plain.body.includes("m".repeat(1000)), "the over-long message is not published in full");
+  const summary = plain.body.slice(plain.body.indexOf("### Findings"));
+  assert.ok(summary.length < 5000, `the appended summary is bounded (${summary.length} chars)`);
+});
+
 
 test("cleanup cap skips cleanup but still removes the rerun label", async () => {
   const api = new MockPublishApi();
