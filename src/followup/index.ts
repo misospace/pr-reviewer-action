@@ -19,6 +19,10 @@ export {
 } from "./rate-limit.js";
 export { renderFollowUpReply } from "./reply.js";
 export {
+  ForgeFollowUpBudget,
+  type ForgeFollowUpBudgetOptions,
+} from "./forge-budget.js";
+export {
   buildFollowUpPrompt,
   FOLLOW_UP_PROMPT_MAX_BYTES,
   MANAGED_REVIEW_MAX_BYTES,

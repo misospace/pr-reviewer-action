@@ -30,6 +30,12 @@
  *     collaborator-permission seam with the shared triage-or-higher
  *     predicate; an unreadable, errored, or subject-mismatched reading fails
  *     closed (`permission-unknown` / `unauthorized`).
+ *   - The Q&A budget is enforced ACROSS deliveries, not per process: the
+ *     Action runs one process per webhook delivery, so the budget state is
+ *     the forge's own PR thread (the reviewer's published answers and the
+ *     questioner's prior questions), read once per delivery and shared with
+ *     the answer prompt. An unreadable thread proves no headroom and denies
+ *     the question — the budget never silently allows.
  *   - Re-review performs NO work here: the `rereview` effect is a pure
  *     hand-off (no side effect, no model work), and the rereview outcome is
  *     mapped back to `route: "pipeline"` so the shipped review path (its own
@@ -57,27 +63,14 @@ import {
   type FollowUpRunOutcome,
 } from "../followup/controller.js";
 import { createFollowUpAnswerExecutor } from "../followup/executor.js";
-import { InMemoryRateLimitStore, type RateLimitStore } from "../followup/rate-limit.js";
+import { ForgeFollowUpBudget } from "../followup/forge-budget.js";
+import type { RateLimitStore } from "../followup/rate-limit.js";
 import {
   DEFAULT_FOLLOW_UP_RATE_LIMITS,
   type FollowUpPlanConfig,
   type FollowUpPlanDeps,
   type FollowUpPlanRequest,
 } from "../followup/plan.js";
-
-/** The process-shared follow-up Q&A budget for the Action path. The Action
- * runs one webhook delivery per process, so one in-memory store per process
- * is the entire budget surface here; a cross-process host (the operator
- * controller) injects its own durable store.
- *
- * KNOWN DEGRADATION (tracked by #1295): until the durable cross-process
- * store lands, this per-process window bounds nothing ACROSS deliveries —
- * repeated authorized questions in separate runs each see a fresh budget,
- * and the real cross-delivery bound on the Action lane is the forge's own
- * workflow concurrency, not this gate. The gate still bounds anything one
- * process plans, and fails closed on its own (a full window answers
- * nothing). */
-const actionFollowUpRateLimitStore = new InMemoryRateLimitStore();
 
 /** Host-bound dependencies for one Action-mode follow-up run. Every field
  * has the production default documented; overrides exist for tests and for
@@ -99,8 +92,19 @@ export interface ActionFollowUpDeps {
   /** Deterministic clock (epoch ms) for the Q&A rate budget. Default:
    * `Date.now`. */
   clock: () => number;
-  /** The per-PR/per-actor follow-up budget. Default: the process-shared
-   * in-memory store above. */
+  /** The per-PR/per-actor follow-up budget. Default: the forge-backed store
+   * over the PR thread (`src/followup/forge-budget.ts`).
+   *
+   * The Action runs ONE PROCESS PER WEBHOOK DELIVERY, so an in-memory budget
+   * store hands every delivery a fresh budget and the planner's limits bound
+   * nothing ACROSS deliveries. The budget state is therefore the FORGE ITSELF:
+   * the reviewer's published answers and the questioner's own questions
+   * already live in the PR thread, so the budget is recomputed from that
+   * thread on every delivery — the same read the answer prompt uses (one read
+   * per delivery). An UNREADABLE thread proves no headroom and denies the
+   * question: a budget source that cannot be read never silently allows.
+   * The operator lane injects its own store (the durable cross-process store
+   * of #1295). */
   rateLimitStore: RateLimitStore;
 }
 
@@ -205,6 +209,35 @@ function makePrBodyRevisionProbe(
   };
 }
 
+/** The reviewer's own proven login, read through the platform's identity
+ * seam. `null` when it cannot be proven — never a guess: the planner's
+ * mention/loop guards then fail closed. */
+async function resolveBotLogin(adapter: PlatformReadAdapter): Promise<string | null> {
+  try {
+    return await adapter.authenticatedIdentity();
+  } catch {
+    return null;
+  }
+}
+
+/** Read the PR conversation comments ONCE per delivery. The same snapshot
+ * feeds the forge-backed Q&A budget (the cross-delivery budget state) and
+ * the answer prompt, so the delivery performs no second read.
+ *
+ * `ok: false` means the thread could not be read: the budget source is then
+ * unproven (every scope denies — fail closed, never silently allow) and the
+ * prompt degrades to no thread context, exactly as before. */
+async function readThreadComments(
+  adapter: PlatformReadAdapter,
+): Promise<{ ok: boolean; comments: readonly unknown[] }> {
+  try {
+    const rr = await adapter.listPrConversationComments();
+    return rr.ok ? { ok: true, comments: rr.data } : { ok: false, comments: [] };
+  } catch {
+    return { ok: false, comments: [] };
+  }
+}
+
 /** Bind the shared planner's forge capabilities to the Action's read seam.
  * Every probe is fail-closed (a failing read proves nothing: null/[]/""),
  * and the trust decisions stay the planner's — this host supplies
@@ -219,14 +252,10 @@ async function bindPlannerDeps(
   adapter: PlatformReadAdapter,
   clock: () => number,
   rateLimitStore: RateLimitStore,
+  botLogin: string | null,
+  threadComments: readonly unknown[],
 ): Promise<FollowUpPlanDeps> {
   const repo = stage.REPO ?? "";
-  let botLogin: string | null = null;
-  try {
-    botLogin = await adapter.authenticatedIdentity();
-  } catch {
-    botLogin = null;
-  }
   return {
     clock,
     botLogin,
@@ -239,14 +268,8 @@ async function bindPlannerDeps(
       }
     },
     rateLimitStore,
-    fetchThreadComments: async (): Promise<readonly unknown[]> => {
-      try {
-        const rr = await adapter.listPrConversationComments();
-        return rr.ok ? rr.data : [];
-      } catch {
-        return [];
-      }
-    },
+    // The already-read snapshot: the budget and the prompt share one read.
+    fetchThreadComments: async (): Promise<readonly unknown[]> => threadComments,
     latestManagedReview: async (): Promise<string> => {
       try {
         const comments = await adapter.listIssueComments();
@@ -304,21 +327,54 @@ export async function runActionFollowUp(
   // 3. Host deps: overrides win; every default is constructed lazily so an
   //    override never triggers a network client.
   const readAdapter = overrides?.readAdapter ?? buildPlatformReadAdapter(stage);
+  const clock = overrides?.clock ?? (() => Date.now());
+  // The reviewer's own proven login: the ONLY mention handle (unproven →
+  // none, so no question can fire — the planner fails closed) and the
+  // identity the forge-backed budget requires to recognize the reviewer's
+  // own published answers.
+  const botLogin = await resolveBotLogin(readAdapter);
+  // ONE thread read per delivery, shared by the budget state and the answer
+  // prompt.
+  const thread = await readThreadComments(readAdapter);
+  const mentionHandles = botLogin === null ? [] : [botLogin];
+  const rereviewCommand = (stage.REREVIEW_COMMAND ?? "").trim();
+  // The cross-delivery Q&A budget: the forge's own thread is the durable
+  // state, so a fresh process (one per delivery) no longer hands every
+  // delivery a fresh budget.
+  const rateLimitStore = overrides?.rateLimitStore ?? new ForgeFollowUpBudget({
+    comments: thread.comments,
+    readOk: thread.ok,
+    platform: event.platform,
+    repoFullName: event.repoFullName,
+    prNumber: event.prNumber,
+    actor: event.actor,
+    botLogin,
+    mentionHandles,
+    rereviewCommand,
+    currentCommentId: event.eventReference,
+  });
   const deps: ActionFollowUpDeps = {
     readAdapter,
     postComment: overrides?.postComment ?? defaultPostComment(stage),
     answer: overrides?.answer ?? defaultAnswerExecutor(stage),
-    clock: overrides?.clock ?? (() => Date.now()),
-    rateLimitStore: overrides?.rateLimitStore ?? actionFollowUpRateLimitStore,
+    clock,
+    rateLimitStore,
   };
 
   // 4. Planner bindings + config. The bot's proven login is the ONLY mention
   //    handle: a question must be addressed to the reviewer, and an
   //    unproven identity can be addressed by nothing (fail closed).
-  const planDeps = await bindPlannerDeps(stage, readAdapter, deps.clock, deps.rateLimitStore);
+  const planDeps = await bindPlannerDeps(
+    stage,
+    readAdapter,
+    deps.clock,
+    deps.rateLimitStore,
+    botLogin,
+    thread.comments,
+  );
   const config: FollowUpPlanConfig = {
-    rereviewCommand: (stage.REREVIEW_COMMAND ?? "").trim(),
-    mentionHandles: planDeps.botLogin ? [planDeps.botLogin] : [],
+    rereviewCommand,
+    mentionHandles,
     rateLimit: DEFAULT_FOLLOW_UP_RATE_LIMITS,
   };
 

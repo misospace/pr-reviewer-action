@@ -230,6 +230,32 @@ module stay the future daemon's own machinery — `prIdentityKey` keeping
 `follow_up` and `review` generations independent — and this module remains
 unwired into the running action pipeline.
 
+### The operator lane's production binding
+
+`src/ingress/operator-router.ts` (`createOperatorEventRouter`) is where the
+operator lane actually CONSUMES a canonical `follow_up` event: it constructs
+the follow-up consumer and routes events by kind — a `follow_up` delivery to
+the consumer (which plans it through the same shared planner the Action path
+uses), every other canonical event to the daemon's dispatch seam, whose
+rejection propagates to the caller that owns redelivery.
+`createForgejoWebhookHandler` hands a `follow_up` delivery to that router
+instead of forwarding it to `onEvent`, so the ingress itself drives the
+follow-up path; with no router configured the handler behaves exactly as
+before. The GitHub App operator lane has no webhook handler yet (#729
+follow-on work), so the router is the seam that path binds when it lands.
+
+### The Q&A budget's durable state
+
+The planner's per-PR/per-actor Q&A budget is a `RateLimitStore` seam
+(`src/followup/rate-limit.ts`). The Action lane runs one process per webhook
+delivery, so an in-memory store hands every delivery a fresh budget; the
+forge-backed store (`src/followup/forge-budget.ts`) reads the budget state
+from the PR thread itself — the reviewer's published answers and the
+questioner's own prior questions — so the window accumulates ACROSS
+deliveries. An unreadable thread proves no headroom and denies the question
+(fail closed). The operator lane injects its own store; the durable
+cross-process store of #1295 remains that lane's target.
+
 ## Out of scope
 
 HTTP ingress (#730), executor implementations (#733), and the PostgreSQL

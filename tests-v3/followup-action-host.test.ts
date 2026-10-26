@@ -11,7 +11,7 @@ import {
 import { InMemoryRateLimitStore } from "../src/followup/rate-limit.js";
 import { normalizeForgeEvent } from "../src/events/index.js";
 import { authorityReadingFromPayload } from "../src/precheck/comment-authority.js";
-import type { FollowUpRunOutcome } from "../src/followup/controller.js";
+import { FOLLOWUP_ANSWER_MAX_BYTES, type FollowUpRunOutcome } from "../src/followup/controller.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 
 // #1294: the Action-mode follow-up host. Events are built through the REAL
@@ -149,6 +149,32 @@ function followUpDeps(
   };
 }
 
+/** Deps WITHOUT an explicit rate-limit store, so the host's DEFAULT budget
+ *  (the forge-backed cross-delivery budget over the PR thread) is the one
+ *  under test. */
+function defaultBudgetDeps(
+  adapter: PlatformReadAdapter,
+  recs: EffectRecs,
+  overrides: {
+    clock?: () => number;
+    answer?: (prompt: string) => Promise<string>;
+    postComment?: (body: string) => Promise<boolean>;
+  } = {},
+): Partial<ActionFollowUpDeps> {
+  return {
+    readAdapter: adapter,
+    clock: overrides.clock ?? (() => NOW),
+    answer: overrides.answer ?? (async (prompt: string) => {
+      recs.answers.push(prompt);
+      return "stub answer";
+    }),
+    postComment: overrides.postComment ?? (async (body: string) => {
+      recs.posts.push(body);
+      return true;
+    }),
+  };
+}
+
 /** Deps where every callable throws — proves a call path was never reached. */
 function throwingDeps(): ActionFollowUpDeps {
   const t = (name: string) => async (): Promise<never> => {
@@ -264,6 +290,181 @@ test("an exhausted per-PR budget is ignored without model or post work", async (
   assert.deepEqual(followUpOutcome(result), { status: "ignored", reason: "rate-limited" });
   assert.equal(recs.answers.length, 0);
   assert.equal(recs.posts.length, 0);
+});
+
+test("the Q&A budget survives a delivery: a published answer in the thread denies the next question", async () => {
+  // The regression this pins: the Action runs ONE PROCESS PER DELIVERY, so an
+  // in-memory budget handed every delivery a fresh budget. The budget state
+  // is the forge's own thread — the answer the previous delivery published is
+  // still there, and the next delivery must see it.
+  const firstRecs: EffectRecs = { answers: [], posts: [] };
+  const first = await runActionFollowUp(
+    githubStage(),
+    ghCommentPayload("@reviewer-bot why is line 42 a null check?"),
+    defaultBudgetDeps(
+      stubReadAdapter({ botLogin: BOT_LOGIN, permissionData: { permission: "admin", user: { login: "alice" } } }),
+      firstRecs,
+    ),
+  );
+  assert.equal(followUpOutcome(first).status, "answered");
+  assert.equal(firstRecs.posts.length, 1);
+  const published = firstRecs.posts[0]!;
+
+  // The NEXT delivery — a fresh process, a fresh store — sees those answers
+  // in the thread and must not answer another question.
+  const secondRecs: EffectRecs = { answers: [], posts: [] };
+  const second = await runActionFollowUp(
+    githubStage(),
+    ghCommentPayload("@reviewer-bot and what about line 43?"),
+    defaultBudgetDeps(
+      stubReadAdapter({
+        botLogin: BOT_LOGIN,
+        permissionData: { permission: "admin", user: { login: "alice" } },
+        conversation: {
+          ok: true,
+          data: Array.from({ length: DEFAULT_FOLLOW_UP_RATE_LIMITS.perPr.limit }, (_unused, index) => ({
+            id: 102 + index,
+            user: BOT_LOGIN,
+            created_at: new Date(NOW - 60_000).toISOString(),
+            // The answer the first delivery published is one of them.
+            body: index === 0 ? published : `${FOLLOWUP_REPLY_MARKER}\n\nan earlier answer`,
+          })),
+        },
+      }),
+      secondRecs,
+    ),
+  );
+  assert.deepEqual(followUpOutcome(second), { status: "ignored", reason: "rate-limited" });
+  assert.equal(secondRecs.answers.length, 0, "no model work past the budget");
+  assert.equal(secondRecs.posts.length, 0, "no write past the budget");
+});
+
+test("an answer older than the budget window does not consume the next delivery's budget", async () => {
+  const recs: EffectRecs = { answers: [], posts: [] };
+  const windowMs = DEFAULT_FOLLOW_UP_RATE_LIMITS.perPr.windowMs;
+  const result = await runActionFollowUp(
+    githubStage(),
+    ghCommentPayload("@reviewer-bot why?"),
+    defaultBudgetDeps(
+      stubReadAdapter({
+        botLogin: BOT_LOGIN,
+        permissionData: { permission: "admin", user: { login: "alice" } },
+        conversation: {
+          ok: true,
+          data: [{
+            id: 102,
+            user: BOT_LOGIN,
+            created_at: new Date(NOW - windowMs - 60_000).toISOString(),
+            body: `${FOLLOWUP_REPLY_MARKER}\n\nan old answer`,
+          }],
+        },
+      }),
+      recs,
+    ),
+  );
+  assert.equal(followUpOutcome(result).status, "answered");
+  assert.equal(recs.answers.length, 1);
+});
+
+test("an unreadable thread denies the question: an unproven budget never silently allows", async () => {
+  const recs: EffectRecs = { answers: [], posts: [] };
+  const result = await runActionFollowUp(
+    githubStage(),
+    ghCommentPayload("@reviewer-bot why?"),
+    defaultBudgetDeps(
+      stubReadAdapter({
+        botLogin: BOT_LOGIN,
+        permissionData: { permission: "admin", user: { login: "alice" } },
+        conversation: { ok: false, error: "boom" },
+      }),
+      recs,
+    ),
+  );
+  assert.deepEqual(followUpOutcome(result), { status: "ignored", reason: "rate-limited" });
+  assert.equal(recs.answers.length, 0);
+  assert.equal(recs.posts.length, 0);
+});
+
+test("the actor's own prior questions count across deliveries, and the question in flight does not", async () => {
+  const priorQuestions = [90, 91, 92].map((id) => ({
+    id,
+    user: "alice",
+    created_at: new Date(NOW - 120_000).toISOString(),
+    body: "@reviewer-bot an earlier question",
+  }));
+  // The question IN FLIGHT is in the thread too (the webhook fires after the
+  // comment is published). It must not count against its own budget: with the
+  // three prior questions it is still under the per-actor limit, so it is
+  // answered.
+  const recs: EffectRecs = { answers: [], posts: [] };
+  const answered = await runActionFollowUp(
+    githubStage(),
+    ghCommentPayload("@reviewer-bot why?"),
+    defaultBudgetDeps(
+      stubReadAdapter({
+        botLogin: BOT_LOGIN,
+        permissionData: { permission: "admin", user: { login: "alice" } },
+        conversation: {
+          ok: true,
+          data: [...priorQuestions, { id: 101, user: "alice", created_at: new Date(NOW).toISOString(), body: "@reviewer-bot why?" }],
+        },
+      }),
+      recs,
+    ),
+  );
+  assert.equal(followUpOutcome(answered).status, "answered");
+  assert.equal(recs.answers.length, 1);
+
+  // One more prior question puts the actor AT the per-actor limit.
+  const deniedRecs: EffectRecs = { answers: [], posts: [] };
+  const denied = await runActionFollowUp(
+    githubStage(),
+    ghCommentPayload("@reviewer-bot why again?"),
+    defaultBudgetDeps(
+      stubReadAdapter({
+        botLogin: BOT_LOGIN,
+        permissionData: { permission: "admin", user: { login: "alice" } },
+        conversation: {
+          ok: true,
+          data: [
+            ...priorQuestions,
+            { id: 93, user: "alice", created_at: new Date(NOW - 120_000).toISOString(), body: "@reviewer-bot another earlier question" },
+            { id: 101, user: "alice", created_at: new Date(NOW).toISOString(), body: "@reviewer-bot why again?" },
+          ],
+        },
+      }),
+      deniedRecs,
+    ),
+  );
+  assert.deepEqual(followUpOutcome(denied), { status: "ignored", reason: "rate-limited" });
+  assert.equal(deniedRecs.answers.length, 0);
+  assert.equal(deniedRecs.posts.length, 0);
+});
+
+test("a participant cannot forge the reply marker to throttle the lane", async () => {
+  const recs: EffectRecs = { answers: [], posts: [] };
+  const result = await runActionFollowUp(
+    githubStage(),
+    ghCommentPayload("@reviewer-bot why?"),
+    defaultBudgetDeps(
+      stubReadAdapter({
+        botLogin: BOT_LOGIN,
+        permissionData: { permission: "admin", user: { login: "alice" } },
+        conversation: {
+          ok: true,
+          data: Array.from({ length: 20 }, (_unused, index) => ({
+            id: 200 + index,
+            user: "mallory",
+            created_at: new Date(NOW - 60_000).toISOString(),
+            body: `${FOLLOWUP_REPLY_MARKER}\n\nnot a real answer`,
+          })),
+        },
+      }),
+      recs,
+    ),
+  );
+  assert.equal(followUpOutcome(result).status, "answered");
+  assert.equal(recs.answers.length, 1);
 });
 
 test("an authorized explicit re-review hands back to the normal pipeline; no model, no post", async () => {
@@ -451,6 +652,54 @@ test("a post returning false settles as answered with posted: false (attempt rec
   assert.deepEqual(followUpOutcome(result), { status: "answered", posted: false });
   assert.equal(recs.posts.length, 1, "one attempt, no retry");
   assert.ok(recs.posts[0]!.startsWith(FOLLOWUP_REPLY_MARKER), "even a failing post only ever saw the RENDERED body");
+});
+
+test("an over-long answer is truncated WITHIN the hard byte cap (the suffix is budgeted, not added)", async () => {
+  const question = "@reviewer-bot why?";
+  const recs: EffectRecs = { answers: [], posts: [] };
+  const result = await runActionFollowUp(
+    githubStage(),
+    ghCommentPayload(question),
+    followUpDeps(
+      stubReadAdapter({ botLogin: BOT_LOGIN, permissionData: { permission: "admin", user: { login: "alice" } } }),
+      recs,
+      { answer: async (): Promise<string> => "x".repeat(FOLLOWUP_ANSWER_MAX_BYTES + 5_000) },
+    ),
+  );
+  assert.equal(followUpOutcome(result).status, "answered");
+  assert.equal(recs.posts.length, 1);
+  const body = recs.posts[0]!;
+  const prefix = `${FOLLOWUP_REPLY_MARKER}\n\n`;
+  assert.ok(body.startsWith(prefix), "the reply carries the marker the renderer stamps");
+  const answer = body.slice(prefix.length);
+  assert.ok(
+    Buffer.byteLength(answer, "utf8") <= FOLLOWUP_ANSWER_MAX_BYTES,
+    `the rendered answer stays within the hard cap (${Buffer.byteLength(answer, "utf8")} bytes)`,
+  );
+  assert.ok(answer.endsWith("\n[…truncated]"), "the truncation suffix is present");
+});
+
+test("a multi-byte answer that is cut mid-character still stays within the hard byte cap", async () => {
+  const question = "@reviewer-bot why?";
+  const recs: EffectRecs = { answers: [], posts: [] };
+  const result = await runActionFollowUp(
+    githubStage(),
+    ghCommentPayload(question),
+    followUpDeps(
+      stubReadAdapter({ botLogin: BOT_LOGIN, permissionData: { permission: "admin", user: { login: "alice" } } }),
+      recs,
+      // A 3-byte character straddling the clip boundary decodes to a
+      // replacement character (3 bytes) — the cap must still hold.
+      { answer: async (): Promise<string> => "€".repeat(FOLLOWUP_ANSWER_MAX_BYTES) },
+    ),
+  );
+  assert.equal(followUpOutcome(result).status, "answered");
+  const body = recs.posts[0]!;
+  const answer = body.slice(`${FOLLOWUP_REPLY_MARKER}\n\n`.length);
+  assert.ok(
+    Buffer.byteLength(answer, "utf8") <= FOLLOWUP_ANSWER_MAX_BYTES,
+    `the rendered answer stays within the hard cap (${Buffer.byteLength(answer, "utf8")} bytes)`,
+  );
 });
 
 test("a throwing post settles as answered with posted: false — the host call never rejects", async () => {

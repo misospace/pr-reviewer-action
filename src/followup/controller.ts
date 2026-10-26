@@ -72,15 +72,31 @@ export type FollowUpRunOutcome =
   | { status: "answer-failed"; cause: "model-unavailable" | "empty-answer" }
   | { status: "rereview"; disposition: FollowUpRereviewDisposition };
 
+/** The stable suffix a truncated answer carries. It is part of the byte
+ * budget, NOT an addition to it: the clipped prefix is shortened so the
+ * returned string never exceeds `maxBytes`. */
+const TRUNCATION_SUFFIX = "\n[…truncated]";
+
 /** Clip `text` to at most `maxBytes` UTF-8 bytes on a line boundary when one
  * survives in the clipped prefix, else on the byte boundary. Same degrade
- * shape as the prompt builder's truncation (the marker suffix is stable). */
+ * shape as the prompt builder's truncation (the marker suffix is stable).
+ *
+ * The result is BYTE-EXACT: the suffix is reserved out of the budget first,
+ * and the clipped prefix is shortened again when decoding turned a cut
+ * multi-byte sequence into a replacement character (3 bytes for 1–2 clipped
+ * ones), so the returned answer never exceeds the documented hard cap. */
 function truncateToBytes(text: string, maxBytes: number): string {
   if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
-  const clipped = Buffer.from(text, "utf8").subarray(0, maxBytes).toString("utf8");
+  const suffixBytes = Buffer.byteLength(TRUNCATION_SUFFIX, "utf8");
+  if (maxBytes <= suffixBytes) return "";
+  const budget = maxBytes - suffixBytes;
+  const clipped = Buffer.from(text, "utf8").subarray(0, budget).toString("utf8");
   const newline = clipped.lastIndexOf("\n");
-  const safe = newline >= 0 ? clipped.slice(0, newline) : clipped;
-  return `${safe.trimEnd()}\n[…truncated]`;
+  let safe = (newline >= 0 ? clipped.slice(0, newline) : clipped).trimEnd();
+  while (safe.length > 0 && Buffer.byteLength(safe + TRUNCATION_SUFFIX, "utf8") > maxBytes) {
+    safe = safe.slice(0, -1);
+  }
+  return `${safe}${TRUNCATION_SUFFIX}`;
 }
 
 /** Consume ONE canonical follow-up event: plan it once, then execute exactly

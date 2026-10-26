@@ -33,13 +33,24 @@ function answerBody(content: string): string {
   });
 }
 
-/** Mock GitHub API: GraphQL viewer identity, the collaborator-permission
- * endpoint (the commenter's permission is configurable), empty conversation
- * comment/review enumerations, and a capturing POST for issue comments. */
+/** One PR conversation comment as the GraphQL thread query reports it. */
+interface ThreadNode {
+  databaseId: number;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+  author: { login: string };
+}
+
+/** Mock GitHub API: GraphQL viewer identity, the PR conversation thread (the
+ * follow-up Q&A budget reads it), the collaborator-permission endpoint (the
+ * commenter's permission is configurable), empty review enumerations, and a
+ * capturing POST for issue comments. */
 function startGithubMock(options: {
   permission: string;
   viewerLogin?: string | null;
   postStatus?: number;
+  threadNodes?: ThreadNode[];
 }): Promise<{
   url: string;
   postedBodies: string[];
@@ -51,6 +62,14 @@ function startGithubMock(options: {
     const url = req.url ?? "";
     res.setHeader("Content-Type", "application/json");
     if (req.method === "POST" && url === "/graphql") {
+      // The conversation-thread query (the Q&A budget's durable state) and
+      // the viewer-identity query are different documents.
+      if (body.includes("comments(last: 100)")) {
+        res.end(JSON.stringify({
+          data: { repository: { pullRequest: { comments: { nodes: options.threadNodes ?? [] } } } },
+        }));
+        return;
+      }
       const viewer = options.viewerLogin === null ? null : { login: options.viewerLogin ?? BOT_LOGIN };
       res.end(JSON.stringify({ data: { viewer } }));
       return;
@@ -150,6 +169,7 @@ async function runCase(options: {
   modelStatus?: number;
   modelContent?: string;
   postStatus?: number;
+  threadNodes?: ThreadNode[];
 }): Promise<{
   exitCode: number;
   outputs: Record<string, string>;
@@ -172,6 +192,7 @@ async function runCase(options: {
     permission: options.permission ?? "write",
     ...(options.viewerLogin !== undefined ? { viewerLogin: options.viewerLogin } : {}),
     ...(options.postStatus !== undefined ? { postStatus: options.postStatus } : {}),
+    ...(options.threadNodes !== undefined ? { threadNodes: options.threadNodes } : {}),
   });
   const eventPath = join(runnerTemp, "event.json");
   writeFileSync(eventPath, commentEvent(options.body));
@@ -264,6 +285,31 @@ test("#1294: an unproven bot identity means no question fires (fail closed, fall
     assert.equal(result.outputs["skip-reason"], "unrelated-comment");
     assert.equal(result.modelRequests, 0, "nothing can be addressed to an unproven identity");
     assert.equal(result.postedBodies.length, 0);
+  } finally {
+    await result.cleanup();
+  }
+});
+
+test("#1294: the Q&A budget survives a delivery — a thread already holding the per-PR budget denies the question", async () => {
+  // The Action runs ONE PROCESS PER DELIVERY: the budget state must live in
+  // the forge's thread, or every delivery would start with a fresh budget.
+  const publishedAt = new Date(Date.now() - 60_000).toISOString();
+  const threadNodes: ThreadNode[] = Array.from({ length: 6 }, (_unused, index) => ({
+    databaseId: 900 + index,
+    body: `${FOLLOWUP_REPLY_MARKER}\n\nan answer from an earlier delivery`,
+    createdAt: publishedAt,
+    updatedAt: publishedAt,
+    author: { login: BOT_LOGIN },
+  }));
+  const result = await runCase({
+    body: `@${BOT_LOGIN} and what about the retry loop?`,
+    threadNodes,
+  });
+  try {
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.modelRequests, 0, "the exhausted budget stops the model work");
+    assert.equal(result.postedBodies.length, 0, "and stops the write");
+    assert.equal(result.outputs["should-review"], "false");
   } finally {
     await result.cleanup();
   }
