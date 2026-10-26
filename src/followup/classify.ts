@@ -25,8 +25,9 @@ import type { ClassifyResult } from "./types.js";
  * body. */
 const MANAGED_TEST = MANAGED_MARKER_RE;
 
-/** #763: the marker a host MUST stamp on every conversational follow-up REPLY
- * it publishes (via `PublishPlatformApi.postIssueComment`). It sits inside the
+/** #763: the marker stamped on every conversational follow-up REPLY by
+ * `renderFollowUpReply` (./reply.js), the single authoritative reply renderer
+ * whose output is what `PublishPlatformApi.postIssueComment` receives. It sits inside the
  * managed-marker family (begins `<!-- ai-pr-review`) so {@link
  * classifyFollowUpComment} recognizes a follow-up reply as the reviewer's own
  * even when its authenticated identity cannot be proven — closing the loop

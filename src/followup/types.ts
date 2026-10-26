@@ -58,8 +58,10 @@ export type ClassifyResult =
  *   a verdict, and carries no verdict-bearing field. `inReplyToCommentId` is
  *   the canonical follow-up comment id being answered; the issues-comment seam
  *   posts top-level only, so the host surfaces the linkage however its forge
- *   supports (quote/at-prefix) and MUST stamp the reply with
- *   `FOLLOWUP_REPLY_MARKER` so the loop guard recognises it.
+ *   supports (quote/at-prefix). The publishable body is produced by ONE
+ *   authoritative renderer, `renderFollowUpReply` (./reply.js), which stamps
+ *   `FOLLOWUP_REPLY_MARKER` for the loop guard; `postIssueComment` then posts
+ *   that body verbatim — the seam never adds or strips markers.
  */
 export type FollowUpPlan =
   | { action: "ignore"; reason: FollowUpIgnoreReason }

@@ -258,13 +258,17 @@ export interface PublishPlatformApi {
   listIssueCommentsResult?(): Promise<IssueCommentEnumeration>;
   /** Create or update the sticky managed comment (marker semantics shared). */
   upsertStickyComment(marker: string, body: string): Promise<StickyResult>;
-  /** #763: post ONE plain (non-managed, marker-free) top-level conversation
-   * comment — the conversational follow-up reply. Optional: an adapter without
-   * it is a forge with no plain-comment surface (Tangled), and the caller
-   * degrades explicitly. An empty body is refused WITHOUT a request; a hostile
-   * body is sent as JSON request DATA only (never in the URL) and the token is
-   * bound to the validated platform origin, so untrusted follow-up text can
-   * never reach another host or become a path segment. */
+  /** #763: post ONE plain (non-managed) top-level conversation comment — the
+   * conversational follow-up write. The body is posted VERBATIM: this seam
+   * never adds or strips markers, so a follow-up ANSWER must arrive already
+   * rendered by `renderFollowUpReply` (src/followup/reply.ts), which stamps
+   * the loop-guard marker; anything else is the caller's own body. Optional:
+   * an adapter without it is a forge with no plain-comment surface (Tangled),
+   * and the caller degrades explicitly. An empty body is refused WITHOUT a
+   * request; a hostile body is sent as JSON request DATA only (never in the
+   * URL) and the token is bound to the validated platform origin, so
+   * untrusted follow-up text can never reach another host or become a path
+   * segment. */
   postIssueComment?(body: string): Promise<CommentPostResult>;
   listReviews(): Promise<PublishReviewRef[]>;
   /** Enumerate and retire individual comments belonging to managed reviews. */
@@ -534,7 +538,9 @@ export class GitHubPublishApi implements PublishPlatformApi {
     }
   }
 
-  /** #763: post a plain (marker-free) follow-up reply. The body is sent as
+  /** #763: post a plain follow-up reply VERBATIM (follow-up answers are
+   * rendered by `renderFollowUpReply` upstream, which stamps the loop-guard
+   * marker; this seam neither adds nor strips markers). The body is sent as
    * JSON request DATA to the repo-scoped issue-comments endpoint; it can never
    * alter the request URL or path, and the credential stays bound to the
    * validated origin. An empty body is refused before any request. */
@@ -1165,7 +1171,9 @@ export class ForgejoPublishApi implements PublishPlatformApi {
       : { ok: true, created: true, commentId: created.id, ...(updatedAt === undefined ? {} : { updatedAt }) };
   }
 
-  /** #763: post a plain (marker-free) follow-up reply. Same data-only posture
+  /** #763: post a plain follow-up reply VERBATIM (follow-up answers are
+   * rendered by `renderFollowUpReply` upstream, which stamps the loop-guard
+   * marker; this seam neither adds nor strips markers). Same data-only posture
    * as the sticky creation path — the body is JSON request data and the
    * credential is bound to the validated Forgejo origin. An empty body is
    * refused before any request. */
