@@ -102,6 +102,14 @@ export function normalizeForgejoIssue(data: unknown): unknown {
 
 // ── PR conversation comments ────────────────────────────────────────────
 
+/** The latest-comments cap BOTH platform seams apply to the PR conversation
+ * read: GitHub's GraphQL asks `comments(last: 100)` (the query string keeps
+ * the verbatim v2 literal) and Forgejo's seam truncates its listing to the
+ * same window. A consumer that needs the thread as a COMPLETE ledger (the
+ * follow-up Q&A budget) must treat a full-length snapshot as possibly
+ * truncated. */
+export const CONVERSATION_COMMENTS_SNAPSHOT_CAP = 100;
+
 function conversationNode(node: unknown): Record<string, unknown> {
   return {
     id: jqField(node, "databaseId"),
@@ -138,7 +146,7 @@ export function forgejoCommentToStandard(raw: unknown): Record<string, unknown> 
  * the GitHub branch is oldest-first; `pr_thread` re-sorts both. */
 export function normalizeForgejoConversationComments(rawComments: readonly unknown[]): unknown[] {
   const standard = rawComments.map(forgejoCommentToStandard);
-  return jqSortBy(standard, (item) => jqAlt(item.created_at, "")).reverse().slice(0, 100);
+  return jqSortBy(standard, (item) => jqAlt(item.created_at, "")).reverse().slice(0, CONVERSATION_COMMENTS_SNAPSHOT_CAP);
 }
 
 // ── Review threads ──────────────────────────────────────────────────────

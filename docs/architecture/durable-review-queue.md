@@ -256,15 +256,21 @@ The planner's per-PR and per-actor-WITHIN-PR Q&A budget is a `RateLimitStore`
 seam (`src/followup/rate-limit.ts`). The Action lane runs one process per
 webhook delivery, so an in-memory store hands every delivery a fresh budget;
 the forge-backed store (`src/followup/forge-budget.ts`) reads the budget state
-from the PR thread itself — the reviewer's published answers and the
-questioner's own prior questions — so the window accumulates ACROSS
+from the PR thread itself — every mention-addressed question on the PR whatever
+author posted it (each question is at most one model attempt, so a failed model
+or post attempt still consumes budget and cannot be repeated past the limit)
+and the questioner's own prior questions — so the window accumulates ACROSS
 deliveries. Both scope keys are PR-scoped (`pr:<platform>:<repo>#<pr>`,
 `actor:<platform>:<repo>#<pr>:<actor>`), so the thread is the COMPLETE state
 behind every key this store answers — no key claims a scope its state cannot
-prove. An unreadable thread proves no headroom and denies the question
-(fail closed). The operator lane injects its own store; the durable
-cross-process store of #1295 remains that lane's target (cross-RESTART
-durability, not a scope this store under-delivers).
+prove. Fail closed: an unreadable thread proves no headroom and denies the
+question, and so does a window the thread snapshot cannot prove covered — both
+platform seams cap the snapshot at the latest comments
+(`CONVERSATION_COMMENTS_SNAPSHOT_CAP`), the host reports snapshot
+completeness, and a failed Forgejo comment page fails the whole read rather
+than silently truncating the ledger. The operator lane injects its own store;
+the durable cross-process store of #1295 remains that lane's target
+(cross-RESTART durability, not a scope this store under-delivers).
 
 ## Out of scope
 

@@ -524,6 +524,24 @@ test("forgejo conversation comments paginate 50 at a time and stop on a short pa
   ]);
 });
 
+test("#1299: a failed forgejo comment page fails the read instead of silently truncating the ledger", async () => {
+  // The follow-up Q&A budget reads this thread as its durable ledger: a
+  // partial listing presented as a successful read would silently widen the
+  // budget, so a failed page fails the WHOLE read (the budget then denies —
+  // fail closed) instead of ending the listing with what was collected.
+  const { fetchImpl, seen } = recorder((url) => {
+    if (url.searchParams.get("page") === "2") return json({}, 500);
+    return json(Array.from({ length: 50 }, (_, i) => ({ id: i, body: "b", created_at: `2026-09-01T00:00:${String(i).padStart(2, "0")}Z`, user: { login: "u" } })));
+  });
+  const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
+  const result = await adapter.listPrConversationComments();
+  assert.equal(result.ok, false);
+  assert.deepEqual(seen.map((s) => s.url), [
+    "https://git.example/api/v1/repos/o/r/issues/5/comments?page=1&limit=50",
+    "https://git.example/api/v1/repos/o/r/issues/5/comments?page=2&limit=50",
+  ]);
+});
+
 test("forgejo review threads fetch each integer review's comments; externalChecks reads only the commit status", async () => {
   const { fetchImpl, seen } = recorder((url) => {
     if (url.pathname.endsWith("/reviews")) return json([{ id: 4 }, { id: "x" }, { id: 8 }]);

@@ -32,10 +32,11 @@
  *     closed (`permission-unknown` / `unauthorized`).
  *   - The Q&A budget is enforced ACROSS deliveries, not per process: the
  *     Action runs one process per webhook delivery, so the budget state is
- *     the forge's own PR thread (the reviewer's published answers and the
- *     questioner's prior questions), read once per delivery and shared with
- *     the answer prompt. An unreadable thread proves no headroom and denies
- *     the question — the budget never silently allows.
+ *     the forge's own PR thread (the PR's mention-addressed questions and
+ *     the questioner's prior questions), read once per delivery and shared
+ *     with the answer prompt. An unreadable thread — or a window the
+ *     latest-comments snapshot cannot prove covered — proves no headroom and
+ *     denies the question; the budget never silently allows.
  *   - Re-review performs NO work here: the `rereview` effect is a pure
  *     hand-off (no side effect, no model work), and the rereview outcome is
  *     mapped back to `route: "pipeline"` so the shipped review path (its own
@@ -56,6 +57,7 @@ import { normalizeForgeEvent } from "../events/normalize.js";
 import { authorityReadingFromPayload, type AuthorityReading } from "../precheck/comment-authority.js";
 import { lastManagedBody } from "../precheck/decide.js";
 import { resolveTierProfiles } from "../routing/tiers.js";
+import { CONVERSATION_COMMENTS_SNAPSHOT_CAP } from "../platform/normalize.js";
 import {
   runFollowUpEvent,
   type FollowUpEffects,
@@ -98,11 +100,14 @@ export interface ActionFollowUpDeps {
    * The Action runs ONE PROCESS PER WEBHOOK DELIVERY, so an in-memory budget
    * store hands every delivery a fresh budget and the planner's limits bound
    * nothing ACROSS deliveries. The budget state is therefore the FORGE ITSELF:
-   * the reviewer's published answers and the questioner's own questions
+   * the PR's mention-addressed questions and the questioner's own questions
    * already live in the PR thread, so the budget is recomputed from that
    * thread on every delivery — the same read the answer prompt uses (one read
-   * per delivery). An UNREADABLE thread proves no headroom and denies the
-   * question: a budget source that cannot be read never silently allows.
+   * per delivery). Every question is at most one model attempt, so failed
+   * attempts consume budget too; a snapshot-capped thread read denies any
+   * window it cannot prove covered; an UNREADABLE thread proves no headroom
+   * and denies the question: a budget source that cannot be read never
+   * silently allows.
    * The operator lane injects its own store (the durable cross-process store
    * of #1295). */
   rateLimitStore: RateLimitStore;
@@ -330,8 +335,8 @@ export async function runActionFollowUp(
   const clock = overrides?.clock ?? (() => Date.now());
   // The reviewer's own proven login: the ONLY mention handle (unproven →
   // none, so no question can fire — the planner fails closed) and the
-  // identity the forge-backed budget requires to recognize the reviewer's
-  // own published answers.
+  // identity the forge-backed budget's classifier loop-guards against (the
+  // reviewer's own publications never classify as questions).
   const botLogin = await resolveBotLogin(readAdapter);
   // ONE thread read per delivery, shared by the budget state and the answer
   // prompt.
@@ -340,10 +345,16 @@ export async function runActionFollowUp(
   const rereviewCommand = (stage.REREVIEW_COMMAND ?? "").trim();
   // The cross-delivery Q&A budget: the forge's own thread is the durable
   // state, so a fresh process (one per delivery) no longer hands every
-  // delivery a fresh budget.
+  // delivery a fresh budget. The snapshot is provably complete only when the
+  // thread read returned FEWER comments than the platforms' snapshot cap —
+  // GitHub's conversation read asks `comments(last: 100)` and Forgejo's seam
+  // truncates its listing to the same latest-100 window, so a full-length
+  // snapshot may have omitted older budgeted questions and the budget then
+  // denies any window the snapshot cannot prove covered (fail closed).
   const rateLimitStore = overrides?.rateLimitStore ?? new ForgeFollowUpBudget({
     comments: thread.comments,
     readOk: thread.ok,
+    snapshotComplete: thread.comments.length < CONVERSATION_COMMENTS_SNAPSHOT_CAP,
     platform: event.platform,
     repoFullName: event.repoFullName,
     prNumber: event.prNumber,

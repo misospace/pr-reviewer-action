@@ -293,13 +293,18 @@ test("#1294: an unproven bot identity means no question fires (fail closed, fall
 test("#1294: the Q&A budget survives a delivery — a thread already holding the per-PR budget denies the question", async () => {
   // The Action runs ONE PROCESS PER DELIVERY: the budget state must live in
   // the forge's thread, or every delivery would start with a fresh budget.
+  // The durable state is the PR's mention-addressed QUESTIONS (each question
+  // is at most one model attempt, so failed attempts consume too): six
+  // questions from different actors exhaust the per-PR scope, so the next
+  // question is denied with no model call and no write.
   const publishedAt = new Date(Date.now() - 60_000).toISOString();
-  const threadNodes: ThreadNode[] = Array.from({ length: 6 }, (_unused, index) => ({
+  const askers = ["alice", "bob", "carol", "dave", "erin", "frank"];
+  const threadNodes: ThreadNode[] = askers.map((login, index) => ({
     databaseId: 900 + index,
-    body: `${FOLLOWUP_REPLY_MARKER}\n\nan answer from an earlier delivery`,
+    body: `@${BOT_LOGIN} question ${index} from an earlier delivery`,
     createdAt: publishedAt,
     updatedAt: publishedAt,
-    author: { login: BOT_LOGIN },
+    author: { login },
   }));
   const result = await runCase({
     body: `@${BOT_LOGIN} and what about the retry loop?`,

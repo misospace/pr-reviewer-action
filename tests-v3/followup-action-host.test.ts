@@ -292,11 +292,12 @@ test("an exhausted per-PR budget is ignored without model or post work", async (
   assert.equal(recs.posts.length, 0);
 });
 
-test("the Q&A budget survives a delivery: a published answer in the thread denies the next question", async () => {
+test("the Q&A budget survives a delivery: the questions earlier deliveries left in the thread deny the next question", async () => {
   // The regression this pins: the Action runs ONE PROCESS PER DELIVERY, so an
   // in-memory budget handed every delivery a fresh budget. The budget state
-  // is the forge's own thread — the answer the previous delivery published is
-  // still there, and the next delivery must see it.
+  // is the forge's own thread — the questions earlier deliveries planned (and
+  // the answers they published) are still there, and the next delivery must
+  // see them.
   const firstRecs: EffectRecs = { answers: [], posts: [] };
   const first = await runActionFollowUp(
     githubStage(),
@@ -310,8 +311,12 @@ test("the Q&A budget survives a delivery: a published answer in the thread denie
   assert.equal(firstRecs.posts.length, 1);
   const published = firstRecs.posts[0]!;
 
-  // The NEXT delivery — a fresh process, a fresh store — sees those answers
-  // in the thread and must not answer another question.
+  // The NEXT delivery — a fresh process, a fresh store — sees the PR's
+  // question traffic in the thread and must not answer another question. The
+  // per-PR scope counts every question whatever author posted it (each
+  // question is at most one model attempt), so six questions from DIFFERENT
+  // actors exhaust it while the per-actor scope alone would not.
+  const others = ["bob", "carol", "dave", "erin", "frank"];
   const secondRecs: EffectRecs = { answers: [], posts: [] };
   const second = await runActionFollowUp(
     githubStage(),
@@ -322,13 +327,27 @@ test("the Q&A budget survives a delivery: a published answer in the thread denie
         permissionData: { permission: "admin", user: { login: "alice" } },
         conversation: {
           ok: true,
-          data: Array.from({ length: DEFAULT_FOLLOW_UP_RATE_LIMITS.perPr.limit }, (_unused, index) => ({
-            id: 102 + index,
-            user: BOT_LOGIN,
-            created_at: new Date(NOW - 60_000).toISOString(),
-            // The answer the first delivery published is one of them.
-            body: index === 0 ? published : `${FOLLOWUP_REPLY_MARKER}\n\nan earlier answer`,
-          })),
+          data: [
+            {
+              id: 90,
+              user: "alice",
+              created_at: new Date(NOW - 60_000).toISOString(),
+              body: "@reviewer-bot why is line 42 a null check?",
+            },
+            ...others.map((user, index) => ({
+              id: 200 + index,
+              user,
+              created_at: new Date(NOW - 60_000).toISOString(),
+              body: `@reviewer-bot question ${index}`,
+            })),
+            {
+              id: 300,
+              user: BOT_LOGIN,
+              created_at: new Date(NOW - 30_000).toISOString(),
+              // The answer the first delivery published is among the reads.
+              body: published,
+            },
+          ],
         },
       }),
       secondRecs,

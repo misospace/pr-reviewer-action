@@ -8,33 +8,54 @@
  * per-actor limits the planner enforces then bound nothing ACROSS deliveries.
  *
  * This module is the store that survives deliveries in the Action lane: the
- * FORGE ITSELF is the durable state. The reviewer's answers are already
- * published in the PR thread, marker-stamped by the one authoritative renderer
- * (`./reply.js`), and the questioner's own questions are already there too —
- * so the thread the platform seam reads IS the ledger, and the budget is
- * recomputed from it on every delivery.
+ * FORGE ITSELF is the durable state. The questioner's questions are already
+ * published in the PR thread before any model work is planned, so the thread
+ * the platform seam reads IS the ledger, and the budget is recomputed from it
+ * on every delivery.
  *
  * What is counted (both only inside the queried window):
- * - the PER-PR scope counts the reviewer's own published follow-up REPLIES on
- *   this PR — one published answer is one unit of model work, which is exactly
- *   what the budget exists to bound;
- * - the PER-ACTOR scope is per-actor WITHIN the PR and counts THIS actor's own
- *   prior QUESTIONS on this PR — the intent the planner documents ("one person
- *   cannot dominate a PR").
+ * - the PER-PR scope counts every mention-addressed QUESTION on this PR,
+ *   whatever author posted it. Each question is at most one model attempt
+ *   (the planner plans once per event and the executor is one-shot, never a
+ *   retry), so the question count bounds the PR's follow-up model work
+ *   whether or not any attempt SUCCEEDED: a failed model call or a failed
+ *   post leaves its question in the thread, so the attempt still consumes
+ *   cross-delivery budget and cannot be repeated past the limit. A question
+ *   the planner DENIED also sits in the thread and counts too — the store
+ *   over-counts rather than under-counts (fail closed), and the per-actor
+ *   scope still caps any single account;
+ * - the PER-ACTOR scope is per-actor WITHIN the PR and counts THIS actor's
+ *   own prior QUESTIONS on this PR — the intent the planner documents ("one
+ *   person cannot dominate a PR").
  * Both scopes the store covers are therefore exactly PR-scoped, so the thread
- * the platform seam reads is the COMPLETE state for both keys it serves —
- * nothing the planner asks about under them lives outside this PR. #1295
- * remains the durable cross-RESTART store target for the operator lane, which
- * can hold state beyond a single PR thread; it is not a gap in this store.
+ * is the COMPLETE state for both keys it serves — nothing the planner asks
+ * about under them lives outside this PR. #1295 remains the durable
+ * cross-RESTART store target for the operator lane, which can hold state
+ * beyond a single PR thread; it is not a gap in this store.
+ *
+ * Snapshot coverage (fail closed): the platform seam's thread read is
+ * bounded to the LATEST comments (both platforms cap the snapshot), so a
+ * busy thread's snapshot can silently omit earlier budgeted questions. The
+ * host reports whether the snapshot provably covers the PR's whole comment
+ * history (`snapshotComplete`); when it does not, a window is answerable
+ * only when the snapshot demonstrably reaches back past the window's start —
+ * the snapshot keeps the LATEST comments, so an in-window event missing from
+ * it must be older than the snapshot's oldest entry, which is impossible
+ * once that entry precedes the window. A window the snapshot cannot prove
+ * covered denies every scope: an unprovable budget source must never
+ * silently ALLOW model work. A comment whose creation instant the seam could
+ * not report is unplaceable in any window, so a question-intent one counts
+ * toward BOTH scopes in every window (conservative, never an under-count).
  *
  * Fail-closed posture:
- * - an UNREADABLE thread proves no budget headroom, so every scope denies —
- *   an unreadable budget source must never silently ALLOW model work;
+ * - an UNREADABLE thread proves no budget headroom, so every scope denies;
+ * - a window the snapshot does not provably cover denies as above;
  * - a scope this store does not cover denies as well (a scope-key change in
  *   the planner can never silently widen the budget);
- * - the reviewer's replies are recognized by the loop-guard marker AND the
- *   reviewer's proven identity, so a participant cannot forge the marker to
- *   throttle the lane.
+ * - the question classification is the SAME classifier the planner uses, so
+ *   a prior comment only counts when it would have triggered the same work —
+ *   the reviewer's own publications never classify as questions (loop
+ *   guards), so a participant cannot forge consumption to throttle the lane.
  *
  * The store is read-only: it never writes to the forge and never performs
  * model work. It is a projection of forge-reported data (author login,
@@ -42,7 +63,7 @@
  * platform seam's normalized comment shape.
  */
 
-import { FOLLOWUP_REPLY_MARKER, classifyFollowUpComment } from "./classify.js";
+import { classifyFollowUpComment } from "./classify.js";
 import type { RateLimitStore } from "./rate-limit.js";
 
 /** The count returned for a scope whose budget headroom cannot be proven.
@@ -108,6 +129,11 @@ export interface ForgeFollowUpBudgetOptions {
   /** Whether the comment read SUCCEEDED. `false` proves no budget headroom,
    * so every scope denies (fail closed, never silently allow). */
   readonly readOk: boolean;
+  /** Whether the snapshot provably covers the PR's WHOLE comment history.
+   * Both platforms cap the thread read at the latest comments, so a host
+   * that read a full-length snapshot must report `false` — a window the
+   * snapshot then cannot prove covered denies (see the module header). */
+  readonly snapshotComplete: boolean;
   /** The canonical platform id ("github" / "forgejo"). */
   readonly platform: string;
   /** The canonical repository full name (lowercased for the scope key, the
@@ -135,42 +161,44 @@ export class ForgeFollowUpBudget implements RateLimitStore {
   readonly prKey: string;
   /** The planner's per-actor scope key (see `planFollowUp`). */
   readonly actorKey: string;
-  /** The reviewer's own follow-up replies in the thread (epoch millis). */
-  private readonly replyInstants: number[] = [];
+  /** Every mention-addressed question on this PR, whatever author posted
+   * it (epoch millis) — the per-PR scope's durable attempt count. */
+  private readonly prQuestionInstants: number[] = [];
   /** This actor's own prior questions in the thread (epoch millis). */
   private readonly questionInstants: number[] = [];
+  /** Question-intent comments whose creation instant the seam could not
+   * report: unplaceable in any window, so they count toward BOTH scopes in
+   * EVERY window (conservative — never an under-count). */
+  private readonly unplaceableQuestions = new Set<string>();
+  /** The oldest creation instant the snapshot reports (null when it reports
+   * none): the reach-back marker the window-coverage proof uses. */
+  private oldestObservedMs: number | null = null;
   /** Events recorded during THIS process (the store's own overlay). */
   private readonly recorded = new Map<string, number[]>();
   private readonly readOk: boolean;
+  private readonly snapshotComplete: boolean;
 
   constructor(options: ForgeFollowUpBudgetOptions) {
     this.readOk = options.readOk;
+    this.snapshotComplete = options.snapshotComplete;
     const repo = options.repoFullName.toLowerCase();
     this.prKey = `pr:${options.platform}:${repo}#${options.prNumber}`;
     this.actorKey = `actor:${options.platform}:${repo}#${options.prNumber}:${options.actor.toLowerCase()}`;
     if (!options.readOk) return;
 
-    const botLogin = options.botLogin === null ? null : options.botLogin.toLowerCase();
     const actor = options.actor.toLowerCase();
     for (const raw of options.comments) {
       const comment = projectComment(raw);
-      if (comment === null || comment.createdAtMs === null) continue;
-      // The reviewer's answer: the marker the one authoritative renderer
-      // stamps AND the reviewer's own proven identity. Requiring both keeps
-      // a participant from forging the marker to throttle the lane.
-      const isReply =
-        comment.body.includes(FOLLOWUP_REPLY_MARKER)
-        && botLogin !== null
-        && comment.user.toLowerCase() === botLogin;
-      if (isReply) {
-        this.replyInstants.push(comment.createdAtMs);
-        continue;
+      if (comment === null) continue;
+      if (comment.createdAtMs !== null
+        && (this.oldestObservedMs === null || comment.createdAtMs < this.oldestObservedMs)) {
+        this.oldestObservedMs = comment.createdAtMs;
       }
-      // The actor's own prior QUESTION: the same classifier the planner uses,
-      // so a prior comment only counts when it would have triggered the same
-      // work. A prior re-review command does not consume the Q&A budget.
-      if (comment.user.toLowerCase() !== actor) continue;
-      if (options.currentCommentId !== "" && comment.id === options.currentCommentId) continue;
+      // The same classifier the planner uses: a prior comment only counts
+      // when it would have triggered the same work. The reviewer's own
+      // publications never classify as questions (the loop guards fire
+      // first), so nobody can forge consumption; a prior re-review command
+      // does not consume the Q&A budget either.
       const intent = classifyFollowUpComment({
         body: comment.body,
         authorLogin: comment.user,
@@ -178,7 +206,19 @@ export class ForgeFollowUpBudget implements RateLimitStore {
         rereviewCommand: options.rereviewCommand,
         mentionHandles: options.mentionHandles,
       });
-      if (intent.intent === "question") this.questionInstants.push(comment.createdAtMs);
+      if (intent.intent !== "question") continue;
+      // The question in flight is not yet part of the thread's history and
+      // must never count against its own budget — in either scope.
+      if (options.currentCommentId !== "" && comment.id === options.currentCommentId) continue;
+      if (comment.createdAtMs === null) {
+        // Unplaceable in any window: count it conservatively in every one.
+        this.unplaceableQuestions.add(comment.id);
+        continue;
+      }
+      this.prQuestionInstants.push(comment.createdAtMs);
+      // The per-actor scope stays THIS actor's own prior questions.
+      if (comment.user.toLowerCase() !== actor) continue;
+      this.questionInstants.push(comment.createdAtMs);
     }
   }
 
@@ -186,15 +226,23 @@ export class ForgeFollowUpBudget implements RateLimitStore {
     // An unreadable budget source proves no headroom: deny every scope.
     if (!this.readOk) return DENY;
     const windowStart = nowMs - Math.max(0, windowMs);
+    // Snapshot coverage: a complete snapshot proves every in-window event is
+    // visible outright; an incomplete (latest-N) snapshot proves it only when
+    // its oldest entry precedes the window — an in-window event missing from
+    // a latest-N snapshot must be OLDER than that entry, which is impossible
+    // then. A window the snapshot cannot prove covered denies every scope.
+    const covered = this.snapshotComplete
+      || (this.oldestObservedMs !== null && this.oldestObservedMs <= windowStart);
+    if (!covered) return DENY;
     const source = key === this.prKey
-      ? this.replyInstants
+      ? this.prQuestionInstants
       : key === this.actorKey
         ? this.questionInstants
         : null;
     // A scope this store does not cover proves no headroom either: a scope
     // key the planner changes can never silently widen the budget.
     if (source === null) return DENY;
-    let count = 0;
+    let count = this.unplaceableQuestions.size;
     for (const instant of source) {
       if (instant > windowStart && instant <= nowMs) count += 1;
     }
