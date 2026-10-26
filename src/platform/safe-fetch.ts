@@ -347,6 +347,62 @@ function initHeaders(init: RequestInit | undefined): Record<string, string> {
   return out;
 }
 
+/** A `fetch`-compatible transport for the `web_fetch` tool executor
+ * (structurally matching the executor's injected `fetch` seam; no import from
+ * `src/tools/`): GET only, http/https only, no credentials in the URL,
+ * public-only pinned resolution through the default public policy, and no
+ * redirect following — a 3xx is returned as-is for the executor to re-gate
+ * per hop. A wall-clock deadline (the old `defaultFetch` semantics) is
+ * composed with the caller's signal: `nodeExchange`'s socket timeout is
+ * inactivity-based, so a byte-dribbling server must not exceed the budget. */
+export function createToolFetch(): (url: string, init: {
+  headers: Record<string, string>;
+  timeoutMs: number;
+  method?: string;
+  body?: string;
+  redirect?: "manual";
+  signal?: AbortSignal;
+}) => Promise<{ status: number; headers: Record<string, string>; body: string; url: string }> {
+  return async (url, init) => {
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(new SourceFetchError(`timed out after ${init.timeoutMs} ms`)), init.timeoutMs);
+    const signal = init.signal !== undefined ? AbortSignal.any([deadline.signal, init.signal]) : deadline.signal;
+    try {
+      return await toolExchange(url, init, signal);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+}
+
+async function toolExchange(url: string, init: { headers: Record<string, string>; timeoutMs: number; method?: string; signal?: AbortSignal }, signal: AbortSignal): Promise<{ status: number; headers: Record<string, string>; body: string; url: string }> {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new SourceFetchError(`scheme ${parsed.protocol} not allowed`);
+  if (parsed.username !== "" || parsed.password !== "") throw new SourceFetchError("credentials in URL not allowed");
+  if (init.method !== undefined && init.method.toUpperCase() !== "GET") throw new SourceFetchError("only GET is allowed");
+  const host = parsed.hostname.replace(/^\[/, "").replace(/\]$/, "");
+  const addresses = await resolvePublicAddresses(host, systemResolver);
+  if (addresses === null) throw new SourceFetchError(`host ${host} does not resolve to public addresses only`);
+  const response = await nodeExchange({
+    url: parsed.href,
+    protocol: parsed.protocol,
+    host,
+    port: parsed.port === "" ? null : Number(parsed.port),
+    path: `${parsed.pathname}${parsed.search}`,
+    addresses,
+    headers: init.headers,
+    timeoutMs: init.timeoutMs,
+    maxBytes: MAX_SOURCE_BYTES,
+    signal,
+  });
+  return {
+    status: response.status,
+    headers: Object.fromEntries(Object.entries(response.headers).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+    body: Buffer.from(response.body).toString("utf8"),
+    url: parsed.href,
+  };
+}
+
 export interface SafeFetchLikeOptions {
   resolver?: Resolver | undefined;
   exchange?: Exchange | undefined;

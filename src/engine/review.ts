@@ -62,7 +62,7 @@ import { resolveReviewerRouting } from "../config/reviewer-routing.js";
 import { resolveHumanReviewRouting, type HumanReviewRoutingMode, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 import { buildConfidencePrompt, unresolvedConfidencePins } from "../confidence/prompt.js";
 import { runConfidenceScorer } from "../confidence/scorer.js";
-import { boundConfidenceField, boundConfidenceReason, CONFIDENCE_DISABLED, confidenceCapNote, confidenceOutputFields, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS, MAX_CONFIDENCE_CONCERN_FILE_CHARS, unscoredConfidenceResult, type ConfidenceResult } from "../confidence/result.js";
+import { boundConfidenceField, boundConfidenceReason, CONFIDENCE_DISABLED, confidenceCapNote, confidenceOutputFields, confidenceReasonWithoutCapNote, maskComposedConfidenceReason, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS, MAX_CONFIDENCE_CONCERN_FILE_CHARS, unscoredConfidenceResult, type ConfidenceResult } from "../confidence/result.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, applyReviewTriageFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
 import { reviewArtifactFromParsed, type ArtifactFinding } from "../enforcement/artifact.js";
 import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
@@ -2013,13 +2013,27 @@ secrets: [profiles.primary.apiKey],
     // keeps its deterministic-cap note through the re-bound, and that note is
     // masked TOO before being re-appended, because a configured credential may
     // be a single character occurring inside the note template.
+    // #1268: the model share and the note are split BEFORE masking. Masking
+    // the combined text lets `redactText` complete a look-alike the model only
+    // half-wrote (the credential rule consumes the model's closing bracket and
+    // the `[REDACTED]` marker supplies another), so the note travels as its
+    // own value and `boundConfidenceReason` re-appends it from `caps` — never
+    // parsed back out of masked text. `maskComposedConfidenceReason` then
+    // closes the boundary-spanning-secret tear the split opens.
     const maskConfidenceField = (text: string, maxChars: number): string =>
       boundConfidenceField(maskConfidenceText(text), maxChars);
+    const confidenceModelReason = confidenceReasonWithoutCapNote(
+      confidenceOutcome.result.reason,
+      confidenceOutcome.result.caps,
+    );
     confidenceResult = {
       ...confidenceOutcome.result,
-      reason: boundConfidenceReason(
-        maskConfidenceText(confidenceOutcome.result.reason),
-        maskConfidenceText(confidenceCapNote(confidenceOutcome.result.caps)),
+      reason: maskComposedConfidenceReason(
+        boundConfidenceReason(
+          maskConfidenceText(confidenceModelReason),
+          maskConfidenceText(confidenceCapNote(confidenceOutcome.result.caps)),
+        ),
+        confidenceSecrets,
       ),
       concerns: confidenceOutcome.result.concerns.map((concern) => ({
         file: maskConfidenceField(concern.file, MAX_CONFIDENCE_CONCERN_FILE_CHARS),
@@ -2610,10 +2624,15 @@ interface ReviewCallInput {
   readonly signal?: AbortSignal;
 }
 
-function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | "smart", env: StageEnv): TierProfile {
+export function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | "smart", env: StageEnv): TierProfile {
   const resolved = tier === "fallback" ? profiles.fallback : tier === "smart" ? profiles.smart : profiles.primary;
   const aiMaxTokens = Number(env.AI_MAX_TOKENS ?? "8192") || 8192;
   const temperatureRaw = env.AI_TEMPERATURE ?? "0.1";
+  // #1246: an explicit zero is a valid temperature and must reach the wire —
+  // `Number(x) || 0.1` rewrote `ai-temperature: "0"` into 0.1. Empty still
+  // omits the field; config validation rejects non-finite values upstream,
+  // so the finite fallback only guards direct-callers defensively.
+  const temperature = Number(temperatureRaw);
   // #1037: same operator headers on every lane; unset config yields
   // `undefined` and the profile omits the field, keeping requests
   // byte-identical.
@@ -2632,7 +2651,7 @@ function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | 
     retryDelaySec: resolved.retryDelaySec,
     shape: tierRequestShape(tier === "smart" ? "smart" : tier === "fallback" ? "fallback" : "primary", env),
     maxTokens: aiMaxTokens,
-    temperature: temperatureRaw === "" ? "" : Number(temperatureRaw) || 0.1,
+    temperature: temperatureRaw === "" ? "" : Number.isFinite(temperature) ? temperature : 0.1,
     responseFormat: resolved.responseFormat,
     tokensParam: (env.AI_TOKENS_PARAM ?? "max_tokens") as TierProfile["tokensParam"],
     // #998: the lane's resolved effort; "" omits the provider field entirely.

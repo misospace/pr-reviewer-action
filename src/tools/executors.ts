@@ -28,6 +28,7 @@ import { committedSourceProvenance, sanitizedSourceProvenance, untrustedTextProv
 import { isRepositorySkillPath, readRepositorySkill, SKILL_LIMITS, SKILL_RESULT_MAX_BYTES } from "../context/repository-skills.js";
 import { USER_AGENT } from "../platform/user-agent.js";
 import { decodeEndpointPath } from "../platform/endpoint.js";
+import { createToolFetch, resolvePublicAddresses, systemResolver, type Resolver } from "../platform/safe-fetch.js";
 import { runProcess, type ProcessResult } from "../runtime/subprocess.js";
 import { pyDumpsCompact, pyDumpsSorted } from "../model/conversation.js";
 
@@ -112,6 +113,8 @@ export type NetworkResponse = { status: number; headers?: Record<string, string>
 export type ToolDeps = {
   env: NodeJS.ProcessEnv;
   fetch?: (url: string, init: { headers: Record<string, string>; timeoutMs: number; method?: string; body?: string; redirect?: "manual"; signal?: AbortSignal }) => Promise<NetworkResponse>;
+  /** Test/DI seam for the per-hop public-DNS gate; production uses `systemResolver`. */
+  resolver?: Resolver;
   ghApi?: (endpoint: string, opts?: { timeoutMs: number }) => Promise<{ data?: unknown; error?: string }>;
   runProcess?: (options: Parameters<typeof runProcess>[0]) => Promise<ProcessResult>;
 };
@@ -1050,7 +1053,8 @@ export async function gitBlame(input: string, ctx: ToolContext, start?: number |
 export async function webFetch(url: string, ctx: ToolContext): Promise<Obj> {
   let current = url;
   const allowed = ctx.allowedHosts ?? [];
-  const fetcher = ctx.deps.fetch ?? defaultFetch;
+  const fetcher = ctx.deps.fetch ?? createToolFetch();
+  const resolver = ctx.deps.resolver ?? systemResolver;
   for (let hop = 0; hop <= 10; hop++) {
     let parsed: URL;
     try {
@@ -1065,6 +1069,12 @@ export async function webFetch(url: string, ctx: ToolContext): Promise<Obj> {
     if (!allowlistedHost(host, allowed)) {
       return {
         error: hop > 0 ? `Redirect to disallowed host: ${host}` : `Host not allowlisted: ${host}`,
+      };
+    }
+    const resolved = await resolvePublicAddresses(host.replace(/^\[/, "").replace(/\]$/, ""), resolver);
+    if (resolved === null) {
+      return {
+        error: hop > 0 ? `Redirect to non-public host: ${host}` : `Host resolves to non-public addresses: ${host}`,
       };
     }
     let res: NetworkResponse;

@@ -497,7 +497,7 @@ test("web fetch checks exact hosts and every redirect; search sanitizes result s
   assert.equal(allowlistedHost("github.com.evil.example", ["github.com"]), false);
   assert.equal(allowlistedHost("evil.example", ["*"]), true);
   assert.equal(allowlistedHost(new URL("https://github.com@evil.example/").hostname, ["github.com"]), false);
-  const context = ctx("/tmp", { allowedHosts: ["github.com"], deps: { ...deps(), fetch: async () => ({ status: 302, headers: { location: "https://evil.example/" }, body: "" }) } });
+  const context = ctx("/tmp", { allowedHosts: ["github.com"], deps: { ...deps(), fetch: async () => ({ status: 302, headers: { location: "https://evil.example/" }, body: "" }), resolver: async () => ["93.184.216.34"] } });
   assert.match((await webFetch("https://github.com/", context)).error!, /Redirect to disallowed host/);
   assert.match((await webFetch("file:///etc/passwd", context)).error!, /scheme/);
   let called = "";
@@ -513,7 +513,7 @@ test("outbound tool fetches carry the non-default reviewer User-Agent (#221/#252
     seen.push(init?.headers);
     return { status: 200, body: JSON.stringify({ results: [] }) };
   };
-  const fetched = await webFetch("https://github.com/", ctx("/tmp", { allowedHosts: ["github.com"], deps: { ...deps(), fetch: fetchDep } }));
+  const fetched = await webFetch("https://github.com/", ctx("/tmp", { allowedHosts: ["github.com"], deps: { ...deps(), fetch: fetchDep, resolver: async () => ["93.184.216.34"] } }));
   assert.equal(fetched.error, undefined);
   const searched = await webSearch("q", ctx("/tmp", { searchUrl: "https://search.test/search", deps: { ...deps(), fetch: fetchDep } }));
   assert.equal(searched.error, undefined);
@@ -528,7 +528,7 @@ test("tool wrapper applies byte truncation and redaction", async () => fixture(a
   const p = path.join(root, "sample.txt"); fs.writeFileSync(p, "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456 AKIA1234567890ABCDEF");
   const result = await executeToolRequest("read_file", { path: "sample.txt" }, ctx(root, { maxResponseBytes: 12000 }));
   assert.equal(result.status, "ok"); assert.match(result.result.content, /redacted:credential/); assert.doesNotMatch(result.result.content, /ghp_|AKIA/);
-  const clipped = await executeToolRequest("web_fetch", { url: "https://github.com/" }, ctx(root, { maxResponseBytes: 5, allowedHosts: ["github.com"], deps: { ...deps(), fetch: async () => ({ status: 200, body: "abcdefgh" }) } }));
+  const clipped = await executeToolRequest("web_fetch", { url: "https://github.com/" }, ctx(root, { maxResponseBytes: 5, allowedHosts: ["github.com"], deps: { ...deps(), fetch: async () => ({ status: 200, body: "abcdefgh" }), resolver: async () => ["93.184.216.34"] } }));
   assert.match(clipped.result.content, /\[truncated\]/);
 }));
 
@@ -796,7 +796,7 @@ test("MCP transport releases non-success bodies without reading them (#1233)", a
 test("web_fetch treats non-2xx final responses as errors, never evidence", async () => {
   const context = (status: number, body: string) => ctx("/tmp", {
     allowedHosts: ["github.com"],
-    deps: { ...deps(), fetch: async () => ({ status, body }) },
+    deps: { ...deps(), fetch: async () => ({ status, body }), resolver: async () => ["93.184.216.34"] },
   });
   const notFound = await webFetch("https://github.com/missing", context(404, '{"message":"Not Found"}'));
   assert.equal(notFound.error, "HTTP Error 404: Not Found");
@@ -819,6 +819,7 @@ test("web_fetch preserves success across an allowed redirect and fail-closes on 
     allowedHosts: ["github.com", "api.github.com"],
     deps: {
       ...deps(),
+      resolver: async () => ["93.184.216.34"],
       fetch: async (url: string) => {
         called++;
         if (called === 1) return { status: 302, headers: { location: "https://api.github.com/real" }, body: "" };
@@ -830,9 +831,89 @@ test("web_fetch preserves success across an allowed redirect and fail-closes on 
   assert.deepEqual(await webFetch("https://github.com/start", allowed), { content: "final body" });
   const disallowed = ctx("/tmp", {
     allowedHosts: ["github.com"],
-    deps: { ...deps(), fetch: async () => ({ status: 302, headers: { location: "https://evil.example/" }, body: "" }) },
+    deps: { ...deps(), fetch: async () => ({ status: 302, headers: { location: "https://evil.example/" }, body: "" }), resolver: async () => ["93.184.216.34"] },
   });
   assert.match((await webFetch("https://github.com/pivot", disallowed)).error!, /Redirect to disallowed host: evil\.example/);
+});
+
+test("web_fetch refuses a link-local literal host before any transport call", async () => {
+  let called = 0;
+  const res = await webFetch("http://169.254.169.254/latest/meta-data/", ctx("/tmp", {
+    allowedHosts: ["169.254.169.254"],
+    deps: { ...deps(), fetch: async () => { called++; return { status: 200, body: "secret" }; } },
+  }));
+  assert.match(String(res.error), /non-public/);
+  assert.equal(called, 0);
+});
+
+test("web_fetch refuses a private DNS answer for an allowlisted host before any transport call", async () => {
+  let called = 0;
+  const res = await webFetch("https://github.com/", ctx("/tmp", {
+    allowedHosts: ["github.com"],
+    deps: { ...deps(), fetch: async () => { called++; return { status: 200, body: "x" }; }, resolver: async () => ["10.0.0.5"] },
+  }));
+  assert.match(String(res.error), /Host resolves to non-public addresses: github\.com/);
+  assert.equal(called, 0);
+});
+
+test("web_fetch fails closed on a mixed public+private DNS answer", async () => {
+  let called = 0;
+  const res = await webFetch("https://github.com/", ctx("/tmp", {
+    allowedHosts: ["github.com"],
+    deps: { ...deps(), fetch: async () => { called++; return { status: 200, body: "x" }; }, resolver: async () => ["93.184.216.34", "10.0.0.9"] },
+  }));
+  assert.match(String(res.error), /Host resolves to non-public addresses: github\.com/);
+  assert.equal(called, 0);
+});
+
+test("web_fetch fails closed when the resolver throws", async () => {
+  let called = 0;
+  const res = await webFetch("https://github.com/", ctx("/tmp", {
+    allowedHosts: ["github.com"],
+    deps: { ...deps(), fetch: async () => { called++; return { status: 200, body: "x" }; }, resolver: async () => { throw new Error("resolver down"); } },
+  }));
+  assert.match(String(res.error), /Host resolves to non-public addresses: github\.com/);
+  assert.equal(called, 0);
+});
+
+test("web_fetch refuses a redirect to a non-public host after one gated public hop", async () => {
+  let called = 0;
+  const seen: string[] = [];
+  const res = await webFetch("https://github.com/start", ctx("/tmp", {
+    allowedHosts: ["github.com", "169.254.169.254"],
+    deps: {
+      ...deps(),
+      resolver: async () => ["93.184.216.34"],
+      fetch: async (url: string) => {
+        called++;
+        seen.push(url);
+        if (called === 1) return { status: 302, headers: { location: "http://169.254.169.254/x" }, body: "" };
+        return { status: 200, body: "should not be reached" };
+      },
+    },
+  }));
+  assert.match(String(res.error), /Redirect to non-public host: 169\.254\.169\.254/);
+  assert.equal(called, 1);
+  assert.deepEqual(seen, ["https://github.com/start"]);
+});
+
+test("web_fetch still succeeds end-to-end when every hop resolves public", async () => {
+  let called = 0;
+  const res = await webFetch("https://github.com/start", ctx("/tmp", {
+    allowedHosts: ["github.com", "api.github.com"],
+    deps: {
+      ...deps(),
+      resolver: async () => ["93.184.216.34"],
+      fetch: async (url: string) => {
+        called++;
+        if (called === 1) return { status: 302, headers: { location: "https://api.github.com/real" }, body: "" };
+        assert.equal(url, "https://api.github.com/real");
+        return { status: 200, body: "final body" };
+      },
+    },
+  }));
+  assert.deepEqual(res, { content: "final body" });
+  assert.equal(called, 2);
 });
 
 test("web_search treats non-2xx as errors even when the body is a valid JSON error object", async () => {
@@ -1169,7 +1250,7 @@ test("#726: a caller cancellation reaches the tool subprocess and fetch seams", 
   const webCtx = ctx(root, {
     allowedHosts: ["example.com"],
     signal: controller.signal,
-    deps: { env: {}, fetch: (async (_url: string, init: any) => { fetchSignal = init.signal; return { status: 200, body: "ok" }; }) as any },
+    deps: { env: {}, fetch: (async (_url: string, init: any) => { fetchSignal = init.signal; return { status: 200, body: "ok" }; }) as any, resolver: async () => ["93.184.216.34"] },
   });
   const web = await webFetch("http://example.com/x", webCtx);
   assert.equal(web.content, "ok");
@@ -1191,8 +1272,11 @@ test("#726: a caller cancellation reaches the tool subprocess and fetch seams", 
     throw new Error("unreachable");
   };
   try {
-    const depsOnly = ctx(root, { allowedHosts: ["example.com"], signal: caller.signal, deps: { env: {} } as any });
-    const pending = webFetch("http://example.com/x", depsOnly);
+    // web_fetch's default transport is now the pinned safe fetch (no
+    // globalThis.fetch seam); the default fetch seam left is web_search's
+    // defaultFetch, so the abort-composition check runs through it.
+    const depsOnly = ctx(root, { searchUrl: "http://example.com/x", signal: caller.signal, deps: { env: {} } as any });
+    const pending = webSearch("q", depsOnly);
     caller.abort(new Error(marker));
     const outcome = await Promise.race([pending, new Promise<{ error: string }>((resolve) => setTimeout(() => resolve({ error: "__guard__" }), 2000))]);
     assert.match(String(outcome.error), new RegExp(marker), "the default fetch carries the caller's cancellation, not just its own timeout");
