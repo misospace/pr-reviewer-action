@@ -37,6 +37,7 @@ import {
   externalChecksConclusion,
 } from "../src/precheck/decide.js";
 import { FixtureAdapter, fixtureLinearCollector, type PrecheckFixture } from "../src/precheck/fixture.js";
+import { ForgejoAdapter } from "../src/platform/forgejo.js";
 import type { ManagedComment, ManagedReview } from "../src/platform/types.js";
 import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 import { loadConfig } from "../src/config/load-config.js";
@@ -947,6 +948,38 @@ test("#1301: even a forced re-review skips an unproven-open PR state", async () 
   const output = await runPrecheck({
     env: { ...fx.env, FORCE_REVIEW: "true" },
     adapter: new FixtureAdapter("github", platform),
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "pr-state-unknown");
+});
+
+test("#1301/#1307: a partial Forgejo PR read is refused by the shared admission gate", async () => {
+  const fx = fixture("changed-diff-reviews");
+  // The REAL Forgejo seam, not a hand-made object: a payload without
+  // `state`/`draft` must not be projected as an open, not-draft PR, so the
+  // shared gate can fail closed instead of letting a malformed read reach
+  // the model.
+  const forgejo = new ForgejoAdapter({
+    repo: "misospace/demo",
+    prNumber: "42",
+    baseUrl: "https://git.example.com",
+    token: "tok",
+    fetchImpl: async () => new Response(
+      JSON.stringify({
+        number: 42,
+        title: "T",
+        body: "B",
+        head: { sha: "head-abc", ref: "feature", repo: { full_name: "misospace/demo" } },
+        base: { sha: "base-abc", ref: "main", repo: { full_name: "misospace/demo" } },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ),
+  });
+  const pr = await forgejo.getPr();
+  assert.ok(pr, "the forge read succeeded");
+  const output = await runPrecheck({
+    env: { ...fx.env, PLATFORM: "forgejo", FORGEJO_API_URL: "https://git.example.com" },
+    adapter: new FixtureAdapter("forgejo", { ...fx.platform, pr }),
   });
   assert.equal(output.should_review, "false");
   assert.equal(output.skip_reason, "pr-state-unknown");
