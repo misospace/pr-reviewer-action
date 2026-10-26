@@ -81,7 +81,6 @@ interface AdapterCalls {
   fetchThreadComments: number;
   postComment: [string, number, string][];
 }
-
 /** Recording forge-adapter fake. The actor is AUTHORIZED (an `admin`
  * reading for any login). The seams the QUESTION path must never touch
  * (head resolution, PR identity — the re-review path) THROW, so a routing
@@ -127,10 +126,14 @@ function makeAdapter(commentBody: string): {
   return { adapter, calls };
 }
 
-/** The operator follow-up host configuration the daemon binds; overrides win. */
+/** The operator follow-up host configuration the daemon binds; overrides win.
+ * `answerCalls` counts the model seam invocations so a test can pin ONE plan
+ * (and therefore one model call) per event directly, not only through the
+ * posted-reply count. */
 function makeFollowUpOptions(
   adapter: FollowUpForgeAdapter,
   overrides: Partial<FollowUpConsumerOptions> = {},
+  answerCalls: { n: number } = { n: 0 },
 ): FollowUpConsumerOptions {
   return {
     adapter,
@@ -139,7 +142,10 @@ function makeFollowUpOptions(
     rateLimitStore: new InMemoryRateLimitStore(),
     rereviewCommand: "/ai-review",
     mentionHandles: [BOT],
-    answer: async () => ANSWER,
+    answer: async () => {
+      answerCalls.n += 1;
+      return ANSWER;
+    },
     ledger: new MemoryGenerationLedger(),
     ...overrides,
   };
@@ -191,9 +197,10 @@ async function post(
 
 test("a signed follow_up delivery is consumed end to end by the host — no router option exists to supply", async (t) => {
   const { adapter, calls } = makeAdapter(QUESTION);
+  const answerCalls = { n: 0 };
   const host = createOperatorHost({
     secret: SECRET,
-    followUp: makeFollowUpOptions(adapter),
+    followUp: makeFollowUpOptions(adapter, {}, answerCalls),
   });
   const h = await startTestHandler(host.handler);
   t.after(() => h.close());
@@ -207,6 +214,7 @@ test("a signed follow_up delivery is consumed end to end by the host — no rout
 
   assert.equal(res.status, 202, "an authorized follow-up delivery is accepted");
   assert.deepEqual(JSON.parse(res.text), { status: "accepted", kind: "follow_up" });
+  assert.equal(answerCalls.n, 1, "exactly one plan, so exactly one model call");
   assert.deepEqual(
     calls.readComment,
     [["org/repo", "55"]],

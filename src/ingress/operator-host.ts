@@ -11,8 +11,10 @@
  * router — and with it the follow-up consumer, UNCONDITIONALLY, which is the
  * production binding the router module's header describes — and BINDS it into
  * the webhook handler, so an operator daemon gets a fully-wired ingress it
- * cannot mis-bind: the only operator-mode ingress construction in this repo
- * already carries the follow-up consumer.
+ * cannot mis-bind: the production binding lives HERE — the low-level handler
+ * seam keeps the router injectable for hosts that deliberately want the
+ * pre-follow-up behavior, but a host built through this module never leaves
+ * the consumer out.
  *
  * Single-router invariant: every canonical event the handler accepts is routed
  * by that ONE router — a `follow_up` delivery through the handler's `router`
