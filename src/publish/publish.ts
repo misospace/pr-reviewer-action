@@ -1748,7 +1748,31 @@ export async function publishReview(
             // #1027: the inline comments were never published, so their
             // `reported` events must not reach the outcome ledger.
             outcomes = undefined;
-            messages.push("WARN: inline findings review submission failed; summary comment was still published");
+            // #1282: the rejected batch carried findings no other channel
+            // publishes — under a non-strict verdict policy the sticky body
+            // was built without the findings table, so without compensation
+            // the rejection would drop every finding. Re-publish the sticky
+            // comment with the same bounded summary the #1249 body-only
+            // fallback appends (the strict policy renders the findings table
+            // into the body itself, so there is nothing to duplicate there).
+            const compensated = !strict;
+            let recovered = false;
+            if (compensated) {
+              const recoveryBody = body + renderFindingsSummary(input.findings, input.upstreamLinkMode);
+              const recovery = await api.upsertStickyComment(input.commentMarker, recoveryBody);
+              if (recovery.ok) {
+                recovered = true;
+                stickyCommentId = recovery.commentId;
+                stickyUpdatedAt = recovery.updatedAt;
+                stickyBody = recoveryBody;
+              } else {
+                messages.push(`WARN: findings-summary recovery on the sticky comment failed: ${recovery.error ?? "unknown error"}`);
+              }
+            }
+            messages.push(
+              "WARN: inline findings review submission failed; summary comment was still published"
+                + (recovered ? " with the findings summary appended to the review body" : ""),
+            );
           }
         }
       } else {
