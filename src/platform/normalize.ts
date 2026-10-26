@@ -147,15 +147,18 @@ export function forgejoCommentToStandard(raw: unknown): Record<string, unknown> 
  * latest-N truncation is by PARSED creation instant (string order as the
  * deterministic tiebreak) so the cap keeps the chronologically latest
  * comments in the same space the follow-up budget's snapshot-coverage
- * proof reasons in; on conforming RFC3339 stamps (what both forges emit)
- * the order is identical to the v2 string sort. Unparseable stamps keep
- * the v2 newest-first position, so they are the first the cap drops. */
+  * proof reasons in; on conforming RFC3339 stamps (what both forges emit)
+  * the order is identical to the v2 string sort. Unparseable stamps sort as
+  * the OLDEST, so a latest-N cap drops them FIRST — a malformed stamp must
+  * never occupy a newest-first slot and evict a valid recent comment (the
+  * follow-up Q&A budget's snapshot-coverage proof reasons over exactly those
+  * retained entries). */
 export function normalizeForgejoConversationComments(rawComments: readonly unknown[]): unknown[] {
   const standard = rawComments.map(forgejoCommentToStandard);
   const instant = (item: Record<string, unknown>): number => {
     const raw = jqAlt(item.created_at, "");
     const parsed = typeof raw === "string" && raw.trim() !== "" ? Date.parse(raw) : Number.NaN;
-    return Number.isNaN(parsed) ? Number.MAX_SAFE_INTEGER : parsed;
+    return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
   };
   return jqSortBy(standard, (item) => [instant(item), jqAlt(item.created_at, ""), jqAlt(item.id, 0)])
     .reverse().slice(0, CONVERSATION_COMMENTS_SNAPSHOT_CAP);
