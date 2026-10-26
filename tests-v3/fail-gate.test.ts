@@ -119,16 +119,23 @@ test("#1140: the confidence scorer's internal-crash diagnostic masks BEFORE capp
     assert.equal(write.includes("maskKnownSecretsDeep("), false, `${artifact} must not fall back to configured-value masking alone`);
   }
 
-  // #1140 review round 9: masking has to stay TERMINAL on the confidence reason.
-  // The deterministic-cap note is rebuilt AFTER the masking pass so a long masked
-  // reason cannot lose it, which means the call site — not `boundConfidenceReason`
-  // — owns masking that note: a configured credential may be any length, including
-  // one character occurring inside the note template (`blocker_cap_2`). The
-  // parameter is a plain string, so the contract is otherwise prose plus the
-  // run-level behavior test; pin the composition here as well.
-  const rebindAt = source.indexOf("reason: boundConfidenceReason(");
-  assert.ok(rebindAt !== -1, "review.ts must re-bind the masked confidence reason");
-  const rebind = source.slice(rebindAt, rebindAt + 400);
-  assert.ok(rebind.includes("maskConfidenceText(confidenceOutcome.result.reason)"), "the reason must reach the re-bound already masked");
+  // #1140 review round 9 + #1268: masking has to stay TERMINAL on the
+  // confidence reason. The model share and the deterministic-cap note are
+  // split BEFORE masking (`confidenceReasonWithoutCapNote`), so `redactText`
+  // can never complete a look-alike the model only half-wrote into a
+  // published note-shaped span; the note is masked on its own and
+  // re-appended from `caps` by `boundConfidenceReason` — a configured
+  // credential may be any length, including one character occurring inside
+  // the note template (`blocker_cap_2`). The parameters are plain strings, so
+  // the contract is otherwise prose plus the run-level behavior test; pin the
+  // composition here as well.
+  const splitAt = source.indexOf("confidenceModelReason = confidenceReasonWithoutCapNote(");
+  assert.ok(splitAt !== -1, "#1268: the cap note must be split off the model share before masking");
+  const rebindAt = source.indexOf("reason: maskComposedConfidenceReason(");
+  assert.ok(rebindAt !== -1 && rebindAt > splitAt, "review.ts must re-bind the masked confidence reason");
+  const rebind = source.slice(rebindAt, rebindAt + 500);
+  assert.ok(rebind.includes("boundConfidenceReason("), "the re-bind must stay the composition point");
+  assert.ok(rebind.includes("maskConfidenceText(confidenceModelReason)"), "the note-free model share must reach the re-bind already masked");
   assert.ok(rebind.includes("maskConfidenceText(confidenceCapNote("), "the rebuilt cap note must be masked before it is re-appended");
+  assert.ok(rebind.includes("confidenceSecrets"), "the composed reason must get the exact-value boundary pass over the lane secrets");
 });

@@ -748,6 +748,165 @@ test("#1238 a gate claim citing another action's path is not decided", async () 
   ]);
 });
 
+test("#1242 semicolon-joined gate-absence clauses are one claim unit", async () => {
+  // "The action never filters by label; its metadata declares no label
+  // input." split at the `;`, so no half carried all four cue families and
+  // the claim was left untouched — the #1238 symptom in this phrasing. It
+  // now classifies as gate_absence and is decided by the same rules as the
+  // comma-joined equivalent, with the absence assertion still clause-scoped.
+  const split = markerFinding({ message: "The action never filters by label; its metadata declares no label input." });
+  const joined = markerFinding({ message: "The action never filters by label, metadata declares no label input." });
+  const result = await verify(
+    [split, joined],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["gate_absence", "refuted", "gate-implemented:label-filter"],
+    ["gate_absence", "refuted", "gate-implemented:label-filter"],
+  ]);
+  assert.equal(split.grounding_status, "refuted");
+  assert.equal(split.severity, "minor");
+});
+
+test("#1242 gate-absence claim citing a bare path is classified and decided like its un-split equivalent", async () => {
+  // The `.` inside the cited path `src/precheck/decide.ts` split the claim
+  // so no half carried all four cue families: the claim was never
+  // recognized as a source claim at all. The path-internal dot is now
+  // path structure, not a split, so it reaches the cue families whole and
+  // the (unchanged) other-action mention guard decides it exactly like the
+  // same citation written where it did not split the unit.
+  const split = markerFinding({ message: "The action never skips drafts (see src/precheck/decide.ts), metadata declares no label input." });
+  const trailing = markerFinding({ message: "The action never skips drafts, metadata declares no label input (see src/precheck/decide.ts)." });
+  const result = await verify(
+    [split, trailing],
+    async () => { throw new Error("gate absence must not read the reviewed repository"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["gate_absence", "unverified", "gate-absence-unverifiable"],
+    ["gate_absence", "unverified", "gate-absence-unverifiable"],
+  ]);
+  assert.equal(split.grounding_status, "unverified");
+  assert.equal(split.severity, "minor");
+});
+
+test("#1242 terminal and ellipsis dots after a cited path still split claim units", async () => {
+  // Adversarial-boundary control (#252): the path-run expansion must not
+  // eat a real sentence boundary when the space after the terminal period
+  // is missing. A sentence onset after "…b.ts." or "…b.ts..." is not a path
+  // segment, so no half carries all four cue families and the claim stays
+  // untouched — the swallowed-dot shape that would forge cue co-occurrence.
+  const noSpace = markerFinding({ message: "The action never filters by label docs/a/b.ts.The metadata declares no draft input." });
+  const ellipsis = markerFinding({ message: "The action never filters by label docs/a/b.ts...The metadata declares no draft input." });
+  const result = await verify(
+    [noSpace, ellipsis],
+    async () => { throw new Error("unclassified claims must not be read"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.deepEqual(result.findings, []);
+  assert.equal(noSpace.grounding_status, undefined);
+  assert.equal(ellipsis.grounding_status, undefined);
+});
+
+test("#1242 a lowercase sentence onset after a terminal path dot keeps the split", async () => {
+  // Capitalization was never the discriminator (#1242 review round): the
+  // same missing-space shape with a lowercase onset word must split like
+  // its uppercase twin, or the path run would join two real sentences into
+  // one unit and forge cue co-occurrence across the boundary. The
+  // extension rule rejects the onset word, and the twin (a real space)
+  // pins both variants to the identical untouched outcome.
+  const noSpace = markerFinding({ message: "The action never filters by label docs/a/b.ts.and the metadata declares no draft input." });
+  const withSpace = markerFinding({ message: "The action never filters by label docs/a/b.ts. and the metadata declares no draft input." });
+  const result = await verify(
+    [noSpace, withSpace],
+    async () => { throw new Error("unclassified claims must not be read"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.deepEqual(result.findings, []);
+  assert.equal(noSpace.grounding_status, undefined);
+  assert.equal(withSpace.grounding_status, undefined);
+});
+
+test("#1242 a lowercase onset after an ellipsis keeps the split", async () => {
+  // The ellipsis dots break the run before any segment is read, no matter
+  // the onset's case; the trailing sentence ("more input.") carries input
+  // vocabulary but no action subject in its own unit, so its cues must not
+  // classify the earlier gate-absence text across the boundary.
+  const ellipsis = markerFinding({ message: "The action never filters by label docs/a/b.ts...more input." });
+  const result = await verify(
+    [ellipsis],
+    async () => { throw new Error("unclassified claims must not be read"); },
+    new Set(),
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.deepEqual(result.findings, []);
+  assert.equal(ellipsis.grounding_status, undefined);
+});
+
+test("#1242 a fabricated input claim gains no cues across a swallowed boundary", async () => {
+  // #1242 review round: had the extension rule let a lowercase onset swell
+  // the run, the later sentence's action/absence cues would have pulled
+  // `ai-api-key` into an input_declaration candidate across the boundary
+  // and REFUTED it against the registry. `docs/a/b.ts` cannot pin this:
+  // a `docs` word in the window trips the attribute-scope guard under any
+  // rule, so the citation is a bare-segmented path the scope guard reads.
+  const noSpace = markerFinding({ message: "`ai-api-key` is unexpected src/a/b.ts.and the action declares no such input." });
+  const withSpace = markerFinding({ message: "`ai-api-key` is unexpected src/a/b.ts. and the action declares no such input." });
+  const result = await verify(
+    [noSpace, withSpace],
+    async () => { throw new Error("input claims must not read source"); },
+    new Set(["ai-api-key"]),
+  );
+  assert.deepEqual(result.findings, []);
+  assert.equal(noSpace.grounding_status, undefined);
+  assert.equal(withSpace.grounding_status, undefined);
+});
+
+test("#1242 a swallowed sentence-adjacent word onset cannot flip presence to refutation", async () => {
+  // #1242 review round: the first extension allowlist admitted word-shaped
+  // entries ("test"), so "…src/a/b.ts.test case: metadata declares…"
+  // swallowed the real sentence dot, and the merged clause window's
+  // "declares no" cue flipped the token's PRESENCE assertion to an absence
+  // and FALSELY refuted a true claim. The dropped word-shaped entries keep
+  // the split, so the decision equals the space-separated twin: the token
+  // is grounded by the registry, and the trailing gate-shaped prose stays
+  // an untouched unit.
+  const registry = new Set(["ai-token"]);
+  const swallowAdjacent = markerFinding({ message: "The action declares `ai-token` input src/a/b.ts.test case: metadata declares no label input." });
+  const withSpace = markerFinding({ message: "The action declares `ai-token` input src/a/b.ts. test case: metadata declares no label input." });
+  const result = await verify(
+    [swallowAdjacent, withSpace],
+    async () => { throw new Error("grounded input claims must not read source"); },
+    registry,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "grounded", "input-declared:ai-token"],
+    ["input_declaration", "grounded", "input-declared:ai-token"],
+  ]);
+});
+
+test("#1242 semicolon-joined input-declaration clauses share the unit but keep clause-scoped direction", async () => {
+  // The token and its action subject sat in different `;`-joined clauses,
+  // so the candidate was never recognized. The unit now spans the
+  // semicolon, and the token's direction still resolves within its own
+  // clause, decided positively by the declared-input registry.
+  const registry = new Set(["ai-api-key"]);
+  const finding = markerFinding({ message: "`ai-api-key` is unexpected; the action declares no such input." });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    registry,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "refuted", "input-declared:ai-api-key"],
+  ]);
+});
+
 test("#1238 a quoted cue word cannot forge an absence assertion", async () => {
   // The cue scan reads the MASKED view: a cited span is a citation, not
   // the claim's own wording, so a quoted "never" cannot turn a claim that
@@ -1249,12 +1408,17 @@ test("#1240 qualifier shapes over-fire only for real revision identifiers", asyn
   // Precision: a partial version of the SAME line ("v3.7"), a bare integer
   // after a keyword ("version 2", "ref: 1234") and an all-letter hex word
   // ("defaced") name no other revision, so a claim that would otherwise be
-  // refuted stays decided.
+  // refuted stays decided. #1263: neither does a bare numeric triple with
+  // no introducer ("Node 20.11.1") nor a short hex run ("colour a1b2c3d") —
+  // shape alone cannot tell them apart from an incidental version-like
+  // token, so they must not leave the claim other-revision-unverified.
   const claims = [
     "The action does not declare `ai-api-key` input (v3.7).",
     "The action does not declare `ai-api-key` input (version 2).",
     "The action does not declare `ai-api-key` input (ref: 1234).",
     "The action does not declare `ai-api-key` input (the manifest defaced the claim).",
+    "The action does not declare `ai-api-key` input; it also requires Node 20.11.1.",
+    "The action does not declare `ai-api-key` input (colour a1b2c3d).",
   ];
   const findings = claims.map((message) => markerFinding({ message }));
   const result = await verify(
@@ -1264,12 +1428,169 @@ test("#1240 qualifier shapes over-fire only for real revision identifiers", asyn
     null,
     "v3.7.0",
   );
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), claims.map(
+    () => ["refuted", "input-declared:ai-api-key"] as const,
+  ));
+});
+
+test("#1263 an introduced bare triple or short hex run still fails closed", async () => {
+  // The trade-off the narrowing must preserve: a claim that GENUINELY
+  // names another revision stays unverified — never refuted with the
+  // executing revision's bytes. An introducer ("at", "pinned at",
+  // "version") is what marks a bare numeric triple or short hex run as a
+  // cited revision, and a full-length sha needs no introducer at all.
+  // #252: the chained introducer ("pinned at", "at commit") and the
+  // introducer word itself are fed directly — a non-overlapping scan that
+  // let the first introducer swallow the second would fail OPEN on exactly
+  // the citation this rule exists to protect.
+  const claims = [
+    "The action does not declare `ai-api-key` input (action.yml at 20.11.1).",
+    "The action does not declare `ai-api-key` input (action.yml at a1b2c3d).",
+    "The action does not declare `ai-api-key` input; the version 20.11.1 manifest confirms it.",
+    "The action does not declare `ai-api-key` input; the version:: 20.11.1 manifest confirms it.",
+    "The action does not declare `ai-api-key` input; pinned at abc1234 the manifest confirms it.",
+    "The action does not declare `ai-api-key` input; at commit abc1234 the manifest confirms it.",
+    "The action does not declare `ai-api-key` input; pinned at 20.11.1 the manifest confirms it.",
+    `The action does not declare \`ai-api-key\` input (${THIRD_SHA}).`,
+  ];
+  const findings = claims.map((message) => markerFinding({ message }));
+  const result = await verify(
+    findings,
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+  );
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), claims.map(
+    () => ["unverified", "other-revision-unverified"] as const,
+  ));
+  assert.ok(findings.every((finding) => finding.grounding_status === "unverified"));
+});
+
+test("#1263 a standalone suffixed stamp names another revision and fails closed", async () => {
+  // #1263: the standalone scan trusts the two shapes an incidental token
+  // cannot take — the deliberate `v` marker and a pre-release/build suffix.
+  // A stamp carrying that suffix ("3.7.0-dev+abc1234") names a revision on
+  // its own, so a claim citing it stays unverified instead of being refuted
+  // with the executing revision's bytes. #252: the fence's OWN boundary
+  // token is fed to it, not just benign input.
+  const claims = [
+    "The action does not declare `ai-api-key` input (3.7.0-dev+abc1234).",
+    "The action does not declare `ai-api-key` input (v3.7.0-rc.1).",
+  ];
+  const findings = claims.map((message) => markerFinding({ message }));
+  const result = await verify(
+    findings,
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.8.0",
+  );
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), claims.map(
+    () => ["unverified", "other-revision-unverified"] as const,
+  ));
+  assert.ok(findings.every((finding) => finding.grounding_status === "unverified"));
+});
+
+test("#1263 a citation with a connector or punctuation still names another revision", async () => {
+  // #1263: the introducer hop binds the identifier through a bounded
+  // CONNECTOR layer and ONE separator class, so a genuine citation that
+  // puts a connector word or a piece of punctuation between the introducer
+  // and the identifier is never missed: "pinned to abc1234", "version of
+  // 3.6.1", "released as 3.6.1", "action.yml at, 3.6.1". Missing one
+  // fails OPEN — the claim names another revision and is then decided with
+  // the EXECUTING revision's bytes. #252: the fence's own boundary tokens
+  // (the connector words, the separator punctuation, the verb forms) are
+  // fed to it directly, not just the plain "at <token>" shape.
+  const citations = [
+    "pinned to abc1234",
+    "pinned to 3.6.1",
+    "version of 3.6.1",
+    "released as 3.6.1",
+    "tagged as abc1234",
+    "committed as abc1234",
+    "at commit sha abc1234",
+    "at the abc1234",
+    "action.yml at, 3.6.1",
+    "action.yml at; 3.6.1",
+  ];
+  const claims = citations.map((citation) =>
+    `The action does not declare \`ai-api-key\` input; ${citation} the manifest confirms it.`);
+  const findings = claims.map((message) => markerFinding({ message }));
+  const result = await verify(
+    findings,
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+  );
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), claims.map(
+    () => ["unverified", "other-revision-unverified"] as const,
+  ));
+  assert.ok(findings.every((finding) => finding.grounding_status === "unverified"));
+});
+
+test("#1263 the connector layer does not re-open the bare-token precision hole", async () => {
+  // #1263: the connector layer is CLOSED — it never skips an ordinary word
+  // to find a version-shaped token. "the version of Node 20.11.1" binds
+  // "Node", "release notes mention Node 20.11.1" binds "notes", and "at
+  // the time of the 20.11.1 release" binds "time": none of them names a
+  // revision, so the claim stays decided with the executing registry
+  // instead of being left other-revision-unverified. #252: the boundary
+  // tokens the layer must NOT cross (an ordinary word between the
+  // introducer and the number) are fed to it directly.
+  const claims = [
+    "The action does not declare `ai-api-key` input (the version of Node 20.11.1).",
+    "The action does not declare `ai-api-key` input (release notes mention Node 20.11.1).",
+    "The action does not declare `ai-api-key` input (at the time of the 20.11.1 release).",
+  ];
+  const findings = claims.map((message) => markerFinding({ message }));
+  const result = await verify(
+    findings,
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+  );
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), claims.map(
+    () => ["refuted", "input-declared:ai-api-key"] as const,
+  ));
+  assert.ok(findings.every((finding) => finding.grounding_status === "refuted"));
+});
+
+test("#1263 the introducer scan stays bounded on a long separator run and a long introducer chain", async () => {
+  // #1263: the separator between an introducer and its identifier is ONE
+  // character class, so a long whitespace run cannot be split in many ways
+  // (the scan was quadratic there), and a long chain of introducer words
+  // cannot blow up either. The claim still names another revision, so it
+  // must stay unverified — never refuted with the executing revision's
+  // bytes — and the scan must complete. #252: the hostile shape itself (a
+  // multi-kilobyte separator run, a multi-kilobyte introducer chain) is
+  // fed to the scan. No wall-clock assertion: timing is flaky; the shape
+  // and the outcome are what is pinned.
+  const separatorHead = "The action does not declare `ai-api-key` input; action.yml at";
+  const separatorTail = "3.6.1 confirms it.";
+  const separatorRun = `${separatorHead}${" ".repeat(16_000 - separatorHead.length - separatorTail.length)}${separatorTail}`;
+  const chainHead = "The action does not declare `ai-api-key` input;";
+  const chainTail = " 3.6.1 confirms it.";
+  const introducerChain = `${chainHead}${" at".repeat(Math.floor((16_000 - chainHead.length - chainTail.length) / 3))}${chainTail}`;
+  // Both messages stay inside the message-level scan bound, so the scan
+  // really runs on them.
+  assert.ok(separatorRun.length <= MAX_CLAIM_SCAN_LENGTH);
+  assert.ok(introducerChain.length <= MAX_CLAIM_SCAN_LENGTH);
+  const findings = [separatorRun, introducerChain].map((message) => markerFinding({ message }));
+  const result = await verify(
+    findings,
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+  );
   assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
-    ["refuted", "input-declared:ai-api-key"],
-    ["refuted", "input-declared:ai-api-key"],
-    ["refuted", "input-declared:ai-api-key"],
-    ["refuted", "input-declared:ai-api-key"],
+    ["unverified", "other-revision-unverified"],
+    ["unverified", "other-revision-unverified"],
   ]);
+  assert.ok(findings.every((finding) => finding.grounding_status === "unverified"));
 });
 
 test("#1240 another line or another patch is unverified", async () => {
@@ -1373,6 +1694,55 @@ test("#1240 a claim naming the pinned sha is decided by the pinned witness, not 
   ]);
   assert.equal(withoutWitness.grounding_status, "unverified");
   assert.equal(withoutWitness.capped_from, "blocker");
+});
+
+test("#1263 a claim naming the pinned sha's SHORT form is decided by the pinned witness", async () => {
+  // #1263: the pin is an EXACT COMMIT, and the consumer's short quote is a
+  // prefix of it. The narrowing of the standalone scan must not silently
+  // kill that route: a claim citing the pin's short form is a claim about
+  // the PINNED revision, so it is decided with the PINNED contract — never
+  // with the executing revision's registry, which would decide it with the
+  // wrong bytes. #252: the fence's own boundary token — the short form
+  // itself, with NO introducer word around it — is fed to it.
+  const shortSha = PINNED_SHA.slice(0, 7);
+  const message = `The action does not declare the \`ai-api-key\` input (${shortSha}).`;
+  // (a) the pin really does declare the input: the PINNED contract
+  // refutes the claim, with the `pinned-` reason that records which
+  // revision's manifest decided it.
+  const declaring = pinnedWitness(new Set(["github-token", "ai-api-key", "rereview-label"]));
+  const refuted = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message });
+  const a = await verify(
+    [refuted],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+    null,
+    declaring.witness,
+  );
+  assert.deepEqual(a.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "refuted", "pinned-input-declared:ai-api-key"],
+  ]);
+  assert.equal(refuted.grounding_status, "refuted");
+  // (b) the pin does NOT declare the input: the PINNED contract confirms
+  // the claim (grounded, `pinned-` reason). The executing registry DOES
+  // declare it, so the executing path would have refuted the claim —
+  // this outcome proves the PINNED bytes decided it.
+  const lacking = pinnedWitness(new Set(["github-token"]));
+  const grounded = markerFinding({ file: ".github/workflows/ai_pr_review.yaml", message });
+  const b = await verify(
+    [grounded],
+    async () => { throw new Error("input claims must not read source"); },
+    INPUT_REGISTRY,
+    null,
+    "v3.7.0",
+    null,
+    lacking.witness,
+  );
+  assert.deepEqual(b.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "grounded", "pinned-input-absent:ai-api-key"],
+  ]);
+  assert.equal(b.demoted, 0);
 });
 
 test("#1240 a pinned-sha citation in a DIFFERENT sentence still routes the claim to the pinned witness", async () => {
@@ -2224,4 +2594,225 @@ test("#1240 a deterministic enforcement finding is never decided by the model-ev
   assert.equal(model.grounding_status, "refuted");
   assert.equal(model.severity, "minor");
   assert.equal(model.capped_from, "blocker");
+});
+
+// ---------------------------------------------------------------------------
+// #1262 — classification composes: a message that carries MORE THAN ONE
+// claim kind gets one decision per kind on the same leaf logic, and the
+// decisions combine fail-closed — grounded > unverified > refuted >
+// unsupported — with the reason and kind taken from the FIRST decision
+// (classification order) that carries the winning tier's status.
+// ---------------------------------------------------------------------------
+
+test("#1262 a mixed message is decided on the combined claims, not the first match", async () => {
+  // The issue's case: the input claim is source-contradicted (the registry
+  // declares `ai-api-key`) while the sibling gate-absence claim is one the
+  // boundary cannot decide (no implementation witness — and a dedupe gate
+  // is not covered anyway). The first-match classifier used to refute the
+  // finding whole on the input claim alone; composition decides both, and
+  // unknown evidence must never be erased by a sibling contradiction
+  // (#1016): the combined status is the gate decision's unverified, with
+  // the gate decision's reason.
+  const finding = markerFinding({
+    message: "The action does not declare `ai-api-key` input. The action has no dedupe gate because its metadata declares no input for it.",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("mixed claims must not read source"); },
+    INPUT_REGISTRY,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["gate_absence", "unverified", "gate-absence-unverifiable"],
+  ]);
+  assert.equal(result.demoted, 1);
+  assert.equal(finding.severity, "minor");
+  // Mirror of demotion: the original severity survives in capped_from, so
+  // the strict verdict mapping still counts the finding as blocking.
+  assert.equal(finding.capped_from, "blocker");
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1262 the mirror: a refuted gate claim does not erase an unverified workflow input claim", async () => {
+  // The gate claim IS refuted (the executing implementation attests both
+  // gates), but the sibling input claim is workflow-scoped and
+  // uncorroborated: the workflow witness is present, yet the cited file
+  // does not pass that name — and the witness NEVER refutes, so the claim
+  // falls through to the unknown-evidence path. Unknown evidence must not
+  // be erased by the contradiction: the combined status is unverified, NOT
+  // refuted, and the finding demotes as unknown evidence (#1016), keeping
+  // it blocking through capped_from.
+  const finding = markerFinding({
+    message: "the workflow passes `ai-key` as the action's credential input. The action never skips drafts, metadata declares no label input.",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("mixed claims must not read source"); },
+    INPUT_REGISTRY,
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+    null,
+    WORKFLOW_INPUTS,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "unverified", "input-presence-unverified"],
+  ]);
+  assert.equal(result.demoted, 1);
+  assert.equal(finding.severity, "minor");
+  assert.equal(finding.capped_from, "blocker");
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1262 refuted and refuted compose: the first contradicted kind decides the reason", async () => {
+  // Both claims are positively contradicted: the input claim by the
+  // declared-input registry (`ai-api-key` IS declared) and the gate claim
+  // by the implementation witness (both gates attested). A finding every
+  // decidable claim of which is contradicted is refuted and demoted (the
+  // unchanged rule) — with ONE combined entry — and the refuted tie-break
+  // follows the classification order: input_declaration precedes
+  // gate_absence, so the entry carries the input decision's reason.
+  const finding = markerFinding({
+    message: "The action does not declare `ai-api-key` input. The action never skips drafts, metadata declares no label input.",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("mixed claims must not read source"); },
+    INPUT_REGISTRY,
+    actionSource({ "src/precheck/decide.ts": 'skip_reason: "pr-draft"\nskip_reason: "unrelated-label"\n' }),
+  );
+  assert.equal(result.findings.length, 1);
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "refuted", "input-declared:ai-api-key"],
+  ]);
+  assert.equal(result.demoted, 1);
+  assert.equal(finding.severity, "minor");
+  assert.equal(finding.capped_from, "blocker");
+  assert.equal(finding.grounding_status, "refuted");
+});
+
+test("#1262 a grounded sibling keeps the finding alive over its unverified gate sibling", async () => {
+  // The input claim is a genuine defect the registry positively confirms
+  // (`model-input` really is undeclared — grounded), and the sibling
+  // gate-absence claim is undecided (no implementation witness). Verified
+  // truth keeps the finding (fail-safe): the combined status is grounded,
+  // the finding is untouched, and the entry carries the winning
+  // (grounded) decision's kind and reason.
+  const finding = markerFinding({
+    message: "The action does not declare `model-input` input. The action never skips drafts, metadata declares no label input.",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("mixed claims must not read source"); },
+    INPUT_REGISTRY,
+  );
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["input_declaration", "grounded", "input-absent:model-input"],
+  ]);
+  assert.equal(result.demoted, 0);
+  assert.equal(finding.severity, "blocker");
+  assert.equal(finding.grounding_status, undefined);
+  assert.equal(finding.capped_from, undefined);
+});
+
+test("#1262 the source-read kinds share one read of the cited file", async () => {
+  // A message carrying BOTH source-read kinds (`committed_literal` via the
+  // quoted marker marked as written, and the leading `requirement not
+  // enforced` assertion) consumes ONE read: the read is memoized per
+  // finding, so the composite costs no extra MAX_VERIFICATION_READS unit.
+  let reads = 0;
+  const counting = async (file: string): Promise<SourceReadResult> => {
+    reads += 1;
+    return source(file === "src/a.ts" ? "one\nconst tolerance = 2\n" : "unrelated");
+  };
+  const finding = markerFinding({
+    message: "requirement not enforced: `one` violates standard X. The file commits the literal `[REDACTED]` as written.",
+  });
+  const result = await verify([finding], counting);
+  assert.equal(reads, 1);
+  // The requirement claim is grounded at the cited line; the sibling
+  // marker claim is refuted; grounded truth keeps the finding (fail-safe)
+  // and the entry carries the first grounded decision in classification
+  // order.
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["requirement_claim", "grounded", "evidence-verified"],
+  ]);
+  assert.equal(result.demoted, 0);
+  assert.equal(finding.severity, "blocker");
+  assert.equal(finding.grounding_status, undefined);
+});
+
+test("#1262 the shared read outlives the budget's last unit for its sibling kind", async () => {
+  // 19 earlier findings exhaust MAX_VERIFICATION_READS-1; the mixed
+  // finding's first source-read kind consumes the pass's LAST unit and
+  // memoizes the read. The requirement sibling must decide on that
+  // memoized read — not spend itself on read-budget-exhausted: the shared
+  // read already answered the question, and a sibling contradiction must
+  // never demote a verified claim (#1016).
+  let reads = 0;
+  const counting = async (): Promise<SourceReadResult> => {
+    reads += 1;
+    return source("one\nconst tolerance = 2\n");
+  };
+  const prior = Array.from({ length: 19 }, () => markerFinding());
+  const mixed = markerFinding({
+    message: "requirement not enforced: `one` violates standard X. The file commits the literal `[REDACTED]` as written.",
+  });
+  const result = await verify([...prior, mixed], counting);
+  assert.equal(reads, MAX_VERIFICATION_READS);
+  assert.equal(result.findings[19]?.kind, "requirement_claim");
+  assert.equal(result.findings[19]?.status, "grounded");
+  assert.equal(result.findings[19]?.reason, "evidence-verified");
+  assert.equal(result.demoted, 19);
+  assert.equal(mixed.severity, "blocker");
+  assert.equal(mixed.grounding_status, undefined);
+  assert.equal(mixed.capped_from, undefined);
+});
+
+test("#1262 a non-authoritative shared read leaves both source kinds unknown evidence", async () => {
+  // A sanitized provenance is no evidence at all: BOTH source-read kinds
+  // of the mixed message share the one read and each returns
+  // non-authoritative-source, so the combined status is unverified —
+  // unknown evidence, not a refutation — and the finding demotes as
+  // unknown evidence (capped_from preserved for the strict mapping).
+  const finding = markerFinding({
+    message: "requirement not enforced: `one` violates standard X. The file commits the literal `[REDACTED]` as written.",
+  });
+  let reads = 0;
+  const result = await verify([finding], async () => {
+    reads += 1;
+    return { status: "ok", text: "one\nconst tolerance = 2\n", provenance: sanitizedSourceProvenance(1, "src/a.ts", revision) };
+  });
+  assert.equal(reads, 1);
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["committed_literal", "unverified", "non-authoritative-source"],
+  ]);
+  assert.equal(result.demoted, 1);
+  assert.equal(finding.severity, "minor");
+  assert.equal(finding.capped_from, "blocker");
+  assert.equal(finding.grounding_status, "unverified");
+});
+
+test("#1262 combined-unverified with DIFFERENT unknown reasons per source-read kind", async () => {
+  // The combined-unverified case where the two source-read kinds disagree
+  // on WHY they are unknown: the requirement claim cites a line beyond the
+  // end of the file (unverified/line-beyond-end) while the sibling marker
+  // claim is positively contradicted by the same authoritative read
+  // (refuted/marker-absent). The unknown evidence must win the combination
+  // (unverified > refuted) — the sibling contradiction may not erase it —
+  // and the winning entry carries the winning kind's status and reason.
+  const finding = markerFinding({
+    line: 99,
+    message: "requirement not enforced: `one` violates standard X. The file commits the literal `[REDACTED]` as written.",
+  });
+  let reads = 0;
+  const result = await verify([finding], async () => {
+    reads += 1;
+    return source("one\nconst tolerance = 2\n");
+  });
+  assert.equal(reads, 1);
+  assert.deepEqual(result.findings.map(({ kind, status, reason }) => [kind, status, reason]), [
+    ["requirement_claim", "unverified", "line-beyond-end"],
+  ]);
+  assert.equal(result.demoted, 1);
+  assert.equal(finding.severity, "minor");
+  assert.equal(finding.capped_from, "blocker");
+  assert.equal(finding.grounding_status, "unverified");
 });

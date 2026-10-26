@@ -226,6 +226,113 @@ export const MAX_CLAIM_SCAN_LENGTH = 16_384;
 const SENTENCE_DELIMITERS = new Set([".", "!", "?", ";", "\n"]);
 
 /**
+ * #1242: characters that can be part of a path-like citation token written
+ * in bare prose — a repo path (`src/precheck/decide.ts`), an owner/repo@ref
+ * reference, a dotted version. The `.` inside such a token is path
+ * structure, not sentence punctuation.
+ */
+const PATH_LIKE_TOKEN_CHAR_RE = /[A-Za-z0-9._~+@/-]/;
+/**
+ * File extensions (lowercase, exact match) a `.` can place INSIDE a path
+ * token: the run of ASCII lowercase letters after the dot must be one to
+ * five long, end at a non lower-alphanumeric character, and match one of
+ * these. ONLY word-shaped-hostile entries were dropped: every lowercase
+ * English word a sentence can be onset with ("and", "the", "go", "test",
+ * "spec", "less", "env", "lock", …) is absent, so a missing space after a
+ * terminal period can never swallow a real sentence onset as an extension;
+ * technical citations whose segments are words (`*.test.ts`, `*.lock`)
+ * split again — the fail-safe direction (a missed swallow keeps the
+ * pre-#1242 tight split; a false swallow merges two sentences into one
+ * prose unit and forges cue co-occurrence across a real boundary, #252).
+ */
+const KNOWN_FILE_EXTENSIONS: ReadonlySet<string> = new Set([
+  "adoc", "bak", "c", "cc", "cfg", "clj", "conf", "cpp", "cs", "css",
+  "cts", "d", "erl", "exs", "h", "hcl", "hh", "hpp", "hs", "htm", "html",
+  "js", "json", "jsx", "kt", "kts", "md", "mdx", "mjs", "mts", "php", "pl",
+  "py", "pyi", "rb", "rs", "rst", "sass", "scss", "sh", "sql", "svg", "toml",
+  "ts", "tsx", "xml", "yaml", "yml", "zsh",
+]);
+/**
+ * Bound on the path-run expansion per dot. A run longer than any real
+ * citation is not a citation, and the bound keeps the widened scanner's
+ * per-dot work O(1) so MAX_CLAIM_SCAN_LENGTH still caps the boundary's
+ * worst-case work on pathological dense path-like input.
+ */
+const PATH_LIKE_TOKEN_MAX_SPAN = 512;
+
+/**
+ * #1242: true when the `.` at `index` sits strictly INSIDE a token that
+ * contains a path separator. The following segment must read as a common
+ * file extension — a run of one to five ASCII lowercase letters matching
+ * the allowlist, terminated by a non lower-alphanumeric character — so a
+ * sentence onset keeps its split in every shape the old capitalization
+ * rule could not catch: a missing space after a terminal period
+ * ("…b.ts.and the metadata…", any English onset word), an ellipsis
+ * ("…b.ts...more"), and a digit after the dot ("v1.2.3"; version dots in
+ * bare citations split — fail-safe). A terminal dot (the one ending a
+ * sentence after a cited path), a leading dot, and a dotted token with no extension or no
+ * separator ("e.g.", `decide.ts` alone) still split — the widening stays
+ * confined to unmistakable path citations.
+ */
+function isPathInternalDot(text: string, index: number): boolean {
+  if (text[index] !== ".") return false;
+  if (!PATH_LIKE_TOKEN_CHAR_RE.test(text[index - 1] ?? "")) return false;
+  let segment = index + 1;
+  while (segment <= index + 5 && /[a-z]/.test(text[segment] ?? "")) segment += 1;
+  if (segment === index + 1) return false;
+  if (/[a-z0-9]/.test(text[segment] ?? "")) return false;
+  if (!KNOWN_FILE_EXTENSIONS.has(text.slice(index + 1, segment))) return false;
+  let sawSeparator = false;
+  let start = index;
+  const floor = Math.max(0, index - PATH_LIKE_TOKEN_MAX_SPAN);
+  while (start > floor && PATH_LIKE_TOKEN_CHAR_RE.test(text[start - 1] ?? "")) {
+    start -= 1;
+    if (text[start] === "/") sawSeparator = true;
+  }
+  let end = segment;
+  const ceil = Math.min(text.length, index + 1 + PATH_LIKE_TOKEN_MAX_SPAN);
+  while (end < ceil && PATH_LIKE_TOKEN_CHAR_RE.test(text[end] ?? "")) {
+    if (text[end] === "/") sawSeparator = true;
+    end += 1;
+  }
+  return sawSeparator;
+}
+
+/**
+ * #1242: the claim-unit boundary for the two #1238 scanners (input
+ * declaration and gate absence). A claim unit is wider than a sentence: a
+ * `;`-joined clause chain is ONE assertion, and a `.` inside a path-like
+ * citation token is path structure, not a split — the incident shapes
+ * "The action never filters by label; its metadata declares no label
+ * input." and "The action never skips drafts (see src/precheck/decide.ts),
+ * metadata declares no label input." must reach the cue families whole.
+ * The decision safety does NOT widen with the unit: cue direction stays
+ * clause-scoped inside it (`clauseWindow`, `gateClauseRanges`), so a
+ * semicolon-joined neighbor clause can never carry the absence assertion
+ * for a token or behavior its own clause does not name. What is unit-scoped
+ * — the action-subject/input vocabulary gates and the gate-coverage set —
+ * is unit-scoped at comma scope in #1238 unchanged: a comma-joined message
+ * whose clauses jointly carry the cue families already classifies as one
+ * claim today, and #1242 extends that SAME accepted semantics across `;`
+ * and bare path citations as the issue asks.
+ *
+ * The committed-literal scanner (#1016 `sentenceContaining`) deliberately
+ * KEEPS the tight sentence split: its assertion/expectation cues are judged
+ * over the whole sentence, not per clause, so widening the unit there would
+ * let an expectation cue from a semicolon-joined neighbor clause ("...never
+ * wired up") bleed into the marker's own existence assertion and flip its
+ * classification. The #1238 scanners can widen safely only because their
+ * cue attribution is clause-anchored within the unit.
+ */
+function isClaimUnitBoundary(text: string, index: number): boolean {
+  const char = text[index];
+  if (char === undefined || !SENTENCE_DELIMITERS.has(char)) return false;
+  if (char === ";") return false;
+  if (char === ".") return !isPathInternalDot(text, index);
+  return true;
+}
+
+/**
  * Character ranges `[start, end)` of quoted spans in `message`: the interior
  * of single-backtick spans (`...`) and triple-backtick fences
  * (```...```), i.e. text a reviewer explicitly cites rather than prose.
@@ -313,8 +420,9 @@ function assertsCommittedMarker(message: string): boolean {
 // substantiated findings and drove request_changes with zero blockers.
 // Verification witness: the executing action's own embedded contract
 // (`declaredActionInputs`) — the exact revision the run executes, offline
-// and deterministic. Classification is sentence-scoped with a clause window
-// so one sentence carrying both directions ("declares `ai-key` ..., so
+// and deterministic. Classification is claim-unit-scoped (#1242: one unit
+// may span a `;`-joined clause chain or a bare path citation) with a clause
+// window so one unit carrying both directions ("declares `ai-key` ..., so
 // `ai-api-key` is unexpected") still resolves each token's direction.
 
 const ACTION_SUBJECT_CUE_RE = /\b(?:pinned|upstream|the )?action(?:'s)?\b/i;
@@ -645,6 +753,10 @@ interface InputCandidate {
 // does: a message naming both a different line and the pin is still a
 // claim about the other line and stays unverified. A message naming any
 // revision neither witness answers for stays unverified exactly as before.
+// #1263: the pin's own SHORT form (a prefix of the pinned sha) reaches
+// this comparison as a qualifier — the pin is the only thing that can say
+// which short quote names it — so a claim citing it is decided with the
+// PINNED contract, never with the executing revision's registry.
 //
 // The scope of the revision scan is the WHOLE finding message: a claim and
 // the revision it talks about can sit in different sentences ("The action
@@ -671,13 +783,47 @@ interface RevisionQualifier {
 const VERSION_QUALIFIER_RE = /^v?(\d+(?:\.\d+)*)(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z][0-9A-Za-z.-]*)?$/;
 /** A commit sha in its short or full form: 7–40 hex characters. */
 const SHA_QUALIFIER_RE = /^[0-9a-f]{7,40}$/i;
+/** The length of a full sha1 hex digest (#1263: the only SHA shape the
+ * standalone scan trusts, because no incidental token takes it). */
+const FULL_SHA_LENGTH = 40;
+/** The length of the SHORT form of a commit sha — the prefix a consumer
+ * quotes. #1263: the short form is not standalone evidence on its own (an
+ * incidental token takes it too), but the PINNED revision can vouch for the
+ * one short form that names it. */
+const MIN_SHA_LENGTH = 7;
 /**
  * The words that INTRODUCE a revision identifier. The introduced token
  * counts as a qualifier only when it is version-like or SHA-like: a bare
  * integer ("version 2", "ref: 1234") names no revision, and a prose word
  * ("release notes") names none either.
+ *
+ * #1263: "at" and "pin"/"pinned" are introducers too — the shapes a finding
+ * uses to cite the revision it means ("action.yml at def5678", "true at
+ * v3.6.1", "pinned at abc1234"), and the only context that keeps an
+ * otherwise-ambiguous bare token (a short hex run, a bare numeric triple)
+ * fail closed. Introducers CHAIN: "pinned at abc1234" must bind the
+ * identifier, not have "at" swallowed as "pinned"'s token and the citation
+ * then missed by the non-overlapping scan (which fails OPEN — the exact
+ * shape the introducer exists to protect).
+ *
+ * A hop may carry a run of separators — whitespace, `:`, `=`, `,` and `;`
+ * in ONE character class, so a separator run cannot be split in many ways
+ * and the scan stays linear (#1263: the ambiguous `\s*[:=]*\s*` split a
+ * whitespace run in k+1 ways and made the scan quadratic) — and a bounded
+ * layer of CONNECTOR words ("pinned TO abc1234", "version OF 3.6.1",
+ * "released AS 3.6.1", "at commit SHA abc1234", "at THE abc1234"): a
+ * genuine citation puts a connector or a piece of punctuation between the
+ * introducer and the identifier, and missing it fails OPEN — the claim
+ * names another revision and is then decided with the executing revision's
+ * bytes. The connector layer is closed and bounded: it never skips an
+ * ordinary word to find a version-shaped token ("the version of Node
+ * 20.11.1" binds "Node"), so the #1263 precision is preserved.
+ *
+ * The introducer set also accepts the VERB forms a citation uses ("released
+ * as 3.6.1", "tagged as abc1234", "committed as abc1234") and collapses
+ * "pin"/"pinned" into one form.
  */
-const REVISION_KEYWORD_RE = /\b(?:revision|release|tag|version|commit|branch|ref)\b\s*[:=]?\s*([^\s]+)/gi;
+const REVISION_KEYWORD_RE = /\b(?:(?:revision|release(?:d)?|tag(?:ged)?|version|commit(?:ted)?|branch|ref|pin(?:ned)?|at)\b[\s:=,;]*(?:\b(?:to|of|as|is|in|on|from|into|onto|the|a|an|sha|rev)\b[\s:=,;]*)*)+([^\s]+)/gi;
 
 /**
  * #1240: is the token a version identifier? The `v` form is a version
@@ -712,15 +858,49 @@ function stripTokenEdges(token: string): string {
 }
 
 /**
+ * #1263: does the token name the PINNED revision in its SHORT form? The pin
+ * is an exact commit, so the consumer's short quote is a PREFIX of it — and
+ * only the pin itself can say which short form names it. A short hex run
+ * that is not a prefix of the pin stays incidental (a colour).
+ */
+function isPinnedShortForm(token: string, pinnedSha: string | null): boolean {
+  if (pinnedSha === null) return false;
+  if (token.length < MIN_SHA_LENGTH) return false;
+  return pinnedSha.startsWith(token.toLowerCase());
+}
+
+/**
  * #1240: the revision qualifiers a finding message names.
  *
- * A qualifier is a revision identifier appearing as a STANDALONE token:
- * version-like ("v3.7.0", "3.7.0"), SHA-like ("abc1234"), or a token a
- * revision keyword introduces that is itself version-like or SHA-like
- * ("version: v3.6.1"). The scan is O(message) and bounded by
- * MAX_CLAIM_SCAN_LENGTH.
+ * A qualifier is either a revision identifier appearing as a STANDALONE
+ * token that cannot be an incidental number — a `v`-prefixed version
+ * ("v3.7.0"), a version carrying a pre-release/build suffix
+ * ("3.7.0-dev+abc1234"), or a FULL-length commit sha ("a"*40) — or a token
+ * a revision introducer names ("version: v3.6.1", "action.yml at 3.6.1",
+ * "commit abc1234"), which counts whenever it is version-like or SHA-like.
+ *
+ * #1263: a BARE numeric triple ("20.11.1", a Node version) or a SHORT hex
+ * run ("a1b2c3d", a colour) is not standalone evidence of a revision —
+ * shape alone cannot tell it apart from an incidental version-like token,
+ * and treating it as one leaves a source-contradicted claim
+ * `other-revision-unverified` and forces request_changes through the #1016
+ * unknown-evidence rule. Such a token only qualifies when an introducer
+ * names it, so a claim that genuinely cites another revision
+ * ("at 3.6.1", "pinned at a1b2c3d") still fails closed. The scan is
+ * O(message) and bounded by MAX_CLAIM_SCAN_LENGTH.
+ *
+ * The introducer hop (#1263) carries a bounded layer of CONNECTOR words
+ * and one separator class between the introducer and the identifier
+ * ("pinned to abc1234", "version of 3.6.1", "released as 3.6.1", "at
+ * commit sha abc1234"), so a genuine citation is never missed; the verb
+ * forms ("released", "tagged", "committed") are introducers too.
+ *
+ * #1263: the standalone scan additionally trusts the SHORT form of the
+ * PINNED revision when the consumer pinned one: only the pin can say which
+ * short quote names it, so a claim citing the pin's short form is decided
+ * with the PINNED contract instead of the executing revision's registry.
  */
-function revisionQualifiers(message: string): RevisionQualifier[] {
+function revisionQualifiers(message: string, pinnedSha: string | null = null): RevisionQualifier[] {
   const found: RevisionQualifier[] = [];
   if (message.length > MAX_CLAIM_SCAN_LENGTH) return found;
   const seen = new Set<string>();
@@ -736,8 +916,18 @@ function revisionQualifiers(message: string): RevisionQualifier[] {
     // Cheap prefilter: every revision identifier carries a digit, so an
     // ordinary prose word never qualifies.
     if (!/\d/.test(token)) continue;
-    if (isVersionLike(token)) push(token.toLowerCase(), "version");
-    else if (isShaLike(token)) push(token.toLowerCase(), "sha");
+    if (isVersionLike(token)) {
+      // #1263: standalone, only shapes no incidental number takes: the
+      // deliberate `v` marker, or a stamp-shaped token with a
+      // pre-release/build suffix.
+      if (/^v/i.test(token) || /[-+]/.test(token)) push(token.toLowerCase(), "version");
+    } else if (isShaLike(token) && (token.length === FULL_SHA_LENGTH || isPinnedShortForm(token, pinnedSha))) {
+      // #1263: a full commit hash cannot plausibly be incidental; a short
+      // hex run can (a colour), so it qualifies only via an introducer —
+      // or when it is the PINNED revision's own short form, which the pin
+      // itself vouches for.
+      push(token.toLowerCase(), "sha");
+    }
   }
   for (const match of message.matchAll(REVISION_KEYWORD_RE)) {
     const token = stripTokenEdges(match[1] ?? "");
@@ -822,7 +1012,9 @@ function qualifierMatchesExecutingRevision(qualifier: RevisionQualifier, executi
  * The pin is an EXACT COMMIT, not a release line: only a SHA-like
  * qualifier can name it, and it matches when the pinned sha EXTENDS the
  * qualifier — the full 40-hex sha, or the short form the consumer quoted
- * (a prefix of the pin). A version-like qualifier names a line, never a
+ * (a prefix of the pin; #1263: that short form reaches this comparison as
+ * a qualifier because the standalone scan trusts a short hex run that
+ * prefixes the pin). A version-like qualifier names a line, never a
  * commit, so it can never match the pin: a message naming both a
  * different line and the pin is still a claim about the other line, and
  * it stays unverified.
@@ -852,12 +1044,13 @@ function maskedForScan(message: string): string {
   return chars.join("");
 }
 
-/** Sentence bounds around a span, mirroring sentenceContaining's delimiters. */
+/** Claim-unit bounds around a span (#1242 boundaries, see
+ * isClaimUnitBoundary; NOT the committed-literal scanner's tight split). */
 function sentenceBounds(masked: string, from: number, to: number): { start: number; end: number } {
   let start = from;
-  while (start > 0 && !SENTENCE_DELIMITERS.has(masked[start - 1] ?? "")) start -= 1;
+  while (start > 0 && !isClaimUnitBoundary(masked, start - 1)) start -= 1;
   let end = to;
-  while (end < masked.length && !SENTENCE_DELIMITERS.has(masked[end] ?? "")) end += 1;
+  while (end < masked.length && !isClaimUnitBoundary(masked, end)) end += 1;
   return { start, end };
 }
 
@@ -909,10 +1102,11 @@ function windowDirection(window: string, workflowSubject: boolean, workflowWitne
 
 /**
  * Collect the quoted input-id candidates a message asserts about the
- * EXECUTING action's declared inputs. Each candidate must sit in a sentence
- * carrying the action-subject cue (or a manifest-file citation) and input
- * vocabulary, must not name another action, and its direction resolves
- * within that token's sentence-bounded clause window. Attribute-scoped
+ * EXECUTING action's declared inputs. Each candidate must sit in a claim
+ * unit (#1242 boundaries) carrying the action-subject cue (or a
+ * manifest-file citation) and input vocabulary, must not name another
+ * action, and its direction resolves within that token's unit-bounded
+ * clause window. Attribute-scoped
  * claims and directionless mentions are not candidates.
  *
  * `workflowWitnessAvailable` gates the workflow-mapping cue vocabulary: it
@@ -966,14 +1160,15 @@ function classifyInputDeclaration(message: string, workflowWitnessAvailable: boo
 }
 
 /**
- * A sentence of a claim message that carries the gate-absence shape: the
+ * A claim unit of a message that carries the gate-absence shape: the
  * action subject, a gate behavior word, an absence cue and a
- * metadata/input-list cue, all in ONE sentence.
+ * metadata/input-list cue, all in ONE claim unit (#1242: a `;`-joined
+ * clause chain or a message spanning a bare path citation counts as one).
  */
 interface GateSentence {
-  /** The sentence as written — the other-action guard must see citations. */
+  /** The unit as written — the other-action guard must see citations. */
   raw: string;
-  /** The same sentence with quoted spans masked — cues, subjects and
+  /** The same unit with quoted spans masked — cues, subjects and
    * qualifiers can never be forged by a cited span. */
   masked: string;
 }
@@ -982,10 +1177,10 @@ interface GateSentence {
  * Gate-absence recognition (#1238): the message asserts that a
  * deterministic behavior of the action is absent while deriving that
  * conclusion from the action's metadata/input list (the incident's "no
- * label input" premise). Sentence-scoped: every cue family must co-occur
- * in one sentence, bounded by MAX_CLAIM_SCAN_LENGTH.
+ * label input" premise). Claim-unit-scoped (#1242 boundaries): every cue
+ * family must co-occur in one unit, bounded by MAX_CLAIM_SCAN_LENGTH.
  *
- * Each matching sentence is returned twice — masked (so a quoted span can
+ * Each matching unit is returned twice — masked (so a quoted span can
  * never forge a cue) and raw (so the other-action guard can see a cited
  * `owner/repo@ref` or `uses:` key). The masking preserves length and
  * indices, so both views describe the same characters.
@@ -999,9 +1194,9 @@ function gateAbsenceSentences(message: string): GateSentence[] {
   const masked = maskedForScan(message);
   let cursor = 0;
   while (cursor < masked.length) {
-    while (cursor < masked.length && SENTENCE_DELIMITERS.has(masked[cursor] ?? "")) cursor += 1;
+    while (cursor < masked.length && isClaimUnitBoundary(masked, cursor)) cursor += 1;
     let end = cursor;
-    while (end < masked.length && !SENTENCE_DELIMITERS.has(masked[end] ?? "")) end += 1;
+    while (end < masked.length && !isClaimUnitBoundary(masked, end)) end += 1;
     const maskedSentence = masked.slice(cursor, end);
     if (
       ACTION_SUBJECT_CUE_RE.test(maskedSentence)
@@ -1020,7 +1215,19 @@ function gateAbsenceSentences(message: string): GateSentence[] {
 }
 
 interface ClaimClassification {
-  kind: GroundingKind | null;
+  /**
+   * #1262: EVERY claim kind the message carries, in the fixed enumeration
+   * order below. The scans always run — the first-match short-circuit is
+   * gone — so a message that carries both an input-declaration claim and a
+   * gate-absence claim classifies as BOTH, and each kind gets its own
+   * decision below. Skipping one scan (the bug) silently decided the
+   * finding on its first matching claim only: a refuted input claim ate a
+   * sibling gate-absence claim the boundary could not confirm (its unknown
+   * evidence was erased and the strict verdict mapping lost the
+   * request_changes it owed), and an undecidable gate claim ate a refutable
+   * input claim the other way round.
+   */
+  kinds: GroundingKind[];
   inputCandidates: InputCandidate[];
   /** #1238: the sentences that assert a gate absence. */
   gateSentences: GateSentence[];
@@ -1031,25 +1238,30 @@ interface ClaimClassification {
 }
 
 /** Classify once per finding; the input candidates and the gate-absence
- * sentences are reused by the verification branch instead of rescanning the
+ * sentences are reused by the verification branches instead of rescanning the
  * message. The revision-qualifier scan (#1240) runs once per message, over
- * the whole message. */
-function classifyClaim(message: string, workflowWitnessAvailable: boolean): ClaimClassification {
+ * the whole message. (#1262: composition — every scan ALWAYS runs, so the
+ * `kinds` list carries each claim kind the message has.) `pinnedSha` is the
+ * exact commit the consumer pinned (#1263): the scan trusts the pin's own
+ * SHORT form as a qualifier, so a claim citing it is decided with the
+ * PINNED contract. */
+function classifyClaim(message: string, workflowWitnessAvailable: boolean, pinnedSha: string | null = null): ClaimClassification {
+  const kinds: GroundingKind[] = [];
   if (assertsCommittedMarker(message)) {
-    return { kind: "committed_literal", inputCandidates: [], gateSentences: [], qualifiers: [] };
+    kinds.push("committed_literal");
   }
   const inputCandidates = classifyInputDeclaration(message, workflowWitnessAvailable);
   if (inputCandidates.length > 0) {
-    return { kind: "input_declaration", inputCandidates, gateSentences: [], qualifiers: revisionQualifiers(message) };
+    kinds.push("input_declaration");
   }
   const gateSentences = gateAbsenceSentences(message);
   if (gateSentences.length > 0) {
-    return { kind: "gate_absence", inputCandidates: [], gateSentences, qualifiers: revisionQualifiers(message) };
+    kinds.push("gate_absence");
   }
   if (REQUIREMENT_NOT_ENFORCED_RE.test(message)) {
-    return { kind: "requirement_claim", inputCandidates: [], gateSentences: [], qualifiers: [] };
+    kinds.push("requirement_claim");
   }
-  return { kind: null, inputCandidates: [], gateSentences: [], qualifiers: [] };
+  return { kinds, inputCandidates, gateSentences, qualifiers: revisionQualifiers(message, pinnedSha) };
 }
 
 /** The word tokens of a sentence, lowercased, with their character spans. */
@@ -1191,12 +1403,14 @@ async function gateAttested(
 }
 
 /**
- * #1238: decide a gate-absence claim, ONE SENTENCE AT A TIME.
+ * #1238: decide a gate-absence claim, ONE CLAIM UNIT AT A TIME.
  *
- * The decision is never made across sentences: a manifest-only sentence
- * (a declaration about the action's inputs) is never refuted because
- * another sentence in the same message carries a behavioral absence. Each
- * sentence is judged on its own:
+ * The decision is never made across units: a manifest-only unit (a
+ * declaration about the action's inputs) is never refuted because another
+ * unit in the same message carries a behavioral absence. Each unit is
+ * judged on its own (#1242: a `;`-joined clause chain is ONE unit, but the
+ * absence assertion below stays CLAUSE-scoped, so joining clauses never
+ * attributes one clause's negation to another clause's subject):
  *
  *  (a) it must not mention ANOTHER action — the executing action's
  *      implementation cannot decide another action's gates;
@@ -1350,12 +1564,281 @@ function extractCodeSpans(message: string): string[] {
   return out;
 }
 
+/**
+ * #1262: the input-declaration decision of one finding, extracted from the
+ * single-kind branch. The leaf logic — statuses, reasons, precedence — is
+ * byte-identical to what the `kind === "input_declaration"` branch ran
+ * before classification composed.
+ */
+async function decideInputDecision(
+  candidates: readonly InputCandidate[],
+  declaredRegistry: ReadonlySet<string> | null | undefined,
+  pinned: PinnedActionWitness | null | undefined,
+  workflowNames: ReadonlySet<string> | null,
+  blockedRevision: boolean,
+  usePinned: boolean,
+): Promise<{ status: GroundingStatus; reason: string }> {
+  let status: GroundingStatus;
+  let reason: string;
+  // #1240: the declared-input registry speaks for the EXECUTING
+  // revision's release line only. A message that names a DIFFERENT
+  // line or another patch is not decidable with it: the whole finding
+  // becomes unverified — never refuted, never grounded — unless every
+  // "other" qualifier matches the pinned revision, in which case the
+  // claim is decided with the PINNED revision's own contract instead.
+  // This check runs before the contradiction/grounding logic and
+  // before the other-action downgrade: a revision mismatch wins the
+  // reason.
+  const declared = usePinned && pinned != null ? await pinned.declaredInputs() : declaredRegistry;
+  if (blockedRevision) {
+    status = "unverified";
+    reason = "other-revision-unverified";
+  } else if (declared === undefined || declared === null) {
+    status = "unverified";
+    reason = usePinned ? "pinned-input-registry-unavailable" : "input-registry-unavailable";
+  } else {
+    const normalized = new Set([...declared].map((input) => input.toLowerCase()));
+    const resolved = candidates.filter((candidate) => candidate.direction !== "ambiguous");
+    // #1238: the registry speaks for what the ACTION DECLARES. A
+    // WORKFLOW-scoped claim is about what the WORKFLOW passes or
+    // declares, so the registry may neither refute it nor ground it:
+    // refuting it would be a false refutation (PR-controlled workflow
+    // bytes deciding a claim about the action's own manifest), and
+    // grounding it would certify a claim about a mapping the registry
+    // does not speak for. Such a claim is unknown evidence here — the
+    // workflow witness corroborates it, and only in the presence
+    // direction: the witness grounds the claim when the cited file's
+    // direct action step passes that name, and never refutes it.
+    //
+    // A claim that the action does NOT declare an input the registry
+    // lacks is a genuine defect claim, and the witness POSITIVELY
+    // confirms it: the input really is undeclared. It therefore keeps
+    // the finding alive even when a sibling claim in the same finding
+    // is contradicted — a finding that carries a true defect must not
+    // be demoted whole (#1238: preserve true findings, including
+    // genuinely undeclared inputs).
+    //
+    // The claim must be about the EXECUTING action: a claim that names
+    // another action as its subject is never decided with this
+    // registry (neither grounded nor refuted), so it cannot ground the
+    // finding either.
+    const missing = resolved.find((candidate) =>
+      candidate.direction === "absence"
+      && !normalized.has(candidate.token)
+      && !candidate.otherActionSubject
+      && !candidate.workflowSubject);
+    // Refutation requires POSITIVE contradiction by the witness: an
+    // absence claim about an input the registry declares. A presence
+    // claim about an input the registry lacks is NOT a contradiction —
+    // the claim may describe a manifest revision the running bundle
+    // predates (a PR adding the input to this very action) — so it is
+    // marked unverified, never refuted (#1238 review: refutation only
+    // on facts the witness can decide).
+    const contradicted = resolved.find((candidate) =>
+      candidate.direction === "absence"
+      && normalized.has(candidate.token)
+      && !candidate.workflowSubject);
+    // A claim about another action's inputs is unknown evidence, never
+    // a refutation: the registry witnesses the executing action only.
+    // A foreign claim the registry WOULD have decided (grounded or
+    // refuted) had it been about this action is undecided for that
+    // reason; a foreign claim the registry could not decide anyway
+    // keeps the ordinary unknown-evidence reason.
+    const foreign = resolved.some((candidate) =>
+      candidate.otherActionSubject
+      && (candidate.direction === "absence" || normalized.has(candidate.token)));
+    // #1238: the WORKFLOW-side witness — the input names the finding's
+    // own cited file passes to the action under review at the exact
+    // reviewed head. It answers exactly one question: does the
+    // workflow-to-action mapping of THAT file carry that name?
+    //
+    // It NEVER decides a claim that is not workflow-scoped (the claim's
+    // subject must BE the workflow), and it NEVER decides an
+    // absence-direction claim: the mapping witness says which names
+    // the workflow passes, not which names the action lacks.
+    //
+    // The witness is absent (null) whenever the finding's own file has
+    // no entry: then every claim below keeps the behavior it had
+    // before the witness existed.
+    //
+    // A workflow-scoped presence claim the workflow witness
+    // CORROBORATES: the cited file's direct action step passes that
+    // name. That is a POSITIVE fact about the finding's own file, so
+    // it grounds the claim.
+    //
+    // The witness NEVER refutes. The reader sees only the DIRECT
+    // action steps of the cited file, so "this file does not pass X"
+    // is NOT an absence it can establish: a local composite action, a
+    // reusable workflow or a remote composite can pass an input name
+    // to the action through a surface the reader never sees. A claim
+    // the witness does not corroborate therefore falls through to the
+    // ordinary unknown-evidence path below — never refuted, so the
+    // review fails closed on it.
+    const workflowGrounded = workflowNames === null ? undefined : resolved.find((candidate) =>
+      candidate.workflowSubject
+      && candidate.direction === "presence"
+      && workflowNames.has(candidate.token)
+      && !candidate.otherActionSubject);
+    // The three registry-decided outcomes are prefixed `pinned-` when
+    // the PINNED witness decided (the claim is a fact about that
+    // revision's manifest, not the executing one's); the shared
+    // reasons (other-action, workflow-input, the unverified
+    // fallthroughs) are unchanged either way.
+    if (missing !== undefined) {
+      status = "grounded";
+      reason = `${usePinned ? "pinned-" : ""}input-absent:${missing.token}`;
+    } else if (foreign) {
+      // Unknown evidence must never certify a clean review (#1016): a
+      // finding that carries a claim about another action cannot be
+      // refuted whole.
+      status = "unverified";
+      reason = "other-action-claim-unverified";
+    } else if (contradicted !== undefined) {
+      status = "refuted";
+      reason = `${usePinned ? "pinned-" : ""}input-declared:${contradicted.token}`;
+    } else if (workflowGrounded !== undefined) {
+      status = "grounded";
+      reason = `workflow-input:${workflowGrounded.token}`;
+    } else {
+      // A presence claim about an input the registry declares is
+      // confirmed, but it asserts no defect of its own: it does not by
+      // itself keep a finding blocking that also carries a refuted
+      // claim.
+      const grounded = resolved.find((candidate) =>
+        candidate.direction === "presence"
+        && normalized.has(candidate.token)
+        && !candidate.otherActionSubject);
+      if (grounded !== undefined) {
+        status = "grounded";
+        reason = `${usePinned ? "pinned-" : ""}input-declared:${grounded.token}`;
+      } else {
+        status = "unverified";
+        reason = resolved.some((candidate) => candidate.direction === "presence")
+          ? "input-presence-unverified"
+          : "input-claim-unresolvable";
+      }
+    }
+  }
+  return { status, reason };
+}
+
+/**
+ * #1262: the decision of one source-read claim kind (`committed_literal`
+ * or `requirement_claim`), extracted from the common else chain.
+ * `committed_literal` and `requirement_claim` share ONE read of the
+ * cited file: `budget` is the pass-wide source-read counter and `shared`
+ * memoizes the read per finding, so a message carrying BOTH kinds
+ * consumes a single MAX_VERIFICATION_READS unit — one read total, exactly
+ * like the single-kind path. The leaf logic — statuses, reasons, the
+ * marker and cited-evidence checks — is byte-identical to what the
+ * single-kind path ran.
+ */
+async function decideSourceClaim(
+  kind: Extract<GroundingKind, "committed_literal" | "requirement_claim">,
+  finding: ArtifactFinding,
+  readSource: SourceReader,
+  expectedRevision: string | null,
+  budget: { reads: number },
+  shared: { result: SourceReadResult | null },
+): Promise<{ status: GroundingStatus; reason: string }> {
+  if (!safeFile(finding.file)) {
+    return kind === "committed_literal"
+      ? { status: "unverified", reason: "no-location" }
+      : { status: "unsupported", reason: "no-concrete-location" };
+  }
+  // The memo is consulted BEFORE the budget guard (#1262 review): a
+  // finding whose first source-read kind consumed the pass's last
+  // MAX_VERIFICATION_READS unit already holds the read result its sibling
+  // kind needs — spending the sibling on `read-budget-exhausted` would
+  // decide nothing the shared read had not already decided. A fresh read
+  // (no memo) still respects the budget: exhausted means unverified, the
+  // fail-safe direction.
+  let read = shared.result;
+  if (read === null) {
+    if (budget.reads >= MAX_VERIFICATION_READS) {
+      return { status: "unverified", reason: "read-budget-exhausted" };
+    }
+    budget.reads += 1;
+    read = await readSource(finding.file);
+    shared.result = read;
+  }
+  if (read.status === "unavailable") {
+    if (read.reason === "not-found") {
+      return kind === "committed_literal"
+        ? { status: "refuted", reason: "marker-absent" }
+        : { status: "refuted", reason: "location-missing" };
+    }
+    return { status: "unverified", reason: read.reason };
+  }
+  if (!authorizesLiteralClaim(read.provenance, expectedRevision)) {
+    // Defense-in-depth: the reader binds provenance to the same exact
+    // revision, so this is normally just "committed_source and
+    // unsynthesized". A reader that reads a different revision (or a
+    // stale one) still fails closed here rather than grounding the claim.
+    return { status: "unverified", reason: "non-authoritative-source" };
+  }
+  if (kind === "committed_literal") {
+    const present = SANITIZER_MARKERS.some((marker) => verifySourceSpan(read.text, marker).present);
+    return present
+      ? { status: "grounded", reason: "marker-present" }
+      : { status: "refuted", reason: "marker-absent" };
+  }
+  // requirement_claim: a generic standard assertion cannot promote
+  // CHANGES_REQUESTED on file/line existence alone — line 3 of
+  // `const x = 1; const y = 2; const z = 3;` does not establish that
+  // a violated standard lives there. Independent, machine-checkable
+  // evidence of a specific violation is required: a backticked code
+  // span whose bytes match the exact-head source. The evidence must
+  // sit at the cited location (#1016 review pass): the span is
+  // grounded only when it occurs within ±EVIDENCE_LINE_WINDOW lines
+  // of the cited line. A span found only elsewhere in the file is
+  // unknown evidence, not confirmation (unverified); a claim with no
+  // cited evidence is unsupported, and one whose spans the source
+  // contains nowhere is refuted (source positively disproves the
+  // cited pattern). A span without a concrete cited line can never
+  // ground, even when it matches elsewhere.
+  const spans = extractCodeSpans(finding.message);
+  if (spans.length === 0) {
+    return { status: "unsupported", reason: "no-cited-evidence" };
+  }
+  const line = finding.line;
+  const citedLine = typeof line === "number" && Number.isInteger(line) && line >= 1 ? line : null;
+  if (citedLine === null) {
+    return { status: "unsupported", reason: "no-concrete-location" };
+  }
+  const lines = read.text.split(/\r?\n/);
+  if (citedLine > lines.length) {
+    // A cited line past the end of the file is an unverifiable
+    // location, not positive disproof (the model may count a
+    // trailing-newline-terminated file one line longer), so it
+    // must not refute into the relaxable path.
+    return { status: "unverified", reason: "line-beyond-end" };
+  }
+  // Compare cited spans to the window modulo carriage returns:
+  // model citations carry LF line endings even when the commit
+  // uses CRLF, and the line-ending representation must never
+  // by itself flip grounded into refuted.
+  const strip = (s: string): string => s.replace(/\r/g, "");
+  const windowText = strip(lines
+    .slice(Math.max(0, citedLine - 1 - EVIDENCE_LINE_WINDOW), citedLine + EVIDENCE_LINE_WINDOW)
+    .join("\n"));
+  if (spans.some((span) => verifySourceSpan(windowText, strip(span)).present)) {
+    return { status: "grounded", reason: "evidence-verified" };
+  }
+  if (spans.some((span) => verifySourceSpan(strip(read.text), strip(span)).present)) {
+    return { status: "unverified", reason: "evidence-location-mismatch" };
+  }
+  return { status: "refuted", reason: "evidence-mismatch" };
+}
+
 export async function applyBlockerVerification(
   findings: ArtifactFinding[],
   options: BlockerVerificationOptions,
 ): Promise<BlockerVerificationResult> {
   const entries: FindingGrounding[] = [];
-  let reads = 0;
+  // The reviewed-repository source-read budget of this pass, consumed by
+  // the source-read claim kinds (decideSourceClaim).
+  const readBudget = { reads: 0 };
   let demoted = 0;
   // The action's own implementation reads of this pass: one read per cited
   // file (however many gates cite it), bounded by MAX_ACTION_SOURCE_READS.
@@ -1380,6 +1863,10 @@ export async function applyBlockerVerification(
   const executing = typeof options.executingActionVersion === "string" && options.executingActionVersion.trim() !== ""
     ? executingRevision(options.executingActionVersion)
     : null;
+  // #1262: the grounding tiers — the combined decision is the HIGHEST tier
+  // among the finding's per-kind decisions (see the combine comment in the
+  // loop).
+  const groundingTier: Record<GroundingStatus, number> = { grounded: 3, unverified: 2, refuted: 1, unsupported: 0 };
 
   for (let index = 0; index < findings.length; index += 1) {
     const finding = findings[index]!;
@@ -1408,8 +1895,17 @@ export async function applyBlockerVerification(
     // for that file means no witness, and the claim keeps the behavior it
     // had before the witness existed.
     const workflowNames = workflowWitnessNames(finding, options.workflowInputsByFile);
-    const { kind, inputCandidates, gateSentences, qualifiers } = classifyClaim(finding.message, workflowNames !== null);
-    if (kind === null) continue;
+    // #1262: classification composes — every scan runs and `kinds` carries
+    // EVERY claim kind the message has; a mixed message gets one decision
+    // per kind below instead of only the first match's.
+    const { kinds, inputCandidates, gateSentences, qualifiers } = classifyClaim(
+      finding.message,
+      workflowNames !== null,
+      // #1263: the pin's own short form is a qualifier — only the pin can
+      // say which short quote names it.
+      pinned?.revision ?? null,
+    );
+    if (kinds.length === 0) continue;
 
     // #1240: the revision qualifiers that fail the EXECUTING match. An
     // unstamped build applies NO scoping: there is no executing revision,
@@ -1425,258 +1921,68 @@ export async function applyBlockerVerification(
       && other.every((qualifier) => qualifierMatchesPinnedRevision(qualifier, pinned.revision));
     const blockedRevision = other.length > 0 && !usePinned;
 
-    let status: GroundingStatus;
-    let reason: string;
-    if (kind === "input_declaration") {
-      // #1240: the declared-input registry speaks for the EXECUTING
-      // revision's release line only. A message that names a DIFFERENT
-      // line or another patch is not decidable with it: the whole finding
-      // becomes unverified — never refuted, never grounded — unless every
-      // "other" qualifier matches the pinned revision, in which case the
-      // claim is decided with the PINNED revision's own contract instead.
-      // This check runs before the contradiction/grounding logic and
-      // before the other-action downgrade: a revision mismatch wins the
-      // reason.
-      const declared = usePinned && pinned != null
-        ? await pinned.declaredInputs()
-        : options.declaredActionInputs;
-      if (blockedRevision) {
-        status = "unverified";
-        reason = "other-revision-unverified";
-      } else if (declared === undefined || declared === null) {
-        status = "unverified";
-        reason = usePinned ? "pinned-input-registry-unavailable" : "input-registry-unavailable";
+    // #1262: ONE decision per claim kind the message carries, in the kind
+    // order classification produced. Each decision is the kind's own leaf
+    // logic — byte-identical to the single-kind path — and the two
+    // source-read kinds (`committed_literal`, `requirement_claim`) share
+    // ONE read of the cited file (`sourceClaimRead`), so a mixed message
+    // costs no extra MAX_VERIFICATION_READS unit and exactly one read
+    // total.
+    const sourceClaimRead: { result: SourceReadResult | null } = { result: null };
+    const decisions: Array<{ kind: GroundingKind; status: GroundingStatus; reason: string }> = [];
+    for (const kind of kinds) {
+      if (kind === "input_declaration") {
+        decisions.push({
+          kind,
+          ...(await decideInputDecision(inputCandidates, options.declaredActionInputs, pinned, workflowNames, blockedRevision, usePinned)),
+        });
+      } else if (kind === "gate_absence") {
+        // #1238: the metadata cannot decide a behavior-existence claim —
+        // the action's own implementation can. The decision is made per
+        // sentence (never across sentences). #1240: the witness is the one
+        // the selection above chose — the executing action's own tree, or
+        // the PINNED revision's tree — and each witness draws on its OWN
+        // budget: the pinned and the executing bytes must never share a
+        // path cache.
+        decisions.push({
+          kind,
+          ...(await decideGateAbsence(
+            gateSentences,
+            usePinned && pinned != null ? pinned.read.bind(pinned) : options.readActionSource,
+            usePinned ? pinnedBudget : actionSourceBudget,
+            blockedRevision,
+            usePinned,
+          )),
+        });
       } else {
-        const normalized = new Set([...declared].map((input) => input.toLowerCase()));
-        const resolved = inputCandidates.filter((candidate) => candidate.direction !== "ambiguous");
-        // #1238: the registry speaks for what the ACTION DECLARES. A
-        // WORKFLOW-scoped claim is about what the WORKFLOW passes or
-        // declares, so the registry may neither refute it nor ground it:
-        // refuting it would be a false refutation (PR-controlled workflow
-        // bytes deciding a claim about the action's own manifest), and
-        // grounding it would certify a claim about a mapping the registry
-        // does not speak for. Such a claim is unknown evidence here — the
-        // workflow witness corroborates it, and only in the presence
-        // direction: the witness grounds the claim when the cited file's
-        // direct action step passes that name, and never refutes it.
-        //
-        // A claim that the action does NOT declare an input the registry
-        // lacks is a genuine defect claim, and the witness POSITIVELY
-        // confirms it: the input really is undeclared. It therefore keeps
-        // the finding alive even when a sibling claim in the same finding
-        // is contradicted — a finding that carries a true defect must not
-        // be demoted whole (#1238: preserve true findings, including
-        // genuinely undeclared inputs).
-        //
-        // The claim must be about the EXECUTING action: a claim that names
-        // another action as its subject is never decided with this
-        // registry (neither grounded nor refuted), so it cannot ground the
-        // finding either.
-        const missing = resolved.find((candidate) =>
-          candidate.direction === "absence"
-          && !normalized.has(candidate.token)
-          && !candidate.otherActionSubject
-          && !candidate.workflowSubject);
-        // Refutation requires POSITIVE contradiction by the witness: an
-        // absence claim about an input the registry declares. A presence
-        // claim about an input the registry lacks is NOT a contradiction —
-        // the claim may describe a manifest revision the running bundle
-        // predates (a PR adding the input to this very action) — so it is
-        // marked unverified, never refuted (#1238 review: refutation only
-        // on facts the witness can decide).
-        const contradicted = resolved.find((candidate) =>
-          candidate.direction === "absence"
-          && normalized.has(candidate.token)
-          && !candidate.workflowSubject);
-        // A claim about another action's inputs is unknown evidence, never
-        // a refutation: the registry witnesses the executing action only.
-        // A foreign claim the registry WOULD have decided (grounded or
-        // refuted) had it been about this action is undecided for that
-        // reason; a foreign claim the registry could not decide anyway
-        // keeps the ordinary unknown-evidence reason.
-        const foreign = resolved.some((candidate) =>
-          candidate.otherActionSubject
-          && (candidate.direction === "absence" || normalized.has(candidate.token)));
-        // #1238: the WORKFLOW-side witness — the input names the finding's
-        // own cited file passes to the action under review at the exact
-        // reviewed head. It answers exactly one question: does the
-        // workflow-to-action mapping of THAT file carry that name?
-        //
-        // It NEVER decides a claim that is not workflow-scoped (the claim's
-        // subject must BE the workflow), and it NEVER decides an
-        // absence-direction claim: the mapping witness says which names
-        // the workflow passes, not which names the action lacks.
-        //
-        // The witness is absent (null) whenever the finding's own file has
-        // no entry: then every claim below keeps the behavior it had
-        // before the witness existed.
-        //
-        // A workflow-scoped presence claim the workflow witness
-        // CORROBORATES: the cited file's direct action step passes that
-        // name. That is a POSITIVE fact about the finding's own file, so
-        // it grounds the claim.
-        //
-        // The witness NEVER refutes. The reader sees only the DIRECT
-        // action steps of the cited file, so "this file does not pass X"
-        // is NOT an absence it can establish: a local composite action, a
-        // reusable workflow or a remote composite can pass an input name
-        // to the action through a surface the reader never sees. A claim
-        // the witness does not corroborate therefore falls through to the
-        // ordinary unknown-evidence path below — never refuted, so the
-        // review fails closed on it.
-        const workflowGrounded = workflowNames === null ? undefined : resolved.find((candidate) =>
-          candidate.workflowSubject
-          && candidate.direction === "presence"
-          && workflowNames.has(candidate.token)
-          && !candidate.otherActionSubject);
-        // The three registry-decided outcomes are prefixed `pinned-` when
-        // the PINNED witness decided (the claim is a fact about that
-        // revision's manifest, not the executing one's); the shared
-        // reasons (other-action, workflow-input, the unverified
-        // fallthroughs) are unchanged either way.
-        if (missing !== undefined) {
-          status = "grounded";
-          reason = `${usePinned ? "pinned-" : ""}input-absent:${missing.token}`;
-        } else if (foreign) {
-          // Unknown evidence must never certify a clean review (#1016): a
-          // finding that carries a claim about another action cannot be
-          // refuted whole.
-          status = "unverified";
-          reason = "other-action-claim-unverified";
-        } else if (contradicted !== undefined) {
-          status = "refuted";
-          reason = `${usePinned ? "pinned-" : ""}input-declared:${contradicted.token}`;
-        } else if (workflowGrounded !== undefined) {
-          status = "grounded";
-          reason = `workflow-input:${workflowGrounded.token}`;
-        } else {
-          // A presence claim about an input the registry declares is
-          // confirmed, but it asserts no defect of its own: it does not by
-          // itself keep a finding blocking that also carries a refuted
-          // claim.
-          const grounded = resolved.find((candidate) =>
-            candidate.direction === "presence"
-            && normalized.has(candidate.token)
-            && !candidate.otherActionSubject);
-          if (grounded !== undefined) {
-            status = "grounded";
-            reason = `${usePinned ? "pinned-" : ""}input-declared:${grounded.token}`;
-          } else {
-            status = "unverified";
-            reason = resolved.some((candidate) => candidate.direction === "presence")
-              ? "input-presence-unverified"
-              : "input-claim-unresolvable";
-          }
-        }
-      }
-    } else if (kind === "gate_absence") {
-      // #1238: the metadata cannot decide a behavior-existence claim —
-      // the action's own implementation can. The decision is made per
-      // sentence (never across sentences): a claim whose named gate the
-      // executing implementation POSITIVELY implements is refuted; every
-      // other shape stays unverified, the fail-safe direction — a missing
-      // marker is no proof of absence, and a claim the registry does not
-      // cover cannot be decided at all.
-      //
-      // #1240: the witness is the one the selection above chose — the
-      // executing action's own tree, or the PINNED revision's tree — and
-      // each witness draws on its OWN budget: the pinned and the
-      // executing bytes must never share a path cache.
-      const decision = await decideGateAbsence(
-        gateSentences,
-        usePinned && pinned != null ? pinned.read.bind(pinned) : options.readActionSource,
-        usePinned ? pinnedBudget : actionSourceBudget,
-        blockedRevision,
-        usePinned,
-      );
-      status = decision.status;
-      reason = decision.reason;
-    } else if (!safeFile(finding.file)) {
-      status = kind === "committed_literal" ? "unverified" : "unsupported";
-      reason = kind === "committed_literal" ? "no-location" : "no-concrete-location";
-    } else if (reads >= MAX_VERIFICATION_READS) {
-      status = "unverified";
-      reason = "read-budget-exhausted";
-    } else {
-      reads += 1;
-      const read = await options.readSource(finding.file);
-      if (read.status === "unavailable") {
-        if (read.reason === "not-found") {
-          status = "refuted";
-          reason = kind === "committed_literal" ? "marker-absent" : "location-missing";
-        } else {
-          status = "unverified";
-          reason = read.reason;
-        }
-      } else if (!authorizesLiteralClaim(read.provenance, options.expectedRevision)) {
-        // Defense-in-depth: the reader binds provenance to the same exact
-        // revision, so this is normally just "committed_source and
-        // unsynthesized". A reader that reads a different revision (or a
-        // stale one) still fails closed here rather than grounding the claim.
-        status = "unverified";
-        reason = "non-authoritative-source";
-      } else if (kind === "committed_literal") {
-        const present = SANITIZER_MARKERS.some((marker) => verifySourceSpan(read.text, marker).present);
-        status = present ? "grounded" : "refuted";
-        reason = present ? "marker-present" : "marker-absent";
-      } else {
-        // requirement_claim: a generic standard assertion cannot promote
-        // CHANGES_REQUESTED on file/line existence alone — line 3 of
-        // `const x = 1; const y = 2; const z = 3;` does not establish that
-        // a violated standard lives there. Independent, machine-checkable
-        // evidence of a specific violation is required: a backticked code
-        // span whose bytes match the exact-head source. The evidence must
-        // sit at the cited location (#1016 review pass): the span is
-        // grounded only when it occurs within ±EVIDENCE_LINE_WINDOW lines
-        // of the cited line. A span found only elsewhere in the file is
-        // unknown evidence, not confirmation (unverified); a claim with no
-        // cited evidence is unsupported, and one whose spans the source
-        // contains nowhere is refuted (source positively disproves the
-        // cited pattern). A span without a concrete cited line can never
-        // ground, even when it matches elsewhere.
-        const spans = extractCodeSpans(finding.message);
-        if (spans.length === 0) {
-          status = "unsupported";
-          reason = "no-cited-evidence";
-        } else {
-          const line = finding.line;
-          const citedLine = typeof line === "number" && Number.isInteger(line) && line >= 1 ? line : null;
-          if (citedLine === null) {
-            status = "unsupported";
-            reason = "no-concrete-location";
-          } else {
-            const lines = read.text.split(/\r?\n/);
-            if (citedLine > lines.length) {
-              // A cited line past the end of the file is an unverifiable
-              // location, not positive disproof (the model may count a
-              // trailing-newline-terminated file one line longer), so it
-              // must not refute into the relaxable path.
-              status = "unverified";
-              reason = "line-beyond-end";
-            } else {
-              // Compare cited spans to the window modulo carriage returns:
-              // model citations carry LF line endings even when the commit
-              // uses CRLF, and the line-ending representation must never
-              // by itself flip grounded into refuted.
-              const strip = (s: string): string => s.replace(/\r/g, "");
-              const windowText = strip(lines
-                .slice(Math.max(0, citedLine - 1 - EVIDENCE_LINE_WINDOW), citedLine + EVIDENCE_LINE_WINDOW)
-                .join("\n"));
-              if (spans.some((span) => verifySourceSpan(windowText, strip(span)).present)) {
-                status = "grounded";
-                reason = "evidence-verified";
-              } else if (spans.some((span) => verifySourceSpan(strip(read.text), strip(span)).present)) {
-                status = "unverified";
-                reason = "evidence-location-mismatch";
-              } else {
-                status = "refuted";
-                reason = "evidence-mismatch";
-              }
-            }
-          }
-        }
+        decisions.push({
+          kind,
+          ...(await decideSourceClaim(kind, finding, options.readSource, options.expectedRevision, readBudget, sourceClaimRead)),
+        });
       }
     }
+
+    // #1262: combine the per-kind decisions fail-closed. Tier order
+    // (highest wins): grounded > unverified > refuted > unsupported.
+    //   - Verified truth keeps the finding (fail-safe): a finding that
+    //     carries a positively confirmed claim is not demoted because a
+    //     sibling claim was contradicted.
+    //   - Unknown evidence must never be erased by a sibling
+    //     contradiction (#1016, #1262): unverified outranks refuted, and
+    //     the strict verdict mapping keeps an unverified blocker/major
+    //     blocking.
+    //   - A finding every decidable claim of which is positively
+    //     contradicted is refuted and demoted (the unchanged rule).
+    //   - Weakest is a finding with no evidence at all (unsupported).
+    // The reason and the entry kind come from the FIRST decision, in
+    // classification/enumeration order, that carries the winning tier's
+    // status.
+    let winning = decisions[0]!;
+    for (const decision of decisions) {
+      if (groundingTier[decision.status] > groundingTier[winning.status]) winning = decision;
+    }
+    const status = winning.status;
+    const reason = winning.reason;
 
     if (status !== "grounded") {
       finding.grounding_status = status;
@@ -1686,7 +1992,7 @@ export async function applyBlockerVerification(
         demoted += 1;
       }
     }
-    entries.push({ index, status, kind, reason });
+    entries.push({ index, status, kind: winning.kind, reason });
   }
 
   return { findings: entries, demoted };
