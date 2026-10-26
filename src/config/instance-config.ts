@@ -13,10 +13,11 @@
  *   for inline credentials (only opaque *credential references* resolved by
  *   the #735 credential broker), model endpoints are scheme-checked
  *   http/https with no embedded credentials, executor profiles are a closed
- *   `kind` enum with bounded scalars (there is nowhere to put an image,
- *   PodSpec, or host path), and every budget carries a hard ceiling. Unknown
- *   fields are rejected at every level, so a hostile or mistaken key has no
- *   place to land.
+ *   `kind` enum whose backend specs are bounded versioned fields (#733: a
+ *   fixed local argv or an OCI image reference — never a PodSpec, host
+ *   path, or free-form string), and every budget carries a hard ceiling.
+ *   Unknown fields are rejected at every level, so a hostile or mistaken
+ *   key has no place to land.
  * - **Operator policy** is this file — trusted input, validated strictly.
  *   A malformed or invalid instance config must fail closed (a typed error
  *   the controller refuses to start on), never partially apply: silently
@@ -96,12 +97,36 @@ export interface ForgeIntegration {
   readonly credential: string;
 }
 
+/** The `local` executor backend spec (#733): the fixed argv the executor
+ * launches. `command` is a single argv element — never a shell line; the
+ * executor spawns argv-only and there is no `/bin/sh -c` anywhere on this
+ * path — and `args` are the operator's fixed arguments, placed BEFORE the
+ * request-path argument the executor appends. */
+export interface LocalExecutorSpec {
+  readonly command: string;
+  readonly args: readonly string[];
+}
+
+/** The `oci` executor backend spec (#733): the fully-qualified image
+ * reference a container-based executor runs. Name[:tag][@sha256:digest]
+ * only — no volumes, privileges, or env; anything more must arrive as an
+ * explicit versioned schema field (#734), never a free-form string. */
+export interface OciImageSpec {
+  readonly image: string;
+}
+
 export interface ExecutorProfile {
   readonly name: string;
-  /** Closed set. OCI/Kubernetes-specific fields arrive with #733/#734 as a
-   * versioned schema extension — never as free-form specs here. */
+  /** Closed set. Backend specs are the versioned schema fields below
+   * (#733): `local` carries a fixed argv, `oci` an image reference, and
+   * `kubernetes` carries none until #734 lands its versioned spec — never
+   * free-form keys here. */
   readonly kind: "local" | "oci" | "kubernetes";
   readonly maxReviews: number | null;
+  /** The `local` backend spec; non-null only for `kind: "local"`. */
+  readonly local: LocalExecutorSpec | null;
+  /** The `oci` backend spec; non-null only for `kind: "oci"`. */
+  readonly oci: OciImageSpec | null;
 }
 
 export interface EvidenceProfile {
@@ -287,20 +312,82 @@ function validateForgeIntegration(value: unknown, path: string): ForgeIntegratio
   });
 }
 
+/** An OCI image reference: lowercase registry/repo name, optional tag,
+ * optional sha256 digest pin. Bounded and punctuation-disciplined — an
+ * image reference is data for a container runtime, never a command line. */
+const OCI_IMAGE_RE = /^[a-z0-9][a-z0-9._/-]*(?::[a-z0-9._-]+)?(@sha256:[0-9a-f]{64})?$/;
+const MAX_IMAGE_CHARS = 512;
+
+/** Shell metacharacters a local executor command/arg must never contain:
+ * each element is ONE argv word passed to `spawn` without a shell, so
+ * `|;&<>` etc. have no meaning here — their presence means the operator
+ * (or an injection) wrote a shell line where an argv element belongs. */
+const EXECUTOR_ARGV_METACHARS = /[|;&<>`$]/;
+const MAX_LOCAL_EXECUTOR_ARGS = 32;
+
 function validateExecutorProfile(value: unknown, path: string): ExecutorProfile {
   const item = objectAt(value, path);
-  // No image/podSpec/host-path field exists anywhere in this closed set —
-  // that absence IS the #727 hard rule ("never becomes an arbitrary
-  // container image/PodSpec/host path"), and rejectUnknown proves it for
-  // any key an operator (or an injection) might try.
-  rejectUnknown(item, ["name", "kind", "max-reviews"], path);
+  // The closed key set IS the #727 hard rule, now with the #733 versioned
+  // specs: an image lives only inside `oci.image`, an argv only inside
+  // `local.command`/`local.args` — rejectUnknown proves no PodSpec, host
+  // path, or free-form infrastructure key can land anywhere else.
+  rejectUnknown(item, ["name", "kind", "max-reviews", "local", "oci"], path);
   const kind = item.kind;
   if (kind !== "local" && kind !== "oci" && kind !== "kubernetes") fail(`${path}.kind`, "must be 'local', 'oci', or 'kubernetes'");
+  const local = item.local === undefined ? null : validateLocalExecutorSpec(item.local, `${path}.local`);
+  const oci = item.oci === undefined ? null : validateOciImageSpec(item.oci, `${path}.oci`);
+  if (kind === "local") {
+    if (local === null) fail(`${path}.local`, "is required for kind 'local'");
+    if (oci !== null) fail(`${path}.oci`, "must be absent for kind 'local'");
+  } else if (kind === "oci") {
+    if (oci === null) fail(`${path}.oci`, "is required for kind 'oci'");
+    if (local !== null) fail(`${path}.local`, "must be absent for kind 'oci'");
+  } else {
+    // The kubernetes spec arrives with #734 as its own versioned field —
+    // until then a kubernetes profile has nowhere to put infrastructure,
+    // so any spec here fails closed.
+    if (local !== null) fail(`${path}.local`, "must be absent for kind 'kubernetes' (its spec arrives with #734)");
+    if (oci !== null) fail(`${path}.oci`, "must be absent for kind 'kubernetes' (its spec arrives with #734)");
+  }
   return Object.freeze({
     name: profileNameAt(item.name, `${path}.name`),
     kind,
     maxReviews: item["max-reviews"] === undefined ? null : integerAt(item["max-reviews"], `${path}.max-reviews`, 1, MAX_EXECUTOR_MAX_REVIEWS),
+    local,
+    oci,
   });
+}
+
+/** Validate one argv element of a local executor spec: a non-empty,
+ * NUL-free (control characters are refused by `stringAt`), bounded string
+ * with no shell metacharacters — the executor spawns argv-only, so a shell
+ * line here is always a mistake or an injection attempt. */
+function executorArgvElementAt(value: unknown, path: string): string {
+  const text = stringAt(value, path);
+  if (Buffer.byteLength(text, "utf8") > MAX_PATH_BYTES) fail(path, `must be at most ${MAX_PATH_BYTES} bytes`);
+  if (EXECUTOR_ARGV_METACHARS.test(text)) fail(path, "must be a single argv element (no shell metacharacters)");
+  return text;
+}
+
+function validateLocalExecutorSpec(value: unknown, path: string): LocalExecutorSpec {
+  const item = objectAt(value, path);
+  rejectUnknown(item, ["command", "args"], path);
+  const argsRaw = item.args ?? [];
+  if (!Array.isArray(argsRaw)) fail(`${path}.args`, "must be a list of argv strings");
+  if (argsRaw.length > MAX_LOCAL_EXECUTOR_ARGS) fail(`${path}.args`, `must have at most ${MAX_LOCAL_EXECUTOR_ARGS} entries`);
+  return Object.freeze({
+    command: executorArgvElementAt(item.command, `${path}.command`),
+    args: Object.freeze(argsRaw.map((entry, index) => executorArgvElementAt(entry, `${path}.args[${index}]`))) as readonly string[],
+  });
+}
+
+function validateOciImageSpec(value: unknown, path: string): OciImageSpec {
+  const item = objectAt(value, path);
+  rejectUnknown(item, ["image"], path);
+  const image = stringAt(item.image, `${path}.image`);
+  if (image.length > MAX_IMAGE_CHARS) fail(`${path}.image`, `must be at most ${MAX_IMAGE_CHARS} characters`);
+  if (!OCI_IMAGE_RE.test(image)) fail(`${path}.image`, "must be an image reference (name[:tag][@sha256:digest])");
+  return Object.freeze({ image });
 }
 
 function validateEvidenceProfile(value: unknown, path: string): EvidenceProfile {

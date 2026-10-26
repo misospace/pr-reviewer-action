@@ -150,13 +150,180 @@ test("executor profiles are a closed set — an arbitrary image/PodSpec/host pat
   );
   const ok = validate({
     ...baseInstance(),
-    "executor-profiles": [{ name: "default", kind: "oci", "max-reviews": 4 }],
+    "executor-profiles": [{
+      name: "default",
+      kind: "oci",
+      "max-reviews": 4,
+      oci: { image: "ghcr.io/acme/review-worker:1" },
+    }],
     "default-executor-profile": "default",
   });
-  assert.deepEqual({ ...ok.executorProfiles[0]! }, { name: "default", kind: "oci", maxReviews: 4 });
+  assert.deepEqual(
+    { ...ok.executorProfiles[0]! },
+    {
+      name: "default",
+      kind: "oci",
+      maxReviews: 4,
+      local: null,
+      oci: { image: "ghcr.io/acme/review-worker:1" },
+    },
+  );
+  // Specs are frozen at validation.
+  assert.ok(Object.isFrozen(ok.executorProfiles[0]));
+  assert.ok(Object.isFrozen(ok.executorProfiles[0]!.oci));
+  assert.throws(() => {
+    (ok.executorProfiles[0]!.oci as unknown as { image: string }).image = "evil";
+  });
   expectError(
-    { ...baseInstance(), "executor-profiles": [{ name: "default", kind: "oci", "max-reviews": 65 }] },
+    { ...baseInstance(), "executor-profiles": [{ name: "default", kind: "oci", "max-reviews": 65, oci: { image: "ghcr.io/acme/review-worker:1" } }] },
     "must be between 1 and 64",
+  );
+});
+
+test("executor profiles carry exactly one kind-matching backend spec (#733)", () => {
+  const localOk = validate({
+    ...baseInstance(),
+    "executor-profiles": [{
+      name: "local-dev",
+      kind: "local",
+      local: { command: "/usr/local/bin/pr-reviewer-worker", args: ["--worker"] },
+    }],
+  });
+  const profile = localOk.executorProfiles[0]!;
+  assert.equal(profile.kind, "local");
+  assert.deepEqual({ ...profile.local! }, { command: "/usr/local/bin/pr-reviewer-worker", args: ["--worker"] });
+  assert.equal(profile.oci, null);
+  assert.ok(Object.isFrozen(profile.local));
+  assert.ok(Object.isFrozen(profile.local!.args));
+
+  // A `local` kind without its spec fails closed — the executor has
+  // nothing to launch.
+  expectError(
+    { ...baseInstance(), "executor-profiles": [{ name: "default", kind: "local" }] },
+    "is required for kind 'local'",
+  );
+  // ... and never carries both specs.
+  expectError(
+    {
+      ...baseInstance(),
+      "executor-profiles": [{
+        name: "default",
+        kind: "local",
+        local: { command: "worker", args: [] },
+        oci: { image: "ghcr.io/acme/worker:1" },
+      }],
+    },
+    "must be absent for kind 'local'",
+  );
+  expectError(
+    { ...baseInstance(), "executor-profiles": [{ name: "default", kind: "oci", local: { command: "worker", args: [] } }] },
+    "is required for kind 'oci'",
+  );
+  expectError(
+    { ...baseInstance(), "executor-profiles": [{ name: "default", kind: "oci", oci: { image: "ghcr.io/acme/worker:1" }, local: { command: "worker", args: [] } }] },
+    "must be absent for kind 'oci'",
+  );
+  // Kubernetes carries NO spec until #734 lands its versioned schema.
+  const kubernetesOk = validate({
+    ...baseInstance(),
+    "executor-profiles": [{ name: "k8s", kind: "kubernetes" }],
+  });
+  assert.equal(kubernetesOk.executorProfiles[0]!.local, null);
+  assert.equal(kubernetesOk.executorProfiles[0]!.oci, null);
+  expectError(
+    { ...baseInstance(), "executor-profiles": [{ name: "k8s", kind: "kubernetes", local: { command: "worker", args: [] } }] },
+    "must be absent for kind 'kubernetes'",
+  );
+  expectError(
+    { ...baseInstance(), "executor-profiles": [{ name: "k8s", kind: "kubernetes", oci: { image: "ghcr.io/acme/worker:1" } }] },
+    "must be absent for kind 'kubernetes'",
+  );
+});
+
+test("local executor specs are bounded single argv elements, not shell lines", () => {
+  const spec = { command: "worker", args: ["--flag"] };
+  for (const [value, why] of [
+    ["sh -c 'rm -rf /' && echo pwned", "single argv element"],
+    ["worker | exfiltrate", "single argv element"],
+    ["worker > /etc/passwd", "single argv element"],
+    ["worker; evil", "single argv element"],
+    ["worker < input", "single argv element"],
+    ["worker `cmd`", "single argv element"],
+    ["worker $HOME", "single argv element"],
+    ["", "non-empty string"],
+  ] as const) {
+    expectError(
+      { ...baseInstance(), "executor-profiles": [{ name: "default", kind: "local", local: { ...spec, command: value } }] },
+      why,
+    );
+    expectError(
+      { ...baseInstance(), "executor-profiles": [{ name: "default", kind: "local", local: { ...spec, args: [value] } }] },
+      why,
+    );
+  }
+  // NUL is a control character and is refused like any other.
+  expectError(
+    { ...baseInstance(), "executor-profiles": [{ name: "default", kind: "local", local: { ...spec, command: "bad\u0000cmd" } }] },
+    "control characters",
+  );
+  expectError(
+    {
+      ...baseInstance(),
+      "executor-profiles": [{
+        name: "default",
+        kind: "local",
+        local: { command: "worker", args: Array.from({ length: 33 }, (_, i) => `arg-${i}`) },
+      }],
+    },
+    "must have at most 32 entries",
+  );
+  // Unknown keys inside a spec are rejected like everywhere else.
+  expectError(
+    {
+      ...baseInstance(),
+      "executor-profiles": [{
+        name: "default",
+        kind: "local",
+        local: { command: "worker", args: [], hostPath: "/etc" },
+      }],
+    },
+    "unsupported field 'hostPath'",
+  );
+});
+
+test("oci executor specs accept only bounded image references", () => {
+  for (const image of [
+    "ghcr.io/acme/review-worker:1",
+    "review-worker",
+    "team/worker@sha256:" + "a".repeat(64),
+  ]) {
+    const ok = validate({
+      ...baseInstance(),
+      "executor-profiles": [{ name: "default", kind: "oci", oci: { image } }],
+    });
+    assert.equal(ok.executorProfiles[0]!.oci!.image, image);
+  }
+  for (const [image, why] of [
+    ["GHCR.io/acme/worker", "must be an image reference"],
+    ["acme/worker:latest extra", "must be an image reference"],
+    ["acme/worker:Bad_Tag", "must be an image reference"],
+    // The bounded v1 grammar keeps registry ports out; #734 may widen it
+    // as a versioned change, never by loosening in place.
+    ["registry.internal:5000/team/worker", "must be an image reference"],
+    ["", "non-empty string"],
+  ] as const) {
+    expectError(
+      { ...baseInstance(), "executor-profiles": [{ name: "default", kind: "oci", oci: { image } }] },
+      why,
+    );
+  }
+  expectError(
+    { ...baseInstance(), "executor-profiles": [{ name: "default", kind: "oci", oci: { image: `ghcr.io/a/${"x".repeat(600)}` } }] },
+    "must be at most 512 characters",
+  );
+  expectError(
+    { ...baseInstance(), "executor-profiles": [{ name: "default", kind: "oci", oci: { image: "acme/worker", tag: "1" } }] },
+    "unsupported field 'tag'",
   );
 });
 

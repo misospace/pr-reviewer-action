@@ -22,7 +22,11 @@ function instance(overrides: Record<string, unknown> = {}): InstanceConfig {
         { name: "strong", endpoint: "http://model.internal:4001", "api-format": "anthropic", credential: "ref-b" },
       ],
       "default-model-profile": "fast",
-      "executor-profiles": [{ name: "default", kind: "local" }],
+      "executor-profiles": [{
+        name: "default",
+        kind: "local",
+        local: { command: "node", args: ["worker.mjs"] },
+      }],
       "default-executor-profile": "default",
       ...overrides,
     },
