@@ -299,7 +299,6 @@ test("a message-less builder rejection falls back to the executor-error category
 });
 
 test("a collect rejection maps to a failed outcome carrying the message as category", async () => {
-  const request = makeRequest("job-a", 1);
   const { adapter } = adapterOver(
     async () => ({
       observe: async () => Object.freeze({ phase: "running" as const, status: "" as const, observedAtMs: 0 }),
