@@ -1115,13 +1115,23 @@ test("#1249: the body-only fallback appends a BOUNDED summary for a hostile find
   const api = new MockPublishApi();
   api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" } }];
   api.reviewResults = [{ ok: false }, { ok: true }];
-  const hostile = [{ file: "p".repeat(5000), line: 2, severity: "major", message: "m".repeat(5000) }];
+  // The first finding is ANCHORABLE (a.ts:2 is in the diff), so the rejected
+  // commit-bound batch really does carry an inline comment — the anchor-race
+  // scenario. The second is un-anchorable and carries the over-long path no
+  // producer bounds. Both messages exceed the summary's 300-char cap.
+  const hostile = [
+    { file: "a.ts", line: 2, severity: "major", message: "m".repeat(2000) },
+    { file: "p".repeat(5000), line: 2, severity: "major", message: "m".repeat(5000) },
+  ];
   const result = await publishReview(
     input({ mode: "review_verdict", inlineFindings: true, findings: hostile }),
     api,
     { diffText: DIFF },
   );
   assert.equal(result.status, "published");
+  assert.equal(api.submitted.length, 2, "the rejected commit-bound batch falls back body-only");
+  const rejected = api.submitted[0]!;
+  assert.equal(rejected.comments?.length, 1, "the rejected batch carried the anchorable inline finding");
   const plain = api.submitted[1]!;
   assert.ok(plain.body.includes("### Findings"), "the fallback body still carries the findings summary");
   assert.ok(!plain.body.includes("p".repeat(1000)), "the over-long path is not published in full");

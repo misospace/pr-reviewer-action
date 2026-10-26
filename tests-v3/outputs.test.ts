@@ -393,8 +393,9 @@ test("#988: a backtick-bearing location path stays a terminated, inert span", ()
 // payloads below are the boundary itself, not a paraphrase of it: a severity
 // carrying a newline (the per-severity counts ride in a heading line, which
 // is never table-escaped), a severity carrying a raw pipe (which would split
-// the row), and over-long severity/path/message values (which would make the
-// published body unbounded).
+// the row), and over-long severity and path values (neither of which any
+// producer bounds — the message was already capped at 300 before escaping, so
+// the message case below pins that existing bound rather than a new one).
 // ---------------------------------------------------------------------------
 
 /** The first column of a finding row — the severity label, between the row's
