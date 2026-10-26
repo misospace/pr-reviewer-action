@@ -21,10 +21,13 @@
 #     refused too, and nothing is written through it
 #   - with pgrep missing, the default mode fails closed with the
 #     prerequisite error before the downloader ever starts
-#   - the stubs of that scenario start under a PATH that holds no shell
-#     at all, so the bootstrap always reaches the prerequisite check:
-#     every stub that can be started that way carries an absolute
-#     shebang (`#!$BASH_ABS`), never `#!/usr/bin/env bash`
+#   - with no usable dirname on PATH (its own directory must come from
+#     ${BASH_SOURCE[0]}, #1274), setup still roots itself correctly and
+#     completes: the receipt records the real checkout and the stubbed
+#     dirname is never invoked
+#   - when the bootstrap cannot resolve its own directory at all
+#     (BASH_SOURCE unset, e.g. piped execution, #1274), it exits non-zero
+#     with the controlled message and installs nothing
 #
 # Auto-discovered by the CI validate-bash job. Target runtime: seconds.
 set -euo pipefail
@@ -1064,17 +1067,15 @@ check "the launcher was never executed (the refusal came before the exec)" \
 echo ""
 echo "=== bootstrap runtime: missing pgrep fails closed before the downloader starts ==="
 new_sandbox
-# A PATH that contains the stub tools but no pgrep at all: the default
-# mode must refuse with the prerequisite error before any bounded phase,
-# not silently degrade the timeout cleanup to killing only the root.
+# A PATH that contains the stub tools but no pgrep at all -- and no
+# dirname and no shell either: resolving the script's own directory must
+# not depend on either (#1274), or the raw failure would kill the
+# bootstrap here before the prerequisite error this scenario asserts on.
+# The default mode must refuse with that controlled error before any
+# bounded phase, not silently degrade the timeout cleanup to killing
+# only the root.
 NOPGREP_BIN="$SANDBOX/bin-nopgrep"
 mkdir -p "$NOPGREP_BIN"
-real_dirname="$(command -v dirname)"
-cat >"$NOPGREP_BIN/dirname" <<EOF
-#!$BASH_ABS
-exec "$real_dirname" "\$@"
-EOF
-chmod 755 "$NOPGREP_BIN/dirname"
 cat >"$NOPGREP_BIN/sha256sum" <<EOF
 #!$BASH_ABS
 printf '%s\n' '$PINNED_DIGEST'
@@ -1084,12 +1085,6 @@ cat >"$NOPGREP_BIN/curl" <<EOF
 printf downloaded > "$SANDBOX/curl-ran-nopgrep"
 exit 0
 EOF
-# The bootstrap's first act is to call dirname, so a stub that cannot
-# start under this PATH takes the whole scenario down before the
-# prerequisite error it asserts on is ever printed. Guard that here:
-# the scenario is "no pgrep", not "no shell".
-check "the restricted PATH still starts the stub the bootstrap calls first" \
-  "$(PATH="$NOPGREP_BIN" dirname "$BOOTSTRAP" 2>&1)" "$(dirname "$BOOTSTRAP")"
 nopgrep_out="$SANDBOX/nopgrep.out"
 run_bootstrap_bg "$nopgrep_out" "" \
   "MISE_INSTALL_DIR=$INSTALL_DIR" \
@@ -1105,10 +1100,104 @@ nopgrep_body="$(cat "$nopgrep_out")"
 check_contains "failure names the missing process tool" "$nopgrep_body" "pgrep"
 check_contains "failure names the prerequisite, not a degraded timeout" \
   "$nopgrep_body" "procps"
+check_not_contains "failure is controlled, not a raw bash cd error" \
+  "$nopgrep_body" "No such file or directory"
 check "the downloader never ran without pgrep" \
   "$(test -e "$SANDBOX/curl-ran-nopgrep" && printf yes || printf no)" "no"
 check "no launcher was installed without pgrep" \
   "$(test -e "$INSTALL_DIR/mise" && printf yes || printf no)" "no"
+
+echo ""
+echo "=== bootstrap runtime: an unusable dirname on PATH cannot mis-root the bootstrap ==="
+new_sandbox
+# A dirname that shadows the real one and always fails: resolving the
+# script's own directory must not go through dirname(1) (#1274). Under
+# the old `cd "$(dirname ...)"` this stub produced no output, so `cd ""`
+# either silently kept the caller's cwd (bash <= 5.2, mis-rooting setup)
+# or aborted with a raw cd error (bash 5.3+); either way the node-pin
+# check below could not pass with a mis-rooted .mise/config.toml. The
+# stub's log proves the bootstrap never even tries.
+cat >"$BIN/dirname" <<EOF
+#!/usr/bin/env bash
+printf 'called\n' >> "$SANDBOX/dirname-calls.log"
+exit 1
+EOF
+chmod 755 "$BIN/dirname"
+write_stub mise <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "install" ] && [ "$2" = "--locked" ]; then
+  printf 'mise: locked toolchain ready\n'
+fi
+exit 0
+EOF
+write_stub node <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "--version" ]; then
+  printf 'v%s\n' '$NODE_PIN'
+fi
+exit 0
+EOF
+write_stub npm <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "ci" ]; then
+  printf 'added 128 packages in 1s\n'
+fi
+exit 0
+EOF
+nodirname_out="$SANDBOX/no-dirname.out"
+run_bootstrap_bg "$nodirname_out" setup \
+  "BOOTSTRAP_MISE=$BIN/mise" \
+  "HOME=$SANDBOX/home" \
+  "PATH=$BIN:/usr/bin:/bin"
+if wait_exited_or_deadline 20; then
+  check "setup mode exits 0 with an unusable dirname on PATH" "$BOOTSTRAP_RC" "0"
+else
+  check "setup mode exits 0 with an unusable dirname on PATH" "timed-out" "0"
+fi
+reap_bootstrap
+nodirname_body="$(cat "$nodirname_out")"
+check_contains "setup with an unusable dirname reaches its receipt" \
+  "$nodirname_body" "Setup complete in"
+check_contains "the receipt records the correctly rooted checkout" \
+  "$nodirname_body" "  repo       $ROOT_DIR"
+check_contains "the receipt names the launcher directory it derived itself" \
+  "$nodirname_body" "($BIN/mise)"
+check "the unusable dirname stub was never invoked" \
+  "$(test -e "$SANDBOX/dirname-calls.log" && printf yes || printf no)" "no"
+
+echo ""
+echo "=== bootstrap runtime: an unresolvable own directory fails closed ==="
+new_sandbox
+# The fail-closed half of the ask (#1274): when the bootstrap cannot
+# resolve its own directory at all it must exit non-zero with a
+# controlled message that names the failure, and install neither the
+# launcher nor npm dependencies -- never fall back to the caller's cwd.
+# Executed through stdin, which leaves BASH_SOURCE unset; the sandbox
+# PATH is empty, so a pre-fix fallback to the caller's cwd could not
+# silently "work" either.
+unresolvable_out="$SANDBOX/unresolvable.out"
+env "HOME=$SANDBOX/home" "PATH=$BIN" "${BASH:-bash}" -s \
+  <"$BOOTSTRAP" >"$unresolvable_out" 2>&1 &
+BOOTSTRAP_PID=$!
+if wait_exited_or_deadline 20; then
+  check_ne "bootstrap exits non-zero when its own directory cannot be resolved" \
+    "$BOOTSTRAP_RC" "0"
+else
+  check_ne "bootstrap exits non-zero when its own directory cannot be resolved" \
+    "timed-out" "0"
+fi
+reap_bootstrap
+unresolvable_body="$(cat "$unresolvable_out")"
+check_contains "failure is the controlled message, prefixed by the bootstrap" \
+  "$unresolvable_body" "bootstrap: cannot resolve the directory containing this script"
+check_not_contains "failure is controlled, not a raw unbound-variable abort" \
+  "$unresolvable_body" "unbound variable"
+check_not_contains "failure is controlled, not a raw bash cd error" \
+  "$unresolvable_body" "No such file or directory"
+check "no launcher was installed when the directory cannot be resolved" \
+  "$(test -e "$INSTALL_DIR/mise" && printf yes || printf no)" "no"
+check_not_contains "the receipt was never reached (no setup completion)" \
+  "$unresolvable_body" "Setup complete in"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
