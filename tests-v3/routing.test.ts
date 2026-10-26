@@ -142,7 +142,11 @@ test("tier profiles bind model defaults, retry/stream settings, and request shap
   assert.equal(configured.smart.resolved, true);
   assert.equal(configured.smart.apiFormat, "anthropic");
   assert.equal(configured.fallback.resolved, true);
-  assert.equal(configured.fallback.stream, false);
+  // #1251: raw-env parity with the config loader — unset ai-fallback-stream
+  // inherits ai-stream ("${AI_FALLBACK_STREAM:-$AI_STREAM}" in v2 config.sh).
+  assert.equal(configured.fallback.stream, true);
+  assert.equal(resolveTierProfiles({ AI_BASE_URL: "p", AI_MODEL: "m", AI_FALLBACK_BASE_URL: "f", AI_FALLBACK_MODEL: "fm", AI_STREAM: "true", AI_FALLBACK_STREAM: "false" }).fallback.stream, false);
+  assert.equal(resolveTierProfiles({ AI_BASE_URL: "p", AI_MODEL: "m", AI_FALLBACK_BASE_URL: "f", AI_FALLBACK_MODEL: "fm" }).fallback.stream, true, "unset ai-stream inherits its own true default");
   assert.equal(configured.fallback.retries, 2);
   assert.equal(configured.smart.retries, 2);
   assert.equal(tierRequestShape("primary", { PRIMARY_REQUEST_SHAPE: "trailing_task" }), "trailing_task");
@@ -150,6 +154,26 @@ test("tier profiles bind model defaults, retry/stream settings, and request shap
   assert.equal(tierRequestShape("smart", { SMART_REQUEST_SHAPE: "trailing_task" }), "trailing_task");
   assert.equal(tierRequestShape("fallback", { SMART_REQUEST_SHAPE: "trailing_task" }), "default");
   assert.equal(tierRequestShape("smart", { SMART_REQUEST_SHAPE: "unknown" }), "default");
+});
+
+test("#1251: the fallback lane's raw-env inheritance mirrors the config loader's resolveInherited", () => {
+  // Only base inputs: the fallback endpoint (url/format/key) and stream
+  // inherit the base, but the base model never becomes the fallback model,
+  // so the lane stays unresolved until ai-fallback-model is configured.
+  const base = resolveTierProfiles({ AI_BASE_URL: "https://b", AI_API_FORMAT: "anthropic", AI_API_KEY: "k", AI_MODEL: "m", AI_STREAM: "true" });
+  assert.equal(base.fallback.baseUrl, "https://b");
+  assert.equal(base.fallback.apiFormat, "anthropic");
+  assert.equal(base.fallback.apiKey, "k");
+  assert.equal(base.fallback.stream, true);
+  assert.equal(base.fallback.model, "");
+  assert.equal(base.fallback.resolved, false);
+  // Explicit fallback values win over the base; an empty-string override
+  // counts as unset and inherits, like `inherit()` in load-config.ts.
+  const explicit = resolveTierProfiles({ AI_BASE_URL: "https://b", AI_API_KEY: "k", AI_FALLBACK_BASE_URL: "https://f", AI_FALLBACK_API_KEY: "fk", AI_FALLBACK_MODEL: "fm" });
+  assert.equal(explicit.fallback.baseUrl, "https://f");
+  assert.equal(explicit.fallback.apiKey, "fk");
+  assert.equal(explicit.fallback.resolved, true);
+  assert.equal(resolveTierProfiles({ AI_BASE_URL: "https://b", AI_API_KEY: "k", AI_FALLBACK_BASE_URL: "", AI_FALLBACK_MODEL: "fm" }).fallback.baseUrl, "https://b");
 });
 
 test("#1009: tierResponseFormat inherits the base setting when the lane override is empty", () => {
