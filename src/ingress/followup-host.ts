@@ -215,7 +215,15 @@ export function createFollowUpConsumer(options: FollowUpConsumerOptions): Follow
           let prId = rereviewEvent.prId;
           let baseSha = rereviewEvent.baseSha;
           if (prId === 0 || baseSha === "") {
-            const identity = await adapter.resolvePrIdentity?.(repoFullName, prNumber).catch(() => null);
+            // try/catch (not `.catch`) so a non-compliant adapter that throws
+            // SYNCHRONOUSLY is absorbed exactly like a rejection — a failed
+            // read must only lose the cross-trigger dedupe, never refuse.
+            let identity: { prId: number; baseSha: string } | null | undefined;
+            try {
+              identity = await adapter.resolvePrIdentity?.(repoFullName, prNumber);
+            } catch {
+              identity = null;
+            }
             if (identity !== null && identity !== undefined) {
               if (prId === 0 && Number.isSafeInteger(identity.prId) && identity.prId >= 0) prId = identity.prId;
               const hydratedBase = identity.baseSha.trim().toLowerCase();
