@@ -13,6 +13,7 @@ import {
   fingerprintsMatch,
 } from "./fingerprint.js";
 import { parseMetadata } from "./metadata.js";
+import { decideAuthorityFromPayload } from "./comment-authority.js";
 import { isIncompleteReason } from "../publish/outputs.js";
 import { isNativeVerdictMode } from "../publish/publish.js";
 import { buildSelectionSignature } from "./selection.js";
@@ -160,30 +161,6 @@ export function commentBodyTriggersCommentCommand(body: string, command: string)
   const rest = trimmed.slice(command.length);
   return rest.trimEnd() === "";
 }
-
-/** #914: the repository permission levels that authorize a comment-command
- * re-review — the `permission` field of the collaborator-permission API at
- * triage-or-higher: `write`/`maintain`/`admin` on GitHub, `write`/`admin`/
- * `owner` on Forgejo. A GitHub `triage` user arrives as `permission:
- * "read"` (the API collapses maintain→write and triage→read in the legacy
- * `permission` field), so the un-collapsed `role_name` is the second signal;
- * anything else (`read`, `none`, or an unrecognized value) fails closed. */
-const COMMENT_COMMAND_AUTHORIZED_PERMISSIONS: ReadonlySet<string> = new Set([
-  "admin",
-  "maintain",
-  "write",
-  "triage",
-  "owner",
-]);
-
-/** #914: `role_name` values that prove triage-or-higher when the collapsed
- * legacy `permission` says `read`. Custom roles are deliberately NOT
- * authorized here — an unrecognizable role cannot prove the bar. */
-const COMMENT_COMMAND_AUTHORIZED_ROLE_NAMES: ReadonlySet<string> = new Set([
-  "triage",
-  "triage_plus",
-]);
-
 
 export interface PrecheckSpec {
   env: Record<string, string>;
@@ -470,59 +447,23 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
         effectiveForgejoApiUrl,
       );
     }
-    const permissionData = permissionResult.data;
-    const permissionRecord =
-      permissionData !== null && typeof permissionData === "object" && !Array.isArray(permissionData)
-        ? (permissionData as Record<string, unknown>)
-        : undefined;
-    const rawPermission = permissionRecord?.permission;
-    if (typeof rawPermission !== "string") {
-      return platformOutputs(
-        { should_review: "false", skip_reason: "comment-permission-unknown" },
-        resolvedPlatform,
-        effectiveForgejoApiUrl,
-      );
-    }
-    const permission = rawPermission.toLowerCase();
-    // Defense in depth for installation-token semantics: if the response
-    // names its subject, the subject must be the commenter — a response
-    // describing someone else (e.g. an echo of the caller's own permission)
-    // can never authorize, and a subject that is not a well-formed user
-    // object with a string `login` matching the commenter is unverifiable,
-    // so it fails closed the same way (a malformed subject — a bare string,
-    // an array, or an object without a usable login — is no proof of
-    // anything). A subject-less response (allowed by the schema) passes
-    // through: nothing provable is wrong with it.
-    const subject = permissionRecord?.user;
-    if (subject !== null && subject !== undefined) {
-      const subjectLogin =
-        typeof subject === "object" && !Array.isArray(subject)
-          ? (subject as Record<string, unknown>).login
-          : undefined;
-      if (typeof subjectLogin !== "string" || subjectLogin.toLowerCase() !== commenter.toLowerCase()) {
-        return platformOutputs(
-          { should_review: "false", skip_reason: "comment-permission-unknown" },
-          resolvedPlatform,
-          effectiveForgejoApiUrl,
-        );
-      }
-    }
-    const rawRoleName = permissionRecord?.role_name;
-    const roleName = typeof rawRoleName === "string" ? rawRoleName.toLowerCase() : "";
-    if (COMMENT_COMMAND_AUTHORIZED_PERMISSIONS.has(permission)) {
-      // write-or-higher on either forge (and uncollapsed triage/maintain
-      // values where a server still returns them).
-    } else if (permission === "read" && COMMENT_COMMAND_AUTHORIZED_ROLE_NAMES.has(roleName)) {
-      // GitHub's collapsed shape for a triage user: permission "read",
-      // role_name "triage". Only the role name can prove the bar.
-    } else if (permission === "read" || permission === "none") {
+    // Parse the collaborator-permission payload and apply the shared
+    // triage-or-higher authority rule (#914) through the ONE predicate the
+    // conversational follow-up planner (#763) also uses, so the two
+    // comment-driven review paths can never drift. A missing/non-string
+    // permission, a subject naming someone other than the commenter (e.g. an
+    // echo of the caller's own permission), an unusable subject, or an
+    // unrecognized permission value all read as `unknown` and fail closed;
+    // only a proven read/none reads as `unauthorized`.
+    const authority = decideAuthorityFromPayload(permissionResult.data, commenter);
+    if (authority === "unauthorized") {
       return platformOutputs(
         { should_review: "false", skip_reason: "comment-unauthorized" },
         resolvedPlatform,
         effectiveForgejoApiUrl,
       );
-    } else {
-      // Unrecognized permission value → fail closed.
+    }
+    if (authority !== "authorized") {
       return platformOutputs(
         { should_review: "false", skip_reason: "comment-permission-unknown" },
         resolvedPlatform,
