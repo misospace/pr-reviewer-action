@@ -70,10 +70,13 @@ model-profiles:                       # required, >= 1
       output-per-million: 1.5
       currency: USD
 default-model-profile: local-fast
-executor-profiles:                    # optional; closed kind set, no specs
+executor-profiles:                    # optional; closed kind set, per-kind spec (#733)
   - name: default
     kind: local                       # local | oci | kubernetes
     max-reviews: 4
+    local:                            # required for kind: local
+      command: /usr/local/bin/pr-reviewer-worker
+      args: ["--worker"]              # argv elements, never a shell string
 default-executor-profile: default
 evidence-profiles:                    # optional; named operator-owned provider sets
   - name: strict
