@@ -13,7 +13,7 @@ import {
 import { applyVerdictPolicy, applyStrictVerdictPolicy, capCiOnlyFindings, parseNonBlockingCategories, relaxCiOnlyVerdict, securityRiskFlagged } from "../src/enforcement/verdict-policy.js";
 import { capCiEvidenceFindings, parseCiCheckNames } from "../src/enforcement/ci-evidence.js";
 import { enforcementView, prepareThreads, renderReviewThreads } from "../src/context/review-threads.js";
-import { applyRequiredCheckValidation, CHECK_CONCEPTS, validateReview } from "../src/enforcement/completeness.js";
+import { applyRequiredCheckValidation } from "../src/enforcement/completeness.js";
 import { applyReviewThreadEnforcement, evidenceCitesCode } from "../src/enforcement/threads.js";
 import { applyHumanReviewEnforcement, inlineCode } from "../src/enforcement/human-reviews.js";
 import {
@@ -400,16 +400,12 @@ test("required-check validation none, structured complete, warn/fail/metadata an
   assert.equal(invalidMode.mode, "warn");
 });
 
-test("required-check structured key absent or unusable is unresolved; legacy keyword oracle remains available", () => {
+test("required-check structured key absent or unusable is unresolved; no keyword fallback (#1252)", () => {
   for (const a of [artifact(), artifact({ required_check_dispositions: "bad" })]) {
     const result = applyRequiredCheckValidation(a, { enabled: "true", mode: "metadata_only", mustCheck: ["run full test suite after upgrade"] });
     assert.equal(result.status, "incomplete");
     assert.equal((result.result.checks as any[])[0].reason, "no-structured-dispositions");
   }
-  for (const [concept, keywords] of Object.entries(CHECK_CONCEPTS)) {
-    assert.equal(validateReview([concept], keywords.join(" / ")).validated, true, concept);
-  }
-  assert.equal(validateReview(["audit repository configuration carefully"], "repository configuration was checked").validated, true);
 });
 
 test("thread settlement handles no rows, missing/fixed evidence, and retained valid dispositions", () => {

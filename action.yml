@@ -162,7 +162,7 @@ inputs:
     required: false
     default: "20"
   validate-required-checks:
-    description: "Whether to validate the final review against the classifier's must_check items. 'auto' (default) validates whenever must_check is non-empty; 'true' and 'false' force it on or off. Since #750, validation is structured-first: when the verdict carries required_check_dispositions, each deterministic check must be dispositioned satisfied, grounded not_applicable, or unresolved; the legacy keyword match applies only when the model emitted no structured dispositions at all."
+    description: "Whether to validate the final review against the classifier's must_check items. 'auto' (default) validates whenever must_check is non-empty; 'true' and 'false' force it on or off. Since #750, validation is structured-first: the verdict's required_check_dispositions are folded against the deterministic check list, and a verdict carrying no usable dispositions leaves every check conservatively unresolved. The legacy v2 keyword match was removed (#1252); no keyword mention can substitute for a missing or malformed disposition."
     required: false
     default: "auto"
   required-check-validation-mode:
