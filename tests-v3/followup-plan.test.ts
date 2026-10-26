@@ -78,6 +78,7 @@ function deps(overrides: Partial<FollowUpPlanDeps> = {}): FollowUpPlanDeps {
     readPermission: async () => ALLOW,
     rateLimitStore: new InMemoryRateLimitStore(),
     fetchThreadComments: async () => [],
+    readPrState: async () => ({ state: "open", draft: "not-draft" }),
     ...overrides,
   };
 }
@@ -291,4 +292,74 @@ test("the Action event and the operator canonical event produce the SAME answer"
   assert.ok(fromGitHub.action === "answer" && fromForgejo.action === "answer");
   assert.equal(fromGitHub.prompt, fromForgejo.prompt, "adapter-local payload differences must not leak into the shared prompt");
   assert.equal(fromGitHub.inReplyToCommentId, fromForgejo.inReplyToCommentId);
+});
+
+// #1298: the PR-state gate mirrors the shipped comment-command refusals
+// (`comment-pr-closed` / `comment-pr-draft`) for the Q&A lane: a closed/merged
+// or draft PR spends no model work and posts no reply, on EITHER host, from a
+// capability reading — never a payload sniff.
+test("#1298: a question on a closed PR is ignored and consumes no budget", async () => {
+  const store = new InMemoryRateLimitStore();
+  let threadFetched = false;
+  const plan = await planFollowUp(
+    { event: ghEvent("@reviewer-bot still relevant?"), body: "@reviewer-bot still relevant?" },
+    deps({ rateLimitStore: store, readPrState: async () => ({ state: "closed", draft: "not-draft" }), fetchThreadComments: async () => { threadFetched = true; return []; } }),
+    CONFIG,
+  );
+  assert.deepEqual(plan, { action: "ignore", reason: "pr-closed" });
+  assert.equal(store.countInWindow("pr:github:o/r#7", 60_000, 1_000_000), 0, "a dead lane consumes no Q&A budget");
+  assert.equal(threadFetched, false, "a refused question builds no answer context");
+});
+
+test("#1298: a question on a draft PR is ignored", async () => {
+  const plan = await planFollowUp(
+    { event: ghEvent("@reviewer-bot thoughts?"), body: "@reviewer-bot thoughts?" },
+    deps({ readPrState: async () => ({ state: "open", draft: "draft" }) }),
+    CONFIG,
+  );
+  assert.deepEqual(plan, { action: "ignore", reason: "pr-draft" });
+});
+
+test("#1298: an unproven PR state fails closed — no answer on uncertainty", async () => {
+  const cases: Array<() => Promise<{ state: "open" | "closed" | "unknown"; draft: "draft" | "not-draft" | "unknown" }>> = [
+    async () => ({ state: "unknown", draft: "unknown" }),
+    async () => ({ state: "open", draft: "unknown" }),
+    async () => { throw new Error("pr lookup failed"); },
+  ];
+  for (const readPrState of cases) {
+    const plan = await planFollowUp(
+      { event: ghEvent("@reviewer-bot ping"), body: "@reviewer-bot ping" },
+      deps({ readPrState }),
+      CONFIG,
+    );
+    assert.deepEqual(plan, { action: "ignore", reason: "pr-state-unknown" });
+  }
+});
+
+test("#1298: the gate runs only for questions — never before authority, never for a re-review", async () => {
+  let stateReads = 0;
+  const counting = async () => { stateReads += 1; return { state: "closed" as const, draft: "not-draft" as const }; };
+  // Unauthorized: refused on authority, the state is never consulted.
+  const unauthorized = await planFollowUp(
+    { event: ghEvent("@reviewer-bot hello"), body: "@reviewer-bot hello" },
+    deps({ readPermission: async () => ({ permission: "read", roleName: "", subject: "absent" }), readPrState: counting }),
+    CONFIG,
+  );
+  assert.deepEqual(unauthorized, { action: "ignore", reason: "unauthorized" });
+  // Unaddressed comment: intent guard outranks everything, no state read.
+  const unaddressed = await planFollowUp(
+    { event: ghEvent("looks fine"), body: "looks fine" },
+    deps({ readPrState: counting }),
+    CONFIG,
+  );
+  assert.deepEqual(unaddressed, { action: "ignore", reason: "not-addressed" });
+  // Explicit re-review: its admission stays the review pipeline's own (#1294),
+  // so even a closed PR's command hands back unchanged, without a state read.
+  const rereview = await planFollowUp(
+    { event: ghEvent("/ai-review"), body: "/ai-review" },
+    deps({ readPrState: counting }),
+    CONFIG,
+  );
+  assert.deepEqual(rereview, { action: "rereview" });
+  assert.equal(stateReads, 0, "only a planned question reaches the PR-state gate");
 });

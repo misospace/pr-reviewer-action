@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { ForgejoAdapter } from "../src/platform/forgejo.js";
 import { GitHubAdapter } from "../src/platform/github.js";
 import { PlatformRequestError, requestText } from "../src/platform/http.js";
-import { deriveIsFork } from "../src/platform/pr.js";
+import { deriveIsFork, derivePrStateReading } from "../src/platform/pr.js";
 import { resolvePlatform, type ResolvedPlatform } from "../src/platform/resolve.js";
 import type { PlatformAdapter } from "../src/platform/types.js";
 import type { PublishPlatformName } from "../src/platform/publish-api.js";
@@ -225,6 +225,25 @@ test("deriveIsFork treats unknown origins as forks", () => {
   assert.equal(deriveIsFork({}), true);
   assert.equal(deriveIsFork(null), true);
   assert.equal(deriveIsFork({ head: { sha: "h" } }), true, "missing head repo must fail closed");
+});
+
+// ── PR-state derivation (#1298) ──────────────────────────────────────────
+
+test("derivePrStateReading mirrors the comment-command gate and fails closed on non-objects", () => {
+  // A merged PR reports `closed` on both forges; casing must not dodge it.
+  assert.deepEqual(derivePrStateReading({ state: "closed", draft: false }), { state: "closed", draft: "not-draft" });
+  assert.equal(derivePrStateReading({ state: "CLOSED", draft: false }).state, "closed");
+  assert.deepEqual(derivePrStateReading({ state: "open", draft: true }), { state: "open", draft: "draft" });
+  // A fetched object without a usable `state` reads open (the pulls API
+  // always supplies one — same as the decide.ts gate); draft stays strict:
+  // only an explicit boolean is authoritative.
+  assert.deepEqual(derivePrStateReading({}), { state: "open", draft: "unknown" });
+  assert.equal(derivePrStateReading({ state: 7, draft: false }).state, "open");
+  assert.equal(derivePrStateReading({ state: "open", draft: "true" }).draft, "unknown", "a string draft is not authoritative");
+  // A failed lookup (null) or a hostile non-object proves NOTHING.
+  assert.deepEqual(derivePrStateReading(null), { state: "unknown", draft: "unknown" });
+  assert.deepEqual(derivePrStateReading("closed"), { state: "unknown", draft: "unknown" });
+  assert.deepEqual(derivePrStateReading([{ state: "closed" }]), { state: "unknown", draft: "unknown" });
 });
 
 // ── Forgejo adapter behaviors ────────────────────────────────────────────

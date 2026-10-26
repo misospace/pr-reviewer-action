@@ -21,6 +21,7 @@ import {
   type CanonicalForgeEvent,
 } from "../src/events/index.js";
 import type { AuthorityReading } from "../src/precheck/comment-authority.js";
+import type { PrStateReading } from "../src/platform/pr.js";
 import type { ReviewJob } from "../src/jobs/types.js";
 
 // #1294: the SELF-HOSTED OPERATOR-mode consumer host for canonical
@@ -75,6 +76,7 @@ interface AdapterCalls {
   readPermission: string[];
   readComment: [string, string][];
   fetchThreadComments: number;
+  readPrState: [string, number][];
   latestManagedReview: number;
   prLastEditedAt: number;
   postComment: string[];
@@ -90,6 +92,10 @@ interface AdapterFixtureOptions {
   threadComments?: readonly unknown[];
   managedReview?: string;
   prLastEditedAt?: string | null;
+  /** The PR-state reading the adapter reports (#1298 gate); defaults to
+   * open + non-draft so the existing fixtures stay answerable. */
+  prState?: PrStateReading;
+  prStateThrows?: boolean;
   postCommentOk?: boolean;
   postCommentThrows?: boolean;
   resolveHeadSha?: string | null;
@@ -110,6 +116,7 @@ function makeAdapter(options: AdapterFixtureOptions = {}): {
     readPermission: [],
     readComment: [],
     fetchThreadComments: 0,
+    readPrState: [],
     latestManagedReview: 0,
     prLastEditedAt: 0,
     postComment: [],
@@ -117,6 +124,7 @@ function makeAdapter(options: AdapterFixtureOptions = {}): {
     resolvePrIdentity: 0,
   };
   const defaultReading: AuthorityReading = { permission: "admin", roleName: "", subject: "absent" };
+  const defaultPrState: PrStateReading = { state: "open", draft: "not-draft" };
   const adapter: FollowUpForgeAdapter = {
     async readPermission(_repoFullName, login) {
       calls.readPermission.push(login);
@@ -131,6 +139,11 @@ function makeAdapter(options: AdapterFixtureOptions = {}): {
     async fetchThreadComments() {
       calls.fetchThreadComments += 1;
       return options.threadComments ?? [];
+    },
+    async readPrState(repoFullName, prNumber) {
+      calls.readPrState.push([repoFullName, prNumber]);
+      if (options.prStateThrows) throw new Error("PR state read failed");
+      return options.prState ?? defaultPrState;
     },
     async latestManagedReview() {
       calls.latestManagedReview += 1;
@@ -224,6 +237,7 @@ test("an authorized question with the body passed is answered and posted exactly
     "the posted body carries the loop-guard marker",
   );
   assert.equal(calls.readComment.length, 0, "a body passed on the request must not re-read the comment");
+  assert.deepEqual(calls.readPrState, [["o/r", 7]], "the open non-draft default passes the gate with one state read");
 });
 
 test("a body-absent event reads the comment through the adapter by its canonical id", async () => {
@@ -244,7 +258,7 @@ test("a body-absent event reads the comment through the adapter by its canonical
   assert.match(prompts[0]!, /why is the cache key installation-scoped/);
 });
 
-test("an unauthorized actor is ignored; answer and post never run", async () => {
+test("an unauthorized actor is ignored; answer, post, and the PR-state read never run", async () => {
   let answerCalls = 0;
   const { adapter, calls } = makeAdapter({
     permission: { permission: "read", roleName: "", subject: "absent" },
@@ -263,6 +277,73 @@ test("an unauthorized actor is ignored; answer and post never run", async () => 
   assert.deepEqual(outcome, { status: "ignored", reason: "unauthorized" });
   assert.equal(answerCalls, 0);
   assert.equal(calls.postComment.length, 0);
+  assert.equal(calls.readPrState.length, 0, "an unauthorized question never reaches the PR-state gate");
+});
+
+test("an authorized question on a closed PR is ignored before the budget: no model, no post, no budget", async () => {
+  const { adapter, calls } = makeAdapter({ prState: { state: "closed", draft: "not-draft" } });
+  let answerCalls = 0;
+  const recorded: string[] = [];
+  const consumer = makeConsumer(adapter, {
+    rateLimitStore: {
+      countInWindow: () => 0,
+      record: (key) => {
+        recorded.push(key);
+      },
+    },
+    answer: async () => {
+      answerCalls += 1;
+      throw new Error("model work must not run on a closed PR");
+    },
+  });
+  const question = "@reviewer-bot why is line 42 a null check?";
+  const outcome = await consumer.handleEvent(commentEvent(question), question);
+  assert.deepEqual(outcome, { status: "ignored", reason: "pr-closed" });
+  assert.equal(answerCalls, 0);
+  assert.equal(calls.postComment.length, 0);
+  assert.equal(calls.fetchThreadComments, 0, "no answer-context read for a dead lane");
+  assert.equal(recorded.length, 0, "the gate runs before the rate budget: nothing is recorded");
+  assert.deepEqual(calls.readPrState, [["o/r", 7]], "the gate read the PR state once, through the adapter");
+});
+
+test("an authorized question on a draft PR is ignored: no model, no post", async () => {
+  const { adapter, calls } = makeAdapter({ prState: { state: "open", draft: "draft" } });
+  let answerCalls = 0;
+  const consumer = makeConsumer(adapter, {
+    answer: async () => {
+      answerCalls += 1;
+      throw new Error("model work must not run on a draft PR");
+    },
+  });
+  const question = "@reviewer-bot what changed in this PR?";
+  const outcome = await consumer.handleEvent(commentEvent(question), question);
+  assert.deepEqual(outcome, { status: "ignored", reason: "pr-draft" });
+  assert.equal(answerCalls, 0);
+  assert.equal(calls.postComment.length, 0);
+  assert.deepEqual(calls.readPrState, [["o/r", 7]]);
+});
+
+test("an unprovable PR state fails closed: no model, no post", async () => {
+  for (const options of [
+    { prState: { state: "unknown", draft: "unknown" } },
+    { prState: { state: "open", draft: "unknown" } },
+    { prStateThrows: true },
+  ] as const) {
+    const { adapter, calls } = makeAdapter(options);
+    let answerCalls = 0;
+    const consumer = makeConsumer(adapter, {
+      answer: async () => {
+        answerCalls += 1;
+        throw new Error("model work must not run on an unproven PR state");
+      },
+    });
+    const question = "@reviewer-bot why?";
+    const outcome = await consumer.handleEvent(commentEvent(question), question);
+    assert.deepEqual(outcome, { status: "ignored", reason: "pr-state-unknown" });
+    assert.equal(answerCalls, 0);
+    assert.equal(calls.postComment.length, 0);
+    assert.equal(calls.readPrState.length, 1, "the state read is attempted once, then fails closed");
+  }
 });
 
 test("an explicit rereview command mints the exact-head review generation and enqueues it once", async () => {
@@ -343,6 +424,27 @@ test("a rereview with an unresolvable head is refused before any ledger reservat
     assert.equal(ledger.addIfAbsentCalls.length, 0, "no generation is minted without a provable exact head");
     assert.equal(ledger.removed.length, 0);
     assert.equal(enqueueCalls, 0);
+  }
+});
+
+test("a rereview command on a closed or draft PR is still handed back; the PR-state seam is never read", async () => {
+  for (const prState of [
+    { state: "closed", draft: "not-draft" },
+    { state: "open", draft: "draft" },
+  ] as const) {
+    const { adapter, calls } = makeAdapter({ resolveHeadSha: RESOLVED_HEAD, prState });
+    const enqueued: ReviewJob[] = [];
+    const consumer = makeConsumer(adapter, {
+      enqueueRereviewJob: async (job) => {
+        enqueued.push(job);
+        return true;
+      },
+    });
+    const outcome = await consumer.handleEvent(commentEvent("/ai-review"), "/ai-review");
+    assert.deepEqual(outcome, { status: "rereview", disposition: "enqueued" });
+    assert.equal(calls.readPrState.length, 0, "the rereview hand-off never reads PR state");
+    assert.equal(calls.postComment.length, 0);
+    assert.equal(enqueued.length, 1);
   }
 });
 
@@ -428,6 +530,7 @@ test("action/operator parity: one event + fixtures yields a byte-identical promp
     readPermission: (login) => adapter.readPermission(event.repoFullName, login),
     rateLimitStore: new InMemoryRateLimitStore(),
     fetchThreadComments: () => adapter.fetchThreadComments(event.repoFullName, event.prNumber),
+    readPrState: () => adapter.readPrState(event.repoFullName, event.prNumber),
     latestManagedReview: () => adapter.latestManagedReview!(event.repoFullName, event.prNumber),
     prLastEditedAt: () => adapter.prLastEditedAt!(event.repoFullName, event.prNumber),
   };

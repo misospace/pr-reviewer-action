@@ -79,12 +79,14 @@ interface AdapterCalls {
   readPermission: string[];
   readComment: [string, string][];
   fetchThreadComments: number;
+  readPrState: number;
   postComment: [string, number, string][];
 }
 /** Recording forge-adapter fake. The actor is AUTHORIZED (an `admin`
  * reading for any login). The seams the QUESTION path must never touch
  * (head resolution, PR identity — the re-review path) THROW, so a routing
- * regression that reaches for them fails loudly. */
+ * regression that reaches for them fails loudly. The PR-state read answers
+ * an OPEN non-draft PR so the #1298 gate passes by default. */
 function makeAdapter(commentBody: string): {
   adapter: FollowUpForgeAdapter;
   calls: AdapterCalls;
@@ -93,6 +95,7 @@ function makeAdapter(commentBody: string): {
     readPermission: [],
     readComment: [],
     fetchThreadComments: 0,
+    readPrState: 0,
     postComment: [],
   };
   const admin: AuthorityReading = { permission: "admin", roleName: "", subject: "absent" };
@@ -108,6 +111,10 @@ function makeAdapter(commentBody: string): {
     async fetchThreadComments() {
       calls.fetchThreadComments += 1;
       return [];
+    },
+    async readPrState(_repoFullName, _prNumber) {
+      calls.readPrState += 1;
+      return { state: "open", draft: "not-draft" };
     },
     async latestManagedReview() {
       return "";
@@ -221,6 +228,7 @@ test("a signed follow_up delivery is consumed end to end by the host — no rout
     "the operator lane reads the comment body by its canonical id",
   );
   assert.equal(calls.postComment.length, 1, "exactly one posted reply");
+  assert.equal(calls.readPrState, 1, "the PR-state gate read the PR exactly once");
   assert.ok(
     calls.postComment[0]![2].startsWith(FOLLOWUP_REPLY_MARKER),
     "the posted body is the marker-stamped rendered reply",

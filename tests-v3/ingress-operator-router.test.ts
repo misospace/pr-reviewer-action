@@ -18,6 +18,7 @@ import { normalizeForgejoEvent, type CanonicalForgeEvent } from "../src/events/i
 import { FOLLOWUP_REPLY_MARKER } from "../src/followup/classify.js";
 import { InMemoryRateLimitStore } from "../src/followup/rate-limit.js";
 import type { AuthorityReading } from "../src/precheck/comment-authority.js";
+import type { PrStateReading } from "../src/platform/pr.js";
 
 // #1299: the operator-mode event router — the PRODUCTION BINDING that makes
 // the self-hosted operator CONSUME the canonical `follow_up` event instead of
@@ -113,13 +114,16 @@ interface AdapterCalls {
   readPermission: string[];
   readComment: [string, string][];
   fetchThreadComments: number;
+  readPrState: [string, number][];
   postComment: [string, number, string][];
 }
 
 /** Recording forge-adapter fake. The seams the QUESTION path must never
  * touch (head resolution, PR identity — the re-review path) THROW, so a
- * routing regression that reaches for them fails loudly. */
-function makeAdapter(commentBody: string): {
+ * routing regression that reaches for them fails loudly. The PR-state
+ * reading defaults to open + non-draft so the question path stays
+ * answerable. */
+function makeAdapter(commentBody: string, prState: PrStateReading = { state: "open", draft: "not-draft" }): {
   adapter: FollowUpForgeAdapter;
   calls: AdapterCalls;
 } {
@@ -127,6 +131,7 @@ function makeAdapter(commentBody: string): {
     readPermission: [],
     readComment: [],
     fetchThreadComments: 0,
+    readPrState: [],
     postComment: [],
   };
   const admin: AuthorityReading = { permission: "admin", roleName: "", subject: "absent" };
@@ -142,6 +147,10 @@ function makeAdapter(commentBody: string): {
     async fetchThreadComments() {
       calls.fetchThreadComments += 1;
       return [];
+    },
+    async readPrState(repoFullName, prNumber) {
+      calls.readPrState.push([repoFullName, prNumber]);
+      return prState;
     },
     async latestManagedReview() {
       return "";
@@ -255,6 +264,28 @@ test("a canonical follow_up event reaches the follow-up consumer: one answer, on
   );
   assert.deepEqual(calls.postComment[0]!.slice(0, 2), ["org/repo", 7]);
   assert.equal(dispatched.length, 0, "a follow-up never reaches the review scheduler");
+});
+
+test("a closed-PR follow_up is reported as the consumer's own ignore outcome; the router invents no policy", async () => {
+  const { adapter, calls } = makeAdapter(QUESTION, { state: "closed", draft: "not-draft" });
+  const dispatched: CanonicalForgeEvent[] = [];
+  const router = createOperatorEventRouter({
+    followUp: makeFollowUpOptions(adapter),
+    dispatch: (event) => {
+      dispatched.push(event);
+    },
+  });
+
+  const outcome = await router.handleEvent(followUpEvent(QUESTION));
+
+  assert.deepEqual(outcome, { kind: "follow-up", outcome: { status: "ignored", reason: "pr-closed" } });
+  assert.equal(calls.postComment.length, 0, "no reply for a dead lane");
+  assert.deepEqual(
+    calls.readPrState,
+    [["org/repo", 7]],
+    "the gate read the PR state once, through the injected capability with the event's coordinates",
+  );
+  assert.equal(dispatched.length, 0, "an ignored follow-up never reaches the review scheduler");
 });
 
 test("a non-follow-up canonical event goes to dispatch and never to the follow-up consumer", async () => {

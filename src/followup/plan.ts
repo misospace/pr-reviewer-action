@@ -11,9 +11,15 @@
  *   4. explicit re-review   — handed straight back to the NORMAL review
  *                             pipeline (its own admission/dedup); never a
  *                             second reviewer, never a verdict here.
- *   5. rate gate (Q&A only) — per-PR and per-actor-within-PR budgets for
+ *   5. PR-state gate (Q&A)  — a closed/merged or draft PR gets no answer
+ *                             (#1298): mirrors the shipped `comment-pr-closed`
+ *                             / `comment-pr-draft` comment-command gates
+ *                             (#961) on a parity-safe capability read; an
+ *                             unproven state fails closed. Runs BEFORE the
+ *                             rate budget so dead lanes consume nothing.
+ *   6. rate gate (Q&A only) — per-PR and per-actor-within-PR budgets for
  *                             open-ended questions, recorded atomically.
- *   6. answer               — a bounded discussion prompt.
+ *   7. answer               — a bounded discussion prompt.
  *
  * The authority gate mirrors but does NOT replace the review pipeline's own
  * gates: a re-review still runs precheck admission, exact-head checks,
@@ -29,6 +35,7 @@
 
 import { classifyCommentAuthority, type AuthorityReading } from "../precheck/comment-authority.js";
 import type { CanonicalForgeEvent } from "../events/types.js";
+import type { PrStateReading } from "../platform/pr.js";
 import { classifyFollowUpComment } from "./classify.js";
 import {
   consumeFollowUpBudget,
@@ -88,6 +95,12 @@ export interface FollowUpPlanDeps {
   latestManagedReview?: () => Promise<string>;
   /** The PR description's last-edit instant (superseded-discussion labeling). */
   prLastEditedAt?: () => Promise<string | null>;
+  /** The PR's open/closed + draft state through a parity-safe forge
+   * capability (#1298) — a canonical `PrStateReading`, never a payload
+   * sniff. REQUIRED: the closed/draft gate is policy, not context, so a host
+   * that cannot read PR state must say so at the type, not silently skip the
+   * gate. A throw or an `unknown` half fails closed (`pr-state-unknown`). */
+  readPrState: () => Promise<PrStateReading>;
 }
 
 export interface FollowUpPlanRequest {
@@ -160,7 +173,28 @@ export async function planFollowUp(
   // command. Authority was already proven above.
   if (classification.intent === "rereview") return { action: "rereview" };
 
-  // 5. Question rate gate — the open-ended, spam-able model work is bounded
+  // 5. PR-state gate (Q&A only, #1298) — a closed/merged or draft PR gets no
+  // answer: the same deterministic states the shipped `/ai-review` comment
+  // command refuses on (`comment-pr-closed` / `comment-pr-draft`, #961). The
+  // state arrives as a parity-safe capability reading (GitHub's comment
+  // payload carries `issue.state`, Forgejo's differs — so neither host
+  // sniffs its payload; the gate lives here instead). Merged PRs report
+  // `closed` on both forges. An unprovable state fails closed like the
+  // comment path's `comment-pr-lookup-failed`: uncertainty never answers.
+  // Before the rate budget, so a dead lane consumes no budget, and AFTER the
+  // re-review hand-off, whose admission stays the review pipeline's own.
+  let prState: PrStateReading;
+  try {
+    prState = await deps.readPrState();
+  } catch {
+    prState = { state: "unknown", draft: "unknown" };
+  }
+  if (prState.state === "unknown") return ignore("pr-state-unknown");
+  if (prState.state === "closed") return ignore("pr-closed");
+  if (prState.draft === "unknown") return ignore("pr-state-unknown");
+  if (prState.draft === "draft") return ignore("pr-draft");
+
+  // 6. Question rate gate — the open-ended, spam-able model work is bounded
   // per-PR and per-actor WITHIN the PR: the actor scope is that actor's own
   // questions on this PR (the intent "one person cannot dominate a PR"), not a
   // repo-wide allowance. `repoFullName` is canonical-lowercase at the event
@@ -177,7 +211,7 @@ export async function planFollowUp(
     return ignore("rate-limited");
   }
 
-  // 6. Question → bounded discussion prompt (never a verdict).
+  // 7. Question → bounded discussion prompt (never a verdict).
   const thread = await deps.fetchThreadComments().catch(() => [] as readonly unknown[]);
   const managed = deps.latestManagedReview === undefined
     ? undefined
