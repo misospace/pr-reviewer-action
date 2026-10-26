@@ -372,15 +372,25 @@ const REVIEW_TRIAGE_LABELS: Record<string, string> = {
  * discipline as every other untrusted string on this surface: redaction,
  * link sanitization, whitespace flattening, a length cap and pipe escaping,
  * none of which can break out of the blockquote line.
+ *
+ * #1269: the triage reason never carries an action-owned cap note, so the
+ * confidence module's reveal strip runs UNCONDITIONALLY after this cut — a
+ * published reason never ends in a model-authored `[deterministic cap: …]`
+ * look-alike, whether it sat at the trailing edge already or the cut dragged
+ * an interior one (complete, or truncated into an unterminated fragment)
+ * onto it. The decision is re-resolved against the STRIPPED reason, so a
+ * `not_required` whose only substantiation was a look-alike fails closed to
+ * `unknown` on this surface too.
  */
 export function renderReviewTriageBlock(
   triage: { decision: string; reason: string },
   linkMode: UpstreamLinkMode,
 ): string {
-  const decision = resolveReviewTriageDecision(triage.decision, triage.reason);
-  const reason = escapeTableCell(
+  const stripped = stripRevealedCapNoteTails(
     sanitizeMarkdown(redactText(String(triage.reason ?? "")), linkMode).replace(/\s+/g, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS),
   );
+  const decision = resolveReviewTriageDecision(triage.decision, stripped);
+  const reason = escapeTableCell(stripped);
   const label = REVIEW_TRIAGE_LABELS[decision]!;
   const line = reason === ""
     ? `> **Human review triage: ${label}**`

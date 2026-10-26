@@ -433,12 +433,18 @@ export function formatReviewStepOutputs(
   outputs: Omit<ReviewStepOutputs, "degradedGateBypass">,
   randomBytes?: () => Uint8Array,
 ): string {
+  // #1269: `redactText` runs LAST on this field, and masking can COMPLETE a
+  // half-written cap-note look-alike at the trailing edge (the #1268 class),
+  // so the reveal strip re-runs terminal to the redaction — this step output
+  // never ends in a note-shaped span either. The decision is re-resolved
+  // against the same stripped text the output carries.
+  const triageReason = stripRevealedCapNoteTails(redactText(outputs.reviewTriageReason));
   // #1003: re-resolve rather than trust the caller, so an unsubstantiated
   // `not_required` (or any non-literal decision) can never be written as a
   // public step output. "" means triage did not run and stays "".
   const triageDecision = outputs.reviewTriageDecision === ""
     ? ""
-    : resolveReviewTriageDecision(outputs.reviewTriageDecision, outputs.reviewTriageReason);
+    : resolveReviewTriageDecision(outputs.reviewTriageDecision, triageReason);
   const assignments: Array<[string, string]> = [
     ["verdict", outputs.verdict],
     ["verdict-source", outputs.verdictSource],
@@ -452,7 +458,7 @@ export function formatReviewStepOutputs(
     // review-markdown/findings — a public step output must never carry raw
     // credentials.
     ["review-triage-decision", triageDecision],
-    ["review-triage-reason", redactText(outputs.reviewTriageReason)],
+    ["review-triage-reason", triageReason],
     // #1005: the routing status is a closed action-owned token; re-validate it
     // here so a carried-forward or hand-edited value can never be written as a
     // public output. "" means routing did not run and stays "".
@@ -646,18 +652,25 @@ export function renderStepSummary(telemetry: StepSummaryTelemetry): string {
   rows.push(`| Route | ${telemetry.route} (${telemetry.routeReason ?? ""}) |`);
   // #1003: compact one-row triage summary, rendered only when triage ran.
   if (telemetry.reviewTriage) {
-    // The decision is re-resolved here rather than trusted: this summary is
-    // a public surface, so a carried-forward or hand-edited value — including
-    // an unsubstantiated `not_required` — must fail closed to `unknown`,
-    // exactly as the parser and the publish body do.
-    const decision = resolveReviewTriageDecision(telemetry.reviewTriage.decision, telemetry.reviewTriage.reason);
     // Model-authored reason: redact, flatten to one cell, and escape pipes so
     // a hostile string cannot forge a row (same discipline as the findings
     // table's message cell). Capped at the same 300 characters as the
     // published-body section so one answer reads identically on both.
-    const reason = escapeTableCell(
+    // #1269: the triage reason never carries an action-owned cap note, so the
+    // confidence module's reveal strip runs UNCONDITIONALLY after this cut —
+    // the row never ends in a model-authored `[deterministic cap: …]`
+    // look-alike the cut revealed.
+    const stripped = stripRevealedCapNoteTails(
       redactText(telemetry.reviewTriage.reason).replace(/\s+/g, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS),
     );
+    // The decision is re-resolved here rather than trusted: this summary is
+    // a public surface, so a carried-forward or hand-edited value — including
+    // an unsubstantiated `not_required` — must fail closed to `unknown`,
+    // exactly as the parser and the publish body do. Re-resolved against the
+    // STRIPPED reason, so a look-alike-only substantiation fails closed here
+    // too (#1269).
+    const decision = resolveReviewTriageDecision(telemetry.reviewTriage.decision, stripped);
+    const reason = escapeTableCell(stripped);
     rows.push(`| Review triage | ${decision}${reason === "" ? "" : `: ${reason}`} (advisory only) |`);
   }
   // #1005: compact one-row routing summary, rendered only when routing ran.
