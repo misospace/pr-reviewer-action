@@ -1,5 +1,6 @@
 import type { FetchLike } from "./http.js";
 import type {
+  CommentPostResult,
   ManagedInlineCommentRef,
   NativeReviewRequest,
   NativeReviewSurface,
@@ -387,6 +388,14 @@ export class TangledPublishApi implements PublishPlatformApi {
   async removeLabel(_label: string): Promise<boolean> {
     // #588/#589: Tangled has no native review surface.
     return false;
+  }
+
+  /** #763: Tangled has no plain top-level comment surface — the only record it
+   * owns is the managed review, so a conversational follow-up reply cannot be
+   * posted there. Declared as an explicit degradation, mirroring the other
+   * unsupported write surfaces. */
+  async postIssueComment(_body: string): Promise<CommentPostResult> {
+    return { ok: false, created: false, error: "plain conversation comments are not supported on Tangled" };
   }
 
   async requestReviewers(_users: readonly string[], _teams: readonly string[]): Promise<ReviewerRequestResult> {
