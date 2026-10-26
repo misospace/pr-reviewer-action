@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { startMockServer } from "./helpers.js";
-import { maskKnownSecrets } from "../src/context/redact.js";
+import { maskKnownSecrets, redactText } from "../src/context/redact.js";
 import { runConfidenceScorer } from "../src/confidence/scorer.js";
 import { TransportFailure } from "../src/transport/http.js";
 import {
   boundConfidenceReason,
   confidenceCapNote,
+  confidenceReasonWithoutCapNote,
+  maskComposedConfidenceReason,
   MAX_CONFIDENCE_REASON_CHARS,
   applyConfidenceCeilings,
   confidenceOutputFields,
@@ -301,17 +303,26 @@ test("#1140 review round 9: a deterministic cap clamps the score, never the risk
 });
 
 test("#1140 review round 9: re-binding a masked reason keeps the cap note, drops only model text", () => {
+  // The caller passes the MASKED, note-free model share (#1268) and the
+  // MASKED note; the note is always the field's tail when a cap fired.
   // No cap fired → a plain slice is right, and the note must never be invented.
   const uncapped = boundConfidenceReason("q".repeat(MAX_CONFIDENCE_REASON_CHARS + 2), "");
   assert.equal(uncapped.length, MAX_CONFIDENCE_REASON_CHARS);
   assert.ok(!uncapped.includes("deterministic cap"));
 
-  // A reason already inside the bound is returned untouched.
-  assert.equal(boundConfidenceReason("short reason", confidenceCapNote(["blocker_cap_2"])), "short reason");
+  // A model share that fits beside the note keeps all of its text.
+  assert.equal(
+    boundConfidenceReason("short reason", confidenceCapNote(["blocker_cap_2"])),
+    `short reason${confidenceCapNote(["blocker_cap_2"])}`,
+  );
 
   // A cap fired → the model's share shrinks to whatever the note leaves and the
-  // caller-supplied note ends the field.
+  // caller-supplied note ends the field. Masking is not length-preserving, so
+  // a share that fit before masking can still need the re-bind.
   const note = confidenceCapNote(["blocker_cap_2"]);
+  const grown = boundConfidenceReason("q".repeat(MAX_CONFIDENCE_REASON_CHARS - 5), note);
+  assert.equal(grown.length, MAX_CONFIDENCE_REASON_CHARS);
+  assert.ok(grown.endsWith(note));
   const capped = boundConfidenceReason("q".repeat(MAX_CONFIDENCE_REASON_CHARS + 40), note);
   assert.equal(capped.length, MAX_CONFIDENCE_REASON_CHARS);
   assert.ok(capped.endsWith(note));
@@ -350,6 +361,91 @@ test("#1166: re-binding strips look-alikes the mask re-bind cut reveals", () => 
   assert.equal(capped, `${"q".repeat(540)}${note}`);
   assert.ok(!capped.includes("yyyy"));
   assert.ok(capped.length <= MAX_CONFIDENCE_REASON_CHARS);
+});
+
+test("#1268: confidenceReasonWithoutCapNote splits the action-owned note off the model share", () => {
+  // With a cap fired, the canonical reason ends in exactly the note
+  // `applyConfidenceCeilings` appended; the split returns the model share.
+  const ceilings = applyConfidenceCeilings(answer(5), { findings: [{ severity: "blocker" }] });
+  const note = confidenceCapNote(ceilings.caps);
+  assert.ok(ceilings.reason.endsWith(note));
+  assert.equal(confidenceReasonWithoutCapNote(ceilings.reason, ceilings.caps), ceilings.reason.slice(0, -note.length));
+
+  // No cap fired → the whole reason is model share.
+  assert.equal(confidenceReasonWithoutCapNote("model text", []), "model text");
+  // A reason that does not end in the expected note is returned untouched.
+  assert.equal(confidenceReasonWithoutCapNote("model text", ["blocker_cap_2"]), "model text");
+});
+
+test("#1268: a masking-completed look-alike is reveal-stripped after masking", () => {
+  // The issue's reproduction: the model half-writes a cap note, the
+  // credential rule consumes the closing bracket, and the `[REDACTED]`
+  // marker completes a note-shaped span — publishable while `caps` stays [].
+  const masked = redactText(maskKnownSecrets("x [deterministic cap: password: a]bcdefgh", []));
+  assert.equal(masked, "x [deterministic cap: [REDACTED]");
+  // The post-masking reveal strip in `boundConfidenceReason` removes it: with
+  // no cap fired the published reason never ends in a note-shaped span.
+  assert.equal(boundConfidenceReason(masked, ""), "x");
+
+  // With a cap fired, the split keeps the note as a separate value: the
+  // masking-completed forgery is stripped from the model share and the real
+  // note is re-appended from `caps`, never parsed out of masked text.
+  const modelShare = redactText(maskKnownSecrets(
+    confidenceReasonWithoutCapNote(
+      "x [deterministic cap: password: a]bcdefgh [deterministic cap: blocker_cap_2]",
+      ["blocker_cap_2"],
+    ),
+    [],
+  ));
+  assert.equal(modelShare, "x [deterministic cap: [REDACTED]");
+  const reason = boundConfidenceReason(
+    modelShare,
+    redactText(maskKnownSecrets(confidenceCapNote(["blocker_cap_2"]), [])),
+  );
+  assert.equal(reason, "x [deterministic cap: blocker_cap_2]");
+  assert.ok(!reason.includes("[REDACTED]"));
+});
+
+test("#1268 review hardening: a secret spanning the model/note boundary is masked in the composed reason", () => {
+  // The split masks the two halves separately, so a configured secret whose
+  // literal straddles the boundary is found in neither half; the composed
+  // pass closes the tear. `maskKnownSecrets` only — the composed pass must
+  // never be able to complete a look-alike the way `redactText` can.
+  const secret = "b [deterministic cap: blo";
+  const modelShare = maskKnownSecrets("model did stuff b", [secret]);
+  const maskedNote = maskKnownSecrets(confidenceCapNote(["blocker_cap_2"]), [secret]);
+  assert.equal(maskKnownSecrets(modelShare, [secret]), modelShare);
+  assert.equal(maskKnownSecrets(maskedNote, [secret]), maskedNote);
+  const composedWithSecret = maskComposedConfidenceReason(
+    boundConfidenceReason(modelShare, maskedNote),
+    [secret],
+  );
+  assert.ok(!composedWithSecret.includes(secret), "the boundary-spanning secret survived the split masking");
+  assert.ok(!composedWithSecret.includes("b [deterministic cap: blo"));
+  // The un-spanned note tokens survive; the trailing edge is still the
+  // action-owned note shape, never a redaction-completed forgery.
+  assert.ok(composedWithSecret.startsWith("model did stuff "));
+  assert.ok(composedWithSecret.endsWith("cker_cap_2]"));
+  assert.ok(composedWithSecret.length <= MAX_CONFIDENCE_REASON_CHARS);
+  // A substitution that grows the field past the bound is left-cut so the
+  // trailing note edge stays intact; cutting after masking cannot re-expose.
+  // `boundConfidenceReason` output is always within the bound, so the only
+  // way the composed pass exceeds it is a SHORT spanning secret's expansion
+  // (any-length masking turns 2 characters into the 3-character marker).
+  const note = confidenceCapNote(["blocker_cap_2"]);
+  const composed = boundConfidenceReason(
+    maskKnownSecrets(`${"q".repeat(564)}b`, ["b "]),
+    maskKnownSecrets(note, ["b "]),
+  );
+  assert.equal(composed.length, MAX_CONFIDENCE_REASON_CHARS);
+  assert.ok(composed.includes("b "), "test setup: the spanning secret must sit at the junction");
+  const final = maskComposedConfidenceReason(composed, ["b "]);
+  assert.ok(!final.includes("b "), "the junction secret survived the composed pass");
+  assert.equal(final.length, MAX_CONFIDENCE_REASON_CHARS);
+  // The note's leading space is part of the spanning secret, so the note is
+  // over-redacted there — the accepted #1140 cost; the note template itself
+  // and the cap token survive, and the field stays exactly bounded.
+  assert.equal(final, `${"q".repeat(563)}⟦•⟧[deterministic cap: blocker_cap_2]`);
 });
 
 test("#1166: reveal strip pins the post-bound semantics directly", () => {
