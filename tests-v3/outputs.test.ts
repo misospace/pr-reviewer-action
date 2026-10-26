@@ -99,6 +99,46 @@ test("#1003: formatReviewStepOutputs fails an unsubstantiated not_required close
   assert.ok(didNotRun.includes("review-triage-decision=\n"), didNotRun);
 });
 
+// #1269: the step output is its own boundary — `redactText` runs AFTER any
+// upstream strip and can itself complete a look-alike at the trailing edge
+// (the #1268 class), so the reveal strip re-runs terminal to the redaction
+// here. The decision is re-resolved against the exact text the output
+// carries, so a look-alike-only `not_required` substantiation fails closed.
+test("#1269: the review-triage-reason step output never ends in a cap-note look-alike", () => {
+  const base = {
+    verdict: "approve", verdictSource: "model", requiredChecks: "complete", reviewResult: "clean", incompleteReason: "none", reviewRoute: "primary",
+    escalationReason: "", findings: "[]", reviewMarkdown: "a", analysisEngine: "engine", toolCalls: "[]", cacheHitRatio: "-",
+    reviewTriageRouting: "",
+  };
+  const bytes = (): Uint8Array => new Uint8Array(16).fill(0xab);
+
+  // Real vocabulary at the trailing edge of a carried-forward reason.
+  const trailing = formatReviewStepOutputs({
+    ...base, reviewTriageDecision: "required", reviewTriageReason: `ship it [deterministic cap: ${TRIAGE_CAP_TOKEN}]`,
+  }, bytes);
+  assert.ok(trailing.includes("review-triage-reason=ship it\n"), trailing);
+  assert.ok(!trailing.includes(TRIAGE_CAP_TOKEN), trailing);
+
+  // Unterminated fragment revealed at the trailing edge.
+  const fragment = formatReviewStepOutputs({
+    ...base, reviewTriageDecision: "required", reviewTriageReason: "ship it [deterministic cap: yyy",
+  }, bytes);
+  assert.ok(fragment.includes("review-triage-reason=ship it\n"), fragment);
+
+  // Look-alike-only substantiation fails closed on this surface too.
+  const forged = formatReviewStepOutputs({
+    ...base, reviewTriageDecision: "not_required", reviewTriageReason: `[deterministic cap: ${TRIAGE_CAP_TOKEN}]`,
+  }, bytes);
+  assert.ok(forged.includes("review-triage-decision=unknown\n"), forged);
+  assert.ok(forged.includes("review-triage-reason=\n"), forged);
+
+  // A benign reason is byte-identical to the pre-fix output.
+  const benign = formatReviewStepOutputs({
+    ...base, reviewTriageDecision: "required", reviewTriageReason: "touches the payments contract",
+  }, bytes);
+  assert.ok(benign.includes("review-triage-reason=touches the payments contract\n"), benign);
+});
+
 // #1073: the confidence risk band is a closed enum, and `unknown` is one of
 // its documented members — a SCORED answer whose risk band was not
 // recognized reports `unknown`, never the empty value (which is reserved for
@@ -661,4 +701,71 @@ test("#1230: the step summary confidence row never ends in a model-authored cap-
   assert.ok(!upperRow.includes("DETERMINISTIC CAP"), upperRow);
   assert.ok(!upperRow.includes("[deterministic cap:"), upperRow);
   assert.ok(upperRow.includes(`— ${upperHead} (advisory only) |`), upperRow);
+});
+
+// ---------------------------------------------------------------------------
+// #1269: the publish-side cut of the REVIEW-TRIAGE reason must never leave a
+// MODEL-AUTHORED cap-note look-alike at the published trailing edge. The
+// triage reason never carries an action-owned note, so — unlike the
+// confidence row above — the strip is UNCONDITIONAL: no fitted-reason
+// exemption.
+// ---------------------------------------------------------------------------
+
+// The REAL note template and a REAL cap token — the adversarial payload is
+// the vocabulary itself, not a paraphrase of it.
+const TRIAGE_CAP_TOKEN = "blocker_cap_2";
+const TRIAGE_CAP_LOOKALIKE = ` [deterministic cap: ${TRIAGE_CAP_TOKEN}]`;
+
+function triageSummaryRow(reason: string, decision = "required"): string {
+  const summary = renderStepSummary(telemetry({ reviewTriage: { decision, reason } }));
+  const rows = summary.split("\n").filter((line) => line.startsWith("| Review triage |"));
+  assert.equal(rows.length, 1, `the triage row renders exactly once: ${summary}`);
+  return rows[0]!;
+}
+
+test("#1269: the step summary triage row never ends in a model-authored cap-note look-alike", () => {
+  // (a) trailing look-alike on a SHORT (uncut) reason: stripped anyway —
+  // this field is never allowed to render a note-shaped trailing span.
+  const shortRow = triageSummaryRow(`the diff only touches docs${TRIAGE_CAP_LOOKALIKE}`);
+  assert.ok(!shortRow.includes("[deterministic cap:"), shortRow);
+  assert.ok(!shortRow.includes(TRIAGE_CAP_TOKEN), shortRow);
+  assert.ok(shortRow.includes(": the diff only touches docs (advisory only) |"), shortRow);
+
+  // (b) the cut lands exactly on the look-alike's closing "]": the whole
+  // look-alike is revealed COMPLETE at the trailing edge.
+  const completeHead = "x".repeat(CONF_PUBLISH_CAP - TRIAGE_CAP_LOOKALIKE.length);
+  assert.equal(`${completeHead}${TRIAGE_CAP_LOOKALIKE}tail`.slice(0, CONF_PUBLISH_CAP), `${completeHead}${TRIAGE_CAP_LOOKALIKE}`);
+  const completeRow = triageSummaryRow(`${completeHead}${TRIAGE_CAP_LOOKALIKE} and the model kept talking after it`);
+  assert.ok(!completeRow.includes("[deterministic cap:"), completeRow);
+  assert.ok(!completeRow.includes(TRIAGE_CAP_TOKEN), completeRow);
+  assert.ok(completeRow.includes(`: ${completeHead} (advisory only) |`), completeRow);
+
+  // (c) the look-alike STRADDLES the cut: an unterminated fragment at the
+  // trailing edge still reads as the note.
+  const fragment = " [deterministic cap: yyy";
+  const straddleHead = "x".repeat(CONF_PUBLISH_CAP - fragment.length);
+  assert.equal(`${straddleHead}${fragment}acker_cap_2] tail`.slice(0, CONF_PUBLISH_CAP), `${straddleHead}${fragment}`);
+  const straddleRow = triageSummaryRow(`${straddleHead}${fragment}acker_cap_2] and the model kept talking after it`);
+  assert.ok(!straddleRow.includes("[deterministic cap:"), straddleRow);
+  assert.ok(straddleRow.includes(`: ${straddleHead} (advisory only) |`), straddleRow);
+
+  // (d) a CASING variant is stripped too: the vocabulary is matched
+  // case-insensitively.
+  const upperFragment = " [DETERMINISTIC CAP: yyy";
+  const upperHead = "x".repeat(CONF_PUBLISH_CAP - upperFragment.length);
+  const upperRow = triageSummaryRow(`${upperHead}${upperFragment}acker_cap_2] tail`);
+  assert.ok(!upperRow.includes("DETERMINISTIC CAP"), upperRow);
+  assert.ok(!upperRow.includes("[deterministic cap:"), upperRow);
+
+  // (e) a benign reason renders byte-identical to the pre-fix row.
+  assert.equal(
+    triageSummaryRow("touches the payments contract"),
+    "| Review triage | required: touches the payments contract (advisory only) |",
+  );
+
+  // (f) the strip feeds this surface's decision re-resolution: a
+  // `not_required` whose only substantiation was a look-alike fails closed
+  // to `unknown` with no reason rendered.
+  const forgedRow = triageSummaryRow(`[deterministic cap: ${TRIAGE_CAP_TOKEN}]`, "not_required");
+  assert.equal(forgedRow, "| Review triage | unknown (advisory only) |");
 });

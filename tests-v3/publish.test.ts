@@ -62,6 +62,9 @@ class MockPublishApi implements PublishPlatformApi {
   inlineListCalls = 0;
   threadQueryCalls = 0;
   stickyResult: { ok: boolean; created: boolean; commentId?: number | string; updatedAt?: string; error?: string } = { ok: true, created: true };
+  /** #1282: per-call sticky results consumed before `stickyResult`, so a test
+   * can model a first upsert that succeeds and a recovery upsert that fails. */
+  stickyResults: { ok: boolean; created: boolean; commentId?: number | string; updatedAt?: string; error?: string }[] = [];
   reviewResults: { ok: boolean; error?: string }[] = [];
   dismissResult = true;
   minimizeResult = true;
@@ -97,14 +100,15 @@ class MockPublishApi implements PublishPlatformApi {
   async listIssueComments(): Promise<PublishCommentRef[]> { return this.comments; }
   async upsertStickyComment(marker: string, body: string) {
     this.sticky.push({ marker, body });
+    const result = this.stickyResults.shift() ?? this.stickyResult;
     // #1093: mirror the real forge — a successful upsert stores the exact
     // published body on the sticky comment, so the checkpoint's body
     // equality read observes the same bytes the run published.
-    if (this.stickyResult.ok && this.stickyResult.commentId !== undefined) {
-      const id = String(this.stickyResult.commentId);
+    if (result.ok && result.commentId !== undefined) {
+      const id = String(result.commentId);
       this.comments = this.comments.map((c) => String(c.id) === id ? { ...c, body } : c);
     }
-    return this.stickyResult;
+    return result;
   }
   async listReviews(): Promise<PublishReviewRef[]> { if (this.listReviewsError) throw new Error("list failed"); return this.reviews; }
   async authenticatedIdentity() { return this.identity; }
@@ -282,7 +286,9 @@ test("inline review failure warns but leaves review_comment published", async ()
   api.reviewResults = [{ ok: false, error: "nope" }];
   const result = await publishReview(input({ mode: "review_comment", inlineFindings: true, findings: FINDINGS }), api, { diffText: DIFF });
   assert.equal(result.status, "published");
-  assert.ok(result.messages.includes("WARN: inline findings review submission failed; summary comment was still published"));
+  assert.ok(
+    result.messages.some((line) => line.startsWith("WARN: inline findings review submission failed; summary comment was still published")),
+  );
 });
 
 test("review_verdict submits commit-bound APPROVE and REQUEST_CHANGES events", async () => {
@@ -1137,6 +1143,111 @@ test("#1249: the body-only fallback appends a BOUNDED summary for a hostile find
   assert.ok(!plain.body.includes("p".repeat(1000)), "the over-long path is not published in full");
   assert.ok(!plain.body.includes("m".repeat(1000)), "the over-long message is not published in full");
   const summary = plain.body.slice(plain.body.indexOf("### Findings"));
+  assert.ok(summary.length < 5000, `the appended summary is bounded (${summary.length} chars)`);
+});
+
+// ---------------------------------------------------------------------------
+// #1282: a rejected inline findings review in `review_comment` mode must not
+// drop the findings the batch carried. The sticky summary comment is published
+// BEFORE that submission and, under a non-strict verdict policy, carries no
+// findings table, so the rejection re-publishes the sticky comment with the
+// same bounded findings summary the #1249 body-only fallback appends. Under
+// the strict policy the sticky body already renders the table, so no second
+// publication may duplicate it. The failed batch must also never retry as a
+// second native review, and the sticky checkpoint must stay unusable either
+// way (#1093).
+// ---------------------------------------------------------------------------
+test("#1282: rejected inline findings review appends the findings summary to the sticky body", async () => {
+  const api = new MockPublishApi();
+  api.reviewResults = [{ ok: false, error: "422 anchor raced a push" }];
+  const result = await publishReview(
+    input({ mode: "review_comment", inlineFindings: true, findings: FINDINGS }),
+    api,
+    { diffText: DIFF },
+  );
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted.length, 1, "the rejected inline batch is not retried as a native review");
+  assert.equal(api.sticky.length, 2, "the sticky comment is re-published with the findings");
+  assert.ok(!api.sticky[0]!.body.includes("### Findings"), "the first publication is the unchanged non-strict body");
+  const recovered = api.sticky[1]!.body;
+  assert.ok(recovered.startsWith(api.sticky[0]!.body), "the recovery keeps the already-published summary intact");
+  assert.ok(recovered.includes("### Findings"), "the recovered sticky body carries the findings summary");
+  assert.ok(recovered.includes("a.ts:2"), "the recovered findings row keeps the location");
+  assert.ok(recovered.includes("A finding"), "the recovered findings row keeps the message");
+  assert.ok(
+    result.messages.some((line) => line.includes("inline findings review submission failed")
+      && line.includes("with the findings summary appended to the review body")),
+    "the warning discloses the compensation",
+  );
+});
+
+test("#1282: strict rejected inline findings review republishes nothing (body already carries findings)", async () => {
+  const api = new MockPublishApi();
+  api.reviewResults = [{ ok: false, error: "422" }];
+  const result = await publishReview(
+    input({ mode: "review_comment", inlineFindings: true, findings: FINDINGS, verdictPolicy: "strict" }),
+    api,
+    { diffText: DIFF },
+  );
+  assert.equal(result.status, "published");
+  assert.equal(api.sticky.length, 1, "no second publication under the strict policy");
+  assert.ok(api.sticky[0]!.body.includes("### Findings"), "the strict body already renders the findings table");
+  assert.ok(result.messages.some((line) => line.includes("inline findings review submission failed")));
+  assert.ok(
+    !result.messages.some((line) => line.includes("findings summary appended")),
+    "no compensation note when there was nothing to compensate",
+  );
+});
+
+test("#1282: failed findings-summary recovery keeps the published sticky and warns honestly", async () => {
+  const api = new MockPublishApi();
+  api.reviewResults = [{ ok: false, error: "422" }];
+  api.stickyResults = [
+    { ok: true, created: true, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" },
+    { ok: false, created: false, error: "sticky update denied" },
+  ];
+  const result = await publishReview(
+    input({ mode: "review_comment", inlineFindings: true, findings: FINDINGS }),
+    api,
+    { diffText: DIFF },
+  );
+  assert.equal(result.status, "published");
+  assert.equal(api.sticky.length, 2, "the recovery update was attempted");
+  assert.ok(
+    result.messages.some((line) => line.includes("findings-summary recovery on the sticky comment failed")
+      && line.includes("sticky update denied")),
+    "the recovery failure is disclosed with its cause",
+  );
+  assert.ok(
+    result.messages.some((line) => line.startsWith("WARN: inline findings review submission failed; summary comment was still published")
+      && !line.includes("with the findings summary appended")),
+    "the warning must not claim compensation that failed",
+  );
+});
+
+test("#1282: the rejected-batch recovery appends a BOUNDED summary for hostile findings", async () => {
+  const api = new MockPublishApi();
+  api.reviewResults = [{ ok: false, error: "422" }];
+  // Same anchor-race hostile shape as the #1249 case: the first finding is
+  // anchorable so the rejected batch really carries an inline comment; the
+  // second carries the over-long path no producer bounds.
+  const hostile = [
+    { file: "a.ts", line: 2, severity: "major", message: "m".repeat(2000) },
+    { file: "p".repeat(5000), line: 2, severity: "major", message: "m".repeat(5000) },
+  ];
+  const result = await publishReview(
+    input({ mode: "review_comment", inlineFindings: true, findings: hostile }),
+    api,
+    { diffText: DIFF },
+  );
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted[0]!.comments?.length, 1, "the rejected batch carried the anchorable inline finding");
+  assert.equal(api.sticky.length, 2);
+  const recovered = api.sticky[1]!.body;
+  assert.ok(recovered.includes("### Findings"), "the recovered sticky body carries the findings summary");
+  assert.ok(!recovered.includes("p".repeat(1000)), "the over-long path is not published in full");
+  assert.ok(!recovered.includes("m".repeat(1000)), "the over-long message is not published in full");
+  const summary = recovered.slice(recovered.indexOf("### Findings"));
   assert.ok(summary.length < 5000, `the appended summary is bounded (${summary.length} chars)`);
 });
 

@@ -471,6 +471,64 @@ test("#1003: a hostile triage reason cannot break out of the triage block", () =
   assert.equal(block.split("\n").filter((line) => line === ">").length, 1);
 });
 
+// #1269: the section's 300-char cut of the model-authored reason can reveal a
+// cap-note look-alike at the trailing edge (complete, or truncated into an
+// unterminated fragment). The triage reason NEVER carries an action-owned
+// note, so the confidence module's reveal strip runs UNCONDITIONALLY here —
+// unlike `publishedConfidenceReason`, there is no fitted-reason exemption.
+test("#1269: the published triage reason never ends in a model-authored cap-note look-alike", () => {
+  // The REAL note template and a REAL cap token — the adversarial payload is
+  // the vocabulary itself, not a paraphrase of it.
+  const token = "blocker_cap_2";
+  const lookalike = ` [deterministic cap: ${token}]`;
+  const cap = 300;
+
+  // (a) trailing look-alike on a SHORT (uncut) reason: stripped anyway.
+  let block = renderReviewTriageBlock({ decision: "required", reason: `the gateway contract changed${lookalike}` }, "inert");
+  assert.ok(!block.includes("[deterministic cap:"), block);
+  assert.ok(!block.includes(token), block);
+  assert.match(block, /> \*\*Human review triage: specialized human review required\*\* — the gateway contract changed$/m);
+
+  // (b) the cut lands exactly on the look-alike's closing "]": the whole
+  // look-alike is revealed COMPLETE at the trailing edge.
+  const completeHead = "x".repeat(cap - lookalike.length);
+  assert.equal(`${completeHead}${lookalike}tail`.slice(0, cap), `${completeHead}${lookalike}`);
+  block = renderReviewTriageBlock({ decision: "required", reason: `${completeHead}${lookalike} and the model kept talking after it` }, "inert");
+  assert.ok(!block.includes("[deterministic cap:"), block);
+  assert.ok(!block.includes(token), block);
+  assert.ok(block.includes(`— ${completeHead}`), block);
+
+  // (c) the look-alike STRADDLES the cut: the cut leaves an unterminated
+  // fragment at the trailing edge.
+  const fragment = " [deterministic cap: yyy";
+  const straddleHead = "x".repeat(cap - fragment.length);
+  assert.equal(`${straddleHead}${fragment}acker_cap_2] tail`.slice(0, cap), `${straddleHead}${fragment}`);
+  block = renderReviewTriageBlock({ decision: "required", reason: `${straddleHead}${fragment}acker_cap_2] and the model kept talking after it` }, "inert");
+  assert.ok(!block.includes("[deterministic cap:"), block);
+  assert.ok(block.includes(`— ${straddleHead}`), block);
+
+  // (d) a CASING variant is stripped too: the vocabulary is matched
+  // case-insensitively.
+  const upperFragment = " [DETERMINISTIC CAP: yyy";
+  const upperHead = "x".repeat(cap - upperFragment.length);
+  block = renderReviewTriageBlock({ decision: "required", reason: `${upperHead}${upperFragment}acker_cap_2] tail` }, "inert");
+  assert.ok(!block.includes("DETERMINISTIC CAP"), block);
+  assert.ok(!block.includes("[deterministic cap:"), block);
+
+  // (e) a benign reason renders byte-identical to the pre-fix section.
+  assert.equal(
+    renderReviewTriageBlock({ decision: "required", reason: "changes the payments gateway contract" }, "inert"),
+    "## Human Review Triage\n\n> **Human review triage: specialized human review required** — changes the payments gateway contract\n>\n_Advisory only: this triage answer does not change the review's verdict or findings, and it requests no reviewer._",
+  );
+
+  // (f) the strip feeds this surface's decision re-resolution: a
+  // `not_required` whose only substantiation was a look-alike renders as
+  // `unknown` with no reason, never as an unsubstantiated pass.
+  block = renderReviewTriageBlock({ decision: "not_required", reason: `[deterministic cap: ${token}]` }, "inert");
+  assert.match(block, /Human review triage: unknown — the reviewer could not determine this\*\*$/m);
+  assert.ok(!block.includes(token), block);
+});
+
 // Adversarial boundary (#252): the published body is a public surface, so an
 // unvalidated decision must fail closed there exactly as it does in the step
 // summary — never render a fourth decision nobody validated.

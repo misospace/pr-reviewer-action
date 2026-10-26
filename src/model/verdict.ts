@@ -2,6 +2,7 @@ import type { NormalizedFinding, NormalizedHumanReviewDisposition, NormalizedReq
 import { resolveReviewTriageDecision } from "./triage.js";
 import { VerdictParseFailure } from "./types.js";
 import { containsKnownSecret, maskDiagnostic } from "../context/redact.js";
+import { stripRevealedCapNoteTails } from "../confidence/result.js";
 
 /**
  * Port of pr_reviewer/response_parser.py: tolerant model-output parsing and
@@ -232,13 +233,20 @@ function normalizeSmartReviewRequest(parsed: Record<string, unknown>): {
  * `not_required` (no usable reason) fails closed to `unknown` too, so the
  * positive claim can never rest on a parser gap. The reason is kept as a
  * bounded, control-char-free single line ("" when absent or blank).
+ *
+ * #1269: the triage reason NEVER carries an action-owned cap note (only the
+ * confidence reason does), so the confidence module's reveal strip runs
+ * UNCONDITIONALLY here — a stored reason never ends in a model-authored
+ * `[deterministic cap: …]` look-alike, complete or cut into an unterminated
+ * fragment by this bound. The strip feeds decision resolution, so a
+ * `not_required` substantiated only by a look-alike note fails closed.
  */
 function normalizeReviewTriage(parsed: Record<string, unknown>): {
   decision: ReviewTriageDecision;
   reason: string;
 } {
   const reason = typeof parsed.review_triage_reason === "string"
-    ? parsed.review_triage_reason.replace(SMART_REVIEW_REASON_CONTROL, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS)
+    ? stripRevealedCapNoteTails(parsed.review_triage_reason.replace(SMART_REVIEW_REASON_CONTROL, " ").trim().slice(0, MAX_REVIEW_TRIAGE_REASON_CHARS))
     : "";
   const decision = resolveReviewTriageDecision(parsed.review_triage_decision, reason);
   return { decision, reason };
