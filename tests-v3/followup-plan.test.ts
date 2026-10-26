@@ -12,18 +12,42 @@ import type { AuthorityReading } from "../src/precheck/comment-authority.js";
 
 const HEAD = "abc1234def5678abc1234def5678abcdef0123";
 
-function ghEvent(body: string, user = "alice"): CanonicalForgeEvent {
+function ghEvent(body: string, user = "alice", repoPr?: { repo?: string; pr?: number }): CanonicalForgeEvent {
+  const repo = repoPr?.repo ?? "o/r";
+  const pr = repoPr?.pr ?? 7;
   const e = normalizeGitHubEvent({
     name: "issue_comment",
     action: "created",
-    repository: { full_name: "o/r" },
+    repository: { full_name: repo },
     installation: { id: 1 },
-    issue: { number: 7, pull_request: { head: { sha: HEAD, repo: { full_name: "o/r" } }, base: { sha: "def5678abcd", repo: { full_name: "o/r" } } } },
+    issue: { number: pr, pull_request: { head: { sha: HEAD, repo: { full_name: repo } }, base: { sha: "def5678abcd", repo: { full_name: repo } } } },
     comment: { id: 555, user: { login: user }, body },
     sender: { login: user },
   });
   assert.ok(e !== null, "fixture event must normalize");
   return e;
+}
+
+/** A hand-built canonical event (operator-mode shape): bypasses the
+ * normalizer's lowercasing, so casing hardening must happen in the planner. */
+function canonicalFollowUp(overrides: Partial<CanonicalForgeEvent> = {}): CanonicalForgeEvent {
+  return {
+    platform: "github",
+    source: "webhook",
+    kind: "follow_up",
+    installationId: "5",
+    repoFullName: "o/r",
+    prNumber: 7,
+    prId: 0,
+    headSha: HEAD,
+    baseSha: "",
+    draft: false,
+    fork: false,
+    labelName: "",
+    actor: "alice",
+    eventReference: "101",
+    ...overrides,
+  };
 }
 
 function forgejoEvent(body: string, user = "alice"): CanonicalForgeEvent {
@@ -178,6 +202,52 @@ test("an explicit rereview is NOT bound by the open-ended Q&A budget (#763)", as
   // Budget exhausted for questions, yet the explicit rereview still passes.
   const rereview = await planFollowUp({ event: ghEvent("/ai-review"), body: "/ai-review" }, deps({ rateLimitStore: store }), config);
   assert.deepEqual(rereview, { action: "rereview" });
+});
+
+test("the per-actor budget is per-actor WITHIN the PR, not repo-wide (#1294)", async () => {
+  const config: FollowUpPlanConfig = { ...CONFIG, rateLimit: { perPr: { limit: 6, windowMs: 60_000 }, perActor: { limit: 1, windowMs: 60_000 } } };
+  const store = new InMemoryRateLimitStore();
+  const d = () => deps({ rateLimitStore: store });
+  // Same actor, same PR: the first question is allowed, the second is not.
+  const first = await planFollowUp({ event: ghEvent("@reviewer-bot q1"), body: "@reviewer-bot q1" }, d(), config);
+  const second = await planFollowUp({ event: ghEvent("@reviewer-bot q2"), body: "@reviewer-bot q2" }, d(), config);
+  assert.equal(first.action, "answer");
+  assert.deepEqual(second, { action: "ignore", reason: "rate-limited" });
+  // Same actor, a different PR: a fresh per-actor-within-PR scope allows it.
+  const otherPr = await planFollowUp(
+    { event: ghEvent("@reviewer-bot q3", "alice", { pr: 8 }), body: "@reviewer-bot q3" },
+    d(),
+    config,
+  );
+  assert.equal(otherPr.action, "answer");
+  // Same actor, a different repo: likewise a fresh scope.
+  const otherRepo = await planFollowUp(
+    { event: ghEvent("@reviewer-bot q4", "alice", { repo: "o/other" }), body: "@reviewer-bot q4" },
+    d(),
+    config,
+  );
+  assert.equal(otherRepo.action, "answer");
+  // A different actor on the original PR is independent: alice's scope is
+  // exhausted but bob's fresh per-actor-within-PR scope still allows.
+  const otherActor = await planFollowUp({ event: ghEvent("@reviewer-bot q5", "bob"), body: "@reviewer-bot q5" }, d(), config);
+  assert.equal(otherActor.action, "answer");
+});
+
+test("a hand-built event cannot split one PR's actor budget by casing", async () => {
+  const config: FollowUpPlanConfig = { ...CONFIG, rateLimit: { perPr: { limit: 6, windowMs: 60_000 }, perActor: { limit: 1, windowMs: 60_000 } } };
+  const store = new InMemoryRateLimitStore();
+  const d = () => deps({ rateLimitStore: store });
+  // Normalized webhook shape (lowercase at the event boundary): allowed.
+  const first = await planFollowUp({ event: ghEvent("@reviewer-bot q1"), body: "@reviewer-bot q1" }, d(), config);
+  assert.equal(first.action, "answer");
+  // Hand-built canonical event with mixed case: the planner's lowercase makes
+  // it the SAME repo/PR/actor scopes, so it is rate-limited, not fresh.
+  const cased = await planFollowUp(
+    { event: canonicalFollowUp({ repoFullName: "O/R", actor: "Alice" }), body: "@reviewer-bot q2" },
+    d(),
+    config,
+  );
+  assert.deepEqual(cased, { action: "ignore", reason: "rate-limited" });
 });
 
 test("an unreadable follow-up body is source-unavailable (fail closed)", async () => {

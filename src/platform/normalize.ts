@@ -102,6 +102,14 @@ export function normalizeForgejoIssue(data: unknown): unknown {
 
 // ── PR conversation comments ────────────────────────────────────────────
 
+/** The latest-comments cap BOTH platform seams apply to the PR conversation
+ * read: GitHub's GraphQL asks `comments(last: 100)` (the query string keeps
+ * the verbatim v2 literal) and Forgejo's seam truncates its listing to the
+ * same window. A consumer that needs the thread as a COMPLETE ledger (the
+ * follow-up Q&A budget) must treat a full-length snapshot as possibly
+ * truncated. */
+export const CONVERSATION_COMMENTS_SNAPSHOT_CAP = 100;
+
 function conversationNode(node: unknown): Record<string, unknown> {
   return {
     id: jqField(node, "databaseId"),
@@ -135,10 +143,25 @@ export function forgejoCommentToStandard(raw: unknown): Record<string, unknown> 
 
 /** Forgejo `list-comments` piped through `jq 'sort_by(.created_at // "") |
  * reverse | .[0:100]'` — note the v2 Forgejo branch is newest-first while
- * the GitHub branch is oldest-first; `pr_thread` re-sorts both. */
+ * the GitHub branch is oldest-first; `pr_thread` re-sorts both. The
+ * latest-N truncation is by PARSED creation instant (string order as the
+ * deterministic tiebreak) so the cap keeps the chronologically latest
+ * comments in the same space the follow-up budget's snapshot-coverage
+  * proof reasons in; on conforming RFC3339 stamps (what both forges emit)
+  * the order is identical to the v2 string sort. Unparseable stamps sort as
+  * the OLDEST, so a latest-N cap drops them FIRST — a malformed stamp must
+  * never occupy a newest-first slot and evict a valid recent comment (the
+  * follow-up Q&A budget's snapshot-coverage proof reasons over exactly those
+  * retained entries). */
 export function normalizeForgejoConversationComments(rawComments: readonly unknown[]): unknown[] {
   const standard = rawComments.map(forgejoCommentToStandard);
-  return jqSortBy(standard, (item) => jqAlt(item.created_at, "")).reverse().slice(0, 100);
+  const instant = (item: Record<string, unknown>): number => {
+    const raw = jqAlt(item.created_at, "");
+    const parsed = typeof raw === "string" && raw.trim() !== "" ? Date.parse(raw) : Number.NaN;
+    return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+  };
+  return jqSortBy(standard, (item) => [instant(item), jqAlt(item.created_at, ""), jqAlt(item.id, 0)])
+    .reverse().slice(0, CONVERSATION_COMMENTS_SNAPSHOT_CAP);
 }
 
 // ── Review threads ──────────────────────────────────────────────────────

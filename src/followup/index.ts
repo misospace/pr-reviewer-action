@@ -19,6 +19,10 @@ export {
 } from "./rate-limit.js";
 export { renderFollowUpReply } from "./reply.js";
 export {
+  ForgeFollowUpBudget,
+  type ForgeFollowUpBudgetOptions,
+} from "./forge-budget.js";
+export {
   buildFollowUpPrompt,
   FOLLOW_UP_PROMPT_MAX_BYTES,
   MANAGED_REVIEW_MAX_BYTES,
@@ -36,6 +40,19 @@ export {
   type FollowUpRateLimits,
   type PermissionProbe,
 } from "./plan.js";
+export {
+  FOLLOWUP_ANSWER_MAX_BYTES,
+  runFollowUpEvent,
+  type FollowUpEffects,
+  type FollowUpRereviewDisposition,
+  type FollowUpRunOutcome,
+} from "./controller.js";
+export {
+  createFollowUpAnswerExecutor,
+  FOLLOWUP_ANSWER_MAX_TOKENS,
+  type FollowUpAnswerProfile,
+  type FollowUpExecutorOptions,
+} from "./executor.js";
 export type {
   ClassifyResult,
   FollowUpIgnoreReason,

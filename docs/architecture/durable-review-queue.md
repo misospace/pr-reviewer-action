@@ -214,6 +214,67 @@ publisher eventually resolves.
 - **Determinism.** The clock is injected; there are no timers anywhere in
   the module, so the whole controller is testable by advancing time.
 
+## Follow-up consumption (#1294)
+
+`follow_up` job kind now has a production consumer, but it lives OUTSIDE
+this library: `src/followup/controller.ts` plans and executes one canonical
+`follow_up` event, wired in both modes — the Action path
+(`src/run/followup-action.ts`, driven by `actionMain`) and the operator host
+(`src/ingress/followup-host.ts`). Neither consumes `JobRecord`s through
+`ReviewQueueController`: the Action path runs its single delivery in-process
+(a rereview plan falls through to the shipped review pipeline; a comment
+command never enqueues), and the operator consumer mints the rereview
+generation through `dispatchCanonicalEvent` and hands it to the daemon's
+queue via `enqueueRereviewJob` when one exists. The scheduler/store in this
+module stay the future daemon's own machinery — `prIdentityKey` keeping
+`follow_up` and `review` generations independent — and this module remains
+unwired into the running action pipeline.
+
+### The operator lane's production binding
+
+`src/ingress/operator-router.ts` (`createOperatorEventRouter`) is where the
+operator lane actually CONSUMES a canonical `follow_up` event: it constructs
+the follow-up consumer and routes events by kind — a `follow_up` delivery to
+the consumer (which plans it through the same shared planner the Action path
+uses), every other canonical event to the daemon's dispatch seam, whose
+rejection propagates to the caller that owns redelivery.
+`src/ingress/operator-host.ts` (`createOperatorHost`) is the in-repo
+PRODUCTION CALLER: it constructs the router UNCONDITIONALLY and binds it into
+`createForgejoWebhookHandler`, so every canonical event the shipped ingress
+accepts is routed by that one router — a `follow_up` delivery through the
+handler's router branch instead of `onEvent`, every other kind through
+`onEvent` into the same router — and follow-up consumption is never an
+opt-in the wiring can forget. The router stays injectable at the low-level
+handler seam (with no router configured that seam behaves exactly as before);
+the HOST is the production binding. The GitHub App operator lane has no
+webhook handler yet (#729 follow-on work), so the router is the seam that
+path binds when it lands.
+
+### The Q&A budget's durable state
+
+The planner's per-PR and per-actor-WITHIN-PR Q&A budget is a `RateLimitStore`
+seam (`src/followup/rate-limit.ts`). The Action lane runs one process per
+webhook delivery, so an in-memory store hands every delivery a fresh budget;
+the forge-backed store (`src/followup/forge-budget.ts`) reads the budget state
+from the PR thread itself — the per-PR scope is the LARGER of every
+mention-addressed question on the PR whatever author posted it (each question
+is at most one model attempt, so a failed model or post attempt still consumes
+budget and cannot be repeated past the limit) and the reviewer's own published
+marker replies (the admin-only floor a participant cannot unwind by deleting
+their own questions), and the per-actor scope is the questioner's own prior
+questions — so the window accumulates ACROSS
+deliveries. Both scope keys are PR-scoped (`pr:<platform>:<repo>#<pr>`,
+`actor:<platform>:<repo>#<pr>:<actor>`), so the thread is the COMPLETE state
+behind every key this store answers — no key claims a scope its state cannot
+prove. Fail closed: an unreadable thread proves no headroom and denies the
+question, and so does a window the thread snapshot cannot prove covered — both
+platform seams cap the snapshot at the latest comments
+(`CONVERSATION_COMMENTS_SNAPSHOT_CAP`), the host reports snapshot
+completeness, and a failed Forgejo comment page fails the whole read rather
+than silently truncating the ledger. The operator lane injects its own store;
+the durable cross-process store of #1295 remains that lane's target
+(cross-RESTART durability, not a scope this store under-delivers).
+
 ## Out of scope
 
 HTTP ingress (#730), executor implementations (#733), and the PostgreSQL

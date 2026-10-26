@@ -566,14 +566,17 @@ export class ForgejoAdapter implements PlatformReadAdapter {
   }
 
   /** `list_comments` (Forgejo) normalized, then the seam's
-   * `sort_by(.created_at // "") | reverse | .[0:100]`. Pages of 50; a
-   * failed or empty page ends the listing with what was collected. */
+   * `sort_by(.created_at // "") | reverse | .[0:100]`. Pages of 50; a short
+   * or empty page ends the listing with what was collected. A FAILED page
+   * fails the whole read rather than silently truncating: the follow-up
+   * Q&A budget reads this thread as its durable ledger, and a partial
+   * ledger presented as complete would silently widen the budget. */
   listPrConversationComments(): Promise<ReadResult<unknown[]>> {
     return this.read(async (at) => {
       const all: unknown[] = [];
       for (let page = 1; ; page += 1) {
         const { status, text } = await this.curl(at("/issues/", `${this.prNumber}/comments?page=${page}&limit=50`));
-        if (status !== 200) break;
+        if (status !== 200) throw new Error(`forgejo comment page ${page} failed with status ${status}`);
         const comments = pyJsonDecode(text);
         if (!Array.isArray(comments) || comments.length === 0) break;
         all.push(...comments);

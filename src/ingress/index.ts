@@ -15,6 +15,12 @@
 //   capabilities.ts      - publish-capability matrix and explicit degradation checks
 //   dispatch.ts          - canonical event -> deduped generations + the publish gate
 //   reconcile.ts         - missed-webhook reconciliation poll
+//   followup-host.ts     - operator-mode consumer host for canonical `follow_up` events
+//   operator-router.ts   - operator-mode event router: `follow_up` -> the follow-up
+//                           consumer, every other canonical event -> the dispatch seam
+//   operator-host.ts     - operator-mode production host: builds the router unconditionally
+//                           and binds it into the webhook handler (the in-repo production
+//                           caller of the router)
 
 export type { ForgejoWebhookHandlerOptions } from "./webhook-handler.js";
 export {
@@ -77,3 +83,20 @@ export { MemoryGenerationLedger, dispatchCanonicalEvent, gateJobPublication } fr
 
 export type { ReconcileReport, ReconcileOptions } from "./reconcile.js";
 export { reconcileForgejoRepositories } from "./reconcile.js";
+
+export type {
+  FollowUpConsumer,
+  FollowUpConsumerOptions,
+  FollowUpForgeAdapter,
+} from "./followup-host.js";
+export { createFollowUpConsumer } from "./followup-host.js";
+
+export type {
+  OperatorEventOutcome,
+  OperatorEventRouter,
+  OperatorEventRouterOptions,
+} from "./operator-router.js";
+export { createOperatorEventRouter } from "./operator-router.js";
+
+export type { OperatorHost, OperatorHostOptions } from "./operator-host.js";
+export { createOperatorHost } from "./operator-host.js";
