@@ -1,5 +1,5 @@
 import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
-import { validateContract } from "../config/contract.js";
+import { AI_MAX_TOKENS_DEFAULT, validateContract } from "../config/contract.js";
 import { loadConfig, type RawInputs } from "../config/load-config.js";
 import { resolveRepositoryConfig } from "../config/repository-config.js";
 import { resolveRequirementOwners } from "../config/requirement-owners.js";
@@ -2626,7 +2626,11 @@ interface ReviewCallInput {
 
 export function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | "smart", env: StageEnv): TierProfile {
   const resolved = tier === "fallback" ? profiles.fallback : tier === "smart" ? profiles.smart : profiles.primary;
-  const aiMaxTokens = Number(env.AI_MAX_TOKENS ?? "8192") || 8192;
+  // #1251: the raw-env default is the contract's, not a second literal —
+  // non-finite or non-positive values fall back to it, same coercion the
+  // `||` performed before.
+  const aiMaxTokensRaw = Number(env.AI_MAX_TOKENS);
+  const aiMaxTokens = Number.isFinite(aiMaxTokensRaw) && aiMaxTokensRaw > 0 ? aiMaxTokensRaw : AI_MAX_TOKENS_DEFAULT;
   const temperatureRaw = env.AI_TEMPERATURE ?? "0.1";
   // #1246: an explicit zero is a valid temperature and must reach the wire —
   // `Number(x) || 0.1` rewrote `ai-temperature: "0"` into 0.1. Empty still
@@ -2644,7 +2648,9 @@ export function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallb
     model: resolved.model,
     apiKey: resolved.apiKey,
     anthropicVersion: env.ANTHROPIC_VERSION ?? "2023-06-01",
-    stream: tier === "fallback" ? (env.AI_FALLBACK_STREAM ?? env.AI_STREAM ?? "false").toLowerCase() === "true" : resolved.stream,
+    // #1251: the tier profile is the single derivation — the fallback lane's
+    // stream inheritance was already resolved by resolveTierProfiles.
+    stream: resolved.stream,
     requestTimeoutSec: resolved.requestTimeoutSec,
     connectTimeoutSec: resolved.connectTimeoutSec,
     retries: resolved.retries,
