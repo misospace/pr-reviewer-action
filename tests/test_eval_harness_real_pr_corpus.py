@@ -1156,9 +1156,10 @@ class TestRealRuntimeIgnoresCommittedDecoyArtifacts:
         # checkout. An untracked .semantic-fixture/ written there would be
         # wiped before the runtime ever runs, the fixture adapter would then
         # serve no PR at all, and admission would fail closed again
-        # ("pr-state-unknown") with no context artifacts written. The
-        # directory name must not collide with the harness's repo checkout
-        # naming (`<repo_full_name with "/" replaced by "-">`).
+        # ("pr-draft" — a failed lookup has no state to read) with no context
+        # artifacts written. The directory name must not collide with the
+        # harness's repo checkout naming
+        # (`<repo_full_name with "/" replaced by "-">`).
         fixture_repo = tmp_path / "pr-identity-fixture"
         (fixture_repo / ".semantic-fixture").mkdir(parents=True)
         (fixture_repo / ".semantic-fixture" / "pr.json").write_text(
