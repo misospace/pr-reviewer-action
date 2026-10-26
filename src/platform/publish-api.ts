@@ -108,6 +108,18 @@ export interface StickyResult {
   error?: string;
 }
 
+/** #763: outcome of an additive, NON-managed comment post (the conversational
+ * follow-up reply). Unlike `upsertStickyComment` it carries NO marker and owns
+ * no managed-review lifecycle — it is a plain top-level conversation comment.
+ * `created` is always `true` on success (it never updates an existing comment).
+ * A failure reports `ok: false` with a bounded `error` and never throws. */
+export interface CommentPostResult {
+  ok: boolean;
+  created: boolean;
+  commentId?: number | string;
+  error?: string;
+}
+
 export interface SupersededThread {
   id: string;
 }
@@ -246,6 +258,19 @@ export interface PublishPlatformApi {
   listIssueCommentsResult?(): Promise<IssueCommentEnumeration>;
   /** Create or update the sticky managed comment (marker semantics shared). */
   upsertStickyComment(marker: string, body: string): Promise<StickyResult>;
+  /** #763: post ONE plain (non-managed) top-level conversation comment — the
+   * conversational follow-up write. The body is posted VERBATIM: this seam
+   * never adds or strips markers, so a follow-up ANSWER must arrive already
+   * rendered by `renderFollowUpReply` (src/followup/reply.ts), which stamps
+   * the loop-guard marker; anything else is the caller's own body. Optional:
+   * an adapter without it — or one that always refuses (Tangled) — is a forge
+   * with no usable plain-comment surface, and the caller degrades explicitly.
+   * An empty body is refused WITHOUT a
+   * request; a hostile body is sent as JSON request DATA only (never in the
+   * URL) and the token is bound to the validated platform origin, so
+   * untrusted follow-up text can never reach another host or become a path
+   * segment. */
+  postIssueComment?(body: string): Promise<CommentPostResult>;
   listReviews(): Promise<PublishReviewRef[]>;
   /** Enumerate and retire individual comments belonging to managed reviews. */
   listManagedInlineComments(reviewIds: readonly string[]): Promise<{ supported: boolean; complete: boolean; comments: ManagedInlineCommentRef[] }>;
@@ -509,6 +534,31 @@ export class GitHubPublishApi implements PublishPlatformApi {
       const id = patched?.id ?? target.id;
       const updatedAt = typeof patched?.updated_at === "string" ? patched.updated_at : undefined;
       return { ok: true, created: false, commentId: id, ...(updatedAt === undefined ? {} : { updatedAt }) };
+    } catch (error) {
+      return { ok: false, created: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /** #763: post a plain follow-up reply VERBATIM (follow-up answers are
+   * rendered by `renderFollowUpReply` upstream, which stamps the loop-guard
+   * marker; this seam neither adds nor strips markers). The body is sent as
+   * JSON request DATA to the repo-scoped issue-comments endpoint; it can never
+   * alter the request URL or path, and the credential stays bound to the
+   * validated origin. An empty body is refused before any request. */
+  async postIssueComment(body: string): Promise<CommentPostResult> {
+    if (typeof body !== "string" || body === "") {
+      return { ok: false, created: false, error: "comment body must be a non-empty string" };
+    }
+    try {
+      const { status, data } = await requestJson(
+        this.url(`/repos/${this.repo}/issues/${this.prNumber}/comments`),
+        this.opts("POST", { body }),
+      );
+      if (status !== 200 && status !== 201) return { ok: false, created: false, error: `status ${status}` };
+      const created = data as { id?: number | string } | null;
+      return created?.id === undefined
+        ? { ok: true, created: true }
+        : { ok: true, created: true, commentId: created.id };
     } catch (error) {
       return { ok: false, created: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -1120,6 +1170,31 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     return created?.id === undefined
       ? { ok: true, created: true, ...(updatedAt === undefined ? {} : { updatedAt }) }
       : { ok: true, created: true, commentId: created.id, ...(updatedAt === undefined ? {} : { updatedAt }) };
+  }
+
+  /** #763: post a plain follow-up reply VERBATIM (follow-up answers are
+   * rendered by `renderFollowUpReply` upstream, which stamps the loop-guard
+   * marker; this seam neither adds nor strips markers). Same data-only posture
+   * as the sticky creation path — the body is JSON request data and the
+   * credential is bound to the validated Forgejo origin. An empty body is
+   * refused before any request. */
+  async postIssueComment(body: string): Promise<CommentPostResult> {
+    if (typeof body !== "string" || body === "") {
+      return { ok: false, created: false, error: "comment body must be a non-empty string" };
+    }
+    try {
+      const { status, data } = await requestJson(
+        this.url(`/repos/${this.repo}/issues/${this.prNumber}/comments`),
+        await this.opts("POST", { body }),
+      );
+      if (status !== 200 && status !== 201) return { ok: false, created: false, error: `status ${status}` };
+      const created = data as { id?: number | string } | null;
+      return created?.id === undefined
+        ? { ok: true, created: true }
+        : { ok: true, created: true, commentId: created.id };
+    } catch (error) {
+      return { ok: false, created: false, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   async listReviews(): Promise<PublishReviewRef[]> {
