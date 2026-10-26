@@ -56,13 +56,13 @@ disposition and complete coverage. Only entries with no attributable
 identity (non-object, non-string/empty/oversized check text) are dropped.
 
 **Tri-state with key presence.** True absence of the
-`required_check_dispositions` key — the only state that may use the
-temporary legacy keyword fallback — is distinct from an explicitly emitted
+`required_check_dispositions` key is distinct from an explicitly emitted
 `null` or another invalid type: the parser preserves a present-but-unusable
 key with a `null` value, and the bridge treats it as structured coverage
 with no usable array (every check unresolved). `#678` reads the same
 tri-state (`requiredCheckDispositions` + `requiredCheckDispositionsEmitted`
-in `src/model/types.ts`).
+in `src/model/types.ts`). Since #1252 there is no keyword fallback in any
+state: key absence means every check is conservatively unresolved.
 
 ### When `not_applicable` is legitimate
 
@@ -116,16 +116,17 @@ The public `required-checks` output vocabulary is unchanged
 Structured dispositions, when present, are authoritative for this decision;
 no keyword mention can substitute for a missing or malformed disposition.
 
-## v2/v3 coexistence (until #680)
+## v2/v3 coexistence (until #680) — historical
 
-The v2 pipeline keeps its shallow keyword matching
-(`completeness.py::validate_review`) **only** as a fallback for outputs that
-carry no `required_check_dispositions` field at all (models on
+The v2 pipeline kept a shallow keyword matching fallback
+(`completeness.py::validate_review`) for outputs that carried no
+`required_check_dispositions` field at all (models on
 `ai-response-format: off`/`json_object` that never engaged with the
-structured contract). When the field is present — even partially or
-malformed — the structured evaluation is authoritative. This fallback is
-explicit, documented, and removed by #680; it is not the v3 contract. The
-v3 evaluator treats a missing field conservatively (all checks unresolved).
+structured contract). That fallback was removed from the live path by #680
+and the remaining keyword reference code (`should_escalate`, its keyword
+table, `validate_review`, and the duplicated concept table) was deleted by
+#1252; see `docs/v3-migration.md`. The v3 evaluator treats a missing field
+conservatively (all checks unresolved).
 
 ## Escalation authority (#721) is unchanged
 
@@ -134,9 +135,9 @@ missing/malformed coverage, and every other completeness outcome — is
 **never** an escalation trigger. The only post-primary smart trigger remains
 the literal structured `smart_review_requested === true` from a successful
 primary review (`escalation.py::reviewer_requested_escalation`). The
-`should_escalate` heuristics (including `incomplete_required_checks`) stay
-telemetry-only, and their telemetry follows the same structured-first
-contract so a grounded N/A is not misreported.
+`should_escalate` heuristics they once fed were removed with the keyword
+table (#1252); telemetry, where it still exists, follows the same
+structured-first contract so a grounded N/A is not misreported.
 
 ## What #678 consumes
 
@@ -151,10 +152,11 @@ contract so a grounded N/A is not misreported.
   the strict schema (the duplicated copies pinned byte-identical by
   `tests-v3/request.test.ts`).
 
-## What #680 still owns
+## What #680 still owned (historical; completed by #680/#1252)
 
 - consuming the typed coverage artifact in enforcement instead of the v2
-  bridge (and removing the legacy keyword fallback entirely);
+  bridge — done by #680, with the residual keyword reference code deleted
+  by #1252;
 - deciding whether `incomplete` maps onto verdict policy in the v3 runtime
   (the v2 `warn`/`fail` behavior remains the production path until then);
 - publishing/publication-side presentation of per-check dispositions;
